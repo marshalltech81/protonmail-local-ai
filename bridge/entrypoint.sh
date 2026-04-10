@@ -17,7 +17,7 @@ chmod 700 "$GNUPGHOME"
 # Bridge requires a keychain on Linux. We use pass backed by GPG.
 # This only runs once — credentials persist in the bridge-data volume.
 # =============================================================================
-if ! gpg --list-keys "ProtonBridge" &>/dev/null 2>&1; then
+if ! gpg --list-keys "ProtonBridge" &>/dev/null; then
     echo ">>> First run: initializing GPG key and pass store..."
 
     # Generate a no-passphrase GPG key for the pass store
