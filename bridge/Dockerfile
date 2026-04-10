@@ -8,7 +8,7 @@
 # Compiles the bridge binary using the no-GUI Makefile target.
 # The full Go toolchain and build dependencies are discarded after this stage.
 # -----------------------------------------------------------------------------
-FROM golang:1.24-bookworm AS builder
+FROM golang:1.26-bookworm AS builder
 
 ARG BRIDGE_VERSION=v3.23.1
 
