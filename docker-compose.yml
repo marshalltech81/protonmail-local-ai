@@ -10,7 +10,7 @@ services:
     build:
       context: ./bridge
       args:
-        BRIDGE_VERSION: ${BRIDGE_VERSION:-v3.21.2}
+        BRIDGE_VERSION: ${BRIDGE_VERSION:-v3.23.1}
     container_name: protonmail-bridge
     restart: unless-stopped
     volumes:
