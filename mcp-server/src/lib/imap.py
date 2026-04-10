@@ -34,9 +34,12 @@ class FullMessage:
 
 
 class IMAPClient:
-    def __init__(self, host: str, port: int, user: str, password: str):
+    def __init__(
+        self, host: str, imap_port: int, user: str, password: str, smtp_port: int = 1025
+    ):
         self.host = host
-        self.port = port
+        self.port = imap_port
+        self.smtp_port = smtp_port
         self.user = user
         self.password = password
 
@@ -154,7 +157,7 @@ class IMAPClient:
             context.check_hostname = False
             context.verify_mode = ssl.CERT_NONE
 
-            with smtplib.SMTP(self.host, 1025) as smtp:
+            with smtplib.SMTP(self.host, self.smtp_port) as smtp:
                 smtp.starttls(context=context)
                 smtp.login(self.user, self.password)
                 all_recipients = to + (cc or []) + (bcc or [])

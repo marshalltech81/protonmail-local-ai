@@ -28,6 +28,14 @@ https://github.com/marshalltech81/protonmail-local-ai
 - Thread-level indexing because message-level loses conversational context
 - Hybrid search (BM25 + vector via RRF) beats either approach alone for email
 - MCP uses HTTP/SSE transport — stdio only works when the process runs on the host
+- Bridge builds two binaries: `bridge` (launcher) + `proton-bridge` (daemon) — both must be
+  copied into the runtime image or the launcher exits with "failed to launch"
+- Bridge account detection checks for vault.enc at
+  $XDG_CONFIG_HOME/protonmail/bridge-v3/vault.enc (not a .db file)
+- sqlite-vec must be ≥0.1.9 on ARM64 — earlier versions ship an armv7 (32-bit) wheel
+  that fails with ELFCLASS32 on aarch64 containers (Apple Silicon / ARM servers)
+- MCP server uses FastMCP (mcp.server.fastmcp) — the low-level Server class does not
+  expose a .tool() decorator in mcp==1.3.0
 
 ## MCP Tool Groups
 1. Search      — search_emails (hybrid/semantic/keyword)
@@ -87,7 +95,7 @@ indexer/                  Parser, threader, embedder, SQLite writer
   src/embedder.py         Ollama embedding client with retry
 
 mcp-server/               MCP server — Claude Desktop interface
-  src/main.py             Starlette + SSE transport setup
+  src/main.py             FastMCP server + SSE transport setup
   src/tools/search.py     search_emails tool
   src/tools/retrieval.py  get_thread, get_message, list_threads, list_folders
   src/tools/intelligence.py  ask_mailbox, summarize_thread, extract_from_emails
@@ -116,9 +124,13 @@ When adding tests:
 - Use real .eml fixture files for parser tests
 
 ## Known Gaps / Next Steps
-- reply_to_thread in mcp-server/src/tools/actions.py needs full implementation
-- create_draft needs IMAP APPEND implementation
+- reply_to_thread in mcp-server/src/tools/actions.py — returns a clear "not implemented"
+  error; needs to fetch last message in thread and call send_email with threading headers
+- create_draft — returns a clear "not implemented" error; needs IMAP APPEND to Drafts folder
 - Per-session LLM mode toggle (currently set globally via .env)
-- Test suite
+- Test suite (pytest — start with indexer/src/parser.py and threader.py)
 - Attachment download tool
 - GitHub Actions CI workflow
+- Schema migration framework — SCHEMA_VERSION is tracked but no migration runner exists yet
+- Ollama embedding dimension (768) is hardcoded in indexer/src/database.py line 93 —
+  switching embedding models requires a manual schema reset

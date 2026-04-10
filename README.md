@@ -26,9 +26,11 @@ Ask questions about your inbox in plain English. Everything stays on your machin
 
 ## Prerequisites
 
-- **Docker Desktop** for Mac (or Linux)
+- **Docker Desktop** for Mac (or Linux with Docker Engine)
 - **Claude Desktop** with MCP support
 - **Proton Mail paid account** (required for Bridge access)
+
+> **Apple Silicon / ARM64**: fully supported. The stack builds and runs natively on aarch64.
 
 ## Quick Start
 
@@ -113,10 +115,23 @@ Set `LLM_MODE=cloud` and provide `ANTHROPIC_API_KEY` for better reasoning qualit
 When Proton releases a new Bridge version:
 
 ```bash
-# 1. Update BRIDGE_VERSION in .env
+# 1. Update BRIDGE_VERSION in bridge/Dockerfile and docker-compose.yml
 # 2. Rebuild and restart
 make update
 ```
+
+## Bridge Re-authentication
+
+If Bridge credentials expire or you change your Proton password:
+
+```bash
+make down
+docker volume rm protonmail-local-ai_bridge-data
+make first-run   # log in again, copy new credentials into .env
+make up
+```
+
+Your email index is preserved in a separate volume — only Bridge credentials are reset.
 
 ## Commands
 
