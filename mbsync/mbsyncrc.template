@@ -1,0 +1,34 @@
+# =============================================================================
+# mbsync configuration template
+# Variables are substituted at container startup from environment variables.
+# Do not put real credentials here — this file is committed to git.
+# =============================================================================
+
+IMAPAccount protonmail
+Host ${BRIDGE_HOST}
+Port ${BRIDGE_IMAP_PORT}
+User ${BRIDGE_USER}
+Pass ${BRIDGE_PASS}
+SSLType STARTTLS
+# Bridge uses a self-signed certificate — disable verification for localhost
+SSLVersions TLSv1.2
+CertificateFile /dev/null
+SSLFingerprint ""
+TLSVersions TLSv1.2
+
+IMAPStore protonmail-remote
+Account protonmail
+
+MaildirStore protonmail-local
+Path /maildir/
+Inbox /maildir/INBOX
+SubFolders Verbatim
+
+Channel protonmail
+Far :protonmail-remote:
+Near :protonmail-local:
+Patterns *
+Create Near
+SyncState *
+Sync All
+Expunge None
