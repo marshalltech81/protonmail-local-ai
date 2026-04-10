@@ -15,7 +15,7 @@ jobs:
     name: Trivy dependency scan
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Scan indexer dependencies
         uses: aquasecurity/trivy-action@master
