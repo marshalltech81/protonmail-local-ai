@@ -2,7 +2,7 @@
 # MCP Server — exposes email search and intelligence tools to Claude Desktop
 # Uses HTTP/SSE transport (required for Docker — stdio only works on host)
 # =============================================================================
-FROM python:3.12-slim-bookworm
+FROM python:3.14-slim-bookworm
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
