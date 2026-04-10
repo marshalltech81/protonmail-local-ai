@@ -1,0 +1,2 @@
+ignore:
+  - DL3008  # apt-get version pinning is impractical on Debian stable
