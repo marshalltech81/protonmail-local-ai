@@ -10,7 +10,7 @@
 # -----------------------------------------------------------------------------
 FROM golang:1.24-bookworm AS builder
 
-ARG BRIDGE_VERSION=v3.21.2
+ARG BRIDGE_VERSION=v3.23.1
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
@@ -51,8 +51,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
  && rm -rf /var/lib/apt/lists/* \
  && rm -rf /usr/share/doc /usr/share/man
 
-# Copy only the compiled binary from the builder stage
-COPY --from=builder /build/proton-bridge /usr/local/bin/bridge
+# Copy both binaries — bridge is the launcher, proton-bridge is the actual daemon
+COPY --from=builder /build/bridge /usr/local/bin/bridge
+COPY --from=builder /build/proton-bridge /usr/local/bin/proton-bridge
 
 # Redirect all Bridge state to /data so a single named volume
 # captures credentials, config, cache, and keychain data.
