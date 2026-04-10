@@ -2,27 +2,25 @@
 Search tools — Group 1 (most frequently called).
 Semantic, keyword, and hybrid search over the SQLite index.
 """
-import json
-import logging
-from typing import Optional
 
-from mcp.server import Server
-from mcp.types import Tool, TextContent
+import logging
+
+from mcp.types import TextContent
 
 log = logging.getLogger("mcp.tools.search")
 
 
-def register_search_tools(server: Server, db, ollama):
+def register_search_tools(server, db, ollama):
 
     @server.tool()
     async def search_emails(
         query: str,
         mode: str = "hybrid",
-        folders: Optional[list[str]] = None,
-        from_addr: Optional[str] = None,
-        date_from: Optional[str] = None,
-        date_to: Optional[str] = None,
-        has_attachments: Optional[bool] = None,
+        folders: list[str] | None = None,
+        from_addr: str | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
+        has_attachments: bool | None = None,
         limit: int = 10,
     ) -> list[TextContent]:
         """
@@ -73,10 +71,7 @@ def register_search_tools(server: Server, db, ollama):
                 )
 
             if not results:
-                return [TextContent(
-                    type="text",
-                    text=f"No results found for: '{query}'"
-                )]
+                return [TextContent(type="text", text=f"No results found for: '{query}'")]
 
             output = [f"Found {len(results)} thread(s) for: '{query}'\n"]
             for i, r in enumerate(results, 1):

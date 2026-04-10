@@ -3,10 +3,10 @@ Email threader.
 Groups messages into threads using In-Reply-To and References headers.
 Indexes at the thread level — the unit Claude reasons about.
 """
+
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
-from typing import Optional
 
 from .parser import Message
 
@@ -88,7 +88,7 @@ class Threader:
         )
         return thread
 
-    def _find_thread_id(self, message: Message) -> Optional[str]:
+    def _find_thread_id(self, message: Message) -> str | None:
         # Check In-Reply-To
         if message.in_reply_to:
             thread_id = self.db.find_thread_by_message_id(message.in_reply_to)
@@ -104,9 +104,7 @@ class Threader:
         # Fall back to normalized subject matching within the same folder
         normalized = _normalize_subject(message.subject)
         if normalized:
-            thread_id = self.db.find_thread_by_subject(
-                normalized, message.folder
-            )
+            thread_id = self.db.find_thread_by_subject(normalized, message.folder)
             if thread_id:
                 return thread_id
 
@@ -131,6 +129,7 @@ def _normalize_subject(subject: str) -> str:
     'Re: Re: Fwd: Hello world' → 'hello world'
     """
     import re
+
     s = subject.lower().strip()
     s = re.sub(r"^(re|fwd|fw|aw|ant)[\s:\[\]]+", "", s, flags=re.IGNORECASE)
     s = re.sub(r"\s+", " ", s).strip()

@@ -3,13 +3,13 @@ Email parser.
 Reads raw .eml files from Maildir and returns structured Message objects.
 Handles MIME, HTML-to-text conversion, and attachment metadata.
 """
+
 import email
 import email.message
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
 
 import html2text
 
@@ -31,7 +31,7 @@ class Attachment:
 @dataclass
 class Message:
     message_id: str
-    in_reply_to: Optional[str]
+    in_reply_to: str | None
     references: list[str]
     subject: str
     from_addr: str
@@ -45,7 +45,7 @@ class Message:
     has_attachments: bool = False
 
 
-def parse_email(path: Path) -> Optional[Message]:
+def parse_email(path: Path) -> Message | None:
     """Parse a single .eml file from Maildir into a Message object."""
     try:
         raw = path.read_bytes()
@@ -57,11 +57,7 @@ def parse_email(path: Path) -> Optional[Message]:
             return None
 
         in_reply_to = _clean_id(msg.get("In-Reply-To", ""))
-        references = [
-            _clean_id(r)
-            for r in msg.get("References", "").split()
-            if r.strip()
-        ]
+        references = [_clean_id(r) for r in msg.get("References", "").split() if r.strip()]
 
         subject = _decode_header(msg.get("Subject", "(no subject)"))
         from_addr = _decode_header(msg.get("From", ""))
@@ -161,6 +157,7 @@ def _parse_addrs(value: str) -> list[str]:
 def _parse_date(value: str) -> datetime:
     try:
         from email.utils import parsedate_to_datetime
+
         return parsedate_to_datetime(value)
     except Exception:
         return datetime.utcnow()

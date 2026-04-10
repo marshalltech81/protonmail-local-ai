@@ -3,16 +3,16 @@ System tools — Group 5.
 Index status, sync health, and folder information.
 Claude should call get_index_status before making claims about email content.
 """
-import logging
-from datetime import datetime, timezone
 
-from mcp.server import Server
+import logging
+from datetime import UTC, datetime
+
 from mcp.types import TextContent
 
 log = logging.getLogger("mcp.tools.system")
 
 
-def register_system_tools(server: Server, db):
+def register_system_tools(server, db):
 
     @server.tool()
     async def get_index_status() -> list[TextContent]:
@@ -36,7 +36,7 @@ def register_system_tools(server: Server, db):
                 f"Total messages: {stats.get('total_messages', 0):,}",
                 f"Oldest message: {oldest}",
                 f"Newest message: {newest}",
-                f"Checked at:     {datetime.now(timezone.utc).isoformat()}",
+                f"Checked at:     {datetime.now(UTC).isoformat()}",
             ]
 
             return [TextContent(type="text", text="\n".join(lines))]
@@ -73,9 +73,7 @@ def register_system_tools(server: Server, db):
         ]
 
         if not bridge_ok:
-            lines.append(
-                "\nTroubleshooting: run 'make logs' to check Bridge container."
-            )
+            lines.append("\nTroubleshooting: run 'make logs' to check Bridge container.")
 
         return [TextContent(type="text", text="\n".join(lines))]
 

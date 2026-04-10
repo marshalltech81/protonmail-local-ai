@@ -1,0 +1,55 @@
+version: 2
+
+updates:
+  # indexer Python dependencies
+  - package-ecosystem: pip
+    directory: /indexer
+    schedule:
+      interval: weekly
+      day: monday
+    labels: [dependencies, python]
+
+  # mcp-server Python dependencies
+  - package-ecosystem: pip
+    directory: /mcp-server
+    schedule:
+      interval: weekly
+      day: monday
+    labels: [dependencies, python]
+
+  # Docker base images
+  - package-ecosystem: docker
+    directory: /bridge
+    schedule:
+      interval: weekly
+      day: monday
+    labels: [dependencies, docker]
+
+  - package-ecosystem: docker
+    directory: /mbsync
+    schedule:
+      interval: weekly
+      day: monday
+    labels: [dependencies, docker]
+
+  - package-ecosystem: docker
+    directory: /indexer
+    schedule:
+      interval: weekly
+      day: monday
+    labels: [dependencies, docker]
+
+  - package-ecosystem: docker
+    directory: /mcp-server
+    schedule:
+      interval: weekly
+      day: monday
+    labels: [dependencies, docker]
+
+  # GitHub Actions
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    labels: [dependencies, github-actions]

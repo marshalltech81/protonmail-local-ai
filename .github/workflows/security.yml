@@ -1,0 +1,36 @@
+name: Security Scan
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "**/requirements.txt"
+      - "**/Dockerfile"
+  schedule:
+    # Every Sunday at 08:00 UTC
+    - cron: "0 8 * * 0"
+
+jobs:
+  trivy-deps:
+    name: Trivy dependency scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Scan indexer dependencies
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: fs
+          scan-ref: indexer/requirements.txt
+          format: table
+          exit-code: "1"
+          severity: CRITICAL,HIGH
+
+      - name: Scan mcp-server dependencies
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: fs
+          scan-ref: mcp-server/requirements.txt
+          format: table
+          exit-code: "1"
+          severity: CRITICAL,HIGH

@@ -2,17 +2,15 @@
 Retrieval tools — Group 2.
 Fetch full thread or message content directly from the index or Bridge IMAP.
 """
-import json
-import logging
-from typing import Optional
 
-from mcp.server import Server
+import logging
+
 from mcp.types import TextContent
 
 log = logging.getLogger("mcp.tools.retrieval")
 
 
-def register_retrieval_tools(server: Server, db, imap):
+def register_retrieval_tools(server, db, imap):
 
     @server.tool()
     async def get_thread(
@@ -32,10 +30,7 @@ def register_retrieval_tools(server: Server, db, imap):
         try:
             thread = db.get_thread(thread_id)
             if not thread:
-                return [TextContent(
-                    type="text",
-                    text=f"Thread not found: {thread_id}"
-                )]
+                return [TextContent(type="text", text=f"Thread not found: {thread_id}")]
 
             lines = [
                 f"Thread: {thread.subject}",
@@ -61,14 +56,11 @@ def register_retrieval_tools(server: Server, db, imap):
                     lines.append(msg.body_text[:3000])
                     if include_attachments_metadata and msg.attachments:
                         lines.append("")
-                        lines.append(
-                            f"Attachments ({len(msg.attachments)}):"
-                        )
+                        lines.append(f"Attachments ({len(msg.attachments)}):")
                         for att in msg.attachments:
                             size_kb = att["size"] // 1024
                             lines.append(
-                                f"  - {att['filename']} "
-                                f"({att['content_type']}, {size_kb}KB)"
+                                f"  - {att['filename']} ({att['content_type']}, {size_kb}KB)"
                             )
                     lines.append("")
 
@@ -98,10 +90,7 @@ def register_retrieval_tools(server: Server, db, imap):
         try:
             msg = await imap.fetch_message(message_id, folder)
             if not msg:
-                return [TextContent(
-                    type="text",
-                    text=f"Message not found: {message_id}"
-                )]
+                return [TextContent(type="text", text=f"Message not found: {message_id}")]
 
             body = msg.body_html if body_format == "html" else msg.body_text
 
@@ -122,9 +111,7 @@ def register_retrieval_tools(server: Server, db, imap):
                 lines.append("")
                 lines.append(f"Attachments ({len(msg.attachments)}):")
                 for att in msg.attachments:
-                    lines.append(
-                        f"  - {att['filename']} ({att['content_type']})"
-                    )
+                    lines.append(f"  - {att['filename']} ({att['content_type']})")
 
             return [TextContent(type="text", text="\n".join(lines))]
 
@@ -160,10 +147,7 @@ def register_retrieval_tools(server: Server, db, imap):
             )
 
             if not threads:
-                return [TextContent(
-                    type="text",
-                    text=f"No threads found in {folder}."
-                )]
+                return [TextContent(type="text", text=f"No threads found in {folder}.")]
 
             lines = [f"Threads in {folder} ({len(threads)} shown):\n"]
             for i, t in enumerate(threads, 1 + offset):
@@ -194,9 +178,7 @@ def register_retrieval_tools(server: Server, db, imap):
         try:
             folders = db.list_folders()
             if not folders:
-                return [TextContent(
-                    type="text", text="No folders found in index."
-                )]
+                return [TextContent(type="text", text="No folders found in index.")]
 
             lines = ["Folders:\n"]
             for f in folders:

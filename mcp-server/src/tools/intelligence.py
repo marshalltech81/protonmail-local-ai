@@ -2,12 +2,11 @@
 Intelligence tools — Group 3 (our differentiator).
 Q&A/RAG, summarization, and structured extraction over email threads.
 """
+
 import json
 import logging
-from typing import Optional
 
 import httpx
-from mcp.server import Server
 from mcp.types import TextContent
 
 log = logging.getLogger("mcp.tools.intelligence")
@@ -28,9 +27,7 @@ email thread content. Extract structured data matching the requested schema.
 Return ONLY valid JSON matching the schema — no preamble, no explanation."""
 
 
-def register_intelligence_tools(
-    server: Server, db, ollama, llm_mode: str, anthropic_key: str
-):
+def register_intelligence_tools(server, db, ollama, llm_mode: str, anthropic_key: str):
 
     async def llm_complete(system: str, user: str) -> str:
         """Route to local Ollama or Claude API based on llm_mode."""
@@ -41,10 +38,10 @@ def register_intelligence_tools(
     @server.tool()
     async def ask_mailbox(
         question: str,
-        from_addr: Optional[str] = None,
-        date_from: Optional[str] = None,
-        date_to: Optional[str] = None,
-        folders: Optional[list[str]] = None,
+        from_addr: str | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
+        folders: list[str] | None = None,
         max_threads: int = 5,
     ) -> list[TextContent]:
         """
@@ -76,10 +73,11 @@ def register_intelligence_tools(
             )
 
             if not results:
-                return [TextContent(
-                    type="text",
-                    text="No relevant emails found to answer your question."
-                )]
+                return [
+                    TextContent(
+                        type="text", text="No relevant emails found to answer your question."
+                    )
+                ]
 
             # Build context from retrieved threads
             context_parts = []
@@ -92,22 +90,15 @@ def register_intelligence_tools(
                 )
 
             context = "\n---\n".join(context_parts)
-            user_prompt = (
-                f"Email threads:\n\n{context}\n\n"
-                f"Question: {question}"
-            )
+            user_prompt = f"Email threads:\n\n{context}\n\nQuestion: {question}"
 
             answer = await llm_complete(ASK_SYSTEM, user_prompt)
 
             sources = "\n".join(
-                f"  - {r.subject} ({r.date_last.strftime('%Y-%m-%d')})"
-                for r in results
+                f"  - {r.subject} ({r.date_last.strftime('%Y-%m-%d')})" for r in results
             )
 
-            return [TextContent(
-                type="text",
-                text=f"{answer}\n\nSources searched:\n{sources}"
-            )]
+            return [TextContent(type="text", text=f"{answer}\n\nSources searched:\n{sources}")]
 
         except Exception as e:
             log.error(f"ask_mailbox error: {e}")
@@ -133,9 +124,7 @@ def register_intelligence_tools(
         try:
             thread = db.get_thread(thread_id)
             if not thread:
-                return [TextContent(
-                    type="text", text=f"Thread not found: {thread_id}"
-                )]
+                return [TextContent(type="text", text=f"Thread not found: {thread_id}")]
 
             style_instructions = {
                 "brief": "Summarize in 2-3 sentences.",
@@ -144,9 +133,7 @@ def register_intelligence_tools(
                 "timeline": "Present the key events in this thread as a chronological timeline with dates.",
             }
 
-            instruction = style_instructions.get(
-                style, style_instructions["brief"]
-            )
+            instruction = style_instructions.get(style, style_instructions["brief"])
 
             user_prompt = (
                 f"Email thread: {thread.subject}\n"
@@ -159,10 +146,9 @@ def register_intelligence_tools(
 
             summary = await llm_complete(SUMMARIZE_SYSTEM, user_prompt)
 
-            return [TextContent(
-                type="text",
-                text=f"Summary ({style}) — {thread.subject}:\n\n{summary}"
-            )]
+            return [
+                TextContent(type="text", text=f"Summary ({style}) — {thread.subject}:\n\n{summary}")
+            ]
 
         except Exception as e:
             log.error(f"summarize_thread error: {e}")
@@ -172,9 +158,9 @@ def register_intelligence_tools(
     async def extract_from_emails(
         query: str,
         schema: dict,
-        folders: Optional[list[str]] = None,
-        date_from: Optional[str] = None,
-        date_to: Optional[str] = None,
+        folders: list[str] | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
         limit: int = 20,
     ) -> list[TextContent]:
         """
@@ -205,9 +191,7 @@ def register_intelligence_tools(
             )
 
             if not results:
-                return [TextContent(
-                    type="text", text="No matching emails found."
-                )]
+                return [TextContent(type="text", text="No matching emails found.")]
 
             schema_str = json.dumps(schema, indent=2)
             extracted_records = []
@@ -235,24 +219,21 @@ def register_intelligence_tools(
                     pass  # LLM returned null or invalid JSON — skip
 
             if not extracted_records:
-                return [TextContent(
-                    type="text",
-                    text=f"No structured data matching the schema found in {len(results)} threads."
-                )]
+                return [
+                    TextContent(
+                        type="text",
+                        text=f"No structured data matching the schema found in {len(results)} threads.",
+                    )
+                ]
 
-            return [TextContent(
-                type="text",
-                text=json.dumps(extracted_records, indent=2)
-            )]
+            return [TextContent(type="text", text=json.dumps(extracted_records, indent=2))]
 
         except Exception as e:
             log.error(f"extract_from_emails error: {e}")
             return [TextContent(type="text", text=f"Error: {e}")]
 
 
-async def _claude_complete(
-    system: str, user: str, api_key: str
-) -> str:
+async def _claude_complete(system: str, user: str, api_key: str) -> str:
     """Call the Claude API for higher-quality reasoning."""
     async with httpx.AsyncClient(timeout=60.0) as client:
         r = await client.post(
