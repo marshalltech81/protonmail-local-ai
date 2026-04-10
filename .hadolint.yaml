@@ -1,2 +1,3 @@
 ignore:
   - DL3008  # apt-get version pinning is impractical on Debian stable
+  - DL3059  # consecutive RUN instructions are intentional for layer caching
