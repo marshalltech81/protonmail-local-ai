@@ -39,11 +39,10 @@ fi
 # Detect whether a Proton account is already authenticated
 # Bridge writes account cache files after first successful login.
 # =============================================================================
-ACCOUNT_DIR="$XDG_CACHE_HOME/protonmail/bridge"
+VAULT="$XDG_CONFIG_HOME/protonmail/bridge-v3/vault.enc"
 LOGGED_IN=false
 
-if [ -d "$ACCOUNT_DIR" ] && \
-   find "$ACCOUNT_DIR" -name "*.db" 2>/dev/null | grep -q .; then
+if [ -f "$VAULT" ]; then
     LOGGED_IN=true
 fi
 

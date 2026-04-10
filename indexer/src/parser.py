@@ -4,6 +4,7 @@ Reads raw .eml files from Maildir and returns structured Message objects.
 Handles MIME, HTML-to-text conversion, and attachment metadata.
 """
 import email
+import email.message
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime

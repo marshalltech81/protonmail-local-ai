@@ -7,6 +7,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     isync \
     ca-certificates \
     netcat-openbsd \
+    gettext-base \
  && rm -rf /var/lib/apt/lists/*
 
 COPY mbsyncrc.template /etc/mbsyncrc.template
