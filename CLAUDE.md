@@ -130,7 +130,6 @@ When adding tests:
 - Per-session LLM mode toggle (currently set globally via .env)
 - Test suite (pytest — start with indexer/src/parser.py and threader.py)
 - Attachment download tool
-- GitHub Actions CI workflow
 - Schema migration framework — SCHEMA_VERSION is tracked but no migration runner exists yet
 - Ollama embedding dimension (768) is hardcoded in indexer/src/database.py line 93 —
   switching embedding models requires a manual schema reset
