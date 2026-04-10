@@ -3,11 +3,11 @@ SQLite database layer.
 Uses FTS5 for keyword search and sqlite-vec for vector similarity search.
 Thread-level indexing: one row per thread, updated as new messages arrive.
 """
+
 import json
 import logging
 import sqlite3
 from pathlib import Path
-from typing import Optional
 
 import sqlite_vec
 
@@ -102,32 +102,25 @@ class Database:
             )
         """)
 
-        cur.execute(
-            "INSERT OR IGNORE INTO schema_version VALUES (?)",
-            (SCHEMA_VERSION,)
-        )
+        cur.execute("INSERT OR IGNORE INTO schema_version VALUES (?)", (SCHEMA_VERSION,))
         self._conn.commit()
         log.info(f"Database ready at {self.path}")
 
     def upsert_thread(self, thread, embedding: list[float]):
         """Insert or update a thread in all three indexes."""
-        from datetime import timezone
         cur = self._conn.cursor()
 
         participants_json = json.dumps(thread.participants)
-        message_ids_json = json.dumps(
-            [m.message_id for m in thread.messages]
-        )
+        message_ids_json = json.dumps([m.message_id for m in thread.messages])
         body = thread.text_for_embedding()
         snippet = thread.snippet()
         date_first = thread.date_first.isoformat()
         date_last = thread.date_last.isoformat()
-        has_attachments = int(
-            any(m.has_attachments for m in thread.messages)
-        )
+        has_attachments = int(any(m.has_attachments for m in thread.messages))
 
         # Upsert main thread record
-        cur.execute("""
+        cur.execute(
+            """
             INSERT INTO threads
                 (thread_id, subject, participants, folder,
                  date_first, date_last, message_ids, snippet, has_attachments)
@@ -138,59 +131,76 @@ class Database:
                 message_ids     = excluded.message_ids,
                 snippet         = excluded.snippet,
                 has_attachments = excluded.has_attachments
-        """, (
-            thread.thread_id, thread.subject, participants_json,
-            thread.folder, date_first, date_last,
-            message_ids_json, snippet, has_attachments
-        ))
+        """,
+            (
+                thread.thread_id,
+                thread.subject,
+                participants_json,
+                thread.folder,
+                date_first,
+                date_last,
+                message_ids_json,
+                snippet,
+                has_attachments,
+            ),
+        )
 
         # Update message→thread mapping for all messages
         for msg in thread.messages:
-            cur.execute("""
+            cur.execute(
+                """
                 INSERT OR REPLACE INTO message_thread_map
                     (message_id, thread_id, filepath)
                 VALUES (?, ?, ?)
-            """, (msg.message_id, thread.thread_id, msg.filepath))
+            """,
+                (msg.message_id, thread.thread_id, msg.filepath),
+            )
 
-            cur.execute("""
+            cur.execute(
+                """
                 INSERT OR REPLACE INTO indexed_files
                     (filepath, indexed_at)
                 VALUES (?, datetime('now'))
-            """, (msg.filepath,))
+            """,
+                (msg.filepath,),
+            )
 
         # Update FTS5 index
+        cur.execute("DELETE FROM threads_fts WHERE thread_id = ?", (thread.thread_id,))
         cur.execute(
-            "DELETE FROM threads_fts WHERE thread_id = ?",
-            (thread.thread_id,)
-        )
-        cur.execute("""
+            """
             INSERT INTO threads_fts (thread_id, subject, participants, body)
             VALUES (?, ?, ?, ?)
-        """, (thread.thread_id, thread.subject, participants_json, body))
+        """,
+            (thread.thread_id, thread.subject, participants_json, body),
+        )
 
         # Update vector index
-        cur.execute("""
+        cur.execute(
+            """
             INSERT OR REPLACE INTO threads_vec (thread_id, embedding)
             VALUES (?, ?)
-        """, (thread.thread_id, sqlite_vec.serialize_float32(embedding)))
+        """,
+            (thread.thread_id, sqlite_vec.serialize_float32(embedding)),
+        )
 
         self._conn.commit()
 
-    def find_thread_by_message_id(self, message_id: str) -> Optional[str]:
+    def find_thread_by_message_id(self, message_id: str) -> str | None:
         row = self._conn.execute(
-            "SELECT thread_id FROM message_thread_map WHERE message_id = ?",
-            (message_id,)
+            "SELECT thread_id FROM message_thread_map WHERE message_id = ?", (message_id,)
         ).fetchone()
         return row["thread_id"] if row else None
 
-    def find_thread_by_subject(
-        self, normalized_subject: str, folder: str
-    ) -> Optional[str]:
-        row = self._conn.execute("""
+    def find_thread_by_subject(self, normalized_subject: str, folder: str) -> str | None:
+        row = self._conn.execute(
+            """
             SELECT thread_id FROM threads
             WHERE subject = ? AND folder = ?
             ORDER BY date_last DESC LIMIT 1
-        """, (normalized_subject, folder)).fetchone()
+        """,
+            (normalized_subject, folder),
+        ).fetchone()
         return row["thread_id"] if row else None
 
     def get_thread(self, thread_id: str):
@@ -201,8 +211,10 @@ class Database:
         if not row:
             return None
         # Lightweight reconstruction for threading purposes
-        from .threader import Thread
         from datetime import datetime
+
+        from .threader import Thread
+
         return Thread(
             thread_id=row["thread_id"],
             subject=row["subject"],
@@ -221,9 +233,7 @@ class Database:
 
     def get_stats(self) -> dict:
         stats = {}
-        stats["total_threads"] = self._conn.execute(
-            "SELECT COUNT(*) FROM threads"
-        ).fetchone()[0]
+        stats["total_threads"] = self._conn.execute("SELECT COUNT(*) FROM threads").fetchone()[0]
         stats["total_messages"] = self._conn.execute(
             "SELECT COUNT(*) FROM message_thread_map"
         ).fetchone()[0]

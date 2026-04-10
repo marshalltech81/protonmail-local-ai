@@ -3,13 +3,13 @@ SQLite query layer for the MCP server.
 Read-only access to the index built by the indexer service.
 Supports BM25 keyword search, vector similarity search, and hybrid fusion.
 """
+
 import json
 import logging
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
 
 import sqlite_vec
 
@@ -53,17 +53,17 @@ class Database:
         self,
         query_text: str,
         query_embedding: list[float],
-        folders: Optional[list[str]] = None,
-        from_addr: Optional[str] = None,
-        date_from: Optional[str] = None,
-        date_to: Optional[str] = None,
-        has_attachments: Optional[bool] = None,
+        folders: list[str] | None = None,
+        from_addr: str | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
+        has_attachments: bool | None = None,
         limit: int = 10,
     ) -> list[ThreadResult]:
-        bm25_results  = self._keyword_search(query_text, limit * 2)
-        vec_results   = self._vector_search(query_embedding, limit * 2)
-        fused         = self._reciprocal_rank_fusion(bm25_results, vec_results)
-        filtered      = self._apply_filters(
+        bm25_results = self._keyword_search(query_text, limit * 2)
+        vec_results = self._vector_search(query_embedding, limit * 2)
+        fused = self._reciprocal_rank_fusion(bm25_results, vec_results)
+        filtered = self._apply_filters(
             fused, folders, from_addr, date_from, date_to, has_attachments
         )
         return filtered[:limit]
@@ -71,7 +71,7 @@ class Database:
     def keyword_search(
         self,
         query_text: str,
-        folders: Optional[list[str]] = None,
+        folders: list[str] | None = None,
         limit: int = 10,
     ) -> list[ThreadResult]:
         results = self._keyword_search(query_text, limit * 2)
@@ -81,7 +81,7 @@ class Database:
     def semantic_search(
         self,
         query_embedding: list[float],
-        folders: Optional[list[str]] = None,
+        folders: list[str] | None = None,
         limit: int = 10,
     ) -> list[ThreadResult]:
         results = self._vector_search(query_embedding, limit * 2)
@@ -90,7 +90,8 @@ class Database:
 
     def _keyword_search(self, query: str, limit: int) -> list[ThreadResult]:
         try:
-            rows = self._conn.execute("""
+            rows = self._conn.execute(
+                """
                 SELECT
                     t.thread_id, t.subject, t.participants, t.folder,
                     t.date_first, t.date_last, t.message_ids,
@@ -101,18 +102,19 @@ class Database:
                 WHERE threads_fts MATCH ?
                 ORDER BY score
                 LIMIT ?
-            """, (query, limit)).fetchall()
+            """,
+                (query, limit),
+            ).fetchall()
             return [self._row_to_result(r) for r in rows]
         except Exception as e:
             log.warning(f"Keyword search error: {e}")
             return []
 
-    def _vector_search(
-        self, embedding: list[float], limit: int
-    ) -> list[ThreadResult]:
+    def _vector_search(self, embedding: list[float], limit: int) -> list[ThreadResult]:
         try:
             serialized = sqlite_vec.serialize_float32(embedding)
-            rows = self._conn.execute("""
+            rows = self._conn.execute(
+                """
                 SELECT
                     t.thread_id, t.subject, t.participants, t.folder,
                     t.date_first, t.date_last, t.message_ids,
@@ -123,7 +125,9 @@ class Database:
                 WHERE v.embedding MATCH ?
                   AND k = ?
                 ORDER BY v.distance
-            """, (serialized, limit)).fetchall()
+            """,
+                (serialized, limit),
+            ).fetchall()
             return [self._row_to_result(r) for r in rows]
         except Exception as e:
             log.warning(f"Vector search error: {e}")
@@ -140,13 +144,11 @@ class Database:
         index: dict[str, ThreadResult] = {}
 
         for rank, result in enumerate(bm25):
-            scores[result.thread_id] = scores.get(result.thread_id, 0) \
-                + 1.0 / (k + rank + 1)
+            scores[result.thread_id] = scores.get(result.thread_id, 0) + 1.0 / (k + rank + 1)
             index[result.thread_id] = result
 
         for rank, result in enumerate(vec):
-            scores[result.thread_id] = scores.get(result.thread_id, 0) \
-                + 1.0 / (k + rank + 1)
+            scores[result.thread_id] = scores.get(result.thread_id, 0) + 1.0 / (k + rank + 1)
             index[result.thread_id] = result
 
         ranked = sorted(scores.items(), key=lambda x: x[1], reverse=True)
@@ -160,21 +162,18 @@ class Database:
     def _apply_filters(
         self,
         results: list[ThreadResult],
-        folders: Optional[list[str]] = None,
-        from_addr: Optional[str] = None,
-        date_from: Optional[str] = None,
-        date_to: Optional[str] = None,
-        has_attachments: Optional[bool] = None,
+        folders: list[str] | None = None,
+        from_addr: str | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
+        has_attachments: bool | None = None,
     ) -> list[ThreadResult]:
         filtered = results
         if folders:
             filtered = [r for r in filtered if r.folder in folders]
         if from_addr:
             fa = from_addr.lower()
-            filtered = [
-                r for r in filtered
-                if any(fa in p.lower() for p in r.participants)
-            ]
+            filtered = [r for r in filtered if any(fa in p.lower() for p in r.participants)]
         if date_from:
             filtered = [r for r in filtered if r.date_last.isoformat() >= date_from]
         if date_to:
@@ -187,7 +186,7 @@ class Database:
     # Direct lookups
     # -------------------------------------------------------------------------
 
-    def get_thread(self, thread_id: str) -> Optional[ThreadResult]:
+    def get_thread(self, thread_id: str) -> ThreadResult | None:
         row = self._conn.execute(
             "SELECT * FROM threads WHERE thread_id = ?", (thread_id,)
         ).fetchone()
@@ -195,8 +194,7 @@ class Database:
 
     def get_thread_message_ids(self, thread_id: str) -> list[str]:
         row = self._conn.execute(
-            "SELECT message_ids FROM threads WHERE thread_id = ?",
-            (thread_id,)
+            "SELECT message_ids FROM threads WHERE thread_id = ?", (thread_id,)
         ).fetchone()
         return json.loads(row["message_ids"]) if row else []
 
@@ -207,25 +205,24 @@ class Database:
         limit: int = 20,
         offset: int = 0,
     ) -> list[ThreadResult]:
-        rows = self._conn.execute("""
+        rows = self._conn.execute(
+            """
             SELECT * FROM threads
             WHERE folder = ?
             ORDER BY date_last DESC
             LIMIT ? OFFSET ?
-        """, (folder, limit, offset)).fetchall()
+        """,
+            (folder, limit, offset),
+        ).fetchall()
         return [self._row_to_result(r) for r in rows]
 
     def get_stats(self) -> dict:
         stats = {}
-        stats["total_threads"] = self._conn.execute(
-            "SELECT COUNT(*) FROM threads"
-        ).fetchone()[0]
+        stats["total_threads"] = self._conn.execute("SELECT COUNT(*) FROM threads").fetchone()[0]
         stats["total_messages"] = self._conn.execute(
             "SELECT COUNT(*) FROM message_thread_map"
         ).fetchone()[0]
-        row = self._conn.execute(
-            "SELECT MIN(date_first), MAX(date_last) FROM threads"
-        ).fetchone()
+        row = self._conn.execute("SELECT MIN(date_first), MAX(date_last) FROM threads").fetchone()
         stats["oldest_message"] = row[0]
         stats["newest_message"] = row[1]
         return stats
@@ -237,8 +234,7 @@ class Database:
             GROUP BY folder
             ORDER BY thread_count DESC
         """).fetchall()
-        return [{"name": r["folder"], "thread_count": r["thread_count"]}
-                for r in rows]
+        return [{"name": r["folder"], "thread_count": r["thread_count"]} for r in rows]
 
     # -------------------------------------------------------------------------
     # Helpers

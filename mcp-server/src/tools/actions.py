@@ -3,8 +3,8 @@ Action tools — Group 4 (write operations).
 Send, reply, move, flag, archive, delete.
 All write operations go through Bridge IMAP/SMTP directly.
 """
+
 import logging
-from typing import Optional
 
 from mcp.types import TextContent
 
@@ -19,9 +19,9 @@ def register_action_tools(server, imap):
         subject: str,
         body: str,
         body_format: str = "text",
-        cc: Optional[list[str]] = None,
-        bcc: Optional[list[str]] = None,
-        reply_to_message_id: Optional[str] = None,
+        cc: list[str] | None = None,
+        bcc: list[str] | None = None,
+        reply_to_message_id: str | None = None,
     ) -> list[TextContent]:
         """
         Send a new email via ProtonBridge SMTP.
@@ -60,14 +60,9 @@ def register_action_tools(server, imap):
 
             if success:
                 recipients = ", ".join(to)
-                return [TextContent(
-                    type="text",
-                    text=f"Email sent successfully to {recipients}."
-                )]
+                return [TextContent(type="text", text=f"Email sent successfully to {recipients}.")]
             else:
-                return [TextContent(
-                    type="text", text="Failed to send email. Check logs."
-                )]
+                return [TextContent(type="text", text="Failed to send email. Check logs.")]
 
         except Exception as e:
             log.error(f"send_email error: {e}")
@@ -94,14 +89,16 @@ def register_action_tools(server, imap):
         Returns:
             Confirmation of send or error message.
         """
-        return [TextContent(
-            type="text",
-            text=(
-                "reply_to_thread is not yet implemented. "
-                "Use send_email with reply_to_message_id set to the Message-ID "
-                "of the last message in the thread to send a reply manually."
+        return [
+            TextContent(
+                type="text",
+                text=(
+                    "reply_to_thread is not yet implemented. "
+                    "Use send_email with reply_to_message_id set to the Message-ID "
+                    "of the last message in the thread to send a reply manually."
+                ),
             )
-        )]
+        ]
 
     @server.tool()
     async def move_message(
@@ -123,10 +120,11 @@ def register_action_tools(server, imap):
         try:
             success = await imap.move_message(uid, src_folder, dst_folder)
             if success:
-                return [TextContent(
-                    type="text",
-                    text=f"Message moved from {src_folder} to {dst_folder}."
-                )]
+                return [
+                    TextContent(
+                        type="text", text=f"Message moved from {src_folder} to {dst_folder}."
+                    )
+                ]
             return [TextContent(type="text", text="Move failed.")]
         except Exception as e:
             log.error(f"move_message error: {e}")
@@ -153,7 +151,9 @@ def register_action_tools(server, imap):
             results = []
             for uid in uids:
                 success = await imap.set_flag(uid, folder, "\\Seen", read)
-                results.append(f"UID {uid}: {'read' if read else 'unread'} {'✓' if success else '✗'}")
+                results.append(
+                    f"UID {uid}: {'read' if read else 'unread'} {'✓' if success else '✗'}"
+                )
             return [TextContent(type="text", text="\n".join(results))]
         except Exception as e:
             log.error(f"mark_read error: {e}")
@@ -180,9 +180,7 @@ def register_action_tools(server, imap):
             success = await imap.set_flag(uid, folder, "\\Flagged", flagged)
             state = "flagged" if flagged else "unflagged"
             if success:
-                return [TextContent(
-                    type="text", text=f"Message {state} successfully."
-                )]
+                return [TextContent(type="text", text=f"Message {state} successfully.")]
             return [TextContent(type="text", text=f"Failed to {state} message.")]
         except Exception as e:
             log.error(f"flag_message error: {e}")
@@ -193,7 +191,7 @@ def register_action_tools(server, imap):
         to: list[str],
         subject: str,
         body: str,
-        reply_to_message_id: Optional[str] = None,
+        reply_to_message_id: str | None = None,
     ) -> list[TextContent]:
         """
         Save a draft email to the Drafts folder.
@@ -207,10 +205,12 @@ def register_action_tools(server, imap):
         Returns:
             Confirmation that draft was saved.
         """
-        return [TextContent(
-            type="text",
-            text=(
-                "create_draft is not yet implemented. "
-                "IMAP APPEND to the Drafts folder is required but not yet built."
+        return [
+            TextContent(
+                type="text",
+                text=(
+                    "create_draft is not yet implemented. "
+                    "IMAP APPEND to the Drafts folder is required but not yet built."
+                ),
             )
-        )]
+        ]

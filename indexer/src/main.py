@@ -3,18 +3,19 @@ Indexer entry point.
 Watches the Maildir for new/changed emails, parses and threads them,
 generates embeddings via Ollama, and writes to the SQLite index.
 """
-import os
+
 import logging
+import os
 import time
 from pathlib import Path
 
-from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
+from watchdog.observers import Observer
 
-from .parser import parse_email
-from .threader import Threader
 from .database import Database
 from .embedder import Embedder
+from .parser import parse_email
+from .threader import Threader
 
 logging.basicConfig(
     level=logging.INFO,

@@ -2,7 +2,7 @@
 IMAP/SMTP client for live Bridge operations.
 Used for message retrieval, send, move, flag, and delete actions.
 """
-import asyncio
+
 import email
 import logging
 import smtplib
@@ -11,7 +11,6 @@ from dataclasses import dataclass
 from datetime import datetime
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
-from typing import Optional
 
 import aioimaplib
 
@@ -34,9 +33,7 @@ class FullMessage:
 
 
 class IMAPClient:
-    def __init__(
-        self, host: str, imap_port: int, user: str, password: str, smtp_port: int = 1025
-    ):
+    def __init__(self, host: str, imap_port: int, user: str, password: str, smtp_port: int = 1025):
         self.host = host
         self.port = imap_port
         self.smtp_port = smtp_port
@@ -50,16 +47,12 @@ class IMAPClient:
         await client.select(folder)
         return client
 
-    async def fetch_message(
-        self, message_id: str, folder: str = "INBOX"
-    ) -> Optional[FullMessage]:
+    async def fetch_message(self, message_id: str, folder: str = "INBOX") -> FullMessage | None:
         """Fetch a full message by Message-ID from IMAP."""
         try:
             client = await self._connect(folder)
             # Search by Message-ID header
-            _, data = await client.search(
-                f'HEADER Message-ID "{message_id}"'
-            )
+            _, data = await client.search(f'HEADER Message-ID "{message_id}"')
             uids = data[0].decode().split()
             if not uids:
                 await client.logout()
@@ -93,9 +86,7 @@ class IMAPClient:
             log.error(f"Failed to list folders: {e}")
             return []
 
-    async def move_message(
-        self, uid: str, src_folder: str, dst_folder: str
-    ) -> bool:
+    async def move_message(self, uid: str, src_folder: str, dst_folder: str) -> bool:
         """Move a message from one folder to another."""
         try:
             client = await self._connect(src_folder)
@@ -108,9 +99,7 @@ class IMAPClient:
             log.error(f"Failed to move message: {e}")
             return False
 
-    async def set_flag(
-        self, uid: str, folder: str, flag: str, value: bool
-    ) -> bool:
+    async def set_flag(self, uid: str, folder: str, flag: str, value: bool) -> bool:
         """Set or unset an IMAP flag (e.g. \\Seen, \\Flagged)."""
         try:
             client = await self._connect(folder)
@@ -128,19 +117,18 @@ class IMAPClient:
         subject: str,
         body: str,
         body_format: str = "text",
-        cc: Optional[list[str]] = None,
-        bcc: Optional[list[str]] = None,
-        reply_to_message_id: Optional[str] = None,
-        in_reply_to: Optional[str] = None,
-        references: Optional[str] = None,
+        cc: list[str] | None = None,
+        bcc: list[str] | None = None,
+        reply_to_message_id: str | None = None,
+        in_reply_to: str | None = None,
+        references: str | None = None,
     ) -> bool:
         """Send an email via Bridge SMTP."""
         try:
-            msg = MIMEMultipart("alternative") if body_format == "html" \
-                else MIMEText(body, "plain")
+            msg = MIMEMultipart("alternative") if body_format == "html" else MIMEText(body, "plain")
 
-            msg["From"]    = self.user
-            msg["To"]      = ", ".join(to)
+            msg["From"] = self.user
+            msg["To"] = ", ".join(to)
             msg["Subject"] = subject
 
             if cc:
@@ -167,9 +155,7 @@ class IMAPClient:
             log.error(f"Failed to send email: {e}")
             return False
 
-    def _parse_full_message(
-        self, raw: bytes, folder: str, uid: str
-    ) -> FullMessage:
+    def _parse_full_message(self, raw: bytes, folder: str, uid: str) -> FullMessage:
         msg = email.message_from_bytes(raw)
         body_text = ""
         body_html = ""
@@ -180,11 +166,13 @@ class IMAPClient:
                 ct = part.get_content_type()
                 cd = part.get("Content-Disposition", "")
                 if "attachment" in cd:
-                    attachments.append({
-                        "filename": part.get_filename() or "unnamed",
-                        "content_type": ct,
-                        "size": len(part.get_payload(decode=True) or b""),
-                    })
+                    attachments.append(
+                        {
+                            "filename": part.get_filename() or "unnamed",
+                            "content_type": ct,
+                            "size": len(part.get_payload(decode=True) or b""),
+                        }
+                    )
                 elif ct == "text/plain" and not body_text:
                     payload = part.get_payload(decode=True) or b""
                     body_text = payload.decode(
@@ -197,11 +185,10 @@ class IMAPClient:
                     )
         else:
             payload = msg.get_payload(decode=True) or b""
-            body_text = payload.decode(
-                msg.get_content_charset() or "utf-8", errors="replace"
-            )
+            body_text = payload.decode(msg.get_content_charset() or "utf-8", errors="replace")
 
         from email.utils import parsedate_to_datetime
+
         try:
             date = parsedate_to_datetime(msg.get("Date", ""))
         except Exception:

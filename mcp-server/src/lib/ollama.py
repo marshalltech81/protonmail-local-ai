@@ -2,6 +2,7 @@
 Ollama client for the MCP server.
 Used for query embedding (search) and local LLM inference (Q&A, agentic).
 """
+
 import logging
 
 import httpx

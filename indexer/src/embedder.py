@@ -2,6 +2,7 @@
 Embedder — generates vector embeddings via the local Ollama API.
 Retries on failure to handle Ollama startup latency.
 """
+
 import logging
 import time
 
@@ -30,19 +31,13 @@ class Embedder:
                         log.info(f"Ollama ready. Model '{self.model}' available.")
                         return
                     else:
-                        log.info(
-                            f"Ollama ready but model '{self.model}' not found. "
-                            f"Pulling now..."
-                        )
+                        log.info(f"Ollama ready but model '{self.model}' not found. Pulling now...")
                         self._pull_model()
                         return
             except Exception:
                 pass
             time.sleep(3)
-        raise RuntimeError(
-            f"Ollama did not become ready within {timeout}s. "
-            f"Run: make pull-models"
-        )
+        raise RuntimeError(f"Ollama did not become ready within {timeout}s. Run: make pull-models")
 
     def _pull_model(self):
         log.info(f"Pulling model: {self.model}")
