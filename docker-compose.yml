@@ -1,0 +1,157 @@
+services:
+
+  # ---------------------------------------------------------------------------
+  # ProtonBridge
+  # Decrypts ProtonMail and exposes IMAP/SMTP on the internal network.
+  # Build from official Proton source using the no-GUI target.
+  # First run requires interactive login: make first-run
+  # ---------------------------------------------------------------------------
+  protonmail-bridge:
+    build:
+      context: ./bridge
+      args:
+        BRIDGE_VERSION: ${BRIDGE_VERSION:-v3.21.2}
+    container_name: protonmail-bridge
+    restart: unless-stopped
+    volumes:
+      - bridge-data:/data
+    networks:
+      - protonmail-net
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "1143"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+  # ---------------------------------------------------------------------------
+  # mbsync
+  # Syncs email from Bridge IMAP to local Maildir in real time.
+  # ---------------------------------------------------------------------------
+  mbsync:
+    build:
+      context: ./mbsync
+    container_name: mbsync
+    restart: unless-stopped
+    depends_on:
+      protonmail-bridge:
+        condition: service_healthy
+    environment:
+      BRIDGE_HOST: protonmail-bridge
+      BRIDGE_IMAP_PORT: 1143
+      BRIDGE_USER: ${BRIDGE_USER}
+      BRIDGE_PASS: ${BRIDGE_PASS}
+      SYNC_INTERVAL: ${SYNC_INTERVAL:-60}
+    volumes:
+      - maildir-volume:/maildir
+    networks:
+      - protonmail-net
+
+  # ---------------------------------------------------------------------------
+  # Ollama
+  # Serves local embedding and LLM models.
+  # GPU passthrough: uncomment the deploy block below if you have NVIDIA GPU.
+  # ---------------------------------------------------------------------------
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    restart: unless-stopped
+    volumes:
+      - ollama-models:/root/.ollama
+    networks:
+      - protonmail-net
+    # Uncomment for NVIDIA GPU support:
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  # ---------------------------------------------------------------------------
+  # Indexer
+  # Watches Maildir, parses and threads emails, generates embeddings,
+  # and writes to the SQLite index (FTS5 + sqlite-vec).
+  # ---------------------------------------------------------------------------
+  indexer:
+    build:
+      context: ./indexer
+    container_name: indexer
+    restart: unless-stopped
+    depends_on:
+      ollama:
+        condition: service_healthy
+      mbsync:
+        condition: service_started
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+      OLLAMA_EMBED_MODEL: ${OLLAMA_EMBED_MODEL:-nomic-embed-text}
+      MAILDIR_PATH: /maildir
+      SQLITE_PATH: /data/mail.db
+    volumes:
+      - maildir-volume:/maildir:ro
+      - sqlite-volume:/data
+    networks:
+      - protonmail-net
+
+  # ---------------------------------------------------------------------------
+  # MCP Server
+  # Exposes search, Q&A, and agentic tools to Claude Desktop via HTTP/SSE.
+  # Accessible at http://localhost:MCP_PORT/mcp on the host machine only.
+  # ---------------------------------------------------------------------------
+  mcp-server:
+    build:
+      context: ./mcp-server
+    container_name: mcp-server
+    restart: unless-stopped
+    depends_on:
+      indexer:
+        condition: service_started
+      protonmail-bridge:
+        condition: service_healthy
+    environment:
+      SQLITE_PATH: /data/mail.db
+      BRIDGE_HOST: protonmail-bridge
+      BRIDGE_IMAP_PORT: 1143
+      BRIDGE_SMTP_PORT: 1025
+      BRIDGE_USER: ${BRIDGE_USER}
+      BRIDGE_PASS: ${BRIDGE_PASS}
+      OLLAMA_HOST: http://ollama:11434
+      OLLAMA_EMBED_MODEL: ${OLLAMA_EMBED_MODEL:-nomic-embed-text}
+      OLLAMA_LLM_MODEL: ${OLLAMA_LLM_MODEL:-llama3.2}
+      LLM_MODE: ${LLM_MODE:-local}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      MCP_PORT: ${MCP_PORT:-3000}
+    volumes:
+      - sqlite-volume:/data:ro
+    ports:
+      - "127.0.0.1:${MCP_PORT:-3000}:3000"
+    networks:
+      - protonmail-net
+
+# =============================================================================
+# Volumes
+# All email data and indexes live in named Docker volumes.
+# Back up sqlite-volume to preserve your search index.
+# =============================================================================
+volumes:
+  bridge-data:       # Bridge credentials, config, and cache
+  maildir-volume:    # Raw email in Maildir format
+  ollama-models:     # Downloaded Ollama models
+  sqlite-volume:     # SQLite database (FTS5 + vector index)
+
+# =============================================================================
+# Networks
+# All containers communicate on an isolated bridge network.
+# Only the MCP server port is exposed to the host (localhost only).
+# =============================================================================
+networks:
+  protonmail-net:
+    driver: bridge
