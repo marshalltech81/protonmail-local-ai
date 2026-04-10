@@ -8,6 +8,7 @@ import logging
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
 
 import sqlite_vec
@@ -35,6 +36,7 @@ class Database:
         self._conn = self._connect()
 
     def _connect(self) -> sqlite3.Connection:
+        Path(self.path).parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(self.path, check_same_thread=False)
         conn.row_factory = sqlite3.Row
         conn.enable_load_extension(True)

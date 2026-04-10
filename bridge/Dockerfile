@@ -19,6 +19,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config \
     libsecret-1-dev \
     libfido2-dev \
+    libcbor-dev \
     ca-certificates \
  && rm -rf /var/lib/apt/lists/*
 
