@@ -43,7 +43,7 @@ MCP_PORT      = int(os.environ.get("MCP_PORT", "3000"))
 def main():
     # Shared service clients
     db     = Database(SQLITE_PATH)
-    imap   = IMAPClient(BRIDGE_HOST, BRIDGE_IMAP, BRIDGE_USER, BRIDGE_PASS)
+    imap   = IMAPClient(BRIDGE_HOST, BRIDGE_IMAP, BRIDGE_USER, BRIDGE_PASS, smtp_port=BRIDGE_SMTP)
     ollama = OllamaClient(OLLAMA_HOST, EMBED_MODEL, LLM_MODEL)
 
     # FastMCP server — supports @server.tool() decorator and SSE transport

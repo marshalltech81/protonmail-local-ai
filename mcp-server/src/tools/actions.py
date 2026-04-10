@@ -6,13 +6,12 @@ All write operations go through Bridge IMAP/SMTP directly.
 import logging
 from typing import Optional
 
-from mcp.server import Server
 from mcp.types import TextContent
 
 log = logging.getLogger("mcp.tools.actions")
 
 
-def register_action_tools(server: Server, imap):
+def register_action_tools(server, imap):
 
     @server.tool()
     async def send_email(
@@ -95,16 +94,14 @@ def register_action_tools(server: Server, imap):
         Returns:
             Confirmation of send or error message.
         """
-        try:
-            # This would fetch the last message in the thread to get
-            # proper threading headers — simplified here
-            return [TextContent(
-                type="text",
-                text="reply_to_thread: fetch last message and send with threading headers."
-            )]
-        except Exception as e:
-            log.error(f"reply_to_thread error: {e}")
-            return [TextContent(type="text", text=f"Error: {e}")]
+        return [TextContent(
+            type="text",
+            text=(
+                "reply_to_thread is not yet implemented. "
+                "Use send_email with reply_to_message_id set to the Message-ID "
+                "of the last message in the thread to send a reply manually."
+            )
+        )]
 
     @server.tool()
     async def move_message(
@@ -210,8 +207,10 @@ def register_action_tools(server: Server, imap):
         Returns:
             Confirmation that draft was saved.
         """
-        # Draft saving via IMAP APPEND to Drafts folder
         return [TextContent(
             type="text",
-            text=f"Draft saved: '{subject}' to {', '.join(to)}"
+            text=(
+                "create_draft is not yet implemented. "
+                "IMAP APPEND to the Drafts folder is required but not yet built."
+            )
         )]
