@@ -9,7 +9,7 @@ starlette==1.0.0
 sqlite-vec==0.1.9
 
 # IMAP client for Bridge operations
-aioimaplib==1.1.0
+aioimaplib==2.0.1
 
 # SMTP for send operations
 aiosmtplib==3.0.1
