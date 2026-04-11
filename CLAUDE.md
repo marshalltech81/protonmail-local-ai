@@ -83,6 +83,20 @@ https://github.com/marshalltech81/protonmail-local-ai
 - LLM_MODE=local uses Ollama (fully private), LLM_MODE=cloud uses Claude API
 - All secrets live in .env which is gitignored — never commit it
 
+## Secret Safety — Before Every Commit
+Before staging or committing, verify no secrets are included:
+```bash
+git diff --staged | grep -iE '(password|pass|secret|token|key|credential)' | grep '^\+'
+```
+Files that must never be committed:
+- `.env` — Bridge credentials, API keys (gitignored, but verify with `git status`)
+- `mbsync/bridge-cert.pem` — extracted TLS cert (gitignored)
+- Any file ending in `.pem`, `.key`, `.p12`, `.pfx`
+
+If a secret is accidentally committed, treat it as compromised immediately:
+rotate the credential, then remove it from git history with `git filter-repo`
+(do not use `git rebase` or `git commit --amend` — they leave the secret in the reflog).
+
 ## Common Commands
 ```
 make build        # build all images (~5 min first time)
