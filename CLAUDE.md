@@ -74,7 +74,9 @@ https://github.com/marshalltech81/protonmail-local-ai
 - bridge.lock at $XDG_CACHE_HOME/protonmail/bridge-v3/bridge.lock can cause "another
   instance running" errors after a hard crash — delete it to recover
 - Bridge restart recovers automatically via restart: unless-stopped in compose file
-- TLS cert extraction command (run after sync is stable):
+- TLS cert extraction is automatic — mbsync/entrypoint.sh runs openssl s_client on every
+  container start and writes the cert to /home/mbsync/bridge-cert.pem inside the container
+- Manual cert extraction (troubleshooting only — e.g. to inspect the cert on the host):
   docker run --rm --network protonmail-local-ai_protonmail-net debian:bookworm-slim \
   bash -c "apt-get install -y openssl -qq 2>/dev/null && echo | openssl s_client \
   -connect protonmail-bridge:1143 -starttls imap 2>/dev/null | openssl x509" \
@@ -89,9 +91,10 @@ https://github.com/marshalltech81/protonmail-local-ai
 
 ## Environment
 - Copy .env.example → .env before running anything
-- BRIDGE_USER and BRIDGE_PASS come from Bridge CLI → info (not your Proton password)
+- BRIDGE_USER comes from Bridge CLI → info (not your Proton password)
+- BRIDGE_PASS is a Docker Compose secret — write it to .secrets/bridge_pass.txt, not .env
 - LLM_MODE=local uses Ollama (fully private), LLM_MODE=cloud uses Claude API
-- All secrets live in .env which is gitignored — never commit it
+- All secrets live in .env or .secrets/ — both are gitignored, never commit them
 
 ## Secret Safety — Before Every Commit
 Before staging or committing, verify no secrets are included:
@@ -99,7 +102,8 @@ Before staging or committing, verify no secrets are included:
 git diff --staged | grep -iE '(password|pass|secret|token|key|credential)' | grep '^\+'
 ```
 Files that must never be committed:
-- `.env` — Bridge credentials, API keys (gitignored, but verify with `git status`)
+- `.env` — Bridge user, API keys (gitignored, but verify with `git status`)
+- `.secrets/bridge_pass.txt` — Bridge password Docker secret (gitignored)
 - `mbsync/bridge-cert.pem` — extracted TLS cert (gitignored)
 - Any file ending in `.pem`, `.key`, `.p12`, `.pfx`
 
@@ -193,20 +197,21 @@ Work through these in order. Do not skip ahead.
 
 ### Next immediate action
 1. Wait for initial ProtonMail sync to complete (watch: docker logs -f mbsync)
-2. Extract TLS cert: run the docker run command in Bridge-Specific Operational Notes above
-   (make recert is not yet a Makefile target)
-3. Verify cert extracted: cat mbsync/bridge-cert.pem
+2. TLS cert extraction is automatic — mbsync/entrypoint.sh runs openssl s_client on every
+   container start and writes the cert to /home/mbsync/bridge-cert.pem inside the container;
+   no manual step needed
 
 ### Security hardening
 - [x] TLS cert pinning in mbsync — entrypoint extracts cert via openssl s_client on
       every container start; CertificateFile points to /home/mbsync/bridge-cert.pem
-- [ ] PassCmd instead of plain BRIDGE_PASS env var in mbsyncrc.template
+- [x] BRIDGE_PASS as Docker Compose secret — .secrets/bridge_pass.txt mounted at
+      /run/secrets/bridge_pass; mbsyncrc.template reads it via PassCmd, never an env var
 - [ ] Split Docker networks: bridge-sync-net (Bridge+mbsync) and protonmail-net (rest)
 
 ### mbsync improvements
-- [ ] Change Sync All → Sync Pull in mbsyncrc.template
-- [ ] Exclude All Mail and Labels/* from Patterns in mbsyncrc.template
-- [ ] Explicit SyncState /maildir/.mbsyncstate in mbsyncrc.template
+- [x] Change Sync All → Sync Pull in mbsyncrc.template
+- [x] Exclude All Mail and Labels/* from Patterns in mbsyncrc.template
+- [x] Explicit SyncState /maildir/.mbsyncstate in mbsyncrc.template
 - [ ] IMAP IDLE investigation — replace sleep loop with push notifications
 
 ### Read-only protection
