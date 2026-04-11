@@ -4,7 +4,7 @@
 # One-time interactive Bridge login helper.
 # Run via: make first-run
 # =============================================================================
-set -e
+set -Eeuo pipefail
 
 echo ""
 echo "╔══════════════════════════════════════════════════════════════╗"
@@ -16,7 +16,7 @@ echo "║  can authenticate your Proton account.                      ║"
 echo "║                                                              ║"
 echo "║  Inside the Bridge CLI:                                      ║"
 echo "║    login  → enter your Proton email + password + 2FA        ║"
-echo "║    info   → copy bridge username + password into .env       ║"
+echo "║    info   → note bridge username + password from output     ║"
 echo "║    exit   → then run: make up                               ║"
 echo "║                                                              ║"
 echo "╚══════════════════════════════════════════════════════════════╝"
