@@ -1,0 +1,17 @@
+# Build context: mcp-server/
+# Only Dockerfile, requirements.txt, and src/ are needed.
+.dockerignore
+*.md
+# Python artifacts
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+*.egg-info/
+.venv/
+venv/
+# Never copy local environment or secrets into the image
+.env
+*.pem
+*.key

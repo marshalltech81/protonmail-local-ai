@@ -1,0 +1,6 @@
+# Build context: mbsync/
+# Only Dockerfile, entrypoint.sh, and mbsyncrc.template are needed.
+.dockerignore
+*.md
+# TLS cert is extracted at runtime — never bake it into the image
+*.pem
