@@ -1,7 +1,7 @@
 # =============================================================================
 # Indexer — parses, threads, embeds, and indexes email into SQLite
 # =============================================================================
-FROM python:3.12-slim-bookworm
+FROM python:3.14-slim-bookworm
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     # sqlite-vec build dependency
