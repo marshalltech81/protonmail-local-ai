@@ -27,12 +27,12 @@ fi
 
 # =============================================================================
 # Detect whether a Proton account is already authenticated
-# Searches all of XDG_CACHE_HOME for any .db file Bridge would have created
-# after a successful login — robust against Bridge changing its subdirectory
-# structure between versions
+# Bridge writes vault.enc after a successful login — its presence means
+# credentials are stored and Bridge can start noninteractively.
 # =============================================================================
+VAULT="$XDG_CONFIG_HOME/protonmail/bridge-v3/vault.enc"
 LOGGED_IN=false
-if find "$XDG_CACHE_HOME" -name "*.db" 2>/dev/null | grep -q .; then
+if [ -f "$VAULT" ]; then
     LOGGED_IN=true
 fi
 
