@@ -194,9 +194,6 @@ docs/
   mcp-tools.md            MCP tool reference with all parameters
   claude_desktop_config.example.json   Copy into Claude Desktop config
 
-scripts/
-  first-run.sh            Wrapper for make first-run
-  update.sh               Bridge version update helper
 ```
 
 ## Testing
