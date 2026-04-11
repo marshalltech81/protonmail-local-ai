@@ -73,7 +73,7 @@
     # Pre-create all subdirectories under /data with correct ownership.
     # Docker copies these into the named volume on first mount (copy-on-empty),
     # ensuring the bridge user can write even though the volume starts root-owned.
-    RUN mkdir -p /data/config /data/cache /data/gnupg /data/pass \
+    RUN mkdir -p /data/config /data/local /data/cache /data/gnupg /data/pass \
      && chmod 700 /data/gnupg \
      && chown -R bridge:bridge /data
     
@@ -81,6 +81,7 @@
     # Bridge writes config, cache, GPG keys, and pass store here
     ENV HOME=/home/bridge \
         XDG_CONFIG_HOME=/data/config \
+        XDG_DATA_HOME=/data/local \
         XDG_CACHE_HOME=/data/cache \
         GNUPGHOME=/data/gnupg \
         PASSWORD_STORE_DIR=/data/pass
