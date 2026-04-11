@@ -1,13 +1,6 @@
 #!/bin/bash
 set -e
 
-# All directories created as bridge user since USER bridge is set in Dockerfile
-mkdir -p "$GNUPGHOME" \
-         "$PASSWORD_STORE_DIR" \
-         "$XDG_CONFIG_HOME" \
-         "$XDG_CACHE_HOME"
-chmod 700 "$GNUPGHOME"
-
 # =============================================================================
 # Bootstrap GPG and pass on first run
 # Only runs once — persists in the bridge-data volume
@@ -43,12 +36,12 @@ if [ "$LOGGED_IN" = false ]; then
     echo ""
     echo "┌──────────────────────────────────────────────────────────────┐"
     echo "│  No Proton account found. Dropping to Bridge interactive CLI │"
-    echo "│                                                               │"
-    echo "│  Steps:                                                       │"
+    echo "│                                                              │"
+    echo "│  Steps:                                                      │"
     echo "│    login    → enter your Proton email, password, and 2FA     │"
     echo "│    info     → copy bridge username + password into .env      │"
-    echo "│    exit                                                       │"
-    echo "│                                                               │"
+    echo "│    exit                                                      │"
+    echo "│                                                              │"
     echo "│  Then: docker compose up -d                                  │"
     echo "└──────────────────────────────────────────────────────────────┘"
     echo ""
