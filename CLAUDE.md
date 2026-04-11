@@ -28,8 +28,8 @@ https://github.com/marshalltech81/protonmail-local-ai
 - Thread-level indexing because message-level loses conversational context
 - Hybrid search (BM25 + vector via RRF) beats either approach alone for email
 - MCP uses HTTP/SSE transport — stdio only works when the process runs on the host
-- Bridge builds two binaries: `bridge` (launcher) + `proton-bridge` (daemon) — both must be
-  copied into the runtime image or the launcher exits with "failed to launch"
+- Bridge builds a single `bridge` binary via `make build-nogui` — prior versions (pre-v3.24)
+  produced a separate `proton-bridge` daemon that also needed copying
 - Bridge container runs as non-root user `bridge` (UID 1000) — /data subdirectories are
   pre-created in the image so Docker's copy-on-empty initializes the named volume with
   correct ownership on first mount
