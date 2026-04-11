@@ -16,7 +16,7 @@ aiosmtplib==3.0.1
 
 # HTTP client for Ollama + Claude API
 httpx==0.27.0
-anthropic==0.40.0
+anthropic==0.93.0
 
 # Utilities
 python-dotenv==1.0.1
