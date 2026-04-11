@@ -34,6 +34,17 @@ RUN sed -i 's/Host = "127.0.0.1"/Host = "0.0.0.0"/' \
 # Verify the patch applied
 RUN grep 'Host = ' internal/constants/constants.go
 
+# Patch Bridge TLS cert generation to include the Docker container hostname as a
+# DNS SAN. Without this mbsync rejects the cert due to hostname mismatch —
+# Bridge issues the cert for 127.0.0.1 but mbsync connects via protonmail-bridge.
+# CertificateFile in mbsyncrc handles the self-signed trust; this fixes the SAN.
+RUN sed -i \
+    's|IPAddresses:           \[\]net\.IP{net\.ParseIP("127\.0\.0\.1")},|IPAddresses: []net.IP{net.ParseIP("127.0.0.1")},\n\t\tDNSNames:    []string{"protonmail-bridge", "localhost"},|' \
+    internal/certs/tls.go
+
+# Verify the patch applied
+RUN grep -A1 'IPAddresses' internal/certs/tls.go
+
 # Build without Qt/GUI
 RUN make build-nogui
 

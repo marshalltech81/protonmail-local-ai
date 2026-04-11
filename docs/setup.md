@@ -322,3 +322,18 @@ make up
 ```
 
 Your email index is in a separate volume (`sqlite-volume`) and is not affected.
+
+### mbsync fails — TLS hostname mismatch after rebuilding Bridge image
+
+The TLS cert Bridge generates is cached inside `vault.enc` in the `bridge-data` volume.
+Rebuilding the image does not regenerate the cert — the old one (issued for `127.0.0.1`
+only) is reused. To force a fresh cert with the correct SANs, delete `vault.enc` from
+the volume without wiping the GPG/pass store:
+
+```bash
+make down
+docker run --rm -v protonmail-local-ai_bridge-data:/data debian:bookworm-slim \
+    rm -f /data/config/protonmail/bridge-v3/vault.enc
+make first-run   # re-login; Bridge generates a new cert with protonmail-bridge SAN
+make up
+```

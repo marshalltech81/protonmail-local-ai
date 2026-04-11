@@ -42,6 +42,16 @@ https://github.com/marshalltech81/protonmail-local-ai
   expose a .tool() decorator in mcp==1.3.0
 - Bridge binds to 0.0.0.0 (patched from 127.0.0.1 in internal/constants/constants.go
   before compilation) — without this patch mbsync cannot reach Bridge from another container
+- Bridge TLS cert SAN is patched in internal/certs/tls.go to add DNSNames for
+  "protonmail-bridge" and "localhost" alongside the existing 127.0.0.1 IP SAN — without
+  this mbsync rejects the cert due to hostname mismatch even with CertificateFile pinning,
+  because hostname verification and chain verification are separate OpenSSL checks;
+  after rebuilding the Bridge image you must delete vault.enc from the bridge-data volume
+  so Bridge regenerates the cert with the new SANs (the old cert cached in vault.enc is
+  not updated by a rebuild alone):
+    docker run --rm -v protonmail-local-ai_bridge-data:/data debian:bookworm-slim \
+      rm -f /data/config/protonmail/bridge-v3/vault.enc
+    make first-run
 - Bridge v3 stores ALL credentials and TLS cert inside vault.enc (encrypted) — there are
   no plain .pem files on disk; TLS cert must be extracted from live connection via
   openssl s_client, not from the filesystem
