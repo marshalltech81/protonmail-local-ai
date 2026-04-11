@@ -139,7 +139,7 @@ mbsync/                   Email sync container
   Dockerfile
   entrypoint.sh           Waits for Bridge, then syncs on loop
   mbsyncrc.template       Config template — envsubst fills credentials at runtime
-  bridge-cert.pem         Bridge TLS cert for IMAP verification (extract via docker run — see CLAUDE.md)
+  bridge-cert.pem         Bridge TLS cert — extracted automatically by entrypoint.sh at startup
 
 indexer/                  Parser, threader, embedder, SQLite writer
   src/main.py             Entry point — watchdog + initial scan
@@ -188,7 +188,8 @@ Work through these in order. Do not skip ahead.
 3. Verify cert extracted: cat mbsync/bridge-cert.pem
 
 ### Security hardening
-- [ ] TLS cert pinning in mbsync (CertificateFile /etc/bridge-cert.pem)
+- [x] TLS cert pinning in mbsync — entrypoint extracts cert via openssl s_client on
+      every container start; CertificateFile points to /home/mbsync/bridge-cert.pem
 - [ ] PassCmd instead of plain BRIDGE_PASS env var in mbsyncrc.template
 - [ ] Split Docker networks: bridge-sync-net (Bridge+mbsync) and protonmail-net (rest)
 
