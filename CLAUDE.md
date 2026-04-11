@@ -31,7 +31,7 @@ https://github.com/marshalltech81/protonmail-local-ai
 - Bridge builds two binaries: `bridge` (launcher) + `proton-bridge` (daemon) — both must be
   copied into the runtime image or the launcher exits with "failed to launch"
 - Bridge account detection checks for vault.enc at
-  $XDG_CONFIG_HOME/protonmail/bridge-v3/vault.enc (not a .db file)
+  $XDG_DATA_HOME/protonmail/bridge-v3/vault.enc (not XDG_CONFIG_HOME)
 - sqlite-vec must be ≥0.1.9 on ARM64 — earlier versions ship an armv7 (32-bit) wheel
   that fails with ELFCLASS32 on aarch64 containers (Apple Silicon / ARM servers)
 - MCP server uses FastMCP (mcp.server.fastmcp) — the low-level Server class does not
