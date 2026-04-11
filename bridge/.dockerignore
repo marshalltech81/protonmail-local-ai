@@ -1,0 +1,4 @@
+# Build context: bridge/
+# Only Dockerfile and entrypoint.sh are needed.
+.dockerignore
+*.md
