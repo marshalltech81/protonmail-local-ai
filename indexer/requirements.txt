@@ -7,7 +7,7 @@ html2text==2024.2.26
 sqlite-vec==0.1.9
 
 # HTTP client for Ollama API
-httpx==0.27.0
+httpx==0.28.1
 
 # File watching
 watchdog==4.0.1
