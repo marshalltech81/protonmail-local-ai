@@ -1,14 +1,14 @@
 # =============================================================================
 # ProtonBridge — built from official Proton source, no GUI
-# https://github.com/ProtonMail/proton-bridge
+# Runs as non-root user 'bridge' for security
 # =============================================================================
 
 # -----------------------------------------------------------------------------
 # Stage 1: Builder
 # -----------------------------------------------------------------------------
-    FROM golang:1.26.2-bookworm AS builder
+    FROM golang:1.22-bookworm AS builder
 
-    ARG BRIDGE_VERSION=v3.24.1
+    ARG BRIDGE_VERSION=v3.21.2
     
     RUN apt-get update && apt-get install -y --no-install-recommends \
         git \
@@ -25,10 +25,8 @@
     RUN git clone --depth 1 --branch ${BRIDGE_VERSION} \
         https://github.com/ProtonMail/proton-bridge.git .
     
-    # Critical fix: Bridge binds to 127.0.0.1 by default.
-    # Inside Docker, 127.0.0.1 is the container's own loopback —
-    # unreachable from mbsync or any other container on the network.
-    # Patch to 0.0.0.0 so Bridge listens on all interfaces.
+    # Critical fix: patch Bridge to listen on 0.0.0.0 instead of 127.0.0.1
+    # Without this mbsync cannot reach Bridge from another container
     RUN sed -i 's/Host = "127.0.0.1"/Host = "0.0.0.0"/' \
         internal/constants/constants.go
     
@@ -40,6 +38,7 @@
     
     # -----------------------------------------------------------------------------
     # Stage 2: Runtime
+    # Runs as non-root user 'bridge' (UID 1000)
     # -----------------------------------------------------------------------------
     FROM debian:bookworm-slim AS runtime
     
@@ -53,15 +52,37 @@
      && rm -rf /var/lib/apt/lists/* \
      && rm -rf /usr/share/doc /usr/share/man
     
+    # Create dedicated non-root user and group
+    RUN groupadd --gid 1000 bridge && \
+        useradd --uid 1000 \
+                --gid 1000 \
+                --home-dir /home/bridge \
+                --create-home \
+                --shell /bin/bash \
+                --no-log-init \
+                bridge
+    
+    # Copy compiled binary from builder
     COPY --from=builder /build/bridge /usr/local/bin/bridge
     
-    ENV XDG_CONFIG_HOME=/data/config \
+    # Copy entrypoint — owned by bridge user
+    COPY --chown=bridge:bridge entrypoint.sh /entrypoint.sh
+    RUN chmod +x /entrypoint.sh
+    
+    # Create /data and hand ownership to bridge user
+    # The bridge-data named volume mounts here
+    RUN mkdir -p /data && chown bridge:bridge /data
+    
+    # Redirect all XDG paths into /data
+    # Bridge writes config, cache, GPG keys, and pass store here
+    ENV HOME=/home/bridge \
+        XDG_CONFIG_HOME=/data/config \
         XDG_CACHE_HOME=/data/cache \
         GNUPGHOME=/data/gnupg \
         PASSWORD_STORE_DIR=/data/pass
     
-    COPY entrypoint.sh /entrypoint.sh
-    RUN chmod +x /entrypoint.sh
+    # Drop to non-root — everything from here runs as bridge
+    USER bridge
     
     EXPOSE 1143 1025
     
