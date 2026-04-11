@@ -130,8 +130,7 @@ Test with: *"What is the status of my email index?"*
 
 ### Bridge won't start — "Failed to launch exit status 1"
 
-Bridge v3+ builds two binaries: a launcher (`bridge`) and the daemon (`proton-bridge`).
-If you see this, both binaries are present in the image. Check:
+This can happen if the image is outdated. Check:
 
 ```bash
 docker compose logs protonmail-bridge
