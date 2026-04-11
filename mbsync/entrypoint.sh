@@ -7,8 +7,10 @@ SYNC_INTERVAL="${SYNC_INTERVAL:-60}"
 
 # =============================================================================
 # Generate mbsync config from template
-# envsubst substitutes ${BRIDGE_HOST}, ${BRIDGE_IMAP_PORT}, ${BRIDGE_USER},
-# ${BRIDGE_PASS} from environment variables set in docker-compose.yml / .env
+# envsubst substitutes ${BRIDGE_HOST}, ${BRIDGE_IMAP_PORT}, ${BRIDGE_USER}
+# from environment variables set in docker-compose.yml / .env.
+# BRIDGE_PASS is NOT passed as an env var — mbsyncrc uses PassCmd to read
+# it directly from the Docker secret at /run/secrets/bridge_pass.
 # =============================================================================
 envsubst < /etc/mbsyncrc.template > /home/mbsync/.mbsyncrc
 chmod 600 /home/mbsync/.mbsyncrc # protect the file because it contains credentials

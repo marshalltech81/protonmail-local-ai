@@ -37,13 +37,14 @@ logs:
 
 # One-time interactive Bridge login
 # Run this on first setup to authenticate with your Proton account.
-# After login, copy the bridge username and password into your .env file.
+# After login: copy username → .env (BRIDGE_USER), password → .secrets/bridge_pass.txt
 first-run:
 	@echo ""
 	@echo "  Starting ProtonBridge interactive login..."
 	@echo "  Commands inside the CLI:"
 	@echo "    login  → enter your Proton credentials + 2FA"
-	@echo "    info   → copy the bridge username and password to .env"
+	@echo "    info   → copy the bridge username to .env (BRIDGE_USER)"
+	@echo "           → write the bridge password to .secrets/bridge_pass.txt"
 	@echo "    exit   → then run: make up"
 	@echo ""
 	docker compose run --rm protonmail-bridge

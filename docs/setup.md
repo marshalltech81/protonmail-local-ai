@@ -22,8 +22,21 @@ cd protonmail-local-ai
 cp .env.example .env
 ```
 
-Edit `.env` — you can leave `BRIDGE_USER` and `BRIDGE_PASS` blank for now.
-You will fill those in after the Bridge login step.
+Edit `.env` — you can leave `BRIDGE_USER` blank for now.
+You will fill it in after the Bridge login step.
+
+Also create the secrets directory with restrictive permissions:
+
+```bash
+mkdir -m 700 .secrets
+```
+
+You will write the Bridge password into `.secrets/bridge_pass.txt` after login.
+The file must be readable only by its owner — set permissions after creating it:
+
+```bash
+chmod 600 .secrets/bridge_pass.txt
+```
 
 ### 3. Build all Docker images
 
@@ -59,12 +72,21 @@ Inside the interactive Bridge CLI:
 >>> exit
 ```
 
-Copy the displayed `Username` and `Password` into your `.env` file:
+Copy the displayed `Username` into your `.env` file:
 
 ```bash
 BRIDGE_USER=your@proton.me          # from info → Username
-BRIDGE_PASS=bridge-generated-pass   # from info → Password
 ```
+
+Write the `Password` into the Docker secret file:
+
+```bash
+echo -n 'bridge-generated-pass' > .secrets/bridge_pass.txt
+chmod 600 .secrets/bridge_pass.txt
+```
+
+Do not put the Bridge password in `.env` — it is passed to the mbsync container
+exclusively via Docker Compose secrets, mounted at `/run/secrets/bridge_pass`.
 
 ### 5. Pull Ollama models
 
@@ -317,7 +339,15 @@ has emails to process.
 ```bash
 make down
 docker volume rm protonmail-local-ai_bridge-data
-make first-run   # log in again, copy new credentials into .env
+make first-run   # log in again
+```
+
+After login, copy the new `Username` into `.env` and write the new `Password`
+into `.secrets/bridge_pass.txt`:
+
+```bash
+echo -n 'new-bridge-generated-pass' > .secrets/bridge_pass.txt
+chmod 600 .secrets/bridge_pass.txt
 make up
 ```
 
