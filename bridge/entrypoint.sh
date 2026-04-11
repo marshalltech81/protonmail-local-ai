@@ -43,62 +43,36 @@ if [ -f "$VAULT" ]; then
 fi
 
 # =============================================================================
-# Follow Bridge log files and switch when rotation creates a new one
-# This watches only Bridge logs: *_bri_*.log
-# Change to *.log if you want every Proton log in the directory.
+# Follow the Bridge log file and stream it to stdout (docker logs).
+# Bridge creates one timestamped *_bri_*.log file per session in LOG_DIR.
+#
+# We wait for that file to appear using inotifywait -t (timeout) as a
+# blocking sleep-with-notification — NOT as a pipeline source. Piping
+# inotifywait into a while loop would run the loop body in a bash subshell,
+# making variable assignments (tail_pid, current) invisible to the outer
+# scope and breaking rotation handling. Using -t avoids the pipe entirely.
+#
+# Once the file exists, exec tail -F replaces this subshell process cleanly.
+# tail -F (follow by name) handles in-place rotation; -n +1 prints from
+# line 1 so no early boot messages are missed.
 # =============================================================================
 follow_bridge_logs() {
     mkdir -p "$LOG_DIR"
 
-    local current=""
-    local tail_pid=""
+    local log_file=""
 
-    stop_tail() {
-        if [ -n "${tail_pid:-}" ]; then
-            kill "$tail_pid" 2>/dev/null || true
-            wait "$tail_pid" 2>/dev/null || true
+    echo ">>> Waiting for Bridge log file..."
+    while [ -z "$log_file" ]; do
+        log_file="$(ls -1t "$LOG_DIR"/*_bri_*.log 2>/dev/null | head -n1 || true)"
+        if [ -z "$log_file" ]; then
+            # Block up to 5 s waiting for a create/move event, then re-check.
+            # The || true prevents set -e from exiting on inotifywait timeout.
+            inotifywait -q -t 5 -e create -e moved_to "$LOG_DIR" >/dev/null 2>&1 || true
         fi
-    }
-
-    get_newest_bridge_log() {
-        shopt -s nullglob
-        local files=( "$LOG_DIR"/*_bri_*.log )
-        shopt -u nullglob
-
-        if [ "${#files[@]}" -eq 0 ]; then
-            return 0
-        fi
-
-        ls -1t "${files[@]}" 2>/dev/null | head -n1
-    }
-
-    attach_newest() {
-        local newest
-        newest="$(get_newest_bridge_log || true)"
-
-        if [ -n "$newest" ] && [ "$newest" != "$current" ]; then
-            stop_tail
-            echo ">>> Forwarding Bridge log: $newest"
-            tail -n +1 -F "$newest" &
-            tail_pid=$!
-            current="$newest"
-        fi
-    }
-
-    trap stop_tail EXIT TERM INT
-
-    # Attach immediately if a log file already exists
-    attach_newest
-
-    # Then react to new files created by rotation/startup
-    inotifywait -m -q -e create -e moved_to --format '%f' "$LOG_DIR" | \
-    while IFS= read -r filename; do
-        case "$filename" in
-            *_bri_*.log)
-                attach_newest
-                ;;
-        esac
     done
+
+    echo ">>> Streaming Bridge logs: $(basename "$log_file")"
+    exec tail -n +1 -F "$log_file"
 }
 
 # =============================================================================
