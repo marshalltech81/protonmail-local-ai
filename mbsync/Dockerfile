@@ -8,6 +8,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     netcat-openbsd \
     gettext-base \
+    openssl \
  && rm -rf /var/lib/apt/lists/*
 
 # -----------------------------------------------------------------------------
@@ -22,14 +23,6 @@ RUN groupadd --gid 1001 mbsync && \
             --shell /bin/bash \
             --no-log-init \
             mbsync
-
-# -----------------------------------------------------------------------------
-# Bridge TLS cert for verified IMAP connection
-# Extract via: make recert
-# Until cert is extracted, replace with /dev/null in mbsyncrc.template
-# -----------------------------------------------------------------------------
-#COPY bridge-cert.pem /etc/bridge-cert.pem
-#RUN chmod 644 /etc/bridge-cert.pem
 
 # -----------------------------------------------------------------------------
 # Config and entrypoint

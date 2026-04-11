@@ -16,7 +16,7 @@
 # PassCmd avoids credentials appearing in docker inspect or process list.
 # STARTTLS upgrades connection to TLS before sending credentials.
 # Bridge v3 uses STARTTLS on port 1143, not implicit TLS on 993.
-# CertificateFile: run 'make recert' to extract Bridge cert and enable pinning.
+# CertificateFile: extracted automatically at container startup by entrypoint.sh.
 IMAPAccount protonmail
 Host ${BRIDGE_HOST}
 Port ${BRIDGE_IMAP_PORT}
@@ -24,7 +24,7 @@ User ${BRIDGE_USER}
 PassCmd "echo ${BRIDGE_PASS}"
 SSLType STARTTLS
 SSLVersions TLSv1.2
-CertificateFile /dev/null
+CertificateFile /home/mbsync/bridge-cert.pem
 
 # Remote store — maps IMAPAccount to a named store for use in Channel.
 IMAPStore protonmail-remote

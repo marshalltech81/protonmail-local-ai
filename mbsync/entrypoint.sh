@@ -25,6 +25,27 @@ done
 echo ">>> Bridge IMAP is ready."
 
 # =============================================================================
+# Extract Bridge TLS certificate for cert pinning
+# openssl s_client fetches the cert from the live IMAP connection without
+# needing to verify it first. The cert is written to a container-local path
+# and re-extracted fresh on every container start so it survives make clean
+# or a Bridge update that rotates the cert.
+# =============================================================================
+CERT_FILE="/home/mbsync/bridge-cert.pem"
+echo ">>> Extracting Bridge TLS cert from ${BRIDGE_HOST}:${BRIDGE_IMAP_PORT}..."
+echo | openssl s_client \
+    -connect "${BRIDGE_HOST}:${BRIDGE_IMAP_PORT}" \
+    -starttls imap \
+    2>/dev/null \
+    | openssl x509 > "$CERT_FILE"
+if [ -s "$CERT_FILE" ]; then
+    echo ">>> Bridge cert extracted successfully."
+else
+    echo ">>> WARNING: cert extraction failed — falling back to no cert pinning."
+    echo "" > "$CERT_FILE"
+fi
+
+# =============================================================================
 # Initial sync
 # Runs once on startup to catch up on any messages that arrived while
 # the container was down. The || true prevents the container from exiting
