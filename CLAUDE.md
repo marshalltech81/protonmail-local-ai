@@ -30,6 +30,11 @@ https://github.com/marshalltech81/protonmail-local-ai
 - MCP uses HTTP/SSE transport — stdio only works when the process runs on the host
 - Bridge builds two binaries: `bridge` (launcher) + `proton-bridge` (daemon) — both must be
   copied into the runtime image or the launcher exits with "failed to launch"
+- Bridge container runs as non-root user `bridge` (UID 1000) — /data subdirectories are
+  pre-created in the image so Docker's copy-on-empty initializes the named volume with
+  correct ownership on first mount
+- Bridge stores all state under XDG_DATA_HOME (/data/local), not XDG_CONFIG_HOME — all
+  five XDG vars must be set or Bridge falls back to ~/.local/share inside the container
 - Bridge account detection checks for vault.enc at
   $XDG_DATA_HOME/protonmail/bridge-v3/vault.enc (not XDG_CONFIG_HOME)
 - sqlite-vec must be ≥0.1.9 on ARM64 — earlier versions ship an armv7 (32-bit) wheel
