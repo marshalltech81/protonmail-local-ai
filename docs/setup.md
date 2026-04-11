@@ -97,6 +97,16 @@ You should see:
 
 The initial index scan may take several minutes depending on mailbox size.
 
+On first run, Bridge must download and decrypt your full mailbox from Proton's
+servers before mbsync can pull anything. This can take a long time for large
+mailboxes. Watch sync progress with:
+
+```bash
+docker compose logs -f protonmail-bridge
+```
+
+Bridge logs sync percentage, elapsed time, and ETA directly to Docker logs.
+
 ### 7. Configure Claude Desktop
 
 Open or create `~/Library/Application Support/Claude/claude_desktop_config.json`:
