@@ -33,10 +33,9 @@ https://github.com/marshalltech81/protonmail-local-ai
 - Bridge container runs as non-root user `bridge` (UID 1000) — /data subdirectories are
   pre-created in the image so Docker's copy-on-empty initializes the named volume with
   correct ownership on first mount
-- Bridge stores all state under XDG_DATA_HOME (/data/local), not XDG_CONFIG_HOME — all
-  five XDG vars must be set or Bridge falls back to ~/.local/share inside the container
+- All five XDG vars must be set or Bridge falls back to ~/.local/share inside the container
 - Bridge account detection checks for vault.enc at
-  $XDG_DATA_HOME/protonmail/bridge-v3/vault.enc (not XDG_CONFIG_HOME)
+  $XDG_CONFIG_HOME/protonmail/bridge-v3/vault.enc
 - sqlite-vec must be ≥0.1.9 on ARM64 — earlier versions ship an armv7 (32-bit) wheel
   that fails with ELFCLASS32 on aarch64 containers (Apple Silicon / ARM servers)
 - MCP server uses FastMCP (mcp.server.fastmcp) — the low-level Server class does not

@@ -23,7 +23,7 @@ fi
 # Bridge writes vault.enc after a successful login — its presence means
 # credentials are stored and Bridge can start noninteractively.
 # =============================================================================
-VAULT="$XDG_DATA_HOME/protonmail/bridge-v3/vault.enc"
+VAULT="$XDG_CONFIG_HOME/protonmail/bridge-v3/vault.enc"
 LOGGED_IN=false
 if [ -f "$VAULT" ]; then
     LOGGED_IN=true
