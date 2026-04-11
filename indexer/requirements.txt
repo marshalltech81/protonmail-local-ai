@@ -1,6 +1,6 @@
 # Email parsing
 mail-parser==4.2.1
-beautifulsoup4==4.12.3
+beautifulsoup4==4.14.3
 html2text==2025.4.15
 
 # SQLite vector search
