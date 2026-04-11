@@ -48,5 +48,20 @@ if [ "$LOGGED_IN" = false ]; then
     exec bridge --cli
 else
     echo ">>> Account found. Starting Bridge as user '$(whoami)' on 0.0.0.0..."
-    exec bridge --noninteractive
+
+    bridge --noninteractive &
+    BRIDGE_PID=$!
+
+    # Forward SIGTERM/SIGINT to Bridge so Docker stop works cleanly
+    trap 'kill "$BRIDGE_PID"' TERM INT
+
+    # Tail Bridge log file to stdout once it appears
+    LOG_DIR="$XDG_DATA_HOME/protonmail/bridge-v3/logs"
+    echo ">>> Waiting for Bridge log directory..."
+    while [ ! -d "$LOG_DIR" ] || [ -z "$(ls -A "$LOG_DIR" 2>/dev/null)" ]; do
+        sleep 1
+    done
+    tail -F "$LOG_DIR"/*.log &
+
+    wait "$BRIDGE_PID"
 fi
