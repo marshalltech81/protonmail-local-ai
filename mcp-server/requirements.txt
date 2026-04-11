@@ -2,7 +2,7 @@
 mcp==1.3.0
 
 # HTTP server (required for SSE transport in Docker)
-uvicorn==0.30.1
+uvicorn==0.44.0
 starlette==1.0.0
 
 # SQLite vector search
