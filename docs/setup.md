@@ -236,6 +236,27 @@ Watch for the log pattern to shift from message fetching to event polling:
 Once you see event polling instead of message fetching, IMAP is fully
 responsive. Proceed to `make recert` and then check mbsync.
 
+**Confirm IMAP port is actually accepting connections**
+
+Run this from outside the container to verify port 1143 is ready:
+
+```bash
+docker run --rm \
+    --network protonmail-local-ai_protonmail-net \
+    debian:bookworm-slim \
+    bash -c "apt-get install -y netcat-openbsd -qq 2>/dev/null && \
+             echo | nc -w 5 protonmail-bridge 1143"
+```
+
+If IMAP is ready you will see the Bridge greeting banner, e.g.:
+
+```
+* OK [CAPABILITY IMAP4rev1 ...] ProtonMail Bridge ready.
+```
+
+If the command hangs or exits silently, Bridge is still syncing or the
+process has crashed — check the logs and process steps above.
+
 ### mbsync fails to connect
 
 Bridge takes 10–15 seconds to fully start. mbsync waits automatically,
