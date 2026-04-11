@@ -40,6 +40,35 @@ https://github.com/marshalltech81/protonmail-local-ai
   that fails with ELFCLASS32 on aarch64 containers (Apple Silicon / ARM servers)
 - MCP server uses FastMCP (mcp.server.fastmcp) — the low-level Server class does not
   expose a .tool() decorator in mcp==1.3.0
+- Bridge binds to 0.0.0.0 (patched from 127.0.0.1 in internal/constants/constants.go
+  before compilation) — without this patch mbsync cannot reach Bridge from another container
+- Bridge v3 stores ALL credentials and TLS cert inside vault.enc (encrypted) — there are
+  no plain .pem files on disk; TLS cert must be extracted from live connection via
+  openssl s_client, not from the filesystem
+- Bridge uses docker-credential-helpers library (unrelated to Docker the runtime) as its
+  cross-platform secret storage abstraction — on Linux this delegates to pass
+- Bridge v3 uses bridge-v3 namespace internally (pass store path decodes to
+  protonmail/bridge-v3/users/bridge-vault-key)
+- mbsync is the only container that should have direct IMAP access to Bridge —
+  mcp-server reads SQLite only and must never connect to port 1143 directly
+- MCP_READ_ONLY=true should be the default — write operations are opt-in, not opt-out
+- All write operations in actions.py must check MCP_READ_ONLY before executing
+
+## Bridge-Specific Operational Notes
+- Bridge's "syncing" log messages refer to its internal Gluon database sync with Proton's
+  API servers — this is NOT the same as mbsync downloading to Maildir
+- Gluon is Bridge v3's internal IMAP library — it has a known bug with All Mail and
+  Labels/* folders causing IMAP CLOSE errors during expunge; exclude both from Patterns
+- Bridge must complete its internal Gluon sync before mbsync can download messages —
+  on first run with a large mailbox this can take hours
+- bridge.lock at $XDG_CACHE_HOME/protonmail/bridge-v3/bridge.lock can cause "another
+  instance running" errors after a hard crash — delete it to recover
+- Bridge restart recovers automatically via restart: unless-stopped in compose file
+- TLS cert extraction command (run after sync is stable):
+  docker run --rm --network protonmail-local-ai_protonmail-net debian:bookworm-slim \
+  bash -c "apt-get install -y openssl -qq 2>/dev/null && echo | openssl s_client \
+  -connect protonmail-bridge:1143 -starttls imap 2>/dev/null | openssl x509" \
+  > ./mbsync/bridge-cert.pem
 
 ## MCP Tool Groups
 1. Search      — search_emails (hybrid/semantic/keyword)
@@ -63,6 +92,7 @@ make up           # start stack
 make logs         # tail all logs
 make status       # container + index health
 make clean        # remove all containers and volumes (destructive)
+make recert       # extract Bridge TLS cert and rebuild mbsync (run after make clean)
 ```
 
 ## Python Conventions
@@ -79,6 +109,10 @@ make clean        # remove all containers and volumes (destructive)
 - Do not add network: host to any container
 - The SQLite schema version is tracked — migrations must increment SCHEMA_VERSION
 - Do not change the thread-level indexing strategy without reading docs/architecture.md
+- Do not give mcp-server or indexer direct network access to Bridge IMAP port 1143
+- Do not set Sync All in mbsyncrc.template — Sync Pull only, never write back to Proton
+- Do not remove Expunge None from mbsyncrc.template
+- Do not add All Mail or Labels/* to mbsync Patterns — causes Gluon IMAP CLOSE errors
 
 ## File Structure
 ```
@@ -90,6 +124,7 @@ mbsync/                   Email sync container
   Dockerfile
   entrypoint.sh           Waits for Bridge, then syncs on loop
   mbsyncrc.template       Config template — envsubst fills credentials at runtime
+  bridge-cert.pem         Bridge TLS cert for IMAP verification (extract via make recert)
 
 indexer/                  Parser, threader, embedder, SQLite writer
   src/main.py             Entry point — watchdog + initial scan
@@ -104,6 +139,7 @@ mcp-server/               MCP server — Claude Desktop interface
   src/tools/retrieval.py  get_thread, get_message, list_threads, list_folders
   src/tools/intelligence.py  ask_mailbox, summarize_thread, extract_from_emails
   src/tools/actions.py    send_email, reply_to_thread, move_message, mark_read, flag_message
+                          ALL write tools must check MCP_READ_ONLY before executing
   src/lib/sqlite.py       Read-only SQLite query layer (hybrid search, RRF)
   src/lib/imap.py         IMAP/SMTP client for Bridge operations
   src/lib/ollama.py       Ollama embed + complete client
@@ -127,13 +163,41 @@ When adding tests:
 - Integration tests should mock IMAP rather than hitting a real Bridge instance
 - Use real .eml fixture files for parser tests
 
-## Known Gaps / Next Steps
-- reply_to_thread in mcp-server/src/tools/actions.py — returns a clear "not implemented"
-  error; needs to fetch last message in thread and call send_email with threading headers
-- create_draft — returns a clear "not implemented" error; needs IMAP APPEND to Drafts folder
-- Per-session LLM mode toggle (currently set globally via .env)
-- Test suite (pytest — start with indexer/src/parser.py and threader.py)
-- Attachment download tool
-- Schema migration framework — SCHEMA_VERSION is tracked but no migration runner exists yet
-- Ollama embedding dimension (768) is hardcoded in indexer/src/database.py line 93 —
-  switching embedding models requires a manual schema reset
+## Pending Implementation Queue
+Work through these in order. Do not skip ahead.
+
+### Next immediate action
+1. Wait for initial ProtonMail sync to complete (watch: docker logs -f mbsync)
+2. Extract TLS cert: make recert
+3. Verify cert extracted: cat mbsync/bridge-cert.pem
+
+### Security hardening
+- [ ] TLS cert pinning in mbsync (CertificateFile /etc/bridge-cert.pem)
+- [ ] PassCmd instead of plain BRIDGE_PASS env var in mbsyncrc.template
+- [ ] Split Docker networks: bridge-sync-net (Bridge+mbsync) and protonmail-net (rest)
+
+### mbsync improvements
+- [ ] Change Sync All → Sync Pull in mbsyncrc.template
+- [ ] Exclude All Mail and Labels/* from Patterns in mbsyncrc.template
+- [ ] Explicit SyncState /maildir/.mbsyncstate in mbsyncrc.template
+- [ ] IMAP IDLE investigation — replace sleep loop with push notifications
+
+### Read-only protection
+- [ ] MCP_READ_ONLY=true default in .env.example
+- [ ] Read-only guard function in mcp-server/src/tools/actions.py
+- [ ] sqlite-volume mounted :ro in mcp-server in docker-compose.yml
+
+### Known gaps (existing)
+- [ ] reply_to_thread — needs fetch last message + send_email with threading headers
+- [ ] create_draft — needs IMAP APPEND to Drafts folder
+- [ ] Per-session LLM mode toggle (currently global via .env)
+- [ ] Test suite (pytest — start with parser.py and threader.py)
+- [ ] Attachment download tool
+- [ ] Schema migration framework — SCHEMA_VERSION tracked but no runner exists
+- [ ] Ollama embedding dimension (768) hardcoded in database.py line 93 —
+      switching models requires manual schema reset
+
+### Future projects
+- [ ] Extract Bridge container into standalone repo `protonmail-bridge-headless`
+      once current Bridge work is complete and stable
+
