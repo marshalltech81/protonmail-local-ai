@@ -61,7 +61,8 @@ else
     LOG_FILE=""
     while [ -z "$LOG_FILE" ]; do
         sleep 1
-        LOG_FILE=$(ls -t "$LOG_DIR"/*.log 2>/dev/null | head -1)
+        LOG_FILE=$(find "$LOG_DIR" -maxdepth 1 -name "*.log" -type f \
+            -printf "%T@ %p\n" 2>/dev/null | sort -rn | awk 'NR==1{print $2}')
     done
     echo ">>> Streaming logs from $LOG_FILE"
     tail -F "$LOG_FILE" &
