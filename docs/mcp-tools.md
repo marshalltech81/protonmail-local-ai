@@ -116,27 +116,39 @@ Send a new email via ProtonBridge SMTP.
 | `bcc` | list | none | BCC recipients |
 | `reply_to_message_id` | string | none | Sets threading headers |
 
-### `reply_to_thread`
-Reply to a thread with correct threading headers.
+### `move_message`
+Move a message from one folder to another.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
-| `thread_id` | string | required | Thread to reply to |
-| `body` | string | required | Reply body |
-| `reply_all` | bool | `false` | Reply to all participants |
-| `body_format` | string | `text` | `text` or `html` |
-
-### `move_message`
-Move a message between folders.
+| `uid` | string | required | IMAP UID of the message |
+| `src_folder` | string | required | Source folder name |
+| `dst_folder` | string | required | Destination folder name |
 
 ### `mark_read`
-Mark messages as read or unread.
+Mark one or more messages as read or unread.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `uids` | list | required | IMAP UIDs of the messages |
+| `folder` | string | `INBOX` | Folder containing the messages |
+| `read` | bool | `true` | `true` to mark read, `false` to mark unread |
 
 ### `flag_message`
-Flag or unflag a message.
+Flag or unflag a message (starred/important).
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `uid` | string | required | IMAP UID of the message |
+| `folder` | string | `INBOX` | Folder containing the message |
+| `flagged` | bool | `true` | `true` to flag, `false` to unflag |
+
+### `reply_to_thread`
+**Not yet implemented.** Use `send_email` with `reply_to_message_id` set to the
+Message-ID of the last message in the thread as a workaround.
 
 ### `create_draft`
-Save a draft to the Drafts folder.
+**Not yet implemented.** Requires IMAP APPEND to the Drafts folder.
 
 ---
 
