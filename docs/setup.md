@@ -174,6 +174,68 @@ These are harmless. Bridge cannot use the desktop keychain (no dbus session in a
 container) and falls back to its own encrypted vault. The "no vault key found" warning
 only appears once — on the very first run before the vault is created.
 
+### Bridge is up but IMAP is unresponsive / mbsync can't connect
+
+Bridge may still be in the middle of its initial Gluon sync — pulling every
+message body from Proton's API into its local database before it can serve IMAP.
+This is not the same as mbsync syncing to Maildir. It happens inside the Bridge
+container and can take hours on a large mailbox.
+
+Run these three diagnostics to understand what state Bridge is in:
+
+**1. Check recent Bridge logs**
+
+```bash
+docker logs protonmail-bridge 2>&1 | tail -30
+```
+
+If you see rapid-fire lines like:
+
+```
+200 OK: GET https://mail-api.proton.me/mail/v4/messages/<id>
+200 OK: GET https://mail-api.proton.me/mail/v4/messages/<id>
+```
+
+Bridge is still downloading messages. Do not attempt cert extraction yet —
+IMAP will be unresponsive during heavy Gluon sync.
+
+**2. Check that Bridge is authenticated**
+
+```bash
+docker exec protonmail-bridge \
+    find /data/config/protonmail/bridge-v3 -type f | sort
+```
+
+If `vault.enc` is missing, Bridge is not authenticated and will not serve IMAP
+at all. Re-run `make first-run` to log in again.
+
+**3. Check the bridge binary is actually running**
+
+```bash
+docker exec protonmail-bridge ps aux
+```
+
+A container can be "Up" while the process inside has crashed. If `bridge` does
+not appear in `ps aux`, the process exited — check the logs for the error and
+restart the container.
+
+**How to know Gluon sync is finished**
+
+Watch for the log pattern to shift from message fetching to event polling:
+
+```
+# Still syncing — rapid fire, sub-second interval:
+200 OK: GET .../mail/v4/messages/<id>
+200 OK: GET .../mail/v4/messages/<id>
+
+# Sync complete — sparse, several seconds apart:
+200 OK: GET .../mail/v4/events/<id>
+200 OK: POST .../data/v1/metrics
+```
+
+Once you see event polling instead of message fetching, IMAP is fully
+responsive. Proceed to `make recert` and then check mbsync.
+
 ### mbsync fails to connect
 
 Bridge takes 10–15 seconds to fully start. mbsync waits automatically,
