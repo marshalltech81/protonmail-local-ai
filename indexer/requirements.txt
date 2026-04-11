@@ -10,7 +10,7 @@ sqlite-vec==0.1.9
 httpx==0.27.0
 
 # File watching
-watchdog==4.0.1
+watchdog==6.0.0
 
 # Utilities
 python-dotenv==1.0.1
