@@ -31,6 +31,8 @@ services:
   mbsync:
     build:
       context: ./mbsync
+    secrets:
+      - bridge_pass
     container_name: mbsync
     restart: unless-stopped
     depends_on:
@@ -40,7 +42,6 @@ services:
       BRIDGE_HOST: protonmail-bridge
       BRIDGE_IMAP_PORT: 1143
       BRIDGE_USER: ${BRIDGE_USER}
-      BRIDGE_PASS: ${BRIDGE_PASS}
       SYNC_INTERVAL: ${SYNC_INTERVAL:-60}
     volumes:
       - maildir-volume:/maildir
@@ -122,7 +123,6 @@ services:
       BRIDGE_IMAP_PORT: 1143
       BRIDGE_SMTP_PORT: 1025
       BRIDGE_USER: ${BRIDGE_USER}
-      BRIDGE_PASS: ${BRIDGE_PASS}
       OLLAMA_HOST: http://ollama:11434
       OLLAMA_EMBED_MODEL: ${OLLAMA_EMBED_MODEL:-nomic-embed-text}
       OLLAMA_LLM_MODEL: ${OLLAMA_LLM_MODEL:-llama3.2}
@@ -155,3 +155,7 @@ volumes:
 networks:
   protonmail-net:
     driver: bridge
+
+secrets:
+  bridge_pass:
+    file: ./.secrets/bridge_pass.txt

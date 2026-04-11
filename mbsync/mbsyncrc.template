@@ -8,8 +8,6 @@
 #   ${BRIDGE_HOST}      — hostname of the ProtonBridge container
 #   ${BRIDGE_IMAP_PORT} — IMAP port exposed by ProtonBridge (default: 1143)
 #   ${BRIDGE_USER}      — Bridge IMAP username (from bridge --cli → info)
-#   ${BRIDGE_PASS}      — Bridge IMAP password (from bridge --cli → info)
-#                         NOTE: This is NOT your Proton account password
 # =============================================================================
 
 # IMAP Account — connection to ProtonBridge local IMAP server.
@@ -21,7 +19,7 @@ IMAPAccount protonmail
 Host ${BRIDGE_HOST}
 Port ${BRIDGE_IMAP_PORT}
 User ${BRIDGE_USER}
-PassCmd "echo ${BRIDGE_PASS}"
+PassCmd "cat /run/secrets/bridge_pass"
 SSLType STARTTLS
 SSLVersions TLSv1.2
 CertificateFile /home/mbsync/bridge-cert.pem
