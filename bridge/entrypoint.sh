@@ -57,11 +57,16 @@ else
 
     # Tail Bridge log file to stdout once it appears
     LOG_DIR="$XDG_DATA_HOME/protonmail/bridge-v3/logs"
-    echo ">>> Waiting for Bridge log directory..."
-    while [ ! -d "$LOG_DIR" ] || [ -z "$(ls -A "$LOG_DIR" 2>/dev/null)" ]; do
+    echo ">>> Waiting for Bridge log file..."
+    LOG_FILE=""
+    while [ -z "$LOG_FILE" ]; do
         sleep 1
+        LOG_FILE=$(ls -t "$LOG_DIR"/*.log 2>/dev/null | head -1)
     done
-    tail -F "$LOG_DIR"/*.log &
+    echo ">>> Streaming logs from $LOG_FILE"
+    tail -F "$LOG_FILE" &
+    TAIL_PID=$!
 
     wait "$BRIDGE_PID"
+    kill "$TAIL_PID" 2>/dev/null
 fi
