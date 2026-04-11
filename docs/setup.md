@@ -234,7 +234,7 @@ Watch for the log pattern to shift from message fetching to event polling:
 ```
 
 Once you see event polling instead of message fetching, IMAP is fully
-responsive. Proceed to `make recert` and then check mbsync.
+responsive. Extract the TLS cert (see below) and then check mbsync.
 
 **Confirm IMAP port is actually accepting connections**
 

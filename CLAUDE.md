@@ -51,8 +51,8 @@ https://github.com/marshalltech81/protonmail-local-ai
   protonmail/bridge-v3/users/bridge-vault-key)
 - mbsync is the only container that should have direct IMAP access to Bridge —
   mcp-server reads SQLite only and must never connect to port 1143 directly
-- MCP_READ_ONLY=true should be the default — write operations are opt-in, not opt-out
-- All write operations in actions.py must check MCP_READ_ONLY before executing
+- MCP_READ_ONLY=true is the intended default — write operations should be opt-in, not opt-out
+  (not yet implemented — see Pending Implementation Queue → Read-only protection)
 
 ## Bridge-Specific Operational Notes
 - Bridge's "syncing" log messages refer to its internal Gluon database sync with Proton's
@@ -106,11 +106,12 @@ make up           # start stack
 make logs         # tail all logs
 make status       # container + index health
 make clean        # remove all containers and volumes (destructive)
-make recert       # extract Bridge TLS cert and rebuild mbsync (run after make clean)
+# make recert — not yet a Makefile target; use the manual docker run command in
+#               Bridge-Specific Operational Notes → TLS cert extraction command
 ```
 
 ## Python Conventions
-- Python 3.12 across all services
+- Python 3.14 across all services
 - No type: ignore comments — fix the types properly
 - Async throughout the MCP server (asyncio + httpx async)
 - Indexer is sync except for the watchdog event loop
@@ -138,7 +139,7 @@ mbsync/                   Email sync container
   Dockerfile
   entrypoint.sh           Waits for Bridge, then syncs on loop
   mbsyncrc.template       Config template — envsubst fills credentials at runtime
-  bridge-cert.pem         Bridge TLS cert for IMAP verification (extract via make recert)
+  bridge-cert.pem         Bridge TLS cert for IMAP verification (extract via docker run — see CLAUDE.md)
 
 indexer/                  Parser, threader, embedder, SQLite writer
   src/main.py             Entry point — watchdog + initial scan
@@ -153,7 +154,7 @@ mcp-server/               MCP server — Claude Desktop interface
   src/tools/retrieval.py  get_thread, get_message, list_threads, list_folders
   src/tools/intelligence.py  ask_mailbox, summarize_thread, extract_from_emails
   src/tools/actions.py    send_email, reply_to_thread, move_message, mark_read, flag_message
-                          ALL write tools must check MCP_READ_ONLY before executing
+                          MCP_READ_ONLY guard not yet implemented — see Pending Implementation Queue
   src/lib/sqlite.py       Read-only SQLite query layer (hybrid search, RRF)
   src/lib/imap.py         IMAP/SMTP client for Bridge operations
   src/lib/ollama.py       Ollama embed + complete client
@@ -182,7 +183,8 @@ Work through these in order. Do not skip ahead.
 
 ### Next immediate action
 1. Wait for initial ProtonMail sync to complete (watch: docker logs -f mbsync)
-2. Extract TLS cert: make recert
+2. Extract TLS cert: run the docker run command in Bridge-Specific Operational Notes above
+   (make recert is not yet a Makefile target)
 3. Verify cert extracted: cat mbsync/bridge-cert.pem
 
 ### Security hardening
