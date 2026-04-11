@@ -124,6 +124,21 @@ make clean        # remove all containers and volumes (destructive)
 #               Bridge-Specific Operational Notes → TLS cert extraction command
 ```
 
+## Bash Conventions
+- All scripts must start with `#!/bin/bash` and `set -Eeuo pipefail`
+  - `-E` — ERR traps are inherited by functions and subshells
+  - `-e` — exit immediately on error
+  - `-u` — treat unset variables as errors
+  - `-o pipefail` — pipeline fails if any command in it fails
+- All scripts must pass `shellcheck -S style` with no warnings or errors
+- Use `find` instead of `ls` for file selection (SC2012)
+- Quote all variable expansions: `"$var"`, `"${var}"` (SC2086)
+- Use `[[ ]]` for conditionals in bash scripts (not `[ ]`)
+- Prefer `printf` over `echo` for output that may contain escape sequences
+- Declare local variables in functions with `local`
+- Use `|| true` to suppress errors on commands that are allowed to fail,
+  never use bare `||` to suppress errors silently
+
 ## Python Conventions
 - Python 3.14 across all services
 - No type: ignore comments — fix the types properly

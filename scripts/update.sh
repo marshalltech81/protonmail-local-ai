@@ -5,7 +5,7 @@
 # Usage: BRIDGE_VERSION=v3.22.0 ./scripts/update.sh
 #    or: bump BRIDGE_VERSION in .env, then run: make update
 # =============================================================================
-set -e
+set -Eeuo pipefail
 
 VERSION="${BRIDGE_VERSION:-$(grep BRIDGE_VERSION .env | cut -d= -f2)}"
 

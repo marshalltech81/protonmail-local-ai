@@ -63,7 +63,8 @@ follow_bridge_logs() {
 
     echo ">>> Waiting for Bridge log file..."
     while [ -z "$log_file" ]; do
-        log_file="$(ls -1t "$LOG_DIR"/*_bri_*.log 2>/dev/null | head -n1 || true)"
+        log_file="$(find "$LOG_DIR" -maxdepth 1 -name '*_bri_*.log' \
+            -printf '%T@\t%p\n' 2>/dev/null | sort -rn | head -n1 | cut -f2-)"
         if [ -z "$log_file" ]; then
             # Block up to 5 s waiting for a create/move event, then re-check.
             # The || true prevents set -e from exiting on inotifywait timeout.

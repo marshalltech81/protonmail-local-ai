@@ -1,5 +1,5 @@
 #!/bin/bash
-set -e
+set -Eeuo pipefail
 
 BRIDGE_HOST="${BRIDGE_HOST:-protonmail-bridge}"
 BRIDGE_IMAP_PORT="${BRIDGE_IMAP_PORT:-1143}"
