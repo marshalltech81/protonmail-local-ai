@@ -70,9 +70,12 @@
     COPY --chown=bridge:bridge entrypoint.sh /entrypoint.sh
     RUN chmod +x /entrypoint.sh
     
-    # Create /data and hand ownership to bridge user
-    # The bridge-data named volume mounts here
-    RUN mkdir -p /data && chown bridge:bridge /data
+    # Pre-create all subdirectories under /data with correct ownership.
+    # Docker copies these into the named volume on first mount (copy-on-empty),
+    # ensuring the bridge user can write even though the volume starts root-owned.
+    RUN mkdir -p /data/config /data/cache /data/gnupg /data/pass \
+     && chmod 700 /data/gnupg \
+     && chown -R bridge:bridge /data
     
     # Redirect all XDG paths into /data
     # Bridge writes config, cache, GPG keys, and pass store here
