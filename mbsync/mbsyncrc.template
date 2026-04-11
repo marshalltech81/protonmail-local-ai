@@ -1,34 +1,53 @@
 # =============================================================================
-# mbsync configuration template
-# Variables are substituted at container startup from environment variables.
-# Do not put real credentials here — this file is committed to git.
+# mbsync configuration template for protonmail-local-ai
+# =============================================================================
+# This file is a template — environment variables are substituted at container
+# startup by envsubst. Do not put real credentials here — committed to git.
+#
+# Variables substituted at runtime:
+#   ${BRIDGE_HOST}      — hostname of the ProtonBridge container
+#   ${BRIDGE_IMAP_PORT} — IMAP port exposed by ProtonBridge (default: 1143)
+#   ${BRIDGE_USER}      — Bridge IMAP username (from bridge --cli → info)
+#   ${BRIDGE_PASS}      — Bridge IMAP password (from bridge --cli → info)
+#                         NOTE: This is NOT your Proton account password
 # =============================================================================
 
+# IMAP Account — connection to ProtonBridge local IMAP server.
+# PassCmd avoids credentials appearing in docker inspect or process list.
+# STARTTLS upgrades connection to TLS before sending credentials.
+# Bridge v3 uses STARTTLS on port 1143, not implicit TLS on 993.
+# CertificateFile: run 'make recert' to extract Bridge cert and enable pinning.
 IMAPAccount protonmail
 Host ${BRIDGE_HOST}
 Port ${BRIDGE_IMAP_PORT}
 User ${BRIDGE_USER}
-Pass ${BRIDGE_PASS}
+PassCmd "echo ${BRIDGE_PASS}"
 SSLType STARTTLS
-# Bridge uses a self-signed certificate — disable verification for localhost
 SSLVersions TLSv1.2
 CertificateFile /dev/null
-SSLFingerprint ""
-TLSVersions TLSv1.2
 
+# Remote store — maps IMAPAccount to a named store for use in Channel.
 IMAPStore protonmail-remote
 Account protonmail
 
+# Local store — where emails are written in Maildir format.
+# SubFolders Verbatim preserves ProtonMail folder names exactly as-is.
 MaildirStore protonmail-local
 Path /maildir/
 Inbox /maildir/INBOX
 SubFolders Verbatim
 
+# Channel — connects remote Bridge IMAP to local Maildir.
+# Patterns excludes All Mail and Labels/* — these are virtual folders in
+# Bridge v3's Gluon IMAP library that cause IMAP CLOSE errors on expunge.
+# Sync Pull — one direction only, never pushes changes back to Proton.
+# SyncState — explicit path prevents full re-sync on container restart.
+# Expunge None — never permanently deletes on either side.
 Channel protonmail
 Far :protonmail-remote:
 Near :protonmail-local:
-Patterns *
+Patterns * !"All Mail" !"Labels/*"
 Create Near
-SyncState *
-Sync All
+SyncState /maildir/.mbsyncstate
+Sync Pull
 Expunge None
