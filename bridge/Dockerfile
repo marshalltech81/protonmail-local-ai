@@ -6,9 +6,9 @@
 # -----------------------------------------------------------------------------
 # Stage 1: Builder
 # -----------------------------------------------------------------------------
-    FROM golang:1.22-bookworm AS builder
+    FROM golang:1.26.2-bookworm AS builder
 
-    ARG BRIDGE_VERSION=v3.21.2
+    ARG BRIDGE_VERSION=v3.24.1
     
     RUN apt-get update && apt-get install -y --no-install-recommends \
         git \
@@ -17,6 +17,7 @@
         pkg-config \
         libsecret-1-dev \
         libfido2-dev \
+        libcbor-dev \
         ca-certificates \
      && rm -rf /var/lib/apt/lists/*
     
