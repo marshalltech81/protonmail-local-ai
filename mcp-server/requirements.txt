@@ -12,7 +12,7 @@ sqlite-vec==0.1.9
 aioimaplib==1.1.0
 
 # SMTP for send operations
-aiosmtplib==3.0.1
+aiosmtplib==5.1.0
 
 # HTTP client for Ollama + Claude API
 httpx==0.28.1
