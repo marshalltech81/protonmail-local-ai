@@ -14,7 +14,6 @@ on:
       - "**/Dockerfile"
       - ".github/workflows/security.yml"
   schedule:
-    # Every Sunday at 08:00 UTC
     - cron: "0 8 * * 0"
   workflow_dispatch:
 
@@ -31,11 +30,11 @@ jobs:
       - name: Install Trivy
         uses: aquasecurity/setup-trivy@v0.2.6
         with:
-          version: v0.68.2
+          version: v0.69.3
           cache: true
 
       - name: Scan indexer dependencies
-        uses: aquasecurity/trivy-action@v0.33.1
+        uses: aquasecurity/trivy-action@v0.35.0
         with:
           skip-setup-trivy: true
           scan-type: fs
@@ -45,7 +44,7 @@ jobs:
           severity: CRITICAL,HIGH
 
       - name: Scan mcp-server dependencies
-        uses: aquasecurity/trivy-action@v0.33.1
+        uses: aquasecurity/trivy-action@v0.35.0
         with:
           skip-setup-trivy: true
           scan-type: fs
@@ -63,11 +62,11 @@ jobs:
       - name: Install Trivy
         uses: aquasecurity/setup-trivy@v0.2.6
         with:
-          version: v0.68.2
+          version: v0.69.3
           cache: true
 
       - name: Scan repository configuration
-        uses: aquasecurity/trivy-action@v0.33.1
+        uses: aquasecurity/trivy-action@v0.35.0
         with:
           skip-setup-trivy: true
           scan-type: fs
