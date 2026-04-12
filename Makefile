@@ -88,7 +88,7 @@ status:
 
 # Run indexer unit tests locally using uv
 test:
-	cd indexer && uv pip install -r requirements.txt -q && uv run pytest -v
+	cd indexer && uv venv -q && uv pip install -r requirements.txt -q && uv run pytest -v
 
 # Remove all containers and volumes
 # WARNING: This deletes your email index and Bridge credentials.
