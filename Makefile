@@ -16,8 +16,8 @@ help:
 	@echo "  update       Rebuild and restart Bridge with new version"
 	@echo "  pull-models  Pull Ollama embedding and LLM models"
 	@echo "  status       Show container and index status"
-	@echo "  test         Run indexer unit tests locally (requires uv)
-  clean        Remove all containers and volumes (destructive)"
+	@echo "  test         Run indexer unit tests locally (requires uv)"
+	@echo "  clean        Remove all containers and volumes (destructive)"
 	@echo ""
 
 # Build all images from source
