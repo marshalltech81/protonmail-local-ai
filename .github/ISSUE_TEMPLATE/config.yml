@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability report
+    url: https://github.com/marshalltech81/protonmail-local-ai/security/advisories/new
+    about: Report security issues privately instead of opening a public issue.
+  - name: Setup and troubleshooting guide
+    url: https://github.com/marshalltech81/protonmail-local-ai/blob/main/docs/setup.md
+    about: Check the setup guide and troubleshooting steps before filing an issue.
