@@ -27,6 +27,7 @@ Implemented and working at a high level:
 - indexer parses and threads messages
 - Ollama embeddings are stored in SQLite with FTS5 + sqlite-vec
 - MCP server exposes mailbox tools over HTTP/SSE
+- Python services now use per-service `uv` projects with `pyproject.toml` and `uv.lock`
 - Bridge TLS cert extraction is automated in `mbsync/entrypoint.sh`
 - Bridge password is handled as a Docker Compose secret
 
@@ -34,12 +35,14 @@ Known limitations:
 
 - initial sync may take a long time on large mailboxes
 - attachments are not indexed yet
-- `mcp-server` live Bridge auth/TLS wiring is incomplete
+- `mcp-server` still expects `BRIDGE_PASS` from the environment instead of the current secret flow
+- `mcp-server` SMTP send path still disables TLS verification
 - read-only protections are not fully enforced yet
 - intelligence tools rely too heavily on stored snippets instead of full-thread context
 - test coverage is incomplete
 - schema migration support is still minimal
 - some MCP action features are incomplete
+- `list_threads(filter_type=...)` does not yet match the documented interface
 
 ## Daily-Driver Gaps
 
@@ -51,11 +54,14 @@ confident daily-driver use.
 Why it matters:
 - retrieval and action tools depend on live IMAP/SMTP access through Bridge
 - current wiring does not cleanly provide Bridge credentials to `mcp-server`
+- the current implementation still expects `BRIDGE_PASS` from the environment, while Compose only provides the Bridge password to `mbsync`
 - SMTP/TLS handling should be aligned with the stricter cert-pinned approach used by `mbsync`
+- SMTP send currently disables hostname and certificate verification entirely
 
 Tasks:
-- pass Bridge credentials to `mcp-server` using a secret-handling path that does not weaken current safety guarantees
+- replace the current `BRIDGE_PASS` environment dependency with a secret-handling path that actually reaches `mcp-server`
 - make `mcp-server` use the same trust model as `mbsync` for Bridge TLS where practical
+- remove `CERT_NONE` / `check_hostname = False` from the SMTP path unless there is a narrowly justified pinned-cert alternative
 - verify live retrieval, send, move, and flag operations against a real Bridge session
 
 ### 2. Enforce read-only safety by default
@@ -63,9 +69,11 @@ Tasks:
 Why it matters:
 - mailbox mutation should be opt-in, not available by default
 - current action tools are registered without a read-only guard
+- `send_email`, `move_message`, `mark_read`, and `flag_message` are still exposed by default
 
 Tasks:
 - set `MCP_READ_ONLY=true` by default in `.env.example`
+- gate action tool registration in `mcp-server/src/main.py`
 - add a read-only guard in `mcp-server/src/tools/actions.py`
 - ensure all mutating paths fail safely with a clear user-facing message
 
@@ -74,9 +82,11 @@ Tasks:
 Why it matters:
 - mailbox Q&A is one of the main reasons to use this project daily
 - current `ask_mailbox`, `summarize_thread`, and `extract_from_emails` flows rely too much on snippets, which can miss key context from earlier messages in a thread
+- some current prompts describe snippet-based context as if it were full-thread content
 
 Tasks:
 - use full-thread stored context, or fetch richer thread content, when building LLM prompts
+- stop presenting snippet-derived context as full thread content in prompts or tool descriptions
 - verify answers remain grounded in retrieved email content
 - add tests covering missed-context regressions
 
@@ -96,11 +106,13 @@ Tasks:
 Why it matters:
 - daily use requires the tool surface to match what it claims to support
 - incomplete tools and partially implemented filters create trust issues quickly
+- `list_threads(filter_type=...)` still ignores the filter parameter
+- `reply_to_thread` and `create_draft` are still stubs
 
 Tasks:
 - implement or hide `reply_to_thread`
 - implement or hide `create_draft`
-- make `list_threads` filter behavior match the documented interface
+- make `list_threads` filter behavior match the documented interface, or reject unsupported filter values clearly
 - add attachment download support only after the read-only policy is explicit
 
 ## Active Priorities
@@ -123,8 +135,9 @@ Goal:
 - make retrieval and action tools work reliably against Bridge without weakening secret handling or TLS safety
 
 Tasks:
-- wire Bridge credentials into `mcp-server` safely
+- wire Bridge credentials into `mcp-server` safely using a real secret-backed path
 - align Bridge TLS handling with current `mbsync` trust expectations
+- remove the current SMTP no-verify fallback unless there is a pinned-cert replacement
 - verify retrieval and action tools against a real session
 
 Definition of done:
@@ -139,6 +152,7 @@ Goal:
 
 Tasks:
 - set `MCP_READ_ONLY=true` by default in `.env.example`
+- gate mutating tool registration by read-only mode
 - add a read-only guard in `mcp-server/src/tools/actions.py`
 - mount SQLite volume read-only in `mcp-server` where appropriate
 
@@ -154,6 +168,7 @@ Goal:
 Tasks:
 - reduce reliance on thread snippets when building prompts
 - use richer thread context in `ask_mailbox`, `summarize_thread`, and `extract_from_emails`
+- make prompt wording accurately reflect the actual context provided
 - add regression tests for multi-message context loss
 
 Definition of done:
@@ -181,6 +196,8 @@ Goal:
 Tasks:
 - keep parser/threader/database tests passing
 - add `mcp-server` tests starting with SQLite search and RRF logic
+- add tests for `list_threads(filter_type=...)` behavior
+- add tests for read-only action-tool gating and user-facing failure paths
 - add integration coverage for indexer watchdog behavior using mocks
 
 Definition of done:
@@ -199,6 +216,7 @@ Definition of done:
 - implement `create_draft`
 - add attachment download support
 - verify action tools respect read-only guardrails
+- either implement `list_threads` filters or narrow the documented interface
 
 ### Attachment indexing
 - index attachment filenames and MIME types for search/filtering
@@ -217,6 +235,7 @@ Definition of done:
 - extract Bridge container work into standalone repo after stabilization
 - improve operational observability and health reporting
 - add `/health` endpoint for `mcp-server` and wire it into `HEALTHCHECK`
+- decide whether `mcp-server` should eventually use live IMAP retrieval only as fallback once richer thread context is available locally
 
 ## Blockers and Risks
 
