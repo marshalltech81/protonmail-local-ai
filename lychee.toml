@@ -1,0 +1,7 @@
+verbose = "info"
+no_progress = true
+exclude_loopback = true
+
+exclude = [
+  '^https://mail-api\.proton\.me/mail/v4/messages/<id>$',
+]
