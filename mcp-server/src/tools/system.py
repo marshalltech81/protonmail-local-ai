@@ -13,7 +13,6 @@ log = logging.getLogger("mcp.tools.system")
 
 
 def register_system_tools(server, db):
-
     @server.tool()
     async def get_index_status() -> list[TextContent]:
         """

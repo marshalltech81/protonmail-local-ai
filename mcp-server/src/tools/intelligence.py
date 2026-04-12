@@ -28,7 +28,6 @@ Return ONLY valid JSON matching the schema — no preamble, no explanation."""
 
 
 def register_intelligence_tools(server, db, ollama, llm_mode: str, anthropic_key: str):
-
     async def llm_complete(system: str, user: str) -> str:
         """Route to local Ollama or Claude API based on llm_mode."""
         if llm_mode == "cloud" and anthropic_key:
