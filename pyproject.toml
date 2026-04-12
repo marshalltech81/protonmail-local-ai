@@ -22,9 +22,11 @@ quote-style = "double"
 indent-style = "space"
 
 [tool.pytest.ini_options]
-testpaths = ["indexer/tests", "mcp-server/tests"]
+testpaths = ["indexer/tests"]
+pythonpath = ["indexer"]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
 addopts = "-v --tb=short"
 # asyncio_mode = "auto" — uncomment when pytest-asyncio is added to requirements
+# testpaths: add "mcp-server/tests" when mcp-server test suite is written
