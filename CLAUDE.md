@@ -226,12 +226,24 @@ docs/
 ```
 
 ## Testing
-No test suite yet — this is the next priority after the initial stack runs cleanly.
-When adding tests:
 - Use pytest for all Python services
-- Start with indexer/src/parser.py and indexer/src/threader.py — most logic lives there
+- Run indexer tests: `cd indexer && pytest` (requires dependencies installed)
 - Integration tests should mock IMAP rather than hitting a real Bridge instance
 - Use real .eml fixture files for parser tests
+
+### Indexer test coverage
+- `tests/test_parser.py` — parse_email (plain, HTML, multipart, attachments,
+  inline body, missing Message-ID, date fallback, folder derivation),
+  _parse_addrs, _decode_header, _clean_id, _normalize_subject
+- `tests/test_threader.py` — Thread.text_for_embedding (truncation, multi-message),
+  Thread.snippet, Threader.assign_thread (new thread, In-Reply-To, References,
+  subject fallback, cross-folder isolation), _participants deduplication
+- `tests/test_database.py` — schema creation, v1→v2 migration, upsert insert/update
+  with body accumulation, find_thread_by_message_id/subject, is_indexed, get_stats
+
+### Still needed
+- mcp-server test suite (pytest — start with src/lib/sqlite.py search/RRF logic)
+- Integration tests for indexer watchdog (mock inotify events)
 
 ## Pending Implementation Queue
 Work through these in order. Do not skip ahead.
