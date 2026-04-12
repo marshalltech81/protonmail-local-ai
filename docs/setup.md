@@ -196,6 +196,20 @@ These are harmless. Bridge cannot use the desktop keychain (no dbus session in a
 container) and falls back to its own encrypted vault. The "no vault key found" warning
 only appears once — on the very first run before the vault is created.
 
+### Reading Bridge logs directly from the volume
+
+Bridge writes structured logs to a timestamped file inside the `bridge-data` volume.
+Since Bridge no longer streams logs to Docker stdout, read them directly:
+
+```bash
+docker run --rm \
+    -v protonmail-local-ai_bridge-data:/data:ro \
+    debian:bookworm-slim \
+    bash -c 'find /data/local/protonmail/bridge-v3/logs -name "*.log" | sort | tail -1 | xargs tail -n 100'
+```
+
+To follow the log in real time, replace `tail -n 100` with `tail -f`.
+
 ### Bridge is up but IMAP is unresponsive / mbsync can't connect
 
 Bridge may still be in the middle of its initial Gluon sync — pulling every
