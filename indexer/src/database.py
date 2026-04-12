@@ -61,9 +61,7 @@ class Database:
         if current < 2:
             self._apply_v2(cur)
 
-        cur.execute(
-            "INSERT OR REPLACE INTO schema_version VALUES (?)", (SCHEMA_VERSION,)
-        )
+        cur.execute("INSERT OR REPLACE INTO schema_version VALUES (?)", (SCHEMA_VERSION,))
         self._conn.commit()
         log.info(f"Database ready at {self.path} (schema v{SCHEMA_VERSION})")
 
@@ -224,9 +222,7 @@ class Database:
             )
 
         # Update FTS5 index
-        cur.execute(
-            "DELETE FROM threads_fts WHERE thread_id = ?", (thread.thread_id,)
-        )
+        cur.execute("DELETE FROM threads_fts WHERE thread_id = ?", (thread.thread_id,))
         cur.execute(
             """
             INSERT INTO threads_fts (thread_id, subject, participants, body)
@@ -301,9 +297,7 @@ class Database:
 
     def get_stats(self) -> dict:
         stats = {}
-        stats["total_threads"] = self._conn.execute(
-            "SELECT COUNT(*) FROM threads"
-        ).fetchone()[0]
+        stats["total_threads"] = self._conn.execute("SELECT COUNT(*) FROM threads").fetchone()[0]
         stats["total_messages"] = self._conn.execute(
             "SELECT COUNT(*) FROM message_thread_map"
         ).fetchone()[0]
