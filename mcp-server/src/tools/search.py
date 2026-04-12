@@ -11,7 +11,6 @@ log = logging.getLogger("mcp.tools.search")
 
 
 def register_search_tools(server, db, ollama):
-
     @server.tool()
     async def search_emails(
         query: str,

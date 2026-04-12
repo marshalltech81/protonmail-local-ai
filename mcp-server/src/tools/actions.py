@@ -12,7 +12,6 @@ log = logging.getLogger("mcp.tools.actions")
 
 
 def register_action_tools(server, imap):
-
     @server.tool()
     async def send_email(
         to: list[str],

@@ -11,7 +11,6 @@ log = logging.getLogger("mcp.tools.retrieval")
 
 
 def register_retrieval_tools(server, db, imap):
-
     @server.tool()
     async def get_thread(
         thread_id: str,
