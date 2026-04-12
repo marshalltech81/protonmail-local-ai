@@ -9,7 +9,7 @@ import email.message
 import email.utils
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import html2text
@@ -161,16 +161,13 @@ def _parse_addrs(value: str) -> list[str]:
     if not value:
         return []
     pairs = email.utils.getaddresses([value])
-    return [
-        f"{name} <{addr}>" if name else addr
-        for name, addr in pairs
-        if addr.strip()
-    ]
+    return [f"{name} <{addr}>" if name else addr for name, addr in pairs if addr.strip()]
 
 
 def _parse_date(value: str) -> datetime:
     try:
         from email.utils import parsedate_to_datetime
+
         return parsedate_to_datetime(value)
     except Exception:
-        return datetime.now(timezone.utc)
+        return datetime.now(UTC)
