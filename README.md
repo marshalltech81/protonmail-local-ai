@@ -60,6 +60,14 @@ make first-run
 #   exit
 ```
 
+After `info`, write the Bridge password to the secret file with owner-only
+permissions:
+
+```bash
+printf '%s' 'bridge-generated-pass' > .secrets/bridge_pass.txt
+chmod 600 .secrets/bridge_pass.txt
+```
+
 ### 4. Pull Ollama models
 
 ```bash
