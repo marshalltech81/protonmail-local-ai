@@ -6,9 +6,20 @@ on:
     paths:
       - "**/requirements.txt"
       - "**/Dockerfile"
+      - ".github/workflows/security.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "**/requirements.txt"
+      - "**/Dockerfile"
+      - ".github/workflows/security.yml"
   schedule:
     # Every Sunday at 08:00 UTC
     - cron: "0 8 * * 0"
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   trivy-deps:
@@ -18,7 +29,7 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Scan indexer dependencies
-        uses: aquasecurity/trivy-action@master
+        uses: aquasecurity/trivy-action@0.33.1
         with:
           scan-type: fs
           scan-ref: indexer/requirements.txt
@@ -27,10 +38,27 @@ jobs:
           severity: CRITICAL,HIGH
 
       - name: Scan mcp-server dependencies
-        uses: aquasecurity/trivy-action@master
+        uses: aquasecurity/trivy-action@0.33.1
         with:
           scan-type: fs
           scan-ref: mcp-server/requirements.txt
           format: table
           exit-code: "1"
           severity: CRITICAL,HIGH
+
+  trivy-misconfig:
+    name: Trivy misconfiguration scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Scan repository configuration
+        uses: aquasecurity/trivy-action@0.33.1
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: misconfig
+          format: table
+          exit-code: "1"
+          severity: CRITICAL,HIGH
+          skip-dirs: .git,.ruff_cache,.pytest_cache,.venv,indexer/.venv
