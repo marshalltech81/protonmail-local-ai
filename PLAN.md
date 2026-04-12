@@ -221,8 +221,28 @@ Definition of done:
 ### Attachment indexing
 - index attachment filenames and MIME types for search/filtering
 - evaluate safe local text extraction for common attachment types
+- add OCR-based text extraction for image attachments such as `.png` and `.jpg`
+- add OCR-based text extraction for scanned PDFs
+- evaluate transcription support for common audio/video attachment types
+- add content-hash-based deduping for expensive extraction work so identical attachments are not OCRed or transcribed repeatedly
+- preserve per-message attachment occurrences even when extracted content is deduped
 - do not store raw attachment binaries in SQLite
+- log unsupported or unparsed attachment types in application logs so parser gaps are visible in real-world use
 - add tests for attachment parsing and search behavior
+
+### Guarded live Bridge integration CI
+- keep normal PR CI secret-free and mocked; do not put live Proton login in the default PR workflow
+- add a separate `.github/workflows/bridge-integration.yml` triggered only by `workflow_dispatch` and optionally a nightly schedule on `main`
+- never run the live Bridge workflow on fork PRs or with `pull_request_target`
+- use a protected GitHub Environment such as `proton-integration` for all live-test secrets and approvals
+- if using GitHub-hosted runners without `PROTON_TEST_TOTP_SECRET` and without pre-provisioned Bridge state, use a dedicated paid Proton test account with 2FA disabled
+- store only `PROTON_TEST_EMAIL` and `PROTON_TEST_PASSWORD` in the protected environment for the GitHub-hosted no-2FA path
+- build a single-session PTY helper such as `scripts/bridge-first-run.expect` that logs in and captures `info` within the same Bridge CLI session
+- keep the current first-run no-log compose override in place while the helper runs
+- have the helper write `BRIDGE_USER` into a CI-only env file and `BRIDGE_PASS` into `.secrets/bridge_pass.txt` with `700` on `.secrets` and `600` on the secret file
+- do not echo Proton credentials, Bridge credentials, TOTP codes, or full `info` output back to workflow logs
+- keep the live workflow focused on smoke coverage only: Bridge health, mbsync auth, cert extraction, and one or two retrieval/action checks
+- let the runner tear down ephemeral Bridge state after the run; do not upload Bridge data volumes as artifacts
 
 ### Schema and embeddings
 - build a real migration runner around `SCHEMA_VERSION`
@@ -237,6 +257,40 @@ Definition of done:
 - add `/health` endpoint for `mcp-server` and wire it into `HEALTHCHECK`
 - decide whether `mcp-server` should eventually use live IMAP retrieval only as fallback once richer thread context is available locally
 
+### Search and intelligence expansion
+- add attachment-aware retrieval with provenance so results can cite message ID, attachment filename, and page/time range where applicable
+- move toward dual retrieval units: thread-level for conversation understanding plus message/attachment-level chunks for precise lookup
+- make intelligence answers consistently grounded in exact message and attachment evidence instead of summary-only responses
+- add structured extraction for high-value mailbox entities such as invoices, dates, addresses, contracts, approvals, and calendar details
+- improve sender/contact identity normalization across aliases, display names, and mailing-list patterns
+- add near-duplicate handling for repeated attachments, forwards, and duplicated content across folders
+- add faceted search by date, sender, recipient, domain, folder, attachment type, and extracted document/entity signals
+- add targeted reindex and parser-version-driven reprocessing so parser improvements do not require full rebuilds
+
+### Product experience expansion
+- add a trusted "ask my mailbox, show receipts" experience with direct citations to the exact supporting messages and attachments
+- surface action-oriented views such as unanswered threads, waiting-on-me, waiting-on-them, deadlines, invoices due, and contracts needing attention
+- build stronger attachment intelligence for PDFs, scanned documents, images, audio, and video once extraction pipelines are in place
+- build a local entity memory for people, companies, projects, dates, invoices, addresses, and commitments derived from email and attachments
+- add thread-state understanding that highlights decisions, unresolved questions, owners, and what changed since the last reply
+- support saved queries and persistent monitors for high-signal conditions such as large invoices, outage mentions, expiring contracts, or new security alerts
+
+### Bridge strategy improvements
+- continue treating Bridge as the Proton-facing ingress/egress boundary, not the primary retrieval backend for search and Q&A
+- keep reads centered on Maildir and SQLite where possible, and make live Bridge retrieval a narrow fallback path instead of the default data plane
+- fix the current `mcp-server` Bridge secret path so any remaining live Bridge client uses a real secret-backed credential flow instead of `BRIDGE_PASS` from the environment
+- align any `mcp-server` Bridge TLS handling with the stricter cert-pinned trust model already used by `mbsync`
+- make TLS cert extraction and trust handling fail closed after first-run instead of silently degrading if cert pinning cannot be refreshed
+- improve Bridge readiness checks so they reflect useful IMAP availability, not just an open TCP port
+- let `mcp-server` stay up in a degraded local-search mode when Bridge is unavailable, with only live retrieval/action paths disabled
+- add a safer single-session first-run helper that keeps Proton login interactive but automates same-session `info` capture into `.env` and `.secrets/bridge_pass.txt`
+- add a lightweight Bridge upgrade smoke-test path so version bumps verify bind, auth, cert, and IMAP readiness behavior before routine use
+- add stronger patch-drift detection around the upstream Bridge source modifications so version bumps fail clearly when the bind or SAN patches no longer apply as expected
+- document and test backup, restore, and rollback handling for the `bridge-data` volume so Bridge upgrades and recovery are safer
+- add better operator tooling such as a `make bridge-status`-style diagnostic path for auth state, Gluon sync state, recent logs, and IMAP readiness
+- evaluate additional Bridge container hardening such as `no-new-privileges`, capability dropping, and a read-only root filesystem if Bridge will tolerate it
+- tighten Bridge-facing network boundaries further if live Bridge access remains in `mcp-server`
+
 ## Blockers and Risks
 
 ### Initial Proton sync duration
@@ -249,6 +303,12 @@ Do not modify this casually.
 
 ### Schema sensitivity
 Changes to SQLite schema, embedding dimensions, or thread model can invalidate existing assumptions and stored data.
+
+### Live Bridge CI credential limits
+Without `PROTON_TEST_TOTP_SECRET`, pre-provisioned `BRIDGE_USER` / `BRIDGE_PASS`,
+or an already authenticated persistent Bridge state, GitHub-hosted automation
+only works cleanly with a dedicated Proton test account that has 2FA disabled.
+Otherwise keep live Bridge testing manual or move it to a trusted self-hosted runner.
 
 ## Open Decisions
 
@@ -265,6 +325,11 @@ Need final decision on whether read-only mode blocks:
 
 ### 3. IMAP strategy
 Need decision on whether polling remains acceptable or whether IMAP IDLE is worth the added complexity.
+
+### 4. Live Bridge integration lane
+Need final decision on the long-term home for live Bridge smoke tests:
+- GitHub-hosted manual/nightly workflow using a dedicated no-2FA Proton test account
+- or a trusted self-hosted runner with persistent authenticated Bridge state
 
 ## Recently Completed
 
