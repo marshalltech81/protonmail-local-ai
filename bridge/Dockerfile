@@ -78,9 +78,8 @@ RUN groupadd --gid 1000 bridge && \
 # Copy compiled binary from builder
 COPY --from=builder /build/bridge /usr/local/bin/bridge
 
-# Copy entrypoint — owned by bridge user
-COPY --chown=bridge:bridge entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
+# Copy entrypoint — owned by bridge user, executable bit set at copy time
+COPY --chmod=755 --chown=bridge:bridge entrypoint.sh /entrypoint.sh
 
 # Pre-create all subdirectories under /data with correct ownership.
 # Docker copies these into the named volume on first mount (copy-on-empty),

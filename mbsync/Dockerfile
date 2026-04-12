@@ -28,8 +28,7 @@ RUN groupadd --gid 1001 mbsync && \
 # Config and entrypoint
 # -----------------------------------------------------------------------------
 COPY mbsyncrc.template /etc/mbsyncrc.template
-COPY --chown=mbsync:mbsync entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
+COPY --chmod=755 --chown=mbsync:mbsync entrypoint.sh /entrypoint.sh
 
 # -----------------------------------------------------------------------------
 # Pre-create Maildir structure with correct ownership BEFORE dropping to

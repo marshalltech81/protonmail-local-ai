@@ -124,6 +124,28 @@ make clean        # remove all containers and volumes (destructive)
 #               Bridge-Specific Operational Notes → TLS cert extraction command
 ```
 
+## Dockerfile Conventions
+All Dockerfiles in this project must follow these best practices:
+- **Non-root user** — every runtime image runs as a dedicated non-root user with an explicit
+  UID/GID; UIDs are assigned per container: bridge=1000, mbsync=1001, indexer=1002, mcp=1003
+- **Multi-stage builds** — build toolchains (gcc, make, Go) must never appear in runtime
+  images; use a named builder stage and copy only the compiled artifacts or installed packages
+- **Layer caching** — copy dependency manifests (requirements.txt, go.mod) before source files
+  so changes to source don't invalidate the dependency install layer
+- **apt hygiene** — always use `--no-install-recommends`; always `rm -rf /var/lib/apt/lists/*`
+  in the same RUN layer as `apt-get install`
+- **pip hygiene** — always use `--no-cache-dir`
+- **chmod via COPY** — use `COPY --chmod=755` instead of a separate `RUN chmod` layer
+- **VOLUME after chown** — declare VOLUME only after pre-creating the directory and setting
+  ownership; Docker copies directory contents into the named volume on first mount, preserving
+  ownership only if the directory exists at image build time
+- **HEALTHCHECK** — add a HEALTHCHECK to every image; for services without a dedicated health
+  endpoint use a port probe (`nc -z localhost <port>`); mcp-server HEALTHCHECK is deferred
+  until a /health endpoint exists in the application
+- **No latest tags** — pin all base images to a specific version (e.g. `debian:bookworm-slim`,
+  `python:3.14-slim-bookworm`) — never use `:latest`
+- **`.dockerignore`** — every service directory must have a `.dockerignore`
+
 ## Bash Conventions
 - All scripts must start with `#!/bin/bash` and `set -Eeuo pipefail`
   - `-E` — ERR traps are inherited by functions and subshells
