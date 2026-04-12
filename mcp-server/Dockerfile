@@ -1,7 +1,7 @@
 # =============================================================================
 # MCP Server — exposes email search and intelligence tools to Claude Desktop
 # Uses HTTP/SSE transport (required for Docker — stdio only works on host)
-# Two-stage: builder installs gcc to compile any native deps; runtime has none.
+# Two-stage: builder installs deps into a uv-managed virtualenv; runtime has none.
 # =============================================================================
 
 # -----------------------------------------------------------------------------
@@ -9,13 +9,19 @@
 # -----------------------------------------------------------------------------
 FROM python:3.14-slim-bookworm AS builder
 
+COPY --from=ghcr.io/astral-sh/uv:0.11.6 /uv /uvx /bin/
+
+ENV UV_PYTHON_DOWNLOADS=0 \
+    UV_LINK_MODE=copy
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
  && rm -rf /var/lib/apt/lists/*
 
-WORKDIR /build
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+WORKDIR /app
+COPY pyproject.toml uv.lock ./
+RUN uv sync --locked --no-dev --no-install-project
+COPY src/ ./src/
 
 # -----------------------------------------------------------------------------
 # Stage 2: Runtime — no build toolchain
@@ -37,13 +43,11 @@ RUN groupadd --gid 1003 mcp && \
             mcp
 
 WORKDIR /app
+ENV PATH="/app/.venv/bin:$PATH"
 
-# Copy installed packages from builder — gcc and build artifacts not included
-COPY --from=builder /usr/local/lib/python3.14/site-packages/ \
-                    /usr/local/lib/python3.14/site-packages/
-COPY --from=builder /usr/local/bin/ /usr/local/bin/
-
-COPY src/ ./src/
+# Copy the uv-managed virtualenv from the builder; runtime keeps no toolchain.
+COPY --from=builder /app/.venv /app/.venv
+COPY --from=builder /app/src/ ./src/
 
 # HEALTHCHECK deferred — requires a /health endpoint in src/main.py first.
 # When implemented: HEALTHCHECK CMD python -c \

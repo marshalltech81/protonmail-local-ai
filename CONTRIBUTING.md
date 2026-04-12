@@ -12,13 +12,15 @@ Thanks for contributing to `protonmail-local-ai`.
 
 1. Copy `.env.example` to `.env`.
 2. Keep secrets out of git. Never commit `.env`, `.secrets/bridge_pass.txt`, or ad hoc key material.
-3. Make focused changes with clear commit boundaries.
-4. Run the relevant checks before opening a pull request.
+3. Install `uv` locally for Python work in `indexer/` and `mcp-server/`.
+4. Make focused changes with clear commit boundaries.
+5. Run the relevant checks before opening a pull request.
 
 ## Recommended checks
 
 - `pre-commit run --all-files`
-- `pytest -q`
+- `cd indexer && uv sync --locked --dev && uv run pytest -q`
+- `cd mcp-server && uv sync --locked`
 - `docker compose config --quiet`
 - `docker compose build protonmail-bridge mbsync indexer mcp-server`
 

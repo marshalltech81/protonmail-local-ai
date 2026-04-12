@@ -4,13 +4,15 @@ on:
   push:
     branches: [main]
     paths:
-      - "**/requirements.txt"
+      - "**/pyproject.toml"
+      - "**/uv.lock"
       - "**/Dockerfile"
       - ".github/workflows/security.yml"
   pull_request:
     branches: [main]
     paths:
-      - "**/requirements.txt"
+      - "**/pyproject.toml"
+      - "**/uv.lock"
       - "**/Dockerfile"
       - ".github/workflows/security.yml"
   schedule:
@@ -38,7 +40,8 @@ jobs:
         with:
           skip-setup-trivy: true
           scan-type: fs
-          scan-ref: indexer/requirements.txt
+          scan-ref: indexer
+          scanners: vuln
           format: table
           exit-code: "1"
           severity: CRITICAL,HIGH
@@ -48,7 +51,8 @@ jobs:
         with:
           skip-setup-trivy: true
           scan-type: fs
-          scan-ref: mcp-server/requirements.txt
+          scan-ref: mcp-server
+          scanners: vuln
           format: table
           exit-code: "1"
           severity: CRITICAL,HIGH
@@ -75,4 +79,4 @@ jobs:
           format: table
           exit-code: "1"
           severity: CRITICAL,HIGH
-          skip-dirs: .git,.ruff_cache,.pytest_cache,.venv,indexer/.venv
+          skip-dirs: .git,.ruff_cache,.pytest_cache,.venv,indexer/.venv,mcp-server/.venv

@@ -252,7 +252,9 @@ set -Eeuo pipefail
 - fix types properly instead
 - MCP server code should remain async
 - indexer is sync except where the watchdog/event loop requires otherwise
-- pin all new Python dependencies to exact versions in `requirements.txt`
+- local Python dependency management uses `uv`
+- for `indexer/` and `mcp-server/`, treat `pyproject.toml` and `uv.lock` as the source of truth
+- pin all new Python dependencies to exact versions in `pyproject.toml` and regenerate `uv.lock`
 
 ## Service Responsibilities
 
