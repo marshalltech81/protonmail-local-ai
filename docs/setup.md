@@ -293,6 +293,54 @@ If IMAP is ready you will see the Bridge greeting banner, e.g.:
 If the command hangs or exits silently, Bridge is still syncing or the
 process has crashed — check the logs and process steps above.
 
+### Verifying mbsync is working
+
+Run these checks in order of depth.
+
+**1. Is mbsync running and looping?**
+
+```bash
+docker compose logs mbsync --tail 20
+```
+
+Look for `>>> Syncing...` lines repeating at your `SYNC_INTERVAL`. If you see
+`>>> Bridge IMAP is ready.` but no sync output, something failed silently.
+
+**2. Did any mail land in the Maildir volume?**
+
+```bash
+docker run --rm \
+    -v protonmail-local-ai_maildir-volume:/maildir:ro \
+    debian:bookworm-slim \
+    find /maildir -name "*.eml" -o -name "*:2,*" | wc -l
+```
+
+A non-zero count means mbsync is writing files. Zero means it connected but
+downloaded nothing — either the mailbox is empty or `Patterns` is filtering
+everything out.
+
+**3. Check the folder structure was created**
+
+```bash
+docker run --rm \
+    -v protonmail-local-ai_maildir-volume:/maildir:ro \
+    debian:bookworm-slim \
+    find /maildir -maxdepth 2 -type d
+```
+
+You should see `INBOX`, `Sent`, `Drafts`, etc. If only `/maildir` appears with
+nothing under it, the sync ran but Bridge returned no folders.
+
+**4. Force a sync now and watch verbose output**
+
+```bash
+docker exec mbsync mbsync -c /home/mbsync/.mbsyncrc -a -V 2>&1 | head -50
+```
+
+`-V` prints each folder being synced and message counts. This is the most
+informative test — it will clearly show auth failures, cert errors, or folder
+mismatches.
+
 ### mbsync fails to connect
 
 Bridge takes 10–15 seconds to fully start. mbsync waits automatically,
