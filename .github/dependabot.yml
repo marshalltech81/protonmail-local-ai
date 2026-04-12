@@ -17,7 +17,7 @@ updates:
     labels: [dependencies, docker]
 
   # indexer Python dependencies
-  - package-ecosystem: pip
+  - package-ecosystem: uv
     directory: /indexer
     schedule:
       interval: weekly
@@ -25,7 +25,7 @@ updates:
     labels: [dependencies, python]
 
   # mcp-server Python dependencies
-  - package-ecosystem: pip
+  - package-ecosystem: uv
     directory: /mcp-server
     schedule:
       interval: weekly

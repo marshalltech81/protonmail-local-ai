@@ -1,4 +1,4 @@
-.PHONY: build up down logs first-run update pull-models status clean test help
+.PHONY: build up down logs first-run update pull-models status clean sync sync-indexer sync-mcp test help
 
 # =============================================================================
 # protonmail-local-ai — Makefile
@@ -16,7 +16,8 @@ help:
 	@echo "  update       Rebuild and restart Bridge with new version"
 	@echo "  pull-models  Pull Ollama embedding and LLM models"
 	@echo "  status       Show container and index status"
-	@echo "  test         Run indexer unit tests locally (requires uv)"
+	@echo "  sync         Sync local uv environments for Python services"
+	@echo "  test         Run indexer unit tests locally with uv"
 	@echo "  clean        Remove all containers and volumes (destructive)"
 	@echo ""
 
@@ -73,6 +74,15 @@ update:
 	docker compose up -d protonmail-bridge
 	@echo "Bridge updated and restarted."
 
+# Sync local Python environments using per-service uv projects
+sync: sync-indexer sync-mcp
+
+sync-indexer:
+	cd indexer && uv sync --locked --dev
+
+sync-mcp:
+	cd mcp-server && uv sync --locked
+
 # Show running containers and basic index status
 status:
 	@echo ""
@@ -87,8 +97,8 @@ status:
 	@echo ""
 
 # Run indexer unit tests locally using uv
-test:
-	uv venv -q && uv pip install -r indexer/requirements.txt -q && uv run pytest
+test: sync-indexer
+	cd indexer && uv run pytest -q
 
 # Remove all containers and volumes
 # WARNING: This deletes your email index and Bridge credentials.

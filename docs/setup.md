@@ -370,8 +370,8 @@ make pull-models
 
 You are running an older pinned version. `sqlite-vec` versions prior to 0.1.9 ship
 an armv7 (32-bit) wheel which is incompatible with aarch64 containers. Ensure
-both `indexer/requirements.txt` and `mcp-server/requirements.txt` pin
-`sqlite-vec==0.1.9` or later, then rebuild:
+both `indexer/pyproject.toml` and `mcp-server/pyproject.toml` pin
+`sqlite-vec==0.1.9` or later, regenerate the lockfiles, then rebuild:
 
 ```bash
 docker compose build indexer mcp-server

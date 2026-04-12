@@ -1,0 +1,30 @@
+[project]
+name = "protonmail-local-ai-indexer"
+version = "0.0.0"
+requires-python = ">=3.14"
+dependencies = [
+    "mail-parser==4.2.1",
+    "beautifulsoup4==4.14.3",
+    "html2text==2025.4.15",
+    "sqlite-vec==0.1.9",
+    "httpx==0.28.1",
+    "watchdog==6.0.0",
+    "python-dotenv==1.2.2",
+    "tenacity==9.1.4",
+]
+
+[dependency-groups]
+dev = [
+    "pytest==9.0.3",
+]
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = "-v --tb=short"

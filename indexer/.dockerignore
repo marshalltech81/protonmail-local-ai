@@ -1,5 +1,5 @@
 # Build context: indexer/
-# Only Dockerfile, requirements.txt, and src/ are needed.
+# Only Dockerfile, pyproject.toml, uv.lock, and src/ are needed.
 .dockerignore
 *.md
 # Python artifacts
