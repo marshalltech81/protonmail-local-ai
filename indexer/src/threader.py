@@ -37,10 +37,14 @@ class Thread:
         for msg in self.messages:
             parts.append(f"From: {msg.from_addr}")
             parts.append(f"Date: {msg.date.isoformat()}")
-            parts.append(msg.body_text[:2000])
+            # nomic-embed-text has a 2048-token context window (~4 chars/token).
+            # 500 chars ≈ 125 tokens per message, leaving room for multiple
+            # messages and the subject/participants header within the 4000-char
+            # thread cap (~1000 tokens, safely under the model limit).
+            parts.append(msg.body_text[:500])
             parts.append("")
 
-        return "\n".join(parts)[:8000]
+        return "\n".join(parts)[:4000]
 
     def snippet(self) -> str:
         """Short preview for search results."""
