@@ -40,6 +40,7 @@ Ask questions about your inbox in plain English. Everything stays on your machin
 git clone git@github.com:marshalltech81/protonmail-local-ai.git
 cd protonmail-local-ai
 cp .env.example .env
+mkdir -m 700 .secrets
 ```
 
 ### 2. Build images
@@ -54,7 +55,8 @@ make build
 make first-run
 # Inside the CLI:
 #   login  → enter Proton credentials + 2FA
-#   info   → copy bridge username and password into .env
+#   info   → copy Bridge username into .env
+#            write Bridge password to .secrets/bridge_pass.txt
 #   exit
 ```
 
@@ -105,17 +107,17 @@ Once connected, ask Claude Desktop:
 | Embeddings | Generated locally by Ollama — never sent anywhere |
 | Search index | Local SQLite in Docker volume |
 | Q&A context | Sent to Ollama locally by default |
-| Q&A context (cloud mode) | Optionally sent to Claude API — opt-in per session |
+| Q&A context (cloud mode) | Optionally sent to Claude API — opt-in when `LLM_MODE=cloud` |
 
 Set `LLM_MODE=local` in `.env` (default) to keep everything fully local.
-Set `LLM_MODE=cloud` and provide `ANTHROPIC_API_KEY` for better reasoning quality.
+Set `LLM_MODE=cloud` and provide `ANTHROPIC_API_KEY` to use Claude API for Q&A.
 
 ## Updating Bridge
 
 When Proton releases a new Bridge version:
 
 ```bash
-# 1. Update BRIDGE_VERSION in bridge/Dockerfile and docker-compose.yml
+# 1. Update BRIDGE_VERSION in .env
 # 2. Rebuild and restart
 make update
 ```
@@ -127,7 +129,9 @@ If Bridge credentials expire or you change your Proton password:
 ```bash
 make down
 docker volume rm protonmail-local-ai_bridge-data
-make first-run   # log in again, copy new credentials into .env
+make first-run   # log in again
+# update BRIDGE_USER in .env
+# write the new Bridge password to .secrets/bridge_pass.txt
 make up
 ```
 
