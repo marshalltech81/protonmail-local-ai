@@ -164,6 +164,7 @@ When working in this repo:
 - preserve existing interfaces unless there is a clear reason to change them
 - keep comments and code aligned
 - update docs when behavior changes
+- if code or config changes create likely doc drift, update the relevant docs or explicitly suggest the needed doc or `AGENTS.md` follow-up
 - avoid introducing new dependencies without a clear need
 - pin all new dependencies to exact versions
 - avoid speculative refactors
@@ -315,6 +316,9 @@ Notes:
 ### General
 
 - use `pytest` for Python services
+- run `pre-commit run --all-files` when practical before opening a PR or finalising a substantial change
+- for Docker Compose or env wiring changes, run `docker compose config --quiet`
+- for Dockerfile, build, or container-runtime changes, run the smallest relevant `docker compose build ...` subset when practical
 - prefer real `.eml` fixtures for parser tests
 - integration tests should mock IMAP rather than hitting a live Bridge instance
 - add or update tests when behavior changes
@@ -342,9 +346,10 @@ Update docs when changing:
 - MCP tool behavior
 - schema or migration behavior
 - environment variables
+- repository workflows, security reporting flow, or contributor-facing automation
 - operational recovery steps
 
-Do not leave behavior changed in code but undocumented in `docs/`.
+If a change may stale `README.md`, `CONTRIBUTING.md`, `SECURITY.md`, `PLAN.md`, `docs/`, or `AGENTS.md`, update it or proactively suggest the follow-up.
 
 ## When to Stop and Ask
 
