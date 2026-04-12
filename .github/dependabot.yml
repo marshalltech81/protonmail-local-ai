@@ -1,6 +1,21 @@
 version: 2
 
 updates:
+  # Repo-level tooling
+  - package-ecosystem: pre-commit
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    labels: [dependencies, pre-commit]
+
+  - package-ecosystem: docker-compose
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    labels: [dependencies, docker]
+
   # indexer Python dependencies
   - package-ecosystem: pip
     directory: /indexer
