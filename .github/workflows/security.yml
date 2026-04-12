@@ -28,9 +28,16 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      - name: Install Trivy
+        uses: aquasecurity/setup-trivy@v0.2.4
+        with:
+          version: v0.68.2
+          cache: true
+
       - name: Scan indexer dependencies
         uses: aquasecurity/trivy-action@v0.33.1
         with:
+          skip-setup-trivy: true
           scan-type: fs
           scan-ref: indexer/requirements.txt
           format: table
@@ -40,6 +47,7 @@ jobs:
       - name: Scan mcp-server dependencies
         uses: aquasecurity/trivy-action@v0.33.1
         with:
+          skip-setup-trivy: true
           scan-type: fs
           scan-ref: mcp-server/requirements.txt
           format: table
@@ -52,9 +60,16 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      - name: Install Trivy
+        uses: aquasecurity/setup-trivy@v0.2.4
+        with:
+          version: v0.68.2
+          cache: true
+
       - name: Scan repository configuration
         uses: aquasecurity/trivy-action@v0.33.1
         with:
+          skip-setup-trivy: true
           scan-type: fs
           scan-ref: .
           scanners: misconfig
