@@ -1,26 +1,44 @@
-mkdir -p .github/ISSUE_TEMPLATE
-
-cat > .github/ISSUE_TEMPLATE/bug_report.md << 'EOF'
 ---
 name: Bug report
-about: Something isn't working
+about: Report a bug in the local ProtonMail stack
+title: "[Bug]: "
+labels: bug
 ---
 
-## Container
+## Affected component
 
-Which container is affected?
 - [ ] protonmail-bridge
 - [ ] mbsync
 - [ ] indexer
 - [ ] ollama
 - [ ] mcp-server
+- [ ] docs / setup
 
 ## What happened
 
-A clear description of what went wrong.
+Describe the bug clearly and concisely.
 
 ## What you expected
 
-What should have happened instead.
+Describe what should have happened instead.
 
-## Logs
+## Steps to reproduce
+
+1.
+2.
+3.
+
+## Environment
+
+- OS:
+- Docker / Docker Compose version:
+- Branch or commit:
+- `LLM_MODE`:
+
+## Logs or screenshots
+
+Paste the relevant logs, stack traces, or screenshots here.
+
+## Additional context
+
+Include anything else that may help reproduce the issue.
