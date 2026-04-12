@@ -267,8 +267,13 @@ Work through these in order. Do not skip ahead.
 - [ ] Test suite (pytest — start with parser.py and threader.py)
 - [ ] Attachment download tool
 - [ ] Schema migration framework — SCHEMA_VERSION tracked but no runner exists
-- [ ] Ollama embedding dimension (768) hardcoded in database.py line 93 —
+- [ ] Ollama embedding dimension (768) hardcoded in database.py —
       switching models requires manual schema reset
+- [ ] Embedding context limits in threader.py are tuned for nomic-embed-text
+      (2048-token window, ~4 chars/token): 500 chars/message, 4000 chars/thread.
+      If OLLAMA_EMBED_MODEL is changed to a model with a different context window
+      these constants must be updated in Thread.text_for_embedding() to match —
+      too large silently truncates input at the model; too small wastes context
 
 ### Future projects
 - [ ] Extract Bridge container into standalone repo `protonmail-bridge-headless`
