@@ -220,10 +220,31 @@ All Dockerfiles in this repository must follow these rules:
 - use `pip --no-cache-dir`
 - prefer `COPY --chmod=755` over separate `RUN chmod`
 - pre-create directories and set ownership before declaring `VOLUME`
+- explicitly set restrictive permissions on sensitive runtime directories and files
 - add a `HEALTHCHECK` when practical
 - pin base images to specific versions
 - do not use `:latest`
 - every service directory should include a `.dockerignore`
+- harden images and containers as far as practical using Docker and Linux best practices, while preserving the repo's required functionality
+- prefer a read-only root filesystem, `tmpfs` for ephemeral writable paths, `no-new-privileges`, and dropped Linux capabilities when the service will tolerate them
+- keep runtime packages minimal, avoid unnecessary shells/tools in runtime images, and pin images by digest where practical
+- remove unused runtime packages, binaries, and libraries once the service is confirmed not to need them
+- prefer non-login service-account shells such as `/usr/sbin/nologin` unless the service genuinely depends on a login shell
+- do not assume operational flows rely on `su` or login-shell access; entrypoints and explicit `docker exec <cmd>` paths should remain sufficient
+- prefer exec-form `ENTRYPOINT` / `CMD` so the service receives signals directly
+- keep default seccomp/AppArmor confinement in place and do not loosen container security profiles casually
+- never use `privileged`, mount the Docker socket, add host devices, or broaden kernel/container privileges without explicit owner approval
+
+## Container Runtime Hardening
+
+When changing Docker Compose service definitions or runtime behavior:
+
+- prefer `read_only: true` with narrowly-scoped writable volumes and `tmpfs` mounts instead of broad writable filesystems
+- use `security_opt` such as `no-new-privileges:true` and `cap_drop: ["ALL"]` by default, then add back only what a service proves it needs
+- keep seccomp/AppArmor confinement in place by default and avoid unconfined profiles
+- add resource controls such as memory limits, `pids_limit`, and log rotation when practical
+- keep container-to-container network access as narrow as the architecture allows
+- prefer degraded modes over broadening privileges, relaxing confinement, or exposing more of the host
 
 ## Bash Conventions
 

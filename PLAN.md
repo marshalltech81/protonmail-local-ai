@@ -289,6 +289,14 @@ Definition of done:
 - document and test backup, restore, and rollback handling for the `bridge-data` volume so Bridge upgrades and recovery are safer
 - add better operator tooling such as a `make bridge-status`-style diagnostic path for auth state, Gluon sync state, recent logs, and IMAP readiness
 - evaluate additional Bridge container hardening such as `no-new-privileges`, capability dropping, and a read-only root filesystem if Bridge will tolerate it
+- evaluate `tmpfs` mounts for ephemeral writable paths and keep the writable surface limited to `/data` plus only truly required runtime scratch space
+- pin production images by digest where practical and keep Bridge runtime packages to the smallest set the service actually needs
+- audit Bridge and `mbsync` runtime packages regularly and remove unused tools or libraries once verified unnecessary
+- switch long-lived service accounts to non-login shells where possible and ensure operational flows like first-run and `docker exec <cmd>` do not depend on a login shell
+- explicitly lock down sensitive Bridge state directories under `/data`, including config, pass-store, and GnuPG paths
+- preserve and strengthen default seccomp/AppArmor confinement; only loosen profiles when Bridge proves it requires it
+- add resource controls such as memory limits, `pids_limit`, and log rotation so Bridge failure modes are more contained
+- document host-level hardening expectations for Docker itself, including full-disk encryption for Docker data, encrypted backups, and stronger daemon isolation such as rootless Docker, `userns-remap`, or Docker Desktop Enhanced Container Isolation where available
 - tighten Bridge-facing network boundaries further if live Bridge access remains in `mcp-server`
 
 ## Blockers and Risks
