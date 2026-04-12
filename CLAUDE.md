@@ -74,6 +74,10 @@ https://github.com/marshalltech81/protonmail-local-ai
 - bridge.lock at $XDG_CACHE_HOME/protonmail/bridge-v3/bridge.lock can cause "another
   instance running" errors after a hard crash — delete it to recover
 - Bridge restart recovers automatically via restart: unless-stopped in compose file
+- make first-run uses docker run --log-driver none (not docker compose run) to prevent
+  Bridge credentials printed by `info` from being written to Docker log files on disk;
+  docker compose run uses the json-file driver by default, which would capture the
+  plaintext password and leave it in /var/lib/docker/containers/<id>/*.log indefinitely
 - TLS cert extraction is automatic — mbsync/entrypoint.sh runs openssl s_client on every
   container start and writes the cert to /home/mbsync/bridge-cert.pem inside the container
 - Manual cert extraction (troubleshooting only — e.g. to inspect the cert on the host):

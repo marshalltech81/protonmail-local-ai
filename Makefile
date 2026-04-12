@@ -38,6 +38,9 @@ logs:
 # One-time interactive Bridge login
 # Run this on first setup to authenticate with your Proton account.
 # After login: copy username → .env (BRIDGE_USER), password → .secrets/bridge_pass.txt
+#
+# Uses docker run --log-driver none instead of docker compose run to prevent
+# Bridge credentials printed by `info` from being captured in Docker log files.
 first-run:
 	@echo ""
 	@echo "  Starting ProtonBridge interactive login..."
@@ -47,7 +50,12 @@ first-run:
 	@echo "           → write the bridge password to .secrets/bridge_pass.txt"
 	@echo "    exit   → then run: make up"
 	@echo ""
-	docker compose run --rm protonmail-bridge
+	@echo "  Logging is disabled for this session — credentials will not"
+	@echo "  appear in docker logs."
+	@echo ""
+	docker run --rm -it --log-driver none \
+		-v protonmail-local-ai_bridge-data:/data \
+		protonmail-local-ai/bridge
 
 # Pull Ollama models defined in .env
 pull-models:
