@@ -1,4 +1,4 @@
-.PHONY: build up down logs first-run update pull-models status clean help
+.PHONY: build up down logs first-run update pull-models status clean test help
 
 # =============================================================================
 # protonmail-local-ai — Makefile
@@ -16,7 +16,8 @@ help:
 	@echo "  update       Rebuild and restart Bridge with new version"
 	@echo "  pull-models  Pull Ollama embedding and LLM models"
 	@echo "  status       Show container and index status"
-	@echo "  clean        Remove all containers and volumes (destructive)"
+	@echo "  test         Run indexer unit tests locally (requires uv)
+  clean        Remove all containers and volumes (destructive)"
 	@echo ""
 
 # Build all images from source
@@ -84,6 +85,10 @@ status:
 		 import json; print(json.dumps(get_index_status(), indent=2))" \
 		2>/dev/null || echo "  MCP server not running or index not ready."
 	@echo ""
+
+# Run indexer unit tests locally using uv
+test:
+	cd indexer && uv pip install -r requirements.txt -q && uv run pytest -v
 
 # Remove all containers and volumes
 # WARNING: This deletes your email index and Bridge credentials.
