@@ -1,0 +1,15 @@
+# =============================================================================
+# First-run logging override
+# Used exclusively by: make first-run
+#
+# Disables the json-file log driver for the bridge container so that Bridge
+# credentials printed by `bridge --cli → info` are never written to
+# /var/lib/docker/containers/<id>/*.log on the host.
+#
+# Usage: docker compose -f docker-compose.yml -f docker-compose.first-run.yml \
+#            run --rm --no-deps protonmail-bridge
+# =============================================================================
+services:
+  protonmail-bridge:
+    logging:
+      driver: none
