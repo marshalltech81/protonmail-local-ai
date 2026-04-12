@@ -126,11 +126,16 @@ class Threader:
 def _normalize_subject(subject: str) -> str:
     """
     Strip Re:, Fwd:, and whitespace variants from subject for matching.
-    'Re: Re: Fwd: Hello world' → 'hello world'
+    Loops until no more prefixes can be removed so deeply-nested reply
+    chains ('Re: Re: Fwd: Hello') collapse to the bare subject ('hello').
     """
     import re
 
+    prefix = re.compile(r"^(re|fwd|fw|aw|ant)[\s:\[\]]+", re.IGNORECASE)
     s = subject.lower().strip()
-    s = re.sub(r"^(re|fwd|fw|aw|ant)[\s:\[\]]+", "", s, flags=re.IGNORECASE)
-    s = re.sub(r"\s+", " ", s).strip()
-    return s
+    while True:
+        stripped = prefix.sub("", s).strip()
+        if stripped == s:
+            break
+        s = stripped
+    return re.sub(r"\s+", " ", s).strip()

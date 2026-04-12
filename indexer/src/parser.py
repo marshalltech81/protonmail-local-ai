@@ -6,9 +6,10 @@ Handles MIME, HTML-to-text conversion, and attachment metadata.
 
 import email
 import email.message
+import email.utils
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import html2text
@@ -101,8 +102,15 @@ def _extract_body_and_attachments(
         for part in msg.walk():
             ct = part.get_content_type()
             cd = part.get("Content-Disposition", "")
+            has_filename = bool(part.get_filename())
 
-            if "attachment" in cd or "inline" in cd:
+            # A part is an attachment if disposition is "attachment", or if it
+            # is "inline" with an explicit filename (e.g. an inline image).
+            # Plain "inline" without a filename is the message body — do not
+            # treat it as an attachment or the body_text will be left empty.
+            is_attachment = "attachment" in cd or ("inline" in cd and has_filename)
+
+            if is_attachment:
                 filename = part.get_filename() or "unnamed"
                 payload = part.get_payload(decode=True) or b""
                 attachments.append(
@@ -149,15 +157,20 @@ def _decode_header(value: str) -> str:
 
 
 def _parse_addrs(value: str) -> list[str]:
+    """Parse an address header, handling display names with commas correctly."""
     if not value:
         return []
-    return [addr.strip() for addr in value.split(",") if addr.strip()]
+    pairs = email.utils.getaddresses([value])
+    return [
+        f"{name} <{addr}>" if name else addr
+        for name, addr in pairs
+        if addr.strip()
+    ]
 
 
 def _parse_date(value: str) -> datetime:
     try:
         from email.utils import parsedate_to_datetime
-
         return parsedate_to_datetime(value)
     except Exception:
-        return datetime.utcnow()
+        return datetime.now(timezone.utc)
