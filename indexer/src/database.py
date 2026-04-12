@@ -61,7 +61,13 @@ class Database:
         if current < 2:
             self._apply_v2(cur)
 
-        cur.execute("INSERT OR REPLACE INTO schema_version VALUES (?)", (SCHEMA_VERSION,))
+        # UPDATE if a row exists, INSERT if this is a fresh database.
+        # INSERT OR REPLACE would insert a new row (new primary key) rather
+        # than overwriting the existing one, leaving both rows in the table.
+        if current == 0:
+            cur.execute("INSERT INTO schema_version VALUES (?)", (SCHEMA_VERSION,))
+        else:
+            cur.execute("UPDATE schema_version SET version = ?", (SCHEMA_VERSION,))
         self._conn.commit()
         log.info(f"Database ready at {self.path} (schema v{SCHEMA_VERSION})")
 
@@ -231,12 +237,11 @@ class Database:
             (thread.thread_id, thread.subject, participants_json, body),
         )
 
-        # Update vector index
+        # Update vector index — vec0 virtual tables do not support
+        # INSERT OR REPLACE conflict resolution; use DELETE + INSERT instead.
+        cur.execute("DELETE FROM threads_vec WHERE thread_id = ?", (thread.thread_id,))
         cur.execute(
-            """
-            INSERT OR REPLACE INTO threads_vec (thread_id, embedding)
-            VALUES (?, ?)
-            """,
+            "INSERT INTO threads_vec (thread_id, embedding) VALUES (?, ?)",
             (thread.thread_id, sqlite_vec.serialize_float32(embedding)),
         )
 
