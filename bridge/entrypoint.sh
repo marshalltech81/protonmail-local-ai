@@ -1,6 +1,16 @@
 #!/bin/bash
 set -Eeuo pipefail
 
+# Bridge expects these runtime paths to be set explicitly. Export them here
+# instead of baking PASSWORD_STORE_DIR into Dockerfile metadata so Trivy does
+# not flag it as a leaked secret purely because of the variable name.
+export HOME="${HOME:-/home/bridge}"
+export XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-/data/config}"
+export XDG_DATA_HOME="${XDG_DATA_HOME:-/data/local}"
+export XDG_CACHE_HOME="${XDG_CACHE_HOME:-/data/cache}"
+export GNUPGHOME="${GNUPGHOME:-/data/gnupg}"
+export PASSWORD_STORE_DIR="${PASSWORD_STORE_DIR:-/data/pass}"
+
 VAULT="$XDG_CONFIG_HOME/protonmail/bridge-v3/vault.enc"
 
 # =============================================================================
