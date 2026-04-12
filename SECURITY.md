@@ -25,7 +25,7 @@ In scope:
 
 Out of scope:
 - Vulnerabilities in ProtonBridge itself — report those upstream to
-  [Proton](https://proton.me/security)
+  [Proton's vulnerability disclosure policy](https://proton.me/security/vulnerability-disclosure)
 - Vulnerabilities in Ollama — report to the
   [Ollama project](https://github.com/ollama/ollama/security)
 - Theoretical issues with no practical exploit path

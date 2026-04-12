@@ -3,5 +3,6 @@ no_progress = true
 exclude_loopback = true
 
 exclude = [
+  '^https://github\.com/marshalltech81/protonmail-local-ai/security/advisories/new$',
   '^https://mail-api\.proton\.me/mail/v4/messages/<id>$',
 ]
