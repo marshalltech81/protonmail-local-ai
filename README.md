@@ -81,6 +81,11 @@ make up
 make logs  # verify everything is running
 ```
 
+By default, the MCP server runs in read-only mode:
+- search, retrieval, and intelligence tools are available
+- mail-changing action tools are not registered
+- retrieval is served from the local SQLite index rather than direct IMAP access
+
 ### 6. Configure Claude Desktop
 
 Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
@@ -126,7 +131,9 @@ When Proton releases a new Bridge version:
 
 ```bash
 # 1. Update BRIDGE_VERSION in .env
-# 2. Rebuild and restart
+# 2. Verify the local patch and runtime assumptions still hold
+make bridge-upgrade-check
+# 3. Rebuild and restart
 make update
 ```
 
@@ -153,6 +160,9 @@ make up           # Start the full stack
 make down         # Stop the full stack
 make logs         # Tail all logs
 make first-run    # One-time Bridge login
+make bridge-patch-check   # Verify Bridge patch points against upstream source
+make bridge-smoke         # Build and smoke test the Bridge image
+make bridge-upgrade-check # Run both Bridge upgrade guard checks
 make pull-models  # Pull Ollama models
 make update       # Update Bridge to new version
 make status       # Container and index status

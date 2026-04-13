@@ -16,7 +16,8 @@ Detailed design and operational docs belong in `docs/`.
 
 ## Current Objective
 
-Bring the local ProtonMail stack to a secure, stable, and testable baseline for daily use, with safe defaults and clear operational behavior.
+Validate the new safe local-first baseline under real first-run/sync conditions,
+then improve retrieval fidelity, test coverage, and tool completeness.
 
 ## Current State
 
@@ -30,54 +31,44 @@ Implemented and working at a high level:
 - Python services now use per-service `uv` projects with `pyproject.toml` and `uv.lock`
 - Bridge TLS cert extraction is automated in `mbsync/entrypoint.sh`
 - Bridge password is handled as a Docker Compose secret
+- `mcp-server` now runs in read-only mode by default and serves retrieval from the local SQLite index
+- mail-changing MCP tools are no longer registered in the default deployment
+- Bridge-facing traffic is now isolated from the application network
+- `mbsync` and `mcp-server` now use a tighter runtime profile with read-only root filesystems, `tmpfs`, `no-new-privileges`, dropped capabilities, and `pids_limit`
+- the long-lived `bridge` and `mbsync` service users now use non-login shells
+- the Bridge build now uses a shared patch helper plus a dedicated patch-drift check and build/runtime smoke-test path for version bumps
 
 Known limitations:
 
 - initial sync may take a long time on large mailboxes
 - attachments are not indexed yet
-- `mcp-server` still expects `BRIDGE_PASS` from the environment instead of the current secret flow
-- `mcp-server` SMTP send path still disables TLS verification
-- read-only protections are not fully enforced yet
+- per-message live retrieval and mail-changing actions are disabled in the default deployment until a safe action backend is implemented
 - intelligence tools rely too heavily on stored snippets instead of full-thread context
 - test coverage is incomplete
 - schema migration support is still minimal
 - some MCP action features are incomplete
 - `list_threads(filter_type=...)` does not yet match the documented interface
+- the new hardened first-run/sync path still needs real end-to-end validation against a live Bridge session
 
 ## Daily-Driver Gaps
 
 The core sync and indexing path is close, but the following gaps still block
 confident daily-driver use.
 
-### 1. Secure live Bridge access for `mcp-server`
+### 1. Validate the hardened first-run and sync path
 
 Why it matters:
-- retrieval and action tools depend on live IMAP/SMTP access through Bridge
-- current wiring does not cleanly provide Bridge credentials to `mcp-server`
-- the current implementation still expects `BRIDGE_PASS` from the environment, while Compose only provides the Bridge password to `mbsync`
-- SMTP/TLS handling should be aligned with the stricter cert-pinned approach used by `mbsync`
-- SMTP send currently disables hostname and certificate verification entirely
+- the Tier 1 safety baseline is now implemented in code and Compose, but it still needs live operational proof
+- `mbsync` now depends on `/tmp` runtime state under a read-only root filesystem
+- first-run, cert extraction, and steady-state sync are the remaining practical questions before calling the baseline routine-use ready
 
 Tasks:
-- replace the current `BRIDGE_PASS` environment dependency with a secret-handling path that actually reaches `mcp-server`
-- make `mcp-server` use the same trust model as `mbsync` for Bridge TLS where practical
-- remove `CERT_NONE` / `check_hostname = False` from the SMTP path unless there is a narrowly justified pinned-cert alternative
-- verify live retrieval, send, move, and flag operations against a real Bridge session
+- run the new first-run and sync flow against a real Bridge session
+- verify `mbsync` cert extraction and sync looping still behave correctly with the new `/tmp` runtime paths
+- verify the default deployment remains useful when Bridge is unavailable and only the local index is present
+- capture any operator-facing recovery or troubleshooting notes that fall out of the live validation
 
-### 2. Enforce read-only safety by default
-
-Why it matters:
-- mailbox mutation should be opt-in, not available by default
-- current action tools are registered without a read-only guard
-- `send_email`, `move_message`, `mark_read`, and `flag_message` are still exposed by default
-
-Tasks:
-- set `MCP_READ_ONLY=true` by default in `.env.example`
-- gate action tool registration in `mcp-server/src/main.py`
-- add a read-only guard in `mcp-server/src/tools/actions.py`
-- ensure all mutating paths fail safely with a clear user-facing message
-
-### 3. Improve intelligence fidelity
+### 2. Improve intelligence fidelity
 
 Why it matters:
 - mailbox Q&A is one of the main reasons to use this project daily
@@ -90,18 +81,20 @@ Tasks:
 - verify answers remain grounded in retrieved email content
 - add tests covering missed-context regressions
 
-### 4. Expand MCP test coverage
+### 3. Expand MCP test coverage
 
 Why it matters:
 - indexer coverage is in decent shape, but MCP behavior is still lightly tested
+- the new local-only/read-only baseline should be protected against regression
 - search, retrieval, ranking, and action regressions are too risky to rely on manual verification alone
 
 Tasks:
 - add tests for SQLite keyword, semantic, and hybrid/RRF search behavior
 - add tests for MCP tool registration and user-facing error handling
+- add tests for the local-only/read-only default behavior using mocks instead of a live Bridge instance
 - add tests for retrieval and action flows using mocks instead of a live Bridge instance
 
-### 5. Tighten incomplete or misleading tool behavior
+### 4. Tighten incomplete or misleading tool behavior
 
 Why it matters:
 - daily use requires the tool surface to match what it claims to support
@@ -119,48 +112,23 @@ Tasks:
 
 Work these in order.
 
-### 1. Confirm stable first-run and sync behavior
+### 1. Confirm stable first-run and sync behavior under the hardened baseline
 
 Goal:
-- ensure first-run, Bridge auth, cert extraction, and initial mail sync are reliable
+- ensure first-run, Bridge auth, cert extraction, and initial mail sync remain reliable after the Tier 1 hardening changes
+
+Tasks:
+- validate first-run against a real Bridge account
+- verify `mbsync` works correctly with generated config/cert material under `/tmp`
+- verify the default deployment still provides useful local retrieval/intelligence when Bridge is unavailable
+- document any live operational caveats discovered during validation
 
 Definition of done:
 - first-run succeeds without leaking credentials to Docker logs
 - mbsync reliably connects after Bridge comes up
 - sync behavior is repeatable after container restarts
 
-### 2. Secure live Bridge access for `mcp-server`
-
-Goal:
-- make retrieval and action tools work reliably against Bridge without weakening secret handling or TLS safety
-
-Tasks:
-- wire Bridge credentials into `mcp-server` safely using a real secret-backed path
-- align Bridge TLS handling with current `mbsync` trust expectations
-- remove the current SMTP no-verify fallback unless there is a pinned-cert replacement
-- verify retrieval and action tools against a real session
-
-Definition of done:
-- `get_thread` / `get_message` can fetch live content reliably
-- send/move/flag operations authenticate successfully when enabled
-- secret handling remains Docker-secret-first and local-only
-
-### 3. Enforce read-only safety by default
-
-Goal:
-- make mailbox mutation opt-in instead of opt-out
-
-Tasks:
-- set `MCP_READ_ONLY=true` by default in `.env.example`
-- gate mutating tool registration by read-only mode
-- add a read-only guard in `mcp-server/src/tools/actions.py`
-- mount SQLite volume read-only in `mcp-server` where appropriate
-
-Definition of done:
-- default startup does not allow mail-changing operations
-- action tools fail safely with a clear message when read-only mode is enabled
-
-### 4. Improve intelligence fidelity
+### 2. Improve intelligence fidelity
 
 Goal:
 - make mailbox Q&A and summarization trustworthy enough for routine use
@@ -175,20 +143,7 @@ Definition of done:
 - answers and summaries consistently reflect whole-thread context
 - structured extraction is based on more than the latest snippet
 
-### 5. Harden network boundaries
-
-Goal:
-- reduce unnecessary cross-container access
-
-Tasks:
-- split Docker networks so Bridge and mbsync are isolated from the rest where possible
-- verify only required services can reach Bridge IMAP/SMTP
-
-Definition of done:
-- Bridge-facing traffic is limited to the minimum necessary containers
-- architecture docs reflect the final network layout
-
-### 6. Expand test coverage
+### 3. Expand test coverage
 
 Goal:
 - make parser, threader, database, and MCP behavior safer to change
@@ -197,12 +152,43 @@ Tasks:
 - keep parser/threader/database tests passing
 - add `mcp-server` tests starting with SQLite search and RRF logic
 - add tests for `list_threads(filter_type=...)` behavior
-- add tests for read-only action-tool gating and user-facing failure paths
+- add tests for read-only action-tool gating, non-registration, and user-facing failure paths
+- add tests for local-only retrieval and system-status behavior
 - add integration coverage for indexer watchdog behavior using mocks
 
 Definition of done:
 - core indexing and retrieval paths have automated coverage
 - risky refactors can be validated without manual mailbox testing
+
+### 4. Tighten incomplete or misleading tool behavior
+
+Goal:
+- make the exposed MCP surface truthful and dependable
+
+Tasks:
+- implement or hide `reply_to_thread`
+- implement or hide `create_draft`
+- make `list_threads` filter behavior match the documented interface, or reject unsupported filter values clearly
+- keep action-tool docs and registration behavior aligned
+
+Definition of done:
+- the documented tool surface matches runtime behavior
+- unsupported paths fail clearly instead of implying functionality that does not exist
+
+### 5. Preserve the Tier 1 safety baseline
+
+Goal:
+- keep the new local-only, read-only, and split-network defaults from regressing over time
+
+Tasks:
+- keep `mcp-server` local-index-first and independent from Bridge availability
+- keep mail-changing action tools out of the default registration path
+- verify only required services can reach Bridge IMAP/SMTP
+- add tests and docs that make accidental regression obvious
+
+Definition of done:
+- the default deployment remains local-first and read-only
+- direct Bridge access remains limited to `mbsync`
 
 ## Near-Term Backlog
 
@@ -277,27 +263,25 @@ Definition of done:
 
 ### Bridge strategy improvements
 - continue treating Bridge as the Proton-facing ingress/egress boundary, not the primary retrieval backend for search and Q&A
-- keep reads centered on Maildir and SQLite where possible, and make live Bridge retrieval a narrow fallback path instead of the default data plane
-- fix the current `mcp-server` Bridge secret path so any remaining live Bridge client uses a real secret-backed credential flow instead of `BRIDGE_PASS` from the environment
-- align any `mcp-server` Bridge TLS handling with the stricter cert-pinned trust model already used by `mbsync`
+- keep reads centered on Maildir and SQLite where possible, and resist reintroducing live Bridge retrieval into the default data plane
+- if a future opt-in Bridge-adjacent write backend is added, give it its own secret-handling path instead of reviving `BRIDGE_PASS` environment wiring in `mcp-server`
+- align any future Bridge-adjacent write transport with the stricter cert-pinned trust model already used by `mbsync`
 - make TLS cert extraction and trust handling fail closed after first-run instead of silently degrading if cert pinning cannot be refreshed
 - improve Bridge readiness checks so they reflect useful IMAP availability, not just an open TCP port
-- let `mcp-server` stay up in a degraded local-search mode when Bridge is unavailable, with only live retrieval/action paths disabled
+- preserve degraded local-search mode when Bridge or mbsync are unavailable, with only future opt-in live paths disabled
 - add a safer single-session first-run helper that keeps Proton login interactive but automates same-session `info` capture into `.env` and `.secrets/bridge_pass.txt`
-- add a lightweight Bridge upgrade smoke-test path so version bumps verify bind, auth, cert, and IMAP readiness behavior before routine use
-- add stronger patch-drift detection around the upstream Bridge source modifications so version bumps fail clearly when the bind or SAN patches no longer apply as expected
+- extend the Bridge smoke-test path beyond build/runtime validation to cover live auth, cert, and IMAP readiness once guarded live Bridge CI exists
 - document and test backup, restore, and rollback handling for the `bridge-data` volume so Bridge upgrades and recovery are safer
 - add better operator tooling such as a `make bridge-status`-style diagnostic path for auth state, Gluon sync state, recent logs, and IMAP readiness
 - evaluate additional Bridge container hardening such as `no-new-privileges`, capability dropping, and a read-only root filesystem if Bridge will tolerate it
 - evaluate `tmpfs` mounts for ephemeral writable paths and keep the writable surface limited to `/data` plus only truly required runtime scratch space
 - pin production images by digest where practical and keep Bridge runtime packages to the smallest set the service actually needs
 - audit Bridge and `mbsync` runtime packages regularly and remove unused tools or libraries once verified unnecessary
-- switch long-lived service accounts to non-login shells where possible and ensure operational flows like first-run and `docker exec <cmd>` do not depend on a login shell
 - explicitly lock down sensitive Bridge state directories under `/data`, including config, pass-store, and GnuPG paths
 - preserve and strengthen default seccomp/AppArmor confinement; only loosen profiles when Bridge proves it requires it
 - add resource controls such as memory limits, `pids_limit`, and log rotation so Bridge failure modes are more contained
 - document host-level hardening expectations for Docker itself, including full-disk encryption for Docker data, encrypted backups, and stronger daemon isolation such as rootless Docker, `userns-remap`, or Docker Desktop Enhanced Container Isolation where available
-- tighten Bridge-facing network boundaries further if live Bridge access remains in `mcp-server`
+- tighten Bridge-facing network boundaries further if any future Bridge-adjacent service is added beyond `mbsync`
 
 ## Blockers and Risks
 

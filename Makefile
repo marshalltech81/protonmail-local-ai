@@ -1,4 +1,4 @@
-.PHONY: build up down logs first-run update pull-models status clean sync sync-indexer sync-mcp test help
+.PHONY: build up down logs first-run update pull-models status clean sync sync-indexer sync-mcp test bridge-patch-check bridge-smoke bridge-upgrade-check help
 
 # =============================================================================
 # protonmail-local-ai — Makefile
@@ -13,6 +13,9 @@ help:
 	@echo "  down         Stop the full stack"
 	@echo "  logs         Tail logs from all containers"
 	@echo "  first-run    One-time interactive Bridge login"
+	@echo "  bridge-patch-check  Verify Bridge source patch points still match upstream"
+	@echo "  bridge-smoke        Build and smoke test the Bridge runtime image"
+	@echo "  bridge-upgrade-check  Run Bridge patch-drift and smoke checks"
 	@echo "  update       Rebuild and restart Bridge with new version"
 	@echo "  pull-models  Pull Ollama embedding and LLM models"
 	@echo "  status       Show container and index status"
@@ -73,6 +76,14 @@ update:
 	docker compose build protonmail-bridge
 	docker compose up -d protonmail-bridge
 	@echo "Bridge updated and restarted."
+
+bridge-patch-check:
+	./scripts/bridge-patch-drift.sh
+
+bridge-smoke:
+	./scripts/bridge-smoke.sh
+
+bridge-upgrade-check: bridge-patch-check bridge-smoke
 
 # Sync local Python environments using per-service uv projects
 sync: sync-indexer sync-mcp

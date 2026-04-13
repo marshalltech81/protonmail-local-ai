@@ -23,6 +23,7 @@ Thanks for contributing to `protonmail-local-ai`.
 - `cd mcp-server && uv sync --locked`
 - `docker compose config --quiet`
 - `docker compose build protonmail-bridge mbsync indexer mcp-server`
+- `make bridge-upgrade-check` for changes that touch `bridge/`, `BRIDGE_VERSION`, or Bridge build/patch logic
 
 If a change affects only one area, run the smallest relevant subset and explain what you ran in the pull request.
 

@@ -21,29 +21,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
+COPY --chmod=755 patch-source.sh /usr/local/bin/patch-source.sh
+
 WORKDIR /build
 
 RUN git clone --depth 1 --branch ${BRIDGE_VERSION} \
     https://github.com/ProtonMail/proton-bridge.git .
 
-# Critical fix: patch Bridge to listen on 0.0.0.0 instead of 127.0.0.1
-# Without this mbsync cannot reach Bridge from another container
-RUN sed -i 's/Host = "127.0.0.1"/Host = "0.0.0.0"/' \
-    internal/constants/constants.go
-
-# Verify the patch applied
-RUN grep 'Host = ' internal/constants/constants.go
-
-# Patch Bridge TLS cert generation to include the Docker container hostname as a
-# DNS SAN. Without this mbsync rejects the cert due to hostname mismatch —
-# Bridge issues the cert for 127.0.0.1 but mbsync connects via protonmail-bridge.
-# CertificateFile in mbsyncrc handles the self-signed trust; this fixes the SAN.
-RUN sed -i \
-    's|IPAddresses:           \[\]net\.IP{net\.ParseIP("127\.0\.0\.1")},|IPAddresses: []net.IP{net.ParseIP("127.0.0.1")},\n\t\tDNSNames:    []string{"protonmail-bridge", "localhost"},|' \
-    internal/certs/tls.go
-
-# Verify the patch applied
-RUN grep -A1 'IPAddresses' internal/certs/tls.go
+# Patch Bridge to bind on the container network and to include the Docker
+# hostname in the generated TLS certificate. The helper fails closed if the
+# upstream source moves and the expected patch points drift.
+RUN /usr/local/bin/patch-source.sh /build
 
 # Build without Qt/GUI
 RUN make build-nogui
@@ -71,7 +59,7 @@ RUN groupadd --gid 1000 bridge && \
             --gid 1000 \
             --home-dir /home/bridge \
             --create-home \
-            --shell /bin/bash \
+            --shell /usr/sbin/nologin \
             --no-log-init \
             bridge
 

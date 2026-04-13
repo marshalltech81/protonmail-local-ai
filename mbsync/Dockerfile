@@ -20,7 +20,7 @@ RUN groupadd --gid 1001 mbsync && \
             --gid 1001 \
             --home-dir /home/mbsync \
             --create-home \
-            --shell /bin/bash \
+            --shell /usr/sbin/nologin \
             --no-log-init \
             mbsync
 
