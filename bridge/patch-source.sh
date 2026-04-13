@@ -69,4 +69,10 @@ require_count "$CONSTANTS_FILE" "$PATCHED_HOST" "1" "patched host binding"
 require_count "$CERTS_FILE" "$UPSTREAM_CERT" "0" "upstream TLS SAN source line after patch"
 require_count "$CERTS_FILE" "$PATCHED_CERT" "1" "patched TLS SAN line"
 
+# Compile the two patched packages to confirm the patches produce valid Go.
+# String-count checks above verify content; this verifies the result compiles.
+cd "$REPO_DIR"
+go build ./internal/constants/... ./internal/certs/... >/dev/null 2>&1 \
+    || { printf 'ERROR: post-patch compilation failed in %s.\n' "$REPO_DIR" >&2; exit 1; }
+
 printf 'Bridge source patches applied cleanly in %s.\n' "$REPO_DIR"

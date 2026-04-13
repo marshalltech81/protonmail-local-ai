@@ -72,7 +72,7 @@ pull-models:
 # Update Bridge to a new version
 # 1. Bump BRIDGE_VERSION in .env
 # 2. Run: make update
-update:
+update: bridge-upgrade-check
 	docker compose build protonmail-bridge
 	docker compose up -d protonmail-bridge
 	@echo "Bridge updated and restarted."
