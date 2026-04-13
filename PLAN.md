@@ -155,24 +155,6 @@ Definition of done:
 - credential values do not appear in error logs or tracebacks
 - the mbsync sync loop exits and triggers a container restart after repeated consecutive failures
 
-### 7. Harden Bridge entrypoint and build reliability
-
-Goal:
-- eliminate silent failure modes in the Bridge container that make first-run and recovery hard to diagnose
-
-Tasks:
-- add explicit error handling to GPG key generation and `pass init` in `bridge/entrypoint.sh`; fail immediately with a clear message if either step fails or produces an empty fingerprint
-- guard against an empty `$FPR` before calling `pass init`; a silent empty-string argument leaves the pass store uninitialized without any visible error
-- replace the vault file-existence check with a real decryptability test; if `vault.enc` exists but cannot be opened, print a clear message and exit rather than starting Bridge into a broken state
-- harden XDG path exports: `unset` all relevant variables before exporting the container-internal paths so a caller-injected value cannot silently redirect Bridge state to an unexpected location
-- make `bridge-upgrade-check` a prerequisite of `make update` in the Makefile so the patch drift check cannot be skipped before a Bridge rebuild
-
-Definition of done:
-- first-run failures in GPG or pass initialization produce an explicit error and non-zero exit, not a silent container start followed by a cryptic Bridge auth error
-- a corrupted or missing vault is detected at entrypoint startup, not after Bridge fails to launch
-- XDG paths are always container-controlled, regardless of the caller environment
-- `make update` refuses to build without a passing drift check
-
 ## Near-Term Backlog
 
 ### mbsync improvements
@@ -218,13 +200,9 @@ Definition of done:
 ### Bridge build and operations
 - consolidate `BRIDGE_VERSION` to a single source of truth (`.env.example`) and remove the duplicate hardcoded defaults from `docker-compose.yml` and `bridge/Dockerfile` so version bumps only require one change
 - parameterize the Go toolchain version as an `ARG` in `bridge/Dockerfile` alongside `BRIDGE_VERSION` for consistency
-- add a post-patch compilation check to `bridge/patch-source.sh` (`go build ./... >/dev/null`) so a malformed patch fails the build rather than producing a silently broken binary
-- replace the `bash -c` healthcheck in `docker-compose.yml` with a probe that does not depend on an implicit `bash` installation, or explicitly install `bash` in the Bridge runtime image
-- increase Bridge `start_period` in `docker-compose.yml` from `15s` to `45s` to give GPG initialization enough time before Docker marks the container unhealthy
 - add a `check-secrets` pre-flight target to the Makefile that validates `.secrets/bridge_pass.txt` has `600` permissions before `make up` proceeds
-- extend the Bridge smoke test in `scripts/bridge-smoke.sh` to verify the healthcheck probe works and that Bridge binds to port 1143 within the expected window
+- extend the Bridge smoke test in `scripts/bridge-smoke.sh` to add `bash --version` to the binary checks so the healthcheck dependency is verified
 - clarify `docs/setup.md` cert regeneration instructions to make explicit that removing `vault.enc` triggers a full re-authentication, not just a cert refresh; consider adding a `make refresh-cert` target with a clear warning
-- pin the `debian:bookworm-slim` runtime image in `bridge/Dockerfile` to a digest in addition to the version tag
 
 ### Hardening and observability
 - add resource limits (`memory`, `cpus`, `pids_limit`) to all Compose services that currently lack them (especially `ollama` and `indexer`)
@@ -314,6 +292,11 @@ Need final decision on the long-term home for live Bridge smoke tests:
 
 ## Recently Completed
 
+- Bridge entrypoint hardened: XDG paths unset before export, explicit error guards on GPG key generation and `pass init`, vault existence cross-checked against GPG key presence so a broken vault is caught at startup
+- Bridge `patch-source.sh`: post-patch compilation check added so a malformed patch fails the build rather than producing a broken binary
+- Bridge `Dockerfile`: `bash` added as an explicit runtime dependency; `debian:bookworm-slim` runtime base pinned to digest
+- Bridge `docker-compose.yml`: `start_period` increased from `15s` to `45s` to allow GPG initialization to complete before the healthcheck fires
+- Bridge `Makefile`: `make update` now requires `bridge-upgrade-check` to pass before rebuilding
 - two-network Docker topology implemented: `bridge-net` isolates Bridge/mbsync from `app-net` used by indexer and mcp-server
 - automated Bridge TLS cert extraction on container start
 - fail-closed `mbsync` cert extraction so sync refuses to proceed without Bridge cert pinning
