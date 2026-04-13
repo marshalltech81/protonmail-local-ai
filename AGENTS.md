@@ -88,6 +88,13 @@ Do not make any of the following changes unless the repository owner explicitly 
 - Do not add `All Mail` or `Labels/*` to mbsync Patterns.
 - Do not weaken or bypass TLS verification casually.
 
+### TLS and connection security constraints
+
+- Never set `ssl.CERT_NONE` or `check_hostname = False` in any service.
+- Always fail closed when TLS cert extraction or validation fails.
+- Do not add or extend any TLS bypass without explicit owner approval.
+- Treat a disabled TLS verification path as a security regression, not a convenience.
+
 ### Data model constraints
 
 - Do not change thread-level indexing to message-level indexing without reviewing architecture impacts.
@@ -268,6 +275,9 @@ set -Eeuo pipefail
 - declare function-local variables with `local`
 - use `|| true` only when failure is intentionally acceptable
 - do not silently suppress errors with bare fallback patterns
+- validate required environment variables early in entrypoints; fail with a clear message rather than proceeding with an empty or missing value
+- do not redirect subprocess stderr to `/dev/null` unconditionally; capture and log failures so errors are not silently lost
+- add a max-retry limit to any indefinite retry loop; do not allow a service to loop silently on persistent failure — exit so the container restarts and the failure is visible
 
 ## Python Conventions
 
@@ -279,6 +289,10 @@ set -Eeuo pipefail
 - local Python dependency management uses `uv`
 - for `indexer/` and `mcp-server/`, treat `pyproject.toml` and `uv.lock` as the source of truth
 - pin all new Python dependencies to exact versions in `pyproject.toml` and regenerate `uv.lock`
+- always wrap multi-step database writes in an explicit transaction; roll back on any error rather than committing partial state
+- never log API keys, passwords, or credential values in error messages or tracebacks; redact or omit before propagating to logs
+- always set an explicit per-request timeout on outbound async HTTP calls; do not rely solely on client-level defaults for per-call deadlines
+- do not hardcode LLM model names; use an environment variable with a pinned default string so the model can be updated without a code change
 
 ## Service Responsibilities
 
@@ -356,6 +370,7 @@ Notes:
 - threader changes should verify threading, subject fallback, references, and participant handling
 - database changes should verify schema creation, migration, and upsert/query behavior
 - MCP search changes should verify hybrid/RRF behavior where applicable
+- before opening PRs that touch TLS, auth, logging, subprocess execution, or credential handling, run `bandit -r src/` and resolve any findings rated medium or higher
 
 Run indexer tests with:
 
@@ -390,6 +405,8 @@ Stop and ask for direction before proceeding if a proposed change would:
 - allow writeback sync to Proton
 - remove TLS verification or other security controls
 - replace the current Bridge build/runtime assumptions
+- disable or weaken TLS verification in any service (`CERT_NONE`, `check_hostname = False`)
+- suppress or remove credential redaction from any log or error path
 
 ## Out of Scope for Root AGENTS.md
 

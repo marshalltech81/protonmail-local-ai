@@ -50,64 +50,6 @@ Known limitations:
 - `list_threads(filter_type=...)` does not yet match the documented interface
 - the new hardened first-run/sync path still needs real end-to-end validation against a live Bridge session
 
-## Daily-Driver Gaps
-
-The core sync and indexing path is close, but the following gaps still block
-confident daily-driver use.
-
-### 1. Validate the hardened first-run and sync path
-
-Why it matters:
-- the Tier 1 safety baseline is now implemented in code and Compose, but it still needs live operational proof
-- `mbsync` now depends on `/tmp` runtime state under a read-only root filesystem
-- first-run, cert extraction, and steady-state sync are the remaining practical questions before calling the baseline routine-use ready
-
-Tasks:
-- run the new first-run and sync flow against a real Bridge session
-- verify `mbsync` cert extraction and sync looping still behave correctly with the new `/tmp` runtime paths
-- verify the default deployment remains useful when Bridge is unavailable and only the local index is present
-- capture any operator-facing recovery or troubleshooting notes that fall out of the live validation
-
-### 2. Improve intelligence fidelity
-
-Why it matters:
-- mailbox Q&A is one of the main reasons to use this project daily
-- current `ask_mailbox`, `summarize_thread`, and `extract_from_emails` flows rely too much on snippets, which can miss key context from earlier messages in a thread
-- some current prompts describe snippet-based context as if it were full-thread content
-
-Tasks:
-- use full-thread stored context, or fetch richer thread content, when building LLM prompts
-- stop presenting snippet-derived context as full thread content in prompts or tool descriptions
-- verify answers remain grounded in retrieved email content
-- add tests covering missed-context regressions
-
-### 3. Expand MCP test coverage
-
-Why it matters:
-- indexer coverage is in decent shape, but MCP behavior is still lightly tested
-- the new local-only/read-only baseline should be protected against regression
-- search, retrieval, ranking, and action regressions are too risky to rely on manual verification alone
-
-Tasks:
-- add tests for SQLite keyword, semantic, and hybrid/RRF search behavior
-- add tests for MCP tool registration and user-facing error handling
-- add tests for the local-only/read-only default behavior using mocks instead of a live Bridge instance
-- add tests for retrieval and action flows using mocks instead of a live Bridge instance
-
-### 4. Tighten incomplete or misleading tool behavior
-
-Why it matters:
-- daily use requires the tool surface to match what it claims to support
-- incomplete tools and partially implemented filters create trust issues quickly
-- `list_threads(filter_type=...)` still ignores the filter parameter
-- `reply_to_thread` and `create_draft` are still stubs
-
-Tasks:
-- implement or hide `reply_to_thread`
-- implement or hide `create_draft`
-- make `list_threads` filter behavior match the documented interface, or reject unsupported filter values clearly
-- add attachment download support only after the read-only policy is explicit
-
 ## Active Priorities
 
 Work these in order.
@@ -155,10 +97,13 @@ Tasks:
 - add tests for read-only action-tool gating, non-registration, and user-facing failure paths
 - add tests for local-only retrieval and system-status behavior
 - add integration coverage for indexer watchdog behavior using mocks
+- add test for circular `In-Reply-To` references (document expected behavior even if not explicitly handled)
+- add `pytest-cov` to CI and include coverage output in the test report
 
 Definition of done:
 - core indexing and retrieval paths have automated coverage
 - risky refactors can be validated without manual mailbox testing
+- coverage output is visible in CI so regressions are caught early
 
 ### 4. Tighten incomplete or misleading tool behavior
 
@@ -190,6 +135,44 @@ Definition of done:
 - the default deployment remains local-first and read-only
 - direct Bridge access remains limited to `mbsync`
 
+### 6. Address review-identified safety and correctness gaps
+
+Goal:
+- fix concrete correctness and security issues identified during codebase review
+
+Tasks:
+- wrap multi-step database writes (threads, message_thread_map, indexed_files, FTS5, vec0) in explicit `BEGIN IMMEDIATE / COMMIT / ROLLBACK` transactions in `indexer/src/database.py`
+- add deduplication guard before accumulating `body_text` so re-indexed messages are not appended twice
+- restore TLS validation in `mcp-server/src/lib/imap.py`: set `verify_mode = ssl.CERT_REQUIRED` and `check_hostname = True`
+- add redaction for `ANTHROPIC_API_KEY` and similar credential values in error log paths when `LLM_MODE=cloud`
+- add a max-retry exit to the mbsync sync loop so the container does not silently loop on persistent failure
+- parameterize Claude model name via `CLAUDE_MODEL` env var with a pinned default instead of hardcoding in `intelligence.py`
+- validate ISO 8601 format on date filter inputs in `mcp-server/src/lib/sqlite.py` before string comparison
+
+Definition of done:
+- database writes are atomic; a partial failure rolls back cleanly with no inconsistent state left behind
+- TLS is validated on all live service connections
+- credential values do not appear in error logs or tracebacks
+- the mbsync sync loop exits and triggers a container restart after repeated consecutive failures
+
+### 7. Harden Bridge entrypoint and build reliability
+
+Goal:
+- eliminate silent failure modes in the Bridge container that make first-run and recovery hard to diagnose
+
+Tasks:
+- add explicit error handling to GPG key generation and `pass init` in `bridge/entrypoint.sh`; fail immediately with a clear message if either step fails or produces an empty fingerprint
+- guard against an empty `$FPR` before calling `pass init`; a silent empty-string argument leaves the pass store uninitialized without any visible error
+- replace the vault file-existence check with a real decryptability test; if `vault.enc` exists but cannot be opened, print a clear message and exit rather than starting Bridge into a broken state
+- harden XDG path exports: `unset` all relevant variables before exporting the container-internal paths so a caller-injected value cannot silently redirect Bridge state to an unexpected location
+- make `bridge-upgrade-check` a prerequisite of `make update` in the Makefile so the patch drift check cannot be skipped before a Bridge rebuild
+
+Definition of done:
+- first-run failures in GPG or pass initialization produce an explicit error and non-zero exit, not a silent container start followed by a cryptic Bridge auth error
+- a corrupted or missing vault is detected at entrypoint startup, not after Bridge fails to launch
+- XDG paths are always container-controlled, regardless of the caller environment
+- `make update` refuses to build without a passing drift check
+
 ## Near-Term Backlog
 
 ### mbsync improvements
@@ -198,11 +181,8 @@ Definition of done:
 - keep sync strictly pull-only
 
 ### MCP feature completion
-- implement `reply_to_thread`
-- implement `create_draft`
-- add attachment download support
+- add attachment download support once the read-only action path is defined
 - verify action tools respect read-only guardrails
-- either implement `list_threads` filters or narrow the documented interface
 
 ### Attachment indexing
 - index attachment filenames and MIME types for search/filtering
@@ -234,6 +214,25 @@ Definition of done:
 - build a real migration runner around `SCHEMA_VERSION`
 - document and enforce embedding dimension assumptions
 - make model-switch behavior explicit and safe
+
+### Bridge build and operations
+- consolidate `BRIDGE_VERSION` to a single source of truth (`.env.example`) and remove the duplicate hardcoded defaults from `docker-compose.yml` and `bridge/Dockerfile` so version bumps only require one change
+- parameterize the Go toolchain version as an `ARG` in `bridge/Dockerfile` alongside `BRIDGE_VERSION` for consistency
+- add a post-patch compilation check to `bridge/patch-source.sh` (`go build ./... >/dev/null`) so a malformed patch fails the build rather than producing a silently broken binary
+- replace the `bash -c` healthcheck in `docker-compose.yml` with a probe that does not depend on an implicit `bash` installation, or explicitly install `bash` in the Bridge runtime image
+- increase Bridge `start_period` in `docker-compose.yml` from `15s` to `45s` to give GPG initialization enough time before Docker marks the container unhealthy
+- add a `check-secrets` pre-flight target to the Makefile that validates `.secrets/bridge_pass.txt` has `600` permissions before `make up` proceeds
+- extend the Bridge smoke test in `scripts/bridge-smoke.sh` to verify the healthcheck probe works and that Bridge binds to port 1143 within the expected window
+- clarify `docs/setup.md` cert regeneration instructions to make explicit that removing `vault.enc` triggers a full re-authentication, not just a cert refresh; consider adding a `make refresh-cert` target with a clear warning
+- pin the `debian:bookworm-slim` runtime image in `bridge/Dockerfile` to a digest in addition to the version tag
+
+### Hardening and observability
+- add resource limits (`memory`, `cpus`, `pids_limit`) to all Compose services that currently lack them (especially `ollama` and `indexer`)
+- add `HEALTHCHECK` to `indexer/Dockerfile` so stalled indexing is detectable
+- pin `python` and `uv` base images to digest in addition to version tag across `indexer/` and `mcp-server/`
+- add `bandit -r src/` to pre-commit for Python security scanning
+- add `validate-env.sh` pre-flight check that verifies required `.env` fields are present before `make up`
+- add `docs/troubleshooting.md` covering common failure patterns: Ollama not ready, cert extraction failure, sync stalled, schema migration
 
 ## Later Backlog
 
@@ -268,15 +267,13 @@ Definition of done:
 - align any future Bridge-adjacent write transport with the stricter cert-pinned trust model already used by `mbsync`
 - improve Bridge readiness checks so they reflect useful IMAP availability, not just an open TCP port
 - preserve degraded local-search mode when Bridge or mbsync are unavailable, with only future opt-in live paths disabled
-- add a safer single-session first-run helper that keeps Proton login interactive but automates same-session `info` capture into `.env` and `.secrets/bridge_pass.txt`
 - extend the Bridge smoke-test path beyond build/runtime validation to cover live auth, cert, and IMAP readiness once guarded live Bridge CI exists
 - document and test backup, restore, and rollback handling for the `bridge-data` volume so Bridge upgrades and recovery are safer
 - add better operator tooling such as a `make bridge-status`-style diagnostic path for auth state, Gluon sync state, recent logs, and IMAP readiness
 - keep validating the new read-only Bridge rootfs baseline as Bridge versions change
-- pin production images by digest where practical and keep Bridge runtime packages to the smallest set the service actually needs
 - audit Bridge and `mbsync` runtime packages regularly and remove unused tools or libraries once verified unnecessary
-- preserve and strengthen default seccomp/AppArmor confinement; only loosen profiles when Bridge proves it requires it
-- add resource controls such as memory limits, `pids_limit`, and log rotation so Bridge failure modes are more contained
+- evaluate a custom seccomp profile for the Bridge container that restricts syscalls to only what Bridge requires; document the profile and gate it behind a tested list of allowed calls
+- document the empty GPG passphrase design constraint in `SECURITY.md` so operators understand that container shell access is equivalent to credential access; note that seccomp, AppArmor, and volume isolation are the primary mitigations
 - document host-level hardening expectations for Docker itself, including full-disk encryption for Docker data, encrypted backups, and stronger daemon isolation such as rootless Docker, `userns-remap`, or Docker Desktop Enhanced Container Isolation where available
 - tighten Bridge-facing network boundaries further if any future Bridge-adjacent service is added beyond `mbsync`
 
@@ -301,27 +298,23 @@ Otherwise keep live Bridge testing manual or move it to a trusted self-hosted ru
 
 ## Open Decisions
 
-### 1. Network split design
-Need final decision on exact Docker network topology:
-- one shared network with tighter service rules
-- or two explicit networks separating Bridge/mbsync from the rest
-
-### 2. Read-only policy surface
+### 1. Read-only policy surface
 Need final decision on whether read-only mode blocks:
 - only action tools
 - action tools plus any SMTP send path
 - all mutating paths including draft creation and move/flag operations
 
-### 3. IMAP strategy
+### 2. IMAP strategy
 Need decision on whether polling remains acceptable or whether IMAP IDLE is worth the added complexity.
 
-### 4. Live Bridge integration lane
+### 3. Live Bridge integration lane
 Need final decision on the long-term home for live Bridge smoke tests:
 - GitHub-hosted manual/nightly workflow using a dedicated no-2FA Proton test account
 - or a trusted self-hosted runner with persistent authenticated Bridge state
 
 ## Recently Completed
 
+- two-network Docker topology implemented: `bridge-net` isolates Bridge/mbsync from `app-net` used by indexer and mcp-server
 - automated Bridge TLS cert extraction on container start
 - fail-closed `mbsync` cert extraction so sync refuses to proceed without Bridge cert pinning
 - Bridge password moved to Docker Compose secret
