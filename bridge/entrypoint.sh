@@ -17,7 +17,10 @@ VAULT="$XDG_CONFIG_HOME/protonmail/bridge-v3/vault.enc"
 
 # =============================================================================
 # Bootstrap GPG and pass on first run
-# Only runs once and persists in the bridge-data volume
+# Only runs once and persists in the bridge-data volume.
+# The empty GPG passphrase is intentional: Bridge must restart unattended, so
+# the design relies on Docker volume isolation, restrictive permissions, and
+# host-level disk encryption rather than an interactive key-unlock step.
 # =============================================================================
 if ! gpg --list-keys "ProtonBridge" >/dev/null 2>&1; then
     echo ">>> First run: initializing GPG key and pass store..."

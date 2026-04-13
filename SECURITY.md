@@ -37,6 +37,10 @@ Out of scope:
   which is opt-in and sends only retrieved email excerpts
 - Bridge credentials are stored as a Docker Compose secret
   (`.secrets/bridge_pass.txt`, mode 600), never in environment variables
+- The Bridge GPG key intentionally has no passphrase so the container can
+  restart unattended; the protection model is volume isolation, strict
+  filesystem permissions, and host-level disk encryption/backups rather than
+  an interactive unlock prompt inside the container
 - Only one port is exposed to the host: `127.0.0.1:3000` (MCP server,
   localhost only — not accessible from the network)
 - All containers run on an isolated Docker bridge network
