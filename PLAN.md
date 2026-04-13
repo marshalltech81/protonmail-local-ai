@@ -143,7 +143,7 @@ Goal:
 Tasks:
 - wrap multi-step database writes (threads, message_thread_map, indexed_files, FTS5, vec0) in explicit `BEGIN IMMEDIATE / COMMIT / ROLLBACK` transactions in `indexer/src/database.py`
 - add deduplication guard before accumulating `body_text` so re-indexed messages are not appended twice
-- restore TLS validation in `mcp-server/src/lib/imap.py`: set `verify_mode = ssl.CERT_REQUIRED` and `check_hostname = True`
+- restore TLS validation in `mcp-server/src/lib/imap.py`: set `verify_mode = ssl.CERT_REQUIRED` and `check_hostname = True` in `send_email`; also add STARTTLS negotiation to `IMAPClient._connect` — the method uses `aioimaplib.IMAP4` (plaintext) without initiating STARTTLS, meaning `client.login()` credentials would be sent unencrypted if this code path were ever active; Bridge listens on port 1143 with STARTTLS required, so the fix is to call `await client.starttls()` with a proper SSL context before `login`, or switch to `aioimaplib.IMAP4_SSL` on a dedicated implicit-TLS port
 - add redaction for `ANTHROPIC_API_KEY` and similar credential values in error log paths when `LLM_MODE=cloud`
 - add a max-retry exit to the mbsync sync loop so the container does not silently loop on persistent failure
 - parameterize Claude model name via `CLAUDE_MODEL` env var with a pinned default instead of hardcoding in `intelligence.py`
