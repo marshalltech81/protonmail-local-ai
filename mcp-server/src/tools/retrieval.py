@@ -1,6 +1,6 @@
 """
 Retrieval tools — Group 2.
-Fetch full thread or message content directly from the index or Bridge IMAP.
+Fetch thread and message context from the local SQLite index.
 """
 
 import logging
@@ -10,21 +10,26 @@ from mcp.types import TextContent
 log = logging.getLogger("mcp.tools.retrieval")
 
 
-def register_retrieval_tools(server, db, imap):
+def register_retrieval_tools(server, db):
+    local_only_note = (
+        "Live Bridge retrieval is disabled in the default local-first deployment. "
+        "This response is based on the local SQLite index only."
+    )
+
     @server.tool()
     async def get_thread(
         thread_id: str,
         include_attachments_metadata: bool = True,
     ) -> list[TextContent]:
         """
-        Get the full contents of an email thread by thread ID.
+        Get indexed context for an email thread by thread ID.
 
         Args:
             thread_id: The thread ID returned by search_emails
-            include_attachments_metadata: Include attachment names and sizes
+            include_attachments_metadata: Include the local attachment availability note
 
         Returns:
-            Full thread with all messages, participants, and timeline.
+            Indexed thread context, participants, and timeline from the local index.
         """
         try:
             thread = db.get_thread(thread_id)
@@ -38,30 +43,32 @@ def register_retrieval_tools(server, db, imap):
                 f"Date range: {thread.date_first.strftime('%Y-%m-%d')} "
                 f"→ {thread.date_last.strftime('%Y-%m-%d')}",
                 f"Messages: {len(thread.message_ids)}",
+                f"Mode: {local_only_note}",
                 "",
             ]
 
-            # Fetch each message from IMAP for full body content
+            if thread.body_text:
+                lines.append("Indexed thread text:")
+                lines.append("")
+                lines.append(thread.body_text)
+                lines.append("")
+            elif thread.snippet:
+                lines.append("Indexed snippet:")
+                lines.append("")
+                lines.append(thread.snippet)
+                lines.append("")
+
+            lines.append("Message IDs:")
             for i, message_id in enumerate(thread.message_ids, 1):
-                msg = await imap.fetch_message(message_id, thread.folder)
-                if msg:
-                    lines.append(f"--- Message {i} ---")
-                    lines.append(f"From: {msg.from_addr}")
-                    lines.append(f"Date: {msg.date.strftime('%Y-%m-%d %H:%M')}")
-                    lines.append(f"To: {', '.join(msg.to_addrs)}")
-                    if msg.cc_addrs:
-                        lines.append(f"Cc: {', '.join(msg.cc_addrs)}")
-                    lines.append("")
-                    lines.append(msg.body_text[:3000])
-                    if include_attachments_metadata and msg.attachments:
-                        lines.append("")
-                        lines.append(f"Attachments ({len(msg.attachments)}):")
-                        for att in msg.attachments:
-                            size_kb = att["size"] // 1024
-                            lines.append(
-                                f"  - {att['filename']} ({att['content_type']}, {size_kb}KB)"
-                            )
-                    lines.append("")
+                lines.append(f"  {i}. {message_id}")
+
+            if include_attachments_metadata and thread.has_attachments:
+                lines.append("")
+                lines.append(
+                    "Attachments are present in this thread, but local-only retrieval "
+                    "currently exposes attachment metadata through search/index flags "
+                    "rather than live per-message attachment listings."
+                )
 
             return [TextContent(type="text", text="\n".join(lines))]
 
@@ -76,41 +83,49 @@ def register_retrieval_tools(server, db, imap):
         body_format: str = "text",
     ) -> list[TextContent]:
         """
-        Get the full content of a single email message.
+        Get local index context for a single email message.
 
         Args:
             message_id: The Message-ID header value
-            folder: The folder the message lives in (default: INBOX)
-            body_format: "text" or "html" (default: text)
+            folder: Retained for interface compatibility; ignored in local-only mode
+            body_format: Retained for interface compatibility; ignored in local-only mode
 
         Returns:
-            Full message content including headers and body.
+            Local index context for the message and its parent thread.
         """
         try:
-            msg = await imap.fetch_message(message_id, folder)
-            if not msg:
+            thread_id = db.find_thread_by_message_id(message_id)
+            if not thread_id:
                 return [TextContent(type="text", text=f"Message not found: {message_id}")]
 
-            body = msg.body_html if body_format == "html" else msg.body_text
+            thread = db.get_thread(thread_id)
+            if not thread:
+                return [TextContent(type="text", text=f"Message not found: {message_id}")]
 
             lines = [
-                f"Subject: {msg.subject}",
-                f"From: {msg.from_addr}",
-                f"To: {', '.join(msg.to_addrs)}",
-            ]
-            if msg.cc_addrs:
-                lines.append(f"Cc: {', '.join(msg.cc_addrs)}")
-            lines += [
-                f"Date: {msg.date.strftime('%Y-%m-%d %H:%M')}",
-                f"Folder: {msg.folder}",
+                f"Message-ID: {message_id}",
+                f"Thread: {thread.subject}",
+                f"Folder: {thread.folder}",
+                f"Thread date range: {thread.date_first.strftime('%Y-%m-%d')} "
+                f"→ {thread.date_last.strftime('%Y-%m-%d')}",
+                f"Participants: {', '.join(thread.participants)}",
+                f"Mode: {local_only_note}",
                 "",
-                body,
+                "The local index does not currently store per-message full bodies. "
+                "Use get_thread for indexed thread context.",
             ]
-            if msg.attachments:
+            if thread.body_text:
+                lines += [
+                    "",
+                    "Indexed thread text:",
+                    "",
+                    thread.body_text,
+                ]
+            elif thread.snippet:
                 lines.append("")
-                lines.append(f"Attachments ({len(msg.attachments)}):")
-                for att in msg.attachments:
-                    lines.append(f"  - {att['filename']} ({att['content_type']})")
+                lines.append("Indexed snippet:")
+                lines.append("")
+                lines.append(thread.snippet)
 
             return [TextContent(type="text", text="\n".join(lines))]
 

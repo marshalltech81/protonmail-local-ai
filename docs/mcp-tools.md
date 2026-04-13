@@ -28,21 +28,21 @@ Search your mailbox using semantic, keyword, or hybrid search.
 ## Group 2 — Retrieval
 
 ### `get_thread`
-Fetch the full content of a thread by ID.
+Fetch indexed thread context by ID from the local SQLite index.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `thread_id` | string | required | Thread ID from search results |
-| `include_attachments_metadata` | bool | `true` | Show attachment names/sizes |
+| `include_attachments_metadata` | bool | `true` | Show the local attachment-availability note when the indexed thread has attachments |
 
 ### `get_message`
-Fetch a single message by Message-ID.
+Fetch local index context for a single message by Message-ID.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `message_id` | string | required | Message-ID header value |
-| `folder` | string | `INBOX` | Folder containing the message |
-| `body_format` | string | `text` | `text` or `html` |
+| `folder` | string | `INBOX` | Retained for interface compatibility; ignored in the default local-only retrieval mode |
+| `body_format` | string | `text` | Retained for interface compatibility; ignored in the default local-only retrieval mode |
 
 ### `list_threads`
 Browse threads in a folder.
@@ -103,6 +103,10 @@ Extract structured data from emails matching a query.
 
 ## Group 4 — Actions
 
+Actions are disabled by default because `MCP_READ_ONLY=true` in the standard deployment.
+The tools below describe the intended interface, but they are not registered unless
+the project explicitly enables a safe write path.
+
 ### `send_email`
 Send a new email via ProtonBridge SMTP.
 
@@ -159,4 +163,5 @@ Returns total threads, messages, date range of indexed email.
 **Call this first** before answering questions about email content.
 
 ### `get_sync_status`
-Checks Bridge IMAP connectivity and sync daemon health.
+Reports local index mode and, when enabled in a future live-Bridge deployment,
+Bridge connectivity and sync health.

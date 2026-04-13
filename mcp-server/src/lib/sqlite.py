@@ -27,6 +27,7 @@ class ThreadResult:
     message_ids: list[str]
     snippet: str
     has_attachments: bool
+    body_text: str = ""
     score: float = 0.0
 
 
@@ -198,6 +199,13 @@ class Database:
         ).fetchone()
         return json.loads(row["message_ids"]) if row else []
 
+    def find_thread_by_message_id(self, message_id: str) -> str | None:
+        row = self._conn.execute(
+            "SELECT thread_id FROM message_thread_map WHERE message_id = ?",
+            (message_id,),
+        ).fetchone()
+        return row["thread_id"] if row else None
+
     def list_threads(
         self,
         folder: str = "INBOX",
@@ -251,5 +259,6 @@ class Database:
             message_ids=json.loads(row["message_ids"]),
             snippet=row["snippet"] or "",
             has_attachments=bool(row["has_attachments"]),
+            body_text=row["body_text"] if "body_text" in row.keys() and row["body_text"] else "",
             score=float(row["score"]) if "score" in row.keys() else 0.0,
         )

@@ -22,7 +22,7 @@ User ${BRIDGE_USER}
 PassCmd "cat /run/secrets/bridge_pass"
 SSLType STARTTLS
 SSLVersions TLSv1.2
-CertificateFile /home/mbsync/bridge-cert.pem
+CertificateFile /tmp/mbsync/bridge-cert.pem
 
 # Remote store — maps IMAPAccount to a named store for use in Channel.
 IMAPStore protonmail-remote

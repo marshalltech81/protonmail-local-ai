@@ -5,7 +5,7 @@
 protonmail-local-ai is a fully containerised, privacy-first AI search and
 intelligence layer for ProtonMail. Every component runs locally in Docker.
 The only optional external call is to the Claude API for Q&A, and that is
-opt-in per session.
+opt-in at deployment time via `LLM_MODE=cloud`.
 
 ## Data Flow
 
@@ -50,7 +50,8 @@ mcp-server container
   - Exposes MCP tools via HTTP/SSE on port 3000
   - Hybrid search: BM25 + vector → RRF merge
   - Q&A: retrieves threads → prompts Ollama or Claude API
-  - Actions: connects to Bridge IMAP/SMTP for write ops
+  - Retrieval: serves indexed mailbox data from SQLite
+  - Actions: disabled by default via MCP read-only mode
         │
         │  HTTP/SSE (localhost:3000)
         ▼
@@ -67,7 +68,7 @@ Claude Desktop (host machine)
 | `mbsync` | Bridge IMAP | `maildir-volume` | nothing |
 | `ollama` | model requests | `ollama-models` vol | HTTP 11434 (internal) |
 | `indexer` | `maildir-volume`, Ollama | `sqlite-volume` | nothing |
-| `mcp-server` | `sqlite-volume`, Bridge IMAP/SMTP | nothing | HTTP 3000 (localhost only) |
+| `mcp-server` | `sqlite-volume`, Ollama | nothing | HTTP 3000 (localhost only) |
 
 ## Docker Volumes
 
@@ -80,8 +81,10 @@ Claude Desktop (host machine)
 
 ## Networking
 
-All containers share the `protonmail-net` bridge network and communicate
-using container names as hostnames (e.g. `protonmail-bridge`, `ollama`).
+The stack uses two isolated bridge networks:
+
+- `bridge-net` for ProtonBridge ↔ `mbsync`
+- `app-net` for `indexer` ↔ `ollama` ↔ `mcp-server`
 
 Only one port is exposed to the host: `127.0.0.1:3000` for the MCP server.
 No container is reachable from outside the machine.
@@ -129,7 +132,7 @@ landlord thread, not individual one-liners that happen to mention heating.
 | Keyword search | ✅ (SQLite FTS5) | Never |
 | Q&A (local mode) | ✅ (Ollama LLM) | Never |
 | Q&A (cloud mode) | Retrieval local | Retrieved chunks → Anthropic API |
-| Send/Move/Flag | ✅ (via Bridge) | Never (Bridge handles E2E) |
+| Send/Move/Flag | Disabled by default | Never |
 
 ## LLM Mode Toggle
 

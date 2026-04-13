@@ -1,7 +1,7 @@
 """
 Action tools — Group 4 (write operations).
-Send, reply, move, flag, archive, delete.
-All write operations go through Bridge IMAP/SMTP directly.
+These interfaces remain defined for a future opt-in write backend, but the
+default local-first deployment does not register them.
 """
 
 import logging
@@ -11,7 +11,32 @@ from mcp.types import TextContent
 log = logging.getLogger("mcp.tools.actions")
 
 
-def register_action_tools(server, imap):
+def register_action_tools(server, imap, read_only: bool = True):
+    def _write_blocked_message() -> list[TextContent]:
+        if read_only:
+            return [
+                TextContent(
+                    type="text",
+                    text=(
+                        "Mailbox actions are disabled because MCP read-only mode is enabled. "
+                        "Set MCP_READ_ONLY=false only after explicitly enabling a safe write path."
+                    ),
+                )
+            ]
+
+        if imap is None:
+            return [
+                TextContent(
+                    type="text",
+                    text=(
+                        "Mailbox actions are unavailable because no live Bridge-backed action "
+                        "transport is configured for mcp-server."
+                    ),
+                )
+            ]
+
+        return []
+
     @server.tool()
     async def send_email(
         to: list[str],
@@ -39,6 +64,10 @@ def register_action_tools(server, imap):
             Confirmation of send or error message.
         """
         try:
+            blocked = _write_blocked_message()
+            if blocked:
+                return blocked
+
             in_reply_to = None
             references = None
 
@@ -117,6 +146,10 @@ def register_action_tools(server, imap):
             Confirmation or error.
         """
         try:
+            blocked = _write_blocked_message()
+            if blocked:
+                return blocked
+
             success = await imap.move_message(uid, src_folder, dst_folder)
             if success:
                 return [
@@ -147,6 +180,10 @@ def register_action_tools(server, imap):
             Confirmation or error.
         """
         try:
+            blocked = _write_blocked_message()
+            if blocked:
+                return blocked
+
             results = []
             for uid in uids:
                 success = await imap.set_flag(uid, folder, "\\Seen", read)
@@ -176,6 +213,10 @@ def register_action_tools(server, imap):
             Confirmation or error.
         """
         try:
+            blocked = _write_blocked_message()
+            if blocked:
+                return blocked
+
             success = await imap.set_flag(uid, folder, "\\Flagged", flagged)
             state = "flagged" if flagged else "unflagged"
             if success:

@@ -12,7 +12,7 @@ from mcp.types import TextContent
 log = logging.getLogger("mcp.tools.system")
 
 
-def register_system_tools(server, db):
+def register_system_tools(server, db, bridge_enabled: bool = False):
     @server.tool()
     async def get_index_status() -> list[TextContent]:
         """
@@ -52,6 +52,15 @@ def register_system_tools(server, db):
         Returns:
             Connection status for Bridge IMAP and sync daemon health.
         """
+        if not bridge_enabled:
+            lines = [
+                "=== Sync Status ===",
+                "Mode: local index only",
+                "Bridge reachability is not checked by mcp-server in the default deployment.",
+                "mbsync remains responsible for talking to Bridge and refreshing Maildir.",
+            ]
+            return [TextContent(type="text", text="\n".join(lines))]
+
         import socket
 
         bridge_host = "protonmail-bridge"
