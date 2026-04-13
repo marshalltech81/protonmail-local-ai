@@ -161,6 +161,9 @@ Definition of done:
 - investigate IMAP IDLE as a replacement for the sync sleep loop
 - confirm current Patterns and expunge behavior remain safe
 - keep sync strictly pull-only
+- add a max-retry count (or cumulative timeout) to the `until nc -z` Bridge IMAP wait loop in `mbsync/entrypoint.sh`; the loop currently runs indefinitely so if Bridge never becomes reachable the mbsync container silently appears "Up" while stuck — this is a distinct gap from the sync loop max-retry in Active Priority #6 which covers the `while true` poll loop
+- capture `openssl s_client` stderr to a temporary file during Bridge cert extraction in `mbsync/entrypoint.sh` and print it only on failure; the current `2>/dev/null` discards all TLS and network error output, so when cert extraction fails the operator sees "cert extraction failed" with no indication of whether the cause was a network error, TLS handshake failure, or Bridge not responding
+- remove the `SSLVersions TLSv1.2` restriction from `mbsync/mbsyncrc.template` or extend it to include `TLSv1.3`; Bridge's Go TLS stack supports TLS 1.3 by default and the current restriction unnecessarily prevents using the stronger protocol
 
 ### MCP feature completion
 - add attachment download support once the read-only action path is defined
@@ -223,6 +226,7 @@ Definition of done:
 - update `SECURITY.md` to accurately describe the two-network topology (`bridge-net` for ProtonBridge and mbsync, `app-net` for indexer, Ollama, and mcp-server); the current text says "All containers run on an isolated Docker bridge network" which no longer reflects the implemented split-network design
 - replace `echo -n 'bridge-generated-pass'` in `docs/setup.md` with `printf '%s' 'bridge-generated-pass'` to avoid portability issues across sh and zsh implementations where `-n` may not suppress the trailing newline
 - add a "Bridge Build and Patching" section to `docs/architecture.md` explaining the two source-level patches applied during the Docker build (bind address changed from `127.0.0.1` to `0.0.0.0`, TLS SAN extended to include `protonmail-bridge` and `localhost`), why they exist, what `patch-source.sh` and `bridge-patch-drift.sh` do, and what operators should expect when running `make bridge-upgrade-check` during a version bump
+- update `CONTRIBUTING.md` to add `mbsync/` paths (specifically `entrypoint.sh`, `mbsyncrc.template`, cert handling, and STARTTLS config) as a trigger for running `make bridge-upgrade-check`; changes to the Bridge ↔ mbsync interface directly affect Bridge connectivity but are not currently listed alongside `bridge/` and `BRIDGE_VERSION` in the recommended checks
 - clarify `docs/setup.md` cert regeneration instructions to make explicit that removing `vault.enc` triggers a full re-authentication, not just a cert refresh; consider adding a `make refresh-cert` target with a clear warning
 
 ### Hardening and observability
@@ -230,6 +234,7 @@ Definition of done:
 - add explicit log rotation to the `protonmail-bridge` service in `docker-compose.yml` (`json-file` driver with `max-size: 10m` and `max-file: 3`) so Bridge logs cannot grow unbounded during long-running deployments
 - add `HEALTHCHECK` to `indexer/Dockerfile` so stalled indexing is detectable
 - pin `python` and `uv` base images to digest in addition to version tag across `indexer/` and `mcp-server/`
+- pin `mbsync/Dockerfile` base image (`debian:bookworm-slim`) to a digest; it is currently unpinned while the bridge runtime image is already digest-pinned; mbsync is Bridge's only direct IMAP consumer and receives the bridge password via Docker secret, making it the second highest-trust component
 - add `bandit -r src/` to pre-commit for Python security scanning
 - add `validate-env.sh` pre-flight check that verifies required `.env` fields are present before `make up`
 - add `docs/troubleshooting.md` covering common failure patterns: Ollama not ready, cert extraction failure, sync stalled, schema migration
