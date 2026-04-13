@@ -48,8 +48,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libfido2-1 \
     libsecret-1-0 \
     ca-certificates \
-    netcat-openbsd \
-    inotify-tools \
     && rm -rf /var/lib/apt/lists/* \
     && rm -rf /usr/share/doc /usr/share/man
 

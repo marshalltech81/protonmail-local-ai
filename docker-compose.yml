@@ -27,7 +27,7 @@ services:
     networks:
       - bridge-net
     healthcheck:
-      test: ["CMD", "nc", "-z", "localhost", "1143"]
+      test: ["CMD", "bash", "-c", ": > /dev/tcp/localhost/1143"]
       interval: 30s
       timeout: 10s
       retries: 3

@@ -10,6 +10,9 @@ readonly PATCHED_HOST='Host = "0.0.0.0"'
 readonly UPSTREAM_CERT='IPAddresses:           []net.IP{net.ParseIP("127.0.0.1")},'
 readonly PATCHED_CERT='DNSNames:    []string{"protonmail-bridge", "localhost"},'
 
+# These exact string checks are intentionally strict: if Proton changes the
+# surrounding source layout, we want the build and drift check to fail loudly
+# instead of silently applying a partial or misplaced patch.
 count_matches() {
     local file="$1"
     local needle="$2"
@@ -36,6 +39,8 @@ sed_in_place() {
     local expression="$1"
     local file="$2"
 
+    # GNU sed accepts `-i`, while BSD/macOS sed requires `-i ''`. Keep the
+    # patch helper portable so local drift checks use the same logic as CI.
     if sed --version >/dev/null 2>&1; then
         sed -i "$expression" "$file"
     else
