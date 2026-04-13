@@ -200,12 +200,25 @@ Definition of done:
 ### Bridge build and operations
 - consolidate `BRIDGE_VERSION` to a single source of truth (`.env.example`) and remove the duplicate hardcoded defaults from `docker-compose.yml` and `bridge/Dockerfile` so version bumps only require one change
 - parameterize the Go toolchain version as an `ARG` in `bridge/Dockerfile` alongside `BRIDGE_VERSION` for consistency
+- pin the `golang` builder image in `bridge/Dockerfile` to a digest in addition to its version tag; the runtime was pinned but the builder was not, leaving the build toolchain open to silent upstream changes
+- pin all apt packages in `bridge/Dockerfile` to exact versions in both the builder stage (`git`, `make`, `gcc`, `pkg-config`, `libsecret-1-dev`, `libfido2-dev`, `libcbor-dev`) and the runtime stage (`bash`, `pass`, `gnupg2`, `libfido2-1`, `libsecret-1-0`) so a Debian package update cannot silently change the build or runtime environment between identical `BRIDGE_VERSION` builds
+- build the Bridge binary with stripped debug symbols by passing `-ldflags="-s -w"` via `GOFLAGS` or an explicit build override in `bridge/Dockerfile`; this reduces binary size and removes embedded source file paths from the shipped binary
+- add OCI image labels (`org.opencontainers.image.source`, `org.opencontainers.image.version`, `org.opencontainers.image.revision`) to `bridge/Dockerfile` so every built image carries build provenance that can be traced back to the exact Bridge release and Dockerfile revision
+- verify the Proton release tag signature before building: import Proton's published signing key into the builder stage, hardcode the expected fingerprint, and run `git verify-tag ${BRIDGE_VERSION}` after cloning so a tampered or substituted tag fails the build
 - add a `check-secrets` pre-flight target to the Makefile that validates `.secrets/bridge_pass.txt` has `600` permissions before `make up` proceeds
+- add a pre-flight check to `make first-run` that detects an existing `bridge-data` volume and warns the operator before proceeding, since a populated volume means Bridge is already logged in and the interactive CLI will not behave as expected
+- wrap all `gpg` and `pass` calls in `bridge/entrypoint.sh` with `timeout` so a stalled GPG agent or hung pass operation cannot cause the container to hang indefinitely at startup; apply to the `--list-keys`, `--quick-gen-key`, and `pass init` invocations
 - extend the Bridge smoke test in `scripts/bridge-smoke.sh` to add `bash --version` to the binary checks so the healthcheck dependency is verified
+- extend the Bridge smoke test in `scripts/bridge-smoke.sh` to verify that the `bridge --version` output contains `BRIDGE_VERSION` so a version mismatch between the built binary and the configured release is caught without requiring a live Bridge session
+- add `GIT_TERMINAL_PROMPT=0` before the `git clone` in `scripts/bridge-patch-drift.sh` to prevent interactive credential prompts from hanging CI when the upstream repository is unreachable, and wrap the clone with a `timeout` so a slow or stalled network connection does not consume the full CI job budget
+- add `timeout-minutes` to both the `bridge-patch-drift` and `bridge-smoke` jobs in `.github/workflows/bridge.yml` so a hung git clone or long-running Docker build does not consume the full GitHub Actions 6-hour job limit
+- pin `actions/checkout` to a commit SHA in `.github/workflows/bridge.yml` instead of a mutable version tag to eliminate supply-chain risk from tag mutation
+- add a Trivy Go vulnerability scan targeting the Bridge Go module graph (`bridge/go.sum` or the built image) in `.github/workflows/security.yml`; the current Trivy scan only covers Python services and leaves Bridge Go dependencies unscanned for CVEs
 - clarify `docs/setup.md` cert regeneration instructions to make explicit that removing `vault.enc` triggers a full re-authentication, not just a cert refresh; consider adding a `make refresh-cert` target with a clear warning
 
 ### Hardening and observability
 - add resource limits (`memory`, `cpus`, `pids_limit`) to all Compose services that currently lack them (especially `ollama` and `indexer`)
+- add explicit log rotation to the `protonmail-bridge` service in `docker-compose.yml` (`json-file` driver with `max-size: 10m` and `max-file: 3`) so Bridge logs cannot grow unbounded during long-running deployments
 - add `HEALTHCHECK` to `indexer/Dockerfile` so stalled indexing is detectable
 - pin `python` and `uv` base images to digest in addition to version tag across `indexer/` and `mcp-server/`
 - add `bandit -r src/` to pre-commit for Python security scanning
