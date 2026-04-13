@@ -11,10 +11,11 @@ from mcp.types import TextContent
 
 log = logging.getLogger("mcp.tools.intelligence")
 
-SUMMARIZE_SYSTEM = """You are an email assistant. You will be given the full
-content of an email thread. Summarize it clearly and concisely according to
-the requested style. Be factual. Do not invent information not present in
-the thread."""
+SUMMARIZE_SYSTEM = """You are an email assistant. You will be given indexed
+thread context from an email thread. The context may be a snippet or truncated
+thread text rather than the full raw mailbox thread. Summarize it clearly and
+concisely according to the requested style. Be factual. Do not invent
+information not present in the provided context."""
 
 ASK_SYSTEM = """You are an email assistant with access to a person's email
 archive. You will be given relevant email thread excerpts retrieved from their
@@ -23,8 +24,10 @@ If the answer is not in the provided threads, say so clearly. Be concise and
 factual. Cite which thread(s) your answer comes from."""
 
 EXTRACT_SYSTEM = """You are a data extraction assistant. You will be given
-email thread content. Extract structured data matching the requested schema.
-Return ONLY valid JSON matching the schema — no preamble, no explanation."""
+indexed email thread context, which may be a snippet or truncated thread text
+rather than the full raw mailbox thread. Extract structured data matching the
+requested schema. Return ONLY valid JSON matching the schema — no preamble, no
+explanation."""
 
 
 def register_intelligence_tools(server, db, ollama, llm_mode: str, anthropic_key: str):
@@ -109,7 +112,7 @@ def register_intelligence_tools(server, db, ollama, llm_mode: str, anthropic_key
         style: str = "brief",
     ) -> list[TextContent]:
         """
-        Summarize an email thread.
+        Summarize indexed context for an email thread.
 
         Args:
             thread_id: The thread ID to summarize
@@ -118,7 +121,7 @@ def register_intelligence_tools(server, db, ollama, llm_mode: str, anthropic_key
                    "timeline" (chronological sequence of events)
 
         Returns:
-            A summary of the thread in the requested style.
+            A summary of the available indexed thread context in the requested style.
         """
         try:
             thread = db.get_thread(thread_id)
@@ -163,7 +166,7 @@ def register_intelligence_tools(server, db, ollama, llm_mode: str, anthropic_key
         limit: int = 20,
     ) -> list[TextContent]:
         """
-        Extract structured data from emails matching a query.
+        Extract structured data from indexed emails matching a query.
         Example: extract all invoices with vendor name and amount.
 
         Args:
@@ -176,7 +179,7 @@ def register_intelligence_tools(server, db, ollama, llm_mode: str, anthropic_key
             limit: Max threads to search through (default: 20)
 
         Returns:
-            A JSON array of extracted records matching your schema.
+            A JSON array of extracted records found in the available indexed thread context.
         """
         try:
             embedding = await ollama.embed(query)

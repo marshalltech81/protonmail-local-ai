@@ -165,6 +165,9 @@ class IMAPClient:
             for part in msg.walk():
                 ct = part.get_content_type()
                 cd = part.get("Content-Disposition", "")
+                # Mirror the indexer parser's policy: keep attachment metadata,
+                # but treat only the first plain/html body part as message
+                # content so forwarded alternatives do not overwrite it.
                 if "attachment" in cd:
                     attachments.append(
                         {

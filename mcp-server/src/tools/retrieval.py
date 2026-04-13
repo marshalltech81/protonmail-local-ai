@@ -141,11 +141,13 @@ def register_retrieval_tools(server, db):
         offset: int = 0,
     ) -> list[TextContent]:
         """
-        List email threads in a folder.
+        List email threads in a folder from the local index.
 
         Args:
             folder: Folder name (default: INBOX)
-            filter_type: "all", "unread", or "flagged" (default: all)
+            filter_type: Retained for interface compatibility. The current
+                         local index listing ignores this value and always
+                         returns the most recent threads in the folder.
             limit: Number of threads to return (default: 20)
             offset: Pagination offset (default: 0)
 
