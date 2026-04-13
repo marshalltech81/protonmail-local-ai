@@ -163,10 +163,12 @@ When working in this repo:
 - prefer narrow, surgical edits
 - preserve existing interfaces unless there is a clear reason to change them
 - keep comments and code aligned
+- make multi-step logic easy to follow in code by keeping the flow explicit and adding brief comments or docstrings where the steps would otherwise be unclear
 - update docs when behavior changes
 - always review the relevant documentation after code, config, workflow, or runtime changes and adjust it so the repository docs stay in sync with the implementation
 - if code or config changes create likely doc drift, update the relevant docs or explicitly suggest the needed doc or `AGENTS.md` follow-up
 - avoid introducing new dependencies without a clear need
+- install only the minimum necessary packages, libraries, and dependencies for the current implementation, whether in Docker images, Python projects, system packages, or tooling
 - pin all new dependencies to exact versions
 - avoid speculative refactors
 - preserve local-first defaults
