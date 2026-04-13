@@ -1,15 +1,17 @@
 #!/bin/bash
 set -Eeuo pipefail
 
-# Bridge expects these runtime paths to be set explicitly. Export them here
-# instead of baking PASSWORD_STORE_DIR into Dockerfile metadata so Trivy does
-# not flag it as a leaked secret purely because of the variable name.
-export HOME="${HOME:-/home/bridge}"
-export XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-/data/config}"
-export XDG_DATA_HOME="${XDG_DATA_HOME:-/data/local}"
-export XDG_CACHE_HOME="${XDG_CACHE_HOME:-/data/cache}"
-export GNUPGHOME="${GNUPGHOME:-/data/gnupg}"
-export PASSWORD_STORE_DIR="${PASSWORD_STORE_DIR:-/data/pass}"
+# Bridge expects these runtime paths to be set explicitly. Unset before
+# exporting so a caller-injected value cannot silently redirect Bridge state
+# to an unexpected path. Exported here rather than baked into Dockerfile
+# metadata so Trivy does not flag PASSWORD_STORE_DIR as a leaked secret.
+unset HOME XDG_CONFIG_HOME XDG_DATA_HOME XDG_CACHE_HOME GNUPGHOME PASSWORD_STORE_DIR
+export HOME="/home/bridge"
+export XDG_CONFIG_HOME="/data/config"
+export XDG_DATA_HOME="/data/local"
+export XDG_CACHE_HOME="/data/cache"
+export GNUPGHOME="/data/gnupg"
+export PASSWORD_STORE_DIR="/data/pass"
 
 VAULT="$XDG_CONFIG_HOME/protonmail/bridge-v3/vault.enc"
 
@@ -21,10 +23,15 @@ if ! gpg --list-keys "ProtonBridge" >/dev/null 2>&1; then
     echo ">>> First run: initializing GPG key and pass store..."
 
     gpg --batch --passphrase '' --quick-gen-key \
-        'ProtonBridge' default default never >/dev/null 2>&1
+        'ProtonBridge' default default never \
+        || { echo "ERROR: GPG key generation failed." >&2; exit 1; }
 
     FPR="$(gpg --list-keys --with-colons 'ProtonBridge' | awk -F: '/^fpr/{print $10; exit}')"
-    pass init "$FPR"
+    [[ -n "$FPR" ]] \
+        || { echo "ERROR: Failed to extract GPG fingerprint after key creation." >&2; exit 1; }
+
+    pass init "$FPR" \
+        || { echo "ERROR: pass store initialization failed." >&2; exit 1; }
 
     echo ">>> GPG + pass initialized (fingerprint: $FPR)"
 fi
@@ -33,8 +40,14 @@ fi
 # Detect whether a Proton account is already authenticated
 # =============================================================================
 LOGGED_IN=false
-if [ -f "$VAULT" ]; then
-    LOGGED_IN=true
+if [[ -f "$VAULT" ]]; then
+    if gpg --list-keys "ProtonBridge" >/dev/null 2>&1; then
+        LOGGED_IN=true
+    else
+        echo "ERROR: vault.enc exists but GPG key 'ProtonBridge' is missing." >&2
+        echo "       The vault cannot be decrypted. Remove the bridge-data volume and run: make first-run" >&2
+        exit 1
+    fi
 fi
 
 # =============================================================================
