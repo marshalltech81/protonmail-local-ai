@@ -4,6 +4,11 @@ set -Eeuo pipefail
 BRIDGE_HOST="${BRIDGE_HOST:-protonmail-bridge}"
 BRIDGE_IMAP_PORT="${BRIDGE_IMAP_PORT:-1143}"
 SYNC_INTERVAL="${SYNC_INTERVAL:-60}"
+RUNTIME_DIR="/tmp/mbsync"
+CONFIG_FILE="${RUNTIME_DIR}/mbsyncrc"
+CERT_FILE="${RUNTIME_DIR}/bridge-cert.pem"
+
+mkdir -p "$RUNTIME_DIR"
 
 # =============================================================================
 # Generate mbsync config from template
@@ -12,8 +17,8 @@ SYNC_INTERVAL="${SYNC_INTERVAL:-60}"
 # BRIDGE_PASS is NOT passed as an env var — mbsyncrc uses PassCmd to read
 # it directly from the Docker secret at /run/secrets/bridge_pass.
 # =============================================================================
-envsubst < /etc/mbsyncrc.template > /home/mbsync/.mbsyncrc
-chmod 600 /home/mbsync/.mbsyncrc # protect the file because it contains credentials
+envsubst < /etc/mbsyncrc.template > "$CONFIG_FILE"
+chmod 600 "$CONFIG_FILE" # protect the file because it contains credentials
 
 # =============================================================================
 # Wait for ProtonBridge IMAP to be available
@@ -33,7 +38,6 @@ echo ">>> Bridge IMAP is ready."
 # and re-extracted fresh on every container start so it survives make clean
 # or a Bridge update that rotates the cert.
 # =============================================================================
-CERT_FILE="/home/mbsync/bridge-cert.pem"
 echo ">>> Extracting Bridge TLS cert from ${BRIDGE_HOST}:${BRIDGE_IMAP_PORT}..."
 echo | openssl s_client \
     -connect "${BRIDGE_HOST}:${BRIDGE_IMAP_PORT}" \
@@ -55,7 +59,7 @@ fi
 # not fatal.
 # =============================================================================
 echo ">>> Running initial sync..."
-mbsync -c /home/mbsync/.mbsyncrc -a 2>&1 || \
+mbsync -c "$CONFIG_FILE" -a 2>&1 || \
     echo ">>> Initial sync completed with warnings (normal on first run)"
 
 # =============================================================================
@@ -67,6 +71,6 @@ echo ">>> Starting sync loop (interval: ${SYNC_INTERVAL}s)..."
 while true; do
     sleep "$SYNC_INTERVAL"
     echo ">>> Syncing..."
-    mbsync -c /home/mbsync/.mbsyncrc -a 2>&1 || \
+    mbsync -c "$CONFIG_FILE" -a 2>&1 || \
         echo ">>> Sync warning (bridge may be busy — will retry next interval)"
 done

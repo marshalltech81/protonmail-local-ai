@@ -1,7 +1,8 @@
 """
 MCP Server entry point.
-Exposes email search, retrieval, intelligence, action, and system tools
-to Claude Desktop via HTTP/SSE transport.
+Exposes local mailbox search, retrieval, intelligence, and system tools to
+Claude Desktop via HTTP/SSE transport. Mail-changing action tools are disabled
+by default until a safe opt-in write backend exists.
 """
 
 import logging
@@ -9,10 +10,8 @@ import os
 
 from mcp.server.fastmcp import FastMCP
 
-from .lib.imap import IMAPClient
 from .lib.ollama import OllamaClient
 from .lib.sqlite import Database
-from .tools.actions import register_action_tools
 from .tools.intelligence import register_intelligence_tools
 from .tools.retrieval import register_retrieval_tools
 from .tools.search import register_search_tools
@@ -24,27 +23,30 @@ logging.basicConfig(
 )
 log = logging.getLogger("mcp-server")
 
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
 # ---------------------------------------------------------------------------
 # Configuration from environment
 # ---------------------------------------------------------------------------
 SQLITE_PATH = os.environ.get("SQLITE_PATH", "/data/mail.db")
-BRIDGE_HOST = os.environ.get("BRIDGE_HOST", "protonmail-bridge")
-BRIDGE_IMAP = int(os.environ.get("BRIDGE_IMAP_PORT", "1143"))
-BRIDGE_SMTP = int(os.environ.get("BRIDGE_SMTP_PORT", "1025"))
-BRIDGE_USER = os.environ.get("BRIDGE_USER", "")
-BRIDGE_PASS = os.environ.get("BRIDGE_PASS", "")
 OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://ollama:11434")
 EMBED_MODEL = os.environ.get("OLLAMA_EMBED_MODEL", "nomic-embed-text")
 LLM_MODEL = os.environ.get("OLLAMA_LLM_MODEL", "llama3.2")
 LLM_MODE = os.environ.get("LLM_MODE", "local")
 ANTHROPIC_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 MCP_PORT = int(os.environ.get("MCP_PORT", "3000"))
+MCP_READ_ONLY = _env_bool("MCP_READ_ONLY", True)
 
 
 def main():
     # Shared service clients
     db = Database(SQLITE_PATH)
-    imap = IMAPClient(BRIDGE_HOST, BRIDGE_IMAP, BRIDGE_USER, BRIDGE_PASS, smtp_port=BRIDGE_SMTP)
     ollama = OllamaClient(OLLAMA_HOST, EMBED_MODEL, LLM_MODEL)
 
     # FastMCP server — supports @server.tool() decorator and SSE transport
@@ -52,16 +54,22 @@ def main():
 
     # Register all tool groups
     register_search_tools(server, db, ollama)
-    register_retrieval_tools(server, db, imap)
+    register_retrieval_tools(server, db)
     register_intelligence_tools(server, db, ollama, LLM_MODE, ANTHROPIC_KEY)
-    register_action_tools(server, imap)
-    register_system_tools(server, db)
+    if MCP_READ_ONLY:
+        log.info("MCP read-only mode enabled; action tools are not registered.")
+    else:
+        log.warning(
+            "MCP_READ_ONLY=false, but mail-changing tools are still not registered because "
+            "the default deployment has no safe write backend for mcp-server."
+        )
+    register_system_tools(server, db, bridge_enabled=False)
 
     log.info(f"MCP server starting on port {MCP_PORT}")
     log.info(f"  SQLite:   {SQLITE_PATH}")
-    log.info(f"  Bridge:   {BRIDGE_HOST}:{BRIDGE_IMAP}")
     log.info(f"  Ollama:   {OLLAMA_HOST}")
     log.info(f"  LLM mode: {LLM_MODE}")
+    log.info("  Retrieval: local SQLite index only")
 
     server.run(transport="sse")
 
