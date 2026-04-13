@@ -255,7 +255,8 @@ If you see rapid-fire lines like:
 ```
 
 Bridge is still downloading messages. Do not attempt cert extraction yet —
-IMAP will be unresponsive during heavy Gluon sync.
+IMAP will be unresponsive during heavy Gluon sync, and `mbsync` now fails
+closed and retries instead of syncing without a pinned Bridge cert.
 
 **2. Check that Bridge is authenticated**
 

@@ -70,8 +70,10 @@ COPY --chmod=755 --chown=bridge:bridge entrypoint.sh /entrypoint.sh
 # Pre-create all subdirectories under /data with correct ownership.
 # Docker copies these into the named volume on first mount (copy-on-empty),
 # ensuring the bridge user can write even though the volume starts root-owned.
+# Keep every Bridge state directory private to the bridge user because these
+# paths hold cached auth, cert, GPG, pass-store, and runtime state.
 RUN mkdir -p /data/config /data/local /data/cache /data/gnupg /data/pass \
-    && chmod 700 /data/gnupg \
+    && chmod 700 /data/config /data/local /data/cache /data/gnupg /data/pass \
     && chown -R bridge:bridge /data
 
 # Drop to non-root — everything from here runs as bridge
