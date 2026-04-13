@@ -47,8 +47,10 @@ echo | openssl s_client \
 if [ -s "$CERT_FILE" ]; then
     echo ">>> Bridge cert extracted successfully."
 else
-    echo ">>> WARNING: cert extraction failed — falling back to no cert pinning."
-    echo "" > "$CERT_FILE"
+    # Fail closed so mbsync never silently downgrades into an unpinned TLS path
+    # if Bridge is not ready yet or a cert refresh/rotation goes wrong.
+    echo ">>> ERROR: cert extraction failed — refusing to sync without cert pinning." >&2
+    exit 1
 fi
 
 # =============================================================================

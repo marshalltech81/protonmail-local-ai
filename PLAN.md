@@ -266,18 +266,15 @@ Definition of done:
 - keep reads centered on Maildir and SQLite where possible, and resist reintroducing live Bridge retrieval into the default data plane
 - if a future opt-in Bridge-adjacent write backend is added, give it its own secret-handling path instead of reviving `BRIDGE_PASS` environment wiring in `mcp-server`
 - align any future Bridge-adjacent write transport with the stricter cert-pinned trust model already used by `mbsync`
-- make TLS cert extraction and trust handling fail closed after first-run instead of silently degrading if cert pinning cannot be refreshed
 - improve Bridge readiness checks so they reflect useful IMAP availability, not just an open TCP port
 - preserve degraded local-search mode when Bridge or mbsync are unavailable, with only future opt-in live paths disabled
 - add a safer single-session first-run helper that keeps Proton login interactive but automates same-session `info` capture into `.env` and `.secrets/bridge_pass.txt`
 - extend the Bridge smoke-test path beyond build/runtime validation to cover live auth, cert, and IMAP readiness once guarded live Bridge CI exists
 - document and test backup, restore, and rollback handling for the `bridge-data` volume so Bridge upgrades and recovery are safer
 - add better operator tooling such as a `make bridge-status`-style diagnostic path for auth state, Gluon sync state, recent logs, and IMAP readiness
-- evaluate additional Bridge container hardening such as `no-new-privileges`, capability dropping, and a read-only root filesystem if Bridge will tolerate it
-- evaluate `tmpfs` mounts for ephemeral writable paths and keep the writable surface limited to `/data` plus only truly required runtime scratch space
+- keep validating the new read-only Bridge rootfs baseline as Bridge versions change
 - pin production images by digest where practical and keep Bridge runtime packages to the smallest set the service actually needs
 - audit Bridge and `mbsync` runtime packages regularly and remove unused tools or libraries once verified unnecessary
-- explicitly lock down sensitive Bridge state directories under `/data`, including config, pass-store, and GnuPG paths
 - preserve and strengthen default seccomp/AppArmor confinement; only loosen profiles when Bridge proves it requires it
 - add resource controls such as memory limits, `pids_limit`, and log rotation so Bridge failure modes are more contained
 - document host-level hardening expectations for Docker itself, including full-disk encryption for Docker data, encrypted backups, and stronger daemon isolation such as rootless Docker, `userns-remap`, or Docker Desktop Enhanced Container Isolation where available
@@ -326,10 +323,14 @@ Need final decision on the long-term home for live Bridge smoke tests:
 ## Recently Completed
 
 - automated Bridge TLS cert extraction on container start
+- fail-closed `mbsync` cert extraction so sync refuses to proceed without Bridge cert pinning
 - Bridge password moved to Docker Compose secret
 - `Sync All` changed to `Sync Pull`
 - `All Mail` and `Labels/*` excluded from mbsync Patterns
 - explicit sync state path added in `mbsyncrc.template`
+- explicit `700` permissions on sensitive Bridge state directories under `/data`
+- read-only Bridge root filesystem with compose-level smoke coverage for writable-path expectations
+- Bridge writable runtime paths narrowed to `/data`, `/tmp`, and a bridge-owned `/home/bridge` tmpfs
 
 ## Notes for Agents
 
