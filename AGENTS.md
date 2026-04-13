@@ -164,6 +164,7 @@ When working in this repo:
 - preserve existing interfaces unless there is a clear reason to change them
 - keep comments and code aligned
 - update docs when behavior changes
+- always review the relevant documentation after code, config, workflow, or runtime changes and adjust it so the repository docs stay in sync with the implementation
 - if code or config changes create likely doc drift, update the relevant docs or explicitly suggest the needed doc or `AGENTS.md` follow-up
 - avoid introducing new dependencies without a clear need
 - pin all new dependencies to exact versions
@@ -342,6 +343,7 @@ Notes:
 - run `pre-commit run --all-files` when practical before opening a PR or finalising a substantial change
 - for Docker Compose or env wiring changes, run `docker compose config --quiet`
 - for Dockerfile, build, or container-runtime changes, run the smallest relevant `docker compose build ...` subset when practical
+- for Bridge build, patch, or version-bump changes, run `make bridge-upgrade-check`
 - prefer real `.eml` fixtures for parser tests
 - integration tests should mock IMAP rather than hitting a live Bridge instance
 - add or update tests when behavior changes

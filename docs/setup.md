@@ -119,15 +119,33 @@ You should see:
 
 The initial index scan may take several minutes depending on mailbox size.
 
+The default MCP deployment is read-only:
+- search, retrieval, and intelligence tools use the local SQLite index
+- mail-changing action tools are not registered until a safe write path is explicitly enabled
+
 On first run, Bridge must download and decrypt your full mailbox from Proton's
 servers before mbsync can pull anything. This can take a long time for large
 mailboxes. Watch sync progress with:
 
 ```bash
-docker compose logs -f protonmail-bridge
+docker run --rm \
+    -v protonmail-local-ai_bridge-data:/data:ro \
+    debian:bookworm-slim \
+    bash -c 'find /data/local/protonmail/bridge-v3/logs -name "*.log" | sort | tail -1 | xargs tail -f'
 ```
 
-Bridge logs sync percentage, elapsed time, and ETA directly to Docker logs.
+Bridge writes sync progress into its structured log file in the `bridge-data`
+volume.
+
+## Updating Bridge
+
+When you bump `BRIDGE_VERSION` in `.env`, validate the upstream patch points and
+the rebuilt image before restarting the service:
+
+```bash
+make bridge-upgrade-check
+make update
+```
 
 ### 7. Configure Claude Desktop
 
@@ -161,7 +179,8 @@ docker compose logs protonmail-bridge
 If the image is outdated, rebuild:
 
 ```bash
-docker compose build protonmail-bridge
+make bridge-upgrade-check
+make update
 ```
 
 ### Bridge won't start — keychain / GPG errors
@@ -222,7 +241,10 @@ Run these three diagnostics to understand what state Bridge is in:
 **1. Check recent Bridge logs**
 
 ```bash
-docker logs protonmail-bridge 2>&1 | tail -30
+docker run --rm \
+    -v protonmail-local-ai_bridge-data:/data:ro \
+    debian:bookworm-slim \
+    bash -c 'find /data/local/protonmail/bridge-v3/logs -name "*.log" | sort | tail -1 | xargs tail -n 30'
 ```
 
 If you see rapid-fire lines like:
@@ -278,7 +300,7 @@ Run this from outside the container to verify port 1143 is ready:
 
 ```bash
 docker run --rm \
-    --network protonmail-local-ai_protonmail-net \
+    --network protonmail-local-ai_bridge-net \
     debian:bookworm-slim \
     bash -c "apt-get install -y netcat-openbsd -qq 2>/dev/null && \
              echo | nc -w 5 protonmail-bridge 1143"
@@ -334,7 +356,7 @@ nothing under it, the sync ran but Bridge returned no folders.
 **4. Force a sync now and watch verbose output**
 
 ```bash
-docker exec mbsync mbsync -c /home/mbsync/.mbsyncrc -a -V 2>&1 | head -50
+docker exec mbsync mbsync -c /tmp/mbsync/mbsyncrc -a -V 2>&1 | head -50
 ```
 
 `-V` prints each folder being synced and message counts. This is the most
