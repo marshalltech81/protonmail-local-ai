@@ -181,6 +181,9 @@ Definition of done:
 - log unsupported or unparsed attachment types in application logs so parser gaps are visible in real-world use
 - add tests for attachment parsing and search behavior
 
+### Bridge release monitoring
+- add a scheduled GitHub Actions workflow that queries the proton-bridge GitHub releases API and compares the latest release tag to `BRIDGE_VERSION` in `.env.example`; when the repo is behind a newer release, open a GitHub issue or post a workflow summary so the operator is notified to evaluate the release and run `make bridge-upgrade-check`; Dependabot monitors Docker base images but has no mechanism to track the upstream Bridge release version, leaving version drift entirely manual
+
 ### Guarded live Bridge integration CI
 - keep normal PR CI secret-free and mocked; do not put live Proton login in the default PR workflow
 - add a separate `.github/workflows/bridge-integration.yml` triggered only by `workflow_dispatch` and optionally a nightly schedule on `main`
@@ -203,7 +206,7 @@ Definition of done:
 ### Bridge build and operations
 - consolidate `BRIDGE_VERSION` to a single source of truth (`.env.example`) and remove the duplicate hardcoded defaults from `docker-compose.yml` and `bridge/Dockerfile` so version bumps only require one change
 - parameterize the Go toolchain version as an `ARG` in `bridge/Dockerfile` alongside `BRIDGE_VERSION` for consistency
-- pin the `golang` builder image in `bridge/Dockerfile` to a digest in addition to its version tag; the runtime was pinned but the builder was not, leaving the build toolchain open to silent upstream changes
+- pin the `golang` builder image in `bridge/Dockerfile` to a digest in addition to its version tag; the runtime was pinned but the builder was not, leaving the build toolchain open to silent upstream changes; note that digest-pinning disables Dependabot's ability to auto-update the image, so the bridge version bump workflow (`make update` and `make bridge-upgrade-check`) must also cover refreshing the builder digest
 - pin all apt packages in `bridge/Dockerfile` to exact versions in both the builder stage (`git`, `make`, `gcc`, `pkg-config`, `libsecret-1-dev`, `libfido2-dev`, `libcbor-dev`) and the runtime stage (`bash`, `pass`, `gnupg2`, `libfido2-1`, `libsecret-1-0`) so a Debian package update cannot silently change the build or runtime environment between identical `BRIDGE_VERSION` builds
 - build the Bridge binary with stripped debug symbols by passing `-ldflags="-s -w"` via `GOFLAGS` or an explicit build override in `bridge/Dockerfile`; this reduces binary size and removes embedded source file paths from the shipped binary
 - add OCI image labels (`org.opencontainers.image.source`, `org.opencontainers.image.version`, `org.opencontainers.image.revision`) to `bridge/Dockerfile` so every built image carries build provenance that can be traced back to the exact Bridge release and Dockerfile revision
