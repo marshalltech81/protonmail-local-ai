@@ -88,6 +88,30 @@ chmod 600 .secrets/bridge_pass.txt
 Do not put the Bridge password in `.env` — it is passed to the mbsync container
 exclusively via Docker Compose secrets, mounted at `/run/secrets/bridge_pass`.
 
+**Why this step is manual (design note)**
+
+The Bridge password lives inside `vault.enc`, which is encrypted with a key held
+in the GPG-backed `pass` store. It would be technically possible to automate
+extraction by reimplementing the vault format (msgpack framing, AES-256-GCM,
+sha256 key derivation). This is intentionally avoided for two reasons:
+
+1. **Fragility.** The vault format is a Bridge internal. Proton can change the
+   framing, cipher parameters, or key derivation in any release without notice.
+   External decryption code would break silently or produce garbage.
+
+2. **Unnecessary.** The Bridge CLI (`bridge-v3 info`) already reads the vault
+   through the supported code path and prints the Bridge credentials. The
+   manual copy from that output is a one-time, human-in-the-loop step that
+   is appropriate for a first-run flow requiring interactive login anyway.
+
+If you want a shortcut, run this after the `login` / `info` steps above to
+print the password directly:
+
+```bash
+docker compose run --rm protonmail-bridge \
+  su -s /bin/bash bridge -c 'bridge-v3 info'
+```
+
 ### 5. Pull Ollama models
 
 ```bash
