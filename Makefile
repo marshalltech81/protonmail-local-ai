@@ -1,4 +1,4 @@
-.PHONY: build up down logs first-run update pull-models status clean sync sync-indexer sync-mcp test bridge-patch-check bridge-smoke bridge-upgrade-check help
+.PHONY: build up down logs first-run update pull-models status clean sync sync-indexer sync-mcp test bridge-patch-check bridge-smoke bridge-upgrade-check init-secrets help
 
 # =============================================================================
 # protonmail-local-ai — Makefile
@@ -8,6 +8,7 @@ help:
 	@echo ""
 	@echo "  protonmail-local-ai"
 	@echo ""
+	@echo "  init-secrets Create placeholder secret files under .secrets/ (run once on setup)"
 	@echo "  build        Build all Docker images"
 	@echo "  up           Start the full stack"
 	@echo "  down         Stop the full stack"
@@ -23,6 +24,29 @@ help:
 	@echo "  test         Run indexer unit tests locally with uv"
 	@echo "  clean        Remove all containers and volumes (destructive)"
 	@echo ""
+
+# Create placeholder secret files required by Docker Compose.
+# Run this once during initial setup before make first-run or make up.
+# bridge_pass.txt — overwrite with real Bridge password after make first-run.
+# anthropic_api_key.txt — overwrite with your Claude API key for LLM_MODE=cloud,
+#                         or leave empty for local-only mode.
+init-secrets:
+	@mkdir -p .secrets
+	@chmod 700 .secrets
+	@if [ ! -f .secrets/bridge_pass.txt ]; then \
+		printf '' > .secrets/bridge_pass.txt; \
+		chmod 600 .secrets/bridge_pass.txt; \
+		echo "  created .secrets/bridge_pass.txt (placeholder — fill in after make first-run)"; \
+	else \
+		echo "  .secrets/bridge_pass.txt already exists, skipping"; \
+	fi
+	@if [ ! -f .secrets/anthropic_api_key.txt ]; then \
+		printf '' > .secrets/anthropic_api_key.txt; \
+		chmod 600 .secrets/anthropic_api_key.txt; \
+		echo "  created .secrets/anthropic_api_key.txt (empty — fill in if LLM_MODE=cloud)"; \
+	else \
+		echo "  .secrets/anthropic_api_key.txt already exists, skipping"; \
+	fi
 
 # Build all images from source
 build:
@@ -47,7 +71,10 @@ logs:
 # Uses a compose override (-f docker-compose.first-run.yml) that sets
 # logging: driver: none for the bridge service, preventing Bridge credentials
 # printed by `info` from being written to Docker log files on the host.
-first-run:
+#
+# NOTE: credentials will NOT appear in docker logs during this session.
+# If the container exits unexpectedly, re-run make first-run to see terminal output.
+first-run: init-secrets
 	@echo ""
 	@echo "  Starting ProtonBridge interactive login..."
 	@echo "  Commands inside the CLI:"

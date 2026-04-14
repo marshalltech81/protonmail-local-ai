@@ -7,6 +7,7 @@ by default until a safe opt-in write backend exists.
 
 import logging
 import os
+from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
 
@@ -31,6 +32,19 @@ def _env_bool(name: str, default: bool) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _read_secret(secret_name: str, env_fallback: str = "") -> str:
+    """Read a Docker secret file, falling back to an environment variable.
+
+    Prefer the secret file so the value is never exposed via docker inspect.
+    The env fallback preserves backward compatibility for local dev without
+    Docker secrets configured.
+    """
+    path = Path(f"/run/secrets/{secret_name}")
+    if path.exists():
+        return path.read_text().strip()
+    return os.environ.get(env_fallback, "")
+
+
 # ---------------------------------------------------------------------------
 # Configuration from environment
 # ---------------------------------------------------------------------------
@@ -39,7 +53,7 @@ OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://ollama:11434")
 EMBED_MODEL = os.environ.get("OLLAMA_EMBED_MODEL", "nomic-embed-text")
 LLM_MODEL = os.environ.get("OLLAMA_LLM_MODEL", "llama3.2")
 LLM_MODE = os.environ.get("LLM_MODE", "local")
-ANTHROPIC_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+ANTHROPIC_KEY = _read_secret("anthropic_api_key", "ANTHROPIC_API_KEY")
 MCP_PORT = int(os.environ.get("MCP_PORT", "3000"))
 MCP_READ_ONLY = _env_bool("MCP_READ_ONLY", True)
 

@@ -16,7 +16,7 @@ git clone git@github.com:marshalltech81/protonmail-local-ai.git
 cd protonmail-local-ai
 ```
 
-### 2. Create your environment file
+### 2. Create your environment file and secret placeholders
 
 ```bash
 cp .env.example .env
@@ -25,18 +25,18 @@ cp .env.example .env
 Edit `.env` — you can leave `BRIDGE_USER` blank for now.
 You will fill it in after the Bridge login step.
 
-Also create the secrets directory with restrictive permissions:
+Create the secrets directory and placeholder files:
 
 ```bash
-mkdir -m 700 .secrets
+make init-secrets
 ```
 
-You will write the Bridge password into `.secrets/bridge_pass.txt` after login.
-The file must be readable only by its owner — set permissions after creating it:
+This creates `.secrets/bridge_pass.txt` and `.secrets/anthropic_api_key.txt`
+as empty placeholders with `600` permissions. Docker Compose requires both files
+to exist before starting. You will overwrite them with real values:
 
-```bash
-chmod 600 .secrets/bridge_pass.txt
-```
+- `bridge_pass.txt` — after the Bridge login step below
+- `anthropic_api_key.txt` — only if you use `LLM_MODE=cloud`; leave empty for local-only mode
 
 ### 3. Build all Docker images
 
@@ -81,7 +81,7 @@ BRIDGE_USER=your@proton.me          # from info → Username
 Write the `Password` into the Docker secret file:
 
 ```bash
-echo -n 'bridge-generated-pass' > .secrets/bridge_pass.txt
+printf '%s' 'bridge-generated-pass' > .secrets/bridge_pass.txt
 chmod 600 .secrets/bridge_pass.txt
 ```
 
@@ -431,7 +431,7 @@ After login, copy the new `Username` into `.env` and write the new `Password`
 into `.secrets/bridge_pass.txt`:
 
 ```bash
-echo -n 'new-bridge-generated-pass' > .secrets/bridge_pass.txt
+printf '%s' 'new-bridge-generated-pass' > .secrets/bridge_pass.txt
 chmod 600 .secrets/bridge_pass.txt
 make up
 ```

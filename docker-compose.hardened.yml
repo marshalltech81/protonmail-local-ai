@@ -1,0 +1,25 @@
+# =============================================================================
+# Hardened network overlay — optional, local-only mode
+# =============================================================================
+# Marks app-net as internal so indexer, Ollama, and mcp-server cannot reach
+# the internet, limiting exfiltration surface if a container is compromised.
+#
+# Prerequisites:
+#   - Pull Ollama models BEFORE applying this overlay — Ollama cannot reach
+#     the internet for model downloads while this overlay is active.
+#     Run: make pull-models
+#   - Use LLM_MODE=local only — mcp-server also loses internet access, so
+#     ANTHROPIC_API_KEY cloud calls will fail under this overlay.
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.hardened.yml up -d
+#
+# To revert (e.g. to pull new models):
+#   docker compose down
+#   docker compose up -d   # base config, internet access restored
+# =============================================================================
+
+networks:
+  app-net:
+    driver: bridge
+    internal: true

@@ -40,6 +40,11 @@ jobs:
     name: Bridge smoke test
     runs-on: ubuntu-latest
     needs: bridge-patch-drift
+    permissions:
+      contents: read
+      # Required for SLSA provenance attestation signing via OIDC.
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@v6
 
@@ -49,6 +54,19 @@ jobs:
           mkdir -p .secrets
           printf 'placeholder-bridge-pass' > .secrets/bridge_pass.txt
           chmod 600 .secrets/bridge_pass.txt
+          printf '' > .secrets/anthropic_api_key.txt
+          chmod 600 .secrets/anthropic_api_key.txt
 
       - name: Build and smoke test Bridge
         run: ./scripts/bridge-smoke.sh
+
+      - name: Extract Bridge binary for attestation
+        run: |
+          docker create --name bridge-tmp protonmail-local-ai/bridge
+          docker cp bridge-tmp:/usr/local/bin/bridge ./bridge-binary
+          docker rm bridge-tmp
+
+      - name: Attest Bridge binary provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: ./bridge-binary

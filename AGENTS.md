@@ -256,6 +256,28 @@ When changing Docker Compose service definitions or runtime behavior:
 - keep container-to-container network access as narrow as the architecture allows
 - prefer degraded modes over broadening privileges, relaxing confinement, or exposing more of the host
 
+## Go Build Conventions
+
+Bridge is the only Go service in this repository. When modifying the Bridge
+build in `bridge/Dockerfile` or any future Go service, follow these rules:
+
+- always pass `-trimpath` via `GOFLAGS` or an explicit build flag; this strips
+  all host filesystem paths embedded in the compiled binary (source file paths,
+  module cache paths, build tool paths) so binary inspection of the shipped image
+  reveals no build environment details
+- always pass `-ldflags="-s -w"` to strip debug symbols and DWARF tables; this
+  reduces binary size and removes embedded source file paths from the shipped binary
+- do not omit either flag in combination — `-trimpath` removes Go-level path
+  metadata while `-ldflags="-s -w"` removes linker-level debug information; they
+  address different embedded data and are both required for a hardened binary
+- never build with `CGO_ENABLED=0` unless the binary is confirmed to not require
+  cgo; Bridge links against libfido2 and libsecret and requires cgo at build time
+- verify that the upstream Makefile target used for the build (`make build-nogui`)
+  accepts the injected `GOFLAGS` without overriding them before bumping Bridge versions
+- if Bridge's Makefile changes in a future version to override `GOFLAGS` or set
+  conflicting build flags, raise the conflict rather than silently dropping the
+  hardening flags
+
 ## Bash Conventions
 
 All shell scripts must follow these rules:

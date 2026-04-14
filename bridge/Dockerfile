@@ -34,7 +34,10 @@ RUN git clone --depth 1 --branch ${BRIDGE_VERSION} \
 RUN /usr/local/bin/patch-source.sh /build
 
 # Build without Qt/GUI
-RUN make build-nogui
+# -trimpath strips host filesystem paths embedded in the binary (source file
+# paths, module cache paths, build tool paths) so binary inspection of the
+# shipped image reveals no build environment details.
+RUN GOFLAGS="-trimpath" make build-nogui
 
 # -----------------------------------------------------------------------------
 # Stage 2: Runtime

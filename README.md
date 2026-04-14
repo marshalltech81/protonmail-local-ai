@@ -40,8 +40,11 @@ Ask questions about your inbox in plain English. Everything stays on your machin
 git clone git@github.com:marshalltech81/protonmail-local-ai.git
 cd protonmail-local-ai
 cp .env.example .env
-mkdir -m 700 .secrets
+make init-secrets
 ```
+
+`make init-secrets` creates placeholder secret files under `.secrets/` that
+Docker Compose requires before starting. You will fill them in during setup.
 
 ### 2. Build images
 
