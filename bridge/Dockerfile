@@ -34,10 +34,17 @@ RUN git clone --depth 1 --branch ${BRIDGE_VERSION} \
 RUN /usr/local/bin/patch-source.sh /build
 
 # Build without Qt/GUI
-# -trimpath strips host filesystem paths embedded in the binary (source file
-# paths, module cache paths, build tool paths) so binary inspection of the
-# shipped image reveals no build environment details.
-RUN GOFLAGS="-trimpath" make build-nogui
+# -trimpath    strips host filesystem paths embedded in the binary.
+# -ldflags=-s  omits the symbol table (function names, variable names).
+# -ldflags=-w  omits DWARF debug information.
+# Both flags are set via GOFLAGS so they apply to every go build invocation
+# in the upstream Makefile without patching it.
+# WARNING: if make build-nogui passes its own -ldflags on the command line,
+# Go will use the command-line value and silently ignore the GOFLAGS one (the
+# last -ldflags wins). Verify stripping held with:
+#   go version -m /usr/local/bin/bridge | grep -E 'GoVersion|mod '
+# A stripped binary reports no Build settings for -ldflags in that output.
+RUN GOFLAGS='-trimpath "-ldflags=-s -w"' make build-nogui
 
 # -----------------------------------------------------------------------------
 # Stage 2: Runtime
