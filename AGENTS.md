@@ -261,60 +261,32 @@ When changing Docker Compose service definitions or runtime behavior:
 Bridge is the only Go service in this repository. When modifying the Bridge
 build in `bridge/Dockerfile` or any future Go service, follow these rules:
 
-### Required build flags (inject via `GOFLAGS`)
+### Build target
 
-- always pass `-trimpath`; this strips all host filesystem paths embedded in the
-  compiled binary (source file paths, module cache paths, build tool paths) so
-  binary inspection of the shipped image reveals no build environment details
-- always pass `-ldflags="-s -w"` to strip the symbol table and DWARF tables;
-  this reduces binary size and removes embedded source file paths from the binary
-- always pass `-buildmode=pie` to produce a Position Independent Executable;
-  PIE is what makes ASLR effective at runtime — without it the binary loads at a
-  fixed address and ASLR provides no protection; requires `-fPIE` in `CGO_CFLAGS`
-- do not omit any of the three flags; each addresses a different class of
-  information leakage or exploit mitigation
+- invoke `make build-nogui` using Proton's upstream Makefile without injecting
+  custom `GOFLAGS`, `CGO_CFLAGS`, or `CGO_LDFLAGS`
+- Proton is a security company; their upstream build configuration reflects their
+  own security requirements — do not second-guess it by layering additional flags
+- if a future evaluation concludes that specific additional flags are warranted,
+  document the rationale clearly and get explicit owner approval before adding them
 
-### CGO compiler and linker hardening
-
-- set `CGO_CFLAGS="-D_FORTIFY_SOURCE=2 -fstack-protector-strong -fPIE"` as a
-  builder-stage `ENV`; this applies to all C code compiled via CGO:
-  - `-D_FORTIFY_SOURCE=2` — runtime buffer-overflow detection in glibc functions
-  - `-fstack-protector-strong` — stack canaries on functions with buffers or
-    address-taken locals
-  - `-fPIE` — position-independent code, required for `-buildmode=pie`
-- set `CGO_LDFLAGS="-Wl,-z,relro,-z,now"` as a builder-stage `ENV`:
-  - `-Wl,-z,relro` — GOT is remapped read-only after startup (partial RELRO)
-  - `-Wl,-z,now` — all symbols resolved at load time (BIND_NOW), removing the
-    late-binding attack surface
-
-### Toolchain supply chain
+### Toolchain version safety
 
 - set `GOTOOLCHAIN=local` as a builder-stage `ENV`; this prevents the Go
   toolchain from auto-downloading a different Go version at build time if `go.mod`
   carries a `toolchain` directive requesting a newer version — the pinned base
   image is the source of truth and must not be silently overridden
+
+### Module integrity
+
 - run `go mod download && go mod verify` after cloning source and before building;
   `go mod verify` confirms every cached module matches its checksum in `go.sum`,
   failing the build if any module has been tampered with or corrupted
 
 ### CGO build mode
 
-- never build with `CGO_ENABLED=0` unless the binary is confirmed to not require
-  cgo; Bridge links against libfido2 and libsecret and requires cgo at build time
-
-### Post-build verification
-
-- add a post-build `RUN` step that asserts all hardening properties held:
-  - `file <binary> | grep -q 'pie executable'` — confirms `-buildmode=pie`
-  - `readelf -d <binary> | grep -q 'BIND_NOW'` — confirms `-Wl,-z,now`
-  - `readelf -l <binary> | grep -q 'GNU_RELRO'` — confirms `-Wl,-z,relro`
-- each check must fail the build immediately with a clear error message; this
-  catches regressions where the upstream Makefile silently overrides injected flags
-- verify that the upstream Makefile target (`make build-nogui`) accepts the
-  injected `GOFLAGS` without overriding them before bumping Bridge versions
-- if Bridge's Makefile changes in a future version to override `GOFLAGS` or set
-  conflicting build flags, raise the conflict rather than silently dropping the
-  hardening flags
+- never build with `CGO_ENABLED=0`; Bridge links against libfido2 and libsecret
+  and requires cgo at build time
 
 ## Bash Conventions
 
