@@ -1,7 +1,7 @@
 # =============================================================================
 # mbsync — real-time incremental email sync from ProtonBridge to Maildir
 # =============================================================================
-FROM debian:bookworm-slim
+FROM debian:bookworm-slim@sha256:4724b8cc51e33e398f0e2e15e18d5ec2851ff0c2280647e1310bc1642182655d
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     isync \
@@ -29,6 +29,7 @@ RUN groupadd --gid 1001 mbsync && \
 # -----------------------------------------------------------------------------
 COPY mbsyncrc.template /etc/mbsyncrc.template
 COPY --chmod=755 --chown=mbsync:mbsync entrypoint.sh /entrypoint.sh
+COPY --chmod=755 --chown=mbsync:mbsync healthcheck.sh /healthcheck.sh
 
 # -----------------------------------------------------------------------------
 # Pre-create Maildir structure with correct ownership BEFORE dropping to
@@ -48,5 +49,7 @@ USER mbsync
 
 # Declare volume AFTER chown so Docker preserves ownership on first mount
 VOLUME ["/maildir"]
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=120s --retries=3 CMD ["/healthcheck.sh"]
 
 ENTRYPOINT ["/entrypoint.sh"]

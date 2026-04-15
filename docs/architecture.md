@@ -23,9 +23,10 @@ ProtonBridge container
         │  IMAP (localhost, internal Docker network)
         ▼
 mbsync container
-  - Polls Bridge IMAP every SYNC_INTERVAL seconds
+  - Polls Bridge IMAP every SYNC_INTERVAL seconds in a bounded retry loop
   - Writes Maildir format to maildir-volume
   - Maintains sync state for incremental updates
+  - Fails closed if cert extraction or repeated sync attempts fail
         │
         │  Maildir files (shared volume, read-only for indexer)
         ▼
@@ -52,6 +53,7 @@ mcp-server container
   - Q&A: retrieves threads → prompts Ollama or Claude API
   - Retrieval: serves indexed mailbox data from SQLite
   - Actions: disabled by default via MCP read-only mode
+  - Any future live write path must be cert-pinned and explicitly enabled
         │
         │  HTTP/SSE (localhost:3000)
         ▼
@@ -85,6 +87,10 @@ The stack uses two isolated bridge networks:
 
 - `bridge-net` for ProtonBridge ↔ `mbsync`
 - `app-net` for `indexer` ↔ `ollama` ↔ `mcp-server`
+
+For stricter local-only deployments, `docker-compose.hardened.yml` marks
+`app-net` as `internal: true` so those services cannot reach the internet.
+Use it only after pulling Ollama models and only with `LLM_MODE=local`.
 
 Only one port is exposed to the host: `127.0.0.1:3000` for the MCP server.
 No container is reachable from outside the machine.

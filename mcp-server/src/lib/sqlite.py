@@ -169,6 +169,11 @@ class Database:
         date_to: str | None = None,
         has_attachments: bool | None = None,
     ) -> list[ThreadResult]:
+        if date_from:
+            self._validate_iso8601("date_from", date_from)
+        if date_to:
+            self._validate_iso8601("date_to", date_to)
+
         filtered = results
         if folders:
             filtered = [r for r in filtered if r.folder in folders]
@@ -262,3 +267,11 @@ class Database:
             body_text=row["body_text"] if "body_text" in row.keys() and row["body_text"] else "",
             score=float(row["score"]) if "score" in row.keys() else 0.0,
         )
+
+    @staticmethod
+    def _validate_iso8601(field_name: str, value: str) -> None:
+        normalized = value[:-1] + "+00:00" if value.endswith("Z") else value
+        try:
+            datetime.fromisoformat(normalized)
+        except ValueError as exc:
+            raise ValueError(f"{field_name} must be a valid ISO 8601 date/time string") from exc

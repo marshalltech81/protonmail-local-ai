@@ -84,10 +84,16 @@ make up
 make logs  # verify everything is running
 ```
 
+`make up` now runs a security preflight first: it validates `.env`, checks that
+the Bridge password secret exists and is non-empty, and enforces `600`
+permissions on secret files before Docker Compose starts the stack.
+
 By default, the MCP server runs in read-only mode:
 - search, retrieval, and intelligence tools are available
 - mail-changing action tools are not registered
 - retrieval is served from the local SQLite index rather than direct IMAP access
+- any future live write path must use explicit cert-pinned TLS; insecure
+  fallback behavior is rejected rather than attempted
 
 ### 6. Configure Claude Desktop
 
@@ -126,7 +132,8 @@ Once connected, ask Claude Desktop:
 | Q&A context (cloud mode) | Optionally sent to Claude API — opt-in when `LLM_MODE=cloud` |
 
 Set `LLM_MODE=local` in `.env` (default) to keep everything fully local.
-Set `LLM_MODE=cloud` and provide `ANTHROPIC_API_KEY` to use Claude API for Q&A.
+Set `LLM_MODE=cloud` and write your Anthropic key to
+`.secrets/anthropic_api_key.txt` to use Claude API for Q&A.
 
 ## Updating Bridge
 
@@ -159,6 +166,7 @@ Your email index is preserved in a separate volume — only Bridge credentials a
 
 ```bash
 make build        # Build all Docker images
+make validate-env # Check .env values and secret permissions before startup
 make up           # Start the full stack
 make down         # Stop the full stack
 make logs         # Tail all logs

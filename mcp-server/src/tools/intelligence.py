@@ -9,6 +9,8 @@ import logging
 import httpx
 from mcp.types import TextContent
 
+from ..lib.security import safe_exception_text
+
 log = logging.getLogger("mcp.tools.intelligence")
 
 SUMMARIZE_SYSTEM = """You are an email assistant. You will be given indexed
@@ -30,11 +32,20 @@ requested schema. Return ONLY valid JSON matching the schema — no preamble, no
 explanation."""
 
 
-def register_intelligence_tools(server, db, ollama, llm_mode: str, anthropic_key: str):
+def register_intelligence_tools(
+    server,
+    db,
+    ollama,
+    llm_mode: str,
+    anthropic_key: str,
+    claude_model: str,
+):
+    secret_values = [anthropic_key]
+
     async def llm_complete(system: str, user: str) -> str:
         """Route to local Ollama or Claude API based on llm_mode."""
         if llm_mode == "cloud" and anthropic_key:
-            return await _claude_complete(system, user, anthropic_key)
+            return await _claude_complete(system, user, anthropic_key, claude_model)
         return await ollama.complete(system, user)
 
     @server.tool()
@@ -103,8 +114,9 @@ def register_intelligence_tools(server, db, ollama, llm_mode: str, anthropic_key
             return [TextContent(type="text", text=f"{answer}\n\nSources searched:\n{sources}")]
 
         except Exception as e:
-            log.error(f"ask_mailbox error: {e}")
-            return [TextContent(type="text", text=f"Error: {e}")]
+            safe_error = safe_exception_text(e, secret_values)
+            log.error("ask_mailbox error: %s", safe_error)
+            return [TextContent(type="text", text=f"Error: {safe_error}")]
 
     @server.tool()
     async def summarize_thread(
@@ -153,8 +165,9 @@ def register_intelligence_tools(server, db, ollama, llm_mode: str, anthropic_key
             ]
 
         except Exception as e:
-            log.error(f"summarize_thread error: {e}")
-            return [TextContent(type="text", text=f"Error: {e}")]
+            safe_error = safe_exception_text(e, secret_values)
+            log.error("summarize_thread error: %s", safe_error)
+            return [TextContent(type="text", text=f"Error: {safe_error}")]
 
     @server.tool()
     async def extract_from_emails(
@@ -231,11 +244,12 @@ def register_intelligence_tools(server, db, ollama, llm_mode: str, anthropic_key
             return [TextContent(type="text", text=json.dumps(extracted_records, indent=2))]
 
         except Exception as e:
-            log.error(f"extract_from_emails error: {e}")
-            return [TextContent(type="text", text=f"Error: {e}")]
+            safe_error = safe_exception_text(e, secret_values)
+            log.error("extract_from_emails error: %s", safe_error)
+            return [TextContent(type="text", text=f"Error: {safe_error}")]
 
 
-async def _claude_complete(system: str, user: str, api_key: str) -> str:
+async def _claude_complete(system: str, user: str, api_key: str, model: str) -> str:
     """Call the Claude API for higher-quality reasoning."""
     async with httpx.AsyncClient(timeout=60.0) as client:
         r = await client.post(
@@ -246,7 +260,7 @@ async def _claude_complete(system: str, user: str, api_key: str) -> str:
                 "content-type": "application/json",
             },
             json={
-                "model": "claude-sonnet-4-6",
+                "model": model,
                 "max_tokens": 1024,
                 "system": system,
                 "messages": [{"role": "user", "content": user}],

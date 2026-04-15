@@ -13,7 +13,28 @@ export XDG_CACHE_HOME="/data/cache"
 export GNUPGHOME="/data/gnupg"
 export PASSWORD_STORE_DIR="/data/pass"
 
-VAULT="$XDG_CONFIG_HOME/protonmail/bridge-v3/vault.enc"
+readonly VAULT="$XDG_CONFIG_HOME/protonmail/bridge-v3/vault.enc"
+readonly PASS_STORE_ID_FILE="$PASSWORD_STORE_DIR/.gpg-id"
+readonly BOOTSTRAP_TIMEOUT_SECONDS=30
+
+run_with_timeout() {
+    local description="$1"
+    shift
+
+    if ! timeout "${BOOTSTRAP_TIMEOUT_SECONDS}s" "$@"; then
+        echo "ERROR: ${description} failed or timed out after ${BOOTSTRAP_TIMEOUT_SECONDS}s." >&2
+        exit 1
+    fi
+}
+
+have_bridge_key() {
+    timeout "${BOOTSTRAP_TIMEOUT_SECONDS}s" gpg --list-keys "ProtonBridge" >/dev/null 2>&1
+}
+
+bridge_fingerprint() {
+    timeout "${BOOTSTRAP_TIMEOUT_SECONDS}s" gpg --list-keys --with-colons "ProtonBridge" \
+        | awk -F: '/^fpr/{print $10; exit}'
+}
 
 # =============================================================================
 # Bootstrap GPG and pass on first run
@@ -22,21 +43,29 @@ VAULT="$XDG_CONFIG_HOME/protonmail/bridge-v3/vault.enc"
 # the design relies on Docker volume isolation, restrictive permissions, and
 # host-level disk encryption rather than an interactive key-unlock step.
 # =============================================================================
-if ! gpg --list-keys "ProtonBridge" >/dev/null 2>&1; then
+if ! have_bridge_key; then
     echo ">>> First run: initializing GPG key and pass store..."
 
-    gpg --batch --passphrase '' --quick-gen-key \
-        'ProtonBridge' default default never \
-        || { echo "ERROR: GPG key generation failed." >&2; exit 1; }
+    run_with_timeout \
+        "GPG key generation" \
+        gpg --batch --passphrase '' --quick-gen-key \
+        "ProtonBridge" default default never
 
-    FPR="$(gpg --list-keys --with-colons 'ProtonBridge' | awk -F: '/^fpr/{print $10; exit}')"
+    FPR="$(bridge_fingerprint)"
     [[ -n "$FPR" ]] \
         || { echo "ERROR: Failed to extract GPG fingerprint after key creation." >&2; exit 1; }
 
-    pass init "$FPR" \
-        || { echo "ERROR: pass store initialization failed." >&2; exit 1; }
+    run_with_timeout "pass store initialization" pass init "$FPR"
 
     echo ">>> GPG + pass initialized (fingerprint: $FPR)"
+fi
+
+if [[ ! -f "$PASS_STORE_ID_FILE" ]]; then
+    echo ">>> Pass store metadata missing. Re-initializing pass store..."
+    FPR="$(bridge_fingerprint)"
+    [[ -n "$FPR" ]] \
+        || { echo "ERROR: Failed to extract GPG fingerprint for pass store repair." >&2; exit 1; }
+    run_with_timeout "pass store initialization" pass init "$FPR"
 fi
 
 # =============================================================================
@@ -44,7 +73,7 @@ fi
 # =============================================================================
 LOGGED_IN=false
 if [[ -f "$VAULT" ]]; then
-    if gpg --list-keys "ProtonBridge" >/dev/null 2>&1; then
+    if have_bridge_key; then
         LOGGED_IN=true
     else
         echo "ERROR: vault.enc exists but GPG key 'ProtonBridge' is missing." >&2

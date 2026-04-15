@@ -8,6 +8,8 @@ import logging
 
 from mcp.types import TextContent
 
+from ..lib.security import safe_exception_text
+
 log = logging.getLogger("mcp.tools.actions")
 
 
@@ -93,8 +95,9 @@ def register_action_tools(server, imap, read_only: bool = True):
                 return [TextContent(type="text", text="Failed to send email. Check logs.")]
 
         except Exception as e:
-            log.error(f"send_email error: {e}")
-            return [TextContent(type="text", text=f"Error: {e}")]
+            safe_error = safe_exception_text(e)
+            log.error("send_email error: %s", safe_error)
+            return [TextContent(type="text", text=f"Error: {safe_error}")]
 
     @server.tool()
     async def reply_to_thread(
@@ -159,8 +162,9 @@ def register_action_tools(server, imap, read_only: bool = True):
                 ]
             return [TextContent(type="text", text="Move failed.")]
         except Exception as e:
-            log.error(f"move_message error: {e}")
-            return [TextContent(type="text", text=f"Error: {e}")]
+            safe_error = safe_exception_text(e)
+            log.error("move_message error: %s", safe_error)
+            return [TextContent(type="text", text=f"Error: {safe_error}")]
 
     @server.tool()
     async def mark_read(
@@ -192,8 +196,9 @@ def register_action_tools(server, imap, read_only: bool = True):
                 )
             return [TextContent(type="text", text="\n".join(results))]
         except Exception as e:
-            log.error(f"mark_read error: {e}")
-            return [TextContent(type="text", text=f"Error: {e}")]
+            safe_error = safe_exception_text(e)
+            log.error("mark_read error: %s", safe_error)
+            return [TextContent(type="text", text=f"Error: {safe_error}")]
 
     @server.tool()
     async def flag_message(
@@ -223,8 +228,9 @@ def register_action_tools(server, imap, read_only: bool = True):
                 return [TextContent(type="text", text=f"Message {state} successfully.")]
             return [TextContent(type="text", text=f"Failed to {state} message.")]
         except Exception as e:
-            log.error(f"flag_message error: {e}")
-            return [TextContent(type="text", text=f"Error: {e}")]
+            safe_error = safe_exception_text(e)
+            log.error("flag_message error: %s", safe_error)
+            return [TextContent(type="text", text=f"Error: {safe_error}")]
 
     @server.tool()
     async def create_draft(

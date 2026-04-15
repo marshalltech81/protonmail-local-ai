@@ -128,6 +128,13 @@ This pulls:
 make up
 ```
 
+`make up` now validates `.env` and the secret files first. It fails fast if:
+
+- `BRIDGE_USER` is still unset or left at the placeholder value
+- `.secrets/bridge_pass.txt` is missing, empty, or not `600`
+- `LLM_MODE=cloud` but `.secrets/anthropic_api_key.txt` is missing, empty, or not `600`
+- numeric or enum settings such as `SYNC_INTERVAL`, `MCP_PORT`, `MCP_READ_ONLY`, or `LLM_MODE` are invalid
+
 Verify everything is running:
 
 ```bash
@@ -146,6 +153,8 @@ The initial index scan may take several minutes depending on mailbox size.
 The default MCP deployment is read-only:
 - search, retrieval, and intelligence tools use the local SQLite index
 - mail-changing action tools are not registered until a safe write path is explicitly enabled
+- the latent live Bridge transport now fails closed unless a future write path
+  is configured with explicit cert-pinned TLS
 
 On first run, Bridge must download and decrypt your full mailbox from Proton's
 servers before mbsync can pull anything. This can take a long time for large
@@ -280,7 +289,9 @@ If you see rapid-fire lines like:
 
 Bridge is still downloading messages. Do not attempt cert extraction yet —
 IMAP will be unresponsive during heavy Gluon sync, and `mbsync` now fails
-closed and retries instead of syncing without a pinned Bridge cert.
+closed instead of syncing without a pinned Bridge cert. If Bridge stays in
+this state, the `mbsync` container now exits after a bounded wait and Docker
+restarts it so the failure is visible instead of hanging forever.
 
 **2. Check that Bridge is authenticated**
 
@@ -350,8 +361,16 @@ Run these checks in order of depth.
 docker compose logs mbsync --tail 20
 ```
 
-Look for `>>> Syncing...` lines repeating at your `SYNC_INTERVAL`. If you see
-`>>> Bridge IMAP is ready.` but no sync output, something failed silently.
+Look for `>>> Syncing...` lines repeating at your `SYNC_INTERVAL`. If startup
+fails, `mbsync` now logs a specific cause such as:
+
+- missing `BRIDGE_USER`
+- missing or empty `/run/secrets/bridge_pass`
+- cert extraction timeout
+- `openssl s_client` handshake errors
+
+Repeated sync failures now count toward an exit threshold so the container
+restarts instead of looping forever in a broken state.
 
 **2. Did any mail land in the Maildir volume?**
 
@@ -390,12 +409,19 @@ mismatches.
 
 ### mbsync fails to connect
 
-Bridge takes 10–15 seconds to fully start. mbsync waits automatically,
-but if it keeps failing:
+Bridge takes 10–15 seconds to fully start. mbsync waits automatically, but it
+now gives up after a bounded wait and lets Docker restart it rather than
+appearing healthy forever. If it keeps failing:
 
 ```bash
 docker compose logs mbsync
 docker compose logs protonmail-bridge
+```
+
+If you want Docker's view of the current state:
+
+```bash
+docker inspect mbsync --format='{{json .State.Health}}'
 ```
 
 ### Ollama container is unhealthy
@@ -464,10 +490,10 @@ Your email index is in a separate volume (`sqlite-volume`) and is not affected.
 
 ### mbsync fails — TLS hostname mismatch after rebuilding Bridge image
 
-The TLS cert Bridge generates is cached inside `vault.enc` in the `bridge-data` volume.
-Rebuilding the image does not regenerate the cert — the old one (issued for `127.0.0.1`
-only) is reused. To force a fresh cert with the correct SANs, delete `vault.enc` from
-the volume without wiping the GPG/pass store:
+The TLS cert Bridge generates is cached inside `vault.enc` in the `bridge-data`
+volume. Rebuilding the image does not regenerate the cert — the old one
+(issued for `127.0.0.1` only) is reused. To force a fresh cert with the correct
+SANs, delete `vault.enc` from the volume without wiping the GPG/pass store:
 
 ```bash
 make down
@@ -476,3 +502,6 @@ docker run --rm -v protonmail-local-ai_bridge-data:/data debian:bookworm-slim \
 make first-run   # re-login; Bridge generates a new cert with protonmail-bridge SAN
 make up
 ```
+
+Deleting `vault.enc` is a full re-authentication path, not a lightweight cert
+refresh. Plan on logging into Bridge again.

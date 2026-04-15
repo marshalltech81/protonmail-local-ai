@@ -14,6 +14,7 @@ services:
     image: protonmail-local-ai/bridge
     container_name: protonmail-bridge
     restart: unless-stopped
+    stop_grace_period: 30s
     read_only: true
     security_opt:
       - no-new-privileges:true
@@ -27,6 +28,11 @@ services:
       - /home/bridge:uid=1000,gid=1000,mode=700
     volumes:
       - bridge-data:/data
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     networks:
       - bridge-net
     healthcheck:
@@ -106,12 +112,22 @@ services:
       context: ./indexer
     container_name: indexer
     restart: unless-stopped
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 128
+    tmpfs:
+      - /tmp
+      - /home/indexer:uid=1002,gid=1002,mode=700
     depends_on:
       ollama:
         condition: service_healthy
       mbsync:
-        condition: service_started
+        condition: service_healthy
     environment:
+      HOME: /home/indexer
       OLLAMA_HOST: http://ollama:11434
       OLLAMA_EMBED_MODEL: ${OLLAMA_EMBED_MODEL:-nomic-embed-text}
       MAILDIR_PATH: /maildir
@@ -142,7 +158,7 @@ services:
       - /tmp
     depends_on:
       indexer:
-        condition: service_started
+        condition: service_healthy
       ollama:
         condition: service_healthy
     secrets:

@@ -161,91 +161,105 @@ class Database:
         date_last = thread.date_last.isoformat()
         has_attachments = int(any(m.has_attachments for m in thread.messages))
 
-        # Accumulate body text rather than regenerating from the (possibly
-        # incomplete) messages list. On insert, text_for_embedding() has all
-        # messages. On update, append only the new message content.
-        existing = cur.execute(
-            "SELECT body_text FROM threads WHERE thread_id = ?", (thread.thread_id,)
-        ).fetchone()
+        try:
+            cur.execute("BEGIN IMMEDIATE")
 
-        if existing and existing["body_text"]:
-            new_content = "\n".join(
-                f"From: {m.from_addr}\nDate: {m.date.isoformat()}\n{m.body_text[:2000]}"
-                for m in thread.messages
-            )
-            body = (existing["body_text"] + "\n" + new_content)[:8000]
-        else:
-            body = thread.text_for_embedding()
+            # Accumulate body text rather than regenerating from the (possibly
+            # incomplete) messages list. On insert, text_for_embedding() has all
+            # messages. On update, append only previously unseen message content.
+            existing = cur.execute(
+                "SELECT body_text, message_ids FROM threads WHERE thread_id = ?",
+                (thread.thread_id,),
+            ).fetchone()
 
-        # Upsert main thread record
-        cur.execute(
-            """
-            INSERT INTO threads
-                (thread_id, subject, participants, folder,
-                 date_first, date_last, message_ids, snippet, has_attachments,
-                 body_text)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(thread_id) DO UPDATE SET
-                participants    = excluded.participants,
-                date_last       = excluded.date_last,
-                message_ids     = excluded.message_ids,
-                snippet         = excluded.snippet,
-                has_attachments = excluded.has_attachments,
-                body_text       = excluded.body_text
-            """,
-            (
-                thread.thread_id,
-                thread.subject,
-                participants_json,
-                thread.folder,
-                date_first,
-                date_last,
-                message_ids_json,
-                snippet,
-                has_attachments,
-                body,
-            ),
-        )
+            if existing and existing["body_text"]:
+                existing_message_ids = set(json.loads(existing["message_ids"] or "[]"))
+                new_messages = [
+                    m for m in thread.messages if m.message_id not in existing_message_ids
+                ]
+                if new_messages:
+                    new_content = "\n".join(
+                        f"From: {m.from_addr}\nDate: {m.date.isoformat()}\n{m.body_text[:2000]}"
+                        for m in new_messages
+                    )
+                    body = (existing["body_text"] + "\n" + new_content)[:8000]
+                else:
+                    body = existing["body_text"]
+            else:
+                body = thread.text_for_embedding()
 
-        # Update message→thread mapping for all messages
-        for msg in thread.messages:
+            # Upsert main thread record
             cur.execute(
                 """
-                INSERT OR REPLACE INTO message_thread_map
-                    (message_id, thread_id, filepath)
-                VALUES (?, ?, ?)
+                INSERT INTO threads
+                    (thread_id, subject, participants, folder,
+                     date_first, date_last, message_ids, snippet, has_attachments,
+                     body_text)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(thread_id) DO UPDATE SET
+                    participants    = excluded.participants,
+                    date_last       = excluded.date_last,
+                    message_ids     = excluded.message_ids,
+                    snippet         = excluded.snippet,
+                    has_attachments = excluded.has_attachments,
+                    body_text       = excluded.body_text
                 """,
-                (msg.message_id, thread.thread_id, msg.filepath),
+                (
+                    thread.thread_id,
+                    thread.subject,
+                    participants_json,
+                    thread.folder,
+                    date_first,
+                    date_last,
+                    message_ids_json,
+                    snippet,
+                    has_attachments,
+                    body,
+                ),
             )
 
+            # Update message→thread mapping for all messages
+            for msg in thread.messages:
+                cur.execute(
+                    """
+                    INSERT OR REPLACE INTO message_thread_map
+                        (message_id, thread_id, filepath)
+                    VALUES (?, ?, ?)
+                    """,
+                    (msg.message_id, thread.thread_id, msg.filepath),
+                )
+
+                cur.execute(
+                    """
+                    INSERT OR REPLACE INTO indexed_files
+                        (filepath, indexed_at)
+                    VALUES (?, datetime('now'))
+                    """,
+                    (msg.filepath,),
+                )
+
+            # Update FTS5 index
+            cur.execute("DELETE FROM threads_fts WHERE thread_id = ?", (thread.thread_id,))
             cur.execute(
                 """
-                INSERT OR REPLACE INTO indexed_files
-                    (filepath, indexed_at)
-                VALUES (?, datetime('now'))
+                INSERT INTO threads_fts (thread_id, subject, participants, body)
+                VALUES (?, ?, ?, ?)
                 """,
-                (msg.filepath,),
+                (thread.thread_id, thread.subject, participants_json, body),
             )
 
-        # Update FTS5 index
-        cur.execute("DELETE FROM threads_fts WHERE thread_id = ?", (thread.thread_id,))
-        cur.execute(
-            """
-            INSERT INTO threads_fts (thread_id, subject, participants, body)
-            VALUES (?, ?, ?, ?)
-            """,
-            (thread.thread_id, thread.subject, participants_json, body),
-        )
+            # Update vector index — vec0 virtual tables do not support
+            # INSERT OR REPLACE conflict resolution; use DELETE + INSERT instead.
+            cur.execute("DELETE FROM threads_vec WHERE thread_id = ?", (thread.thread_id,))
+            cur.execute(
+                "INSERT INTO threads_vec (thread_id, embedding) VALUES (?, ?)",
+                (thread.thread_id, sqlite_vec.serialize_float32(embedding)),
+            )
 
-        # Update vector index — vec0 virtual tables do not support
-        # INSERT OR REPLACE conflict resolution; use DELETE + INSERT instead.
-        cur.execute("DELETE FROM threads_vec WHERE thread_id = ?", (thread.thread_id,))
-        cur.execute(
-            "INSERT INTO threads_vec (thread_id, embedding) VALUES (?, ?)",
-            (thread.thread_id, sqlite_vec.serialize_float32(embedding)),
-        )
-
-        self._conn.commit()
+            self._conn.commit()
+        except Exception:
+            self._conn.rollback()
+            raise
 
     # -------------------------------------------------------------------------
     # Read operations

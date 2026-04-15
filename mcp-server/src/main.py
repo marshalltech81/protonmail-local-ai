@@ -53,6 +53,7 @@ OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://ollama:11434")
 EMBED_MODEL = os.environ.get("OLLAMA_EMBED_MODEL", "nomic-embed-text")
 LLM_MODEL = os.environ.get("OLLAMA_LLM_MODEL", "llama3.2")
 LLM_MODE = os.environ.get("LLM_MODE", "local")
+CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL", "claude-sonnet-4-6")
 ANTHROPIC_KEY = _read_secret("anthropic_api_key", "ANTHROPIC_API_KEY")
 MCP_PORT = int(os.environ.get("MCP_PORT", "3000"))
 MCP_READ_ONLY = _env_bool("MCP_READ_ONLY", True)
@@ -69,7 +70,7 @@ def main():
     # Register all tool groups
     register_search_tools(server, db, ollama)
     register_retrieval_tools(server, db)
-    register_intelligence_tools(server, db, ollama, LLM_MODE, ANTHROPIC_KEY)
+    register_intelligence_tools(server, db, ollama, LLM_MODE, ANTHROPIC_KEY, CLAUDE_MODEL)
     if MCP_READ_ONLY:
         log.info("MCP read-only mode enabled; action tools are not registered.")
     else:
@@ -83,6 +84,8 @@ def main():
     log.info(f"  SQLite:   {SQLITE_PATH}")
     log.info(f"  Ollama:   {OLLAMA_HOST}")
     log.info(f"  LLM mode: {LLM_MODE}")
+    if LLM_MODE == "cloud":
+        log.info(f"  Claude model: {CLAUDE_MODEL}")
     log.info("  Retrieval: local SQLite index only")
 
     server.run(transport="sse")

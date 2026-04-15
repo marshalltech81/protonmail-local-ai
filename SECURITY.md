@@ -43,4 +43,17 @@ Out of scope:
   an interactive unlock prompt inside the container
 - Only one port is exposed to the host: `127.0.0.1:3000` (MCP server,
   localhost only — not accessible from the network)
-- All containers run on an isolated Docker bridge network
+- The deployment uses two isolated Docker bridge networks:
+  - `bridge-net` for ProtonBridge and `mbsync`
+  - `app-net` for `indexer`, `ollama`, and `mcp-server`
+- An optional hardened overlay (`docker-compose.hardened.yml`) can make
+  `app-net` fully internal for local-only deployments, preventing those
+  containers from reaching the internet
+- Mail-changing MCP tools are disabled by default, and the live Bridge action
+  transport fails closed unless an explicitly configured cert-pinned TLS path
+  exists
+- Secret files under `.secrets/` should remain `600`, and `.secrets/` itself
+  should remain `700`
+- Host-level controls matter: enable full-disk encryption for Docker storage
+  and backups, and prefer stronger daemon isolation such as rootless Docker,
+  `userns-remap`, or Docker Desktop Enhanced Container Isolation when available

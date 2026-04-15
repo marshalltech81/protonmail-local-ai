@@ -1,4 +1,4 @@
-.PHONY: build up down logs first-run update pull-models status clean sync sync-indexer sync-mcp test bridge-patch-check bridge-smoke bridge-upgrade-check init-secrets help
+.PHONY: build up down logs first-run update pull-models status clean sync sync-indexer sync-mcp test bridge-patch-check bridge-smoke bridge-upgrade-check init-secrets validate-env help
 
 # =============================================================================
 # protonmail-local-ai — Makefile
@@ -9,6 +9,7 @@ help:
 	@echo "  protonmail-local-ai"
 	@echo ""
 	@echo "  init-secrets Create placeholder secret files under .secrets/ (run once on setup)"
+	@echo "  validate-env Verify .env values and secret file permissions before startup"
 	@echo "  build        Build all Docker images"
 	@echo "  up           Start the full stack"
 	@echo "  down         Stop the full stack"
@@ -52,8 +53,11 @@ init-secrets:
 build:
 	docker compose build
 
+validate-env:
+	./scripts/validate-env.sh
+
 # Start the full stack in detached mode
-up:
+up: init-secrets validate-env
 	docker compose up -d
 
 # Stop everything

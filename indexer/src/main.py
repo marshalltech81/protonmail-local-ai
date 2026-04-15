@@ -27,6 +27,11 @@ MAILDIR_PATH = Path(os.environ.get("MAILDIR_PATH", "/maildir"))
 SQLITE_PATH = Path(os.environ.get("SQLITE_PATH", "/data/mail.db"))
 OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://ollama:11434")
 EMBED_MODEL = os.environ.get("OLLAMA_EMBED_MODEL", "nomic-embed-text")
+INDEXER_HEALTH_FILE = Path(os.environ.get("INDEXER_HEALTH_FILE", "/tmp/indexer-health"))
+
+
+def touch_health_file() -> None:
+    INDEXER_HEALTH_FILE.touch(exist_ok=True)
 
 
 class MaildirHandler(FileSystemEventHandler):
@@ -91,12 +96,14 @@ def main():
     db = Database(SQLITE_PATH)
     embedder = Embedder(OLLAMA_HOST, EMBED_MODEL)
     threader = Threader(db)
+    touch_health_file()
 
     # Wait for Ollama to be ready
     embedder.wait_for_ready()
 
     # Index existing emails
     initial_index(db, embedder, threader)
+    touch_health_file()
 
     # Watch for new emails
     handler = MaildirHandler(db, embedder, threader)
@@ -107,6 +114,7 @@ def main():
 
     try:
         while True:
+            touch_health_file()
             time.sleep(1)
     except KeyboardInterrupt:
         observer.stop()

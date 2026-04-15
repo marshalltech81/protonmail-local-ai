@@ -105,7 +105,9 @@ Extract structured data from emails matching a query.
 
 Actions are disabled by default because `MCP_READ_ONLY=true` in the standard deployment.
 The tools below describe the intended interface, but they are not registered unless
-the project explicitly enables a safe write path.
+the project explicitly enables a safe write path. The code now fails closed if a
+future write path tries to use live Bridge transport without explicit
+cert-pinned TLS configuration.
 
 ### `send_email`
 Send a new email via ProtonBridge SMTP.

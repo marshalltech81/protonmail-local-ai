@@ -20,6 +20,7 @@ resolve_bridge_version() {
         if [[ -f "$env_file" ]]; then
             candidate="$(grep -E '^BRIDGE_VERSION=' "$env_file" | head -n 1 | cut -d= -f2- || true)"
             if [[ -n "$candidate" ]]; then
+                candidate="${candidate%$'\r'}"
                 printf '%s\n' "$candidate"
                 return 0
             fi
@@ -49,7 +50,7 @@ trap cleanup EXIT
 # Docker build uses. If the helper cannot find the expected patch points, it
 # exits non-zero and we know the upstream source drifted.
 printf 'Checking Proton Bridge patch points for %s...\n' "$BRIDGE_VERSION"
-git clone --depth 1 --branch "$BRIDGE_VERSION" \
+GIT_TERMINAL_PROMPT=0 timeout 60s git clone --depth 1 --branch "$BRIDGE_VERSION" \
     https://github.com/ProtonMail/proton-bridge.git "$CLONE_DIR"
 
 printf 'Fetched upstream Bridge commit %s.\n' "$(git -C "$CLONE_DIR" rev-parse --short HEAD)"

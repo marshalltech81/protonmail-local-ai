@@ -6,7 +6,7 @@
 # -----------------------------------------------------------------------------
 # Stage 1: Builder
 # -----------------------------------------------------------------------------
-FROM golang:1.26.2-bookworm AS builder
+FROM golang:1.26.2-bookworm@sha256:4f4ab2c90005e7e63cb631f0b4427f05422f241622ee3ec4727cc5febbf83e34 AS builder
 
 # Use bash with pipefail for all RUN steps so pipe failures are not silently ignored.
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
@@ -80,7 +80,7 @@ RUN groupadd --gid 1000 bridge && \
             bridge
 
 # Copy compiled binary from builder
-COPY --from=builder /build/bridge /usr/local/bin/bridge
+COPY --chmod=555 --from=builder /build/bridge /usr/local/bin/bridge
 
 # Copy entrypoint — owned by bridge user, executable bit set at copy time
 COPY --chmod=755 --chown=bridge:bridge entrypoint.sh /entrypoint.sh

@@ -11,8 +11,11 @@ from dataclasses import dataclass
 from datetime import datetime
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+from pathlib import Path
 
 import aioimaplib
+
+from .security import safe_exception_text
 
 log = logging.getLogger("mcp.imap")
 
@@ -33,15 +36,35 @@ class FullMessage:
 
 
 class IMAPClient:
-    def __init__(self, host: str, imap_port: int, user: str, password: str, smtp_port: int = 1025):
+    def __init__(
+        self,
+        host: str,
+        imap_port: int,
+        user: str,
+        password: str,
+        smtp_port: int = 1025,
+        tls_cert_file: str | None = None,
+        use_implicit_imap_tls: bool = False,
+    ):
         self.host = host
         self.port = imap_port
         self.smtp_port = smtp_port
         self.user = user
         self.password = password
+        self.tls_cert_file = tls_cert_file
+        self.use_implicit_imap_tls = use_implicit_imap_tls
 
     async def _connect(self, folder: str = "INBOX") -> aioimaplib.IMAP4:
-        client = aioimaplib.IMAP4(host=self.host, port=self.port)
+        context = self._tls_context()
+        if not self.use_implicit_imap_tls:
+            raise RuntimeError(
+                "Refusing insecure live IMAP login: aioimaplib 2.0.1 does not expose a "
+                "cert-validated STARTTLS upgrade path for Bridge port 1143. Keep the "
+                "default write path disabled until a cert-pinned implicit TLS IMAP "
+                "endpoint is explicitly configured."
+            )
+
+        client = aioimaplib.IMAP4_SSL(host=self.host, port=self.port, ssl_context=context)
         await client.wait_hello_from_server()
         await client.login(self.user, self.password)
         await client.select(folder)
@@ -65,7 +88,7 @@ class IMAPClient:
 
             return self._parse_full_message(raw, folder, uid)
         except Exception as e:
-            log.error(f"Failed to fetch message {message_id}: {e}")
+            log.error("Failed to fetch message %s: %s", message_id, self._safe_error(e))
             return None
 
     async def list_folders(self) -> list[dict]:
@@ -83,7 +106,7 @@ class IMAPClient:
                         folders.append({"name": name})
             return folders
         except Exception as e:
-            log.error(f"Failed to list folders: {e}")
+            log.error("Failed to list folders: %s", self._safe_error(e))
             return []
 
     async def move_message(self, uid: str, src_folder: str, dst_folder: str) -> bool:
@@ -96,7 +119,7 @@ class IMAPClient:
             await client.logout()
             return True
         except Exception as e:
-            log.error(f"Failed to move message: {e}")
+            log.error("Failed to move message: %s", self._safe_error(e))
             return False
 
     async def set_flag(self, uid: str, folder: str, flag: str, value: bool) -> bool:
@@ -108,7 +131,7 @@ class IMAPClient:
             await client.logout()
             return True
         except Exception as e:
-            log.error(f"Failed to set flag: {e}")
+            log.error("Failed to set flag: %s", self._safe_error(e))
             return False
 
     def send_email(
@@ -141,18 +164,18 @@ class IMAPClient:
             if body_format == "html":
                 msg.attach(MIMEText(body, "html"))
 
-            context = ssl.create_default_context()
-            context.check_hostname = False
-            context.verify_mode = ssl.CERT_NONE
+            context = self._tls_context()
 
             with smtplib.SMTP(self.host, self.smtp_port) as smtp:
+                smtp.ehlo()
                 smtp.starttls(context=context)
+                smtp.ehlo()
                 smtp.login(self.user, self.password)
                 all_recipients = to + (cc or []) + (bcc or [])
                 smtp.sendmail(self.user, all_recipients, msg.as_string())
             return True
         except Exception as e:
-            log.error(f"Failed to send email: {e}")
+            log.error("Failed to send email: %s", self._safe_error(e))
             return False
 
     def _parse_full_message(self, raw: bytes, folder: str, uid: str) -> FullMessage:
@@ -210,3 +233,22 @@ class IMAPClient:
             imap_uid=uid,
             attachments=attachments,
         )
+
+    def _tls_context(self) -> ssl.SSLContext:
+        if not self.tls_cert_file:
+            raise RuntimeError(
+                "Pinned Bridge TLS certificate path is required for any live Bridge operation."
+            )
+
+        cert_path = Path(self.tls_cert_file)
+        if not cert_path.is_file():
+            raise RuntimeError(f"Pinned Bridge TLS certificate not found at {cert_path}.")
+
+        context = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
+        context.check_hostname = True
+        context.verify_mode = ssl.CERT_REQUIRED
+        context.load_verify_locations(cafile=str(cert_path))
+        return context
+
+    def _safe_error(self, error: Exception) -> str:
+        return safe_exception_text(error, [self.password])
