@@ -80,7 +80,7 @@ services:
   # GPU passthrough: uncomment the deploy block below if you have NVIDIA GPU.
   # ---------------------------------------------------------------------------
   ollama:
-    image: ollama/ollama:0.20.5
+    image: ollama/ollama:0.20.6
     container_name: ollama
     restart: unless-stopped
     volumes:
