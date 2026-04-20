@@ -46,7 +46,7 @@ repos:
         exclude: '\.env\.example$'
 
   - repo: https://github.com/PyCQA/bandit
-    rev: 1.8.6
+    rev: 1.9.4
     hooks:
       - id: bandit
         args: ['-r', 'indexer/src', 'mcp-server/src', '--severity-level', 'medium']
