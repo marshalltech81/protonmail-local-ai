@@ -131,11 +131,17 @@ class Threader:
         # falls within SUBJECT_FALLBACK_WINDOW of the thread's last activity.
         # Without these guards, any two "Re: Hello" / "Invoice" / "Follow
         # up" messages in the same folder would merge into one thread.
+        #
+        # Check multiple candidates newest-first: the most recent thread
+        # with this normalized subject may be an unrelated "Invoice" /
+        # "Follow up" from a different sender, but an older thread in the
+        # same folder can still be a valid match.
         normalized = _normalize_subject(message.subject)
         if normalized:
-            candidate_id = self.db.find_thread_by_subject(normalized, message.folder)
-            if candidate_id and self._subject_fallback_accepts(message, candidate_id):
-                return candidate_id
+            candidate_ids = self.db.find_threads_by_subject(normalized, message.folder)
+            for candidate_id in candidate_ids:
+                if self._subject_fallback_accepts(message, candidate_id):
+                    return candidate_id
 
         return None
 
