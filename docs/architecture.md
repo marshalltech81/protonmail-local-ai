@@ -157,8 +157,11 @@ the fraction of total indexed messages the reaper will touch in a single
 pass. Transient Bridge outages (vault rebuilds, folder renames, auth
 glitches) can cause mbsync to `T`-flag a huge batch at once; the brake
 stops the reaper from acting, while still recording tombstones that will
-clear themselves if mbsync reverts the flags. `INDEXER_DELETION_FORCE=true`
-overrides the brake for intentional bulk cleanups.
+clear themselves if mbsync reverts the flags. An absolute floor of 10
+tombstones per pass is always allowed regardless of the percentage so
+that routine cleanup on small mailboxes is not gated by the 5% default.
+`INDEXER_DELETION_FORCE=true` overrides the brake for intentional bulk
+cleanups.
 
 `mbsync` keeps `Expunge None` regardless — the reaper cleans up the local
 index; it does not change mbsync's pull-only, no-destructive-delete posture

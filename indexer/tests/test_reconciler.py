@@ -361,9 +361,11 @@ class TestMassDeleteBrake:
         return paths
 
     def test_aborts_when_tombstones_exceed_threshold(self, db, threader, embedder, maildir):
-        paths = self._stage_batch(maildir, db, threader, 10)
-        # Tombstone 6 of 10 (60%) — well over the 5% default
-        for p in paths[:6]:
+        # Stage past the 10-message absolute floor so the 5% percentage
+        # gate is the binding constraint — max_allowed here is
+        # ``max(10, int(30 * 0.05)) = 10``; 20 tombstones trips the brake.
+        paths = self._stage_batch(maildir, db, threader, 30)
+        for p in paths[:20]:
             t = p.with_name(p.name + "T")
             p.rename(t)
 
@@ -378,12 +380,33 @@ class TestMassDeleteBrake:
         result = rec.reap()
         assert result["aborted"] is True
         # Index was not touched
-        assert db.count_total_messages() == 10
-        assert db.count_pending_deletions() == 6
+        assert db.count_total_messages() == 30
+        assert db.count_pending_deletions() == 20
 
-    def test_force_overrides_brake(self, db, threader, embedder, maildir):
+    def test_small_mailbox_floor_permits_routine_cleanup(self, db, threader, embedder, maildir):
+        """Regression: without an absolute floor a 10-message mailbox
+        would trip the 5% brake on a single deletion (10%). The brake
+        exists to catch Bridge-outage-induced mass tombstoning, not to
+        block routine cleanup on small mailboxes — so the first 10
+        tombstones per pass are always allowed."""
         paths = self._stage_batch(maildir, db, threader, 10)
         for p in paths[:6]:
+            t = p.with_name(p.name + "T")
+            p.rename(t)
+
+        cfg = _default_config(grace_days=0, max_batch_pct=0.05)
+        rec = Reconciler(db, embedder, threader, cfg)
+        rec.sweep()
+        db._conn.execute("UPDATE pending_deletions SET marked_at = '2000-01-01T00:00:00+00:00'")
+        db._conn.commit()
+
+        result = rec.reap()
+        assert result["aborted"] is False
+        assert db.count_total_messages() == 4  # 10 - 6 reaped
+
+    def test_force_overrides_brake(self, db, threader, embedder, maildir):
+        paths = self._stage_batch(maildir, db, threader, 30)
+        for p in paths[:20]:
             t = p.with_name(p.name + "T")
             p.rename(t)
 
@@ -395,7 +418,7 @@ class TestMassDeleteBrake:
 
         result = rec.reap()
         assert result["aborted"] is False
-        assert db.count_total_messages() == 4  # 10 - 6 reaped
+        assert db.count_total_messages() == 10  # 30 - 20 reaped
 
 
 # ---------------------------------------------------------------------------
