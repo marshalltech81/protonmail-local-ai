@@ -10,6 +10,8 @@ import os
 from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
+from starlette.requests import Request
+from starlette.responses import JSONResponse
 
 from .lib.ollama import OllamaClient
 from .lib.sqlite import Database
@@ -66,6 +68,23 @@ def main():
 
     # FastMCP server — supports @server.tool() decorator and SSE transport
     server = FastMCP("protonmail-local-ai", port=MCP_PORT)
+
+    # Plain HTTP health endpoint used by the container healthcheck. Sits
+    # outside the MCP protocol so `docker healthcheck` and operator scripts
+    # can probe liveness without speaking SSE. Returns 200 when the SQLite
+    # index is reachable via the read-only connection — enough to catch a
+    # missing volume mount or a corrupt DB without exercising any write
+    # path. The error string is intentionally generic in the response so
+    # the endpoint does not leak DB paths or schema details to anyone who
+    # can reach localhost:MCP_PORT.
+    @server.custom_route("/health", methods=["GET"], include_in_schema=False)
+    async def health(_: Request) -> JSONResponse:
+        try:
+            db.ping()
+        except Exception:
+            log.exception("health probe failed")
+            return JSONResponse({"status": "unhealthy"}, status_code=503)
+        return JSONResponse({"status": "ok"})
 
     # Register all tool groups
     register_search_tools(server, db, ollama)

@@ -27,6 +27,17 @@ class TestReadOnlyConnection:
         assert row["subject"] == "invoice for march"
 
 
+class TestPing:
+    def test_ping_succeeds_on_healthy_db(self, seeded_db: Database):
+        # Returns None on success; no exception is the signal.
+        assert seeded_db.ping() is None
+
+    def test_ping_raises_when_connection_closed(self, seeded_db: Database):
+        seeded_db._conn.close()
+        with pytest.raises(sqlite3.ProgrammingError):
+            seeded_db.ping()
+
+
 class TestFailFastOnMissingIndex:
     def test_missing_parent_directory_raises(self, tmp_path):
         """MCP is a read-only consumer; if the data directory does not
