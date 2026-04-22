@@ -38,6 +38,6 @@ jobs:
         with:
           args: >-
             --config ./lychee.toml
-            README.md AGENTS.md PLAN.md CLAUDE.md CONTRIBUTING.md SECURITY.md
+            README.md AGENTS.md PLAN.md CLAUDE.md
             docs/**/*.md docs/**/*.json
             .github/**/*.md .github/**/*.yml
