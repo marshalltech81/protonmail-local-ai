@@ -19,7 +19,7 @@ from watchdog.observers import Observer
 from .database import EMBEDDING_DIM, Database
 from .embedder import Embedder
 from .parser import parse_email
-from .reconciler import Reconciler, ReconcilerConfig, load_config_from_env
+from .reconciler import Reconciler, ReconcilerConfig, load_config_from_env, sweep_paths
 from .threader import Threader
 
 logging.basicConfig(
@@ -228,6 +228,19 @@ def main():
     # Index existing emails
     initial_index(db, embedder, threader)
     touch_health_file()
+
+    # Always-on startup rename sweep. mbsync renames files in place for
+    # any flag change (e.g. seen ``S`` → seen+replied ``SR``) and when
+    # promoting from ``new/`` to ``cur/``. Events that land while the
+    # indexer is offline would otherwise leave stale filepaths in
+    # ``indexed_files``, which makes later lookups on the renamed file
+    # miss. sweep_paths() only updates filepath rows; it does not
+    # tombstone missing files, so running it unconditionally preserves
+    # the opt-in posture of deletion reconciliation.
+    try:
+        sweep_paths(db)
+    except Exception as e:
+        log.error(f"startup rename sweep failed: {e}")
 
     # Startup reconciliation sweep — detect tombstones and path renames that
     # landed while the indexer was offline. Safe to run every startup: it only

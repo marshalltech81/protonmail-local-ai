@@ -7,8 +7,37 @@ Indexes at the thread level — the unit Claude reasons about.
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from email.utils import parseaddr
 
 from .parser import Message
+
+
+def canonical_addr(value: str) -> str:
+    """Normalize an address string to a lowercase bare email for matching.
+
+    RFC 2822 ``From`` / ``To`` headers can carry the same person as
+    ``Bob Smith <bob@example.com>``, ``bob@example.com``, or
+    ``"Bob S." <bob@example.com>`` — stable string comparison treats
+    those three as different participants and produces false misses for
+    subject-fallback matching and duplicate entries in participant
+    lists. ``parseaddr`` extracts the bare address; lowercasing makes
+    the match case-insensitive.
+
+    Returns an empty string when no usable email address can be
+    recovered. ``parseaddr`` is permissive and will return a first-token
+    value like ``"just"`` for a header like ``"just a name"`` — rejecting
+    results without an ``@`` keeps malformed entries from becoming their
+    own spurious "participant" and from matching other malformed entries
+    to each other.
+    """
+    if not value:
+        return ""
+    _, addr = parseaddr(value)
+    addr = addr.strip().lower()
+    if "@" not in addr:
+        return ""
+    return addr
+
 
 # Subject-only fallback is a last-resort threading path: any two messages
 # with the same normalized subject in the same folder would otherwise
@@ -90,11 +119,17 @@ class Threader:
             if thread:
                 thread.messages.append(message)
                 thread.messages.sort(key=lambda m: m.date)
-                seen = set(thread.participants)
+                # Dedup by canonical address so ``Bob <bob@x>`` does not
+                # shadow ``bob@x`` already in the list. Keep the existing
+                # (richer) display string when a canonical duplicate
+                # arrives; add the new display string only when we have
+                # no entry for that canonical address yet.
+                seen_canonical = {canonical_addr(addr) for addr in thread.participants}
                 for addr in self._participants([message]):
-                    if addr not in seen:
+                    key = canonical_addr(addr)
+                    if key and key not in seen_canonical:
                         thread.participants.append(addr)
-                        seen.add(addr)
+                        seen_canonical.add(key)
                 thread.date_first = min(thread.date_first, message.date)
                 thread.date_last = max(thread.date_last, message.date)
                 return thread
@@ -147,17 +182,24 @@ class Threader:
 
     def _subject_fallback_accepts(self, message: Message, candidate_id: str) -> bool:
         """Gate the subject-only thread merge with participant overlap +
-        date proximity checks. Returns True if the fallback is safe."""
+        date proximity checks. Returns True if the fallback is safe.
+
+        Both sides are compared by canonical address so display-name
+        variants (``Bob Smith <bob@x>`` vs ``bob@x``) do not cause
+        spurious "no participant overlap" results.
+        """
         thread = self.db.get_thread(candidate_id)
         if thread is None:
             return False
 
-        incoming_addrs = {
-            addr.strip()
+        incoming_canonical = {
+            canonical_addr(addr)
             for addr in [message.from_addr, *message.to_addrs, *message.cc_addrs]
-            if addr.strip()
         }
-        if not incoming_addrs.intersection(thread.participants):
+        incoming_canonical.discard("")
+        thread_canonical = {canonical_addr(addr) for addr in thread.participants}
+        thread_canonical.discard("")
+        if not incoming_canonical.intersection(thread_canonical):
             return False
 
         delta = abs(message.date - thread.date_last)
@@ -165,14 +207,23 @@ class Threader:
 
     @staticmethod
     def _participants(messages: list[Message]) -> list[str]:
-        seen = set()
-        result = []
+        # Dedup by canonical lowercase email so ``Bob <bob@x>`` does not
+        # appear separately from ``bob@x`` (or ``BOB@X``) in the output.
+        # The richer display string wins when duplicates exist because
+        # the first-seen entry is preserved; headers without an email
+        # address part are skipped.
+        seen_canonical: set[str] = set()
+        result: list[str] = []
         for msg in messages:
-            for addr in [msg.from_addr] + msg.to_addrs + msg.cc_addrs:
-                addr = addr.strip()
-                if addr and addr not in seen:
-                    seen.add(addr)
-                    result.append(addr)
+            for addr in [msg.from_addr, *msg.to_addrs, *msg.cc_addrs]:
+                stripped = addr.strip()
+                if not stripped:
+                    continue
+                key = canonical_addr(stripped)
+                if not key or key in seen_canonical:
+                    continue
+                seen_canonical.add(key)
+                result.append(stripped)
         return result
 
 

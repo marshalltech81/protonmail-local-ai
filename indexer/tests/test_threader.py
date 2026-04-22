@@ -8,7 +8,7 @@ and participant deduplication.
 
 from datetime import UTC, datetime
 
-from src.threader import Thread, Threader, _normalize_subject
+from src.threader import Thread, Threader, _normalize_subject, canonical_addr
 
 from tests.conftest import make_message, make_thread
 
@@ -395,3 +395,81 @@ class TestParticipants:
         )
         result = Threader._participants([msg])
         assert result[0] == "alice@example.com"
+
+    def test_deduplicates_display_name_variants(self):
+        """``Bob Smith <bob@x>`` and ``bob@x`` are the same person — the
+        older substring-comparison dedup treated them as distinct and
+        left duplicate participant entries in the list."""
+        msg1 = make_message(
+            from_addr="Bob Smith <bob@example.com>",
+            to_addrs=["alice@example.com"],
+        )
+        msg2 = make_message(
+            message_id="msg2@example.com",
+            from_addr="bob@example.com",
+            to_addrs=['"Bob S." <bob@example.com>'],
+        )
+        result = Threader._participants([msg1, msg2])
+        assert sum(1 for p in result if canonical_addr(p) == "bob@example.com") == 1
+        # First-seen display form wins.
+        assert "Bob Smith <bob@example.com>" in result
+
+    def test_skips_entries_without_an_email_part(self):
+        msg = make_message(from_addr="   ", to_addrs=["just a name"])
+        result = Threader._participants([msg])
+        assert result == []
+
+
+# ---------------------------------------------------------------------------
+# canonical_addr helper
+# ---------------------------------------------------------------------------
+
+
+class TestCanonicalAddr:
+    def test_bare_email_is_lowercased(self):
+        assert canonical_addr("BOB@Example.COM") == "bob@example.com"
+
+    def test_display_name_variant_is_stripped(self):
+        assert canonical_addr("Bob Smith <bob@example.com>") == "bob@example.com"
+
+    def test_quoted_display_name_variant(self):
+        assert canonical_addr('"Bob S." <bob@example.com>') == "bob@example.com"
+
+    def test_empty_input_returns_empty(self):
+        assert canonical_addr("") == ""
+
+    def test_input_without_address_part_returns_empty(self):
+        # parseaddr("just a name") returns ("just a name", ""); keep the
+        # empty string so callers can filter rather than matching all
+        # such rows together.
+        assert canonical_addr("just a name") == ""
+
+
+class TestSubjectFallbackCanonicalMatching:
+    def test_accepts_display_name_vs_bare_email(self, db, threader):
+        """Regression: ``Bob Smith <bob@x>`` in the incoming message's
+        From must still overlap the existing thread's ``bob@x``
+        participant. Prior string-equality match would have rejected
+        the fallback and incorrectly started a new thread."""
+        original = make_message(
+            message_id="canon_orig@example.com",
+            subject="Project kickoff",
+            from_addr="alice@example.com",
+            to_addrs=["bob@example.com"],
+        )
+        t1 = threader.assign_thread(original)
+        db.upsert_thread(t1, [0.0] * 768)
+
+        # Same bob but with display name + different letter case. No
+        # In-Reply-To / References headers so only subject fallback can
+        # match — which now has to canonicalize to succeed.
+        followup = make_message(
+            message_id="canon_follow@example.com",
+            subject="Re: Project kickoff",
+            from_addr="Bob Smith <BOB@example.com>",
+            to_addrs=["alice@example.com"],
+            filepath="/maildir/INBOX/cur/canon_follow",
+            date=datetime(2024, 1, 2, tzinfo=UTC),
+        )
+        t2 = threader.assign_thread(followup)
+        assert t2.thread_id == "canon_orig@example.com"

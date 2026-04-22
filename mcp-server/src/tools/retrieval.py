@@ -7,6 +7,8 @@ import logging
 
 from mcp.types import TextContent
 
+from ..lib.validation import clamp_int
+
 log = logging.getLogger("mcp.tools.retrieval")
 
 
@@ -154,11 +156,12 @@ def register_retrieval_tools(server, db):
         Returns:
             List of threads sorted by most recent activity.
         """
-        # Clamp both values so a caller-supplied ``limit=100000`` or
-        # ``offset=-1`` can't drive an unbounded or malformed query. 100
-        # is well above any reasonable interactive use of list_threads.
-        limit = max(1, min(int(limit), 100))
-        offset = max(0, int(offset))
+        # Clamp both values so a caller-supplied ``limit=100000``,
+        # ``offset=-1``, or non-numeric value can't drive an unbounded
+        # or malformed query. 100 is well above any reasonable
+        # interactive use of list_threads.
+        limit = clamp_int(limit, default=20, minimum=1, maximum=100)
+        offset = clamp_int(offset, default=0, minimum=0, maximum=1_000_000)
 
         try:
             threads = db.list_threads(

@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 from src.database import Database
-from src.reconciler import Reconciler, ReconcilerConfig, load_config_from_env
+from src.reconciler import Reconciler, ReconcilerConfig, load_config_from_env, sweep_paths
 from src.threader import Threader
 
 FAKE_EMBEDDING = [0.0] * 768
@@ -172,6 +172,69 @@ class TestSweep:
 
         result = reconciler.sweep()
         assert result["missing"] == 1
+
+
+# ---------------------------------------------------------------------------
+# sweep_paths — always-on startup rename sweep
+# ---------------------------------------------------------------------------
+
+
+class TestSweepPaths:
+    def test_updates_filepath_on_flag_rename(self, db, threader, maildir):
+        path = maildir / "1700000000.M1.host:2,S"
+        _write_eml(path, "sp1@example.com")
+        _index(path, db, threader)
+
+        replied = maildir / "1700000000.M1.host:2,RS"
+        path.rename(replied)
+
+        result = sweep_paths(db)
+        assert result["renamed"] == 1
+        assert result["unreachable"] == 0
+        assert db.find_message_entry_by_filepath(str(replied)) is not None
+        assert db.find_message_entry_by_filepath(str(path)) is None
+
+    def test_does_not_tombstone_missing_files(self, db, threader, maildir):
+        """sweep_paths is the always-on variant; a missing file must be
+        counted as unreachable but NOT recorded in pending_deletions.
+        The opt-in Reconciler.sweep() is still responsible for
+        tombstoning when the operator has enabled deletion
+        reconciliation."""
+        path = maildir / "1700000000.M1.host:2,S"
+        _write_eml(path, "sp2@example.com")
+        _index(path, db, threader)
+        path.unlink()
+
+        result = sweep_paths(db)
+        assert result["unreachable"] == 1
+        assert db.count_pending_deletions() == 0
+
+    def test_does_not_tombstone_t_flagged_files(self, db, threader, maildir):
+        """A trashed file is reachable at its new path, so sweep_paths
+        updates the filepath and keeps the row alive. Tombstoning of
+        T-flagged files stays opt-in via the full Reconciler."""
+        path = maildir / "1700000000.M1.host:2,S"
+        _write_eml(path, "sp3@example.com")
+        _index(path, db, threader)
+
+        trashed = maildir / "1700000000.M1.host:2,ST"
+        path.rename(trashed)
+
+        result = sweep_paths(db)
+        assert result["renamed"] == 1
+        assert db.count_pending_deletions() == 0
+
+    def test_idempotent(self, db, threader, maildir):
+        path = maildir / "1700000000.M1.host:2,S"
+        _write_eml(path, "sp4@example.com")
+        _index(path, db, threader)
+        replied = maildir / "1700000000.M1.host:2,RS"
+        path.rename(replied)
+
+        first = sweep_paths(db)
+        second = sweep_paths(db)
+        assert first["renamed"] == 1
+        assert second["renamed"] == 0
 
 
 # ---------------------------------------------------------------------------

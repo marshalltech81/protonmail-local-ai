@@ -53,6 +53,13 @@ Implemented and working at a high level:
 - `scripts/validate-env.sh` no longer shell-sources `.env`; it parses known keys explicitly so a hostile or malformed value cannot trigger command substitution on the operator's host
 - `indexer` Ollama readiness now uses exact model matching (with optional `:latest` suffix) instead of substring matching, and a failed `_pull_model` raises instead of being silently reported as ready
 - `make test` now runs both `test-indexer` and `test-mcp`
+- MCP tool-boundary integer inputs (`search.limit`, `list_threads.limit/offset`, `ask_mailbox.max_threads`, `extract_from_emails.limit`) now route through a shared `clamp_int` helper so non-numeric or out-of-range caller values fall back to the default rather than raising a bare `ValueError` before the tool's try/except
+- threader participant matching and deduplication now canonicalize addresses via `email.utils.parseaddr` + lowercase, so `Bob Smith <bob@x>`, `bob@x`, and `"Bob S." <bob@x>` collapse to the same identity; malformed entries without an `@` are dropped instead of becoming their own spurious participants
+- the indexer now runs a lightweight rename-only `sweep_paths()` at every startup (always on, regardless of `INDEXER_DELETION_ENABLED`) so mbsync flag renames that land while the indexer was offline no longer leave stale `indexed_files` filepaths; tombstoning and reaping remain opt-in
+- unused Python dependencies were removed: `mail-parser`, `beautifulsoup4` from `indexer`; `aiosmtplib`, `anthropic` from `mcp-server` (the Claude API call already uses `httpx` directly; `aioimaplib` stays for the live-IMAP code path)
+- `init: true` is set on every long-running Compose service so tini as PID 1 forwards signals and reaps zombie subprocesses
+- `ollama` now documents per-model RAM budgets and an optional `mem_limit` knob so memory-constrained hosts can prevent Ollama from OOM-killing other services
+- a new `compileall` CI job byte-compiles `indexer/src` and `mcp-server/src` as belt-and-braces over ruff — catches import-time failures that a pure lint pass can miss
 
 Known limitations:
 
@@ -230,6 +237,8 @@ Definition of done:
 ### Hardening and observability
 - add resource limits (`memory`, `cpus`, `pids_limit`) to all Compose services that currently lack them; `protonmail-bridge` holds live Proton credentials in memory and is the highest-priority target — a `mem_limit` prevents a runaway or exploited process from exhausting host memory; `ollama` and `indexer` are also missing limits
 - add `docs/troubleshooting.md` covering common failure patterns: Ollama not ready, cert extraction failure, sync stalled, schema migration
+- evaluate optional bearer-token auth for `mcp-server` as defense-in-depth on top of the localhost-only bind; today any local process that can reach `127.0.0.1:MCP_PORT` can query the index. This is a posture change, not a bug fix — weigh the operational complexity of a shared token against the threat model (malware on the host, misconfigured port forward) before implementing
+- emit a loud, one-shot `LLM_MODE=cloud` warning at `mcp-server` startup reminding the operator that retrieved email excerpts will be sent to Anthropic; the cloud path is already opt-in but the warning would surface drift if someone flips the mode and forgets
 
 ## Later Backlog
 
