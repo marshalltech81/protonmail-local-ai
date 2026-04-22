@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+from email.utils import getaddresses
 from pathlib import Path
 
 import aioimaplib
@@ -71,18 +72,24 @@ class IMAPClient:
         return client
 
     async def fetch_message(self, message_id: str, folder: str = "INBOX") -> FullMessage | None:
-        """Fetch a full message by Message-ID from IMAP."""
+        """Fetch a full message by Message-ID from IMAP.
+
+        Uses ``UID SEARCH`` / ``UID FETCH`` so the value stored on the
+        returned ``FullMessage`` is a persistent UID that action tools
+        (move, flag, delete) can pass back into IMAP. Plain ``SEARCH``
+        returns session-local sequence numbers that become invalid as
+        soon as any message in the folder is expunged.
+        """
         try:
             client = await self._connect(folder)
-            # Search by Message-ID header
-            _, data = await client.search(f'HEADER Message-ID "{message_id}"')
+            _, data = await client.uid_search(f'HEADER Message-ID "{message_id}"')
             uids = data[0].decode().split()
             if not uids:
                 await client.logout()
                 return None
 
             uid = uids[0]
-            _, msg_data = await client.fetch(uid, "(RFC822)")
+            _, msg_data = await client.uid("FETCH", uid, "(RFC822)")
             raw = msg_data[1]
             await client.logout()
 
@@ -110,11 +117,11 @@ class IMAPClient:
             return []
 
     async def move_message(self, uid: str, src_folder: str, dst_folder: str) -> bool:
-        """Move a message from one folder to another."""
+        """Move a message from one folder to another by UID."""
         try:
             client = await self._connect(src_folder)
-            await client.copy(uid, dst_folder)
-            await client.store(uid, "+FLAGS", "\\Deleted")
+            await client.uid("COPY", uid, dst_folder)
+            await client.uid("STORE", uid, "+FLAGS", "\\Deleted")
             await client.expunge()
             await client.logout()
             return True
@@ -123,11 +130,11 @@ class IMAPClient:
             return False
 
     async def set_flag(self, uid: str, folder: str, flag: str, value: bool) -> bool:
-        """Set or unset an IMAP flag (e.g. \\Seen, \\Flagged)."""
+        """Set or unset an IMAP flag (e.g. \\Seen, \\Flagged) by UID."""
         try:
             client = await self._connect(folder)
             op = "+FLAGS" if value else "-FLAGS"
-            await client.store(uid, op, flag)
+            await client.uid("STORE", uid, op, flag)
             await client.logout()
             return True
         except Exception as e:
@@ -187,7 +194,12 @@ class IMAPClient:
         if msg.is_multipart():
             for part in msg.walk():
                 ct = part.get_content_type()
-                cd = part.get("Content-Disposition", "")
+                # RFC 2183 doesn't constrain the case of ``Content-Disposition``
+                # values; producers in the wild emit ``Attachment`` / ``ATTACHMENT``.
+                # A case-sensitive ``"attachment" in cd`` check would miss those
+                # and incorrectly fold the attachment's decoded payload into
+                # ``body_text`` as if it were the message body.
+                cd = part.get("Content-Disposition", "").lower()
                 # Mirror the indexer parser's policy: keep attachment metadata,
                 # but treat only the first plain/html body part as message
                 # content so forwarded alternatives do not overwrite it.
@@ -220,12 +232,19 @@ class IMAPClient:
         except Exception:
             date = datetime.utcnow()
 
+        # ``getaddresses`` parses RFC 5322 address lists correctly, including
+        # display names that contain commas (``"Doe, Jane" <jane@x.com>``).
+        # A naive ``split(",")`` would shred those into ``"Doe"`` and
+        # ``"Jane" <jane@x.com>``.
+        to_addrs = [addr for _, addr in getaddresses([msg.get("To", "")]) if addr]
+        cc_addrs = [addr for _, addr in getaddresses([msg.get("Cc", "")]) if addr]
+
         return FullMessage(
             message_id=msg.get("Message-ID", "").strip("<>"),
             subject=msg.get("Subject", ""),
             from_addr=msg.get("From", ""),
-            to_addrs=[a.strip() for a in msg.get("To", "").split(",")],
-            cc_addrs=[a.strip() for a in msg.get("Cc", "").split(",") if msg.get("Cc")],
+            to_addrs=to_addrs,
+            cc_addrs=cc_addrs,
             date=date,
             body_text=body_text,
             body_html=body_html,

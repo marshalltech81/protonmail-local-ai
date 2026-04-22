@@ -145,6 +145,74 @@ class TestParseFullMessage:
         assert result.attachments[0]["filename"] == "report.pdf"
         assert result.attachments[0]["content_type"] == "application/octet-stream"
 
+    def test_attachment_with_uppercase_content_disposition_is_recognized(self, tmp_path: Path):
+        """Regression: case-sensitive ``"attachment" in cd`` missed parts
+        marked ``Content-Disposition: Attachment`` / ``ATTACHMENT`` and
+        folded their decoded payload into ``body_text``."""
+        client = _make_client(tmp_path)
+        raw = (
+            b'Content-Type: multipart/mixed; boundary="BOUNDARY"\r\n'
+            b"Message-ID: <upper@example.com>\r\n"
+            b"From: a@x\r\n"
+            b"To: b@x\r\n"
+            b"Subject: upper-case disposition\r\n"
+            b"Date: Mon, 01 Jan 2024 09:00:00 +0000\r\n"
+            b"MIME-Version: 1.0\r\n"
+            b"\r\n"
+            b"--BOUNDARY\r\n"
+            b"Content-Type: text/plain\r\n"
+            b"\r\n"
+            b"real body\r\n"
+            b"--BOUNDARY\r\n"
+            b"Content-Type: application/octet-stream\r\n"
+            b'Content-Disposition: Attachment; filename="weird.bin"\r\n'
+            b"\r\n"
+            b"binarypayload\r\n"
+            b"--BOUNDARY--\r\n"
+        )
+        result = client._parse_full_message(raw, "INBOX", "9")
+        assert "real body" in result.body_text
+        assert "binarypayload" not in result.body_text
+        assert len(result.attachments) == 1
+        assert result.attachments[0]["filename"] == "weird.bin"
+
+    def test_address_with_comma_in_display_name_is_not_split(self, tmp_path: Path):
+        """Regression: ``To: "Doe, Jane" <jane@x.com>`` used to be split
+        on the comma in the quoted display name, shredding the address
+        list. ``getaddresses`` handles RFC 5322 quoting correctly."""
+        client = _make_client(tmp_path)
+        raw = (
+            b"Message-ID: <comma@example.com>\r\n"
+            b"From: a@x\r\n"
+            b'To: "Doe, Jane" <jane@example.com>, bob@example.com\r\n'
+            b'Cc: "Smith, Sam" <sam@example.com>\r\n'
+            b"Subject: commas\r\n"
+            b"Date: Mon, 01 Jan 2024 09:00:00 +0000\r\n"
+            b"\r\n"
+            b"body\r\n"
+        )
+        result = client._parse_full_message(raw, "INBOX", "11")
+        assert result.to_addrs == ["jane@example.com", "bob@example.com"]
+        assert result.cc_addrs == ["sam@example.com"]
+
+    def test_empty_to_and_cc_headers_yield_empty_lists(self, tmp_path: Path):
+        """Regression: the old ``split(",")`` path produced ``[""]`` for an
+        empty ``To`` header, leaking an empty-string recipient into
+        downstream code."""
+        client = _make_client(tmp_path)
+        raw = (
+            b"Message-ID: <empty@example.com>\r\n"
+            b"From: a@x\r\n"
+            b"To: \r\n"
+            b"Subject: empty recipients\r\n"
+            b"Date: Mon, 01 Jan 2024 09:00:00 +0000\r\n"
+            b"\r\n"
+            b"body\r\n"
+        )
+        result = client._parse_full_message(raw, "INBOX", "12")
+        assert result.to_addrs == []
+        assert result.cc_addrs == []
+
     def test_falls_back_to_utcnow_on_unparseable_date(self, tmp_path: Path):
         client = _make_client(tmp_path)
         raw = (
@@ -168,11 +236,12 @@ def _mock_imap_client() -> MagicMock:
     client.login = AsyncMock()
     client.select = AsyncMock()
     client.logout = AsyncMock()
-    client.search = AsyncMock()
-    client.fetch = AsyncMock()
+    client.uid_search = AsyncMock()
+    # ``uid`` is the generic IMAP UID-command entry point used by
+    # fetch/copy/store so action tools receive stable UIDs rather than
+    # session-local sequence numbers.
+    client.uid = AsyncMock()
     client.list = AsyncMock()
-    client.copy = AsyncMock()
-    client.store = AsyncMock()
     client.expunge = AsyncMock()
     return client
 
@@ -191,18 +260,24 @@ class TestAsyncIMAPOperations:
             b"body\r\n"
         )
         mock = _mock_imap_client()
-        mock.search.return_value = (None, [b"42"])
-        mock.fetch.return_value = (None, [None, raw_eml])
+        mock.uid_search.return_value = (None, [b"42"])
+        mock.uid.return_value = (None, [None, raw_eml])
 
         client = _make_client(tmp_path, use_implicit_imap_tls=True)
         with patch("src.lib.imap.aioimaplib.IMAP4_SSL", return_value=mock):
             result = asyncio.run(client.fetch_message("found@example.com"))
         assert result is not None
         assert result.message_id == "found@example.com"
+        # ``imap_uid`` must be the stable UID returned by UID SEARCH so
+        # later action tools (move/flag/delete) reference the right
+        # message even after expunges shift sequence numbers.
+        assert result.imap_uid == "42"
+        mock.uid_search.assert_awaited_once()
+        mock.uid.assert_awaited_once_with("FETCH", "42", "(RFC822)")
 
     def test_fetch_message_returns_none_when_no_match(self, tmp_path: Path):
         mock = _mock_imap_client()
-        mock.search.return_value = (None, [b""])
+        mock.uid_search.return_value = (None, [b""])
 
         client = _make_client(tmp_path, use_implicit_imap_tls=True)
         with patch("src.lib.imap.aioimaplib.IMAP4_SSL", return_value=mock):
@@ -210,7 +285,7 @@ class TestAsyncIMAPOperations:
 
     def test_fetch_message_swallows_errors_and_returns_none(self, tmp_path: Path):
         mock = _mock_imap_client()
-        mock.search.side_effect = RuntimeError("boom")
+        mock.uid_search.side_effect = RuntimeError("boom")
 
         client = _make_client(tmp_path, use_implicit_imap_tls=True)
         with patch("src.lib.imap.aioimaplib.IMAP4_SSL", return_value=mock):
@@ -243,12 +318,16 @@ class TestAsyncIMAPOperations:
         client = _make_client(tmp_path, use_implicit_imap_tls=True)
         with patch("src.lib.imap.aioimaplib.IMAP4_SSL", return_value=mock):
             assert asyncio.run(client.move_message("7", "INBOX", "Archive")) is True
-        mock.copy.assert_awaited_once_with("7", "Archive")
+        # Must be dispatched as UID COPY / UID STORE so the caller-supplied
+        # UID is matched against persistent UIDs, not session sequence numbers.
+        calls = [c.args for c in mock.uid.await_args_list]
+        assert calls[0] == ("COPY", "7", "Archive")
+        assert calls[1] == ("STORE", "7", "+FLAGS", "\\Deleted")
         mock.expunge.assert_awaited_once()
 
     def test_move_message_returns_false_on_error(self, tmp_path: Path):
         mock = _mock_imap_client()
-        mock.copy.side_effect = RuntimeError("nope")
+        mock.uid.side_effect = RuntimeError("nope")
         client = _make_client(tmp_path, use_implicit_imap_tls=True)
         with patch("src.lib.imap.aioimaplib.IMAP4_SSL", return_value=mock):
             assert asyncio.run(client.move_message("7", "INBOX", "Archive")) is False
@@ -259,14 +338,14 @@ class TestAsyncIMAPOperations:
         with patch("src.lib.imap.aioimaplib.IMAP4_SSL", return_value=mock):
             assert asyncio.run(client.set_flag("1", "INBOX", "\\Seen", True)) is True
             assert asyncio.run(client.set_flag("1", "INBOX", "\\Seen", False)) is True
-        # First call uses +FLAGS, second uses -FLAGS.
-        calls = [c.args for c in mock.store.await_args_list]
-        assert calls[0][1] == "+FLAGS"
-        assert calls[1][1] == "-FLAGS"
+        # First call uses UID STORE +FLAGS, second uses UID STORE -FLAGS.
+        calls = [c.args for c in mock.uid.await_args_list]
+        assert calls[0] == ("STORE", "1", "+FLAGS", "\\Seen")
+        assert calls[1] == ("STORE", "1", "-FLAGS", "\\Seen")
 
     def test_set_flag_returns_false_on_error(self, tmp_path: Path):
         mock = _mock_imap_client()
-        mock.store.side_effect = RuntimeError("nope")
+        mock.uid.side_effect = RuntimeError("nope")
         client = _make_client(tmp_path, use_implicit_imap_tls=True)
         with patch("src.lib.imap.aioimaplib.IMAP4_SSL", return_value=mock):
             assert asyncio.run(client.set_flag("1", "INBOX", "\\Seen", True)) is False
