@@ -159,6 +159,102 @@ class TestApplyFilters:
         assert filtered == []
 
 
+class TestKeywordSearchFilterPushdown:
+    def test_folder_filter_pushed_into_sql(self, seeded_db: Database):
+        """Regression: folder filter used to be applied in Python after the
+        BM25 LIMIT. If the top candidates were all INBOX but the user
+        asked for Archive, the Archive match deeper in the ranking would
+        be cut. Pushdown lets the SQL WHERE filter before LIMIT."""
+        results = seeded_db._keyword_search("meeting invoice lunch", limit=2, folders=["Archive"])
+        assert all(r.folder == "Archive" for r in results)
+        assert any(r.thread_id == "t-gamma" for r in results)
+
+    def test_date_filter_pushed_into_sql(self, seeded_db: Database):
+        """Pushing the date filter into SQL means pre-March threads never
+        enter the ranked window — no need to over-fetch and drop them."""
+        results = seeded_db._keyword_search(
+            "march invoice lunch meeting", limit=10, date_from="2024-03-01"
+        )
+        assert all(r.thread_id != "t-gamma" for r in results)  # Feb thread excluded
+        assert all(
+            r.date_last
+            >= __import__("datetime").datetime.fromisoformat("2024-03-01T00:00:00+00:00")
+            for r in results
+        )
+
+    def test_has_attachments_filter_pushed_into_sql(self, seeded_db: Database):
+        results = seeded_db._keyword_search("invoice lunch meeting", limit=10, has_attachments=True)
+        assert all(r.has_attachments for r in results)
+
+    def test_like_fallback_honors_filters(self, seeded_db: Database, monkeypatch):
+        """Force FTS to raise so the LIKE fallback runs, and verify filters
+        still apply in the fallback path."""
+        from src.lib import sqlite as sqlite_mod
+
+        monkeypatch.setattr(sqlite_mod, "_sanitize_fts_query", lambda q: "AND OR NEAR")
+        results = seeded_db._keyword_search("invoice", limit=10, folders=["INBOX"])
+        # t-alpha is in INBOX and matches subject/body LIKE "%invoice%"
+        assert any(r.thread_id == "t-alpha" for r in results)
+        assert all(r.folder == "INBOX" for r in results)
+
+
+class TestSenderFilter:
+    def test_from_addr_only_matches_senders(self, seeded_db: Database):
+        """Regression: from_addr used to check participants (From + To + Cc),
+        so "from alice" matched threads where alice was merely a recipient.
+        With schema v6 senders populated, the filter now matches senders
+        only.
+        """
+        # alice sent t-alpha; alice is only a recipient on t-beta.
+        results = seeded_db.keyword_search("invoice lunch", from_addr="alice@example.com")
+        ids = {r.thread_id for r in results}
+        assert "t-alpha" in ids
+        assert "t-beta" not in ids  # alice is a recipient here, not sender
+
+    def test_from_addr_falls_back_to_participants_for_legacy_rows(self):
+        """Pre-v6 rows have an empty senders list. The filter must still
+        match them via participants so existing indexes do not lose
+        recall on upgrade day."""
+        from datetime import UTC, datetime
+
+        from src.lib.sqlite import ThreadResult, _matches_sender
+
+        legacy = ThreadResult(
+            thread_id="legacy",
+            subject="s",
+            participants=["alice@example.com", "bob@example.com"],
+            senders=[],  # empty senders -> legacy row
+            folder="INBOX",
+            date_first=datetime(2024, 1, 1, tzinfo=UTC),
+            date_last=datetime(2024, 1, 1, tzinfo=UTC),
+            message_ids=[],
+            snippet="",
+            has_attachments=False,
+        )
+        assert _matches_sender(legacy, "alice")
+        assert _matches_sender(legacy, "bob")
+
+    def test_from_addr_ignores_recipients_when_senders_populated(self):
+        from datetime import UTC, datetime
+
+        from src.lib.sqlite import ThreadResult, _matches_sender
+
+        modern = ThreadResult(
+            thread_id="modern",
+            subject="s",
+            participants=["alice@example.com", "bob@example.com"],
+            senders=["bob@example.com"],
+            folder="INBOX",
+            date_first=datetime(2024, 1, 1, tzinfo=UTC),
+            date_last=datetime(2024, 1, 1, tzinfo=UTC),
+            message_ids=[],
+            snippet="",
+            has_attachments=False,
+        )
+        assert _matches_sender(modern, "bob")
+        assert not _matches_sender(modern, "alice")
+
+
 class TestKeywordSearch:
     def test_matches_body_token(self, seeded_db: Database):
         results = seeded_db.keyword_search("invoice")
@@ -386,9 +482,9 @@ class TestOversampleOnFilter:
         seen_limits: list[int] = []
         real_keyword = seeded_db._keyword_search
 
-        def spy_keyword(q, limit):
+        def spy_keyword(q, limit, **kwargs):
             seen_limits.append(limit)
-            return real_keyword(q, limit)
+            return real_keyword(q, limit, **kwargs)
 
         monkeypatch.setattr(seeded_db, "_keyword_search", spy_keyword)
 

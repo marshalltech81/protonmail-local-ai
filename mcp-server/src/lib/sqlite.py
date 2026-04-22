@@ -8,7 +8,7 @@ import json
 import logging
 import re
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
@@ -23,6 +23,19 @@ log = logging.getLogger("mcp.sqlite")
 # are present to preserve recall.
 _UNFILTERED_OVERSAMPLE = 2
 _FILTERED_OVERSAMPLE = 4
+
+
+def _matches_sender(result, from_addr_lower: str) -> bool:
+    """True if ``from_addr_lower`` appears in the thread's senders.
+
+    Senders is the list of ``From`` addresses recorded on the thread
+    (schema v6 and later). For legacy threads where senders is empty the
+    check falls back to ``participants`` (the previous, over-permissive
+    behavior) so users do not suddenly lose results for pre-migration
+    mail — the filter strictens only as threads are reprocessed.
+    """
+    haystack = result.senders or result.participants
+    return any(from_addr_lower in s.lower() for s in haystack)
 
 
 def _sanitize_fts_query(query: str) -> str:
@@ -58,6 +71,11 @@ class ThreadResult:
     snippet: str
     has_attachments: bool
     body_text: str = ""
+    # Senders = only the From addresses of messages in this thread (a subset
+    # of participants). Populated by the indexer on writes made after schema
+    # v6; legacy rows surface as ``[]`` and the from_addr filter falls back
+    # to participants so pre-migration threads still match.
+    senders: list[str] = field(default_factory=list)
     score: float = 0.0
 
 
@@ -124,7 +142,19 @@ class Database:
             else _UNFILTERED_OVERSAMPLE
         )
         fetch_limit = limit * oversample
-        bm25_results = self._keyword_search(query_text, fetch_limit)
+        # Push folder / date / has_attachments filters into the keyword SQL
+        # so that deep-ranked candidates aren't truncated by the fetch
+        # limit before they could qualify. Vector search has no equivalent
+        # pushdown in sqlite-vec, so it stays unfiltered; _apply_filters
+        # catches everything post-fusion for uniformity.
+        bm25_results = self._keyword_search(
+            query_text,
+            fetch_limit,
+            folders=folders,
+            date_from=date_from,
+            date_to=date_to,
+            has_attachments=has_attachments,
+        )
         vec_results = self._vector_search(query_embedding, fetch_limit)
         fused = self._reciprocal_rank_fusion(bm25_results, vec_results)
         filtered = self._apply_filters(
@@ -150,7 +180,14 @@ class Database:
             if self._has_post_fusion_filter(folders, from_addr, date_from, date_to, has_attachments)
             else _UNFILTERED_OVERSAMPLE
         )
-        results = self._keyword_search(query_text, limit * oversample)
+        results = self._keyword_search(
+            query_text,
+            limit * oversample,
+            folders=folders,
+            date_from=date_from,
+            date_to=date_to,
+            has_attachments=has_attachments,
+        )
         filtered = self._apply_filters(
             results, folders, from_addr, date_from, date_to, has_attachments
         )
@@ -187,55 +224,115 @@ class Database:
     ) -> bool:
         return bool(folders or from_addr or date_from or date_to or has_attachments is not None)
 
-    def _keyword_search(self, query: str, limit: int) -> list[ThreadResult]:
+    def _keyword_search(
+        self,
+        query: str,
+        limit: int,
+        folders: list[str] | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
+        has_attachments: bool | None = None,
+    ) -> list[ThreadResult]:
         # threads_fts is a contentless FTS5 table, so its columns (including
         # any UNINDEXED ones) always read back as NULL. The reliable way to
         # link an FTS row back to its thread is the rowid, which the indexer
         # captures on write into threads.fts_rowid.
+        #
+        # Filters that live on the ``threads`` table — folder, date range,
+        # attachment flag — are pushed into SQL rather than applied after a
+        # Python slice. Otherwise the ``LIMIT`` truncates before the filter
+        # runs, and a user searching "2024-06 emails in Sent" can see empty
+        # results even when matching mail exists outside the top N BM25
+        # candidates. ``from_addr``/sender filtering stays in Python because
+        # it hits a JSON-in-column value.
         fts_query = _sanitize_fts_query(query)
         if not fts_query:
             return []
+
+        where_clauses = ["threads_fts MATCH ?"]
+        params: list = [fts_query]
+        if folders:
+            placeholders = ",".join(["?"] * len(folders))
+            where_clauses.append(f"t.folder IN ({placeholders})")
+            params.extend(folders)
+        if date_from:
+            where_clauses.append("t.date_last >= ?")
+            params.append(date_from)
+        if date_to:
+            where_clauses.append("t.date_first <= ?")
+            params.append(date_to)
+        if has_attachments is not None:
+            where_clauses.append("t.has_attachments = ?")
+            params.append(1 if has_attachments else 0)
+
+        # The WHERE clauses composed here are fixed literals chosen by the
+        # branches above; every user-supplied value goes through ``?``
+        # parameter binding. nosec B608 suppresses the hardcoded-SQL
+        # heuristic that bandit can't verify statically.
+        sql = (
+            "SELECT "
+            "t.thread_id, t.subject, t.participants, t.senders, t.folder, "
+            "t.date_first, t.date_last, t.message_ids, "
+            "t.snippet, t.has_attachments, t.body_text, "
+            "bm25(threads_fts) AS score "
+            "FROM threads_fts "
+            "JOIN threads t ON threads_fts.rowid = t.fts_rowid "
+            "WHERE " + " AND ".join(where_clauses) + " "  # nosec B608
+            "ORDER BY score LIMIT ?"
+        )
+        params.append(limit)
+
         try:
-            rows = self._conn.execute(
-                """
-                SELECT
-                    t.thread_id, t.subject, t.participants, t.folder,
-                    t.date_first, t.date_last, t.message_ids,
-                    t.snippet, t.has_attachments, t.body_text,
-                    bm25(threads_fts) AS score
-                FROM threads_fts
-                JOIN threads t ON threads_fts.rowid = t.fts_rowid
-                WHERE threads_fts MATCH ?
-                ORDER BY score
-                LIMIT ?
-            """,
-                (fts_query, limit),
-            ).fetchall()
+            rows = self._conn.execute(sql, params).fetchall()
             return [self._row_to_result(r) for r in rows]
         except sqlite3.OperationalError as e:
             # Defense-in-depth: if the sanitized query still trips FTS5, fall
             # back to a LIKE scan against subject/body/participants so valid
             # searches still return recall rather than empty.
             log.warning(f"FTS keyword search error, falling back to LIKE: {e}")
-            return self._like_fallback(query, limit)
+            return self._like_fallback(query, limit, folders, date_from, date_to, has_attachments)
 
-    def _like_fallback(self, query: str, limit: int) -> list[ThreadResult]:
+    def _like_fallback(
+        self,
+        query: str,
+        limit: int,
+        folders: list[str] | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
+        has_attachments: bool | None = None,
+    ) -> list[ThreadResult]:
         pattern = f"%{query}%"
+        where_clauses = ["(subject LIKE ? OR body_text LIKE ? OR participants LIKE ?)"]
+        params: list = [pattern, pattern, pattern]
+        if folders:
+            placeholders = ",".join(["?"] * len(folders))
+            where_clauses.append(f"folder IN ({placeholders})")
+            params.extend(folders)
+        if date_from:
+            where_clauses.append("date_last >= ?")
+            params.append(date_from)
+        if date_to:
+            where_clauses.append("date_first <= ?")
+            params.append(date_to)
+        if has_attachments is not None:
+            where_clauses.append("has_attachments = ?")
+            params.append(1 if has_attachments else 0)
+
+        # Same reasoning as _keyword_search: WHERE clauses are literals,
+        # user values are bound via ``?``. nosec B608.
+        sql = (
+            "SELECT "
+            "thread_id, subject, participants, senders, folder, "
+            "date_first, date_last, message_ids, "
+            "snippet, has_attachments, body_text, 0.0 AS score "
+            "FROM threads "
+            "WHERE " + " AND ".join(where_clauses) + " "  # nosec B608
+            "ORDER BY date_last DESC LIMIT ?"
+        )
+        params.append(limit)
+
         try:
-            rows = self._conn.execute(
-                """
-                SELECT
-                    thread_id, subject, participants, folder,
-                    date_first, date_last, message_ids,
-                    snippet, has_attachments, body_text,
-                    0.0 AS score
-                FROM threads
-                WHERE subject LIKE ? OR body_text LIKE ? OR participants LIKE ?
-                ORDER BY date_last DESC
-                LIMIT ?
-            """,
-                (pattern, pattern, pattern, limit),
-            ).fetchall()
+            rows = self._conn.execute(sql, params).fetchall()
             return [self._row_to_result(r) for r in rows]
         except sqlite3.OperationalError as e:
             log.warning(f"LIKE fallback search error: {e}")
@@ -247,7 +344,7 @@ class Database:
             rows = self._conn.execute(
                 """
                 SELECT
-                    t.thread_id, t.subject, t.participants, t.folder,
+                    t.thread_id, t.subject, t.participants, t.senders, t.folder,
                     t.date_first, t.date_last, t.message_ids,
                     t.snippet, t.has_attachments, t.body_text,
                     v.distance AS score
@@ -313,7 +410,11 @@ class Database:
             filtered = [r for r in filtered if r.folder in folders]
         if from_addr:
             fa = from_addr.lower()
-            filtered = [r for r in filtered if any(fa in p.lower() for p in r.participants)]
+            # Filter by sender: check the senders list (From addresses only)
+            # when present; fall back to participants for legacy rows that
+            # pre-date schema v6 so existing threads still match the filter
+            # until the indexer reprocesses them.
+            filtered = [r for r in filtered if _matches_sender(r, fa)]
         # Compare as datetimes rather than as strings: a user-supplied
         # date-only ``date_to="2024-12-31"`` was previously compared against
         # stored ISO timestamps like ``"2024-12-31T10:00:00+00:00"`` and
@@ -394,10 +495,18 @@ class Database:
     # -------------------------------------------------------------------------
 
     def _row_to_result(self, row) -> ThreadResult:
+        # ``senders`` was added in schema v6; legacy rows surface as an
+        # empty list. A missing column (tests that build a pre-v6 schema
+        # directly) also resolves to ``[]`` rather than KeyError.
+        if "senders" in row.keys() and row["senders"]:
+            senders = json.loads(row["senders"])
+        else:
+            senders = []
         return ThreadResult(
             thread_id=row["thread_id"],
             subject=row["subject"],
             participants=json.loads(row["participants"]),
+            senders=senders,
             folder=row["folder"],
             date_first=datetime.fromisoformat(row["date_first"]),
             date_last=datetime.fromisoformat(row["date_last"]),

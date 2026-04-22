@@ -381,6 +381,77 @@ class TestParseAddrs:
 # ---------------------------------------------------------------------------
 
 
+class TestMimeHardening:
+    def _write(self, tmp_path: Path, content: str, name: str = "m.eml") -> Path:
+        folder = tmp_path / "INBOX" / "cur"
+        folder.mkdir(parents=True, exist_ok=True)
+        path = folder / name
+        path.write_bytes(content.encode("utf-8"))
+        return path
+
+    def test_uppercase_attachment_disposition_recognised(self, tmp_path):
+        """Content-Disposition is case-insensitive per RFC 2183. A sender
+        using ``Attachment`` (capital A) used to be parsed as the message
+        body — its payload decoded as text and the body_text lost."""
+        content = (
+            "From: alice@example.com\r\n"
+            "To: bob@example.com\r\n"
+            "Subject: Upper attach\r\n"
+            "Message-ID: <upper_attach@example.com>\r\n"
+            "Date: Mon, 01 Jan 2024 12:00:00 +0000\r\n"
+            "MIME-Version: 1.0\r\n"
+            'Content-Type: multipart/mixed; boundary="bound"\r\n'
+            "\r\n"
+            "--bound\r\n"
+            "Content-Type: text/plain; charset=utf-8\r\n"
+            "\r\n"
+            "Real body text.\r\n"
+            "--bound\r\n"
+            "Content-Type: application/pdf\r\n"
+            'Content-Disposition: Attachment; filename="report.pdf"\r\n'
+            "Content-Transfer-Encoding: base64\r\n"
+            "\r\n"
+            "AAAA\r\n"
+            "--bound--\r\n"
+        )
+        msg = parse_email(self._write(tmp_path, content))
+        assert msg is not None
+        assert msg.has_attachments is True
+        assert len(msg.attachments) == 1
+        assert msg.attachments[0].filename == "report.pdf"
+        assert "Real body text." in msg.body_text
+
+    def test_html_before_plain_still_prefers_plain(self, tmp_path):
+        """Previous body extraction took whichever of text/plain or
+        text/html appeared first in the multipart. If an HTML part came
+        first, the LLM got html2text-converted output even when the
+        sender sent a clean text/plain body. Always prefer text/plain."""
+        content = (
+            "From: alice@example.com\r\n"
+            "To: bob@example.com\r\n"
+            "Subject: HTML first\r\n"
+            "Message-ID: <html_first@example.com>\r\n"
+            "Date: Mon, 01 Jan 2024 12:00:00 +0000\r\n"
+            "MIME-Version: 1.0\r\n"
+            'Content-Type: multipart/alternative; boundary="bound"\r\n'
+            "\r\n"
+            "--bound\r\n"
+            "Content-Type: text/html; charset=utf-8\r\n"
+            "\r\n"
+            "<p>HTML <b>body</b></p>\r\n"
+            "--bound\r\n"
+            "Content-Type: text/plain; charset=utf-8\r\n"
+            "\r\n"
+            "Plain body marker.\r\n"
+            "--bound--\r\n"
+        )
+        msg = parse_email(self._write(tmp_path, content))
+        assert msg is not None
+        assert "Plain body marker." in msg.body_text
+        # html2text markdown would include asterisks for <b>; plain path doesn't.
+        assert "**" not in msg.body_text
+
+
 class TestDecodeHeader:
     def test_plain_ascii(self):
         assert _decode_header("Hello world") == "Hello world"

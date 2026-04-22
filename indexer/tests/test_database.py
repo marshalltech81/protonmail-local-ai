@@ -666,6 +666,97 @@ class TestFtsRowidAndReplacement:
 # ---------------------------------------------------------------------------
 
 
+class TestSendersColumn:
+    def test_senders_column_exists(self, db):
+        cols = {row[1] for row in db._conn.execute("PRAGMA table_info(threads)").fetchall()}
+        assert "senders" in cols
+
+    def test_upsert_stores_only_from_addresses_in_senders(self, db):
+        """Regression: the from_addr filter used to match participants
+        (From + To + Cc), so 'from alice' matched threads where alice was
+        a recipient. senders now holds only From addresses."""
+        msg = make_message(
+            message_id="s1@x",
+            from_addr="alice@example.com",
+            to_addrs=["bob@example.com", "carol@example.com"],
+        )
+        thread = make_thread(messages=[msg])
+        db.upsert_thread(thread, FAKE_EMBEDDING)
+        row = db._conn.execute(
+            "SELECT senders FROM threads WHERE thread_id = ?", (thread.thread_id,)
+        ).fetchone()
+        senders = json.loads(row["senders"])
+        assert senders == ["alice@example.com"]
+
+    def test_upsert_merges_senders_across_messages(self, db, threader):
+        original = make_message(
+            message_id="ms1@x",
+            from_addr="alice@example.com",
+            to_addrs=["bob@example.com"],
+        )
+        reply = make_message(
+            message_id="ms2@x",
+            from_addr="bob@example.com",
+            to_addrs=["alice@example.com"],
+            in_reply_to="ms1@x",
+            filepath="/ms/2",
+            date=datetime(2024, 1, 2, tzinfo=UTC),
+        )
+        t1 = threader.assign_thread(original)
+        db.upsert_thread(t1, FAKE_EMBEDDING)
+        t2 = threader.assign_thread(reply)
+        db.upsert_thread(t2, FAKE_EMBEDDING)
+
+        row = db._conn.execute(
+            "SELECT senders FROM threads WHERE thread_id = ?", (t1.thread_id,)
+        ).fetchone()
+        senders = json.loads(row["senders"])
+        assert set(senders) == {"alice@example.com", "bob@example.com"}
+
+    def test_v5_to_v6_adds_senders_column(self, tmp_path):
+        """A v5 database migrates forward, gaining the senders column
+        with an empty-JSON default so existing rows read back as []."""
+        db_path = tmp_path / "v5.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.execute("CREATE TABLE schema_version (version INTEGER PRIMARY KEY)")
+        conn.execute("INSERT INTO schema_version VALUES (5)")
+        conn.execute("""
+            CREATE TABLE threads (
+                thread_id TEXT PRIMARY KEY, subject TEXT, participants TEXT,
+                folder TEXT, date_first TEXT, date_last TEXT, message_ids TEXT,
+                snippet TEXT, has_attachments INTEGER, body_text TEXT,
+                fts_rowid INTEGER
+            )
+        """)
+        conn.execute("""
+            CREATE VIRTUAL TABLE threads_fts
+            USING fts5(
+                subject, participants, body,
+                content='', contentless_delete=1, tokenize='porter unicode61'
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE pending_deletions (
+                filepath TEXT PRIMARY KEY, message_id TEXT NOT NULL,
+                thread_id TEXT NOT NULL, marked_at TEXT NOT NULL
+            )
+        """)
+        conn.execute(
+            "INSERT INTO threads (thread_id, subject, participants, folder, "
+            "date_first, date_last, message_ids, snippet, has_attachments, body_text) "
+            "VALUES ('legacy', 's', '[]', 'INBOX', '2024-01-01', '2024-01-01', '[]', '', 0, '')"
+        )
+        conn.commit()
+        conn.close()
+
+        Database(db_path)
+
+        conn = sqlite3.connect(str(db_path))
+        row = conn.execute("SELECT senders FROM threads WHERE thread_id = 'legacy'").fetchone()
+        conn.close()
+        assert row[0] == "[]"
+
+
 class TestPendingDeletions:
     def test_add_pending_deletion_returns_true_on_first_insert(self, db):
         inserted = db.add_pending_deletion("/p", "msg@x", "t1")
