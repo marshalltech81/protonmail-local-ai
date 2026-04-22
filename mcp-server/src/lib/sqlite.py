@@ -10,11 +10,31 @@ import re
 import sqlite3
 from dataclasses import dataclass, field
 from datetime import datetime
+from email.utils import parseaddr
 from pathlib import Path
 
 import sqlite_vec
 
 log = logging.getLogger("mcp.sqlite")
+
+
+def canonical_addr(value: str) -> str:
+    """Extract the bare lowercased email from a display string.
+
+    Mirrors ``indexer.threader.canonical_addr`` (the two services are separate
+    ``uv`` projects, so the helper is duplicated intentionally until a shared
+    package exists). Returns ``""`` when no ``@``-bearing address is
+    recoverable, so a callee can distinguish "no email found" from a
+    successful normalization.
+    """
+    if not value:
+        return ""
+    _, addr = parseaddr(value)
+    addr = addr.strip().lower()
+    if "@" not in addr:
+        return ""
+    return addr
+
 
 # When any filter (folder, sender, date range, attachment flag) is active,
 # the filtered result set is a subset of the raw ranked candidates. Pulling
@@ -26,15 +46,33 @@ _FILTERED_OVERSAMPLE = 4
 
 
 def _matches_sender(result, from_addr_lower: str) -> bool:
-    """True if ``from_addr_lower`` appears in the thread's senders.
+    """True if ``from_addr_lower`` matches one of the thread's senders.
 
     Senders is the list of ``From`` addresses recorded on the thread
     (schema v6 and later). For legacy threads where senders is empty the
     check falls back to ``participants`` (the previous, over-permissive
     behavior) so users do not suddenly lose results for pre-migration
     mail — the filter strictens only as threads are reprocessed.
+
+    Match mode depends on the shape of the query:
+
+    * A full address (``bob@example.com``) is compared by canonical
+      equality so that case variation in the stored display string
+      (``Bob@Example.com``, ``Bob Smith <bob@example.com>``) still matches.
+    * A bare name (``bob``) or domain fragment (``@example.com``,
+      ``example.com``) keeps the previous substring behavior against the
+      lowercased display string, since those shapes cannot canonicalize.
     """
     haystack = result.senders or result.participants
+    canonical_query = canonical_addr(from_addr_lower)
+    # A canonicalizable full address requires a non-empty local part.
+    # ``canonical_addr`` still returns the input for a bare domain like
+    # ``@example.com`` because the ``@`` check passes, but equality against
+    # ``bob@example.com`` would then miss. Route the domain-only shape through
+    # the substring fallback so ``from_addr="@example.com"`` still behaves
+    # like a domain filter.
+    if canonical_query and not canonical_query.startswith("@"):
+        return any(canonical_addr(s) == canonical_query for s in haystack)
     return any(from_addr_lower in s.lower() for s in haystack)
 
 
