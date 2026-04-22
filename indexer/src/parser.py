@@ -46,8 +46,19 @@ class Message:
     has_attachments: bool = False
 
 
-def parse_email(path: Path) -> Message | None:
-    """Parse a single .eml file from Maildir into a Message object."""
+def parse_email(path: Path, maildir_root: Path | None = None) -> Message | None:
+    """Parse a single .eml file from Maildir into a Message object.
+
+    ``maildir_root`` — when provided, the folder is derived as the relative
+    path from the root to the directory that contains ``cur/``/``new/``.
+    mbsync ``SubFolders Verbatim`` can nest folders more than one level
+    deep (``Clients/ABC``, ``Archive/2023``); without the root, nested
+    folders collapse to only the leaf directory name and unrelated threads
+    can be merged by the subject-only fallback.
+
+    When ``maildir_root`` is not provided the folder falls back to the
+    leaf name (``path.parent.parent.name``) for backward compatibility.
+    """
     try:
         raw = path.read_bytes()
         msg = email.message_from_bytes(raw)
@@ -68,8 +79,7 @@ def parse_email(path: Path) -> Message | None:
 
         body_text, attachments = _extract_body_and_attachments(msg)
 
-        # Derive folder from path — Maildir structure is folder/cur|new/file
-        folder = path.parent.parent.name
+        folder = _derive_folder(path, maildir_root)
 
         return Message(
             message_id=message_id,
@@ -90,6 +100,25 @@ def parse_email(path: Path) -> Message | None:
     except Exception as e:
         log.error(f"Failed to parse {path}: {e}")
         return None
+
+
+def _derive_folder(path: Path, maildir_root: Path | None) -> str:
+    """Derive a Maildir folder name for a message path.
+
+    With a root provided, returns the POSIX-style relative path from the
+    root to the directory containing ``cur/``/``new/`` — so
+    ``/maildir/Clients/ABC/cur/msg`` becomes ``Clients/ABC`` rather than
+    collapsing to ``ABC``. Falls back to the leaf directory name when the
+    path is outside the root (legacy behavior, for tests that do not pass
+    a root).
+    """
+    folder_dir = path.parent.parent
+    if maildir_root is not None:
+        try:
+            return folder_dir.relative_to(maildir_root).as_posix()
+        except ValueError:
+            pass
+    return folder_dir.name
 
 
 def _extract_body_and_attachments(

@@ -107,7 +107,7 @@ class MaildirHandler(FileSystemEventHandler):
 
     def _index_file(self, path: Path):
         try:
-            message = parse_email(path)
+            message = parse_email(path, maildir_root=MAILDIR_PATH)
             if not message:
                 return
             thread = self.threader.assign_thread(message)
@@ -126,6 +126,16 @@ class MaildirHandler(FileSystemEventHandler):
 HEALTH_REFRESH_EVERY = 25
 
 
+def _iter_maildir_messages(root: Path):
+    """Yield every message file under ``root`` whose parent is ``cur`` or
+    ``new``, at any nesting depth. mbsync ``SubFolders Verbatim`` can
+    produce ``Clients/ABC/cur/msg`` — a flat ``iterdir`` over ``root``
+    would miss every nested folder's mail."""
+    for filepath in root.rglob("*"):
+        if filepath.is_file() and filepath.parent.name in ("cur", "new"):
+            yield filepath
+
+
 def initial_index(db: Database, embedder: Embedder, threader: Threader):
     """Index all existing emails on startup.
 
@@ -136,26 +146,22 @@ def initial_index(db: Database, embedder: Embedder, threader: Threader):
     """
     log.info("Running initial index scan...")
     count = 0
-    for folder in MAILDIR_PATH.iterdir():
-        for subdir in ("cur", "new"):
-            subpath = folder / subdir
-            if not subpath.exists():
+    for filepath in _iter_maildir_messages(MAILDIR_PATH):
+        if db.is_indexed(str(filepath)):
+            continue
+        try:
+            message = parse_email(filepath, maildir_root=MAILDIR_PATH)
+            if not message:
                 continue
-            for filepath in subpath.iterdir():
-                if filepath.is_file() and not db.is_indexed(str(filepath)):
-                    try:
-                        message = parse_email(filepath)
-                        if not message:
-                            continue
-                        thread = threader.assign_thread(message)
-                        body = db.build_merged_body(thread)
-                        embedding = embedder.embed(body)
-                        db.upsert_thread(thread, embedding, body=body)
-                        count += 1
-                        if count % HEALTH_REFRESH_EVERY == 0:
-                            touch_health_file()
-                    except Exception as e:
-                        log.error(f"Failed to index {filepath}: {e}")
+            thread = threader.assign_thread(message)
+            body = db.build_merged_body(thread)
+            embedding = embedder.embed(body)
+            db.upsert_thread(thread, embedding, body=body)
+            count += 1
+            if count % HEALTH_REFRESH_EVERY == 0:
+                touch_health_file()
+        except Exception as e:
+            log.error(f"Failed to index {filepath}: {e}")
     log.info(f"Initial index complete: {count} messages processed.")
 
 
@@ -209,7 +215,9 @@ def main():
     _log_reconciler_config(reconciler_config)
     reconciler: Reconciler | None = None
     if reconciler_config.enabled:
-        reconciler = Reconciler(db, embedder, threader, reconciler_config)
+        reconciler = Reconciler(
+            db, embedder, threader, reconciler_config, maildir_root=MAILDIR_PATH
+        )
 
     # Wait for Ollama to be ready
     embedder.wait_for_ready()

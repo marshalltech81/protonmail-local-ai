@@ -299,10 +299,14 @@ class Database:
         date_to: str | None = None,
         has_attachments: bool | None = None,
     ) -> list[ThreadResult]:
-        if date_from:
-            self._validate_iso8601("date_from", date_from)
-        if date_to:
-            self._validate_iso8601("date_to", date_to)
+        date_from_dt = (
+            _parse_filter_date(date_from, end_of_day=False, _field_name="date_from")
+            if date_from
+            else None
+        )
+        date_to_dt = (
+            _parse_filter_date(date_to, end_of_day=True, _field_name="date_to") if date_to else None
+        )
 
         filtered = results
         if folders:
@@ -310,10 +314,16 @@ class Database:
         if from_addr:
             fa = from_addr.lower()
             filtered = [r for r in filtered if any(fa in p.lower() for p in r.participants)]
-        if date_from:
-            filtered = [r for r in filtered if r.date_last.isoformat() >= date_from]
-        if date_to:
-            filtered = [r for r in filtered if r.date_first.isoformat() <= date_to]
+        # Compare as datetimes rather than as strings: a user-supplied
+        # date-only ``date_to="2024-12-31"`` was previously compared against
+        # stored ISO timestamps like ``"2024-12-31T10:00:00+00:00"`` and
+        # excluded the entire last day because the stored string sorts
+        # lexicographically greater than the bare date. ``_parse_filter_date``
+        # promotes date-only values to start/end of day in UTC.
+        if date_from_dt is not None:
+            filtered = [r for r in filtered if r.date_last >= date_from_dt]
+        if date_to_dt is not None:
+            filtered = [r for r in filtered if r.date_first <= date_to_dt]
         if has_attachments is not None:
             filtered = [r for r in filtered if r.has_attachments == has_attachments]
         return filtered
@@ -400,8 +410,48 @@ class Database:
 
     @staticmethod
     def _validate_iso8601(field_name: str, value: str) -> None:
-        normalized = value[:-1] + "+00:00" if value.endswith("Z") else value
         try:
-            datetime.fromisoformat(normalized)
+            _parse_filter_date(value, end_of_day=False, _field_name=field_name)
         except ValueError as exc:
-            raise ValueError(f"{field_name} must be a valid ISO 8601 date/time string") from exc
+            raise ValueError(
+                f"{field_name} must be a valid ISO 8601 date or date/time string"
+            ) from exc
+
+
+def _parse_filter_date(
+    value: str, *, end_of_day: bool, _field_name: str = "date filter"
+) -> datetime:
+    """Parse a user-supplied date filter into a tz-aware UTC ``datetime``.
+
+    Accepts:
+    - date-only values (``"2024-12-31"``): promoted to ``00:00:00`` when
+      used as a lower bound, ``23:59:59.999999`` when used as an upper
+      bound, both in UTC — so the filter includes the full day the user
+      named.
+    - trailing ``Z`` (``"2024-12-31T00:00:00Z"``): normalized to the
+      ``+00:00`` offset form that ``datetime.fromisoformat`` accepts.
+    - any other ISO 8601 datetime string: passed through.
+
+    Naive datetimes are assumed to be UTC.
+    """
+    normalized = value[:-1] + "+00:00" if value.endswith("Z") else value
+
+    # Date-only: ``"YYYY-MM-DD"`` is exactly 10 chars of [digits/hyphens].
+    if len(normalized) == 10 and normalized[4] == "-" and normalized[7] == "-":
+        try:
+            base = datetime.fromisoformat(normalized + "T00:00:00+00:00")
+        except ValueError as exc:
+            raise ValueError(f"{_field_name}: invalid date {value!r}") from exc
+        if end_of_day:
+            return base.replace(hour=23, minute=59, second=59, microsecond=999999)
+        return base
+
+    try:
+        dt = datetime.fromisoformat(normalized)
+    except ValueError as exc:
+        raise ValueError(f"{_field_name}: invalid datetime {value!r}") from exc
+    if dt.tzinfo is None:
+        from datetime import UTC
+
+        dt = dt.replace(tzinfo=UTC)
+    return dt

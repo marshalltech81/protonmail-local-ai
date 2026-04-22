@@ -677,6 +677,29 @@ class TestPendingDeletions:
         assert db.add_pending_deletion("/p", "msg@x", "t1") is False
         assert db.count_pending_deletions() == 1
 
+    def test_add_pending_deletion_writes_iso8601_utc_timestamp(self, db):
+        """Regression: ``datetime('now')`` produced a space-separated,
+        TZ-less timestamp that sorted lexicographically before the
+        reaper's ISO 8601 cutoff, reaping tombstones up to a day early."""
+        db.add_pending_deletion("/iso", "iso@x", "t1")
+        row = db._conn.execute(
+            "SELECT marked_at FROM pending_deletions WHERE filepath = '/iso'"
+        ).fetchone()
+        marked_at = row["marked_at"]
+        assert "T" in marked_at, f"expected 'T' separator, got {marked_at!r}"
+        assert marked_at.endswith("+00:00"), f"expected '+00:00' TZ, got {marked_at!r}"
+
+    def test_tombstone_comparison_includes_cutoff_day(self, db):
+        """End-to-end: a tombstone marked just now compared against a cutoff
+        one second ago must NOT be reaped. Previously the space vs T
+        mismatch made it look older than the cutoff."""
+        from datetime import UTC, datetime, timedelta
+
+        db.add_pending_deletion("/today", "today@x", "t1")
+        cutoff = (datetime.now(UTC) - timedelta(seconds=1)).isoformat()
+        result = db.list_pending_deletions_older_than(cutoff)
+        assert not any(r["filepath"] == "/today" for r in result)
+
     def test_clear_pending_deletion(self, db):
         db.add_pending_deletion("/p", "msg@x", "t1")
         db.clear_pending_deletion("/p")

@@ -146,6 +146,54 @@ class TestOnMovedIndexesDestination:
         assert not db.is_indexed(str(original_path))
 
 
+class TestInitialIndexNestedFolders:
+    def test_recursive_scan_indexes_nested_folders(self, tmp_path, monkeypatch):
+        """Regression: ``initial_index`` walked only one level under
+        ``MAILDIR_PATH``. With mbsync ``SubFolders Verbatim``, nested
+        folders like ``Clients/ABC`` were never scanned. The recursive
+        walk now picks them up at any depth."""
+        maildir = tmp_path / "maildir"
+        nested = maildir / "Clients" / "ABC" / "cur"
+        nested.mkdir(parents=True)
+        flat = maildir / "INBOX" / "cur"
+        flat.mkdir(parents=True)
+
+        _write_eml(nested / "deep.eml", "deep@example.com")
+        _write_eml(flat / "top.eml", "top@example.com")
+
+        db = Database(tmp_path / "mail.db")
+        threader = Threader(db)
+        embedder = MagicMock()
+        embedder.embed.return_value = [0.0] * 768
+
+        monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
+        main.initial_index(db, embedder, threader)
+
+        assert db.is_indexed(str(nested / "deep.eml"))
+        assert db.is_indexed(str(flat / "top.eml"))
+
+    def test_nested_folder_stored_as_relative_path(self, tmp_path, monkeypatch):
+        """Once indexed, a nested message's stored ``folder`` reflects the
+        full relative path under the Maildir root."""
+        maildir = tmp_path / "maildir"
+        nested = maildir / "Clients" / "ABC" / "cur"
+        nested.mkdir(parents=True)
+        _write_eml(nested / "m.eml", "nested@example.com")
+
+        db = Database(tmp_path / "mail.db")
+        threader = Threader(db)
+        embedder = MagicMock()
+        embedder.embed.return_value = [0.0] * 768
+        monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
+
+        main.initial_index(db, embedder, threader)
+
+        row = db._conn.execute(
+            "SELECT folder FROM threads WHERE thread_id = 'nested@example.com'"
+        ).fetchone()
+        assert row["folder"] == "Clients/ABC"
+
+
 class TestInitialIndexHeartbeat:
     def test_health_file_refreshed_during_long_scan(self, tmp_path, monkeypatch):
         """``initial_index`` must refresh the heartbeat every
