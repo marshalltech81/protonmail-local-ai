@@ -16,7 +16,7 @@ from pathlib import Path
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
-from .database import Database
+from .database import EMBEDDING_DIM, Database
 from .embedder import Embedder
 from .parser import parse_email
 from .reconciler import Reconciler, ReconcilerConfig, load_config_from_env
@@ -92,8 +92,13 @@ class MaildirHandler(FileSystemEventHandler):
             if not message:
                 return
             thread = self.threader.assign_thread(message)
-            embedding = self.embedder.embed(thread.text_for_embedding())
-            self.db.upsert_thread(thread, embedding)
+            # Embed the merged accumulated body so the vector reflects the
+            # whole thread rather than only the newly-arrived message.
+            # thread.text_for_embedding() would only see thread.messages,
+            # which holds just the new message for existing threads.
+            body = self.db.build_merged_body(thread)
+            embedding = self.embedder.embed(body)
+            self.db.upsert_thread(thread, embedding, body=body)
             log.info(f"Indexed: {message.subject[:60]}")
         except Exception as e:
             log.error(f"Failed to index {path}: {e}")
@@ -124,14 +129,35 @@ def initial_index(db: Database, embedder: Embedder, threader: Threader):
                         if not message:
                             continue
                         thread = threader.assign_thread(message)
-                        embedding = embedder.embed(thread.text_for_embedding())
-                        db.upsert_thread(thread, embedding)
+                        body = db.build_merged_body(thread)
+                        embedding = embedder.embed(body)
+                        db.upsert_thread(thread, embedding, body=body)
                         count += 1
                         if count % HEALTH_REFRESH_EVERY == 0:
                             touch_health_file()
                     except Exception as e:
                         log.error(f"Failed to index {filepath}: {e}")
     log.info(f"Initial index complete: {count} messages processed.")
+
+
+def _validate_embedding_dim(embedder: Embedder) -> None:
+    """Probe the running embedding model once at startup and verify its
+    output dimension matches the schema-reserved ``EMBEDDING_DIM``.
+
+    Switching ``OLLAMA_EMBED_MODEL`` to a model with a different output
+    dimension (e.g. ``mxbai-embed-large`` at 1024) would otherwise fail
+    on the first ``upsert_thread`` with a cryptic sqlite-vec error. Fail
+    fast at startup with a clear, actionable message instead.
+    """
+    probe = embedder.embed("dimension probe")
+    if len(probe) != EMBEDDING_DIM:
+        raise SystemExit(
+            f"OLLAMA_EMBED_MODEL={EMBED_MODEL!r} produces {len(probe)}-dim "
+            f"embeddings, but the SQLite schema reserves {EMBEDDING_DIM}-dim "
+            f"(threads_vec FLOAT[{EMBEDDING_DIM}]). Either switch to a model "
+            f"that outputs {EMBEDDING_DIM}-dim vectors (e.g. nomic-embed-text), "
+            f"or migrate the schema."
+        )
 
 
 def _log_reconciler_config(cfg: ReconcilerConfig) -> None:
@@ -168,6 +194,9 @@ def main():
 
     # Wait for Ollama to be ready
     embedder.wait_for_ready()
+
+    # Verify the running model matches the schema's reserved vector dim.
+    _validate_embedding_dim(embedder)
 
     # Index existing emails
     initial_index(db, embedder, threader)
