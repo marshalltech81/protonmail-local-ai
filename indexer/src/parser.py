@@ -233,7 +233,7 @@ def _parse_date(value: str) -> datetime:
         from email.utils import parsedate_to_datetime
 
         dt = parsedate_to_datetime(value)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return datetime.now(UTC)
     if dt is None:
         return datetime.now(UTC)
