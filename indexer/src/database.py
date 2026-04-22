@@ -17,6 +17,29 @@ log = logging.getLogger("indexer.database")
 
 SCHEMA_VERSION = 4
 
+# Schema v3 uses FTS5 ``contentless_delete=1``, which SQLite added in 3.43.
+# Running against an older runtime silently degrades (migration errors caught
+# by a broad except) or hard-fails at boot — both difficult to diagnose in
+# production. Validate the runtime version at Database init and fail fast
+# with a clear message instead.
+MIN_SQLITE_VERSION = (3, 43, 0)
+
+
+class SQLiteTooOldError(RuntimeError):
+    """Raised when the runtime SQLite library is older than required."""
+
+
+def _require_minimum_sqlite() -> None:
+    if sqlite3.sqlite_version_info < MIN_SQLITE_VERSION:
+        required = ".".join(str(x) for x in MIN_SQLITE_VERSION)
+        raise SQLiteTooOldError(
+            f"indexer requires SQLite >= {required}, "
+            f"runtime is {sqlite3.sqlite_version}. Schema v3 FTS5 "
+            "contentless_delete=1 will not work on this runtime. Rebuild "
+            "the indexer image from a base that ships a newer SQLite "
+            "(python:3.14-slim-trixie ships 3.46.1)."
+        )
+
 
 def _synchronized(fn):
     """Serialize ``Database`` method calls across threads.
@@ -43,6 +66,7 @@ def _synchronized(fn):
 
 class Database:
     def __init__(self, path: Path):
+        _require_minimum_sqlite()
         self.path = path
         self._lock = threading.RLock()
         path.parent.mkdir(parents=True, exist_ok=True)

@@ -11,6 +11,7 @@ import sqlite3
 import threading
 from datetime import UTC, datetime
 
+import pytest
 from src.database import SCHEMA_VERSION, Database
 
 from tests.conftest import make_message, make_thread
@@ -28,6 +29,17 @@ class TestSchema:
         db_path = tmp_path / "mail.db"
         Database(db_path)
         assert db_path.exists()
+
+    def test_raises_clear_error_when_sqlite_too_old(self, tmp_path, monkeypatch):
+        """Schema v3 uses ``contentless_delete=1`` (SQLite >= 3.43). If the
+        runtime is older we fail loudly at Database init with an actionable
+        message, instead of silently dying inside a broad migration except."""
+        from src import database
+
+        monkeypatch.setattr(database.sqlite3, "sqlite_version", "3.40.1")
+        monkeypatch.setattr(database.sqlite3, "sqlite_version_info", (3, 40, 1))
+        with pytest.raises(database.SQLiteTooOldError, match="contentless_delete"):
+            Database(tmp_path / "too_old.db")
 
     def test_schema_version_set_correctly(self, db):
         row = db._conn.execute("SELECT version FROM schema_version").fetchone()
