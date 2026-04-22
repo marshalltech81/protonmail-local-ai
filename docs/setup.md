@@ -373,6 +373,8 @@ fails, `mbsync` now logs a specific cause such as:
 - missing or empty `/run/secrets/bridge_pass`
 - cert extraction timeout
 - `openssl s_client` handshake errors
+- Bridge TLS cert fingerprint does not match the pinned value (see the
+  "Bridge cert pin mismatch" section below)
 
 Repeated sync failures now count toward an exit threshold so the container
 restarts instead of looping forever in a broken state.
@@ -525,6 +527,37 @@ make up
 ```
 
 Your email index is in a separate volume (`sqlite-volume`) and is not affected.
+
+### mbsync refuses to sync — Bridge cert pin mismatch
+
+On first boot `mbsync` extracts Bridge's TLS cert, computes its SHA-256
+fingerprint, and saves it to a persistent state volume (`mbsync-state`).
+On every subsequent boot the freshly extracted cert is compared to the
+pinned fingerprint. A mismatch is treated as a security event and
+`mbsync` refuses to sync. Log output looks like:
+
+```
+>>> ERROR: Bridge cert fingerprint does not match pinned value — refusing to sync.
+>>>   pinned:  sha256:<old>
+>>>   current: sha256:<new>
+```
+
+Legitimate cert rotations happen when Bridge is upgraded or `vault.enc`
+is regenerated. To accept the new cert, start `mbsync` once with
+`BRIDGE_CERT_PIN_ROTATE=true`:
+
+```bash
+BRIDGE_CERT_PIN_ROTATE=true docker compose up -d mbsync
+```
+
+The container writes the new fingerprint to the pin file on startup and
+syncing resumes. Set `BRIDGE_CERT_PIN_ROTATE` back to `false` (or remove
+it from `.env`) before the next restart so the new pin is enforced going
+forward. Leaving it permanently true disables pin enforcement.
+
+`make clean` removes the `mbsync-state` volume along with everything
+else, so the next boot after `make clean` is treated as a first boot
+and trust-on-first-use re-pins whatever cert Bridge presents.
 
 ### mbsync fails — TLS hostname mismatch after rebuilding Bridge image
 

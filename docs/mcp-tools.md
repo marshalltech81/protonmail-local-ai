@@ -91,6 +91,27 @@ default) so multi-thread contexts stay within local-LLM context windows.
 If a thread row has no stored body text (legacy rows from an earlier
 schema), the 200-character ``snippet`` is used as a fallback.
 
+### Prompt-injection hardening
+
+Email is attacker-controlled input: any external sender can attempt to
+inject instructions into the user's inbox that an LLM might treat as
+commands. The intelligence tools mitigate this two ways:
+
+1. **System-prompt framing.** Every `ask_mailbox`, `summarize_thread`,
+   and `extract_from_emails` call prepends a security notice telling the
+   model that email content is untrusted data, must not be followed as
+   instructions, and that the model must not reveal the system prompt or
+   act on URLs/addresses/phone numbers found inside email bodies.
+2. **Explicit delimiters.** Each retrieved thread is wrapped in
+   `<untrusted_email>…</untrusted_email>` tags in the user message. The
+   user's task (question, summarization instruction, extraction schema)
+   is placed outside those tags so the model has a clear lexical
+   boundary between trusted task and untrusted evidence.
+
+These are defense-in-depth measures — they do not guarantee immunity.
+Operators running `LLM_MODE=cloud` should still treat retrieved email
+content as potentially hostile.
+
 ### `ask_mailbox`
 Ask a natural language question about your email.
 Retrieves relevant threads and synthesizes an answer.

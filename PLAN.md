@@ -47,6 +47,12 @@ Implemented and working at a high level:
 - indexer `on_moved` now indexes the destination of Maildir rename events (standard delivery writes tmp → new/cur) so new mail no longer has to wait for a restart to appear in the index; the initial-index scan refreshes the heartbeat every 25 messages so large mailboxes do not exceed the 90-second healthcheck window
 - intelligence tools (`ask_mailbox`, `summarize_thread`, `extract_from_emails`) now feed the LLM the accumulated thread body text (bounded per thread) instead of the 200-character snippet; keyword search sanitizes user input into safe FTS5 phrases with a LIKE fallback, and filtered searches oversample raw candidates to preserve recall
 - `make pull-models` self-starts the ollama container and waits for readiness; `scripts/validate-env.sh` uses a portable `stat` helper so `make up` works on macOS; `make status` now reports real index counts instead of a hardcoded `{"status": "ok"}`
+- `mbsync` now pins Bridge's TLS cert SHA-256 fingerprint on first boot to the persistent `mbsync-state` volume and refuses to sync on mismatch; an operator-opt-in `BRIDGE_CERT_PIN_ROTATE=true` is required to accept a legitimate rotation (e.g. Bridge upgrade)
+- `mcp-server` now exposes a plain HTTP `/health` endpoint (outside the MCP protocol) that probes the read-only SQLite connection; the Dockerfile `HEALTHCHECK` uses it so Compose reports mcp-server health without speaking SSE
+- the three intelligence tools now wrap retrieved email excerpts in `<untrusted_email>` tags and ship a system-prompt security notice framing email as untrusted data — defense-in-depth against prompt injection from attacker-controlled email content
+- `scripts/validate-env.sh` no longer shell-sources `.env`; it parses known keys explicitly so a hostile or malformed value cannot trigger command substitution on the operator's host
+- `indexer` Ollama readiness now uses exact model matching (with optional `:latest` suffix) instead of substring matching, and a failed `_pull_model` raises instead of being silently reported as ready
+- `make test` now runs both `test-indexer` and `test-mcp`
 
 Known limitations:
 
@@ -230,7 +236,6 @@ Definition of done:
 - per-session LLM mode toggle
 - extract Bridge container work into standalone repo after stabilization
 - improve operational observability and health reporting
-- add `/health` endpoint for `mcp-server` and wire it into `HEALTHCHECK`
 - decide whether `mcp-server` should eventually use live IMAP retrieval only as fallback once richer thread context is available locally
 
 ### Search and intelligence expansion
