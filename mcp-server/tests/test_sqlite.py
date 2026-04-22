@@ -197,6 +197,40 @@ class TestKeywordSearchFilterPushdown:
         assert any(r.thread_id == "t-alpha" for r in results)
         assert all(r.folder == "INBOX" for r in results)
 
+    def test_date_to_bare_day_includes_same_day_thread_in_sql(self, tmp_path, _build_thread_on):
+        """Regression: date-only ``date_to`` was pushed straight into SQL
+        and compared as a raw string against full ISO timestamps, so a
+        thread with ``date_first = 2024-12-31T10:00:00+00:00`` was
+        lexicographically greater than ``"2024-12-31"`` and excluded from
+        the keyword path entirely. Normalize before pushdown."""
+        db = _build_thread_on(
+            tmp_path,
+            subject="year end report",
+            body_text="final year end report numbers",
+            date_first="2024-12-31T10:00:00+00:00",
+            date_last="2024-12-31T10:00:00+00:00",
+        )
+        results = db._keyword_search("year end report", limit=10, date_to="2024-12-31")
+        assert any(r.thread_id == "on-last-day" for r in results)
+
+    def test_date_to_bare_day_includes_same_day_thread_via_like_fallback(
+        self, tmp_path, monkeypatch, _build_thread_on
+    ):
+        """Same regression as above, also exercised through the LIKE
+        fallback where the SQL predicate is on ``threads.date_first``."""
+        from src.lib import sqlite as sqlite_mod
+
+        db = _build_thread_on(
+            tmp_path,
+            subject="year end report",
+            body_text="final year end report numbers",
+            date_first="2024-12-31T10:00:00+00:00",
+            date_last="2024-12-31T10:00:00+00:00",
+        )
+        monkeypatch.setattr(sqlite_mod, "_sanitize_fts_query", lambda q: "AND OR NEAR")
+        results = db._keyword_search("report", limit=10, date_to="2024-12-31")
+        assert any(r.thread_id == "on-last-day" for r in results)
+
 
 class TestSenderFilter:
     def test_from_addr_only_matches_senders(self, seeded_db: Database):

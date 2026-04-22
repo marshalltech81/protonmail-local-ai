@@ -84,3 +84,33 @@ class TestResolveCurrentPath:
         actual = tmp_path / "msg.host"
         actual.write_text("data")
         assert resolve_current_path(stored) == actual
+
+    def test_finds_file_promoted_from_new_to_cur(self, tmp_path: Path):
+        # mbsync moved the file from INBOX/new to INBOX/cur while indexer
+        # was offline. The scan must follow the sibling or the reconciler
+        # will treat a live message as missing and tombstone it.
+        folder = tmp_path / "INBOX"
+        (folder / "new").mkdir(parents=True)
+        cur = folder / "cur"
+        cur.mkdir()
+        stored = folder / "new" / "msg.host"
+        actual = cur / "msg.host:2,S"
+        actual.write_text("data")
+        assert resolve_current_path(stored) == actual
+
+    def test_finds_file_demoted_from_cur_to_new(self, tmp_path: Path):
+        folder = tmp_path / "INBOX"
+        new = folder / "new"
+        new.mkdir(parents=True)
+        (folder / "cur").mkdir()
+        stored = folder / "cur" / "msg.host:2,S"
+        actual = new / "msg.host"
+        actual.write_text("data")
+        assert resolve_current_path(stored) == actual
+
+    def test_returns_none_when_missing_in_both_new_and_cur(self, tmp_path: Path):
+        folder = tmp_path / "INBOX"
+        (folder / "new").mkdir(parents=True)
+        (folder / "cur").mkdir()
+        stored = folder / "cur" / "msg.host:2,S"
+        assert resolve_current_path(stored) is None

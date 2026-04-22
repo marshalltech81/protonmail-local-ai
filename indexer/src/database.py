@@ -567,16 +567,27 @@ class Database:
         return row["thread_id"] if row else None
 
     @_synchronized
-    def find_thread_by_subject(self, normalized_subject: str, folder: str) -> str | None:
-        row = self._conn.execute(
+    def find_threads_by_subject(
+        self, normalized_subject: str, folder: str, limit: int = 10
+    ) -> list[str]:
+        """Return up to ``limit`` candidate thread ids matching the normalized
+        subject within ``folder``, newest first.
+
+        Multiple candidates are returned so the subject-fallback gate in
+        ``Threader`` can keep looking when the most recent same-subject
+        thread fails participant/date checks (e.g. an unrelated "Invoice"
+        reply beat a valid older thread to the top of the list).
+        """
+        rows = self._conn.execute(
             """
             SELECT thread_id FROM threads
             WHERE subject = ? AND folder = ?
-            ORDER BY date_last DESC LIMIT 1
+            ORDER BY date_last DESC
+            LIMIT ?
             """,
-            (normalized_subject, folder),
-        ).fetchone()
-        return row["thread_id"] if row else None
+            (normalized_subject, folder, limit),
+        ).fetchall()
+        return [r["thread_id"] for r in rows]
 
     @_synchronized
     def get_thread(self, thread_id: str):

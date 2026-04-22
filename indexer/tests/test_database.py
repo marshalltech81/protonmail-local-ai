@@ -532,20 +532,43 @@ class TestLookups:
     def test_find_thread_by_message_id_miss(self, db):
         assert db.find_thread_by_message_id("ghost@example.com") is None
 
-    def test_find_thread_by_subject_hit(self, db):
+    def test_find_threads_by_subject_hit(self, db):
         thread = make_thread(subject="budget discussion")
         db.upsert_thread(thread, FAKE_EMBEDDING)
-        result = db.find_thread_by_subject("budget discussion", "INBOX")
-        assert result == thread.thread_id
+        result = db.find_threads_by_subject("budget discussion", "INBOX")
+        assert result == [thread.thread_id]
 
-    def test_find_thread_by_subject_miss_wrong_folder(self, db):
+    def test_find_threads_by_subject_miss_wrong_folder(self, db):
         thread = make_thread(subject="budget discussion", folder="INBOX")
         db.upsert_thread(thread, FAKE_EMBEDDING)
-        result = db.find_thread_by_subject("budget discussion", "Sent")
-        assert result is None
+        result = db.find_threads_by_subject("budget discussion", "Sent")
+        assert result == []
 
-    def test_find_thread_by_subject_miss_unknown_subject(self, db):
-        assert db.find_thread_by_subject("unknown subject", "INBOX") is None
+    def test_find_threads_by_subject_miss_unknown_subject(self, db):
+        assert db.find_threads_by_subject("unknown subject", "INBOX") == []
+
+    def test_find_threads_by_subject_returns_multiple_newest_first(self, db):
+        """Regression: threader now iterates candidates until one passes the
+        participant/date gate, so multiple same-subject threads in the same
+        folder must all surface (newest first)."""
+        from datetime import UTC, datetime
+
+        older_msg = make_message(
+            message_id="old@example.com",
+            subject="invoice",
+            date=datetime(2024, 1, 1, tzinfo=UTC),
+        )
+        newer_msg = make_message(
+            message_id="new@example.com",
+            subject="invoice",
+            date=datetime(2024, 6, 1, tzinfo=UTC),
+        )
+        older = make_thread(messages=[older_msg], subject="invoice")
+        newer = make_thread(messages=[newer_msg], subject="invoice")
+        db.upsert_thread(older, FAKE_EMBEDDING)
+        db.upsert_thread(newer, FAKE_EMBEDDING)
+        result = db.find_threads_by_subject("invoice", "INBOX")
+        assert result == [newer.thread_id, older.thread_id]
 
     def test_get_thread_returns_thread(self, db):
         thread = make_thread()

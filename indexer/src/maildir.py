@@ -43,21 +43,48 @@ def resolve_current_path(stored_path: Path) -> Path | None:
     ``stored_path``. Returns ``None`` if the file is no longer present under
     its original uniq in the same Maildir folder.
 
-    Looks first at the stored path itself (fast path — no rename has occurred),
-    then scans the parent directory for any file sharing the same uniq base
-    name. Maildir semantics guarantee the uniq is stable across flag-induced
-    renames within the same folder.
+    Scans, in order:
+
+    1. the stored path itself (fast path — no rename has occurred),
+    2. the stored file's parent directory (flag-only rename, e.g. ``S → SR``),
+    3. the ``new`` / ``cur`` siblings under the Maildir folder root when the
+       stored file lived in one of them (mbsync promotion from ``new`` to
+       ``cur`` while the indexer was offline would otherwise look like a
+       deletion).
+
+    Maildir semantics guarantee the uniq is stable across flag-induced renames
+    and ``new``/``cur`` moves within the same folder.
     """
     if stored_path.exists():
         return stored_path
-    parent = stored_path.parent
-    if not parent.exists():
-        return None
+
     uniq = get_uniq(stored_path)
     prefix = uniq + FLAG_SEPARATOR
-    for child in parent.iterdir():
-        if not child.is_file():
-            continue
-        if child.name == uniq or child.name.startswith(prefix):
-            return child
+
+    def _scan(directory: Path) -> Path | None:
+        if not directory.exists():
+            return None
+        for child in directory.iterdir():
+            if not child.is_file():
+                continue
+            if child.name == uniq or child.name.startswith(prefix):
+                return child
+        return None
+
+    parent = stored_path.parent
+    match = _scan(parent)
+    if match is not None:
+        return match
+
+    # If the stored path lives in a Maildir folder's ``new`` or ``cur``
+    # subdir, also scan its sibling. This catches the case where mbsync
+    # promoted the file from ``new`` to ``cur`` (or vice versa) while the
+    # indexer was offline, which would otherwise trip reconciliation into
+    # treating a live message as missing.
+    if parent.name in {"new", "cur"}:
+        sibling_name = "cur" if parent.name == "new" else "new"
+        match = _scan(parent.parent / sibling_name)
+        if match is not None:
+            return match
+
     return None

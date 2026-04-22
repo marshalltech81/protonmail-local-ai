@@ -183,6 +183,48 @@ def empty_db(tmp_path: Path) -> Database:
     return Database(str(db_path))
 
 
+@pytest.fixture
+def _build_thread_on():
+    """Build a fresh DB with a single thread on caller-supplied dates.
+
+    Regression tests for date-filter SQL pushdown need a ``date_first`` on
+    a specific boundary day; ``seeded_db`` only covers Feb/Mar 2024.
+    """
+
+    def _factory(
+        tmp_path: Path,
+        *,
+        thread_id: str = "on-last-day",
+        subject: str = "year end report",
+        body_text: str = "final year end report numbers",
+        date_first: str,
+        date_last: str,
+    ) -> Database:
+        db_path = tmp_path / "mcp-boundary.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.enable_load_extension(True)
+        sqlite_vec.load(conn)
+        conn.enable_load_extension(False)
+        _build_schema(conn)
+        _insert_thread(
+            conn,
+            thread_id=thread_id,
+            subject=subject,
+            participants=["alice@example.com"],
+            senders=["alice@example.com"],
+            folder="INBOX",
+            date_first=date_first,
+            date_last=date_last,
+            snippet=subject,
+            body_text=body_text,
+            embedding=[1.0, 0.0, 0.0, 0.0],
+        )
+        conn.close()
+        return Database(str(db_path))
+
+    return _factory
+
+
 def _make_result(thread_id: str, folder: str = "INBOX"):
     """Tiny ThreadResult factory for pure fusion/filter tests."""
     from src.lib.sqlite import ThreadResult

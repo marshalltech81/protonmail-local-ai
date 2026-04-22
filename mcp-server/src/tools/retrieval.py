@@ -154,6 +154,12 @@ def register_retrieval_tools(server, db):
         Returns:
             List of threads sorted by most recent activity.
         """
+        # Clamp both values so a caller-supplied ``limit=100000`` or
+        # ``offset=-1`` can't drive an unbounded or malformed query. 100
+        # is well above any reasonable interactive use of list_threads.
+        limit = max(1, min(int(limit), 100))
+        offset = max(0, int(offset))
+
         try:
             threads = db.list_threads(
                 folder=folder,

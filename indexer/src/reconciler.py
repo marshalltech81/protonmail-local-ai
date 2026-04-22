@@ -38,6 +38,12 @@ from .threader import Thread, Threader
 
 log = logging.getLogger("indexer.reconciler")
 
+# Absolute lower bound on how many tombstones the reaper will process in
+# one pass even when ``max_batch_pct`` is the binding constraint. With a
+# 5% default and a 10-message mailbox, a single deletion is 10% and
+# would incorrectly trip the mass-delete brake. See ``reap()``.
+_REAP_ABSOLUTE_FLOOR = 10
+
 
 @dataclass(frozen=True)
 class ReconcilerConfig:
@@ -164,13 +170,27 @@ class Reconciler:
 
         total_messages = self._total_messages()
         if total_messages > 0 and not self.config.force:
-            pct = len(tombstones) / total_messages
-            if pct > self.config.max_batch_pct:
+            # Small mailboxes need an absolute floor on the brake. With
+            # the default ``max_batch_pct=0.05`` a 10-message mailbox
+            # would trip the brake on a single deletion (10%), which is
+            # the expected steady-state cadence of a small mailbox. The
+            # brake's purpose is to catch a Bridge-outage-induced mass
+            # tombstoning event, not to block routine single-message
+            # cleanup — so allow at least ``_REAP_ABSOLUTE_FLOOR``
+            # tombstones per pass before gating.
+            max_allowed = max(
+                _REAP_ABSOLUTE_FLOOR,
+                int(total_messages * self.config.max_batch_pct),
+            )
+            if len(tombstones) > max_allowed:
                 log.error(
                     "reaper aborted: %d tombstones past grace window exceed "
-                    "mass-delete threshold %.1f%% of %d total messages "
-                    "(set INDEXER_DELETION_FORCE=true to override)",
+                    "mass-delete threshold (max allowed %d = max(%d, %.1f%% "
+                    "of %d total messages); set INDEXER_DELETION_FORCE=true "
+                    "to override)",
                     len(tombstones),
+                    max_allowed,
+                    _REAP_ABSOLUTE_FLOOR,
                     self.config.max_batch_pct * 100,
                     total_messages,
                 )
