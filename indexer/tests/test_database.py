@@ -950,6 +950,79 @@ class TestConcurrency:
         assert db.count_total_messages() == 100
 
 
+class TestReapThreadMessages:
+    """``reap_thread_messages`` fuses the thread rewrite and per-message
+    teardown into a single transaction so a crash mid-reap cannot leave
+    ``threads`` and ``message_thread_map`` disagreeing about which
+    messages belong to the thread. The prior code used two separate
+    transactions (``rebuild_thread`` then N × ``remove_message``)."""
+
+    def _seed_two_message_thread(self, db, threader):
+        original = make_message(message_id="r1@x", filepath="/r/1")
+        reply = make_message(
+            message_id="r2@x",
+            in_reply_to="r1@x",
+            filepath="/r/2",
+            date=datetime(2024, 2, 1, tzinfo=UTC),
+        )
+        t1 = threader.assign_thread(original)
+        db.upsert_thread(t1, FAKE_EMBEDDING)
+        t2 = threader.assign_thread(reply)
+        db.upsert_thread(t2, FAKE_EMBEDDING)
+        db.add_pending_deletion("/r/2", "r2@x", t1.thread_id)
+        return t1, original, reply
+
+    def test_atomic_reap_rewrites_thread_and_removes_reaped_rows(self, db, threader):
+        from src.threader import Thread
+
+        t1, original, _ = self._seed_two_message_thread(db, threader)
+        rebuilt = Thread(
+            thread_id=t1.thread_id,
+            subject="hello world",
+            participants=[original.from_addr, *original.to_addrs],
+            messages=[original],
+            folder="INBOX",
+            date_first=original.date,
+            date_last=original.date,
+        )
+
+        removed = db.reap_thread_messages(rebuilt, FAKE_EMBEDDING, ["r2@x"])
+
+        assert removed == ["/r/2"]
+        # message_thread_map only has the survivor now
+        map_ids = {
+            r["message_id"]
+            for r in db._conn.execute(
+                "SELECT message_id FROM message_thread_map WHERE thread_id = ?",
+                (t1.thread_id,),
+            ).fetchall()
+        }
+        assert map_ids == {"r1@x"}
+        # indexed_files and pending_deletions for the reaped file are gone
+        assert not db.is_indexed("/r/2")
+        assert not db.has_pending_deletion("/r/2")
+
+    def test_atomic_reap_rolls_back_when_thread_rewrite_fails(self, db, threader):
+        """If the thread rewrite step raises, the per-message removals must
+        not have taken effect — the transaction rolls back cleanly."""
+        t1, _, _ = self._seed_two_message_thread(db, threader)
+
+        with pytest.raises(ValueError):
+            # Wrong-dimension embedding trips the validator in upsert_thread /
+            # _rewrite_thread_row, before the remove loop runs.
+            db.reap_thread_messages(
+                make_thread(thread_id=t1.thread_id),
+                [0.0] * 10,  # wrong dim, but rewrite path doesn't check dim
+                ["r2@x"],
+            )
+        # Nothing was removed — tombstone and map entry still intact
+        assert db.has_pending_deletion("/r/2")
+        assert any(
+            r["message_id"] == "r2@x"
+            for r in db._conn.execute("SELECT message_id FROM message_thread_map").fetchall()
+        )
+
+
 class TestRebuildThread:
     def test_rebuild_replaces_body_text_instead_of_appending(self, db, threader):
         original = make_message(message_id="r1@x", body_text="First message body.", filepath="/r/1")

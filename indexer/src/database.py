@@ -755,22 +755,13 @@ class Database:
 
         Does not touch the parent thread row — the caller is responsible for
         rebuilding or deleting the thread after determining how many messages
-        remain.
+        remain. Prefer ``reap_thread_messages`` when the thread rebuild and
+        the message removals need to land atomically as one transaction.
         """
         cur = self._conn.cursor()
         try:
             cur.execute("BEGIN IMMEDIATE")
-            row = cur.execute(
-                "SELECT filepath FROM message_thread_map WHERE message_id = ?",
-                (message_id,),
-            ).fetchone()
-            if row is None:
-                self._conn.rollback()
-                return
-            filepath = row["filepath"]
-            cur.execute("DELETE FROM message_thread_map WHERE message_id = ?", (message_id,))
-            cur.execute("DELETE FROM indexed_files WHERE filepath = ?", (filepath,))
-            cur.execute("DELETE FROM pending_deletions WHERE filepath = ?", (filepath,))
+            self._remove_message_row(cur, message_id)
             self._conn.commit()
         except Exception:
             self._conn.rollback()
@@ -817,6 +808,65 @@ class Database:
         reflects the surviving messages only (re-parsed from disk).
         """
         cur = self._conn.cursor()
+        try:
+            cur.execute("BEGIN IMMEDIATE")
+            self._rewrite_thread_row(cur, thread, embedding)
+            self._conn.commit()
+        except Exception:
+            self._conn.rollback()
+            raise
+
+    @_synchronized
+    def reap_thread_messages(
+        self,
+        thread,
+        embedding: list[float],
+        reaped_message_ids: list[str],
+    ) -> list[str]:
+        """Atomically rewrite a thread and remove reaped messages.
+
+        The reconciler previously called ``rebuild_thread`` and then looped
+        ``remove_message`` — three or more separate transactions. If the
+        process crashed between them, the thread row reflected only
+        survivors while ``message_thread_map`` and ``pending_deletions``
+        still held rows for the reaped messages. The recovery path worked
+        (a second reap pass completed idempotently) but any observer
+        running between the two commits saw inconsistent state.
+
+        All writes now happen inside a single ``BEGIN IMMEDIATE`` / commit
+        so either the whole reap lands or none of it does.
+
+        Returns the filepaths that were removed, so the caller can perform
+        any on-disk unlink work outside the transaction.
+        """
+        cur = self._conn.cursor()
+        removed_filepaths: list[str] = []
+        try:
+            cur.execute("BEGIN IMMEDIATE")
+            self._rewrite_thread_row(cur, thread, embedding)
+            for mid in reaped_message_ids:
+                fp = self._remove_message_row(cur, mid)
+                if fp is not None:
+                    removed_filepaths.append(fp)
+            self._conn.commit()
+        except Exception:
+            self._conn.rollback()
+            raise
+        return removed_filepaths
+
+    def _rewrite_thread_row(self, cur: sqlite3.Cursor, thread, embedding: list[float]) -> None:
+        """Replace a thread row and its FTS/vec entries using ``cur``.
+
+        Shared by ``rebuild_thread`` and ``reap_thread_messages`` so the
+        same rewrite can participate in a larger transaction when needed.
+        The caller owns ``BEGIN`` / ``COMMIT`` / ``ROLLBACK``.
+        """
+        if len(embedding) != EMBEDDING_DIM:
+            raise ValueError(
+                f"embedding has {len(embedding)} dims but threads_vec reserves "
+                f"{EMBEDDING_DIM}. Check OLLAMA_EMBED_MODEL."
+            )
+
         participants_json = json.dumps(thread.participants)
         senders_json = json.dumps(
             list(
@@ -834,49 +884,63 @@ class Database:
         has_attachments = int(any(m.has_attachments for m in thread.messages))
         body = thread.text_for_embedding()
 
-        try:
-            cur.execute("BEGIN IMMEDIATE")
-            cur.execute(
-                """
-                INSERT INTO threads
-                    (thread_id, subject, participants, senders, folder,
-                     date_first, date_last, message_ids, snippet, has_attachments,
-                     body_text)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(thread_id) DO UPDATE SET
-                    subject         = excluded.subject,
-                    participants    = excluded.participants,
-                    senders         = excluded.senders,
-                    date_first      = excluded.date_first,
-                    date_last       = excluded.date_last,
-                    message_ids     = excluded.message_ids,
-                    snippet         = excluded.snippet,
-                    has_attachments = excluded.has_attachments,
-                    body_text       = excluded.body_text
-                """,
-                (
-                    thread.thread_id,
-                    thread.subject,
-                    participants_json,
-                    senders_json,
-                    thread.folder,
-                    date_first,
-                    date_last,
-                    message_ids_json,
-                    snippet,
-                    has_attachments,
-                    body,
-                ),
-            )
+        cur.execute(
+            """
+            INSERT INTO threads
+                (thread_id, subject, participants, senders, folder,
+                 date_first, date_last, message_ids, snippet, has_attachments,
+                 body_text)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(thread_id) DO UPDATE SET
+                subject         = excluded.subject,
+                participants    = excluded.participants,
+                senders         = excluded.senders,
+                date_first      = excluded.date_first,
+                date_last       = excluded.date_last,
+                message_ids     = excluded.message_ids,
+                snippet         = excluded.snippet,
+                has_attachments = excluded.has_attachments,
+                body_text       = excluded.body_text
+            """,
+            (
+                thread.thread_id,
+                thread.subject,
+                participants_json,
+                senders_json,
+                thread.folder,
+                date_first,
+                date_last,
+                message_ids_json,
+                snippet,
+                has_attachments,
+                body,
+            ),
+        )
 
-            self._replace_fts_row(cur, thread.thread_id, thread.subject, participants_json, body)
+        self._replace_fts_row(cur, thread.thread_id, thread.subject, participants_json, body)
 
-            cur.execute("DELETE FROM threads_vec WHERE thread_id = ?", (thread.thread_id,))
-            cur.execute(
-                "INSERT INTO threads_vec (thread_id, embedding) VALUES (?, ?)",
-                (thread.thread_id, sqlite_vec.serialize_float32(embedding)),
-            )
-            self._conn.commit()
-        except Exception:
-            self._conn.rollback()
-            raise
+        cur.execute("DELETE FROM threads_vec WHERE thread_id = ?", (thread.thread_id,))
+        cur.execute(
+            "INSERT INTO threads_vec (thread_id, embedding) VALUES (?, ?)",
+            (thread.thread_id, sqlite_vec.serialize_float32(embedding)),
+        )
+
+    @staticmethod
+    def _remove_message_row(cur: sqlite3.Cursor, message_id: str) -> str | None:
+        """Remove a message's map / indexed_files / tombstone rows using
+        ``cur``. Returns the message's filepath (for optional on-disk
+        cleanup), or ``None`` if no such message was tracked. Shared by
+        ``remove_message`` and ``reap_thread_messages``; the caller owns
+        the enclosing transaction.
+        """
+        row = cur.execute(
+            "SELECT filepath FROM message_thread_map WHERE message_id = ?",
+            (message_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        filepath = row["filepath"]
+        cur.execute("DELETE FROM message_thread_map WHERE message_id = ?", (message_id,))
+        cur.execute("DELETE FROM indexed_files WHERE filepath = ?", (filepath,))
+        cur.execute("DELETE FROM pending_deletions WHERE filepath = ?", (filepath,))
+        return filepath
