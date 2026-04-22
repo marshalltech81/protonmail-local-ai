@@ -1,8 +1,9 @@
 """
 Tests for src/database.py.
 
-Covers: schema creation, v1→v2 migration, upsert_thread (insert and update
-with body accumulation), threading lookups, file tracking, and stats.
+Covers: schema creation, forward migrations through the current
+``SCHEMA_VERSION``, ``upsert_thread`` (insert and body-accumulation update),
+threading lookups, file tracking, and stats.
 """
 
 import json
@@ -48,7 +49,7 @@ class TestSchema:
         assert "body_text" in cols
 
     def test_v1_to_v2_migration_adds_body_text(self, tmp_path):
-        """A database created at schema v1 (no body_text) migrates to v2."""
+        """A database created at schema v1 migrates forward to SCHEMA_VERSION."""
         db_path = tmp_path / "v1.db"
 
         # Build a v1 database manually — no body_text column
@@ -71,12 +72,72 @@ class TestSchema:
         conn.commit()
         conn.close()
 
-        # Open with Database — migration should run
+        # Open with Database — migrations should run forward to SCHEMA_VERSION
         db = Database(db_path)
         cols = {row[1] for row in db._conn.execute("PRAGMA table_info(threads)").fetchall()}
         assert "body_text" in cols
         row = db._conn.execute("SELECT version FROM schema_version").fetchone()
-        assert row["version"] == 2
+        assert row["version"] == SCHEMA_VERSION
+
+    def test_v2_to_v3_migration_adds_fts_rowid_and_rebuilds_fts(self, tmp_path):
+        """A v2 database migrates forward, gaining the fts_rowid column and
+        a threads_fts table rebuilt with contentless_delete=1."""
+        db_path = tmp_path / "v2.db"
+
+        # Build a v2 database manually — has body_text, old-style threads_fts
+        conn = sqlite3.connect(str(db_path))
+        conn.execute("CREATE TABLE schema_version (version INTEGER PRIMARY KEY)")
+        conn.execute("INSERT INTO schema_version VALUES (2)")
+        conn.execute("""
+            CREATE TABLE threads (
+                thread_id    TEXT PRIMARY KEY,
+                subject      TEXT NOT NULL,
+                participants TEXT NOT NULL,
+                folder       TEXT NOT NULL,
+                date_first   TEXT NOT NULL,
+                date_last    TEXT NOT NULL,
+                message_ids  TEXT NOT NULL,
+                snippet      TEXT,
+                has_attachments INTEGER DEFAULT 0,
+                body_text    TEXT
+            )
+        """)
+        conn.execute("""
+            CREATE VIRTUAL TABLE threads_fts
+            USING fts5(
+                thread_id UNINDEXED, subject, participants, body,
+                content='', tokenize='porter unicode61'
+            )
+        """)
+        conn.execute(
+            "INSERT INTO threads (thread_id, subject, participants, folder, "
+            "date_first, date_last, message_ids, snippet, body_text) "
+            "VALUES ('t1', 'old subject', '[]', 'INBOX', "
+            "'2024-01-01', '2024-01-01', '[]', 's', 'carryovertoken body')"
+        )
+        conn.commit()
+        conn.close()
+
+        db = Database(db_path)
+
+        cols = {row[1] for row in db._conn.execute("PRAGMA table_info(threads)").fetchall()}
+        assert "fts_rowid" in cols
+
+        version_row = db._conn.execute("SELECT version FROM schema_version").fetchone()
+        assert version_row["version"] == SCHEMA_VERSION
+
+        # Existing thread's body is backfilled into the rebuilt FTS and its
+        # rowid recorded so future keyword searches can join via fts_rowid.
+        hit = db._conn.execute(
+            """
+            SELECT t.thread_id
+            FROM threads_fts
+            JOIN threads t ON threads_fts.rowid = t.fts_rowid
+            WHERE threads_fts MATCH 'carryovertoken'
+            """
+        ).fetchone()
+        assert hit is not None
+        assert hit["thread_id"] == "t1"
 
     def test_migration_is_idempotent(self, tmp_path):
         """Opening an already-migrated database does not error."""
@@ -324,3 +385,55 @@ class TestGetStats:
         stats = db.get_stats()
         assert stats["total_threads"] == 2
         assert stats["total_messages"] == 2
+
+
+# ---------------------------------------------------------------------------
+# FTS behavior — contentless_delete + fts_rowid (schema v3)
+# ---------------------------------------------------------------------------
+
+
+class TestFtsRowidAndReplacement:
+    def test_upsert_update_replaces_fts_row_instead_of_accumulating(self, db, threader):
+        """Body-text updates must DELETE the prior FTS row so stale tokens do
+        not linger in the search index. Regression test for the pre-v3 bug
+        where DELETE silently no-op'd on contentless tables without
+        ``contentless_delete=1``.
+        """
+        msg = make_message(
+            message_id="upd@x",
+            body_text="oldcontentmarker1 oldcontentmarker2",
+            filepath="/u/1",
+        )
+        t = threader.assign_thread(msg)
+        db.upsert_thread(t, FAKE_EMBEDDING)
+
+        reply = make_message(
+            message_id="upd_reply@x",
+            body_text="newcontentmarker1 newcontentmarker2",
+            in_reply_to="upd@x",
+            filepath="/u/2",
+            date=datetime(2024, 2, 1, tzinfo=UTC),
+        )
+        t2 = threader.assign_thread(reply)
+        db.upsert_thread(t2, FAKE_EMBEDDING)
+
+        # Only one FTS row per thread even after update
+        total_fts = db._conn.execute("SELECT COUNT(*) FROM threads_fts").fetchone()[0]
+        assert total_fts == 1
+
+    def test_keyword_join_via_fts_rowid(self, db, threader):
+        """FTS rowid → thread row join (the pattern MCP keyword search uses)."""
+        msg = make_message(message_id="join@x", body_text="uniquejointoken here")
+        t = threader.assign_thread(msg)
+        db.upsert_thread(t, FAKE_EMBEDDING)
+
+        row = db._conn.execute(
+            """
+            SELECT t.thread_id
+            FROM threads_fts
+            JOIN threads t ON threads_fts.rowid = t.fts_rowid
+            WHERE threads_fts MATCH 'uniquejointoken'
+            """
+        ).fetchone()
+        assert row is not None
+        assert row["thread_id"] == t.thread_id
