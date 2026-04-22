@@ -122,6 +122,11 @@ This pulls:
 - `nomic-embed-text` — embedding model for search (~274MB)
 - `llama3.2` — local LLM for Q&A (~2GB)
 
+`make pull-models` brings the `ollama` container up first (if not already
+running) and waits up to 120 seconds for it to report ready before
+pulling, so this step works from a clean stack — you do not need to run
+`make up` first.
+
 ### 6. Start the full stack
 
 ```bash
