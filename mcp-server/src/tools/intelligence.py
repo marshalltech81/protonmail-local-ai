@@ -10,14 +10,24 @@ import httpx
 from mcp.types import TextContent
 
 from ..lib.security import safe_exception_text
+from ..lib.sqlite import ThreadResult
 
 log = logging.getLogger("mcp.tools.intelligence")
 
+# Per-thread character budget when assembling LLM prompts from retrieved
+# threads. The indexer caps ``body_text`` at 8000 chars per thread; feeding
+# multiple full-length threads to a local Ollama model easily exceeds its
+# context. 2000 chars ≈ 500 tokens per thread keeps five-thread contexts
+# well under an 8k-token model window while still giving the LLM the
+# accumulated thread body instead of the 200-char snippet.
+PER_THREAD_CHAR_BUDGET = 2000
+
 SUMMARIZE_SYSTEM = """You are an email assistant. You will be given indexed
-thread context from an email thread. The context may be a snippet or truncated
-thread text rather than the full raw mailbox thread. Summarize it clearly and
-concisely according to the requested style. Be factual. Do not invent
-information not present in the provided context."""
+thread context from an email thread. The context is the accumulated body
+text for the thread, possibly truncated to stay within the model context
+window. Summarize it clearly and concisely according to the requested
+style. Be factual. Do not invent information not present in the provided
+context."""
 
 ASK_SYSTEM = """You are an email assistant with access to a person's email
 archive. You will be given relevant email thread excerpts retrieved from their
@@ -26,10 +36,21 @@ If the answer is not in the provided threads, say so clearly. Be concise and
 factual. Cite which thread(s) your answer comes from."""
 
 EXTRACT_SYSTEM = """You are a data extraction assistant. You will be given
-indexed email thread context, which may be a snippet or truncated thread text
-rather than the full raw mailbox thread. Extract structured data matching the
-requested schema. Return ONLY valid JSON matching the schema — no preamble, no
-explanation."""
+indexed email thread context (accumulated body text, possibly truncated).
+Extract structured data matching the requested schema. Return ONLY valid
+JSON matching the schema — no preamble, no explanation."""
+
+
+def _thread_context(thread: ThreadResult, limit: int = PER_THREAD_CHAR_BUDGET) -> str:
+    """Return the richest available text for a thread, bounded by ``limit``.
+
+    Prefers the accumulated ``body_text`` column (capped at 8000 chars per
+    thread in the indexer) and falls back to ``snippet`` (200 chars) when
+    a legacy row is missing ``body_text``. A fixed per-thread character
+    budget keeps multi-thread prompts within the LLM context window.
+    """
+    text = thread.body_text or thread.snippet or ""
+    return text[:limit]
 
 
 def register_intelligence_tools(
@@ -99,7 +120,7 @@ def register_intelligence_tools(
                     f"[Thread {i}: {thread.subject}]\n"
                     f"Participants: {', '.join(thread.participants[:3])}\n"
                     f"Date: {thread.date_last.strftime('%Y-%m-%d')}\n"
-                    f"{thread.snippet}\n"
+                    f"{_thread_context(thread)}\n"
                 )
 
             context = "\n---\n".join(context_parts)
@@ -154,7 +175,7 @@ def register_intelligence_tools(
                 f"Participants: {', '.join(thread.participants)}\n"
                 f"Date range: {thread.date_first.strftime('%Y-%m-%d')} "
                 f"to {thread.date_last.strftime('%Y-%m-%d')}\n\n"
-                f"Content:\n{thread.snippet}\n\n"
+                f"Content:\n{_thread_context(thread)}\n\n"
                 f"Task: {instruction}"
             )
 
@@ -217,7 +238,7 @@ def register_intelligence_tools(
                     f"From this email thread:\n"
                     f"Subject: {thread.subject}\n"
                     f"Date: {thread.date_last.strftime('%Y-%m-%d')}\n"
-                    f"Content: {thread.snippet}\n\n"
+                    f"Content: {_thread_context(thread)}\n\n"
                     f"Return a JSON object matching the schema, "
                     f"or null if no relevant data found."
                 )
