@@ -43,10 +43,18 @@ def register_search_tools(server, db, ollama):
             dates, folder, and a short snippet.
         """
         try:
+            # All three modes accept the same filter set; keyword and
+            # semantic modes previously only forwarded ``folders`` and
+            # silently dropped sender/date/attachment filters, returning
+            # unfiltered results without warning.
             if mode == "keyword":
                 results = db.keyword_search(
                     query_text=query,
                     folders=folders,
+                    from_addr=from_addr,
+                    date_from=date_from,
+                    date_to=date_to,
+                    has_attachments=has_attachments,
                     limit=limit,
                 )
             elif mode == "semantic":
@@ -54,6 +62,10 @@ def register_search_tools(server, db, ollama):
                 results = db.semantic_search(
                     query_embedding=embedding,
                     folders=folders,
+                    from_addr=from_addr,
+                    date_from=date_from,
+                    date_to=date_to,
+                    has_attachments=has_attachments,
                     limit=limit,
                 )
             else:  # hybrid (default)

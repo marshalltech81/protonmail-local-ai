@@ -20,6 +20,10 @@ from src import main
 from src.database import EMBEDDING_DIM, Database
 from src.threader import Threader
 
+# Matches threads_vec FLOAT[768] in src/database.py; mirrored here to keep
+# tests decoupled from the database module constant.
+EMBEDDING_DIM = 768
+
 
 class _FakeEvent:
     def __init__(self, src_path: str, dest_path: str, is_directory: bool = False):
@@ -108,6 +112,42 @@ class TestOnMovedIndexesDestination:
         # trigger another embed.
         handler.on_moved(_FakeEvent(src_path=str(dest), dest_path=str(dest)))
         assert embedder.embed.call_count == first_call_count
+
+    def test_flag_rename_moves_filepath_without_reindexing(self, tmp_path):
+        """Maildir flag changes land as on_moved(src=old_name, dest=new_name)
+        where both live in the same ``cur/`` directory and the source path
+        is already indexed. The prior on_moved fix re-indexed the new path
+        because ``is_indexed(dest)`` was False (indexed_files still held
+        the old name). Now we must detect the rename, skip the re-embed,
+        and move the stored filepath forward."""
+        db_path = tmp_path / "db" / "mail.db"
+        db = Database(db_path)
+        threader = Threader(db)
+
+        # Deliver msg:2,S into cur/
+        original_path = tmp_path / "INBOX" / "cur" / "1738500000.uniq.proton:2,S"
+        _write_eml(original_path, "flag@example.com")
+
+        embedder = MagicMock()
+        embedder.embed.return_value = [0.0] * EMBEDDING_DIM
+
+        handler = main.MaildirHandler(db, embedder, threader)
+        handler.on_moved(
+            _FakeEvent(src_path=str(tmp_path / "tmp" / "m"), dest_path=str(original_path))
+        )
+        deliveries = embedder.embed.call_count
+        assert deliveries == 1
+
+        # mbsync marks it replied: renames file to msg:2,SR.
+        renamed_path = tmp_path / "INBOX" / "cur" / "1738500000.uniq.proton:2,SR"
+        original_path.rename(renamed_path)
+        handler.on_moved(_FakeEvent(src_path=str(original_path), dest_path=str(renamed_path)))
+
+        # Must not have re-parsed or re-embedded.
+        assert embedder.embed.call_count == deliveries
+        # indexed_files now tracks the new filepath; old path is gone.
+        assert db.is_indexed(str(renamed_path))
+        assert not db.is_indexed(str(original_path))
 
 
 class TestInitialIndexHeartbeat:

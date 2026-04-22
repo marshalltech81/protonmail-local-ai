@@ -65,26 +65,45 @@ class MaildirHandler(FileSystemEventHandler):
 
     def on_moved(self, event):
         # Two distinct move scenarios land here:
-        # 1. Maildir delivery: a message is first written under tmp/ and then
-        #    renamed into new/ or cur/ — the destination is a newly-arrived
-        #    message that must be indexed (``on_created`` does not fire for
-        #    rename destinations).
-        # 2. Flag changes: mbsync renames files in-place within the same
-        #    directory when flags change (e.g. S → ST for a \Deleted flag).
-        #    The reconciler inspects the destination to record or clear a
-        #    tombstone based on the new flag set.
+        # 1. Flag changes: mbsync renames files in-place within the same
+        #    directory when flags change (e.g. ``msg:2,S`` → ``msg:2,SR``
+        #    when the message is replied to). The source path is already
+        #    in ``indexed_files``. Re-parsing and re-embedding would waste
+        #    an Ollama round-trip and leave stale rows behind — the
+        #    reconciler (or fall-through ``update_filepath``) just has to
+        #    move the stored filepath to the new name.
+        # 2. Maildir delivery: a message is first written under ``tmp/``
+        #    and renamed into ``new/`` or ``cur/``. The source path is not
+        #    in ``indexed_files`` (it was a temp file), so this is a new
+        #    message that must be indexed (``on_created`` does not fire
+        #    for rename destinations).
         if event.is_directory:
             return
 
-        dest_path = Path(event.dest_path)
-        if dest_path.parent.name in ("cur", "new") and not self.db.is_indexed(str(dest_path)):
-            self._index_file(dest_path)
+        src_path = str(event.src_path)
+        dest_path_obj = Path(event.dest_path)
+        dest_path = str(dest_path_obj)
 
-        if self.reconciler is not None:
-            try:
-                self.reconciler.handle_moved(str(event.src_path), str(event.dest_path))
-            except Exception as e:
-                log.error(f"reconciler on_moved failed: {e}")
+        if self.db.is_indexed(src_path):
+            # Case 1: rename of an existing indexed message.
+            if self.reconciler is not None:
+                try:
+                    self.reconciler.handle_moved(src_path, dest_path)
+                except Exception as e:
+                    log.error(f"reconciler on_moved failed: {e}")
+            else:
+                # Default deployment has no reconciler; still move the
+                # indexed_files / message_thread_map filepath forward so
+                # future lookups find the current on-disk name.
+                try:
+                    self.db.update_filepath(src_path, dest_path)
+                except Exception as e:
+                    log.error(f"update_filepath failed on rename: {e}")
+            return
+
+        # Case 2: new delivery.
+        if dest_path_obj.parent.name in ("cur", "new") and not self.db.is_indexed(dest_path):
+            self._index_file(dest_path_obj)
 
     def _index_file(self, path: Path):
         try:
