@@ -48,6 +48,15 @@ def canonical_addr(value: str) -> str:
 # match; otherwise start a new thread.
 SUBJECT_FALLBACK_WINDOW = timedelta(days=60)
 
+# Cap for the stored / embedded thread body text. Used by both the fresh
+# insert path (``Thread.text_for_embedding``) and the accumulation path
+# in ``Database._compute_body``. Defining a single constant keeps brand-
+# new threads and later-updated threads on the same footing: without it,
+# a reply that arrives after the initial insert could expand the stored
+# body well past what the insert path would have kept, and the FTS /
+# embedding input would drift between the two code paths.
+THREAD_BODY_TEXT_MAX_CHARS = 8000
+
 log = logging.getLogger("indexer.threader")
 
 
@@ -65,7 +74,9 @@ class Thread:
         """
         Build a single text representation of the thread for embedding.
         Includes subject, participants, and all message bodies.
-        Trimmed to ~8000 chars to stay within embedding model context.
+        Trimmed to ``THREAD_BODY_TEXT_MAX_CHARS`` to stay within the
+        embedding model context, matching the cap the accumulation path
+        in ``Database._compute_body`` applies on update.
         """
         parts = [
             f"Subject: {self.subject}",
@@ -76,13 +87,13 @@ class Thread:
             parts.append(f"From: {msg.from_addr}")
             parts.append(f"Date: {msg.date.isoformat()}")
             # nomic-embed-text has a 2048-token context window (~4 chars/token).
-            # 500 chars ≈ 125 tokens per message, leaving room for multiple
-            # messages and the subject/participants header within the 4000-char
-            # thread cap (~1000 tokens, safely under the model limit).
+            # 500 chars ≈ 125 tokens per message keeps per-message input
+            # bounded while the joined output is capped at the shared
+            # THREAD_BODY_TEXT_MAX_CHARS limit below.
             parts.append(msg.body_text[:500])
             parts.append("")
 
-        return "\n".join(parts)[:4000]
+        return "\n".join(parts)[:THREAD_BODY_TEXT_MAX_CHARS]
 
     def snippet(self) -> str:
         """Short preview for search results."""

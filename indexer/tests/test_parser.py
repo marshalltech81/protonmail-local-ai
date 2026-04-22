@@ -229,6 +229,71 @@ class TestParseEmail:
 
 
 # ---------------------------------------------------------------------------
+# parse_email — file identity (schema v7)
+# ---------------------------------------------------------------------------
+
+
+class TestFileIdentity:
+    def test_populates_size_mtime_and_content_hash(self, tmp_path):
+        import hashlib
+
+        path = write_eml(
+            tmp_path,
+            """
+            From: alice@example.com
+            To: bob@example.com
+            Subject: Identity
+            Message-ID: <identity1@example.com>
+            Date: Mon, 01 Jan 2024 12:00:00 +0000
+            Content-Type: text/plain; charset=utf-8
+
+            Body text for identity check.
+        """,
+        )
+        raw = path.read_bytes()
+        expected_hash = hashlib.sha256(raw).hexdigest()
+
+        msg = parse_email(path)
+        assert msg is not None
+        assert msg.size == len(raw)
+        assert msg.content_hash == expected_hash
+        # mtime_ns must be an int when the stat succeeds; the exact value
+        # depends on the filesystem, so verify only the type and that it
+        # is non-negative.
+        assert isinstance(msg.mtime_ns, int)
+        assert msg.mtime_ns >= 0
+
+    def test_flag_rename_preserves_content_hash(self, tmp_path):
+        """A Maildir flag rename (``msg:2,S`` → ``msg:2,SR``) is a
+        filename change only; the file contents on disk are identical.
+        Parsing both paths must yield identical ``content_hash`` values
+        so the reconciler can recognise it as the same message."""
+        folder = tmp_path / "INBOX" / "cur"
+        folder.mkdir(parents=True)
+        raw = (
+            b"From: alice@example.com\r\n"
+            b"To: bob@example.com\r\n"
+            b"Subject: Flag rename\r\n"
+            b"Message-ID: <flagrename@example.com>\r\n"
+            b"Date: Mon, 01 Jan 2024 12:00:00 +0000\r\n"
+            b"\r\n"
+            b"Body.\r\n"
+        )
+
+        path_seen = folder / "msg:2,S"
+        path_seen.write_bytes(raw)
+        msg_seen = parse_email(path_seen)
+
+        path_seen_replied = folder / "msg:2,SR"
+        path_seen_replied.write_bytes(raw)
+        msg_seen_replied = parse_email(path_seen_replied)
+
+        assert msg_seen is not None and msg_seen_replied is not None
+        assert msg_seen.content_hash == msg_seen_replied.content_hash
+        assert msg_seen.size == msg_seen_replied.size
+
+
+# ---------------------------------------------------------------------------
 # parse_email — body extraction
 # ---------------------------------------------------------------------------
 
@@ -419,6 +484,40 @@ class TestMimeHardening:
         assert msg.has_attachments is True
         assert len(msg.attachments) == 1
         assert msg.attachments[0].filename == "report.pdf"
+        assert "Real body text." in msg.body_text
+
+    def test_filename_without_content_disposition_is_attachment(self, tmp_path):
+        """Some clients emit attachment parts with a ``filename`` parameter
+        but no ``Content-Disposition`` header at all. Under the old rule
+        (``"attachment" in cd or ("inline" in cd and has_filename)``) such a
+        part would fall through to the body path — its payload decoded as
+        text and the real body_text lost when the attachment preceded it.
+        Any part carrying a filename is treated as an attachment now."""
+        content = (
+            "From: alice@example.com\r\n"
+            "To: bob@example.com\r\n"
+            "Subject: Filename only\r\n"
+            "Message-ID: <fname_only@example.com>\r\n"
+            "Date: Mon, 01 Jan 2024 12:00:00 +0000\r\n"
+            "MIME-Version: 1.0\r\n"
+            'Content-Type: multipart/mixed; boundary="bound"\r\n'
+            "\r\n"
+            "--bound\r\n"
+            'Content-Type: application/octet-stream; name="leak.bin"\r\n'
+            "Content-Transfer-Encoding: base64\r\n"
+            "\r\n"
+            "AAAA\r\n"
+            "--bound\r\n"
+            "Content-Type: text/plain; charset=utf-8\r\n"
+            "\r\n"
+            "Real body text.\r\n"
+            "--bound--\r\n"
+        )
+        msg = parse_email(self._write(tmp_path, content))
+        assert msg is not None
+        assert msg.has_attachments is True
+        assert len(msg.attachments) == 1
+        assert msg.attachments[0].filename == "leak.bin"
         assert "Real body text." in msg.body_text
 
     def test_html_before_plain_still_prefers_plain(self, tmp_path):

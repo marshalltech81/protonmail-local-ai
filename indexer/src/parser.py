@@ -7,7 +7,9 @@ Handles MIME, HTML-to-text conversion, and attachment metadata.
 import email
 import email.message
 import email.utils
+import hashlib
 import logging
+import os
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -44,6 +46,14 @@ class Message:
     filepath: str
     attachments: list[Attachment] = field(default_factory=list)
     has_attachments: bool = False
+    # File identity captured at parse time (schema v7). ``size`` / ``mtime_ns``
+    # / ``content_hash`` feed ``indexed_files`` so the reconciler can tell a
+    # flag-only rename from a genuine content change without re-reading every
+    # file from disk. Defaults to ``None`` for Messages built by test
+    # fixtures that do not round-trip through ``parse_email``.
+    size: int | None = None
+    mtime_ns: int | None = None
+    content_hash: str | None = None
 
 
 def parse_email(path: Path, maildir_root: Path | None = None) -> Message | None:
@@ -81,6 +91,20 @@ def parse_email(path: Path, maildir_root: Path | None = None) -> Message | None:
 
         folder = _derive_folder(path, maildir_root)
 
+        # Capture file identity (schema v7). ``size`` is the length of the
+        # bytes we actually hashed; ``content_hash`` is computed over the
+        # raw file — not the decoded body — so flag-only renames keep the
+        # same hash while any real content mutation shows up as a mismatch.
+        # A ``stat`` failure is treated as "identity unknown" rather than a
+        # parse failure: the file was just read successfully, so the row
+        # still belongs in the index. Future passes can backfill.
+        size = len(raw)
+        content_hash = hashlib.sha256(raw).hexdigest()
+        try:
+            mtime_ns = os.stat(path).st_mtime_ns
+        except OSError:
+            mtime_ns = None
+
         return Message(
             message_id=message_id,
             in_reply_to=in_reply_to or None,
@@ -95,6 +119,9 @@ def parse_email(path: Path, maildir_root: Path | None = None) -> Message | None:
             filepath=str(path),
             attachments=attachments,
             has_attachments=len(attachments) > 0,
+            size=size,
+            mtime_ns=mtime_ns,
+            content_hash=content_hash,
         )
 
     except Exception as e:
@@ -139,11 +166,16 @@ def _extract_body_and_attachments(
             cd = part.get("Content-Disposition", "").lower()
             has_filename = bool(part.get_filename())
 
-            # A part is an attachment if disposition is "attachment", or if it
-            # is "inline" with an explicit filename (e.g. an inline image).
-            # Plain "inline" without a filename is the message body — do not
-            # treat it as an attachment or the body_text will be left empty.
-            is_attachment = "attachment" in cd or ("inline" in cd and has_filename)
+            # Any part carrying a filename is treated as an attachment.
+            # Message bodies are normally ``text/plain`` / ``text/html``
+            # with no filename; anything that was given a filename is,
+            # by convention, intended to be presented as a file. Some
+            # clients also omit ``Content-Disposition`` entirely on
+            # attachment parts — the explicit disposition check below
+            # covers the filename-less ``Content-Disposition: attachment``
+            # case, while the ``has_filename`` branch covers dispositions
+            # that are absent, non-standard, or ``inline`` with a file.
+            is_attachment = has_filename or "attachment" in cd
 
             if is_attachment:
                 filename = part.get_filename() or "unnamed"

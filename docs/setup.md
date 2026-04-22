@@ -502,6 +502,34 @@ The reaper sweeps `pending_deletions` on startup and once per
 `INDEXER_DELETION_SWEEP_INTERVAL_SECS`. If you want a deletion to land
 immediately for testing, drop the grace window to `0` and restart.
 
+### Tuning indexing retries
+
+Every discovered Maildir file is written to an `indexing_jobs` table
+and drained by a worker loop. Transient failures (Ollama down, SQLite
+lock contention) get exponential backoff; a persistent parser or
+schema error transitions the row to `dead` after
+`INDEXER_MAX_ATTEMPTS` attempts and stops being retried.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `INDEXER_MAX_ATTEMPTS` | `5` | Max retries before a row becomes `dead`. |
+| `INDEXER_RETRY_BASE_SECONDS` | `30` | Base backoff. Each attempt multiplies by `2^(attempts-1)`, capped at 6 h. |
+
+Inspect queued / dead work directly:
+
+```bash
+docker run --rm -v protonmail-local-ai_sqlite-volume:/data:ro \
+    debian:bookworm-slim bash -c \
+    'apt-get -qq install -y sqlite3 >/dev/null && \
+     sqlite3 /data/mail.db \
+       "SELECT status, COUNT(*) FROM indexing_jobs GROUP BY status;"'
+```
+
+A `dead` row carries the last `last_stage` / `last_error` so you can
+tell an Ollama outage from a parser bug without digging through logs.
+Re-enqueueing (for example by touching the file so mbsync re-delivers)
+resets the row to `queued` with `attempts = 0`.
+
 ### Claude Desktop doesn't see the tools
 
 1. Verify the MCP server is running: `docker compose ps`

@@ -38,18 +38,26 @@ class TestTextForEmbedding:
         assert "x" * 500 in text
         assert "x" * 501 not in text
 
-    def test_thread_output_capped_at_4000_chars(self):
+    def test_thread_output_capped_at_shared_max_chars(self):
+        """Both the fresh-insert embedding text and the accumulated body
+        written on update must respect the same cap so updated threads
+        don't silently retain more context than brand-new ones."""
+        from datetime import timedelta
+
+        from src.threader import THREAD_BODY_TEXT_MAX_CHARS
+
+        base_date = datetime(2024, 1, 1, tzinfo=UTC)
         msgs = [
             make_message(
                 message_id=f"msg{i}@example.com",
                 body_text="y" * 500,
                 filepath=f"/maildir/INBOX/cur/msg{i}",
-                date=datetime(2024, 1, i + 1, tzinfo=UTC),
+                date=base_date + timedelta(days=i),
             )
-            for i in range(20)
+            for i in range(40)
         ]
         thread = make_thread(messages=msgs)
-        assert len(thread.text_for_embedding()) <= 4000
+        assert len(thread.text_for_embedding()) <= THREAD_BODY_TEXT_MAX_CHARS
 
     def test_multiple_messages_all_represented(self):
         msg1 = make_message(

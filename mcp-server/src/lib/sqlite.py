@@ -9,7 +9,7 @@ import logging
 import re
 import sqlite3
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from email.utils import parseaddr
 from pathlib import Path
 
@@ -613,7 +613,11 @@ def _parse_filter_date(
       ``+00:00`` offset form that ``datetime.fromisoformat`` accepts.
     - any other ISO 8601 datetime string: passed through.
 
-    Naive datetimes are assumed to be UTC.
+    Naive datetimes are assumed to be UTC. Offset-aware values are
+    converted to UTC before being returned, so callers that feed the
+    result's ``isoformat()`` into SQL string comparisons against stored
+    UTC timestamps compare the same instant rather than two offset-shifted
+    strings that happen to sort differently.
     """
     normalized = value[:-1] + "+00:00" if value.endswith("Z") else value
 
@@ -632,7 +636,5 @@ def _parse_filter_date(
     except ValueError as exc:
         raise ValueError(f"{_field_name}: invalid datetime {value!r}") from exc
     if dt.tzinfo is None:
-        from datetime import UTC
-
-        dt = dt.replace(tzinfo=UTC)
-    return dt
+        return dt.replace(tzinfo=UTC)
+    return dt.astimezone(UTC)
