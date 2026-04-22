@@ -4,8 +4,27 @@ Covers pure fusion/filter logic against synthetic ThreadResult lists and
 real read queries against an in-memory-style database seeded via conftest.
 """
 
+import sqlite3
+
 import pytest
 from src.lib.sqlite import Database
+
+
+class TestReadOnlyConnection:
+    def test_write_attempt_raises(self, seeded_db: Database):
+        """The MCP reader opens SQLite via ``?mode=ro`` URI — any attempt
+        to mutate the shared index must fail at the SQLite API level, not
+        rely only on ``PRAGMA query_only`` being honored."""
+        with pytest.raises(sqlite3.OperationalError, match="readonly|read-only"):
+            seeded_db._conn.execute(
+                "UPDATE threads SET subject = 'hijacked' WHERE thread_id = 't-alpha'"
+            )
+
+    def test_reads_still_work(self, seeded_db: Database):
+        row = seeded_db._conn.execute(
+            "SELECT subject FROM threads WHERE thread_id = ?", ("t-alpha",)
+        ).fetchone()
+        assert row["subject"] == "invoice for march"
 
 
 class TestReciprocalRankFusion:

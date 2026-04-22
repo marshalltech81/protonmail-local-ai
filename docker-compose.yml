@@ -184,7 +184,13 @@ services:
       MCP_PORT: ${MCP_PORT:-3000}
       MCP_READ_ONLY: ${MCP_READ_ONLY:-true}
     volumes:
-      - sqlite-volume:/data:ro
+      # Mounted writable so SQLite can create the WAL ``-shm`` sidecar needed
+      # for readers on a WAL-mode database. The mcp-server process opens the
+      # DB via the ``?mode=ro`` URI and enforces ``PRAGMA query_only`` so the
+      # connection cannot mutate the index — a writable mount plus an
+      # application-level read-only connection preserves read-only semantics
+      # without blocking WAL reads.
+      - sqlite-volume:/data
     ports:
       - "127.0.0.1:${MCP_PORT:-3000}:3000"
     networks:

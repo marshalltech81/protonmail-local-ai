@@ -4,9 +4,11 @@ Uses FTS5 for keyword search and sqlite-vec for vector similarity search.
 Thread-level indexing: one row per thread, updated as new messages arrive.
 """
 
+import functools
 import json
 import logging
 import sqlite3
+import threading
 from pathlib import Path
 
 import sqlite_vec
@@ -16,9 +18,33 @@ log = logging.getLogger("indexer.database")
 SCHEMA_VERSION = 4
 
 
+def _synchronized(fn):
+    """Serialize ``Database`` method calls across threads.
+
+    The indexer runs two concurrent DB writers: the watchdog observer
+    (``MaildirHandler`` callbacks) and the main loop (periodic
+    reconciler sweeps). Python's ``sqlite3`` module allows cross-thread
+    connection use via ``check_same_thread=False``, but individual
+    ``BEGIN IMMEDIATE``/execute/``commit`` sequences are not atomic at
+    the Python layer — interleaving can trigger ``sqlite3.OperationalError``
+    ("cannot start a transaction within a transaction") or silently
+    commit partial state. A per-instance re-entrant lock around every
+    public method makes the whole transaction atomic from the caller's
+    perspective.
+    """
+
+    @functools.wraps(fn)
+    def wrapper(self, *args, **kwargs):
+        with self._lock:
+            return fn(self, *args, **kwargs)
+
+    return wrapper
+
+
 class Database:
     def __init__(self, path: Path):
         self.path = path
+        self._lock = threading.RLock()
         path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = self._connect()
         self._migrate()
@@ -227,6 +253,7 @@ class Database:
     # Write operations
     # -------------------------------------------------------------------------
 
+    @_synchronized
     def upsert_thread(self, thread, embedding: list[float]):
         """Insert or update a thread in all three indexes.
 
@@ -401,6 +428,7 @@ class Database:
     # Read operations
     # -------------------------------------------------------------------------
 
+    @_synchronized
     def find_thread_by_message_id(self, message_id: str) -> str | None:
         row = self._conn.execute(
             "SELECT thread_id FROM message_thread_map WHERE message_id = ?",
@@ -408,6 +436,7 @@ class Database:
         ).fetchone()
         return row["thread_id"] if row else None
 
+    @_synchronized
     def find_thread_by_subject(self, normalized_subject: str, folder: str) -> str | None:
         row = self._conn.execute(
             """
@@ -419,6 +448,7 @@ class Database:
         ).fetchone()
         return row["thread_id"] if row else None
 
+    @_synchronized
     def get_thread(self, thread_id: str):
         """Load a thread from the database (for adding new messages to)."""
         row = self._conn.execute(
@@ -444,12 +474,14 @@ class Database:
             date_last=datetime.fromisoformat(row["date_last"]),
         )
 
+    @_synchronized
     def is_indexed(self, filepath: str) -> bool:
         row = self._conn.execute(
             "SELECT 1 FROM indexed_files WHERE filepath = ?", (filepath,)
         ).fetchone()
         return row is not None
 
+    @_synchronized
     def get_stats(self) -> dict:
         stats = {}
         stats["total_threads"] = self._conn.execute("SELECT COUNT(*) FROM threads").fetchone()[0]
@@ -468,28 +500,33 @@ class Database:
     # Reconciliation support — filepath tracking, tombstones, thread rebuild
     # -------------------------------------------------------------------------
 
+    @_synchronized
     def iter_message_map(self) -> list[sqlite3.Row]:
         """Return every (message_id, thread_id, filepath) row for sweeping."""
         return self._conn.execute(
             "SELECT message_id, thread_id, filepath FROM message_thread_map"
         ).fetchall()
 
+    @_synchronized
     def get_message_map_entry(self, message_id: str) -> sqlite3.Row | None:
         return self._conn.execute(
             "SELECT message_id, thread_id, filepath FROM message_thread_map WHERE message_id = ?",
             (message_id,),
         ).fetchone()
 
+    @_synchronized
     def find_message_entry_by_filepath(self, filepath: str) -> sqlite3.Row | None:
         return self._conn.execute(
             "SELECT message_id, thread_id, filepath FROM message_thread_map WHERE filepath = ?",
             (filepath,),
         ).fetchone()
 
+    @_synchronized
     def count_total_messages(self) -> int:
         row = self._conn.execute("SELECT COUNT(*) FROM message_thread_map").fetchone()
         return int(row[0]) if row else 0
 
+    @_synchronized
     def get_thread_messages(self, thread_id: str) -> list[sqlite3.Row]:
         """All (message_id, filepath) rows for a thread, used to rebuild it."""
         return self._conn.execute(
@@ -497,6 +534,7 @@ class Database:
             (thread_id,),
         ).fetchall()
 
+    @_synchronized
     def update_filepath(self, old_path: str, new_path: str) -> None:
         """Update message_thread_map + indexed_files after a Maildir rename.
 
@@ -528,6 +566,7 @@ class Database:
             self._conn.rollback()
             raise
 
+    @_synchronized
     def add_pending_deletion(self, filepath: str, message_id: str, thread_id: str) -> bool:
         """Record a tombstone. Returns True if newly inserted, False if already present.
 
@@ -545,20 +584,24 @@ class Database:
         self._conn.commit()
         return cur.rowcount > 0
 
+    @_synchronized
     def clear_pending_deletion(self, filepath: str) -> None:
         self._conn.execute("DELETE FROM pending_deletions WHERE filepath = ?", (filepath,))
         self._conn.commit()
 
+    @_synchronized
     def has_pending_deletion(self, filepath: str) -> bool:
         row = self._conn.execute(
             "SELECT 1 FROM pending_deletions WHERE filepath = ?", (filepath,)
         ).fetchone()
         return row is not None
 
+    @_synchronized
     def count_pending_deletions(self) -> int:
         row = self._conn.execute("SELECT COUNT(*) FROM pending_deletions").fetchone()
         return int(row[0]) if row else 0
 
+    @_synchronized
     def list_pending_deletions_older_than(self, cutoff_iso: str) -> list[sqlite3.Row]:
         return self._conn.execute(
             "SELECT filepath, message_id, thread_id, marked_at "
@@ -566,6 +609,7 @@ class Database:
             (cutoff_iso,),
         ).fetchall()
 
+    @_synchronized
     def remove_message(self, message_id: str) -> None:
         """Remove a message's map + indexed_files + tombstone rows.
 
@@ -592,6 +636,7 @@ class Database:
             self._conn.rollback()
             raise
 
+    @_synchronized
     def delete_thread_completely(self, thread_id: str) -> None:
         """Remove a thread and every derived row. Used when the last message
         in a thread has been reaped.
@@ -622,6 +667,7 @@ class Database:
             self._conn.rollback()
             raise
 
+    @_synchronized
     def rebuild_thread(self, thread, embedding: list[float]) -> None:
         """Fully rewrite a thread row after a message has been removed.
 

@@ -38,7 +38,13 @@ class Database:
 
     def _connect(self) -> sqlite3.Connection:
         Path(self.path).parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(self.path, check_same_thread=False)
+        # Open the SQLite file in read-only URI mode so the MCP server never
+        # attempts to mutate the shared index and so WAL readers can operate
+        # without the connection trying to create or write a journal sidecar.
+        # ``PRAGMA query_only`` is kept as defense-in-depth — any accidental
+        # mutation via extension or future code path still fails fast.
+        uri = f"file:{self.path}?mode=ro"
+        conn = sqlite3.connect(uri, uri=True, check_same_thread=False)
         conn.row_factory = sqlite3.Row
         conn.enable_load_extension(True)
         sqlite_vec.load(conn)
