@@ -20,9 +20,8 @@ jobs:
       - name: Seed local config for compose validation
         run: |
           cp .env.example .env
-          mkdir -p .secrets
+          make init-secrets
           printf 'placeholder-bridge-pass' > .secrets/bridge_pass.txt
-          chmod 600 .secrets/bridge_pass.txt
 
       - name: Validate docker compose configuration
         run: docker compose config --quiet
@@ -37,9 +36,8 @@ jobs:
       - name: Seed local config for image build
         run: |
           cp .env.example .env
-          mkdir -p .secrets
+          make init-secrets
           printf 'placeholder-bridge-pass' > .secrets/bridge_pass.txt
-          chmod 600 .secrets/bridge_pass.txt
 
       - name: Build local images
         run: docker compose build protonmail-bridge mbsync indexer mcp-server
