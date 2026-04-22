@@ -15,6 +15,10 @@ services:
     container_name: protonmail-bridge
     restart: unless-stopped
     stop_grace_period: 30s
+    # Run tini (Docker's built-in init) as PID 1 so signals are forwarded
+    # to the bridge binary on `docker stop` and any orphaned child
+    # processes are reaped instead of accumulating as zombies.
+    init: true
     read_only: true
     security_opt:
       - no-new-privileges:true
@@ -53,6 +57,7 @@ services:
       - bridge_pass
     container_name: mbsync
     restart: unless-stopped
+    init: true
     read_only: true
     security_opt:
       - no-new-privileges:true
@@ -83,15 +88,30 @@ services:
   # Ollama
   # Serves local embedding and LLM models.
   # GPU passthrough: uncomment the deploy block below if you have NVIDIA GPU.
+  #
+  # Memory planning: Ollama loads the full embedding + LLM weights into RAM
+  # on first use. Rough per-model footprint (model weights + ~20% runtime):
+  #   - nomic-embed-text         ~0.5 GB  (embedding, always loaded)
+  #   - llama3.2:3b              ~3 GB
+  #   - llama3.1:8b              ~6 GB
+  #   - qwen2.5:14b / mixtral    ~10 GB+
+  # Budget host RAM for the embedding model plus whichever LLM you pull, and
+  # add ~2 GB headroom so the kernel can keep a page cache. If the host is
+  # memory-tight, add a hard ceiling with `mem_limit` (e.g. `mem_limit: 6g`)
+  # — Ollama will error cleanly rather than triggering the OOM killer on
+  # another service.
   # ---------------------------------------------------------------------------
   ollama:
     image: ollama/ollama:0.21.0
     container_name: ollama
     restart: unless-stopped
+    init: true
     volumes:
       - ollama-models:/root/.ollama
     networks:
       - app-net
+    # Uncomment and tune based on your model and host budget:
+    # mem_limit: 6g
     # Uncomment for NVIDIA GPU support:
     # deploy:
     #   resources:
@@ -117,6 +137,7 @@ services:
       context: ./indexer
     container_name: indexer
     restart: unless-stopped
+    init: true
     read_only: true
     security_opt:
       - no-new-privileges:true
@@ -165,6 +186,7 @@ services:
       context: ./mcp-server
     container_name: mcp-server
     restart: unless-stopped
+    init: true
     read_only: true
     security_opt:
       - no-new-privileges:true
