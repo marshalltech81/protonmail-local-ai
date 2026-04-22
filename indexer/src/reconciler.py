@@ -264,11 +264,20 @@ class Reconciler:
             )
             return False, False
 
-        self.db.rebuild_thread(rebuilt_thread, embedding)
-        for tomb in tombs:
-            self.db.remove_message(tomb["message_id"])
-            if self.config.unlink_on_reap:
-                self._safe_unlink(tomb["filepath"])
+        # Atomic reap: rewrite the thread row with survivors + tear down
+        # each reaped message's message_thread_map / indexed_files /
+        # pending_deletions rows inside a single BEGIN IMMEDIATE. Prior
+        # code used rebuild_thread + a per-message remove_message loop —
+        # separate transactions, so a crash mid-reap could leave the
+        # thread row and the map disagreeing about which messages belong.
+        removed_filepaths = self.db.reap_thread_messages(
+            rebuilt_thread,
+            embedding,
+            [tomb["message_id"] for tomb in tombs],
+        )
+        if self.config.unlink_on_reap:
+            for fp in removed_filepaths:
+                self._safe_unlink(fp)
         log.info(
             "rebuilt thread %s: removed %d message(s), %d survive",
             thread_id,
