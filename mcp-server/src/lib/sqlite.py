@@ -6,6 +6,7 @@ Supports BM25 keyword search, vector similarity search, and hybrid fusion.
 
 import json
 import logging
+import re
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime
@@ -14,6 +15,35 @@ from pathlib import Path
 import sqlite_vec
 
 log = logging.getLogger("mcp.sqlite")
+
+# When any filter (folder, sender, date range, attachment flag) is active,
+# the filtered result set is a subset of the raw ranked candidates. Pulling
+# only ``limit * 2`` raw candidates means a filter can wipe out the page —
+# valid matches ranked deeper are never considered. Oversample when filters
+# are present to preserve recall.
+_UNFILTERED_OVERSAMPLE = 2
+_FILTERED_OVERSAMPLE = 4
+
+
+def _sanitize_fts_query(query: str) -> str:
+    """Build a safe FTS5 MATCH expression from arbitrary user input.
+
+    FTS5's MATCH grammar treats punctuation, hyphens, quotes, colons, and
+    trailing operators as syntax, so raw human search strings often fail to
+    parse (``"Who's the landlord?"``, ``alice@example.com`` with unbalanced
+    quotes, etc.). The failure mode of the previous implementation was to
+    catch the error and silently return no results, which looks to the user
+    like their query "doesn't match anything."
+
+    The sanitizer extracts word-like tokens (keeping ``@ . -`` so email
+    addresses and hostnames survive), quotes each one as an FTS phrase, and
+    joins with ``OR`` so any-term match is preserved — the typical
+    search-box expectation.
+    """
+    tokens = re.findall(r"[\w@.\-]+", query or "")
+    if not tokens:
+        return ""
+    return " OR ".join(f'"{t}"' for t in tokens)
 
 
 @dataclass
@@ -61,8 +91,14 @@ class Database:
         has_attachments: bool | None = None,
         limit: int = 10,
     ) -> list[ThreadResult]:
-        bm25_results = self._keyword_search(query_text, limit * 2)
-        vec_results = self._vector_search(query_embedding, limit * 2)
+        oversample = (
+            _FILTERED_OVERSAMPLE
+            if self._has_post_fusion_filter(folders, from_addr, date_from, date_to, has_attachments)
+            else _UNFILTERED_OVERSAMPLE
+        )
+        fetch_limit = limit * oversample
+        bm25_results = self._keyword_search(query_text, fetch_limit)
+        vec_results = self._vector_search(query_embedding, fetch_limit)
         fused = self._reciprocal_rank_fusion(bm25_results, vec_results)
         filtered = self._apply_filters(
             fused, folders, from_addr, date_from, date_to, has_attachments
@@ -75,7 +111,12 @@ class Database:
         folders: list[str] | None = None,
         limit: int = 10,
     ) -> list[ThreadResult]:
-        results = self._keyword_search(query_text, limit * 2)
+        oversample = (
+            _FILTERED_OVERSAMPLE
+            if self._has_post_fusion_filter(folders)
+            else _UNFILTERED_OVERSAMPLE
+        )
+        results = self._keyword_search(query_text, limit * oversample)
         filtered = self._apply_filters(results, folders)
         return filtered[:limit]
 
@@ -85,22 +126,40 @@ class Database:
         folders: list[str] | None = None,
         limit: int = 10,
     ) -> list[ThreadResult]:
-        results = self._vector_search(query_embedding, limit * 2)
+        oversample = (
+            _FILTERED_OVERSAMPLE
+            if self._has_post_fusion_filter(folders)
+            else _UNFILTERED_OVERSAMPLE
+        )
+        results = self._vector_search(query_embedding, limit * oversample)
         filtered = self._apply_filters(results, folders)
         return filtered[:limit]
+
+    @staticmethod
+    def _has_post_fusion_filter(
+        folders: list[str] | None = None,
+        from_addr: str | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
+        has_attachments: bool | None = None,
+    ) -> bool:
+        return bool(folders or from_addr or date_from or date_to or has_attachments is not None)
 
     def _keyword_search(self, query: str, limit: int) -> list[ThreadResult]:
         # threads_fts is a contentless FTS5 table, so its columns (including
         # any UNINDEXED ones) always read back as NULL. The reliable way to
         # link an FTS row back to its thread is the rowid, which the indexer
         # captures on write into threads.fts_rowid.
+        fts_query = _sanitize_fts_query(query)
+        if not fts_query:
+            return []
         try:
             rows = self._conn.execute(
                 """
                 SELECT
                     t.thread_id, t.subject, t.participants, t.folder,
                     t.date_first, t.date_last, t.message_ids,
-                    t.snippet, t.has_attachments,
+                    t.snippet, t.has_attachments, t.body_text,
                     bm25(threads_fts) AS score
                 FROM threads_fts
                 JOIN threads t ON threads_fts.rowid = t.fts_rowid
@@ -108,11 +167,36 @@ class Database:
                 ORDER BY score
                 LIMIT ?
             """,
-                (query, limit),
+                (fts_query, limit),
             ).fetchall()
             return [self._row_to_result(r) for r in rows]
-        except Exception as e:
-            log.warning(f"Keyword search error: {e}")
+        except sqlite3.OperationalError as e:
+            # Defense-in-depth: if the sanitized query still trips FTS5, fall
+            # back to a LIKE scan against subject/body/participants so valid
+            # searches still return recall rather than empty.
+            log.warning(f"FTS keyword search error, falling back to LIKE: {e}")
+            return self._like_fallback(query, limit)
+
+    def _like_fallback(self, query: str, limit: int) -> list[ThreadResult]:
+        pattern = f"%{query}%"
+        try:
+            rows = self._conn.execute(
+                """
+                SELECT
+                    thread_id, subject, participants, folder,
+                    date_first, date_last, message_ids,
+                    snippet, has_attachments, body_text,
+                    0.0 AS score
+                FROM threads
+                WHERE subject LIKE ? OR body_text LIKE ? OR participants LIKE ?
+                ORDER BY date_last DESC
+                LIMIT ?
+            """,
+                (pattern, pattern, pattern, limit),
+            ).fetchall()
+            return [self._row_to_result(r) for r in rows]
+        except sqlite3.OperationalError as e:
+            log.warning(f"LIKE fallback search error: {e}")
             return []
 
     def _vector_search(self, embedding: list[float], limit: int) -> list[ThreadResult]:
@@ -123,7 +207,7 @@ class Database:
                 SELECT
                     t.thread_id, t.subject, t.participants, t.folder,
                     t.date_first, t.date_last, t.message_ids,
-                    t.snippet, t.has_attachments,
+                    t.snippet, t.has_attachments, t.body_text,
                     v.distance AS score
                 FROM threads_vec v
                 JOIN threads t ON v.thread_id = t.thread_id

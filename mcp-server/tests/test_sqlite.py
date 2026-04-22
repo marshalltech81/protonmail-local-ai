@@ -99,9 +99,11 @@ class TestKeywordSearch:
         inbox_only = seeded_db.keyword_search("meeting", folders=["INBOX"])
         assert inbox_only == []
 
-    def test_malformed_fts_query_returns_empty_not_raise(self, seeded_db: Database):
-        # FTS5 treats an unbalanced quote as a syntax error; the layer is
-        # expected to log and return [] rather than propagate.
+    def test_unmatched_quote_query_is_sanitized(self, seeded_db: Database):
+        # Raw input with an unbalanced quote previously tripped FTS5 and
+        # returned []. The sanitizer now extracts the word token so the
+        # query runs — the expected result is still empty here because
+        # "unterminated" does not appear in the seeded rows.
         assert seeded_db.keyword_search('"unterminated') == []
 
 
@@ -191,3 +193,116 @@ class TestValidateIso8601:
     def test_rejects_garbage(self):
         with pytest.raises(ValueError, match="date_from"):
             Database._validate_iso8601("date_from", "yesterday")
+
+
+class TestFtsSanitization:
+    def test_sanitizer_extracts_word_tokens(self):
+        from src.lib.sqlite import _sanitize_fts_query
+
+        assert _sanitize_fts_query("hello world") == '"hello" OR "world"'
+
+    def test_sanitizer_preserves_email_tokens(self):
+        from src.lib.sqlite import _sanitize_fts_query
+
+        # @, ., - must survive so email addresses remain searchable.
+        assert '"alice@example.com"' in _sanitize_fts_query("from alice@example.com")
+
+    def test_sanitizer_strips_punctuation_that_would_break_fts(self):
+        from src.lib.sqlite import _sanitize_fts_query
+
+        sanitized = _sanitize_fts_query("Who's the landlord? (urgent)")
+        assert "?" not in sanitized
+        assert "(" not in sanitized
+
+    def test_sanitizer_empty_for_noise_only_input(self):
+        from src.lib.sqlite import _sanitize_fts_query
+
+        assert _sanitize_fts_query("!!!") == ""
+        assert _sanitize_fts_query("") == ""
+
+
+class TestKeywordSearchSanitization:
+    def test_punctuation_query_does_not_crash(self, seeded_db: Database):
+        """A natural-language query full of punctuation previously returned
+        empty due to FTS syntax errors. The sanitizer extracts the meaningful
+        tokens so matches still come back."""
+        results = seeded_db.keyword_search("Who sent the invoice?")
+        assert any(r.thread_id == "t-alpha" for r in results)
+
+    def test_email_address_query_returns_expected_match(self, seeded_db: Database):
+        results = seeded_db.keyword_search("alice@example.com")
+        # "alice@example.com" appears in participants of t-alpha and t-beta
+        assert results
+
+    def test_empty_query_returns_empty(self, seeded_db: Database):
+        assert seeded_db.keyword_search("") == []
+        assert seeded_db.keyword_search("!!!") == []
+
+
+class TestLikeFallback:
+    def test_like_fallback_returns_matches_by_subject(self, seeded_db: Database):
+        """``_like_fallback`` scans subject/body_text/participants with
+        ``LIKE`` and is the recovery path used when FTS rejects a
+        sanitized query."""
+        results = seeded_db._like_fallback("invoice", limit=10)
+        assert any(r.thread_id == "t-alpha" for r in results)
+
+    def test_like_fallback_returns_matches_by_body(self, seeded_db: Database):
+        results = seeded_db._like_fallback("spot", limit=10)
+        # "spot" appears in t-beta body_text "want to grab lunch tomorrow at the usual spot"
+        assert any(r.thread_id == "t-beta" for r in results)
+
+    def test_like_fallback_returns_empty_when_no_match(self, seeded_db: Database):
+        assert seeded_db._like_fallback("nowhereinseededdata", limit=10) == []
+
+    def test_keyword_search_falls_back_when_fts_raises(self, seeded_db: Database, monkeypatch):
+        """Patch ``_sanitize_fts_query`` to return a deliberately invalid
+        MATCH expression that FTS5 will reject — the except branch must
+        invoke ``_like_fallback`` and still return matches."""
+        from src.lib import sqlite as sqlite_mod
+
+        monkeypatch.setattr(sqlite_mod, "_sanitize_fts_query", lambda q: "AND OR NEAR")
+        results = seeded_db.keyword_search("invoice")
+        assert any(r.thread_id == "t-alpha" for r in results)
+
+
+class TestOversampleOnFilter:
+    def test_fetch_limit_grows_when_filter_present(self, seeded_db: Database, monkeypatch):
+        """A folder filter must trigger the higher oversample multiplier so
+        filtered results deeper in the ranked list still make the page."""
+        seen_limits: list[int] = []
+        real_keyword = seeded_db._keyword_search
+
+        def spy_keyword(q, limit):
+            seen_limits.append(limit)
+            return real_keyword(q, limit)
+
+        monkeypatch.setattr(seeded_db, "_keyword_search", spy_keyword)
+
+        seeded_db.hybrid_search(
+            query_text="meeting",
+            query_embedding=[0.0, 0.0, 1.0, 0.0],
+            folders=["INBOX"],
+            limit=10,
+        )
+        assert seen_limits == [40]
+
+        seen_limits.clear()
+        seeded_db.hybrid_search(
+            query_text="meeting",
+            query_embedding=[0.0, 0.0, 1.0, 0.0],
+            limit=10,
+        )
+        assert seen_limits == [20]
+
+
+class TestBodyTextLoadedIntoResult:
+    def test_body_text_populated_from_fts_join(self, seeded_db: Database):
+        results = seeded_db.keyword_search("invoice")
+        assert results
+        assert "invoice attached for march" in results[0].body_text
+
+    def test_body_text_populated_from_vector_search(self, seeded_db: Database):
+        results = seeded_db.semantic_search([1.0, 0.0, 0.0, 0.0], limit=1)
+        assert results
+        assert results[0].body_text
