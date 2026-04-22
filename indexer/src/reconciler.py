@@ -320,6 +320,48 @@ class Reconciler:
             log.warning("reaper: failed to unlink %s: %s", path, e)
 
 
+def sweep_paths(db: Database) -> dict:
+    """Walk every indexed file and update the stored filepath when mbsync
+    has renamed it in place (e.g. a flag-only rename such as ``S`` →
+    ``SR``, or a ``new`` → ``cur`` promotion). Intended to be safe to
+    run on every indexer startup — unlike ``Reconciler.sweep()`` it does
+    NOT tombstone missing files and does NOT touch ``pending_deletions``,
+    so it preserves the current opt-in posture of deletion reconciliation
+    while still healing path drift that accumulated while the indexer
+    was offline.
+
+    Returns a summary dict so the caller can log how much drift there
+    was (useful when diagnosing "new mail shows up in search late" on
+    mailboxes where the indexer restarts often).
+    """
+    renamed = 0
+    unreachable = 0
+
+    for row in db.iter_message_map():
+        stored = Path(row["filepath"])
+        current = resolve_current_path(stored)
+
+        if current is None:
+            # File is no longer at any of the expected Maildir paths. A
+            # full sweep (with reconciliation enabled) would tombstone
+            # the row here; this lightweight variant just counts the
+            # miss so the operator can see the signal in logs.
+            unreachable += 1
+            continue
+
+        if str(current) != row["filepath"]:
+            db.update_filepath(row["filepath"], str(current))
+            renamed += 1
+
+    if renamed or unreachable:
+        log.info(
+            "startup rename sweep: renamed=%d unreachable=%d",
+            renamed,
+            unreachable,
+        )
+    return {"renamed": renamed, "unreachable": unreachable}
+
+
 def load_config_from_env(env: dict[str, str]) -> ReconcilerConfig:
     """Parse reconciler knobs from environment variables.
 
