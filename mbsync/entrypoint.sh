@@ -9,10 +9,17 @@ readonly CONFIG_FILE="${RUNTIME_DIR}/mbsyncrc"
 readonly CERT_FILE="${RUNTIME_DIR}/bridge-cert.pem"
 readonly HEALTH_FILE="${RUNTIME_DIR}/last-successful-sync"
 readonly BRIDGE_PASS_FILE="/run/secrets/bridge_pass"
+# State directory persists the pinned Bridge cert fingerprint across
+# container restarts. The directory is backed by a named volume so it
+# survives `docker compose down` / rebuilds but is cleared by `make
+# clean`, giving the operator a clean way to start over if needed.
+readonly STATE_DIR="/state"
+readonly PIN_FILE="${STATE_DIR}/bridge-cert.fingerprint"
 readonly BRIDGE_WAIT_INTERVAL_SECONDS=2
 readonly BRIDGE_WAIT_MAX_ATTEMPTS=300
 readonly CERT_EXTRACT_TIMEOUT_SECONDS=20
 readonly MAX_CONSECUTIVE_SYNC_FAILURES=5
+readonly BRIDGE_CERT_PIN_ROTATE="${BRIDGE_CERT_PIN_ROTATE:-false}"
 
 umask 077
 mkdir -p "$RUNTIME_DIR"
@@ -54,36 +61,96 @@ wait_for_bridge_imap() {
     return 1
 }
 
+cert_fingerprint() {
+    local cert_path="$1"
+    # SHA-256 over the DER-encoded cert — matches `openssl x509 -fingerprint
+    # -sha256 -noout`. Emitted as a bare lowercase hex string without
+    # colons so it's easy to compare and store.
+    openssl x509 -in "$cert_path" -outform DER \
+        | openssl dgst -sha256 \
+        | awk '{print $NF}' \
+        | tr '[:upper:]' '[:lower:]'
+}
+
+verify_cert_pin() {
+    # First boot: no pin on disk yet → TOFU, save fingerprint.
+    # Subsequent boots: fingerprint must match, or the operator must opt
+    # in to rotation via BRIDGE_CERT_PIN_ROTATE=true (used when Bridge is
+    # upgraded and its TLS cert is deliberately replaced).
+    local current_fp="$1"
+    local pinned_fp
+
+    if [[ ! -s "$PIN_FILE" ]]; then
+        printf '%s\n' "$current_fp" > "$PIN_FILE"
+        chmod 600 "$PIN_FILE"
+        echo ">>> First boot — pinned Bridge cert fingerprint sha256:${current_fp}."
+        return 0
+    fi
+
+    pinned_fp="$(tr -d '[:space:]' < "$PIN_FILE")"
+    if [[ "$pinned_fp" == "$current_fp" ]]; then
+        echo ">>> Bridge cert fingerprint matches the pinned value."
+        return 0
+    fi
+
+    if [[ "$BRIDGE_CERT_PIN_ROTATE" == "true" ]]; then
+        echo ">>> WARNING: Bridge cert fingerprint changed and BRIDGE_CERT_PIN_ROTATE=true — rotating pin." >&2
+        echo ">>>   pinned:  sha256:${pinned_fp}" >&2
+        echo ">>>   current: sha256:${current_fp}" >&2
+        printf '%s\n' "$current_fp" > "$PIN_FILE"
+        chmod 600 "$PIN_FILE"
+        return 0
+    fi
+
+    echo ">>> ERROR: Bridge cert fingerprint does not match pinned value — refusing to sync." >&2
+    echo ">>>   pinned:  sha256:${pinned_fp}" >&2
+    echo ">>>   current: sha256:${current_fp}" >&2
+    echo ">>> If this rotation is expected (e.g. Bridge upgrade), restart mbsync with BRIDGE_CERT_PIN_ROTATE=true." >&2
+    echo ">>> Otherwise this is a security event — investigate before proceeding." >&2
+    return 1
+}
+
 extract_bridge_cert() {
     local cert_tmp
     local openssl_err_file
+    local current_fp
 
     cert_tmp="$(mktemp "${RUNTIME_DIR}/bridge-cert.XXXXXX")"
     openssl_err_file="$(mktemp "${RUNTIME_DIR}/openssl-s_client.XXXXXX")"
 
     echo ">>> Extracting Bridge TLS cert from ${BRIDGE_HOST}:${BRIDGE_IMAP_PORT}..."
-    if timeout "${CERT_EXTRACT_TIMEOUT_SECONDS}s" \
+    if ! timeout "${CERT_EXTRACT_TIMEOUT_SECONDS}s" \
         openssl s_client \
             -connect "${BRIDGE_HOST}:${BRIDGE_IMAP_PORT}" \
             -starttls imap \
             < /dev/null \
             2>"$openssl_err_file" \
         | openssl x509 > "$cert_tmp"; then
-        mv "$cert_tmp" "$CERT_FILE"
-        chmod 600 "$CERT_FILE"
-        rm -f "$openssl_err_file"
-        echo ">>> Bridge cert extracted successfully."
-        return 0
+        echo ">>> ERROR: cert extraction failed — refusing to sync without cert pinning." >&2
+        if [[ -s "$openssl_err_file" ]]; then
+            echo ">>> openssl s_client stderr follows:" >&2
+            cat "$openssl_err_file" >&2
+        fi
+        rm -f "$cert_tmp" "$openssl_err_file"
+        return 1
     fi
 
-    echo ">>> ERROR: cert extraction failed — refusing to sync without cert pinning." >&2
-    if [[ -s "$openssl_err_file" ]]; then
-        echo ">>> openssl s_client stderr follows:" >&2
-        cat "$openssl_err_file" >&2
+    if ! current_fp="$(cert_fingerprint "$cert_tmp")" || [[ -z "$current_fp" ]]; then
+        echo ">>> ERROR: failed to compute fingerprint for extracted cert." >&2
+        rm -f "$cert_tmp" "$openssl_err_file"
+        return 1
     fi
 
-    rm -f "$cert_tmp" "$openssl_err_file"
-    return 1
+    if ! verify_cert_pin "$current_fp"; then
+        rm -f "$cert_tmp" "$openssl_err_file"
+        return 1
+    fi
+
+    mv "$cert_tmp" "$CERT_FILE"
+    chmod 600 "$CERT_FILE"
+    rm -f "$openssl_err_file"
+    echo ">>> Bridge cert extracted successfully."
+    return 0
 }
 
 run_sync() {
@@ -98,6 +165,18 @@ run_sync() {
 # it directly from the Docker secret at /run/secrets/bridge_pass.
 # =============================================================================
 require_prerequisites
+
+# BRIDGE_CERT_PIN_ROTATE is a single-restart opt-in for accepting a
+# legitimate Bridge cert rotation. Leaving it set to true across
+# restarts silently disables pin enforcement — every new cert will be
+# accepted without comparison. Surface that drift on every boot so the
+# operator notices if they forgot to flip it back to false.
+if [[ "$BRIDGE_CERT_PIN_ROTATE" == "true" ]]; then
+    echo ">>> WARNING: BRIDGE_CERT_PIN_ROTATE=true — any Bridge cert fingerprint change this boot will be accepted without comparison." >&2
+    echo ">>> This is intended only for a single restart after a deliberate Bridge cert rotation (e.g. Bridge upgrade)." >&2
+    echo ">>> Set BRIDGE_CERT_PIN_ROTATE=false (or remove it from .env) and restart mbsync to re-enable pin enforcement." >&2
+fi
+
 envsubst < /etc/mbsyncrc.template > "$CONFIG_FILE"
 chmod 600 "$CONFIG_FILE" # protect the file because it contains credentials
 
@@ -110,11 +189,14 @@ chmod 600 "$CONFIG_FILE" # protect the file because it contains credentials
 wait_for_bridge_imap
 
 # =============================================================================
-# Extract Bridge TLS certificate for cert pinning
+# Extract Bridge TLS certificate and verify the cert pin
 # openssl s_client fetches the cert from the live IMAP connection without
-# needing to verify it first. The cert is written to a container-local path
-# and re-extracted fresh on every container start so it survives make clean
-# or a Bridge update that rotates the cert.
+# needing to verify it first. On first boot the SHA-256 fingerprint is
+# saved to the persistent state volume ($PIN_FILE). On subsequent boots
+# the fingerprint must match the pinned value — otherwise mbsync refuses
+# to sync. A legitimate rotation (e.g. Bridge upgrade) is accepted by
+# restarting mbsync with BRIDGE_CERT_PIN_ROTATE=true. `make clean`
+# deletes the state volume and resets the pin.
 # =============================================================================
 extract_bridge_cert
 

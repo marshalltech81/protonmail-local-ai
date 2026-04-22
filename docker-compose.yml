@@ -69,8 +69,13 @@ services:
       BRIDGE_IMAP_PORT: 1143
       BRIDGE_USER: ${BRIDGE_USER}
       SYNC_INTERVAL: ${SYNC_INTERVAL:-60}
+      # Set to true once, for a single restart, when Bridge's TLS cert is
+      # deliberately rotated (e.g. Bridge version upgrade). mbsync refuses
+      # to sync on a fingerprint mismatch otherwise.
+      BRIDGE_CERT_PIN_ROTATE: ${BRIDGE_CERT_PIN_ROTATE:-false}
     volumes:
       - maildir-volume:/maildir
+      - mbsync-state:/state
     networks:
       - bridge-net
 
@@ -195,6 +200,7 @@ services:
       - "127.0.0.1:${MCP_PORT:-3000}:3000"
     networks:
       - app-net
+    # Healthcheck is defined in mcp-server/Dockerfile and inherited here.
 
 # =============================================================================
 # Volumes
@@ -204,6 +210,7 @@ services:
 volumes:
   bridge-data:       # Bridge credentials, config, and cache
   maildir-volume:    # Raw email in Maildir format
+  mbsync-state:      # Persistent mbsync state (pinned Bridge cert fingerprint)
   ollama-models:     # Downloaded Ollama models
   sqlite-volume:     # SQLite database (FTS5 + vector index)
 
