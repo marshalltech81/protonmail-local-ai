@@ -90,6 +90,10 @@ class Database:
         return filtered[:limit]
 
     def _keyword_search(self, query: str, limit: int) -> list[ThreadResult]:
+        # threads_fts is a contentless FTS5 table, so its columns (including
+        # any UNINDEXED ones) always read back as NULL. The reliable way to
+        # link an FTS row back to its thread is the rowid, which the indexer
+        # captures on write into threads.fts_rowid.
         try:
             rows = self._conn.execute(
                 """
@@ -99,7 +103,7 @@ class Database:
                     t.snippet, t.has_attachments,
                     bm25(threads_fts) AS score
                 FROM threads_fts
-                JOIN threads t ON threads_fts.thread_id = t.thread_id
+                JOIN threads t ON threads_fts.rowid = t.fts_rowid
                 WHERE threads_fts MATCH ?
                 ORDER BY score
                 LIMIT ?

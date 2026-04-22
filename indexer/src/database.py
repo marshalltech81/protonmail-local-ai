@@ -13,7 +13,7 @@ import sqlite_vec
 
 log = logging.getLogger("indexer.database")
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 class Database:
@@ -60,6 +60,8 @@ class Database:
             self._apply_v1(cur)
         if current < 2:
             self._apply_v2(cur)
+        if current < 3:
+            self._apply_v3(cur)
 
         # UPDATE if a row exists, INSERT if this is a fresh database.
         # INSERT OR REPLACE would insert a new row (new primary key) rather
@@ -137,6 +139,60 @@ class Database:
             cur.execute("ALTER TABLE threads ADD COLUMN body_text TEXT")
         except sqlite3.OperationalError:
             pass  # Column already exists on a fresh database built from v1
+        self._conn.commit()
+
+    def _apply_v3(self, cur: sqlite3.Cursor):
+        """Rebuild ``threads_fts`` with ``contentless_delete=1`` and track
+        its rowid on each thread so updates/deletes actually remove rows.
+
+        The v1 schema created ``threads_fts`` as a contentless FTS5 table
+        without the ``contentless_delete`` option, and with an ``UNINDEXED``
+        ``thread_id`` column. Two issues follow from that:
+
+        1. ``DELETE FROM threads_fts WHERE thread_id = ?`` silently no-ops on
+           a contentless FTS5 table — so every update or rebuild accumulated
+           stale rows rather than replacing them.
+        2. UNINDEXED columns in a contentless FTS5 table always read back as
+           ``NULL``, which broke the MCP keyword-search join
+           (``JOIN threads ON threads_fts.thread_id = threads.thread_id``).
+
+        SQLite >= 3.43 adds ``contentless_delete=1`` which makes
+        ``DELETE FROM fts WHERE rowid = ?`` work. We store each row's rowid
+        in a new ``threads.fts_rowid`` column so the writer side can delete
+        a specific FTS row before re-inserting updated content, and the
+        reader side can join on the rowid instead of the always-null
+        ``thread_id``.
+        """
+        try:
+            cur.execute("ALTER TABLE threads ADD COLUMN fts_rowid INTEGER")
+        except sqlite3.OperationalError:
+            pass
+        cur.execute("DROP TABLE IF EXISTS threads_fts")
+        cur.execute(
+            """
+            CREATE VIRTUAL TABLE threads_fts
+            USING fts5(
+                subject,
+                participants,
+                body,
+                content='',
+                contentless_delete=1,
+                tokenize='porter unicode61'
+            )
+            """
+        )
+        rows = cur.execute(
+            "SELECT thread_id, subject, participants, body_text FROM threads"
+        ).fetchall()
+        for r in rows:
+            cur.execute(
+                "INSERT INTO threads_fts (subject, participants, body) VALUES (?, ?, ?)",
+                (r["subject"], r["participants"], r["body_text"] or ""),
+            )
+            cur.execute(
+                "UPDATE threads SET fts_rowid = ? WHERE thread_id = ?",
+                (cur.lastrowid, r["thread_id"]),
+            )
         self._conn.commit()
 
     # -------------------------------------------------------------------------
@@ -238,15 +294,10 @@ class Database:
                     (msg.filepath,),
                 )
 
-            # Update FTS5 index
-            cur.execute("DELETE FROM threads_fts WHERE thread_id = ?", (thread.thread_id,))
-            cur.execute(
-                """
-                INSERT INTO threads_fts (thread_id, subject, participants, body)
-                VALUES (?, ?, ?, ?)
-                """,
-                (thread.thread_id, thread.subject, participants_json, body),
-            )
+            # Update FTS5 index. threads_fts is contentless_delete=1 so DELETE
+            # requires a specific rowid — read the existing fts_rowid and then
+            # record the new rowid after INSERT.
+            self._replace_fts_row(cur, thread.thread_id, thread.subject, participants_json, body)
 
             # Update vector index — vec0 virtual tables do not support
             # INSERT OR REPLACE conflict resolution; use DELETE + INSERT instead.
@@ -260,6 +311,34 @@ class Database:
         except Exception:
             self._conn.rollback()
             raise
+
+    def _replace_fts_row(
+        self,
+        cur: sqlite3.Cursor,
+        thread_id: str,
+        subject: str,
+        participants_json: str,
+        body: str,
+    ) -> None:
+        """Delete any prior FTS row for ``thread_id`` and insert a fresh one.
+
+        Depends on ``threads.fts_rowid`` tracking the FTS rowid; without it
+        the DELETE would no-op silently and stale tokens would linger in the
+        index (see v3 migration notes).
+        """
+        existing = cur.execute(
+            "SELECT fts_rowid FROM threads WHERE thread_id = ?", (thread_id,)
+        ).fetchone()
+        if existing and existing["fts_rowid"] is not None:
+            cur.execute("DELETE FROM threads_fts WHERE rowid = ?", (existing["fts_rowid"],))
+        cur.execute(
+            "INSERT INTO threads_fts (subject, participants, body) VALUES (?, ?, ?)",
+            (subject, participants_json, body),
+        )
+        cur.execute(
+            "UPDATE threads SET fts_rowid = ? WHERE thread_id = ?",
+            (cur.lastrowid, thread_id),
+        )
 
     # -------------------------------------------------------------------------
     # Read operations
