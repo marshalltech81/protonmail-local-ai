@@ -431,7 +431,7 @@ Update docs when changing:
 - repository workflows, security reporting flow, or contributor-facing automation
 - operational recovery steps
 
-If a change may stale `README.md`, `CONTRIBUTING.md`, `SECURITY.md`, `PLAN.md`, `docs/`, or `AGENTS.md`, update it or proactively suggest the follow-up.
+If a change may stale `README.md`, `PLAN.md`, `docs/`, or `AGENTS.md`, update it or proactively suggest the follow-up. Contributor-facing defaults (`CONTRIBUTING.md`, `SECURITY.md`, issue/PR templates) live in the org-level `marshalltech81/.github` repo; flag follow-ups there when a change in this repo makes them stale.
 
 ## When to Stop and Ask
 
