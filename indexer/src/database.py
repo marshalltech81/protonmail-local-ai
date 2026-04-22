@@ -24,6 +24,12 @@ SCHEMA_VERSION = 4
 # with a clear message instead.
 MIN_SQLITE_VERSION = (3, 43, 0)
 
+# Vector dimension reserved by the threads_vec schema (FLOAT[768]). The
+# embedding model's output dimension must match this, or vec0 inserts fail.
+# nomic-embed-text is 768-dim and is the default. A startup-time check in
+# main.py validates the running model against this constant.
+EMBEDDING_DIM = 768
+
 
 class SQLiteTooOldError(RuntimeError):
     """Raised when the runtime SQLite library is older than required."""
@@ -278,7 +284,45 @@ class Database:
     # -------------------------------------------------------------------------
 
     @_synchronized
-    def upsert_thread(self, thread, embedding: list[float]):
+    def build_merged_body(self, thread) -> str:
+        """Compute the final ``body_text`` this thread will have after upsert.
+
+        Read-only. Intended for callers that need to embed the merged body
+        before it is written — e.g. the indexer computes a thread embedding
+        from the accumulated thread text, not from only the newly-arrived
+        message's ``text_for_embedding()``. Without this step the FTS body
+        reflects the whole thread while the vector embedding drifts toward
+        the latest message alone, degrading semantic search.
+        """
+        existing = self._conn.execute(
+            "SELECT body_text, message_ids FROM threads WHERE thread_id = ?",
+            (thread.thread_id,),
+        ).fetchone()
+        return self._compute_body(thread, existing)
+
+    @staticmethod
+    def _compute_body(thread, existing) -> str:
+        """Pure function: body_text given the incoming thread and existing row.
+
+        On insert, ``text_for_embedding()`` already sees all messages. On
+        update, ``thread.messages`` only holds the newly-arrived message,
+        so append its content to the stored ``body_text`` rather than
+        regenerating from scratch.
+        """
+        if existing and existing["body_text"]:
+            existing_message_ids = set(json.loads(existing["message_ids"] or "[]"))
+            new_messages = [m for m in thread.messages if m.message_id not in existing_message_ids]
+            if new_messages:
+                new_content = "\n".join(
+                    f"From: {m.from_addr}\nDate: {m.date.isoformat()}\n{m.body_text[:2000]}"
+                    for m in new_messages
+                )
+                return (existing["body_text"] + "\n" + new_content)[:8000]
+            return existing["body_text"]
+        return thread.text_for_embedding()
+
+    @_synchronized
+    def upsert_thread(self, thread, embedding: list[float], body: str | None = None):
         """Insert or update a thread in all three indexes.
 
         On update, accumulated thread metadata is merged with the incoming
@@ -294,7 +338,18 @@ class Database:
         - ``has_attachments``: true if previously true or newly true
         - ``date_first``: min(existing, incoming)
         - ``body_text``: existing body plus any previously-unseen messages
+
+        ``body`` override: callers that computed the merged body via
+        ``build_merged_body`` and embedded from it should pass the same
+        value back in so the stored body matches what the embedding
+        represents. When omitted, the merged body is recomputed here.
         """
+        if len(embedding) != EMBEDDING_DIM:
+            raise ValueError(
+                f"embedding has {len(embedding)} dims but threads_vec reserves "
+                f"{EMBEDDING_DIM}. Check OLLAMA_EMBED_MODEL."
+            )
+
         cur = self._conn.cursor()
 
         incoming_message_ids = [m.message_id for m in thread.messages]
@@ -323,28 +378,18 @@ class Database:
                 # Lexicographic min() is safe on ISO 8601 datetime strings
                 # once they are normalized to UTC (parser._parse_date).
                 merged_date_first = min(existing["date_first"], thread.date_first.isoformat())
-
-                if existing["body_text"]:
-                    existing_ids_set = set(existing_ids)
-                    new_messages = [
-                        m for m in thread.messages if m.message_id not in existing_ids_set
-                    ]
-                    if new_messages:
-                        new_content = "\n".join(
-                            f"From: {m.from_addr}\nDate: {m.date.isoformat()}\n{m.body_text[:2000]}"
-                            for m in new_messages
-                        )
-                        body = (existing["body_text"] + "\n" + new_content)[:8000]
-                    else:
-                        body = existing["body_text"]
-                else:
-                    body = thread.text_for_embedding()
             else:
                 merged_ids = incoming_message_ids
                 merged_participants = incoming_participants
                 merged_has_attachments = incoming_has_attachments
                 merged_date_first = thread.date_first.isoformat()
-                body = thread.text_for_embedding()
+
+            # Either use the caller's pre-computed merged body (so the stored
+            # body matches what they embedded) or compute it here. Both paths
+            # produce the same result when nothing else has written between
+            # the caller's build_merged_body() and this upsert.
+            if body is None:
+                body = self._compute_body(thread, existing)
 
             participants_json = json.dumps(merged_participants)
             message_ids_json = json.dumps(merged_ids)

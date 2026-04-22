@@ -206,6 +206,66 @@ class TestSchema:
 # ---------------------------------------------------------------------------
 
 
+class TestBuildMergedBody:
+    def test_insert_returns_text_for_embedding(self, db):
+        """For a thread not yet in the DB, build_merged_body reflects the
+        thread's own text_for_embedding() — i.e. the full message set the
+        caller assembled."""
+        thread = make_thread()
+        body = db.build_merged_body(thread)
+        assert "Subject:" in body
+        assert thread.subject in body
+
+    def test_update_appends_new_message_to_stored_body(self, db, threader):
+        """On update, build_merged_body returns the stored body with the
+        new message appended. This is what the embedder should see so the
+        vector represents the whole thread, not just the new message."""
+        import src.database as db_mod
+
+        original = make_message(
+            message_id="bm_orig@example.com",
+            body_text="Original message content marker.",
+        )
+        t1 = threader.assign_thread(original)
+        db.upsert_thread(t1, [0.0] * db_mod.EMBEDDING_DIM)
+
+        reply = make_message(
+            message_id="bm_reply@example.com",
+            body_text="Reply content marker.",
+            in_reply_to="bm_orig@example.com",
+            filepath="/bm/reply",
+            date=datetime(2024, 1, 2, tzinfo=UTC),
+        )
+        t2 = threader.assign_thread(reply)
+        body = db.build_merged_body(t2)
+
+        assert "Original message content marker." in body
+        assert "Reply content marker." in body
+
+    def test_upsert_with_explicit_body_stores_that_body(self, db):
+        """Passing ``body=`` overrides the recomputed merge — critical so
+        the stored body matches what the caller embedded."""
+        thread = make_thread()
+        db.upsert_thread(thread, FAKE_EMBEDDING, body="CUSTOM BODY MARKER")
+
+        row = db._conn.execute(
+            "SELECT body_text FROM threads WHERE thread_id = ?", (thread.thread_id,)
+        ).fetchone()
+        assert row["body_text"] == "CUSTOM BODY MARKER"
+
+
+class TestEmbeddingDimGuard:
+    def test_upsert_rejects_wrong_dimension(self, db):
+        """Passing an embedding whose length does not match EMBEDDING_DIM
+        fails fast — switching OLLAMA_EMBED_MODEL to a non-768 model would
+        otherwise surface as a cryptic sqlite-vec error on insert."""
+        thread = make_thread()
+        with pytest.raises(ValueError, match="dims"):
+            db.upsert_thread(thread, [0.1] * 512)  # wrong dim
+        with pytest.raises(ValueError, match="dims"):
+            db.upsert_thread(thread, [0.1] * 1024)  # wrong dim
+
+
 class TestUpsertThreadInsert:
     def test_inserts_thread_record(self, db):
         thread = make_thread()

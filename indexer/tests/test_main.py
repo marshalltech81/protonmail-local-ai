@@ -1,10 +1,12 @@
 """Tests for src/main.py.
 
-Covers the two watchdog-facing behaviors that cannot be verified by
+Covers the watchdog-facing behaviors that cannot be verified by
 ``database`` or ``threader`` tests alone: that ``on_moved`` indexes the
-destination of a Maildir rename (standard delivery path), and that
+destination of a Maildir rename (standard delivery path), that
 ``initial_index`` refreshes the health file periodically so long scans
-do not exceed ``HEALTH_MAX_AGE_SECONDS``.
+do not exceed ``HEALTH_MAX_AGE_SECONDS``, and that the startup probe
+validates the running embedding model's output dimension against the
+schema-reserved vector dimension.
 
 ``main`` orchestrates watchdog, Ollama, and filesystem I/O; these tests
 exercise it with stub collaborators rather than booting a live indexer.
@@ -13,8 +15,9 @@ exercise it with stub collaborators rather than booting a live indexer.
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import pytest
 from src import main
-from src.database import Database
+from src.database import EMBEDDING_DIM, Database
 from src.threader import Threader
 
 
@@ -56,7 +59,7 @@ class TestOnMovedIndexesDestination:
         _write_eml(dest, "moved@example.com")
 
         embedder = MagicMock()
-        embedder.embed.return_value = [0.0] * 768
+        embedder.embed.return_value = [0.0] * EMBEDDING_DIM
 
         handler = main.MaildirHandler(db, embedder, threader)
         handler.on_moved(
@@ -93,7 +96,7 @@ class TestOnMovedIndexesDestination:
         _write_eml(dest, "flag_change@example.com")
 
         embedder = MagicMock()
-        embedder.embed.return_value = [0.0] * 768
+        embedder.embed.return_value = [0.0] * EMBEDDING_DIM
 
         handler = main.MaildirHandler(db, embedder, threader)
 
@@ -125,7 +128,7 @@ class TestInitialIndexHeartbeat:
         threader = Threader(db)
 
         embedder = MagicMock()
-        embedder.embed.return_value = [0.0] * 768
+        embedder.embed.return_value = [0.0] * EMBEDDING_DIM
 
         touches: list[None] = []
         monkeypatch.setattr(main, "touch_health_file", lambda: touches.append(None))
@@ -134,3 +137,21 @@ class TestInitialIndexHeartbeat:
         main.initial_index(db, embedder, threader)
 
         assert len(touches) >= 1
+
+
+class TestValidateEmbeddingDim:
+    def test_matching_dim_passes_silently(self):
+        embedder = MagicMock()
+        embedder.embed.return_value = [0.0] * EMBEDDING_DIM
+        main._validate_embedding_dim(embedder)
+        embedder.embed.assert_called_once()
+
+    def test_mismatched_dim_raises_systemexit(self):
+        """A 1024-dim model (e.g. mxbai-embed-large) against a 768-reserved
+        schema must fail fast at startup rather than surface later as a
+        cryptic sqlite-vec insert error."""
+        embedder = MagicMock()
+        embedder.embed.return_value = [0.0] * (EMBEDDING_DIM + 256)
+        with pytest.raises(SystemExit) as exc_info:
+            main._validate_embedding_dim(embedder)
+        assert str(EMBEDDING_DIM) in str(exc_info.value)
