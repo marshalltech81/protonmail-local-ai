@@ -230,47 +230,75 @@ class Database:
     def upsert_thread(self, thread, embedding: list[float]):
         """Insert or update a thread in all three indexes.
 
-        Body text is accumulated across calls: when a new message arrives in an
-        existing thread, its content is appended to the stored body_text rather
-        than regenerated from scratch. This is necessary because get_thread
-        returns an empty messages list (it does not re-parse files from disk),
-        so thread.text_for_embedding() at update time only sees the new message.
+        On update, accumulated thread metadata is merged with the incoming
+        ``Thread`` rather than replaced. ``threader.assign_thread`` returns a
+        Thread whose ``messages`` list only contains the newly-arrived message
+        (``get_thread`` deliberately returns ``messages=[]``), so blindly
+        serializing ``thread.messages`` / ``thread.participants`` /
+        ``has_attachments`` into the ON CONFLICT UPDATE would clobber the
+        existing thread's accumulated state. Merge rules:
+
+        - ``message_ids``: union existing and incoming, preserving order
+        - ``participants``: union existing and incoming, preserving order
+        - ``has_attachments``: true if previously true or newly true
+        - ``date_first``: min(existing, incoming)
+        - ``body_text``: existing body plus any previously-unseen messages
         """
         cur = self._conn.cursor()
 
-        participants_json = json.dumps(thread.participants)
-        message_ids_json = json.dumps([m.message_id for m in thread.messages])
-        snippet = thread.snippet()
-        date_first = thread.date_first.isoformat()
-        date_last = thread.date_last.isoformat()
-        has_attachments = int(any(m.has_attachments for m in thread.messages))
+        incoming_message_ids = [m.message_id for m in thread.messages]
+        incoming_participants = list(thread.participants)
+        incoming_has_attachments = int(any(m.has_attachments for m in thread.messages))
 
         try:
             cur.execute("BEGIN IMMEDIATE")
 
-            # Accumulate body text rather than regenerating from the (possibly
-            # incomplete) messages list. On insert, text_for_embedding() has all
-            # messages. On update, append only previously unseen message content.
             existing = cur.execute(
-                "SELECT body_text, message_ids FROM threads WHERE thread_id = ?",
+                "SELECT body_text, message_ids, participants, has_attachments, date_first "
+                "FROM threads WHERE thread_id = ?",
                 (thread.thread_id,),
             ).fetchone()
 
-            if existing and existing["body_text"]:
-                existing_message_ids = set(json.loads(existing["message_ids"] or "[]"))
-                new_messages = [
-                    m for m in thread.messages if m.message_id not in existing_message_ids
-                ]
-                if new_messages:
-                    new_content = "\n".join(
-                        f"From: {m.from_addr}\nDate: {m.date.isoformat()}\n{m.body_text[:2000]}"
-                        for m in new_messages
-                    )
-                    body = (existing["body_text"] + "\n" + new_content)[:8000]
+            if existing:
+                existing_ids = json.loads(existing["message_ids"] or "[]")
+                merged_ids = list(dict.fromkeys(existing_ids + incoming_message_ids))
+                existing_participants = json.loads(existing["participants"] or "[]")
+                merged_participants = list(
+                    dict.fromkeys(existing_participants + incoming_participants)
+                )
+                merged_has_attachments = int(
+                    bool(existing["has_attachments"]) or bool(incoming_has_attachments)
+                )
+                # Lexicographic min() is safe on ISO 8601 datetime strings
+                # once they are normalized to UTC (parser._parse_date).
+                merged_date_first = min(existing["date_first"], thread.date_first.isoformat())
+
+                if existing["body_text"]:
+                    existing_ids_set = set(existing_ids)
+                    new_messages = [
+                        m for m in thread.messages if m.message_id not in existing_ids_set
+                    ]
+                    if new_messages:
+                        new_content = "\n".join(
+                            f"From: {m.from_addr}\nDate: {m.date.isoformat()}\n{m.body_text[:2000]}"
+                            for m in new_messages
+                        )
+                        body = (existing["body_text"] + "\n" + new_content)[:8000]
+                    else:
+                        body = existing["body_text"]
                 else:
-                    body = existing["body_text"]
+                    body = thread.text_for_embedding()
             else:
+                merged_ids = incoming_message_ids
+                merged_participants = incoming_participants
+                merged_has_attachments = incoming_has_attachments
+                merged_date_first = thread.date_first.isoformat()
                 body = thread.text_for_embedding()
+
+            participants_json = json.dumps(merged_participants)
+            message_ids_json = json.dumps(merged_ids)
+            snippet = thread.snippet()
+            date_last = thread.date_last.isoformat()
 
             # Upsert main thread record
             cur.execute(
@@ -282,6 +310,7 @@ class Database:
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(thread_id) DO UPDATE SET
                     participants    = excluded.participants,
+                    date_first      = excluded.date_first,
                     date_last       = excluded.date_last,
                     message_ids     = excluded.message_ids,
                     snippet         = excluded.snippet,
@@ -293,11 +322,11 @@ class Database:
                     thread.subject,
                     participants_json,
                     thread.folder,
-                    date_first,
+                    merged_date_first,
                     date_last,
                     message_ids_json,
                     snippet,
-                    has_attachments,
+                    merged_has_attachments,
                     body,
                 ),
             )

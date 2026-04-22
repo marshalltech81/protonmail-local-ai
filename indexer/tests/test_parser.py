@@ -136,6 +136,52 @@ class TestParseEmail:
         # Fallback uses timezone.utc
         assert msg.date.tzinfo is not None
 
+    def test_date_minus_zero_normalized_to_aware_utc(self, tmp_path):
+        """RFC 2822 ``-0000`` means "local time, offset unknown".
+        ``parsedate_to_datetime`` returns a naive datetime for that case,
+        which mixes badly with aware datetimes during thread sorting.
+        ``_parse_date`` must normalize it to a UTC-aware datetime."""
+        from datetime import UTC
+
+        path = write_eml(
+            tmp_path,
+            """
+            From: alice@example.com
+            To: bob@example.com
+            Subject: Minus-zero date
+            Message-ID: <mz_date@example.com>
+            Date: Mon, 01 Jan 2024 12:00:00 -0000
+            Content-Type: text/plain; charset=utf-8
+
+            Body.
+        """,
+        )
+        msg = parse_email(path)
+        assert msg is not None
+        assert msg.date.tzinfo is not None
+        assert msg.date.utcoffset().total_seconds() == 0
+        assert msg.date.tzinfo is UTC
+
+    def test_date_non_utc_offset_converted_to_utc(self, tmp_path):
+        """A +0500 offset must be converted to UTC for downstream comparisons."""
+        path = write_eml(
+            tmp_path,
+            """
+            From: alice@example.com
+            To: bob@example.com
+            Subject: Offset date
+            Message-ID: <off_date@example.com>
+            Date: Mon, 01 Jan 2024 12:00:00 +0500
+            Content-Type: text/plain; charset=utf-8
+
+            Body.
+        """,
+        )
+        msg = parse_email(path)
+        assert msg is not None
+        assert msg.date.utcoffset().total_seconds() == 0
+        assert msg.date.hour == 7  # 12:00 +0500 = 07:00 UTC
+
     def test_nonexistent_file_returns_none(self, tmp_path):
         assert parse_email(tmp_path / "ghost.eml") is None
 

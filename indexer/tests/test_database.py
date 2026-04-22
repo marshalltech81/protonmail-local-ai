@@ -311,6 +311,113 @@ class TestUpsertThreadUpdate:
         ).fetchone()
         assert "2024-06-01" in row["date_last"]
 
+    def test_update_preserves_prior_message_ids(self, db, threader):
+        """Regression: the second message arriving in an existing thread must
+        not drop the first message's ID from threads.message_ids. Prior bug
+        serialized only ``thread.messages`` (which held the newest message
+        alone) into the UPSERT, clobbering the accumulated list."""
+        original = make_message(message_id="mid_orig@example.com", filepath="/m/1")
+        t1 = threader.assign_thread(original)
+        db.upsert_thread(t1, FAKE_EMBEDDING)
+
+        reply = make_message(
+            message_id="mid_reply@example.com",
+            in_reply_to="mid_orig@example.com",
+            filepath="/m/2",
+            date=datetime(2024, 1, 2, tzinfo=UTC),
+        )
+        t2 = threader.assign_thread(reply)
+        db.upsert_thread(t2, FAKE_EMBEDDING)
+
+        row = db._conn.execute(
+            "SELECT message_ids FROM threads WHERE thread_id = 'mid_orig@example.com'"
+        ).fetchone()
+        stored_ids = json.loads(row["message_ids"])
+        assert stored_ids == ["mid_orig@example.com", "mid_reply@example.com"]
+
+    def test_update_preserves_prior_participants(self, db, threader):
+        """Regression: a reply from a new participant must not clobber
+        previously-recorded participants."""
+        original = make_message(
+            message_id="pp_orig@example.com",
+            from_addr="alice@example.com",
+            to_addrs=["bob@example.com"],
+            filepath="/pp/1",
+        )
+        t1 = threader.assign_thread(original)
+        db.upsert_thread(t1, FAKE_EMBEDDING)
+
+        reply = make_message(
+            message_id="pp_reply@example.com",
+            from_addr="carol@example.com",
+            to_addrs=["alice@example.com"],
+            in_reply_to="pp_orig@example.com",
+            filepath="/pp/2",
+            date=datetime(2024, 1, 2, tzinfo=UTC),
+        )
+        t2 = threader.assign_thread(reply)
+        db.upsert_thread(t2, FAKE_EMBEDDING)
+
+        row = db._conn.execute(
+            "SELECT participants FROM threads WHERE thread_id = 'pp_orig@example.com'"
+        ).fetchone()
+        participants = json.loads(row["participants"])
+        assert "alice@example.com" in participants
+        assert "bob@example.com" in participants
+        assert "carol@example.com" in participants
+
+    def test_update_preserves_has_attachments_flag(self, db, threader):
+        """Regression: a plain reply following an original message with
+        attachments must not reset has_attachments to 0."""
+        original = make_message(
+            message_id="ha_orig@example.com",
+            filepath="/ha/1",
+            has_attachments=True,
+        )
+        t1 = threader.assign_thread(original)
+        db.upsert_thread(t1, FAKE_EMBEDDING)
+
+        reply = make_message(
+            message_id="ha_reply@example.com",
+            in_reply_to="ha_orig@example.com",
+            filepath="/ha/2",
+            date=datetime(2024, 1, 2, tzinfo=UTC),
+            has_attachments=False,
+        )
+        t2 = threader.assign_thread(reply)
+        db.upsert_thread(t2, FAKE_EMBEDDING)
+
+        row = db._conn.execute(
+            "SELECT has_attachments FROM threads WHERE thread_id = 'ha_orig@example.com'"
+        ).fetchone()
+        assert row["has_attachments"] == 1
+
+    def test_update_lowers_date_first_for_out_of_order_older_message(self, db, threader):
+        """Regression: a late-arriving older message must lower date_first
+        rather than leaving it at the originally-indexed newer date."""
+        newer = make_message(
+            message_id="ooo_db_newer@example.com",
+            filepath="/ooo/1",
+            date=datetime(2024, 6, 1, tzinfo=UTC),
+        )
+        t1 = threader.assign_thread(newer)
+        db.upsert_thread(t1, FAKE_EMBEDDING)
+
+        older = make_message(
+            message_id="ooo_db_older@example.com",
+            in_reply_to="ooo_db_newer@example.com",
+            filepath="/ooo/2",
+            date=datetime(2024, 1, 1, tzinfo=UTC),
+        )
+        t2 = threader.assign_thread(older)
+        db.upsert_thread(t2, FAKE_EMBEDDING)
+
+        row = db._conn.execute(
+            "SELECT date_first, date_last FROM threads WHERE thread_id = 'ooo_db_newer@example.com'"
+        ).fetchone()
+        assert row["date_first"].startswith("2024-01-01")
+        assert row["date_last"].startswith("2024-06-01")
+
     def test_accumulated_body_capped_at_8000_chars(self, db, threader):
         original = make_message(
             message_id="long_orig@example.com",
