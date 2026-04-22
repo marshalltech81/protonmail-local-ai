@@ -22,6 +22,13 @@ log = logging.getLogger("mcp.tools.intelligence")
 # accumulated thread body instead of the 200-char snippet.
 PER_THREAD_CHAR_BUDGET = 2000
 
+# Hard ceilings on caller-supplied limits. MCP tool calls can be generated
+# by an LLM; an inflated ``max_threads=5000`` or ``limit=100000`` would
+# otherwise drive huge retrievals and, for intelligence tools, assemble
+# absurdly large prompts that blow past the model context window.
+_MAX_ASK_THREADS = 10
+_MAX_EXTRACT_LIMIT = 50
+
 SUMMARIZE_SYSTEM = """You are an email assistant. You will be given indexed
 thread context from an email thread. The context is the accumulated body
 text for the thread, possibly truncated to stay within the model context
@@ -93,6 +100,10 @@ def register_intelligence_tools(
         Returns:
             A synthesized answer with source thread references.
         """
+        # Clamp to [1, _MAX_ASK_THREADS] so a caller-supplied
+        # ``max_threads=5000`` can't expand into a massive prompt.
+        max_threads = max(1, min(int(max_threads), _MAX_ASK_THREADS))
+
         try:
             # Retrieve relevant threads via hybrid search
             embedding = await ollama.embed(question)
@@ -215,6 +226,11 @@ def register_intelligence_tools(
         Returns:
             A JSON array of extracted records found in the available indexed thread context.
         """
+        # Clamp to [1, _MAX_EXTRACT_LIMIT]. Structured extraction loops
+        # one LLM call per retrieved thread; an inflated ``limit`` would
+        # otherwise fan out into that many model calls.
+        limit = max(1, min(int(limit), _MAX_EXTRACT_LIMIT))
+
         try:
             embedding = await ollama.embed(query)
             results = db.hybrid_search(
@@ -247,12 +263,22 @@ def register_intelligence_tools(
 
                 try:
                     record = json.loads(result_str.strip())
-                    if record:
-                        record["_source_thread"] = thread.subject
-                        record["_date"] = thread.date_last.strftime("%Y-%m-%d")
-                        extracted_records.append(record)
                 except json.JSONDecodeError:
-                    pass  # LLM returned null or invalid JSON — skip
+                    continue  # LLM returned null or invalid JSON — skip
+                # Accept both a single object and a JSON array of objects.
+                # The prompt asks for an object, but models occasionally
+                # return an array when the schema implies multiple items
+                # (e.g. "all invoices in this thread"). Previously the
+                # array path raised ``TypeError`` on the dict assignment
+                # and aborted the entire tool call instead of skipping
+                # the thread.
+                items = record if isinstance(record, list) else [record]
+                for item in items:
+                    if not isinstance(item, dict):
+                        continue
+                    item["_source_thread"] = thread.subject
+                    item["_date"] = thread.date_last.strftime("%Y-%m-%d")
+                    extracted_records.append(item)
 
             if not extracted_records:
                 return [

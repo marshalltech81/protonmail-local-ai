@@ -23,6 +23,11 @@ Search your mailbox using semantic, keyword, or hybrid search.
 - `keyword` — exact names, invoice numbers, email addresses
 - `semantic` — conceptual queries, topic-based search
 
+An unrecognized `mode` returns an error; it is not silently remapped
+to `hybrid`. `limit` is clamped to `[1, 50]` at the tool boundary so
+an out-of-range value (e.g. from an LLM-generated tool call) cannot
+drive an unbounded query against the index.
+
 **Query handling notes:**
 - Keyword queries are tokenized before hitting FTS5. Punctuation,
   colons, and unbalanced quotes are stripped so natural search strings
@@ -36,6 +41,10 @@ Search your mailbox using semantic, keyword, or hybrid search.
   applied, search oversamples raw candidates by ``limit * 4`` rather
   than ``limit * 2`` so deeper-ranked matches still qualify after
   filtering.
+- Date bounds accept either a full ISO 8601 timestamp or a date-only
+  value (``"2024-12-31"``); date-only values are promoted to start/end
+  of day in UTC before being pushed into SQL so the filter matches
+  the full day the user named.
 
 ---
 
@@ -95,6 +104,10 @@ Retrieves relevant threads and synthesizes an answer.
 | `folders` | list | all | Scope to specific folders |
 | `max_threads` | int | `5` | Context threads to use |
 
+`max_threads` is clamped to `[1, 10]` at the tool boundary so an
+inflated caller-supplied value cannot expand into an oversized prompt
+that blows past the model's context window.
+
 ### `summarize_thread`
 Summarize a thread in different styles.
 
@@ -119,6 +132,12 @@ Extract structured data from emails matching a query.
 ```json
 {"vendor": "string", "amount": "number", "due_date": "string"}
 ```
+
+The extractor accepts either a single JSON object matching the schema
+or a JSON array of such objects (useful when a thread contains
+multiple invoices, receipts, etc.). `limit` is clamped to `[1, 50]`
+at the tool boundary. Each retrieved thread drives one LLM call, so
+inflated values fan out into that many model calls.
 
 ---
 

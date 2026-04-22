@@ -9,6 +9,15 @@ from mcp.types import TextContent
 
 log = logging.getLogger("mcp.tools.search")
 
+# Hard ceiling on ``limit``. MCP tool calls can originate from an LLM,
+# which may hallucinate values like ``limit=100000`` — without a clamp
+# that becomes a large FTS + vector + RRF workload and a large result
+# payload to ship back through the protocol. 50 is well above any
+# reasonable interactive use of the search tool.
+_MAX_SEARCH_LIMIT = 50
+
+_VALID_SEARCH_MODES = frozenset({"hybrid", "semantic", "keyword"})
+
 
 def register_search_tools(server, db, ollama):
     @server.tool()
@@ -42,6 +51,17 @@ def register_search_tools(server, db, ollama):
             List of matching email threads with subject, participants,
             dates, folder, and a short snippet.
         """
+        if mode not in _VALID_SEARCH_MODES:
+            return [
+                TextContent(
+                    type="text",
+                    text=(f"Invalid mode {mode!r}. Use 'hybrid', 'semantic', or 'keyword'."),
+                )
+            ]
+        # Clamp to [1, _MAX_SEARCH_LIMIT] so an out-of-range client value
+        # never drives an unbounded query against the index.
+        limit = max(1, min(int(limit), _MAX_SEARCH_LIMIT))
+
         try:
             # All three modes accept the same filter set; keyword and
             # semantic modes previously only forwarded ``folders`` and
