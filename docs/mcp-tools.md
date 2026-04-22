@@ -23,6 +23,20 @@ Search your mailbox using semantic, keyword, or hybrid search.
 - `keyword` — exact names, invoice numbers, email addresses
 - `semantic` — conceptual queries, topic-based search
 
+**Query handling notes:**
+- Keyword queries are tokenized before hitting FTS5. Punctuation,
+  colons, and unbalanced quotes are stripped so natural search strings
+  (``"Who sent the invoice?"``) run a valid ``MATCH`` instead of
+  silently returning no results. Email addresses and hostnames are
+  preserved as single tokens.
+- If FTS5 still rejects a sanitized query, search falls back to a
+  ``LIKE`` scan over subject / body / participants so recall is
+  preserved.
+- When any filter (folder, sender, date range, attachment flag) is
+  applied, search oversamples raw candidates by ``limit * 4`` rather
+  than ``limit * 2`` so deeper-ranked matches still qualify after
+  filtering.
+
 ---
 
 ## Group 2 — Retrieval
@@ -60,6 +74,13 @@ List all folders and thread counts.
 ---
 
 ## Group 3 — Intelligence
+
+The intelligence tools build LLM prompts from the indexed thread body
+accumulated by the indexer (``threads.body_text``, up to ~8000 characters
+per thread), bounded by a fixed per-thread character budget (``2000`` by
+default) so multi-thread contexts stay within local-LLM context windows.
+If a thread row has no stored body text (legacy rows from an earlier
+schema), the 200-character ``snippet`` is used as a fallback.
 
 ### `ask_mailbox`
 Ask a natural language question about your email.
@@ -163,6 +184,10 @@ Message-ID of the last message in the thread as a workaround.
 ### `get_index_status`
 Returns total threads, messages, date range of indexed email.
 **Call this first** before answering questions about email content.
+
+The same helper powers ``make status`` on the host: the Makefile target
+invokes the module-level ``get_index_status`` directly against the shared
+SQLite index so the reported counts match what MCP queries see.
 
 ### `get_sync_status`
 Reports local index mode and, when enabled in a future live-Bridge deployment,

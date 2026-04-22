@@ -42,13 +42,17 @@ Implemented and working at a high level:
 - the Bridge build now uses a shared patch helper plus a dedicated patch-drift check and build/runtime smoke-test path for version bumps
 - the indexer now ships an opt-in deletion reconciler: mbsync `T`-flag detection (startup sweep + watchdog `on_moved`), grace-window reaping with thread rebuild, and a mass-delete safety brake; `mbsync` keeps `Expunge None` unchanged
 - schema v4 rebuilds `threads_fts` with `contentless_delete=1` and tracks `threads.fts_rowid`; this fixes stale-token accumulation on thread updates and the MCP keyword-search JOIN that was returning empty results due to UNINDEXED-column null reads
+- `upsert_thread` now merges `message_ids`, `participants`, `has_attachments`, and `date_first` with the existing row rather than replacing them from the single newly-arrived message; RFC 2822 dates normalize to UTC-aware so thread sorting no longer mixes aware and naive datetimes
+- `mcp-server` opens SQLite via `file:{path}?mode=ro` URI and the sqlite volume is mounted writable so WAL reads work; the indexer `Database` wraps its shared connection in a per-instance `RLock` so watchdog-thread writes cannot interleave with reconciler-loop writes
+- indexer `on_moved` now indexes the destination of Maildir rename events (standard delivery writes tmp → new/cur) so new mail no longer has to wait for a restart to appear in the index; the initial-index scan refreshes the heartbeat every 25 messages so large mailboxes do not exceed the 90-second healthcheck window
+- intelligence tools (`ask_mailbox`, `summarize_thread`, `extract_from_emails`) now feed the LLM the accumulated thread body text (bounded per thread) instead of the 200-character snippet; keyword search sanitizes user input into safe FTS5 phrases with a LIKE fallback, and filtered searches oversample raw candidates to preserve recall
+- `make pull-models` self-starts the ollama container and waits for readiness; `scripts/validate-env.sh` uses a portable `stat` helper so `make up` works on macOS; `make status` now reports real index counts instead of a hardcoded `{"status": "ok"}`
 
 Known limitations:
 
 - initial sync may take a long time on large mailboxes
 - attachments are not indexed yet
 - per-message live retrieval and mail-changing actions are disabled in the default deployment until a safe action backend is implemented
-- intelligence tools rely too heavily on stored snippets instead of full-thread context
 - test coverage is incomplete
 - some MCP action features are incomplete
 - `list_threads(filter_type=...)` does not yet match the documented interface
@@ -75,20 +79,19 @@ Definition of done:
 - mbsync reliably connects after Bridge comes up
 - sync behavior is repeatable after container restarts
 
-### 2. Improve intelligence fidelity
+### 2. Validate intelligence fidelity end-to-end
 
 Goal:
-- make mailbox Q&A and summarization trustworthy enough for routine use
+- confirm the body-text-based RAG path produces noticeably better answers and summaries than the previous snippet-only behavior under real mailbox conditions
 
 Tasks:
-- reduce reliance on thread snippets when building prompts
-- use richer thread context in `ask_mailbox`, `summarize_thread`, and `extract_from_emails`
-- make prompt wording accurately reflect the actual context provided
-- add regression tests for multi-message context loss
+- exercise `ask_mailbox`, `summarize_thread`, and `extract_from_emails` against a live mailbox and compare against the prior snippet-only behavior
+- tune `PER_THREAD_CHAR_BUDGET` if local LLM context limits are hit in practice
+- add regression tests that would catch a reversion to snippet-only prompts
 
 Definition of done:
-- answers and summaries consistently reflect whole-thread context
-- structured extraction is based on more than the latest snippet
+- answers and summaries consistently reflect whole-thread context in practice, not just in unit tests
+- structured extraction is based on full accumulated thread bodies rather than the latest snippet
 
 ### 3. Expand test coverage
 

@@ -46,7 +46,7 @@ ollama container              sqlite-volume
     for local Q&A               - indexed_files
                                 - pending_deletions (reconciler)
         │
-        │  reads sqlite-volume (read-only)
+        │  reads sqlite-volume (connection opened read-only)
         ▼
 mcp-server container
   - Exposes MCP tools via HTTP/SSE on port 3000
@@ -163,6 +163,41 @@ overrides the brake for intentional bulk cleanups.
 `mbsync` keeps `Expunge None` regardless — the reaper cleans up the local
 index; it does not change mbsync's pull-only, no-destructive-delete posture
 on the Maildir itself.
+
+## MCP Read-Only Enforcement
+
+`mcp-server` never mutates the SQLite index. Read-only posture is enforced
+at two layers:
+
+1. The connection is opened via the SQLite URI `file:{path}?mode=ro`, so
+   the underlying connection cannot issue writes — any `INSERT`/`UPDATE`/
+   `DELETE` raises `OperationalError: attempt to write a readonly database`
+   before it reaches the storage engine.
+2. `PRAGMA query_only = ON` is set immediately after connect as
+   defense-in-depth.
+
+The `sqlite-volume` is mounted writable into `mcp-server` so SQLite can
+create the `-shm` sidecar needed for WAL readers. Without the sidecar,
+MCP reads would either fail at startup or fall back to a stale-only mode
+that does not reflect in-flight indexer writes. Making the application
+layer read-only while keeping the filesystem writable gives both
+correctness (live WAL visibility) and safety (no mutating path exists).
+
+## Concurrency (indexer)
+
+The indexer serves two concurrent DB writers on a single `sqlite3`
+connection:
+
+- the watchdog observer thread, via `MaildirHandler.on_created` /
+  `on_moved` callbacks
+- the main loop, via periodic `Reconciler.sweep()` / `reap()` passes
+
+`sqlite3.connect(check_same_thread=False)` lets both threads share the
+connection, but the Python-level `BEGIN IMMEDIATE` / execute / commit
+sequence is not atomic across threads and can raise "cannot start a
+transaction within a transaction" or silently commit partial state. A
+per-instance `threading.RLock` wraps every public `Database` method so
+transactions are serialized from the caller's perspective.
 
 ## FTS Rowid Tracking
 
