@@ -62,3 +62,23 @@ jobs:
       - uses: astral-sh/ruff-action@v3
         with:
           args: "format --check ."
+
+  compileall:
+    name: compileall
+    runs-on: ubuntu-latest
+    # Belt-and-braces around ruff: exercises the full Python import-time
+    # path (__init__.py, relative imports, from-imports) which ruff's
+    # parser doesn't fully simulate. Catches broken imports or accidental
+    # use of a symbol that ruff's static check lets through.
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+
+      - name: Compile indexer sources
+        run: python -m compileall -q -f indexer/src
+
+      - name: Compile mcp-server sources
+        run: python -m compileall -q -f mcp-server/src
