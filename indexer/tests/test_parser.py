@@ -185,6 +185,48 @@ class TestParseEmail:
     def test_nonexistent_file_returns_none(self, tmp_path):
         assert parse_email(tmp_path / "ghost.eml") is None
 
+    def test_nested_folder_path_preserved_when_maildir_root_given(self, tmp_path):
+        """Regression: without a ``maildir_root`` the folder is derived as
+        ``path.parent.parent.name``, which collapses ``Clients/ABC/cur/msg``
+        to just ``ABC`` and loses the parent context. Passing the root
+        preserves the full relative path."""
+        folder = tmp_path / "Clients" / "ABC" / "cur"
+        folder.mkdir(parents=True)
+        path = folder / "msg.eml"
+        path.write_text(
+            "From: alice@example.com\r\n"
+            "To: bob@example.com\r\n"
+            "Subject: Nested\r\n"
+            "Message-ID: <nested@example.com>\r\n"
+            "Date: Mon, 01 Jan 2024 12:00:00 +0000\r\n"
+            "Content-Type: text/plain; charset=utf-8\r\n\r\n"
+            "Body.\r\n",
+            encoding="utf-8",
+        )
+        msg = parse_email(path, maildir_root=tmp_path)
+        assert msg is not None
+        assert msg.folder == "Clients/ABC"
+
+    def test_folder_falls_back_to_leaf_without_root(self, tmp_path):
+        """Backward compat: callers that do not pass ``maildir_root`` still
+        get the old leaf-name behavior."""
+        folder = tmp_path / "Clients" / "ABC" / "cur"
+        folder.mkdir(parents=True)
+        path = folder / "msg.eml"
+        path.write_text(
+            "From: alice@example.com\r\n"
+            "To: bob@example.com\r\n"
+            "Subject: Nested\r\n"
+            "Message-ID: <nested2@example.com>\r\n"
+            "Date: Mon, 01 Jan 2024 12:00:00 +0000\r\n"
+            "Content-Type: text/plain; charset=utf-8\r\n\r\n"
+            "Body.\r\n",
+            encoding="utf-8",
+        )
+        msg = parse_email(path)
+        assert msg is not None
+        assert msg.folder == "ABC"
+
 
 # ---------------------------------------------------------------------------
 # parse_email — body extraction

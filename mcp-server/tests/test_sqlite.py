@@ -120,6 +120,44 @@ class TestApplyFilters:
     def test_iso8601_z_suffix_accepted(self, seeded_db: Database, make_result):
         seeded_db._apply_filters([make_result("a")], date_from="2024-01-01T00:00:00Z")
 
+    def test_date_to_includes_the_named_day(self, seeded_db: Database, make_result):
+        """Regression: ``date_to="2024-12-31"`` used to be compared as a
+        raw string against ISO timestamps like ``"2024-12-31T10:00:00+00:00"``,
+        which excluded the entire 31st because the stored string sorts
+        lexicographically greater than the bare date."""
+        from datetime import UTC, datetime
+
+        on_last_day = make_result("on_last_day")
+        on_last_day.date_first = datetime(2024, 12, 31, 10, 0, tzinfo=UTC)
+        on_last_day.date_last = datetime(2024, 12, 31, 10, 0, tzinfo=UTC)
+
+        filtered = seeded_db._apply_filters([on_last_day], date_to="2024-12-31")
+        assert [r.thread_id for r in filtered] == ["on_last_day"]
+
+    def test_date_from_includes_the_named_day(self, seeded_db: Database, make_result):
+        """Date-only ``date_from`` is promoted to the start of that day in
+        UTC, so a message from 10:00 on the same day qualifies."""
+        from datetime import UTC, datetime
+
+        on_start_day = make_result("on_start_day")
+        on_start_day.date_first = datetime(2024, 1, 1, 10, 0, tzinfo=UTC)
+        on_start_day.date_last = datetime(2024, 1, 1, 10, 0, tzinfo=UTC)
+
+        filtered = seeded_db._apply_filters([on_start_day], date_from="2024-01-01")
+        assert [r.thread_id for r in filtered] == ["on_start_day"]
+
+    def test_date_range_excludes_prior_day(self, seeded_db: Database, make_result):
+        """Messages strictly before ``date_from`` stay excluded — date-only
+        promotion applies to the filter boundary, not to the data."""
+        from datetime import UTC, datetime
+
+        yesterday = make_result("yesterday")
+        yesterday.date_first = datetime(2024, 12, 30, 23, 59, tzinfo=UTC)
+        yesterday.date_last = datetime(2024, 12, 30, 23, 59, tzinfo=UTC)
+
+        filtered = seeded_db._apply_filters([yesterday], date_from="2024-12-31")
+        assert filtered == []
+
 
 class TestKeywordSearch:
     def test_matches_body_token(self, seeded_db: Database):

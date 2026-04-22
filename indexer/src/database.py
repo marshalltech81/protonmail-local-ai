@@ -15,7 +15,7 @@ import sqlite_vec
 
 log = logging.getLogger("indexer.database")
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 # Schema v3 uses FTS5 ``contentless_delete=1``, which SQLite added in 3.43.
 # Running against an older runtime silently degrades (migration errors caught
@@ -120,6 +120,8 @@ class Database:
             self._apply_v3(cur)
         if current < 4:
             self._apply_v4(cur)
+        if current < 5:
+            self._apply_v5(cur)
 
         # UPDATE if a row exists, INSERT if this is a fresh database.
         # INSERT OR REPLACE would insert a new row (new primary key) rather
@@ -276,6 +278,32 @@ class Database:
         cur.execute(
             "CREATE INDEX IF NOT EXISTS idx_pending_deletions_thread "
             "ON pending_deletions(thread_id)"
+        )
+        self._conn.commit()
+
+    def _apply_v5(self, cur: sqlite3.Cursor):
+        """Normalize ``pending_deletions.marked_at`` to ISO 8601 UTC.
+
+        ``add_pending_deletion`` previously wrote timestamps via SQLite's
+        ``datetime('now')`` function, which produces ``"YYYY-MM-DD HH:MM:SS"``
+        (space separator, no TZ). The reaper computes its cutoff from Python's
+        ``datetime.now(UTC).isoformat()`` → ``"YYYY-MM-DDTHH:MM:SS+00:00"``
+        (``T`` separator, explicit TZ). The ``WHERE marked_at <= ?`` query
+        is a lexicographic string compare, and space (0x20) sorts before
+        ``T`` (0x54), so a tombstone marked e.g. ``"2024-12-25 10:00:00"``
+        compared against cutoff ``"2024-12-25T00:00:00+00:00"`` looks older
+        than the cutoff even though it was actually created *after*. Result:
+        messages get reaped up to a day earlier than the grace window
+        promises.
+
+        Rewrite existing rows to the ISO 8601 UTC format so the sorted
+        comparison is well-defined. Going forward ``add_pending_deletion``
+        stores timestamps in the same format.
+        """
+        cur.execute(
+            "UPDATE pending_deletions "
+            "SET marked_at = REPLACE(marked_at, ' ', 'T') || '+00:00' "
+            "WHERE marked_at LIKE '____-__-__ __:__:__'"
         )
         self._conn.commit()
 
@@ -642,13 +670,23 @@ class Database:
         Uses INSERT OR IGNORE so repeated sweeps over the same T-flagged file
         do not churn the marked_at timestamp — the grace window is measured
         from when the file was *first* seen as tombstoned.
+
+        ``marked_at`` is written as an ISO 8601 UTC string so that the
+        reaper's ``WHERE marked_at <= ?`` comparison against
+        ``datetime.now(UTC).isoformat()`` is well-defined. SQLite's own
+        ``datetime('now')`` returns a space-separated format that sorts
+        lexicographically before ``T``-separated ISO strings and would
+        cause tombstones to be reaped up to a day early.
         """
+        from datetime import UTC, datetime
+
         cur = self._conn.cursor()
+        marked_at = datetime.now(UTC).isoformat()
         cur.execute(
             "INSERT OR IGNORE INTO pending_deletions "
             "(filepath, message_id, thread_id, marked_at) "
-            "VALUES (?, ?, ?, datetime('now'))",
-            (filepath, message_id, thread_id),
+            "VALUES (?, ?, ?, ?)",
+            (filepath, message_id, thread_id, marked_at),
         )
         self._conn.commit()
         return cur.rowcount > 0

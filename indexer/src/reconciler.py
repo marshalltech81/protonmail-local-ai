@@ -58,11 +58,15 @@ class Reconciler:
         embedder: Embedder,
         threader: Threader,
         config: ReconcilerConfig,
+        maildir_root: Path | None = None,
     ):
         self.db = db
         self.embedder = embedder
         self.threader = threader
         self.config = config
+        # Passed through to parse_email when re-reading survivors so nested
+        # folder paths (``Clients/ABC``) are preserved during thread rebuild.
+        self.maildir_root = maildir_root
 
     # -----------------------------------------------------------------
     # Tombstone detection
@@ -219,7 +223,7 @@ class Reconciler:
         # Thread has survivors — parse them from disk and rebuild.
         survivors: list = []
         for row in survivor_rows:
-            msg = parse_email(Path(row["filepath"]))
+            msg = parse_email(Path(row["filepath"]), maildir_root=self.maildir_root)
             if msg is None:
                 # Survivor unparseable; skip it from the rebuild but do not
                 # delete the DB row. A later sweep can pick it up again.
