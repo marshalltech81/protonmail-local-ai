@@ -27,6 +27,24 @@ class TestReadOnlyConnection:
         assert row["subject"] == "invoice for march"
 
 
+class TestFailFastOnMissingIndex:
+    def test_missing_parent_directory_raises(self, tmp_path):
+        """MCP is a read-only consumer; if the data directory does not
+        exist, the deployment is misconfigured. Fail fast with a clear
+        message rather than silently creating an empty directory."""
+        nonexistent = tmp_path / "no_such_dir" / "mail.db"
+        with pytest.raises(FileNotFoundError, match="data directory"):
+            Database(str(nonexistent))
+
+    def test_missing_db_file_raises(self, tmp_path):
+        """Parent exists but the DB file itself does not — this means the
+        indexer has not yet initialized the shared index. Surface that
+        specifically rather than as a cryptic 'unable to open' later."""
+        (tmp_path / "data").mkdir()
+        with pytest.raises(FileNotFoundError, match="index not found"):
+            Database(str(tmp_path / "data" / "mail.db"))
+
+
 class TestReciprocalRankFusion:
     def test_single_list_preserves_ranking(self, seeded_db: Database, make_result):
         bm25 = [make_result("t1"), make_result("t2"), make_result("t3")]

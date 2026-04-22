@@ -215,6 +215,59 @@ class TestAssignThread:
         t2 = threader.assign_thread(followup)
         assert t2.thread_id == "subj_orig@example.com"
 
+    def test_subject_fallback_rejected_when_no_participant_overlap(self, db, threader):
+        """Regression: subject-only fallback merged any two messages with
+        the same normalized subject in the same folder — "Re: Follow up"
+        from one sender/recipient pair would merge into an unrelated
+        thread with the same subject. Require participant overlap."""
+        original = make_message(
+            message_id="sub_no_overlap_orig@example.com",
+            subject="Follow up",
+            from_addr="alice@example.com",
+            to_addrs=["bob@example.com"],
+        )
+        t1 = threader.assign_thread(original)
+        db.upsert_thread(t1, [0.0] * 768)
+
+        # Same subject, same folder, totally different participants.
+        unrelated = make_message(
+            message_id="sub_no_overlap_unrelated@example.com",
+            subject="Re: Follow up",
+            from_addr="carol@example.com",
+            to_addrs=["dave@example.com"],
+            filepath="/maildir/INBOX/cur/unrelated",
+            date=datetime(2024, 1, 2, tzinfo=UTC),
+        )
+        t2 = threader.assign_thread(unrelated)
+        # Must NOT merge — no shared participant.
+        assert t2.thread_id == "sub_no_overlap_unrelated@example.com"
+
+    def test_subject_fallback_rejected_when_too_distant_in_time(self, db, threader):
+        """Subject fallback must also respect a time window — a matching
+        subject more than a year later is almost certainly a different
+        conversation even if the participants overlap."""
+        original = make_message(
+            message_id="sub_stale_orig@example.com",
+            subject="Invoice",
+            from_addr="alice@example.com",
+            to_addrs=["bob@example.com"],
+            date=datetime(2023, 1, 1, tzinfo=UTC),
+        )
+        t1 = threader.assign_thread(original)
+        db.upsert_thread(t1, [0.0] * 768)
+
+        # Shares participants but arrives well outside the fallback window.
+        later = make_message(
+            message_id="sub_stale_later@example.com",
+            subject="Re: Invoice",
+            from_addr="alice@example.com",
+            to_addrs=["bob@example.com"],
+            filepath="/maildir/INBOX/cur/later",
+            date=datetime(2024, 6, 1, tzinfo=UTC),
+        )
+        t2 = threader.assign_thread(later)
+        assert t2.thread_id == "sub_stale_later@example.com"
+
     def test_subject_fallback_does_not_cross_folders(self, db, threader):
         """Subject matching is scoped to the same folder."""
         inbox_msg = make_message(

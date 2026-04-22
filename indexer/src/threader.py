@@ -6,9 +6,18 @@ Indexes at the thread level — the unit Claude reasons about.
 
 import logging
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from .parser import Message
+
+# Subject-only fallback is a last-resort threading path: any two messages
+# with the same normalized subject in the same folder would otherwise
+# collapse into a single thread. That produces false merges for common
+# subjects ("Re: Hello", "Invoice", "Follow up"), which is particularly
+# dangerous for invoice/legal/HOA records. Require at least one shared
+# participant AND proximity in time before accepting a subject-only
+# match; otherwise start a new thread.
+SUBJECT_FALLBACK_WINDOW = timedelta(days=60)
 
 log = logging.getLogger("indexer.threader")
 
@@ -116,14 +125,37 @@ class Threader:
             if thread_id:
                 return thread_id
 
-        # Fall back to normalized subject matching within the same folder
+        # Fall back to normalized subject matching within the same folder.
+        # Only accept the fallback when the candidate thread shares at least
+        # one participant with the incoming message and the message's date
+        # falls within SUBJECT_FALLBACK_WINDOW of the thread's last activity.
+        # Without these guards, any two "Re: Hello" / "Invoice" / "Follow
+        # up" messages in the same folder would merge into one thread.
         normalized = _normalize_subject(message.subject)
         if normalized:
-            thread_id = self.db.find_thread_by_subject(normalized, message.folder)
-            if thread_id:
-                return thread_id
+            candidate_id = self.db.find_thread_by_subject(normalized, message.folder)
+            if candidate_id and self._subject_fallback_accepts(message, candidate_id):
+                return candidate_id
 
         return None
+
+    def _subject_fallback_accepts(self, message: Message, candidate_id: str) -> bool:
+        """Gate the subject-only thread merge with participant overlap +
+        date proximity checks. Returns True if the fallback is safe."""
+        thread = self.db.get_thread(candidate_id)
+        if thread is None:
+            return False
+
+        incoming_addrs = {
+            addr.strip()
+            for addr in [message.from_addr, *message.to_addrs, *message.cc_addrs]
+            if addr.strip()
+        }
+        if not incoming_addrs.intersection(thread.participants):
+            return False
+
+        delta = abs(message.date - thread.date_last)
+        return delta <= SUBJECT_FALLBACK_WINDOW
 
     @staticmethod
     def _participants(messages: list[Message]) -> list[str]:
