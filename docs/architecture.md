@@ -44,6 +44,7 @@ ollama container              sqlite-volume
     for embeddings              - threads_vec table (sqlite-vec)
   - llama3.2 (or other)         - message_thread_map
     for local Q&A               - indexed_files
+                                - pending_deletions (reconciler)
         │
         │  reads sqlite-volume (read-only)
         ▼
@@ -127,6 +128,58 @@ This is the key architectural decision that makes Q&A useful:
 
 A query like "what did my landlord say about the heating?" returns the full
 landlord thread, not individual one-liners that happen to mention heating.
+
+## Deletion Reconciliation (opt-in)
+
+`mbsync` is configured `Sync Pull` + `Expunge None`, which means a message
+deleted on ProtonMail is never physically removed from the local Maildir.
+Instead, mbsync renames the file to add the IMAP `\Deleted` (Maildir `T`)
+flag. Without reconciliation, the local SQLite index keeps those messages
+forever.
+
+The indexer ships an opt-in reconciler
+(`INDEXER_DELETION_ENABLED=true`) that handles this in two phases:
+
+1. **Tombstone** — a startup sweep plus a live `on_moved` watchdog handler
+   record every `T`-flagged file in a `pending_deletions` table. No primary
+   data is mutated at tombstone time, so the soft-delete is fully reversible
+   if mbsync un-flags the file on a later pull.
+2. **Reap** — after a configurable grace window
+   (`INDEXER_DELETION_GRACE_DAYS`, default 7 days) the reaper removes the
+   reaped message's rows from `message_thread_map` / `indexed_files`, and
+   either rebuilds the parent thread from the surviving messages on disk
+   (re-parsed, re-embedded) or deletes the thread entirely when nothing
+   remains. Ollama failures during rebuild cause the reaper to back off and
+   retry on the next pass.
+
+A **mass-delete brake** (`INDEXER_DELETION_MAX_BATCH_PCT`, default 5%) caps
+the fraction of total indexed messages the reaper will touch in a single
+pass. Transient Bridge outages (vault rebuilds, folder renames, auth
+glitches) can cause mbsync to `T`-flag a huge batch at once; the brake
+stops the reaper from acting, while still recording tombstones that will
+clear themselves if mbsync reverts the flags. `INDEXER_DELETION_FORCE=true`
+overrides the brake for intentional bulk cleanups.
+
+`mbsync` keeps `Expunge None` regardless — the reaper cleans up the local
+index; it does not change mbsync's pull-only, no-destructive-delete posture
+on the Maildir itself.
+
+## FTS Rowid Tracking
+
+`threads_fts` is a contentless FTS5 virtual table. Under SQLite's default
+contentless configuration two things are true that matter here:
+
+- `DELETE FROM threads_fts WHERE thread_id = ?` silently no-ops (the
+  contentless table does not support DELETE), so every update used to
+  accumulate stale rows.
+- `UNINDEXED` columns always read back as `NULL`, so the MCP keyword-search
+  join on `threads_fts.thread_id` could not return any rows.
+
+Schema v3 rebuilds `threads_fts` with `contentless_delete=1` (SQLite ≥ 3.43)
+and stores each row's rowid in `threads.fts_rowid`. Writes delete by rowid
+before re-inserting; the MCP keyword search joins on
+`threads_fts.rowid = threads.fts_rowid`. This fixes both the stale-token
+problem and the always-null join.
 
 ## Privacy Model
 

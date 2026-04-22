@@ -139,6 +139,48 @@ class TestSchema:
         assert hit is not None
         assert hit["thread_id"] == "t1"
 
+    def test_v3_to_v4_migration_adds_pending_deletions(self, tmp_path):
+        """A v3 database migrates forward to include pending_deletions."""
+        db_path = tmp_path / "v3.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.execute("CREATE TABLE schema_version (version INTEGER PRIMARY KEY)")
+        conn.execute("INSERT INTO schema_version VALUES (3)")
+        # Minimal tables so the open path doesn't blow up on something unrelated
+        conn.execute("""
+            CREATE TABLE threads (
+                thread_id TEXT PRIMARY KEY, subject TEXT, participants TEXT,
+                folder TEXT, date_first TEXT, date_last TEXT, message_ids TEXT,
+                snippet TEXT, has_attachments INTEGER, body_text TEXT,
+                fts_rowid INTEGER
+            )
+        """)
+        conn.execute("""
+            CREATE VIRTUAL TABLE threads_fts
+            USING fts5(
+                subject, participants, body,
+                content='', contentless_delete=1, tokenize='porter unicode61'
+            )
+        """)
+        conn.commit()
+        conn.close()
+
+        db = Database(db_path)
+        tables = {
+            row[0]
+            for row in db._conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        assert "pending_deletions" in tables
+        row = db._conn.execute("SELECT version FROM schema_version").fetchone()
+        assert row["version"] == SCHEMA_VERSION
+
+    def test_pending_deletions_table_columns(self, db):
+        cols = {
+            row[1] for row in db._conn.execute("PRAGMA table_info(pending_deletions)").fetchall()
+        }
+        assert cols == {"filepath", "message_id", "thread_id", "marked_at"}
+
     def test_migration_is_idempotent(self, tmp_path):
         """Opening an already-migrated database does not error."""
         db_path = tmp_path / "idem.db"
@@ -437,3 +479,220 @@ class TestFtsRowidAndReplacement:
         ).fetchone()
         assert row is not None
         assert row["thread_id"] == t.thread_id
+
+
+# ---------------------------------------------------------------------------
+# Pending deletions — tombstone CRUD
+# ---------------------------------------------------------------------------
+
+
+class TestPendingDeletions:
+    def test_add_pending_deletion_returns_true_on_first_insert(self, db):
+        inserted = db.add_pending_deletion("/p", "msg@x", "t1")
+        assert inserted is True
+
+    def test_add_pending_deletion_is_idempotent(self, db):
+        db.add_pending_deletion("/p", "msg@x", "t1")
+        # Second call must not update marked_at nor report an insert
+        assert db.add_pending_deletion("/p", "msg@x", "t1") is False
+        assert db.count_pending_deletions() == 1
+
+    def test_clear_pending_deletion(self, db):
+        db.add_pending_deletion("/p", "msg@x", "t1")
+        db.clear_pending_deletion("/p")
+        assert db.has_pending_deletion("/p") is False
+
+    def test_has_pending_deletion(self, db):
+        assert db.has_pending_deletion("/p") is False
+        db.add_pending_deletion("/p", "msg@x", "t1")
+        assert db.has_pending_deletion("/p") is True
+
+    def test_list_pending_deletions_older_than_filters(self, db):
+        db.add_pending_deletion("/old", "msg1", "t1")
+        # Walk the marked_at back manually to simulate an aged tombstone
+        db._conn.execute(
+            "UPDATE pending_deletions SET marked_at = '2000-01-01T00:00:00+00:00' "
+            "WHERE filepath = '/old'"
+        )
+        db._conn.commit()
+        db.add_pending_deletion("/new", "msg2", "t1")
+
+        old = db.list_pending_deletions_older_than("2024-01-01T00:00:00+00:00")
+        assert len(old) == 1
+        assert old[0]["filepath"] == "/old"
+
+
+# ---------------------------------------------------------------------------
+# Reconciliation support — lookups, filepath updates, message/thread removal
+# ---------------------------------------------------------------------------
+
+
+class TestReconciliationSupport:
+    def test_find_message_entry_by_filepath(self, db):
+        msg = make_message(filepath="/maildir/INBOX/cur/find_me")
+        db.upsert_thread(make_thread(messages=[msg]), FAKE_EMBEDDING)
+        row = db.find_message_entry_by_filepath("/maildir/INBOX/cur/find_me")
+        assert row is not None
+        assert row["message_id"] == msg.message_id
+
+    def test_find_message_entry_by_filepath_miss(self, db):
+        assert db.find_message_entry_by_filepath("/nope") is None
+
+    def test_count_total_messages(self, db):
+        assert db.count_total_messages() == 0
+        m1 = make_message(message_id="c1@x", filepath="/m/1")
+        m2 = make_message(message_id="c2@x", filepath="/m/2")
+        db.upsert_thread(make_thread(messages=[m1], thread_id="t1"), FAKE_EMBEDDING)
+        db.upsert_thread(
+            make_thread(messages=[m2], thread_id="t2", subject="other"), FAKE_EMBEDDING
+        )
+        assert db.count_total_messages() == 2
+
+    def test_update_filepath_moves_map_indexed_and_tombstone_rows(self, db):
+        msg = make_message(filepath="/old/path")
+        db.upsert_thread(make_thread(messages=[msg]), FAKE_EMBEDDING)
+        db.add_pending_deletion("/old/path", msg.message_id, make_thread().thread_id)
+
+        db.update_filepath("/old/path", "/new/path")
+
+        assert db.find_message_entry_by_filepath("/new/path") is not None
+        assert db.find_message_entry_by_filepath("/old/path") is None
+        assert db.is_indexed("/new/path") is True
+        assert db.is_indexed("/old/path") is False
+        assert db.has_pending_deletion("/new/path") is True
+        assert db.has_pending_deletion("/old/path") is False
+
+    def test_update_filepath_noop_when_paths_equal(self, db):
+        msg = make_message(filepath="/same")
+        db.upsert_thread(make_thread(messages=[msg]), FAKE_EMBEDDING)
+        db.update_filepath("/same", "/same")  # must not raise
+        assert db.find_message_entry_by_filepath("/same") is not None
+
+    def test_remove_message_removes_map_indexed_and_tombstone(self, db):
+        msg1 = make_message(message_id="keep@x", filepath="/keep")
+        msg2 = make_message(message_id="drop@x", filepath="/drop")
+        thread = make_thread(messages=[msg1, msg2])
+        db.upsert_thread(thread, FAKE_EMBEDDING)
+        db.add_pending_deletion("/drop", "drop@x", thread.thread_id)
+
+        db.remove_message("drop@x")
+
+        assert db.find_message_entry_by_filepath("/drop") is None
+        assert db.is_indexed("/drop") is False
+        assert db.has_pending_deletion("/drop") is False
+        # Other message and parent thread row stay intact
+        assert db.find_message_entry_by_filepath("/keep") is not None
+        assert db.get_thread(thread.thread_id) is not None
+
+    def test_remove_message_silently_returns_for_unknown_id(self, db):
+        db.remove_message("ghost@x")  # must not raise
+
+    def test_delete_thread_completely_removes_all_dependent_rows(self, db):
+        msg1 = make_message(message_id="d1@x", filepath="/d/1")
+        msg2 = make_message(message_id="d2@x", filepath="/d/2")
+        thread = make_thread(messages=[msg1, msg2], thread_id="doomed", subject="doomedsubject")
+        db.upsert_thread(thread, FAKE_EMBEDDING)
+        db.add_pending_deletion("/d/1", "d1@x", "doomed")
+
+        db.delete_thread_completely("doomed")
+
+        assert db.get_thread("doomed") is None
+        assert db.find_message_entry_by_filepath("/d/1") is None
+        assert db.find_message_entry_by_filepath("/d/2") is None
+        assert db.is_indexed("/d/1") is False
+        assert db.is_indexed("/d/2") is False
+        assert db.has_pending_deletion("/d/1") is False
+        # threads_fts uses contentless_delete=1 with rowid-keyed deletes; a
+        # MATCH against the old subject must return zero hits after the
+        # thread is reaped.
+        fts_hits = db._conn.execute(
+            "SELECT COUNT(*) FROM threads_fts WHERE threads_fts MATCH 'doomedsubject'"
+        ).fetchone()[0]
+        vec = db._conn.execute(
+            "SELECT COUNT(*) FROM threads_vec WHERE thread_id = 'doomed'"
+        ).fetchone()[0]
+        assert fts_hits == 0
+        assert vec == 0
+
+
+# ---------------------------------------------------------------------------
+# rebuild_thread — full rewrite without body accumulation
+# ---------------------------------------------------------------------------
+
+
+class TestRebuildThread:
+    def test_rebuild_replaces_body_text_instead_of_appending(self, db, threader):
+        original = make_message(message_id="r1@x", body_text="First message body.", filepath="/r/1")
+        reply = make_message(
+            message_id="r2@x",
+            body_text="Second message body.",
+            in_reply_to="r1@x",
+            filepath="/r/2",
+            date=datetime(2024, 2, 1, tzinfo=UTC),
+        )
+        t1 = threader.assign_thread(original)
+        db.upsert_thread(t1, FAKE_EMBEDDING)
+        t2 = threader.assign_thread(reply)
+        db.upsert_thread(t2, FAKE_EMBEDDING)
+
+        # Simulate reaping the original — rebuild from reply only
+        from src.threader import Thread
+
+        rebuilt = Thread(
+            thread_id=t1.thread_id,
+            subject="hello world",
+            participants=[reply.from_addr] + reply.to_addrs,
+            messages=[reply],
+            folder="INBOX",
+            date_first=reply.date,
+            date_last=reply.date,
+        )
+        db.rebuild_thread(rebuilt, FAKE_EMBEDDING)
+
+        row = db._conn.execute(
+            "SELECT body_text FROM threads WHERE thread_id = ?", (t1.thread_id,)
+        ).fetchone()
+        # The original's body must no longer be present — rebuild is a
+        # full replacement, not an append.
+        assert "First message body." not in row["body_text"]
+        assert "Second message body." in row["body_text"]
+
+    def test_rebuild_updates_fts_and_vec_rows(self, db, threader):
+        original = make_message(message_id="r3@x", filepath="/r/3")
+        t1 = threader.assign_thread(original)
+        db.upsert_thread(t1, FAKE_EMBEDDING)
+
+        # Rebuild with a different subject
+        from src.threader import Thread
+
+        rebuilt = Thread(
+            thread_id=t1.thread_id,
+            subject="brand new subject",
+            participants=["only@x"],
+            messages=[original],
+            folder="INBOX",
+            date_first=original.date,
+            date_last=original.date,
+        )
+        db.rebuild_thread(rebuilt, FAKE_EMBEDDING)
+
+        # Primary thread row reflects the new subject
+        thread_row = db._conn.execute(
+            "SELECT subject FROM threads WHERE thread_id = ?", (t1.thread_id,)
+        ).fetchone()
+        assert thread_row["subject"] == "brand new subject"
+
+        # FTS index is searchable for the new subject and not the old one
+        new_hits = db._conn.execute(
+            "SELECT rowid FROM threads_fts WHERE threads_fts MATCH 'brand'"
+        ).fetchall()
+        old_hits = db._conn.execute(
+            "SELECT rowid FROM threads_fts WHERE threads_fts MATCH 'hello'"
+        ).fetchall()
+        assert len(new_hits) == 1
+        assert len(old_hits) == 0
+
+        vec_count = db._conn.execute(
+            "SELECT COUNT(*) FROM threads_vec WHERE thread_id = ?", (t1.thread_id,)
+        ).fetchone()[0]
+        assert vec_count == 1

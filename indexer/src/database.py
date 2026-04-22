@@ -13,7 +13,7 @@ import sqlite_vec
 
 log = logging.getLogger("indexer.database")
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 class Database:
@@ -62,6 +62,8 @@ class Database:
             self._apply_v2(cur)
         if current < 3:
             self._apply_v3(cur)
+        if current < 4:
+            self._apply_v4(cur)
 
         # UPDATE if a row exists, INSERT if this is a fresh database.
         # INSERT OR REPLACE would insert a new row (new primary key) rather
@@ -193,6 +195,32 @@ class Database:
                 "UPDATE threads SET fts_rowid = ? WHERE thread_id = ?",
                 (cur.lastrowid, r["thread_id"]),
             )
+        self._conn.commit()
+
+    def _apply_v4(self, cur: sqlite3.Cursor):
+        """Add pending_deletions table for deletion reconciliation.
+
+        Records messages whose Maildir file has been flagged deleted by mbsync
+        (via the IMAP \\Deleted / Maildir ``T`` flag). The reconciler sweeps
+        this table and removes thread/FTS/vec rows only after a configurable
+        grace window — nothing in the primary tables is changed at tombstone
+        time, which keeps the soft-delete reversible if mbsync un-sets the
+        flag on a subsequent pull.
+        """
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS pending_deletions (
+                filepath   TEXT PRIMARY KEY,
+                message_id TEXT NOT NULL,
+                thread_id  TEXT NOT NULL,
+                marked_at  TEXT NOT NULL
+            )
+            """
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_pending_deletions_thread "
+            "ON pending_deletions(thread_id)"
+        )
         self._conn.commit()
 
     # -------------------------------------------------------------------------
@@ -406,3 +434,223 @@ class Database:
             "SELECT MAX(date_last) FROM threads"
         ).fetchone()[0]
         return stats
+
+    # -------------------------------------------------------------------------
+    # Reconciliation support — filepath tracking, tombstones, thread rebuild
+    # -------------------------------------------------------------------------
+
+    def iter_message_map(self) -> list[sqlite3.Row]:
+        """Return every (message_id, thread_id, filepath) row for sweeping."""
+        return self._conn.execute(
+            "SELECT message_id, thread_id, filepath FROM message_thread_map"
+        ).fetchall()
+
+    def get_message_map_entry(self, message_id: str) -> sqlite3.Row | None:
+        return self._conn.execute(
+            "SELECT message_id, thread_id, filepath FROM message_thread_map WHERE message_id = ?",
+            (message_id,),
+        ).fetchone()
+
+    def find_message_entry_by_filepath(self, filepath: str) -> sqlite3.Row | None:
+        return self._conn.execute(
+            "SELECT message_id, thread_id, filepath FROM message_thread_map WHERE filepath = ?",
+            (filepath,),
+        ).fetchone()
+
+    def count_total_messages(self) -> int:
+        row = self._conn.execute("SELECT COUNT(*) FROM message_thread_map").fetchone()
+        return int(row[0]) if row else 0
+
+    def get_thread_messages(self, thread_id: str) -> list[sqlite3.Row]:
+        """All (message_id, filepath) rows for a thread, used to rebuild it."""
+        return self._conn.execute(
+            "SELECT message_id, filepath FROM message_thread_map WHERE thread_id = ?",
+            (thread_id,),
+        ).fetchall()
+
+    def update_filepath(self, old_path: str, new_path: str) -> None:
+        """Update message_thread_map + indexed_files after a Maildir rename.
+
+        mbsync renames a Maildir file whenever flags change (e.g. S → SR when
+        the message is replied to). Keep the stored path in sync so later
+        reconciliation sweeps can still find the file.
+        """
+        if old_path == new_path:
+            return
+        cur = self._conn.cursor()
+        try:
+            cur.execute("BEGIN IMMEDIATE")
+            cur.execute(
+                "UPDATE message_thread_map SET filepath = ? WHERE filepath = ?",
+                (new_path, old_path),
+            )
+            cur.execute("DELETE FROM indexed_files WHERE filepath = ?", (old_path,))
+            cur.execute(
+                "INSERT OR REPLACE INTO indexed_files (filepath, indexed_at) "
+                "VALUES (?, datetime('now'))",
+                (new_path,),
+            )
+            cur.execute(
+                "UPDATE pending_deletions SET filepath = ? WHERE filepath = ?",
+                (new_path, old_path),
+            )
+            self._conn.commit()
+        except Exception:
+            self._conn.rollback()
+            raise
+
+    def add_pending_deletion(self, filepath: str, message_id: str, thread_id: str) -> bool:
+        """Record a tombstone. Returns True if newly inserted, False if already present.
+
+        Uses INSERT OR IGNORE so repeated sweeps over the same T-flagged file
+        do not churn the marked_at timestamp — the grace window is measured
+        from when the file was *first* seen as tombstoned.
+        """
+        cur = self._conn.cursor()
+        cur.execute(
+            "INSERT OR IGNORE INTO pending_deletions "
+            "(filepath, message_id, thread_id, marked_at) "
+            "VALUES (?, ?, ?, datetime('now'))",
+            (filepath, message_id, thread_id),
+        )
+        self._conn.commit()
+        return cur.rowcount > 0
+
+    def clear_pending_deletion(self, filepath: str) -> None:
+        self._conn.execute("DELETE FROM pending_deletions WHERE filepath = ?", (filepath,))
+        self._conn.commit()
+
+    def has_pending_deletion(self, filepath: str) -> bool:
+        row = self._conn.execute(
+            "SELECT 1 FROM pending_deletions WHERE filepath = ?", (filepath,)
+        ).fetchone()
+        return row is not None
+
+    def count_pending_deletions(self) -> int:
+        row = self._conn.execute("SELECT COUNT(*) FROM pending_deletions").fetchone()
+        return int(row[0]) if row else 0
+
+    def list_pending_deletions_older_than(self, cutoff_iso: str) -> list[sqlite3.Row]:
+        return self._conn.execute(
+            "SELECT filepath, message_id, thread_id, marked_at "
+            "FROM pending_deletions WHERE marked_at <= ? ORDER BY marked_at ASC",
+            (cutoff_iso,),
+        ).fetchall()
+
+    def remove_message(self, message_id: str) -> None:
+        """Remove a message's map + indexed_files + tombstone rows.
+
+        Does not touch the parent thread row — the caller is responsible for
+        rebuilding or deleting the thread after determining how many messages
+        remain.
+        """
+        cur = self._conn.cursor()
+        try:
+            cur.execute("BEGIN IMMEDIATE")
+            row = cur.execute(
+                "SELECT filepath FROM message_thread_map WHERE message_id = ?",
+                (message_id,),
+            ).fetchone()
+            if row is None:
+                self._conn.rollback()
+                return
+            filepath = row["filepath"]
+            cur.execute("DELETE FROM message_thread_map WHERE message_id = ?", (message_id,))
+            cur.execute("DELETE FROM indexed_files WHERE filepath = ?", (filepath,))
+            cur.execute("DELETE FROM pending_deletions WHERE filepath = ?", (filepath,))
+            self._conn.commit()
+        except Exception:
+            self._conn.rollback()
+            raise
+
+    def delete_thread_completely(self, thread_id: str) -> None:
+        """Remove a thread and every derived row. Used when the last message
+        in a thread has been reaped.
+        """
+        cur = self._conn.cursor()
+        try:
+            cur.execute("BEGIN IMMEDIATE")
+            row = cur.execute(
+                "SELECT fts_rowid FROM threads WHERE thread_id = ?", (thread_id,)
+            ).fetchone()
+            filepaths = [
+                r["filepath"]
+                for r in cur.execute(
+                    "SELECT filepath FROM message_thread_map WHERE thread_id = ?",
+                    (thread_id,),
+                ).fetchall()
+            ]
+            if row and row["fts_rowid"] is not None:
+                cur.execute("DELETE FROM threads_fts WHERE rowid = ?", (row["fts_rowid"],))
+            cur.execute("DELETE FROM threads_vec WHERE thread_id = ?", (thread_id,))
+            cur.execute("DELETE FROM threads WHERE thread_id = ?", (thread_id,))
+            cur.execute("DELETE FROM message_thread_map WHERE thread_id = ?", (thread_id,))
+            cur.execute("DELETE FROM pending_deletions WHERE thread_id = ?", (thread_id,))
+            for fp in filepaths:
+                cur.execute("DELETE FROM indexed_files WHERE filepath = ?", (fp,))
+            self._conn.commit()
+        except Exception:
+            self._conn.rollback()
+            raise
+
+    def rebuild_thread(self, thread, embedding: list[float]) -> None:
+        """Fully rewrite a thread row after a message has been removed.
+
+        Unlike ``upsert_thread``, this path always regenerates ``body_text``
+        from the supplied messages rather than appending to the stored body.
+        The caller is expected to pass a ``Thread`` whose ``messages`` list
+        reflects the surviving messages only (re-parsed from disk).
+        """
+        cur = self._conn.cursor()
+        participants_json = json.dumps(thread.participants)
+        message_ids_json = json.dumps([m.message_id for m in thread.messages])
+        snippet = thread.snippet()
+        date_first = thread.date_first.isoformat()
+        date_last = thread.date_last.isoformat()
+        has_attachments = int(any(m.has_attachments for m in thread.messages))
+        body = thread.text_for_embedding()
+
+        try:
+            cur.execute("BEGIN IMMEDIATE")
+            cur.execute(
+                """
+                INSERT INTO threads
+                    (thread_id, subject, participants, folder,
+                     date_first, date_last, message_ids, snippet, has_attachments,
+                     body_text)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(thread_id) DO UPDATE SET
+                    subject         = excluded.subject,
+                    participants    = excluded.participants,
+                    date_first      = excluded.date_first,
+                    date_last       = excluded.date_last,
+                    message_ids     = excluded.message_ids,
+                    snippet         = excluded.snippet,
+                    has_attachments = excluded.has_attachments,
+                    body_text       = excluded.body_text
+                """,
+                (
+                    thread.thread_id,
+                    thread.subject,
+                    participants_json,
+                    thread.folder,
+                    date_first,
+                    date_last,
+                    message_ids_json,
+                    snippet,
+                    has_attachments,
+                    body,
+                ),
+            )
+
+            self._replace_fts_row(cur, thread.thread_id, thread.subject, participants_json, body)
+
+            cur.execute("DELETE FROM threads_vec WHERE thread_id = ?", (thread.thread_id,))
+            cur.execute(
+                "INSERT INTO threads_vec (thread_id, embedding) VALUES (?, ?)",
+                (thread.thread_id, sqlite_vec.serialize_float32(embedding)),
+            )
+            self._conn.commit()
+        except Exception:
+            self._conn.rollback()
+            raise

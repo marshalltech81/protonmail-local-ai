@@ -2,6 +2,10 @@
 Indexer entry point.
 Watches the Maildir for new/changed emails, parses and threads them,
 generates embeddings via Ollama, and writes to the SQLite index.
+
+When ``INDEXER_DELETION_ENABLED=true`` the indexer also runs a reconciler
+that records tombstones for mbsync-flagged (``T``) Maildir files and reaps
+them after a grace window. See ``src/reconciler.py``.
 """
 
 import logging
@@ -15,6 +19,7 @@ from watchdog.observers import Observer
 from .database import Database
 from .embedder import Embedder
 from .parser import parse_email
+from .reconciler import Reconciler, ReconcilerConfig, load_config_from_env
 from .threader import Threader
 
 logging.basicConfig(
@@ -38,10 +43,17 @@ def touch_health_file() -> None:
 class MaildirHandler(FileSystemEventHandler):
     """Watches Maildir for new email files and triggers indexing."""
 
-    def __init__(self, db: Database, embedder: Embedder, threader: Threader):
+    def __init__(
+        self,
+        db: Database,
+        embedder: Embedder,
+        threader: Threader,
+        reconciler: Reconciler | None = None,
+    ):
         self.db = db
         self.embedder = embedder
         self.threader = threader
+        self.reconciler = reconciler
 
     def on_created(self, event):
         if event.is_directory:
@@ -50,6 +62,18 @@ class MaildirHandler(FileSystemEventHandler):
         # Only process files in cur/ or new/ subdirectories
         if path.parent.name in ("cur", "new"):
             self._index_file(path)
+
+    def on_moved(self, event):
+        # Maildir flag changes are renames within the same directory. The
+        # reconciler inspects the destination to either record or clear a
+        # tombstone based on the new flag set. Only runs when deletion
+        # reconciliation is enabled.
+        if event.is_directory or self.reconciler is None:
+            return
+        try:
+            self.reconciler.handle_moved(str(event.src_path), str(event.dest_path))
+        except Exception as e:
+            log.error(f"reconciler on_moved failed: {e}")
 
     def _index_file(self, path: Path):
         try:
@@ -88,6 +112,21 @@ def initial_index(db: Database, embedder: Embedder, threader: Threader):
     log.info(f"Initial index complete: {count} messages processed.")
 
 
+def _log_reconciler_config(cfg: ReconcilerConfig) -> None:
+    if not cfg.enabled:
+        log.info("Deletion reconciliation: disabled (set INDEXER_DELETION_ENABLED=true to enable)")
+        return
+    log.info(
+        "Deletion reconciliation: enabled "
+        "(grace=%dd, sweep=%ds, max_batch=%.1f%%, force=%s, unlink=%s)",
+        cfg.grace_days,
+        cfg.sweep_interval_secs,
+        cfg.max_batch_pct * 100,
+        cfg.force,
+        cfg.unlink_on_reap,
+    )
+
+
 def main():
     log.info("Starting indexer...")
     log.info(f"  Maildir: {MAILDIR_PATH}")
@@ -99,6 +138,12 @@ def main():
     threader = Threader(db)
     touch_health_file()
 
+    reconciler_config = load_config_from_env(os.environ)
+    _log_reconciler_config(reconciler_config)
+    reconciler: Reconciler | None = None
+    if reconciler_config.enabled:
+        reconciler = Reconciler(db, embedder, threader, reconciler_config)
+
     # Wait for Ollama to be ready
     embedder.wait_for_ready()
 
@@ -106,16 +151,36 @@ def main():
     initial_index(db, embedder, threader)
     touch_health_file()
 
+    # Startup reconciliation sweep — detect tombstones and path renames that
+    # landed while the indexer was offline. Safe to run every startup: it only
+    # writes to pending_deletions and updates stored filepaths.
+    if reconciler is not None:
+        try:
+            reconciler.sweep()
+            reconciler.reap()
+        except Exception as e:
+            log.error(f"startup reconciliation failed: {e}")
+
     # Watch for new emails
-    handler = MaildirHandler(db, embedder, threader)
+    handler = MaildirHandler(db, embedder, threader, reconciler=reconciler)
     observer = Observer()
     observer.schedule(handler, str(MAILDIR_PATH), recursive=True)
     observer.start()
     log.info("Watching Maildir for new emails...")
 
+    last_reconcile = time.monotonic()
     try:
         while True:
             touch_health_file()
+            if reconciler is not None:
+                now = time.monotonic()
+                if now - last_reconcile >= reconciler_config.sweep_interval_secs:
+                    try:
+                        reconciler.sweep()
+                        reconciler.reap()
+                    except Exception as e:
+                        log.error(f"periodic reconciliation failed: {e}")
+                    last_reconcile = now
             time.sleep(1)
     except KeyboardInterrupt:
         observer.stop()

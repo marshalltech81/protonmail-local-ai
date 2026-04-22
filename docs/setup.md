@@ -462,6 +462,39 @@ docker compose logs mbsync
 mbsync must connect to Bridge and complete at least one sync before the indexer
 has emails to process.
 
+### Enabling deletion reconciliation
+
+By default the local index is append-only: messages you delete on ProtonMail
+are still kept locally. To propagate deletions, set
+`INDEXER_DELETION_ENABLED=true` in `.env` and restart the indexer. See the
+`Indexer — deletion reconciliation` block in `.env.example` for all knobs
+(grace window, sweep interval, mass-delete brake, unlink-on-reap).
+
+Defaults — 7-day grace window, 5% mass-delete brake, no file unlink — are
+the safe starting point. Quick checks after enabling:
+
+```bash
+docker compose logs indexer | grep reconciler
+```
+
+You should see one line per sweep/reap. If the reaper ever logs
+`reaper aborted: ... exceed mass-delete threshold`, investigate why mbsync
+marked a large batch as deleted (Bridge vault rebuild, folder rename,
+account re-auth) before setting `INDEXER_DELETION_FORCE=true`.
+
+Tombstones and reaper actions can be inspected directly:
+
+```bash
+docker run --rm -v protonmail-local-ai_sqlite-volume:/data:ro \
+    debian:bookworm-slim bash -c \
+    'apt-get -qq install -y sqlite3 >/dev/null && \
+     sqlite3 /data/mail.db "SELECT COUNT(*) FROM pending_deletions;"'
+```
+
+The reaper sweeps `pending_deletions` on startup and once per
+`INDEXER_DELETION_SWEEP_INTERVAL_SECS`. If you want a deletion to land
+immediately for testing, drop the grace window to `0` and restart.
+
 ### Claude Desktop doesn't see the tools
 
 1. Verify the MCP server is running: `docker compose ps`
