@@ -255,12 +255,21 @@ class Database:
             placeholders = ",".join(["?"] * len(folders))
             where_clauses.append(f"t.folder IN ({placeholders})")
             params.extend(folders)
-        if date_from:
+        # Normalize before SQL pushdown. Stored dates are full ISO timestamps
+        # (``"2024-12-31T10:00:00+00:00"``); a bare user filter ``"2024-12-31"``
+        # would lexicographically sort *below* any same-day stored timestamp
+        # and exclude the final day entirely. ``_parse_filter_date`` promotes
+        # date-only values to start/end of day in UTC so the comparison is
+        # correct. date_from also benefits from explicit UTC normalization
+        # for inputs that arrive with ``Z`` or offset suffixes.
+        date_from_iso = _normalize_date_bound(date_from, end_of_day=False, field_name="date_from")
+        date_to_iso = _normalize_date_bound(date_to, end_of_day=True, field_name="date_to")
+        if date_from_iso is not None:
             where_clauses.append("t.date_last >= ?")
-            params.append(date_from)
-        if date_to:
+            params.append(date_from_iso)
+        if date_to_iso is not None:
             where_clauses.append("t.date_first <= ?")
-            params.append(date_to)
+            params.append(date_to_iso)
         if has_attachments is not None:
             where_clauses.append("t.has_attachments = ?")
             params.append(1 if has_attachments else 0)
@@ -308,12 +317,16 @@ class Database:
             placeholders = ",".join(["?"] * len(folders))
             where_clauses.append(f"folder IN ({placeholders})")
             params.extend(folders)
-        if date_from:
+        # See ``_keyword_search`` for why date bounds are normalized before
+        # being pushed into SQL.
+        date_from_iso = _normalize_date_bound(date_from, end_of_day=False, field_name="date_from")
+        date_to_iso = _normalize_date_bound(date_to, end_of_day=True, field_name="date_to")
+        if date_from_iso is not None:
             where_clauses.append("date_last >= ?")
-            params.append(date_from)
-        if date_to:
+            params.append(date_from_iso)
+        if date_to_iso is not None:
             where_clauses.append("date_first <= ?")
-            params.append(date_to)
+            params.append(date_to_iso)
         if has_attachments is not None:
             where_clauses.append("has_attachments = ?")
             params.append(1 if has_attachments else 0)
@@ -525,6 +538,18 @@ class Database:
             raise ValueError(
                 f"{field_name} must be a valid ISO 8601 date or date/time string"
             ) from exc
+
+
+def _normalize_date_bound(value: str | None, *, end_of_day: bool, field_name: str) -> str | None:
+    """Return an ISO 8601 string suitable for lexicographic comparison against
+    stored ``date_first`` / ``date_last`` values, or ``None`` if no filter was
+    supplied. Raises ``ValueError`` on invalid input (same policy as
+    ``_apply_filters``) so bad filters fail loudly instead of silently
+    returning the wrong rows.
+    """
+    if not value:
+        return None
+    return _parse_filter_date(value, end_of_day=end_of_day, _field_name=field_name).isoformat()
 
 
 def _parse_filter_date(
