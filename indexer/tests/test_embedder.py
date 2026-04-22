@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 import httpx
 import pytest
-from src.embedder import Embedder
+from src.embedder import Embedder, _model_matches
 
 
 def _install_mock(embedder: Embedder, handler) -> None:
@@ -99,3 +99,57 @@ class TestWaitForReady:
         with patch("src.embedder.time.sleep", lambda _: None):
             with pytest.raises(RuntimeError, match="Ollama did not become ready"):
                 emb.wait_for_ready(timeout=0)
+
+    def test_does_not_match_prefix_model(self):
+        # Prior substring matching would have treated ``llama3`` as
+        # present whenever ``llama3.2`` was pulled, silently returning
+        # ready with the wrong model. Exact matching forces a pull.
+        emb = Embedder("http://ollama:11434", "llama3")
+        calls = {"tags": 0, "pull": 0}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/api/tags":
+                calls["tags"] += 1
+                return httpx.Response(200, json={"models": [{"name": "llama3.2:latest"}]})
+            if request.url.path == "/api/pull":
+                calls["pull"] += 1
+                return httpx.Response(200, text='{"status":"success"}\n')
+            raise AssertionError(f"unexpected request to {request.url}")
+
+        _install_mock(emb, handler)
+        emb.wait_for_ready(timeout=5)
+        assert calls["pull"] == 1
+
+    def test_pull_raises_on_http_error(self):
+        # A failed pull (e.g. unknown model name) must surface as an
+        # exception, not be silently logged as a successful ready state.
+        emb = Embedder("http://ollama:11434", "nonexistent")
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/api/tags":
+                return httpx.Response(200, json={"models": []})
+            if request.url.path == "/api/pull":
+                return httpx.Response(404, json={"error": "not found"})
+            raise AssertionError(f"unexpected request to {request.url}")
+
+        _install_mock(emb, handler)
+        with pytest.raises(httpx.HTTPStatusError):
+            emb.wait_for_ready(timeout=5)
+
+
+class TestModelMatches:
+    def test_exact_match(self):
+        assert _model_matches("nomic-embed-text", "nomic-embed-text")
+
+    def test_latest_suffix_match(self):
+        assert _model_matches("nomic-embed-text", "nomic-embed-text:latest")
+
+    def test_prefix_is_not_match(self):
+        assert not _model_matches("llama3", "llama3.2:latest")
+
+    def test_different_tag_is_not_match(self):
+        assert not _model_matches("nomic-embed-text:v1", "nomic-embed-text:v2")
+
+    def test_configured_with_tag_requires_exact(self):
+        assert _model_matches("llama3:8b", "llama3:8b")
+        assert not _model_matches("llama3:8b", "llama3:8b:latest")

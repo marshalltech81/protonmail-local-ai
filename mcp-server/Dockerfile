@@ -49,11 +49,15 @@ ENV PATH="/app/.venv/bin:$PATH"
 COPY --from=builder /app/.venv /app/.venv
 COPY --from=builder /app/src/ ./src/
 
-# HEALTHCHECK deferred — requires a /health endpoint in src/main.py first.
-# When implemented: HEALTHCHECK CMD python -c \
-#   "import urllib.request; urllib.request.urlopen('http://localhost:3000/health')"
-
 USER mcp
+
+# Probes the FastMCP custom /health route — returns 200 when the
+# read-only SQLite connection answers a trivial query, 503 otherwise.
+# urllib raises on non-2xx, giving docker a non-zero exit without
+# adding curl/wget to the runtime image. Resolves the port from
+# MCP_PORT so the check tracks whatever the server actually bound.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+    CMD ["python", "-c", "import os,urllib.request; urllib.request.urlopen(f'http://127.0.0.1:{os.environ.get(\"MCP_PORT\",\"3000\")}/health', timeout=4).read()"]
 
 EXPOSE 3000
 

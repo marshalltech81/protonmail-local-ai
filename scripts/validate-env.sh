@@ -72,49 +72,80 @@ require_file "$ENV_FILE" ".env"
 require_file "$BRIDGE_PASS_FILE" "Bridge password secret"
 require_file "$ANTHROPIC_KEY_FILE" "Anthropic API key secret file"
 
-set -a
-# shellcheck source=/dev/null
-source "$ENV_FILE"
-set +a
+# Read a single KEY=VALUE from .env without shell-sourcing.
+# Shell-sourcing would evaluate command substitutions in values, so a
+# malformed or hostile .env line could execute arbitrary commands from the
+# operator's host. Parsing known keys avoids that entire class of issue.
+#
+# Semantics:
+#   - last assignment wins (matches `source` behavior)
+#   - comment (#) and blank lines are ignored
+#   - optional surrounding single or double quotes are stripped
+#   - no variable expansion, no command substitution, no escape processing
+get_env_value() {
+    local key="$1"
+    local raw value
 
-[[ -n "${BRIDGE_USER:-}" && "${BRIDGE_USER}" != "your@proton.me" ]] || {
+    raw="$(grep -E "^[[:space:]]*${key}=" "$ENV_FILE" | tail -n 1)"
+    [[ -n "$raw" ]] || { printf '\n'; return 0; }
+
+    value="${raw#*=}"
+    # strip a single pair of matching surrounding quotes, if present
+    if [[ "$value" =~ ^\"(.*)\"$ ]]; then
+        value="${BASH_REMATCH[1]}"
+    elif [[ "$value" =~ ^\'(.*)\'$ ]]; then
+        value="${BASH_REMATCH[1]}"
+    fi
+    printf '%s\n' "$value"
+}
+
+BRIDGE_USER="$(get_env_value BRIDGE_USER)"
+BRIDGE_VERSION="$(get_env_value BRIDGE_VERSION)"
+OLLAMA_EMBED_MODEL="$(get_env_value OLLAMA_EMBED_MODEL)"
+OLLAMA_LLM_MODEL="$(get_env_value OLLAMA_LLM_MODEL)"
+SYNC_INTERVAL="$(get_env_value SYNC_INTERVAL)"
+MCP_PORT="$(get_env_value MCP_PORT)"
+MCP_READ_ONLY="$(get_env_value MCP_READ_ONLY)"
+LLM_MODE="$(get_env_value LLM_MODE)"
+
+[[ -n "$BRIDGE_USER" && "$BRIDGE_USER" != "your@proton.me" ]] || {
     echo "ERROR: BRIDGE_USER in .env must be set to the Bridge username from 'bridge --cli info'." >&2
     exit 1
 }
 
-[[ -n "${BRIDGE_VERSION:-}" ]] || {
+[[ -n "$BRIDGE_VERSION" ]] || {
     echo "ERROR: BRIDGE_VERSION must be set in .env." >&2
     exit 1
 }
 
-[[ -n "${OLLAMA_EMBED_MODEL:-}" ]] || {
+[[ -n "$OLLAMA_EMBED_MODEL" ]] || {
     echo "ERROR: OLLAMA_EMBED_MODEL must be set in .env." >&2
     exit 1
 }
 
-[[ -n "${OLLAMA_LLM_MODEL:-}" ]] || {
+[[ -n "$OLLAMA_LLM_MODEL" ]] || {
     echo "ERROR: OLLAMA_LLM_MODEL must be set in .env." >&2
     exit 1
 }
 
-require_integer "SYNC_INTERVAL" "${SYNC_INTERVAL:-}"
-[[ "${SYNC_INTERVAL}" -gt 0 ]] || {
+require_integer "SYNC_INTERVAL" "$SYNC_INTERVAL"
+[[ "$SYNC_INTERVAL" -gt 0 ]] || {
     echo "ERROR: SYNC_INTERVAL must be greater than zero." >&2
     exit 1
 }
 
-require_integer "MCP_PORT" "${MCP_PORT:-}"
-[[ "${MCP_PORT}" -ge 1 && "${MCP_PORT}" -le 65535 ]] || {
+require_integer "MCP_PORT" "$MCP_PORT"
+[[ "$MCP_PORT" -ge 1 && "$MCP_PORT" -le 65535 ]] || {
     echo "ERROR: MCP_PORT must be between 1 and 65535." >&2
     exit 1
 }
 
-[[ "${MCP_READ_ONLY:-}" =~ ^(true|false)$ ]] || {
+[[ "$MCP_READ_ONLY" =~ ^(true|false)$ ]] || {
     echo "ERROR: MCP_READ_ONLY must be 'true' or 'false'." >&2
     exit 1
 }
 
-[[ "${LLM_MODE:-}" =~ ^(local|cloud)$ ]] || {
+[[ "$LLM_MODE" =~ ^(local|cloud)$ ]] || {
     echo "ERROR: LLM_MODE must be 'local' or 'cloud'." >&2
     exit 1
 }
@@ -122,7 +153,7 @@ require_integer "MCP_PORT" "${MCP_PORT:-}"
 require_nonempty_file "$BRIDGE_PASS_FILE" "Bridge password secret"
 require_mode_600 "$BRIDGE_PASS_FILE"
 
-if [[ "${LLM_MODE}" == "cloud" ]]; then
+if [[ "$LLM_MODE" == "cloud" ]]; then
     require_nonempty_file "$ANTHROPIC_KEY_FILE" "Anthropic API key secret"
     require_mode_600 "$ANTHROPIC_KEY_FILE"
 fi

@@ -483,6 +483,15 @@ class Database:
         ).fetchall()
         return [self._row_to_result(r) for r in rows]
 
+    def ping(self) -> None:
+        """Trivial query used as a liveness probe by the HTTP /health route.
+
+        Exercises the read-only SQLite connection without touching any
+        application table so it stays cheap under a per-30s healthcheck
+        interval and surfaces a missing/unreadable DB as an exception.
+        """
+        self._conn.execute("SELECT 1").fetchone()
+
     def get_stats(self) -> dict:
         stats = {}
         stats["total_threads"] = self._conn.execute("SELECT COUNT(*) FROM threads").fetchone()[0]

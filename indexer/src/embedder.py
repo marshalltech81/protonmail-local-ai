@@ -12,6 +12,22 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 log = logging.getLogger("indexer.embedder")
 
 
+def _model_matches(configured: str, available: str) -> bool:
+    """Return True when ``available`` refers to the same model as ``configured``.
+
+    Ollama lists models with an explicit ``:tag`` suffix (``:latest`` by
+    default). A bare configured name like ``nomic-embed-text`` should match
+    the exact string and also ``nomic-embed-text:latest``. Substring
+    matching is avoided because it produced false positives for models
+    that share a prefix (e.g. ``llama3`` matching ``llama3.2``).
+    """
+    if available == configured:
+        return True
+    if ":" in configured:
+        return False
+    return available == f"{configured}:latest"
+
+
 class Embedder:
     def __init__(self, ollama_host: str, model: str):
         self.host = ollama_host.rstrip("/")
@@ -19,24 +35,33 @@ class Embedder:
         self.client = httpx.Client(timeout=60.0)
 
     def wait_for_ready(self, timeout: int = 120):
-        """Block until Ollama is available and the model is pulled."""
+        """Block until Ollama is available and the model is pulled.
+
+        The readiness loop tolerates connection errors to `/api/tags`
+        because Ollama may still be starting. Once the server answers,
+        the pull is a definitive step — any error raised by `_pull_model`
+        propagates to the caller rather than being swallowed, so a
+        missing or misnamed model surfaces as a real failure instead of
+        a misleading readiness timeout.
+        """
         log.info(f"Waiting for Ollama at {self.host}...")
         deadline = time.time() + timeout
         while time.time() < deadline:
             try:
                 r = self.client.get(f"{self.host}/api/tags")
-                if r.status_code == 200:
-                    models = [m["name"] for m in r.json().get("models", [])]
-                    if any(self.model in m for m in models):
-                        log.info(f"Ollama ready. Model '{self.model}' available.")
-                        return
-                    else:
-                        log.info(f"Ollama ready but model '{self.model}' not found. Pulling now...")
-                        self._pull_model()
-                        return
-            except Exception:
-                pass
-            time.sleep(3)
+            except httpx.HTTPError:
+                time.sleep(3)
+                continue
+            if r.status_code != 200:
+                time.sleep(3)
+                continue
+            models = [m["name"] for m in r.json().get("models", [])]
+            if any(_model_matches(self.model, m) for m in models):
+                log.info(f"Ollama ready. Model '{self.model}' available.")
+                return
+            log.info(f"Ollama ready but model '{self.model}' not found. Pulling now...")
+            self._pull_model()
+            return
         raise RuntimeError(f"Ollama did not become ready within {timeout}s. Run: make pull-models")
 
     def _pull_model(self):
@@ -47,6 +72,10 @@ class Embedder:
             json={"name": self.model},
             timeout=600.0,
         ) as r:
+            # Raise on non-2xx before iterating the body so a 4xx/5xx pull
+            # (e.g. unknown model name) is surfaced as a RuntimeError rather
+            # than silently logged as a successful "ready" state.
+            r.raise_for_status()
             for line in r.iter_lines():
                 if line:
                     log.debug(f"pull: {line}")

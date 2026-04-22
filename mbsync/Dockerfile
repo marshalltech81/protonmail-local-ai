@@ -41,14 +41,16 @@ COPY --chmod=755 --chown=mbsync:mbsync healthcheck.sh /healthcheck.sh
 # ownership. If VOLUME comes before, the directory is empty and ownership
 # is lost.
 # -----------------------------------------------------------------------------
-RUN mkdir -p /maildir \
-  && chown -R mbsync:mbsync /maildir
+RUN mkdir -p /maildir /state \
+  && chown -R mbsync:mbsync /maildir /state \
+  && chmod 700 /state
 
 # Drop to non-root user
 USER mbsync
 
-# Declare volume AFTER chown so Docker preserves ownership on first mount
-VOLUME ["/maildir"]
+# Declare volumes AFTER chown so Docker preserves ownership on first mount.
+# /state persists the pinned Bridge TLS cert fingerprint across restarts.
+VOLUME ["/maildir", "/state"]
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=120s --retries=3 CMD ["/healthcheck.sh"]
 

@@ -26,6 +26,9 @@ mbsync container
   - Polls Bridge IMAP every SYNC_INTERVAL seconds in a bounded retry loop
   - Writes Maildir format to maildir-volume
   - Maintains sync state for incremental updates
+  - Pins Bridge TLS cert on first boot (SHA-256 fingerprint stored in
+    mbsync-state volume); refuses to sync on mismatch unless the operator
+    sets BRIDGE_CERT_PIN_ROTATE=true for a legitimate rotation
   - Fails closed if cert extraction or repeated sync attempts fail
         │
         │  Maildir files (shared volume, read-only for indexer)
@@ -50,9 +53,14 @@ ollama container              sqlite-volume
         ▼
 mcp-server container
   - Exposes MCP tools via HTTP/SSE on port 3000
+  - Serves GET /health for the container healthcheck (200 when the
+    read-only SQLite connection answers, 503 otherwise)
   - Hybrid search: BM25 + vector → RRF merge
   - Q&A: retrieves threads → prompts Ollama or Claude API
   - Retrieval: serves indexed mailbox data from SQLite
+  - Email excerpts sent to the LLM are wrapped in <untrusted_email>
+    tags and framed as untrusted data — defense against prompt
+    injection from attacker-controlled email content
   - Actions: disabled by default via MCP read-only mode
   - Any future live write path must be cert-pinned and explicitly enabled
         │
