@@ -3,8 +3,6 @@ name = "protonmail-local-ai-indexer"
 version = "0.0.0"
 requires-python = ">=3.14"
 dependencies = [
-    "mail-parser==4.2.1",
-    "beautifulsoup4==4.14.3",
     "html2text==2025.4.15",
     "sqlite-vec==0.1.9",
     "httpx==0.28.1",
