@@ -67,7 +67,28 @@ class Database:
         self._conn = self._connect()
 
     def _connect(self) -> sqlite3.Connection:
-        Path(self.path).parent.mkdir(parents=True, exist_ok=True)
+        # MCP is a read-only consumer of the indexer's output; the indexer
+        # is the only component allowed to create the data directory or
+        # initialize the SQLite file. If either is missing at MCP startup,
+        # the deployment topology is wrong (indexer unhealthy, wrong volume
+        # mount, typo in SQLITE_PATH) — fail fast with a specific message
+        # rather than silently creating an empty directory or opening a
+        # non-existent ``?mode=ro`` URI and surfacing as "unable to open
+        # database file" later.
+        db_path = Path(self.path)
+        if not db_path.parent.exists():
+            raise FileNotFoundError(
+                f"SQLite data directory does not exist: {db_path.parent}. "
+                "mcp-server reads from the indexer's shared volume; verify "
+                "that indexer is running and that SQLITE_PATH points at the "
+                "mounted volume."
+            )
+        if not db_path.exists():
+            raise FileNotFoundError(
+                f"SQLite index not found at {db_path}. The indexer must "
+                "initialize the database before mcp-server starts; check "
+                "'docker compose logs indexer' for migration errors."
+            )
         # Open the SQLite file in read-only URI mode so the MCP server never
         # attempts to mutate the shared index and so WAL readers can operate
         # without the connection trying to create or write a journal sidecar.

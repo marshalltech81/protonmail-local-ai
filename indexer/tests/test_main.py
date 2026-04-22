@@ -20,10 +20,6 @@ from src import main
 from src.database import EMBEDDING_DIM, Database
 from src.threader import Threader
 
-# Matches threads_vec FLOAT[768] in src/database.py; mirrored here to keep
-# tests decoupled from the database module constant.
-EMBEDDING_DIM = 768
-
 
 class _FakeEvent:
     def __init__(self, src_path: str, dest_path: str, is_directory: bool = False):

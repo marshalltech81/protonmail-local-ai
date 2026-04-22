@@ -150,7 +150,17 @@ def _decode_header(value: str) -> str:
     decoded = []
     for part, charset in parts:
         if isinstance(part, bytes):
-            decoded.append(part.decode(charset or "utf-8", errors="replace"))
+            # ``charset`` is whatever the sender claimed in the MIME header;
+            # obscure or invalid labels ("x-mac-romanian", typos, historical
+            # aliases) raise LookupError here, propagate up through
+            # parse_email's broad except, and cause the whole message to be
+            # silently dropped from the index. Fall back to utf-8 with
+            # replacement on decode errors instead.
+            encoding = charset or "utf-8"
+            try:
+                decoded.append(part.decode(encoding, errors="replace"))
+            except LookupError:
+                decoded.append(part.decode("utf-8", errors="replace"))
         else:
             decoded.append(part)
     return " ".join(decoded).strip()

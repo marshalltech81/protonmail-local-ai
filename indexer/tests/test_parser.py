@@ -352,6 +352,36 @@ class TestDecodeHeader:
     def test_empty_string(self):
         assert _decode_header("") == ""
 
+    def test_unknown_charset_falls_back_to_utf8(self):
+        """Regression: an obscure or invalid charset label used to raise
+        LookupError inside _decode_header, which propagated up through
+        parse_email's broad except and silently dropped the whole message
+        from the index. Fall back to utf-8 with replacement instead."""
+        encoded = "=?not-a-real-charset?q?Hello?="
+        result = _decode_header(encoded)
+        assert "Hello" in result
+
+    def test_unknown_charset_in_eml_does_not_drop_message(self, tmp_path):
+        """End-to-end: a message whose Subject declares an unknown charset
+        must still be parsed rather than returned as ``None``."""
+        content = (
+            "From: alice@example.com\r\n"
+            "To: bob@example.com\r\n"
+            "Subject: =?not-a-real-charset?q?Weird?=\r\n"
+            "Message-ID: <bad_charset@example.com>\r\n"
+            "Date: Mon, 01 Jan 2024 12:00:00 +0000\r\n"
+            "Content-Type: text/plain; charset=utf-8\r\n"
+            "\r\n"
+            "Body.\r\n"
+        )
+        folder = tmp_path / "INBOX" / "cur"
+        folder.mkdir(parents=True)
+        path = folder / "badcharset.eml"
+        path.write_bytes(content.encode("utf-8"))
+        msg = parse_email(path)
+        assert msg is not None
+        assert "Weird" in msg.subject
+
 
 # ---------------------------------------------------------------------------
 # _clean_id
