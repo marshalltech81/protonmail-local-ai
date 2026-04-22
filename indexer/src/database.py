@@ -13,7 +13,40 @@ from pathlib import Path
 
 import sqlite_vec
 
+from .threader import canonical_addr
+
 log = logging.getLogger("indexer.database")
+
+
+def _dedupe_by_canonical(addrs: list[str]) -> list[str]:
+    """Dedup address display strings, first-seen display wins.
+
+    The merge path in ``upsert_thread`` / ``_rewrite_thread_row`` previously
+    keyed de-duplication on the raw display string via ``dict.fromkeys``, so
+    ``Bob Smith <bob@x>`` accumulated alongside a pre-existing ``bob@x`` row
+    even though both refer to the same correspondent. Keying on the canonical
+    bare address (``parseaddr`` + lowercase) collapses those variants.
+
+    Entries with no recoverable email address (``canonical_addr`` returns
+    ``""``) are keyed on their lowercased stripped value rather than dropped.
+    The threader already filters malformed header values at write time; at
+    the database merge layer the ``existing`` side may include pre-canonical
+    legacy data, and silently dropping it would be surprising data loss.
+    """
+    seen: set[str] = set()
+    result: list[str] = []
+    for addr in addrs:
+        stripped = (addr or "").strip()
+        if not stripped:
+            continue
+        canonical = canonical_addr(stripped)
+        key = canonical or stripped.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(stripped)
+    return result
+
 
 SCHEMA_VERSION = 6
 
@@ -405,9 +438,7 @@ class Database:
 
         incoming_message_ids = [m.message_id for m in thread.messages]
         incoming_participants = list(thread.participants)
-        incoming_senders = [
-            m.from_addr.strip() for m in thread.messages if m.from_addr and m.from_addr.strip()
-        ]
+        incoming_senders = [m.from_addr for m in thread.messages if m.from_addr]
         incoming_has_attachments = int(any(m.has_attachments for m in thread.messages))
 
         try:
@@ -424,11 +455,11 @@ class Database:
                 existing_ids = json.loads(existing["message_ids"] or "[]")
                 merged_ids = list(dict.fromkeys(existing_ids + incoming_message_ids))
                 existing_participants = json.loads(existing["participants"] or "[]")
-                merged_participants = list(
-                    dict.fromkeys(existing_participants + incoming_participants)
+                merged_participants = _dedupe_by_canonical(
+                    existing_participants + incoming_participants
                 )
                 existing_senders = json.loads(existing["senders"] or "[]")
-                merged_senders = list(dict.fromkeys(existing_senders + incoming_senders))
+                merged_senders = _dedupe_by_canonical(existing_senders + incoming_senders)
                 merged_has_attachments = int(
                     bool(existing["has_attachments"]) or bool(incoming_has_attachments)
                 )
@@ -437,8 +468,8 @@ class Database:
                 merged_date_first = min(existing["date_first"], thread.date_first.isoformat())
             else:
                 merged_ids = incoming_message_ids
-                merged_participants = incoming_participants
-                merged_senders = list(dict.fromkeys(incoming_senders))
+                merged_participants = _dedupe_by_canonical(incoming_participants)
+                merged_senders = _dedupe_by_canonical(incoming_senders)
                 merged_has_attachments = incoming_has_attachments
                 merged_date_first = thread.date_first.isoformat()
 
@@ -878,15 +909,9 @@ class Database:
                 f"{EMBEDDING_DIM}. Check OLLAMA_EMBED_MODEL."
             )
 
-        participants_json = json.dumps(thread.participants)
+        participants_json = json.dumps(_dedupe_by_canonical(thread.participants))
         senders_json = json.dumps(
-            list(
-                dict.fromkeys(
-                    m.from_addr.strip()
-                    for m in thread.messages
-                    if m.from_addr and m.from_addr.strip()
-                )
-            )
+            _dedupe_by_canonical([m.from_addr for m in thread.messages if m.from_addr])
         )
         message_ids_json = json.dumps([m.message_id for m in thread.messages])
         snippet = thread.snippet()
