@@ -115,30 +115,45 @@ class Database:
         self,
         query_text: str,
         folders: list[str] | None = None,
+        from_addr: str | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
+        has_attachments: bool | None = None,
         limit: int = 10,
     ) -> list[ThreadResult]:
+        # Previously dropped every filter except ``folders`` on the floor, so
+        # a keyword search with a date or sender filter returned unfiltered
+        # results. All four filters now flow through, matching hybrid_search.
         oversample = (
             _FILTERED_OVERSAMPLE
-            if self._has_post_fusion_filter(folders)
+            if self._has_post_fusion_filter(folders, from_addr, date_from, date_to, has_attachments)
             else _UNFILTERED_OVERSAMPLE
         )
         results = self._keyword_search(query_text, limit * oversample)
-        filtered = self._apply_filters(results, folders)
+        filtered = self._apply_filters(
+            results, folders, from_addr, date_from, date_to, has_attachments
+        )
         return filtered[:limit]
 
     def semantic_search(
         self,
         query_embedding: list[float],
         folders: list[str] | None = None,
+        from_addr: str | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
+        has_attachments: bool | None = None,
         limit: int = 10,
     ) -> list[ThreadResult]:
         oversample = (
             _FILTERED_OVERSAMPLE
-            if self._has_post_fusion_filter(folders)
+            if self._has_post_fusion_filter(folders, from_addr, date_from, date_to, has_attachments)
             else _UNFILTERED_OVERSAMPLE
         )
         results = self._vector_search(query_embedding, limit * oversample)
-        filtered = self._apply_filters(results, folders)
+        filtered = self._apply_filters(
+            results, folders, from_addr, date_from, date_to, has_attachments
+        )
         return filtered[:limit]
 
     @staticmethod

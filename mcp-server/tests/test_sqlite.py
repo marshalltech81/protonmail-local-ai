@@ -111,6 +111,44 @@ class TestKeywordSearch:
     def test_returns_empty_when_no_match(self, seeded_db: Database):
         assert seeded_db.keyword_search("nonexistentsearchtoken") == []
 
+    def test_keyword_search_honors_from_addr_filter(self, seeded_db: Database):
+        """Regression: keyword mode previously dropped every filter except
+        ``folders``, silently returning unfiltered results."""
+        # t-alpha and t-beta both have "alice@example.com" as a participant;
+        # restrict by sender that only appears in t-gamma ("Archive").
+        results = seeded_db.keyword_search("meeting", from_addr="dave@example.com")
+        assert all(any("dave@example.com" in p.lower() for p in r.participants) for r in results)
+
+    def test_keyword_search_honors_date_filter(self, seeded_db: Database):
+        # t-gamma is in Archive with date_last 2024-02-15; restrict to
+        # post-March so only t-alpha / t-beta qualify.
+        results = seeded_db.keyword_search(
+            "march invoice lunch meeting",
+            date_from="2024-03-01T00:00:00+00:00",
+        )
+        assert all(r.date_last.isoformat() >= "2024-03-01T00:00:00+00:00" for r in results)
+        assert not any(r.thread_id == "t-gamma" for r in results)
+
+    def test_keyword_search_honors_has_attachments_filter(self, seeded_db: Database):
+        only_with = seeded_db.keyword_search("march invoice lunch meeting", has_attachments=True)
+        assert all(r.has_attachments for r in only_with)
+        assert any(r.thread_id == "t-alpha" for r in only_with)
+
+    def test_semantic_search_honors_from_addr_filter(self, seeded_db: Database):
+        """Same regression as keyword mode — filter parity across all three."""
+        results = seeded_db.semantic_search(
+            [0.0, 0.0, 1.0, 0.0],  # nearest to t-gamma
+            from_addr="dave@example.com",
+        )
+        assert all(any("dave@example.com" in p.lower() for p in r.participants) for r in results)
+
+    def test_semantic_search_honors_date_filter(self, seeded_db: Database):
+        results = seeded_db.semantic_search(
+            [1.0, 0.0, 0.0, 0.0],
+            date_from="2024-03-01T00:00:00+00:00",
+        )
+        assert all(r.date_last.isoformat() >= "2024-03-01T00:00:00+00:00" for r in results)
+
     def test_folder_filter_restricts_results(self, seeded_db: Database):
         # "meeting" appears only in the Archive thread
         all_results = seeded_db.keyword_search("meeting")
