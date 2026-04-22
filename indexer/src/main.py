@@ -64,16 +64,27 @@ class MaildirHandler(FileSystemEventHandler):
             self._index_file(path)
 
     def on_moved(self, event):
-        # Maildir flag changes are renames within the same directory. The
-        # reconciler inspects the destination to either record or clear a
-        # tombstone based on the new flag set. Only runs when deletion
-        # reconciliation is enabled.
-        if event.is_directory or self.reconciler is None:
+        # Two distinct move scenarios land here:
+        # 1. Maildir delivery: a message is first written under tmp/ and then
+        #    renamed into new/ or cur/ — the destination is a newly-arrived
+        #    message that must be indexed (``on_created`` does not fire for
+        #    rename destinations).
+        # 2. Flag changes: mbsync renames files in-place within the same
+        #    directory when flags change (e.g. S → ST for a \Deleted flag).
+        #    The reconciler inspects the destination to record or clear a
+        #    tombstone based on the new flag set.
+        if event.is_directory:
             return
-        try:
-            self.reconciler.handle_moved(str(event.src_path), str(event.dest_path))
-        except Exception as e:
-            log.error(f"reconciler on_moved failed: {e}")
+
+        dest_path = Path(event.dest_path)
+        if dest_path.parent.name in ("cur", "new") and not self.db.is_indexed(str(dest_path)):
+            self._index_file(dest_path)
+
+        if self.reconciler is not None:
+            try:
+                self.reconciler.handle_moved(str(event.src_path), str(event.dest_path))
+            except Exception as e:
+                log.error(f"reconciler on_moved failed: {e}")
 
     def _index_file(self, path: Path):
         try:
@@ -88,8 +99,17 @@ class MaildirHandler(FileSystemEventHandler):
             log.error(f"Failed to index {path}: {e}")
 
 
+HEALTH_REFRESH_EVERY = 25
+
+
 def initial_index(db: Database, embedder: Embedder, threader: Threader):
-    """Index all existing emails on startup."""
+    """Index all existing emails on startup.
+
+    Refreshes the health file every ``HEALTH_REFRESH_EVERY`` processed
+    messages so that long initial indexes (large mailboxes, slow Ollama
+    embeddings) do not exceed ``HEALTH_MAX_AGE_SECONDS`` in the healthcheck
+    and cause the container to be reported unhealthy mid-scan.
+    """
     log.info("Running initial index scan...")
     count = 0
     for folder in MAILDIR_PATH.iterdir():
@@ -107,6 +127,8 @@ def initial_index(db: Database, embedder: Embedder, threader: Threader):
                         embedding = embedder.embed(thread.text_for_embedding())
                         db.upsert_thread(thread, embedding)
                         count += 1
+                        if count % HEALTH_REFRESH_EVERY == 0:
+                            touch_health_file()
                     except Exception as e:
                         log.error(f"Failed to index {filepath}: {e}")
     log.info(f"Initial index complete: {count} messages processed.")

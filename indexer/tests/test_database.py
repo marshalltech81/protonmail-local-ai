@@ -8,6 +8,7 @@ threading lookups, file tracking, and stats.
 
 import json
 import sqlite3
+import threading
 from datetime import UTC, datetime
 
 from src.database import SCHEMA_VERSION, Database
@@ -618,6 +619,42 @@ class TestReconciliationSupport:
 # ---------------------------------------------------------------------------
 # rebuild_thread — full rewrite without body accumulation
 # ---------------------------------------------------------------------------
+
+
+class TestConcurrency:
+    def test_concurrent_writes_do_not_corrupt_or_error(self, db):
+        """Two threads hammering ``upsert_thread`` must not interleave
+        ``BEGIN IMMEDIATE``/``COMMIT`` pairs on the shared connection.
+        Without the per-instance lock, cross-thread interleaving can
+        raise ``sqlite3.OperationalError`` ("cannot start a transaction
+        within a transaction") or silently commit partial state.
+        """
+        errors: list[Exception] = []
+        FAKE_EMB = [0.0] * 768
+
+        def writer(prefix: str):
+            try:
+                for i in range(50):
+                    msg = make_message(
+                        message_id=f"{prefix}_{i}@x",
+                        filepath=f"/c/{prefix}/{i}",
+                        date=datetime(2024, 1, 1, tzinfo=UTC),
+                    )
+                    thread = make_thread(messages=[msg], thread_id=f"t_{prefix}_{i}")
+                    db.upsert_thread(thread, FAKE_EMB)
+            except Exception as exc:
+                errors.append(exc)
+
+        t_a = threading.Thread(target=writer, args=("a",))
+        t_b = threading.Thread(target=writer, args=("b",))
+        t_a.start()
+        t_b.start()
+        t_a.join()
+        t_b.join()
+
+        assert errors == []
+        # Both threads' threads all landed in the DB.
+        assert db.count_total_messages() == 100
 
 
 class TestRebuildThread:
