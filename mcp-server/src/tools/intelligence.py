@@ -11,6 +11,7 @@ from mcp.types import TextContent
 
 from ..lib.security import safe_exception_text
 from ..lib.sqlite import ThreadResult
+from ..lib.validation import clamp_int
 
 log = logging.getLogger("mcp.tools.intelligence")
 
@@ -132,8 +133,9 @@ def register_intelligence_tools(
             A synthesized answer with source thread references.
         """
         # Clamp to [1, _MAX_ASK_THREADS] so a caller-supplied
-        # ``max_threads=5000`` can't expand into a massive prompt.
-        max_threads = max(1, min(int(max_threads), _MAX_ASK_THREADS))
+        # ``max_threads=5000`` (or a non-numeric value) can't expand
+        # into a massive prompt or raise before the try/except below.
+        max_threads = clamp_int(max_threads, default=5, minimum=1, maximum=_MAX_ASK_THREADS)
 
         try:
             # Retrieve relevant threads via hybrid search
@@ -271,9 +273,10 @@ def register_intelligence_tools(
             A JSON array of extracted records found in the available indexed thread context.
         """
         # Clamp to [1, _MAX_EXTRACT_LIMIT]. Structured extraction loops
-        # one LLM call per retrieved thread; an inflated ``limit`` would
-        # otherwise fan out into that many model calls.
-        limit = max(1, min(int(limit), _MAX_EXTRACT_LIMIT))
+        # one LLM call per retrieved thread; an inflated or non-numeric
+        # ``limit`` would otherwise fan out into that many model calls
+        # or raise before the try/except below.
+        limit = clamp_int(limit, default=20, minimum=1, maximum=_MAX_EXTRACT_LIMIT)
 
         try:
             embedding = await ollama.embed(query)

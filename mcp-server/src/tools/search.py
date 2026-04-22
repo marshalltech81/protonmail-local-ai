@@ -7,6 +7,8 @@ import logging
 
 from mcp.types import TextContent
 
+from ..lib.validation import clamp_int
+
 log = logging.getLogger("mcp.tools.search")
 
 # Hard ceiling on ``limit``. MCP tool calls can originate from an LLM,
@@ -58,9 +60,12 @@ def register_search_tools(server, db, ollama):
                     text=(f"Invalid mode {mode!r}. Use 'hybrid', 'semantic', or 'keyword'."),
                 )
             ]
-        # Clamp to [1, _MAX_SEARCH_LIMIT] so an out-of-range client value
-        # never drives an unbounded query against the index.
-        limit = max(1, min(int(limit), _MAX_SEARCH_LIMIT))
+        # Clamp to [1, _MAX_SEARCH_LIMIT] so an out-of-range or
+        # non-numeric caller value never drives an unbounded query
+        # against the index. clamp_int returns the default (10) when the
+        # raw value is missing or unparseable rather than raising a bare
+        # ValueError before the try/except below.
+        limit = clamp_int(limit, default=10, minimum=1, maximum=_MAX_SEARCH_LIMIT)
 
         try:
             # All three modes accept the same filter set; keyword and
