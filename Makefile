@@ -140,7 +140,7 @@ sync-indexer:
 	cd indexer && uv sync --locked --dev
 
 sync-mcp:
-	cd mcp-server && uv sync --locked
+	cd mcp-server && uv sync --locked --dev
 
 # Show running containers and basic index status
 status:

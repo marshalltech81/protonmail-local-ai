@@ -521,6 +521,55 @@ class TestValidateIso8601:
             Database._validate_iso8601("date_from", "yesterday")
 
 
+class TestFilterDateUtcNormalization:
+    """Stored ``date_last`` / ``date_first`` values are UTC-normalized by
+    the indexer parser and serialized with a ``+00:00`` offset. Filter
+    bounds reach SQL via ``isoformat()`` too, and the comparison happens
+    lexicographically. If an offset-aware filter kept its original offset,
+    two strings representing the same instant would sort differently —
+    e.g. ``2024-06-01T08:00:00-04:00`` vs stored ``2024-06-01T12:00:00+00:00``
+    — and silently drop matching rows. Normalize to UTC first."""
+
+    def test_offset_aware_filter_normalized_to_utc(self, seeded_db: Database, make_result):
+        """Same instant as ``2024-06-01T12:00:00+00:00``, written with a
+        ``-04:00`` offset, must still include a row stamped at that instant."""
+        from datetime import UTC, datetime
+
+        on_boundary = make_result("on_boundary")
+        on_boundary.date_first = datetime(2024, 6, 1, 12, 0, tzinfo=UTC)
+        on_boundary.date_last = datetime(2024, 6, 1, 12, 0, tzinfo=UTC)
+
+        filtered = seeded_db._apply_filters([on_boundary], date_from="2024-06-01T08:00:00-04:00")
+        assert [r.thread_id for r in filtered] == ["on_boundary"]
+
+    def test_offset_aware_upper_bound_normalized_to_utc(self, seeded_db: Database, make_result):
+        """An offset-aware ``date_to`` one minute before the stored UTC
+        instant (same instant shifted by offset does not clear the row)
+        must still exclude rows strictly after that instant."""
+        from datetime import UTC, datetime
+
+        after_cutoff = make_result("after_cutoff")
+        after_cutoff.date_first = datetime(2024, 6, 1, 12, 30, tzinfo=UTC)
+        after_cutoff.date_last = datetime(2024, 6, 1, 12, 30, tzinfo=UTC)
+
+        filtered = seeded_db._apply_filters([after_cutoff], date_to="2024-06-01T08:29:00-04:00")
+        assert filtered == []
+
+    def test_normalize_date_bound_returns_utc_isoformat(self):
+        """``_normalize_date_bound`` produces the string handed straight to
+        SQL pushdown — it must carry a ``+00:00`` offset regardless of the
+        offset the caller supplied, so lexicographic comparison against
+        stored UTC timestamps is well-defined."""
+        from src.lib.sqlite import _normalize_date_bound
+
+        normalized = _normalize_date_bound(
+            "2024-06-01T08:00:00-04:00", end_of_day=False, field_name="date_from"
+        )
+        assert normalized is not None
+        assert normalized.endswith("+00:00")
+        assert normalized.startswith("2024-06-01T12:00:00")
+
+
 class TestFtsSanitization:
     def test_sanitizer_extracts_word_tokens(self):
         from src.lib.sqlite import _sanitize_fts_query

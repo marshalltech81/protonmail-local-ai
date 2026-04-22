@@ -13,7 +13,7 @@ from pathlib import Path
 
 import sqlite_vec
 
-from .threader import canonical_addr
+from .threader import THREAD_BODY_TEXT_MAX_CHARS, canonical_addr
 
 log = logging.getLogger("indexer.database")
 
@@ -48,7 +48,7 @@ def _dedupe_by_canonical(addrs: list[str]) -> list[str]:
     return result
 
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 8
 
 # Schema v3 uses FTS5 ``contentless_delete=1``, which SQLite added in 3.43.
 # Running against an older runtime silently degrades (migration errors caught
@@ -157,14 +157,18 @@ class Database:
             self._apply_v5(cur)
         if current < 6:
             self._apply_v6(cur)
+        if current < 7:
+            self._apply_v7(cur)
+        if current < 8:
+            self._apply_v8(cur)
 
-        # UPDATE if a row exists, INSERT if this is a fresh database.
-        # INSERT OR REPLACE would insert a new row (new primary key) rather
-        # than overwriting the existing one, leaving both rows in the table.
-        if current == 0:
-            cur.execute("INSERT INTO schema_version VALUES (?)", (SCHEMA_VERSION,))
-        else:
-            cur.execute("UPDATE schema_version SET version = ?", (SCHEMA_VERSION,))
+        # Reset to a single row. Databases upgraded through an earlier
+        # ``INSERT OR REPLACE`` revision may carry multiple rows in
+        # ``schema_version``; updating them all to the same PRIMARY KEY
+        # value would violate uniqueness. DELETE + INSERT collapses any
+        # stale history into one canonical row regardless of prior state.
+        cur.execute("DELETE FROM schema_version")
+        cur.execute("INSERT INTO schema_version VALUES (?)", (SCHEMA_VERSION,))
         self._conn.commit()
         log.info(f"Database ready at {self.path} (schema v{SCHEMA_VERSION})")
 
@@ -363,6 +367,75 @@ class Database:
             pass  # Column already exists on a fresh database built from v1
         self._conn.commit()
 
+    def _apply_v7(self, cur: sqlite3.Cursor):
+        """Add file-identity columns to ``indexed_files``.
+
+        ``is_indexed`` is still filepath-keyed (hot path stays O(1) on the
+        primary key), but the new columns let the reconciler distinguish
+        a flag-only rename from a genuine content change and, in future
+        passes, spot a "file vanished from path A but its content_hash
+        reappears at path B" rename that mbsync's in-place rename path
+        did not emit an ``on_moved`` event for.
+
+        Existing rows read back as ``NULL`` for the new columns and are
+        backfilled lazily as files are re-indexed or as
+        ``update_filepath`` carries them forward on rename. No migration-
+        time walk of the Maildir is required.
+        """
+        for column_type in (
+            ("size", "INTEGER"),
+            ("mtime_ns", "INTEGER"),
+            ("content_hash", "TEXT"),
+        ):
+            column, col_type = column_type
+            try:
+                cur.execute(f"ALTER TABLE indexed_files ADD COLUMN {column} {col_type}")
+            except sqlite3.OperationalError:
+                pass  # column already exists on a fresh database built from v1
+        self._conn.commit()
+
+    def _apply_v8(self, cur: sqlite3.Cursor):
+        """Add the ``indexing_jobs`` table — durable retry/dead-letter queue.
+
+        Before this, ``_index_file`` caught exceptions, logged them, and
+        dropped the work. A parser bug on one file would be retried on
+        every restart (since ``indexed_files`` never records the
+        failure) with no visibility; a transient Ollama outage during an
+        initial scan could silently skip files if the indexer happened
+        to restart before the scan resumed.
+
+        ``indexing_jobs`` closes both gaps. Every discovered filepath is
+        enqueued first; the worker loop claims due rows, runs the existing
+        parse/thread/embed/upsert pipeline, and marks the row succeeded
+        (delete) or failed (increment attempts, schedule backoff, or
+        transition to ``dead`` when attempts reach
+        ``INDEXER_MAX_ATTEMPTS``). Dead rows stay in the table for
+        operator visibility rather than disappearing silently.
+
+        The PRIMARY KEY on ``filepath`` collapses duplicate enqueues for
+        the same file (e.g. a watchdog event and an initial-scan discovery
+        landing back-to-back). The ``(status, next_attempt_at)`` index
+        lets ``claim_next`` pick the oldest due queued row in O(log N).
+        """
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS indexing_jobs (
+                filepath        TEXT PRIMARY KEY,
+                reason          TEXT NOT NULL,
+                status          TEXT NOT NULL,
+                attempts        INTEGER NOT NULL DEFAULT 0,
+                last_error      TEXT,
+                last_stage      TEXT,
+                created_at      TEXT NOT NULL,
+                updated_at      TEXT NOT NULL,
+                next_attempt_at TEXT NOT NULL
+            )
+        """)
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_indexing_jobs_status_next
+            ON indexing_jobs(status, next_attempt_at)
+        """)
+        self._conn.commit()
+
     # -------------------------------------------------------------------------
     # Write operations
     # -------------------------------------------------------------------------
@@ -401,7 +474,7 @@ class Database:
                     f"From: {m.from_addr}\nDate: {m.date.isoformat()}\n{m.body_text[:2000]}"
                     for m in new_messages
                 )
-                return (existing["body_text"] + "\n" + new_content)[:8000]
+                return (existing["body_text"] + "\n" + new_content)[:THREAD_BODY_TEXT_MAX_CHARS]
             return existing["body_text"]
         return thread.text_for_embedding()
 
@@ -446,7 +519,7 @@ class Database:
 
             existing = cur.execute(
                 "SELECT body_text, message_ids, participants, senders, "
-                "has_attachments, date_first "
+                "has_attachments, date_first, date_last, snippet "
                 "FROM threads WHERE thread_id = ?",
                 (thread.thread_id,),
             ).fetchone()
@@ -483,7 +556,18 @@ class Database:
             participants_json = json.dumps(merged_participants)
             senders_json = json.dumps(merged_senders)
             message_ids_json = json.dumps(merged_ids)
+            # Preserve the existing snippet when the newly-arrived message is
+            # strictly older than the stored date_last. thread.snippet() is
+            # derived from the appended message only (get_thread returns
+            # messages=[] by design), so an out-of-order older message would
+            # otherwise replace a preview that still represents the actual
+            # newest message in the thread — date_last is merged via max()
+            # above, and the snippet should track that same rule.
             snippet = thread.snippet()
+            if existing and existing["snippet"] and thread.messages:
+                newest_incoming = max(m.date for m in thread.messages).isoformat()
+                if newest_incoming < existing["date_last"]:
+                    snippet = existing["snippet"]
             date_last = thread.date_last.isoformat()
 
             # Upsert main thread record
@@ -533,10 +617,10 @@ class Database:
                 cur.execute(
                     """
                     INSERT OR REPLACE INTO indexed_files
-                        (filepath, indexed_at)
-                    VALUES (?, datetime('now'))
+                        (filepath, indexed_at, size, mtime_ns, content_hash)
+                    VALUES (?, datetime('now'), ?, ?, ?)
                     """,
-                    (msg.filepath,),
+                    (msg.filepath, msg.size, msg.mtime_ns, msg.content_hash),
                 )
 
             # Update FTS5 index. threads_fts is contentless_delete=1 so DELETE
@@ -654,6 +738,26 @@ class Database:
         return row is not None
 
     @_synchronized
+    def find_indexed_paths_by_content_hash(self, content_hash: str) -> list[str]:
+        """Return every indexed filepath whose content_hash matches.
+
+        Enables future reconciler passes to spot "file at path A
+        disappeared, but the same content_hash is indexed at path B" —
+        a rename mbsync performed without emitting an ``on_moved`` event
+        (e.g. across folder moves or restarts) — and to catch genuine
+        duplicate deliveries. Rows indexed before schema v7 or whose
+        identity capture failed have ``content_hash IS NULL`` and are
+        excluded from the match.
+        """
+        if not content_hash:
+            return []
+        rows = self._conn.execute(
+            "SELECT filepath FROM indexed_files WHERE content_hash = ?",
+            (content_hash,),
+        ).fetchall()
+        return [row["filepath"] for row in rows]
+
+    @_synchronized
     def get_stats(self) -> dict:
         stats = {}
         stats["total_threads"] = self._conn.execute("SELECT COUNT(*) FROM threads").fetchone()[0]
@@ -667,6 +771,111 @@ class Database:
             "SELECT MAX(date_last) FROM threads"
         ).fetchone()[0]
         return stats
+
+    # -------------------------------------------------------------------------
+    # indexing_jobs — durable retry / dead-letter queue (schema v8).
+    #
+    # The ``IndexingQueue`` abstraction in ``queue.py`` owns the retry /
+    # backoff / dead-letter semantics. These methods are the thin SQL
+    # layer — they serialize through the same ``_synchronized`` lock as
+    # every other writer so queue updates never interleave with
+    # ``upsert_thread`` / reconciler writes.
+    # -------------------------------------------------------------------------
+
+    @_synchronized
+    def queue_enqueue(self, *, filepath: str, reason: str, status: str, now_iso: str) -> None:
+        self._conn.execute(
+            """
+            INSERT OR REPLACE INTO indexing_jobs
+                (filepath, reason, status, attempts,
+                 last_error, last_stage,
+                 created_at, updated_at, next_attempt_at)
+            VALUES (?, ?, ?, 0, NULL, NULL, ?, ?, ?)
+            """,
+            (filepath, reason, status, now_iso, now_iso, now_iso),
+        )
+        self._conn.commit()
+
+    @_synchronized
+    def queue_claim_next(self, status: str, now_iso: str) -> sqlite3.Row | None:
+        """Return the oldest ``status`` row whose ``next_attempt_at`` is due."""
+        return self._conn.execute(
+            """
+            SELECT filepath, reason, status, attempts,
+                   last_error, last_stage,
+                   created_at, updated_at, next_attempt_at
+            FROM indexing_jobs
+            WHERE status = ? AND next_attempt_at <= ?
+            ORDER BY next_attempt_at ASC
+            LIMIT 1
+            """,
+            (status, now_iso),
+        ).fetchone()
+
+    @_synchronized
+    def queue_delete(self, filepath: str) -> None:
+        self._conn.execute("DELETE FROM indexing_jobs WHERE filepath = ?", (filepath,))
+        self._conn.commit()
+
+    @_synchronized
+    def queue_get_attempts(self, filepath: str) -> int | None:
+        row = self._conn.execute(
+            "SELECT attempts FROM indexing_jobs WHERE filepath = ?", (filepath,)
+        ).fetchone()
+        return int(row["attempts"]) if row else None
+
+    @_synchronized
+    def queue_mark_failed(
+        self,
+        *,
+        filepath: str,
+        attempts: int,
+        last_stage: str,
+        last_error: str,
+        now_iso: str,
+        next_attempt_iso: str,
+    ) -> None:
+        self._conn.execute(
+            """
+            UPDATE indexing_jobs
+            SET attempts = ?, last_stage = ?, last_error = ?,
+                updated_at = ?, next_attempt_at = ?, status = 'queued'
+            WHERE filepath = ?
+            """,
+            (attempts, last_stage, last_error, now_iso, next_attempt_iso, filepath),
+        )
+        self._conn.commit()
+
+    @_synchronized
+    def queue_mark_dead(
+        self,
+        *,
+        filepath: str,
+        attempts: int,
+        last_stage: str,
+        last_error: str,
+        now_iso: str,
+    ) -> None:
+        self._conn.execute(
+            """
+            UPDATE indexing_jobs
+            SET attempts = ?, last_stage = ?, last_error = ?,
+                updated_at = ?, status = 'dead'
+            WHERE filepath = ?
+            """,
+            (attempts, last_stage, last_error, now_iso, filepath),
+        )
+        self._conn.commit()
+
+    @_synchronized
+    def queue_stats(self) -> dict[str, int]:
+        rows = self._conn.execute(
+            "SELECT status, COUNT(*) AS n FROM indexing_jobs GROUP BY status"
+        ).fetchall()
+        out = {"queued": 0, "dead": 0}
+        for row in rows:
+            out[row["status"]] = int(row["n"])
+        return out
 
     # -------------------------------------------------------------------------
     # Reconciliation support — filepath tracking, tombstones, thread rebuild
@@ -723,11 +932,26 @@ class Database:
                 "UPDATE message_thread_map SET filepath = ? WHERE filepath = ?",
                 (new_path, old_path),
             )
+            # Carry the file-identity columns forward on rename. mbsync
+            # renames files in place for flag changes; the content on
+            # disk is unchanged, so reindexing just to recompute ``size``
+            # / ``mtime_ns`` / ``content_hash`` would be wasted I/O.
+            # Preserve whatever identity the previous indexing captured.
+            prior = cur.execute(
+                "SELECT size, mtime_ns, content_hash FROM indexed_files WHERE filepath = ?",
+                (old_path,),
+            ).fetchone()
             cur.execute("DELETE FROM indexed_files WHERE filepath = ?", (old_path,))
             cur.execute(
-                "INSERT OR REPLACE INTO indexed_files (filepath, indexed_at) "
-                "VALUES (?, datetime('now'))",
-                (new_path,),
+                "INSERT OR REPLACE INTO indexed_files "
+                "(filepath, indexed_at, size, mtime_ns, content_hash) "
+                "VALUES (?, datetime('now'), ?, ?, ?)",
+                (
+                    new_path,
+                    prior["size"] if prior else None,
+                    prior["mtime_ns"] if prior else None,
+                    prior["content_hash"] if prior else None,
+                ),
             )
             cur.execute(
                 "UPDATE pending_deletions SET filepath = ? WHERE filepath = ?",

@@ -200,6 +200,160 @@ class TestSchema:
         Database(db_path)
         Database(db_path)  # second open must not raise
 
+    def test_schema_version_collapses_duplicate_rows(self, tmp_path):
+        """Regression: an earlier revision wrote the schema version with
+        ``INSERT OR REPLACE``, which — because ``version`` is the primary
+        key — could leave behind rows at the prior version as well as the
+        current one. The subsequent ``UPDATE schema_version SET version = ?``
+        would then try to set both rows to the same primary key and fail
+        with a UNIQUE constraint violation. The migrate path collapses any
+        stale duplicates into a single canonical row."""
+        db_path = tmp_path / "dupe.db"
+        # Create a fully-migrated database, then inject a stale second
+        # ``schema_version`` row the way the old ``INSERT OR REPLACE`` path
+        # could have left one behind.
+        Database(db_path)
+        conn = sqlite3.connect(str(db_path))
+        conn.execute("INSERT INTO schema_version VALUES (?)", (SCHEMA_VERSION - 1,))
+        conn.commit()
+        rows_before = conn.execute("SELECT version FROM schema_version").fetchall()
+        conn.close()
+        assert len(rows_before) == 2
+
+        # Re-opening must not raise a UNIQUE constraint violation and must
+        # leave exactly one canonical row at the current SCHEMA_VERSION.
+        Database(db_path)
+
+        conn = sqlite3.connect(str(db_path))
+        rows_after = conn.execute("SELECT version FROM schema_version").fetchall()
+        conn.close()
+        assert len(rows_after) == 1
+        assert rows_after[0][0] == SCHEMA_VERSION
+
+    def test_v7_to_v8_adds_indexing_jobs_table(self, tmp_path):
+        """A v7 database migrates forward, gaining the ``indexing_jobs``
+        table used by the durable retry / dead-letter queue. The table
+        starts empty — v8 is pure addition, not data migration."""
+        db_path = tmp_path / "v7.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.execute("CREATE TABLE schema_version (version INTEGER PRIMARY KEY)")
+        conn.execute("INSERT INTO schema_version VALUES (7)")
+        conn.execute("""
+            CREATE TABLE threads (
+                thread_id TEXT PRIMARY KEY, subject TEXT, participants TEXT,
+                folder TEXT, date_first TEXT, date_last TEXT, message_ids TEXT,
+                snippet TEXT, has_attachments INTEGER, body_text TEXT,
+                fts_rowid INTEGER, senders TEXT NOT NULL DEFAULT '[]'
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE indexed_files (
+                filepath TEXT PRIMARY KEY, indexed_at TEXT NOT NULL,
+                size INTEGER, mtime_ns INTEGER, content_hash TEXT
+            )
+        """)
+        conn.execute("""
+            CREATE VIRTUAL TABLE threads_fts
+            USING fts5(
+                subject, participants, body,
+                content='', contentless_delete=1, tokenize='porter unicode61'
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE pending_deletions (
+                filepath TEXT PRIMARY KEY, message_id TEXT NOT NULL,
+                thread_id TEXT NOT NULL, marked_at TEXT NOT NULL
+            )
+        """)
+        conn.commit()
+        conn.close()
+
+        Database(db_path)
+
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        tables = {
+            row[0]
+            for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+        }
+        assert "indexing_jobs" in tables
+
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(indexing_jobs)").fetchall()}
+        assert cols == {
+            "filepath",
+            "reason",
+            "status",
+            "attempts",
+            "last_error",
+            "last_stage",
+            "created_at",
+            "updated_at",
+            "next_attempt_at",
+        }
+        conn.close()
+
+    def test_v6_to_v7_adds_file_identity_columns(self, tmp_path):
+        """A v6 database migrates forward, gaining ``size`` / ``mtime_ns``
+        / ``content_hash`` columns on ``indexed_files``. Existing rows
+        read back as NULL for the new columns (populated lazily as files
+        are re-indexed or as rename events carry prior values forward)."""
+        db_path = tmp_path / "v6.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.execute("CREATE TABLE schema_version (version INTEGER PRIMARY KEY)")
+        conn.execute("INSERT INTO schema_version VALUES (6)")
+        # Tables we need present for v7 to apply cleanly. v7 only touches
+        # ``indexed_files``; everything else is stubbed to minimal shape.
+        conn.execute("""
+            CREATE TABLE threads (
+                thread_id TEXT PRIMARY KEY, subject TEXT, participants TEXT,
+                folder TEXT, date_first TEXT, date_last TEXT, message_ids TEXT,
+                snippet TEXT, has_attachments INTEGER, body_text TEXT,
+                fts_rowid INTEGER, senders TEXT NOT NULL DEFAULT '[]'
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE indexed_files (
+                filepath TEXT PRIMARY KEY,
+                indexed_at TEXT NOT NULL
+            )
+        """)
+        conn.execute(
+            "INSERT INTO indexed_files (filepath, indexed_at) VALUES (?, ?)",
+            ("/maildir/INBOX/cur/legacy", "2024-01-01T00:00:00+00:00"),
+        )
+        conn.execute("""
+            CREATE VIRTUAL TABLE threads_fts
+            USING fts5(
+                subject, participants, body,
+                content='', contentless_delete=1, tokenize='porter unicode61'
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE pending_deletions (
+                filepath TEXT PRIMARY KEY, message_id TEXT NOT NULL,
+                thread_id TEXT NOT NULL, marked_at TEXT NOT NULL
+            )
+        """)
+        conn.commit()
+        conn.close()
+
+        Database(db_path)
+
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(indexed_files)").fetchall()}
+        assert cols == {"filepath", "indexed_at", "size", "mtime_ns", "content_hash"}
+        # Legacy row still present with NULL identity values — no data loss,
+        # no migration-time disk walk required.
+        row = conn.execute(
+            "SELECT size, mtime_ns, content_hash FROM indexed_files "
+            "WHERE filepath = '/maildir/INBOX/cur/legacy'"
+        ).fetchone()
+        conn.close()
+        assert row["size"] is None
+        assert row["mtime_ns"] is None
+        assert row["content_hash"] is None
+
 
 # ---------------------------------------------------------------------------
 # upsert_thread — insert
@@ -491,6 +645,67 @@ class TestUpsertThreadUpdate:
         assert row["date_first"].startswith("2024-01-01")
         assert row["date_last"].startswith("2024-06-01")
 
+    def test_update_preserves_snippet_when_older_message_arrives_late(self, db, threader):
+        """Regression: snippet used to be derived only from ``thread.messages``,
+        which for an update only holds the newly-arrived message. An older
+        out-of-order message would therefore replace a snippet that still
+        represented the actual newest message in the thread — while
+        ``date_last`` was correctly preserved via the max() merge. The
+        snippet should follow the same rule and track the latest message."""
+        newer = make_message(
+            message_id="snip_newer@example.com",
+            body_text="Newer message preview text.",
+            filepath="/snip/1",
+            date=datetime(2024, 6, 1, tzinfo=UTC),
+        )
+        t1 = threader.assign_thread(newer)
+        db.upsert_thread(t1, FAKE_EMBEDDING)
+
+        older = make_message(
+            message_id="snip_older@example.com",
+            in_reply_to="snip_newer@example.com",
+            body_text="Older message preview text.",
+            filepath="/snip/2",
+            date=datetime(2024, 1, 1, tzinfo=UTC),
+        )
+        t2 = threader.assign_thread(older)
+        db.upsert_thread(t2, FAKE_EMBEDDING)
+
+        row = db._conn.execute(
+            "SELECT snippet, date_last FROM threads WHERE thread_id = 'snip_newer@example.com'"
+        ).fetchone()
+        assert "Newer message" in row["snippet"]
+        assert "Older message" not in row["snippet"]
+        assert row["date_last"].startswith("2024-06-01")
+
+    def test_update_refreshes_snippet_when_newer_message_arrives(self, db, threader):
+        """Companion to the out-of-order test: when the incoming message
+        extends ``date_last``, the snippet must follow — the stored preview
+        should reflect the most recent message, not freeze at the first one."""
+        first = make_message(
+            message_id="snip_first@example.com",
+            body_text="First message preview text.",
+            filepath="/snip_fwd/1",
+            date=datetime(2024, 1, 1, tzinfo=UTC),
+        )
+        t1 = threader.assign_thread(first)
+        db.upsert_thread(t1, FAKE_EMBEDDING)
+
+        second = make_message(
+            message_id="snip_second@example.com",
+            in_reply_to="snip_first@example.com",
+            body_text="Second message preview text.",
+            filepath="/snip_fwd/2",
+            date=datetime(2024, 6, 1, tzinfo=UTC),
+        )
+        t2 = threader.assign_thread(second)
+        db.upsert_thread(t2, FAKE_EMBEDDING)
+
+        row = db._conn.execute(
+            "SELECT snippet FROM threads WHERE thread_id = 'snip_first@example.com'"
+        ).fetchone()
+        assert "Second message" in row["snippet"]
+
     def test_accumulated_body_capped_at_8000_chars(self, db, threader):
         original = make_message(
             message_id="long_orig@example.com",
@@ -596,6 +811,114 @@ class TestIsIndexed:
         thread = make_thread(messages=[msg])
         db.upsert_thread(thread, FAKE_EMBEDDING)
         assert db.is_indexed("/maildir/INBOX/cur/tracked") is True
+
+
+# ---------------------------------------------------------------------------
+# File identity on indexed_files (schema v7)
+# ---------------------------------------------------------------------------
+
+
+class TestIndexedFileIdentity:
+    def test_upsert_writes_size_mtime_content_hash(self, db):
+        """A fully-populated Message (as ``parse_email`` produces) lands
+        its file-identity fields in ``indexed_files`` alongside the
+        indexed_at timestamp."""
+        msg = make_message(filepath="/maildir/INBOX/cur/ident")
+        msg.size = 4096
+        msg.mtime_ns = 1_700_000_000_000_000_000
+        msg.content_hash = "a" * 64
+        db.upsert_thread(make_thread(messages=[msg]), FAKE_EMBEDDING)
+        row = db._conn.execute(
+            "SELECT size, mtime_ns, content_hash FROM indexed_files WHERE filepath = ?",
+            ("/maildir/INBOX/cur/ident",),
+        ).fetchone()
+        assert row["size"] == 4096
+        assert row["mtime_ns"] == 1_700_000_000_000_000_000
+        assert row["content_hash"] == "a" * 64
+
+    def test_upsert_accepts_null_identity_for_legacy_fixtures(self, db):
+        """Messages built by test fixtures that do not go through
+        ``parse_email`` have ``size`` / ``mtime_ns`` / ``content_hash``
+        as ``None``. ``upsert_thread`` writes them as SQL NULL without
+        raising so existing callers aren't forced to adopt the new
+        fields all at once."""
+        msg = make_message(filepath="/maildir/INBOX/cur/no_ident")
+        # Defaults: size=None, mtime_ns=None, content_hash=None
+        db.upsert_thread(make_thread(messages=[msg]), FAKE_EMBEDDING)
+        row = db._conn.execute(
+            "SELECT size, mtime_ns, content_hash FROM indexed_files WHERE filepath = ?",
+            ("/maildir/INBOX/cur/no_ident",),
+        ).fetchone()
+        assert row["size"] is None
+        assert row["mtime_ns"] is None
+        assert row["content_hash"] is None
+
+    def test_update_filepath_preserves_identity_on_rename(self, db):
+        """mbsync renames files in place for flag changes (S → SR etc.)
+        without touching content. ``update_filepath`` must carry the
+        captured identity forward so the index doesn't regress to
+        ``NULL`` columns just because a flag bit flipped."""
+        msg = make_message(filepath="/maildir/INBOX/cur/renameme:2,S")
+        msg.size = 8192
+        msg.mtime_ns = 1_800_000_000_000_000_000
+        msg.content_hash = "b" * 64
+        db.upsert_thread(make_thread(messages=[msg]), FAKE_EMBEDDING)
+
+        db.update_filepath(
+            "/maildir/INBOX/cur/renameme:2,S",
+            "/maildir/INBOX/cur/renameme:2,SR",
+        )
+
+        row = db._conn.execute(
+            "SELECT size, mtime_ns, content_hash FROM indexed_files WHERE filepath = ?",
+            ("/maildir/INBOX/cur/renameme:2,SR",),
+        ).fetchone()
+        assert row["size"] == 8192
+        assert row["mtime_ns"] == 1_800_000_000_000_000_000
+        assert row["content_hash"] == "b" * 64
+
+    def test_find_indexed_paths_by_content_hash_hit(self, db):
+        msg = make_message(filepath="/maildir/INBOX/cur/hashhit")
+        msg.size = 1024
+        msg.content_hash = "c" * 64
+        db.upsert_thread(make_thread(messages=[msg]), FAKE_EMBEDDING)
+        paths = db.find_indexed_paths_by_content_hash("c" * 64)
+        assert paths == ["/maildir/INBOX/cur/hashhit"]
+
+    def test_find_indexed_paths_by_content_hash_returns_multiple(self, db):
+        """Same content at two filepaths (duplicate delivery / same
+        message in two folders) returns both entries."""
+        msg_a = make_message(
+            message_id="dup-a@example.com",
+            filepath="/maildir/INBOX/cur/a",
+        )
+        msg_a.content_hash = "d" * 64
+        msg_b = make_message(
+            message_id="dup-b@example.com",
+            filepath="/maildir/Archive/cur/b",
+            date=datetime(2024, 1, 2, tzinfo=UTC),
+        )
+        msg_b.content_hash = "d" * 64
+        db.upsert_thread(make_thread(messages=[msg_a], thread_id="ta"), FAKE_EMBEDDING)
+        db.upsert_thread(make_thread(messages=[msg_b], thread_id="tb"), FAKE_EMBEDDING)
+        paths = db.find_indexed_paths_by_content_hash("d" * 64)
+        assert set(paths) == {
+            "/maildir/INBOX/cur/a",
+            "/maildir/Archive/cur/b",
+        }
+
+    def test_find_indexed_paths_by_content_hash_miss(self, db):
+        assert db.find_indexed_paths_by_content_hash("e" * 64) == []
+
+    def test_find_indexed_paths_by_content_hash_ignores_null_rows(self, db):
+        """Rows indexed before schema v7 (or when identity capture
+        failed) carry ``content_hash IS NULL``. A lookup must never
+        treat those as matches for any hash string."""
+        msg = make_message(filepath="/maildir/INBOX/cur/nullhash")
+        # size=None, content_hash=None by default
+        db.upsert_thread(make_thread(messages=[msg]), FAKE_EMBEDDING)
+        assert db.find_indexed_paths_by_content_hash("") == []
+        assert db.find_indexed_paths_by_content_hash("f" * 64) == []
 
 
 # ---------------------------------------------------------------------------

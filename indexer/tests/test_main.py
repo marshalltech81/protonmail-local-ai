@@ -18,6 +18,7 @@ from unittest.mock import MagicMock
 import pytest
 from src import main
 from src.database import EMBEDDING_DIM, Database
+from src.queue import IndexingQueue
 from src.threader import Threader
 
 
@@ -26,6 +27,12 @@ class _FakeEvent:
         self.src_path = src_path
         self.dest_path = dest_path
         self.is_directory = is_directory
+
+
+def _make_queue(db: Database) -> IndexingQueue:
+    """Queue with tight retry limits so tests that exercise failure
+    paths don't wait on real-world 30 s backoffs."""
+    return IndexingQueue(db, max_attempts=3, base_backoff_seconds=0)
 
 
 def _write_eml(path: Path, message_id: str, subject: str = "Hello") -> None:
@@ -48,12 +55,14 @@ class TestOnMovedIndexesDestination:
         """Regression: Maildir delivery writes a file under ``tmp/`` then
         renames it into ``new/``. Prior behavior only fired ``on_created``
         for the source rename event, leaving the message unindexed until
-        restart. ``on_moved`` must now index the destination."""
+        restart. ``on_moved`` must enqueue the destination and the
+        worker drain must then pick it up."""
         db_path = tmp_path / "db" / "mail.db"
         db = Database(db_path)
         threader = Threader(db)
+        queue = _make_queue(db)
 
-        # Populate a real Maildir destination file so ``_index_file``
+        # Populate a real Maildir destination file so the pipeline
         # succeeds end-to-end through the parser.
         dest = tmp_path / "INBOX" / "new" / "msg.eml"
         _write_eml(dest, "moved@example.com")
@@ -61,19 +70,22 @@ class TestOnMovedIndexesDestination:
         embedder = MagicMock()
         embedder.embed.return_value = [0.0] * EMBEDDING_DIM
 
-        handler = main.MaildirHandler(db, embedder, threader)
+        handler = main.MaildirHandler(db, queue)
         handler.on_moved(
             _FakeEvent(
                 src_path=str(tmp_path / "tmp" / "msg.eml"),
                 dest_path=str(dest),
             )
         )
-
+        # The event only enqueued — the file becomes indexed once the
+        # worker drains the queue.
+        assert not db.is_indexed(str(dest))
+        main.drain_queue(queue, db, embedder, threader)
         assert db.is_indexed(str(dest))
 
     def test_directory_moves_are_ignored(self, tmp_path):
         db = Database(tmp_path / "db" / "mail.db")
-        handler = main.MaildirHandler(db, MagicMock(), Threader(db))
+        handler = main.MaildirHandler(db, _make_queue(db))
         # Directory events should not cause an index attempt
         handler.on_moved(
             _FakeEvent(
@@ -91,6 +103,7 @@ class TestOnMovedIndexesDestination:
         db_path = tmp_path / "db" / "mail.db"
         db = Database(db_path)
         threader = Threader(db)
+        queue = _make_queue(db)
 
         dest = tmp_path / "INBOX" / "cur" / "msg.eml"
         _write_eml(dest, "flag_change@example.com")
@@ -98,15 +111,18 @@ class TestOnMovedIndexesDestination:
         embedder = MagicMock()
         embedder.embed.return_value = [0.0] * EMBEDDING_DIM
 
-        handler = main.MaildirHandler(db, embedder, threader)
+        handler = main.MaildirHandler(db, queue)
 
-        # First delivery indexes the message
+        # First delivery enqueues and drains, indexing the message.
         handler.on_moved(_FakeEvent(src_path=str(tmp_path / "tmp" / "m"), dest_path=str(dest)))
+        main.drain_queue(queue, db, embedder, threader)
         first_call_count = embedder.embed.call_count
+        assert first_call_count == 1
 
         # Second move event on the same path (e.g., flag rename) must not
-        # trigger another embed.
+        # re-enqueue work or trigger another embed.
         handler.on_moved(_FakeEvent(src_path=str(dest), dest_path=str(dest)))
+        main.drain_queue(queue, db, embedder, threader)
         assert embedder.embed.call_count == first_call_count
 
     def test_flag_rename_moves_filepath_without_reindexing(self, tmp_path):
@@ -119,6 +135,7 @@ class TestOnMovedIndexesDestination:
         db_path = tmp_path / "db" / "mail.db"
         db = Database(db_path)
         threader = Threader(db)
+        queue = _make_queue(db)
 
         # Deliver msg:2,S into cur/
         original_path = tmp_path / "INBOX" / "cur" / "1738500000.uniq.proton:2,S"
@@ -127,10 +144,11 @@ class TestOnMovedIndexesDestination:
         embedder = MagicMock()
         embedder.embed.return_value = [0.0] * EMBEDDING_DIM
 
-        handler = main.MaildirHandler(db, embedder, threader)
+        handler = main.MaildirHandler(db, queue)
         handler.on_moved(
             _FakeEvent(src_path=str(tmp_path / "tmp" / "m"), dest_path=str(original_path))
         )
+        main.drain_queue(queue, db, embedder, threader)
         deliveries = embedder.embed.call_count
         assert deliveries == 1
 
@@ -138,6 +156,7 @@ class TestOnMovedIndexesDestination:
         renamed_path = tmp_path / "INBOX" / "cur" / "1738500000.uniq.proton:2,SR"
         original_path.rename(renamed_path)
         handler.on_moved(_FakeEvent(src_path=str(original_path), dest_path=str(renamed_path)))
+        main.drain_queue(queue, db, embedder, threader)
 
         # Must not have re-parsed or re-embedded.
         assert embedder.embed.call_count == deliveries
@@ -167,7 +186,7 @@ class TestInitialIndexNestedFolders:
         embedder.embed.return_value = [0.0] * 768
 
         monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
-        main.initial_index(db, embedder, threader)
+        main.initial_index(db, embedder, threader, _make_queue(db))
 
         assert db.is_indexed(str(nested / "deep.eml"))
         assert db.is_indexed(str(flat / "top.eml"))
@@ -186,7 +205,7 @@ class TestInitialIndexNestedFolders:
         embedder.embed.return_value = [0.0] * 768
         monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
 
-        main.initial_index(db, embedder, threader)
+        main.initial_index(db, embedder, threader, _make_queue(db))
 
         row = db._conn.execute(
             "SELECT folder FROM threads WHERE thread_id = 'nested@example.com'"
@@ -218,9 +237,81 @@ class TestInitialIndexHeartbeat:
         monkeypatch.setattr(main, "touch_health_file", lambda: touches.append(None))
         monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
 
-        main.initial_index(db, embedder, threader)
+        main.initial_index(db, embedder, threader, _make_queue(db))
 
         assert len(touches) >= 1
+
+
+class TestDrainQueueRetryAndDeadLetter:
+    """End-to-end coverage of the queue worker: transient embedding
+    failure retries until it succeeds; persistent failure transitions
+    the row to ``dead`` after ``max_attempts``."""
+
+    def test_transient_embed_failure_retries_and_eventually_succeeds(self, tmp_path):
+        dest = tmp_path / "INBOX" / "new" / "msg.eml"
+        _write_eml(dest, "retry@example.com")
+
+        db = Database(tmp_path / "mail.db")
+        threader = Threader(db)
+        queue = _make_queue(db)
+
+        embedder = MagicMock()
+        # First embed call raises (Ollama transient); second call succeeds.
+        embedder.embed.side_effect = [
+            RuntimeError("ollama unavailable"),
+            [0.0] * EMBEDDING_DIM,
+        ]
+
+        queue.enqueue(str(dest), "test")
+
+        # ``max_batch=1`` models the main loop's interleaving behavior:
+        # each pass through drain processes at most one job before
+        # yielding to other concerns (reconciler, health file). With
+        # the tight zero-backoff queue fixture, the two calls run
+        # attempt 1 (fail → re-queued) and attempt 2 (success → row
+        # deleted) on separate passes.
+        attempted_first = main.drain_queue(queue, db, embedder, threader, max_batch=1)
+        assert attempted_first == 1
+        assert not db.is_indexed(str(dest))
+        row = db._conn.execute(
+            "SELECT attempts, status FROM indexing_jobs WHERE filepath = ?",
+            (str(dest),),
+        ).fetchone()
+        assert row["attempts"] == 1
+        assert row["status"] == "queued"
+
+        attempted_second = main.drain_queue(queue, db, embedder, threader, max_batch=1)
+        assert attempted_second == 1
+        assert db.is_indexed(str(dest))
+        assert queue.stats() == {"queued": 0, "dead": 0}
+
+    def test_persistent_embed_failure_transitions_to_dead(self, tmp_path):
+        dest = tmp_path / "INBOX" / "new" / "msg.eml"
+        _write_eml(dest, "giveup@example.com")
+
+        db = Database(tmp_path / "mail.db")
+        threader = Threader(db)
+        queue = _make_queue(db)  # max_attempts=3
+
+        embedder = MagicMock()
+        embedder.embed.side_effect = RuntimeError("ollama still down")
+
+        queue.enqueue(str(dest), "test")
+
+        # Drain three times — each attempt fails, the third crosses
+        # max_attempts and transitions the row to ``dead``.
+        main.drain_queue(queue, db, embedder, threader)
+        main.drain_queue(queue, db, embedder, threader)
+        main.drain_queue(queue, db, embedder, threader)
+
+        assert not db.is_indexed(str(dest))
+        assert queue.stats() == {"queued": 0, "dead": 1}
+        row = db._conn.execute(
+            "SELECT last_stage, last_error FROM indexing_jobs WHERE filepath = ?",
+            (str(dest),),
+        ).fetchone()
+        assert row["last_stage"] == "embed"
+        assert "ollama still down" in row["last_error"]
 
 
 class TestValidateEmbeddingDim:

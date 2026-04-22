@@ -34,6 +34,7 @@ from .database import Database
 from .embedder import Embedder
 from .maildir import is_trashed, resolve_current_path
 from .parser import parse_email
+from .quoting import strip_for_embedding
 from .threader import Thread, Threader
 
 log = logging.getLogger("indexer.reconciler")
@@ -273,7 +274,9 @@ class Reconciler:
         )
 
         try:
-            embedding = self.embedder.embed(rebuilt_thread.text_for_embedding())
+            embedding = self.embedder.embed(
+                strip_for_embedding(rebuilt_thread.text_for_embedding())
+            )
         except Exception as e:
             # Ollama unavailable or embedding failed — leave state untouched
             # and retry on the next sweep rather than committing partial work.

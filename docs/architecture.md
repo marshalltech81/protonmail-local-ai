@@ -134,6 +134,18 @@ This is the key architectural decision that makes Q&A useful:
 3. Each thread gets one embedding representing the full conversation
 4. New messages arriving in a thread update the thread's embedding
 
+The stored `body_text` that feeds FTS5 is the full accumulated thread
+content (users legitimately search quoted text and signatures). The
+input to the embedding model, however, is first passed through
+`strip_for_embedding` (`indexer/src/quoting.py`) to remove quoted
+replies, signatures, and forward headers. Without that pass the vector
+for a long reply chain drifts toward whatever content was quoted most
+often — typically the original message or a contract below the
+signature — and stops reflecting the substantive content of the latest
+replies. Stripping is intentionally conservative: quoted text is still
+searchable through FTS and falls back to the original body when the
+stripped result would be empty.
+
 A query like "what did my landlord say about the heating?" returns the full
 landlord thread, not individual one-liners that happen to mention heating.
 
@@ -226,6 +238,61 @@ and stores each row's rowid in `threads.fts_rowid`. Writes delete by rowid
 before re-inserting; the MCP keyword search joins on
 `threads_fts.rowid = threads.fts_rowid`. This fixes both the stale-token
 problem and the always-null join.
+
+## Durable Indexing Queue
+
+Schema v8 adds the `indexing_jobs` table. The watchdog callbacks and
+`initial_index` no longer run the parse / embed / upsert pipeline
+inline — they `enqueue` each filepath and return immediately. A worker
+loop in the main thread drains the queue via `drain_queue`, capped at
+`HEALTH_REFRESH_EVERY` jobs per pass so the reconciler and health-file
+refresh aren't starved by a large event burst.
+
+Each job carries `attempts`, `last_stage`, `last_error`, and a
+`next_attempt_at` scheduled via exponential backoff
+(`base_backoff_seconds × 2^(attempts - 1)`, capped at 6 hours). When
+`attempts` reaches `INDEXER_MAX_ATTEMPTS` (default 5), the row
+transitions to `status = 'dead'` — it stays in the table for operator
+visibility and stops being claimed. Re-enqueuing a path (for instance
+a new mbsync delivery that reuses the filename) resets the row to
+`queued` with `attempts = 0`, so `dead` is "give up for now," not
+"never try again."
+
+Two environment variables shape the queue: `INDEXER_MAX_ATTEMPTS` and
+`INDEXER_RETRY_BASE_SECONDS`. Neither is required — the defaults are
+suitable for typical mailboxes, and both are documented in
+`docs/setup.md` for operators who need to tune retry aggressiveness
+against an unreliable Ollama or a flaky mailbox.
+
+Observability: `queue.stats()` returns `{queued, dead}` counts and is
+logged at startup when the queue carries non-zero depth from a prior
+run. The main loop's periodic health-file refresh continues
+independent of queue depth, so a stuck queue does not mark the
+container unhealthy (dead jobs are a data issue, not a liveness
+issue).
+
+## File Identity on `indexed_files`
+
+Schema v7 augments `indexed_files` with `size`, `mtime_ns`, and
+`content_hash` (SHA-256 over the raw file bytes) captured at
+`parse_email` time. `is_indexed` stays filepath-keyed — the hot path
+remains an O(1) primary-key lookup — and the new columns are written
+alongside. On a flag-only mbsync rename (`msg:2,S` → `msg:2,SR`)
+`update_filepath` carries the captured identity forward rather than
+clearing it, because the file contents on disk are unchanged.
+
+The columns exist to let future reconciler passes distinguish a
+flag-only rename from a genuine content change, and to spot a "file
+vanished from path A but the same `content_hash` reappears at path B"
+rename that mbsync performed without emitting an `on_moved` event.
+`find_indexed_paths_by_content_hash` is the lookup that unlocks those
+passes; consumers are deliberately not wired in this revision so the
+schema change lands as a pure extension.
+
+Rows indexed before v7 (or for which stat / hash capture failed) carry
+NULL identity values and are skipped by the content-hash lookup. There
+is no migration-time disk walk; backfill is lazy, driven by re-indexing
+or by rename events.
 
 ## Privacy Model
 
