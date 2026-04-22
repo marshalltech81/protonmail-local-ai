@@ -15,7 +15,7 @@ import sqlite_vec
 
 log = logging.getLogger("indexer.database")
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 # Schema v3 uses FTS5 ``contentless_delete=1``, which SQLite added in 3.43.
 # Running against an older runtime silently degrades (migration errors caught
@@ -122,6 +122,8 @@ class Database:
             self._apply_v4(cur)
         if current < 5:
             self._apply_v5(cur)
+        if current < 6:
+            self._apply_v6(cur)
 
         # UPDATE if a row exists, INSERT if this is a fresh database.
         # INSERT OR REPLACE would insert a new row (new primary key) rather
@@ -307,6 +309,27 @@ class Database:
         )
         self._conn.commit()
 
+    def _apply_v6(self, cur: sqlite3.Cursor):
+        """Add a ``senders`` JSON column to ``threads``.
+
+        The ``from_addr`` MCP search filter previously matched against
+        ``participants`` (the union of ``From`` / ``To`` / ``Cc``), so
+        "from alice" returned threads where alice was a recipient. That
+        overpromises — users reading the filter name expect sender-only
+        matching. ``senders`` stores only the ``From`` addresses of each
+        message in the thread, so the filter can be honest.
+
+        Existing rows get an empty JSON array; the filter implementation
+        falls back to ``participants`` for rows with empty senders, so
+        behavior is unchanged until the indexer reprocesses a thread and
+        populates the new column.
+        """
+        try:
+            cur.execute("ALTER TABLE threads ADD COLUMN senders TEXT NOT NULL DEFAULT '[]'")
+        except sqlite3.OperationalError:
+            pass  # Column already exists on a fresh database built from v1
+        self._conn.commit()
+
     # -------------------------------------------------------------------------
     # Write operations
     # -------------------------------------------------------------------------
@@ -382,13 +405,17 @@ class Database:
 
         incoming_message_ids = [m.message_id for m in thread.messages]
         incoming_participants = list(thread.participants)
+        incoming_senders = [
+            m.from_addr.strip() for m in thread.messages if m.from_addr and m.from_addr.strip()
+        ]
         incoming_has_attachments = int(any(m.has_attachments for m in thread.messages))
 
         try:
             cur.execute("BEGIN IMMEDIATE")
 
             existing = cur.execute(
-                "SELECT body_text, message_ids, participants, has_attachments, date_first "
+                "SELECT body_text, message_ids, participants, senders, "
+                "has_attachments, date_first "
                 "FROM threads WHERE thread_id = ?",
                 (thread.thread_id,),
             ).fetchone()
@@ -400,6 +427,8 @@ class Database:
                 merged_participants = list(
                     dict.fromkeys(existing_participants + incoming_participants)
                 )
+                existing_senders = json.loads(existing["senders"] or "[]")
+                merged_senders = list(dict.fromkeys(existing_senders + incoming_senders))
                 merged_has_attachments = int(
                     bool(existing["has_attachments"]) or bool(incoming_has_attachments)
                 )
@@ -409,6 +438,7 @@ class Database:
             else:
                 merged_ids = incoming_message_ids
                 merged_participants = incoming_participants
+                merged_senders = list(dict.fromkeys(incoming_senders))
                 merged_has_attachments = incoming_has_attachments
                 merged_date_first = thread.date_first.isoformat()
 
@@ -420,6 +450,7 @@ class Database:
                 body = self._compute_body(thread, existing)
 
             participants_json = json.dumps(merged_participants)
+            senders_json = json.dumps(merged_senders)
             message_ids_json = json.dumps(merged_ids)
             snippet = thread.snippet()
             date_last = thread.date_last.isoformat()
@@ -428,12 +459,13 @@ class Database:
             cur.execute(
                 """
                 INSERT INTO threads
-                    (thread_id, subject, participants, folder,
+                    (thread_id, subject, participants, senders, folder,
                      date_first, date_last, message_ids, snippet, has_attachments,
                      body_text)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(thread_id) DO UPDATE SET
                     participants    = excluded.participants,
+                    senders         = excluded.senders,
                     date_first      = excluded.date_first,
                     date_last       = excluded.date_last,
                     message_ids     = excluded.message_ids,
@@ -445,6 +477,7 @@ class Database:
                     thread.thread_id,
                     thread.subject,
                     participants_json,
+                    senders_json,
                     thread.folder,
                     merged_date_first,
                     date_last,
@@ -785,6 +818,15 @@ class Database:
         """
         cur = self._conn.cursor()
         participants_json = json.dumps(thread.participants)
+        senders_json = json.dumps(
+            list(
+                dict.fromkeys(
+                    m.from_addr.strip()
+                    for m in thread.messages
+                    if m.from_addr and m.from_addr.strip()
+                )
+            )
+        )
         message_ids_json = json.dumps([m.message_id for m in thread.messages])
         snippet = thread.snippet()
         date_first = thread.date_first.isoformat()
@@ -797,13 +839,14 @@ class Database:
             cur.execute(
                 """
                 INSERT INTO threads
-                    (thread_id, subject, participants, folder,
+                    (thread_id, subject, participants, senders, folder,
                      date_first, date_last, message_ids, snippet, has_attachments,
                      body_text)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(thread_id) DO UPDATE SET
                     subject         = excluded.subject,
                     participants    = excluded.participants,
+                    senders         = excluded.senders,
                     date_first      = excluded.date_first,
                     date_last       = excluded.date_last,
                     message_ids     = excluded.message_ids,
@@ -815,6 +858,7 @@ class Database:
                     thread.thread_id,
                     thread.subject,
                     participants_json,
+                    senders_json,
                     thread.folder,
                     date_first,
                     date_last,

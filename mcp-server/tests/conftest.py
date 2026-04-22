@@ -13,8 +13,9 @@ from src.lib.sqlite import Database
 def _build_schema(conn: sqlite3.Connection) -> None:
     """Build the minimal thread-level schema the MCP reader depends on.
 
-    Mirrors indexer SCHEMA_VERSION 4: threads, threads_fts (contentless with
-    contentless_delete=1), threads_vec, and message_thread_map.
+    Mirrors indexer SCHEMA_VERSION 5: threads (with ``senders``), threads_fts
+    (contentless with contentless_delete=1), threads_vec, and
+    message_thread_map.
     """
     conn.executescript(
         """
@@ -22,6 +23,7 @@ def _build_schema(conn: sqlite3.Connection) -> None:
             thread_id    TEXT PRIMARY KEY,
             subject      TEXT NOT NULL,
             participants TEXT NOT NULL,
+            senders      TEXT NOT NULL DEFAULT '[]',
             folder       TEXT NOT NULL,
             date_first   TEXT NOT NULL,
             date_last    TEXT NOT NULL,
@@ -59,6 +61,7 @@ def _insert_thread(
     thread_id: str,
     subject: str,
     participants: list[str],
+    senders: list[str] | None = None,
     folder: str = "INBOX",
     date_first: str = "2024-01-01T10:00:00+00:00",
     date_last: str = "2024-01-01T10:00:00+00:00",
@@ -80,15 +83,16 @@ def _insert_thread(
     cur.execute(
         """
         INSERT INTO threads (
-            thread_id, subject, participants, folder,
+            thread_id, subject, participants, senders, folder,
             date_first, date_last, message_ids, snippet,
             has_attachments, body_text, fts_rowid
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             thread_id,
             subject,
             json.dumps(participants),
+            json.dumps(senders if senders is not None else []),
             folder,
             date_first,
             date_last,
@@ -127,6 +131,7 @@ def seeded_db(tmp_path: Path) -> Database:
         thread_id="t-alpha",
         subject="invoice for march",
         participants=["alice@example.com", "bob@example.com"],
+        senders=["alice@example.com"],
         folder="INBOX",
         date_first="2024-03-01T09:00:00+00:00",
         date_last="2024-03-02T09:00:00+00:00",
@@ -140,6 +145,7 @@ def seeded_db(tmp_path: Path) -> Database:
         thread_id="t-beta",
         subject="lunch plans",
         participants=["carol@example.com", "alice@example.com"],
+        senders=["carol@example.com"],
         folder="INBOX",
         date_first="2024-03-05T12:00:00+00:00",
         date_last="2024-03-05T12:30:00+00:00",
@@ -152,6 +158,7 @@ def seeded_db(tmp_path: Path) -> Database:
         thread_id="t-gamma",
         subject="meeting notes archive",
         participants=["dave@example.com"],
+        senders=["dave@example.com"],
         folder="Archive",
         date_first="2024-02-15T08:00:00+00:00",
         date_last="2024-02-15T08:00:00+00:00",

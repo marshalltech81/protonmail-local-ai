@@ -124,13 +124,19 @@ def _derive_folder(path: Path, maildir_root: Path | None) -> str:
 def _extract_body_and_attachments(
     msg: email.message.Message,
 ) -> tuple[str, list[Attachment]]:
-    body_text = ""
-    attachments = []
+    plain_text = ""
+    html_text = ""
+    attachments: list[Attachment] = []
 
     if msg.is_multipart():
         for part in msg.walk():
             ct = part.get_content_type()
-            cd = part.get("Content-Disposition", "")
+            # Content-Disposition values are case-insensitive per RFC 2183.
+            # The old ``"attachment" in cd`` check missed ``Attachment``,
+            # ``ATTACHMENT``, and similar variants some clients emit,
+            # causing real attachments to be decoded as the body or vice
+            # versa.
+            cd = part.get("Content-Disposition", "").lower()
             has_filename = bool(part.get_filename())
 
             # A part is an attachment if disposition is "attachment", or if it
@@ -149,25 +155,37 @@ def _extract_body_and_attachments(
                         size=len(payload),
                     )
                 )
-            elif ct == "text/plain" and not body_text:
+            elif ct == "text/plain" and not plain_text:
                 payload = part.get_payload(decode=True) or b""
                 charset = part.get_content_charset() or "utf-8"
-                body_text = payload.decode(charset, errors="replace")
-            elif ct == "text/html" and not body_text:
+                plain_text = _safe_decode(payload, charset)
+            elif ct == "text/html" and not html_text:
                 payload = part.get_payload(decode=True) or b""
                 charset = part.get_content_charset() or "utf-8"
-                html = payload.decode(charset, errors="replace")
-                body_text = h2t.handle(html)
+                html_text = h2t.handle(_safe_decode(payload, charset))
     else:
         ct = msg.get_content_type()
         payload = msg.get_payload(decode=True) or b""
         charset = msg.get_content_charset() or "utf-8"
         if ct == "text/html":
-            body_text = h2t.handle(payload.decode(charset, errors="replace"))
+            html_text = h2t.handle(_safe_decode(payload, charset))
         else:
-            body_text = payload.decode(charset, errors="replace")
+            plain_text = _safe_decode(payload, charset)
 
+    # Prefer ``text/plain`` over ``text/html`` regardless of the order parts
+    # appear in the message — otherwise a multipart where the HTML part
+    # comes first wins, and the LLM gets html2text-converted output even
+    # when the sender provided a clean plain-text body.
+    body_text = plain_text or html_text
     return body_text.strip(), attachments
+
+
+def _safe_decode(payload: bytes, charset: str) -> str:
+    """Decode payload bytes, falling back to utf-8 on unknown charsets."""
+    try:
+        return payload.decode(charset, errors="replace")
+    except LookupError:
+        return payload.decode("utf-8", errors="replace")
 
 
 def _clean_id(value: str) -> str:
