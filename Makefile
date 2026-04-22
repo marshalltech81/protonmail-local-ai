@@ -93,12 +93,27 @@ first-run: init-secrets
 	docker compose -f docker-compose.yml -f docker-compose.first-run.yml \
 		run --rm --no-deps protonmail-bridge
 
-# Pull Ollama models defined in .env
+# Pull Ollama models defined in .env.
+# Brings the ollama container up first so the target works from a clean
+# setup where no services are running; waits up to 120s for Ollama to
+# become ready before attempting pulls.
 pull-models:
+	@docker compose up -d ollama
+	@printf 'Waiting for Ollama to be ready'
+	@for i in $$(seq 1 60); do \
+		if docker exec ollama ollama list >/dev/null 2>&1; then \
+			printf '\n'; \
+			exit 0; \
+		fi; \
+		printf '.'; \
+		sleep 2; \
+	done; \
+	printf '\nERROR: Ollama did not become ready within 120s.\n' >&2; \
+	exit 1
 	@echo "Pulling embedding model..."
-	docker exec ollama ollama pull $$(grep OLLAMA_EMBED_MODEL .env | cut -d= -f2)
+	docker exec ollama ollama pull $$(grep '^OLLAMA_EMBED_MODEL=' .env | cut -d= -f2)
 	@echo "Pulling LLM model..."
-	docker exec ollama ollama pull $$(grep OLLAMA_LLM_MODEL .env | cut -d= -f2)
+	docker exec ollama ollama pull $$(grep '^OLLAMA_LLM_MODEL=' .env | cut -d= -f2)
 
 # Update Bridge to a new version
 # 1. Bump BRIDGE_VERSION in .env

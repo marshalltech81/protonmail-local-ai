@@ -27,11 +27,31 @@ require_nonempty_file() {
     }
 }
 
+file_mode() {
+    local path="$1"
+    local mode
+
+    # GNU coreutils (Linux containers) uses -c; BSD (macOS host) uses -f.
+    # validate-env runs on the operator's host via `make up`, so both must
+    # work — stderr is suppressed on each attempt to avoid surfacing the
+    # format-flag mismatch as a spurious error.
+    if mode=$(stat -c '%a' "$path" 2>/dev/null); then
+        printf '%s\n' "$mode"
+        return 0
+    fi
+    if mode=$(stat -f '%Lp' "$path" 2>/dev/null); then
+        printf '%s\n' "$mode"
+        return 0
+    fi
+    printf 'ERROR: unable to read file mode for %s on this platform.\n' "$path" >&2
+    return 1
+}
+
 require_mode_600() {
     local path="$1"
     local actual_mode
 
-    actual_mode="$(stat -c '%a' "$path")"
+    actual_mode="$(file_mode "$path")"
     [[ "$actual_mode" == "600" ]] || {
         printf 'ERROR: %s must have mode 600, found %s.\n' "$path" "$actual_mode" >&2
         exit 1

@@ -87,5 +87,28 @@ def register_system_tools(server, db, bridge_enabled: bool = False):
 
 
 def get_index_status() -> dict:
-    """Standalone function used by Makefile status target."""
-    return {"status": "ok"}
+    """Standalone helper used by the Makefile ``status`` target.
+
+    Opens the local SQLite index directly (in read-only URI mode, same as
+    the running MCP server) and returns real stats. Previous behavior
+    unconditionally returned ``{"status": "ok"}`` regardless of index state,
+    so ``make status`` never reflected reality.
+    """
+    import os
+    from datetime import UTC, datetime
+
+    from ..lib.sqlite import Database
+
+    try:
+        db = Database(os.environ.get("SQLITE_PATH", "/data/mail.db"))
+        stats = db.get_stats()
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+    return {
+        "status": "ok",
+        "total_threads": stats.get("total_threads", 0),
+        "total_messages": stats.get("total_messages", 0),
+        "oldest_message": stats.get("oldest_message"),
+        "newest_message": stats.get("newest_message"),
+        "checked_at": datetime.now(UTC).isoformat(),
+    }
