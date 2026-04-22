@@ -299,6 +299,78 @@ class TestSenderFilter:
         assert _matches_sender(modern, "bob")
         assert not _matches_sender(modern, "alice")
 
+    def test_from_addr_full_address_matches_display_name_variant(self):
+        """Regression: a full-address query (``bob@example.com``) was
+        compared with lowercased substring, so a stored display form like
+        ``Bob Smith <bob@example.com>`` matched by accident, but a
+        case-mixed stored address (``Bob@Example.com``) could also slip
+        through other address-in-string coincidences. Canonical equality
+        normalizes both sides the same way, so the full-address query
+        reliably matches every display variant of the same correspondent."""
+        from datetime import UTC, datetime
+
+        from src.lib.sqlite import ThreadResult, _matches_sender
+
+        result = ThreadResult(
+            thread_id="t",
+            subject="s",
+            participants=["Bob Smith <Bob@Example.com>"],
+            senders=["Bob Smith <Bob@Example.com>"],
+            folder="INBOX",
+            date_first=datetime(2024, 1, 1, tzinfo=UTC),
+            date_last=datetime(2024, 1, 1, tzinfo=UTC),
+            message_ids=[],
+            snippet="",
+            has_attachments=False,
+        )
+        assert _matches_sender(result, "bob@example.com")
+
+    def test_from_addr_full_address_does_not_partial_match(self):
+        """Regression: substring matching meant ``from_addr="bob@example.com"``
+        also matched ``"notbob@example.com"``. Canonical equality for
+        full-address queries rejects near-misses."""
+        from datetime import UTC, datetime
+
+        from src.lib.sqlite import ThreadResult, _matches_sender
+
+        result = ThreadResult(
+            thread_id="t",
+            subject="s",
+            participants=["notbob@example.com"],
+            senders=["notbob@example.com"],
+            folder="INBOX",
+            date_first=datetime(2024, 1, 1, tzinfo=UTC),
+            date_last=datetime(2024, 1, 1, tzinfo=UTC),
+            message_ids=[],
+            snippet="",
+            has_attachments=False,
+        )
+        assert not _matches_sender(result, "bob@example.com")
+
+    def test_from_addr_domain_fragment_keeps_substring_behavior(self):
+        """A query that cannot canonicalize (bare name, domain fragment)
+        stays on the substring-match path so friendly searches like
+        ``from Bob`` or domain-wide filters like ``@example.com`` still
+        work against the lowercased display string."""
+        from datetime import UTC, datetime
+
+        from src.lib.sqlite import ThreadResult, _matches_sender
+
+        result = ThreadResult(
+            thread_id="t",
+            subject="s",
+            participants=["Bob Smith <bob@example.com>"],
+            senders=["Bob Smith <bob@example.com>"],
+            folder="INBOX",
+            date_first=datetime(2024, 1, 1, tzinfo=UTC),
+            date_last=datetime(2024, 1, 1, tzinfo=UTC),
+            message_ids=[],
+            snippet="",
+            has_attachments=False,
+        )
+        assert _matches_sender(result, "bob")
+        assert _matches_sender(result, "@example.com")
+
 
 class TestKeywordSearch:
     def test_matches_body_token(self, seeded_db: Database):

@@ -711,6 +711,67 @@ class TestSendersColumn:
         senders = json.loads(row["senders"])
         assert senders == ["alice@example.com"]
 
+    def test_upsert_dedupes_senders_by_canonical_address(self, db, threader):
+        """Regression: merge used to key de-dup on the raw display string via
+        ``dict.fromkeys``, so ``Bob Smith <bob@x>`` and a later ``bob@x``
+        accumulated as two sender entries for the same correspondent. Keying
+        on the canonical bare address collapses them — first-seen display
+        wins."""
+        first = make_message(
+            message_id="dm1@x",
+            from_addr="Bob Smith <bob@example.com>",
+            to_addrs=["alice@example.com"],
+        )
+        second = make_message(
+            message_id="dm2@x",
+            from_addr="bob@example.com",
+            to_addrs=["alice@example.com"],
+            in_reply_to="dm1@x",
+            filepath="/dm/2",
+            date=datetime(2024, 1, 2, tzinfo=UTC),
+        )
+        t1 = threader.assign_thread(first)
+        db.upsert_thread(t1, FAKE_EMBEDDING)
+        t2 = threader.assign_thread(second)
+        db.upsert_thread(t2, FAKE_EMBEDDING)
+
+        row = db._conn.execute(
+            "SELECT senders, participants FROM threads WHERE thread_id = ?",
+            (t1.thread_id,),
+        ).fetchone()
+        senders = json.loads(row["senders"])
+        participants = json.loads(row["participants"])
+        assert senders == ["Bob Smith <bob@example.com>"]
+        assert "Bob Smith <bob@example.com>" in participants
+        assert "bob@example.com" not in participants
+
+    def test_upsert_dedupes_senders_case_insensitively(self, db):
+        """Case differences in the local or domain part should not create
+        duplicate sender entries in an insert-only path either."""
+        msg_a = make_message(
+            message_id="ci1@x",
+            from_addr="Carol@Example.COM",
+            to_addrs=["dave@example.com"],
+        )
+        msg_b = make_message(
+            message_id="ci2@x",
+            from_addr="carol@example.com",
+            to_addrs=["dave@example.com"],
+            date=datetime(2024, 1, 2, tzinfo=UTC),
+            filepath="/ci/2",
+        )
+        thread = make_thread(
+            messages=[msg_a, msg_b],
+            thread_id="ci-thread",
+        )
+        db.upsert_thread(thread, FAKE_EMBEDDING)
+
+        row = db._conn.execute(
+            "SELECT senders FROM threads WHERE thread_id = 'ci-thread'"
+        ).fetchone()
+        senders = json.loads(row["senders"])
+        assert senders == ["Carol@Example.COM"]
+
     def test_upsert_merges_senders_across_messages(self, db, threader):
         original = make_message(
             message_id="ms1@x",
