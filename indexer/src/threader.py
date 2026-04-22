@@ -70,13 +70,24 @@ class Threader:
         thread_id = self._find_thread_id(message)
 
         if thread_id:
-            # Add to existing thread
+            # Add to existing thread. get_thread() returns messages=[] by
+            # design — the caller is expected to append only the new message
+            # and the database layer merges accumulated fields on upsert.
+            # Participants loaded from the DB must therefore be unioned with
+            # the new message's participants rather than replaced, and dates
+            # must widen (min for date_first, max for date_last) to tolerate
+            # out-of-order Maildir delivery.
             thread = self.db.get_thread(thread_id)
             if thread:
                 thread.messages.append(message)
                 thread.messages.sort(key=lambda m: m.date)
-                thread.date_last = max(m.date for m in thread.messages)
-                thread.participants = self._participants(thread.messages)
+                seen = set(thread.participants)
+                for addr in self._participants([message]):
+                    if addr not in seen:
+                        thread.participants.append(addr)
+                        seen.add(addr)
+                thread.date_first = min(thread.date_first, message.date)
+                thread.date_last = max(thread.date_last, message.date)
                 return thread
 
         # Create a new thread rooted at this message

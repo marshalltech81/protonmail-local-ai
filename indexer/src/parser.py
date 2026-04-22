@@ -165,9 +165,21 @@ def _parse_addrs(value: str) -> list[str]:
 
 
 def _parse_date(value: str) -> datetime:
+    """Parse an RFC 2822 date header and normalize to a UTC-aware datetime.
+
+    ``parsedate_to_datetime`` returns a naive datetime for ``-0000`` ("no TZ
+    info" per RFC 2822) and aware datetimes for everything else. Threader
+    sorts and compares message dates, which raises ``TypeError`` when naive
+    and aware values are mixed — so every parsed date is forced to UTC here.
+    """
     try:
         from email.utils import parsedate_to_datetime
 
-        return parsedate_to_datetime(value)
-    except Exception:
+        dt = parsedate_to_datetime(value)
+    except (TypeError, ValueError):
         return datetime.now(UTC)
+    if dt is None:
+        return datetime.now(UTC)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    return dt.astimezone(UTC)

@@ -254,6 +254,57 @@ class TestAssignThread:
         t2 = threader.assign_thread(later)
         assert t2.date_last == datetime(2024, 6, 1, tzinfo=UTC)
 
+    def test_existing_participants_preserved_when_new_message_joins(self, db, threader):
+        """Regression: appending a reply must not drop previously-seen
+        participants from the thread. Prior behavior overwrote participants
+        with only the new message's addresses."""
+        original = make_message(
+            message_id="part_orig@example.com",
+            from_addr="alice@example.com",
+            to_addrs=["bob@example.com"],
+        )
+        t1 = threader.assign_thread(original)
+        db.upsert_thread(t1, [0.0] * 768)
+
+        # Reply from a third party introduces a new participant; existing
+        # participants must still be present after threader runs.
+        reply = make_message(
+            message_id="part_reply@example.com",
+            subject="Re: Hello world",
+            from_addr="carol@example.com",
+            to_addrs=["alice@example.com"],
+            in_reply_to="part_orig@example.com",
+            filepath="/maildir/INBOX/cur/part_reply",
+            date=datetime(2024, 1, 2, tzinfo=UTC),
+        )
+        t2 = threader.assign_thread(reply)
+
+        assert "alice@example.com" in t2.participants
+        assert "bob@example.com" in t2.participants
+        assert "carol@example.com" in t2.participants
+
+    def test_out_of_order_older_message_widens_date_first(self, db, threader):
+        """An older message arriving after newer ones must lower date_first
+        and leave date_last unchanged."""
+        newer = make_message(
+            message_id="ooo_newer@example.com",
+            date=datetime(2024, 6, 1, tzinfo=UTC),
+        )
+        t1 = threader.assign_thread(newer)
+        db.upsert_thread(t1, [0.0] * 768)
+
+        older = make_message(
+            message_id="ooo_older@example.com",
+            subject="Re: Hello world",
+            in_reply_to="ooo_newer@example.com",
+            filepath="/maildir/INBOX/cur/older",
+            date=datetime(2024, 1, 1, tzinfo=UTC),
+        )
+        t2 = threader.assign_thread(older)
+
+        assert t2.date_first == datetime(2024, 1, 1, tzinfo=UTC)
+        assert t2.date_last == datetime(2024, 6, 1, tzinfo=UTC)
+
 
 # ---------------------------------------------------------------------------
 # Threader._participants
