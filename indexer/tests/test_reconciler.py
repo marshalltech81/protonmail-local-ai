@@ -1,0 +1,433 @@
+"""
+Tests for src/reconciler.py — tombstone detection, live on_moved handling,
+reap behavior (full-thread and rebuild paths), grace window, mass-delete
+brake, and Ollama-failure backoff.
+
+The reconciler is exercised end-to-end against a real SQLite database and
+real .eml files in tmp_path. Embedding is stubbed with FakeEmbedder so the
+tests do not require Ollama.
+"""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime
+from email.message import EmailMessage
+from pathlib import Path
+
+import pytest
+from src.database import Database
+from src.reconciler import Reconciler, ReconcilerConfig, load_config_from_env
+from src.threader import Threader
+
+FAKE_EMBEDDING = [0.0] * 768
+
+
+class FakeEmbedder:
+    def __init__(self):
+        self.calls = 0
+        self.should_fail = False
+
+    def embed(self, text: str) -> list[float]:
+        self.calls += 1
+        if self.should_fail:
+            raise RuntimeError("simulated Ollama outage")
+        return FAKE_EMBEDDING
+
+
+def _default_config(**overrides) -> ReconcilerConfig:
+    base = {
+        "enabled": True,
+        "grace_days": 0,
+        "sweep_interval_secs": 60,
+        "max_batch_pct": 1.0,
+        "force": False,
+        "unlink_on_reap": False,
+    }
+    base.update(overrides)
+    return ReconcilerConfig(**base)
+
+
+def _write_eml(
+    path: Path,
+    message_id: str,
+    subject: str = "Test message",
+    body: str = "Hello",
+    in_reply_to: str | None = None,
+    date: datetime | None = None,
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    msg = EmailMessage()
+    msg["Message-ID"] = f"<{message_id}>"
+    msg["From"] = "alice@example.com"
+    msg["To"] = "bob@example.com"
+    msg["Subject"] = subject
+    msg["Date"] = (date or datetime(2024, 1, 1, 12, 0, tzinfo=UTC)).strftime(
+        "%a, %d %b %Y %H:%M:%S %z"
+    )
+    if in_reply_to:
+        msg["In-Reply-To"] = f"<{in_reply_to}>"
+    msg.set_content(body)
+    path.write_bytes(bytes(msg))
+
+
+def _index(path: Path, db: Database, threader: Threader) -> str:
+    """Parse + thread + upsert a real .eml file. Returns the thread_id."""
+    from src.parser import parse_email
+
+    parsed = parse_email(path)
+    assert parsed is not None
+    thread = threader.assign_thread(parsed)
+    db.upsert_thread(thread, FAKE_EMBEDDING)
+    return thread.thread_id
+
+
+@pytest.fixture
+def maildir(tmp_path: Path) -> Path:
+    d = tmp_path / "maildir" / "INBOX" / "cur"
+    d.mkdir(parents=True)
+    return d
+
+
+@pytest.fixture
+def embedder() -> FakeEmbedder:
+    return FakeEmbedder()
+
+
+@pytest.fixture
+def reconciler(db: Database, embedder: FakeEmbedder, threader: Threader) -> Reconciler:
+    return Reconciler(db, embedder, threader, _default_config())
+
+
+# ---------------------------------------------------------------------------
+# Sweep — startup detection
+# ---------------------------------------------------------------------------
+
+
+class TestSweep:
+    def test_records_tombstone_when_file_has_t_flag(self, db, threader, reconciler, maildir):
+        path = maildir / "1700000000.M1.host:2,S"
+        _write_eml(path, "m1@example.com")
+        _index(path, db, threader)
+
+        # mbsync renames to add T flag
+        trashed = maildir / "1700000000.M1.host:2,ST"
+        path.rename(trashed)
+
+        result = reconciler.sweep()
+        assert result["tombstoned"] == 1
+        assert db.has_pending_deletion(str(trashed))
+
+    def test_updates_filepath_when_non_deletion_flag_changes(
+        self, db, threader, reconciler, maildir
+    ):
+        path = maildir / "1700000000.M1.host:2,S"
+        _write_eml(path, "m2@example.com")
+        _index(path, db, threader)
+
+        # mbsync renames to add R flag (replied)
+        replied = maildir / "1700000000.M1.host:2,RS"
+        path.rename(replied)
+
+        result = reconciler.sweep()
+        assert result["renamed"] == 1
+        assert result["tombstoned"] == 0
+        assert db.find_message_entry_by_filepath(str(replied)) is not None
+        assert db.find_message_entry_by_filepath(str(path)) is None
+
+    def test_clears_tombstone_when_t_flag_reversed(self, db, threader, reconciler, maildir):
+        path = maildir / "1700000000.M1.host:2,S"
+        _write_eml(path, "m3@example.com")
+        _index(path, db, threader)
+        trashed = maildir / "1700000000.M1.host:2,ST"
+        path.rename(trashed)
+        reconciler.sweep()
+        assert db.has_pending_deletion(str(trashed))
+
+        # mbsync un-flags on a subsequent pull (T removed)
+        restored = maildir / "1700000000.M1.host:2,S"
+        trashed.rename(restored)
+
+        result = reconciler.sweep()
+        assert result["cleared"] == 1
+        assert db.has_pending_deletion(str(restored)) is False
+
+    def test_idempotent_across_multiple_sweeps(self, db, threader, reconciler, maildir):
+        path = maildir / "1700000000.M1.host:2,S"
+        _write_eml(path, "m4@example.com")
+        _index(path, db, threader)
+        trashed = maildir / "1700000000.M1.host:2,ST"
+        path.rename(trashed)
+
+        first = reconciler.sweep()
+        second = reconciler.sweep()
+        assert first["tombstoned"] == 1
+        assert second["tombstoned"] == 0  # already recorded
+        assert db.count_pending_deletions() == 1
+
+    def test_marks_missing_file_as_tombstone(self, db, threader, reconciler, maildir):
+        path = maildir / "1700000000.M1.host:2,S"
+        _write_eml(path, "m5@example.com")
+        _index(path, db, threader)
+        path.unlink()
+
+        result = reconciler.sweep()
+        assert result["missing"] == 1
+
+
+# ---------------------------------------------------------------------------
+# handle_moved — live watchdog detection
+# ---------------------------------------------------------------------------
+
+
+class TestHandleMoved:
+    def test_records_tombstone_on_t_flag_rename(self, db, threader, reconciler, maildir):
+        path = maildir / "1700000000.M1.host:2,S"
+        _write_eml(path, "mv1@example.com")
+        _index(path, db, threader)
+        trashed = maildir / "1700000000.M1.host:2,ST"
+        path.rename(trashed)
+
+        reconciler.handle_moved(str(path), str(trashed))
+        assert db.has_pending_deletion(str(trashed))
+
+    def test_clears_tombstone_when_flag_removed(self, db, threader, reconciler, maildir):
+        path = maildir / "1700000000.M1.host:2,S"
+        _write_eml(path, "mv2@example.com")
+        _index(path, db, threader)
+
+        trashed = maildir / "1700000000.M1.host:2,ST"
+        path.rename(trashed)
+        reconciler.handle_moved(str(path), str(trashed))
+        assert db.has_pending_deletion(str(trashed))
+
+        restored = maildir / "1700000000.M1.host:2,S"
+        trashed.rename(restored)
+        reconciler.handle_moved(str(trashed), str(restored))
+        assert db.has_pending_deletion(str(trashed)) is False
+        assert db.has_pending_deletion(str(restored)) is False
+
+    def test_ignores_moves_for_unindexed_files(self, db, threader, reconciler, maildir):
+        src = maildir / "unknown:2,S"
+        dest = maildir / "unknown:2,ST"
+        # Must not raise, must not record anything
+        reconciler.handle_moved(str(src), str(dest))
+        assert db.count_pending_deletions() == 0
+
+
+# ---------------------------------------------------------------------------
+# Reap — grace window, full-reap, rebuild paths
+# ---------------------------------------------------------------------------
+
+
+class TestReap:
+    def test_does_not_reap_inside_grace_window(self, db, threader, embedder, maildir):
+        cfg = _default_config(grace_days=7)
+        rec = Reconciler(db, embedder, threader, cfg)
+
+        path = maildir / "1700000000.M1.host:2,S"
+        _write_eml(path, "g1@example.com")
+        _index(path, db, threader)
+        trashed = maildir / "1700000000.M1.host:2,ST"
+        path.rename(trashed)
+        rec.sweep()
+
+        result = rec.reap()
+        assert result["threads_reaped"] == 0
+        assert result["threads_rebuilt"] == 0
+        assert (
+            db.get_thread(db.find_message_entry_by_filepath(str(trashed))["thread_id"]) is not None
+        )
+
+    def test_full_reap_when_last_message_tombstoned(self, db, threader, reconciler, maildir):
+        path = maildir / "1700000000.M1.host:2,S"
+        _write_eml(path, "full@example.com")
+        thread_id = _index(path, db, threader)
+        trashed = maildir / "1700000000.M1.host:2,ST"
+        path.rename(trashed)
+
+        reconciler.sweep()
+        result = reconciler.reap()
+
+        assert result["threads_reaped"] == 1
+        assert result["threads_rebuilt"] == 0
+        assert db.get_thread(thread_id) is None
+        assert db.count_total_messages() == 0
+        assert db.count_pending_deletions() == 0
+
+    def test_rebuild_when_thread_has_survivors(self, db, threader, embedder, reconciler, maildir):
+        # Two messages in one thread; tombstone the original, keep the reply.
+        orig_path = maildir / "1700000000.M1.host:2,S"
+        _write_eml(
+            orig_path,
+            "orig@example.com",
+            subject="Budget discussion",
+            body="Original message body.",
+        )
+        thread_id = _index(orig_path, db, threader)
+
+        reply_path = maildir / "1700000001.M2.host:2,S"
+        _write_eml(
+            reply_path,
+            "reply@example.com",
+            subject="Re: Budget discussion",
+            body="Reply body content.",
+            in_reply_to="orig@example.com",
+            date=datetime(2024, 2, 1, 12, 0, tzinfo=UTC),
+        )
+        _index(reply_path, db, threader)
+
+        # mbsync flags the original as deleted; reply survives
+        orig_trashed = maildir / "1700000000.M1.host:2,ST"
+        orig_path.rename(orig_trashed)
+
+        reconciler.sweep()
+        embed_calls_before = embedder.calls
+        result = reconciler.reap()
+
+        assert result["threads_rebuilt"] == 1
+        assert result["threads_reaped"] == 0
+        assert db.get_thread(thread_id) is not None
+        # Original message row gone, reply row stays
+        assert db.find_message_entry_by_filepath(str(orig_trashed)) is None
+        assert db.find_message_entry_by_filepath(str(reply_path)) is not None
+        # body_text was rebuilt — the original body no longer appears
+        body = db._conn.execute(
+            "SELECT body_text FROM threads WHERE thread_id = ?", (thread_id,)
+        ).fetchone()["body_text"]
+        assert "Original message body." not in body
+        assert "Reply body content." in body
+        # Re-embedding happened
+        assert embedder.calls > embed_calls_before
+
+    def test_backs_off_when_embedder_fails(self, db, threader, embedder, reconciler, maildir):
+        orig_path = maildir / "1700000000.M1.host:2,S"
+        _write_eml(orig_path, "e1@example.com")
+        thread_id = _index(orig_path, db, threader)
+
+        reply_path = maildir / "1700000001.M2.host:2,S"
+        _write_eml(
+            reply_path,
+            "e2@example.com",
+            in_reply_to="e1@example.com",
+            subject="Re: Test message",
+            date=datetime(2024, 2, 1, tzinfo=UTC),
+        )
+        _index(reply_path, db, threader)
+
+        trashed = maildir / "1700000000.M1.host:2,ST"
+        orig_path.rename(trashed)
+        reconciler.sweep()
+
+        embedder.should_fail = True
+        result = reconciler.reap()
+        assert result["threads_rebuilt"] == 0
+        # Nothing was committed — thread and tombstone remain
+        assert db.get_thread(thread_id) is not None
+        assert db.has_pending_deletion(str(trashed))
+        # On next pass with embedder healthy, reap succeeds
+        embedder.should_fail = False
+        result = reconciler.reap()
+        assert result["threads_rebuilt"] == 1
+        assert db.has_pending_deletion(str(trashed)) is False
+
+    def test_unlinks_files_when_unlink_on_reap_enabled(self, db, threader, embedder, maildir):
+        cfg = _default_config(unlink_on_reap=True)
+        rec = Reconciler(db, embedder, threader, cfg)
+
+        path = maildir / "1700000000.M1.host:2,S"
+        _write_eml(path, "u1@example.com")
+        _index(path, db, threader)
+        trashed = maildir / "1700000000.M1.host:2,ST"
+        path.rename(trashed)
+        rec.sweep()
+        assert trashed.exists()
+        rec.reap()
+        assert trashed.exists() is False
+
+
+# ---------------------------------------------------------------------------
+# Mass-delete brake
+# ---------------------------------------------------------------------------
+
+
+class TestMassDeleteBrake:
+    def _stage_batch(self, maildir, db, threader, count: int) -> list[Path]:
+        paths = []
+        for i in range(count):
+            p = maildir / f"1700000{i:04d}.M1.host:2,S"
+            _write_eml(p, f"mass{i}@example.com", subject=f"Subject {i}")
+            _index(p, db, threader)
+            paths.append(p)
+        return paths
+
+    def test_aborts_when_tombstones_exceed_threshold(self, db, threader, embedder, maildir):
+        paths = self._stage_batch(maildir, db, threader, 10)
+        # Tombstone 6 of 10 (60%) — well over the 5% default
+        for p in paths[:6]:
+            t = p.with_name(p.name + "T")
+            p.rename(t)
+
+        cfg = _default_config(grace_days=0, max_batch_pct=0.05)
+        rec = Reconciler(db, embedder, threader, cfg)
+        rec.sweep()
+
+        # Age all tombstones so they are past the grace window
+        db._conn.execute("UPDATE pending_deletions SET marked_at = '2000-01-01T00:00:00+00:00'")
+        db._conn.commit()
+
+        result = rec.reap()
+        assert result["aborted"] is True
+        # Index was not touched
+        assert db.count_total_messages() == 10
+        assert db.count_pending_deletions() == 6
+
+    def test_force_overrides_brake(self, db, threader, embedder, maildir):
+        paths = self._stage_batch(maildir, db, threader, 10)
+        for p in paths[:6]:
+            t = p.with_name(p.name + "T")
+            p.rename(t)
+
+        cfg = _default_config(grace_days=0, max_batch_pct=0.05, force=True)
+        rec = Reconciler(db, embedder, threader, cfg)
+        rec.sweep()
+        db._conn.execute("UPDATE pending_deletions SET marked_at = '2000-01-01T00:00:00+00:00'")
+        db._conn.commit()
+
+        result = rec.reap()
+        assert result["aborted"] is False
+        assert db.count_total_messages() == 4  # 10 - 6 reaped
+
+
+# ---------------------------------------------------------------------------
+# load_config_from_env
+# ---------------------------------------------------------------------------
+
+
+class TestLoadConfig:
+    def test_defaults_disabled(self):
+        cfg = load_config_from_env({})
+        assert cfg.enabled is False
+        assert cfg.grace_days == 7
+        assert cfg.sweep_interval_secs == 3600
+        assert cfg.max_batch_pct == pytest.approx(0.05)
+        assert cfg.force is False
+        assert cfg.unlink_on_reap is False
+
+    def test_enabled_parses_truthy_values(self):
+        for val in ("1", "true", "TRUE", "yes", "on"):
+            cfg = load_config_from_env({"INDEXER_DELETION_ENABLED": val})
+            assert cfg.enabled is True, val
+
+    def test_invalid_numeric_falls_back_to_default(self):
+        cfg = load_config_from_env({"INDEXER_DELETION_GRACE_DAYS": "not-a-number"})
+        assert cfg.grace_days == 7
+
+    def test_max_batch_pct_clamped_to_unit_range(self):
+        cfg = load_config_from_env({"INDEXER_DELETION_MAX_BATCH_PCT": "2.5"})
+        assert cfg.max_batch_pct == 1.0
+        cfg = load_config_from_env({"INDEXER_DELETION_MAX_BATCH_PCT": "-0.1"})
+        assert cfg.max_batch_pct == 0.0
+
+    def test_sweep_interval_has_minimum(self):
+        cfg = load_config_from_env({"INDEXER_DELETION_SWEEP_INTERVAL_SECS": "5"})
+        assert cfg.sweep_interval_secs == 60

@@ -132,7 +132,19 @@ services:
       OLLAMA_EMBED_MODEL: ${OLLAMA_EMBED_MODEL:-nomic-embed-text}
       MAILDIR_PATH: /maildir
       SQLITE_PATH: /data/mail.db
+      # Deletion reconciliation — opt-in. See .env.example for details.
+      INDEXER_DELETION_ENABLED: ${INDEXER_DELETION_ENABLED:-false}
+      INDEXER_DELETION_GRACE_DAYS: ${INDEXER_DELETION_GRACE_DAYS:-7}
+      INDEXER_DELETION_SWEEP_INTERVAL_SECS: ${INDEXER_DELETION_SWEEP_INTERVAL_SECS:-3600}
+      INDEXER_DELETION_MAX_BATCH_PCT: ${INDEXER_DELETION_MAX_BATCH_PCT:-0.05}
+      INDEXER_DELETION_FORCE: ${INDEXER_DELETION_FORCE:-false}
+      INDEXER_UNLINK_ON_REAP: ${INDEXER_UNLINK_ON_REAP:-false}
     volumes:
+      # Maildir is mounted read-only by default: the indexer's job is to read
+      # .eml files and build the SQLite index. INDEXER_UNLINK_ON_REAP needs
+      # write access to actually remove reaped files; with the default ro
+      # mount the unlink call logs a warning and the index still cleans up
+      # correctly, the files just stay on disk.
       - maildir-volume:/maildir:ro
       - sqlite-volume:/data
     networks:

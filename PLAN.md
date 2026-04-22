@@ -40,6 +40,7 @@ Implemented and working at a high level:
 - the Bridge bootstrap now time-bounds `gpg`/`pass`, repairs missing `.gpg-id`, and the indexer now has a hardened runtime profile plus a heartbeat healthcheck
 - `mcp-server` cloud error paths now redact secrets, Claude model selection is configurable via `CLAUDE_MODEL`, and insecure live Bridge transport paths fail closed unless a cert-pinned backend is explicitly configured
 - the Bridge build now uses a shared patch helper plus a dedicated patch-drift check and build/runtime smoke-test path for version bumps
+- the indexer now ships an opt-in deletion reconciler: mbsync `T`-flag detection (startup sweep + watchdog `on_moved`), grace-window reaping with thread rebuild, and a mass-delete safety brake; `mbsync` keeps `Expunge None` unchanged
 
 Known limitations:
 
@@ -48,10 +49,10 @@ Known limitations:
 - per-message live retrieval and mail-changing actions are disabled in the default deployment until a safe action backend is implemented
 - intelligence tools rely too heavily on stored snippets instead of full-thread context
 - test coverage is incomplete
-- schema migration support is still minimal
 - some MCP action features are incomplete
 - `list_threads(filter_type=...)` does not yet match the documented interface
 - the new hardened first-run/sync path still needs real end-to-end validation against a live Bridge session
+- deletion reconciliation is opt-in (`INDEXER_DELETION_ENABLED=true`) and needs real-world validation; `INDEXER_UNLINK_ON_REAP=true` only removes the `.eml` file when Maildir is mounted read-write (default mount is read-only)
 
 ## Active Priorities
 
