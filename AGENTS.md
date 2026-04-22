@@ -396,18 +396,26 @@ Notes:
 - integration tests should mock IMAP rather than hitting a live Bridge instance
 - add or update tests when behavior changes
 
+### Coverage expectations
+
+- both `indexer` and `mcp-server` enforce a 90% coverage floor via `--cov-fail-under=90` in each service's `pyproject.toml`; a PR that drops coverage below 90% will fail CI
+- for `indexer`, coverage scope is `src/` with `src/main.py` omitted (service bootstrap is covered by docker-compose integration, not unit tests); for `mcp-server`, coverage scope is `src/lib` only — tool handlers, MCP framework wiring, and the main entrypoint do not yet have unit tests
+- when widening `mcp-server` unit coverage into `src/tools` or `src/main.py`, expand the `source` list in `mcp-server/pyproject.toml` under `[tool.coverage.run]` rather than lowering the threshold
+- CI runs `pytest --cov` in `.github/workflows/tests.yml` and uploads `coverage.xml` as an artifact per service
+
 ### Minimum expectations by area
 
 - parser changes should add or update parser fixtures/tests
 - threader changes should verify threading, subject fallback, references, and participant handling
 - database changes should verify schema creation, migration, and upsert/query behavior
 - MCP search changes should verify hybrid/RRF behavior where applicable
-- before opening PRs that touch TLS, auth, logging, subprocess execution, or credential handling, run `bandit -r src/` and resolve any findings rated medium or higher
+- before opening PRs that touch TLS, auth, logging, subprocess execution, or credential handling, run `bandit -r src/` and resolve any findings rated medium or higher (a CI job in `.github/workflows/security.yml` enforces this at medium+ severity for both services)
 
-Run indexer tests with:
+Run tests with:
 
 ```bash
-cd indexer && pytest
+cd indexer    && uv run pytest
+cd mcp-server && uv run pytest
 ```
 
 ## Documentation Expectations

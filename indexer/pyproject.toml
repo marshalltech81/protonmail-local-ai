@@ -16,6 +16,7 @@ dependencies = [
 [dependency-groups]
 dev = [
     "pytest==9.0.3",
+    "pytest-cov==7.1.0",
 ]
 
 [tool.uv]
@@ -27,4 +28,25 @@ pythonpath = ["."]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
-addopts = "-v --tb=short"
+addopts = "-v --tb=short --cov=src --cov-branch --cov-report=term-missing --cov-fail-under=90"
+
+[tool.coverage.run]
+branch = true
+source = ["src"]
+omit = [
+    "tests/*",
+    # main.py is the service entrypoint: argument parsing, logging setup,
+    # Ollama wait, watchdog registration. It is covered by docker-compose
+    # integration rather than unit tests; excluding it keeps unit-test
+    # coverage numbers honest.
+    "src/main.py",
+]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false
+exclude_lines = [
+    "pragma: no cover",
+    "if __name__ == .__main__.:",
+    "raise NotImplementedError",
+]

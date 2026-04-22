@@ -17,3 +17,36 @@ dependencies = [
 
 [tool.uv]
 package = false
+
+[dependency-groups]
+dev = [
+    "pytest==9.0.3",
+    "pytest-cov==7.1.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = "-v --tb=short --cov=src/lib --cov-branch --cov-report=term-missing --cov-fail-under=90"
+
+[tool.coverage.run]
+branch = true
+# Unit-test scope is currently the shared library layer (security, sqlite,
+# ollama). The MCP tool handlers, IMAP/SMTP client, and service bootstrap
+# require live MCP framework / aioimaplib scaffolding and are validated via
+# docker-compose integration rather than unit tests. Expand `source` as
+# additional code paths gain dedicated unit tests.
+source = ["src/lib"]
+omit = ["tests/*"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false
+exclude_lines = [
+    "pragma: no cover",
+    "if __name__ == .__main__.:",
+    "raise NotImplementedError",
+]
