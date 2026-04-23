@@ -245,3 +245,122 @@ def _make_result(thread_id: str, folder: str = "INBOX"):
 @pytest.fixture
 def make_result():
     return _make_result
+
+
+# ---------------------------------------------------------------------------
+# MCP tool handler test scaffolding
+# ---------------------------------------------------------------------------
+#
+# The tool modules in ``src/tools/`` call ``@server.tool()`` to register
+# handlers with a FastMCP server. Exercising the real FastMCP machinery in
+# unit tests pulls in MCP protocol scaffolding that has no bearing on the
+# handler logic we want to cover. ``FakeMCPServer`` captures each decorated
+# function under its ``__name__`` so tests can call the handlers directly
+# as plain async callables, isolating the code under test from the framework.
+
+
+class FakeMCPServer:
+    """Minimal stub of the FastMCP surface used by tool-registration functions.
+
+    Captures every function passed to ``@server.tool()`` in ``tools`` keyed
+    by the function's name. ``custom_route`` is a no-op decorator so
+    ``main.py`` registration paths run without needing a real Starlette
+    app. Nothing about the captured callables is wrapped or instrumented —
+    tests invoke them exactly as the FastMCP dispatcher would, which is
+    the behavior we want to verify.
+    """
+
+    def __init__(self) -> None:
+        self.tools: dict[str, object] = {}
+        self.custom_routes: dict[str, object] = {}
+
+    def tool(self, *_args, **_kwargs):
+        def decorator(fn):
+            self.tools[fn.__name__] = fn
+            return fn
+
+        return decorator
+
+    def custom_route(self, path: str, *_args, **_kwargs):
+        def decorator(fn):
+            self.custom_routes[path] = fn
+            return fn
+
+        return decorator
+
+
+class FakeOllama:
+    """Async stub of ``src.lib.ollama.OllamaClient``.
+
+    Returns a canned 4-dim embedding that matches ``seeded_db`` /
+    ``empty_db`` vec0 schema, and a canned ``complete()`` response so
+    intelligence tools can be exercised without hitting a live Ollama
+    instance. ``complete_responses`` lets a test queue up successive
+    distinct responses for the per-thread ``extract_from_emails`` loop.
+    """
+
+    def __init__(
+        self,
+        embedding: list[float] | None = None,
+        response: str = "mock answer",
+        complete_responses: list[str] | None = None,
+    ) -> None:
+        self._embedding = embedding if embedding is not None else [1.0, 0.0, 0.0, 0.0]
+        self._default_response = response
+        self._queued = list(complete_responses) if complete_responses is not None else []
+        self.embed_calls: list[str] = []
+        self.complete_calls: list[tuple[str, str]] = []
+
+    async def embed(self, text: str) -> list[float]:
+        self.embed_calls.append(text)
+        return list(self._embedding)
+
+    async def complete(self, system: str, user: str) -> str:
+        self.complete_calls.append((system, user))
+        if self._queued:
+            return self._queued.pop(0)
+        return self._default_response
+
+
+class FakeIMAP:
+    """Stub of the IMAP/SMTP client used by action tools.
+
+    Calls are recorded for assertion. ``send_email`` is sync on the real
+    client; ``move_message`` / ``set_flag`` are async. The stub preserves
+    that split so tests catch a caller that awaits the wrong one.
+    """
+
+    def __init__(self, send_ok: bool = True, move_ok: bool = True, flag_ok: bool = True) -> None:
+        self._send_ok = send_ok
+        self._move_ok = move_ok
+        self._flag_ok = flag_ok
+        self.send_calls: list[dict] = []
+        self.move_calls: list[tuple[str, str, str]] = []
+        self.flag_calls: list[tuple[str, str, str, bool]] = []
+
+    def send_email(self, **kwargs) -> bool:
+        self.send_calls.append(kwargs)
+        return self._send_ok
+
+    async def move_message(self, uid: str, src: str, dst: str) -> bool:
+        self.move_calls.append((uid, src, dst))
+        return self._move_ok
+
+    async def set_flag(self, uid: str, folder: str, flag: str, value: bool) -> bool:
+        self.flag_calls.append((uid, folder, flag, value))
+        return self._flag_ok
+
+
+@pytest.fixture
+def fake_server() -> FakeMCPServer:
+    return FakeMCPServer()
+
+
+@pytest.fixture
+def fake_ollama() -> FakeOllama:
+    return FakeOllama()
+
+
+@pytest.fixture
+def fake_imap() -> FakeIMAP:
+    return FakeIMAP()
