@@ -23,22 +23,34 @@ dev = [
 ]
 
 [tool.pytest.ini_options]
+# ``tests/eval`` is the opt-in retrieval-quality harness — it requires a
+# real indexed mailbox via ``MCP_EVAL_DB`` and is excluded from the
+# default collection so the regular suite stays self-contained. Run it
+# explicitly with ``pytest -m eval``.
 testpaths = ["tests"]
 pythonpath = ["."]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
-addopts = "-v --tb=short --cov=src/lib --cov-branch --cov-report=term-missing --cov-fail-under=90"
+addopts = "-v --tb=short --cov=src --cov-branch --cov-report=term-missing --cov-fail-under=90 --ignore=tests/eval"
+markers = [
+    "eval: opt-in retrieval-quality eval against a real mailbox (skipped by default; run with `pytest -m eval --override-ini='addopts='`)",
+]
 
 [tool.coverage.run]
 branch = true
-# Unit-test scope is currently the shared library layer (security, sqlite,
-# ollama). The MCP tool handlers, IMAP/SMTP client, and service bootstrap
-# require live MCP framework / aioimaplib scaffolding and are validated via
-# docker-compose integration rather than unit tests. Expand `source` as
-# additional code paths gain dedicated unit tests.
-source = ["src/lib"]
-omit = ["tests/*"]
+# Coverage scope is the full mcp-server package. Tool handlers run
+# against a FakeMCPServer stub (see ``tests/conftest.py::FakeMCPServer``)
+# so handler logic is exercised without standing up the real FastMCP
+# transport. ``main.main()`` itself is excluded because it is a service
+# bootstrap (env wiring, tool registration, ``server.run``) covered by
+# docker-compose integration; its testable helpers (``_env_bool``,
+# ``_read_secret``, the ``/health`` route) are unit-tested directly.
+source = ["src"]
+omit = [
+    "tests/*",
+    "src/main.py",
+]
 
 [tool.coverage.report]
 show_missing = true

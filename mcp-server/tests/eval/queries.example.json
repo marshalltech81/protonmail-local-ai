@@ -1,0 +1,26 @@
+[
+  {
+    "id": "landlord-deposit",
+    "question": "What did my landlord say about the deposit?",
+    "search_query": "landlord deposit",
+    "expected_thread_ids": ["REPLACE_WITH_REAL_THREAD_ID"],
+    "expected_substrings": ["deposit"],
+    "notes": "Replace expected_thread_ids with one or more real thread_ids from your indexed mailbox. Run `make status` or call get_index_status to discover thread ids."
+  },
+  {
+    "id": "invoice-march",
+    "question": "Find the invoice from March.",
+    "search_query": "invoice march",
+    "expected_thread_ids": ["REPLACE_WITH_REAL_THREAD_ID"],
+    "expected_substrings": ["invoice"],
+    "notes": "Useful for date-scoped retrieval. The eval reports the rank at which the first expected_thread_id appears."
+  },
+  {
+    "id": "meeting-confirmation",
+    "question": "Was the meeting confirmed?",
+    "search_query": "meeting confirmed",
+    "expected_thread_ids": ["REPLACE_WITH_REAL_THREAD_ID"],
+    "expected_substrings": ["meeting"],
+    "notes": "Tests semantic retrieval where the question phrasing differs from the email subject."
+  }
+]
