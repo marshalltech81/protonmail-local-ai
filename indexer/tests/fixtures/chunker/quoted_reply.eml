@@ -1,0 +1,15 @@
+From: bob@example.com
+To: alice@example.com
+Subject: Re: Ship the feature?
+Date: Wed, 3 Jan 2024 15:30:00 +0000
+Message-ID: <quoted-reply-001@example.com>
+In-Reply-To: <original-001@example.com>
+Content-Type: text/plain; charset="utf-8"
+
+Sounds good, ship it.
+
+On Mon, Jan 1, 2024 at 10:00 AM Alice <alice@example.com> wrote:
+> Original question text about whether we are ready to ship.
+> Please confirm receipt and approval.
+>
+> -- Alice

@@ -1,0 +1,8 @@
+From: alice@example.com
+To: bob@example.com
+Subject: Re: Invoice 4421
+Date: Mon, 1 Jan 2024 10:00:00 +0000
+Message-ID: <short-reply-001@example.com>
+Content-Type: text/plain; charset="utf-8"
+
+Approved. Please go ahead and send it.
