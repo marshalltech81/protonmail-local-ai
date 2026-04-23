@@ -23,12 +23,19 @@ dev = [
 ]
 
 [tool.pytest.ini_options]
+# ``tests/eval`` is the opt-in retrieval-quality harness — it requires a
+# real indexed mailbox via ``MCP_EVAL_DB`` and is excluded from the
+# default collection so the regular suite stays self-contained. Run it
+# explicitly with ``pytest -m eval``.
 testpaths = ["tests"]
 pythonpath = ["."]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
-addopts = "-v --tb=short --cov=src --cov-branch --cov-report=term-missing --cov-fail-under=90"
+addopts = "-v --tb=short --cov=src --cov-branch --cov-report=term-missing --cov-fail-under=90 --ignore=tests/eval"
+markers = [
+    "eval: opt-in retrieval-quality eval against a real mailbox (skipped by default; run with `pytest -m eval --override-ini='addopts='`)",
+]
 
 [tool.coverage.run]
 branch = true
