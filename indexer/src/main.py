@@ -29,6 +29,7 @@ from .queue import load_config_from_env as load_queue_config_from_env
 from .quoting import strip_for_embedding
 from .reconciler import Reconciler, ReconcilerConfig, load_config_from_env, sweep_paths
 from .threader import Threader
+from .timings import StageTimings, TimingAggregator, format_summary
 
 logging.basicConfig(
     level=logging.INFO,
@@ -125,27 +126,43 @@ def _index_one_file(
     db: Database,
     embedder: Embedder,
     threader: Threader,
-) -> tuple[bool, str, str | None]:
+) -> tuple[bool, str, str | None, StageTimings]:
     """Run the parse → thread → embed → upsert pipeline for ``path``.
 
-    Returns ``(succeeded, stage, error_message)`` so the caller can
-    record the specific failure stage in ``indexing_jobs.last_stage``.
-    A ``None`` ``Message`` from the parser is treated as a terminal
+    Returns ``(succeeded, stage, error_message, timings)`` so the caller
+    can record the specific failure stage in ``indexing_jobs.last_stage``
+    and feed the per-stage durations into a rolling aggregator. A
+    ``None`` ``Message`` from the parser is treated as a terminal
     success (no Message-ID, nothing retries will fix) — the queue row
-    is deleted rather than retried indefinitely.
+    is deleted rather than retried indefinitely. Timings reflect only
+    stages that ran; stages skipped due to an earlier failure stay 0.
     """
+    parse_ms = thread_ms = embed_ms = db_write_ms = 0.0
+
+    t0 = time.perf_counter()
     try:
         message = parse_email(path, maildir_root=MAILDIR_PATH)
     except Exception as e:  # defensive: parse_email catches internally
-        return False, "parse", repr(e)
+        parse_ms = (time.perf_counter() - t0) * 1000
+        return False, "parse", repr(e), StageTimings(parse_ms=parse_ms)
+    parse_ms = (time.perf_counter() - t0) * 1000
     if message is None:
-        return True, "parse", None
+        return True, "parse", None, StageTimings(parse_ms=parse_ms)
 
+    t0 = time.perf_counter()
     try:
         thread = threader.assign_thread(message)
     except Exception as e:
-        return False, "thread", repr(e)
+        thread_ms = (time.perf_counter() - t0) * 1000
+        return (
+            False,
+            "thread",
+            repr(e),
+            StageTimings(parse_ms=parse_ms, thread_ms=thread_ms),
+        )
+    thread_ms = (time.perf_counter() - t0) * 1000
 
+    t0 = time.perf_counter()
     try:
         # The stored body_text feeds FTS (users legitimately search
         # quoted text), but the embedding input is stripped of quoted
@@ -154,15 +171,45 @@ def _index_one_file(
         body = db.build_merged_body(thread)
         embedding = embedder.embed(strip_for_embedding(body))
     except Exception as e:
-        return False, "embed", repr(e)
+        embed_ms = (time.perf_counter() - t0) * 1000
+        return (
+            False,
+            "embed",
+            repr(e),
+            StageTimings(parse_ms=parse_ms, thread_ms=thread_ms, embed_ms=embed_ms),
+        )
+    embed_ms = (time.perf_counter() - t0) * 1000
 
+    t0 = time.perf_counter()
     try:
         db.upsert_thread(thread, embedding, body=body)
     except Exception as e:
-        return False, "db_write", repr(e)
+        db_write_ms = (time.perf_counter() - t0) * 1000
+        return (
+            False,
+            "db_write",
+            repr(e),
+            StageTimings(
+                parse_ms=parse_ms,
+                thread_ms=thread_ms,
+                embed_ms=embed_ms,
+                db_write_ms=db_write_ms,
+            ),
+        )
+    db_write_ms = (time.perf_counter() - t0) * 1000
 
     log.info(f"Indexed: {message.subject[:60]}")
-    return True, "db_write", None
+    return (
+        True,
+        "db_write",
+        None,
+        StageTimings(
+            parse_ms=parse_ms,
+            thread_ms=thread_ms,
+            embed_ms=embed_ms,
+            db_write_ms=db_write_ms,
+        ),
+    )
 
 
 def drain_queue(
@@ -172,6 +219,7 @@ def drain_queue(
     threader: Threader,
     *,
     max_batch: int | None = None,
+    timing_aggregator: TimingAggregator | None = None,
 ) -> int:
     """Process queued jobs until nothing is due, or ``max_batch`` have run.
 
@@ -180,7 +228,8 @@ def drain_queue(
     or failure (increment attempts, schedule backoff, or dead-letter).
     Running with ``max_batch`` lets the main loop interleave reconciler
     passes and health-file refreshes with queue work so neither starves
-    the other.
+    the other. ``timing_aggregator`` is fed every per-file timing so
+    operators can see p50/p95 of each stage in the periodic summary.
     """
     attempted = 0
     while max_batch is None or attempted < max_batch:
@@ -188,7 +237,9 @@ def drain_queue(
         if row is None:
             break
         filepath = row["filepath"]
-        succeeded, stage, error = _index_one_file(Path(filepath), db, embedder, threader)
+        succeeded, stage, error, timings = _index_one_file(Path(filepath), db, embedder, threader)
+        if timing_aggregator is not None:
+            timing_aggregator.record(timings)
         if succeeded:
             queue.mark_succeeded(filepath)
         else:
@@ -198,6 +249,12 @@ def drain_queue(
 
 
 HEALTH_REFRESH_EVERY = 25
+# Emit a p50/p95/max timing summary at most this often. The aggregator
+# itself has an independent rolling window — this constant only controls
+# how often the line is logged, not how many samples back the percentiles
+# look. Keeping it equal to ``HEALTH_REFRESH_EVERY`` lines summaries up
+# with the same cadence as the health-file refresh.
+TIMING_LOG_EVERY = 25
 
 
 def _iter_maildir_messages(root: Path):
@@ -240,12 +297,14 @@ def initial_index(
     log.info(f"Initial index: enqueued {enqueued} message(s).")
 
     processed = 0
+    timing_aggregator = TimingAggregator(window=200)
     while True:
         row = queue.claim_next()
         if row is None:
             break
         filepath = row["filepath"]
-        succeeded, stage, error = _index_one_file(Path(filepath), db, embedder, threader)
+        succeeded, stage, error, timings = _index_one_file(Path(filepath), db, embedder, threader)
+        timing_aggregator.record(timings)
         if succeeded:
             queue.mark_succeeded(filepath)
         else:
@@ -253,6 +312,16 @@ def initial_index(
         processed += 1
         if processed % HEALTH_REFRESH_EVERY == 0:
             touch_health_file()
+        if processed % TIMING_LOG_EVERY == 0:
+            line = format_summary(timing_aggregator.summary())
+            if line:
+                log.info(line)
+    # Always emit a final summary at the end of the initial scan, even
+    # if the count was not a multiple of ``TIMING_LOG_EVERY`` — the
+    # operator wants to see the cost of the scan they just ran.
+    final_line = format_summary(timing_aggregator.summary())
+    if final_line:
+        log.info(final_line)
     log.info(f"Initial index complete: {processed} job(s) processed.")
 
 
@@ -370,6 +439,8 @@ def main():
     log.info("Watching Maildir for new emails...")
 
     last_reconcile = time.monotonic()
+    timing_aggregator = TimingAggregator(window=200)
+    drained_since_log = 0
     try:
         while True:
             touch_health_file()
@@ -379,7 +450,20 @@ def main():
             # enqueue (or a burst from an mbsync sync) does not starve
             # the reconciler or the health-file refresh.
             try:
-                drain_queue(queue, db, embedder, threader, max_batch=HEALTH_REFRESH_EVERY)
+                drained = drain_queue(
+                    queue,
+                    db,
+                    embedder,
+                    threader,
+                    max_batch=HEALTH_REFRESH_EVERY,
+                    timing_aggregator=timing_aggregator,
+                )
+                drained_since_log += drained
+                if drained_since_log >= TIMING_LOG_EVERY:
+                    line = format_summary(timing_aggregator.summary())
+                    if line:
+                        log.info(line)
+                    drained_since_log = 0
             except Exception as e:
                 log.error(f"queue drain failed: {e}")
             if reconciler is not None:
