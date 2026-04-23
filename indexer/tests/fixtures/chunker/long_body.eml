@@ -1,0 +1,20 @@
+From: alice@example.com
+To: bob@example.com
+Subject: Quarterly review - long form
+Date: Tue, 2 Jan 2024 09:00:00 +0000
+Message-ID: <long-body-001@example.com>
+Content-Type: text/plain; charset="utf-8"
+
+OPENING_MARKER This is the first paragraph of a long-form quarterly review email. It contains enough text to easily exceed the chunker's target token budget on its own when combined with the paragraphs that follow. We use deterministic filler so test assertions stay stable across runs.
+
+The second paragraph covers product updates. We shipped three major features this quarter: the new search ranker, the improved indexer reliability work, and the per-message chunking pipeline that this review email is itself testing. Each feature landed with full unit and integration coverage and shipped behind a feature flag for the first two weeks.
+
+The third paragraph covers reliability. P95 latency for the search endpoint dropped from 480ms to 210ms after the chunk-level retrieval path went live. Indexer throughput improved by roughly forty percent thanks to the durable job queue work that landed earlier in the quarter. Error rates remained below the alert threshold for the entire reporting window.
+
+The fourth paragraph covers customer feedback. Three of our top ten accounts mentioned the chunk-grounded answers as the single most-improved aspect of the product this quarter. Two of those accounts had previously filed escalations about answer quality on long threads and have since closed those tickets.
+
+The fifth paragraph covers next quarter. The plan is to extend the chunk pipeline to attachments, add a citation surface in the MCP tools so answers can point at specific chunks, and revisit the embedding model now that the per-chunk granularity makes a smaller, faster model more viable than it was at thread granularity.
+
+The sixth paragraph covers risks. The largest is migration cost: existing thread-level vectors must coexist with chunk-level vectors during the rollout, which roughly doubles the index size for a few weeks. We have budget for the storage but want to keep the dual-index window short to limit operational complexity.
+
+CLOSING_MARKER This is the closing paragraph. If both the opening and the closing markers survive into the chunked output, the chunker has not silently dropped either end of the message. That is the property the fixture is designed to assert.
