@@ -7,7 +7,7 @@
 # -----------------------------------------------------------------------------
 # Stage 1: Builder — installs Python dependencies that require compilation
 # -----------------------------------------------------------------------------
-FROM python:3.14-slim-trixie@sha256:bc389f7dfcb21413e72a28f491985326994795e34d2b86c8ae2f417b4e7818aa AS builder
+FROM python:3.14-slim-trixie@sha256:5b3879b6f3cb77e712644d50262d05a7c146b7312d784a18eff7ff5462e77033 AS builder
 
 COPY --from=ghcr.io/astral-sh/uv:0.11.6@sha256:b1e699368d24c57cda93c338a57a8c5a119009ba809305cc8e86986d4a006754 /uv /uvx /bin/
 
@@ -27,7 +27,7 @@ COPY src/ ./src/
 # Stage 2: Runtime — no build toolchain
 # Runs as non-root user 'mcp' (UID 1003)
 # -----------------------------------------------------------------------------
-FROM python:3.14-slim-trixie@sha256:bc389f7dfcb21413e72a28f491985326994795e34d2b86c8ae2f417b4e7818aa
+FROM python:3.14-slim-trixie@sha256:5b3879b6f3cb77e712644d50262d05a7c146b7312d784a18eff7ff5462e77033
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
