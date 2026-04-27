@@ -37,7 +37,7 @@ jobs:
         run: uv run pytest -q --cov-report=xml:coverage.xml --cov-report=term
 
       - name: Upload indexer coverage report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: indexer-coverage
           path: indexer/coverage.xml
@@ -70,7 +70,7 @@ jobs:
         run: uv run pytest -q --cov-report=xml:coverage.xml --cov-report=term
 
       - name: Upload mcp-server coverage report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: mcp-server-coverage
           path: mcp-server/coverage.xml
