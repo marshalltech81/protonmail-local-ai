@@ -40,7 +40,7 @@ jobs:
           cache: true
 
       - name: Scan indexer dependencies
-        uses: aquasecurity/trivy-action@v0.35.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           skip-setup-trivy: true
           scan-type: fs
@@ -51,7 +51,7 @@ jobs:
           severity: CRITICAL,HIGH
 
       - name: Scan mcp-server dependencies
-        uses: aquasecurity/trivy-action@v0.35.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           skip-setup-trivy: true
           scan-type: fs
@@ -93,7 +93,7 @@ jobs:
           cache: true
 
       - name: Scan repository configuration
-        uses: aquasecurity/trivy-action@v0.35.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           skip-setup-trivy: true
           scan-type: fs
