@@ -147,9 +147,8 @@ def register_retrieval_tools(server, db):
 
         Args:
             folder: Folder name (default: INBOX)
-            filter_type: Retained for interface compatibility. The current
-                         local index listing ignores this value and always
-                         returns the most recent threads in the folder.
+            filter_type: Currently only "all" is supported by the local
+                         index. Other values return a clear validation error.
             limit: Number of threads to return (default: 20)
             offset: Pagination offset (default: 0)
 

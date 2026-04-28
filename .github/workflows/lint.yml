@@ -82,3 +82,30 @@ jobs:
 
       - name: Compile mcp-server sources
         run: python -m compileall -q -f mcp-server/src
+
+  mypy:
+    name: mypy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version-file: ".python-version"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+        with:
+          version: "0.11.6"
+          enable-cache: true
+          cache-dependency-glob: |
+            indexer/uv.lock
+            mcp-server/uv.lock
+
+      - name: Typecheck indexer
+        working-directory: indexer
+        run: uv run mypy src
+
+      - name: Typecheck mcp-server
+        working-directory: mcp-server
+        run: uv run mypy src

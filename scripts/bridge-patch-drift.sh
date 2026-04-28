@@ -46,11 +46,25 @@ cleanup() {
 
 trap cleanup EXIT
 
+# `timeout` is the GNU coreutils binary; on Linux it ships as `timeout`, on
+# macOS as `gtimeout` (from `brew install coreutils`). Pick whichever the host
+# provides so the drift check runs the same on dev laptops and CI.
+if command -v timeout >/dev/null 2>&1; then
+    TIMEOUT_CMD="timeout"
+elif command -v gtimeout >/dev/null 2>&1; then
+    TIMEOUT_CMD="gtimeout"
+else
+    printf 'ERROR: neither timeout nor gtimeout found on PATH.\n' >&2
+    printf 'On macOS, install with: brew install coreutils\n' >&2
+    exit 1
+fi
+readonly TIMEOUT_CMD
+
 # Fetch the exact upstream Bridge release and then run the same patch helper the
 # Docker build uses. If the helper cannot find the expected patch points, it
 # exits non-zero and we know the upstream source drifted.
 printf 'Checking Proton Bridge patch points for %s...\n' "$BRIDGE_VERSION"
-GIT_TERMINAL_PROMPT=0 timeout 60s git clone --depth 1 --branch "$BRIDGE_VERSION" \
+GIT_TERMINAL_PROMPT=0 "$TIMEOUT_CMD" 60s git clone --depth 1 --branch "$BRIDGE_VERSION" \
     https://github.com/ProtonMail/proton-bridge.git "$CLONE_DIR"
 
 printf 'Fetched upstream Bridge commit %s.\n' "$(git -C "$CLONE_DIR" rev-parse --short HEAD)"

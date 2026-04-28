@@ -62,7 +62,11 @@ def make_thread(
 
 @pytest.fixture
 def db(tmp_path: Path) -> Database:
-    return Database(tmp_path / "test.db")
+    database = Database(tmp_path / "test.db")
+    try:
+        yield database
+    finally:
+        database.close()
 
 
 @pytest.fixture

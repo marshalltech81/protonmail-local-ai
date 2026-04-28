@@ -135,6 +135,13 @@ class TestListThreads:
         out = asyncio.run(handler(folder="INBOX"))
         assert "Error" in _text(out)
 
+    def test_unsupported_filter_type_returns_error_text(self, fake_server, seeded_db):
+        handler = _handlers(fake_server, seeded_db)["list_threads"]
+        out = asyncio.run(handler(folder="INBOX", filter_type="unread"))
+        text = _text(out)
+        assert "Error" in text
+        assert "filter_type" in text
+
 
 class TestListFolders:
     def test_lists_each_folder_with_count(self, fake_server, seeded_db):

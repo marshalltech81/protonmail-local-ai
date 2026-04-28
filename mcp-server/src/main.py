@@ -1,15 +1,18 @@
 """
 MCP Server entry point.
-Exposes local mailbox search, retrieval, intelligence, and system tools to
-Claude Desktop via HTTP/SSE transport. Mail-changing action tools are disabled
-by default until a safe opt-in write backend exists.
+Exposes local mailbox search, retrieval, intelligence, and system tools over
+MCP transports. Mail-changing action tools are disabled by default until a safe
+opt-in write backend exists.
 """
 
 import logging
 import os
 from pathlib import Path
+from typing import Literal, cast
 
+import uvicorn
 from mcp.server.fastmcp import FastMCP
+from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
@@ -31,7 +34,12 @@ def _env_bool(name: str, default: bool) -> bool:
     raw = os.environ.get(name)
     if raw is None:
         return default
-    return raw.strip().lower() in {"1", "true", "yes", "on"}
+    normalized = raw.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{name} must be a boolean value")
 
 
 def _read_secret(secret_name: str, env_fallback: str = "") -> str:
@@ -59,6 +67,43 @@ CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL", "claude-sonnet-4-6")
 ANTHROPIC_KEY = _read_secret("anthropic_api_key", "ANTHROPIC_API_KEY")
 MCP_PORT = int(os.environ.get("MCP_PORT", "3000"))
 MCP_READ_ONLY = _env_bool("MCP_READ_ONLY", True)
+MCP_TRANSPORT = os.environ.get("MCP_TRANSPORT", "sse")
+
+
+def _normalize_transport(raw: str) -> str:
+    transport = raw.strip().lower()
+    if transport in {"sse", "streamable-http", "dual"}:
+        return transport
+    raise ValueError("MCP_TRANSPORT must be one of: sse, streamable-http, dual")
+
+
+async def _run_dual_transport_async(server: FastMCP) -> None:
+    """Serve SSE and Streamable HTTP routes from one FastMCP instance."""
+    sse_app = server.sse_app()
+    streamable_http_app = server.streamable_http_app()
+
+    app = Starlette(
+        debug=server.settings.debug,
+        routes=[*streamable_http_app.routes, *sse_app.routes],
+        lifespan=lambda _: server.session_manager.run(),
+    )
+    config = uvicorn.Config(
+        app,
+        host=server.settings.host,
+        port=server.settings.port,
+        log_level=server.settings.log_level.lower(),
+    )
+    await uvicorn.Server(config).serve()
+
+
+def _run_server(server: FastMCP, transport: str) -> None:
+    normalized = _normalize_transport(transport)
+    if normalized == "dual":
+        import anyio
+
+        anyio.run(lambda: _run_dual_transport_async(server))
+        return
+    server.run(transport=cast(Literal["sse", "streamable-http"], normalized))
 
 
 def main():
@@ -67,7 +112,7 @@ def main():
     ollama = OllamaClient(OLLAMA_HOST, EMBED_MODEL, LLM_MODEL)
 
     # FastMCP server — supports @server.tool() decorator and SSE transport
-    server = FastMCP("protonmail-local-ai", port=MCP_PORT)
+    server = FastMCP("protonmail-local-ai", host="0.0.0.0", port=MCP_PORT)  # nosec B104
 
     # Plain HTTP health endpoint used by the container healthcheck. Sits
     # outside the MCP protocol so `docker healthcheck` and operator scripts
@@ -99,15 +144,18 @@ def main():
         )
     register_system_tools(server, db, bridge_enabled=False)
 
+    transport = _normalize_transport(MCP_TRANSPORT)
+
     log.info(f"MCP server starting on port {MCP_PORT}")
     log.info(f"  SQLite:   {SQLITE_PATH}")
     log.info(f"  Ollama:   {OLLAMA_HOST}")
     log.info(f"  LLM mode: {LLM_MODE}")
+    log.info(f"  Transport: {transport}")
     if LLM_MODE == "cloud":
         log.info(f"  Claude model: {CLAUDE_MODEL}")
     log.info("  Retrieval: local SQLite index only")
 
-    server.run(transport="sse")
+    _run_server(server, transport)
 
 
 if __name__ == "__main__":

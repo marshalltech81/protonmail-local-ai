@@ -1,0 +1,59 @@
+services:
+
+  # ---------------------------------------------------------------------------
+  # Open WebUI (optional)
+  # Local browser UI for Ollama-backed chats and Streamable HTTP MCP tools.
+  # Start with: make open-webui-up
+  # ---------------------------------------------------------------------------
+  open-webui:
+    image: ${OPEN_WEBUI_IMAGE:-ghcr.io/open-webui/open-webui:v0.9.0}
+    container_name: open-webui
+    restart: unless-stopped
+    init: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 256
+    secrets:
+      - open_webui_secret_key
+    depends_on:
+      ollama:
+        condition: service_healthy
+      mcp-server:
+        condition: service_healthy
+    environment:
+      WEBUI_NAME: ${OPEN_WEBUI_NAME:-ProtonMail Local AI}
+      WEBUI_URL: http://localhost:${OPEN_WEBUI_PORT:-8080}
+      # Open WebUI's start.sh reads the key from this path when WEBUI_SECRET_KEY
+      # is unset; keeps the secret out of `docker inspect` env metadata.
+      WEBUI_SECRET_KEY_FILE: /run/secrets/open_webui_secret_key
+      ENABLE_SIGNUP: ${OPEN_WEBUI_ENABLE_SIGNUP:-true}
+      DEFAULT_MODELS: ${OPEN_WEBUI_DEFAULT_MODEL:-llama3.2}
+      ENABLE_OLLAMA_API: "true"
+      OLLAMA_BASE_URL: http://ollama:11434
+      ENABLE_OPENAI_API: "false"
+      ENABLE_COMMUNITY_SHARING: "false"
+      ENABLE_FORWARD_USER_INFO_HEADERS: "false"
+      ENABLE_WEB_LOADER_SSL_VERIFICATION: "true"
+      SCARF_NO_ANALYTICS: "true"
+      DO_NOT_TRACK: "true"
+      ANONYMIZED_TELEMETRY: "false"
+    volumes:
+      - open-webui-data:/app/backend/data
+    ports:
+      - "127.0.0.1:${OPEN_WEBUI_PORT:-8080}:8080"
+    networks:
+      - app-net
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  open-webui-data:
+
+secrets:
+  open_webui_secret_key:
+    file: ./.secrets/open_webui_secret_key.txt

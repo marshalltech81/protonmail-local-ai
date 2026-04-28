@@ -5,10 +5,13 @@ Thread-level indexing: one row per thread, updated as new messages arrive.
 """
 
 import functools
+import hashlib
 import json
 import logging
 import sqlite3
 import threading
+import weakref
+from contextlib import contextmanager
 from pathlib import Path
 
 import sqlite_vec
@@ -18,20 +21,18 @@ from .threader import THREAD_BODY_TEXT_MAX_CHARS, canonical_addr
 log = logging.getLogger("indexer.database")
 
 
+def _close_connection(conn: sqlite3.Connection) -> None:
+    conn.close()
+
+
 def _dedupe_by_canonical(addrs: list[str]) -> list[str]:
     """Dedup address display strings, first-seen display wins.
 
-    The merge path in ``upsert_thread`` / ``_rewrite_thread_row`` previously
-    keyed de-duplication on the raw display string via ``dict.fromkeys``, so
-    ``Bob Smith <bob@x>`` accumulated alongside a pre-existing ``bob@x`` row
-    even though both refer to the same correspondent. Keying on the canonical
-    bare address (``parseaddr`` + lowercase) collapses those variants.
-
-    Entries with no recoverable email address (``canonical_addr`` returns
-    ``""``) are keyed on their lowercased stripped value rather than dropped.
-    The threader already filters malformed header values at write time; at
-    the database merge layer the ``existing`` side may include pre-canonical
-    legacy data, and silently dropping it would be surprising data loss.
+    Keys on the canonical bare address (``parseaddr`` + lowercase) so
+    variants like ``Bob Smith <bob@x>`` and ``bob@x`` collapse into a
+    single entry rather than accumulating both. Entries with no
+    recoverable email address (``canonical_addr`` returns ``""``) are
+    keyed on their lowercased stripped value instead of being dropped.
     """
     seen: set[str] = set()
     result: list[str] = []
@@ -48,13 +49,11 @@ def _dedupe_by_canonical(addrs: list[str]) -> list[str]:
     return result
 
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 12
 
-# Schema v3 uses FTS5 ``contentless_delete=1``, which SQLite added in 3.43.
-# Running against an older runtime silently degrades (migration errors caught
-# by a broad except) or hard-fails at boot — both difficult to diagnose in
-# production. Validate the runtime version at Database init and fail fast
-# with a clear message instead.
+# The schema uses FTS5 ``contentless_delete=1``, which SQLite added in 3.43.
+# Validate the runtime version at Database init and fail fast with a clear
+# message instead of degrading silently.
 MIN_SQLITE_VERSION = (3, 43, 0)
 
 # Vector dimension reserved by the threads_vec schema (FLOAT[768]). The
@@ -73,7 +72,7 @@ def _require_minimum_sqlite() -> None:
         required = ".".join(str(x) for x in MIN_SQLITE_VERSION)
         raise SQLiteTooOldError(
             f"indexer requires SQLite >= {required}, "
-            f"runtime is {sqlite3.sqlite_version}. Schema v3 FTS5 "
+            f"runtime is {sqlite3.sqlite_version}. FTS5 "
             "contentless_delete=1 will not work on this runtime. Rebuild "
             "the indexer image from a base that ships a newer SQLite "
             "(python:3.14-slim-trixie ships 3.46.1)."
@@ -108,9 +107,16 @@ class Database:
         _require_minimum_sqlite()
         self.path = path
         self._lock = threading.RLock()
+        self._transaction_depth = 0
         path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = self._connect()
-        self._migrate()
+        self._closed = False
+        self._finalizer = weakref.finalize(self, _close_connection, self._conn)
+        try:
+            self._migrate()
+        except Exception:
+            self.close()
+            raise
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(str(self.path), check_same_thread=False)
@@ -119,306 +125,271 @@ class Database:
         conn.enable_load_extension(True)
         sqlite_vec.load(conn)
         conn.enable_load_extension(False)
+        conn.execute("PRAGMA foreign_keys = ON")
         # Performance tuning
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
         conn.execute("PRAGMA cache_size=-64000")  # 64MB cache
         return conn
 
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._finalizer.detach()
+        self._conn.close()
+        self._closed = True
+
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except Exception:
+            pass
+
+    def _begin_if_needed(self, cur: sqlite3.Cursor) -> bool:
+        if self._transaction_depth > 0:
+            return False
+        cur.execute("BEGIN IMMEDIATE")
+        return True
+
+    def _commit_if_started(self, started: bool) -> None:
+        if started:
+            self._conn.commit()
+
+    def _rollback_if_started(self, started: bool) -> None:
+        if started:
+            self._conn.rollback()
+
+    @contextmanager
+    def transaction(self):
+        """Run several database writes as one atomic unit.
+
+        Public write helpers normally manage their own ``BEGIN``/``COMMIT``.
+        The indexing pipeline needs a wider boundary so thread, chunk,
+        attachment, and vector rows cannot be left half-written if the final
+        step fails. Nested calls reuse the outer transaction and only the
+        outermost context commits or rolls back.
+        """
+        with self._lock:
+            outermost = self._transaction_depth == 0
+            if outermost:
+                self._conn.execute("BEGIN IMMEDIATE")
+            self._transaction_depth += 1
+            try:
+                yield
+            except Exception:
+                self._transaction_depth -= 1
+                if outermost:
+                    self._conn.rollback()
+                raise
+            else:
+                self._transaction_depth -= 1
+                if outermost:
+                    self._conn.commit()
+
     # -------------------------------------------------------------------------
-    # Schema migrations
-    # Each _apply_vN method is idempotent and only runs when the stored version
-    # is below N. Bump SCHEMA_VERSION and add a new _apply_vN for each change.
+    # Schema setup
+    # Fresh installs apply ``_apply_initial_schema`` directly; an existing
+    # database with a different version raises rather than auto-migrating
+    # (see ``_migrate``).
     # -------------------------------------------------------------------------
 
     def _migrate(self):
+        """Create the schema if it doesn't exist; otherwise verify it.
+
+        This codebase has no committed migration story — fresh installs
+        write the current schema directly, and the only upgrade path
+        for an existing volume is to wipe ``sqlite-volume`` and let the
+        indexer re-index the Maildir. ``SCHEMA_VERSION`` is kept as a
+        constant so the day a real upgrade is needed, this function can
+        be extended into a proper migration runner without churning
+        the read paths.
+        """
         cur = self._conn.cursor()
-
-        # schema_version must exist before we can read from it
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS schema_version (
-                version INTEGER PRIMARY KEY
-            )
-        """)
-        self._conn.commit()
-
+        cur.execute("CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY)")
         row = cur.execute("SELECT version FROM schema_version").fetchone()
-        current = row["version"] if row else 0
+        if row is None:
+            self._apply_initial_schema(cur)
+            cur.execute("INSERT INTO schema_version VALUES (?)", (SCHEMA_VERSION,))
+            self._conn.commit()
+            log.info(f"Database initialized at {self.path} (schema v{SCHEMA_VERSION})")
+            return
 
-        if current < 1:
-            self._apply_v1(cur)
-        if current < 2:
-            self._apply_v2(cur)
-        if current < 3:
-            self._apply_v3(cur)
-        if current < 4:
-            self._apply_v4(cur)
-        if current < 5:
-            self._apply_v5(cur)
-        if current < 6:
-            self._apply_v6(cur)
-        if current < 7:
-            self._apply_v7(cur)
-        if current < 8:
-            self._apply_v8(cur)
-
-        # Reset to a single row. Databases upgraded through an earlier
-        # ``INSERT OR REPLACE`` revision may carry multiple rows in
-        # ``schema_version``; updating them all to the same PRIMARY KEY
-        # value would violate uniqueness. DELETE + INSERT collapses any
-        # stale history into one canonical row regardless of prior state.
-        cur.execute("DELETE FROM schema_version")
-        cur.execute("INSERT INTO schema_version VALUES (?)", (SCHEMA_VERSION,))
-        self._conn.commit()
+        if row["version"] != SCHEMA_VERSION:
+            raise RuntimeError(
+                f"Schema version mismatch: stored v{row['version']}, code expects "
+                f"v{SCHEMA_VERSION}. This codebase does not implement migrations; "
+                "wipe the sqlite-volume and let the indexer rebuild from Maildir."
+            )
         log.info(f"Database ready at {self.path} (schema v{SCHEMA_VERSION})")
 
-    def _apply_v1(self, cur: sqlite3.Cursor):
-        """Initial schema."""
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS threads (
-                thread_id    TEXT PRIMARY KEY,
-                subject      TEXT NOT NULL,
-                participants TEXT NOT NULL,  -- JSON array
-                folder       TEXT NOT NULL,
-                date_first   TEXT NOT NULL,
-                date_last    TEXT NOT NULL,
-                message_ids  TEXT NOT NULL,  -- JSON array
-                snippet      TEXT,
-                has_attachments INTEGER DEFAULT 0
-            )
-        """)
+    def _apply_initial_schema(self, cur: sqlite3.Cursor):
+        """Create every table the indexer needs, in their final shape.
 
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS message_thread_map (
-                message_id TEXT PRIMARY KEY,
-                thread_id  TEXT NOT NULL,
-                filepath   TEXT NOT NULL,
-                FOREIGN KEY (thread_id) REFERENCES threads(thread_id)
-            )
-        """)
+        Three families of tables, each with its FTS5 + sqlite-vec
+        sidecar where applicable:
 
-        cur.execute("""
-            CREATE VIRTUAL TABLE IF NOT EXISTS threads_fts
-            USING fts5(
-                thread_id UNINDEXED,
-                subject,
-                participants,
-                body,
-                content='',
-                tokenize='porter unicode61'
-            )
-        """)
+        * **Thread-level coarse retrieval** — ``threads`` (one row per
+          conversation) plus ``threads_fts`` (BM25 keyword search) and
+          ``threads_vec`` (vector search). The thread vector is the
+          mean of its chunks' vectors so coarse and precise retrieval
+          share source data. ``fts_rowid`` on ``threads`` lets the
+          writer delete a specific FTS row before re-inserting updated
+          content.
+        * **Per-message chunk precision retrieval** — ``message_chunks``
+          (paragraph-packed slices keyed by deterministic SHA-256
+          chunk_id), ``message_chunks_fts``, and ``message_chunks_vec``.
+          ``attachment_id`` is non-null for chunks derived from a
+          specific attachment; null for body chunks.
+        * **Attachment indexing** — ``attachments`` (one per occurrence,
+          captures filename/MIME), ``attachments_fts`` (filename + MIME
+          search), and ``attachment_extractions`` (per content-hash
+          cache so OCR / PDF parse cost runs at most once per unique
+          payload regardless of forwarding count).
 
-        cur.execute("""
-            CREATE VIRTUAL TABLE IF NOT EXISTS threads_vec
-            USING vec0(
-                thread_id TEXT PRIMARY KEY,
-                embedding FLOAT[768]
-            )
-        """)
-
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS indexed_files (
-                filepath TEXT PRIMARY KEY,
-                indexed_at TEXT NOT NULL
-            )
-        """)
-        self._conn.commit()
-
-    def _apply_v2(self, cur: sqlite3.Cursor):
-        """Add body_text column to threads.
-
-        Stores the accumulated embedding text for a thread so that when a new
-        message arrives, its content can be appended to the existing body
-        rather than regenerated only from the new message. Without this column,
-        get_thread returns an empty messages list and upsert_thread would embed
-        only the latest message, discarding all thread history.
+        Plus the cross-cutting tables: ``message_thread_map`` (message
+        → thread index), ``indexed_files`` (file identity for rename
+        detection), ``pending_deletions`` (tombstones for the opt-in
+        deletion reconciler), and ``indexing_jobs`` (durable retry +
+        dead-letter queue for the parse → embed → upsert pipeline).
         """
-        try:
-            cur.execute("ALTER TABLE threads ADD COLUMN body_text TEXT")
-        except sqlite3.OperationalError:
-            pass  # Column already exists on a fresh database built from v1
-        self._conn.commit()
+        cur.executescript(f"""
+            -- Thread-level coarse retrieval
+            CREATE TABLE threads (
+                thread_id       TEXT PRIMARY KEY,
+                subject         TEXT NOT NULL,
+                participants    TEXT NOT NULL,           -- JSON array
+                senders         TEXT NOT NULL DEFAULT '[]',  -- JSON array (From only)
+                folder          TEXT NOT NULL,
+                date_first      TEXT NOT NULL,
+                date_last       TEXT NOT NULL,
+                message_ids     TEXT NOT NULL,           -- JSON array
+                snippet         TEXT,
+                has_attachments INTEGER DEFAULT 0,
+                body_text       TEXT,
+                fts_rowid       INTEGER
+            );
 
-    def _apply_v3(self, cur: sqlite3.Cursor):
-        """Rebuild ``threads_fts`` with ``contentless_delete=1`` and track
-        its rowid on each thread so updates/deletes actually remove rows.
-
-        The v1 schema created ``threads_fts`` as a contentless FTS5 table
-        without the ``contentless_delete`` option, and with an ``UNINDEXED``
-        ``thread_id`` column. Two issues follow from that:
-
-        1. ``DELETE FROM threads_fts WHERE thread_id = ?`` silently no-ops on
-           a contentless FTS5 table — so every update or rebuild accumulated
-           stale rows rather than replacing them.
-        2. UNINDEXED columns in a contentless FTS5 table always read back as
-           ``NULL``, which broke the MCP keyword-search join
-           (``JOIN threads ON threads_fts.thread_id = threads.thread_id``).
-
-        SQLite >= 3.43 adds ``contentless_delete=1`` which makes
-        ``DELETE FROM fts WHERE rowid = ?`` work. We store each row's rowid
-        in a new ``threads.fts_rowid`` column so the writer side can delete
-        a specific FTS row before re-inserting updated content, and the
-        reader side can join on the rowid instead of the always-null
-        ``thread_id``.
-        """
-        try:
-            cur.execute("ALTER TABLE threads ADD COLUMN fts_rowid INTEGER")
-        except sqlite3.OperationalError:
-            pass
-        cur.execute("DROP TABLE IF EXISTS threads_fts")
-        cur.execute(
-            """
-            CREATE VIRTUAL TABLE threads_fts
-            USING fts5(
+            CREATE VIRTUAL TABLE threads_fts USING fts5(
                 subject,
                 participants,
                 body,
                 content='',
                 contentless_delete=1,
                 tokenize='porter unicode61'
-            )
-            """
-        )
-        rows = cur.execute(
-            "SELECT thread_id, subject, participants, body_text FROM threads"
-        ).fetchall()
-        for r in rows:
-            cur.execute(
-                "INSERT INTO threads_fts (subject, participants, body) VALUES (?, ?, ?)",
-                (r["subject"], r["participants"], r["body_text"] or ""),
-            )
-            cur.execute(
-                "UPDATE threads SET fts_rowid = ? WHERE thread_id = ?",
-                (cur.lastrowid, r["thread_id"]),
-            )
-        self._conn.commit()
+            );
 
-    def _apply_v4(self, cur: sqlite3.Cursor):
-        """Add pending_deletions table for deletion reconciliation.
+            CREATE VIRTUAL TABLE threads_vec USING vec0(
+                thread_id TEXT PRIMARY KEY,
+                embedding FLOAT[{EMBEDDING_DIM}]
+            );
 
-        Records messages whose Maildir file has been flagged deleted by mbsync
-        (via the IMAP \\Deleted / Maildir ``T`` flag). The reconciler sweeps
-        this table and removes thread/FTS/vec rows only after a configurable
-        grace window — nothing in the primary tables is changed at tombstone
-        time, which keeps the soft-delete reversible if mbsync un-sets the
-        flag on a subsequent pull.
-        """
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS pending_deletions (
+            -- Per-message chunks (precision retrieval)
+            CREATE TABLE message_chunks (
+                chunk_id        TEXT PRIMARY KEY,
+                message_id      TEXT NOT NULL,
+                thread_id       TEXT NOT NULL,
+                chunk_index     INTEGER NOT NULL,
+                text            TEXT NOT NULL,
+                char_start      INTEGER NOT NULL,
+                char_end        INTEGER NOT NULL,
+                token_est       INTEGER NOT NULL,
+                chunked_at      TEXT NOT NULL,
+                fts_rowid       INTEGER,
+                attachment_id   TEXT,
+                FOREIGN KEY (message_id) REFERENCES message_thread_map(message_id)
+                    ON DELETE CASCADE,
+                FOREIGN KEY (thread_id) REFERENCES threads(thread_id)
+                    ON DELETE CASCADE
+            );
+
+            CREATE INDEX idx_message_chunks_message ON message_chunks(message_id);
+            CREATE INDEX idx_message_chunks_thread ON message_chunks(thread_id);
+            CREATE INDEX idx_message_chunks_attachment ON message_chunks(attachment_id);
+
+            CREATE VIRTUAL TABLE message_chunks_fts USING fts5(
+                text,
+                content='',
+                contentless_delete=1,
+                tokenize='porter unicode61'
+            );
+
+            CREATE VIRTUAL TABLE message_chunks_vec USING vec0(
+                chunk_id TEXT PRIMARY KEY,
+                embedding FLOAT[{EMBEDDING_DIM}]
+            );
+
+            -- Attachment indexing
+            CREATE TABLE attachments (
+                attachment_occurrence_id TEXT PRIMARY KEY,
+                message_id                TEXT NOT NULL,
+                attachment_id             TEXT NOT NULL,
+                thread_id                 TEXT NOT NULL,
+                filename                  TEXT NOT NULL,
+                content_type              TEXT NOT NULL,
+                size_bytes                INTEGER NOT NULL,
+                seen_at                   TEXT NOT NULL,
+                fts_rowid                 INTEGER,
+                FOREIGN KEY (message_id) REFERENCES message_thread_map(message_id)
+                    ON DELETE CASCADE,
+                FOREIGN KEY (thread_id) REFERENCES threads(thread_id)
+                    ON DELETE CASCADE
+            );
+
+            CREATE INDEX idx_attachments_attachment_id ON attachments(attachment_id);
+            CREATE INDEX idx_attachments_thread ON attachments(thread_id);
+            CREATE INDEX idx_attachments_message ON attachments(message_id);
+
+            CREATE TABLE attachment_extractions (
+                attachment_id      TEXT PRIMARY KEY,
+                extraction_status  TEXT NOT NULL,
+                extractor          TEXT,
+                extracted_text     TEXT,
+                extraction_error   TEXT,
+                extracted_at       TEXT NOT NULL
+            );
+
+            CREATE VIRTUAL TABLE attachments_fts USING fts5(
+                filename,
+                content_type,
+                content='',
+                contentless_delete=1,
+                tokenize='porter unicode61'
+            );
+
+            -- Cross-cutting tables
+            CREATE TABLE message_thread_map (
+                message_id TEXT PRIMARY KEY,
+                thread_id  TEXT NOT NULL,
+                filepath   TEXT NOT NULL,
+                FOREIGN KEY (thread_id) REFERENCES threads(thread_id)
+            );
+
+            CREATE TABLE indexed_files (
+                filepath     TEXT PRIMARY KEY,
+                indexed_at   TEXT NOT NULL,
+                size         INTEGER,
+                mtime_ns     INTEGER,
+                content_hash TEXT
+            );
+
+            -- Tombstones for opt-in deletion reconciler. ``marked_at``
+            -- is ISO 8601 UTC so the reaper's lexicographic cutoff
+            -- comparison is well-defined.
+            CREATE TABLE pending_deletions (
                 filepath   TEXT PRIMARY KEY,
                 message_id TEXT NOT NULL,
                 thread_id  TEXT NOT NULL,
                 marked_at  TEXT NOT NULL
-            )
-            """
-        )
-        cur.execute(
-            "CREATE INDEX IF NOT EXISTS idx_pending_deletions_thread "
-            "ON pending_deletions(thread_id)"
-        )
-        self._conn.commit()
+            );
+            CREATE INDEX idx_pending_deletions_thread
+                ON pending_deletions(thread_id);
 
-    def _apply_v5(self, cur: sqlite3.Cursor):
-        """Normalize ``pending_deletions.marked_at`` to ISO 8601 UTC.
-
-        ``add_pending_deletion`` previously wrote timestamps via SQLite's
-        ``datetime('now')`` function, which produces ``"YYYY-MM-DD HH:MM:SS"``
-        (space separator, no TZ). The reaper computes its cutoff from Python's
-        ``datetime.now(UTC).isoformat()`` → ``"YYYY-MM-DDTHH:MM:SS+00:00"``
-        (``T`` separator, explicit TZ). The ``WHERE marked_at <= ?`` query
-        is a lexicographic string compare, and space (0x20) sorts before
-        ``T`` (0x54), so a tombstone marked e.g. ``"2024-12-25 10:00:00"``
-        compared against cutoff ``"2024-12-25T00:00:00+00:00"`` looks older
-        than the cutoff even though it was actually created *after*. Result:
-        messages get reaped up to a day earlier than the grace window
-        promises.
-
-        Rewrite existing rows to the ISO 8601 UTC format so the sorted
-        comparison is well-defined. Going forward ``add_pending_deletion``
-        stores timestamps in the same format.
-        """
-        cur.execute(
-            "UPDATE pending_deletions "
-            "SET marked_at = REPLACE(marked_at, ' ', 'T') || '+00:00' "
-            "WHERE marked_at LIKE '____-__-__ __:__:__'"
-        )
-        self._conn.commit()
-
-    def _apply_v6(self, cur: sqlite3.Cursor):
-        """Add a ``senders`` JSON column to ``threads``.
-
-        The ``from_addr`` MCP search filter previously matched against
-        ``participants`` (the union of ``From`` / ``To`` / ``Cc``), so
-        "from alice" returned threads where alice was a recipient. That
-        overpromises — users reading the filter name expect sender-only
-        matching. ``senders`` stores only the ``From`` addresses of each
-        message in the thread, so the filter can be honest.
-
-        Existing rows get an empty JSON array; the filter implementation
-        falls back to ``participants`` for rows with empty senders, so
-        behavior is unchanged until the indexer reprocesses a thread and
-        populates the new column.
-        """
-        try:
-            cur.execute("ALTER TABLE threads ADD COLUMN senders TEXT NOT NULL DEFAULT '[]'")
-        except sqlite3.OperationalError:
-            pass  # Column already exists on a fresh database built from v1
-        self._conn.commit()
-
-    def _apply_v7(self, cur: sqlite3.Cursor):
-        """Add file-identity columns to ``indexed_files``.
-
-        ``is_indexed`` is still filepath-keyed (hot path stays O(1) on the
-        primary key), but the new columns let the reconciler distinguish
-        a flag-only rename from a genuine content change and, in future
-        passes, spot a "file vanished from path A but its content_hash
-        reappears at path B" rename that mbsync's in-place rename path
-        did not emit an ``on_moved`` event for.
-
-        Existing rows read back as ``NULL`` for the new columns and are
-        backfilled lazily as files are re-indexed or as
-        ``update_filepath`` carries them forward on rename. No migration-
-        time walk of the Maildir is required.
-        """
-        for column_type in (
-            ("size", "INTEGER"),
-            ("mtime_ns", "INTEGER"),
-            ("content_hash", "TEXT"),
-        ):
-            column, col_type = column_type
-            try:
-                cur.execute(f"ALTER TABLE indexed_files ADD COLUMN {column} {col_type}")
-            except sqlite3.OperationalError:
-                pass  # column already exists on a fresh database built from v1
-        self._conn.commit()
-
-    def _apply_v8(self, cur: sqlite3.Cursor):
-        """Add the ``indexing_jobs`` table — durable retry/dead-letter queue.
-
-        Before this, ``_index_file`` caught exceptions, logged them, and
-        dropped the work. A parser bug on one file would be retried on
-        every restart (since ``indexed_files`` never records the
-        failure) with no visibility; a transient Ollama outage during an
-        initial scan could silently skip files if the indexer happened
-        to restart before the scan resumed.
-
-        ``indexing_jobs`` closes both gaps. Every discovered filepath is
-        enqueued first; the worker loop claims due rows, runs the existing
-        parse/thread/embed/upsert pipeline, and marks the row succeeded
-        (delete) or failed (increment attempts, schedule backoff, or
-        transition to ``dead`` when attempts reach
-        ``INDEXER_MAX_ATTEMPTS``). Dead rows stay in the table for
-        operator visibility rather than disappearing silently.
-
-        The PRIMARY KEY on ``filepath`` collapses duplicate enqueues for
-        the same file (e.g. a watchdog event and an initial-scan discovery
-        landing back-to-back). The ``(status, next_attempt_at)`` index
-        lets ``claim_next`` pick the oldest due queued row in O(log N).
-        """
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS indexing_jobs (
+            -- Durable retry / dead-letter queue. Every discovered file
+            -- is enqueued first; the worker loop claims due rows and
+            -- runs parse/thread/embed/upsert. Failures back off
+            -- exponentially up to ``INDEXER_MAX_ATTEMPTS`` then
+            -- transition to ``status='dead'``.
+            CREATE TABLE indexing_jobs (
                 filepath        TEXT PRIMARY KEY,
                 reason          TEXT NOT NULL,
                 status          TEXT NOT NULL,
@@ -428,34 +399,15 @@ class Database:
                 created_at      TEXT NOT NULL,
                 updated_at      TEXT NOT NULL,
                 next_attempt_at TEXT NOT NULL
-            )
-        """)
-        cur.execute("""
-            CREATE INDEX IF NOT EXISTS idx_indexing_jobs_status_next
-            ON indexing_jobs(status, next_attempt_at)
+            );
+            CREATE INDEX idx_indexing_jobs_status_next
+                ON indexing_jobs(status, next_attempt_at);
         """)
         self._conn.commit()
 
     # -------------------------------------------------------------------------
     # Write operations
     # -------------------------------------------------------------------------
-
-    @_synchronized
-    def build_merged_body(self, thread) -> str:
-        """Compute the final ``body_text`` this thread will have after upsert.
-
-        Read-only. Intended for callers that need to embed the merged body
-        before it is written — e.g. the indexer computes a thread embedding
-        from the accumulated thread text, not from only the newly-arrived
-        message's ``text_for_embedding()``. Without this step the FTS body
-        reflects the whole thread while the vector embedding drifts toward
-        the latest message alone, degrading semantic search.
-        """
-        existing = self._conn.execute(
-            "SELECT body_text, message_ids FROM threads WHERE thread_id = ?",
-            (thread.thread_id,),
-        ).fetchone()
-        return self._compute_body(thread, existing)
 
     @staticmethod
     def _compute_body(thread, existing) -> str:
@@ -467,7 +419,7 @@ class Database:
         regenerating from scratch.
         """
         if existing and existing["body_text"]:
-            existing_message_ids = set(json.loads(existing["message_ids"] or "[]"))
+            existing_message_ids = set(json.loads(existing["message_ids"]))
             new_messages = [m for m in thread.messages if m.message_id not in existing_message_ids]
             if new_messages:
                 new_content = "\n".join(
@@ -479,7 +431,7 @@ class Database:
         return thread.text_for_embedding()
 
     @_synchronized
-    def upsert_thread(self, thread, embedding: list[float], body: str | None = None):
+    def upsert_thread(self, thread, embedding: list[float]):
         """Insert or update a thread in all three indexes.
 
         On update, accumulated thread metadata is merged with the incoming
@@ -495,11 +447,6 @@ class Database:
         - ``has_attachments``: true if previously true or newly true
         - ``date_first``: min(existing, incoming)
         - ``body_text``: existing body plus any previously-unseen messages
-
-        ``body`` override: callers that computed the merged body via
-        ``build_merged_body`` and embedded from it should pass the same
-        value back in so the stored body matches what the embedding
-        represents. When omitted, the merged body is recomputed here.
         """
         if len(embedding) != EMBEDDING_DIM:
             raise ValueError(
@@ -514,8 +461,9 @@ class Database:
         incoming_senders = [m.from_addr for m in thread.messages if m.from_addr]
         incoming_has_attachments = int(any(m.has_attachments for m in thread.messages))
 
+        started = False
         try:
-            cur.execute("BEGIN IMMEDIATE")
+            started = self._begin_if_needed(cur)
 
             existing = cur.execute(
                 "SELECT body_text, message_ids, participants, senders, "
@@ -525,13 +473,13 @@ class Database:
             ).fetchone()
 
             if existing:
-                existing_ids = json.loads(existing["message_ids"] or "[]")
+                existing_ids = json.loads(existing["message_ids"])
                 merged_ids = list(dict.fromkeys(existing_ids + incoming_message_ids))
-                existing_participants = json.loads(existing["participants"] or "[]")
+                existing_participants = json.loads(existing["participants"])
                 merged_participants = _dedupe_by_canonical(
                     existing_participants + incoming_participants
                 )
-                existing_senders = json.loads(existing["senders"] or "[]")
+                existing_senders = json.loads(existing["senders"])
                 merged_senders = _dedupe_by_canonical(existing_senders + incoming_senders)
                 merged_has_attachments = int(
                     bool(existing["has_attachments"]) or bool(incoming_has_attachments)
@@ -546,12 +494,7 @@ class Database:
                 merged_has_attachments = incoming_has_attachments
                 merged_date_first = thread.date_first.isoformat()
 
-            # Either use the caller's pre-computed merged body (so the stored
-            # body matches what they embedded) or compute it here. Both paths
-            # produce the same result when nothing else has written between
-            # the caller's build_merged_body() and this upsert.
-            if body is None:
-                body = self._compute_body(thread, existing)
+            body = self._compute_body(thread, existing)
 
             participants_json = json.dumps(merged_participants)
             senders_json = json.dumps(merged_senders)
@@ -607,9 +550,12 @@ class Database:
             for msg in thread.messages:
                 cur.execute(
                     """
-                    INSERT OR REPLACE INTO message_thread_map
+                    INSERT INTO message_thread_map
                         (message_id, thread_id, filepath)
                     VALUES (?, ?, ?)
+                    ON CONFLICT(message_id) DO UPDATE SET
+                        thread_id = excluded.thread_id,
+                        filepath  = excluded.filepath
                     """,
                     (msg.message_id, thread.thread_id, msg.filepath),
                 )
@@ -636,10 +582,478 @@ class Database:
                 (thread.thread_id, sqlite_vec.serialize_float32(embedding)),
             )
 
-            self._conn.commit()
+            self._commit_if_started(started)
         except Exception:
-            self._conn.rollback()
+            self._rollback_if_started(started)
             raise
+
+    # -------------------------------------------------------------------------
+    # Per-message chunks — diff-based idempotent write,
+    # cascading delete, mean-of-chunks thread vector aggregation.
+    # -------------------------------------------------------------------------
+
+    @_synchronized
+    def get_chunk_ids_for_message(
+        self, message_id: str, attachment_id: str | None = None
+    ) -> set[str]:
+        """Return the set of stored ``chunk_id`` values for ``message_id``.
+
+        Used by the indexer write path to compute the diff between newly
+        chunked output and what is already stored. Chunks are paragraph-
+        packed and the chunker's IDs are deterministic
+        (``sha256(message_pk || index || text)``) — so an unchanged body
+        yields a byte-identical ID set, and only genuinely new chunks
+        need an embed call.
+
+        ``attachment_id`` selects which slice of the message's chunks to
+        return:
+
+        * ``None`` (default) — chunks derived from the message body only
+          (``attachment_id IS NULL`` rows). Matches the schema-v9 contract.
+        * a string — chunks derived from that specific attachment within
+          the message. Used by the indexer to diff per-attachment chunks
+          independently of body chunks.
+        """
+        if attachment_id is None:
+            rows = self._conn.execute(
+                "SELECT chunk_id FROM message_chunks "
+                "WHERE message_id = ? AND attachment_id IS NULL",
+                (message_id,),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT chunk_id FROM message_chunks WHERE message_id = ? AND attachment_id = ?",
+                (message_id, attachment_id),
+            ).fetchall()
+        return {row["chunk_id"] for row in rows}
+
+    @_synchronized
+    def replace_message_chunks(
+        self,
+        *,
+        message_id: str,
+        thread_id: str,
+        chunks,
+        embeddings_by_chunk_id: dict[str, list[float]],
+        attachment_id: str | None = None,
+    ) -> dict[str, int]:
+        """Idempotently sync the chunk rows for one slice of a message.
+
+        ``chunks`` is the full ordered ``list[MessageChunk]`` the chunker
+        emitted for the slice. ``embeddings_by_chunk_id`` must contain
+        an embedding for every chunk_id in ``chunks`` that is *new*
+        relative to what's already stored — embeddings for existing
+        chunk_ids are not touched (the chunk text is unchanged so the
+        prior embedding is still valid). Returns ``{"inserted": n,
+        "deleted": m, "kept": k}`` for observability.
+
+        ``attachment_id`` selects which slice of the message's chunks
+        this call manages:
+
+        * ``None`` (default) — body chunks for the message
+          (``attachment_id IS NULL`` rows). Body and attachment chunks
+          coexist for the same message; passing ``None`` only diffs
+          against body rows so an attachment write does not delete body
+          chunks and vice versa.
+        * a string — attachment chunks for that specific
+          ``attachment_id`` within the message. The same content
+          forwarded across N messages produces N distinct chunk
+          occurrences (one per parent thread) so any chunk hit can lift
+          its parent thread into ranking.
+
+        All inserts / deletes across ``message_chunks``,
+        ``message_chunks_fts`` and ``message_chunks_vec`` happen inside
+        one transaction so the three indexes never disagree about which
+        chunks exist for a (message, slice) pair.
+        """
+        from datetime import UTC, datetime
+
+        incoming_ids = {c.chunk_id for c in chunks}
+        cur = self._conn.cursor()
+
+        started = False
+        try:
+            started = self._begin_if_needed(cur)
+
+            if attachment_id is None:
+                existing_rows = cur.execute(
+                    "SELECT chunk_id, fts_rowid FROM message_chunks "
+                    "WHERE message_id = ? AND attachment_id IS NULL",
+                    (message_id,),
+                ).fetchall()
+            else:
+                existing_rows = cur.execute(
+                    "SELECT chunk_id, fts_rowid FROM message_chunks "
+                    "WHERE message_id = ? AND attachment_id = ?",
+                    (message_id, attachment_id),
+                ).fetchall()
+            existing_ids = {row["chunk_id"] for row in existing_rows}
+            existing_fts_rowids = {
+                row["chunk_id"]: row["fts_rowid"]
+                for row in existing_rows
+                if row["fts_rowid"] is not None
+            }
+
+            to_delete = existing_ids - incoming_ids
+            to_insert = [c for c in chunks if c.chunk_id not in existing_ids]
+
+            for chunk_id in to_delete:
+                fts_rowid = existing_fts_rowids.get(chunk_id)
+                if fts_rowid is not None:
+                    cur.execute("DELETE FROM message_chunks_fts WHERE rowid = ?", (fts_rowid,))
+                cur.execute("DELETE FROM message_chunks_vec WHERE chunk_id = ?", (chunk_id,))
+                cur.execute("DELETE FROM message_chunks WHERE chunk_id = ?", (chunk_id,))
+
+            now_iso = datetime.now(UTC).isoformat()
+            for chunk in to_insert:
+                embedding = embeddings_by_chunk_id.get(chunk.chunk_id)
+                if embedding is None:
+                    raise ValueError(
+                        f"missing embedding for new chunk {chunk.chunk_id!r} "
+                        f"(message_id={message_id!r})"
+                    )
+                if len(embedding) != EMBEDDING_DIM:
+                    raise ValueError(
+                        f"chunk embedding has {len(embedding)} dims but "
+                        f"message_chunks_vec reserves {EMBEDDING_DIM}"
+                    )
+                cur.execute(
+                    "INSERT INTO message_chunks_fts (text) VALUES (?)",
+                    (chunk.text,),
+                )
+                fts_rowid = cur.lastrowid
+                cur.execute(
+                    "INSERT INTO message_chunks_vec (chunk_id, embedding) VALUES (?, ?)",
+                    (chunk.chunk_id, sqlite_vec.serialize_float32(embedding)),
+                )
+                cur.execute(
+                    """
+                    INSERT INTO message_chunks
+                        (chunk_id, message_id, thread_id, chunk_index, text,
+                         char_start, char_end, token_est,
+                         chunked_at, fts_rowid, attachment_id)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        chunk.chunk_id,
+                        message_id,
+                        thread_id,
+                        chunk.chunk_index,
+                        chunk.text,
+                        chunk.char_start,
+                        chunk.char_end,
+                        chunk.token_est,
+                        now_iso,
+                        fts_rowid,
+                        attachment_id,
+                    ),
+                )
+
+            self._commit_if_started(started)
+        except Exception:
+            self._rollback_if_started(started)
+            raise
+
+        return {
+            "inserted": len(to_insert),
+            "deleted": len(to_delete),
+            "kept": len(existing_ids & incoming_ids),
+        }
+
+    @_synchronized
+    def upsert_attachment(
+        self,
+        *,
+        message_id: str,
+        thread_id: str,
+        attachment_id: str,
+        filename: str,
+        content_type: str,
+        size_bytes: int,
+        occurrence_id: str | None = None,
+    ) -> bool:
+        """Record one attachment occurrence on a message.
+
+        Returns True if the row was newly inserted, False if it already
+        existed. Idempotent — re-indexing the same message produces the
+        same occurrence id for a specific attachment slot, and this call
+        no-ops on the second call rather than churning ``seen_at`` or the
+        FTS row.
+
+        The filename + MIME type are mirrored into the ``attachments_fts``
+        contentless table for direct keyword search ("find the .pdf
+        named contract"). The deterministic ``attachment_id`` (sha256
+        of payload bytes) is what links the occurrence to its single
+        cached extraction in ``attachment_extractions``.
+        """
+        from datetime import UTC, datetime
+
+        occurrence_id = (
+            occurrence_id
+            or hashlib.sha256(
+                f"{message_id}\0{attachment_id}\0{filename}\0{content_type}".encode()
+            ).hexdigest()
+        )
+        cur = self._conn.cursor()
+        started = False
+        try:
+            started = self._begin_if_needed(cur)
+            existing = cur.execute(
+                "SELECT 1 FROM attachments WHERE attachment_occurrence_id = ?",
+                (occurrence_id,),
+            ).fetchone()
+            if existing is not None:
+                self._commit_if_started(started)
+                return False
+
+            now_iso = datetime.now(UTC).isoformat()
+            cur.execute(
+                "INSERT INTO attachments_fts (filename, content_type) VALUES (?, ?)",
+                (filename, content_type),
+            )
+            fts_rowid = cur.lastrowid
+            cur.execute(
+                """
+                INSERT INTO attachments
+                    (attachment_occurrence_id, message_id, attachment_id, thread_id, filename,
+                     content_type, size_bytes, seen_at, fts_rowid)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    occurrence_id,
+                    message_id,
+                    attachment_id,
+                    thread_id,
+                    filename,
+                    content_type,
+                    size_bytes,
+                    now_iso,
+                    fts_rowid,
+                ),
+            )
+            self._commit_if_started(started)
+            return True
+        except Exception:
+            self._rollback_if_started(started)
+            raise
+
+    @_synchronized
+    def get_attachment_extraction(self, attachment_id: str) -> sqlite3.Row | None:
+        """Return the cached extraction row for an attachment, or None.
+
+        Used by the indexer write path to skip extraction work whenever
+        the same payload has already been processed. Even a failed prior
+        extraction is returned — the caller can decide whether to retry
+        based on ``extraction_status`` and how recent ``extracted_at``
+        is.
+        """
+        return self._conn.execute(
+            "SELECT attachment_id, extraction_status, extractor, "
+            "extracted_text, extraction_error, extracted_at "
+            "FROM attachment_extractions WHERE attachment_id = ?",
+            (attachment_id,),
+        ).fetchone()
+
+    @_synchronized
+    def store_attachment_extraction(
+        self,
+        *,
+        attachment_id: str,
+        extraction_status: str,
+        extractor: str | None,
+        extracted_text: str | None,
+        extraction_error: str | None,
+    ) -> None:
+        """Persist (or replace) the extraction record for ``attachment_id``.
+
+        ``extraction_status`` is one of:
+
+        * ``"success"`` — text extracted; ``extracted_text`` populated
+        * ``"empty"`` — extractor ran but produced no text (image of a
+          blank page, password-protected PDF with no fallback, etc.)
+        * ``"unsupported"`` — no extractor registered for the MIME type
+        * ``"too_large"`` — payload exceeds the configured byte cap
+        * ``"failed"`` — extractor raised; ``extraction_error`` populated
+
+        The same (attachment_id) is OR-REPLACE'd so a follow-up pass
+        (e.g. after enabling OCR or bumping ``INDEXER_OCR_MAX_PAGES``)
+        can upgrade a prior ``unsupported`` / ``empty`` status without
+        churning the schema.
+        """
+        from datetime import UTC, datetime
+
+        cur = self._conn.cursor()
+        started = False
+        try:
+            started = self._begin_if_needed(cur)
+            cur.execute(
+                """
+                INSERT OR REPLACE INTO attachment_extractions
+                    (attachment_id, extraction_status, extractor,
+                     extracted_text, extraction_error, extracted_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    attachment_id,
+                    extraction_status,
+                    extractor,
+                    extracted_text,
+                    extraction_error,
+                    datetime.now(UTC).isoformat(),
+                ),
+            )
+            self._commit_if_started(started)
+        except Exception:
+            self._rollback_if_started(started)
+            raise
+
+    def _delete_attachments_for_message(self, cur: sqlite3.Cursor, message_id: str) -> None:
+        """Drop all ``attachments`` occurrences and their FTS rows for ``message_id``.
+
+        Cached ``attachment_extractions`` rows are left in place: another
+        message may still reference the same content_hash, and even when
+        nothing does today, retaining the cached extraction means a
+        future re-arrival (forwarded from outside) skips the extract
+        cost. A separate sweep can prune true orphans periodically.
+        """
+        rows = cur.execute(
+            "SELECT fts_rowid FROM attachments WHERE message_id = ?", (message_id,)
+        ).fetchall()
+        for row in rows:
+            if row["fts_rowid"] is not None:
+                cur.execute("DELETE FROM attachments_fts WHERE rowid = ?", (row["fts_rowid"],))
+        cur.execute("DELETE FROM attachments WHERE message_id = ?", (message_id,))
+
+    @_synchronized
+    def replace_thread_vector(self, thread_id: str, embedding: list[float]) -> None:
+        """Replace the row in ``threads_vec`` for ``thread_id``.
+
+        Used by the reconciler reap path to rewrite a thread vector as the
+        mean of newly-emitted chunk vectors, without going through the
+        full ``upsert_thread`` path (which requires a materialized
+        ``Thread`` and would also rewrite the FTS row, body_text, and
+        every metadata field unnecessarily). Validates the embedding
+        dimension so a misconfigured embed model fails loud here rather
+        than as a cryptic vec0 insert error.
+        """
+        if len(embedding) != EMBEDDING_DIM:
+            raise ValueError(
+                f"embedding has {len(embedding)} dims but threads_vec reserves "
+                f"{EMBEDDING_DIM}. Check OLLAMA_EMBED_MODEL."
+            )
+        cur = self._conn.cursor()
+        started = False
+        try:
+            started = self._begin_if_needed(cur)
+            cur.execute("DELETE FROM threads_vec WHERE thread_id = ?", (thread_id,))
+            cur.execute(
+                "INSERT INTO threads_vec (thread_id, embedding) VALUES (?, ?)",
+                (thread_id, sqlite_vec.serialize_float32(embedding)),
+            )
+            self._commit_if_started(started)
+        except Exception:
+            self._rollback_if_started(started)
+            raise
+
+    @_synchronized
+    def get_chunk_embeddings_for_messages(self, message_ids: list[str]) -> list[list[float]]:
+        """Return every chunk embedding for the given ``message_ids``.
+
+        Used by the reconciler's reap path to compute a survivor-only
+        thread vector after a partial reap: the caller passes the
+        surviving message ids, gets back their chunk embeddings, and
+        means them with ``chunker.mean_vector``. Skipping the reaped
+        messages here (rather than after a thread-wide fetch) keeps the
+        reconciler's pre-transaction read cheap on threads with a long
+        tail of historical messages.
+        """
+        import struct
+
+        if not message_ids:
+            return []
+        placeholders = ",".join(["?"] * len(message_ids))
+        # Composed SQL is a fixed SELECT; user values are bound through
+        # ``?`` placeholders. nosec B608.
+        sql = (
+            "SELECT v.embedding AS embedding "
+            "FROM message_chunks c "
+            "JOIN message_chunks_vec v ON v.chunk_id = c.chunk_id "
+            f"WHERE c.message_id IN ({placeholders})"  # nosec B608
+        )
+        rows = self._conn.execute(sql, list(message_ids)).fetchall()
+        result: list[list[float]] = []
+        for row in rows:
+            blob = row["embedding"]
+            count = len(blob) // 4
+            result.append(list(struct.unpack(f"{count}f", blob)))
+        return result
+
+    @_synchronized
+    def get_thread_chunk_embeddings(self, thread_id: str) -> list[list[float]]:
+        """Return every chunk embedding stored for ``thread_id``.
+
+        The indexer averages these to produce the thread-level vector,
+        so coarse thread retrieval and precise chunk retrieval both
+        derive from the same per-chunk source data. Returns an empty
+        list when the thread has no chunks yet (a thread whose only
+        message had an empty body, or where every embed previously
+        failed).
+        """
+        import struct
+
+        rows = self._conn.execute(
+            """
+            SELECT v.embedding AS embedding
+            FROM message_chunks c
+            JOIN message_chunks_vec v ON v.chunk_id = c.chunk_id
+            WHERE c.thread_id = ?
+            """,
+            (thread_id,),
+        ).fetchall()
+        # sqlite-vec stores embeddings as packed float32. Each row's
+        # ``embedding`` blob is ``EMBEDDING_DIM * 4`` bytes; unpack to a
+        # plain Python list so the caller can mean-pool without depending
+        # on numpy.
+        result: list[list[float]] = []
+        for row in rows:
+            blob = row["embedding"]
+            count = len(blob) // 4
+            result.append(list(struct.unpack(f"{count}f", blob)))
+        return result
+
+    def _delete_chunks_for_message(self, cur: sqlite3.Cursor, message_id: str) -> None:
+        """Drop every chunk row + FTS + vec entry for ``message_id``.
+
+        Internal helper used inside an enclosing transaction by
+        ``_remove_message_row`` and the reconciler's reap path.
+        """
+        rows = cur.execute(
+            "SELECT chunk_id, fts_rowid FROM message_chunks WHERE message_id = ?",
+            (message_id,),
+        ).fetchall()
+        for row in rows:
+            if row["fts_rowid"] is not None:
+                cur.execute("DELETE FROM message_chunks_fts WHERE rowid = ?", (row["fts_rowid"],))
+            cur.execute("DELETE FROM message_chunks_vec WHERE chunk_id = ?", (row["chunk_id"],))
+        cur.execute("DELETE FROM message_chunks WHERE message_id = ?", (message_id,))
+
+    def _delete_chunks_for_thread(self, cur: sqlite3.Cursor, thread_id: str) -> None:
+        """Drop every chunk row + FTS + vec entry for ``thread_id``.
+
+        Used when a thread is deleted in its entirety (last message
+        reaped). The per-message helper would also work in a loop, but
+        a single thread-id query is cheaper and matches the cascade
+        semantics of ``delete_thread_completely``.
+        """
+        rows = cur.execute(
+            "SELECT chunk_id, fts_rowid FROM message_chunks WHERE thread_id = ?",
+            (thread_id,),
+        ).fetchall()
+        for row in rows:
+            if row["fts_rowid"] is not None:
+                cur.execute("DELETE FROM message_chunks_fts WHERE rowid = ?", (row["fts_rowid"],))
+            cur.execute("DELETE FROM message_chunks_vec WHERE chunk_id = ?", (row["chunk_id"],))
+        cur.execute("DELETE FROM message_chunks WHERE thread_id = ?", (thread_id,))
 
     def _replace_fts_row(
         self,
@@ -745,7 +1159,7 @@ class Database:
         disappeared, but the same content_hash is indexed at path B" —
         a rename mbsync performed without emitting an ``on_moved`` event
         (e.g. across folder moves or restarts) — and to catch genuine
-        duplicate deliveries. Rows indexed before schema v7 or whose
+        duplicate deliveries. Rows for which whose
         identity capture failed have ``content_hash IS NULL`` and are
         excluded from the match.
         """
@@ -773,7 +1187,7 @@ class Database:
         return stats
 
     # -------------------------------------------------------------------------
-    # indexing_jobs — durable retry / dead-letter queue (schema v8).
+    # indexing_jobs — durable retry / dead-letter queue.
     #
     # The ``IndexingQueue`` abstraction in ``queue.py`` owns the retry /
     # backoff / dead-letter semantics. These methods are the thin SQL
@@ -1054,8 +1468,22 @@ class Database:
             if row and row["fts_rowid"] is not None:
                 cur.execute("DELETE FROM threads_fts WHERE rowid = ?", (row["fts_rowid"],))
             cur.execute("DELETE FROM threads_vec WHERE thread_id = ?", (thread_id,))
-            cur.execute("DELETE FROM threads WHERE thread_id = ?", (thread_id,))
+            self._delete_chunks_for_thread(cur, thread_id)
+            # Walk every message in the thread to drop its attachments
+            # rows + FTS shadows. ``message_id``-keyed deletes from
+            # ``message_thread_map`` happen below; do attachments first
+            # so the per-message lookup still finds rows.
+            message_ids = [
+                r["message_id"]
+                for r in cur.execute(
+                    "SELECT message_id FROM message_thread_map WHERE thread_id = ?",
+                    (thread_id,),
+                ).fetchall()
+            ]
+            for mid in message_ids:
+                self._delete_attachments_for_message(cur, mid)
             cur.execute("DELETE FROM message_thread_map WHERE thread_id = ?", (thread_id,))
+            cur.execute("DELETE FROM threads WHERE thread_id = ?", (thread_id,))
             cur.execute("DELETE FROM pending_deletions WHERE thread_id = ?", (thread_id,))
             for fp in filepaths:
                 cur.execute("DELETE FROM indexed_files WHERE filepath = ?", (fp,))
@@ -1185,13 +1613,13 @@ class Database:
             (thread.thread_id, sqlite_vec.serialize_float32(embedding)),
         )
 
-    @staticmethod
-    def _remove_message_row(cur: sqlite3.Cursor, message_id: str) -> str | None:
-        """Remove a message's map / indexed_files / tombstone rows using
-        ``cur``. Returns the message's filepath (for optional on-disk
-        cleanup), or ``None`` if no such message was tracked. Shared by
-        ``remove_message`` and ``reap_thread_messages``; the caller owns
-        the enclosing transaction.
+    def _remove_message_row(self, cur: sqlite3.Cursor, message_id: str) -> str | None:
+        """Remove a message's map / indexed_files / tombstone / chunk /
+        attachment rows using ``cur``. Returns the message's filepath
+        (for optional on-disk cleanup), or ``None`` if no such message
+        was tracked. Shared by ``remove_message`` and
+        ``reap_thread_messages``; the caller owns the enclosing
+        transaction.
         """
         row = cur.execute(
             "SELECT filepath FROM message_thread_map WHERE message_id = ?",
@@ -1200,6 +1628,14 @@ class Database:
         if row is None:
             return None
         filepath = row["filepath"]
+        # Per-message chunk cascade. ``_delete_chunks_for_message``
+        # drops both body-chunk and attachment-chunk rows because both
+        # carry this message_id; the deduped extraction cache stays.
+        self._delete_chunks_for_message(cur, message_id)
+        # Attachment occurrences for this message. Cached extractions
+        # in ``attachment_extractions`` are deliberately kept — see
+        # ``_delete_attachments_for_message``.
+        self._delete_attachments_for_message(cur, message_id)
         cur.execute("DELETE FROM message_thread_map WHERE message_id = ?", (message_id,))
         cur.execute("DELETE FROM indexed_files WHERE filepath = ?", (filepath,))
         cur.execute("DELETE FROM pending_deletions WHERE filepath = ?", (filepath,))

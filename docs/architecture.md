@@ -80,6 +80,7 @@ Claude Desktop (host machine)
 | `ollama` | model requests | `ollama-models` vol | HTTP 11434 (internal) |
 | `indexer` | `maildir-volume`, Ollama | `sqlite-volume` | nothing |
 | `mcp-server` | `sqlite-volume`, Ollama | nothing | HTTP 3000 (localhost only) |
+| `open-webui` (optional overlay) | Ollama, `mcp-server` | `open-webui-data` vol | HTTP 8080 (localhost only) |
 
 ## Docker Volumes
 
@@ -89,6 +90,7 @@ Claude Desktop (host machine)
 | `maildir-volume` | Raw email in Maildir format | Optional — mbsync can re-sync |
 | `ollama-models` | Downloaded Ollama model weights | Optional — can re-pull |
 | `sqlite-volume` | SQLite index (FTS5 + vectors) | Optional — indexer can rebuild |
+| `open-webui-data` | Optional Open WebUI accounts, settings, and chats | Yes, if you want to preserve UI state |
 
 ## Networking
 
@@ -96,12 +98,15 @@ The stack uses two isolated bridge networks:
 
 - `bridge-net` for ProtonBridge ↔ `mbsync`
 - `app-net` for `indexer` ↔ `ollama` ↔ `mcp-server`
+- The optional Open WebUI overlay joins `app-net` and reuses the existing
+  `ollama` service; it does not run a second Ollama instance.
 
 For stricter local-only deployments, `docker-compose.hardened.yml` marks
 `app-net` as `internal: true` so those services cannot reach the internet.
 Use it only after pulling Ollama models and only with `LLM_MODE=local`.
 
-Only one port is exposed to the host: `127.0.0.1:3000` for the MCP server.
+The default stack exposes only `127.0.0.1:3000` for the MCP server. The
+optional Open WebUI overlay also exposes `127.0.0.1:8080` for the browser UI.
 No container is reachable from outside the machine.
 
 ## Search Architecture
@@ -113,41 +118,137 @@ User query
     │
     ├─ Embed query text → nomic-embed-text → 768-dim vector
     │
-    ├─ BM25 search → SQLite FTS5 virtual table → ranked list A
+    ├─ BM25 search   → SQLite FTS5 over thread bodies      → ranked list A
     │
-    ├─ Vector search → sqlite-vec → ranked list B
+    ├─ Vector search → sqlite-vec over thread vectors      → ranked list B
+    │
+    ├─ Vector search → sqlite-vec over per-message chunks  → ranked list C
+    │                  (chunks "lifted" to parent thread_id)
     │
     └─ Reciprocal Rank Fusion (k=60) → merged list → top-k threads
+       │
+       └─ optional: attach matching chunks per thread as evidence
 ```
 
-RRF merges the two ranked lists without needing to normalise scores.
-Each result's RRF score = 1/(k + rank_in_A) + 1/(k + rank_in_B).
-Results appearing in both lists are boosted significantly.
+RRF merges the three ranked lists without needing to normalise scores.
+Each thread's RRF score = sum over lanes of `1/(k + rank_in_lane + 1)`.
+The chunk lane credits each thread by the rank of its **best** chunk
+only — without that dedup, a thread with many similar sibling chunks
+would dominate by accumulated score rather than by relevance.
+
+Every thread is chunked at index time, so the chunk lane is always
+populated alongside the BM25 and thread-vector lanes.
 
 ## Thread Indexing
 
-Emails are indexed at the **thread level**, not the message level.
-This is the key architectural decision that makes Q&A useful:
+Emails are indexed at the **thread level** as the coarse unit of
+discovery, with **per-message chunks** as the precise unit of retrieval.
 
 1. Messages are grouped using `In-Reply-To` and `References` headers
 2. Failing that, subject normalisation within the same folder
-3. Each thread gets one embedding representing the full conversation
-4. New messages arriving in a thread update the thread's embedding
+3. Each message's body is sliced into paragraph-packed chunks
+   (`indexer/src/chunker.py`); each chunk is FTS-indexed and gets its
+   own vector embedding stored in `message_chunks_vec`
+4. The thread's vector in `threads_vec` is the **mean** of its chunk
+   vectors — coarse and precise retrieval derive from the same source
+5. New messages joining a thread emit new chunks (idempotent diff
+   write keyed on deterministic chunk IDs) and rewrite the parent
+   thread's vector
 
-The stored `body_text` that feeds FTS5 is the full accumulated thread
-content (users legitimately search quoted text and signatures). The
-input to the embedding model, however, is first passed through
-`strip_for_embedding` (`indexer/src/quoting.py`) to remove quoted
-replies, signatures, and forward headers. Without that pass the vector
-for a long reply chain drifts toward whatever content was quoted most
-often — typically the original message or a contract below the
-signature — and stops reflecting the substantive content of the latest
-replies. Stripping is intentionally conservative: quoted text is still
+The indexer commits the thread row, message map, body chunks, attachment
+occurrences, and final thread vector inside one SQLite transaction. Chunk and
+attachment rows have foreign-key parents in `threads` / `message_thread_map`,
+and SQLite foreign-key enforcement is enabled on the indexer connection, so
+partial sidecar rows fail closed instead of becoming orphan retrieval state.
+
+The stored `body_text` on `threads` still feeds FTS5 over the full
+accumulated thread content (users legitimately search quoted text and
+signatures). Chunk inputs are first passed through
+`strip_for_embedding` (`indexer/src/quoting.py`) so chunk vectors track
+substantive content of each reply rather than accumulated quoted
+history. Stripping is intentionally conservative: quoted text is still
 searchable through FTS and falls back to the original body when the
 stripped result would be empty.
 
-A query like "what did my landlord say about the heating?" returns the full
-landlord thread, not individual one-liners that happen to mention heating.
+A query like "what did my landlord say about the heating?" returns the
+full landlord thread (via the coarse lanes) and surfaces the specific
+chunk where the heating discussion appears (via the chunk lane). The
+intelligence tools (`ask_mailbox`, `extract_from_emails`) feed those
+matched chunks to the LLM with `[chunk N chars X-Y]` provenance
+headers rather than the truncated accumulated body, so answers cite
+exact passages.
+
+### Chunk write idempotency
+
+Chunk IDs are `sha256(message_pk || index || chunk_text)` — the same
+body always produces the same ID set. The indexer's per-message chunk
+write diffs the new chunk IDs against stored IDs, embeds only the new
+ones, and deletes any that are no longer present. Re-running on
+unchanged input is therefore zero embed cost. Attachment chunks use a
+composite `message_pk` of `f"{message_id}::{attachment_id}"` so their
+chunk IDs are distinct from body chunks for the same message.
+
+## Attachment Indexing
+
+Email attachments flow through the same chunker and embedder pipeline
+as message bodies. Two extra tables sit alongside `message_chunks`:
+
+| Table | Keyed by | Purpose |
+|---|---|---|
+| `attachments` | attachment_occurrence_id | Per-occurrence row capturing filename + MIME + size as it appeared on a specific email. The occurrence id includes the message, payload hash, filename, and attachment slot so duplicate same-payload files in one email are still represented. |
+| `attachment_extractions` | attachment_id (= sha256 of payload) | Per-content-hash cache of extracted text + status. The expensive work (Tesseract OCR, pypdf parse, DOCX walk) runs at most once per unique payload. |
+
+Per-occurrence chunks land in `message_chunks` with the
+`attachment_id` column populated. They embed exactly like body chunks
+and surface through the same chunk-vector retrieval lane — so a query
+matching a PDF's contents lifts the parent thread of the email that
+carried it, with zero new MCP search code.
+
+### Extractor dispatch
+
+`indexer.extractors.extract` resolves a (content_type, filename) pair
+to a per-format module:
+
+```
+content_type → _MIME_DISPATCH (text/plain, application/pdf, ...)
+   ↓ unknown MIME
+filename ext → _EXT_DISPATCH (.pdf, .docx, .xlsx, .png, ...)
+   ↓ no match
+status="unsupported" (still searchable by filename via attachments_fts)
+```
+
+Per-format modules live under `indexer/src/extractors/` and are
+lazy-imported so a missing optional dependency (e.g. `python-docx`
+not in this image) downgrades to `unsupported` rather than crashing
+the indexer at startup.
+
+### OCR
+
+PDFs and images route through Tesseract when `INDEXER_OCR_ENABLED=true`
+(default). The PDF extractor first tries the digital text layer via
+`pypdf`; if the result is below a small minimum-character threshold,
+it falls through to rendering each page via Poppler (`pdf2image`) and
+OCR'ing via `pytesseract`. `INDEXER_OCR_MAX_PAGES` (default 20) caps
+the cost on long scanned documents.
+
+### Cost bounds
+
+| Knob | Default | Purpose |
+|---|---|---|
+| `INDEXER_ATTACHMENT_EXTRACTION_ENABLED` | `true` | Master switch — turns the whole pipeline off if needed |
+| `INDEXER_OCR_ENABLED` | `true` | Disables all OCR paths (image + PDF fallback) |
+| `INDEXER_ATTACHMENT_MAX_BYTES` | `10000000` (10 MB) | Skip very large attachments — bounds CPU/memory for huge zips |
+| `INDEXER_OCR_MAX_PAGES` | `20` | Cap pages OCR'd per PDF |
+
+### Cascade on message removal
+
+When a message is reaped, `_delete_attachments_for_message` drops its
+`attachments` rows and FTS shadows; the `_delete_chunks_for_message`
+cascade also drops the message's attachment chunks (they share the
+`message_id` key). Cached extractions in `attachment_extractions` are
+**deliberately preserved** — another message may still reference the
+same content_hash, and even when nothing does today the cached
+extraction means a future re-arrival skips the OCR cost.
 
 ## Deletion Reconciliation (opt-in)
 
@@ -289,12 +390,16 @@ rename that mbsync performed without emitting an `on_moved` event.
 passes; consumers are deliberately not wired in this revision so the
 schema change lands as a pure extension.
 
-Rows indexed before v7 (or for which stat / hash capture failed) carry
-NULL identity values and are skipped by the content-hash lookup. There
-is no migration-time disk walk; backfill is lazy, driven by re-indexing
-or by rename events.
+Rows for which `stat` / hash capture failed at parse time carry NULL
+identity values and are skipped by the content-hash lookup; the
+columns are populated lazily on the next reindex of the file.
 
 ## Privacy Model
+
+Three layers, each with its own boundary. The README has the operator-facing
+walkthrough; the table below is the per-operation reference.
+
+### Storage and processing layer (always local)
 
 | Operation | Local only | Leaves machine |
 |---|---|---|
@@ -302,9 +407,36 @@ or by rename events.
 | Embedding generation | ✅ (Ollama) | Never |
 | Vector index | ✅ (SQLite) | Never |
 | Keyword search | ✅ (SQLite FTS5) | Never |
-| Q&A (local mode) | ✅ (Ollama LLM) | Never |
-| Q&A (cloud mode) | Retrieval local | Retrieved chunks → Anthropic API |
 | Send/Move/Flag | Disabled by default | Never |
+
+### MCP server intelligence tools (governed by `LLM_MODE`)
+
+| Operation | Local only | Leaves machine |
+|---|---|---|
+| Q&A — `LLM_MODE=local` | ✅ (Ollama LLM) | Never |
+| Q&A — `LLM_MODE=cloud` | Retrieval local | Retrieved chunks → Anthropic Claude API |
+
+### MCP client layer (governed by which client you connect)
+
+When the MCP server is consumed by a cloud-backed client, the tool *return
+values* are sent to that client's backend as part of the conversation
+context. Tool results often contain email snippets, full thread bodies, or
+LLM-generated answers grounded in mail — so the client's backend sees that
+content regardless of `LLM_MODE`.
+
+| Client | What sees tool results |
+|---|---|
+| Claude Desktop | Anthropic (Claude runs in the cloud; tool results go back as conversation context) |
+| Local-LLM MCP client (e.g. Open WebUI backed by Ollama) | Stays on machine |
+| Direct `docker exec` into mcp-server | Stays on machine |
+
+`LLM_MODE` and the MCP client choice are independent boundaries and must
+both be set deliberately if "fully local conversations" is a goal.
+
+The MCP server defaults to SSE for existing Claude Desktop compatibility.
+Set `MCP_TRANSPORT=streamable-http` for clients that only speak Streamable
+HTTP, or `MCP_TRANSPORT=dual` to serve both `/sse` and `/mcp` on the same
+localhost-bound port.
 
 ## LLM Mode Toggle
 

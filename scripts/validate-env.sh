@@ -84,9 +84,19 @@ require_file "$ANTHROPIC_KEY_FILE" "Anthropic API key secret file"
 #   - no variable expansion, no command substitution, no escape processing
 get_env_value() {
     local key="$1"
-    local raw value
+    local line raw value
 
-    raw="$(grep -E "^[[:space:]]*${key}=" "$ENV_FILE" | tail -n 1)"
+    [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || {
+        printf 'ERROR: invalid environment key: %s\n' "$key" >&2
+        return 2
+    }
+
+    raw=""
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        if [[ "$line" =~ ^[[:space:]]*${key}= ]]; then
+            raw="$line"
+        fi
+    done < "$ENV_FILE"
     [[ -n "$raw" ]] || { printf '\n'; return 0; }
 
     value="${raw#*=}"
@@ -99,14 +109,25 @@ get_env_value() {
     printf '%s\n' "$value"
 }
 
+if [[ "${1:-}" == "--get" ]]; then
+    [[ $# -eq 2 ]] || {
+        echo "ERROR: usage: validate-env.sh --get KEY" >&2
+        exit 1
+    }
+    get_env_value "$2"
+    exit 0
+fi
+
 BRIDGE_USER="$(get_env_value BRIDGE_USER)"
 BRIDGE_VERSION="$(get_env_value BRIDGE_VERSION)"
 OLLAMA_EMBED_MODEL="$(get_env_value OLLAMA_EMBED_MODEL)"
 OLLAMA_LLM_MODEL="$(get_env_value OLLAMA_LLM_MODEL)"
 SYNC_INTERVAL="$(get_env_value SYNC_INTERVAL)"
 MCP_PORT="$(get_env_value MCP_PORT)"
+MCP_TRANSPORT="$(get_env_value MCP_TRANSPORT)"
 MCP_READ_ONLY="$(get_env_value MCP_READ_ONLY)"
 LLM_MODE="$(get_env_value LLM_MODE)"
+OPEN_WEBUI_PORT="$(get_env_value OPEN_WEBUI_PORT)"
 
 [[ -n "$BRIDGE_USER" && "$BRIDGE_USER" != "your@proton.me" ]] || {
     echo "ERROR: BRIDGE_USER in .env must be set to the Bridge username from 'bridge --cli info'." >&2
@@ -140,6 +161,12 @@ require_integer "MCP_PORT" "$MCP_PORT"
     exit 1
 }
 
+MCP_TRANSPORT="${MCP_TRANSPORT:-sse}"
+[[ "$MCP_TRANSPORT" =~ ^(sse|streamable-http|dual)$ ]] || {
+    echo "ERROR: MCP_TRANSPORT must be 'sse', 'streamable-http', or 'dual'." >&2
+    exit 1
+}
+
 [[ "$MCP_READ_ONLY" =~ ^(true|false)$ ]] || {
     echo "ERROR: MCP_READ_ONLY must be 'true' or 'false'." >&2
     exit 1
@@ -156,6 +183,14 @@ require_mode_600 "$BRIDGE_PASS_FILE"
 if [[ "$LLM_MODE" == "cloud" ]]; then
     require_nonempty_file "$ANTHROPIC_KEY_FILE" "Anthropic API key secret"
     require_mode_600 "$ANTHROPIC_KEY_FILE"
+fi
+
+if [[ -n "$OPEN_WEBUI_PORT" ]]; then
+    require_integer "OPEN_WEBUI_PORT" "$OPEN_WEBUI_PORT"
+    [[ "$OPEN_WEBUI_PORT" -ge 1 && "$OPEN_WEBUI_PORT" -le 65535 ]] || {
+        echo "ERROR: OPEN_WEBUI_PORT must be between 1 and 65535." >&2
+        exit 1
+    }
 fi
 
 printf 'Environment validation passed.\n'

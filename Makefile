@@ -1,4 +1,7 @@
-.PHONY: build up down logs first-run update pull-models status clean sync sync-indexer sync-mcp test test-indexer test-mcp bridge-patch-check bridge-smoke bridge-upgrade-check init-secrets validate-env help
+.PHONY: build up down logs first-run update pull-models status clean sync sync-indexer sync-mcp test test-indexer test-mcp typecheck typecheck-indexer typecheck-mcp bridge-patch-check bridge-smoke bridge-upgrade-check open-webui-up open-webui-down open-webui-logs init-secrets validate-env help
+
+UV_CACHE_DIR ?= /tmp/uv-cache
+export UV_CACHE_DIR
 
 # =============================================================================
 # protonmail-local-ai — Makefile
@@ -18,11 +21,15 @@ help:
 	@echo "  bridge-patch-check  Verify Bridge source patch points still match upstream"
 	@echo "  bridge-smoke        Build and smoke test the Bridge runtime image"
 	@echo "  bridge-upgrade-check  Run Bridge patch-drift and smoke checks"
+	@echo "  open-webui-up Start optional local Open WebUI on localhost"
+	@echo "  open-webui-down Stop optional local Open WebUI"
+	@echo "  open-webui-logs Tail optional Open WebUI logs"
 	@echo "  update       Rebuild and restart Bridge with new version"
 	@echo "  pull-models  Pull Ollama embedding and LLM models"
 	@echo "  status       Show container and index status"
 	@echo "  sync         Sync local uv environments for Python services"
 	@echo "  test         Run indexer and mcp-server unit tests locally with uv"
+	@echo "  typecheck    Run mypy over both Python services"
 	@echo "  test-indexer Run indexer unit tests only"
 	@echo "  test-mcp     Run mcp-server unit tests only"
 	@echo "  clean        Remove all containers and volumes (destructive)"
@@ -113,9 +120,9 @@ pull-models:
 	printf '\nERROR: Ollama did not become ready within 120s.\n' >&2; \
 	exit 1
 	@echo "Pulling embedding model..."
-	docker exec ollama ollama pull $$(grep '^OLLAMA_EMBED_MODEL=' .env | cut -d= -f2)
+	docker exec ollama ollama pull "$$(./scripts/validate-env.sh --get OLLAMA_EMBED_MODEL)"
 	@echo "Pulling LLM model..."
-	docker exec ollama ollama pull $$(grep '^OLLAMA_LLM_MODEL=' .env | cut -d= -f2)
+	docker exec ollama ollama pull "$$(./scripts/validate-env.sh --get OLLAMA_LLM_MODEL)"
 
 # Update Bridge to a new version
 # 1. Bump BRIDGE_VERSION in .env
@@ -132,6 +139,34 @@ bridge-smoke:
 	./scripts/bridge-smoke.sh
 
 bridge-upgrade-check: bridge-patch-check bridge-smoke
+
+open-webui-up: init-secrets validate-env
+	@if [ ! -s .secrets/open_webui_secret_key.txt ]; then \
+		if ! command -v openssl >/dev/null 2>&1; then \
+			printf 'ERROR: openssl not found on host; cannot generate Open WebUI session key.\n' >&2; \
+			printf 'Install openssl, or write 32+ random bytes to .secrets/open_webui_secret_key.txt manually.\n' >&2; \
+			exit 1; \
+		fi; \
+		openssl rand -base64 32 > .secrets/open_webui_secret_key.txt; \
+		chmod 600 .secrets/open_webui_secret_key.txt; \
+		echo "  generated .secrets/open_webui_secret_key.txt"; \
+	fi
+	@transport="$$(./scripts/validate-env.sh --get MCP_TRANSPORT)"; \
+	if [ "$$transport" != "dual" ] && [ "$$transport" != "streamable-http" ]; then \
+		printf 'ERROR: set MCP_TRANSPORT=dual or MCP_TRANSPORT=streamable-http in .env before starting Open WebUI.\n' >&2; \
+		exit 1; \
+	fi
+	@port="$$(./scripts/validate-env.sh --get OPEN_WEBUI_PORT)"; \
+	port="$${port:-8080}"; \
+	printf '\n  Starting Open WebUI on http://localhost:%s\n' "$$port"; \
+	printf '  Open WebUI uses the existing ollama container and MCP at http://mcp-server:3000/mcp.\n\n'
+	docker compose -f docker-compose.yml -f docker-compose.open-webui.yml up -d open-webui
+
+open-webui-down:
+	docker compose -f docker-compose.yml -f docker-compose.open-webui.yml stop open-webui
+
+open-webui-logs:
+	docker compose -f docker-compose.yml -f docker-compose.open-webui.yml logs -f open-webui
 
 # Sync local Python environments using per-service uv projects
 sync: sync-indexer sync-mcp
@@ -163,6 +198,14 @@ test-indexer: sync-indexer
 
 test-mcp: sync-mcp
 	cd mcp-server && uv run pytest -q
+
+typecheck: typecheck-indexer typecheck-mcp
+
+typecheck-indexer: sync-indexer
+	cd indexer && uv run mypy src
+
+typecheck-mcp: sync-mcp
+	cd mcp-server && uv run mypy src
 
 # Remove all containers and volumes
 # WARNING: This deletes your email index and Bridge credentials.
