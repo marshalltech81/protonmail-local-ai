@@ -311,6 +311,32 @@ class TestPdfDigitalExtractor:
         assert name == "pdf-ocr"
         assert "OCR'd page 1" in text
 
+    def test_ocr_fallback_failure_is_reported_as_failed(self, monkeypatch):
+        """If a scanned PDF needs OCR but Poppler/Tesseract fails, the
+        dispatcher should cache a failed extraction with the error
+        instead of treating near-empty digital text as a successful
+        no-text result.
+        """
+        from src.extractors import pdf
+
+        monkeypatch.setattr(pdf, "_extract_digital", lambda payload: "")
+
+        def fail_ocr(payload, *, max_ocr_pages):
+            raise RuntimeError("poppler missing")
+
+        monkeypatch.setattr(pdf, "_extract_ocr", fail_ocr)
+
+        result = extract(
+            content_type="application/pdf",
+            filename="scan.pdf",
+            payload=b"%PDF-1.7",
+        )
+
+        assert result.status == STATUS_FAILED
+        assert result.extractor == "pdf"
+        assert result.text is None
+        assert "poppler missing" in (result.error or "")
+
     def test_ocr_disabled_returns_digital_text_only(self, monkeypatch):
         from src.extractors import pdf
 

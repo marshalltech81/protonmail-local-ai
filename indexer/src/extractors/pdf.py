@@ -57,13 +57,14 @@ def extract(
     try:
         ocr_text = _extract_ocr(payload, max_ocr_pages=max_ocr_pages)
     except Exception as exc:  # noqa: BLE001
-        # If OCR setup is broken (Tesseract / Poppler missing in the
-        # image, transient memory error, etc.), surface whatever the
-        # digital path produced so the attachment is still partially
-        # indexed. The dispatcher's failed/empty path covers the
-        # zero-text case below.
+        # At this point the digital text layer was below the usable
+        # threshold, so swallowing OCR failures would cache the
+        # attachment as empty / partial and make the job look
+        # successful. Let the dispatcher record a failed extraction
+        # with the OCR error so operators can fix Poppler/Tesseract and
+        # re-run extraction.
         log.warning("PDF OCR fallback failed: %s", exc)
-        return digital_text, "pdf-digital"
+        raise
 
     # Concatenate digital + OCR — digital is fast and may have caught a
     # few lines (cover page, embedded title) even when most of the doc
