@@ -62,17 +62,17 @@ def register_system_tools(server, db, bridge_enabled: bool = False):
             return [TextContent(type="text", text="\n".join(lines))]
 
         import socket
+        from contextlib import closing
 
         bridge_host = "protonmail-bridge"
         bridge_port = 1143
         bridge_ok = False
 
         try:
-            sock = socket.create_connection((bridge_host, bridge_port), timeout=3)
-            sock.close()
-            bridge_ok = True
-        except Exception:
-            pass
+            with closing(socket.create_connection((bridge_host, bridge_port), timeout=3)):
+                bridge_ok = True
+        except OSError as e:
+            log.debug("Bridge reachability check failed: %s", e)
 
         lines = [
             "=== Sync Status ===",

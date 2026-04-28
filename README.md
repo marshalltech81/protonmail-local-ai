@@ -119,21 +119,72 @@ Once connected, ask Claude Desktop:
 - *"What did my accountant say about Q3 taxes?"*
 - *"Find all invoices from last year and extract the vendor names and amounts"*
 - *"Summarize the thread about the project deadline"*
-- *"Show me all unread emails in my INBOX"*
+- *"Show me recent INBOX threads with attachments"*
 
-## Privacy Model
+## Privacy Boundaries
+
+This stack is local-first for **storage, sync, indexing, and embeddings**.
+Whether your *conversations* are also local depends on which MCP client you
+use and which `LLM_MODE` you select. Be deliberate about all three layers.
+
+### 1. Storage and indexing layer — always local
 
 | Data | Where it lives |
 |---|---|
-| Your emails | Local Docker volume — never leaves your machine |
+| Your emails (Maildir) | Local Docker volume — never leaves your machine |
 | Embeddings | Generated locally by Ollama — never sent anywhere |
-| Search index | Local SQLite in Docker volume |
-| Q&A context | Sent to Ollama locally by default |
-| Q&A context (cloud mode) | Optionally sent to Claude API — opt-in when `LLM_MODE=cloud` |
+| Search index (SQLite FTS5 + sqlite-vec) | Local Docker volume |
+| Bridge ↔ Proton traffic | The only path off your machine for mail data |
 
-Set `LLM_MODE=local` in `.env` (default) to keep everything fully local.
-Set `LLM_MODE=cloud` and write your Anthropic key to
-`.secrets/anthropic_api_key.txt` to use Claude API for Q&A.
+The MCP server itself binds to `127.0.0.1:3000` only — nothing else on your
+network can reach it.
+
+### 2. Project-internal LLM layer — controlled by `LLM_MODE`
+
+The MCP server's intelligence tools (`ask_mailbox`, `summarize_thread`,
+`extract_from_emails`) need an LLM for generation. Where that runs depends on
+`LLM_MODE` in `.env`:
+
+| Mode | What happens to retrieved email content |
+|---|---|
+| `local` (default) | Sent to local Ollama inside the Docker stack. Stays on your machine. |
+| `cloud` | Sent to Anthropic's Claude API for generation. Requires `.secrets/anthropic_api_key.txt`. |
+
+This setting only governs what the MCP server does *internally* during a tool
+call. It does not govern what your MCP *client* does with the result.
+
+### 3. MCP client layer — Claude Desktop is a cloud product
+
+This is the boundary most easily missed. **Claude Desktop is not a local
+LLM.** When you wire it up to this MCP server:
+
+1. You ask Claude Desktop a question.
+2. Claude (running on Anthropic's servers) decides to call an MCP tool.
+3. Claude Desktop relays the call to your local MCP server. The tool runs
+   locally — including, in `LLM_MODE=local`, any LLM work via Ollama.
+4. The tool's *return value* (which often contains email snippets, thread
+   bodies, or LLM-generated answers grounded in your mail) is sent back to
+   Claude on Anthropic's servers as part of the conversation context.
+5. Claude generates the next response using that data as input.
+
+So: **using Claude Desktop as your client transmits email content (whatever
+the called tools return) to Anthropic, regardless of `LLM_MODE`.** Anthropic's
+data handling for Claude Desktop applies — see Anthropic's current privacy
+policy for retention and training-use details.
+
+If you want end-to-end local conversations:
+
+- Drive the MCP intelligence tools directly via `docker exec mcp-server
+  python -c "..."`. Less ergonomic; nothing leaves your laptop.
+- Or use a different MCP client backed by a local LLM. For Open WebUI, set
+  `MCP_TRANSPORT=dual` and run `make open-webui-up` (the target auto-generates
+  the session-key secret on first run). It connects to the existing Ollama
+  container and uses `http://mcp-server:3000/mcp` as a Streamable HTTP MCP
+  server. Quality varies.
+
+Most users accept the Claude-Desktop-as-frontend tradeoff because the
+alternative is much less useful, but it is a real tradeoff and it is not
+the same posture as "everything stays local."
 
 ## Updating Bridge
 

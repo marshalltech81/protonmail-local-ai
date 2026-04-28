@@ -31,8 +31,23 @@ FROM python:3.14-slim-trixie@sha256:5b3879b6f3cb77e712644d50262d05a7c146b7312d78
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     inotify-tools \
+    # Attachment text extraction (schema v10). Tesseract supplies the OCR
+    # path used by image attachments and the scanned-PDF fallback in
+    # src/extractors/{image,pdf}.py; Poppler's pdftoppm is what pdf2image
+    # shells out to when rendering each PDF page to a PIL image. English
+    # is the only Tesseract language pack installed by default — extend
+    # via tesseract-ocr-* packages here if non-English mailboxes appear.
+    tesseract-ocr \
+    poppler-utils \
  && rm -rf /var/lib/apt/lists/*
 
+# UID 1002 — distinct from mbsync (UID 1001) so a parser/extractor
+# exploit triggered by a malicious .eml or attachment doesn't end up
+# with mbsync's UID. mbsync's entrypoint relaxes Maildir file perms
+# to 0644 after each sync (see relax_new_maildir_perms) so the
+# indexer reads via "other" permission rather than sharing mbsync's
+# UID. The Maildir mount is `:ro` from the indexer side as further
+# defense-in-depth.
 RUN groupadd --gid 1002 indexer && \
     useradd --uid 1002 \
             --gid 1002 \

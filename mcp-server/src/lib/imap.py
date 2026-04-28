@@ -8,17 +8,23 @@ import logging
 import smtplib
 import ssl
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.utils import getaddresses
 from pathlib import Path
+from typing import Any
 
 import aioimaplib
 
 from .security import safe_exception_text
 
 log = logging.getLogger("mcp.imap")
+
+
+def _decoded_payload(part: Any) -> bytes:
+    payload = part.get_payload(decode=True)
+    return payload if isinstance(payload, bytes) else b""
 
 
 @dataclass
@@ -212,17 +218,17 @@ class IMAPClient:
                         }
                     )
                 elif ct == "text/plain" and not body_text:
-                    payload = part.get_payload(decode=True) or b""
+                    payload = _decoded_payload(part)
                     body_text = payload.decode(
                         part.get_content_charset() or "utf-8", errors="replace"
                     )
                 elif ct == "text/html" and not body_html:
-                    payload = part.get_payload(decode=True) or b""
+                    payload = _decoded_payload(part)
                     body_html = payload.decode(
                         part.get_content_charset() or "utf-8", errors="replace"
                     )
         else:
-            payload = msg.get_payload(decode=True) or b""
+            payload = _decoded_payload(msg)
             body_text = payload.decode(msg.get_content_charset() or "utf-8", errors="replace")
 
         from email.utils import parsedate_to_datetime
@@ -230,7 +236,7 @@ class IMAPClient:
         try:
             date = parsedate_to_datetime(msg.get("Date", ""))
         except Exception:
-            date = datetime.utcnow()
+            date = datetime.now(UTC)
 
         # ``getaddresses`` parses RFC 5322 address lists correctly, including
         # display names that contain commas (``"Doe, Jane" <jane@x.com>``).

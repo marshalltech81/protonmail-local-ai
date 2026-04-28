@@ -1,7 +1,7 @@
 """
 Durable indexing queue backed by the ``indexing_jobs`` SQLite table.
 
-Prior to schema v8 the indexer processed files inline inside the
+Before the indexing_jobs queue, the indexer processed files inline inside the
 watchdog callback: any crash mid-embed or Ollama outage left the file
 unindexed with no durable record of the failure, and a parser bug on a
 single message was silently retried on every restart without ever

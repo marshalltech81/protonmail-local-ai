@@ -407,6 +407,90 @@ class TestReap:
         rec.reap()
         assert trashed.exists() is False
 
+    def test_reap_drops_chunks_for_reaped_messages_and_keeps_survivor_chunks(
+        self, db, threader, embedder, reconciler, maildir
+    ):
+        """Chunk cascade: when the reaper rebuilds a thread, the reaped
+        message's per-message chunks must be removed (across the chunks
+        table, the FTS shadow tables, and the vec table), while the
+        survivor's chunks must remain so the rebuilt thread vector can
+        derive from them.
+        """
+        from src.chunker import MessageChunk
+
+        # Index two messages with body content; manually write per-message
+        # chunks for each so the reap-time mean-of-survivors path has
+        # something to consume. ``_index`` here goes through the legacy
+        # direct-upsert path (no chunker) so we add the chunks ourselves.
+        orig_path = maildir / "1700000000.M1.host:2,S"
+        _write_eml(orig_path, "co1@example.com", subject="Chunked", body="orig")
+        thread_id = _index(orig_path, db, threader)
+
+        reply_path = maildir / "1700000001.M2.host:2,S"
+        _write_eml(
+            reply_path,
+            "co2@example.com",
+            subject="Re: Chunked",
+            body="reply",
+            in_reply_to="co1@example.com",
+            date=datetime(2024, 2, 1, 12, 0, tzinfo=UTC),
+        )
+        _index(reply_path, db, threader)
+
+        orig_chunk = MessageChunk(
+            chunk_id="orig-chunk".ljust(64, "0"),
+            chunk_index=0,
+            text="original chunk text",
+            char_start=0,
+            char_end=20,
+            token_est=5,
+        )
+        reply_chunk = MessageChunk(
+            chunk_id="reply-chunk".ljust(64, "0"),
+            chunk_index=0,
+            text="reply chunk text",
+            char_start=0,
+            char_end=20,
+            token_est=5,
+        )
+        db.replace_message_chunks(
+            message_id="co1@example.com",
+            thread_id=thread_id,
+            chunks=[orig_chunk],
+            embeddings_by_chunk_id={orig_chunk.chunk_id: [0.1] * 768},
+        )
+        db.replace_message_chunks(
+            message_id="co2@example.com",
+            thread_id=thread_id,
+            chunks=[reply_chunk],
+            embeddings_by_chunk_id={reply_chunk.chunk_id: [0.2] * 768},
+        )
+
+        # Tombstone the original; reply survives.
+        orig_trashed = maildir / "1700000000.M1.host:2,ST"
+        orig_path.rename(orig_trashed)
+        reconciler.sweep()
+
+        embed_calls_before = embedder.calls
+        result = reconciler.reap()
+        assert result["threads_rebuilt"] == 1
+
+        # Reaped message's chunk is gone from all three indexes.
+        assert db.get_chunk_ids_for_message("co1@example.com") == set()
+        orig_vec = db._conn.execute(
+            "SELECT COUNT(*) FROM message_chunks_vec WHERE chunk_id = ?", (orig_chunk.chunk_id,)
+        ).fetchone()[0]
+        assert orig_vec == 0
+
+        # Survivor's chunk is preserved.
+        assert db.get_chunk_ids_for_message("co2@example.com") == {reply_chunk.chunk_id}
+
+        # Embedder was NOT called for the rebuilt thread vector — the
+        # survivor had a chunk embedding to mean over, so the reap path
+        # took the chunk-aware branch instead of the subject-fallback
+        # embed.
+        assert embedder.calls == embed_calls_before
+
 
 # ---------------------------------------------------------------------------
 # Mass-delete brake

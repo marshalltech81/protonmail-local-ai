@@ -73,7 +73,7 @@ Browse threads in a folder.
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `folder` | string | `INBOX` | Folder to list |
-| `filter_type` | string | `all` | `all`, `unread`, or `flagged` |
+| `filter_type` | string | `all` | Currently only `all`; unread/flagged state is not indexed |
 | `limit` | int | `20` | Number of threads |
 | `offset` | int | `0` | Pagination offset |
 
@@ -84,12 +84,11 @@ List all folders and thread counts.
 
 ## Group 3 — Intelligence
 
-The intelligence tools build LLM prompts from the indexed thread body
-accumulated by the indexer (``threads.body_text``, up to ~8000 characters
-per thread), bounded by a fixed per-thread character budget (``2000`` by
-default) so multi-thread contexts stay within local-LLM context windows.
-If a thread row has no stored body text (legacy rows from an earlier
-schema), the 200-character ``snippet`` is used as a fallback.
+The intelligence tools build LLM prompts from the most relevant indexed
+chunks returned by hybrid search, bounded by a fixed per-thread character
+budget (``2000`` by default) so multi-thread contexts stay within local-LLM
+context windows. If a thread has no matching chunks, the tool falls back to
+the indexed thread body and finally to the 200-character ``snippet``.
 
 ### Prompt-injection hardening
 

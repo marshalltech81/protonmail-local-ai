@@ -11,11 +11,12 @@ from src.lib.sqlite import Database
 
 
 def _build_schema(conn: sqlite3.Connection) -> None:
-    """Build the minimal thread-level schema the MCP reader depends on.
+    """Build the schema the MCP reader depends on.
 
-    Mirrors indexer SCHEMA_VERSION 5: threads (with ``senders``), threads_fts
-    (contentless with contentless_delete=1), threads_vec, and
-    message_thread_map.
+    Mirrors the indexer's tables (``threads`` + ``threads_fts`` +
+    ``threads_vec``, ``message_thread_map``, ``message_chunks`` family,
+    ``attachments`` family) with toy 4-dim embedding columns so test
+    vectors stay readable.
     """
     conn.executescript(
         """
@@ -51,8 +52,145 @@ def _build_schema(conn: sqlite3.Connection) -> None:
             thread_id TEXT PRIMARY KEY,
             embedding FLOAT[4]
         );
+
+        -- Per-message chunks. Tests use the same toy 4-dim embedding
+        -- space as the thread vec table so synthetic vectors like
+        -- ``[1, 0, 0, 0]`` work uniformly across both lanes.
+        CREATE TABLE message_chunks (
+            chunk_id        TEXT PRIMARY KEY,
+            message_id      TEXT NOT NULL,
+            thread_id       TEXT NOT NULL,
+            chunk_index     INTEGER NOT NULL,
+            text            TEXT NOT NULL,
+            char_start      INTEGER NOT NULL,
+            char_end        INTEGER NOT NULL,
+            token_est       INTEGER NOT NULL,
+            chunked_at      TEXT NOT NULL,
+            fts_rowid       INTEGER,
+            attachment_id   TEXT
+        );
+
+        CREATE VIRTUAL TABLE message_chunks_fts USING fts5(
+            text,
+            content='',
+            contentless_delete=1,
+            tokenize='porter unicode61'
+        );
+
+        CREATE VIRTUAL TABLE message_chunks_vec USING vec0(
+            chunk_id TEXT PRIMARY KEY,
+            embedding FLOAT[4]
+        );
+
+        CREATE TABLE attachments (
+            attachment_occurrence_id TEXT PRIMARY KEY,
+            message_id                TEXT NOT NULL,
+            attachment_id             TEXT NOT NULL,
+            thread_id                 TEXT NOT NULL,
+            filename                  TEXT NOT NULL,
+            content_type              TEXT NOT NULL,
+            size_bytes                INTEGER NOT NULL,
+            seen_at                   TEXT NOT NULL,
+            fts_rowid                 INTEGER
+        );
+
+        CREATE VIRTUAL TABLE attachments_fts USING fts5(
+            filename,
+            content_type,
+            content='',
+            contentless_delete=1,
+            tokenize='porter unicode61'
+        );
         """
     )
+
+
+def _insert_chunk(
+    conn: sqlite3.Connection,
+    *,
+    chunk_id: str,
+    message_id: str,
+    thread_id: str,
+    text: str,
+    embedding: list[float],
+    chunk_index: int = 0,
+) -> None:
+    """Insert one ``message_chunks`` + matching FTS + vec row.
+
+    Mirrors the indexer's ``replace_message_chunks`` write path closely
+    enough that the chunk-aware retrieval lane in the MCP reader can
+    exercise it end-to-end, without requiring a real indexer pipeline
+    in the unit-test stack.
+    """
+    cur = conn.cursor()
+    cur.execute("INSERT INTO message_chunks_fts (text) VALUES (?)", (text,))
+    fts_rowid = cur.lastrowid
+    cur.execute(
+        "INSERT INTO message_chunks_vec (chunk_id, embedding) VALUES (?, ?)",
+        (chunk_id, sqlite_vec.serialize_float32(embedding)),
+    )
+    cur.execute(
+        """
+        INSERT INTO message_chunks
+            (chunk_id, message_id, thread_id, chunk_index, text,
+             char_start, char_end, token_est,
+             chunked_at, fts_rowid)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            chunk_id,
+            message_id,
+            thread_id,
+            chunk_index,
+            text,
+            0,
+            len(text),
+            max(1, len(text) // 4),
+            "2024-01-01T00:00:00+00:00",
+            fts_rowid,
+        ),
+    )
+    conn.commit()
+
+
+def _insert_attachment(
+    conn: sqlite3.Connection,
+    *,
+    message_id: str,
+    thread_id: str,
+    attachment_id: str,
+    filename: str,
+    content_type: str = "application/pdf",
+    size_bytes: int = 1234,
+    occurrence_id: str | None = None,
+) -> None:
+    occurrence_id = occurrence_id or f"{message_id}:{attachment_id}:{filename}"
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO attachments_fts (filename, content_type) VALUES (?, ?)",
+        (filename, content_type),
+    )
+    fts_rowid = cur.lastrowid
+    cur.execute(
+        """
+        INSERT INTO attachments
+            (attachment_occurrence_id, message_id, attachment_id, thread_id, filename,
+             content_type, size_bytes, seen_at, fts_rowid)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            occurrence_id,
+            message_id,
+            attachment_id,
+            thread_id,
+            filename,
+            content_type,
+            size_bytes,
+            "2024-01-01T00:00:00+00:00",
+            fts_rowid,
+        ),
+    )
+    conn.commit()
 
 
 def _insert_thread(
@@ -117,7 +255,7 @@ def _insert_thread(
 
 
 @pytest.fixture
-def seeded_db(tmp_path: Path) -> Database:
+def seeded_db(tmp_path: Path):
     """Build a populated read-only DB matching the indexer schema."""
     db_path = tmp_path / "mcp-test.db"
     conn = sqlite3.connect(str(db_path))
@@ -139,6 +277,14 @@ def seeded_db(tmp_path: Path) -> Database:
         has_attachments=True,
         body_text="please find the invoice attached for march",
         embedding=[1.0, 0.0, 0.0, 0.0],
+    )
+    _insert_attachment(
+        conn,
+        message_id="t-alpha",
+        thread_id="t-alpha",
+        attachment_id="att-alpha",
+        filename="march-statement-unique.pdf",
+        content_type="application/pdf",
     )
     _insert_thread(
         conn,
@@ -168,11 +314,100 @@ def seeded_db(tmp_path: Path) -> Database:
     )
     conn.close()
 
-    return Database(str(db_path))
+    db = Database(str(db_path))
+    try:
+        yield db
+    finally:
+        db.close()
 
 
 @pytest.fixture
-def empty_db(tmp_path: Path) -> Database:
+def chunked_db(tmp_path: Path):
+    """Populated read-only DB with both thread-level rows and v9 per-message
+    chunks.
+
+    Each thread also carries one or two chunks aligned to the same toy
+    4-dim embedding axis as its parent thread vector. Lets chunk-search
+    and chunk-aware RRF tests assert that a chunk hit lifts its parent
+    thread into ranking, without re-deriving the indexer pipeline.
+    """
+    db_path = tmp_path / "mcp-chunks.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.enable_load_extension(True)
+    sqlite_vec.load(conn)
+    conn.enable_load_extension(False)
+    _build_schema(conn)
+
+    # Same three threads as ``seeded_db`` but with chunks attached.
+    _insert_thread(
+        conn,
+        thread_id="t-alpha",
+        subject="invoice for march",
+        participants=["alice@example.com", "bob@example.com"],
+        senders=["alice@example.com"],
+        date_first="2024-03-01T09:00:00+00:00",
+        date_last="2024-03-02T09:00:00+00:00",
+        snippet="please find the invoice attached",
+        body_text="please find the invoice attached for march",
+        embedding=[1.0, 0.0, 0.0, 0.0],
+    )
+    _insert_chunk(
+        conn,
+        chunk_id="alpha-c1",
+        message_id="t-alpha",
+        thread_id="t-alpha",
+        text="invoice number 12345 due march 31",
+        embedding=[1.0, 0.0, 0.0, 0.0],
+    )
+
+    _insert_thread(
+        conn,
+        thread_id="t-beta",
+        subject="lunch plans",
+        participants=["carol@example.com", "alice@example.com"],
+        senders=["carol@example.com"],
+        date_first="2024-03-05T12:00:00+00:00",
+        date_last="2024-03-05T12:30:00+00:00",
+        snippet="want to grab lunch tomorrow",
+        body_text="want to grab lunch tomorrow at the usual spot",
+        embedding=[0.0, 1.0, 0.0, 0.0],
+    )
+    _insert_chunk(
+        conn,
+        chunk_id="beta-c1",
+        message_id="t-beta",
+        thread_id="t-beta",
+        text="lets grab lunch at noon tomorrow",
+        embedding=[0.0, 1.0, 0.0, 0.0],
+    )
+
+    # Third thread has no chunks — exercises the empty-body path:
+    # thread vector is still present, but chunk lane will not surface
+    # this thread.
+    _insert_thread(
+        conn,
+        thread_id="t-gamma",
+        subject="meeting notes archive",
+        participants=["dave@example.com"],
+        senders=["dave@example.com"],
+        folder="Archive",
+        date_first="2024-02-15T08:00:00+00:00",
+        date_last="2024-02-15T08:00:00+00:00",
+        snippet="notes from the planning meeting",
+        body_text="notes from the planning meeting last week",
+        embedding=[0.0, 0.0, 1.0, 0.0],
+    )
+
+    conn.close()
+    db = Database(str(db_path))
+    try:
+        yield db
+    finally:
+        db.close()
+
+
+@pytest.fixture
+def empty_db(tmp_path: Path):
     db_path = tmp_path / "mcp-empty.db"
     conn = sqlite3.connect(str(db_path))
     conn.enable_load_extension(True)
@@ -180,7 +415,11 @@ def empty_db(tmp_path: Path) -> Database:
     conn.enable_load_extension(False)
     _build_schema(conn)
     conn.close()
-    return Database(str(db_path))
+    db = Database(str(db_path))
+    try:
+        yield db
+    finally:
+        db.close()
 
 
 @pytest.fixture
@@ -190,6 +429,8 @@ def _build_thread_on():
     Regression tests for date-filter SQL pushdown need a ``date_first`` on
     a specific boundary day; ``seeded_db`` only covers Feb/Mar 2024.
     """
+
+    created: list[Database] = []
 
     def _factory(
         tmp_path: Path,
@@ -220,9 +461,15 @@ def _build_thread_on():
             embedding=[1.0, 0.0, 0.0, 0.0],
         )
         conn.close()
-        return Database(str(db_path))
+        db = Database(str(db_path))
+        created.append(db)
+        return db
 
-    return _factory
+    try:
+        yield _factory
+    finally:
+        for db in created:
+            db.close()
 
 
 def _make_result(thread_id: str, folder: str = "INBOX"):

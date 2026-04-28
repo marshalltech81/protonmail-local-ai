@@ -178,8 +178,10 @@ services:
 
   # ---------------------------------------------------------------------------
   # MCP Server
-  # Exposes search, Q&A, and agentic tools to Claude Desktop via HTTP/SSE.
-  # Accessible at http://localhost:MCP_PORT/mcp on the host machine only.
+  # Exposes search, Q&A, and agentic tools over MCP transports.
+  # Accessible on the host machine only. Default SSE path:
+  # http://localhost:MCP_PORT/sse. Streamable HTTP path when enabled:
+  # http://localhost:MCP_PORT/mcp.
   # ---------------------------------------------------------------------------
   mcp-server:
     build:
@@ -209,6 +211,7 @@ services:
       OLLAMA_LLM_MODEL: ${OLLAMA_LLM_MODEL:-llama3.2}
       LLM_MODE: ${LLM_MODE:-local}
       MCP_PORT: ${MCP_PORT:-3000}
+      MCP_TRANSPORT: ${MCP_TRANSPORT:-sse}
       MCP_READ_ONLY: ${MCP_READ_ONLY:-true}
     volumes:
       # Mounted writable so SQLite can create the WAL ``-shm`` sidecar needed

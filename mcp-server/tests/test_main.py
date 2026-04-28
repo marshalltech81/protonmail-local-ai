@@ -19,7 +19,7 @@ here:
 
 import asyncio
 
-from src.main import _env_bool, _read_secret
+from src.main import _env_bool, _normalize_transport, _read_secret, _run_server
 
 
 class TestEnvBool:
@@ -38,13 +38,16 @@ class TestEnvBool:
             monkeypatch.setenv("FAKE_BOOL_FLAG", raw)
             assert _env_bool("FAKE_BOOL_FLAG", default=True) is False, raw
 
-    def test_unrecognized_value_is_treated_as_false(self, monkeypatch):
-        # Anything outside the truthy set falls to False — fail closed for
-        # a flag like MCP_READ_ONLY whose default-on posture is the safe
-        # one. ``_env_bool`` is not used for any flag where the safer
-        # interpretation of garbage input would be ``True``.
+    def test_unrecognized_value_raises(self, monkeypatch):
+        # A malformed safety flag should fail startup rather than silently
+        # flipping the deployment posture.
         monkeypatch.setenv("FAKE_BOOL_FLAG", "maybe")
-        assert _env_bool("FAKE_BOOL_FLAG", default=True) is False
+        try:
+            _env_bool("FAKE_BOOL_FLAG", default=True)
+        except ValueError as exc:
+            assert "FAKE_BOOL_FLAG" in str(exc)
+        else:
+            raise AssertionError("expected ValueError")
 
     def test_whitespace_around_value_is_tolerated(self, monkeypatch):
         monkeypatch.setenv("FAKE_BOOL_FLAG", "  true  ")
@@ -89,6 +92,34 @@ class TestReadSecret:
     def test_returns_empty_when_neither_source_present(self, monkeypatch):
         monkeypatch.delenv("DEFINITELY_UNSET", raising=False)
         assert _read_secret("missing_secret", "DEFINITELY_UNSET") == ""
+
+
+class TestMcpTransport:
+    def test_supported_transports_are_normalized(self):
+        assert _normalize_transport("sse") == "sse"
+        assert _normalize_transport(" streamable-http ") == "streamable-http"
+        assert _normalize_transport("DUAL") == "dual"
+
+    def test_unknown_transport_fails_closed(self):
+        try:
+            _normalize_transport("websocket")
+        except ValueError as exc:
+            assert "MCP_TRANSPORT" in str(exc)
+        else:
+            raise AssertionError("expected ValueError")
+
+    def test_sse_and_streamable_delegate_to_fastmcp_run(self):
+        class FakeServer:
+            def __init__(self):
+                self.transports = []
+
+            def run(self, transport):
+                self.transports.append(transport)
+
+        fake = FakeServer()
+        _run_server(fake, "sse")
+        _run_server(fake, "streamable-http")
+        assert fake.transports == ["sse", "streamable-http"]
 
 
 class TestHealthEndpoint:

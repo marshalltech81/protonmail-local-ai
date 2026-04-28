@@ -16,83 +16,78 @@ Detailed design and operational docs belong in `docs/`.
 
 ## Current Objective
 
-Validate the new safe local-first baseline under real first-run/sync conditions,
-then improve retrieval fidelity, test coverage, and tool completeness.
+Improve retrieval fidelity, test coverage, and tool completeness on top of the
+validated local-first baseline.
 
 ## Current State
 
-Implemented and working at a high level:
+Stack (five containers — see `docs/architecture.md` for the data flow):
 
-- ProtonBridge runs headless in Docker
-- mbsync pulls mail from Bridge into Maildir
-- indexer parses and threads messages
-- Ollama embeddings are stored in SQLite with FTS5 + sqlite-vec
-- MCP server exposes mailbox tools over HTTP/SSE
-- Python services now use per-service `uv` projects with `pyproject.toml` and `uv.lock`
-- Bridge TLS cert extraction is automated in `mbsync/entrypoint.sh`
-- Bridge password is handled as a Docker Compose secret
-- `mcp-server` now runs in read-only mode by default and serves retrieval from the local SQLite index
-- mail-changing MCP tools are no longer registered in the default deployment
-- Bridge-facing traffic is now isolated from the application network
-- `mbsync` and `mcp-server` now use a tighter runtime profile with read-only root filesystems, `tmpfs`, `no-new-privileges`, dropped capabilities, and `pids_limit`
-- the long-lived `bridge` and `mbsync` service users now use non-login shells
-- `mbsync` now validates Bridge auth prerequisites, bounds startup/sync failure loops, captures cert extraction diagnostics, exposes a healthcheck, and allows current TLS negotiation defaults
-- the Bridge bootstrap now time-bounds `gpg`/`pass`, repairs missing `.gpg-id`, and the indexer now has a hardened runtime profile plus a heartbeat healthcheck
-- `mcp-server` cloud error paths now redact secrets, Claude model selection is configurable via `CLAUDE_MODEL`, and insecure live Bridge transport paths fail closed unless a cert-pinned backend is explicitly configured
-- the Bridge build now uses a shared patch helper plus a dedicated patch-drift check and build/runtime smoke-test path for version bumps
-- the indexer now ships an opt-in deletion reconciler: mbsync `T`-flag detection (startup sweep + watchdog `on_moved`), grace-window reaping with thread rebuild, and a mass-delete safety brake; `mbsync` keeps `Expunge None` unchanged
-- schema v4 rebuilds `threads_fts` with `contentless_delete=1` and tracks `threads.fts_rowid`; this fixes stale-token accumulation on thread updates and the MCP keyword-search JOIN that was returning empty results due to UNINDEXED-column null reads
-- `upsert_thread` now merges `message_ids`, `participants`, `has_attachments`, and `date_first` with the existing row rather than replacing them from the single newly-arrived message; RFC 2822 dates normalize to UTC-aware so thread sorting no longer mixes aware and naive datetimes
-- `mcp-server` opens SQLite via `file:{path}?mode=ro` URI and the sqlite volume is mounted writable so WAL reads work; the indexer `Database` wraps its shared connection in a per-instance `RLock` so watchdog-thread writes cannot interleave with reconciler-loop writes
-- indexer `on_moved` now indexes the destination of Maildir rename events (standard delivery writes tmp → new/cur) so new mail no longer has to wait for a restart to appear in the index; the initial-index scan refreshes the heartbeat every 25 messages so large mailboxes do not exceed the 90-second healthcheck window
-- intelligence tools (`ask_mailbox`, `summarize_thread`, `extract_from_emails`) now feed the LLM the accumulated thread body text (bounded per thread) instead of the 200-character snippet; keyword search sanitizes user input into safe FTS5 phrases with a LIKE fallback, and filtered searches oversample raw candidates to preserve recall
-- `make pull-models` self-starts the ollama container and waits for readiness; `scripts/validate-env.sh` uses a portable `stat` helper so `make up` works on macOS; `make status` now reports real index counts instead of a hardcoded `{"status": "ok"}`
-- `mbsync` now pins Bridge's TLS cert SHA-256 fingerprint on first boot to the persistent `mbsync-state` volume and refuses to sync on mismatch; an operator-opt-in `BRIDGE_CERT_PIN_ROTATE=true` is required to accept a legitimate rotation (e.g. Bridge upgrade)
-- `mcp-server` now exposes a plain HTTP `/health` endpoint (outside the MCP protocol) that probes the read-only SQLite connection; the Dockerfile `HEALTHCHECK` uses it so Compose reports mcp-server health without speaking SSE
-- the three intelligence tools now wrap retrieved email excerpts in `<untrusted_email>` tags and ship a system-prompt security notice framing email as untrusted data — defense-in-depth against prompt injection from attacker-controlled email content
-- `scripts/validate-env.sh` no longer shell-sources `.env`; it parses known keys explicitly so a hostile or malformed value cannot trigger command substitution on the operator's host
-- `indexer` Ollama readiness now uses exact model matching (with optional `:latest` suffix) instead of substring matching, and a failed `_pull_model` raises instead of being silently reported as ready
-- `make test` now runs both `test-indexer` and `test-mcp`
-- MCP tool-boundary integer inputs (`search.limit`, `list_threads.limit/offset`, `ask_mailbox.max_threads`, `extract_from_emails.limit`) now route through a shared `clamp_int` helper so non-numeric or out-of-range caller values fall back to the default rather than raising a bare `ValueError` before the tool's try/except
-- threader participant matching and deduplication now canonicalize addresses via `email.utils.parseaddr` + lowercase, so `Bob Smith <bob@x>`, `bob@x`, and `"Bob S." <bob@x>` collapse to the same identity; malformed entries without an `@` are dropped instead of becoming their own spurious participants
-- the indexer now runs a lightweight rename-only `sweep_paths()` at every startup (always on, regardless of `INDEXER_DELETION_ENABLED`) so mbsync flag renames that land while the indexer was offline no longer leave stale `indexed_files` filepaths; tombstoning and reaping remain opt-in
-- unused Python dependencies were removed: `mail-parser`, `beautifulsoup4` from `indexer`; `aiosmtplib`, `anthropic` from `mcp-server` (the Claude API call already uses `httpx` directly; `aioimaplib` stays for the live-IMAP code path)
-- `init: true` is set on every long-running Compose service so tini as PID 1 forwards signals and reaps zombie subprocesses
-- `ollama` now documents per-model RAM budgets and an optional `mem_limit` knob so memory-constrained hosts can prevent Ollama from OOM-killing other services
-- a new `compileall` CI job byte-compiles `indexer/src` and `mcp-server/src` as belt-and-braces over ruff — catches import-time failures that a pure lint pass can miss
+- **ProtonBridge** runs headless in Docker, exposes IMAP/SMTP on the
+  internal `bridge-net` network only.
+- **mbsync** pulls mail from Bridge into a Maildir volume on a
+  bounded retry loop, pins Bridge's TLS cert fingerprint on first
+  boot, and runs `chmod go+r` after each sync so the indexer (a
+  different UID) can read new files via "other" perms while keeping
+  cross-UID separation.
+- **indexer** parses Maildir messages, threads them, embeds via
+  Ollama, and writes SQLite (FTS5 + `sqlite-vec`). Per-message
+  paragraph-packed chunks land in `message_chunks_*`; thread vectors
+  are the mean of their chunks. Attachments (PDF / DOCX / XLSX / HTML
+  / TXT / images via OCR) are extracted, chunked, and indexed
+  alongside body content; the per-content-hash extraction cache
+  dedups OCR / parse work for forwarded copies.
+- **Ollama** serves the embedding model (`nomic-embed-text`) and the
+  local LLM (`llama3.2`) over the internal `app-net` network.
+- **mcp-server** exposes search, retrieval, and intelligence tools to
+  Claude Desktop over HTTP/SSE on `localhost:3000`. Read-only by
+  default; mail-changing action tools are not registered. Hybrid
+  search merges three lanes (thread BM25, thread vector, chunk
+  vector) via reciprocal rank fusion.
+
+Operational baseline:
+
+- Python services use per-service `uv` projects with pinned
+  `pyproject.toml` + `uv.lock`. Both meet a 90% coverage floor in CI.
+- Bridge built from upstream Proton source via `make build-nogui`; a
+  patch-drift check + smoke test gate version bumps.
+- All long-running services run as non-root with `cap_drop: ["ALL"]`,
+  `no-new-privileges`, read-only root filesystems, `pids_limit`, and
+  `init: true` for proper signal handling.
+- Bridge password lives in `.secrets/bridge_pass.txt` (Docker
+  Compose secret), never `.env`. `make first-run` uses
+  `logging: driver: none` to keep credentials out of Docker logs.
+- Deletion reconciliation is opt-in
+  (`INDEXER_DELETION_ENABLED=true`) with a grace window, mass-delete
+  brake, and atomic reap-or-rollback.
+- A durable `indexing_jobs` queue retries transient failures with
+  exponential backoff and dead-letters persistent ones for operator
+  visibility.
 
 Known limitations:
 
 - initial sync may take a long time on large mailboxes
-- attachments are not indexed yet
-- per-message live retrieval and mail-changing actions are disabled in the default deployment until a safe action backend is implemented
-- test coverage is incomplete
-- some MCP action features are incomplete
-- `list_threads(filter_type=...)` does not yet match the documented interface
-- the new hardened first-run/sync path still needs real end-to-end validation against a live Bridge session
-- deletion reconciliation is opt-in (`INDEXER_DELETION_ENABLED=true`) and needs real-world validation; `INDEXER_UNLINK_ON_REAP=true` only removes the `.eml` file when Maildir is mounted read-write (default mount is read-only)
+- audio / video attachment transcription is not yet supported; other
+  formats (PDF / DOCX / XLSX / HTML / TXT / images) are extracted,
+  chunked, and searchable
+- per-message live retrieval and mail-changing actions are disabled
+  in the default deployment until a safe action backend is
+  implemented
+- test coverage covers `indexer/src` and the full `mcp-server/src`
+  package except service bootstrap entrypoints; MCP tool handlers are
+  unit-tested through lightweight FastMCP stubs
+- `list_threads(filter_type=...)` rejects unsupported values
+  cleanly; unread/flagged state remains unindexed
+- deletion reconciliation is opt-in and not yet validated under
+  long-running real-world conditions; `INDEXER_UNLINK_ON_REAP=true`
+  only removes the `.eml` when Maildir is mounted read-write (the
+  default is read-only)
 
 ## Active Priorities
 
 Work these in order.
 
-### 1. Confirm stable first-run and sync behavior under the hardened baseline
-
-Goal:
-- ensure first-run, Bridge auth, cert extraction, and initial mail sync remain reliable after the Tier 1 hardening changes
-
-Tasks:
-- validate first-run against a real Bridge account
-- verify `mbsync` works correctly with generated config/cert material under `/tmp`
-- verify the default deployment still provides useful local retrieval/intelligence when Bridge is unavailable
-- document any live operational caveats discovered during validation
-
-Definition of done:
-- first-run succeeds without leaking credentials to Docker logs
-- mbsync reliably connects after Bridge comes up
-- sync behavior is repeatable after container restarts
-
-### 2. Validate intelligence fidelity end-to-end
+### 1. Validate intelligence fidelity end-to-end
 
 Goal:
 - confirm the body-text-based RAG path produces noticeably better answers and summaries than the previous snippet-only behavior under real mailbox conditions
@@ -106,26 +101,28 @@ Definition of done:
 - answers and summaries consistently reflect whole-thread context in practice, not just in unit tests
 - structured extraction is based on full accumulated thread bodies rather than the latest snippet
 
-### 3. Expand test coverage
+### 2. Expand test coverage
 
 Goal:
 - make parser, threader, database, and MCP behavior safer to change
 
 Tasks:
 - keep parser/threader/database tests passing
-- add tests for `list_threads(filter_type=...)` behavior
+- keep `list_threads(filter_type=...)` validation tests passing
 - add tests for read-only action-tool gating, non-registration, and user-facing failure paths
 - add tests for local-only retrieval and system-status behavior
 - add integration coverage for indexer watchdog behavior using mocks
 - add test for circular `In-Reply-To` references (document expected behavior even if not explicitly handled)
-- expand `mcp-server` coverage beyond `src/lib` (tool handlers, service bootstrap) and then widen the coverage scope accordingly
+- keep MCP tool-handler coverage in the widened `src` scope; add only
+  targeted bootstrap coverage where it can be tested without standing up
+  a live transport
 
 Definition of done:
 - core indexing and retrieval paths have automated coverage
 - risky refactors can be validated without manual mailbox testing
 - coverage output is visible in CI so regressions are caught early
 
-### 4. Tighten incomplete or misleading tool behavior
+### 3. Tighten incomplete or misleading tool behavior
 
 Goal:
 - make the exposed MCP surface truthful and dependable
@@ -133,14 +130,14 @@ Goal:
 Tasks:
 - implement or hide `reply_to_thread`
 - implement or hide `create_draft`
-- make `list_threads` filter behavior match the documented interface, or reject unsupported filter values clearly
+- keep `list_threads` filter documentation and validation aligned
 - keep action-tool docs and registration behavior aligned
 
 Definition of done:
 - the documented tool surface matches runtime behavior
 - unsupported paths fail clearly instead of implying functionality that does not exist
 
-### 5. Preserve the Tier 1 safety baseline
+### 4. Preserve the Tier 1 safety baseline
 
 Goal:
 - keep the new local-only, read-only, and split-network defaults from regressing over time
@@ -158,25 +155,31 @@ Definition of done:
 ## Near-Term Backlog
 
 ### mbsync improvements
-- investigate IMAP IDLE as a replacement for the sync sleep loop
 - confirm current Patterns and expunge behavior remain safe
 - keep sync strictly pull-only
+- move `BRIDGE_USER` out of the Compose environment and into a file-backed config/secret consumed by `mbsync/entrypoint.sh`; the username is less sensitive than the Bridge password, but it is still authentication material currently exposed via container metadata
+- add explicit log rotation plus memory/CPU limits to the `mbsync` service so a noisy sync failure or runaway process cannot fill disk or starve the rest of the stack
+- evaluate pinning `mbsync` runtime package versions and/or scanning the image in CI; the base image is digest-pinned, but the installed Debian packages still float at build time
 
 ### MCP feature completion
 - add attachment download support once the read-only action path is defined
 - verify action tools respect read-only guardrails
 
-### Attachment indexing
-- index attachment filenames and MIME types for search/filtering
-- evaluate safe local text extraction for common attachment types
-- add OCR-based text extraction for image attachments such as `.png` and `.jpg`
-- add OCR-based text extraction for scanned PDFs
-- evaluate transcription support for common audio/video attachment types
-- add content-hash-based deduping for expensive extraction work so identical attachments are not OCRed or transcribed repeatedly
-- preserve per-message attachment occurrences even when extracted content is deduped
-- do not store raw attachment binaries in SQLite
-- log unsupported or unparsed attachment types in application logs so parser gaps are visible in real-world use
-- add tests for attachment parsing and search behavior
+### Attachment indexing — remaining work
+Most of this section is implemented: filenames/MIME indexed in
+`attachments_fts`, per-format extraction (PDF / DOCX / XLSX / HTML / TXT /
+images) feeds chunks through the existing `message_chunks` lane, dedup runs
+via the per-content-hash `attachment_extractions` cache, raw bytes are not
+persisted, unsupported types log at debug. What's still open:
+
+- audio / video transcription via Whisper (Tier 3 — model storage + CPU/GPU
+  cost is significant; deferred until there's a clear use case)
+- expand integration coverage with real-world fixtures (scanned PDFs from
+  multiple OCR engines, Office docs from various authoring tools, HEIC
+  images, password-protected PDFs)
+- consider an attachments-search MCP tool that surfaces attachment-only hits
+  (filename + extracted excerpt) separately from thread-level retrieval, for
+  "find that PDF" queries that don't need the parent email body
 
 ### Bridge release monitoring
 - add a scheduled GitHub Actions workflow that queries the proton-bridge GitHub releases API and compares the latest release tag to `BRIDGE_VERSION` in `.env.example`; when the repo is behind a newer release, open a GitHub issue or post a workflow summary so the operator is notified to evaluate the release and run `make bridge-upgrade-check`; Dependabot monitors Docker base images but has no mechanism to track the upstream Bridge release version, leaving version drift entirely manual
@@ -196,7 +199,10 @@ Definition of done:
 - let the runner tear down ephemeral Bridge state after the run; do not upload Bridge data volumes as artifacts
 
 ### Schema and embeddings
-- build a real migration runner around `SCHEMA_VERSION`
+- the indexer currently fails fast on a `SCHEMA_VERSION` mismatch with a
+  "wipe the volume" error rather than running migrations. Add a real
+  forward-migration runner the next time the schema actually needs to
+  evolve in a way that preserves existing data
 - document and enforce embedding dimension assumptions
 - make model-switch behavior explicit and safe
 
@@ -308,36 +314,44 @@ Need final decision on whether read-only mode blocks:
 - action tools plus any SMTP send path
 - all mutating paths including draft creation and move/flag operations
 
-### 2. IMAP strategy
-Need decision on whether polling remains acceptable or whether IMAP IDLE is worth the added complexity.
-
-### 3. Live Bridge integration lane
+### 2. Live Bridge integration lane
 Need final decision on the long-term home for live Bridge smoke tests:
 - GitHub-hosted manual/nightly workflow using a dedicated no-2FA Proton test account
 - or a trusted self-hosted runner with persistent authenticated Bridge state
 
 ## Recently Completed
 
-- test coverage wired into CI: `pytest-cov` added to both services with a 90% fail-under floor; coverage scope is `indexer/src` (omitting `src/main.py`) and `mcp-server/src/lib`; coverage XML uploaded as an artifact per job
-- `mcp-server` unit-test suite added covering `security`, `sqlite` (hybrid/keyword/semantic/RRF/filters/validators), `ollama` (async httpx MockTransport), and `imap` (TLS context, fail-closed refusal, async aioimaplib mocks, smtplib mocks, RFC822 parser)
-- fixed a latent bug in `mcp-server/src/lib/security.py` where `redact_sensitive_text` raised `re.PatternError` on every call because the `sk-ant-...` pattern had no capture group but the substitution template used `\1`
-- `bandit` static analysis added as a dedicated CI job scanning `indexer/src` and `mcp-server/src` at `-ll` (medium+) severity
-- Bridge CI jobs now invoke `make bridge-patch-check` and `make bridge-smoke` directly so the `make bridge-upgrade-check` gate documented for local version bumps has the same shape in CI; `timeout-minutes` added to both jobs
-- Bridge entrypoint hardened: XDG paths unset before export, explicit error guards on GPG key generation and `pass init`, vault existence cross-checked against GPG key presence so a broken vault is caught at startup
-- Bridge `patch-source.sh`: post-patch compilation check added so a malformed patch fails the build rather than producing a broken binary
-- Bridge `Dockerfile`: `bash` added as an explicit runtime dependency; `debian:bookworm-slim` runtime base pinned to digest
-- Bridge `docker-compose.yml`: `start_period` increased from `15s` to `45s` to allow GPG initialization to complete before the healthcheck fires
-- Bridge `Makefile`: `make update` now requires `bridge-upgrade-check` to pass before rebuilding
-- two-network Docker topology implemented: `bridge-net` isolates Bridge/mbsync from `app-net` used by indexer and mcp-server
-- automated Bridge TLS cert extraction on container start
-- fail-closed `mbsync` cert extraction so sync refuses to proceed without Bridge cert pinning
-- Bridge password moved to Docker Compose secret
-- `Sync All` changed to `Sync Pull`
-- `All Mail` and `Labels/*` excluded from mbsync Patterns
-- explicit sync state path added in `mbsyncrc.template`
-- explicit `700` permissions on sensitive Bridge state directories under `/data`
-- read-only Bridge root filesystem with compose-level smoke coverage for writable-path expectations
-- Bridge writable runtime paths narrowed to `/data`, `/tmp`, and a bridge-owned `/home/bridge` tmpfs
+The repository was simplified end-to-end to drop migration debt that had
+accumulated over the prior schema-v1-through-v12 history. Net effect:
+~1,200 lines of code deleted, ~500 lines simplified. Highlights:
+
+- **Schema collapsed** into one ``_apply_initial_schema`` (the v1→v12
+  per-version migration methods, the ``schema_version`` reset
+  workaround, the ``ALTER TABLE`` / ``try/except OperationalError``
+  patterns, and every "legacy row" defensiveness path are gone). A
+  schema version mismatch now raises a clear "wipe the volume" error
+  rather than silently running migrations.
+- **`src/backfill.py` deleted** along with `make backfill-chunks` and
+  the per-version migration tests; the chunker runs on every new
+  message in the steady-state path and there's no pre-existing data to
+  fill in.
+- **Cross-container Maildir handoff simplified** from the
+  mailshare/SGID/umask dance to a one-liner post-sync `chmod go+r`.
+  mbsync stays UID 1001, indexer stays UID 1002, indexer's mount stays
+  `:ro`, defense-in-depth preserved.
+- **`scripts/maildir-perms-smoke.sh` deleted** along with `make
+  maildir-perms-smoke`.
+- **`build_merged_body` removed** and `body=` parameter dropped from
+  `upsert_thread`; merge-on-update logic is internal-only.
+- **`senders → participants` legacy fallback removed** from the MCP
+  filter and row reader; senders is always populated on writes.
+- **PLAN.md "Recently Completed" history** reduced from a 25-entry
+  log to this summary.
+
+The functional surface — chunker, attachment extractors (PDF/DOCX/
+XLSX/HTML/TXT/image-OCR), per-occurrence + per-content-hash dedup,
+hybrid RRF retrieval with chunk lane, intelligence-tool chunk
+evidence, deletion reconciler, durable indexing queue — all stays.
 
 ## Notes for Agents
 

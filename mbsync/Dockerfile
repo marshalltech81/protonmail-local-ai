@@ -13,7 +13,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # -----------------------------------------------------------------------------
 # Non-root user
-# UID 1001 — distinct from bridge user (UID 1000)
+# UID 1001 — distinct from bridge (UID 1000) and from indexer (UID
+# 1002). mbsync owns every file under /maildir; the indexer reads via
+# "other" perms after the entrypoint's post-sync chmod relaxes
+# Maildir files from the default 0600 to 0644. This keeps cross-UID
+# defense-in-depth (a parser/extractor exploit in the indexer cannot
+# write to mbsync's spool even if the mount is ever flipped to rw)
+# while avoiding a shared-group + SGID + umask dance.
 # -----------------------------------------------------------------------------
 RUN groupadd --gid 1001 mbsync && \
     useradd --uid 1001 \
@@ -43,6 +49,7 @@ COPY --chmod=755 --chown=mbsync:mbsync healthcheck.sh /healthcheck.sh
 # -----------------------------------------------------------------------------
 RUN mkdir -p /maildir /state \
   && chown -R mbsync:mbsync /maildir /state \
+  && chmod 755 /maildir \
   && chmod 700 /state
 
 # Drop to non-root user

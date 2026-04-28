@@ -16,6 +16,8 @@ from pathlib import Path
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
+from .attachment_indexing import process_attachment
+from .chunker import chunk_message, mean_vector
 from .database import EMBEDDING_DIM, Database
 from .embedder import Embedder
 from .parser import parse_email
@@ -43,6 +45,53 @@ OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://ollama:11434")
 EMBED_MODEL = os.environ.get("OLLAMA_EMBED_MODEL", "nomic-embed-text")
 # /tmp default is safe: container tmpfs, non-root user, overridable via env.
 INDEXER_HEALTH_FILE = Path(os.environ.get("INDEXER_HEALTH_FILE", "/tmp/indexer-health"))  # nosec B108
+
+
+def _int_env(name: str, default: int, minimum: int = 1) -> int:
+    """Read a positive int from the environment with a clamp + fallback.
+
+    Used for the chunker token budgets so a typo or empty string falls back
+    to the default rather than raising at startup. Mirrors the lenient parse
+    used elsewhere (queue, reconciler) so operators get the same behavior
+    across knobs.
+    """
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        log.warning("invalid %s=%r; falling back to %d", name, raw, default)
+        return default
+    return max(minimum, value)
+
+
+# Chunker token budgets — see ``chunker.chunk_message`` for semantics. The
+# defaults match the chunker's own defaults, sized for ``nomic-embed-text``
+# at 768 dim with an ~8k token context window (target=350 tokens leaves
+# generous headroom).
+CHUNK_TARGET_TOKENS = _int_env("INDEXER_CHUNK_TARGET_TOKENS", 350)
+CHUNK_MAX_TOKENS = _int_env("INDEXER_CHUNK_MAX_TOKENS", 500)
+CHUNK_OVERLAP_TOKENS = _int_env("INDEXER_CHUNK_OVERLAP_TOKENS", 60, minimum=0)
+
+
+def _bool_env(name: str, default: bool) -> bool:
+    raw = os.environ.get(name, "").strip().lower()
+    if not raw:
+        return default
+    return raw in {"1", "true", "yes", "on"}
+
+
+# Attachment extraction — see ``src/extractors/`` for
+# per-format implementations and ``.env.example`` for the operator-
+# facing reference. Defaults are conservative: OCR enabled (most
+# valuable for scanned receipts and screenshots), 10 MB attachment
+# cap (skips huge backup zips), 20-page OCR cap (bounds CPU on
+# scanned books).
+INDEXER_ATTACHMENT_EXTRACTION_ENABLED = _bool_env("INDEXER_ATTACHMENT_EXTRACTION_ENABLED", True)
+INDEXER_OCR_ENABLED = _bool_env("INDEXER_OCR_ENABLED", True)
+INDEXER_ATTACHMENT_MAX_BYTES = _int_env("INDEXER_ATTACHMENT_MAX_BYTES", 10_000_000, minimum=1)
+INDEXER_OCR_MAX_PAGES = _int_env("INDEXER_OCR_MAX_PAGES", 20, minimum=1)
 
 
 def touch_health_file() -> None:
@@ -164,12 +213,44 @@ def _index_one_file(
 
     t0 = time.perf_counter()
     try:
-        # The stored body_text feeds FTS (users legitimately search
-        # quoted text), but the embedding input is stripped of quoted
-        # replies and signatures so the vector tracks the substantive
-        # content of each reply rather than accumulated quoted history.
-        body = db.build_merged_body(thread)
-        embedding = embedder.embed(strip_for_embedding(body))
+        chunk_writes = []
+        # Chunk each newly-arrived message individually. ``thread.messages``
+        # is the new arrivals only — existing messages already have chunks
+        # on disk and re-chunking them would burn embed cycles for no
+        # gain (chunk ids are deterministic from message_pk + index +
+        # text, so the diff would be empty anyway). For new threads,
+        # ``thread.messages`` is the full thread (one message); for
+        # updates, it is the single newly-arrived reply.
+        for msg in thread.messages:
+            chunks = chunk_message(
+                message_pk=msg.message_id,
+                body_text=strip_for_embedding(msg.body_text or ""),
+                target_tokens=CHUNK_TARGET_TOKENS,
+                max_tokens=CHUNK_MAX_TOKENS,
+                overlap_tokens=CHUNK_OVERLAP_TOKENS,
+            )
+            stored_ids = db.get_chunk_ids_for_message(msg.message_id)
+            new_chunks = [c for c in chunks if c.chunk_id not in stored_ids]
+            embeddings_by_chunk_id = {
+                chunk.chunk_id: embedder.embed(chunk.text) for chunk in new_chunks
+            }
+            chunk_writes.append((msg, chunks, embeddings_by_chunk_id))
+
+        # Seed the thread row with the current vector if one exists. The
+        # final vector is replaced after the chunk writes inside the same
+        # transaction, so thread/chunk/vector state commits or rolls back
+        # together.
+        chunk_embeddings = db.get_thread_chunk_embeddings(thread.thread_id)
+        has_incoming_chunks = any(chunks for _, chunks, _ in chunk_writes)
+        if chunk_embeddings:
+            embedding = mean_vector(chunk_embeddings)
+        elif has_incoming_chunks:
+            # Temporary in-transaction value. The thread vector is replaced
+            # after chunk rows are written and before the transaction commits.
+            embedding = [0.0] * EMBEDDING_DIM
+        else:
+            fallback = thread.subject.strip() if thread.subject else "(empty thread)"
+            embedding = embedder.embed(fallback)
     except Exception as e:
         embed_ms = (time.perf_counter() - t0) * 1000
         return (
@@ -182,7 +263,43 @@ def _index_one_file(
 
     t0 = time.perf_counter()
     try:
-        db.upsert_thread(thread, embedding, body=body)
+        with db.transaction():
+            db.upsert_thread(thread, embedding)
+            for msg, chunks, embeddings_by_chunk_id in chunk_writes:
+                db.replace_message_chunks(
+                    message_id=msg.message_id,
+                    thread_id=thread.thread_id,
+                    chunks=chunks,
+                    embeddings_by_chunk_id=embeddings_by_chunk_id,
+                )
+
+                # Per-message attachment processing. Benign extractor
+                # outcomes (unsupported, empty, too_large, failed parse) are
+                # recorded as status rows by process_attachment. Hard
+                # infrastructure failures (Ollama, SQLite) propagate so the
+                # outer transaction rolls back and the queue retries the
+                # whole message rather than committing a half-indexed
+                # attachment.
+                if INDEXER_ATTACHMENT_EXTRACTION_ENABLED:
+                    for occurrence_index, attachment in enumerate(msg.attachments):
+                        process_attachment(
+                            attachment=attachment,
+                            message_id=msg.message_id,
+                            thread_id=thread.thread_id,
+                            db=db,
+                            embedder=embedder,
+                            chunk_target_tokens=CHUNK_TARGET_TOKENS,
+                            chunk_max_tokens=CHUNK_MAX_TOKENS,
+                            chunk_overlap_tokens=CHUNK_OVERLAP_TOKENS,
+                            ocr_enabled=INDEXER_OCR_ENABLED,
+                            max_bytes=INDEXER_ATTACHMENT_MAX_BYTES,
+                            max_ocr_pages=INDEXER_OCR_MAX_PAGES,
+                            occurrence_index=occurrence_index,
+                        )
+
+            updated_chunk_embeddings = db.get_thread_chunk_embeddings(thread.thread_id)
+            if updated_chunk_embeddings:
+                db.replace_thread_vector(thread.thread_id, mean_vector(updated_chunk_embeddings))
     except Exception as e:
         db_write_ms = (time.perf_counter() - t0) * 1000
         return (
