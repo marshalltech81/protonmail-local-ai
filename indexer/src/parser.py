@@ -290,7 +290,14 @@ def _parse_date(value: str) -> datetime:
         from email.utils import parsedate_to_datetime
 
         dt = parsedate_to_datetime(value)
-    except TypeError, ValueError:
+    except TypeError:
+        # Older Python releases occasionally raise TypeError on malformed
+        # dates; ``parsedate_to_datetime`` proper raises ValueError below.
+        return datetime.now(UTC)
+    except ValueError:
+        # ``parsedate_to_datetime`` raises ValueError on unparseable headers
+        # (empty string, single-token gibberish, malformed timezone). Force
+        # current UTC so threader doesn't crash on a bad header.
         return datetime.now(UTC)
     if dt is None:
         return datetime.now(UTC)

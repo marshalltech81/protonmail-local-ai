@@ -16,7 +16,11 @@ from pathlib import Path
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
-from .attachment_indexing import process_attachment
+from .attachment_indexing import (
+    AttachmentWritePlan,
+    apply_attachment_writes,
+    prepare_attachment_writes,
+)
 from .chunker import chunk_message, mean_vector
 from .database import EMBEDDING_DIM, Database
 from .embedder import Embedder
@@ -236,15 +240,48 @@ def _index_one_file(
             }
             chunk_writes.append((msg, chunks, embeddings_by_chunk_id))
 
+        # Pre-compute attachment plans BEFORE opening the DB write
+        # transaction. ``prepare_attachment_writes`` runs the extractor
+        # (OCR / pypdf / openpyxl) and the per-chunk Ollama embed calls,
+        # both of which are too slow to hold inside a ``BEGIN IMMEDIATE``
+        # — every outbound HTTP roundtrip would otherwise block the
+        # watchdog observer and the reconciler on the same DB lock. The
+        # apply phase below does only DB writes inside the transaction.
+        attachment_plans_by_msg: dict[str, list[AttachmentWritePlan]] = {}
+        if INDEXER_ATTACHMENT_EXTRACTION_ENABLED:
+            for msg in thread.messages:
+                if not msg.attachments:
+                    continue
+                plans: list[AttachmentWritePlan] = []
+                for occurrence_index, attachment in enumerate(msg.attachments):
+                    plan = prepare_attachment_writes(
+                        attachment=attachment,
+                        message_id=msg.message_id,
+                        db=db,
+                        embedder=embedder,
+                        chunk_target_tokens=CHUNK_TARGET_TOKENS,
+                        chunk_max_tokens=CHUNK_MAX_TOKENS,
+                        chunk_overlap_tokens=CHUNK_OVERLAP_TOKENS,
+                        ocr_enabled=INDEXER_OCR_ENABLED,
+                        max_bytes=INDEXER_ATTACHMENT_MAX_BYTES,
+                        max_ocr_pages=INDEXER_OCR_MAX_PAGES,
+                        occurrence_index=occurrence_index,
+                    )
+                    plans.append(plan)
+                attachment_plans_by_msg[msg.message_id] = plans
+
         # Seed the thread row with the current vector if one exists. The
         # final vector is replaced after the chunk writes inside the same
         # transaction, so thread/chunk/vector state commits or rolls back
         # together.
         chunk_embeddings = db.get_thread_chunk_embeddings(thread.thread_id)
         has_incoming_chunks = any(chunks for _, chunks, _ in chunk_writes)
+        has_incoming_attachment_chunks = any(
+            plan.chunks for plans in attachment_plans_by_msg.values() for plan in plans
+        )
         if chunk_embeddings:
             embedding = mean_vector(chunk_embeddings)
-        elif has_incoming_chunks:
+        elif has_incoming_chunks or has_incoming_attachment_chunks:
             # Temporary in-transaction value. The thread vector is replaced
             # after chunk rows are written and before the transaction commits.
             embedding = [0.0] * EMBEDDING_DIM
@@ -273,29 +310,21 @@ def _index_one_file(
                     embeddings_by_chunk_id=embeddings_by_chunk_id,
                 )
 
-                # Per-message attachment processing. Benign extractor
-                # outcomes (unsupported, empty, too_large, failed parse) are
-                # recorded as status rows by process_attachment. Hard
-                # infrastructure failures (Ollama, SQLite) propagate so the
-                # outer transaction rolls back and the queue retries the
-                # whole message rather than committing a half-indexed
-                # attachment.
-                if INDEXER_ATTACHMENT_EXTRACTION_ENABLED:
-                    for occurrence_index, attachment in enumerate(msg.attachments):
-                        process_attachment(
-                            attachment=attachment,
-                            message_id=msg.message_id,
-                            thread_id=thread.thread_id,
-                            db=db,
-                            embedder=embedder,
-                            chunk_target_tokens=CHUNK_TARGET_TOKENS,
-                            chunk_max_tokens=CHUNK_MAX_TOKENS,
-                            chunk_overlap_tokens=CHUNK_OVERLAP_TOKENS,
-                            ocr_enabled=INDEXER_OCR_ENABLED,
-                            max_bytes=INDEXER_ATTACHMENT_MAX_BYTES,
-                            max_ocr_pages=INDEXER_OCR_MAX_PAGES,
-                            occurrence_index=occurrence_index,
-                        )
+                # Per-message attachment apply. Plans were prepared above
+                # outside the transaction, so this loop only does DB
+                # writes — no Ollama, no extractor. Benign extractor
+                # outcomes (unsupported, empty, too_large, failed parse)
+                # land as status rows here. Hard DB failures propagate
+                # so the outer transaction rolls back and the queue
+                # retries the whole message rather than committing a
+                # half-indexed attachment.
+                for plan in attachment_plans_by_msg.get(msg.message_id, ()):
+                    apply_attachment_writes(
+                        plan=plan,
+                        message_id=msg.message_id,
+                        thread_id=thread.thread_id,
+                        db=db,
+                    )
 
             updated_chunk_embeddings = db.get_thread_chunk_embeddings(thread.thread_id)
             if updated_chunk_embeddings:

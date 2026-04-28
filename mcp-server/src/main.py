@@ -5,6 +5,7 @@ MCP transports. Mail-changing action tools are disabled by default until a safe
 opt-in write backend exists.
 """
 
+import contextlib
 import logging
 import os
 from pathlib import Path
@@ -78,15 +79,47 @@ def _normalize_transport(raw: str) -> str:
 
 
 async def _run_dual_transport_async(server: FastMCP) -> None:
-    """Serve SSE and Streamable HTTP routes from one FastMCP instance."""
+    """Serve SSE and Streamable HTTP routes from one FastMCP instance.
+
+    Each transport app is invoked as a complete ASGI app rather than
+    having its routes flattened into a fresh Starlette — that
+    preserves whatever middleware and per-request context plumbing
+    the SDK attaches to ``streamable_http_app()`` / ``sse_app()`` (the
+    Streamable HTTP transport in particular relies on session-manager
+    context that lives on the inner app, not on individual routes).
+
+    Lifespan is run on a tiny outer Starlette whose only job is to
+    enter both inner apps' ``lifespan_context`` — ``session_manager``
+    starts here for Streamable HTTP, and SSE gets to register its
+    startup/shutdown hooks too even though the current SDK sse_app
+    doesn't ship any. HTTP/WebSocket scopes go straight to the right
+    transport app via prefix dispatch.
+    """
     sse_app = server.sse_app()
     streamable_http_app = server.streamable_http_app()
 
-    app = Starlette(
-        debug=server.settings.debug,
-        routes=[*streamable_http_app.routes, *sse_app.routes],
-        lifespan=lambda _: server.session_manager.run(),
-    )
+    @contextlib.asynccontextmanager
+    async def combined_lifespan(scope_app):
+        async with contextlib.AsyncExitStack() as stack:
+            await stack.enter_async_context(streamable_http_app.router.lifespan_context(scope_app))
+            await stack.enter_async_context(sse_app.router.lifespan_context(scope_app))
+            yield
+
+    # Outer Starlette owns lifespan only — it has no routes of its own.
+    lifespan_owner = Starlette(debug=server.settings.debug, lifespan=combined_lifespan)
+
+    async def app(scope, receive, send):
+        if scope["type"] == "lifespan":
+            await lifespan_owner(scope, receive, send)
+            return
+        path = scope.get("path", "/")
+        # Streamable HTTP claims the configured streamable path (``/mcp``
+        # by default); everything else — ``/sse``, ``/messages/``, the
+        # ``/health`` custom route registered on the FastMCP server — is
+        # served by the SSE app (which inherits the FastMCP custom routes).
+        target = streamable_http_app if path.startswith("/mcp") else sse_app
+        await target(scope, receive, send)
+
     config = uvicorn.Config(
         app,
         host=server.settings.host,

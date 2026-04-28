@@ -10,11 +10,20 @@ services:
     container_name: open-webui
     restart: unless-stopped
     init: true
+    # Read-only rootfs with narrowly-scoped writable mounts: the persistent
+    # SQLite + uploads volume covers ``/app/backend/data``, while ``/tmp``
+    # and ``/root/.cache`` are tmpfs so transient writes (uvicorn lock
+    # files, HuggingFace tokenizer cache that Open WebUI shells out to)
+    # don't need a writable root filesystem.
+    read_only: true
     security_opt:
       - no-new-privileges:true
     cap_drop:
       - ALL
     pids_limit: 256
+    tmpfs:
+      - /tmp
+      - /root/.cache
     secrets:
       - open_webui_secret_key
     depends_on:

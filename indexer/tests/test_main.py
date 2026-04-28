@@ -483,11 +483,12 @@ class TestIndexOneFileChunking:
         # The second pass should not have triggered any new embed calls.
         assert embedder.embed.call_count == first_call_count
 
-    def test_attachment_embed_failure_rolls_back_message_for_retry(self, tmp_path):
-        """If attachment chunk embedding fails after attachment metadata or
-        extraction rows have been written, the outer transaction must roll
-        everything back. Otherwise the queue marks the message indexed and
-        the attachment text never gets another chance to produce chunks."""
+    def test_attachment_embed_failure_does_not_persist_partial_state(self, tmp_path):
+        """Attachment chunk embedding now runs in the embed phase, before the
+        DB write transaction opens. A failing Ollama call must surface as a
+        retryable embed-stage failure and leave zero rows behind — neither
+        the body, nor the attachment row, nor the extraction cache should
+        be persisted, so the queue can replay the whole message cleanly."""
         db_path = tmp_path / "db" / "mail.db"
         db = Database(db_path)
         threader = Threader(db)
@@ -511,7 +512,10 @@ class TestIndexOneFileChunking:
             main_mod.MAILDIR_PATH = original_root
 
         assert not ok
-        assert stage == "db_write"
+        # Attachment embedding now happens in the embed phase, outside the
+        # ``with db.transaction()`` block, so the failure surfaces as
+        # ``embed`` rather than ``db_write``. The queue retries on either.
+        assert stage == "embed"
         assert err is not None
         assert "ollama attachment failure" in err
         assert not db.is_indexed(str(dest))
