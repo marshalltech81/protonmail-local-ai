@@ -17,6 +17,10 @@ multi-gigapixel canvas that would OOM the indexer container during
 defense — we lower it from PIL's default (~89 Mpx) to 50 Mpx and
 promote the warning to an error so an oversize image surfaces as a
 ``failed`` extraction row rather than wedging the worker.
+
+Both safeguards are scoped to ``extract()`` rather than module-import
+time so other PIL consumers in the same process keep PIL's defaults
+and the warnings filter doesn't leak across unrelated callers.
 """
 
 from __future__ import annotations
@@ -31,11 +35,11 @@ from PIL import Image, ImageOps
 # phone shot is ~12,000,000 pixels) while keeping memory bounded —
 # decoding a 50 Mpx RGB image is ~150 MB of pixel buffer at most. PIL
 # raises ``DecompressionBombError`` past 2× this limit; the warning
-# filter below promotes the milder ``DecompressionBombWarning`` (between
-# 1× and 2×) to the same error so the dispatcher records both as
-# ``failed`` rather than letting them through with a log line.
-Image.MAX_IMAGE_PIXELS = 50_000_000
-warnings.simplefilter("error", Image.DecompressionBombWarning)
+# filter inside ``extract()`` promotes the milder
+# ``DecompressionBombWarning`` (between 1× and 2×) to the same error so
+# the dispatcher records both as ``failed`` rather than letting them
+# through with a log line.
+_MAX_IMAGE_PIXELS = 50_000_000
 
 
 def extract(
@@ -45,9 +49,19 @@ def extract(
     max_ocr_pages: int = 20,  # noqa: ARG001 — single-page format
 ) -> tuple[str, str]:
     """OCR an image attachment. Returns (text, "image-ocr")."""
-    image: Image.Image = Image.open(io.BytesIO(payload))
-    # ``exif_transpose`` reads the EXIF Orientation tag and rotates the
-    # pixels accordingly. No-op for images without EXIF.
-    image = ImageOps.exif_transpose(image)
-    text = pytesseract.image_to_string(image)
+    prior_max_pixels = Image.MAX_IMAGE_PIXELS
+    Image.MAX_IMAGE_PIXELS = _MAX_IMAGE_PIXELS
+    try:
+        with warnings.catch_warnings():
+            # Scope the bomb-warning promotion to this call so other
+            # callers in the same process aren't forced into the same
+            # filter state.
+            warnings.simplefilter("error", Image.DecompressionBombWarning)
+            image: Image.Image = Image.open(io.BytesIO(payload))
+            # ``exif_transpose`` reads the EXIF Orientation tag and rotates the
+            # pixels accordingly. No-op for images without EXIF.
+            image = ImageOps.exif_transpose(image)
+            text = pytesseract.image_to_string(image)
+    finally:
+        Image.MAX_IMAGE_PIXELS = prior_max_pixels
     return text, "image-ocr"

@@ -127,6 +127,7 @@ def extract(
     ocr_enabled: bool = True,
     max_bytes: int = 10_000_000,
     max_ocr_pages: int = 20,
+    max_extracted_chars: int | None = None,
 ) -> ExtractionResult:
     """Run text extraction for one attachment payload.
 
@@ -135,6 +136,12 @@ def extract(
     into a ``failed`` result so a single malformed attachment cannot
     dead-letter the parent message. The caller is expected to persist
     the result via ``Database.store_attachment_extraction``.
+
+    ``max_extracted_chars`` (when supplied) caps the length of
+    extracted text that is returned and persisted in the cache. A
+    multi-hundred-page OCR'd PDF can otherwise produce megabytes of
+    text and bloat the ``attachment_extractions`` table well past the
+    payload's on-disk size. ``None`` means no cap.
     """
     if len(payload) > max_bytes:
         return ExtractionResult(
@@ -203,6 +210,15 @@ def extract(
             text=None,
             error=None,
         )
+    if max_extracted_chars is not None and len(cleaned) > max_extracted_chars:
+        log.info(
+            "extractor %s output truncated from %d to %d chars (filename=%r)",
+            extractor_name,
+            len(cleaned),
+            max_extracted_chars,
+            filename,
+        )
+        cleaned = cleaned[:max_extracted_chars]
     return ExtractionResult(
         status=STATUS_SUCCESS,
         extractor=extractor_name,
@@ -242,26 +258,31 @@ def _safe_import(module_name: str) -> Callable[..., tuple[str, str]] | None:
 
     Each extractor module exposes ``extract(payload, **opts) -> (text, name)``.
     A missing optional dependency (the module's ``import`` raising
-    ``ImportError``) is downgraded to ``None`` here so callers see it
-    as ``unsupported`` rather than a hard failure. Cached so repeated
-    attachments of the same MIME type do not re-pay the import cost.
+    ``ImportError`` for one of *its* imports) is downgraded to ``None``
+    here so callers see it as ``unsupported`` rather than a hard failure.
+    Cached so repeated attachments of the same MIME type do not re-pay
+    the import cost.
+
+    The package root is ``src`` in both the indexer container
+    (``python -m src.main``) and the test runner
+    (``pythonpath = ["."]``), so a single canonical import path is
+    sufficient. The actual ``ImportError`` is logged so a missing
+    optional dependency surfaces with the offending module name rather
+    than just "extractor X not importable".
     """
     if module_name in _IMPORT_CACHE:
         return _IMPORT_CACHE[module_name]
     try:
-        module = __import__(
-            f"indexer.extractors.{module_name}",
-            fromlist=["extract"],
+        module = __import__(f"src.extractors.{module_name}", fromlist=["extract"])
+    except ImportError as exc:
+        log.warning(
+            "extractor %s unavailable (missing dependency %r): %s",
+            module_name,
+            exc.name or "<unknown>",
+            exc,
         )
-    except ImportError:
-        # Try the package-relative path used inside the indexer container
-        # where ``indexer.extractors`` may not be the import root.
-        try:
-            module = __import__(f"src.extractors.{module_name}", fromlist=["extract"])
-        except ImportError as e:
-            log.warning("extractor %s not importable: %s", module_name, e)
-            _IMPORT_CACHE[module_name] = None
-            return None
+        _IMPORT_CACHE[module_name] = None
+        return None
     fn = getattr(module, "extract", None)
     _IMPORT_CACHE[module_name] = fn
     return fn

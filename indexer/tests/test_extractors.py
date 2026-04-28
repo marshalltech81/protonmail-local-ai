@@ -247,9 +247,6 @@ class TestPdfDigitalExtractor:
         write and pypdf to read.
         """
 
-        # Build a one-page PDF whose content stream renders "Invoice 42".
-        # Use a fixture we ship in tests/fixtures for a reliable
-        # text-layer PDF.
         from pathlib import Path as _P
 
         from src.extractors.pdf import extract as pdf_extract
@@ -289,12 +286,12 @@ class TestPdfDigitalExtractor:
 
         payload = fixture.read_bytes()
         text, name = pdf_extract(payload, ocr_enabled=False)
-        # The digital path returns a string; for a real fixture this
-        # contains the literal "Invoice number 42". For minimum-viable
-        # PDFs that pypdf chokes on, the path returns "" and we still
-        # pass the dispatcher contract — verify the function shape.
-        assert isinstance(text, str)
-        assert name in {"pdf-digital", "pdf-ocr"}
+        # The fixture's content stream contains a literal "Invoice
+        # number 42". Assert the digital path round-trips it so a
+        # regression in the pypdf pin or in ``_extract_digital``
+        # surfaces here rather than silently degrading retrieval.
+        assert "Invoice number 42" in text
+        assert name == "pdf-digital"
 
     def test_ocr_fallback_invoked_when_digital_too_short(self, monkeypatch):
         """When ``_extract_digital`` returns near-empty text (a scanned
@@ -358,3 +355,125 @@ class TestImageExtractor:
         assert captured["called"] is True
         assert "RECEIPT TOTAL" in text
         assert name == "image-ocr"
+
+    def test_exif_orientation_rotates_image_before_ocr(self, monkeypatch):
+        """An image with EXIF Orientation=6 (rotated 90° CW for display)
+        must reach pytesseract post-rotation. ``ImageOps.exif_transpose``
+        is the production mechanism — verify it actually fires by
+        building a wide source image and asserting the OCR'd image
+        comes through with the rotated dimensions."""
+        import io
+
+        from PIL import Image
+        from src.extractors import image as image_module
+
+        # Wide source image (40x10). Orientation=6 means "rotate 90° CW
+        # for display", so post-transpose the image becomes 10×40.
+        src = Image.new("RGB", (40, 10), color="white")
+        exif = src.getexif()
+        # 0x0112 is the standard Orientation tag. Pillow's
+        # ``Image.Exif`` accepts integer keys directly, avoiding a new
+        # piexif dependency just for the test.
+        exif[0x0112] = 6
+        buf = io.BytesIO()
+        src.save(buf, format="JPEG", exif=exif.tobytes())
+
+        captured: dict[str, tuple[int, int]] = {}
+
+        def fake_image_to_string(img):
+            captured["size"] = img.size
+            return "ok"
+
+        monkeypatch.setattr(image_module.pytesseract, "image_to_string", fake_image_to_string)
+
+        image_module.extract(buf.getvalue())
+
+        # Post-rotation the image is 10 wide × 40 tall — assert we did
+        # not OCR the unrotated 40×10 source.
+        assert captured["size"] == (10, 40)
+
+    def test_decompression_bomb_warning_promoted_to_error(self, monkeypatch):
+        """A canvas in the warning band (1×–2× the cap) must surface
+        as a raised ``DecompressionBombWarning`` (promoted to error
+        inside the ``warnings.catch_warnings()`` scope) so the
+        dispatcher records it as ``failed`` rather than OOM'ing the
+        worker. PIL raises ``DecompressionBombError`` past 2× directly,
+        so we size the test image into the warning band only."""
+        import io
+
+        import pytest
+        from PIL import Image
+        from src.extractors import image as image_module
+
+        # 50×50 = 2500 pixels. Cap at 1500 puts the image at 1.67× the
+        # cap — inside the warning band (Error fires only past 2×).
+        monkeypatch.setattr(image_module, "_MAX_IMAGE_PIXELS", 1500)
+
+        buf = io.BytesIO()
+        Image.new("RGB", (50, 50), color="white").save(buf, format="PNG")
+
+        with pytest.raises(Image.DecompressionBombWarning):
+            image_module.extract(buf.getvalue())
+
+    def test_decompression_bomb_error_propagates(self, monkeypatch):
+        """A canvas past 2× the cap must surface PIL's
+        ``DecompressionBombError`` directly. The dispatcher's exception
+        handler converts both this and the warning-band raise into a
+        ``failed`` ExtractionResult."""
+        import io
+
+        import pytest
+        from PIL import Image
+        from src.extractors import image as image_module
+
+        # 50×50 = 2500 pixels. Cap at 100 → 25× the cap → Error.
+        monkeypatch.setattr(image_module, "_MAX_IMAGE_PIXELS", 100)
+
+        buf = io.BytesIO()
+        Image.new("RGB", (50, 50), color="white").save(buf, format="PNG")
+
+        with pytest.raises(Image.DecompressionBombError):
+            image_module.extract(buf.getvalue())
+
+    def test_max_image_pixels_restored_after_extract(self, monkeypatch):
+        """``Image.MAX_IMAGE_PIXELS`` must be restored after a call so
+        other PIL consumers in the same process aren't permanently
+        constrained by the extractor's cap."""
+        import io
+
+        from PIL import Image
+        from src.extractors import image as image_module
+
+        prior = Image.MAX_IMAGE_PIXELS
+        monkeypatch.setattr(image_module.pytesseract, "image_to_string", lambda img: "ok")
+
+        buf = io.BytesIO()
+        Image.new("RGB", (10, 10), color="white").save(buf, format="PNG")
+        image_module.extract(buf.getvalue())
+
+        assert Image.MAX_IMAGE_PIXELS == prior
+
+
+class TestDispatcherTextCap:
+    def test_max_extracted_chars_truncates_success_text(self):
+        result = extract(
+            content_type="text/plain",
+            filename="long.txt",
+            payload=b"abcdefghijklmnopqrstuvwxyz" * 100,
+            max_extracted_chars=64,
+        )
+        assert result.status == STATUS_SUCCESS
+        assert result.text is not None
+        assert len(result.text) == 64
+
+    def test_max_extracted_chars_none_does_not_truncate(self):
+        payload = b"abcdefghij" * 50
+        result = extract(
+            content_type="text/plain",
+            filename="long.txt",
+            payload=payload,
+            max_extracted_chars=None,
+        )
+        assert result.status == STATUS_SUCCESS
+        assert result.text is not None
+        assert len(result.text) == len(payload)

@@ -480,8 +480,11 @@ class Database:
         try:
             rows = self._conn.execute(sql, params).fetchall()
         except sqlite3.OperationalError as e:
-            # Older databases may not have the v9 chunk FTS tables yet.
-            log.debug("Chunk keyword search unavailable: %s", e)
+            # Indexer fails fast on schema-version mismatch, so an older
+            # DB is impossible at runtime. Reaching this branch implies
+            # corruption or a missing FTS shadow — log at warning so the
+            # operator notices precision retrieval has degraded to none.
+            log.warning("Chunk keyword search unavailable: %s", e)
             return []
         return self._dedupe_ranked_results([self._row_to_result(r) for r in rows])[:limit]
 
@@ -524,8 +527,11 @@ class Database:
         try:
             rows = self._conn.execute(sql, params).fetchall()
         except sqlite3.OperationalError as e:
-            # Older databases may not have the v10 attachment FTS tables yet.
-            log.debug("Attachment keyword search unavailable: %s", e)
+            # Indexer fails fast on schema-version mismatch, so an older
+            # DB is impossible at runtime. Reaching this branch implies
+            # corruption or a missing FTS shadow — log at warning so the
+            # operator notices attachment retrieval has degraded to none.
+            log.warning("Attachment keyword search unavailable: %s", e)
             return []
         return self._dedupe_ranked_results([self._row_to_result(r) for r in rows])[:limit]
 
@@ -653,7 +659,11 @@ class Database:
                 )
                 for r in rows
             ]
-        except Exception as e:
+        except (sqlite3.Error, ValueError) as e:
+            # ``sqlite3.Error`` covers OperationalError (missing vec
+            # table) and DatabaseError (corruption); ``ValueError`` is
+            # raised by sqlite-vec on malformed embedding payloads. Any
+            # other exception type is unexpected and should propagate.
             log.warning(f"Chunk vector search error: {e}")
             return []
 
@@ -707,7 +717,11 @@ class Database:
                 (serialized, limit),
             ).fetchall()
             return [self._row_to_result(r) for r in rows]
-        except Exception as e:
+        except (sqlite3.Error, ValueError) as e:
+            # Same catch surface as ``_chunk_vector_search`` —
+            # ``sqlite3.Error`` for table/connection issues, ``ValueError``
+            # for malformed serialised vectors. Other exception types
+            # should propagate so corrupt-state bugs aren't masked.
             log.warning(f"Vector search error: {e}")
             return []
 

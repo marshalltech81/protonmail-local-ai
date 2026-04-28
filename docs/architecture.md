@@ -239,6 +239,7 @@ the cost on long scanned documents.
 | `INDEXER_OCR_ENABLED` | `true` | Disables all OCR paths (image + PDF fallback) |
 | `INDEXER_ATTACHMENT_MAX_BYTES` | `10000000` (10 MB) | Skip very large attachments — bounds CPU/memory for huge zips |
 | `INDEXER_OCR_MAX_PAGES` | `20` | Cap pages OCR'd per PDF |
+| `INDEXER_ATTACHMENT_MAX_EXTRACTED_CHARS` | `2000000` (~500 pages) | Truncate extracted text before persisting in `attachment_extractions`. Bounds SQLite row size for very long OCR'd PDFs. Set to `0` to disable. |
 
 ### Cascade on message removal
 

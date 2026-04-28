@@ -72,6 +72,45 @@ class AttachmentWritePlan:
     embeddings_by_chunk_id: dict[str, list[float]] = field(default_factory=dict)
 
 
+def _resolve_extracted_text(
+    *,
+    attachment: Attachment,
+    db: Database,
+    ocr_enabled: bool,
+    max_bytes: int,
+    max_ocr_pages: int,
+    max_extracted_chars: int | None,
+) -> tuple[str | None, str, ExtractionResult | None, bool]:
+    """Return ``(text, status, extraction_to_persist, extraction_reused)``.
+
+    A successful cache hit short-circuits and returns the stored text
+    with ``extraction_to_persist=None`` so the apply phase does not
+    re-write a row that already represents this content. Anything else
+    — cache miss, cached non-success, cached row with empty text —
+    re-runs the extractor and asks the apply phase to persist the
+    fresh result.
+    """
+    cached = db.get_attachment_extraction(attachment.content_hash)
+    if (
+        cached is not None
+        and cached["extraction_status"] == STATUS_SUCCESS
+        and cached["extracted_text"]
+    ):
+        return cached["extracted_text"], cached["extraction_status"], None, True
+
+    result = extract_attachment(
+        content_type=attachment.content_type,
+        filename=attachment.filename,
+        payload=attachment.payload,
+        ocr_enabled=ocr_enabled,
+        max_bytes=max_bytes,
+        max_ocr_pages=max_ocr_pages,
+        max_extracted_chars=max_extracted_chars,
+    )
+    text = result.text if result.status == STATUS_SUCCESS else None
+    return text, result.status, result, False
+
+
 def prepare_attachment_writes(
     *,
     attachment: Attachment,
@@ -85,6 +124,7 @@ def prepare_attachment_writes(
     max_bytes: int,
     max_ocr_pages: int,
     occurrence_index: int = 0,
+    max_extracted_chars: int | None = None,
 ) -> AttachmentWritePlan:
     """Compute everything needed to write one attachment occurrence.
 
@@ -105,29 +145,14 @@ def prepare_attachment_writes(
         ).encode()
     ).hexdigest()
 
-    cached = db.get_attachment_extraction(attachment.content_hash)
-    if (
-        cached is not None
-        and cached["extraction_status"] == STATUS_SUCCESS
-        and cached["extracted_text"]
-    ):
-        text = cached["extracted_text"]
-        status = cached["extraction_status"]
-        extraction_to_persist: ExtractionResult | None = None
-        extraction_reused = True
-    else:
-        result = extract_attachment(
-            content_type=attachment.content_type,
-            filename=attachment.filename,
-            payload=attachment.payload,
-            ocr_enabled=ocr_enabled,
-            max_bytes=max_bytes,
-            max_ocr_pages=max_ocr_pages,
-        )
-        text = result.text if result.status == STATUS_SUCCESS else None
-        status = result.status
-        extraction_to_persist = result
-        extraction_reused = False
+    text, status, extraction_to_persist, extraction_reused = _resolve_extracted_text(
+        attachment=attachment,
+        db=db,
+        ocr_enabled=ocr_enabled,
+        max_bytes=max_bytes,
+        max_ocr_pages=max_ocr_pages,
+        max_extracted_chars=max_extracted_chars,
+    )
 
     if status != STATUS_SUCCESS or not text:
         # No usable text for chunking. Still searchable by filename / MIME
@@ -262,6 +287,7 @@ def process_attachment(
     max_bytes: int,
     max_ocr_pages: int,
     occurrence_index: int = 0,
+    max_extracted_chars: int | None = None,
 ) -> dict[str, int]:
     """Single-call wrapper: prepare + apply for one attachment occurrence.
 
@@ -283,6 +309,7 @@ def process_attachment(
         max_bytes=max_bytes,
         max_ocr_pages=max_ocr_pages,
         occurrence_index=occurrence_index,
+        max_extracted_chars=max_extracted_chars,
     )
     return apply_attachment_writes(
         plan=plan,
