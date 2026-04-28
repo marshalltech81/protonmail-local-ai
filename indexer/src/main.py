@@ -273,36 +273,29 @@ def _index_one_file(
                     embeddings_by_chunk_id=embeddings_by_chunk_id,
                 )
 
-                # Per-message attachment processing. Failures in an
-                # individual attachment do not dead-letter the parent
-                # message; the thread row exists in this same transaction,
-                # so any successful attachment/chunk writes still have a
-                # valid parent and rollback with the rest of the message if a
-                # later required DB write fails.
+                # Per-message attachment processing. Benign extractor
+                # outcomes (unsupported, empty, too_large, failed parse) are
+                # recorded as status rows by process_attachment. Hard
+                # infrastructure failures (Ollama, SQLite) propagate so the
+                # outer transaction rolls back and the queue retries the
+                # whole message rather than committing a half-indexed
+                # attachment.
                 if INDEXER_ATTACHMENT_EXTRACTION_ENABLED:
                     for occurrence_index, attachment in enumerate(msg.attachments):
-                        try:
-                            process_attachment(
-                                attachment=attachment,
-                                message_id=msg.message_id,
-                                thread_id=thread.thread_id,
-                                db=db,
-                                embedder=embedder,
-                                chunk_target_tokens=CHUNK_TARGET_TOKENS,
-                                chunk_max_tokens=CHUNK_MAX_TOKENS,
-                                chunk_overlap_tokens=CHUNK_OVERLAP_TOKENS,
-                                ocr_enabled=INDEXER_OCR_ENABLED,
-                                max_bytes=INDEXER_ATTACHMENT_MAX_BYTES,
-                                max_ocr_pages=INDEXER_OCR_MAX_PAGES,
-                                occurrence_index=occurrence_index,
-                            )
-                        except Exception as e:
-                            log.warning(
-                                "attachment processing failed for %s in %s: %s",
-                                attachment.filename,
-                                msg.message_id,
-                                e,
-                            )
+                        process_attachment(
+                            attachment=attachment,
+                            message_id=msg.message_id,
+                            thread_id=thread.thread_id,
+                            db=db,
+                            embedder=embedder,
+                            chunk_target_tokens=CHUNK_TARGET_TOKENS,
+                            chunk_max_tokens=CHUNK_MAX_TOKENS,
+                            chunk_overlap_tokens=CHUNK_OVERLAP_TOKENS,
+                            ocr_enabled=INDEXER_OCR_ENABLED,
+                            max_bytes=INDEXER_ATTACHMENT_MAX_BYTES,
+                            max_ocr_pages=INDEXER_OCR_MAX_PAGES,
+                            occurrence_index=occurrence_index,
+                        )
 
             updated_chunk_embeddings = db.get_thread_chunk_embeddings(thread.thread_id)
             if updated_chunk_embeddings:

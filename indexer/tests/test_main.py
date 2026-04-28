@@ -50,6 +50,33 @@ def _write_eml(path: Path, message_id: str, subject: str = "Hello") -> None:
     )
 
 
+def _write_eml_with_text_attachment(path: Path, message_id: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        f"From: alice@example.com\r\n"
+        f"To: bob@example.com\r\n"
+        f"Subject: Attachment retry\r\n"
+        f"Message-ID: <{message_id}>\r\n"
+        f"Date: Mon, 01 Jan 2024 12:00:00 +0000\r\n"
+        f"MIME-Version: 1.0\r\n"
+        f"Content-Type: multipart/mixed; boundary=frontier\r\n"
+        f"\r\n"
+        f"--frontier\r\n"
+        f"Content-Type: text/plain; charset=utf-8\r\n"
+        f"\r\n"
+        f"Body of {message_id}.\r\n"
+        f"\r\n"
+        f"--frontier\r\n"
+        f"Content-Type: text/plain; name=note.txt\r\n"
+        f"Content-Disposition: attachment; filename=note.txt\r\n"
+        f"Content-Transfer-Encoding: 7bit\r\n"
+        f"\r\n"
+        f"attachment text that should be chunked\r\n"
+        f"--frontier--\r\n",
+        encoding="utf-8",
+    )
+
+
 class TestOnMovedIndexesDestination:
     def test_rename_into_new_indexes_destination(self, tmp_path, monkeypatch):
         """Regression: Maildir delivery writes a file under ``tmp/`` then
@@ -455,3 +482,40 @@ class TestIndexOneFileChunking:
 
         # The second pass should not have triggered any new embed calls.
         assert embedder.embed.call_count == first_call_count
+
+    def test_attachment_embed_failure_rolls_back_message_for_retry(self, tmp_path):
+        """If attachment chunk embedding fails after attachment metadata or
+        extraction rows have been written, the outer transaction must roll
+        everything back. Otherwise the queue marks the message indexed and
+        the attachment text never gets another chance to produce chunks."""
+        db_path = tmp_path / "db" / "mail.db"
+        db = Database(db_path)
+        threader = Threader(db)
+
+        dest = tmp_path / "INBOX" / "cur" / "msg.eml"
+        _write_eml_with_text_attachment(dest, "attachment-retry@x")
+
+        embedder = MagicMock()
+        embedder.embed.side_effect = [
+            [0.1] * EMBEDDING_DIM,  # body chunk
+            RuntimeError("ollama attachment failure"),
+        ]
+
+        import src.main as main_mod
+
+        original_root = main_mod.MAILDIR_PATH
+        main_mod.MAILDIR_PATH = tmp_path
+        try:
+            ok, stage, err, _ = main._index_one_file(dest, db, embedder, threader)
+        finally:
+            main_mod.MAILDIR_PATH = original_root
+
+        assert not ok
+        assert stage == "db_write"
+        assert err is not None
+        assert "ollama attachment failure" in err
+        assert not db.is_indexed(str(dest))
+        assert db.count_total_messages() == 0
+        assert not db.get_chunk_ids_for_message("attachment-retry@x")
+        assert db._conn.execute("SELECT COUNT(*) FROM attachments").fetchone()[0] == 0
+        assert db._conn.execute("SELECT COUNT(*) FROM attachment_extractions").fetchone()[0] == 0

@@ -68,10 +68,6 @@ require_integer() {
     }
 }
 
-require_file "$ENV_FILE" ".env"
-require_file "$BRIDGE_PASS_FILE" "Bridge password secret"
-require_file "$ANTHROPIC_KEY_FILE" "Anthropic API key secret file"
-
 # Read a single KEY=VALUE from .env without shell-sourcing.
 # Shell-sourcing would evaluate command substitutions in values, so a
 # malformed or hostile .env line could execute arbitrary commands from the
@@ -114,9 +110,14 @@ if [[ "${1:-}" == "--get" ]]; then
         echo "ERROR: usage: validate-env.sh --get KEY" >&2
         exit 1
     }
+    require_file "$ENV_FILE" ".env"
     get_env_value "$2"
     exit 0
 fi
+
+require_file "$ENV_FILE" ".env"
+require_file "$BRIDGE_PASS_FILE" "Bridge password secret"
+require_file "$ANTHROPIC_KEY_FILE" "Anthropic API key secret file"
 
 BRIDGE_USER="$(get_env_value BRIDGE_USER)"
 BRIDGE_VERSION="$(get_env_value BRIDGE_VERSION)"
