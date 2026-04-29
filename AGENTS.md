@@ -207,7 +207,7 @@ When working in this repo:
 - if code or config changes create likely doc drift, update the relevant docs or explicitly suggest the needed doc or `AGENTS.md` follow-up
 - avoid introducing new dependencies without a clear need
 - install only the minimum necessary packages, libraries, and dependencies for the current implementation, whether in Docker images, Python projects, system packages, or tooling
-- pin all new dependencies to exact versions
+- pin all new dependencies to exact versions, except apt packages — see Dockerfile Conventions
 - avoid speculative refactors
 - preserve local-first defaults
 
@@ -263,6 +263,7 @@ All Dockerfiles in this repository must follow these rules:
 - build toolchains must not remain in runtime images
 - copy dependency manifests before source files for layer caching
 - use `apt-get install --no-install-recommends`
+- do not pin apt package versions; Debian/Ubuntu point releases drop old versions from the archive, so pinned `apt-get install pkg=x.y.z` lines break unpredictably when the base image refreshes. Rely on the pinned base image digest plus `apt-get update` for reproducibility instead.
 - remove `/var/lib/apt/lists/*` in the same layer as install
 - use `pip --no-cache-dir`
 - prefer `COPY --chmod=755` over separate `RUN chmod`
