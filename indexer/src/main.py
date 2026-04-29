@@ -96,6 +96,16 @@ INDEXER_ATTACHMENT_EXTRACTION_ENABLED = _bool_env("INDEXER_ATTACHMENT_EXTRACTION
 INDEXER_OCR_ENABLED = _bool_env("INDEXER_OCR_ENABLED", True)
 INDEXER_ATTACHMENT_MAX_BYTES = _int_env("INDEXER_ATTACHMENT_MAX_BYTES", 10_000_000, minimum=1)
 INDEXER_OCR_MAX_PAGES = _int_env("INDEXER_OCR_MAX_PAGES", 20, minimum=1)
+# Per-page OCR time ceiling. Tesseract is single-threaded and a
+# crafted high-noise image (still inside ``INDEXER_ATTACHMENT_MAX_BYTES``)
+# can keep it busy for minutes; combined with ``INDEXER_OCR_MAX_PAGES``
+# that pins the worker for tens of minutes per PDF. Set to 0 to
+# disable the timeout.
+INDEXER_OCR_TIMEOUT_SECONDS = _int_env("INDEXER_OCR_TIMEOUT_SECONDS", 60, minimum=0)
+# Page cap for the digital pypdf path. The OCR cap above doesn't bound
+# this — a 5 MB text-only PDF can carry thousands of pages, and even
+# at ~ms per page the indexer queue stalls. Set to 0 to disable.
+INDEXER_PDF_MAX_DIGITAL_PAGES = _int_env("INDEXER_PDF_MAX_DIGITAL_PAGES", 500, minimum=0)
 # 2,000,000 chars ~ 500 pages of dense OCR text. Bounds the
 # ``attachment_extractions.extracted_text`` row size so a single huge
 # scanned PDF can't blow up SQLite by storing tens of MB of text per
@@ -252,6 +262,8 @@ def _build_attachment_plans(
                     ocr_enabled=INDEXER_OCR_ENABLED,
                     max_bytes=INDEXER_ATTACHMENT_MAX_BYTES,
                     max_ocr_pages=INDEXER_OCR_MAX_PAGES,
+                    ocr_timeout_seconds=INDEXER_OCR_TIMEOUT_SECONDS or None,
+                    max_pdf_pages=INDEXER_PDF_MAX_DIGITAL_PAGES or None,
                     occurrence_index=occurrence_index,
                     max_extracted_chars=cap,
                 )

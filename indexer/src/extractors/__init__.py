@@ -30,12 +30,35 @@ operators can act on.
 
 from __future__ import annotations
 
+import importlib
 import logging
 import os
+import zipfile
 from collections.abc import Callable
 from dataclasses import dataclass
 
+import defusedxml
+
+# ``defuse_stdlib`` swaps the standard-library XML parsers (``xml.etree``,
+# ``xml.sax``, ``xml.dom.*``, ``xml.parsers.expat``, ``xmlrpc.client``)
+# for hardened equivalents that reject billion-laughs / external-entity /
+# DTD-of-doom payloads. python-docx and openpyxl ultimately decode their
+# zip members through libraries that may reach into stdlib XML; calling
+# this once at module import time covers that path. The lxml-direct
+# paths inside python-docx already disable entity resolution at parser
+# construction; openpyxl uses ``defusedxml.ElementTree`` when available
+# (which adding the dep here also enables).
+defusedxml.defuse_stdlib()
+
 log = logging.getLogger("indexer.extractor")
+
+# Cap the *uncompressed* size of any zip-based attachment (DOCX / XLSX).
+# The dispatcher's ``max_bytes`` already bounds the on-disk payload, but
+# a 1 MB workbook can decompress to multi-GB of XML (zip bomb). Reject
+# anything whose declared uncompressed size exceeds this cap before
+# python-docx / openpyxl get a chance to expand it. 200 MB covers any
+# realistic spreadsheet while keeping memory bounded.
+ZIP_MAX_UNCOMPRESSED_BYTES = 200 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -128,6 +151,8 @@ def extract(
     max_bytes: int = 10_000_000,
     max_ocr_pages: int = 20,
     max_extracted_chars: int | None = None,
+    ocr_timeout_seconds: float | None = None,
+    max_pdf_pages: int | None = None,
 ) -> ExtractionResult:
     """Run text extraction for one attachment payload.
 
@@ -181,13 +206,42 @@ def extract(
             error=f"extractor module {module_name!r} not importable in this image",
         )
 
+    # Zip-based formats (DOCX, XLSX) need a zip-bomb pre-check: the
+    # ``max_bytes`` cap above only bounds the compressed payload; a
+    # malicious workbook can declare 200× expansion in its central
+    # directory. Reject before handing to lxml.
+    if module_name in {"docx", "xlsx"}:
+        zip_error = _validate_zip_payload(payload)
+        if zip_error is not None:
+            return ExtractionResult(
+                status=STATUS_FAILED,
+                extractor=module_name,
+                text=None,
+                error=zip_error,
+            )
+
     try:
         text, extractor_name = extractor_fn(
             payload,
             ocr_enabled=ocr_enabled,
             max_ocr_pages=max_ocr_pages,
+            ocr_timeout_seconds=ocr_timeout_seconds,
+            max_pdf_pages=max_pdf_pages,
         )
-    except Exception as exc:  # noqa: BLE001 — we deliberately catch everything
+    except MemoryError, RecursionError:
+        # Resource-exhaustion errors are not "the extractor failed on
+        # this payload" — they are "the runtime is in trouble". Letting
+        # them bubble surfaces the host-level pressure (a zip-bomb
+        # attachment that decompressed past the indexer container's
+        # memory ceiling) instead of caching a misleading ``failed``
+        # row that retries on every reappearance of the same payload.
+        raise
+    except Exception as exc:  # noqa: BLE001 — see comment below
+        # Per-payload extractor errors (broken PDFs, malformed DOCX,
+        # missing optional deps that slipped past _safe_import) become
+        # ``failed`` rows so a single bad attachment cannot dead-letter
+        # the parent message. ``MemoryError`` / ``RecursionError`` are
+        # excluded above precisely because they are not per-payload.
         log.debug(
             "extractor %s failed on %s (dispatch_via=%s): %s",
             module_name,
@@ -250,6 +304,42 @@ def _resolve_extractor(content_type: str, filename: str) -> tuple[str | None, st
     return None, "none"
 
 
+def _validate_zip_payload(payload: bytes) -> str | None:
+    """Return an error string when ``payload`` looks like a zip bomb, else ``None``.
+
+    Walks the central directory and rejects the archive when:
+
+    * the file is not a valid zip (let the per-format extractor surface
+      that as ``failed`` for a clearer error string),
+    * any single member declares an uncompressed size above the cap, or
+    * the sum of declared uncompressed sizes exceeds the cap.
+
+    Reading ``ZipInfo.file_size`` does not decompress anything — it just
+    parses the central directory header — so this check is cheap and
+    runs before lxml gets involved.
+    """
+    try:
+        import io
+
+        with zipfile.ZipFile(io.BytesIO(payload)) as zf:
+            total = 0
+            for info in zf.infolist():
+                if info.file_size > ZIP_MAX_UNCOMPRESSED_BYTES:
+                    return (
+                        f"zip member {info.filename!r} declares "
+                        f"{info.file_size} uncompressed bytes (cap "
+                        f"{ZIP_MAX_UNCOMPRESSED_BYTES})"
+                    )
+                total += info.file_size
+                if total > ZIP_MAX_UNCOMPRESSED_BYTES:
+                    return f"zip total uncompressed size exceeds cap {ZIP_MAX_UNCOMPRESSED_BYTES}"
+    except zipfile.BadZipFile:
+        # Not a zip — let the format-specific extractor produce a more
+        # informative failure (e.g. python-docx's ``BadZipFile``).
+        return None
+    return None
+
+
 _IMPORT_CACHE: dict[str, Callable[..., tuple[str, str]] | None] = {}
 
 
@@ -263,17 +353,15 @@ def _safe_import(module_name: str) -> Callable[..., tuple[str, str]] | None:
     Cached so repeated attachments of the same MIME type do not re-pay
     the import cost.
 
-    The package root is ``src`` in both the indexer container
-    (``python -m src.main``) and the test runner
-    (``pythonpath = ["."]``), so a single canonical import path is
-    sufficient. The actual ``ImportError`` is logged so a missing
-    optional dependency surfaces with the offending module name rather
-    than just "extractor X not importable".
+    Importing relative to the current package keeps this resilient to
+    any future package rename. The actual ``ImportError`` is logged so
+    a missing optional dependency surfaces with the offending module
+    name rather than just "extractor X not importable".
     """
     if module_name in _IMPORT_CACHE:
         return _IMPORT_CACHE[module_name]
     try:
-        module = __import__(f"src.extractors.{module_name}", fromlist=["extract"])
+        module = importlib.import_module(f".{module_name}", package=__package__)
     except ImportError as exc:
         log.warning(
             "extractor %s unavailable (missing dependency %r): %s",

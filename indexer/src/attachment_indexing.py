@@ -30,11 +30,14 @@ from __future__ import annotations
 import hashlib
 import logging
 from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
 
 from .chunker import MessageChunk, chunk_message
 from .database import Database
 from .embedder import Embedder
 from .extractors import (
+    STATUS_EMPTY,
+    STATUS_FAILED,
     STATUS_SUCCESS,
     STATUS_TOO_LARGE,
     STATUS_UNSUPPORTED,
@@ -46,6 +49,93 @@ from .extractors import (
 from .parser import Attachment
 
 log = logging.getLogger("indexer.attachments")
+
+
+def attachment_occurrence_id(
+    *,
+    message_id: str,
+    content_hash: str,
+    filename: str,
+    occurrence_index: int,
+) -> str:
+    """Deterministic id for one attachment occurrence on one message.
+
+    Same payload appearing twice on the same message (e.g. inline + as
+    a regular attachment) gets two distinct rows differentiated by
+    ``occurrence_index``. The hash inputs and order are part of the
+    on-disk identity and must not change without a schema bump — both
+    the indexer write path and ``Database.upsert_attachment`` derive ids
+    from this function so they cannot drift.
+    """
+    return hashlib.sha256(
+        f"{message_id}\0{content_hash}\0{filename}\0{occurrence_index}".encode()
+    ).hexdigest()
+
+
+# How long to honor a cached ``STATUS_FAILED`` row before re-running the
+# extractor. AGENTS.md says ``attachment_extractions`` exists "so OCR /
+# parse cost runs at most once per unique payload" — but a ``failed``
+# row may be due to a corrupt PDF that *will* keep failing or a
+# transient extractor bug that a future dependency bump fixes. Default
+# 7 days strikes a balance: most retries within a week of a real
+# library upgrade, but a chronic failure no longer burns OCR cycles
+# every time the same payload reappears.
+_FAILED_CACHE_MAX_AGE = timedelta(days=7)
+
+
+def _cache_hit_short_circuits(cached: dict, ocr_enabled: bool) -> bool:
+    """Return True when ``cached`` should short-circuit re-extraction.
+
+    ``STATUS_SUCCESS`` rows with non-empty text are the obvious hit. The
+    other statuses are also honored to spare the worker from redoing
+    work whose result will not change between attempts:
+
+    * ``STATUS_EMPTY`` — the payload genuinely had no text. Re-running
+      will produce the same empty result.
+    * ``STATUS_UNSUPPORTED`` / ``STATUS_TOO_LARGE`` — the dispatch table
+      and size cap are runtime config; if either changed, the operator
+      restarted the indexer and the cache is the wrong place to resolve
+      the version skew (a future schema bump or explicit cache clear
+      handles it). One special case: an image cached as
+      ``unsupported`` because OCR was disabled at the time should be
+      re-run when the operator re-enables it, since the cached row's
+      "OCR disabled" reason is no longer current.
+    * ``STATUS_FAILED`` — re-run if the cached row is older than
+      ``_FAILED_CACHE_MAX_AGE`` (defense against a chronic failure
+      burning OCR cycles on every reappearance), otherwise honor the
+      cache.
+    """
+    status = cached["extraction_status"]
+    if status == STATUS_SUCCESS:
+        return bool(cached["extracted_text"])
+    if status == STATUS_EMPTY:
+        return True
+    if status == STATUS_TOO_LARGE:
+        return True
+    if status == STATUS_UNSUPPORTED:
+        # Re-run an image that was cached as unsupported because OCR was
+        # off at the time, now that OCR is on. Other unsupported reasons
+        # (no extractor for this MIME type) stay cached.
+        error = cached["extraction_error"] or ""
+        if ocr_enabled and "OCR disabled" in error:
+            return False
+        return True
+    if status == STATUS_FAILED:
+        cached_at = cached["extracted_at"]
+        if not cached_at:
+            return False
+        try:
+            stamp = datetime.fromisoformat(cached_at)
+        except Exception:
+            # ``fromisoformat`` raises ``ValueError`` on a malformed
+            # ``extracted_at`` string and ``TypeError`` if the column
+            # wasn't a string. Both indicate a corrupt cache row; fall
+            # through and let the caller refresh it.
+            return False
+        if stamp.tzinfo is None:
+            stamp = stamp.replace(tzinfo=UTC)
+        return datetime.now(UTC) - stamp < _FAILED_CACHE_MAX_AGE
+    return False
 
 
 @dataclass
@@ -80,6 +170,8 @@ def _resolve_extracted_text(
     max_bytes: int,
     max_ocr_pages: int,
     max_extracted_chars: int | None,
+    ocr_timeout_seconds: float | None = None,
+    max_pdf_pages: int | None = None,
 ) -> tuple[str | None, str, ExtractionResult | None, bool]:
     """Return ``(text, status, extraction_to_persist, extraction_reused)``.
 
@@ -91,12 +183,13 @@ def _resolve_extracted_text(
     fresh result.
     """
     cached = db.get_attachment_extraction(attachment.content_hash)
-    if (
-        cached is not None
-        and cached["extraction_status"] == STATUS_SUCCESS
-        and cached["extracted_text"]
-    ):
-        return cached["extracted_text"], cached["extraction_status"], None, True
+    if cached is not None and _cache_hit_short_circuits(cached, ocr_enabled):
+        # Successful hits return the stored text; non-success hits
+        # (empty / unsupported / too_large / failed-within-window)
+        # return ``None`` text so the caller skips chunking but the
+        # apply phase also skips re-persisting an unchanged row.
+        text = cached["extracted_text"] if cached["extraction_status"] == STATUS_SUCCESS else None
+        return text, cached["extraction_status"], None, True
 
     result = extract_attachment(
         content_type=attachment.content_type,
@@ -106,6 +199,8 @@ def _resolve_extracted_text(
         max_bytes=max_bytes,
         max_ocr_pages=max_ocr_pages,
         max_extracted_chars=max_extracted_chars,
+        ocr_timeout_seconds=ocr_timeout_seconds,
+        max_pdf_pages=max_pdf_pages,
     )
     text = result.text if result.status == STATUS_SUCCESS else None
     return text, result.status, result, False
@@ -125,6 +220,8 @@ def prepare_attachment_writes(
     max_ocr_pages: int,
     occurrence_index: int = 0,
     max_extracted_chars: int | None = None,
+    ocr_timeout_seconds: float | None = None,
+    max_pdf_pages: int | None = None,
 ) -> AttachmentWritePlan:
     """Compute everything needed to write one attachment occurrence.
 
@@ -139,11 +236,12 @@ def prepare_attachment_writes(
     (``Database`` I/O, ``Embedder`` I/O) still propagate so the caller
     can decide whether to retry the message.
     """
-    occurrence_id = hashlib.sha256(
-        (
-            f"{message_id}\0{attachment.content_hash}\0{attachment.filename}\0{occurrence_index}"
-        ).encode()
-    ).hexdigest()
+    occurrence_id = attachment_occurrence_id(
+        message_id=message_id,
+        content_hash=attachment.content_hash,
+        filename=attachment.filename,
+        occurrence_index=occurrence_index,
+    )
 
     text, status, extraction_to_persist, extraction_reused = _resolve_extracted_text(
         attachment=attachment,
@@ -152,6 +250,8 @@ def prepare_attachment_writes(
         max_bytes=max_bytes,
         max_ocr_pages=max_ocr_pages,
         max_extracted_chars=max_extracted_chars,
+        ocr_timeout_seconds=ocr_timeout_seconds,
+        max_pdf_pages=max_pdf_pages,
     )
 
     if status != STATUS_SUCCESS or not text:
@@ -288,6 +388,8 @@ def process_attachment(
     max_ocr_pages: int,
     occurrence_index: int = 0,
     max_extracted_chars: int | None = None,
+    ocr_timeout_seconds: float | None = None,
+    max_pdf_pages: int | None = None,
 ) -> dict[str, int]:
     """Single-call wrapper: prepare + apply for one attachment occurrence.
 
@@ -310,6 +412,8 @@ def process_attachment(
         max_ocr_pages=max_ocr_pages,
         occurrence_index=occurrence_index,
         max_extracted_chars=max_extracted_chars,
+        ocr_timeout_seconds=ocr_timeout_seconds,
+        max_pdf_pages=max_pdf_pages,
     )
     return apply_attachment_writes(
         plan=plan,

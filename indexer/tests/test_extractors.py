@@ -102,6 +102,59 @@ class TestSafetyGates:
         assert result.status == STATUS_UNSUPPORTED
         assert "OCR disabled" in (result.error or "")
 
+    def test_zip_bomb_oversize_member_is_rejected(self, monkeypatch):
+        """A zip whose central directory declares a member above the
+        uncompressed cap surfaces as ``failed`` before the per-format
+        extractor runs — defense against quadratic-blowup XML in DOCX /
+        XLSX payloads. The cap is monkeypatched low here so the test
+        doesn't need to forge a multi-MB zip; the production cap
+        (``ZIP_MAX_UNCOMPRESSED_BYTES``) is 200 MiB.
+        """
+        import io
+        import zipfile
+
+        # Lower the cap so any nontrivial zip member trips it. The test
+        # doesn't actually need a multi-MB payload to verify the gate.
+        monkeypatch.setattr("src.extractors.ZIP_MAX_UNCOMPRESSED_BYTES", 4)
+
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as zf:
+            zf.writestr("payload.xml", b"<root>" * 50)
+
+        result = extract(
+            content_type=("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
+            filename="bomb.xlsx",
+            payload=buf.getvalue(),
+        )
+        assert result.status == STATUS_FAILED
+        assert "uncompressed" in (result.error or "")
+
+    def test_memory_error_propagates_not_cached_as_failed(self, monkeypatch):
+        """``MemoryError`` is host-level pressure, not a per-payload
+        extractor bug — bubble it so the runtime sees it instead of
+        caching a misleading ``failed`` row that would retry on every
+        reappearance of the same content_hash.
+        """
+
+        def fake_safe_import(module_name):
+            def boom(payload, **opts):
+                raise MemoryError("simulated OOM")
+
+            return boom
+
+        monkeypatch.setattr("src.extractors._safe_import", fake_safe_import)
+        monkeypatch.setattr("src.extractors._IMPORT_CACHE", {})
+
+        try:
+            extract(
+                content_type="text/plain",
+                filename="big.txt",
+                payload=b"hi",
+            )
+        except MemoryError:
+            return
+        raise AssertionError("expected MemoryError to propagate, got an ExtractionResult")
+
     def test_extractor_exception_becomes_failed_not_raised(self, monkeypatch):
         # Dispatcher must convert per-format exceptions into a ``failed``
         # ExtractionResult so a single malformed attachment cannot
@@ -300,11 +353,11 @@ class TestPdfDigitalExtractor:
         """
         from src.extractors import pdf
 
-        monkeypatch.setattr(pdf, "_extract_digital", lambda payload: "")
+        monkeypatch.setattr(pdf, "_extract_digital", lambda payload, **_: "")
         monkeypatch.setattr(
             pdf,
             "_extract_ocr",
-            lambda payload, *, max_ocr_pages: "OCR'd page 1\n\nOCR'd page 2",
+            lambda payload, **_: "OCR'd page 1\n\nOCR'd page 2",
         )
 
         text, name = pdf.extract(b"%PDF-1.7 (mocked)", ocr_enabled=True, max_ocr_pages=5)
@@ -319,9 +372,9 @@ class TestPdfDigitalExtractor:
         """
         from src.extractors import pdf
 
-        monkeypatch.setattr(pdf, "_extract_digital", lambda payload: "")
+        monkeypatch.setattr(pdf, "_extract_digital", lambda payload, **_: "")
 
-        def fail_ocr(payload, *, max_ocr_pages):
+        def fail_ocr(payload, **_):
             raise RuntimeError("poppler missing")
 
         monkeypatch.setattr(pdf, "_extract_ocr", fail_ocr)
@@ -340,7 +393,7 @@ class TestPdfDigitalExtractor:
     def test_ocr_disabled_returns_digital_text_only(self, monkeypatch):
         from src.extractors import pdf
 
-        monkeypatch.setattr(pdf, "_extract_digital", lambda payload: "tiny")
+        monkeypatch.setattr(pdf, "_extract_digital", lambda payload, **_: "tiny")
         # OCR must NOT be called when ocr_enabled=False, even if digital
         # text is too short to satisfy ``_MIN_DIGITAL_CHARS``.
         ocr_called = []
@@ -365,9 +418,10 @@ class TestImageExtractor:
 
         captured = {}
 
-        def fake_image_to_string(img):
+        def fake_image_to_string(img, **kwargs):
             captured["called"] = True
             captured["mode"] = img.mode
+            captured["kwargs"] = kwargs
             return "RECEIPT TOTAL $42.00\n"
 
         monkeypatch.setattr(image_module.pytesseract, "image_to_string", fake_image_to_string)
@@ -406,7 +460,7 @@ class TestImageExtractor:
 
         captured: dict[str, tuple[int, int]] = {}
 
-        def fake_image_to_string(img):
+        def fake_image_to_string(img, **kwargs):
             captured["size"] = img.size
             return "ok"
 
@@ -471,7 +525,7 @@ class TestImageExtractor:
         from src.extractors import image as image_module
 
         prior = Image.MAX_IMAGE_PIXELS
-        monkeypatch.setattr(image_module.pytesseract, "image_to_string", lambda img: "ok")
+        monkeypatch.setattr(image_module.pytesseract, "image_to_string", lambda img, **_: "ok")
 
         buf = io.BytesIO()
         Image.new("RGB", (10, 10), color="white").save(buf, format="PNG")

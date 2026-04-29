@@ -285,6 +285,11 @@ def _parse_date(value: str) -> datetime:
     info" per RFC 2822) and aware datetimes for everything else. Threader
     sorts and compares message dates, which raises ``TypeError`` when naive
     and aware values are mixed — so every parsed date is forced to UTC here.
+
+    Unparseable headers fall back to the current UTC time so threading
+    doesn't crash, but that fabricates a date — log at WARNING with the
+    offending value so an operator notices a corrupt mailbox before the
+    fabricated dates dominate "recent" sorts.
     """
     try:
         from email.utils import parsedate_to_datetime
@@ -293,13 +298,16 @@ def _parse_date(value: str) -> datetime:
     except TypeError:
         # Older Python releases occasionally raise TypeError on malformed
         # dates; ``parsedate_to_datetime`` proper raises ValueError below.
+        log.warning("date header type error, using now(): %r", value)
         return datetime.now(UTC)
     except ValueError:
         # ``parsedate_to_datetime`` raises ValueError on unparseable headers
         # (empty string, single-token gibberish, malformed timezone). Force
         # current UTC so threader doesn't crash on a bad header.
+        log.warning("date header unparseable, using now(): %r", value)
         return datetime.now(UTC)
     if dt is None:
+        log.warning("date header parsed to None, using now(): %r", value)
         return datetime.now(UTC)
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=UTC)

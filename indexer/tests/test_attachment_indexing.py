@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock
 
 from src import attachment_indexing
@@ -13,6 +14,7 @@ from src.attachment_indexing import (
 )
 from src.database import EMBEDDING_DIM, Database
 from src.extractors import (
+    STATUS_EMPTY,
     STATUS_FAILED,
     STATUS_SUCCESS,
     STATUS_TOO_LARGE,
@@ -83,7 +85,99 @@ def test_successful_cached_extraction_is_reused(tmp_path, monkeypatch):
     )
 
 
-def test_non_success_cached_extraction_is_retried(tmp_path, monkeypatch):
+def _seed_thread_for_cache_test(tmp_path):
+    db = Database(tmp_path / "mail.db")
+    db.upsert_thread(
+        make_thread(
+            messages=[make_message(message_id="message@example.com")], thread_id="thread-1"
+        ),
+        [0.0] * EMBEDDING_DIM,
+    )
+    return db
+
+
+def _run_process_with_cached_status(
+    db, attachment, status, monkeypatch, *, error=None, ocr_enabled=True
+):
+    db.store_attachment_extraction(
+        attachment_id=attachment.content_hash,
+        extraction_status=status,
+        extractor="text",
+        extracted_text=None,
+        extraction_error=error,
+    )
+    extractor = MagicMock()
+    monkeypatch.setattr(attachment_indexing, "extract_attachment", extractor)
+    embedder = MagicMock()
+    embedder.embed.return_value = [0.2] * EMBEDDING_DIM
+    summary = process_attachment(
+        attachment=attachment,
+        message_id="message@example.com",
+        thread_id="thread-1",
+        db=db,
+        embedder=embedder,
+        chunk_target_tokens=350,
+        chunk_max_tokens=500,
+        chunk_overlap_tokens=60,
+        ocr_enabled=ocr_enabled,
+        max_bytes=10_000_000,
+        max_ocr_pages=20,
+    )
+    return summary, extractor
+
+
+def test_cached_empty_extraction_is_honored(tmp_path, monkeypatch):
+    """An ``empty`` cache row means the payload genuinely had no text;
+    re-running the extractor would produce the same result.
+    """
+    db = _seed_thread_for_cache_test(tmp_path)
+    summary, extractor = _run_process_with_cached_status(
+        db, _attachment(), STATUS_EMPTY, monkeypatch
+    )
+    assert summary["extractions_reused"] == 1
+    assert summary["extractions_run"] == 0
+    extractor.assert_not_called()
+
+
+def test_cached_too_large_extraction_is_honored(tmp_path, monkeypatch):
+    """A ``too_large`` cache row implies the payload exceeds the
+    operator's size cap. Re-running on every reappearance is wasted
+    cycles unless the cap is widened (which requires a redeploy and
+    can be paired with a cache clear).
+    """
+    db = _seed_thread_for_cache_test(tmp_path)
+    summary, extractor = _run_process_with_cached_status(
+        db, _attachment(), STATUS_TOO_LARGE, monkeypatch
+    )
+    assert summary["extractions_reused"] == 1
+    extractor.assert_not_called()
+
+
+def test_cached_unsupported_for_unknown_mime_is_honored(tmp_path, monkeypatch):
+    """``unsupported`` for a no-extractor reason stays cached. The
+    OCR-disabled subcase is covered separately by
+    ``test_ocr_disabled_unsupported_is_re_run_when_ocr_re_enabled``.
+    """
+    db = _seed_thread_for_cache_test(tmp_path)
+    summary, extractor = _run_process_with_cached_status(
+        db,
+        _attachment(),
+        STATUS_UNSUPPORTED,
+        monkeypatch,
+        error="no extractor for content_type='application/x-foo'",
+    )
+    assert summary["extractions_reused"] == 1
+    extractor.assert_not_called()
+
+
+def test_recent_failed_cached_extraction_is_honored(tmp_path, monkeypatch):
+    """A STATUS_FAILED row cached within the retry window short-circuits.
+
+    Re-running the extractor on every reappearance of the same payload
+    would burn OCR / parse cycles on a chronic failure. The retry
+    window (``_FAILED_CACHE_MAX_AGE``) lets a real fix land later
+    without permanently caching broken extractions.
+    """
     db = Database(tmp_path / "mail.db")
     db.upsert_thread(
         make_thread(
@@ -97,8 +191,65 @@ def test_non_success_cached_extraction_is_retried(tmp_path, monkeypatch):
         extraction_status=STATUS_FAILED,
         extractor="text",
         extracted_text=None,
-        extraction_error="old failure",
+        extraction_error="recent failure",
     )
+    extractor = MagicMock()
+    monkeypatch.setattr(attachment_indexing, "extract_attachment", extractor)
+
+    embedder = MagicMock()
+    embedder.embed.return_value = [0.2] * EMBEDDING_DIM
+
+    summary = process_attachment(
+        attachment=attachment,
+        message_id="message@example.com",
+        thread_id="thread-1",
+        db=db,
+        embedder=embedder,
+        chunk_target_tokens=350,
+        chunk_max_tokens=500,
+        chunk_overlap_tokens=60,
+        ocr_enabled=True,
+        max_bytes=10_000_000,
+        max_ocr_pages=20,
+    )
+
+    assert summary["extractions_reused"] == 1
+    assert summary["extractions_run"] == 0
+    extractor.assert_not_called()
+
+
+def test_stale_failed_cached_extraction_is_retried(tmp_path, monkeypatch):
+    """A STATUS_FAILED row beyond the retry window is re-extracted.
+
+    The window exists so a chronic failure stops burning OCR cycles,
+    but a real library / dep upgrade should eventually pick the
+    payload up again rather than caching the failure forever.
+    """
+    db = Database(tmp_path / "mail.db")
+    db.upsert_thread(
+        make_thread(
+            messages=[make_message(message_id="message@example.com")], thread_id="thread-1"
+        ),
+        [0.0] * EMBEDDING_DIM,
+    )
+    attachment = _attachment()
+    # Stamp the cache row 30 days in the past — well beyond the 7-day
+    # retry window — so the resolver classifies it as stale.
+    stale_iso = (datetime.now(UTC) - timedelta(days=30)).isoformat()
+    db._conn.execute(
+        "INSERT INTO attachment_extractions "
+        "(attachment_id, extraction_status, extractor, extracted_text, "
+        "extraction_error, extracted_at) VALUES (?, ?, ?, ?, ?, ?)",
+        (
+            attachment.content_hash,
+            STATUS_FAILED,
+            "text",
+            None,
+            "old failure",
+            stale_iso,
+        ),
+    )
+    db._conn.commit()
     extractor = MagicMock(
         return_value=ExtractionResult(
             status=STATUS_SUCCESS,
@@ -133,6 +284,58 @@ def test_non_success_cached_extraction_is_retried(tmp_path, monkeypatch):
     assert cached is not None
     assert cached["extraction_status"] == STATUS_SUCCESS
     assert cached["extracted_text"] == "fresh extracted text"
+
+
+def test_ocr_disabled_unsupported_is_re_run_when_ocr_re_enabled(tmp_path, monkeypatch):
+    """An image cached as ``unsupported`` because OCR was off should re-run
+    when the operator re-enables OCR. Other ``unsupported`` reasons (no
+    extractor for this MIME type) stay cached.
+    """
+    db = Database(tmp_path / "mail.db")
+    db.upsert_thread(
+        make_thread(
+            messages=[make_message(message_id="message@example.com")], thread_id="thread-1"
+        ),
+        [0.0] * EMBEDDING_DIM,
+    )
+    attachment = _attachment()
+    db.store_attachment_extraction(
+        attachment_id=attachment.content_hash,
+        extraction_status="unsupported",
+        extractor=None,
+        extracted_text=None,
+        extraction_error="OCR disabled (INDEXER_OCR_ENABLED=false)",
+    )
+    extractor = MagicMock(
+        return_value=ExtractionResult(
+            status=STATUS_SUCCESS,
+            extractor="image-ocr",
+            text="now extracted",
+            error=None,
+        )
+    )
+    monkeypatch.setattr(attachment_indexing, "extract_attachment", extractor)
+
+    embedder = MagicMock()
+    embedder.embed.return_value = [0.2] * EMBEDDING_DIM
+
+    summary = process_attachment(
+        attachment=attachment,
+        message_id="message@example.com",
+        thread_id="thread-1",
+        db=db,
+        embedder=embedder,
+        chunk_target_tokens=350,
+        chunk_max_tokens=500,
+        chunk_overlap_tokens=60,
+        ocr_enabled=True,  # operator turned it on after the cached row was written
+        max_bytes=10_000_000,
+        max_ocr_pages=20,
+    )
+
+    assert summary["extractions_reused"] == 0
+    assert summary["extractions_run"] == 1
+    extractor.assert_called_once()
 
 
 def _setup_db_for_attachment(tmp_path, message_id="msg@x", thread_id="thread-x"):

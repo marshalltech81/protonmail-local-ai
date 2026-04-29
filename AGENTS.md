@@ -127,10 +127,10 @@ Do not make any of the following changes unless the repository owner explicitly 
   inputs producing identical IDs so the diff-write path skips already-
   embedded chunks. Attachment chunks use
   `message_pk = f"{message_id}::{attachment_id}"`.
-- Do not store raw attachment payload bytes in SQLite. Schema v11 keeps
-  bytes only in the `.eml` on disk. ``attachment_extractions`` caches the
-  extracted *text* per content hash so OCR / parse cost runs at most once
-  per unique payload, not the bytes themselves.
+- Do not store raw attachment payload bytes in SQLite. The current schema
+  keeps bytes only in the `.eml` on disk. ``attachment_extractions`` caches
+  the extracted *text* per content hash so OCR / parse cost runs at most
+  once per unique payload, not the bytes themselves.
 
 ## Bridge-Specific Guardrails
 

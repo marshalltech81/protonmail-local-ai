@@ -47,8 +47,19 @@ def extract(
     *,
     ocr_enabled: bool = True,  # noqa: ARG001 — dispatcher already gated on this
     max_ocr_pages: int = 20,  # noqa: ARG001 — single-page format
+    ocr_timeout_seconds: float | None = None,
+    max_pdf_pages: int | None = None,  # noqa: ARG001 — single-page format
 ) -> tuple[str, str]:
-    """OCR an image attachment. Returns (text, "image-ocr")."""
+    """OCR an image attachment. Returns (text, "image-ocr").
+
+    ``ocr_timeout_seconds`` (when set) bounds Tesseract per call.
+    Tesseract is single-threaded and a crafted high-noise image can
+    keep it busy for minutes; the indexer queue is single-worker, so
+    one bad image stalls every subsequent attachment until the OS
+    reaps Tesseract. ``pytesseract`` raises ``RuntimeError`` when the
+    timeout fires; the dispatcher converts that to a ``failed``
+    extraction row.
+    """
     prior_max_pixels = Image.MAX_IMAGE_PIXELS
     Image.MAX_IMAGE_PIXELS = _MAX_IMAGE_PIXELS
     try:
@@ -61,7 +72,10 @@ def extract(
             # ``exif_transpose`` reads the EXIF Orientation tag and rotates the
             # pixels accordingly. No-op for images without EXIF.
             image = ImageOps.exif_transpose(image)
-            text = pytesseract.image_to_string(image)
+            tesseract_kwargs: dict[str, float] = {}
+            if ocr_timeout_seconds is not None and ocr_timeout_seconds > 0:
+                tesseract_kwargs["timeout"] = float(ocr_timeout_seconds)
+            text = pytesseract.image_to_string(image, **tesseract_kwargs)
     finally:
         Image.MAX_IMAGE_PIXELS = prior_max_pixels
     return text, "image-ocr"

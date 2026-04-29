@@ -12,6 +12,7 @@ import threading
 from datetime import UTC, datetime
 
 import pytest
+from src.attachment_indexing import attachment_occurrence_id
 from src.database import SCHEMA_VERSION, Database
 
 from tests.conftest import make_message, make_thread
@@ -1517,6 +1518,12 @@ class TestUpsertAttachment:
             filename="invoice.pdf",
             content_type="application/pdf",
             size_bytes=1234,
+            occurrence_id=attachment_occurrence_id(
+                message_id="att1@x",
+                content_hash="hash-a" * 8,
+                filename="invoice.pdf",
+                occurrence_index=0,
+            ),
         )
         assert inserted is True
 
@@ -1544,6 +1551,12 @@ class TestUpsertAttachment:
                 "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
             ),
             size_bytes=5678,
+            occurrence_id=attachment_occurrence_id(
+                message_id="att2@x",
+                content_hash="hash-b" * 8,
+                filename="contract.docx",
+                occurrence_index=0,
+            ),
         )
         assert db.upsert_attachment(**kwargs) is True
         assert db.upsert_attachment(**kwargs) is False
@@ -1596,6 +1609,12 @@ class TestUpsertAttachment:
             filename="march-statement.pdf",
             content_type="application/pdf",
             size_bytes=10,
+            occurrence_id=attachment_occurrence_id(
+                message_id="att3@x",
+                content_hash="hash-c" * 8,
+                filename="march-statement.pdf",
+                occurrence_index=0,
+            ),
         )
         hits = db._conn.execute(
             "SELECT rowid FROM attachments_fts WHERE attachments_fts MATCH 'statement'"
@@ -1738,6 +1757,12 @@ class TestAttachmentCascadeOnMessageRemoval:
             filename="doomed.pdf",
             content_type="application/pdf",
             size_bytes=1,
+            occurrence_id=attachment_occurrence_id(
+                message_id="cas1@x",
+                content_hash="cascade-hash" * 4,
+                filename="doomed.pdf",
+                occurrence_index=0,
+            ),
         )
         # Make sure it landed.
         before = db._conn.execute(
@@ -1768,6 +1793,12 @@ class TestAttachmentCascadeOnMessageRemoval:
             filename="preserved.pdf",
             content_type="application/pdf",
             size_bytes=1,
+            occurrence_id=attachment_occurrence_id(
+                message_id="cas2@x",
+                content_hash=attachment_id,
+                filename="preserved.pdf",
+                occurrence_index=0,
+            ),
         )
         db.store_attachment_extraction(
             attachment_id=attachment_id,
@@ -1791,13 +1822,20 @@ class TestAttachmentCascadeOnMessageRemoval:
         db.upsert_thread(t, FAKE_EMBEDDING)
 
         for mid in ("cas3a@x", "cas3b@x"):
+            attachment_id = f"thread-cascade-{mid}".ljust(64, "0")
             db.upsert_attachment(
                 message_id=mid,
                 thread_id=t.thread_id,
-                attachment_id=f"thread-cascade-{mid}".ljust(64, "0"),
+                attachment_id=attachment_id,
                 filename=f"{mid}.pdf",
                 content_type="application/pdf",
                 size_bytes=1,
+                occurrence_id=attachment_occurrence_id(
+                    message_id=mid,
+                    content_hash=attachment_id,
+                    filename=f"{mid}.pdf",
+                    occurrence_index=0,
+                ),
             )
 
         db.delete_thread_completely(t.thread_id)

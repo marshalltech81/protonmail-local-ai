@@ -5,7 +5,6 @@ Thread-level indexing: one row per thread, updated as new messages arrive.
 """
 
 import functools
-import hashlib
 import json
 import logging
 import sqlite3
@@ -49,6 +48,21 @@ def _dedupe_by_canonical(addrs: list[str]) -> list[str]:
     return result
 
 
+# SCHEMA_VERSION jumped from v8 to v12 in one PR; the four logical steps
+# that the bump represents (and that a future reader will see in the
+# ``_apply_initial_schema`` body) are:
+#   v9  — ``message_chunks`` / ``message_chunks_fts`` / ``message_chunks_vec``
+#         tables: the precision-retrieval lane on top of thread-level rows.
+#   v10 — ``attachments`` + ``attachments_fts``: per-message attachment
+#         occurrences so filename / MIME filters work uniformly.
+#   v11 — ``attachment_extractions`` cache: extracted *text* per
+#         ``content_hash`` (never payload bytes) so OCR / PDF parse cost
+#         runs at most once per unique payload.
+#   v12 — FK ``ON DELETE CASCADE`` across chunk + attachment tables so
+#         a thread or message deletion takes its dependent rows with it
+#         without relying on application-side helpers.
+# Bumping this constant requires wiping ``sqlite-volume`` — there is no
+# migration runner; the indexer rebuilds from Maildir on next start.
 SCHEMA_VERSION = 12
 
 # The schema uses FTS5 ``contentless_delete=1``, which SQLite added in 3.43.
@@ -770,7 +784,7 @@ class Database:
         filename: str,
         content_type: str,
         size_bytes: int,
-        occurrence_id: str | None = None,
+        occurrence_id: str,
     ) -> bool:
         """Record one attachment occurrence on a message.
 
@@ -780,6 +794,11 @@ class Database:
         no-ops on the second call rather than churning ``seen_at`` or the
         FTS row.
 
+        ``occurrence_id`` must be derived via
+        ``attachment_indexing.attachment_occurrence_id`` so the formula
+        stays in one place and write callers cannot drift from the
+        indexer's own production path.
+
         The filename + MIME type are mirrored into the ``attachments_fts``
         contentless table for direct keyword search ("find the .pdf
         named contract"). The deterministic ``attachment_id`` (sha256
@@ -788,12 +807,6 @@ class Database:
         """
         from datetime import UTC, datetime
 
-        occurrence_id = (
-            occurrence_id
-            or hashlib.sha256(
-                f"{message_id}\0{attachment_id}\0{filename}\0{content_type}".encode()
-            ).hexdigest()
-        )
         cur = self._conn.cursor()
         started = False
         try:
@@ -974,11 +987,16 @@ class Database:
         placeholders = ",".join(["?"] * len(message_ids))
         # Composed SQL is a fixed SELECT; user values are bound through
         # ``?`` placeholders. nosec B608.
+        # ``ORDER BY c.chunk_id`` pins read order so ``mean_vector`` sums
+        # in a deterministic sequence. Float64 addition is not associative,
+        # so without this an idempotent replay can rewrite ``threads_vec``
+        # with a marginally different blob, churning WAL pages.
         sql = (
             "SELECT v.embedding AS embedding "
             "FROM message_chunks c "
             "JOIN message_chunks_vec v ON v.chunk_id = c.chunk_id "
-            f"WHERE c.message_id IN ({placeholders})"  # nosec B608
+            f"WHERE c.message_id IN ({placeholders}) "  # nosec B608
+            "ORDER BY c.chunk_id"
         )
         rows = self._conn.execute(sql, list(message_ids)).fetchall()
         result: list[list[float]] = []
@@ -1001,12 +1019,16 @@ class Database:
         """
         import struct
 
+        # ``ORDER BY c.chunk_id`` pins read order — see the matching note
+        # in ``get_chunk_embeddings_for_messages`` for why a deterministic
+        # mean read matters.
         rows = self._conn.execute(
             """
             SELECT v.embedding AS embedding
             FROM message_chunks c
             JOIN message_chunks_vec v ON v.chunk_id = c.chunk_id
             WHERE c.thread_id = ?
+            ORDER BY c.chunk_id
             """,
             (thread_id,),
         ).fetchall()
@@ -1021,6 +1043,49 @@ class Database:
             result.append(list(struct.unpack(f"{count}f", blob)))
         return result
 
+    @staticmethod
+    def _delete_chunks_in_batches(
+        cur: sqlite3.Cursor,
+        rows: list[sqlite3.Row],
+    ) -> None:
+        """Bulk-delete the ``message_chunks_fts`` and ``message_chunks_vec``
+        rows for a list of ``(chunk_id, fts_rowid)`` results.
+
+        Issuing one ``DELETE`` per chunk is correct but slow on threads
+        with thousands of chunks (FTS5 contentless tables and vec0 each
+        take a per-row hit, so a 1000-chunk thread runs 2000 statements).
+        Chunked ``WHERE ... IN (?, ?, ...)`` deletes amortise the
+        per-statement overhead inside the same transaction.
+        """
+        if not rows:
+            return
+
+        chunk_ids: list[str] = []
+        fts_rowids: list[int] = []
+        for row in rows:
+            chunk_ids.append(row["chunk_id"])
+            if row["fts_rowid"] is not None:
+                fts_rowids.append(row["fts_rowid"])
+
+        # SQLite default ``SQLITE_LIMIT_VARIABLE_NUMBER`` is 32766 in
+        # 3.32+, well above 500. Smaller batches keep memory/log noise
+        # bounded for very large reaps.
+        batch_size = 500
+        for start in range(0, len(fts_rowids), batch_size):
+            int_batch = fts_rowids[start : start + batch_size]
+            placeholders = ",".join(["?"] * len(int_batch))
+            cur.execute(
+                f"DELETE FROM message_chunks_fts WHERE rowid IN ({placeholders})",  # nosec B608
+                int_batch,
+            )
+        for start in range(0, len(chunk_ids), batch_size):
+            str_batch = chunk_ids[start : start + batch_size]
+            placeholders = ",".join(["?"] * len(str_batch))
+            cur.execute(
+                f"DELETE FROM message_chunks_vec WHERE chunk_id IN ({placeholders})",  # nosec B608
+                str_batch,
+            )
+
     def _delete_chunks_for_message(self, cur: sqlite3.Cursor, message_id: str) -> None:
         """Drop every chunk row + FTS + vec entry for ``message_id``.
 
@@ -1031,10 +1096,7 @@ class Database:
             "SELECT chunk_id, fts_rowid FROM message_chunks WHERE message_id = ?",
             (message_id,),
         ).fetchall()
-        for row in rows:
-            if row["fts_rowid"] is not None:
-                cur.execute("DELETE FROM message_chunks_fts WHERE rowid = ?", (row["fts_rowid"],))
-            cur.execute("DELETE FROM message_chunks_vec WHERE chunk_id = ?", (row["chunk_id"],))
+        self._delete_chunks_in_batches(cur, rows)
         cur.execute("DELETE FROM message_chunks WHERE message_id = ?", (message_id,))
 
     def _delete_chunks_for_thread(self, cur: sqlite3.Cursor, thread_id: str) -> None:
@@ -1049,10 +1111,7 @@ class Database:
             "SELECT chunk_id, fts_rowid FROM message_chunks WHERE thread_id = ?",
             (thread_id,),
         ).fetchall()
-        for row in rows:
-            if row["fts_rowid"] is not None:
-                cur.execute("DELETE FROM message_chunks_fts WHERE rowid = ?", (row["fts_rowid"],))
-            cur.execute("DELETE FROM message_chunks_vec WHERE chunk_id = ?", (row["chunk_id"],))
+        self._delete_chunks_in_batches(cur, rows)
         cur.execute("DELETE FROM message_chunks WHERE thread_id = ?", (thread_id,))
 
     def _replace_fts_row(
@@ -1159,9 +1218,8 @@ class Database:
         disappeared, but the same content_hash is indexed at path B" —
         a rename mbsync performed without emitting an ``on_moved`` event
         (e.g. across folder moves or restarts) — and to catch genuine
-        duplicate deliveries. Rows for which whose
-        identity capture failed have ``content_hash IS NULL`` and are
-        excluded from the match.
+        duplicate deliveries. Rows whose identity capture failed have
+        ``content_hash IS NULL`` and are excluded from the match.
         """
         if not content_hash:
             return []

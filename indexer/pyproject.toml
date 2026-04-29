@@ -19,6 +19,7 @@ dependencies = [
     "pillow==12.2.0",              # image loading + EXIF rotation for OCR
     "python-docx==1.2.0",          # DOCX paragraph + table walk
     "openpyxl==3.1.5",             # XLSX read-only workbook walk
+    "defusedxml==0.7.1",           # XML-bomb defense for python-docx + openpyxl
 ]
 
 [dependency-groups]
@@ -41,6 +42,7 @@ check_untyped_defs = true
 
 [[tool.mypy.overrides]]
 module = [
+    "defusedxml.*",
     "openpyxl.*",
     "pytesseract.*",
     "sqlite_vec.*",

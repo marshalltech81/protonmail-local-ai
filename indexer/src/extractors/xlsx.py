@@ -24,6 +24,8 @@ def extract(
     *,
     ocr_enabled: bool = True,  # noqa: ARG001
     max_ocr_pages: int = 20,  # noqa: ARG001
+    ocr_timeout_seconds: float | None = None,  # noqa: ARG001
+    max_pdf_pages: int | None = None,  # noqa: ARG001
 ) -> tuple[str, str]:
     """Extract text from an XLSX payload. Returns (text, "xlsx")."""
     workbook = openpyxl.load_workbook(
