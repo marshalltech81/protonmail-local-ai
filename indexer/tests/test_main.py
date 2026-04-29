@@ -241,17 +241,19 @@ class TestInitialIndexNestedFolders:
 
 
 class TestInitialIndexHeartbeat:
-    def test_health_file_refreshed_during_long_scan(self, tmp_path, monkeypatch):
-        """``initial_index`` must refresh the heartbeat every
-        ``HEALTH_REFRESH_EVERY`` messages so that embedding a large mailbox
-        does not exceed ``HEALTH_MAX_AGE_SECONDS`` mid-scan."""
+    def test_health_file_refreshed_after_every_processed_message(self, tmp_path, monkeypatch):
+        """``initial_index`` must refresh the heartbeat after every
+        processed message so that embedding a large mailbox does not
+        exceed ``HEALTH_MAX_AGE_SECONDS`` mid-scan. A single batch of 25
+        jobs at ~5 embeds/sec with chunky attachments easily exceeds the
+        90s threshold; per-job touch decouples healthcheck cadence from
+        per-batch duration."""
         maildir = tmp_path / "maildir"
         inbox = maildir / "INBOX" / "cur"
         inbox.mkdir(parents=True)
 
-        # Write one more than the refresh threshold so we expect at least
-        # one refresh to fire during the scan.
-        for i in range(main.HEALTH_REFRESH_EVERY + 1):
+        message_count = 5
+        for i in range(message_count):
             _write_eml(inbox / f"m{i}.eml", f"m{i}@example.com")
 
         db = Database(tmp_path / "mail.db")
@@ -266,7 +268,10 @@ class TestInitialIndexHeartbeat:
 
         main.initial_index(db, embedder, threader, _make_queue(db))
 
-        assert len(touches) >= 1
+        # One touch per processed message in the drain loop. (The
+        # outer ``main()`` adds two more touches — pre-call and
+        # post-call — but those are not exercised by this test.)
+        assert len(touches) == message_count
 
 
 class TestDrainQueueRetryAndDeadLetter:

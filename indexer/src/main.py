@@ -498,11 +498,13 @@ def initial_index(
 ):
     """Enqueue every unindexed Maildir message and drain the queue.
 
-    Refreshes the health file every ``HEALTH_REFRESH_EVERY`` processed
-    messages so that long initial indexes (large mailboxes, slow Ollama
-    embeddings) do not exceed ``HEALTH_MAX_AGE_SECONDS`` in the
+    Refreshes the health file after every processed message so that
+    long initial indexes (large mailboxes, slow Ollama embeddings, OCR
+    on scanned PDFs) do not exceed ``HEALTH_MAX_AGE_SECONDS`` in the
     healthcheck and cause the container to be reported unhealthy
-    mid-scan.
+    mid-scan. (A single message that itself takes longer than
+    ``HEALTH_MAX_AGE_SECONDS`` will still trip the healthcheck — that
+    case would need a heartbeat hook inside ``_index_one_file``.)
 
     Routing the initial scan through the queue — rather than indexing
     files inline — means a crash or Ollama outage mid-scan leaves the
@@ -533,8 +535,14 @@ def initial_index(
         else:
             queue.mark_failed(filepath, stage=stage, error=error or "")
         processed += 1
-        if processed % HEALTH_REFRESH_EVERY == 0:
-            touch_health_file()
+        # Touch the heartbeat after every job rather than every
+        # ``HEALTH_REFRESH_EVERY`` jobs. ``HEALTH_MAX_AGE_SECONDS`` is 90s
+        # in the healthcheck script; a 25-job batch can exceed that on
+        # mailboxes with large attachments (PDF chunking + OCR), flipping
+        # the container to unhealthy mid-work and blocking compose
+        # dependency-gated starts. A single ``Path.touch()`` per job is
+        # negligible relative to parse + embed + upsert cost.
+        touch_health_file()
         if processed % TIMING_LOG_EVERY == 0:
             line = format_summary(timing_aggregator.summary())
             if line:
