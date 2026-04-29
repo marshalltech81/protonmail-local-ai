@@ -35,6 +35,15 @@ services:
     tmpfs:
       - /tmp
       - /root/.cache
+      # v0.9.2 onward unconditionally wipes-and-recopies STATIC_DIR
+      # from FRONTEND_BUILD_DIR/static on every startup (see
+      # /app/backend/open_webui/config.py). With read_only: true that
+      # write would otherwise spam EROFS errors for every favicon /
+      # splash / loader.js / custom.css. tmpfs here is masked over the
+      # image's pre-baked static dir, then the copy on startup
+      # repopulates it from the (read-only) frontend build dir, so
+      # the FE always serves fresh defaults from the current image.
+      - /app/backend/open_webui/static:size=64m,uid=0,gid=0,mode=755
     secrets:
       - open_webui_secret_key
     depends_on:
@@ -71,7 +80,7 @@ services:
       # absent) and any subsequent UI edits override it. To disable
       # MCP tooling entirely, change the value below to ``[]``; to add
       # additional tool servers, extend the JSON array.
-      TOOL_SERVER_CONNECTIONS: '[{"url":"http://mcp-server:3000","path":"/mcp","type":"mcp","auth_type":"none","key":"","config":{"enable":true}}]'
+      TOOL_SERVER_CONNECTIONS: '[{"url":"http://mcp-server:3000","path":"/mcp","type":"mcp","auth_type":"none","key":"","config":{"enable":true},"info":{"id":"protonmail-mcp","name":"ProtonMail MCP","description":"Local mailbox search, retrieval, and intelligence tools backed by the on-disk SQLite index."}}]'
       ENABLE_COMMUNITY_SHARING: "false"
       ENABLE_FORWARD_USER_INFO_HEADERS: "false"
       ENABLE_WEB_LOADER_SSL_VERIFICATION: "true"
