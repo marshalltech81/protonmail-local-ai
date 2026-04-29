@@ -6,7 +6,12 @@ services:
   # Start with: make open-webui-up
   # ---------------------------------------------------------------------------
   open-webui:
-    image: ${OPEN_WEBUI_IMAGE:-ghcr.io/open-webui/open-webui:v0.9.0}
+    # Pin by digest, not just tag. Open WebUI's GHCR registry is the
+    # only third-party-controlled image in the stack; a retag of
+    # ``v0.9.0`` upstream would otherwise silently land different bits
+    # on ``make open-webui-up``. The digest below is the multi-arch
+    # OCI index for v0.9.0 — covers both linux/amd64 and linux/arm64.
+    image: ${OPEN_WEBUI_IMAGE:-ghcr.io/open-webui/open-webui:v0.9.0@sha256:eb874c0530209dd5ca21a4d0a7cc42e69f2ee85f0e7b90ae94659cd415c27c6d}
     container_name: open-webui
     restart: unless-stopped
     init: true
@@ -21,6 +26,12 @@ services:
     cap_drop:
       - ALL
     pids_limit: 256
+    # Cap memory for the same reason indexer is capped: an unbounded
+    # process can starve other containers (notably Ollama, which is
+    # memory-hungry) on the shared docker host. 1 GiB covers ordinary
+    # web-UI session state + a tokenizer load with headroom; tune via
+    # ``OPEN_WEBUI_MEM_LIMIT`` if a workload needs more.
+    mem_limit: ${OPEN_WEBUI_MEM_LIMIT:-1g}
     tmpfs:
       - /tmp
       - /root/.cache
@@ -37,8 +48,18 @@ services:
       # Open WebUI's start.sh reads the key from this path when WEBUI_SECRET_KEY
       # is unset; keeps the secret out of `docker inspect` env metadata.
       WEBUI_SECRET_KEY_FILE: /run/secrets/open_webui_secret_key
-      ENABLE_SIGNUP: ${OPEN_WEBUI_ENABLE_SIGNUP:-true}
-      DEFAULT_MODELS: ${OPEN_WEBUI_DEFAULT_MODEL:-llama3.2}
+      # Default-deny signup. The first-run admin must be created with
+      # ``OPEN_WEBUI_ENABLE_SIGNUP=true make open-webui-up`` (one-shot)
+      # then flipped back; documented in .env.example. Default-allow
+      # is unsafe on a multi-user workstation because Open WebUI grants
+      # admin to whoever signs up first, and the loopback bind alone
+      # does not exclude other local users from racing the legit
+      # operator.
+      ENABLE_SIGNUP: ${OPEN_WEBUI_ENABLE_SIGNUP:-false}
+      # Default the chat model to whatever the rest of the stack uses
+      # for ``OLLAMA_LLM_MODEL`` so an operator who changes that env
+      # var doesn't have to also remember to change it in two places.
+      DEFAULT_MODELS: ${OPEN_WEBUI_DEFAULT_MODEL:-${OLLAMA_LLM_MODEL:-llama3.2}}
       ENABLE_OLLAMA_API: "true"
       OLLAMA_BASE_URL: http://ollama:11434
       ENABLE_OPENAI_API: "false"
@@ -54,6 +75,15 @@ services:
       - "127.0.0.1:${OPEN_WEBUI_PORT:-8080}:8080"
     networks:
       - app-net
+    healthcheck:
+      # Open WebUI exposes ``/health`` (200 = ok). curl is in the
+      # upstream image; we just need to probe with no auth so a hung
+      # process flips ``docker ps`` to ``unhealthy``.
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8080/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
     logging:
       driver: json-file
       options:

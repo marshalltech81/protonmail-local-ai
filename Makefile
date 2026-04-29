@@ -147,8 +147,10 @@ open-webui-up: init-secrets validate-env
 			printf 'Install openssl, or write 32+ random bytes to .secrets/open_webui_secret_key.txt manually.\n' >&2; \
 			exit 1; \
 		fi; \
-		openssl rand -base64 32 > .secrets/open_webui_secret_key.txt; \
-		chmod 600 .secrets/open_webui_secret_key.txt; \
+		( \
+			umask 077; \
+			openssl rand -base64 32 | tr -d '\n' > .secrets/open_webui_secret_key.txt; \
+		); \
 		echo "  generated .secrets/open_webui_secret_key.txt"; \
 	fi
 	@transport="$$(./scripts/validate-env.sh --get MCP_TRANSPORT)"; \
