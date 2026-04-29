@@ -63,6 +63,15 @@ services:
       ENABLE_OLLAMA_API: "true"
       OLLAMA_BASE_URL: http://ollama:11434
       ENABLE_OPENAI_API: "false"
+      # Pre-wire the local mcp-server as an MCP tool source so chats can
+      # call mailbox tools out of the box without an admin clicking
+      # through Settings → Tools after first login. Open WebUI uses
+      # PersistentConfig: this env value is loaded into the SQLite
+      # config row on first start (when ``tool_server.connections`` is
+      # absent) and any subsequent UI edits override it. To disable
+      # MCP tooling entirely, change the value below to ``[]``; to add
+      # additional tool servers, extend the JSON array.
+      TOOL_SERVER_CONNECTIONS: '[{"url":"http://mcp-server:3000","path":"/mcp","type":"mcp","auth_type":"none","key":"","config":{"enable":true}}]'
       ENABLE_COMMUNITY_SHARING: "false"
       ENABLE_FORWARD_USER_INFO_HEADERS: "false"
       ENABLE_WEB_LOADER_SSL_VERIFICATION: "true"
