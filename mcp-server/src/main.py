@@ -13,6 +13,7 @@ from typing import Literal, cast
 
 import uvicorn
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse
@@ -98,6 +99,12 @@ async def _run_dual_transport_async(server: FastMCP) -> None:
     sse_app = server.sse_app()
     streamable_http_app = server.streamable_http_app()
 
+    streamable_path = server.settings.streamable_http_path
+    # Pre-compute the prefix used to recognize trailing-slash and
+    # sub-path requests (``/mcp/`` or ``/mcp/foo``) without also
+    # matching unrelated paths like ``/mcpfoo`` or ``/mcp-debug``.
+    streamable_prefix = streamable_path.rstrip("/") + "/"
+
     @contextlib.asynccontextmanager
     async def combined_lifespan(scope_app):
         async with contextlib.AsyncExitStack() as stack:
@@ -113,11 +120,18 @@ async def _run_dual_transport_async(server: FastMCP) -> None:
             await lifespan_owner(scope, receive, send)
             return
         path = scope.get("path", "/")
-        # Streamable HTTP claims the configured streamable path (``/mcp``
-        # by default); everything else — ``/sse``, ``/messages/``, the
-        # ``/health`` custom route registered on the FastMCP server — is
-        # served by the SSE app (which inherits the FastMCP custom routes).
-        target = streamable_http_app if path.startswith("/mcp") else sse_app
+        # Streamable HTTP claims exactly the configured streamable path
+        # (``/mcp`` by default) and any sub-path under it. Everything
+        # else — ``/sse``, ``/messages/``, the ``/health`` custom route
+        # registered on the FastMCP server, and any future ``/mcp-*``
+        # custom route — is served by the SSE app (which inherits the
+        # FastMCP custom routes). Using a startswith check on a
+        # trailing-slash prefix avoids ``/mcp`` over-matching paths
+        # like ``/mcpfoo``.
+        if path == streamable_path or path.startswith(streamable_prefix):
+            target = streamable_http_app
+        else:
+            target = sse_app
         await target(scope, receive, send)
 
     config = uvicorn.Config(
@@ -144,8 +158,47 @@ def main():
     db = Database(SQLITE_PATH)
     ollama = OllamaClient(OLLAMA_HOST, EMBED_MODEL, LLM_MODEL)
 
-    # FastMCP server — supports @server.tool() decorator and SSE transport
-    server = FastMCP("protonmail-local-ai", host="0.0.0.0", port=MCP_PORT)  # nosec B104
+    # FastMCP server — supports @server.tool() decorator and SSE transport.
+    # ``host="0.0.0.0"`` is required so the in-container bind is reachable
+    # through the Docker port-forward; the host-side mapping in
+    # ``docker-compose.yml`` keeps the port loopback-only
+    # (``127.0.0.1:${MCP_PORT}:3000``). nosec B104.
+    #
+    # FastMCP only auto-enables DNS-rebinding protection when ``host`` is
+    # one of ``127.0.0.1``/``localhost``/``::1``; binding to ``0.0.0.0``
+    # silently disables it. We re-enable Host/Origin allow-listing
+    # explicitly so a malicious local browser page cannot DNS-rebind to
+    # this listener — relevant once the optional Open WebUI overlay
+    # shares the ``app-net`` network with the MCP server.
+    transport_security = TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=[
+            "localhost",
+            "localhost:*",
+            "127.0.0.1",
+            "127.0.0.1:*",
+            "[::1]",
+            "[::1]:*",
+            "mcp-server",
+            "mcp-server:*",
+        ],
+        allowed_origins=[
+            "http://localhost",
+            "http://localhost:*",
+            "http://127.0.0.1",
+            "http://127.0.0.1:*",
+            "http://[::1]",
+            "http://[::1]:*",
+            "http://mcp-server",
+            "http://mcp-server:*",
+        ],
+    )
+    server = FastMCP(
+        "protonmail-local-ai",
+        host="0.0.0.0",  # nosec B104 — see comment above
+        port=MCP_PORT,
+        transport_security=transport_security,
+    )
 
     # Plain HTTP health endpoint used by the container healthcheck. Sits
     # outside the MCP protocol so `docker healthcheck` and operator scripts

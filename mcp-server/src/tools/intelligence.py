@@ -3,6 +3,7 @@ Intelligence tools — Group 3 (our differentiator).
 Q&A/RAG, summarization, and structured extraction over email threads.
 """
 
+import asyncio
 import json
 import logging
 
@@ -170,7 +171,8 @@ def register_intelligence_tools(
             # context below is the precise passages that drove ranking
             # rather than the truncated accumulated thread body.
             embedding = await ollama.embed(question)
-            results = db.hybrid_search(
+            results = await asyncio.to_thread(
+                db.hybrid_search,
                 query_text=question,
                 query_embedding=embedding,
                 folders=folders,
@@ -242,7 +244,7 @@ def register_intelligence_tools(
             A summary of the available indexed thread context in the requested style.
         """
         try:
-            thread = db.get_thread(thread_id)
+            thread = await asyncio.to_thread(db.get_thread, thread_id)
             if not thread:
                 return [TextContent(type="text", text=f"Thread not found: {thread_id}")]
 
@@ -317,7 +319,8 @@ def register_intelligence_tools(
             # accumulated body. For structured extraction this matters:
             # passing only the relevant chunk reduces the chance the LLM
             # picks data from an unrelated reply elsewhere in the thread.
-            results = db.hybrid_search(
+            results = await asyncio.to_thread(
+                db.hybrid_search,
                 query_text=query,
                 query_embedding=embedding,
                 folders=folders,
@@ -386,7 +389,12 @@ def register_intelligence_tools(
 
 async def _claude_complete(system: str, user: str, api_key: str, model: str) -> str:
     """Call the Claude API for higher-quality reasoning."""
-    async with httpx.AsyncClient(timeout=60.0) as client:
+    # Explicit per-call timeout — connect quickly, allow the read budget
+    # to span Claude's reasoning. Setting on the call rather than relying
+    # on the client-level default keeps the semantics correct if the
+    # client is ever shared across requests.
+    timeout = httpx.Timeout(60.0, connect=5.0)
+    async with httpx.AsyncClient() as client:
         r = await client.post(
             "https://api.anthropic.com/v1/messages",
             headers={
@@ -400,6 +408,7 @@ async def _claude_complete(system: str, user: str, api_key: str, model: str) -> 
                 "system": system,
                 "messages": [{"role": "user", "content": user}],
             },
+            timeout=timeout,
         )
         r.raise_for_status()
         return r.json()["content"][0]["text"]

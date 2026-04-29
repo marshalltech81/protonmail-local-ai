@@ -3,6 +3,7 @@ Retrieval tools — Group 2.
 Fetch thread and message context from the local SQLite index.
 """
 
+import asyncio
 import logging
 
 from mcp.types import TextContent
@@ -34,7 +35,7 @@ def register_retrieval_tools(server, db):
             Indexed thread context, participants, and timeline from the local index.
         """
         try:
-            thread = db.get_thread(thread_id)
+            thread = await asyncio.to_thread(db.get_thread, thread_id)
             if not thread:
                 return [TextContent(type="text", text=f"Thread not found: {thread_id}")]
 
@@ -96,11 +97,11 @@ def register_retrieval_tools(server, db):
             Local index context for the message and its parent thread.
         """
         try:
-            thread_id = db.find_thread_by_message_id(message_id)
+            thread_id = await asyncio.to_thread(db.find_thread_by_message_id, message_id)
             if not thread_id:
                 return [TextContent(type="text", text=f"Message not found: {message_id}")]
 
-            thread = db.get_thread(thread_id)
+            thread = await asyncio.to_thread(db.get_thread, thread_id)
             if not thread:
                 return [TextContent(type="text", text=f"Message not found: {message_id}")]
 
@@ -163,7 +164,8 @@ def register_retrieval_tools(server, db):
         offset = clamp_int(offset, default=0, minimum=0, maximum=1_000_000)
 
         try:
-            threads = db.list_threads(
+            threads = await asyncio.to_thread(
+                db.list_threads,
                 folder=folder,
                 filter_type=filter_type,
                 limit=limit,
@@ -200,7 +202,7 @@ def register_retrieval_tools(server, db):
             All folders with thread counts from the local index.
         """
         try:
-            folders = db.list_folders()
+            folders = await asyncio.to_thread(db.list_folders)
             if not folders:
                 return [TextContent(type="text", text="No folders found in index.")]
 

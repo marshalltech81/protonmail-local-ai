@@ -49,6 +49,15 @@ def canonical_addr(value: str) -> str:
 _UNFILTERED_OVERSAMPLE = 2
 _FILTERED_OVERSAMPLE = 4
 
+# Oversample factor for the chunk and attachment FTS lanes, where one
+# thread can legitimately own many matching rows (a long thread, a
+# popular term). Without enough oversample, those threads absorb every
+# top-N row and other threads never enter the lane. The value is a
+# deliberate over-correction of the prior 3× — empirically a ~10×
+# oversample lets ``_best_per_thread`` still surface enough threads
+# even on dense matches.
+_CHUNK_LANE_OVERSAMPLE = 10
+
 
 def _matches_sender(result, from_addr_lower: str) -> bool:
     """True if ``from_addr_lower`` matches one of the thread's senders.
@@ -156,11 +165,11 @@ class Database:
         self._conn.close()
         self._closed = True
 
-    def __del__(self) -> None:
-        try:
-            self.close()
-        except Exception:
-            pass
+    # Note: no ``__del__`` — ``weakref.finalize`` registered in ``__init__``
+    # is the documented modern pattern for "close on GC" and runs even
+    # when the interpreter is shutting down. Adding ``__del__`` on top
+    # would either fight the finalizer (calling close twice) or swallow
+    # genuine shutdown errors via a bare ``except``.
 
     def _connect(self) -> sqlite3.Connection:
         # MCP is a read-only consumer of the indexer's output; the indexer
@@ -464,6 +473,13 @@ class Database:
             date_to=date_to,
             has_attachments=has_attachments,
         )
+        # SQLite FTS5 doesn't allow ``bm25(...)`` inside aggregates or
+        # subqueries the outer query aggregates over, so the dedupe-by-
+        # thread step happens in Python below. The SQL oversample is
+        # ``limit * _CHUNK_LANE_OVERSAMPLE`` so that a long thread with
+        # many matching chunks doesn't absorb every row before other
+        # threads get a chance to enter the chunk lane (the failure
+        # mode that hurts RRF diversity in the hybrid fuse).
         sql = (
             "SELECT "
             "t.thread_id, t.subject, t.participants, t.senders, t.folder, "
@@ -476,7 +492,7 @@ class Database:
             "WHERE " + " AND ".join(where_clauses) + " "  # nosec B608
             "ORDER BY score LIMIT ?"
         )
-        params.append(limit * 3)
+        params.append(limit * _CHUNK_LANE_OVERSAMPLE)
         try:
             rows = self._conn.execute(sql, params).fetchall()
         except sqlite3.OperationalError as e:
@@ -486,7 +502,8 @@ class Database:
             # operator notices precision retrieval has degraded to none.
             log.warning("Chunk keyword search unavailable: %s", e)
             return []
-        return self._dedupe_ranked_results([self._row_to_result(r) for r in rows])[:limit]
+        results = [self._row_to_result(r) for r in rows]
+        return self._best_per_thread(results)[:limit]
 
     def _attachment_keyword_search(
         self,
@@ -511,6 +528,8 @@ class Database:
             date_to=date_to,
             has_attachments=has_attachments,
         )
+        # Same dedupe-in-Python pattern as ``_chunk_keyword_search`` —
+        # FTS5 forbids aggregating over ``bm25()``.
         sql = (
             "SELECT "
             "t.thread_id, t.subject, t.participants, t.senders, t.folder, "
@@ -523,7 +542,7 @@ class Database:
             "WHERE " + " AND ".join(where_clauses) + " "  # nosec B608
             "ORDER BY score LIMIT ?"
         )
-        params.append(limit * 3)
+        params.append(limit * _CHUNK_LANE_OVERSAMPLE)
         try:
             rows = self._conn.execute(sql, params).fetchall()
         except sqlite3.OperationalError as e:
@@ -533,7 +552,8 @@ class Database:
             # operator notices attachment retrieval has degraded to none.
             log.warning("Attachment keyword search unavailable: %s", e)
             return []
-        return self._dedupe_ranked_results([self._row_to_result(r) for r in rows])[:limit]
+        results = [self._row_to_result(r) for r in rows]
+        return self._best_per_thread(results)[:limit]
 
     @staticmethod
     def _append_thread_filter_sql(
@@ -571,6 +591,38 @@ class Database:
             seen.add(result.thread_id)
             deduped.append(result)
         return deduped
+
+    @staticmethod
+    def _best_per_thread(results: list[ThreadResult]) -> list[ThreadResult]:
+        """Collapse to one row per ``thread_id``, keeping the best score.
+
+        The chunk and attachment FTS lanes can return many rows for the
+        same thread (one row per matching chunk). Take the row with the
+        lowest BM25 score (lower = better in FTS5) per thread, then
+        return the surviving rows in the original BM25 order so the
+        caller's ``LIMIT`` slice picks the strongest threads. Compared
+        to ``_dedupe_ranked_results`` (first-seen-wins), this guarantees
+        the kept row carries the thread's best chunk score.
+        """
+        best_score: dict[str, float] = {}
+        best_idx: dict[str, int] = {}
+        for index, result in enumerate(results):
+            if result.thread_id not in best_score or result.score < best_score[result.thread_id]:
+                best_score[result.thread_id] = result.score
+                best_idx[result.thread_id] = index
+        # Preserve original input order — results came in already sorted
+        # by ``score`` ASC from the SQL, so threads with their best
+        # chunk encountered first stay near the top.
+        kept: list[ThreadResult] = []
+        seen: set[str] = set()
+        for index, result in enumerate(results):
+            if best_idx.get(result.thread_id) != index:
+                continue
+            if result.thread_id in seen:
+                continue
+            seen.add(result.thread_id)
+            kept.append(result)
+        return kept
 
     def _like_fallback(
         self,

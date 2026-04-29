@@ -79,6 +79,37 @@ class TestReciprocalRankFusion:
         assert seeded_db._reciprocal_rank_fusion([], []) == []
 
 
+class TestBestPerThread:
+    """``_best_per_thread`` collapses chunk-lane rows to one per thread,
+    keeping the row with the lowest BM25 score (best chunk match).
+    """
+
+    def test_keeps_best_score_per_thread(self, make_result):
+        # Three rows for thread A (scores 0.9, 0.3, 0.7) and one for B.
+        # The best for A is 0.3; the kept row should be that one.
+        a1 = make_result("A")
+        a1.score = 0.9
+        a2 = make_result("A")
+        a2.score = 0.3
+        a3 = make_result("A")
+        a3.score = 0.7
+        b1 = make_result("B")
+        b1.score = 0.5
+
+        from src.lib.sqlite import Database
+
+        kept = Database._best_per_thread([a1, a2, a3, b1])
+        kept_ids = [r.thread_id for r in kept]
+        assert kept_ids == ["A", "B"]
+        a_kept = [r for r in kept if r.thread_id == "A"][0]
+        assert a_kept.score == 0.3
+
+    def test_empty_input_returns_empty(self):
+        from src.lib.sqlite import Database
+
+        assert Database._best_per_thread([]) == []
+
+
 class TestApplyFilters:
     def test_folder_filter(self, seeded_db: Database, make_result):
         results = [
