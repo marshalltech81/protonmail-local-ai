@@ -1,9 +1,9 @@
 """
 Tests for src/database.py.
 
-Covers: schema creation, forward migrations through the current
-``SCHEMA_VERSION``, ``upsert_thread`` (insert and body-accumulation update),
-threading lookups, file tracking, and stats.
+Covers: schema creation, ``upsert_thread`` (insert and body-accumulation
+update), threading lookups, file tracking, chunk + attachment writes,
+and stats.
 """
 
 import json
@@ -12,6 +12,7 @@ import threading
 from datetime import UTC, datetime
 
 import pytest
+from src.attachment_indexing import attachment_occurrence_id
 from src.database import SCHEMA_VERSION, Database
 
 from tests.conftest import make_message, make_thread
@@ -20,20 +21,21 @@ FAKE_EMBEDDING = [0.1] * 768
 
 
 # ---------------------------------------------------------------------------
-# Schema and migrations
+# Schema setup
 # ---------------------------------------------------------------------------
 
 
 class TestSchema:
     def test_database_created_at_given_path(self, tmp_path):
         db_path = tmp_path / "mail.db"
-        Database(db_path)
+        database = Database(db_path)
+        database.close()
         assert db_path.exists()
 
     def test_raises_clear_error_when_sqlite_too_old(self, tmp_path, monkeypatch):
-        """Schema v3 uses ``contentless_delete=1`` (SQLite >= 3.43). If the
-        runtime is older we fail loudly at Database init with an actionable
-        message, instead of silently dying inside a broad migration except."""
+        """The schema uses FTS5 ``contentless_delete=1`` (SQLite >= 3.43).
+        If the runtime is older we fail loudly at Database init with an
+        actionable message, instead of silently degrading."""
         from src import database
 
         monkeypatch.setattr(database.sqlite3, "sqlite_version", "3.40.1")
@@ -61,132 +63,8 @@ class TestSchema:
         cols = {row[1] for row in db._conn.execute("PRAGMA table_info(threads)").fetchall()}
         assert "body_text" in cols
 
-    def test_v1_to_v2_migration_adds_body_text(self, tmp_path):
-        """A database created at schema v1 migrates forward to SCHEMA_VERSION."""
-        db_path = tmp_path / "v1.db"
-
-        # Build a v1 database manually — no body_text column
-        conn = sqlite3.connect(str(db_path))
-        conn.execute("CREATE TABLE schema_version (version INTEGER PRIMARY KEY)")
-        conn.execute("INSERT INTO schema_version VALUES (1)")
-        conn.execute("""
-            CREATE TABLE threads (
-                thread_id    TEXT PRIMARY KEY,
-                subject      TEXT NOT NULL,
-                participants TEXT NOT NULL,
-                folder       TEXT NOT NULL,
-                date_first   TEXT NOT NULL,
-                date_last    TEXT NOT NULL,
-                message_ids  TEXT NOT NULL,
-                snippet      TEXT,
-                has_attachments INTEGER DEFAULT 0
-            )
-        """)
-        conn.commit()
-        conn.close()
-
-        # Open with Database — migrations should run forward to SCHEMA_VERSION
-        db = Database(db_path)
-        cols = {row[1] for row in db._conn.execute("PRAGMA table_info(threads)").fetchall()}
-        assert "body_text" in cols
-        row = db._conn.execute("SELECT version FROM schema_version").fetchone()
-        assert row["version"] == SCHEMA_VERSION
-
-    def test_v2_to_v3_migration_adds_fts_rowid_and_rebuilds_fts(self, tmp_path):
-        """A v2 database migrates forward, gaining the fts_rowid column and
-        a threads_fts table rebuilt with contentless_delete=1."""
-        db_path = tmp_path / "v2.db"
-
-        # Build a v2 database manually — has body_text, old-style threads_fts
-        conn = sqlite3.connect(str(db_path))
-        conn.execute("CREATE TABLE schema_version (version INTEGER PRIMARY KEY)")
-        conn.execute("INSERT INTO schema_version VALUES (2)")
-        conn.execute("""
-            CREATE TABLE threads (
-                thread_id    TEXT PRIMARY KEY,
-                subject      TEXT NOT NULL,
-                participants TEXT NOT NULL,
-                folder       TEXT NOT NULL,
-                date_first   TEXT NOT NULL,
-                date_last    TEXT NOT NULL,
-                message_ids  TEXT NOT NULL,
-                snippet      TEXT,
-                has_attachments INTEGER DEFAULT 0,
-                body_text    TEXT
-            )
-        """)
-        conn.execute("""
-            CREATE VIRTUAL TABLE threads_fts
-            USING fts5(
-                thread_id UNINDEXED, subject, participants, body,
-                content='', tokenize='porter unicode61'
-            )
-        """)
-        conn.execute(
-            "INSERT INTO threads (thread_id, subject, participants, folder, "
-            "date_first, date_last, message_ids, snippet, body_text) "
-            "VALUES ('t1', 'old subject', '[]', 'INBOX', "
-            "'2024-01-01', '2024-01-01', '[]', 's', 'carryovertoken body')"
-        )
-        conn.commit()
-        conn.close()
-
-        db = Database(db_path)
-
-        cols = {row[1] for row in db._conn.execute("PRAGMA table_info(threads)").fetchall()}
-        assert "fts_rowid" in cols
-
-        version_row = db._conn.execute("SELECT version FROM schema_version").fetchone()
-        assert version_row["version"] == SCHEMA_VERSION
-
-        # Existing thread's body is backfilled into the rebuilt FTS and its
-        # rowid recorded so future keyword searches can join via fts_rowid.
-        hit = db._conn.execute(
-            """
-            SELECT t.thread_id
-            FROM threads_fts
-            JOIN threads t ON threads_fts.rowid = t.fts_rowid
-            WHERE threads_fts MATCH 'carryovertoken'
-            """
-        ).fetchone()
-        assert hit is not None
-        assert hit["thread_id"] == "t1"
-
-    def test_v3_to_v4_migration_adds_pending_deletions(self, tmp_path):
-        """A v3 database migrates forward to include pending_deletions."""
-        db_path = tmp_path / "v3.db"
-        conn = sqlite3.connect(str(db_path))
-        conn.execute("CREATE TABLE schema_version (version INTEGER PRIMARY KEY)")
-        conn.execute("INSERT INTO schema_version VALUES (3)")
-        # Minimal tables so the open path doesn't blow up on something unrelated
-        conn.execute("""
-            CREATE TABLE threads (
-                thread_id TEXT PRIMARY KEY, subject TEXT, participants TEXT,
-                folder TEXT, date_first TEXT, date_last TEXT, message_ids TEXT,
-                snippet TEXT, has_attachments INTEGER, body_text TEXT,
-                fts_rowid INTEGER
-            )
-        """)
-        conn.execute("""
-            CREATE VIRTUAL TABLE threads_fts
-            USING fts5(
-                subject, participants, body,
-                content='', contentless_delete=1, tokenize='porter unicode61'
-            )
-        """)
-        conn.commit()
-        conn.close()
-
-        db = Database(db_path)
-        tables = {
-            row[0]
-            for row in db._conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table'"
-            ).fetchall()
-        }
-        assert "pending_deletions" in tables
-        row = db._conn.execute("SELECT version FROM schema_version").fetchone()
-        assert row["version"] == SCHEMA_VERSION
+    def test_foreign_key_enforcement_enabled(self, db):
+        assert db._conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
 
     def test_pending_deletions_table_columns(self, db):
         cols = {
@@ -194,218 +72,34 @@ class TestSchema:
         }
         assert cols == {"filepath", "message_id", "thread_id", "marked_at"}
 
-    def test_migration_is_idempotent(self, tmp_path):
-        """Opening an already-migrated database does not error."""
+    def test_reopening_initialized_database_does_not_error(self, tmp_path):
+        """A fresh database created on first open is reopened cleanly on
+        the second call: ``_migrate`` finds the matching SCHEMA_VERSION
+        row and exits without touching the schema."""
         db_path = tmp_path / "idem.db"
-        Database(db_path)
-        Database(db_path)  # second open must not raise
+        first = Database(db_path)
+        first.close()
+        second = Database(db_path)  # second open must not raise
+        second.close()
 
-    def test_schema_version_collapses_duplicate_rows(self, tmp_path):
-        """Regression: an earlier revision wrote the schema version with
-        ``INSERT OR REPLACE``, which — because ``version`` is the primary
-        key — could leave behind rows at the prior version as well as the
-        current one. The subsequent ``UPDATE schema_version SET version = ?``
-        would then try to set both rows to the same primary key and fail
-        with a UNIQUE constraint violation. The migrate path collapses any
-        stale duplicates into a single canonical row."""
-        db_path = tmp_path / "dupe.db"
-        # Create a fully-migrated database, then inject a stale second
-        # ``schema_version`` row the way the old ``INSERT OR REPLACE`` path
-        # could have left one behind.
-        Database(db_path)
-        conn = sqlite3.connect(str(db_path))
-        conn.execute("INSERT INTO schema_version VALUES (?)", (SCHEMA_VERSION - 1,))
-        conn.commit()
-        rows_before = conn.execute("SELECT version FROM schema_version").fetchall()
-        conn.close()
-        assert len(rows_before) == 2
-
-        # Re-opening must not raise a UNIQUE constraint violation and must
-        # leave exactly one canonical row at the current SCHEMA_VERSION.
-        Database(db_path)
+    def test_opening_with_mismatched_schema_version_raises(self, tmp_path):
+        """The codebase fails fast on schema-version drift instead of
+        running an absent migration framework. The error message must
+        be actionable so an operator knows to wipe the volume."""
+        db_path = tmp_path / "stale.db"
+        database = Database(db_path)
+        database.close()
+        # Stamp a stale version into the existing database.
+        import sqlite3
 
         conn = sqlite3.connect(str(db_path))
-        rows_after = conn.execute("SELECT version FROM schema_version").fetchall()
-        conn.close()
-        assert len(rows_after) == 1
-        assert rows_after[0][0] == SCHEMA_VERSION
-
-    def test_v7_to_v8_adds_indexing_jobs_table(self, tmp_path):
-        """A v7 database migrates forward, gaining the ``indexing_jobs``
-        table used by the durable retry / dead-letter queue. The table
-        starts empty — v8 is pure addition, not data migration."""
-        db_path = tmp_path / "v7.db"
-        conn = sqlite3.connect(str(db_path))
-        conn.execute("CREATE TABLE schema_version (version INTEGER PRIMARY KEY)")
-        conn.execute("INSERT INTO schema_version VALUES (7)")
-        conn.execute("""
-            CREATE TABLE threads (
-                thread_id TEXT PRIMARY KEY, subject TEXT, participants TEXT,
-                folder TEXT, date_first TEXT, date_last TEXT, message_ids TEXT,
-                snippet TEXT, has_attachments INTEGER, body_text TEXT,
-                fts_rowid INTEGER, senders TEXT NOT NULL DEFAULT '[]'
-            )
-        """)
-        conn.execute("""
-            CREATE TABLE indexed_files (
-                filepath TEXT PRIMARY KEY, indexed_at TEXT NOT NULL,
-                size INTEGER, mtime_ns INTEGER, content_hash TEXT
-            )
-        """)
-        conn.execute("""
-            CREATE VIRTUAL TABLE threads_fts
-            USING fts5(
-                subject, participants, body,
-                content='', contentless_delete=1, tokenize='porter unicode61'
-            )
-        """)
-        conn.execute("""
-            CREATE TABLE pending_deletions (
-                filepath TEXT PRIMARY KEY, message_id TEXT NOT NULL,
-                thread_id TEXT NOT NULL, marked_at TEXT NOT NULL
-            )
-        """)
-        conn.commit()
-        conn.close()
-
-        Database(db_path)
-
-        conn = sqlite3.connect(str(db_path))
-        conn.row_factory = sqlite3.Row
-        tables = {
-            row[0]
-            for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
-        }
-        assert "indexing_jobs" in tables
-
-        cols = {row[1] for row in conn.execute("PRAGMA table_info(indexing_jobs)").fetchall()}
-        assert cols == {
-            "filepath",
-            "reason",
-            "status",
-            "attempts",
-            "last_error",
-            "last_stage",
-            "created_at",
-            "updated_at",
-            "next_attempt_at",
-        }
-        conn.close()
-
-    def test_v6_to_v7_adds_file_identity_columns(self, tmp_path):
-        """A v6 database migrates forward, gaining ``size`` / ``mtime_ns``
-        / ``content_hash`` columns on ``indexed_files``. Existing rows
-        read back as NULL for the new columns (populated lazily as files
-        are re-indexed or as rename events carry prior values forward)."""
-        db_path = tmp_path / "v6.db"
-        conn = sqlite3.connect(str(db_path))
-        conn.execute("CREATE TABLE schema_version (version INTEGER PRIMARY KEY)")
-        conn.execute("INSERT INTO schema_version VALUES (6)")
-        # Tables we need present for v7 to apply cleanly. v7 only touches
-        # ``indexed_files``; everything else is stubbed to minimal shape.
-        conn.execute("""
-            CREATE TABLE threads (
-                thread_id TEXT PRIMARY KEY, subject TEXT, participants TEXT,
-                folder TEXT, date_first TEXT, date_last TEXT, message_ids TEXT,
-                snippet TEXT, has_attachments INTEGER, body_text TEXT,
-                fts_rowid INTEGER, senders TEXT NOT NULL DEFAULT '[]'
-            )
-        """)
-        conn.execute("""
-            CREATE TABLE indexed_files (
-                filepath TEXT PRIMARY KEY,
-                indexed_at TEXT NOT NULL
-            )
-        """)
-        conn.execute(
-            "INSERT INTO indexed_files (filepath, indexed_at) VALUES (?, ?)",
-            ("/maildir/INBOX/cur/legacy", "2024-01-01T00:00:00+00:00"),
-        )
-        conn.execute("""
-            CREATE VIRTUAL TABLE threads_fts
-            USING fts5(
-                subject, participants, body,
-                content='', contentless_delete=1, tokenize='porter unicode61'
-            )
-        """)
-        conn.execute("""
-            CREATE TABLE pending_deletions (
-                filepath TEXT PRIMARY KEY, message_id TEXT NOT NULL,
-                thread_id TEXT NOT NULL, marked_at TEXT NOT NULL
-            )
-        """)
-        conn.commit()
-        conn.close()
-
-        Database(db_path)
-
-        conn = sqlite3.connect(str(db_path))
-        conn.row_factory = sqlite3.Row
-        cols = {row[1] for row in conn.execute("PRAGMA table_info(indexed_files)").fetchall()}
-        assert cols == {"filepath", "indexed_at", "size", "mtime_ns", "content_hash"}
-        # Legacy row still present with NULL identity values — no data loss,
-        # no migration-time disk walk required.
-        row = conn.execute(
-            "SELECT size, mtime_ns, content_hash FROM indexed_files "
-            "WHERE filepath = '/maildir/INBOX/cur/legacy'"
-        ).fetchone()
-        conn.close()
-        assert row["size"] is None
-        assert row["mtime_ns"] is None
-        assert row["content_hash"] is None
-
-
-# ---------------------------------------------------------------------------
-# upsert_thread — insert
-# ---------------------------------------------------------------------------
-
-
-class TestBuildMergedBody:
-    def test_insert_returns_text_for_embedding(self, db):
-        """For a thread not yet in the DB, build_merged_body reflects the
-        thread's own text_for_embedding() — i.e. the full message set the
-        caller assembled."""
-        thread = make_thread()
-        body = db.build_merged_body(thread)
-        assert "Subject:" in body
-        assert thread.subject in body
-
-    def test_update_appends_new_message_to_stored_body(self, db, threader):
-        """On update, build_merged_body returns the stored body with the
-        new message appended. This is what the embedder should see so the
-        vector represents the whole thread, not just the new message."""
-        import src.database as db_mod
-
-        original = make_message(
-            message_id="bm_orig@example.com",
-            body_text="Original message content marker.",
-        )
-        t1 = threader.assign_thread(original)
-        db.upsert_thread(t1, [0.0] * db_mod.EMBEDDING_DIM)
-
-        reply = make_message(
-            message_id="bm_reply@example.com",
-            body_text="Reply content marker.",
-            in_reply_to="bm_orig@example.com",
-            filepath="/bm/reply",
-            date=datetime(2024, 1, 2, tzinfo=UTC),
-        )
-        t2 = threader.assign_thread(reply)
-        body = db.build_merged_body(t2)
-
-        assert "Original message content marker." in body
-        assert "Reply content marker." in body
-
-    def test_upsert_with_explicit_body_stores_that_body(self, db):
-        """Passing ``body=`` overrides the recomputed merge — critical so
-        the stored body matches what the caller embedded."""
-        thread = make_thread()
-        db.upsert_thread(thread, FAKE_EMBEDDING, body="CUSTOM BODY MARKER")
-
-        row = db._conn.execute(
-            "SELECT body_text FROM threads WHERE thread_id = ?", (thread.thread_id,)
-        ).fetchone()
-        assert row["body_text"] == "CUSTOM BODY MARKER"
+        try:
+            conn.execute("UPDATE schema_version SET version = ?", (SCHEMA_VERSION - 1,))
+            conn.commit()
+        finally:
+            conn.close()
+        with pytest.raises(RuntimeError, match="wipe the sqlite-volume"):
+            Database(db_path)
 
 
 class TestEmbeddingDimGuard:
@@ -836,12 +530,12 @@ class TestIndexedFileIdentity:
         assert row["mtime_ns"] == 1_700_000_000_000_000_000
         assert row["content_hash"] == "a" * 64
 
-    def test_upsert_accepts_null_identity_for_legacy_fixtures(self, db):
+    def test_upsert_accepts_null_identity_for_test_fixtures(self, db):
         """Messages built by test fixtures that do not go through
         ``parse_email`` have ``size`` / ``mtime_ns`` / ``content_hash``
         as ``None``. ``upsert_thread`` writes them as SQL NULL without
-        raising so existing callers aren't forced to adopt the new
-        fields all at once."""
+        raising so test code can keep using the lightweight
+        ``make_message`` factory without populating those fields."""
         msg = make_message(filepath="/maildir/INBOX/cur/no_ident")
         # Defaults: size=None, mtime_ns=None, content_hash=None
         db.upsert_thread(make_thread(messages=[msg]), FAKE_EMBEDDING)
@@ -1119,49 +813,6 @@ class TestSendersColumn:
         ).fetchone()
         senders = json.loads(row["senders"])
         assert set(senders) == {"alice@example.com", "bob@example.com"}
-
-    def test_v5_to_v6_adds_senders_column(self, tmp_path):
-        """A v5 database migrates forward, gaining the senders column
-        with an empty-JSON default so existing rows read back as []."""
-        db_path = tmp_path / "v5.db"
-        conn = sqlite3.connect(str(db_path))
-        conn.execute("CREATE TABLE schema_version (version INTEGER PRIMARY KEY)")
-        conn.execute("INSERT INTO schema_version VALUES (5)")
-        conn.execute("""
-            CREATE TABLE threads (
-                thread_id TEXT PRIMARY KEY, subject TEXT, participants TEXT,
-                folder TEXT, date_first TEXT, date_last TEXT, message_ids TEXT,
-                snippet TEXT, has_attachments INTEGER, body_text TEXT,
-                fts_rowid INTEGER
-            )
-        """)
-        conn.execute("""
-            CREATE VIRTUAL TABLE threads_fts
-            USING fts5(
-                subject, participants, body,
-                content='', contentless_delete=1, tokenize='porter unicode61'
-            )
-        """)
-        conn.execute("""
-            CREATE TABLE pending_deletions (
-                filepath TEXT PRIMARY KEY, message_id TEXT NOT NULL,
-                thread_id TEXT NOT NULL, marked_at TEXT NOT NULL
-            )
-        """)
-        conn.execute(
-            "INSERT INTO threads (thread_id, subject, participants, folder, "
-            "date_first, date_last, message_ids, snippet, has_attachments, body_text) "
-            "VALUES ('legacy', 's', '[]', 'INBOX', '2024-01-01', '2024-01-01', '[]', '', 0, '')"
-        )
-        conn.commit()
-        conn.close()
-
-        Database(db_path)
-
-        conn = sqlite3.connect(str(db_path))
-        row = conn.execute("SELECT senders FROM threads WHERE thread_id = 'legacy'").fetchone()
-        conn.close()
-        assert row[0] == "[]"
 
 
 class TestPendingDeletions:
@@ -1506,3 +1157,690 @@ class TestRebuildThread:
             "SELECT COUNT(*) FROM threads_vec WHERE thread_id = ?", (t1.thread_id,)
         ).fetchone()[0]
         assert vec_count == 1
+
+
+# ---------------------------------------------------------------------------
+# Schema v9 — message_chunks tables and the diff-based chunk write
+# ---------------------------------------------------------------------------
+
+
+def _make_chunk(chunk_id: str, index: int = 0, text: str = "chunk text"):
+    """Lightweight ``MessageChunk`` factory for chunk-write tests."""
+    from src.chunker import MessageChunk
+
+    return MessageChunk(
+        chunk_id=chunk_id,
+        chunk_index=index,
+        text=text,
+        char_start=0,
+        char_end=len(text),
+        token_est=max(1, len(text) // 4),
+    )
+
+
+def _seed_thread_for_message(db, message_id: str, thread_id: str, filepath: str | None = None):
+    msg = make_message(
+        message_id=message_id,
+        filepath=filepath or f"/maildir/INBOX/cur/{message_id}",
+    )
+    db.upsert_thread(make_thread(messages=[msg], thread_id=thread_id), FAKE_EMBEDDING)
+
+
+class TestChunkTables:
+    def test_chunk_tables_exist(self, db):
+        tables = {
+            row[0]
+            for row in db._conn.execute(
+                "SELECT name FROM sqlite_master WHERE type IN ('table', 'virtual')"
+            ).fetchall()
+        }
+        assert "message_chunks" in tables
+
+    def test_chunk_indexes_exist(self, db):
+        indexes = {
+            row[0]
+            for row in db._conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='index'"
+            ).fetchall()
+        }
+        assert "idx_message_chunks_message" in indexes
+        assert "idx_message_chunks_thread" in indexes
+
+    def test_chunk_columns_complete(self, db):
+        cols = {row[1] for row in db._conn.execute("PRAGMA table_info(message_chunks)").fetchall()}
+        for required in (
+            "chunk_id",
+            "message_id",
+            "thread_id",
+            "chunk_index",
+            "text",
+            "char_start",
+            "char_end",
+            "token_est",
+            "chunked_at",
+            "fts_rowid",
+        ):
+            assert required in cols
+
+    def test_chunk_fts_and_vec_virtual_tables_present(self, db):
+        # Virtual tables register backing shadow tables; matching by
+        # name confirms the CREATE VIRTUAL TABLE ran.
+        names = {
+            row[0]
+            for row in db._conn.execute(
+                "SELECT name FROM sqlite_master WHERE name LIKE 'message_chunks%'"
+            ).fetchall()
+        }
+        assert "message_chunks_fts" in names
+        assert "message_chunks_vec" in names
+
+
+class TestReplaceMessageChunks:
+    def test_chunk_write_requires_parent_message_mapping(self, db):
+        chunk = _make_chunk("parent-required".ljust(64, "0"), 0, "orphan")
+        with pytest.raises(sqlite3.IntegrityError, match="FOREIGN KEY"):
+            db.replace_message_chunks(
+                message_id="missing@x",
+                thread_id="missing-thread",
+                chunks=[chunk],
+                embeddings_by_chunk_id={chunk.chunk_id: [0.1] * 768},
+            )
+
+    def test_first_write_inserts_all_chunks_and_indexes(self, db):
+        _seed_thread_for_message(db, "m1@x", "t1")
+        chunks = [_make_chunk("a" * 64, 0, "first"), _make_chunk("b" * 64, 1, "second")]
+        embeds = {chunks[0].chunk_id: [0.1] * 768, chunks[1].chunk_id: [0.2] * 768}
+
+        result = db.replace_message_chunks(
+            message_id="m1@x",
+            thread_id="t1",
+            chunks=chunks,
+            embeddings_by_chunk_id=embeds,
+        )
+
+        assert result == {"inserted": 2, "deleted": 0, "kept": 0}
+        # Each chunk landed in all three indexes.
+        assert (
+            db._conn.execute(
+                "SELECT COUNT(*) FROM message_chunks WHERE message_id = ?", ("m1@x",)
+            ).fetchone()[0]
+            == 2
+        )
+        assert (
+            db._conn.execute(
+                "SELECT COUNT(*) FROM message_chunks_vec WHERE chunk_id IN (?, ?)",
+                (chunks[0].chunk_id, chunks[1].chunk_id),
+            ).fetchone()[0]
+            == 2
+        )
+        # FTS row was created and recorded back into chunk row.
+        rows = db._conn.execute(
+            "SELECT fts_rowid FROM message_chunks WHERE message_id = ?", ("m1@x",)
+        ).fetchall()
+        assert all(r["fts_rowid"] is not None for r in rows)
+
+    def test_replay_with_identical_input_is_idempotent(self, db):
+        """Re-running the chunker with the same body must produce no work
+        — the diff path must skip already-stored chunk_ids and require no
+        embeddings for them.
+        """
+        _seed_thread_for_message(db, "m2@x", "t2")
+        chunks = [_make_chunk("c" * 64, 0, "stable")]
+        embeds = {chunks[0].chunk_id: [0.3] * 768}
+
+        first = db.replace_message_chunks(
+            message_id="m2@x",
+            thread_id="t2",
+            chunks=chunks,
+            embeddings_by_chunk_id=embeds,
+        )
+        assert first == {"inserted": 1, "deleted": 0, "kept": 0}
+
+        # Replay with no embeddings — would raise if the diff path tried
+        # to insert anything.
+        second = db.replace_message_chunks(
+            message_id="m2@x",
+            thread_id="t2",
+            chunks=chunks,
+            embeddings_by_chunk_id={},
+        )
+        assert second == {"inserted": 0, "deleted": 0, "kept": 1}
+
+    def test_diff_write_inserts_new_keeps_existing_drops_gone(self, db):
+        _seed_thread_for_message(db, "m3@x", "t3")
+        keep = _make_chunk("k" * 64, 0, "keep this")
+        drop = _make_chunk("d" * 64, 1, "drop this")
+        new = _make_chunk("n" * 64, 1, "new chunk")
+
+        # Round 1: keep + drop.
+        db.replace_message_chunks(
+            message_id="m3@x",
+            thread_id="t3",
+            chunks=[keep, drop],
+            embeddings_by_chunk_id={
+                keep.chunk_id: [0.1] * 768,
+                drop.chunk_id: [0.2] * 768,
+            },
+        )
+
+        # Round 2: keep + new (drop should be deleted; keep should be kept).
+        result = db.replace_message_chunks(
+            message_id="m3@x",
+            thread_id="t3",
+            chunks=[keep, new],
+            embeddings_by_chunk_id={new.chunk_id: [0.3] * 768},
+        )
+        assert result == {"inserted": 1, "deleted": 1, "kept": 1}
+
+        stored = {
+            row[0]
+            for row in db._conn.execute(
+                "SELECT chunk_id FROM message_chunks WHERE message_id = ?", ("m3@x",)
+            ).fetchall()
+        }
+        assert stored == {keep.chunk_id, new.chunk_id}
+        # vec table tracks the same set.
+        vec_count = db._conn.execute(
+            "SELECT COUNT(*) FROM message_chunks_vec WHERE chunk_id = ?", (drop.chunk_id,)
+        ).fetchone()[0]
+        assert vec_count == 0
+
+    def test_missing_embedding_for_new_chunk_raises(self, db):
+        chunk = _make_chunk("e" * 64, 0, "needs embed")
+        with pytest.raises(ValueError, match="missing embedding"):
+            db.replace_message_chunks(
+                message_id="m4@x",
+                thread_id="t4",
+                chunks=[chunk],
+                embeddings_by_chunk_id={},
+            )
+
+    def test_wrong_dim_embedding_raises(self, db):
+        chunk = _make_chunk("f" * 64, 0, "bad dim")
+        with pytest.raises(ValueError, match="EMBEDDING_DIM|reserves 768"):
+            db.replace_message_chunks(
+                message_id="m5@x",
+                thread_id="t5",
+                chunks=[chunk],
+                embeddings_by_chunk_id={chunk.chunk_id: [0.1] * 100},
+            )
+
+
+class TestThreadChunkAggregation:
+    def test_get_thread_chunk_embeddings_returns_per_message_vectors(self, db):
+        # Two messages in the same thread, each with one chunk.
+        _seed_thread_for_message(db, "m6a@x", "t6")
+        msg = make_message(message_id="m6b@x", filepath="/maildir/INBOX/cur/m6b@x")
+        db.upsert_thread(make_thread(messages=[msg], thread_id="t6"), FAKE_EMBEDDING)
+        for mid, vec in [("m6a@x", [0.5] * 768), ("m6b@x", [0.7] * 768)]:
+            chunk = _make_chunk(f"x{mid}".ljust(64, "0"), 0, f"body of {mid}")
+            db.replace_message_chunks(
+                message_id=mid,
+                thread_id="t6",
+                chunks=[chunk],
+                embeddings_by_chunk_id={chunk.chunk_id: vec},
+            )
+
+        results = db.get_thread_chunk_embeddings("t6")
+        assert len(results) == 2
+        # Both vectors round-trip with their original values.
+        sums = sorted(round(sum(v) / len(v), 3) for v in results)
+        assert sums == [0.5, 0.7]
+
+    def test_get_chunk_embeddings_for_messages_filters_correctly(self, db):
+        _seed_thread_for_message(db, "m7a@x", "t7")
+        msg = make_message(message_id="m7b@x", filepath="/maildir/INBOX/cur/m7b@x")
+        db.upsert_thread(make_thread(messages=[msg], thread_id="t7"), FAKE_EMBEDDING)
+        for mid, vec in [("m7a@x", [0.1] * 768), ("m7b@x", [0.9] * 768)]:
+            chunk = _make_chunk(f"y{mid}".ljust(64, "0"), 0, f"body of {mid}")
+            db.replace_message_chunks(
+                message_id=mid,
+                thread_id="t7",
+                chunks=[chunk],
+                embeddings_by_chunk_id={chunk.chunk_id: vec},
+            )
+
+        survivors = db.get_chunk_embeddings_for_messages(["m7a@x"])
+        assert len(survivors) == 1
+        assert round(sum(survivors[0]) / len(survivors[0]), 3) == 0.1
+
+    def test_get_chunk_embeddings_for_messages_empty_input_returns_empty(self, db):
+        assert db.get_chunk_embeddings_for_messages([]) == []
+
+
+class TestAtomicIndexTransaction:
+    def test_thread_and_chunk_writes_roll_back_together(self, db):
+        msg = make_message(message_id="atomic@x", filepath="/maildir/INBOX/cur/atomic")
+        thread = make_thread(messages=[msg], thread_id="atomic-thread")
+        chunk = _make_chunk("atomic-chunk".ljust(64, "0"), 0, "atomic body")
+
+        with pytest.raises(RuntimeError, match="force rollback"):
+            with db.transaction():
+                db.upsert_thread(thread, FAKE_EMBEDDING)
+                db.replace_message_chunks(
+                    message_id=msg.message_id,
+                    thread_id=thread.thread_id,
+                    chunks=[chunk],
+                    embeddings_by_chunk_id={chunk.chunk_id: [0.2] * 768},
+                )
+                raise RuntimeError("force rollback")
+
+        assert db.get_thread(thread.thread_id) is None
+        assert db.get_chunk_ids_for_message(msg.message_id) == set()
+        assert db.find_thread_by_message_id(msg.message_id) is None
+
+
+class TestChunkCascadeOnMessageRemoval:
+    def test_remove_message_drops_its_chunks(self, db, threader):
+        message = make_message(message_id="m8@x", filepath="/m/8")
+        thread = threader.assign_thread(message)
+        db.upsert_thread(thread, FAKE_EMBEDDING)
+
+        chunk = _make_chunk("z" * 64, 0, "to be removed")
+        db.replace_message_chunks(
+            message_id="m8@x",
+            thread_id=thread.thread_id,
+            chunks=[chunk],
+            embeddings_by_chunk_id={chunk.chunk_id: [0.4] * 768},
+        )
+
+        db.remove_message("m8@x")
+
+        assert db.get_chunk_ids_for_message("m8@x") == set()
+        vec_count = db._conn.execute(
+            "SELECT COUNT(*) FROM message_chunks_vec WHERE chunk_id = ?", (chunk.chunk_id,)
+        ).fetchone()[0]
+        assert vec_count == 0
+
+    def test_delete_thread_completely_drops_all_thread_chunks(self, db, threader):
+        m1 = make_message(message_id="m9a@x", filepath="/m/9a")
+        m2 = make_message(message_id="m9b@x", filepath="/m/9b")
+        t = threader.assign_thread(m1)
+        t.messages.append(m2)
+        db.upsert_thread(t, FAKE_EMBEDDING)
+
+        for mid in ("m9a@x", "m9b@x"):
+            chunk = _make_chunk(f"q{mid}".ljust(64, "0"), 0, "doomed")
+            db.replace_message_chunks(
+                message_id=mid,
+                thread_id=t.thread_id,
+                chunks=[chunk],
+                embeddings_by_chunk_id={chunk.chunk_id: [0.5] * 768},
+            )
+
+        db.delete_thread_completely(t.thread_id)
+
+        assert db.get_thread_chunk_embeddings(t.thread_id) == []
+        assert (
+            db._conn.execute(
+                "SELECT COUNT(*) FROM message_chunks WHERE thread_id = ?", (t.thread_id,)
+            ).fetchone()[0]
+            == 0
+        )
+
+
+# ---------------------------------------------------------------------------
+# Schema v12 — attachments + attachment_extractions + enforced sidecar parents
+# ---------------------------------------------------------------------------
+
+
+class TestAttachmentTables:
+    def test_attachment_tables_exist(self, db):
+        names = {
+            row[0]
+            for row in db._conn.execute(
+                "SELECT name FROM sqlite_master WHERE name LIKE 'attachment%'"
+            ).fetchall()
+        }
+        assert "attachments" in names
+        assert "attachments_fts" in names
+        assert "attachment_extractions" in names
+
+    def test_message_chunks_has_attachment_id_column(self, db):
+        cols = {row[1] for row in db._conn.execute("PRAGMA table_info(message_chunks)").fetchall()}
+        assert "attachment_id" in cols
+
+    def test_attachments_has_occurrence_primary_key(self, db):
+        cols = {row[1] for row in db._conn.execute("PRAGMA table_info(attachments)").fetchall()}
+        assert "attachment_occurrence_id" in cols
+
+
+class TestUpsertAttachment:
+    def test_first_upsert_inserts_and_returns_true(self, db, threader):
+        msg = make_message(message_id="att1@x", filepath="/m/att1")
+        thread = threader.assign_thread(msg)
+        db.upsert_thread(thread, FAKE_EMBEDDING)
+
+        inserted = db.upsert_attachment(
+            message_id="att1@x",
+            thread_id=thread.thread_id,
+            attachment_id="hash-a" * 8,
+            filename="invoice.pdf",
+            content_type="application/pdf",
+            size_bytes=1234,
+            occurrence_id=attachment_occurrence_id(
+                message_id="att1@x",
+                content_hash="hash-a" * 8,
+                filename="invoice.pdf",
+                occurrence_index=0,
+            ),
+        )
+        assert inserted is True
+
+        row = db._conn.execute(
+            "SELECT filename, content_type, size_bytes, fts_rowid "
+            "FROM attachments WHERE message_id = ? AND attachment_id = ?",
+            ("att1@x", "hash-a" * 8),
+        ).fetchone()
+        assert row["filename"] == "invoice.pdf"
+        assert row["content_type"] == "application/pdf"
+        assert row["size_bytes"] == 1234
+        assert row["fts_rowid"] is not None
+
+    def test_repeat_upsert_returns_false_and_no_extra_fts(self, db, threader):
+        msg = make_message(message_id="att2@x", filepath="/m/att2")
+        thread = threader.assign_thread(msg)
+        db.upsert_thread(thread, FAKE_EMBEDDING)
+
+        kwargs = dict(
+            message_id="att2@x",
+            thread_id=thread.thread_id,
+            attachment_id="hash-b" * 8,
+            filename="contract.docx",
+            content_type=(
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            ),
+            size_bytes=5678,
+            occurrence_id=attachment_occurrence_id(
+                message_id="att2@x",
+                content_hash="hash-b" * 8,
+                filename="contract.docx",
+                occurrence_index=0,
+            ),
+        )
+        assert db.upsert_attachment(**kwargs) is True
+        assert db.upsert_attachment(**kwargs) is False
+
+        # Exactly one attachments row + one FTS row.
+        cnt = db._conn.execute(
+            "SELECT COUNT(*) FROM attachments WHERE message_id = ?", ("att2@x",)
+        ).fetchone()[0]
+        assert cnt == 1
+
+    def test_same_payload_can_have_multiple_filename_occurrences(self, db, threader):
+        msg = make_message(message_id="att-dupe@x", filepath="/m/att-dupe")
+        thread = threader.assign_thread(msg)
+        db.upsert_thread(thread, FAKE_EMBEDDING)
+
+        shared_hash = "hash-dupe" * 8
+        assert db.upsert_attachment(
+            message_id="att-dupe@x",
+            thread_id=thread.thread_id,
+            attachment_id=shared_hash,
+            filename="invoice-a.pdf",
+            content_type="application/pdf",
+            size_bytes=10,
+            occurrence_id="occ-a",
+        )
+        assert db.upsert_attachment(
+            message_id="att-dupe@x",
+            thread_id=thread.thread_id,
+            attachment_id=shared_hash,
+            filename="invoice-b.pdf",
+            content_type="application/pdf",
+            size_bytes=10,
+            occurrence_id="occ-b",
+        )
+
+        rows = db._conn.execute(
+            "SELECT filename FROM attachments WHERE message_id = ? ORDER BY filename",
+            ("att-dupe@x",),
+        ).fetchall()
+        assert [r["filename"] for r in rows] == ["invoice-a.pdf", "invoice-b.pdf"]
+
+    def test_attachments_fts_searchable_by_filename(self, db, threader):
+        msg = make_message(message_id="att3@x", filepath="/m/att3")
+        thread = threader.assign_thread(msg)
+        db.upsert_thread(thread, FAKE_EMBEDDING)
+        db.upsert_attachment(
+            message_id="att3@x",
+            thread_id=thread.thread_id,
+            attachment_id="hash-c" * 8,
+            filename="march-statement.pdf",
+            content_type="application/pdf",
+            size_bytes=10,
+            occurrence_id=attachment_occurrence_id(
+                message_id="att3@x",
+                content_hash="hash-c" * 8,
+                filename="march-statement.pdf",
+                occurrence_index=0,
+            ),
+        )
+        hits = db._conn.execute(
+            "SELECT rowid FROM attachments_fts WHERE attachments_fts MATCH 'statement'"
+        ).fetchall()
+        assert len(hits) == 1
+
+
+class TestAttachmentExtractionCache:
+    def test_get_returns_none_when_not_stored(self, db):
+        assert db.get_attachment_extraction("nonexistent" * 4) is None
+
+    def test_store_then_get_roundtrips(self, db):
+        attachment_id = "hash-d" * 8
+        db.store_attachment_extraction(
+            attachment_id=attachment_id,
+            extraction_status="success",
+            extractor="pdf-digital",
+            extracted_text="hello world",
+            extraction_error=None,
+        )
+        row = db.get_attachment_extraction(attachment_id)
+        assert row is not None
+        assert row["extraction_status"] == "success"
+        assert row["extractor"] == "pdf-digital"
+        assert row["extracted_text"] == "hello world"
+
+    def test_store_replaces_existing_row(self, db):
+        attachment_id = "hash-e" * 8
+        db.store_attachment_extraction(
+            attachment_id=attachment_id,
+            extraction_status="empty",
+            extractor="pdf-digital",
+            extracted_text=None,
+            extraction_error=None,
+        )
+        # Operator enabled OCR → re-extract upgraded the row.
+        db.store_attachment_extraction(
+            attachment_id=attachment_id,
+            extraction_status="success",
+            extractor="pdf-ocr",
+            extracted_text="now we have text",
+            extraction_error=None,
+        )
+        row = db.get_attachment_extraction(attachment_id)
+        assert row["extraction_status"] == "success"
+        assert row["extracted_text"] == "now we have text"
+
+
+class TestAttachmentChunkSlicing:
+    """Body chunks and attachment chunks must be diffed independently
+    so a write of attachment chunks doesn't delete body chunks for the
+    same message — and vice versa.
+    """
+
+    def test_body_and_attachment_chunks_coexist(self, db, threader):
+        msg = make_message(message_id="slice1@x", filepath="/m/s1")
+        thread = threader.assign_thread(msg)
+        db.upsert_thread(thread, FAKE_EMBEDDING)
+
+        body_chunk = _make_chunk("body-chunk".ljust(64, "0"), 0, "body")
+        att_chunk = _make_chunk("att-chunk".ljust(64, "0"), 0, "attachment")
+        attachment_id = "att-hash" * 8
+
+        db.replace_message_chunks(
+            message_id="slice1@x",
+            thread_id=thread.thread_id,
+            chunks=[body_chunk],
+            embeddings_by_chunk_id={body_chunk.chunk_id: [0.1] * 768},
+        )
+        db.replace_message_chunks(
+            message_id="slice1@x",
+            thread_id=thread.thread_id,
+            chunks=[att_chunk],
+            embeddings_by_chunk_id={att_chunk.chunk_id: [0.2] * 768},
+            attachment_id=attachment_id,
+        )
+
+        # Both chunks present.
+        all_ids = {
+            row[0]
+            for row in db._conn.execute(
+                "SELECT chunk_id FROM message_chunks WHERE message_id = ?",
+                ("slice1@x",),
+            ).fetchall()
+        }
+        assert all_ids == {body_chunk.chunk_id, att_chunk.chunk_id}
+
+        # The slice-aware getter returns only the requested slice.
+        assert db.get_chunk_ids_for_message("slice1@x") == {body_chunk.chunk_id}
+        assert db.get_chunk_ids_for_message("slice1@x", attachment_id=attachment_id) == {
+            att_chunk.chunk_id
+        }
+
+    def test_re_writing_body_chunks_does_not_drop_attachment_chunks(self, db, threader):
+        msg = make_message(message_id="slice2@x", filepath="/m/s2")
+        thread = threader.assign_thread(msg)
+        db.upsert_thread(thread, FAKE_EMBEDDING)
+
+        body = _make_chunk("body2".ljust(64, "0"), 0, "body")
+        att = _make_chunk("att2".ljust(64, "0"), 0, "attachment")
+        att_id = "attID" * 13
+
+        db.replace_message_chunks(
+            message_id="slice2@x",
+            thread_id=thread.thread_id,
+            chunks=[body],
+            embeddings_by_chunk_id={body.chunk_id: [0.1] * 768},
+        )
+        db.replace_message_chunks(
+            message_id="slice2@x",
+            thread_id=thread.thread_id,
+            chunks=[att],
+            embeddings_by_chunk_id={att.chunk_id: [0.2] * 768},
+            attachment_id=att_id,
+        )
+
+        # Re-write body slice with a different chunk — attachment chunk stays.
+        body2 = _make_chunk("body2-new".ljust(64, "0"), 0, "new body")
+        db.replace_message_chunks(
+            message_id="slice2@x",
+            thread_id=thread.thread_id,
+            chunks=[body2],
+            embeddings_by_chunk_id={body2.chunk_id: [0.3] * 768},
+        )
+
+        assert db.get_chunk_ids_for_message("slice2@x") == {body2.chunk_id}
+        assert db.get_chunk_ids_for_message("slice2@x", attachment_id=att_id) == {att.chunk_id}
+
+
+class TestAttachmentCascadeOnMessageRemoval:
+    def test_remove_message_drops_its_attachment_rows(self, db, threader):
+        msg = make_message(message_id="cas1@x", filepath="/m/cas1")
+        thread = threader.assign_thread(msg)
+        db.upsert_thread(thread, FAKE_EMBEDDING)
+
+        db.upsert_attachment(
+            message_id="cas1@x",
+            thread_id=thread.thread_id,
+            attachment_id="cascade-hash" * 4,
+            filename="doomed.pdf",
+            content_type="application/pdf",
+            size_bytes=1,
+            occurrence_id=attachment_occurrence_id(
+                message_id="cas1@x",
+                content_hash="cascade-hash" * 4,
+                filename="doomed.pdf",
+                occurrence_index=0,
+            ),
+        )
+        # Make sure it landed.
+        before = db._conn.execute(
+            "SELECT COUNT(*) FROM attachments WHERE message_id = ?", ("cas1@x",)
+        ).fetchone()[0]
+        assert before == 1
+
+        db.remove_message("cas1@x")
+
+        after = db._conn.execute(
+            "SELECT COUNT(*) FROM attachments WHERE message_id = ?", ("cas1@x",)
+        ).fetchone()[0]
+        assert after == 0
+
+    def test_extraction_cache_is_preserved_on_message_removal(self, db, threader):
+        """Cached extractions outlive their messages so a future
+        re-arrival of the same content (forwarded again) skips the
+        extract cost."""
+        msg = make_message(message_id="cas2@x", filepath="/m/cas2")
+        thread = threader.assign_thread(msg)
+        db.upsert_thread(thread, FAKE_EMBEDDING)
+
+        attachment_id = "preserve-hash" * 4
+        db.upsert_attachment(
+            message_id="cas2@x",
+            thread_id=thread.thread_id,
+            attachment_id=attachment_id,
+            filename="preserved.pdf",
+            content_type="application/pdf",
+            size_bytes=1,
+            occurrence_id=attachment_occurrence_id(
+                message_id="cas2@x",
+                content_hash=attachment_id,
+                filename="preserved.pdf",
+                occurrence_index=0,
+            ),
+        )
+        db.store_attachment_extraction(
+            attachment_id=attachment_id,
+            extraction_status="success",
+            extractor="pdf-digital",
+            extracted_text="cached content",
+            extraction_error=None,
+        )
+
+        db.remove_message("cas2@x")
+
+        cached = db.get_attachment_extraction(attachment_id)
+        assert cached is not None
+        assert cached["extracted_text"] == "cached content"
+
+    def test_delete_thread_completely_drops_attachments_for_all_messages(self, db, threader):
+        m1 = make_message(message_id="cas3a@x", filepath="/m/cas3a")
+        m2 = make_message(message_id="cas3b@x", filepath="/m/cas3b")
+        t = threader.assign_thread(m1)
+        t.messages.append(m2)
+        db.upsert_thread(t, FAKE_EMBEDDING)
+
+        for mid in ("cas3a@x", "cas3b@x"):
+            attachment_id = f"thread-cascade-{mid}".ljust(64, "0")
+            db.upsert_attachment(
+                message_id=mid,
+                thread_id=t.thread_id,
+                attachment_id=attachment_id,
+                filename=f"{mid}.pdf",
+                content_type="application/pdf",
+                size_bytes=1,
+                occurrence_id=attachment_occurrence_id(
+                    message_id=mid,
+                    content_hash=attachment_id,
+                    filename=f"{mid}.pdf",
+                    occurrence_index=0,
+                ),
+            )
+
+        db.delete_thread_completely(t.thread_id)
+
+        cnt = db._conn.execute(
+            "SELECT COUNT(*) FROM attachments WHERE thread_id = ?", (t.thread_id,)
+        ).fetchone()[0]
+        assert cnt == 0

@@ -9,16 +9,45 @@ dependencies = [
     "watchdog==6.0.0",
     "python-dotenv==1.2.2",
     "tenacity==9.1.4",
+    # Attachment text extraction (schema v10). Each library is required
+    # by exactly one extractor module under src/extractors/; lazy import
+    # there means a missing one downgrades to ``unsupported`` rather
+    # than crashing the indexer.
+    "pypdf==6.4.0",                # digital PDF text layer
+    "pdf2image==1.17.0",           # render PDF pages → PIL.Image (needs Poppler)
+    "pytesseract==0.3.13",         # OCR via Tesseract binary
+    "pillow==12.2.0",              # image loading + EXIF rotation for OCR
+    "python-docx==1.2.0",          # DOCX paragraph + table walk
+    "openpyxl==3.1.5",             # XLSX read-only workbook walk
+    "defusedxml==0.7.1",           # XML-bomb defense for python-docx + openpyxl
 ]
 
 [dependency-groups]
 dev = [
+    "mypy==1.18.2",
     "pytest==9.0.3",
     "pytest-cov==7.1.0",
 ]
 
 [tool.uv]
 package = false
+
+[tool.mypy]
+python_version = "3.14"
+warn_unused_configs = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+no_implicit_optional = true
+check_untyped_defs = true
+
+[[tool.mypy.overrides]]
+module = [
+    "defusedxml.*",
+    "openpyxl.*",
+    "pytesseract.*",
+    "sqlite_vec.*",
+]
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

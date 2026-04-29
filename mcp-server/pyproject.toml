@@ -18,6 +18,7 @@ package = false
 
 [dependency-groups]
 dev = [
+    "mypy==1.18.2",
     "pytest==9.0.3",
     "pytest-cov==7.1.0",
 ]
@@ -36,6 +37,21 @@ addopts = "-v --tb=short --cov=src --cov-branch --cov-report=term-missing --cov-
 markers = [
     "eval: opt-in retrieval-quality eval against a real mailbox (skipped by default; run with `pytest -m eval --override-ini='addopts='`)",
 ]
+
+[tool.mypy]
+python_version = "3.14"
+warn_unused_configs = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+no_implicit_optional = true
+check_untyped_defs = true
+
+[[tool.mypy.overrides]]
+module = [
+    "aioimaplib.*",
+    "sqlite_vec.*",
+]
+ignore_missing_imports = true
 
 [tool.coverage.run]
 branch = true

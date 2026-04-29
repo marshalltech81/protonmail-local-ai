@@ -1,0 +1,124 @@
+services:
+
+  # ---------------------------------------------------------------------------
+  # Open WebUI (optional)
+  # Local browser UI for Ollama-backed chats and Streamable HTTP MCP tools.
+  # Start with: make open-webui-up
+  # ---------------------------------------------------------------------------
+  open-webui:
+    # Pin by digest, not just tag. Open WebUI's GHCR registry is the
+    # only third-party-controlled image in the stack; a retag of
+    # ``v0.9.2`` upstream would otherwise silently land different bits
+    # on ``make open-webui-up``. The digest below is the multi-arch
+    # OCI index for v0.9.2 — covers both linux/amd64 and linux/arm64.
+    image: ${OPEN_WEBUI_IMAGE:-ghcr.io/open-webui/open-webui:v0.9.2@sha256:a7e4796ae894d1e2a0c1824860ade472f35c507608a01c3581377b5c19b0ed49}
+    container_name: open-webui
+    restart: unless-stopped
+    init: true
+    # Read-only rootfs with narrowly-scoped writable mounts: the persistent
+    # SQLite + uploads volume covers ``/app/backend/data``, while ``/tmp``
+    # and ``/root/.cache`` are tmpfs so transient writes (uvicorn lock
+    # files, HuggingFace tokenizer cache that Open WebUI shells out to)
+    # don't need a writable root filesystem.
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 256
+    # Cap memory for the same reason indexer is capped: an unbounded
+    # process can starve other containers (notably Ollama, which is
+    # memory-hungry) on the shared docker host. 1 GiB covers ordinary
+    # web-UI session state + a tokenizer load with headroom; tune via
+    # ``OPEN_WEBUI_MEM_LIMIT`` if a workload needs more.
+    mem_limit: ${OPEN_WEBUI_MEM_LIMIT:-1g}
+    tmpfs:
+      - /tmp
+      - /root/.cache
+      # v0.9.2 onward unconditionally wipes-and-recopies STATIC_DIR
+      # from FRONTEND_BUILD_DIR/static on every startup (see
+      # /app/backend/open_webui/config.py). With read_only: true that
+      # write would otherwise spam EROFS errors for every favicon /
+      # splash / loader.js / custom.css. tmpfs here is masked over the
+      # image's pre-baked static dir, then the copy on startup
+      # repopulates it from the (read-only) frontend build dir, so
+      # the FE always serves fresh defaults from the current image.
+      - /app/backend/open_webui/static:size=64m,uid=0,gid=0,mode=755
+    secrets:
+      - open_webui_secret_key
+    depends_on:
+      ollama:
+        condition: service_healthy
+      mcp-server:
+        condition: service_healthy
+    environment:
+      WEBUI_NAME: ${OPEN_WEBUI_NAME:-ProtonMail Local AI}
+      WEBUI_URL: http://localhost:${OPEN_WEBUI_PORT:-8080}
+      # Open WebUI's start.sh reads the key from this path when WEBUI_SECRET_KEY
+      # is unset; keeps the secret out of `docker inspect` env metadata.
+      WEBUI_SECRET_KEY_FILE: /run/secrets/open_webui_secret_key
+      # Default-deny signup. The first-run admin must be created with
+      # ``OPEN_WEBUI_ENABLE_SIGNUP=true make open-webui-up`` (one-shot)
+      # then flipped back; documented in .env.example. Default-allow
+      # is unsafe on a multi-user workstation because Open WebUI grants
+      # admin to whoever signs up first, and the loopback bind alone
+      # does not exclude other local users from racing the legit
+      # operator.
+      ENABLE_SIGNUP: ${OPEN_WEBUI_ENABLE_SIGNUP:-false}
+      # Default the chat model to whatever the rest of the stack uses
+      # for ``OLLAMA_LLM_MODEL`` so an operator who changes that env
+      # var doesn't have to also remember to change it in two places.
+      DEFAULT_MODELS: ${OPEN_WEBUI_DEFAULT_MODEL:-${OLLAMA_LLM_MODEL:-llama3.2}}
+      ENABLE_OLLAMA_API: "true"
+      OLLAMA_BASE_URL: http://ollama:11434
+      ENABLE_OPENAI_API: "false"
+      # Pre-wire the local mcp-server as an MCP tool source so chats can
+      # call mailbox tools out of the box without an admin clicking
+      # through Settings → Tools after first login. Open WebUI uses
+      # PersistentConfig: this env value is loaded into the SQLite
+      # config row on first start (when ``tool_server.connections`` is
+      # absent) and any subsequent UI edits override it. To disable
+      # MCP tooling entirely, change the value below to ``[]``; to add
+      # additional tool servers, extend the JSON array.
+      # Open WebUI's MCP client passes ``url`` to streamablehttp_client
+      # verbatim and ignores ``path`` (utils/mcp/client.py +
+      # utils/middleware.py + routers/configs.py:verify all call
+      # MCPClient.connect(form_data.url, ...)). The ``path`` field is
+      # only consumed for OpenAPI ``openapi.json`` resolution. So for
+      # an MCP entry, ``url`` must be the full Streamable HTTP
+      # endpoint including ``/mcp``; ``path`` is kept here only because
+      # the ToolServerConnection pydantic schema requires it.
+      TOOL_SERVER_CONNECTIONS: '[{"url":"http://mcp-server:3000/mcp","path":"/mcp","type":"mcp","auth_type":"none","key":"","config":{"enable":true},"info":{"id":"protonmail-mcp","name":"ProtonMail MCP","description":"Local mailbox search, retrieval, and intelligence tools backed by the on-disk SQLite index."}}]'
+      ENABLE_COMMUNITY_SHARING: "false"
+      ENABLE_FORWARD_USER_INFO_HEADERS: "false"
+      ENABLE_WEB_LOADER_SSL_VERIFICATION: "true"
+      SCARF_NO_ANALYTICS: "true"
+      DO_NOT_TRACK: "true"
+      ANONYMIZED_TELEMETRY: "false"
+    volumes:
+      - open-webui-data:/app/backend/data
+    ports:
+      - "127.0.0.1:${OPEN_WEBUI_PORT:-8080}:8080"
+    networks:
+      - app-net
+    healthcheck:
+      # Open WebUI exposes ``/health`` (200 = ok). curl is in the
+      # upstream image; we just need to probe with no auth so a hung
+      # process flips ``docker ps`` to ``unhealthy``.
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8080/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  open-webui-data:
+
+secrets:
+  open_webui_secret_key:
+    file: ./.secrets/open_webui_secret_key.txt

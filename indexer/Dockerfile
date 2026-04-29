@@ -31,8 +31,23 @@ FROM python:3.14-slim-trixie@sha256:5b3879b6f3cb77e712644d50262d05a7c146b7312d78
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     inotify-tools \
+    # Attachment text extraction (schema v10). Tesseract supplies the OCR
+    # path used by image attachments and the scanned-PDF fallback in
+    # src/extractors/{image,pdf}.py; Poppler's pdftoppm is what pdf2image
+    # shells out to when rendering each PDF page to a PIL image. English
+    # is the only Tesseract language pack installed by default — extend
+    # via tesseract-ocr-* packages here if non-English mailboxes appear.
+    tesseract-ocr \
+    poppler-utils \
  && rm -rf /var/lib/apt/lists/*
 
+# UID 1002 — distinct from mbsync (UID 1001) so a parser/extractor
+# exploit triggered by a malicious .eml or attachment doesn't end up
+# with mbsync's UID. mbsync's entrypoint relaxes Maildir file perms
+# to 0644 after each sync (see relax_new_maildir_perms) so the
+# indexer reads via "other" permission rather than sharing mbsync's
+# UID. The Maildir mount is `:ro` from the indexer side as further
+# defense-in-depth.
 RUN groupadd --gid 1002 indexer && \
     useradd --uid 1002 \
             --gid 1002 \
@@ -52,9 +67,19 @@ COPY --from=builder /app/src/ ./src/
 COPY --chmod=755 --chown=indexer:indexer healthcheck.sh /healthcheck.sh
 
 # Pre-create volume mount points with correct ownership BEFORE VOLUME declaration.
-# Docker copies these into the named volume on first mount (copy-on-empty),
-# ensuring the indexer user can write even though the volume starts root-owned.
-RUN mkdir -p /maildir /data && chown -R indexer:indexer /maildir /data
+# Docker copies these into the named volume on first mount (copy-on-empty).
+#
+# /maildir is owned by UID 1001 (mbsync) here, NOT the indexer user, to make
+# the named-volume seeding race harmless: the maildir-volume is shared with
+# the mbsync container, and whichever image's mount is hit first by docker
+# compose seeds the volume's ownership. mbsync writes; the indexer reads via
+# "other" permission bits (mbsync's entrypoint chmods go+r after each sync)
+# and mounts /maildir :ro for defense-in-depth, so indexer does not need to
+# own this directory. Keeping both images' /maildir at 1001:1001 means either
+# seeding order produces a working volume.
+RUN mkdir -p /maildir /data \
+ && chown 1001:1001 /maildir \
+ && chown -R indexer:indexer /data
 
 USER indexer
 

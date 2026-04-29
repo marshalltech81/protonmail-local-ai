@@ -79,6 +79,37 @@ class TestReciprocalRankFusion:
         assert seeded_db._reciprocal_rank_fusion([], []) == []
 
 
+class TestBestPerThread:
+    """``_best_per_thread`` collapses chunk-lane rows to one per thread,
+    keeping the row with the lowest BM25 score (best chunk match).
+    """
+
+    def test_keeps_best_score_per_thread(self, make_result):
+        # Three rows for thread A (scores 0.9, 0.3, 0.7) and one for B.
+        # The best for A is 0.3; the kept row should be that one.
+        a1 = make_result("A")
+        a1.score = 0.9
+        a2 = make_result("A")
+        a2.score = 0.3
+        a3 = make_result("A")
+        a3.score = 0.7
+        b1 = make_result("B")
+        b1.score = 0.5
+
+        from src.lib.sqlite import Database
+
+        kept = Database._best_per_thread([a1, a2, a3, b1])
+        kept_ids = [r.thread_id for r in kept]
+        assert kept_ids == ["A", "B"]
+        a_kept = [r for r in kept if r.thread_id == "A"][0]
+        assert a_kept.score == 0.3
+
+    def test_empty_input_returns_empty(self):
+        from src.lib.sqlite import Database
+
+        assert Database._best_per_thread([]) == []
+
+
 class TestApplyFilters:
     def test_folder_filter(self, seeded_db: Database, make_result):
         results = [
@@ -91,9 +122,9 @@ class TestApplyFilters:
 
     def test_from_addr_substring_match_case_insensitive(self, seeded_db: Database, make_result):
         a = make_result("a")
-        a.participants = ["Alice@EXAMPLE.com"]
+        a.senders = ["Alice@EXAMPLE.com"]
         b = make_result("b")
-        b.participants = ["bob@example.com"]
+        b.senders = ["bob@example.com"]
         filtered = seeded_db._apply_filters([a, b], from_addr="alice")
         assert [r.thread_id for r in filtered] == ["a"]
 
@@ -171,6 +202,18 @@ class TestApplyFilters:
 
 
 class TestKeywordSearchFilterPushdown:
+    def test_keyword_search_matches_chunk_text(self, chunked_db: Database):
+        """Exact terms present only in message_chunks_fts should still find
+        the parent thread; otherwise precise chunk FTS rows are write-only."""
+        results = chunked_db.keyword_search("12345", limit=10)
+        assert [r.thread_id for r in results] == ["t-alpha"]
+
+    def test_keyword_search_matches_attachment_filename(self, seeded_db: Database):
+        """Attachment filename/MIME FTS is populated by the indexer, so MCP
+        keyword search must query it as well as thread bodies."""
+        results = seeded_db.keyword_search("march-statement-unique", limit=10)
+        assert [r.thread_id for r in results] == ["t-alpha"]
+
     def test_folder_filter_pushed_into_sql(self, seeded_db: Database):
         """Regression: folder filter used to be applied in Python after the
         BM25 LIMIT. If the top candidates were all INBOX but the user
@@ -255,29 +298,6 @@ class TestSenderFilter:
         ids = {r.thread_id for r in results}
         assert "t-alpha" in ids
         assert "t-beta" not in ids  # alice is a recipient here, not sender
-
-    def test_from_addr_falls_back_to_participants_for_legacy_rows(self):
-        """Pre-v6 rows have an empty senders list. The filter must still
-        match them via participants so existing indexes do not lose
-        recall on upgrade day."""
-        from datetime import UTC, datetime
-
-        from src.lib.sqlite import ThreadResult, _matches_sender
-
-        legacy = ThreadResult(
-            thread_id="legacy",
-            subject="s",
-            participants=["alice@example.com", "bob@example.com"],
-            senders=[],  # empty senders -> legacy row
-            folder="INBOX",
-            date_first=datetime(2024, 1, 1, tzinfo=UTC),
-            date_last=datetime(2024, 1, 1, tzinfo=UTC),
-            message_ids=[],
-            snippet="",
-            has_attachments=False,
-        )
-        assert _matches_sender(legacy, "alice")
-        assert _matches_sender(legacy, "bob")
 
     def test_from_addr_ignores_recipients_when_senders_populated(self):
         from datetime import UTC, datetime
@@ -493,6 +513,10 @@ class TestDirectLookups:
         assert [r.thread_id for r in first] == ["t-beta"]
         assert [r.thread_id for r in second] == ["t-alpha"]
 
+    def test_list_threads_rejects_unindexed_filter_types(self, seeded_db: Database):
+        with pytest.raises(ValueError, match="filter_type"):
+            seeded_db.list_threads(folder="INBOX", filter_type="unread")
+
 
 class TestStatsAndFolders:
     def test_get_stats(self, seeded_db: Database):
@@ -681,3 +705,142 @@ class TestBodyTextLoadedIntoResult:
         results = seeded_db.semantic_search([1.0, 0.0, 0.0, 0.0], limit=1)
         assert results
         assert results[0].body_text
+
+
+# ---------------------------------------------------------------------------
+# Schema v9 — chunk vector lane and chunk-aware hybrid search
+# ---------------------------------------------------------------------------
+
+
+class TestChunkVectorSearch:
+    def test_returns_nearest_chunk_first(self, chunked_db: Database):
+        results = chunked_db._chunk_vector_search([1.0, 0.0, 0.0, 0.0], limit=5)
+        assert results, "expected chunk hits for an aligned query"
+        assert results[0].thread_id == "t-alpha"
+        assert "invoice number 12345" in results[0].text
+
+    def test_skips_threads_without_chunks(self, chunked_db: Database):
+        # The third axis aligns with t-gamma's thread vector — but t-gamma
+        # has NO chunks (e.g. empty body), so the chunk lane must
+        # not surface it. Coarse retrieval lanes will still find it via
+        # the existing thread vector + thread FTS paths.
+        results = chunked_db._chunk_vector_search([0.0, 0.0, 1.0, 0.0], limit=5)
+        for r in results:
+            assert r.thread_id != "t-gamma"
+
+    def test_empty_db_returns_empty_list(self, empty_db: Database):
+        assert empty_db._chunk_vector_search([1.0, 0.0, 0.0, 0.0], limit=5) == []
+
+
+class TestEvidenceChunksHelper:
+    def test_groups_chunks_by_requested_thread_id(self, chunked_db: Database):
+        evidence = chunked_db.get_evidence_chunks_for_threads(
+            thread_ids=["t-alpha", "t-beta"],
+            embedding=[1.0, 0.0, 0.0, 0.0],
+            per_thread_limit=3,
+        )
+        assert set(evidence.keys()) == {"t-alpha", "t-beta"}
+        assert all(c.thread_id == "t-alpha" for c in evidence["t-alpha"])
+
+    def test_unrequested_threads_excluded(self, chunked_db: Database):
+        evidence = chunked_db.get_evidence_chunks_for_threads(
+            thread_ids=["t-alpha"],
+            embedding=[0.0, 1.0, 0.0, 0.0],
+        )
+        # Only the requested thread appears in the dict, regardless of
+        # which chunks the underlying lane found.
+        assert set(evidence.keys()) == {"t-alpha"}
+
+    def test_empty_thread_ids_returns_empty_dict(self, chunked_db: Database):
+        assert chunked_db.get_evidence_chunks_for_threads([], [1.0, 0.0, 0.0, 0.0]) == {}
+
+
+class TestHybridSearchChunkLane:
+    def test_chunk_specific_query_lifts_parent_thread(self, chunked_db: Database):
+        """A query whose terms appear in a chunk but not the thread body
+        must still surface the parent thread because the chunk lane lifts
+        it into the merged ranking."""
+        results = chunked_db.hybrid_search(
+            query_text="invoice number 12345",
+            query_embedding=[1.0, 0.0, 0.0, 0.0],
+            limit=3,
+        )
+        assert results
+        assert results[0].thread_id == "t-alpha"
+
+    def test_with_evidence_populates_evidence_chunks(self, chunked_db: Database):
+        results = chunked_db.hybrid_search(
+            query_text="invoice",
+            query_embedding=[1.0, 0.0, 0.0, 0.0],
+            limit=3,
+            with_evidence=True,
+        )
+        assert results
+        top = results[0]
+        assert top.evidence_chunks
+        for chunk in top.evidence_chunks:
+            assert chunk.thread_id == top.thread_id
+            assert chunk.text
+
+    def test_without_evidence_evidence_chunks_stays_empty(self, chunked_db: Database):
+        results = chunked_db.hybrid_search(
+            query_text="invoice",
+            query_embedding=[1.0, 0.0, 0.0, 0.0],
+            limit=3,
+        )
+        assert results
+        assert all(r.evidence_chunks == [] for r in results)
+
+    def test_thread_without_chunks_still_searchable(self, chunked_db: Database):
+        # t-gamma has no chunks (e.g. an empty-body message). A query
+        # aligned with its thread vector + body keyword must still
+        # return it via the BM25 + thread-vector lanes.
+        results = chunked_db.hybrid_search(
+            query_text="meeting notes",
+            query_embedding=[0.0, 0.0, 1.0, 0.0],
+            limit=5,
+        )
+        assert any(r.thread_id == "t-gamma" for r in results)
+
+
+class TestRRFChunkLifting:
+    def test_only_best_rank_per_thread_counts(self, chunked_db: Database):
+        """Multiple chunks from the same thread must not double-count: the
+        best (lowest rank) chunk per thread is the only one credited to
+        thread ranking. Otherwise a thread with many similar chunks
+        would dominate via accumulated score rather than relevance.
+        """
+        from src.lib.sqlite import ChunkResult
+
+        chunks = [
+            ChunkResult(
+                chunk_id=f"x{i}",
+                message_id="t-alpha",
+                thread_id="t-alpha",
+                chunk_index=i,
+                text="x",
+                char_start=0,
+                char_end=1,
+            )
+            for i in range(3)
+        ] + [
+            ChunkResult(
+                chunk_id="y0",
+                message_id="t-beta",
+                thread_id="t-beta",
+                chunk_index=0,
+                text="y",
+                char_start=0,
+                char_end=1,
+            )
+        ]
+
+        fused = chunked_db._reciprocal_rank_fusion([], [], chunks)
+        # t-alpha ranks first (its best chunk is at index 0).
+        assert fused[0].thread_id == "t-alpha"
+        # Score reflects dedup: 1/(k+rank+1) for rank 0, k=60. If we'd
+        # accumulated all three of t-alpha's chunks, the score would be
+        # 1/61 + 1/62 + 1/63 — meaningfully larger than this.
+        assert fused[0].score == pytest.approx(1.0 / 61, rel=1e-6)
+        beta = next(r for r in fused if r.thread_id == "t-beta")
+        assert beta.score == pytest.approx(1.0 / 64, rel=1e-6)

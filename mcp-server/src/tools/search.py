@@ -3,6 +3,7 @@ Search tools — Group 1 (most frequently called).
 Semantic, keyword, and hybrid search over the SQLite index.
 """
 
+import asyncio
 import logging
 
 from mcp.types import TextContent
@@ -72,8 +73,15 @@ def register_search_tools(server, db, ollama):
             # semantic modes previously only forwarded ``folders`` and
             # silently dropped sender/date/attachment filters, returning
             # unfiltered results without warning.
+            # SQLite work runs in a worker thread so the asyncio event
+            # loop stays responsive while FTS / vector / RRF (and now
+            # the additive chunk lane) execute against the index. The
+            # FastMCP server is async-first; without ``to_thread`` a
+            # multi-second hybrid query would block every other tool
+            # call concurrently in flight.
             if mode == "keyword":
-                results = db.keyword_search(
+                results = await asyncio.to_thread(
+                    db.keyword_search,
                     query_text=query,
                     folders=folders,
                     from_addr=from_addr,
@@ -84,7 +92,8 @@ def register_search_tools(server, db, ollama):
                 )
             elif mode == "semantic":
                 embedding = await ollama.embed(query)
-                results = db.semantic_search(
+                results = await asyncio.to_thread(
+                    db.semantic_search,
                     query_embedding=embedding,
                     folders=folders,
                     from_addr=from_addr,
@@ -95,7 +104,8 @@ def register_search_tools(server, db, ollama):
                 )
             else:  # hybrid (default)
                 embedding = await ollama.embed(query)
-                results = db.hybrid_search(
+                results = await asyncio.to_thread(
+                    db.hybrid_search,
                     query_text=query,
                     query_embedding=embedding,
                     folders=folders,

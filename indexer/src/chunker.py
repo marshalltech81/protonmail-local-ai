@@ -26,15 +26,11 @@ Input contract:
   into the raw ``.eml`` source — map back through the same normalization
   if that is needed.
 
-``CHUNKER_VERSION`` is exported so the indexer (PR 2) can persist it per
-chunk and re-chunk messages whose stored version is stale after a bump.
 """
 
 import hashlib
 import re
 from dataclasses import dataclass
-
-CHUNKER_VERSION = 1
 
 # Chars-per-token is a rough estimate good enough for sizing decisions.
 # The real tokenizer for the embedding model is not loaded here; we only
@@ -51,6 +47,30 @@ _PARAGRAPH_RE = re.compile(r"[^\n]+(?:\n(?![ \t]*\n)[^\n]*)*")
 # followed by whitespace or end-of-string. This is a fallback, not a
 # general-purpose sentence splitter.
 _SENTENCE_END_RE = re.compile(r"[.!?]+(?=\s|$)")
+
+
+def mean_vector(vectors: list[list[float]]) -> list[float]:
+    """Element-wise mean of equal-length float vectors.
+
+    Lives here rather than in ``main.py`` so the reconciler's reap path
+    can reuse it to compute a survivor-only thread vector after a partial
+    reap. Pure Python so the indexer stays free of numpy at runtime —
+    embedding dim is small (768) and per-thread fan-out is bounded.
+
+    Raises ``ValueError`` on empty input or mismatched dimensions; the
+    caller chooses the fallback (typically embedding the subject line).
+    """
+    if not vectors:
+        raise ValueError("cannot mean an empty vector list")
+    dim = len(vectors[0])
+    if any(len(v) != dim for v in vectors):
+        raise ValueError("all vectors must have the same dimension")
+    sums = [0.0] * dim
+    for vec in vectors:
+        for i, value in enumerate(vec):
+            sums[i] += value
+    n = float(len(vectors))
+    return [s / n for s in sums]
 
 
 @dataclass(frozen=True)
@@ -268,8 +288,10 @@ def _make_subspan(parent: _Span, source: str, local_start: int, local_end: int) 
         return None
     start = parent.start + local_start + lead
     end = parent.start + local_end - trail
-    # Defensive check: offsets must round-trip through ``source``.
-    assert source[start:end] == trimmed, "subspan offsets drifted"
+    # Defensive check: offsets must round-trip through ``source`` even when
+    # Python runs with optimization flags that remove assert statements.
+    if source[start:end] != trimmed:
+        raise ValueError("subspan offsets drifted")
     return _Span(text=trimmed, start=start, end=end)
 
 

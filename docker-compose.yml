@@ -144,6 +144,13 @@ services:
     cap_drop:
       - ALL
     pids_limit: 128
+    # Cap memory so a malicious attachment that slips past the
+    # ``ZIP_MAX_UNCOMPRESSED_BYTES`` pre-check (e.g. a quadratic-blowup
+    # XML payload that lxml expands in core) cannot pressure the host.
+    # 1 GiB covers any realistic OCR/PDF/XLSX workload — embedding RPC
+    # output and FTS staging are tiny — while keeping the blast radius
+    # bounded.
+    mem_limit: 1g
     tmpfs:
       - /tmp
       - /home/indexer:uid=1002,gid=1002,mode=700
@@ -165,6 +172,18 @@ services:
       INDEXER_DELETION_MAX_BATCH_PCT: ${INDEXER_DELETION_MAX_BATCH_PCT:-0.05}
       INDEXER_DELETION_FORCE: ${INDEXER_DELETION_FORCE:-false}
       INDEXER_UNLINK_ON_REAP: ${INDEXER_UNLINK_ON_REAP:-false}
+      # Attachment extraction knobs. Code defaults already match these
+      # values; explicit wiring is here so operator overrides in .env
+      # actually reach the container env (otherwise compose interpolates
+      # them only into its own substitution scope, never into os.environ
+      # inside the indexer process).
+      INDEXER_ATTACHMENT_EXTRACTION_ENABLED: ${INDEXER_ATTACHMENT_EXTRACTION_ENABLED:-true}
+      INDEXER_OCR_ENABLED: ${INDEXER_OCR_ENABLED:-true}
+      INDEXER_ATTACHMENT_MAX_BYTES: ${INDEXER_ATTACHMENT_MAX_BYTES:-10000000}
+      INDEXER_OCR_MAX_PAGES: ${INDEXER_OCR_MAX_PAGES:-20}
+      INDEXER_OCR_TIMEOUT_SECONDS: ${INDEXER_OCR_TIMEOUT_SECONDS:-60}
+      INDEXER_PDF_MAX_DIGITAL_PAGES: ${INDEXER_PDF_MAX_DIGITAL_PAGES:-500}
+      INDEXER_ATTACHMENT_MAX_EXTRACTED_CHARS: ${INDEXER_ATTACHMENT_MAX_EXTRACTED_CHARS:-2000000}
     volumes:
       # Maildir is mounted read-only by default: the indexer's job is to read
       # .eml files and build the SQLite index. INDEXER_UNLINK_ON_REAP needs
@@ -178,8 +197,10 @@ services:
 
   # ---------------------------------------------------------------------------
   # MCP Server
-  # Exposes search, Q&A, and agentic tools to Claude Desktop via HTTP/SSE.
-  # Accessible at http://localhost:MCP_PORT/mcp on the host machine only.
+  # Exposes search, Q&A, and agentic tools over MCP transports.
+  # Accessible on the host machine only. Default SSE path:
+  # http://localhost:MCP_PORT/sse. Streamable HTTP path when enabled:
+  # http://localhost:MCP_PORT/mcp.
   # ---------------------------------------------------------------------------
   mcp-server:
     build:
@@ -209,6 +230,7 @@ services:
       OLLAMA_LLM_MODEL: ${OLLAMA_LLM_MODEL:-llama3.2}
       LLM_MODE: ${LLM_MODE:-local}
       MCP_PORT: ${MCP_PORT:-3000}
+      MCP_TRANSPORT: ${MCP_TRANSPORT:-sse}
       MCP_READ_ONLY: ${MCP_READ_ONLY:-true}
     volumes:
       # Mounted writable so SQLite can create the WAL ``-shm`` sidecar needed

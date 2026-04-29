@@ -3,6 +3,7 @@ Intelligence tools — Group 3 (our differentiator).
 Q&A/RAG, summarization, and structured extraction over email threads.
 """
 
+import asyncio
 import json
 import logging
 
@@ -83,11 +84,37 @@ matching the schema — no preamble, no explanation."""
 def _thread_context(thread: ThreadResult, limit: int = PER_THREAD_CHAR_BUDGET) -> str:
     """Return the richest available text for a thread, bounded by ``limit``.
 
-    Prefers the accumulated ``body_text`` column (capped at 8000 chars per
-    thread in the indexer) and falls back to ``snippet`` (200 chars) when
-    a legacy row is missing ``body_text``. A fixed per-thread character
-    budget keeps multi-thread prompts within the LLM context window.
+    When the v9 chunk-aware retrieval lane attached ``evidence_chunks``,
+    use the matched chunks as the LLM context: they're the precise
+    passages that drove the thread's ranking. Each chunk is rendered
+    with a ``[chunk N: chars X-Y]`` header so the model can cite the
+    specific passage rather than the whole thread.
+
+    Falls back to the accumulated ``body_text`` (capped at 8000 chars
+    per thread in the indexer) when no evidence chunks were attached —
+    typically because the caller did not request them, or the thread
+    has no chunks (empty body, extraction failure). Final fallback is
+    the short ``snippet`` row for empty-body threads.
     """
+    if thread.evidence_chunks:
+        # Render the matched chunks with provenance. Cap the total at
+        # ``limit`` so multi-thread prompts (e.g. ``ask_mailbox`` with
+        # ``max_threads=5``) stay within the LLM context window even
+        # when each thread carries multiple chunks.
+        parts: list[str] = []
+        used = 0
+        for chunk in thread.evidence_chunks:
+            header = f"[chunk {chunk.chunk_index} chars {chunk.char_start}-{chunk.char_end}]"
+            text = chunk.text
+            remaining = limit - used - len(header) - 2  # \n separators
+            if remaining <= 0:
+                break
+            if len(text) > remaining:
+                text = text[:remaining]
+            parts.append(f"{header}\n{text}")
+            used += len(header) + len(text) + 2
+        if parts:
+            return "\n\n".join(parts)
     text = thread.body_text or thread.snippet or ""
     return text[:limit]
 
@@ -138,9 +165,14 @@ def register_intelligence_tools(
         max_threads = clamp_int(max_threads, default=5, minimum=1, maximum=_MAX_ASK_THREADS)
 
         try:
-            # Retrieve relevant threads via hybrid search
+            # Retrieve relevant threads via hybrid search. ``with_evidence``
+            # asks the chunk-aware retrieval lane to attach matching
+            # per-message chunks to each surfaced thread, so the LLM
+            # context below is the precise passages that drove ranking
+            # rather than the truncated accumulated thread body.
             embedding = await ollama.embed(question)
-            results = db.hybrid_search(
+            results = await asyncio.to_thread(
+                db.hybrid_search,
                 query_text=question,
                 query_embedding=embedding,
                 folders=folders,
@@ -148,6 +180,7 @@ def register_intelligence_tools(
                 date_from=date_from,
                 date_to=date_to,
                 limit=max_threads,
+                with_evidence=True,
             )
 
             if not results:
@@ -211,7 +244,7 @@ def register_intelligence_tools(
             A summary of the available indexed thread context in the requested style.
         """
         try:
-            thread = db.get_thread(thread_id)
+            thread = await asyncio.to_thread(db.get_thread, thread_id)
             if not thread:
                 return [TextContent(type="text", text=f"Thread not found: {thread_id}")]
 
@@ -280,13 +313,21 @@ def register_intelligence_tools(
 
         try:
             embedding = await ollama.embed(query)
-            results = db.hybrid_search(
+            # ``with_evidence`` attaches the chunk(s) that ranked each
+            # thread, so the per-thread extraction prompt below sees the
+            # exact passages relevant to ``query`` rather than the whole
+            # accumulated body. For structured extraction this matters:
+            # passing only the relevant chunk reduces the chance the LLM
+            # picks data from an unrelated reply elsewhere in the thread.
+            results = await asyncio.to_thread(
+                db.hybrid_search,
                 query_text=query,
                 query_embedding=embedding,
                 folders=folders,
                 date_from=date_from,
                 date_to=date_to,
                 limit=limit,
+                with_evidence=True,
             )
 
             if not results:
@@ -348,7 +389,12 @@ def register_intelligence_tools(
 
 async def _claude_complete(system: str, user: str, api_key: str, model: str) -> str:
     """Call the Claude API for higher-quality reasoning."""
-    async with httpx.AsyncClient(timeout=60.0) as client:
+    # Explicit per-call timeout — connect quickly, allow the read budget
+    # to span Claude's reasoning. Setting on the call rather than relying
+    # on the client-level default keeps the semantics correct if the
+    # client is ever shared across requests.
+    timeout = httpx.Timeout(60.0, connect=5.0)
+    async with httpx.AsyncClient() as client:
         r = await client.post(
             "https://api.anthropic.com/v1/messages",
             headers={
@@ -362,6 +408,7 @@ async def _claude_complete(system: str, user: str, api_key: str, model: str) -> 
                 "system": system,
                 "messages": [{"role": "user", "content": user}],
             },
+            timeout=timeout,
         )
         r.raise_for_status()
         return r.json()["content"][0]["text"]

@@ -50,6 +50,33 @@ def _write_eml(path: Path, message_id: str, subject: str = "Hello") -> None:
     )
 
 
+def _write_eml_with_text_attachment(path: Path, message_id: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        f"From: alice@example.com\r\n"
+        f"To: bob@example.com\r\n"
+        f"Subject: Attachment retry\r\n"
+        f"Message-ID: <{message_id}>\r\n"
+        f"Date: Mon, 01 Jan 2024 12:00:00 +0000\r\n"
+        f"MIME-Version: 1.0\r\n"
+        f"Content-Type: multipart/mixed; boundary=frontier\r\n"
+        f"\r\n"
+        f"--frontier\r\n"
+        f"Content-Type: text/plain; charset=utf-8\r\n"
+        f"\r\n"
+        f"Body of {message_id}.\r\n"
+        f"\r\n"
+        f"--frontier\r\n"
+        f"Content-Type: text/plain; name=note.txt\r\n"
+        f"Content-Disposition: attachment; filename=note.txt\r\n"
+        f"Content-Transfer-Encoding: 7bit\r\n"
+        f"\r\n"
+        f"attachment text that should be chunked\r\n"
+        f"--frontier--\r\n",
+        encoding="utf-8",
+    )
+
+
 class TestOnMovedIndexesDestination:
     def test_rename_into_new_indexes_destination(self, tmp_path, monkeypatch):
         """Regression: Maildir delivery writes a file under ``tmp/`` then
@@ -214,17 +241,19 @@ class TestInitialIndexNestedFolders:
 
 
 class TestInitialIndexHeartbeat:
-    def test_health_file_refreshed_during_long_scan(self, tmp_path, monkeypatch):
-        """``initial_index`` must refresh the heartbeat every
-        ``HEALTH_REFRESH_EVERY`` messages so that embedding a large mailbox
-        does not exceed ``HEALTH_MAX_AGE_SECONDS`` mid-scan."""
+    def test_health_file_refreshed_after_every_processed_message(self, tmp_path, monkeypatch):
+        """``initial_index`` must refresh the heartbeat after every
+        processed message so that embedding a large mailbox does not
+        exceed ``HEALTH_MAX_AGE_SECONDS`` mid-scan. A single batch of 25
+        jobs at ~5 embeds/sec with chunky attachments easily exceeds the
+        90s threshold; per-job touch decouples healthcheck cadence from
+        per-batch duration."""
         maildir = tmp_path / "maildir"
         inbox = maildir / "INBOX" / "cur"
         inbox.mkdir(parents=True)
 
-        # Write one more than the refresh threshold so we expect at least
-        # one refresh to fire during the scan.
-        for i in range(main.HEALTH_REFRESH_EVERY + 1):
+        message_count = 5
+        for i in range(message_count):
             _write_eml(inbox / f"m{i}.eml", f"m{i}@example.com")
 
         db = Database(tmp_path / "mail.db")
@@ -239,7 +268,10 @@ class TestInitialIndexHeartbeat:
 
         main.initial_index(db, embedder, threader, _make_queue(db))
 
-        assert len(touches) >= 1
+        # One touch per processed message in the drain loop. (The
+        # outer ``main()`` adds two more touches — pre-call and
+        # post-call — but those are not exercised by this test.)
+        assert len(touches) == message_count
 
 
 class TestDrainQueueRetryAndDeadLetter:
@@ -330,3 +362,169 @@ class TestValidateEmbeddingDim:
         with pytest.raises(SystemExit) as exc_info:
             main._validate_embedding_dim(embedder)
         assert str(EMBEDDING_DIM) in str(exc_info.value)
+
+
+class TestIndexOneFileChunking:
+    """End-to-end of the schema-v9 chunker integration through the
+    real ``_index_one_file`` path — chunker is invoked for each new
+    message, every new chunk gets an embed call, chunks land in the
+    three chunk tables, and the thread vector is the mean of those
+    chunk vectors rather than a single embed of the merged body.
+    """
+
+    def test_chunks_land_and_thread_vector_is_chunk_mean(self, tmp_path):
+
+        db_path = tmp_path / "db" / "mail.db"
+        db = Database(db_path)
+        threader = Threader(db)
+
+        # A multi-paragraph body so the chunker emits at least one
+        # chunk; defaults are tuned to ~350 token target so a short
+        # body fits in one chunk, exercising the "single chunk per
+        # message" path that nonetheless writes through the chunk
+        # tables and drives the mean-vector computation.
+        body = "Paragraph one with some content.\n\nParagraph two follows.\n"
+        dest = tmp_path / "INBOX" / "cur" / "msg.eml"
+        dest.parent.mkdir(parents=True)
+        dest.write_text(
+            "From: alice@example.com\r\n"
+            "To: bob@example.com\r\n"
+            "Subject: chunked\r\n"
+            "Message-ID: <chunked@x>\r\n"
+            "Date: Mon, 01 Jan 2024 12:00:00 +0000\r\n"
+            "Content-Type: text/plain; charset=utf-8\r\n"
+            "\r\n" + body,
+            encoding="utf-8",
+        )
+
+        # MagicMock returns the SAME embedding for every call. The thread
+        # vector — computed as the mean of all chunk embeddings — must
+        # therefore equal that embedding regardless of how many chunks
+        # the chunker emitted.
+        chunk_vec = [0.42] * EMBEDDING_DIM
+        embedder = MagicMock()
+        embedder.embed.return_value = chunk_vec
+
+        # Patch MAILDIR_PATH so parse_email's relative-folder calculation
+        # works against tmp_path — the indexer normally roots that at
+        # /maildir.
+        import src.main as main_mod
+
+        original_root = main_mod.MAILDIR_PATH
+        main_mod.MAILDIR_PATH = tmp_path
+        try:
+            ok, stage, err, _ = main._index_one_file(dest, db, embedder, threader)
+        finally:
+            main_mod.MAILDIR_PATH = original_root
+
+        assert ok, f"failed at {stage}: {err}"
+
+        # Chunk(s) for this message landed in all three indexes.
+        chunk_ids = db.get_chunk_ids_for_message("chunked@x")
+        assert len(chunk_ids) >= 1
+        for cid in chunk_ids:
+            vec_count = db._conn.execute(
+                "SELECT COUNT(*) FROM message_chunks_vec WHERE chunk_id = ?", (cid,)
+            ).fetchone()[0]
+            assert vec_count == 1
+
+        # Thread vector equals the (constant) chunk vector — proves the
+        # mean-of-chunks path drove the upsert, not a separate embed of
+        # the merged body.
+        import struct
+
+        row = db._conn.execute(
+            "SELECT embedding FROM threads_vec WHERE thread_id = ?", ("chunked@x",)
+        ).fetchone()
+        assert row is not None
+        stored = list(struct.unpack(f"{EMBEDDING_DIM}f", row["embedding"]))
+        assert stored == pytest.approx(chunk_vec, rel=1e-5)
+
+    def test_replay_same_message_skips_re_embedding_existing_chunks(self, tmp_path):
+        """Idempotency: chunking the same body twice must not re-embed
+        chunks that are already stored. The diff path keys on
+        deterministic chunk_ids so a re-index burns zero extra Ollama
+        round-trips."""
+        db_path = tmp_path / "db" / "mail.db"
+        db = Database(db_path)
+        threader = Threader(db)
+
+        dest = tmp_path / "INBOX" / "cur" / "msg.eml"
+        dest.parent.mkdir(parents=True)
+        dest.write_text(
+            "From: alice@example.com\r\n"
+            "To: bob@example.com\r\n"
+            "Subject: replay\r\n"
+            "Message-ID: <replay@x>\r\n"
+            "Date: Mon, 01 Jan 2024 12:00:00 +0000\r\n"
+            "Content-Type: text/plain; charset=utf-8\r\n"
+            "\r\n"
+            "Single short paragraph.\n",
+            encoding="utf-8",
+        )
+
+        embedder = MagicMock()
+        embedder.embed.return_value = [0.1] * EMBEDDING_DIM
+
+        import src.main as main_mod
+
+        original_root = main_mod.MAILDIR_PATH
+        main_mod.MAILDIR_PATH = tmp_path
+        try:
+            ok, _, _, _ = main._index_one_file(dest, db, embedder, threader)
+            assert ok
+            first_call_count = embedder.embed.call_count
+
+            # Second pass: same file, same body, same chunk_ids.
+            # Threader will see the existing thread and produce a Thread
+            # whose ``messages`` list contains just this re-arrived
+            # message; the chunker emits the same chunk_ids; the diff
+            # path skips them all and embed should not be called again.
+            ok2, _, _, _ = main._index_one_file(dest, db, embedder, threader)
+            assert ok2
+        finally:
+            main_mod.MAILDIR_PATH = original_root
+
+        # The second pass should not have triggered any new embed calls.
+        assert embedder.embed.call_count == first_call_count
+
+    def test_attachment_embed_failure_does_not_persist_partial_state(self, tmp_path):
+        """Attachment chunk embedding now runs in the embed phase, before the
+        DB write transaction opens. A failing Ollama call must surface as a
+        retryable embed-stage failure and leave zero rows behind — neither
+        the body, nor the attachment row, nor the extraction cache should
+        be persisted, so the queue can replay the whole message cleanly."""
+        db_path = tmp_path / "db" / "mail.db"
+        db = Database(db_path)
+        threader = Threader(db)
+
+        dest = tmp_path / "INBOX" / "cur" / "msg.eml"
+        _write_eml_with_text_attachment(dest, "attachment-retry@x")
+
+        embedder = MagicMock()
+        embedder.embed.side_effect = [
+            [0.1] * EMBEDDING_DIM,  # body chunk
+            RuntimeError("ollama attachment failure"),
+        ]
+
+        import src.main as main_mod
+
+        original_root = main_mod.MAILDIR_PATH
+        main_mod.MAILDIR_PATH = tmp_path
+        try:
+            ok, stage, err, _ = main._index_one_file(dest, db, embedder, threader)
+        finally:
+            main_mod.MAILDIR_PATH = original_root
+
+        assert not ok
+        # Attachment embedding now happens in the embed phase, outside the
+        # ``with db.transaction()`` block, so the failure surfaces as
+        # ``embed`` rather than ``db_write``. The queue retries on either.
+        assert stage == "embed"
+        assert err is not None
+        assert "ollama attachment failure" in err
+        assert not db.is_indexed(str(dest))
+        assert db.count_total_messages() == 0
+        assert not db.get_chunk_ids_for_message("attachment-retry@x")
+        assert db._conn.execute("SELECT COUNT(*) FROM attachments").fetchone()[0] == 0
+        assert db._conn.execute("SELECT COUNT(*) FROM attachment_extractions").fetchone()[0] == 0

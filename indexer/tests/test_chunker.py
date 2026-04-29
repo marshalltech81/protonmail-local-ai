@@ -13,7 +13,6 @@ from pathlib import Path
 
 import pytest
 from src.chunker import (
-    CHUNKER_VERSION,
     chunk_message,
     estimate_tokens,
     normalize_body,
@@ -317,12 +316,6 @@ class TestValidation:
 
 
 class TestModuleSurface:
-    def test_chunker_version_is_positive_int(self):
-        # PR 2 will persist this per chunk; a bump triggers re-chunk on
-        # the next touch. The constant must exist and be int-typed.
-        assert isinstance(CHUNKER_VERSION, int)
-        assert CHUNKER_VERSION >= 1
-
     def test_message_chunk_is_frozen(self):
         chunks = chunk_message(message_pk="m1", body_text="hello")
         with pytest.raises(Exception):  # FrozenInstanceError subclasses AttributeError
@@ -373,3 +366,37 @@ class TestFixtures:
             assert normalized[c.char_start : c.char_end] == c.text
         joined = "\n".join(c.text for c in chunks)
         assert "café" in joined.lower()
+
+
+# ---------------------------------------------------------------------------
+# mean_vector — used by the indexer write path and the reconciler reap path
+# to derive a thread-level vector from its component chunk vectors.
+# ---------------------------------------------------------------------------
+
+
+class TestMeanVector:
+    def test_two_vectors_average_element_wise(self):
+        from src.chunker import mean_vector
+
+        result = mean_vector([[0.0, 1.0, 2.0], [2.0, 1.0, 0.0]])
+        assert result == [1.0, 1.0, 1.0]
+
+    def test_single_vector_is_identity(self):
+        from src.chunker import mean_vector
+
+        v = [0.5, 0.25, -0.1]
+        assert mean_vector([v]) == v
+
+    def test_empty_list_raises(self):
+        import pytest
+        from src.chunker import mean_vector
+
+        with pytest.raises(ValueError, match="empty"):
+            mean_vector([])
+
+    def test_mismatched_dimensions_raises(self):
+        import pytest
+        from src.chunker import mean_vector
+
+        with pytest.raises(ValueError, match="dimension"):
+            mean_vector([[0.1, 0.2], [0.3, 0.4, 0.5]])

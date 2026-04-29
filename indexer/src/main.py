@@ -16,6 +16,12 @@ from pathlib import Path
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
+from .attachment_indexing import (
+    AttachmentWritePlan,
+    apply_attachment_writes,
+    prepare_attachment_writes,
+)
+from .chunker import chunk_message, mean_vector
 from .database import EMBEDDING_DIM, Database
 from .embedder import Embedder
 from .parser import parse_email
@@ -43,6 +49,70 @@ OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://ollama:11434")
 EMBED_MODEL = os.environ.get("OLLAMA_EMBED_MODEL", "nomic-embed-text")
 # /tmp default is safe: container tmpfs, non-root user, overridable via env.
 INDEXER_HEALTH_FILE = Path(os.environ.get("INDEXER_HEALTH_FILE", "/tmp/indexer-health"))  # nosec B108
+
+
+def _int_env(name: str, default: int, minimum: int = 1) -> int:
+    """Read a positive int from the environment with a clamp + fallback.
+
+    Used for the chunker token budgets so a typo or empty string falls back
+    to the default rather than raising at startup. Mirrors the lenient parse
+    used elsewhere (queue, reconciler) so operators get the same behavior
+    across knobs.
+    """
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        log.warning("invalid %s=%r; falling back to %d", name, raw, default)
+        return default
+    return max(minimum, value)
+
+
+# Chunker token budgets — see ``chunker.chunk_message`` for semantics. The
+# defaults match the chunker's own defaults, sized for ``nomic-embed-text``
+# at 768 dim with an ~8k token context window (target=350 tokens leaves
+# generous headroom).
+CHUNK_TARGET_TOKENS = _int_env("INDEXER_CHUNK_TARGET_TOKENS", 350)
+CHUNK_MAX_TOKENS = _int_env("INDEXER_CHUNK_MAX_TOKENS", 500)
+CHUNK_OVERLAP_TOKENS = _int_env("INDEXER_CHUNK_OVERLAP_TOKENS", 60, minimum=0)
+
+
+def _bool_env(name: str, default: bool) -> bool:
+    raw = os.environ.get(name, "").strip().lower()
+    if not raw:
+        return default
+    return raw in {"1", "true", "yes", "on"}
+
+
+# Attachment extraction — see ``src/extractors/`` for
+# per-format implementations and ``.env.example`` for the operator-
+# facing reference. Defaults are conservative: OCR enabled (most
+# valuable for scanned receipts and screenshots), 10 MB attachment
+# cap (skips huge backup zips), 20-page OCR cap (bounds CPU on
+# scanned books).
+INDEXER_ATTACHMENT_EXTRACTION_ENABLED = _bool_env("INDEXER_ATTACHMENT_EXTRACTION_ENABLED", True)
+INDEXER_OCR_ENABLED = _bool_env("INDEXER_OCR_ENABLED", True)
+INDEXER_ATTACHMENT_MAX_BYTES = _int_env("INDEXER_ATTACHMENT_MAX_BYTES", 10_000_000, minimum=1)
+INDEXER_OCR_MAX_PAGES = _int_env("INDEXER_OCR_MAX_PAGES", 20, minimum=1)
+# Per-page OCR time ceiling. Tesseract is single-threaded and a
+# crafted high-noise image (still inside ``INDEXER_ATTACHMENT_MAX_BYTES``)
+# can keep it busy for minutes; combined with ``INDEXER_OCR_MAX_PAGES``
+# that pins the worker for tens of minutes per PDF. Set to 0 to
+# disable the timeout.
+INDEXER_OCR_TIMEOUT_SECONDS = _int_env("INDEXER_OCR_TIMEOUT_SECONDS", 60, minimum=0)
+# Page cap for the digital pypdf path. The OCR cap above doesn't bound
+# this — a 5 MB text-only PDF can carry thousands of pages, and even
+# at ~ms per page the indexer queue stalls. Set to 0 to disable.
+INDEXER_PDF_MAX_DIGITAL_PAGES = _int_env("INDEXER_PDF_MAX_DIGITAL_PAGES", 500, minimum=0)
+# 2,000,000 chars ~ 500 pages of dense OCR text. Bounds the
+# ``attachment_extractions.extracted_text`` row size so a single huge
+# scanned PDF can't blow up SQLite by storing tens of MB of text per
+# attachment. Set to 0 to disable the cap.
+INDEXER_ATTACHMENT_MAX_EXTRACTED_CHARS = _int_env(
+    "INDEXER_ATTACHMENT_MAX_EXTRACTED_CHARS", 2_000_000, minimum=0
+)
 
 
 def touch_health_file() -> None:
@@ -121,6 +191,160 @@ class MaildirHandler(FileSystemEventHandler):
             self.queue.enqueue(dest_path, REASON_ON_MOVED)
 
 
+def _build_chunk_writes(
+    thread,
+    db: Database,
+    embedder: Embedder,
+) -> list[tuple[object, list, dict[str, list[float]]]]:
+    """Chunk + embed every newly-arrived message in ``thread``.
+
+    ``thread.messages`` is the new arrivals only — existing messages
+    already have chunks on disk and re-chunking them would burn embed
+    cycles for no gain (chunk ids are deterministic from
+    ``message_pk + index + text``, so the diff would be empty anyway).
+    For new threads, ``thread.messages`` is the full thread (one
+    message); for updates, it is the single newly-arrived reply.
+    """
+    chunk_writes: list[tuple[object, list, dict[str, list[float]]]] = []
+    for msg in thread.messages:
+        chunks = chunk_message(
+            message_pk=msg.message_id,
+            body_text=strip_for_embedding(msg.body_text or ""),
+            target_tokens=CHUNK_TARGET_TOKENS,
+            max_tokens=CHUNK_MAX_TOKENS,
+            overlap_tokens=CHUNK_OVERLAP_TOKENS,
+        )
+        stored_ids = db.get_chunk_ids_for_message(msg.message_id)
+        new_chunks = [c for c in chunks if c.chunk_id not in stored_ids]
+        embeddings_by_chunk_id = {
+            chunk.chunk_id: embedder.embed(chunk.text) for chunk in new_chunks
+        }
+        chunk_writes.append((msg, chunks, embeddings_by_chunk_id))
+    return chunk_writes
+
+
+def _build_attachment_plans(
+    thread,
+    db: Database,
+    embedder: Embedder,
+) -> dict[str, list[AttachmentWritePlan]]:
+    """Pre-compute per-message attachment plans outside any transaction.
+
+    ``prepare_attachment_writes`` runs the extractor (OCR / pypdf /
+    openpyxl) and the per-chunk Ollama embed calls — both too slow to
+    hold inside a ``BEGIN IMMEDIATE``, since every outbound roundtrip
+    would block the watchdog observer and the reconciler on the same
+    DB lock. The caller applies the resulting plans inside the
+    transaction.
+    """
+    plans_by_msg: dict[str, list[AttachmentWritePlan]] = {}
+    if not INDEXER_ATTACHMENT_EXTRACTION_ENABLED:
+        return plans_by_msg
+    cap = (
+        INDEXER_ATTACHMENT_MAX_EXTRACTED_CHARS
+        if INDEXER_ATTACHMENT_MAX_EXTRACTED_CHARS > 0
+        else None
+    )
+    for msg in thread.messages:
+        if not msg.attachments:
+            continue
+        plans: list[AttachmentWritePlan] = []
+        for occurrence_index, attachment in enumerate(msg.attachments):
+            plans.append(
+                prepare_attachment_writes(
+                    attachment=attachment,
+                    message_id=msg.message_id,
+                    db=db,
+                    embedder=embedder,
+                    chunk_target_tokens=CHUNK_TARGET_TOKENS,
+                    chunk_max_tokens=CHUNK_MAX_TOKENS,
+                    chunk_overlap_tokens=CHUNK_OVERLAP_TOKENS,
+                    ocr_enabled=INDEXER_OCR_ENABLED,
+                    max_bytes=INDEXER_ATTACHMENT_MAX_BYTES,
+                    max_ocr_pages=INDEXER_OCR_MAX_PAGES,
+                    ocr_timeout_seconds=INDEXER_OCR_TIMEOUT_SECONDS or None,
+                    max_pdf_pages=INDEXER_PDF_MAX_DIGITAL_PAGES or None,
+                    occurrence_index=occurrence_index,
+                    max_extracted_chars=cap,
+                )
+            )
+        plans_by_msg[msg.message_id] = plans
+    return plans_by_msg
+
+
+def _seed_thread_embedding(
+    thread,
+    db: Database,
+    embedder: Embedder,
+    chunk_writes,
+    attachment_plans_by_msg: dict[str, list[AttachmentWritePlan]],
+) -> list[float]:
+    """Pick the seed thread vector to write inside the transaction.
+
+    The final vector is replaced after the chunk writes inside the same
+    transaction (see ``_commit_indexing_writes``), so this seed only has
+    to satisfy the ``threads_vec`` insert. Use the existing chunk mean
+    when available, a zero vector if new chunks are about to land in
+    this transaction (the post-write replace will overwrite it), and
+    fall through to embedding the subject line only when there is no
+    body or attachment text at all.
+    """
+    chunk_embeddings = db.get_thread_chunk_embeddings(thread.thread_id)
+    if chunk_embeddings:
+        return mean_vector(chunk_embeddings)
+    has_incoming_chunks = any(chunks for _, chunks, _ in chunk_writes)
+    has_incoming_attachment_chunks = any(
+        plan.chunks for plans in attachment_plans_by_msg.values() for plan in plans
+    )
+    if has_incoming_chunks or has_incoming_attachment_chunks:
+        return [0.0] * EMBEDDING_DIM
+    fallback = thread.subject.strip() if thread.subject else "(empty thread)"
+    return embedder.embed(fallback)
+
+
+def _commit_indexing_writes(
+    thread,
+    db: Database,
+    chunk_writes,
+    attachment_plans_by_msg: dict[str, list[AttachmentWritePlan]],
+    seed_embedding: list[float],
+) -> None:
+    """Persist a fully-prepared indexing payload inside one transaction.
+
+    Body chunks, attachment chunks, and the recomputed thread vector
+    all land or all roll back together. No network or extractor work
+    happens here — every slow operation has already run during
+    ``_build_chunk_writes`` / ``_build_attachment_plans``.
+    """
+    with db.transaction():
+        db.upsert_thread(thread, seed_embedding)
+        for msg, chunks, embeddings_by_chunk_id in chunk_writes:
+            db.replace_message_chunks(
+                message_id=msg.message_id,
+                thread_id=thread.thread_id,
+                chunks=chunks,
+                embeddings_by_chunk_id=embeddings_by_chunk_id,
+            )
+            # Plans were prepared outside this transaction, so the
+            # apply loop only does DB writes — no Ollama, no extractor.
+            # Benign extractor outcomes (unsupported, empty, too_large,
+            # failed parse) land as status rows here. Hard DB failures
+            # propagate so the outer transaction rolls back and the
+            # queue retries the whole message rather than committing a
+            # half-indexed attachment.
+            for plan in attachment_plans_by_msg.get(msg.message_id, ()):
+                apply_attachment_writes(
+                    plan=plan,
+                    message_id=msg.message_id,
+                    thread_id=thread.thread_id,
+                    db=db,
+                )
+
+        updated_chunk_embeddings = db.get_thread_chunk_embeddings(thread.thread_id)
+        if updated_chunk_embeddings:
+            db.replace_thread_vector(thread.thread_id, mean_vector(updated_chunk_embeddings))
+
+
 def _index_one_file(
     path: Path,
     db: Database,
@@ -164,12 +388,11 @@ def _index_one_file(
 
     t0 = time.perf_counter()
     try:
-        # The stored body_text feeds FTS (users legitimately search
-        # quoted text), but the embedding input is stripped of quoted
-        # replies and signatures so the vector tracks the substantive
-        # content of each reply rather than accumulated quoted history.
-        body = db.build_merged_body(thread)
-        embedding = embedder.embed(strip_for_embedding(body))
+        chunk_writes = _build_chunk_writes(thread, db, embedder)
+        attachment_plans_by_msg = _build_attachment_plans(thread, db, embedder)
+        embedding = _seed_thread_embedding(
+            thread, db, embedder, chunk_writes, attachment_plans_by_msg
+        )
     except Exception as e:
         embed_ms = (time.perf_counter() - t0) * 1000
         return (
@@ -182,7 +405,7 @@ def _index_one_file(
 
     t0 = time.perf_counter()
     try:
-        db.upsert_thread(thread, embedding, body=body)
+        _commit_indexing_writes(thread, db, chunk_writes, attachment_plans_by_msg, embedding)
     except Exception as e:
         db_write_ms = (time.perf_counter() - t0) * 1000
         return (
@@ -275,11 +498,13 @@ def initial_index(
 ):
     """Enqueue every unindexed Maildir message and drain the queue.
 
-    Refreshes the health file every ``HEALTH_REFRESH_EVERY`` processed
-    messages so that long initial indexes (large mailboxes, slow Ollama
-    embeddings) do not exceed ``HEALTH_MAX_AGE_SECONDS`` in the
+    Refreshes the health file after every processed message so that
+    long initial indexes (large mailboxes, slow Ollama embeddings, OCR
+    on scanned PDFs) do not exceed ``HEALTH_MAX_AGE_SECONDS`` in the
     healthcheck and cause the container to be reported unhealthy
-    mid-scan.
+    mid-scan. (A single message that itself takes longer than
+    ``HEALTH_MAX_AGE_SECONDS`` will still trip the healthcheck — that
+    case would need a heartbeat hook inside ``_index_one_file``.)
 
     Routing the initial scan through the queue — rather than indexing
     files inline — means a crash or Ollama outage mid-scan leaves the
@@ -310,8 +535,14 @@ def initial_index(
         else:
             queue.mark_failed(filepath, stage=stage, error=error or "")
         processed += 1
-        if processed % HEALTH_REFRESH_EVERY == 0:
-            touch_health_file()
+        # Touch the heartbeat after every job rather than every
+        # ``HEALTH_REFRESH_EVERY`` jobs. ``HEALTH_MAX_AGE_SECONDS`` is 90s
+        # in the healthcheck script; a 25-job batch can exceed that on
+        # mailboxes with large attachments (PDF chunking + OCR), flipping
+        # the container to unhealthy mid-work and blocking compose
+        # dependency-gated starts. A single ``Path.touch()`` per job is
+        # negligible relative to parse + embed + upsert cost.
+        touch_health_file()
         if processed % TIMING_LOG_EVERY == 0:
             line = format_summary(timing_aggregator.summary())
             if line:

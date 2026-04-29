@@ -20,7 +20,13 @@ readonly BRIDGE_WAIT_MAX_ATTEMPTS=300
 readonly CERT_EXTRACT_TIMEOUT_SECONDS=20
 readonly MAX_CONSECUTIVE_SYNC_FAILURES=5
 readonly BRIDGE_CERT_PIN_ROTATE="${BRIDGE_CERT_PIN_ROTATE:-false}"
+readonly MAILDIR_PATH="/maildir"
 
+# Owner-only umask for the runtime tmp dir (config + cert material).
+# mbsync itself ignores umask for Maildir writes — it explicitly passes
+# mode 0600 to ``open()`` and can create subdirectories under this umask,
+# so the post-sync chmod hook in ``relax_new_maildir_perms`` is what makes
+# new Maildir paths traversable/readable to the indexer (a different UID).
 umask 077
 mkdir -p "$RUNTIME_DIR"
 
@@ -153,8 +159,22 @@ extract_bridge_cert() {
     return 0
 }
 
+relax_new_maildir_perms() {
+    # mbsync calls ``open(O_CREAT, 0600)`` for every new message and
+    # ignores umask, so newly delivered files are owner-only by default
+    # and unreadable to the indexer (a different UID). Subdirectories
+    # created while the service umask is 077 are also not traversable by
+    # the indexer. Re-apply directory execute/read and file read bits after
+    # each sync so the indexer reads via "other" permission.
+    find "$MAILDIR_PATH" -type d \! -perm -005 -exec chmod go+rx {} +
+    find "$MAILDIR_PATH" -type f \! -perm -044 -exec chmod go+r {} +
+}
+
 run_sync() {
-    mbsync -c "$CONFIG_FILE" -a 2>&1
+    local rc=0
+    mbsync -c "$CONFIG_FILE" -a 2>&1 || rc=$?
+    relax_new_maildir_perms
+    return "$rc"
 }
 
 # =============================================================================

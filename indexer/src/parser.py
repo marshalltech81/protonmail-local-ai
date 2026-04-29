@@ -13,6 +13,7 @@ import os
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import html2text
 
@@ -24,11 +25,33 @@ h2t.ignore_images = True
 h2t.body_width = 0
 
 
+def _decoded_payload(part: Any) -> bytes:
+    payload = part.get_payload(decode=True)
+    return payload if isinstance(payload, bytes) else b""
+
+
 @dataclass
 class Attachment:
+    """One MIME attachment from a message.
+
+    ``payload`` holds the raw decoded bytes for the lifetime of the
+    indexer pass — the extractor needs them to pull text out of PDFs,
+    DOCX, images, etc. They are not persisted anywhere; once the
+    indexer has chunked + embedded any extracted text, the Attachment
+    object goes out of scope and the bytes are GC'd. Callers that only
+    need metadata can ignore ``payload``.
+
+    ``content_hash`` is the SHA-256 of ``payload`` and acts as the
+    deduplication key in ``attachment_extractions`` — a forwarded PDF
+    is OCR'd / parsed once per content, regardless of how many emails
+    carry it.
+    """
+
     filename: str
     content_type: str
     size: int
+    payload: bytes = b""
+    content_hash: str = ""
 
 
 @dataclass
@@ -46,7 +69,7 @@ class Message:
     filepath: str
     attachments: list[Attachment] = field(default_factory=list)
     has_attachments: bool = False
-    # File identity captured at parse time (schema v7). ``size`` / ``mtime_ns``
+    # File identity captured at parse time. ``size`` / ``mtime_ns``
     # / ``content_hash`` feed ``indexed_files`` so the reconciler can tell a
     # flag-only rename from a genuine content change without re-reading every
     # file from disk. Defaults to ``None`` for Messages built by test
@@ -91,7 +114,7 @@ def parse_email(path: Path, maildir_root: Path | None = None) -> Message | None:
 
         folder = _derive_folder(path, maildir_root)
 
-        # Capture file identity (schema v7). ``size`` is the length of the
+        # Capture file identity. ``size`` is the length of the
         # bytes we actually hashed; ``content_hash`` is computed over the
         # raw file — not the decoded body — so flag-only renames keep the
         # same hash while any real content mutation shows up as a mismatch.
@@ -179,25 +202,27 @@ def _extract_body_and_attachments(
 
             if is_attachment:
                 filename = part.get_filename() or "unnamed"
-                payload = part.get_payload(decode=True) or b""
+                payload = _decoded_payload(part)
                 attachments.append(
                     Attachment(
                         filename=filename,
                         content_type=ct,
                         size=len(payload),
+                        payload=payload,
+                        content_hash=hashlib.sha256(payload).hexdigest(),
                     )
                 )
             elif ct == "text/plain" and not plain_text:
-                payload = part.get_payload(decode=True) or b""
+                payload = _decoded_payload(part)
                 charset = part.get_content_charset() or "utf-8"
                 plain_text = _safe_decode(payload, charset)
             elif ct == "text/html" and not html_text:
-                payload = part.get_payload(decode=True) or b""
+                payload = _decoded_payload(part)
                 charset = part.get_content_charset() or "utf-8"
                 html_text = h2t.handle(_safe_decode(payload, charset))
     else:
         ct = msg.get_content_type()
-        payload = msg.get_payload(decode=True) or b""
+        payload = _decoded_payload(msg)
         charset = msg.get_content_charset() or "utf-8"
         if ct == "text/html":
             html_text = h2t.handle(_safe_decode(payload, charset))
@@ -260,14 +285,29 @@ def _parse_date(value: str) -> datetime:
     info" per RFC 2822) and aware datetimes for everything else. Threader
     sorts and compares message dates, which raises ``TypeError`` when naive
     and aware values are mixed — so every parsed date is forced to UTC here.
+
+    Unparseable headers fall back to the current UTC time so threading
+    doesn't crash, but that fabricates a date — log at WARNING with the
+    offending value so an operator notices a corrupt mailbox before the
+    fabricated dates dominate "recent" sorts.
     """
     try:
         from email.utils import parsedate_to_datetime
 
         dt = parsedate_to_datetime(value)
-    except TypeError, ValueError:
+    except TypeError:
+        # Older Python releases occasionally raise TypeError on malformed
+        # dates; ``parsedate_to_datetime`` proper raises ValueError below.
+        log.warning("date header type error, using now(): %r", value)
+        return datetime.now(UTC)
+    except ValueError:
+        # ``parsedate_to_datetime`` raises ValueError on unparseable headers
+        # (empty string, single-token gibberish, malformed timezone). Force
+        # current UTC so threader doesn't crash on a bad header.
+        log.warning("date header unparseable, using now(): %r", value)
         return datetime.now(UTC)
     if dt is None:
+        log.warning("date header parsed to None, using now(): %r", value)
         return datetime.now(UTC)
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=UTC)

@@ -204,6 +204,54 @@ Restart Claude Desktop.
 In a new conversation, you should see the ProtonMail tools available.
 Test with: *"What is the status of my email index?"*
 
+### Optional: Run Open WebUI
+
+Open WebUI can provide a local browser UI backed by the existing Ollama
+container. It does **not** need a second Ollama instance.
+
+Open WebUI's native MCP integration uses Streamable HTTP, not SSE. To expose
+both transports from this server, set this in `.env`:
+
+```bash
+MCP_TRANSPORT=dual
+```
+
+The Open WebUI session key is a Docker Compose secret (not an env var, so it
+stays out of `docker inspect` metadata). `make open-webui-up` auto-generates
+`.secrets/open_webui_secret_key.txt` via `openssl rand -base64 32` on first
+run; to rotate it later, delete the file and re-run the target.
+
+Start the UI. Signup is **disabled by default** (Open WebUI grants admin to
+whoever signs up first; on a multi-user workstation a default-allow posture
+risks another local user racing you to admin). For the very first run, flip
+the switch on for the admin-creation pass:
+
+```bash
+OPEN_WEBUI_ENABLE_SIGNUP=true make open-webui-up
+```
+
+Open `http://localhost:8080`, create the first admin account, then add the
+MCP server in Open WebUI:
+
+- Type: `MCP (Streamable HTTP)`
+- Server URL: `http://mcp-server:3000/mcp`
+- Auth: `None`
+
+Because Open WebUI is running in Docker on the Compose network, it should use
+container DNS names: `http://ollama:11434` for the model backend and
+`http://mcp-server:3000/mcp` for the MCP server. Both are set by
+`docker-compose.open-webui.yml`.
+
+After creating the admin account, restart the UI **without** the signup
+override so the default-deny posture is back in effect:
+
+```bash
+make open-webui-up
+```
+
+Keep Open WebUI bound to localhost and backed by Ollama if your goal is fully
+local mail conversations.
+
 ## Troubleshooting
 
 ### Bridge won't start — "Failed to launch exit status 1"

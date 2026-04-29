@@ -8,6 +8,7 @@ import json
 import logging
 import re
 import sqlite3
+import weakref
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from email.utils import parseaddr
@@ -16,6 +17,10 @@ from pathlib import Path
 import sqlite_vec
 
 log = logging.getLogger("mcp.sqlite")
+
+
+def _close_connection(conn: sqlite3.Connection) -> None:
+    conn.close()
 
 
 def canonical_addr(value: str) -> str:
@@ -44,16 +49,20 @@ def canonical_addr(value: str) -> str:
 _UNFILTERED_OVERSAMPLE = 2
 _FILTERED_OVERSAMPLE = 4
 
+# Oversample factor for the chunk and attachment FTS lanes, where one
+# thread can legitimately own many matching rows (a long thread, a
+# popular term). Without enough oversample, those threads absorb every
+# top-N row and other threads never enter the lane. The value is a
+# deliberate over-correction of the prior 3× — empirically a ~10×
+# oversample lets ``_best_per_thread`` still surface enough threads
+# even on dense matches.
+_CHUNK_LANE_OVERSAMPLE = 10
+
 
 def _matches_sender(result, from_addr_lower: str) -> bool:
     """True if ``from_addr_lower`` matches one of the thread's senders.
 
-    Senders is the list of ``From`` addresses recorded on the thread
-    (schema v6 and later). For legacy threads where senders is empty the
-    check falls back to ``participants`` (the previous, over-permissive
-    behavior) so users do not suddenly lose results for pre-migration
-    mail — the filter strictens only as threads are reprocessed.
-
+    Senders is the list of ``From`` addresses recorded on the thread.
     Match mode depends on the shape of the query:
 
     * A full address (``bob@example.com``) is compared by canonical
@@ -63,7 +72,7 @@ def _matches_sender(result, from_addr_lower: str) -> bool:
       ``example.com``) keeps the previous substring behavior against the
       lowercased display string, since those shapes cannot canonicalize.
     """
-    haystack = result.senders or result.participants
+    haystack = result.senders
     canonical_query = canonical_addr(from_addr_lower)
     # A canonicalizable full address requires a non-empty local part.
     # ``canonical_addr`` still returns the input for a bare domain like
@@ -98,6 +107,27 @@ def _sanitize_fts_query(query: str) -> str:
 
 
 @dataclass
+class ChunkResult:
+    """One per-message chunk hit, used as precise evidence for a thread.
+
+    The indexer stores per-message paragraph-packed chunks alongside
+    the coarse thread row. A chunk hit carries its parent ``thread_id``
+    so the hybrid-search RRF can lift it into thread ranking, and its
+    ``text`` + ``char_start`` / ``char_end`` so intelligence tools can
+    cite the exact passage they used.
+    """
+
+    chunk_id: str
+    message_id: str
+    thread_id: str
+    chunk_index: int
+    text: str
+    char_start: int
+    char_end: int
+    score: float = 0.0
+
+
+@dataclass
 class ThreadResult:
     thread_id: str
     subject: str
@@ -110,17 +140,36 @@ class ThreadResult:
     has_attachments: bool
     body_text: str = ""
     # Senders = only the From addresses of messages in this thread (a subset
-    # of participants). Populated by the indexer on writes made after schema
-    # v6; legacy rows surface as ``[]`` and the from_addr filter falls back
-    # to participants so pre-migration threads still match.
+    # of participants). The indexer populates this on every thread upsert.
     senders: list[str] = field(default_factory=list)
     score: float = 0.0
+    # Per-message chunk hits backing this thread's ranking. Populated only
+    # when the caller passes ``with_evidence=True``; left empty otherwise so
+    # the existing hybrid_search consumers see the same shape they always
+    # did. Intelligence tools surface these to the LLM as precise passage
+    # citations rather than feeding the whole accumulated body.
+    evidence_chunks: list[ChunkResult] = field(default_factory=list)
 
 
 class Database:
     def __init__(self, path: str):
         self.path = path
         self._conn = self._connect()
+        self._closed = False
+        self._finalizer = weakref.finalize(self, _close_connection, self._conn)
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._finalizer.detach()
+        self._conn.close()
+        self._closed = True
+
+    # Note: no ``__del__`` — ``weakref.finalize`` registered in ``__init__``
+    # is the documented modern pattern for "close on GC" and runs even
+    # when the interpreter is shutting down. Adding ``__del__`` on top
+    # would either fight the finalizer (calling close twice) or swallow
+    # genuine shutdown errors via a bare ``except``.
 
     def _connect(self) -> sqlite3.Connection:
         # MCP is a read-only consumer of the indexer's output; the indexer
@@ -173,6 +222,7 @@ class Database:
         date_to: str | None = None,
         has_attachments: bool | None = None,
         limit: int = 10,
+        with_evidence: bool = False,
     ) -> list[ThreadResult]:
         oversample = (
             _FILTERED_OVERSAMPLE
@@ -194,11 +244,35 @@ class Database:
             has_attachments=has_attachments,
         )
         vec_results = self._vector_search(query_embedding, fetch_limit)
-        fused = self._reciprocal_rank_fusion(bm25_results, vec_results)
+        # Per-message chunks. Oversample heavily because many chunks
+        # may belong to a single thread — without enough chunks the lane
+        # only contributes a handful of unique threads. The chunk lane
+        # "lifts" precise-passage hits into thread ranking, so a thread
+        # with one strong chunk can outrank a thread with a mediocre
+        # coarse vector score. Threads with no chunks (empty bodies)
+        # simply don't appear in this lane and rely on the other two
+        # for ranking.
+        chunk_hits = self._chunk_vector_search(query_embedding, fetch_limit * 3)
+        fused = self._reciprocal_rank_fusion(bm25_results, vec_results, chunk_hits)
         filtered = self._apply_filters(
             fused, folders, from_addr, date_from, date_to, has_attachments
         )
-        return filtered[:limit]
+        top = filtered[:limit]
+
+        if with_evidence and top:
+            # Reuse the chunk lane already fetched: group its hits by
+            # parent thread, take the best per thread for the surfaced
+            # results. Avoids a second sqlite-vec round-trip when
+            # ``chunk_hits`` already covers the surfaced threads.
+            wanted = {r.thread_id for r in top}
+            grouped: dict[str, list[ChunkResult]] = {tid: [] for tid in wanted}
+            for chunk in chunk_hits:
+                if chunk.thread_id in wanted and len(grouped[chunk.thread_id]) < 3:
+                    grouped[chunk.thread_id].append(chunk)
+            for result in top:
+                result.evidence_chunks = grouped.get(result.thread_id, [])
+
+        return top
 
     def keyword_search(
         self,
@@ -263,6 +337,43 @@ class Database:
         return bool(folders or from_addr or date_from or date_to or has_attachments is not None)
 
     def _keyword_search(
+        self,
+        query: str,
+        limit: int,
+        folders: list[str] | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
+        has_attachments: bool | None = None,
+    ) -> list[ThreadResult]:
+        thread_hits = self._thread_keyword_search(
+            query,
+            limit,
+            folders=folders,
+            date_from=date_from,
+            date_to=date_to,
+            has_attachments=has_attachments,
+        )
+        chunk_hits = self._chunk_keyword_search(
+            query,
+            limit,
+            folders=folders,
+            date_from=date_from,
+            date_to=date_to,
+            has_attachments=has_attachments,
+        )
+        attachment_hits = self._attachment_keyword_search(
+            query,
+            limit,
+            folders=folders,
+            date_from=date_from,
+            date_to=date_to,
+            has_attachments=has_attachments,
+        )
+        return self._reciprocal_rank_fusion_threads(thread_hits, chunk_hits, attachment_hits)[
+            :limit
+        ]
+
+    def _thread_keyword_search(
         self,
         query: str,
         limit: int,
@@ -339,6 +450,180 @@ class Database:
             log.warning(f"FTS keyword search error, falling back to LIKE: {e}")
             return self._like_fallback(query, limit, folders, date_from, date_to, has_attachments)
 
+    def _chunk_keyword_search(
+        self,
+        query: str,
+        limit: int,
+        folders: list[str] | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
+        has_attachments: bool | None = None,
+    ) -> list[ThreadResult]:
+        fts_query = _sanitize_fts_query(query)
+        if not fts_query:
+            return []
+
+        where_clauses = ["message_chunks_fts MATCH ?"]
+        params: list = [fts_query]
+        self._append_thread_filter_sql(
+            where_clauses,
+            params,
+            folders=folders,
+            date_from=date_from,
+            date_to=date_to,
+            has_attachments=has_attachments,
+        )
+        # SQLite FTS5 doesn't allow ``bm25(...)`` inside aggregates or
+        # subqueries the outer query aggregates over, so the dedupe-by-
+        # thread step happens in Python below. The SQL oversample is
+        # ``limit * _CHUNK_LANE_OVERSAMPLE`` so that a long thread with
+        # many matching chunks doesn't absorb every row before other
+        # threads get a chance to enter the chunk lane (the failure
+        # mode that hurts RRF diversity in the hybrid fuse).
+        sql = (
+            "SELECT "
+            "t.thread_id, t.subject, t.participants, t.senders, t.folder, "
+            "t.date_first, t.date_last, t.message_ids, "
+            "t.snippet, t.has_attachments, t.body_text, "
+            "bm25(message_chunks_fts) AS score "
+            "FROM message_chunks_fts "
+            "JOIN message_chunks c ON message_chunks_fts.rowid = c.fts_rowid "
+            "JOIN threads t ON c.thread_id = t.thread_id "
+            "WHERE " + " AND ".join(where_clauses) + " "  # nosec B608
+            "ORDER BY score LIMIT ?"
+        )
+        params.append(limit * _CHUNK_LANE_OVERSAMPLE)
+        try:
+            rows = self._conn.execute(sql, params).fetchall()
+        except sqlite3.OperationalError as e:
+            # Indexer fails fast on schema-version mismatch, so an older
+            # DB is impossible at runtime. Reaching this branch implies
+            # corruption or a missing FTS shadow — log at warning so the
+            # operator notices precision retrieval has degraded to none.
+            log.warning("Chunk keyword search unavailable: %s", e)
+            return []
+        results = [self._row_to_result(r) for r in rows]
+        return self._best_per_thread(results)[:limit]
+
+    def _attachment_keyword_search(
+        self,
+        query: str,
+        limit: int,
+        folders: list[str] | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
+        has_attachments: bool | None = None,
+    ) -> list[ThreadResult]:
+        fts_query = _sanitize_fts_query(query)
+        if not fts_query:
+            return []
+
+        where_clauses = ["attachments_fts MATCH ?"]
+        params: list = [fts_query]
+        self._append_thread_filter_sql(
+            where_clauses,
+            params,
+            folders=folders,
+            date_from=date_from,
+            date_to=date_to,
+            has_attachments=has_attachments,
+        )
+        # Same dedupe-in-Python pattern as ``_chunk_keyword_search`` —
+        # FTS5 forbids aggregating over ``bm25()``.
+        sql = (
+            "SELECT "
+            "t.thread_id, t.subject, t.participants, t.senders, t.folder, "
+            "t.date_first, t.date_last, t.message_ids, "
+            "t.snippet, t.has_attachments, t.body_text, "
+            "bm25(attachments_fts) AS score "
+            "FROM attachments_fts "
+            "JOIN attachments a ON attachments_fts.rowid = a.fts_rowid "
+            "JOIN threads t ON a.thread_id = t.thread_id "
+            "WHERE " + " AND ".join(where_clauses) + " "  # nosec B608
+            "ORDER BY score LIMIT ?"
+        )
+        params.append(limit * _CHUNK_LANE_OVERSAMPLE)
+        try:
+            rows = self._conn.execute(sql, params).fetchall()
+        except sqlite3.OperationalError as e:
+            # Indexer fails fast on schema-version mismatch, so an older
+            # DB is impossible at runtime. Reaching this branch implies
+            # corruption or a missing FTS shadow — log at warning so the
+            # operator notices attachment retrieval has degraded to none.
+            log.warning("Attachment keyword search unavailable: %s", e)
+            return []
+        results = [self._row_to_result(r) for r in rows]
+        return self._best_per_thread(results)[:limit]
+
+    @staticmethod
+    def _append_thread_filter_sql(
+        where_clauses: list[str],
+        params: list,
+        *,
+        folders: list[str] | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
+        has_attachments: bool | None = None,
+    ) -> None:
+        if folders:
+            placeholders = ",".join(["?"] * len(folders))
+            where_clauses.append(f"t.folder IN ({placeholders})")
+            params.extend(folders)
+        date_from_iso = _normalize_date_bound(date_from, end_of_day=False, field_name="date_from")
+        date_to_iso = _normalize_date_bound(date_to, end_of_day=True, field_name="date_to")
+        if date_from_iso is not None:
+            where_clauses.append("t.date_last >= ?")
+            params.append(date_from_iso)
+        if date_to_iso is not None:
+            where_clauses.append("t.date_first <= ?")
+            params.append(date_to_iso)
+        if has_attachments is not None:
+            where_clauses.append("t.has_attachments = ?")
+            params.append(1 if has_attachments else 0)
+
+    @staticmethod
+    def _dedupe_ranked_results(results: list[ThreadResult]) -> list[ThreadResult]:
+        seen: set[str] = set()
+        deduped: list[ThreadResult] = []
+        for result in results:
+            if result.thread_id in seen:
+                continue
+            seen.add(result.thread_id)
+            deduped.append(result)
+        return deduped
+
+    @staticmethod
+    def _best_per_thread(results: list[ThreadResult]) -> list[ThreadResult]:
+        """Collapse to one row per ``thread_id``, keeping the best score.
+
+        The chunk and attachment FTS lanes can return many rows for the
+        same thread (one row per matching chunk). Take the row with the
+        lowest BM25 score (lower = better in FTS5) per thread, then
+        return the surviving rows in the original BM25 order so the
+        caller's ``LIMIT`` slice picks the strongest threads. Compared
+        to ``_dedupe_ranked_results`` (first-seen-wins), this guarantees
+        the kept row carries the thread's best chunk score.
+        """
+        best_score: dict[str, float] = {}
+        best_idx: dict[str, int] = {}
+        for index, result in enumerate(results):
+            if result.thread_id not in best_score or result.score < best_score[result.thread_id]:
+                best_score[result.thread_id] = result.score
+                best_idx[result.thread_id] = index
+        # Preserve original input order — results came in already sorted
+        # by ``score`` ASC from the SQL, so threads with their best
+        # chunk encountered first stay near the top.
+        kept: list[ThreadResult] = []
+        seen: set[str] = set()
+        for index, result in enumerate(results):
+            if best_idx.get(result.thread_id) != index:
+                continue
+            if result.thread_id in seen:
+                continue
+            seen.add(result.thread_id)
+            kept.append(result)
+        return kept
+
     def _like_fallback(
         self,
         query: str,
@@ -389,6 +674,82 @@ class Database:
             log.warning(f"LIKE fallback search error: {e}")
             return []
 
+    def _chunk_vector_search(self, embedding: list[float], limit: int) -> list[ChunkResult]:
+        """Return per-message chunks whose vectors are closest to ``embedding``.
+
+        The chunk vec table is populated incrementally by the indexer.
+        Threads with no chunks (empty bodies) simply do not appear in
+        this lane and fall back to the coarse thread-vector lane in
+        the hybrid fuse.
+        """
+        try:
+            serialized = sqlite_vec.serialize_float32(embedding)
+            rows = self._conn.execute(
+                """
+                SELECT
+                    c.chunk_id, c.message_id, c.thread_id, c.chunk_index,
+                    c.text, c.char_start, c.char_end,
+                    v.distance AS score
+                FROM message_chunks_vec v
+                JOIN message_chunks c ON c.chunk_id = v.chunk_id
+                WHERE v.embedding MATCH ?
+                  AND k = ?
+                ORDER BY v.distance
+                """,
+                (serialized, limit),
+            ).fetchall()
+            return [
+                ChunkResult(
+                    chunk_id=r["chunk_id"],
+                    message_id=r["message_id"],
+                    thread_id=r["thread_id"],
+                    chunk_index=int(r["chunk_index"]),
+                    text=r["text"],
+                    char_start=int(r["char_start"]),
+                    char_end=int(r["char_end"]),
+                    score=float(r["score"]),
+                )
+                for r in rows
+            ]
+        except (sqlite3.Error, ValueError) as e:
+            # ``sqlite3.Error`` covers OperationalError (missing vec
+            # table) and DatabaseError (corruption); ``ValueError`` is
+            # raised by sqlite-vec on malformed embedding payloads. Any
+            # other exception type is unexpected and should propagate.
+            log.warning(f"Chunk vector search error: {e}")
+            return []
+
+    def get_evidence_chunks_for_threads(
+        self,
+        thread_ids: list[str],
+        embedding: list[float],
+        per_thread_limit: int = 3,
+        candidate_pool: int = 200,
+    ) -> dict[str, list[ChunkResult]]:
+        """Return up to ``per_thread_limit`` best-matching chunks per thread.
+
+        Pulls a single vector-search candidate pool of size
+        ``candidate_pool`` and groups the results by thread, keeping
+        only the top chunks for the requested ``thread_ids``. One sqlite-
+        vec round-trip serves N threads at once; per-thread queries
+        would scale linearly.
+
+        Used by intelligence tools after ``hybrid_search`` to attach
+        precise passage citations to the threads it returned.
+        """
+        if not thread_ids:
+            return {}
+        chunks = self._chunk_vector_search(embedding, candidate_pool)
+        wanted = set(thread_ids)
+        grouped: dict[str, list[ChunkResult]] = {tid: [] for tid in thread_ids}
+        for chunk in chunks:
+            if chunk.thread_id not in wanted:
+                continue
+            bucket = grouped[chunk.thread_id]
+            if len(bucket) < per_thread_limit:
+                bucket.append(chunk)
+        return grouped
+
     def _vector_search(self, embedding: list[float], limit: int) -> list[ThreadResult]:
         try:
             serialized = sqlite_vec.serialize_float32(embedding)
@@ -408,7 +769,11 @@ class Database:
                 (serialized, limit),
             ).fetchall()
             return [self._row_to_result(r) for r in rows]
-        except Exception as e:
+        except (sqlite3.Error, ValueError) as e:
+            # Same catch surface as ``_chunk_vector_search`` —
+            # ``sqlite3.Error`` for table/connection issues, ``ValueError``
+            # for malformed serialised vectors. Other exception types
+            # should propagate so corrupt-state bugs aren't masked.
             log.warning(f"Vector search error: {e}")
             return []
 
@@ -416,9 +781,21 @@ class Database:
         self,
         bm25: list[ThreadResult],
         vec: list[ThreadResult],
+        chunks: list[ChunkResult] | None = None,
         k: int = 60,
     ) -> list[ThreadResult]:
-        """Merge two ranked lists via RRF. Higher score = better."""
+        """Merge ranked lanes via RRF. Higher score = better.
+
+        Three lanes participate when ``chunks`` is supplied:
+        BM25 keyword over thread bodies, dense vector over thread-level
+        embeddings, and dense vector over per-message chunks. Chunk
+        hits are lifted to their parent ``thread_id`` — the best (lowest
+        rank) chunk per thread is what counts toward thread ranking, so
+        a thread doesn't accumulate inflated score from many similar
+        sibling chunks. Threads found only via the chunk lane are still
+        materialized into the result set via a thread fetch so the
+        merged list never references a thread the caller can't display.
+        """
         scores: dict[str, float] = {}
         index: dict[str, ThreadResult] = {}
 
@@ -430,12 +807,60 @@ class Database:
             scores[result.thread_id] = scores.get(result.thread_id, 0) + 1.0 / (k + rank + 1)
             index[result.thread_id] = result
 
+        if chunks:
+            seen_threads: set[str] = set()
+            for rank, chunk in enumerate(chunks):
+                tid = chunk.thread_id
+                # Best-rank-only contribution: skip any later (worse-
+                # ranked) chunk from a thread we've already credited.
+                # Without this, a thread with ten near-duplicate chunks
+                # would drown out a thread with one strong chunk.
+                if tid in seen_threads:
+                    continue
+                seen_threads.add(tid)
+                scores[tid] = scores.get(tid, 0) + 1.0 / (k + rank + 1)
+                if tid not in index:
+                    # Materialize chunk-only threads via a thread fetch.
+                    # Skip silently if the thread row is missing (shouldn't
+                    # happen in steady state — chunk rows live and die
+                    # with their thread — but defensive against stale
+                    # state mid-reap).
+                    fetched = self.get_thread(tid)
+                    if fetched is not None:
+                        index[tid] = fetched
+
         ranked = sorted(scores.items(), key=lambda x: x[1], reverse=True)
         results = []
         for thread_id, score in ranked:
+            if thread_id not in index:
+                continue
             r = index[thread_id]
             r.score = score
             results.append(r)
+        return results
+
+    @staticmethod
+    def _reciprocal_rank_fusion_threads(
+        *lanes: list[ThreadResult],
+        k: int = 60,
+    ) -> list[ThreadResult]:
+        """Merge ranked ThreadResult lanes via RRF.
+
+        Used by keyword search, where thread-body FTS, chunk-text FTS, and
+        attachment filename/MIME FTS all already materialize parent threads.
+        """
+        scores: dict[str, float] = {}
+        index: dict[str, ThreadResult] = {}
+        for lane in lanes:
+            for rank, result in enumerate(lane):
+                scores[result.thread_id] = scores.get(result.thread_id, 0.0) + 1.0 / (k + rank + 1)
+                index.setdefault(result.thread_id, result)
+
+        results: list[ThreadResult] = []
+        for thread_id, score in sorted(scores.items(), key=lambda x: x[1], reverse=True):
+            result = index[thread_id]
+            result.score = score
+            results.append(result)
         return results
 
     def _apply_filters(
@@ -461,10 +886,7 @@ class Database:
             filtered = [r for r in filtered if r.folder in folders]
         if from_addr:
             fa = from_addr.lower()
-            # Filter by sender: check the senders list (From addresses only)
-            # when present; fall back to participants for legacy rows that
-            # pre-date schema v6 so existing threads still match the filter
-            # until the indexer reprocesses them.
+            # Filter by sender (the From-only subset, not all participants).
             filtered = [r for r in filtered if _matches_sender(r, fa)]
         # Compare as datetimes rather than as strings: a user-supplied
         # date-only ``date_to="2024-12-31"`` was previously compared against
@@ -510,6 +932,8 @@ class Database:
         limit: int = 20,
         offset: int = 0,
     ) -> list[ThreadResult]:
+        if filter_type != "all":
+            raise ValueError("filter_type must be 'all'; unread/flagged state is not indexed")
         rows = self._conn.execute(
             """
             SELECT * FROM threads
@@ -555,25 +979,18 @@ class Database:
     # -------------------------------------------------------------------------
 
     def _row_to_result(self, row) -> ThreadResult:
-        # ``senders`` was added in schema v6; legacy rows surface as an
-        # empty list. A missing column (tests that build a pre-v6 schema
-        # directly) also resolves to ``[]`` rather than KeyError.
-        if "senders" in row.keys() and row["senders"]:
-            senders = json.loads(row["senders"])
-        else:
-            senders = []
         return ThreadResult(
             thread_id=row["thread_id"],
             subject=row["subject"],
             participants=json.loads(row["participants"]),
-            senders=senders,
+            senders=json.loads(row["senders"]),
             folder=row["folder"],
             date_first=datetime.fromisoformat(row["date_first"]),
             date_last=datetime.fromisoformat(row["date_last"]),
             message_ids=json.loads(row["message_ids"]),
             snippet=row["snippet"] or "",
             has_attachments=bool(row["has_attachments"]),
-            body_text=row["body_text"] if "body_text" in row.keys() and row["body_text"] else "",
+            body_text=row["body_text"] or "",
             score=float(row["score"]) if "score" in row.keys() else 0.0,
         )
 

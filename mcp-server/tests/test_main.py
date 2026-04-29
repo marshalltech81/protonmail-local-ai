@@ -19,7 +19,7 @@ here:
 
 import asyncio
 
-from src.main import _env_bool, _read_secret
+from src.main import _env_bool, _normalize_transport, _read_secret, _run_server
 
 
 class TestEnvBool:
@@ -38,13 +38,16 @@ class TestEnvBool:
             monkeypatch.setenv("FAKE_BOOL_FLAG", raw)
             assert _env_bool("FAKE_BOOL_FLAG", default=True) is False, raw
 
-    def test_unrecognized_value_is_treated_as_false(self, monkeypatch):
-        # Anything outside the truthy set falls to False — fail closed for
-        # a flag like MCP_READ_ONLY whose default-on posture is the safe
-        # one. ``_env_bool`` is not used for any flag where the safer
-        # interpretation of garbage input would be ``True``.
+    def test_unrecognized_value_raises(self, monkeypatch):
+        # A malformed safety flag should fail startup rather than silently
+        # flipping the deployment posture.
         monkeypatch.setenv("FAKE_BOOL_FLAG", "maybe")
-        assert _env_bool("FAKE_BOOL_FLAG", default=True) is False
+        try:
+            _env_bool("FAKE_BOOL_FLAG", default=True)
+        except ValueError as exc:
+            assert "FAKE_BOOL_FLAG" in str(exc)
+        else:
+            raise AssertionError("expected ValueError")
 
     def test_whitespace_around_value_is_tolerated(self, monkeypatch):
         monkeypatch.setenv("FAKE_BOOL_FLAG", "  true  ")
@@ -89,6 +92,144 @@ class TestReadSecret:
     def test_returns_empty_when_neither_source_present(self, monkeypatch):
         monkeypatch.delenv("DEFINITELY_UNSET", raising=False)
         assert _read_secret("missing_secret", "DEFINITELY_UNSET") == ""
+
+
+class TestMcpTransport:
+    def test_supported_transports_are_normalized(self):
+        assert _normalize_transport("sse") == "sse"
+        assert _normalize_transport(" streamable-http ") == "streamable-http"
+        assert _normalize_transport("DUAL") == "dual"
+
+    def test_unknown_transport_fails_closed(self):
+        try:
+            _normalize_transport("websocket")
+        except ValueError as exc:
+            assert "MCP_TRANSPORT" in str(exc)
+        else:
+            raise AssertionError("expected ValueError")
+
+    def test_sse_and_streamable_delegate_to_fastmcp_run(self):
+        class FakeServer:
+            def __init__(self):
+                self.transports = []
+
+            def run(self, transport):
+                self.transports.append(transport)
+
+        fake = FakeServer()
+        _run_server(fake, "sse")
+        _run_server(fake, "streamable-http")
+        assert fake.transports == ["sse", "streamable-http"]
+
+    def test_dual_transport_dispatches_paths_correctly(self):
+        """Verifies that the in-process ASGI app routes ``/mcp`` and
+        sub-paths to the streamable HTTP app, and ``/sse``, ``/messages/``,
+        ``/health``, and ``/mcp-debug`` (a name that *starts with* ``/mcp``
+        but is not ``/mcp`` or a sub-path) to the SSE app. Pre-fix this
+        last case incorrectly went to the streamable HTTP app.
+        """
+        import asyncio
+
+        # Lazy capture of the ``app`` closure that
+        # ``_run_dual_transport_async`` builds. We never actually call
+        # uvicorn — we replace the server with a stub and capture the
+        # ``app`` argument for direct invocation.
+        captured: dict = {}
+
+        class _StubUvicorn:
+            class Config:
+                def __init__(self, app, **_):
+                    captured["app"] = app
+
+            class Server:
+                def __init__(self, _config):
+                    pass
+
+                async def serve(self):  # pragma: no cover — never reached
+                    return None
+
+        # FastMCP-shaped fake exposing only what
+        # ``_run_dual_transport_async`` reads: an ``settings`` object with
+        # ``debug``, ``log_level``, ``host``, ``port``, ``streamable_http_path``;
+        # plus ``sse_app`` / ``streamable_http_app`` factories returning
+        # tagged async-callable shims.
+        class _SettingsStub:
+            debug = False
+            log_level = "INFO"
+            host = "127.0.0.1"
+            port = 0
+            streamable_http_path = "/mcp"
+
+        class _AppShim:
+            def __init__(self, tag):
+                self.tag = tag
+                self.calls: list[str] = []
+
+                class _Router:
+                    @staticmethod
+                    def lifespan_context(_app):
+                        from contextlib import asynccontextmanager
+
+                        @asynccontextmanager
+                        async def _ctx():
+                            yield
+
+                        return _ctx()
+
+                self.router = _Router()
+
+            async def __call__(self, scope, receive, send):
+                self.calls.append(scope["path"])
+
+        sse = _AppShim("sse")
+        http = _AppShim("http")
+
+        class _ServerStub:
+            settings = _SettingsStub()
+
+            def sse_app(self):
+                return sse
+
+            def streamable_http_app(self):
+                return http
+
+        import src.main as main_mod
+
+        original_uvicorn = main_mod.uvicorn
+        main_mod.uvicorn = _StubUvicorn  # type: ignore[assignment]
+        try:
+            asyncio.run(self._capture_app(_ServerStub()))
+        except SystemExit:
+            pass
+        finally:
+            main_mod.uvicorn = original_uvicorn
+
+        # Drive the captured ASGI app for each path of interest.
+        app = captured["app"]
+
+        async def _dispatch(path):
+            await app({"type": "http", "path": path}, lambda: None, lambda *_: None)
+
+        asyncio.run(_dispatch("/mcp"))
+        asyncio.run(_dispatch("/mcp/messages/abc"))
+        asyncio.run(_dispatch("/sse"))
+        asyncio.run(_dispatch("/messages/x"))
+        asyncio.run(_dispatch("/health"))
+        # ``/mcp-debug`` and ``/mcpfoo`` start with ``/mcp`` textually but
+        # are not the streamable path nor sub-paths under it. Pre-fix
+        # they incorrectly routed to the streamable HTTP app.
+        asyncio.run(_dispatch("/mcp-debug"))
+        asyncio.run(_dispatch("/mcpfoo"))
+
+        assert http.calls == ["/mcp", "/mcp/messages/abc"]
+        assert sse.calls == ["/sse", "/messages/x", "/health", "/mcp-debug", "/mcpfoo"]
+
+    async def _capture_app(self, server_stub):
+        from src.main import _run_dual_transport_async
+
+        # The stubbed uvicorn raises SystemExit-equivalent so serve()
+        # never actually starts a listener — just enough to capture.
+        await _run_dual_transport_async(server_stub)
 
 
 class TestHealthEndpoint:

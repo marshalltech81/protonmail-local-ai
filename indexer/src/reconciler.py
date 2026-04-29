@@ -26,15 +26,16 @@ causes mbsync to mark a large batch as ``T`` cannot silently wipe the index.
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from .chunker import mean_vector
 from .database import Database
 from .embedder import Embedder
 from .maildir import is_trashed, resolve_current_path
 from .parser import parse_email
-from .quoting import strip_for_embedding
 from .threader import Thread, Threader
 
 log = logging.getLogger("indexer.reconciler")
@@ -274,9 +275,20 @@ class Reconciler:
         )
 
         try:
-            embedding = self.embedder.embed(
-                strip_for_embedding(rebuilt_thread.text_for_embedding())
-            )
+            # Recompute the thread vector as the mean of the survivors'
+            # chunk embeddings. Reading chunks for survivor message_ids
+            # excludes the reaped messages even though their chunk rows
+            # are still on disk at this point — the reap transaction
+            # below tears them down atomically. Falls back to embedding
+            # the subject line in the rare case that no survivor has
+            # any indexed chunks (e.g. all bodies empty).
+            survivor_message_ids = [r["message_id"] for r in survivor_rows]
+            survivor_chunks = self.db.get_chunk_embeddings_for_messages(survivor_message_ids)
+            if survivor_chunks:
+                embedding = mean_vector(survivor_chunks)
+            else:
+                fallback = rebuilt_thread.subject.strip() or "(empty thread)"
+                embedding = self.embedder.embed(fallback)
         except Exception as e:
             # Ollama unavailable or embedding failed — leave state untouched
             # and retry on the next sweep rather than committing partial work.
@@ -365,7 +377,7 @@ def sweep_paths(db: Database) -> dict:
     return {"renamed": renamed, "unreachable": unreachable}
 
 
-def load_config_from_env(env: dict[str, str]) -> ReconcilerConfig:
+def load_config_from_env(env: Mapping[str, str]) -> ReconcilerConfig:
     """Parse reconciler knobs from environment variables.
 
     All settings are opt-in: with defaults, ``enabled`` is ``False`` and no

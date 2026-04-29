@@ -4,7 +4,7 @@
 
 This repository provides a fully local, privacy-first AI search and intelligence layer for ProtonMail.
 
-The stack consists of five containers:
+The default stack consists of five containers:
 
 - ProtonBridge
 - mbsync
@@ -12,13 +12,18 @@ The stack consists of five containers:
 - indexer
 - MCP server
 
+An optional Open WebUI overlay can be started for a local browser UI. It must
+reuse the existing Ollama and MCP server containers; do not add a second Ollama
+instance for the UI.
+
 Core behavior:
 
 - email stays local by default
 - Bridge is the only path to Proton
 - mbsync pulls mail into Maildir
 - indexer parses and stores thread-level data in SQLite
-- MCP exposes search, retrieval, intelligence, and action tools over HTTP/SSE
+- MCP exposes search, retrieval, intelligence, and action tools over SSE and/or
+  Streamable HTTP depending on `MCP_TRANSPORT`
 
 ## Priorities
 
@@ -50,15 +55,18 @@ High-level data flow:
 1. ProtonBridge connects to ProtonMail.
 2. mbsync pulls from Bridge into Maildir.
 3. indexer parses Maildir messages, builds conversation threads, generates embeddings via Ollama, and writes SQLite.
-4. MCP server reads from SQLite and exposes tools over HTTP/SSE.
-5. Only the MCP server is exposed to the host on `localhost:3000`.
+4. MCP server reads from SQLite and exposes tools over SSE and/or Streamable HTTP.
+5. Only the MCP server is exposed to the host on `localhost:3000` by default.
+   The optional Open WebUI overlay may additionally expose a localhost-only
+   browser UI on `localhost:8080`.
 
 Important architecture facts:
 
 - the index is SQLite with FTS5 plus `sqlite-vec`
 - retrieval is hybrid keyword plus vector search with RRF
 - indexing is thread-level, not message-level
-- MCP uses HTTP/SSE transport
+- MCP defaults to SSE transport; `MCP_TRANSPORT=streamable-http` enables
+  Streamable HTTP, and `MCP_TRANSPORT=dual` serves both `/sse` and `/mcp`
 - `ollama` uses the official image with no custom Dockerfile
 
 ## Non-Negotiable Constraints
@@ -75,10 +83,15 @@ Do not make any of the following changes unless the repository owner explicitly 
 ### Network and exposure constraints
 
 - Do not expose any container port other than `mcp-server:3000` to the host.
+  Exception: the optional Open WebUI overlay may expose only
+  `127.0.0.1:${OPEN_WEBUI_PORT:-8080}:8080`.
 - Do not add `network_mode: host`.
 - Do not give `mcp-server` direct IMAP access to Bridge.
 - Do not give `indexer` direct IMAP access to Bridge.
 - mbsync is the only container that should talk directly to Bridge IMAP.
+- Do not give Open WebUI direct access to Bridge, Maildir, or SQLite volumes.
+- Do not expose Open WebUI on `0.0.0.0` or a LAN interface without explicit
+  owner approval.
 
 ### Mail sync and safety constraints
 
@@ -97,9 +110,27 @@ Do not make any of the following changes unless the repository owner explicitly 
 
 ### Data model constraints
 
-- Do not change thread-level indexing to message-level indexing without reviewing architecture impacts.
+- Threads remain the **coarse unit of indexing and retrieval**. Per-message
+  chunks (`message_chunks` / `message_chunks_fts` / `message_chunks_vec`)
+  are an *additive* precision-retrieval layer on top of thread-level
+  indexing — they do not replace it. Do not remove thread-level rows or
+  vectors. The thread vector is derived as the mean of a thread's chunk
+  vectors so coarse and precise retrieval share source data.
 - Do not change the SQLite schema without incrementing `SCHEMA_VERSION`.
+  The indexer fails fast on a stored-vs-code version mismatch rather than
+  running migrations; until a real migration runner is added, schema
+  changes require wiping `sqlite-volume` so the indexer rebuilds from
+  Maildir.
 - Do not change embedding dimensions or model assumptions without verifying schema and context-window implications.
+- Do not change chunk ID derivation away from the deterministic
+  `sha256(message_pk || index || text)` shape — re-runs depend on identical
+  inputs producing identical IDs so the diff-write path skips already-
+  embedded chunks. Attachment chunks use
+  `message_pk = f"{message_id}::{attachment_id}"`.
+- Do not store raw attachment payload bytes in SQLite. The current schema
+  keeps bytes only in the `.eml` on disk. ``attachment_extractions`` caches
+  the extracted *text* per content hash so OCR / parse cost runs at most
+  once per unique payload, not the bytes themselves.
 
 ## Bridge-Specific Guardrails
 
@@ -176,7 +207,7 @@ When working in this repo:
 - if code or config changes create likely doc drift, update the relevant docs or explicitly suggest the needed doc or `AGENTS.md` follow-up
 - avoid introducing new dependencies without a clear need
 - install only the minimum necessary packages, libraries, and dependencies for the current implementation, whether in Docker images, Python projects, system packages, or tooling
-- pin all new dependencies to exact versions
+- pin all new dependencies to exact versions, except apt packages — see Dockerfile Conventions
 - avoid speculative refactors
 - preserve local-first defaults
 
@@ -222,10 +253,17 @@ All Dockerfiles in this repository must follow these rules:
   - `mbsync=1001`
   - `indexer=1002`
   - `mcp=1003`
+- the indexer reads mbsync-written Maildir files via "other" permission
+  bits, not a shared group. mbsync's entrypoint runs `chmod go+r` on new
+  Maildir files after each sync (because mbsync ignores umask and
+  `open()`s with mode 0600); the indexer mounts `/maildir` as `:ro` so
+  the cross-UID separation also blocks any write path even on a future
+  malicious-attachment-driven indexer compromise.
 - use multi-stage builds when toolchains are needed
 - build toolchains must not remain in runtime images
 - copy dependency manifests before source files for layer caching
 - use `apt-get install --no-install-recommends`
+- do not pin apt package versions; Debian/Ubuntu point releases drop old versions from the archive, so pinned `apt-get install pkg=x.y.z` lines break unpredictably when the base image refreshes. Rely on the pinned base image digest plus `apt-get update` for reproducibility instead.
 - remove `/var/lib/apt/lists/*` in the same layer as install
 - use `pip --no-cache-dir`
 - prefer `COPY --chmod=755` over separate `RUN chmod`
@@ -373,7 +411,7 @@ Notes:
 
 Purpose:
 
-- exposes mailbox tools over HTTP/SSE
+- exposes mailbox tools over SSE and/or Streamable HTTP
 - reads SQLite for retrieval/search
 - performs mail actions when enabled
 
@@ -382,12 +420,34 @@ Notes:
 - keep FastMCP-based implementation unless there is a strong reason to change it
 - preserve read-only posture as the default design direction
 - do not broaden direct access to Bridge
+- keep `MCP_TRANSPORT=sse` as the default unless the owner asks to change the
+  default client posture; use `dual` for Claude Desktop plus Open WebUI.
+
+### `open-webui` optional overlay
+
+Purpose:
+
+- provides a local browser UI for Ollama-backed chat and MCP tools
+
+Notes:
+
+- defined only in `docker-compose.open-webui.yml`; do not add it to the default
+  stack unless explicitly asked
+- reuse the existing `ollama` service via `http://ollama:11434`
+- connect to the MCP server via `http://mcp-server:3000/mcp`
+- keep the UI bound to localhost only
+- require the Open WebUI session key as a Docker Compose secret backed by
+  `.secrets/open_webui_secret_key.txt` (consumed via `WEBUI_SECRET_KEY_FILE`);
+  do not move it into `.env` or hardcode a real value
+- leave signup enabled only for first local admin creation, then document or
+  default toward `OPEN_WEBUI_ENABLE_SIGNUP=false`
 
 ## Testing Expectations
 
 ### General
 
 - use `pytest` for Python services
+- run `make typecheck` for mypy checks when Python service code changes
 - run `pre-commit run --all-files` when practical before opening a PR or finalising a substantial change
 - for Docker Compose or env wiring changes, run `docker compose config --quiet`
 - for Dockerfile, build, or container-runtime changes, run the smallest relevant `docker compose build ...` subset when practical
@@ -416,6 +476,7 @@ Run tests with:
 ```bash
 cd indexer    && uv run pytest
 cd mcp-server && uv run pytest
+make typecheck
 ```
 
 ## Documentation Expectations
