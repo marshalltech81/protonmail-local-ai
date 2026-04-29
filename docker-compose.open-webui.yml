@@ -80,7 +80,15 @@ services:
       # absent) and any subsequent UI edits override it. To disable
       # MCP tooling entirely, change the value below to ``[]``; to add
       # additional tool servers, extend the JSON array.
-      TOOL_SERVER_CONNECTIONS: '[{"url":"http://mcp-server:3000","path":"/mcp","type":"mcp","auth_type":"none","key":"","config":{"enable":true},"info":{"id":"protonmail-mcp","name":"ProtonMail MCP","description":"Local mailbox search, retrieval, and intelligence tools backed by the on-disk SQLite index."}}]'
+      # Open WebUI's MCP client passes ``url`` to streamablehttp_client
+      # verbatim and ignores ``path`` (utils/mcp/client.py +
+      # utils/middleware.py + routers/configs.py:verify all call
+      # MCPClient.connect(form_data.url, ...)). The ``path`` field is
+      # only consumed for OpenAPI ``openapi.json`` resolution. So for
+      # an MCP entry, ``url`` must be the full Streamable HTTP
+      # endpoint including ``/mcp``; ``path`` is kept here only because
+      # the ToolServerConnection pydantic schema requires it.
+      TOOL_SERVER_CONNECTIONS: '[{"url":"http://mcp-server:3000/mcp","path":"/mcp","type":"mcp","auth_type":"none","key":"","config":{"enable":true},"info":{"id":"protonmail-mcp","name":"ProtonMail MCP","description":"Local mailbox search, retrieval, and intelligence tools backed by the on-disk SQLite index."}}]'
       ENABLE_COMMUNITY_SHARING: "false"
       ENABLE_FORWARD_USER_INFO_HEADERS: "false"
       ENABLE_WEB_LOADER_SSL_VERIFICATION: "true"
