@@ -338,6 +338,62 @@ def test_ocr_disabled_unsupported_is_re_run_when_ocr_re_enabled(tmp_path, monkey
     extractor.assert_called_once()
 
 
+def test_ocr_disabled_pdf_cache_is_re_run_when_ocr_re_enabled(tmp_path, monkeypatch):
+    """Scanned PDFs seen while OCR is disabled cache the same marker as
+    images, so enabling OCR later refreshes them instead of preserving an
+    empty/tiny digital-text result forever.
+    """
+    db = Database(tmp_path / "mail.db")
+    db.upsert_thread(
+        make_thread(
+            messages=[make_message(message_id="message@example.com")], thread_id="thread-1"
+        ),
+        [0.0] * EMBEDDING_DIM,
+    )
+    attachment = _attachment(filename="scan.pdf", content_type="application/pdf")
+    db.store_attachment_extraction(
+        attachment_id=attachment.content_hash,
+        extraction_status="unsupported",
+        extractor=None,
+        extracted_text=None,
+        extraction_error="OCR disabled (INDEXER_OCR_ENABLED=false)",
+    )
+    extractor = MagicMock(
+        return_value=ExtractionResult(
+            status=STATUS_SUCCESS,
+            extractor="pdf-ocr",
+            text="ocr text from scanned pdf",
+            error=None,
+        )
+    )
+    monkeypatch.setattr(attachment_indexing, "extract_attachment", extractor)
+
+    embedder = MagicMock()
+    embedder.embed.return_value = [0.2] * EMBEDDING_DIM
+
+    summary = process_attachment(
+        attachment=attachment,
+        message_id="message@example.com",
+        thread_id="thread-1",
+        db=db,
+        embedder=embedder,
+        chunk_target_tokens=350,
+        chunk_max_tokens=500,
+        chunk_overlap_tokens=60,
+        ocr_enabled=True,
+        max_bytes=10_000_000,
+        max_ocr_pages=20,
+    )
+
+    assert summary["extractions_reused"] == 0
+    assert summary["extractions_run"] == 1
+    extractor.assert_called_once()
+    cached = db.get_attachment_extraction(attachment.content_hash)
+    assert cached is not None
+    assert cached["extraction_status"] == STATUS_SUCCESS
+    assert cached["extractor"] == "pdf-ocr"
+
+
 def _setup_db_for_attachment(tmp_path, message_id="msg@x", thread_id="thread-x"):
     """Create a DB with one thread + message ready to receive attachments."""
     db = Database(tmp_path / "mail.db")

@@ -302,7 +302,7 @@ class TestPdfDigitalExtractor:
 
         from pathlib import Path as _P
 
-        from src.extractors.pdf import extract as pdf_extract
+        from src.extractors.pdf import _extract_digital
 
         fixture = _P(__file__).parent / "fixtures" / "extractors" / "digital.pdf"
         if not fixture.exists():
@@ -338,11 +338,29 @@ class TestPdfDigitalExtractor:
                 writer.write(f)
 
         payload = fixture.read_bytes()
-        text, name = pdf_extract(payload, ocr_enabled=False)
+        text = _extract_digital(payload)
         # The fixture's content stream contains a literal "Invoice
         # number 42". Assert the digital path round-trips it so a
         # regression in the pypdf pin or in ``_extract_digital``
         # surfaces here rather than silently degrading retrieval.
+        assert "Invoice number 42" in text
+
+    def test_public_pdf_extract_accepts_long_digital_text_without_ocr(self, monkeypatch):
+        from src.extractors import pdf
+
+        monkeypatch.setattr(
+            pdf,
+            "_extract_digital",
+            lambda payload, **_: "Invoice number 42 with enough digital text to clear threshold.",
+        )
+        monkeypatch.setattr(
+            pdf,
+            "_extract_ocr",
+            lambda *a, **kw: pytest.fail("OCR should not run for digital PDFs"),
+        )
+
+        text, name = pdf.extract(b"%PDF-1.7", ocr_enabled=True)
+
         assert "Invoice number 42" in text
         assert name == "pdf-digital"
 
@@ -395,7 +413,9 @@ class TestPdfDigitalExtractor:
 
         monkeypatch.setattr(pdf, "_extract_digital", lambda payload, **_: "tiny")
         # OCR must NOT be called when ocr_enabled=False, even if digital
-        # text is too short to satisfy ``_MIN_DIGITAL_CHARS``.
+        # text is too short to satisfy ``_MIN_DIGITAL_CHARS``. The sentinel
+        # extractor name lets the dispatcher cache an OCR-disabled row that
+        # will be re-run when OCR is enabled later.
         ocr_called = []
         monkeypatch.setattr(
             pdf,
@@ -405,8 +425,30 @@ class TestPdfDigitalExtractor:
 
         text, name = pdf.extract(b"%PDF-1.7", ocr_enabled=False, max_ocr_pages=5)
         assert text == "tiny"
-        assert name == "pdf-digital"
+        assert name == "pdf-ocr-disabled"
         assert ocr_called == []
+
+    def test_ocr_disabled_scanned_pdf_dispatches_as_unsupported(self, monkeypatch):
+        from src.extractors import pdf
+
+        monkeypatch.setattr(pdf, "_extract_digital", lambda payload, **_: "tiny")
+        monkeypatch.setattr(
+            pdf,
+            "_extract_ocr",
+            lambda *a, **kw: pytest.fail("OCR should not run when disabled"),
+        )
+
+        result = extract(
+            content_type="application/pdf",
+            filename="scan.pdf",
+            payload=b"%PDF-1.7",
+            ocr_enabled=False,
+        )
+
+        assert result.status == STATUS_UNSUPPORTED
+        assert result.text is None
+        assert result.extractor is None
+        assert "OCR disabled" in (result.error or "")
 
 
 class TestImageExtractor:

@@ -35,6 +35,7 @@ log = logging.getLogger("indexer.extractor.pdf")
 # pypdf — without this floor we'd accept that as "success" and never
 # OCR the actual page contents.
 _MIN_DIGITAL_CHARS = 40
+_OCR_DISABLED_EXTRACTOR = "pdf-ocr-disabled"
 
 
 def extract(
@@ -60,10 +61,12 @@ def extract(
         return digital_text, "pdf-digital"
 
     if not ocr_enabled:
-        # Return whatever the digital path produced (may be empty);
-        # caller will see "empty" status and persist the row so a
-        # future OCR-enabled re-run picks it up.
-        return digital_text, "pdf-digital"
+        # The digital text layer is below the useful threshold, so this
+        # PDF likely needs OCR. Return a sentinel extractor name so the
+        # dispatcher can cache the same OCR-disabled ``unsupported`` shape
+        # image attachments use; that cache row is re-run when OCR is
+        # enabled later instead of permanently poisoning recall.
+        return digital_text, _OCR_DISABLED_EXTRACTOR
 
     try:
         ocr_text = _extract_ocr(

@@ -256,6 +256,14 @@ def extract(
             error=f"{type(exc).__name__}: {exc}",
         )
 
+    if extractor_name == "pdf-ocr-disabled":
+        return ExtractionResult(
+            status=STATUS_UNSUPPORTED,
+            extractor=None,
+            text=None,
+            error="OCR disabled (INDEXER_OCR_ENABLED=false)",
+        )
+
     cleaned = (text or "").strip()
     if not cleaned:
         return ExtractionResult(
