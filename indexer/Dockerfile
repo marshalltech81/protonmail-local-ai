@@ -67,9 +67,19 @@ COPY --from=builder /app/src/ ./src/
 COPY --chmod=755 --chown=indexer:indexer healthcheck.sh /healthcheck.sh
 
 # Pre-create volume mount points with correct ownership BEFORE VOLUME declaration.
-# Docker copies these into the named volume on first mount (copy-on-empty),
-# ensuring the indexer user can write even though the volume starts root-owned.
-RUN mkdir -p /maildir /data && chown -R indexer:indexer /maildir /data
+# Docker copies these into the named volume on first mount (copy-on-empty).
+#
+# /maildir is owned by UID 1001 (mbsync) here, NOT the indexer user, to make
+# the named-volume seeding race harmless: the maildir-volume is shared with
+# the mbsync container, and whichever image's mount is hit first by docker
+# compose seeds the volume's ownership. mbsync writes; the indexer reads via
+# "other" permission bits (mbsync's entrypoint chmods go+r after each sync)
+# and mounts /maildir :ro for defense-in-depth, so indexer does not need to
+# own this directory. Keeping both images' /maildir at 1001:1001 means either
+# seeding order produces a working volume.
+RUN mkdir -p /maildir /data \
+ && chown 1001:1001 /maildir \
+ && chown -R indexer:indexer /data
 
 USER indexer
 
