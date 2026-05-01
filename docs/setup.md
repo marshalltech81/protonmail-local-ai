@@ -338,8 +338,19 @@ make down-host-ollama
 make up
 ```
 
-You can also leave the brew Ollama installed and stopped:
-`brew services stop ollama`. The default stack will start its own
+The host LaunchAgent keeps running independently — `make down-host-ollama`
+only changes how containers are wired. To free port `11434` and undo the
+wildcard bind, stop the LaunchAgent too:
+
+```bash
+launchctl bootout "gui/$(id -u)/com.local.ollama-host"
+lsof -iTCP:11434 -sTCP:LISTEN  # should now print nothing
+```
+
+`brew services stop ollama` does **not** stop the custom LaunchAgent —
+brew does not manage the `com.local.ollama-host` label. Use `launchctl
+bootout` as shown above. After the LaunchAgent is stopped you can leave
+the brew formula installed; the default stack will start its own
 container as before.
 
 ### Threat model
