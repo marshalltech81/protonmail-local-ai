@@ -13,7 +13,7 @@ dependencies = [
     # by exactly one extractor module under src/extractors/; lazy import
     # there means a missing one downgrades to ``unsupported`` rather
     # than crashing the indexer.
-    "pypdf==6.4.0",                # digital PDF text layer
+    "pypdf==6.10.2",               # digital PDF text layer
     "pdf2image==1.17.0",           # render PDF pages → PIL.Image (needs Poppler)
     "pytesseract==0.3.13",         # OCR via Tesseract binary
     "pillow==12.2.0",              # image loading + EXIF rotation for OCR
