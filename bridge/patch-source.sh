@@ -4,6 +4,7 @@ set -Eeuo pipefail
 readonly REPO_DIR="${1:-/build}"
 readonly CONSTANTS_FILE="${REPO_DIR}/internal/constants/constants.go"
 readonly CERTS_FILE="${REPO_DIR}/internal/certs/tls.go"
+readonly SETTINGS_FILE="${REPO_DIR}/internal/vault/types_settings.go"
 
 # Resolve early so the post-patch compile step can locate bridge/Dockerfile
 # (the source of truth for the pinned Go image) when invoked from a host
@@ -17,6 +18,13 @@ readonly UPSTREAM_HOST='Host = "127.0.0.1"'
 readonly PATCHED_HOST='Host = "0.0.0.0"'
 readonly UPSTREAM_CERT='IPAddresses:           []net.IP{net.ParseIP("127.0.0.1")},'
 readonly PATCHED_CERT='DNSNames:    []string{"protonmail-bridge", "localhost"},'
+# Bridge's vault default has AutoUpdate: true. Patching to false disables the
+# in-process auto-updater (which silently downloads new releases from the
+# Proton CDN — including the Qt/GUI variant — and stages them under
+# /data/local/protonmail/bridge-v3/updates/, bypassing the BRIDGE_VERSION
+# pin and the bridge-patch-check / bridge-smoke gates). See AGENTS.md.
+readonly UPSTREAM_AUTOUPDATE='AutoUpdate:        true,'
+readonly PATCHED_AUTOUPDATE='AutoUpdate:        false,'
 
 # These exact string checks are intentionally strict: if Proton changes the
 # surrounding source layout, we want the build and drift check to fail loudly
@@ -56,7 +64,7 @@ sed_in_place() {
     fi
 }
 
-if [[ ! -f "$CONSTANTS_FILE" || ! -f "$CERTS_FILE" ]]; then
+if [[ ! -f "$CONSTANTS_FILE" || ! -f "$CERTS_FILE" || ! -f "$SETTINGS_FILE" ]]; then
     printf 'Bridge source files not found under %s.\n' "$REPO_DIR" >&2
     exit 1
 fi
@@ -65,17 +73,22 @@ require_count "$CONSTANTS_FILE" "$UPSTREAM_HOST" "1" "upstream host binding"
 require_count "$CONSTANTS_FILE" "$PATCHED_HOST" "0" "patched host binding before patch"
 require_count "$CERTS_FILE" "$UPSTREAM_CERT" "1" "upstream TLS SAN source line"
 require_count "$CERTS_FILE" "$PATCHED_CERT" "0" "patched TLS SAN line before patch"
+require_count "$SETTINGS_FILE" "$UPSTREAM_AUTOUPDATE" "1" "upstream AutoUpdate default"
+require_count "$SETTINGS_FILE" "$PATCHED_AUTOUPDATE" "0" "patched AutoUpdate default before patch"
 
 sed_in_place 's/Host = "127.0.0.1"/Host = "0.0.0.0"/' "$CONSTANTS_FILE"
 sed_in_place \
     's|IPAddresses:           \[\]net\.IP{net\.ParseIP("127\.0\.0\.1")},|IPAddresses: []net.IP{net.ParseIP("127.0.0.1")},\
 \t\tDNSNames:    []string{"protonmail-bridge", "localhost"},|' \
     "$CERTS_FILE"
+sed_in_place 's/AutoUpdate:        true,/AutoUpdate:        false,/' "$SETTINGS_FILE"
 
 require_count "$CONSTANTS_FILE" "$UPSTREAM_HOST" "0" "upstream host binding after patch"
 require_count "$CONSTANTS_FILE" "$PATCHED_HOST" "1" "patched host binding"
 require_count "$CERTS_FILE" "$UPSTREAM_CERT" "0" "upstream TLS SAN source line after patch"
 require_count "$CERTS_FILE" "$PATCHED_CERT" "1" "patched TLS SAN line"
+require_count "$SETTINGS_FILE" "$UPSTREAM_AUTOUPDATE" "0" "upstream AutoUpdate default after patch"
+require_count "$SETTINGS_FILE" "$PATCHED_AUTOUPDATE" "1" "patched AutoUpdate default"
 
 # Compile the two patched packages to confirm the patches produce valid Go.
 # String-count checks above verify content; this verifies the result compiles.
@@ -88,9 +101,47 @@ require_count "$CERTS_FILE" "$PATCHED_CERT" "1" "patched TLS SAN line"
 #      inside the exact pinned Go image bridge/Dockerfile uses, so the host
 #      check matches the actual build's Go version. The image reference is
 #      sourced from bridge/Dockerfile to avoid drift between the two pins.
+resolve_go_image() {
+    local go_image="${BRIDGE_GO_IMAGE:-}"
+    if [[ -z "$go_image" && -f "$BRIDGE_DOCKERFILE" ]]; then
+        go_image="$(awk '/^FROM golang:/ {sub(/^FROM /, ""); sub(/ +AS .*/, ""); print; exit}' "$BRIDGE_DOCKERFILE")"
+    fi
+    if [[ -z "$go_image" ]]; then
+        printf 'ERROR: could not resolve pinned Go image; set BRIDGE_GO_IMAGE or run from a tree containing bridge/Dockerfile.\n' >&2
+        return 1
+    fi
+    printf '%s\n' "$go_image"
+}
+
+# Run a `go ...` command inside the pinned golang image with the same C
+# build deps Bridge's own Dockerfile installs in its builder stage. The
+# vault package transitively imports docker-credential-helpers, which
+# requires libsecret-1-dev via pkg-config; without it `go build`/`go test`
+# fail with "Package libsecret-1 was not found." Installing on every
+# invocation is fine — the drift check is rare and the apt step is small
+# next to the bridge git clone and module download it already does.
+run_go_in_pinned_image() {
+    local go_image="$1"
+    shift
+    local go_args
+    go_args="$(printf ' %q' "$@")"
+
+    docker run --rm \
+        --workdir /src \
+        --volume "$REPO_DIR:/src:ro" \
+        --env GOTOOLCHAIN=local \
+        --env DEBIAN_FRONTEND=noninteractive \
+        "$go_image" \
+        sh -c "apt-get update >/dev/null \
+            && apt-get install -y --no-install-recommends \
+                pkg-config libsecret-1-dev libfido2-dev libcbor-dev >/dev/null \
+            && go${go_args}"
+}
+
 compile_patched_packages() {
     if command -v go >/dev/null 2>&1; then
-        ( cd "$REPO_DIR" && go build ./internal/constants/... ./internal/certs/... )
+        ( cd "$REPO_DIR" \
+          && go build ./internal/constants/... ./internal/certs/... ./internal/vault/... )
         return
     fi
 
@@ -100,25 +151,69 @@ compile_patched_packages() {
         return 1
     fi
 
-    local go_image="${BRIDGE_GO_IMAGE:-}"
-    if [[ -z "$go_image" && -f "$BRIDGE_DOCKERFILE" ]]; then
-        go_image="$(awk '/^FROM golang:/ {sub(/^FROM /, ""); sub(/ +AS .*/, ""); print; exit}' "$BRIDGE_DOCKERFILE")"
+    local go_image
+    go_image="$(resolve_go_image)" || return 1
+
+    printf 'Compiling patched packages inside %s...\n' "$go_image"
+    run_go_in_pinned_image "$go_image" \
+        build ./internal/constants/... ./internal/certs/... ./internal/vault/...
+}
+
+# Layer 3: prove the AutoUpdate patch flips the *runtime* default, not just
+# the source string. We synthesize a tiny test inside the patched vault
+# package that calls the unexported newDefaultSettings() and asserts the
+# field. If Proton ever renames the constructor or introduces a second
+# code path that overrides the default, this test fails the build.
+verify_autoupdate_default() {
+    local test_file="${REPO_DIR}/internal/vault/autoupdate_patch_assert_test.go"
+
+    cat > "$test_file" <<'GOEOF'
+package vault
+
+import "testing"
+
+// TestPatchedAutoUpdateDefaultIsFalse is generated by
+// bridge/patch-source.sh after the AutoUpdate hunk is applied. It verifies
+// the patched source actually flips the runtime default returned by
+// newDefaultSettings(); a passing string-replace alone does not guarantee
+// that.
+func TestPatchedAutoUpdateDefaultIsFalse(t *testing.T) {
+	settings := newDefaultSettings(t.TempDir())
+	if settings.AutoUpdate {
+		t.Fatal("AutoUpdate default is true after patch — runtime field was not flipped")
+	}
+}
+GOEOF
+
+    # Always remove the synthetic test on exit so a re-run starts from the
+    # same state and the patched tree never carries our assertion file
+    # back out into a build artifact.
+    cleanup_assertion_test() { rm -f "$test_file"; }
+    trap cleanup_assertion_test RETURN
+
+    if command -v go >/dev/null 2>&1; then
+        ( cd "$REPO_DIR" \
+          && go test -count=1 -run TestPatchedAutoUpdateDefaultIsFalse ./internal/vault/ )
+        return
     fi
-    if [[ -z "$go_image" ]]; then
-        printf 'ERROR: could not resolve pinned Go image; set BRIDGE_GO_IMAGE or run from a tree containing bridge/Dockerfile.\n' >&2
+
+    if ! command -v docker >/dev/null 2>&1; then
+        printf 'ERROR: neither go nor docker found on PATH; cannot run the AutoUpdate assertion.\n' >&2
         return 1
     fi
 
-    printf 'Compiling patched packages inside %s...\n' "$go_image"
-    docker run --rm \
-        --workdir /src \
-        --volume "$REPO_DIR:/src:ro" \
-        --env GOTOOLCHAIN=local \
-        "$go_image" \
-        go build ./internal/constants/... ./internal/certs/...
+    local go_image
+    go_image="$(resolve_go_image)" || return 1
+
+    printf 'Running AutoUpdate default assertion inside %s...\n' "$go_image"
+    run_go_in_pinned_image "$go_image" \
+        test -count=1 -run TestPatchedAutoUpdateDefaultIsFalse ./internal/vault/
 }
 
 compile_patched_packages \
     || { printf 'ERROR: post-patch compilation failed in %s.\n' "$REPO_DIR" >&2; exit 1; }
+
+verify_autoupdate_default \
+    || { printf 'ERROR: AutoUpdate runtime-default assertion failed in %s.\n' "$REPO_DIR" >&2; exit 1; }
 
 printf 'Bridge source patches applied cleanly in %s.\n' "$REPO_DIR"

@@ -11,7 +11,7 @@ FROM golang:1.26.2-bookworm@sha256:47ce5636e9936b2c5cbf708925578ef386b4f8872aec7
 # Use bash with pipefail for all RUN steps so pipe failures are not silently ignored.
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
-ARG BRIDGE_VERSION=v3.24.1
+ARG BRIDGE_VERSION=v3.24.2
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \

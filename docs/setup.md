@@ -127,6 +127,12 @@ running) and waits up to 120 seconds for it to report ready before
 pulling, so this step works from a clean stack — you do not need to run
 `make up` first.
 
+If you plan to use the host-Ollama overlay on macOS (recommended on Apple
+Silicon for Metal acceleration), use `make pull-models-host` instead. It
+pulls into the native Ollama install via `ollama pull` rather than
+`docker exec ollama ollama pull`. See the "Optional: native (host) Ollama
+on macOS" section below for one-time host setup.
+
 ### 6. Start the full stack
 
 ```bash
@@ -174,6 +180,176 @@ docker run --rm \
 
 Bridge writes sync progress into its structured log file in the `bridge-data`
 volume.
+
+## Optional: native (host) Ollama on macOS
+
+Containerized Ollama on Apple Silicon cannot use Metal GPU acceleration —
+OrbStack runs the linux/arm64 build inside a Linux VM that has no Metal pass-
+through. Native Homebrew Ollama uses Metal directly and is typically several
+times faster for both inference and embedding.
+
+The repository ships an overlay (`docker-compose.host-ollama.yml`) that drops
+the in-stack `ollama` container and points the indexer + mcp-server at a
+host-resident Ollama via OrbStack's `host.docker.internal`. The default stack
+(`make up`) is unchanged; the overlay opts in.
+
+### One-time host setup
+
+1. **Install Ollama:**
+
+   ```bash
+   brew install ollama
+   ```
+
+2. **Bind the listener on `0.0.0.0:11434`** so OrbStack containers can reach
+   it via `host.docker.internal`. Containers cannot reach the host's
+   `127.0.0.1`.
+
+   `brew services` regenerates `~/Library/LaunchAgents/homebrew.mxcl.ollama.plist`
+   from its template on every `start` / `restart` and discards user edits, so
+   the durable pattern is to run Ollama under a separate user-owned LaunchAgent
+   that brew does not manage.
+
+   First, stop the brew-managed service:
+
+   ```bash
+   brew services stop ollama
+   ```
+
+   Then write `~/Library/LaunchAgents/com.local.ollama-host.plist` with the
+   following contents (preserves brew's flash-attention + KV cache defaults
+   and adds `OLLAMA_HOST`):
+
+   ```xml
+   <?xml version="1.0" encoding="UTF-8"?>
+   <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+   <plist version="1.0">
+   <dict>
+     <key>Label</key>
+     <string>com.local.ollama-host</string>
+     <key>EnvironmentVariables</key>
+     <dict>
+       <key>OLLAMA_HOST</key>
+       <string>0.0.0.0:11434</string>
+       <key>OLLAMA_FLASH_ATTENTION</key>
+       <string>1</string>
+       <key>OLLAMA_KV_CACHE_TYPE</key>
+       <string>q8_0</string>
+     </dict>
+     <key>ProgramArguments</key>
+     <array>
+       <string>/opt/homebrew/opt/ollama/bin/ollama</string>
+       <string>serve</string>
+     </array>
+     <key>KeepAlive</key>
+     <true/>
+     <key>RunAtLoad</key>
+     <true/>
+     <key>StandardErrorPath</key>
+     <string>/opt/homebrew/var/log/ollama.log</string>
+     <key>StandardOutPath</key>
+     <string>/opt/homebrew/var/log/ollama.log</string>
+     <key>WorkingDirectory</key>
+     <string>/opt/homebrew/var</string>
+   </dict>
+   </plist>
+   ```
+
+   Load it with launchd directly:
+
+   ```bash
+   launchctl bootstrap "gui/$(id -u)" \
+     ~/Library/LaunchAgents/com.local.ollama-host.plist
+   ```
+
+   To stop or reload the service later:
+
+   ```bash
+   launchctl bootout "gui/$(id -u)/com.local.ollama-host"
+   launchctl bootstrap "gui/$(id -u)" \
+     ~/Library/LaunchAgents/com.local.ollama-host.plist
+   ```
+
+   Verify the bind:
+
+   ```bash
+   curl -s http://127.0.0.1:11434/api/tags
+   lsof -iTCP:11434 -sTCP:LISTEN  # should show *:11434, not 127.0.0.1:11434
+   ```
+
+   Do not run `brew services start ollama` after this point — it would
+   spawn a second listener on the same port and the bootstrap will fight
+   with brew. If you need to revert, `launchctl bootout` the custom label
+   first, then `brew services start ollama` to fall back to the brew
+   default (loopback bind).
+
+3. **Enable the macOS Application Firewall** so the listener is not exposed
+   to LAN neighbors:
+
+   - System Settings → Network → Firewall → On
+   - Click **Options** and enable **Stealth mode**
+   - Add an explicit block on the Ollama binary (loopback and the OrbStack
+     vmnet bridge are not affected by the Application Firewall, so containers
+     still reach Ollama; the LAN does not):
+
+     ```bash
+     sudo /usr/libexec/ApplicationFirewall/socketfilterfw \
+       --add /opt/homebrew/bin/ollama
+     sudo /usr/libexec/ApplicationFirewall/socketfilterfw \
+       --blockapp /opt/homebrew/bin/ollama
+     ```
+
+4. **Verify reachability from a container** before changing how you start
+   the stack:
+
+   ```bash
+   docker run --rm curlimages/curl:latest \
+     -fsS http://host.docker.internal:11434/api/tags
+   ```
+
+   This should return a JSON tag list.
+
+5. **Pull the models on the host** (replaces `make pull-models`, which pulls
+   into the container):
+
+   ```bash
+   make pull-models-host
+   ```
+
+### Day-to-day commands
+
+| Mode | Start | Stop | Logs | Pull models |
+|---|---|---|---|---|
+| Containerized Ollama (default) | `make up` | `make down` | `make logs` | `make pull-models` |
+| Host-Ollama overlay (macOS) | `make up-host-ollama` | `make down-host-ollama` | `make logs-host-ollama` | `make pull-models-host` |
+
+The Open WebUI overlay has a host-Ollama variant too:
+
+```bash
+make open-webui-up-host-ollama
+```
+
+### Falling back
+
+The overlay is purely additive. To return to the containerized path:
+
+```bash
+make down-host-ollama
+make up
+```
+
+You can also leave the brew Ollama installed and stopped:
+`brew services stop ollama`. The default stack will start its own
+container as before.
+
+### Threat model
+
+The host-bound `0.0.0.0:11434` listener is the only externally-reachable
+interface this overlay introduces. The mitigations above (stealth mode +
+binary block) close the LAN exposure. Same-machine processes can still
+reach Ollama without authentication; on a single-user dev laptop this is
+the same trust boundary the containerized stack already operates in.
+Ollama itself does not have access to the SQLite index or Maildir.
 
 ## Updating Bridge
 

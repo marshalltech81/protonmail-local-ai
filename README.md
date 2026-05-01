@@ -77,6 +77,14 @@ chmod 600 .secrets/bridge_pass.txt
 make pull-models
 ```
 
+> **Apple Silicon performance tip:** containerized Ollama on macOS cannot use
+> Metal GPU acceleration. For 3–10x faster inference on M-series, install
+> Ollama natively (`brew install ollama`) and start the stack with
+> `make up-host-ollama` instead of `make up`. See
+> [docs/setup.md](docs/setup.md#optional-native-host-ollama-on-macos) for
+> the one-time host setup (firewall + bind) and use `make pull-models-host`
+> in place of `make pull-models`.
+
 ### 5. Start the stack
 
 ```bash
@@ -180,7 +188,9 @@ If you want end-to-end local conversations:
   `MCP_TRANSPORT=dual` and run `make open-webui-up` (the target auto-generates
   the session-key secret on first run). It connects to the existing Ollama
   container and uses `http://mcp-server:3000/mcp` as a Streamable HTTP MCP
-  server. Quality varies.
+  server. Quality varies. When running the host-Ollama overlay on macOS,
+  use `make open-webui-up-host-ollama` so Open WebUI is rewired to the
+  native Ollama on `host.docker.internal:11434`.
 
 Most users accept the Claude-Desktop-as-frontend tradeoff because the
 alternative is much less useful, but it is a real tradeoff and it is not
@@ -225,7 +235,11 @@ make first-run    # One-time Bridge login
 make bridge-patch-check   # Verify Bridge patch points against upstream source
 make bridge-smoke         # Build and smoke test the Bridge image
 make bridge-upgrade-check # Run both Bridge upgrade guard checks
-make pull-models  # Pull Ollama models
+make pull-models  # Pull Ollama models (containerized Ollama)
+make pull-models-host     # Pull Ollama models via the native macOS Ollama
+make up-host-ollama       # Start the stack pointed at native macOS Ollama
+make down-host-ollama     # Stop the host-Ollama stack
+make open-webui-up-host-ollama # Open WebUI variant for the host-Ollama stack
 make update       # Update Bridge to new version
 make status       # Container and index status
 make clean        # Remove everything (destructive)

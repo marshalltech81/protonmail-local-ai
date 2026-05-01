@@ -77,7 +77,7 @@ Claude Desktop (host machine)
 |---|---|---|---|
 | `protonmail-bridge` | ProtonMail Cloud | `bridge-data` vol | IMAP 1143, SMTP 1025 (internal) |
 | `mbsync` | Bridge IMAP | `maildir-volume` | nothing |
-| `ollama` | model requests | `ollama-models` vol | HTTP 11434 (internal) |
+| `ollama` | model requests | `ollama-models` vol | HTTP 11434 (internal) — *or* native macOS host process via `docker-compose.host-ollama.yml` overlay (recommended on Mac for Metal acceleration) |
 | `indexer` | `maildir-volume`, Ollama | `sqlite-volume` | nothing |
 | `mcp-server` | `sqlite-volume`, Ollama | nothing | HTTP 3000 (localhost only) |
 | `open-webui` (optional overlay) | Ollama, `mcp-server` | `open-webui-data` vol | HTTP 8080 (localhost only) |
@@ -108,6 +108,17 @@ Use it only after pulling Ollama models and only with `LLM_MODE=local`.
 The default stack exposes only `127.0.0.1:3000` for the MCP server. The
 optional Open WebUI overlay also exposes `127.0.0.1:8080` for the browser UI.
 No container is reachable from outside the machine.
+
+### Optional: native (host) Ollama on macOS
+
+On macOS, the `docker-compose.host-ollama.yml` overlay removes the in-stack
+`ollama` container and points the indexer + mcp-server at a Homebrew-installed
+Ollama on the host (reached via OrbStack's `host.docker.internal`). This is
+recommended when running on Apple Silicon because containerized Ollama cannot
+use Metal. The native listener must be bound to `0.0.0.0:11434` so containers
+can reach it; the macOS Application Firewall must be enabled (with a block
+rule on the `ollama` binary) so the listener is not exposed to the LAN. See
+`docs/setup.md` for one-time host setup.
 
 ## Search Architecture
 

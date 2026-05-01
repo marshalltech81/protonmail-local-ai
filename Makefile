@@ -1,4 +1,4 @@
-.PHONY: build up down logs first-run update pull-models status clean sync sync-indexer sync-mcp test test-indexer test-mcp typecheck typecheck-indexer typecheck-mcp bridge-patch-check bridge-smoke bridge-upgrade-check open-webui-up open-webui-down open-webui-logs init-secrets validate-env help
+.PHONY: build up down logs first-run update pull-models pull-models-host status clean sync sync-indexer sync-mcp test test-indexer test-mcp typecheck typecheck-indexer typecheck-mcp bridge-patch-check bridge-smoke bridge-upgrade-check open-webui-up open-webui-up-host-ollama open-webui-down open-webui-logs up-host-ollama down-host-ollama logs-host-ollama init-secrets validate-env help
 
 UV_CACHE_DIR ?= /tmp/uv-cache
 export UV_CACHE_DIR
@@ -22,10 +22,15 @@ help:
 	@echo "  bridge-smoke        Build and smoke test the Bridge runtime image"
 	@echo "  bridge-upgrade-check  Run Bridge patch-drift and smoke checks"
 	@echo "  open-webui-up Start optional local Open WebUI on localhost"
+	@echo "  open-webui-up-host-ollama Start Open WebUI pointed at native macOS Ollama"
 	@echo "  open-webui-down Stop optional local Open WebUI"
 	@echo "  open-webui-logs Tail optional Open WebUI logs"
+	@echo "  up-host-ollama Start the stack pointed at native macOS Ollama (see docs/setup.md)"
+	@echo "  down-host-ollama Stop the host-Ollama stack"
+	@echo "  logs-host-ollama Tail logs for the host-Ollama stack"
 	@echo "  update       Rebuild and restart Bridge with new version"
-	@echo "  pull-models  Pull Ollama embedding and LLM models"
+	@echo "  pull-models  Pull Ollama embedding and LLM models (containerized Ollama)"
+	@echo "  pull-models-host Pull Ollama models via the native macOS Ollama (host-Ollama mode)"
 	@echo "  status       Show container and index status"
 	@echo "  sync         Sync local uv environments for Python services"
 	@echo "  test         Run indexer and mcp-server unit tests locally with uv"
@@ -124,6 +129,43 @@ pull-models:
 	@echo "Pulling LLM model..."
 	docker exec ollama ollama pull "$$(./scripts/validate-env.sh --get OLLAMA_LLM_MODEL)"
 
+# Pull Ollama models via the native (host) Ollama. Use this in host-Ollama
+# mode (docker-compose.host-ollama.yml). Requires `brew install ollama`
+# and the launchd service to be running on 127.0.0.1:11434. See
+# docs/setup.md for the host-side setup steps.
+pull-models-host:
+	@if ! command -v ollama >/dev/null 2>&1; then \
+		printf 'ERROR: ollama CLI not found on host. Install with: brew install ollama\n' >&2; \
+		exit 1; \
+	fi
+	@if ! curl -fsS --max-time 3 http://127.0.0.1:11434/api/tags >/dev/null 2>&1; then \
+		printf 'ERROR: native Ollama is not responding on 127.0.0.1:11434.\n' >&2; \
+		printf 'Start it with: brew services start ollama\n' >&2; \
+		exit 1; \
+	fi
+	@echo "Pulling embedding model (native)..."
+	ollama pull "$$(./scripts/validate-env.sh --get OLLAMA_EMBED_MODEL)"
+	@echo "Pulling LLM model (native)..."
+	ollama pull "$$(./scripts/validate-env.sh --get OLLAMA_LLM_MODEL)"
+
+# Start the stack with Ollama running natively on the macOS host.
+# Containers reach Ollama via OrbStack's host.docker.internal. Requires the
+# host to bind 0.0.0.0:11434 AND the macOS Application Firewall to be on.
+# See docs/setup.md for one-time host setup.
+up-host-ollama: init-secrets validate-env
+	@if ! curl -fsS --max-time 3 http://127.0.0.1:11434/api/tags >/dev/null 2>&1; then \
+		printf 'ERROR: native Ollama is not responding on 127.0.0.1:11434.\n' >&2; \
+		printf 'Start it with: brew services start ollama (and complete docs/setup.md host-Ollama steps).\n' >&2; \
+		exit 1; \
+	fi
+	docker compose -f docker-compose.yml -f docker-compose.host-ollama.yml up -d
+
+down-host-ollama:
+	docker compose -f docker-compose.yml -f docker-compose.host-ollama.yml down
+
+logs-host-ollama:
+	docker compose -f docker-compose.yml -f docker-compose.host-ollama.yml logs -f
+
 # Update Bridge to a new version
 # 1. Bump BRIDGE_VERSION in .env
 # 2. Run: make update
@@ -163,6 +205,38 @@ open-webui-up: init-secrets validate-env
 	printf '\n  Starting Open WebUI on http://localhost:%s\n' "$$port"; \
 	printf '  Open WebUI uses the existing ollama container and MCP at http://mcp-server:3000/mcp.\n\n'
 	docker compose -f docker-compose.yml -f docker-compose.open-webui.yml up -d open-webui
+
+# Start Open WebUI when Ollama is running natively on the macOS host
+# (host-Ollama mode). Layers all four overlay files so Open WebUI joins the
+# host-Ollama stack and points at host.docker.internal:11434.
+open-webui-up-host-ollama: init-secrets validate-env
+	@if [ ! -s .secrets/open_webui_secret_key.txt ]; then \
+		if ! command -v openssl >/dev/null 2>&1; then \
+			printf 'ERROR: openssl not found on host; cannot generate Open WebUI session key.\n' >&2; \
+			exit 1; \
+		fi; \
+		( \
+			umask 077; \
+			openssl rand -base64 32 | tr -d '\n' > .secrets/open_webui_secret_key.txt; \
+		); \
+		echo "  generated .secrets/open_webui_secret_key.txt"; \
+	fi
+	@transport="$$(./scripts/validate-env.sh --get MCP_TRANSPORT)"; \
+	if [ "$$transport" != "dual" ] && [ "$$transport" != "streamable-http" ]; then \
+		printf 'ERROR: set MCP_TRANSPORT=dual or MCP_TRANSPORT=streamable-http in .env before starting Open WebUI.\n' >&2; \
+		exit 1; \
+	fi
+	@if ! curl -fsS --max-time 3 http://127.0.0.1:11434/api/tags >/dev/null 2>&1; then \
+		printf 'ERROR: native Ollama is not responding on 127.0.0.1:11434.\n' >&2; \
+		printf 'Start it with: brew services start ollama (and complete docs/setup.md host-Ollama steps).\n' >&2; \
+		exit 1; \
+	fi
+	docker compose \
+		-f docker-compose.yml \
+		-f docker-compose.host-ollama.yml \
+		-f docker-compose.open-webui.yml \
+		-f docker-compose.open-webui.host-ollama.yml \
+		up -d open-webui
 
 open-webui-down:
 	docker compose -f docker-compose.yml -f docker-compose.open-webui.yml stop open-webui
