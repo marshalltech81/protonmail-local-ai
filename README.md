@@ -78,9 +78,9 @@ make pull-models
 ```
 
 > **Apple Silicon performance tip:** containerized Ollama on macOS cannot use
-> Metal GPU acceleration. For 3–10x faster inference on M-series, install
-> Ollama natively (`brew install ollama`) and start the stack with
-> `make up-host-ollama` instead of `make up`. See
+> Metal GPU acceleration. Inference is typically several times faster on
+> M-series when Ollama runs natively (`brew install ollama`); start the stack
+> with `make up-host-ollama` instead of `make up`. See
 > [docs/setup.md](docs/setup.md#optional-native-host-ollama-on-macos) for
 > the one-time host setup (firewall + bind) and use `make pull-models-host`
 > in place of `make pull-models`.

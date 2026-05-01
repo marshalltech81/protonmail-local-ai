@@ -59,6 +59,14 @@ jobs:
             echo "ERROR: could not read latest Bridge release from upstream" >&2
             exit 1
           fi
+          # Sanity-check the tag shape before downstream steps sed it
+          # into the pin sites. Upstream has used vX.Y.Z consistently;
+          # an unexpected shape (RC marker, suffix, retag) should fail
+          # loudly here rather than produce a malformed pin in a PR.
+          if ! printf '%s' "$version" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "ERROR: upstream tag '$version' does not match expected vX.Y.Z shape" >&2
+            exit 1
+          fi
           echo "version=${version}" >> "$GITHUB_OUTPUT"
           echo "Upstream latest: ${version}"
 
@@ -107,7 +115,10 @@ jobs:
 
       - name: Open or refresh PR
         if: steps.compare.outputs.needs_bump == 'true'
-        uses: peter-evans/create-pull-request@v7
+        # Pinned to a commit SHA rather than a floating major tag because
+        # this step holds `contents: write` + `pull-requests: write`. The
+        # tag comment documents the human-readable version for review.
+        uses: peter-evans/create-pull-request@22a9089034f40e5a961c8808d113e2c98fb63676 # v7.0.11
         with:
           branch: chore/bridge-${{ steps.latest.outputs.version }}
           base: main

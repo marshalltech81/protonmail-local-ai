@@ -79,7 +79,11 @@ docker run --rm \
         # initializes GPG + pass, creates the vault, and exec()s into
         # bridge --cli. Bridge logs "Vault loaded" early (before any
         # network call), then sees EOF on stdin and exits cleanly.
-        /entrypoint.sh </dev/null >/dev/null 2>&1 &
+        # Capture entrypoint output to a tmpfile rather than discarding
+        # it: failures that happen before Bridge writes its structured
+        # log (GPG init, exec error) would otherwise be invisible.
+        ENTRY_OUT=/tmp/bridge-entrypoint.out
+        /entrypoint.sh </dev/null >"$ENTRY_OUT" 2>&1 &
         ENTRY_PID=$!
         # Poll the structured log for the "Vault loaded" marker, with a
         # bounded deadline so a stuck startup fails the smoke test
@@ -97,11 +101,16 @@ docker run --rm \
         sleep 1
         kill -KILL "$ENTRY_PID" 2>/dev/null || true
         # Dump the most recent log so the host can grep for the marker.
+        # On the no-log path, also dump entrypoint output so a pre-Bridge
+        # failure (GPG init, missing binary, exec error) is visible
+        # instead of silently swallowed.
         LOG="$(find /data/local/protonmail/bridge-v3/logs -name "*.log" 2>/dev/null | sort | tail -1)"
         if [ -n "$LOG" ]; then
             cat "$LOG"
         else
             echo "NO_BRIDGE_LOG_WRITTEN"
+            echo "--- entrypoint output ---"
+            cat "$ENTRY_OUT" 2>/dev/null || true
         fi
     ' > "$SMOKE_OUT" 2>&1 || true
 

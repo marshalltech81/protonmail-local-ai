@@ -138,11 +138,7 @@ pull-models-host:
 		printf 'ERROR: ollama CLI not found on host. Install with: brew install ollama\n' >&2; \
 		exit 1; \
 	fi
-	@if ! curl -fsS --max-time 3 http://127.0.0.1:11434/api/tags >/dev/null 2>&1; then \
-		printf 'ERROR: native Ollama is not responding on 127.0.0.1:11434.\n' >&2; \
-		printf 'Start it with: brew services start ollama\n' >&2; \
-		exit 1; \
-	fi
+	@./scripts/check-host-ollama.sh
 	@echo "Pulling embedding model (native)..."
 	ollama pull "$$(./scripts/validate-env.sh --get OLLAMA_EMBED_MODEL)"
 	@echo "Pulling LLM model (native)..."
@@ -153,11 +149,7 @@ pull-models-host:
 # host to bind 0.0.0.0:11434 AND the macOS Application Firewall to be on.
 # See docs/setup.md for one-time host setup.
 up-host-ollama: init-secrets validate-env
-	@if ! curl -fsS --max-time 3 http://127.0.0.1:11434/api/tags >/dev/null 2>&1; then \
-		printf 'ERROR: native Ollama is not responding on 127.0.0.1:11434.\n' >&2; \
-		printf 'Start it with: brew services start ollama (and complete docs/setup.md host-Ollama steps).\n' >&2; \
-		exit 1; \
-	fi
+	@./scripts/check-host-ollama.sh
 	docker compose -f docker-compose.yml -f docker-compose.host-ollama.yml up -d
 
 down-host-ollama:
@@ -195,11 +187,7 @@ open-webui-up: init-secrets validate-env
 		); \
 		echo "  generated .secrets/open_webui_secret_key.txt"; \
 	fi
-	@transport="$$(./scripts/validate-env.sh --get MCP_TRANSPORT)"; \
-	if [ "$$transport" != "dual" ] && [ "$$transport" != "streamable-http" ]; then \
-		printf 'ERROR: set MCP_TRANSPORT=dual or MCP_TRANSPORT=streamable-http in .env before starting Open WebUI.\n' >&2; \
-		exit 1; \
-	fi
+	@./scripts/check-mcp-streamable.sh
 	@port="$$(./scripts/validate-env.sh --get OPEN_WEBUI_PORT)"; \
 	port="$${port:-8080}"; \
 	printf '\n  Starting Open WebUI on http://localhost:%s\n' "$$port"; \
@@ -221,16 +209,8 @@ open-webui-up-host-ollama: init-secrets validate-env
 		); \
 		echo "  generated .secrets/open_webui_secret_key.txt"; \
 	fi
-	@transport="$$(./scripts/validate-env.sh --get MCP_TRANSPORT)"; \
-	if [ "$$transport" != "dual" ] && [ "$$transport" != "streamable-http" ]; then \
-		printf 'ERROR: set MCP_TRANSPORT=dual or MCP_TRANSPORT=streamable-http in .env before starting Open WebUI.\n' >&2; \
-		exit 1; \
-	fi
-	@if ! curl -fsS --max-time 3 http://127.0.0.1:11434/api/tags >/dev/null 2>&1; then \
-		printf 'ERROR: native Ollama is not responding on 127.0.0.1:11434.\n' >&2; \
-		printf 'Start it with: brew services start ollama (and complete docs/setup.md host-Ollama steps).\n' >&2; \
-		exit 1; \
-	fi
+	@./scripts/check-mcp-streamable.sh
+	@./scripts/check-host-ollama.sh
 	docker compose \
 		-f docker-compose.yml \
 		-f docker-compose.host-ollama.yml \

@@ -26,6 +26,19 @@ readonly PATCHED_CERT='DNSNames:    []string{"protonmail-bridge", "localhost"},'
 readonly UPSTREAM_AUTOUPDATE='AutoUpdate:        true,'
 readonly PATCHED_AUTOUPDATE='AutoUpdate:        false,'
 
+# Path to the synthetic Go test file written by verify_autoupdate_default.
+# Tracked at script scope so the EXIT/INT/TERM trap below can clean it up
+# even if `go test` is interrupted by a signal — a function-local RETURN
+# trap would not fire on Ctrl-C and would leak the file into the patched
+# tree, breaking the next re-run against a reused checkout.
+ASSERT_TEST_FILE=""
+cleanup_assert_test_file() {
+    if [[ -n "$ASSERT_TEST_FILE" ]]; then
+        rm -f "$ASSERT_TEST_FILE"
+    fi
+}
+trap cleanup_assert_test_file EXIT INT TERM
+
 # These exact string checks are intentionally strict: if Proton changes the
 # surrounding source layout, we want the build and drift check to fail loudly
 # instead of silently applying a partial or misplaced patch.
@@ -132,10 +145,18 @@ run_go_in_pinned_image() {
         --env GOTOOLCHAIN=local \
         --env DEBIAN_FRONTEND=noninteractive \
         "$go_image" \
-        sh -c "apt-get update >/dev/null \
-            && apt-get install -y --no-install-recommends \
+        sh -c '
+            if ! apt-get update >/dev/null 2>&1; then
+                echo "ERROR: apt-get update failed inside the pinned Go image." >&2
+                echo "       The drift check needs network access to Debian mirrors;" >&2
+                echo "       reconnect and re-run, or run on a host with Go installed" >&2
+                echo "       to skip the in-container path." >&2
+                exit 1
+            fi
+            apt-get install -y --no-install-recommends \
                 pkg-config libsecret-1-dev libfido2-dev libcbor-dev >/dev/null \
-            && go${go_args}"
+            && rm -rf /var/lib/apt/lists/* \
+            && go'"$go_args"
 }
 
 compile_patched_packages() {
@@ -165,9 +186,12 @@ compile_patched_packages() {
 # field. If Proton ever renames the constructor or introduces a second
 # code path that overrides the default, this test fails the build.
 verify_autoupdate_default() {
-    local test_file="${REPO_DIR}/internal/vault/autoupdate_patch_assert_test.go"
+    # Set the script-scope path before writing the file so the EXIT/INT/TERM
+    # trap above will clean it up on any exit path, including SIGINT during
+    # `go test`.
+    ASSERT_TEST_FILE="${REPO_DIR}/internal/vault/autoupdate_patch_assert_test.go"
 
-    cat > "$test_file" <<'GOEOF'
+    cat > "$ASSERT_TEST_FILE" <<'GOEOF'
 package vault
 
 import "testing"
@@ -184,12 +208,6 @@ func TestPatchedAutoUpdateDefaultIsFalse(t *testing.T) {
 	}
 }
 GOEOF
-
-    # Always remove the synthetic test on exit so a re-run starts from the
-    # same state and the patched tree never carries our assertion file
-    # back out into a build artifact.
-    cleanup_assertion_test() { rm -f "$test_file"; }
-    trap cleanup_assertion_test RETURN
 
     if command -v go >/dev/null 2>&1; then
         ( cd "$REPO_DIR" \
