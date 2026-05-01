@@ -39,6 +39,17 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      # The drift check compiles internal/vault, which transitively imports
+      # docker-credential-helpers/secretservice and needs libsecret-1-dev via
+      # pkg-config. The runner ships with Go on PATH so the script's "host
+      # Go" path is taken; install the same C deps Bridge's Dockerfile
+      # builder stage uses so the host compile matches the build.
+      - name: Install Bridge build C dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libsecret-1-dev libfido2-dev libcbor-dev
+
       - name: Verify Bridge source patch points
         run: make bridge-patch-check
 

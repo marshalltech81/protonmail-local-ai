@@ -5,4 +5,7 @@ exclude_loopback = true
 exclude = [
   '^https://github\.com/marshalltech81/protonmail-local-ai/security/advisories/new$',
   '^https://mail-api\.proton\.me/mail/v4/messages/<id>$',
+  # Templated URL in .github/workflows/bridge-version-check.yml — lychee
+  # sees "${{ steps.latest.outputs.version }}" as a literal "$" and 404s.
+  '^https://github\.com/ProtonMail/proton-bridge/releases/tag/\$$',
 ]
