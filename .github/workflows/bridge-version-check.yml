@@ -1,0 +1,165 @@
+name: Bridge version check
+
+# Weekly poll of the upstream Proton Bridge release feed. If a newer tag
+# than the pinned BRIDGE_VERSION is published, this workflow opens (or
+# refreshes) a PR that bumps the pin in both `.env.example` and
+# `bridge/Dockerfile` and runs `make bridge-upgrade-check` as the gate.
+#
+# A failing patch-check still produces a PR (continue-on-error). That is
+# intentional: a failure means upstream restructured `internal/constants/`,
+# `internal/certs/`, or `internal/vault/` enough to break one of our
+# string-count guards. A failing PR is the human signal that
+# `bridge/patch-source.sh` needs an updated string target. Hiding that
+# behind a workflow that bails on patch failure would mask exactly the
+# case we most need to see.
+#
+# Bot PRs opened by this workflow do not trigger the standard PR CI
+# suite (tests, CodeQL, Bandit, Trivy, lychee, pre-commit, Docker
+# build). GitHub treats events created with the default `GITHUB_TOKEN`
+# as "no new workflow runs" to prevent recursion. This is an
+# intentional trade-off: the load-bearing check for a Bridge bump is
+# `make bridge-upgrade-check` (patch-drift guards + smoke test), and
+# this workflow runs it itself in the gate step below, surfacing the
+# outcome in the PR body. AGENTS.md additionally requires running it
+# locally before merging, which exercises the local toolchain. If
+# broader CI on bot PRs becomes necessary, switch to a GitHub App or
+# PAT token rather than relaxing this design.
+
+on:
+  schedule:
+    # Mondays at 13:00 UTC. Picked deliberately after typical weekend
+    # release windows close so a Friday/Saturday Bridge release lands
+    # in a Monday PR rather than waiting a full week.
+    - cron: "0 13 * * 1"
+  workflow_dispatch:
+
+permissions:
+  # `contents: write` is needed so peter-evans/create-pull-request can
+  # push a `chore/bridge-<version>` branch; `pull-requests: write` is
+  # needed to open or refresh the PR. No other scopes are required.
+  contents: write
+  pull-requests: write
+
+jobs:
+  check-and-bump:
+    name: Check upstream Bridge version
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Read currently pinned Bridge version
+        id: current
+        run: |
+          version="$(grep -E '^BRIDGE_VERSION=' .env.example | head -n1 | cut -d= -f2)"
+          if [ -z "$version" ]; then
+            echo "ERROR: could not read BRIDGE_VERSION from .env.example" >&2
+            exit 1
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "Currently pinned: ${version}"
+
+      - name: Read latest upstream Bridge release
+        id: latest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # `releases/latest` excludes pre-releases, which is what we
+          # want — no silent jumps to RC builds via this automation.
+          version="$(gh api repos/ProtonMail/proton-bridge/releases/latest --jq .tag_name)"
+          if [ -z "$version" ] || [ "$version" = "null" ]; then
+            echo "ERROR: could not read latest Bridge release from upstream" >&2
+            exit 1
+          fi
+          # Sanity-check the tag shape before downstream steps sed it
+          # into the pin sites. Upstream has used vX.Y.Z consistently;
+          # an unexpected shape (RC marker, suffix, retag) should fail
+          # loudly here rather than produce a malformed pin in a PR.
+          if ! printf '%s' "$version" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "ERROR: upstream tag '$version' does not match expected vX.Y.Z shape" >&2
+            exit 1
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "Upstream latest: ${version}"
+
+      - name: Compare versions
+        id: compare
+        run: |
+          if [ "${{ steps.current.outputs.version }}" = "${{ steps.latest.outputs.version }}" ]; then
+            echo "needs_bump=false" >> "$GITHUB_OUTPUT"
+            echo "Already on latest (${{ steps.current.outputs.version }}); nothing to do."
+          else
+            echo "needs_bump=true" >> "$GITHUB_OUTPUT"
+            echo "Bump needed: ${{ steps.current.outputs.version }} → ${{ steps.latest.outputs.version }}"
+          fi
+
+      - name: Apply version bump to pin sites
+        if: steps.compare.outputs.needs_bump == 'true'
+        run: |
+          new="${{ steps.latest.outputs.version }}"
+          # Both pin sites must move together — `.env.example` is what
+          # the Compose stack reads at runtime, `bridge/Dockerfile` ARG
+          # is the build-time default if .env is absent.
+          sed -i "s|^BRIDGE_VERSION=.*|BRIDGE_VERSION=${new}|" .env.example
+          sed -i "s|^ARG BRIDGE_VERSION=.*|ARG BRIDGE_VERSION=${new}|" bridge/Dockerfile
+          echo "--- diff ---"
+          git --no-pager diff .env.example bridge/Dockerfile
+
+      - name: Seed local config for bridge-upgrade-check
+        if: steps.compare.outputs.needs_bump == 'true'
+        run: |
+          # Mirror .github/workflows/bridge.yml's seeding step so
+          # docker-compose can read .env and the Bridge service finds
+          # the secret files it expects (real values not needed —
+          # bridge-smoke does not log in to Proton).
+          cp .env.example .env
+          mkdir -p .secrets
+          printf 'placeholder-bridge-pass' > .secrets/bridge_pass.txt
+          chmod 600 .secrets/bridge_pass.txt
+          printf '' > .secrets/anthropic_api_key.txt
+          chmod 600 .secrets/anthropic_api_key.txt
+
+      - name: Run bridge-upgrade-check (informational)
+        if: steps.compare.outputs.needs_bump == 'true'
+        id: gate
+        continue-on-error: true
+        run: make bridge-upgrade-check
+
+      - name: Open or refresh PR
+        if: steps.compare.outputs.needs_bump == 'true'
+        # Pinned to a commit SHA rather than a floating major tag because
+        # this step holds `contents: write` + `pull-requests: write`. The
+        # tag comment documents the human-readable version for review.
+        uses: peter-evans/create-pull-request@22a9089034f40e5a961c8808d113e2c98fb63676 # v7.0.11
+        with:
+          branch: chore/bridge-${{ steps.latest.outputs.version }}
+          base: main
+          title: "chore(bridge): bump Bridge to ${{ steps.latest.outputs.version }}"
+          commit-message: |
+            chore(bridge): bump Bridge to ${{ steps.latest.outputs.version }}
+
+            Auto-generated by .github/workflows/bridge-version-check.yml.
+          body: |
+            Automated weekly upstream check picked up a new Proton Bridge release.
+
+            - Old: `${{ steps.current.outputs.version }}`
+            - New: `${{ steps.latest.outputs.version }}`
+            - Upstream release notes: https://github.com/ProtonMail/proton-bridge/releases/tag/${{ steps.latest.outputs.version }}
+
+            ## Patch + smoke gate
+
+            `make bridge-upgrade-check` outcome: **${{ steps.gate.outcome }}**
+
+            If the gate failed, upstream most likely restructured
+            `internal/constants/`, `internal/certs/`, or
+            `internal/vault/` enough to break one of the `require_count`
+            guards in `bridge/patch-source.sh`. Review the workflow logs
+            and update the affected `UPSTREAM_*` / `PATCHED_*` constants
+            so the patch hunk lines up against the new source.
+
+            Per `AGENTS.md`, run `make bridge-upgrade-check` locally
+            before merging.
+          labels: |
+            bridge
+            dependencies
+          delete-branch: true

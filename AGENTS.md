@@ -67,7 +67,13 @@ Important architecture facts:
 - indexing is thread-level, not message-level
 - MCP defaults to SSE transport; `MCP_TRANSPORT=streamable-http` enables
   Streamable HTTP, and `MCP_TRANSPORT=dual` serves both `/sse` and `/mcp`
-- `ollama` uses the official image with no custom Dockerfile
+- `ollama` uses the official image with no custom Dockerfile in the default
+  stack. An optional `docker-compose.host-ollama.yml` overlay drops the
+  `ollama` container and points the indexer + mcp-server at a Homebrew-
+  installed Ollama on the host via OrbStack's `host.docker.internal`. This
+  exists because containerized Ollama on macOS cannot use Metal GPU
+  acceleration. See `docs/setup.md` for the required host-side setup
+  (firewall + listener bind).
 
 ## Non-Negotiable Constraints
 
@@ -85,6 +91,27 @@ Do not make any of the following changes unless the repository owner explicitly 
 - Do not expose any container port other than `mcp-server:3000` to the host.
   Exception: the optional Open WebUI overlay may expose only
   `127.0.0.1:${OPEN_WEBUI_PORT:-8080}:8080`.
+- The host-Ollama overlay (`docker-compose.host-ollama.yml`) introduces a
+  *host process* listener on `0.0.0.0:11434`, not a published container
+  port — the rule above is preserved literally. That host-side bind is
+  only safe when paired with the macOS Application Firewall steps in
+  `docs/setup.md` (stealth mode + a binary-level block on the Ollama
+  binary). Do not document or recommend the overlay without those steps.
+  Do not switch the overlay to use the host's LAN IP — `host.docker.internal`
+  is required so the wiring survives changing networks.
+- After a `brew upgrade` (or any reinstall of the `ollama` formula) on a
+  host running the host-Ollama overlay, verify three things before relying
+  on the stack again:
+  1. The custom LaunchAgent (`~/Library/LaunchAgents/com.local.ollama-host.plist`)
+     is still loaded: `launchctl print "gui/$(id -u)/com.local.ollama-host"`.
+  2. The listener is bound on `*:11434`, not `127.0.0.1:11434`:
+     `lsof -iTCP:11434 -sTCP:LISTEN`. A loopback bind means brew's plist
+     is winning — confirm `brew services list` does not show `ollama`
+     started, and re-bootstrap the custom LaunchAgent if needed.
+  3. The Application Firewall block on `/opt/homebrew/bin/ollama` is still
+     in place (a brew upgrade can replace the binary at the same path,
+     which preserves the rule, but a path change would silently void it):
+     `/usr/libexec/ApplicationFirewall/socketfilterfw --getappblocked /opt/homebrew/bin/ollama`.
 - Do not add `network_mode: host`.
 - Do not give `mcp-server` direct IMAP access to Bridge.
 - Do not give `indexer` direct IMAP access to Bridge.
@@ -145,8 +172,23 @@ Important facts:
   `$XDG_CONFIG_HOME/protonmail/bridge-v3/vault.enc`
 - Bridge binds to `0.0.0.0` via a source patch so mbsync can reach it from another container
 - Bridge TLS SANs are patched so the cert is valid for `protonmail-bridge` and `localhost`
+- Bridge's vault default `AutoUpdate: true` is patched to `false` so the
+  in-process auto-updater does not silently bypass `BRIDGE_VERSION`. Without
+  this patch Bridge fetches `proton.me/download/bridge/linux/x86/v1/version.json`
+  on every startup, downloads the latest release (the Qt/GUI variant —
+  exactly what `build-nogui` exists to avoid), and stages it under
+  `/data/local/protonmail/bridge-v3/updates/<version>/`. The pin then
+  controls only what gets compiled in the Dockerfile, not what ships at
+  runtime. The patch is verified at three layers: source string-count
+  guards in `bridge/patch-source.sh`, a synthetic `go test` against
+  `internal/vault.newDefaultSettings` run during the build, and an
+  end-to-end `"Vault loaded ... autoUpdate=\"false\""` log assertion in
+  `scripts/bridge-smoke.sh`.
 - Bridge v3 stores credentials and TLS cert material in `vault.enc`
-- the cert is not read from plain files on disk
+- the cert is not baked into any image or persisted in a volume — but mbsync's
+  entrypoint extracts it from a live connection with `openssl s_client` on
+  every container start and writes it to a tmpfs file at
+  `/tmp/mbsync/bridge-cert.pem` for the duration of the run
 - mbsync cert extraction is done from a live connection with `openssl s_client`
 
 Operational implications:
@@ -154,6 +196,11 @@ Operational implications:
 - if you touch Bridge build logic, TLS logic, auth storage, or XDG paths, review setup and recovery behavior first
 - do not assume rebuilding Bridge updates the existing cached cert in `vault.enc`
 - do not replace pass/gpg-based behavior with a weaker shortcut
+- if a future change adds a fourth patch hunk to `bridge/patch-source.sh`,
+  follow the existing three-layer pattern: pre/post `require_count` guards,
+  add the touched package to `compile_patched_packages`, and (if the patch
+  flips a runtime default rather than just a binding/string) add a `go test`
+  assertion plus an end-to-end log/behavior check in `bridge-smoke.sh`
 
 ## Secret Handling
 
