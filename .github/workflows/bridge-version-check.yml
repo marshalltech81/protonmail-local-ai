@@ -12,6 +12,18 @@ name: Bridge version check
 # `bridge/patch-source.sh` needs an updated string target. Hiding that
 # behind a workflow that bails on patch failure would mask exactly the
 # case we most need to see.
+#
+# Bot PRs opened by this workflow do not trigger the standard PR CI
+# suite (tests, CodeQL, Bandit, Trivy, lychee, pre-commit, Docker
+# build). GitHub treats events created with the default `GITHUB_TOKEN`
+# as "no new workflow runs" to prevent recursion. This is an
+# intentional trade-off: the load-bearing check for a Bridge bump is
+# `make bridge-upgrade-check` (patch-drift guards + smoke test), and
+# this workflow runs it itself in the gate step below, surfacing the
+# outcome in the PR body. AGENTS.md additionally requires running it
+# locally before merging, which exercises the local toolchain. If
+# broader CI on bot PRs becomes necessary, switch to a GitHub App or
+# PAT token rather than relaxing this design.
 
 on:
   schedule:
