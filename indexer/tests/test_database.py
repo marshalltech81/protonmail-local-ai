@@ -82,21 +82,57 @@ class TestSchema:
         second = Database(db_path)  # second open must not raise
         second.close()
 
-    def test_opening_with_lower_stored_version_with_no_migration_raises(self, tmp_path):
-        """An existing volume below ``SCHEMA_VERSION`` triggers the
-        migration runner; with no forward migration file shipped to
-        cover the gap, the runner raises a sequence-broken error so
-        the operator knows a migration file is missing rather than
-        silently leaving the schema mid-version."""
+    def test_opening_with_stale_version_runs_migration_to_current(self, tmp_path):
+        """An existing volume one version behind ``SCHEMA_VERSION``
+        triggers the migration runner, which applies the matching
+        migration file and stamps the current version. The schema
+        change must take effect (here: ``threads.display_subject``
+        column exists after upgrade)."""
         db_path = tmp_path / "stale.db"
         database = Database(db_path)
         database.close()
-        # Stamp a stale version into the existing database.
+        import sqlite3
+
+        # Drop the v13 column and stamp v12 to simulate an existing
+        # install that pre-dates the v13 migration. ``ALTER TABLE
+        # DROP COLUMN`` exists in SQLite >= 3.35; the indexer's runtime
+        # already requires SQLite >= 3.43.
+        conn = sqlite3.connect(str(db_path))
+        try:
+            conn.execute("ALTER TABLE threads DROP COLUMN display_subject")
+            conn.execute("UPDATE schema_version SET version = ?", (SCHEMA_VERSION - 1,))
+            conn.commit()
+        finally:
+            conn.close()
+
+        # Reopening should run the v13 migration silently.
+        database = Database(db_path)
+        try:
+            cur = database._conn.execute("PRAGMA table_info(threads)")
+            columns = {row["name"] for row in cur.fetchall()}
+            assert "display_subject" in columns
+            stored = database._conn.execute("SELECT version FROM schema_version").fetchone()[
+                "version"
+            ]
+            assert stored == SCHEMA_VERSION
+        finally:
+            database.close()
+
+    def test_opening_with_unreachable_lower_version_raises(self, tmp_path):
+        """If the stored version is older than the oldest forward
+        migration shipped, the runner raises rather than silently
+        skipping unmodelled steps."""
+        db_path = tmp_path / "ancient.db"
+        database = Database(db_path)
+        database.close()
         import sqlite3
 
         conn = sqlite3.connect(str(db_path))
         try:
-            conn.execute("UPDATE schema_version SET version = ?", (SCHEMA_VERSION - 1,))
+            # v1 is older than any migration file we ship — we currently
+            # ship v13 only; v2..v12 have no migration files because
+            # ``_apply_initial_schema`` covers them on fresh installs.
+            conn.execute("UPDATE schema_version SET version = ?", (1,))
             conn.commit()
         finally:
             conn.close()
@@ -145,6 +181,32 @@ class TestUpsertThreadInsert:
         assert row is not None
         assert row["subject"] == thread.subject
         assert row["folder"] == thread.folder
+
+    def test_writes_display_subject_from_oldest_message(self, db):
+        """``display_subject`` is the oldest incoming message's
+        original (case-preserving) subject so the human-facing label
+        is the cleanest available — not whatever ``Re:`` chain arrives
+        last."""
+        old = make_message(
+            message_id="msg-old@example.com",
+            subject="Today's Meeting",
+            date=datetime(2024, 1, 1, 9, 0, tzinfo=UTC),
+        )
+        reply = make_message(
+            message_id="msg-new@example.com",
+            subject="Re: Today's Meeting",
+            date=datetime(2024, 1, 1, 12, 0, tzinfo=UTC),
+        )
+        # Pass them in reverse-chronological order to confirm that the
+        # MIN(date) selection — not list order — drives the choice.
+        thread = make_thread(messages=[reply, old], subject="today's meeting")
+        db.upsert_thread(thread, FAKE_EMBEDDING)
+        row = db._conn.execute(
+            "SELECT subject, display_subject FROM threads WHERE thread_id = ?",
+            (thread.thread_id,),
+        ).fetchone()
+        assert row["subject"] == "today's meeting"  # normalized matching key untouched
+        assert row["display_subject"] == "Today's Meeting"
 
     def test_inserts_message_thread_map(self, db):
         msg = make_message()
@@ -201,6 +263,114 @@ class TestUpsertThreadInsert:
 
 
 class TestUpsertThreadUpdate:
+    def test_display_subject_preserves_first_writer_through_replies(self, db, threader):
+        """The cleaner original subject sticks even after a ``Re: …``
+        reply is upserted into the same thread, AS LONG AS the reply
+        arrives second. Without this, every reply would clobber the
+        display label and the user would see the most recent ``Re:``
+        chain in the UI."""
+        original = make_message(
+            message_id="display@example.com",
+            subject="Today's Meeting",
+            date=datetime(2024, 1, 1, 9, 0, tzinfo=UTC),
+        )
+        t1 = threader.assign_thread(original)
+        db.upsert_thread(t1, FAKE_EMBEDDING)
+
+        reply = make_message(
+            message_id="display-reply@example.com",
+            subject="Re: Today's Meeting",
+            in_reply_to="display@example.com",
+            filepath="/maildir/INBOX/cur/display-reply",
+            date=datetime(2024, 1, 1, 14, 0, tzinfo=UTC),
+        )
+        t2 = threader.assign_thread(reply)
+        db.upsert_thread(t2, FAKE_EMBEDDING)
+
+        row = db._conn.execute(
+            "SELECT display_subject FROM threads WHERE thread_id = 'display@example.com'"
+        ).fetchone()
+        assert row["display_subject"] == "Today's Meeting"
+
+    def test_display_subject_replaced_when_older_root_arrives_after_reply(self, db, threader):
+        """Out-of-order indexing: the reply arrives first and stamps
+        ``display_subject = "Re: Today's Meeting"``. When the older
+        root message is later indexed, its earlier date pushes
+        ``date_first`` back and its cleaner subject must replace the
+        ``Re:``-prefixed label. A naive COALESCE-on-upsert would trap
+        the reply subject as the display label permanently and the UI
+        would show the wrong thread title forever."""
+        reply = make_message(
+            message_id="reply-first@example.com",
+            subject="Re: Today's Meeting",
+            date=datetime(2024, 1, 1, 14, 0, tzinfo=UTC),
+        )
+        # Reply arrives first — at this point the indexer has no idea
+        # there is an older root.
+        t1 = threader.assign_thread(reply)
+        db.upsert_thread(t1, FAKE_EMBEDDING)
+        row = db._conn.execute(
+            "SELECT display_subject FROM threads WHERE thread_id = ?",
+            (t1.thread_id,),
+        ).fetchone()
+        assert row["display_subject"] == "Re: Today's Meeting"
+
+        # Now the original root message is discovered (older date,
+        # cleaner subject). It should join the same thread and replace
+        # the display_subject.
+        root = make_message(
+            message_id="root-second@example.com",
+            subject="Today's Meeting",
+            date=datetime(2024, 1, 1, 9, 0, tzinfo=UTC),
+        )
+        # Stitch the root into the same thread by sharing a Message-ID
+        # the reply references. We can simulate this by upserting a
+        # Thread that carries the older message as a "new arrival" but
+        # shares the existing thread_id (the threader produces this
+        # shape when it discovers a thread root post-hoc).
+        from src.threader import Thread
+
+        t2 = Thread(
+            thread_id=t1.thread_id,
+            subject=t1.subject,
+            participants=[root.from_addr] + root.to_addrs,
+            messages=[root],
+            folder=root.folder,
+            date_first=root.date,
+            date_last=root.date,
+        )
+        db.upsert_thread(t2, FAKE_EMBEDDING)
+
+        row = db._conn.execute(
+            "SELECT display_subject, date_first FROM threads WHERE thread_id = ?",
+            (t1.thread_id,),
+        ).fetchone()
+        # date_first must reflect the older root (sanity-check the merge).
+        assert row["date_first"] == "2024-01-01T09:00:00+00:00"
+        # display_subject must now reflect the older root, not the reply.
+        assert row["display_subject"] == "Today's Meeting"
+
+    def test_display_subject_backfills_when_legacy_row_was_null(self, db):
+        """A pre-v13 row has ``display_subject = NULL``. The next upsert
+        that supplies a non-NULL value backfills it. After that, normal
+        date-ordered precedence applies."""
+        thread = make_thread()
+        db.upsert_thread(thread, FAKE_EMBEDDING)
+        # Simulate the legacy state by clearing display_subject.
+        db._conn.execute(
+            "UPDATE threads SET display_subject = NULL WHERE thread_id = ?",
+            (thread.thread_id,),
+        )
+        db._conn.commit()
+
+        # Re-upsert the same thread; COALESCE should fill the column.
+        db.upsert_thread(thread, FAKE_EMBEDDING)
+        row = db._conn.execute(
+            "SELECT display_subject FROM threads WHERE thread_id = ?",
+            (thread.thread_id,),
+        ).fetchone()
+        assert row["display_subject"] == thread.messages[0].subject
+
     def test_body_text_accumulates_on_second_message(self, db, threader):
         """
         When a new message joins an existing thread, its content must be

@@ -61,13 +61,21 @@ def _dedupe_by_canonical(addrs: list[str]) -> list[str]:
 #   v12 — FK ``ON DELETE CASCADE`` across chunk + attachment tables so
 #         a thread or message deletion takes its dependent rows with it
 #         without relying on application-side helpers.
+#   v13 — ``threads.display_subject``: retrieval-facing original-cased
+#         subject (with ``Re:``/``Fwd:`` prefixes intact). The existing
+#         ``subject`` column stays as the normalized matching key used
+#         by the threader for grouping. Existing threads receive
+#         ``NULL`` for ``display_subject``; the retrieval layer
+#         coalesces back to ``subject`` so old threads render with the
+#         legacy normalized value until a future indexer pass refreshes
+#         them.
 # Bumping this constant requires shipping a forward migration file at
 # ``src/migrations/<NNNN>_<slug>.sql`` covering the new version. Fresh
 # installs continue to apply ``_apply_initial_schema`` directly and stamp
 # the current version; existing installs run the migration runner to
 # catch up. See ``src/migrations/runner.py`` for the file layout and
 # transactional guarantees.
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
 
 # The schema uses FTS5 ``contentless_delete=1``, which SQLite added in 3.43.
 # Validate the runtime version at Database init and fail fast with a clear
@@ -295,7 +303,7 @@ class Database:
             -- Thread-level coarse retrieval
             CREATE TABLE threads (
                 thread_id       TEXT PRIMARY KEY,
-                subject         TEXT NOT NULL,
+                subject         TEXT NOT NULL,           -- normalized matching key (lowercased, prefix-stripped)
                 participants    TEXT NOT NULL,           -- JSON array
                 senders         TEXT NOT NULL DEFAULT '[]',  -- JSON array (From only)
                 folder          TEXT NOT NULL,
@@ -305,7 +313,8 @@ class Database:
                 snippet         TEXT,
                 has_attachments INTEGER DEFAULT 0,
                 body_text       TEXT,
-                fts_rowid       INTEGER
+                fts_rowid       INTEGER,
+                display_subject TEXT                     -- original-cased subject for retrieval; NULL on legacy rows, COALESCE'd back to subject by readers
             );
 
             CREATE VIRTUAL TABLE threads_fts USING fts5(
@@ -499,6 +508,22 @@ class Database:
         incoming_participants = list(thread.participants)
         incoming_senders = [m.from_addr for m in thread.messages if m.from_addr]
         incoming_has_attachments = int(any(m.has_attachments for m in thread.messages))
+        # display_subject: pick the oldest incoming message's original
+        # subject as the human-facing label. The threader strips Re:/Fwd:
+        # and lowercases ``thread.subject`` for grouping, so the original
+        # only survives on the Message objects. The on-update merge runs
+        # in Python below (``merged_display_subject``) — a naive COALESCE
+        # in ON CONFLICT cannot distinguish the "in-order arrival, keep
+        # original" case from the "reply arrived first, replace with the
+        # later-discovered older root" case, and would trap a ``Re:``
+        # subject as the display label whenever messages are indexed
+        # out of order.
+        incoming_display_subject: str | None = None
+        incoming_earliest_date_iso: str | None = None
+        if thread.messages:
+            earliest = min(thread.messages, key=lambda m: m.date)
+            incoming_display_subject = earliest.subject or None
+            incoming_earliest_date_iso = earliest.date.isoformat()
 
         started = False
         try:
@@ -506,7 +531,8 @@ class Database:
 
             existing = cur.execute(
                 "SELECT body_text, message_ids, participants, senders, "
-                "has_attachments, date_first, date_last, snippet "
+                "has_attachments, date_first, date_last, snippet, "
+                "display_subject "
                 "FROM threads WHERE thread_id = ?",
                 (thread.thread_id,),
             ).fetchone()
@@ -526,12 +552,39 @@ class Database:
                 # Lexicographic min() is safe on ISO 8601 datetime strings
                 # once they are normalized to UTC (parser._parse_date).
                 merged_date_first = min(existing["date_first"], thread.date_first.isoformat())
+                # display_subject merge: prefer the subject of the
+                # oldest message we have ever seen for this thread.
+                # Three cases:
+                #   1. Existing display_subject is NULL (legacy v12 row,
+                #      or first non-NULL writer hasn't arrived yet) →
+                #      take the incoming.
+                #   2. The incoming earliest message is older than the
+                #      currently-recorded ``date_first`` → the new
+                #      message is the new "root" and its subject is
+                #      cleaner than whatever ``Re:`` reply may have
+                #      been recorded as the display label first → take
+                #      the incoming.
+                #   3. Otherwise (the existing row was already populated
+                #      and the incoming message is not older) → keep
+                #      the existing label so a later ``Re:`` reply
+                #      cannot clobber the cleaner original subject.
+                existing_display = existing["display_subject"]
+                if not existing_display:
+                    merged_display_subject = incoming_display_subject
+                elif (
+                    incoming_earliest_date_iso is not None
+                    and incoming_earliest_date_iso < existing["date_first"]
+                ):
+                    merged_display_subject = incoming_display_subject or existing_display
+                else:
+                    merged_display_subject = existing_display
             else:
                 merged_ids = incoming_message_ids
                 merged_participants = _dedupe_by_canonical(incoming_participants)
                 merged_senders = _dedupe_by_canonical(incoming_senders)
                 merged_has_attachments = incoming_has_attachments
                 merged_date_first = thread.date_first.isoformat()
+                merged_display_subject = incoming_display_subject
 
             body = self._compute_body(thread, existing)
 
@@ -552,14 +605,19 @@ class Database:
                     snippet = existing["snippet"]
             date_last = thread.date_last.isoformat()
 
-            # Upsert main thread record
+            # Upsert main thread record. ``display_subject`` was merged
+            # in Python above (``merged_display_subject``) — see that
+            # block for the date-driven precedence rules. Passing the
+            # already-resolved value lets the SQL stay simple and lets
+            # ON CONFLICT just overwrite, mirroring how every other
+            # column flows through the upsert.
             cur.execute(
                 """
                 INSERT INTO threads
                     (thread_id, subject, participants, senders, folder,
                      date_first, date_last, message_ids, snippet, has_attachments,
-                     body_text)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     body_text, display_subject)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(thread_id) DO UPDATE SET
                     participants    = excluded.participants,
                     senders         = excluded.senders,
@@ -568,7 +626,8 @@ class Database:
                     message_ids     = excluded.message_ids,
                     snippet         = excluded.snippet,
                     has_attachments = excluded.has_attachments,
-                    body_text       = excluded.body_text
+                    body_text       = excluded.body_text,
+                    display_subject = excluded.display_subject
                 """,
                 (
                     thread.thread_id,
@@ -582,6 +641,7 @@ class Database:
                     snippet,
                     merged_has_attachments,
                     body,
+                    merged_display_subject,
                 ),
             )
 
