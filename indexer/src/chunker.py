@@ -41,7 +41,11 @@ from tokenizers import Tokenizer
 # default ``OLLAMA_EMBED_MODEL``. Used by ``estimate_tokens`` so chunk
 # size budgets reflect real BPE token counts instead of a 4-chars-per-
 # token heuristic that under-counted CJK / URL / Base64 / code text by
-# 4-6× and produced chunks past the model's 2048-token context window.
+# 4-6× and produced chunks past the embed model's *practical* context
+# window. The model itself supports 8192 tokens, but Ollama's default
+# ``num_ctx`` for nomic-embed-text is 2048, which is the binding limit
+# until the operator explicitly raises it. Sizing chunks to fit under
+# 2048 keeps embed calls succeeding regardless of operator config.
 _TOKENIZER_PATH = Path(__file__).parent / "data" / "nomic-embed-text" / "tokenizer.json"
 
 # Paragraph: one or more non-blank lines separated from the next paragraph
@@ -118,7 +122,10 @@ def estimate_tokens(text: str) -> int:
     """Return the real BPE token count for ``text``.
 
     Uses the bundled nomic-embed-text tokenizer so chunk-size budgets
-    line up with the embed model's 2048-token context window. The
+    line up with the embed model's practical context window (Ollama
+    serves nomic-embed-text with a default ``num_ctx=2048``; the model
+    itself supports 8192 but raising it requires explicit operator
+    config). The
     previous char-count heuristic under-counted CJK / URL / Base64 /
     dense code text by 4-6×, which produced chunks the embed model
     rejected with HTTP 500 ("input length exceeds the context length").
@@ -254,12 +261,23 @@ def _split_by_sentence(span: _Span, source: str, max_tokens: int) -> list[_Span]
 
     # A single sentence may still be too large. Recurse into words for
     # those only. Everything else is already safely under the ceiling.
+    # If word-splitting also leaves a span over ``max_tokens`` (CJK
+    # text without spaces, a long URL, a Base64 wall — all single
+    # "words" by ``\\S+``), fall back to ``_split_by_tokens`` which
+    # uses the embed model's tokenizer to slice at exact token
+    # boundaries. Without that final layer, runaway non-whitespace
+    # spans pass through and trigger ``input length exceeds the
+    # context length`` from Ollama at embed time.
     final: list[_Span] = []
     for sub in sub_spans:
         if estimate_tokens(sub.text) <= max_tokens:
             final.append(sub)
         else:
-            final.extend(_split_by_word(sub, source, max_tokens))
+            for word_split in _split_by_word(sub, source, max_tokens):
+                if estimate_tokens(word_split.text) <= max_tokens:
+                    final.append(word_split)
+                else:
+                    final.extend(_split_by_tokens(word_split, source, max_tokens))
     return final if final else [span]
 
 
@@ -294,6 +312,48 @@ def _split_by_word(span: _Span, source: str, max_tokens: int) -> list[_Span]:
     tail = _make_subspan(span, source, segment_start, len(text))
     if tail is not None:
         sub_spans.append(tail)
+    return sub_spans if sub_spans else [span]
+
+
+def _split_by_tokens(span: _Span, source: str, max_tokens: int) -> list[_Span]:
+    """Last-resort splitter for spans without exploitable whitespace.
+
+    Used when ``_split_by_word`` cannot reduce a span — typical inputs
+    are CJK text (no spaces), a single very long URL, or a Base64 wall
+    pasted from an attachment. The splitter encodes the span's text
+    with the embed-model tokenizer, takes the per-token ``offsets``
+    metadata that the HuggingFace ``Encoding`` exposes, and slices
+    the source at those exact token boundaries. The result is
+    guaranteed to fit under ``max_tokens`` (with a small safety
+    margin for whitespace re-insertion at slice boundaries) without
+    losing the offset round-trip invariant — each emitted sub-span's
+    ``[start, end)`` still maps back to the parent.
+
+    The safety margin matters because the tokenizer treats whitespace
+    differently mid-word vs at boundaries; ``max_tokens - 8`` keeps
+    re-encoding the decoded slice safely under the ceiling on every
+    BPE the bundled tokenizer ships with.
+    """
+    encoding = _load_tokenizer().encode(span.text, add_special_tokens=False)
+    n_tokens = len(encoding.ids)
+    if n_tokens <= max_tokens:
+        return [span]
+
+    # ``offsets`` is parallel to ``ids``: for each token, ``(start,
+    # end)`` are character offsets into the encoded text. Use the
+    # first token's start and the last token's end of each slice.
+    offsets = encoding.offsets
+    chunk_size = max(1, max_tokens - 8)
+    sub_spans: list[_Span] = []
+    for i in range(0, n_tokens, chunk_size):
+        last = min(i + chunk_size, n_tokens) - 1
+        local_start = offsets[i][0]
+        local_end = offsets[last][1]
+        if local_end <= local_start:
+            continue
+        sub = _make_subspan(span, source, local_start, local_end)
+        if sub is not None:
+            sub_spans.append(sub)
     return sub_spans if sub_spans else [span]
 
 

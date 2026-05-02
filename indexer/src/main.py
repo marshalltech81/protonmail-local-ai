@@ -581,6 +581,39 @@ def _validate_embedding_dim(embedder: Embedder) -> None:
         )
 
 
+def _validate_embed_model_tokenizer() -> None:
+    """Verify ``OLLAMA_EMBED_MODEL`` matches the bundled tokenizer.
+
+    The chunker counts tokens with the
+    ``nomic-ai/nomic-embed-text-v1.5`` BPE tokenizer bundled at
+    ``src/data/nomic-embed-text/tokenizer.json``. A different
+    embedding model with the same 768-dim output would pass the
+    dimension check but tokenize text differently — chunk size
+    estimates would silently drift back into the
+    ``input length exceeds the context length`` failure mode the
+    real tokenizer was added to fix.
+
+    Until tokenizer selection becomes model-coupled (operator
+    chooses both, or we ship multiple bundled tokenizers and
+    dispatch by model), restrict ``OLLAMA_EMBED_MODEL`` to
+    nomic-embed-text variants. The check is a substring match on
+    the canonical model family name so aliases like
+    ``nomic-embed-text:latest`` and ``nomic-embed-text-v1.5``
+    still pass.
+    """
+    if "nomic-embed-text" not in EMBED_MODEL.lower():
+        raise SystemExit(
+            f"OLLAMA_EMBED_MODEL={EMBED_MODEL!r} is not a nomic-embed-text "
+            "variant. The chunker's token counting uses the bundled "
+            "nomic-embed-text-v1.5 tokenizer; using a different embed "
+            "model would silently mis-size chunks and reintroduce "
+            "'input length exceeds the context length' embed errors. "
+            "Either switch back to nomic-embed-text or extend the "
+            "indexer to bundle the new model's tokenizer and dispatch "
+            "by OLLAMA_EMBED_MODEL."
+        )
+
+
 def _log_reconciler_config(cfg: ReconcilerConfig) -> None:
     if not cfg.enabled:
         log.info("Deletion reconciliation: disabled (set INDEXER_DELETION_ENABLED=true to enable)")
@@ -637,7 +670,10 @@ def main():
     # Wait for Ollama to be ready
     embedder.wait_for_ready()
 
-    # Verify the running model matches the schema's reserved vector dim.
+    # Verify the running model matches the schema's reserved vector dim
+    # AND that the configured embed model matches the bundled tokenizer
+    # the chunker uses for size estimation.
+    _validate_embed_model_tokenizer()
     _validate_embedding_dim(embedder)
 
     # Index existing emails
