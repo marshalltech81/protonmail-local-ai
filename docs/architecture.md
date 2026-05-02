@@ -45,7 +45,7 @@ indexer container
 ollama container              sqlite-volume
   - nomic-embed-text            - threads table (FTS5)
     for embeddings              - threads_vec table (sqlite-vec)
-  - llama3.2 (or other)         - message_thread_map
+  - qwen2.5 (or other)          - message_thread_map
     for local Q&A               - indexed_files
                                 - pending_deletions (reconciler)
         │

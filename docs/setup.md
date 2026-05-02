@@ -118,9 +118,20 @@ docker compose run --rm protonmail-bridge \
 make pull-models
 ```
 
-This pulls:
-- `nomic-embed-text` — embedding model for search (~274MB)
-- `llama3.2` — local LLM for Q&A (~2GB)
+This pulls whichever models are configured in `.env`. With the shipped
+defaults that means:
+
+- `OLLAMA_EMBED_MODEL` — embedding model for search
+  (default `nomic-embed-text`, ~274 MB)
+- `OLLAMA_LLM_MODEL` — local LLM for Q&A and the MCP intelligence tools
+  (default `qwen2.5:14b-instruct`, ~9 GB at Q4_K_M)
+
+The Q&A model dominates the download. On a low-VRAM host (8 GB or less of
+allocatable GPU memory) edit `.env` to set `OLLAMA_LLM_MODEL=llama3.2`
+(~2 GB) before running `make pull-models` — the smaller model produces
+weaker synthesis from `ask_mailbox` / `summarize_thread` /
+`extract_from_emails` but fits comfortably alongside the embed model on
+modest hardware.
 
 `make pull-models` brings the `ollama` container up first (if not already
 running) and waits up to 120 seconds for it to report ready before
@@ -821,6 +832,17 @@ forward. Leaving it permanently true disables pin enforcement.
 `make clean` removes the `mbsync-state` volume along with everything
 else, so the next boot after `make clean` is treated as a first boot
 and trust-on-first-use re-pins whatever cert Bridge presents.
+
+`make clean` also truncates `.secrets/bridge_pass.txt` and
+`.secrets/open_webui_secret_key.txt` because both authenticate against
+state the volume wipe just deleted (Bridge's `vault.enc` and Open
+WebUI's session DB respectively). After `make clean` you must re-run
+`make first-run` and paste the new Bridge password into
+`.secrets/bridge_pass.txt`; `.secrets/open_webui_secret_key.txt`
+auto-regenerates on the next `make open-webui-up`.
+`.secrets/anthropic_api_key.txt` is intentionally preserved because it
+authenticates against an external service that survives container
+rebuilds.
 
 ### mbsync fails — TLS hostname mismatch after rebuilding Bridge image
 
