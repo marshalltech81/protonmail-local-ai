@@ -56,6 +56,16 @@ python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
 addopts = "-v --tb=short --cov=src --cov-branch --cov-report=term-missing --cov-fail-under=90"
+filterwarnings = [
+    # ``defusedxml`` emits this DeprecationWarning at import time of its
+    # internal ``cElementTree`` shim. We pin defusedxml as a transitive
+    # XML-bomb defense for python-docx + openpyxl and do not import the
+    # deprecated submodule ourselves; the warning is third-party noise we
+    # cannot fix without dropping the dependency. Filter it specifically
+    # rather than blanket-ignoring DeprecationWarning so a future
+    # deprecation in our own code still surfaces.
+    "ignore:defusedxml.cElementTree is deprecated:DeprecationWarning",
+]
 
 [tool.coverage.run]
 branch = true
