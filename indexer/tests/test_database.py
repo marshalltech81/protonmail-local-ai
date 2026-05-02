@@ -264,10 +264,11 @@ class TestUpsertThreadInsert:
 
 class TestUpsertThreadUpdate:
     def test_display_subject_preserves_first_writer_through_replies(self, db, threader):
-        """COALESCE on update means the original cleaner subject sticks
-        even after a ``Re: …`` reply is upserted into the same thread.
-        Without this, every reply would clobber the display label and
-        the user would see the most recent ``Re:`` chain in the UI."""
+        """The cleaner original subject sticks even after a ``Re: …``
+        reply is upserted into the same thread, AS LONG AS the reply
+        arrives second. Without this, every reply would clobber the
+        display label and the user would see the most recent ``Re:``
+        chain in the UI."""
         original = make_message(
             message_id="display@example.com",
             subject="Today's Meeting",
@@ -291,10 +292,68 @@ class TestUpsertThreadUpdate:
         ).fetchone()
         assert row["display_subject"] == "Today's Meeting"
 
+    def test_display_subject_replaced_when_older_root_arrives_after_reply(self, db, threader):
+        """Out-of-order indexing: the reply arrives first and stamps
+        ``display_subject = "Re: Today's Meeting"``. When the older
+        root message is later indexed, its earlier date pushes
+        ``date_first`` back and its cleaner subject must replace the
+        ``Re:``-prefixed label. A naive COALESCE-on-upsert would trap
+        the reply subject as the display label permanently and the UI
+        would show the wrong thread title forever."""
+        reply = make_message(
+            message_id="reply-first@example.com",
+            subject="Re: Today's Meeting",
+            date=datetime(2024, 1, 1, 14, 0, tzinfo=UTC),
+        )
+        # Reply arrives first — at this point the indexer has no idea
+        # there is an older root.
+        t1 = threader.assign_thread(reply)
+        db.upsert_thread(t1, FAKE_EMBEDDING)
+        row = db._conn.execute(
+            "SELECT display_subject FROM threads WHERE thread_id = ?",
+            (t1.thread_id,),
+        ).fetchone()
+        assert row["display_subject"] == "Re: Today's Meeting"
+
+        # Now the original root message is discovered (older date,
+        # cleaner subject). It should join the same thread and replace
+        # the display_subject.
+        root = make_message(
+            message_id="root-second@example.com",
+            subject="Today's Meeting",
+            date=datetime(2024, 1, 1, 9, 0, tzinfo=UTC),
+        )
+        # Stitch the root into the same thread by sharing a Message-ID
+        # the reply references. We can simulate this by upserting a
+        # Thread that carries the older message as a "new arrival" but
+        # shares the existing thread_id (the threader produces this
+        # shape when it discovers a thread root post-hoc).
+        from src.threader import Thread
+
+        t2 = Thread(
+            thread_id=t1.thread_id,
+            subject=t1.subject,
+            participants=[root.from_addr] + root.to_addrs,
+            messages=[root],
+            folder=root.folder,
+            date_first=root.date,
+            date_last=root.date,
+        )
+        db.upsert_thread(t2, FAKE_EMBEDDING)
+
+        row = db._conn.execute(
+            "SELECT display_subject, date_first FROM threads WHERE thread_id = ?",
+            (t1.thread_id,),
+        ).fetchone()
+        # date_first must reflect the older root (sanity-check the merge).
+        assert row["date_first"] == "2024-01-01T09:00:00+00:00"
+        # display_subject must now reflect the older root, not the reply.
+        assert row["display_subject"] == "Today's Meeting"
+
     def test_display_subject_backfills_when_legacy_row_was_null(self, db):
         """A pre-v13 row has ``display_subject = NULL``. The next upsert
-        that supplies a non-NULL value backfills it (COALESCE picks the
-        non-NULL side). After that, normal first-writer-wins applies."""
+        that supplies a non-NULL value backfills it. After that, normal
+        date-ordered precedence applies."""
         thread = make_thread()
         db.upsert_thread(thread, FAKE_EMBEDDING)
         # Simulate the legacy state by clearing display_subject.

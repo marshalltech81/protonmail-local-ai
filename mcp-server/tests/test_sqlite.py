@@ -586,6 +586,117 @@ class TestDisplaySubjectFallback:
         finally:
             db.close()
 
+    def test_keyword_search_returns_display_subject(self, tmp_path):
+        """Regression: the explicit column projection in
+        ``_thread_keyword_search`` previously omitted ``display_subject``
+        from the SELECT, so ``_row_to_result`` could not see it and
+        ``ThreadResult.subject`` fell back to the normalized lowercase
+        ``subject`` even when a ``display_subject`` was stored. Hybrid
+        and semantic search shared the same shape."""
+        import sqlite3
+
+        import sqlite_vec
+        from src.lib.sqlite import Database
+
+        from tests.conftest import _build_schema, _insert_thread
+
+        db_path = tmp_path / "kw-display.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.enable_load_extension(True)
+        sqlite_vec.load(conn)
+        conn.enable_load_extension(False)
+        _build_schema(conn)
+        _insert_thread(
+            conn,
+            thread_id="t-kw",
+            subject="today's meeting",
+            participants=["a@example.com"],
+            body_text="agenda for today's meeting",
+            display_subject="Today's Meeting",
+            embedding=[1.0, 0.0, 0.0, 0.0],
+        )
+        conn.close()
+
+        db = Database(db_path)
+        try:
+            results = db.keyword_search("agenda")
+            assert len(results) == 1
+            assert results[0].subject == "Today's Meeting"
+        finally:
+            db.close()
+
+    def test_semantic_search_returns_display_subject(self, tmp_path):
+        """Same regression coverage for the semantic lane."""
+        import sqlite3
+
+        import sqlite_vec
+        from src.lib.sqlite import Database
+
+        from tests.conftest import _build_schema, _insert_thread
+
+        db_path = tmp_path / "sem-display.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.enable_load_extension(True)
+        sqlite_vec.load(conn)
+        conn.enable_load_extension(False)
+        _build_schema(conn)
+        _insert_thread(
+            conn,
+            thread_id="t-sem",
+            subject="today's meeting",
+            participants=["a@example.com"],
+            body_text="agenda for today's meeting",
+            display_subject="Today's Meeting",
+            embedding=[1.0, 0.0, 0.0, 0.0],
+        )
+        conn.close()
+
+        db = Database(db_path)
+        try:
+            results = db.semantic_search([1.0, 0.0, 0.0, 0.0])
+            assert len(results) == 1
+            assert results[0].subject == "Today's Meeting"
+        finally:
+            db.close()
+
+    def test_hybrid_search_returns_display_subject(self, tmp_path):
+        """Same regression coverage for hybrid (the actual user-facing
+        path through ``search_emails``)."""
+        import sqlite3
+
+        import sqlite_vec
+        from src.lib.sqlite import Database
+
+        from tests.conftest import _build_schema, _insert_thread
+
+        db_path = tmp_path / "hyb-display.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.enable_load_extension(True)
+        sqlite_vec.load(conn)
+        conn.enable_load_extension(False)
+        _build_schema(conn)
+        _insert_thread(
+            conn,
+            thread_id="t-hyb",
+            subject="today's meeting",
+            participants=["a@example.com"],
+            body_text="agenda for today's meeting",
+            display_subject="Today's Meeting",
+            embedding=[1.0, 0.0, 0.0, 0.0],
+        )
+        conn.close()
+
+        db = Database(db_path)
+        try:
+            results = db.hybrid_search(
+                query_text="agenda",
+                query_embedding=[1.0, 0.0, 0.0, 0.0],
+            )
+            assert len(results) == 1
+            assert results[0].subject == "Today's Meeting"
+        finally:
+            db.close()
+
 
 class TestStatsAndFolders:
     def test_get_stats(self, seeded_db: Database):

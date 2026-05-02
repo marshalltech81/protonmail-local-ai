@@ -510,14 +510,19 @@ class Database:
         # display_subject: pick the oldest incoming message's original
         # subject as the human-facing label. The threader strips Re:/Fwd:
         # and lowercases ``thread.subject`` for grouping, so the original
-        # only survives on the Message objects. The ON CONFLICT clause
-        # below uses COALESCE so the first writer to populate this column
-        # wins — later messages with ``Re:`` prefixes don't clobber the
-        # cleaner original subject.
+        # only survives on the Message objects. The on-update merge runs
+        # in Python below (``merged_display_subject``) — a naive COALESCE
+        # in ON CONFLICT cannot distinguish the "in-order arrival, keep
+        # original" case from the "reply arrived first, replace with the
+        # later-discovered older root" case, and would trap a ``Re:``
+        # subject as the display label whenever messages are indexed
+        # out of order.
         incoming_display_subject: str | None = None
+        incoming_earliest_date_iso: str | None = None
         if thread.messages:
             earliest = min(thread.messages, key=lambda m: m.date)
             incoming_display_subject = earliest.subject or None
+            incoming_earliest_date_iso = earliest.date.isoformat()
 
         started = False
         try:
@@ -525,7 +530,8 @@ class Database:
 
             existing = cur.execute(
                 "SELECT body_text, message_ids, participants, senders, "
-                "has_attachments, date_first, date_last, snippet "
+                "has_attachments, date_first, date_last, snippet, "
+                "display_subject "
                 "FROM threads WHERE thread_id = ?",
                 (thread.thread_id,),
             ).fetchone()
@@ -545,12 +551,39 @@ class Database:
                 # Lexicographic min() is safe on ISO 8601 datetime strings
                 # once they are normalized to UTC (parser._parse_date).
                 merged_date_first = min(existing["date_first"], thread.date_first.isoformat())
+                # display_subject merge: prefer the subject of the
+                # oldest message we have ever seen for this thread.
+                # Three cases:
+                #   1. Existing display_subject is NULL (legacy v12 row,
+                #      or first non-NULL writer hasn't arrived yet) →
+                #      take the incoming.
+                #   2. The incoming earliest message is older than the
+                #      currently-recorded ``date_first`` → the new
+                #      message is the new "root" and its subject is
+                #      cleaner than whatever ``Re:`` reply may have
+                #      been recorded as the display label first → take
+                #      the incoming.
+                #   3. Otherwise (the existing row was already populated
+                #      and the incoming message is not older) → keep
+                #      the existing label so a later ``Re:`` reply
+                #      cannot clobber the cleaner original subject.
+                existing_display = existing["display_subject"]
+                if not existing_display:
+                    merged_display_subject = incoming_display_subject
+                elif (
+                    incoming_earliest_date_iso is not None
+                    and incoming_earliest_date_iso < existing["date_first"]
+                ):
+                    merged_display_subject = incoming_display_subject or existing_display
+                else:
+                    merged_display_subject = existing_display
             else:
                 merged_ids = incoming_message_ids
                 merged_participants = _dedupe_by_canonical(incoming_participants)
                 merged_senders = _dedupe_by_canonical(incoming_senders)
                 merged_has_attachments = incoming_has_attachments
                 merged_date_first = thread.date_first.isoformat()
+                merged_display_subject = incoming_display_subject
 
             body = self._compute_body(thread, existing)
 
@@ -571,12 +604,12 @@ class Database:
                     snippet = existing["snippet"]
             date_last = thread.date_last.isoformat()
 
-            # Upsert main thread record. ``display_subject`` is COALESCE'd
-            # so the first writer to populate it wins — a later upsert
-            # for a reply ("Re: …") won't overwrite the cleaner original
-            # subject captured the first time the thread was seen. An
-            # existing NULL (legacy row pre-v13) gets backfilled by the
-            # first upsert that supplies a non-NULL value.
+            # Upsert main thread record. ``display_subject`` was merged
+            # in Python above (``merged_display_subject``) — see that
+            # block for the date-driven precedence rules. Passing the
+            # already-resolved value lets the SQL stay simple and lets
+            # ON CONFLICT just overwrite, mirroring how every other
+            # column flows through the upsert.
             cur.execute(
                 """
                 INSERT INTO threads
@@ -593,7 +626,7 @@ class Database:
                     snippet         = excluded.snippet,
                     has_attachments = excluded.has_attachments,
                     body_text       = excluded.body_text,
-                    display_subject = COALESCE(threads.display_subject, excluded.display_subject)
+                    display_subject = excluded.display_subject
                 """,
                 (
                     thread.thread_id,
@@ -607,7 +640,7 @@ class Database:
                     snippet,
                     merged_has_attachments,
                     body,
-                    incoming_display_subject,
+                    merged_display_subject,
                 ),
             )
 

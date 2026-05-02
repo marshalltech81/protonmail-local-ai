@@ -431,7 +431,7 @@ class Database:
             "SELECT "
             "t.thread_id, t.subject, t.participants, t.senders, t.folder, "
             "t.date_first, t.date_last, t.message_ids, "
-            "t.snippet, t.has_attachments, t.body_text, "
+            "t.snippet, t.has_attachments, t.body_text, t.display_subject, "
             "bm25(threads_fts) AS score "
             "FROM threads_fts "
             "JOIN threads t ON threads_fts.rowid = t.fts_rowid "
@@ -484,7 +484,7 @@ class Database:
             "SELECT "
             "t.thread_id, t.subject, t.participants, t.senders, t.folder, "
             "t.date_first, t.date_last, t.message_ids, "
-            "t.snippet, t.has_attachments, t.body_text, "
+            "t.snippet, t.has_attachments, t.body_text, t.display_subject, "
             "bm25(message_chunks_fts) AS score "
             "FROM message_chunks_fts "
             "JOIN message_chunks c ON message_chunks_fts.rowid = c.fts_rowid "
@@ -534,7 +534,7 @@ class Database:
             "SELECT "
             "t.thread_id, t.subject, t.participants, t.senders, t.folder, "
             "t.date_first, t.date_last, t.message_ids, "
-            "t.snippet, t.has_attachments, t.body_text, "
+            "t.snippet, t.has_attachments, t.body_text, t.display_subject, "
             "bm25(attachments_fts) AS score "
             "FROM attachments_fts "
             "JOIN attachments a ON attachments_fts.rowid = a.fts_rowid "
@@ -660,7 +660,7 @@ class Database:
             "SELECT "
             "thread_id, subject, participants, senders, folder, "
             "date_first, date_last, message_ids, "
-            "snippet, has_attachments, body_text, 0.0 AS score "
+            "snippet, has_attachments, body_text, display_subject, 0.0 AS score "
             "FROM threads "
             "WHERE " + " AND ".join(where_clauses) + " "  # nosec B608
             "ORDER BY date_last DESC LIMIT ?"
@@ -758,7 +758,7 @@ class Database:
                 SELECT
                     t.thread_id, t.subject, t.participants, t.senders, t.folder,
                     t.date_first, t.date_last, t.message_ids,
-                    t.snippet, t.has_attachments, t.body_text,
+                    t.snippet, t.has_attachments, t.body_text, t.display_subject,
                     v.distance AS score
                 FROM threads_vec v
                 JOIN threads t ON v.thread_id = t.thread_id
