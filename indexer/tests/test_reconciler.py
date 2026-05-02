@@ -393,6 +393,42 @@ class TestReap:
         assert result["threads_rebuilt"] == 1
         assert db.has_pending_deletion(str(trashed)) is False
 
+    def test_skips_reap_when_survivor_unreadable(self, db, threader, embedder, reconciler, maildir):
+        # If a survivor's file is transiently unreadable when the
+        # reconciler reparses it (mbsync chmod race, perms regression),
+        # the reaper must skip the pass cleanly — not crash. Equivalent
+        # to the prior None-return behavior, now exercised through the
+        # OSError path that ``parse_email`` propagates.
+        import os
+
+        orig_path = maildir / "1700000000.M1.host:2,S"
+        _write_eml(orig_path, "u1@example.com")
+        thread_id = _index(orig_path, db, threader)
+
+        reply_path = maildir / "1700000001.M2.host:2,S"
+        _write_eml(
+            reply_path,
+            "u2@example.com",
+            in_reply_to="u1@example.com",
+            subject="Re: Test message",
+            date=datetime(2024, 2, 1, tzinfo=UTC),
+        )
+        _index(reply_path, db, threader)
+
+        trashed = maildir / "1700000000.M1.host:2,ST"
+        orig_path.rename(trashed)
+        reconciler.sweep()
+
+        os.chmod(reply_path, 0o000)
+        try:
+            result = reconciler.reap()
+        finally:
+            os.chmod(reply_path, 0o644)
+
+        assert result["threads_rebuilt"] == 0
+        assert db.get_thread(thread_id) is not None
+        assert db.has_pending_deletion(str(trashed))
+
     def test_unlinks_files_when_unlink_on_reap_enabled(self, db, threader, embedder, maildir):
         cfg = _default_config(unlink_on_reap=True)
         rec = Reconciler(db, embedder, threader, cfg)

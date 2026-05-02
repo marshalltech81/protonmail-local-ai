@@ -245,7 +245,18 @@ class Reconciler:
         # Thread has survivors — parse them from disk and rebuild.
         survivors: list = []
         for row in survivor_rows:
-            msg = parse_email(Path(row["filepath"]), maildir_root=self.maildir_root)
+            try:
+                msg = parse_email(Path(row["filepath"]), maildir_root=self.maildir_root)
+            except OSError as e:
+                # Transient read failure (mbsync chmod race, perms regression,
+                # rename mid-sweep). Skip the pass; a later sweep will retry.
+                log.warning(
+                    "reaper: could not read survivor %s in thread %s (%s); skipping this reap pass",
+                    row["filepath"],
+                    thread_id,
+                    e,
+                )
+                return False, False
             if msg is None:
                 # Survivor unparseable; skip it from the rebuild but do not
                 # delete the DB row. A later sweep can pick it up again.

@@ -366,7 +366,12 @@ def _index_one_file(
     t0 = time.perf_counter()
     try:
         message = parse_email(path, maildir_root=MAILDIR_PATH)
-    except Exception as e:  # defensive: parse_email catches internally
+    except Exception as e:
+        # Transient I/O (PermissionError from the mbsync chmod race,
+        # FileNotFoundError from a mid-event rename) propagates from
+        # parse_email so the queue routes it to retry/backoff. Other
+        # parse-content failures are caught inside parse_email and
+        # surface as ``message is None`` below.
         parse_ms = (time.perf_counter() - t0) * 1000
         return False, "parse", repr(e), StageTimings(parse_ms=parse_ms)
     parse_ms = (time.perf_counter() - t0) * 1000
