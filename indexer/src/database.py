@@ -206,9 +206,10 @@ class Database:
 
     # -------------------------------------------------------------------------
     # Schema setup
-    # Fresh installs apply ``_apply_initial_schema`` directly; an existing
-    # database with a different version raises rather than auto-migrating
-    # (see ``_migrate``).
+    # Fresh installs apply ``_apply_initial_schema`` directly. Existing
+    # installs at a lower stored version run forward migration files
+    # from ``src/migrations/`` via the runner. Existing installs at a
+    # higher stored version (a downgrade) are rejected — see ``_migrate``.
     # -------------------------------------------------------------------------
 
     def _migrate(self):

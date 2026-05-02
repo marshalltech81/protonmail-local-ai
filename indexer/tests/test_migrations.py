@@ -189,6 +189,56 @@ class TestApplyPending:
                 conn, current_version=12, target_version=15, migration_dir=tmp_path
             )
 
+    def test_empty_migration_file_rejected_before_version_bump(self, tmp_path):
+        # An empty (or whitespace-only / comment-only) migration file
+        # contains no SQL statements. Without this guard the runner
+        # would still UPDATE schema_version, leaving the DB stamped at
+        # the new version with none of the expected DDL applied — a
+        # subsequent ``ALTER TABLE`` against the assumed schema would
+        # fail with a misleading "no such column" error and hide the
+        # original mistake. Refuse to advance the version instead.
+        _write(tmp_path, "0013_empty.sql", "   \n\n  ")
+        conn = _make_versioned_db(tmp_path, 12)
+        with pytest.raises(RuntimeError, match="contains no SQL statements"):
+            runner.apply_pending(
+                conn, current_version=12, target_version=13, migration_dir=tmp_path
+            )
+        assert _stored_version(conn) == 12
+
+    def test_compound_trigger_migration_applies_atomically(self, tmp_path):
+        # End-to-end coverage for a CREATE TRIGGER … BEGIN … END;
+        # compound. A naive split-on-semicolon would shred the trigger
+        # body into invalid fragments and the migration would fail.
+        # With ``sqlite3.complete_statement`` the trigger and the
+        # follow-on CREATE TABLE both apply cleanly inside the same
+        # per-migration transaction.
+        _write(
+            tmp_path,
+            "0013_trigger.sql",
+            (
+                "CREATE TABLE log (id INTEGER);\n"
+                "CREATE TABLE t (id INTEGER);\n"
+                "CREATE TRIGGER trg AFTER INSERT ON t BEGIN\n"
+                "  INSERT INTO log (id) VALUES (NEW.id);\n"
+                "END;\n"
+            ),
+        )
+        conn = _make_versioned_db(tmp_path, 12)
+        applied = runner.apply_pending(
+            conn, current_version=12, target_version=13, migration_dir=tmp_path
+        )
+        assert applied == [13]
+        assert _stored_version(conn) == 13
+        # All three objects exist; the trigger fires on insert.
+        for name in ("log", "t", "trg"):
+            assert (
+                conn.execute("SELECT name FROM sqlite_master WHERE name = ?", (name,)).fetchone()
+                is not None
+            )
+        conn.execute("INSERT INTO t (id) VALUES (42)")
+        conn.commit()
+        assert conn.execute("SELECT id FROM log").fetchone()["id"] == 42
+
 
 # ---------------------------------------------------------------------------
 # _split_statements — the SQL splitter is load-bearing for atomicity, so
@@ -206,29 +256,79 @@ class TestSplitStatements:
         assert runner._split_statements("CREATE TABLE a (x)") == ["CREATE TABLE a (x)"]
 
     def test_multiple_statements_split_on_semicolon(self):
+        # ``sqlite3.complete_statement`` keeps the trailing ``;`` as
+        # part of each statement boundary; sqlite3 accepts statements
+        # with or without it on ``execute``, so the test asserts the
+        # boundary count and content rather than exact stripping.
         sql = "CREATE TABLE a (x); CREATE TABLE b (y);"
-        assert runner._split_statements(sql) == ["CREATE TABLE a (x)", "CREATE TABLE b (y)"]
+        statements = runner._split_statements(sql)
+        assert len(statements) == 2
+        assert statements[0].rstrip(";").strip() == "CREATE TABLE a (x)"
+        assert statements[1].rstrip(";").strip() == "CREATE TABLE b (y)"
 
-    def test_line_comment_skipped(self):
+    def test_line_comment_kept_with_following_statement(self):
+        # ``sqlite3.complete_statement`` treats the leading comment as
+        # part of the statement that follows it; sqlite3 is happy to
+        # execute that as a single statement (the comment is a no-op).
+        # We do not strip comments — they may carry useful migration
+        # provenance to anyone reading the journal.
         sql = "-- this is a comment\nCREATE TABLE a (x);"
-        assert runner._split_statements(sql) == ["CREATE TABLE a (x)"]
+        statements = runner._split_statements(sql)
+        assert len(statements) == 1
+        assert "CREATE TABLE a (x)" in statements[0]
+        assert "-- this is a comment" in statements[0]
 
     def test_inline_line_comment_after_statement(self):
+        # The trailing comment between two statements stays attached to
+        # whichever statement it is closer to per sqlite3's parser.
         sql = "CREATE TABLE a (x); -- trailing comment\nCREATE TABLE b (y);"
-        assert runner._split_statements(sql) == ["CREATE TABLE a (x)", "CREATE TABLE b (y)"]
+        statements = runner._split_statements(sql)
+        assert len(statements) == 2
+        assert "CREATE TABLE a (x)" in statements[0]
+        assert "CREATE TABLE b (y)" in statements[1]
+
+    def test_compound_create_trigger_stays_one_statement(self):
+        # A naive ``split(';')`` shreds a CREATE TRIGGER body — the
+        # ``BEGIN`` block contains its own ``;`` terminators that are
+        # part of the compound statement, not boundaries between
+        # statements. ``sqlite3.complete_statement`` only returns True
+        # at the final ``END;``, so the splitter emits the whole
+        # trigger as a single statement.
+        sql = (
+            "CREATE TRIGGER trg AFTER INSERT ON t BEGIN\n"
+            "  INSERT INTO log (id) VALUES (NEW.id);\n"
+            "  UPDATE counters SET n = n + 1;\n"
+            "END;\n"
+            "CREATE TABLE u (x);"
+        )
+        statements = runner._split_statements(sql)
+        assert len(statements) == 2
+        assert statements[0].startswith("CREATE TRIGGER trg")
+        assert statements[0].rstrip(";").endswith("END")
+        assert "CREATE TABLE u (x)" in statements[1]
+
+    def test_block_comment_kept_with_following_statement(self):
+        # ``/* … */`` block comments are recognized by
+        # ``sqlite3.complete_statement`` — the parser treats them as
+        # whitespace, so a block comment never falsely closes a
+        # statement boundary even when it contains a ``;``.
+        sql = "/* setup;\n   note */\nCREATE TABLE a (x);"
+        statements = runner._split_statements(sql)
+        assert len(statements) == 1
+        assert "CREATE TABLE a (x)" in statements[0]
 
     def test_string_literal_with_semicolon_kept_intact(self):
         # A naive ``split(';')`` would shred this into two broken halves.
         sql = "INSERT INTO t VALUES ('hello;world'); INSERT INTO t VALUES ('next');"
-        assert runner._split_statements(sql) == [
-            "INSERT INTO t VALUES ('hello;world')",
-            "INSERT INTO t VALUES ('next')",
-        ]
+        statements = runner._split_statements(sql)
+        assert len(statements) == 2
+        assert "'hello;world'" in statements[0]
+        assert "'next'" in statements[1]
 
     def test_string_literal_with_escaped_quote(self):
         # SQLite's standard ``''`` escape inside a single-quoted string.
         sql = "INSERT INTO t VALUES ('it''s fine'); CREATE TABLE x (y);"
-        assert runner._split_statements(sql) == [
-            "INSERT INTO t VALUES ('it''s fine')",
-            "CREATE TABLE x (y)",
-        ]
+        statements = runner._split_statements(sql)
+        assert len(statements) == 2
+        assert "'it''s fine'" in statements[0]
+        assert "CREATE TABLE x (y)" in statements[1]

@@ -196,10 +196,6 @@ persisted, unsupported types log at debug. What's still open:
 - let the runner tear down ephemeral Bridge state after the run; do not upload Bridge data volumes as artifacts
 
 ### Schema and embeddings
-- the indexer currently fails fast on a `SCHEMA_VERSION` mismatch with a
-  "wipe the volume" error rather than running migrations. Add a real
-  forward-migration runner the next time the schema actually needs to
-  evolve in a way that preserves existing data
 - document and enforce embedding dimension assumptions
 - make model-switch behavior explicit and safe
 

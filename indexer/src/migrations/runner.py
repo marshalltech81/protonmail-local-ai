@@ -61,58 +61,35 @@ def discover_migrations(directory: Path) -> list[tuple[int, Path]]:
 
 
 def _split_statements(sql: str) -> list[str]:
-    """Split a SQL script into individual statements at top-level ``;``.
+    """Split a SQL script into individual statements.
 
-    Handles ``--`` line comments and single-quoted string literals
-    (with the SQLite ``''`` escape). Block comments (``/* ... */``)
-    are intentionally unsupported — keep migration files simple.
+    Uses ``sqlite3.complete_statement`` as the boundary detector so the
+    same parser SQLite itself uses to decide "is this a complete
+    statement?" decides where to split. That means string literals
+    containing ``;``, ``--`` line comments, ``/* … */`` block comments,
+    and compound statements like ``CREATE TRIGGER … BEGIN … END;`` are
+    all handled correctly without re-implementing SQLite's lexer here.
 
     This exists because ``sqlite3.Connection.executescript`` issues an
     implicit ``COMMIT`` before running, which breaks per-migration
     transactional atomicity. Running statements one at a time via
     ``Connection.execute`` inside an explicit ``BEGIN`` / ``COMMIT``
     keeps the whole migration atomic.
+
+    Returns only non-empty statements. A trailing fragment without a
+    final ``;`` is included as the last statement (sqlite3 accepts an
+    unterminated final statement on ``execute``).
     """
     statements: list[str] = []
-    current: list[str] = []
-    in_string = False
-    i = 0
-    while i < len(sql):
-        ch = sql[i]
-        if in_string:
-            current.append(ch)
-            if ch == "'":
-                # SQLite escapes a single quote inside a string by
-                # doubling it (``''``). Keep the second quote in the
-                # buffer and stay inside the string.
-                if i + 1 < len(sql) and sql[i + 1] == "'":
-                    current.append(sql[i + 1])
-                    i += 2
-                    continue
-                in_string = False
-            i += 1
-            continue
-        if ch == "'":
-            in_string = True
-            current.append(ch)
-            i += 1
-            continue
-        if ch == "-" and i + 1 < len(sql) and sql[i + 1] == "-":
-            # Line comment — skip up to (but not past) the newline so
-            # the newline itself stays as a statement separator hint.
-            while i < len(sql) and sql[i] != "\n":
-                i += 1
-            continue
-        if ch == ";":
-            stmt = "".join(current).strip()
+    buffer = ""
+    for ch in sql:
+        buffer += ch
+        if ch == ";" and sqlite3.complete_statement(buffer):
+            stmt = buffer.strip()
             if stmt:
                 statements.append(stmt)
-            current = []
-            i += 1
-            continue
-        current.append(ch)
-        i += 1
-    final = "".join(current).strip()
+            buffer = ""
+    final = buffer.strip()
     if final:
         statements.append(final)
     return statements
@@ -155,6 +132,17 @@ def apply_pending(
     for version, path in pending:
         sql = path.read_text(encoding="utf-8")
         statements = _split_statements(sql)
+        if not statements:
+            # An empty (or comment-only) migration file would otherwise
+            # silently bump ``schema_version`` without any DDL running.
+            # That makes a future ``ALTER TABLE`` against the assumed
+            # schema fail with a misleading "no such column" error and
+            # hides the original mistake. Refuse to advance the version
+            # for a content-free migration.
+            raise RuntimeError(
+                f"migration v{version} ({path.name}) contains no SQL statements; "
+                "an empty migration cannot advance schema_version"
+            )
         log.info(
             "Applying migration v%d (%s, %d statement(s))", version, path.name, len(statements)
         )
