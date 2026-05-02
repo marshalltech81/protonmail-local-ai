@@ -266,8 +266,22 @@ typecheck-mcp: sync-mcp
 # Remove all containers and volumes
 # WARNING: This deletes your email index and Bridge credentials.
 # You will need to run first-run again after this.
+#
+# The open-webui overlay is layered in so that an open-webui container and
+# its named volume (created by `make open-webui-up`) are also removed.
+# host-ollama overlays are intentionally NOT layered: that overlay does
+# `ollama: !reset null` and would hide the in-stack ollama service from
+# `down -v`, leaving its volume behind.
 clean:
-	@echo "WARNING: This will delete all containers, volumes, and your email index."
+	@echo "WARNING: This will delete all containers, volumes, your email index,"
+	@echo "         and Bridge credentials. You will need to run make first-run"
+	@echo "         again to re-authenticate with Proton."
 	@read -p "Are you sure? (yes/no): " confirm && [ "$$confirm" = "yes" ]
-	docker compose down -v
+	docker compose -f docker-compose.yml -f docker-compose.open-webui.yml down -v
+	@# Truncate secrets tied to wiped local state. anthropic_api_key.txt is the
+	@# user's external Claude key and is intentionally preserved.
+	@if [ -f .secrets/bridge_pass.txt ]; then : > .secrets/bridge_pass.txt; fi
+	@if [ -f .secrets/open_webui_secret_key.txt ]; then : > .secrets/open_webui_secret_key.txt; fi
 	@echo "All containers and volumes removed."
+	@echo "Cleared .secrets/bridge_pass.txt and .secrets/open_webui_secret_key.txt."
+	@echo "Re-run make first-run, then paste the new Bridge password into .secrets/bridge_pass.txt."
