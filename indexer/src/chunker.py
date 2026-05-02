@@ -31,11 +31,18 @@ Input contract:
 import hashlib
 import re
 from dataclasses import dataclass
+from functools import lru_cache
+from pathlib import Path
 
-# Chars-per-token is a rough estimate good enough for sizing decisions.
-# The real tokenizer for the embedding model is not loaded here; we only
-# need a consistent ruler so target/max/overlap comparisons stay stable.
-_CHARS_PER_TOKEN = 4
+from tokenizers import Tokenizer
+
+# Path to the bundled HuggingFace tokenizer.json for
+# ``nomic-ai/nomic-embed-text-v1.5`` — the model behind the project's
+# default ``OLLAMA_EMBED_MODEL``. Used by ``estimate_tokens`` so chunk
+# size budgets reflect real BPE token counts instead of a 4-chars-per-
+# token heuristic that under-counted CJK / URL / Base64 / code text by
+# 4-6× and produced chunks past the model's 2048-token context window.
+_TOKENIZER_PATH = Path(__file__).parent / "data" / "nomic-embed-text" / "tokenizer.json"
 
 # Paragraph: one or more non-blank lines separated from the next paragraph
 # by one or more entirely-blank lines. A "blank" line is empty or
@@ -94,15 +101,35 @@ class _Span:
     end: int
 
 
-def estimate_tokens(text: str) -> int:
-    """Return a stable, cheap approximation of the token count for ``text``.
+@lru_cache(maxsize=1)
+def _load_tokenizer() -> Tokenizer:
+    """Load the bundled nomic-embed-text tokenizer once per process.
 
-    Not tied to any tokenizer. Used only for relative sizing decisions
-    inside the chunker (target vs. max vs. overlap budgets).
+    Cached because ``Tokenizer.from_file`` parses ~700 KB of JSON and
+    builds the BPE merge tables; doing that per ``estimate_tokens`` call
+    would dominate the chunker's runtime. The lazy load also keeps unit
+    tests that never call ``estimate_tokens`` (``mean_vector`` / dataclass
+    construction tests) free from any I/O.
+    """
+    return Tokenizer.from_file(str(_TOKENIZER_PATH))
+
+
+def estimate_tokens(text: str) -> int:
+    """Return the real BPE token count for ``text``.
+
+    Uses the bundled nomic-embed-text tokenizer so chunk-size budgets
+    line up with the embed model's 2048-token context window. The
+    previous char-count heuristic under-counted CJK / URL / Base64 /
+    dense code text by 4-6×, which produced chunks the embed model
+    rejected with HTTP 500 ("input length exceeds the context length").
+
+    Special tokens (``[CLS]`` / ``[SEP]``) are not added — Ollama's
+    embedding endpoint adds those on the server side, so counting them
+    here would double-count by two tokens per chunk.
     """
     if not text:
         return 0
-    return max(1, len(text) // _CHARS_PER_TOKEN)
+    return len(_load_tokenizer().encode(text, add_special_tokens=False).ids)
 
 
 def normalize_body(body_text: str) -> str:
@@ -162,7 +189,7 @@ def chunk_message(
 
     chunks: list[MessageChunk] = []
     for index, group in enumerate(packed):
-        text = _render_group(normalized, group)
+        text, char_start, char_end = _render_group(normalized, group)
         if not text:
             continue
         chunks.append(
@@ -170,8 +197,8 @@ def chunk_message(
                 chunk_id=_chunk_id(message_pk, index, text),
                 chunk_index=index,
                 text=text,
-                char_start=group[0].start,
-                char_end=group[-1].end,
+                char_start=char_start,
+                char_end=char_end,
                 token_est=estimate_tokens(text),
             )
         )
@@ -365,16 +392,26 @@ def _overlap_tail(group: list[_Span], overlap_tokens: int) -> list[_Span]:
     return tail
 
 
-def _render_group(source: str, group: list[_Span]) -> str:
-    """Render a chunk's text by slicing the normalized source.
+def _render_group(source: str, group: list[_Span]) -> tuple[str, int, int]:
+    """Render a chunk's text and the matching trimmed offsets.
 
     Slicing the source (rather than rejoining span text) preserves the
-    exact whitespace between spans and makes the char_start / char_end
-    pair a precise pointer into the normalized body.
+    exact whitespace between spans. Trailing/leading whitespace at the
+    edges of the slice is trimmed atomically so the offsets stay
+    honest: the contract ``source[char_start:char_end] == text`` must
+    hold for every chunk so downstream tools can map a chunk back to
+    its position in the normalized body.
+
+    Returns ``("", 0, 0)`` when the group is empty.
     """
     if not group:
-        return ""
-    return source[group[0].start : group[-1].end].strip()
+        return "", 0, 0
+    raw_start = group[0].start
+    raw_end = group[-1].end
+    raw = source[raw_start:raw_end]
+    lead = len(raw) - len(raw.lstrip())
+    trail = len(raw) - len(raw.rstrip())
+    return raw.strip(), raw_start + lead, raw_end - trail
 
 
 def _chunk_id(message_pk: str, index: int, text: str) -> str:

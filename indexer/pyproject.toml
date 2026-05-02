@@ -9,6 +9,15 @@ dependencies = [
     "watchdog==6.0.0",
     "python-dotenv==1.2.2",
     "tenacity==9.1.4",
+    # Real BPE tokenizer for chunk-size estimation. Counting chunk tokens
+    # with a char-count heuristic undercounts CJK / URL / Base64 / code
+    # text by 4-6×, which can blow past the embed model's 2048-token
+    # context and cause embed-stage HTTP 500s. The tokenizer.json bundled
+    # under ``src/data/nomic-embed-text/`` is the upstream HuggingFace
+    # tokenizer for ``nomic-ai/nomic-embed-text-v1.5`` (the model behind
+    # the project's ``OLLAMA_EMBED_MODEL`` default). If the embed model
+    # is changed, the bundled tokenizer file must be updated to match.
+    "tokenizers==0.22.1",
     # Attachment text extraction (schema v10). Each library is required
     # by exactly one extractor module under src/extractors/; lazy import
     # there means a missing one downgrades to ``unsupported`` rather
@@ -46,6 +55,7 @@ module = [
     "openpyxl.*",
     "pytesseract.*",
     "sqlite_vec.*",
+    "tokenizers.*",
 ]
 ignore_missing_imports = true
 
