@@ -39,3 +39,8 @@ htmlcov/
 # Logs
 *.log
 logs/
+
+# Eval queries grounded in a real mailbox — must never be committed.
+# The ``.example`` companions are tracked as schema/templates.
+mcp-server/tests/eval/queries.json
+mcp-server/tests/eval/eval-queries.md
