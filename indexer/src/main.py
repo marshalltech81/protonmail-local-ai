@@ -70,10 +70,14 @@ def _int_env(name: str, default: int, minimum: int = 1) -> int:
     return max(minimum, value)
 
 
-# Chunker token budgets — see ``chunker.chunk_message`` for semantics. The
-# defaults match the chunker's own defaults, sized for ``nomic-embed-text``
-# at 768 dim with an ~8k token context window (target=350 tokens leaves
-# generous headroom).
+# Chunker token budgets — see ``chunker.chunk_message`` for semantics.
+# The defaults match the chunker's own defaults, sized for the
+# ``nomic-embed-text`` *practical* context window. The model itself
+# supports 8192 tokens, but Ollama serves it with a default
+# ``num_ctx=2048``; that is the binding limit until the operator
+# raises it via a custom Modelfile. The default ``max=500`` keeps a
+# 4× safety margin under 2048 so embed calls succeed regardless of
+# operator config.
 CHUNK_TARGET_TOKENS = _int_env("INDEXER_CHUNK_TARGET_TOKENS", 350)
 CHUNK_MAX_TOKENS = _int_env("INDEXER_CHUNK_MAX_TOKENS", 500)
 CHUNK_OVERLAP_TOKENS = _int_env("INDEXER_CHUNK_OVERLAP_TOKENS", 60, minimum=0)
@@ -667,13 +671,18 @@ def main():
             db, embedder, threader, reconciler_config, maildir_root=MAILDIR_PATH
         )
 
+    # Validate the configured embed model name BEFORE waiting on Ollama.
+    # ``wait_for_ready`` will pull a missing model from the registry, so
+    # an invalid ``OLLAMA_EMBED_MODEL`` (e.g. ``mxbai-embed-large``) would
+    # otherwise trigger an unnecessary multi-hundred-MB download just to
+    # be rejected immediately afterwards. Failing fast on the env var
+    # keeps the misconfiguration cheap.
+    _validate_embed_model_tokenizer()
+
     # Wait for Ollama to be ready
     embedder.wait_for_ready()
 
-    # Verify the running model matches the schema's reserved vector dim
-    # AND that the configured embed model matches the bundled tokenizer
-    # the chunker uses for size estimation.
-    _validate_embed_model_tokenizer()
+    # Verify the running model matches the schema's reserved vector dim.
     _validate_embedding_dim(embedder)
 
     # Index existing emails
