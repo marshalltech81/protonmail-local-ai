@@ -45,12 +45,44 @@ class TestEstimateTokens:
         assert estimate_tokens("") == 0
 
     def test_short_string_is_at_least_one(self):
-        assert estimate_tokens("hi") == 1
+        assert estimate_tokens("hi") >= 1
 
     def test_scales_roughly_with_length(self):
-        # 4 chars per token by construction; just confirm monotonicity
-        # rather than locking in the exact ratio.
+        # The real BPE tokenizer is non-linear (single tokens absorb
+        # common substrings), but counts strictly increase with text
+        # size for repeated content. Just confirm monotonicity.
         assert estimate_tokens("a" * 100) > estimate_tokens("a" * 10)
+
+    def test_cjk_text_costs_more_tokens_than_chars_per_4_heuristic(self):
+        """The previous 4-chars/token heuristic massively under-counted
+        CJK because BPE tokenizes CJK characters roughly 1:1. A 500-
+        char Chinese passage that the heuristic estimated at ~125
+        tokens is actually ~500-1000 real tokens — enough to blow past
+        nomic-embed-text's 2048 ceiling when packed into a chunk.
+
+        This test pins the relationship qualitatively so a future
+        regression to a char-based heuristic gets caught."""
+        cjk = "中文测试字符串" * 50  # 350 CJK characters
+        char_based_4 = len(cjk) // 4
+        real = estimate_tokens(cjk)
+        assert real > char_based_4 * 2, (
+            f"BPE token count for CJK ({real}) should be at least 2x the "
+            f"naive chars-per-4 heuristic ({char_based_4}); a regression "
+            "to char-based estimation would re-open the embed-stage 500s."
+        )
+
+    def test_english_text_estimate_is_in_realistic_range(self):
+        """English BPE typically averages ~4-5 chars/token. Check that
+        a known English passage lands in that ballpark — both far above
+        zero and well below the char count."""
+        text = "The quick brown fox jumps over the lazy dog. " * 20
+        n_chars = len(text)
+        n_tokens = estimate_tokens(text)
+        # Token count must be between 1/8 and 1/2 of char count for
+        # ASCII English. Anything outside that range means the
+        # tokenizer was misconfigured (e.g., counting bytes, counting
+        # characters, or counting words).
+        assert n_chars // 8 < n_tokens < n_chars // 2
 
 
 class TestNormalizeBody:
@@ -174,6 +206,54 @@ class TestPackingAndSplitting:
         chunks = chunk_message(message_pk="m1", body_text=body)
         for c in chunks:
             assert c.text.strip() != ""
+
+    def test_cjk_wall_without_whitespace_splits_under_max(self):
+        """Regression: ``_split_by_word`` cannot reduce a single
+        non-whitespace span. CJK text typically has no spaces, so a
+        long Chinese passage used to pass straight through to the
+        embedder as a single oversized chunk and trigger Ollama 500
+        ('input length exceeds the context length'). The
+        ``_split_by_tokens`` fallback handles this by slicing at
+        embed-tokenizer boundaries."""
+        # ~5,000 real BPE tokens worth of Chinese with no Latin
+        # whitespace — under the old chunker this was 1 chunk; the
+        # tokenizer fallback should produce many.
+        body = "中文测试字符串，包含一些标点符号。" * 300
+        chunks = chunk_message(message_pk="cjk-wall", body_text=body, max_tokens=500)
+        assert len(chunks) > 1, "CJK wall must be split into multiple chunks"
+        for c in chunks:
+            assert c.token_est <= 500, (
+                f"chunk {c.chunk_index} has {c.token_est} tokens > max_tokens=500"
+            )
+
+    def test_long_url_repeated_splits_under_max(self):
+        """Same regression class for URLs: a paste of one giant URL
+        repeated has no exploitable whitespace — the URL itself is
+        one ``\\S+`` token. Tokenizer fallback must split it."""
+        body = (
+            "https://example.com/very/long/path/with/many/segments/and/a/query?"
+            "param=value&other=stuff"
+        ) * 50
+        chunks = chunk_message(message_pk="url-wall", body_text=body, max_tokens=500)
+        assert len(chunks) > 1
+        for c in chunks:
+            assert c.token_est <= 500
+
+    def test_base64_wall_splits_under_max(self):
+        """Same regression class for Base64: pasted attachment payload
+        as text. No spaces, BPE tokenizer chops it into many tokens
+        per character — a few hundred chars can blow past 500 tokens.
+        Tokenizer fallback keeps each chunk under the ceiling."""
+        body = (
+            (
+                "aGVsbG8gd29ybGQgaG93IGFyZSB5b3UgdG9kYXkgaXQgaXMgYSBuaWNlIGRheQ=="  # pragma: allowlist secret
+            )
+            * 50
+        )
+        chunks = chunk_message(message_pk="b64-wall", body_text=body, max_tokens=500)
+        assert len(chunks) > 1
+        for c in chunks:
+            assert c.token_est <= 500
 
 
 class TestOffsetRoundTrip:
@@ -338,7 +418,12 @@ class TestFixtures:
             max_tokens=350,
             overlap_tokens=40,
         )
-        assert len(chunks) >= 3
+        # The fixture is long enough to require at least one split. The
+        # exact chunk count depends on the embed model's tokenizer (real
+        # BPE counts pack denser than the prior 4-chars/token heuristic),
+        # so this only asserts the splitting behavior — not a specific
+        # number — to stay stable across tokenizer changes.
+        assert len(chunks) >= 2
         # First and last paragraphs should each appear somewhere in the
         # output — neither end of the message should be silently dropped.
         assert any("OPENING_MARKER" in c.text for c in chunks)

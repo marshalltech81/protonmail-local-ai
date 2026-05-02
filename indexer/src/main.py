@@ -70,10 +70,14 @@ def _int_env(name: str, default: int, minimum: int = 1) -> int:
     return max(minimum, value)
 
 
-# Chunker token budgets — see ``chunker.chunk_message`` for semantics. The
-# defaults match the chunker's own defaults, sized for ``nomic-embed-text``
-# at 768 dim with an ~8k token context window (target=350 tokens leaves
-# generous headroom).
+# Chunker token budgets — see ``chunker.chunk_message`` for semantics.
+# The defaults match the chunker's own defaults, sized for the
+# ``nomic-embed-text`` *practical* context window. The model itself
+# supports 8192 tokens, but Ollama serves it with a default
+# ``num_ctx=2048``; that is the binding limit until the operator
+# raises it via a custom Modelfile. The default ``max=500`` keeps a
+# 4× safety margin under 2048 so embed calls succeed regardless of
+# operator config.
 CHUNK_TARGET_TOKENS = _int_env("INDEXER_CHUNK_TARGET_TOKENS", 350)
 CHUNK_MAX_TOKENS = _int_env("INDEXER_CHUNK_MAX_TOKENS", 500)
 CHUNK_OVERLAP_TOKENS = _int_env("INDEXER_CHUNK_OVERLAP_TOKENS", 60, minimum=0)
@@ -581,6 +585,39 @@ def _validate_embedding_dim(embedder: Embedder) -> None:
         )
 
 
+def _validate_embed_model_tokenizer() -> None:
+    """Verify ``OLLAMA_EMBED_MODEL`` matches the bundled tokenizer.
+
+    The chunker counts tokens with the
+    ``nomic-ai/nomic-embed-text-v1.5`` BPE tokenizer bundled at
+    ``src/data/nomic-embed-text/tokenizer.json``. A different
+    embedding model with the same 768-dim output would pass the
+    dimension check but tokenize text differently — chunk size
+    estimates would silently drift back into the
+    ``input length exceeds the context length`` failure mode the
+    real tokenizer was added to fix.
+
+    Until tokenizer selection becomes model-coupled (operator
+    chooses both, or we ship multiple bundled tokenizers and
+    dispatch by model), restrict ``OLLAMA_EMBED_MODEL`` to
+    nomic-embed-text variants. The check is a substring match on
+    the canonical model family name so aliases like
+    ``nomic-embed-text:latest`` and ``nomic-embed-text-v1.5``
+    still pass.
+    """
+    if "nomic-embed-text" not in EMBED_MODEL.lower():
+        raise SystemExit(
+            f"OLLAMA_EMBED_MODEL={EMBED_MODEL!r} is not a nomic-embed-text "
+            "variant. The chunker's token counting uses the bundled "
+            "nomic-embed-text-v1.5 tokenizer; using a different embed "
+            "model would silently mis-size chunks and reintroduce "
+            "'input length exceeds the context length' embed errors. "
+            "Either switch back to nomic-embed-text or extend the "
+            "indexer to bundle the new model's tokenizer and dispatch "
+            "by OLLAMA_EMBED_MODEL."
+        )
+
+
 def _log_reconciler_config(cfg: ReconcilerConfig) -> None:
     if not cfg.enabled:
         log.info("Deletion reconciliation: disabled (set INDEXER_DELETION_ENABLED=true to enable)")
@@ -633,6 +670,14 @@ def main():
         reconciler = Reconciler(
             db, embedder, threader, reconciler_config, maildir_root=MAILDIR_PATH
         )
+
+    # Validate the configured embed model name BEFORE waiting on Ollama.
+    # ``wait_for_ready`` will pull a missing model from the registry, so
+    # an invalid ``OLLAMA_EMBED_MODEL`` (e.g. ``mxbai-embed-large``) would
+    # otherwise trigger an unnecessary multi-hundred-MB download just to
+    # be rejected immediately afterwards. Failing fast on the env var
+    # keeps the misconfiguration cheap.
+    _validate_embed_model_tokenizer()
 
     # Wait for Ollama to be ready
     embedder.wait_for_ready()
