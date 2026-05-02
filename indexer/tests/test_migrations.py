@@ -13,14 +13,33 @@ import pytest
 from src.migrations import runner
 
 
-def _make_versioned_db(tmp_path: Path, version: int) -> sqlite3.Connection:
-    """Build a fresh on-disk SQLite DB with a stamped schema_version row."""
-    conn = sqlite3.connect(tmp_path / "test.db")
-    conn.row_factory = sqlite3.Row
-    conn.execute("CREATE TABLE schema_version (version INTEGER PRIMARY KEY)")
-    conn.execute("INSERT INTO schema_version VALUES (?)", (version,))
-    conn.commit()
-    return conn
+@pytest.fixture
+def make_versioned_db(tmp_path: Path):
+    """Factory that builds fresh on-disk SQLite DBs with a stamped
+    ``schema_version`` row. All connections handed out are closed on
+    fixture teardown so the test runner doesn't see ResourceWarnings
+    about unclosed sqlite3 connections — ResourceWarning silence
+    matters because pytest can promote it to an error in CI under
+    Python's dev mode.
+
+    Each call gets a unique on-disk file so a single test can stage
+    multiple DBs without aliasing.
+    """
+    created: list[sqlite3.Connection] = []
+
+    def _factory(version: int) -> sqlite3.Connection:
+        path = tmp_path / f"db_{len(created)}.sqlite"
+        conn = sqlite3.connect(path)
+        conn.row_factory = sqlite3.Row
+        conn.execute("CREATE TABLE schema_version (version INTEGER PRIMARY KEY)")
+        conn.execute("INSERT INTO schema_version VALUES (?)", (version,))
+        conn.commit()
+        created.append(conn)
+        return conn
+
+    yield _factory
+    for conn in created:
+        conn.close()
 
 
 def _stored_version(conn: sqlite3.Connection) -> int:
@@ -73,29 +92,29 @@ class TestDiscover:
 
 
 class TestApplyPending:
-    def test_no_op_when_current_equals_target(self, tmp_path):
-        conn = _make_versioned_db(tmp_path, 12)
+    def test_no_op_when_current_equals_target(self, tmp_path, make_versioned_db):
+        conn = make_versioned_db(12)
         applied = runner.apply_pending(
             conn, current_version=12, target_version=12, migration_dir=tmp_path
         )
         assert applied == []
         assert _stored_version(conn) == 12
 
-    def test_no_op_when_current_above_target(self, tmp_path):
+    def test_no_op_when_current_above_target(self, tmp_path, make_versioned_db):
         # Defense in depth — caller (Database._migrate) is expected to
         # reject downgrades, but the runner stays lenient: no migration
         # files apply, so nothing happens. The stored version is the
         # caller's problem, not ours.
-        conn = _make_versioned_db(tmp_path, 13)
+        conn = make_versioned_db(13)
         applied = runner.apply_pending(
             conn, current_version=13, target_version=12, migration_dir=tmp_path
         )
         assert applied == []
         assert _stored_version(conn) == 13
 
-    def test_single_migration_advances_version(self, tmp_path):
+    def test_single_migration_advances_version(self, tmp_path, make_versioned_db):
         _write(tmp_path, "0013_add_widget.sql", "CREATE TABLE widget (id INTEGER);")
-        conn = _make_versioned_db(tmp_path, 12)
+        conn = make_versioned_db(12)
         applied = runner.apply_pending(
             conn, current_version=12, target_version=13, migration_dir=tmp_path
         )
@@ -107,23 +126,23 @@ class TestApplyPending:
             is not None
         )
 
-    def test_multiple_migrations_apply_in_order(self, tmp_path):
+    def test_multiple_migrations_apply_in_order(self, tmp_path, make_versioned_db):
         _write(tmp_path, "0013_a.sql", "CREATE TABLE a (x INTEGER);")
         _write(tmp_path, "0014_b.sql", "CREATE TABLE b (x INTEGER);")
         _write(tmp_path, "0015_c.sql", "CREATE TABLE c (x INTEGER);")
-        conn = _make_versioned_db(tmp_path, 12)
+        conn = make_versioned_db(12)
         applied = runner.apply_pending(
             conn, current_version=12, target_version=15, migration_dir=tmp_path
         )
         assert applied == [13, 14, 15]
         assert _stored_version(conn) == 15
 
-    def test_skips_already_applied_versions(self, tmp_path):
+    def test_skips_already_applied_versions(self, tmp_path, make_versioned_db):
         # Files exist for 13, 14, 15; only 15 should apply if stored is 14.
         _write(tmp_path, "0013_a.sql", "CREATE TABLE a (x INTEGER);")
         _write(tmp_path, "0014_b.sql", "CREATE TABLE b (x INTEGER);")
         _write(tmp_path, "0015_c.sql", "CREATE TABLE c (x INTEGER);")
-        conn = _make_versioned_db(tmp_path, 14)
+        conn = make_versioned_db(14)
         applied = runner.apply_pending(
             conn, current_version=14, target_version=15, migration_dir=tmp_path
         )
@@ -134,11 +153,11 @@ class TestApplyPending:
         assert conn.execute("SELECT name FROM sqlite_master WHERE name='b'").fetchone() is None
         assert conn.execute("SELECT name FROM sqlite_master WHERE name='c'").fetchone() is not None
 
-    def test_rejects_gap_in_pending_sequence(self, tmp_path):
+    def test_rejects_gap_in_pending_sequence(self, tmp_path, make_versioned_db):
         # current=12, target=15, but only 13 and 15 exist — 14 missing.
         _write(tmp_path, "0013_a.sql", "CREATE TABLE a (x INTEGER);")
         _write(tmp_path, "0015_c.sql", "CREATE TABLE c (x INTEGER);")
-        conn = _make_versioned_db(tmp_path, 12)
+        conn = make_versioned_db(12)
         with pytest.raises(RuntimeError, match="migration sequence"):
             runner.apply_pending(
                 conn, current_version=12, target_version=15, migration_dir=tmp_path
@@ -147,7 +166,7 @@ class TestApplyPending:
         assert _stored_version(conn) == 12
         assert conn.execute("SELECT name FROM sqlite_master WHERE name='a'").fetchone() is None
 
-    def test_failing_migration_rolls_back_that_migration_only(self, tmp_path):
+    def test_failing_migration_rolls_back_that_migration_only(self, tmp_path, make_versioned_db):
         # 13 succeeds, 14 fails. After the call, version should be 13 and
         # table_a should exist (committed by 13's transaction); table_b
         # should NOT exist (rolled back by 14's transaction).
@@ -157,7 +176,7 @@ class TestApplyPending:
             "0014_broken.sql",
             "CREATE TABLE b (x INTEGER); SELECT * FROM nonexistent_table;",
         )
-        conn = _make_versioned_db(tmp_path, 12)
+        conn = make_versioned_db(12)
         with pytest.raises(sqlite3.Error):
             runner.apply_pending(
                 conn, current_version=12, target_version=14, migration_dir=tmp_path
@@ -166,13 +185,15 @@ class TestApplyPending:
         assert conn.execute("SELECT name FROM sqlite_master WHERE name='a'").fetchone() is not None
         assert conn.execute("SELECT name FROM sqlite_master WHERE name='b'").fetchone() is None
 
-    def test_target_below_available_files_only_applies_through_target(self, tmp_path):
+    def test_target_below_available_files_only_applies_through_target(
+        self, tmp_path, make_versioned_db
+    ):
         # Files exist for 13, 14, 15; target is 14, so 15 must be left
         # alone even though its file is present.
         _write(tmp_path, "0013_a.sql", "CREATE TABLE a (x INTEGER);")
         _write(tmp_path, "0014_b.sql", "CREATE TABLE b (x INTEGER);")
         _write(tmp_path, "0015_c.sql", "CREATE TABLE c (x INTEGER);")
-        conn = _make_versioned_db(tmp_path, 12)
+        conn = make_versioned_db(12)
         applied = runner.apply_pending(
             conn, current_version=12, target_version=14, migration_dir=tmp_path
         )
@@ -180,51 +201,53 @@ class TestApplyPending:
         assert _stored_version(conn) == 14
         assert conn.execute("SELECT name FROM sqlite_master WHERE name='c'").fetchone() is None
 
-    def test_target_above_available_files_raises_with_clear_message(self, tmp_path):
+    def test_target_above_available_files_raises_with_clear_message(
+        self, tmp_path, make_versioned_db
+    ):
         # current=12, target=15, but no files at all — caller bumped the
         # constant without shipping a migration.
-        conn = _make_versioned_db(tmp_path, 12)
+        conn = make_versioned_db(12)
         with pytest.raises(RuntimeError, match="migration sequence"):
             runner.apply_pending(
                 conn, current_version=12, target_version=15, migration_dir=tmp_path
             )
 
-    def test_empty_migration_file_rejected_before_version_bump(self, tmp_path):
+    def test_empty_migration_file_rejected_before_version_bump(self, tmp_path, make_versioned_db):
         # A whitespace-only migration produces no statements at all.
         # Without this guard the runner would still UPDATE
         # schema_version, leaving the DB stamped at the new version
         # with none of the expected DDL applied.
         _write(tmp_path, "0013_empty.sql", "   \n\n  ")
-        conn = _make_versioned_db(tmp_path, 12)
+        conn = make_versioned_db(12)
         with pytest.raises(RuntimeError, match="no executable SQL"):
             runner.apply_pending(
                 conn, current_version=12, target_version=13, migration_dir=tmp_path
             )
         assert _stored_version(conn) == 12
 
-    def test_line_comment_only_migration_rejected(self, tmp_path):
+    def test_line_comment_only_migration_rejected(self, tmp_path, make_versioned_db):
         # sqlite3 accepts a comment-only statement as a no-op, so
         # without ``_has_executable_sql`` the runner would happily
         # execute it and advance schema_version. The guard catches it.
         _write(tmp_path, "0013_note.sql", "-- just a note about the upcoming change\n")
-        conn = _make_versioned_db(tmp_path, 12)
+        conn = make_versioned_db(12)
         with pytest.raises(RuntimeError, match="no executable SQL"):
             runner.apply_pending(
                 conn, current_version=12, target_version=13, migration_dir=tmp_path
             )
         assert _stored_version(conn) == 12
 
-    def test_block_comment_only_migration_rejected(self, tmp_path):
+    def test_block_comment_only_migration_rejected(self, tmp_path, make_versioned_db):
         # Same risk for ``/* … */`` block comments.
         _write(tmp_path, "0013_block.sql", "/* TODO: real migration goes here */\n")
-        conn = _make_versioned_db(tmp_path, 12)
+        conn = make_versioned_db(12)
         with pytest.raises(RuntimeError, match="no executable SQL"):
             runner.apply_pending(
                 conn, current_version=12, target_version=13, migration_dir=tmp_path
             )
         assert _stored_version(conn) == 12
 
-    def test_mixed_comments_and_ddl_applies(self, tmp_path):
+    def test_mixed_comments_and_ddl_applies(self, tmp_path, make_versioned_db):
         # A comment header followed by real DDL is the normal case and
         # must still apply cleanly. Confirms the guard discriminates
         # comment-only from comment-prefixed.
@@ -235,7 +258,7 @@ class TestApplyPending:
             "/* Schema reviewed 2026-05-02. */\n"
             "CREATE TABLE widget (id INTEGER);\n",
         )
-        conn = _make_versioned_db(tmp_path, 12)
+        conn = make_versioned_db(12)
         applied = runner.apply_pending(
             conn, current_version=12, target_version=13, migration_dir=tmp_path
         )
@@ -246,7 +269,7 @@ class TestApplyPending:
             is not None
         )
 
-    def test_compound_trigger_migration_applies_atomically(self, tmp_path):
+    def test_compound_trigger_migration_applies_atomically(self, tmp_path, make_versioned_db):
         # End-to-end coverage for a CREATE TRIGGER … BEGIN … END;
         # compound. A naive split-on-semicolon would shred the trigger
         # body into invalid fragments and the migration would fail.
@@ -264,7 +287,7 @@ class TestApplyPending:
                 "END;\n"
             ),
         )
-        conn = _make_versioned_db(tmp_path, 12)
+        conn = make_versioned_db(12)
         applied = runner.apply_pending(
             conn, current_version=12, target_version=13, migration_dir=tmp_path
         )
