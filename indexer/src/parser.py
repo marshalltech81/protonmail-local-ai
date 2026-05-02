@@ -91,9 +91,16 @@ def parse_email(path: Path, maildir_root: Path | None = None) -> Message | None:
 
     When ``maildir_root`` is not provided the folder falls back to the
     leaf name (``path.parent.parent.name``) for backward compatibility.
+
+    Transient I/O errors (``PermissionError`` from the mbsync 0600→0644
+    chmod race, ``FileNotFoundError`` from a rename mid-event) propagate
+    so the worker's queue routes them to the retry/backoff path rather
+    than collapsing them into ``None`` — which the worker treats as
+    "terminal success, no Message-ID" and would silently drop the file
+    from the index.
     """
+    raw = path.read_bytes()
     try:
-        raw = path.read_bytes()
         msg = email.message_from_bytes(raw)
 
         message_id = _clean_id(msg.get("Message-ID", ""))

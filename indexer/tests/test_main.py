@@ -345,6 +345,33 @@ class TestDrainQueueRetryAndDeadLetter:
         assert row["last_stage"] == "embed"
         assert "ollama still down" in row["last_error"]
 
+    def test_unreadable_file_routes_to_retry_not_terminal_success(self, tmp_path):
+        # Models the mbsync 0600→0644 chmod race: the watchdog enqueues a
+        # newly-delivered file before mbsync's post-sync chmod hook makes
+        # it readable. ``_index_one_file`` must surface that as a parse
+        # failure so the queue retries on backoff. The previous behavior
+        # (parse_email caught EACCES, returned None, worker treated None
+        # as terminal success) silently dropped the message.
+        import os
+
+        dest = tmp_path / "INBOX" / "new" / "msg.eml"
+        _write_eml(dest, "race@example.com")
+        os.chmod(dest, 0o000)
+
+        db = Database(tmp_path / "mail.db")
+        threader = Threader(db)
+        embedder = MagicMock()
+        embedder.embed.return_value = [0.0] * EMBEDDING_DIM
+        try:
+            ok, stage, err, _ = main._index_one_file(dest, db, embedder, threader)
+        finally:
+            os.chmod(dest, 0o644)
+
+        assert ok is False
+        assert stage == "parse"
+        assert err is not None
+        assert "PermissionError" in err or "Errno 13" in err
+
 
 class TestValidateEmbeddingDim:
     def test_matching_dim_passes_silently(self):

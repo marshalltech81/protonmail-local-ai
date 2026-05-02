@@ -182,8 +182,45 @@ class TestParseEmail:
         assert msg.date.utcoffset().total_seconds() == 0
         assert msg.date.hour == 7  # 12:00 +0500 = 07:00 UTC
 
-    def test_nonexistent_file_returns_none(self, tmp_path):
-        assert parse_email(tmp_path / "ghost.eml") is None
+    def test_nonexistent_file_propagates_filenotfounderror(self, tmp_path):
+        # Transient I/O errors must propagate so the worker's retry
+        # path takes over. Returning ``None`` would route the row to
+        # ``mark_succeeded`` and silently drop the file from the index.
+        import pytest
+
+        with pytest.raises(FileNotFoundError):
+            parse_email(tmp_path / "ghost.eml")
+
+    def test_permission_denied_propagates_for_queue_retry(self, tmp_path):
+        # Models the mbsync 0600→0644 chmod race: the file exists but
+        # is not yet readable to the indexer UID. The error must
+        # propagate so the durable queue retries on backoff; the prior
+        # behavior (return None) collapsed this into "terminal success"
+        # and dropped the message permanently.
+        import os
+
+        import pytest
+
+        path = write_eml(
+            tmp_path,
+            """
+            From: a@example.com
+            To: b@example.com
+            Subject: race
+            Message-ID: <race@example.com>
+            Date: Mon, 01 Jan 2024 12:00:00 +0000
+            Content-Type: text/plain; charset=utf-8
+
+            Body.
+            """,
+            name="race.eml",
+        )
+        os.chmod(path, 0o000)
+        try:
+            with pytest.raises(PermissionError):
+                parse_email(path)
+        finally:
+            os.chmod(path, 0o644)
 
     def test_nested_folder_path_preserved_when_maildir_root_given(self, tmp_path):
         """Regression: without a ``maildir_root`` the folder is derived as
