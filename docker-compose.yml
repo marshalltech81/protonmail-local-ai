@@ -147,10 +147,13 @@ services:
     # Cap memory so a malicious attachment that slips past the
     # ``ZIP_MAX_UNCOMPRESSED_BYTES`` pre-check (e.g. a quadratic-blowup
     # XML payload that lxml expands in core) cannot pressure the host.
-    # 1 GiB covers any realistic OCR/PDF/XLSX workload — embedding RPC
-    # output and FTS staging are tiny — while keeping the blast radius
-    # bounded.
-    mem_limit: 1g
+    # 2 GiB accommodates parallel embed dispatch — peak memory scales
+    # with ``concurrency × largest_in_flight_message`` because parsed
+    # attachment text and per-chunk float vectors are held in memory
+    # while waiting on Ollama embed RPCs. 1 GiB was empirically too
+    # tight under normal indexing bursts on a populated mailbox; 2 GiB
+    # still bounds the blast radius well below the typical host budget.
+    mem_limit: 2g
     tmpfs:
       - /tmp
       - /home/indexer:uid=1002,gid=1002,mode=700
