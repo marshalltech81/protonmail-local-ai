@@ -186,10 +186,13 @@ If you want end-to-end local conversations:
   python -c "..."`. Less ergonomic; nothing leaves your laptop.
 - Or use a different MCP client backed by a local LLM. For Open WebUI, set
   `MCP_TRANSPORT=dual` and run `make open-webui-up` (the target auto-generates
-  the session-key secret on first run). It connects to the existing Ollama
-  container and uses `http://mcp-server:3000/mcp` as a Streamable HTTP MCP
-  server. Quality varies. When running the host-Ollama overlay on macOS,
-  use `make open-webui-up-host-ollama` so Open WebUI is rewired to the
+  the session-key secret on first run; for the very first launch, prepend
+  `OPEN_WEBUI_ENABLE_SIGNUP=true` to create the admin account — see
+  `docs/setup.md` for the full first-run flow including MCP server
+  registration). It connects to the existing Ollama container and uses
+  `http://mcp-server:3000/mcp` as a Streamable HTTP MCP server. Quality
+  varies. When running the host-Ollama overlay on macOS, use
+  `make open-webui-up-host-ollama` so Open WebUI is rewired to the
   native Ollama on `host.docker.internal:11434`.
 
 Most users accept the Claude-Desktop-as-frontend tradeoff because the
