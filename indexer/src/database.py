@@ -61,13 +61,21 @@ def _dedupe_by_canonical(addrs: list[str]) -> list[str]:
 #   v12 — FK ``ON DELETE CASCADE`` across chunk + attachment tables so
 #         a thread or message deletion takes its dependent rows with it
 #         without relying on application-side helpers.
+#   v13 — ``threads.display_subject``: retrieval-facing original-cased
+#         subject (with ``Re:``/``Fwd:`` prefixes intact). The existing
+#         ``subject`` column stays as the normalized matching key used
+#         by the threader for grouping. Existing threads receive
+#         ``NULL`` for ``display_subject``; the retrieval layer
+#         coalesces back to ``subject`` so old threads render with the
+#         legacy normalized value until a future indexer pass refreshes
+#         them.
 # Bumping this constant requires shipping a forward migration file at
 # ``src/migrations/<NNNN>_<slug>.sql`` covering the new version. Fresh
 # installs continue to apply ``_apply_initial_schema`` directly and stamp
 # the current version; existing installs run the migration runner to
 # catch up. See ``src/migrations/runner.py`` for the file layout and
 # transactional guarantees.
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
 
 # The schema uses FTS5 ``contentless_delete=1``, which SQLite added in 3.43.
 # Validate the runtime version at Database init and fail fast with a clear
@@ -294,7 +302,7 @@ class Database:
             -- Thread-level coarse retrieval
             CREATE TABLE threads (
                 thread_id       TEXT PRIMARY KEY,
-                subject         TEXT NOT NULL,
+                subject         TEXT NOT NULL,           -- normalized matching key (lowercased, prefix-stripped)
                 participants    TEXT NOT NULL,           -- JSON array
                 senders         TEXT NOT NULL DEFAULT '[]',  -- JSON array (From only)
                 folder          TEXT NOT NULL,
@@ -304,7 +312,8 @@ class Database:
                 snippet         TEXT,
                 has_attachments INTEGER DEFAULT 0,
                 body_text       TEXT,
-                fts_rowid       INTEGER
+                fts_rowid       INTEGER,
+                display_subject TEXT                     -- original-cased subject for retrieval; NULL on legacy rows, COALESCE'd back to subject by readers
             );
 
             CREATE VIRTUAL TABLE threads_fts USING fts5(
@@ -498,6 +507,17 @@ class Database:
         incoming_participants = list(thread.participants)
         incoming_senders = [m.from_addr for m in thread.messages if m.from_addr]
         incoming_has_attachments = int(any(m.has_attachments for m in thread.messages))
+        # display_subject: pick the oldest incoming message's original
+        # subject as the human-facing label. The threader strips Re:/Fwd:
+        # and lowercases ``thread.subject`` for grouping, so the original
+        # only survives on the Message objects. The ON CONFLICT clause
+        # below uses COALESCE so the first writer to populate this column
+        # wins — later messages with ``Re:`` prefixes don't clobber the
+        # cleaner original subject.
+        incoming_display_subject: str | None = None
+        if thread.messages:
+            earliest = min(thread.messages, key=lambda m: m.date)
+            incoming_display_subject = earliest.subject or None
 
         started = False
         try:
@@ -551,14 +571,19 @@ class Database:
                     snippet = existing["snippet"]
             date_last = thread.date_last.isoformat()
 
-            # Upsert main thread record
+            # Upsert main thread record. ``display_subject`` is COALESCE'd
+            # so the first writer to populate it wins — a later upsert
+            # for a reply ("Re: …") won't overwrite the cleaner original
+            # subject captured the first time the thread was seen. An
+            # existing NULL (legacy row pre-v13) gets backfilled by the
+            # first upsert that supplies a non-NULL value.
             cur.execute(
                 """
                 INSERT INTO threads
                     (thread_id, subject, participants, senders, folder,
                      date_first, date_last, message_ids, snippet, has_attachments,
-                     body_text)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     body_text, display_subject)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(thread_id) DO UPDATE SET
                     participants    = excluded.participants,
                     senders         = excluded.senders,
@@ -567,7 +592,8 @@ class Database:
                     message_ids     = excluded.message_ids,
                     snippet         = excluded.snippet,
                     has_attachments = excluded.has_attachments,
-                    body_text       = excluded.body_text
+                    body_text       = excluded.body_text,
+                    display_subject = COALESCE(threads.display_subject, excluded.display_subject)
                 """,
                 (
                     thread.thread_id,
@@ -581,6 +607,7 @@ class Database:
                     snippet,
                     merged_has_attachments,
                     body,
+                    incoming_display_subject,
                 ),
             )
 

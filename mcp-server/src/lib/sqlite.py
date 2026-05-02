@@ -979,9 +979,19 @@ class Database:
     # -------------------------------------------------------------------------
 
     def _row_to_result(self, row) -> ThreadResult:
+        # Prefer the original-cased ``display_subject`` (added in
+        # SCHEMA_VERSION v13). Legacy rows written before v13 have NULL
+        # ``display_subject``; fall back to the normalized ``subject``
+        # so existing threads keep rendering instead of going blank.
+        # The fallback also covers the read-only-DB-pre-v13 case where
+        # the column itself is missing.
+        try:
+            display = row["display_subject"]
+        except KeyError, IndexError:
+            display = None
         return ThreadResult(
             thread_id=row["thread_id"],
-            subject=row["subject"],
+            subject=display or row["subject"],
             participants=json.loads(row["participants"]),
             senders=json.loads(row["senders"]),
             folder=row["folder"],

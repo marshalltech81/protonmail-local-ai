@@ -21,18 +21,19 @@ def _build_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(
         """
         CREATE TABLE threads (
-            thread_id    TEXT PRIMARY KEY,
-            subject      TEXT NOT NULL,
-            participants TEXT NOT NULL,
-            senders      TEXT NOT NULL DEFAULT '[]',
-            folder       TEXT NOT NULL,
-            date_first   TEXT NOT NULL,
-            date_last    TEXT NOT NULL,
-            message_ids  TEXT NOT NULL,
-            snippet      TEXT,
+            thread_id       TEXT PRIMARY KEY,
+            subject         TEXT NOT NULL,
+            participants    TEXT NOT NULL,
+            senders         TEXT NOT NULL DEFAULT '[]',
+            folder          TEXT NOT NULL,
+            date_first      TEXT NOT NULL,
+            date_last       TEXT NOT NULL,
+            message_ids     TEXT NOT NULL,
+            snippet         TEXT,
             has_attachments INTEGER DEFAULT 0,
-            body_text    TEXT,
-            fts_rowid    INTEGER
+            body_text       TEXT,
+            fts_rowid       INTEGER,
+            display_subject TEXT
         );
 
         CREATE TABLE message_thread_map (
@@ -208,6 +209,7 @@ def _insert_thread(
     has_attachments: bool = False,
     body_text: str = "",
     embedding: list[float] | None = None,
+    display_subject: str | None = None,
 ) -> None:
     cur = conn.cursor()
     cur.execute(
@@ -223,8 +225,8 @@ def _insert_thread(
         INSERT INTO threads (
             thread_id, subject, participants, senders, folder,
             date_first, date_last, message_ids, snippet,
-            has_attachments, body_text, fts_rowid
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            has_attachments, body_text, fts_rowid, display_subject
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             thread_id,
@@ -239,6 +241,7 @@ def _insert_thread(
             1 if has_attachments else 0,
             body_text,
             fts_rowid,
+            display_subject,
         ),
     )
     for mid in message_ids or [thread_id]:

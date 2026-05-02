@@ -518,6 +518,75 @@ class TestDirectLookups:
             seeded_db.list_threads(folder="INBOX", filter_type="unread")
 
 
+class TestDisplaySubjectFallback:
+    """``ThreadResult.subject`` surfaces ``display_subject`` when set
+    (added in v13) and falls back to the normalized ``subject`` for
+    legacy rows where ``display_subject`` is ``NULL``."""
+
+    def test_uses_display_subject_when_present(self, tmp_path):
+        import sqlite3
+
+        import sqlite_vec
+        from src.lib.sqlite import Database
+
+        from tests.conftest import _build_schema, _insert_thread
+
+        db_path = tmp_path / "with-display.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.enable_load_extension(True)
+        sqlite_vec.load(conn)
+        conn.enable_load_extension(False)
+        _build_schema(conn)
+        _insert_thread(
+            conn,
+            thread_id="t-display",
+            subject="today's meeting",  # normalized matching key
+            participants=["a@example.com"],
+            display_subject="Today's Meeting",  # original-cased
+        )
+        conn.close()
+
+        db = Database(db_path)
+        try:
+            result = db.get_thread("t-display")
+            assert result is not None
+            assert result.subject == "Today's Meeting"
+        finally:
+            db.close()
+
+    def test_falls_back_to_normalized_subject_when_display_is_null(self, tmp_path):
+        import sqlite3
+
+        import sqlite_vec
+        from src.lib.sqlite import Database
+
+        from tests.conftest import _build_schema, _insert_thread
+
+        db_path = tmp_path / "without-display.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.enable_load_extension(True)
+        sqlite_vec.load(conn)
+        conn.enable_load_extension(False)
+        _build_schema(conn)
+        _insert_thread(
+            conn,
+            thread_id="t-legacy",
+            subject="legacy lowercased subject",
+            participants=["a@example.com"],
+            # display_subject left None — simulates a v12 row carried
+            # forward through the v13 migration without a refresh.
+        )
+        conn.close()
+
+        db = Database(db_path)
+        try:
+            result = db.get_thread("t-legacy")
+            assert result is not None
+            assert result.subject == "legacy lowercased subject"
+        finally:
+            db.close()
+
+
 class TestStatsAndFolders:
     def test_get_stats(self, seeded_db: Database):
         stats = seeded_db.get_stats()
