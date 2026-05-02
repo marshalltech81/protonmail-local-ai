@@ -82,10 +82,12 @@ class TestSchema:
         second = Database(db_path)  # second open must not raise
         second.close()
 
-    def test_opening_with_mismatched_schema_version_raises(self, tmp_path):
-        """The codebase fails fast on schema-version drift instead of
-        running an absent migration framework. The error message must
-        be actionable so an operator knows to wipe the volume."""
+    def test_opening_with_lower_stored_version_with_no_migration_raises(self, tmp_path):
+        """An existing volume below ``SCHEMA_VERSION`` triggers the
+        migration runner; with no forward migration file shipped to
+        cover the gap, the runner raises a sequence-broken error so
+        the operator knows a migration file is missing rather than
+        silently leaving the schema mid-version."""
         db_path = tmp_path / "stale.db"
         database = Database(db_path)
         database.close()
@@ -98,7 +100,26 @@ class TestSchema:
             conn.commit()
         finally:
             conn.close()
-        with pytest.raises(RuntimeError, match="wipe the sqlite-volume"):
+        with pytest.raises(RuntimeError, match="migration sequence"):
+            Database(db_path)
+
+    def test_opening_with_higher_stored_version_raises_downgrade_error(self, tmp_path):
+        """A stored version above ``SCHEMA_VERSION`` is a downgrade
+        attempt — the runner does not support reverse migrations. The
+        error must point at the two viable paths (image upgrade or
+        volume wipe)."""
+        db_path = tmp_path / "future.db"
+        database = Database(db_path)
+        database.close()
+        import sqlite3
+
+        conn = sqlite3.connect(str(db_path))
+        try:
+            conn.execute("UPDATE schema_version SET version = ?", (SCHEMA_VERSION + 1,))
+            conn.commit()
+        finally:
+            conn.close()
+        with pytest.raises(RuntimeError, match="Downgrade migrations are not supported"):
             Database(db_path)
 
 

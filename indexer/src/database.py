@@ -61,8 +61,12 @@ def _dedupe_by_canonical(addrs: list[str]) -> list[str]:
 #   v12 — FK ``ON DELETE CASCADE`` across chunk + attachment tables so
 #         a thread or message deletion takes its dependent rows with it
 #         without relying on application-side helpers.
-# Bumping this constant requires wiping ``sqlite-volume`` — there is no
-# migration runner; the indexer rebuilds from Maildir on next start.
+# Bumping this constant requires shipping a forward migration file at
+# ``src/migrations/<NNNN>_<slug>.sql`` covering the new version. Fresh
+# installs continue to apply ``_apply_initial_schema`` directly and stamp
+# the current version; existing installs run the migration runner to
+# catch up. See ``src/migrations/runner.py`` for the file layout and
+# transactional guarantees.
 SCHEMA_VERSION = 12
 
 # The schema uses FTS5 ``contentless_delete=1``, which SQLite added in 3.43.
@@ -202,22 +206,25 @@ class Database:
 
     # -------------------------------------------------------------------------
     # Schema setup
-    # Fresh installs apply ``_apply_initial_schema`` directly; an existing
-    # database with a different version raises rather than auto-migrating
-    # (see ``_migrate``).
+    # Fresh installs apply ``_apply_initial_schema`` directly. Existing
+    # installs at a lower stored version run forward migration files
+    # from ``src/migrations/`` via the runner. Existing installs at a
+    # higher stored version (a downgrade) are rejected — see ``_migrate``.
     # -------------------------------------------------------------------------
 
     def _migrate(self):
-        """Create the schema if it doesn't exist; otherwise verify it.
+        """Create the schema if it doesn't exist; otherwise migrate or verify.
 
-        This codebase has no committed migration story — fresh installs
-        write the current schema directly, and the only upgrade path
-        for an existing volume is to wipe ``sqlite-volume`` and let the
-        indexer re-index the Maildir. ``SCHEMA_VERSION`` is kept as a
-        constant so the day a real upgrade is needed, this function can
-        be extended into a proper migration runner without churning
-        the read paths.
+        Fresh installs apply ``_apply_initial_schema`` directly and stamp
+        the current ``SCHEMA_VERSION`` — they skip every historical
+        migration file. Existing installs at a lower stored version run
+        the forward migration files in ``src/migrations/`` to catch up.
+        Stored versions higher than the code's ``SCHEMA_VERSION`` (a
+        downgrade attempt) are rejected — wipe the volume or upgrade
+        the image.
         """
+        from .migrations import runner as migration_runner
+
         cur = self._conn.cursor()
         cur.execute("CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY)")
         row = cur.execute("SELECT version FROM schema_version").fetchone()
@@ -228,13 +235,31 @@ class Database:
             log.info(f"Database initialized at {self.path} (schema v{SCHEMA_VERSION})")
             return
 
-        if row["version"] != SCHEMA_VERSION:
+        stored = row["version"]
+        if stored == SCHEMA_VERSION:
+            log.info(f"Database ready at {self.path} (schema v{SCHEMA_VERSION})")
+            return
+
+        if stored > SCHEMA_VERSION:
             raise RuntimeError(
-                f"Schema version mismatch: stored v{row['version']}, code expects "
-                f"v{SCHEMA_VERSION}. This codebase does not implement migrations; "
-                "wipe the sqlite-volume and let the indexer rebuild from Maildir."
+                f"Schema version mismatch: stored v{stored} is newer than code "
+                f"v{SCHEMA_VERSION}. Downgrade migrations are not supported; "
+                "either upgrade the indexer image or wipe the sqlite-volume "
+                "and let the indexer rebuild from Maildir."
             )
-        log.info(f"Database ready at {self.path} (schema v{SCHEMA_VERSION})")
+
+        migration_dir = Path(__file__).parent / "migrations"
+        log.info(f"Migrating database at {self.path}: v{stored} -> v{SCHEMA_VERSION}")
+        applied = migration_runner.apply_pending(
+            self._conn,
+            current_version=stored,
+            target_version=SCHEMA_VERSION,
+            migration_dir=migration_dir,
+        )
+        log.info(
+            f"Database ready at {self.path} (schema v{SCHEMA_VERSION}, "
+            f"applied migrations: {applied})"
+        )
 
     def _apply_initial_schema(self, cur: sqlite3.Cursor):
         """Create every table the indexer needs, in their final shape.

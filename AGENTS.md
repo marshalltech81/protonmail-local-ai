@@ -143,11 +143,17 @@ Do not make any of the following changes unless the repository owner explicitly 
   indexing — they do not replace it. Do not remove thread-level rows or
   vectors. The thread vector is derived as the mean of a thread's chunk
   vectors so coarse and precise retrieval share source data.
-- Do not change the SQLite schema without incrementing `SCHEMA_VERSION`.
-  The indexer fails fast on a stored-vs-code version mismatch rather than
-  running migrations; until a real migration runner is added, schema
-  changes require wiping `sqlite-volume` so the indexer rebuilds from
-  Maildir.
+- Do not change the SQLite schema without incrementing `SCHEMA_VERSION`
+  **and** shipping a forward migration file at
+  `indexer/src/migrations/<NNNN>_<slug>.sql` covering the new version.
+  Fresh installs apply `_apply_initial_schema` directly and stamp the
+  current version; existing installs run the migration runner
+  (`indexer/src/migrations/runner.py`) to catch up. Each migration runs
+  in its own `BEGIN IMMEDIATE`/`COMMIT`, so a failure leaves the
+  database stamped at the last successfully applied version and the
+  next startup retries from the failing migration onward. Downgrades
+  (stored version > code) and gaps (no migration file for an intermediate
+  version) both fail closed at startup with actionable error messages.
 - Do not change embedding dimensions or model assumptions without verifying schema and context-window implications.
 - Do not change chunk ID derivation away from the deterministic
   `sha256(message_pk || index || text)` shape — re-runs depend on identical
