@@ -190,20 +190,61 @@ class TestApplyPending:
             )
 
     def test_empty_migration_file_rejected_before_version_bump(self, tmp_path):
-        # An empty (or whitespace-only / comment-only) migration file
-        # contains no SQL statements. Without this guard the runner
-        # would still UPDATE schema_version, leaving the DB stamped at
-        # the new version with none of the expected DDL applied — a
-        # subsequent ``ALTER TABLE`` against the assumed schema would
-        # fail with a misleading "no such column" error and hide the
-        # original mistake. Refuse to advance the version instead.
+        # A whitespace-only migration produces no statements at all.
+        # Without this guard the runner would still UPDATE
+        # schema_version, leaving the DB stamped at the new version
+        # with none of the expected DDL applied.
         _write(tmp_path, "0013_empty.sql", "   \n\n  ")
         conn = _make_versioned_db(tmp_path, 12)
-        with pytest.raises(RuntimeError, match="contains no SQL statements"):
+        with pytest.raises(RuntimeError, match="no executable SQL"):
             runner.apply_pending(
                 conn, current_version=12, target_version=13, migration_dir=tmp_path
             )
         assert _stored_version(conn) == 12
+
+    def test_line_comment_only_migration_rejected(self, tmp_path):
+        # sqlite3 accepts a comment-only statement as a no-op, so
+        # without ``_has_executable_sql`` the runner would happily
+        # execute it and advance schema_version. The guard catches it.
+        _write(tmp_path, "0013_note.sql", "-- just a note about the upcoming change\n")
+        conn = _make_versioned_db(tmp_path, 12)
+        with pytest.raises(RuntimeError, match="no executable SQL"):
+            runner.apply_pending(
+                conn, current_version=12, target_version=13, migration_dir=tmp_path
+            )
+        assert _stored_version(conn) == 12
+
+    def test_block_comment_only_migration_rejected(self, tmp_path):
+        # Same risk for ``/* … */`` block comments.
+        _write(tmp_path, "0013_block.sql", "/* TODO: real migration goes here */\n")
+        conn = _make_versioned_db(tmp_path, 12)
+        with pytest.raises(RuntimeError, match="no executable SQL"):
+            runner.apply_pending(
+                conn, current_version=12, target_version=13, migration_dir=tmp_path
+            )
+        assert _stored_version(conn) == 12
+
+    def test_mixed_comments_and_ddl_applies(self, tmp_path):
+        # A comment header followed by real DDL is the normal case and
+        # must still apply cleanly. Confirms the guard discriminates
+        # comment-only from comment-prefixed.
+        _write(
+            tmp_path,
+            "0013_with_header.sql",
+            "-- Add a widget table for retrieval testing.\n"
+            "/* Schema reviewed 2026-05-02. */\n"
+            "CREATE TABLE widget (id INTEGER);\n",
+        )
+        conn = _make_versioned_db(tmp_path, 12)
+        applied = runner.apply_pending(
+            conn, current_version=12, target_version=13, migration_dir=tmp_path
+        )
+        assert applied == [13]
+        assert _stored_version(conn) == 13
+        assert (
+            conn.execute("SELECT name FROM sqlite_master WHERE name = 'widget'").fetchone()
+            is not None
+        )
 
     def test_compound_trigger_migration_applies_atomically(self, tmp_path):
         # End-to-end coverage for a CREATE TRIGGER … BEGIN … END;
@@ -316,6 +357,40 @@ class TestSplitStatements:
         statements = runner._split_statements(sql)
         assert len(statements) == 1
         assert "CREATE TABLE a (x)" in statements[0]
+
+
+# ---------------------------------------------------------------------------
+# _has_executable_sql — drives the "comment-only migration is not enough to
+# advance schema_version" guard. Pin the qualitative behavior so a future
+# refactor of comment-stripping can't silently re-open the bug.
+# ---------------------------------------------------------------------------
+
+
+class TestHasExecutableSql:
+    def test_pure_ddl_is_executable(self):
+        assert runner._has_executable_sql("CREATE TABLE a (x)") is True
+        assert runner._has_executable_sql("CREATE TABLE a (x);") is True
+
+    def test_comment_prefixed_ddl_is_executable(self):
+        assert runner._has_executable_sql("-- header\nCREATE TABLE a (x);") is True
+
+    def test_line_comment_only_is_not_executable(self):
+        assert runner._has_executable_sql("-- just a note") is False
+        assert runner._has_executable_sql("-- a;\n") is False
+
+    def test_block_comment_only_is_not_executable(self):
+        assert runner._has_executable_sql("/* TODO */") is False
+        assert runner._has_executable_sql("/* multi\n line\n note */") is False
+
+    def test_mixed_comment_only_is_not_executable(self):
+        # Both styles, no DDL — still not executable.
+        assert runner._has_executable_sql("-- one\n/* two */\n-- three\n") is False
+
+    def test_whitespace_and_semicolons_are_not_executable(self):
+        assert runner._has_executable_sql("") is False
+        assert runner._has_executable_sql("   \n\n  ") is False
+        assert runner._has_executable_sql(";") is False
+        assert runner._has_executable_sql(" ; ; ") is False
 
     def test_string_literal_with_semicolon_kept_intact(self):
         # A naive ``split(';')`` would shred this into two broken halves.

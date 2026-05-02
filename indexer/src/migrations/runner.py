@@ -27,6 +27,31 @@ log = logging.getLogger(__name__)
 
 _MIGRATION_FILENAME_RE = re.compile(r"^(\d{4})_[a-z0-9_]+\.sql$")
 
+# Naive comment matchers used by ``_has_executable_sql`` to decide
+# whether a "statement" carries any DDL/DML or only comments. They do
+# not respect string literals containing ``--`` or ``/* … */``, so a
+# pathological literal like ``INSERT INTO t VALUES ('--');`` could leave
+# an artifact in the stripped output. That's fine — false positives
+# (treating a string-only statement as executable) keep correct
+# migrations running. The check exists only to recognize pure-comment
+# migrations as non-executable so they can't silently advance
+# ``schema_version``.
+_LINE_COMMENT_RE = re.compile(r"--[^\n]*")
+_BLOCK_COMMENT_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
+
+
+def _has_executable_sql(stmt: str) -> bool:
+    """True if ``stmt`` contains any non-comment, non-whitespace content.
+
+    sqlite3 happily ``execute``s a statement that consists only of
+    comments — it just no-ops. Without this check the runner would
+    treat a comment-only migration file as a successful upgrade and
+    advance ``schema_version`` without applying any DDL.
+    """
+    without_block = _BLOCK_COMMENT_RE.sub("", stmt)
+    without_line = _LINE_COMMENT_RE.sub("", without_block)
+    return bool(without_line.strip().strip(";").strip())
+
 
 def discover_migrations(directory: Path) -> list[tuple[int, Path]]:
     """Return ``(version, path)`` pairs for every migration file in ``directory``.
@@ -132,23 +157,27 @@ def apply_pending(
     for version, path in pending:
         sql = path.read_text(encoding="utf-8")
         statements = _split_statements(sql)
-        if not statements:
-            # An empty (or comment-only) migration file would otherwise
-            # silently bump ``schema_version`` without any DDL running.
-            # That makes a future ``ALTER TABLE`` against the assumed
-            # schema fail with a misleading "no such column" error and
-            # hides the original mistake. Refuse to advance the version
-            # for a content-free migration.
+        # Drop pure-comment statements (sqlite3 accepts them as no-ops).
+        # Without this filter, a comment-only migration file would still
+        # produce a non-empty ``statements`` list, the runner would
+        # ``execute`` each one (no-op), advance ``schema_version``, and
+        # leave the DB stamped at the new version with none of the
+        # expected DDL applied. A subsequent ``ALTER TABLE`` against the
+        # assumed schema would fail with a misleading "no such column"
+        # error and hide the original mistake.
+        executable = [stmt for stmt in statements if _has_executable_sql(stmt)]
+        if not executable:
             raise RuntimeError(
-                f"migration v{version} ({path.name}) contains no SQL statements; "
-                "an empty migration cannot advance schema_version"
+                f"migration v{version} ({path.name}) contains no executable SQL "
+                "(only comments and/or whitespace); a content-free migration "
+                "cannot advance schema_version"
             )
         log.info(
-            "Applying migration v%d (%s, %d statement(s))", version, path.name, len(statements)
+            "Applying migration v%d (%s, %d statement(s))", version, path.name, len(executable)
         )
         try:
             conn.execute("BEGIN IMMEDIATE")
-            for stmt in statements:
+            for stmt in executable:
                 conn.execute(stmt)
             conn.execute("UPDATE schema_version SET version = ?", (version,))
             conn.commit()
