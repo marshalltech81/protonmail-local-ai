@@ -7,6 +7,7 @@ Thread-level indexing: one row per thread, updated as new messages arrive.
 import functools
 import json
 import logging
+import os
 import sqlite3
 import threading
 import weakref
@@ -75,18 +76,21 @@ def _dedupe_by_canonical(addrs: list[str]) -> list[str]:
 # the current version; existing installs run the migration runner to
 # catch up. See ``src/migrations/runner.py`` for the file layout and
 # transactional guarantees.
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 14
 
 # The schema uses FTS5 ``contentless_delete=1``, which SQLite added in 3.43.
 # Validate the runtime version at Database init and fail fast with a clear
 # message instead of degrading silently.
 MIN_SQLITE_VERSION = (3, 43, 0)
 
-# Vector dimension reserved by the threads_vec schema (FLOAT[768]). The
-# embedding model's output dimension must match this, or vec0 inserts fail.
-# nomic-embed-text is 768-dim and is the default. A startup-time check in
-# main.py validates the running model against this constant.
-EMBEDDING_DIM = 768
+# Vector dimension reserved by the ``*_vec`` schemas. Must match the
+# active embedding model's output dimension or vec0 inserts fail.
+# Qwen3-Embedding-8B (served by mlx-service) is 4096-dim. The legacy
+# Ollama ``nomic-embed-text`` is 768-dim — running it against this
+# schema requires switching ``USE_MLX_EMBEDDER=false`` AND restoring
+# the previous dimension; the v13→v14 migration is one-way for the
+# current MLX-default deployment.
+EMBEDDING_DIM = 4096
 
 
 class SQLiteTooOldError(RuntimeError):
@@ -257,6 +261,7 @@ class Database:
             )
 
         migration_dir = Path(__file__).parent / "migrations"
+        self._guard_destructive_migrations(stored, SCHEMA_VERSION)
         log.info(f"Migrating database at {self.path}: v{stored} -> v{SCHEMA_VERSION}")
         applied = migration_runner.apply_pending(
             self._conn,
@@ -267,6 +272,61 @@ class Database:
         log.info(
             f"Database ready at {self.path} (schema v{SCHEMA_VERSION}, "
             f"applied migrations: {applied})"
+        )
+
+    def _guard_destructive_migrations(self, stored: int, target: int) -> None:
+        """Refuse known-destructive migrations against populated databases
+        unless the operator has explicitly opted in.
+
+        v14 (768→4096-dim Qwen3 embeddings) is destructive — it drops
+        and recreates the vector tables, and clears
+        ``message_chunks`` / ``message_chunks_fts`` / ``indexed_files``
+        / ``indexing_jobs`` so the next scan re-embeds. On a populated
+        v13 install that means hours of indexing work get reset; the
+        operator must reindex from Maildir afterward. Worth a
+        confirmation gate so a routine container restart doesn't
+        silently kick off a full backfill.
+
+        Set ``INDEXER_MIGRATION_V14_FORCE=true`` to acknowledge and
+        proceed. Empty databases (no ``message_chunks`` rows) skip
+        the gate — there's nothing to lose.
+        """
+        if not (stored < 14 <= target):
+            return
+        try:
+            row = self._conn.execute("SELECT COUNT(*) AS n FROM message_chunks").fetchone()
+        except sqlite3.OperationalError:
+            # Pre-v9 schemas don't have message_chunks. Nothing to lose.
+            return
+        existing = row["n"] if row is not None else 0
+        if existing == 0:
+            return
+        force = os.environ.get("INDEXER_MIGRATION_V14_FORCE", "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+        if force:
+            log.warning(
+                "INDEXER_MIGRATION_V14_FORCE=true: applying destructive "
+                "v14 migration over %d existing message_chunks rows. "
+                "All chunks, vector data, file cache, and queue state "
+                "will be cleared; the next scan will re-embed every "
+                "message.",
+                existing,
+            )
+            return
+        raise RuntimeError(
+            f"Refusing destructive migration v14 over {existing} existing "
+            "message_chunks rows. v14 resizes the embedding vector tables "
+            "from 768-dim to 4096-dim (Qwen3-Embedding-8B) and clears "
+            "message_chunks / message_chunks_fts / indexed_files / "
+            "indexing_jobs so the next scan re-embeds. Existing chunks, "
+            "vectors, and queue state will be DROPPED. To proceed, set "
+            "INDEXER_MIGRATION_V14_FORCE=true and restart. The next scan "
+            "will re-chunk and re-embed every message — expect hours of "
+            "work on a populated mailbox."
         )
 
     def _apply_initial_schema(self, cur: sqlite3.Cursor):

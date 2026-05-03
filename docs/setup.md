@@ -373,6 +373,168 @@ reach Ollama without authentication; on a single-user dev laptop this is
 the same trust boundary the containerized stack already operates in.
 Ollama itself does not have access to the SQLite index or Maildir.
 
+## Required: mlx-service (host process for embeddings + reranking)
+
+The default retrieval stack runs the embedder (Qwen3-Embedding-8B) and
+reranker (Qwen3-Reranker-4B) natively on Apple Metal via a small
+FastAPI service in `mlx-service/`. The service is bare-metal — not in
+Docker — because MLX needs Metal access. Containers reach it through
+OrbStack's `host.docker.internal` shortcut.
+
+Set `USE_MLX_EMBEDDER=false` and `USE_MLX_RERANKER=false` in `.env` if
+you want to opt out, but note that the SQLite schema is sized for
+Qwen3-Embedding-8B's 4096-dim vectors — turning the flag off without
+restoring the prior 768-dim schema and reindexing produces an embed
+shape mismatch at startup.
+
+### One-time host setup
+
+1. Install the project's Python deps for the service. The `mlx-service`
+   directory ships its own `pyproject.toml` so it stays isolated from
+   the indexer / mcp-server uv environments:
+
+   ```bash
+   cd mlx-service && uv sync
+   ```
+
+   First run downloads MLX itself and the model handles; the model
+   weights download lazily on the first `/embed` and `/rerank` request
+   (~8 GB embedder + ~4 GB reranker into `~/.cache/huggingface/hub/`).
+
+2. Smoke-test the service before installing the LaunchAgent:
+
+   ```bash
+   uv run uvicorn src.main:app --host 127.0.0.1 --port 8001
+   # in another shell:
+   curl http://127.0.0.1:8001/health
+   curl -X POST http://127.0.0.1:8001/embed \
+        -H 'Content-Type: application/json' \
+        -d '{"input":"hello"}' | head -c 60
+   ```
+
+   The first embed call may take ~4 min on a cold cache; subsequent
+   calls are sub-second.
+
+3. Install the LaunchAgent so the service starts at login and survives
+   reboots. The plist invokes the venv's `uvicorn` directly so it does
+   not depend on `uv` being on `launchd`'s PATH:
+
+   ```bash
+   cat > ~/Library/LaunchAgents/com.local.mlx-service.plist <<'PLIST'
+   <?xml version="1.0" encoding="UTF-8"?>
+   <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+     "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+   <plist version="1.0">
+   <dict>
+       <key>Label</key>
+       <string>com.local.mlx-service</string>
+       <key>ProgramArguments</key>
+       <array>
+           <string>/ABSOLUTE/PATH/TO/mlx-service/.venv/bin/uvicorn</string>
+           <string>src.main:app</string>
+           <string>--host</string><string>127.0.0.1</string>
+           <string>--port</string><string>8001</string>
+           <string>--log-level</string><string>info</string>
+       </array>
+       <key>WorkingDirectory</key>
+       <string>/ABSOLUTE/PATH/TO/mlx-service</string>
+       <key>EnvironmentVariables</key>
+       <dict>
+           <key>PATH</key>
+           <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+       </dict>
+       <key>RunAtLoad</key><true/>
+       <key>KeepAlive</key>
+       <dict>
+           <key>SuccessfulExit</key><false/>
+       </dict>
+       <key>StandardOutPath</key>
+       <string>/Users/YOU/Library/Logs/mlx-service.log</string>
+       <key>StandardErrorPath</key>
+       <string>/Users/YOU/Library/Logs/mlx-service.log</string>
+       <key>ProcessType</key><string>Interactive</string>
+   </dict>
+   </plist>
+   PLIST
+
+   launchctl bootstrap "gui/$(id -u)" \
+       ~/Library/LaunchAgents/com.local.mlx-service.plist
+   launchctl print "gui/$(id -u)/com.local.mlx-service" | head
+   ```
+
+   No firewall rule is needed: the service binds `127.0.0.1` only and
+   loopback bypasses the macOS Application Firewall. Same-machine
+   processes (including OrbStack containers via `host.docker.internal`)
+   can reach it without prompts.
+
+4. Verify container reachability after the first `make up`:
+
+   ```bash
+   docker run --rm --add-host=host.docker.internal:host-gateway \
+       curlimages/curl:latest \
+       -s http://host.docker.internal:8001/health
+   ```
+
+   Expected: `{"status":"ok",...}`.
+
+### Threat model (mlx-service)
+
+The service binds loopback only (`127.0.0.1:8001`) and serves no
+authentication on `/embed`, `/rerank`, or `/health`. **Any local
+user-process — Docker containers via `host.docker.internal`, browser
+tabs reaching `127.0.0.1`, ad-hoc shells — can call any endpoint
+without credentials.** The trust boundary is identical to the
+host-Ollama overlay above: a single-user laptop where same-machine
+processes are assumed trusted.
+
+What the service holds: model weights in process memory and the
+HuggingFace cache on disk. What it does NOT hold: the SQLite index,
+Maildir, or Bridge credentials. A compromise of this process leaks
+the model weights (public anyway) and the contents of recent embed /
+rerank request bodies (the queries plus, for reranking, snippets of
+threads the operator just searched). It does not give the attacker
+access to mailbox data at rest.
+
+If the trust assumption changes (multi-user host, untrusted local
+processes), the right next step is a bearer-token check in the
+FastAPI app gated on a Docker secret — same posture the project
+notes for `mcp-server` itself.
+
+### Falling back
+
+To stop the LaunchAgent and free port 8001:
+
+```bash
+launchctl bootout "gui/$(id -u)/com.local.mlx-service"
+lsof -iTCP:8001 -sTCP:LISTEN  # should now print nothing
+```
+
+**Rolling back the embedder is not a configuration toggle — it is a
+reindex.** The two MLX flags do different things:
+
+- `USE_MLX_RERANKER=false` is a clean toggle. The reranker is a
+  post-RRF stage with no schema dependency, so flipping it off
+  immediately returns to RRF-only ranking. Use this for a fast
+  rerank-side rollback.
+- `USE_MLX_EMBEDDER=false` switches the embedder routing back to
+  Ollama, but the SQLite schema is sized for Qwen3-Embedding-8B's
+  4096-dim vectors. Ollama's `nomic-embed-text` produces 768-dim
+  vectors and the indexer's startup dim probe will fail-closed on
+  the mismatch. A real embedder rollback requires:
+  1. Stop the stack: `make down`
+  2. Reset the SQLite volume: `docker volume rm protonmail-local-ai_sqlite-volume`
+  3. Restore the old code (revert the v14 schema bump, set
+     `EMBEDDING_DIM = 768`)
+  4. Set `USE_MLX_EMBEDDER=false` in `.env`
+  5. `make up` and let the indexer **rebuild the index from Maildir**
+     under Ollama — multiple hours on a populated mailbox.
+
+So `USE_MLX_EMBEDDER` is an integration-level safety net for "MLX is
+down today, I want to fail-fast clearly", not a data-level rollback.
+Plan accordingly: once you've migrated to the v14 (4096-dim) schema,
+returning to Ollama-served embeddings costs a full reindex — the flag
+is not a free toggle.
+
 ## Updating Bridge
 
 When you bump `BRIDGE_VERSION` in `.env`, validate the upstream patch points and

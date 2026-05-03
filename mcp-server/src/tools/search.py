@@ -22,7 +22,7 @@ _MAX_SEARCH_LIMIT = 50
 _VALID_SEARCH_MODES = frozenset({"hybrid", "semantic", "keyword"})
 
 
-def register_search_tools(server, db, ollama):
+def register_search_tools(server, db, ollama, *, reranker=None):
     @server.tool()
     async def search_emails(
         query: str,
@@ -175,6 +175,7 @@ def register_search_tools(server, db, ollama):
                     date_to=date_to,
                     has_attachments=has_attachments,
                     limit=limit,
+                    reranker=reranker,
                 )
 
             if not results:

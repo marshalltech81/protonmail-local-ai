@@ -481,6 +481,175 @@ class TestHybridSearch:
         assert all(r.folder == "INBOX" for r in results)
 
 
+class _IndexScoringReranker:
+    """Test stub: scores each candidate by its position in the input
+    list, using a caller-supplied score map.
+
+    ``scores_by_index[i]`` is the rerank score for the candidate at
+    position ``i``. Missing positions get 0.0. The stub captures the
+    last call's ``(query, docs, top_n)`` for assertion-side inspection.
+    The fake conforms to the ``RerankerBackend`` protocol structurally
+    — duck-typed, no inheritance — so the sqlite layer takes it
+    without test-time imports of reranker.py.
+    """
+
+    def __init__(self, scores_by_index: dict[int, float], candidates: int = 50, top_n: int = 5):
+        self.candidates = candidates
+        self.top_n = top_n
+        self._scores = scores_by_index
+        self._last_query: str | None = None
+        self._last_docs: list[str] | None = None
+        self._last_top_n: int | None = None
+
+    def rerank(
+        self,
+        query: str,
+        documents: list[str],
+        top_n: int | None = None,
+    ) -> list[tuple[int, float]]:
+        self._last_query = query
+        self._last_docs = list(documents)
+        self._last_top_n = top_n
+        effective_top_n = top_n if top_n is not None else self.top_n
+        scored = [(i, self._scores.get(i, 0.0)) for i in range(len(documents))]
+        scored.sort(key=lambda x: -x[1])
+        return scored[:effective_top_n]
+
+
+class _BrokenReranker:
+    """Stub that always reports failure so we can verify the RRF
+    fallback path keeps results from disappearing."""
+
+    candidates = 50
+    top_n = 5
+
+    def rerank(
+        self,
+        query: str,
+        documents: list[str],
+        top_n: int | None = None,
+    ) -> list[tuple[int, float]]:
+        return []
+
+
+class TestRerankInHybridSearch:
+    """Reranker is wired in as an optional, post-RRF pass that
+    reorders the top ``candidates`` to a final ``top_n``. Tests run
+    against the seeded DB with stubbed rerankers — the rerank stage
+    is library-agnostic."""
+
+    def test_no_reranker_preserves_legacy_behavior(self, seeded_db: Database):
+        results = seeded_db.hybrid_search(
+            query_text="invoice",
+            query_embedding=[1.0, 0.0, 0.0, 0.0],
+            limit=2,
+        )
+        assert len(results) <= 2
+        assert results[0].thread_id == "t-alpha"
+
+    def test_reranker_reorders_and_truncates_to_top_n(self, seeded_db: Database):
+        # Establish the baseline RRF order so we can promote the worst
+        # candidate to top-1 via the reranker and prove the reorder is
+        # actually score-driven, not order-preserving.
+        baseline = seeded_db.hybrid_search(
+            query_text="meeting",
+            query_embedding=[0.0, 0.0, 1.0, 0.0],
+            limit=10,
+        )
+        assert len(baseline) >= 2, "fixture must surface at least 2 candidates"
+        last_idx = len(baseline) - 1
+        promoted_thread_id = baseline[last_idx].thread_id
+
+        scripted = _IndexScoringReranker(
+            scores_by_index={last_idx: 9.99, 0: 0.01},
+            candidates=10,
+            top_n=2,
+        )
+        reranked = seeded_db.hybrid_search(
+            query_text="meeting",
+            query_embedding=[0.0, 0.0, 1.0, 0.0],
+            limit=2,
+            reranker=scripted,
+        )
+        assert reranked[0].thread_id == promoted_thread_id
+        assert reranked[0].score == 9.99
+        assert len(reranked) == 2
+
+    def test_reranker_receives_subject_prefixed_doc_text(self, seeded_db: Database):
+        scripted = _IndexScoringReranker(scores_by_index={}, candidates=10, top_n=5)
+        seeded_db.hybrid_search(
+            query_text="invoice",
+            query_embedding=[1.0, 0.0, 0.0, 0.0],
+            limit=3,
+            reranker=scripted,
+        )
+        assert scripted._last_query == "invoice"
+        assert scripted._last_docs is not None
+        assert all(d.startswith("Subject: ") for d in scripted._last_docs)
+
+    def test_caller_limit_overrides_reranker_default_top_n(self, seeded_db: Database):
+        # The reranker's ``top_n`` is a *default*, not a hard cap. A
+        # caller asking for ``limit=3`` against a reranker whose
+        # default ``top_n`` is 1 must still receive 3 results — the
+        # rerank stage gets ``top_n=3`` for this call so it doesn't
+        # silently undercut the caller. This guards against the
+        # ``extract_from_emails(limit=20)`` regression Codex flagged
+        # where a default top_n=10 truncated the caller's request.
+        scripted = _IndexScoringReranker(
+            scores_by_index={0: 0.9, 1: 0.5, 2: 0.1},
+            candidates=10,
+            top_n=1,  # default cap that MUST NOT win over limit=3
+        )
+        results = seeded_db.hybrid_search(
+            query_text="invoice",
+            query_embedding=[1.0, 0.0, 0.0, 0.0],
+            limit=3,
+            reranker=scripted,
+        )
+        assert scripted._last_top_n == 3
+        assert len(results) == min(3, len(scripted._last_docs or []))
+
+    def test_caller_limit_overrides_reranker_candidates_floor(self, seeded_db: Database):
+        # ``RERANK_CANDIDATES`` is the rerank-stage funnel size, not a
+        # result cap. A caller asking for ``limit=3`` against a
+        # reranker configured with ``candidates=1`` must still get 3
+        # results — the candidate slice has to honour
+        # ``max(limit, candidates)``. Without that ``max``, an
+        # operator who tightened ``RERANK_CANDIDATES`` for latency
+        # would silently cap recall for callers like
+        # ``extract_from_emails(limit=50)``.
+        scripted = _IndexScoringReranker(
+            scores_by_index={0: 0.9, 1: 0.5, 2: 0.1},
+            candidates=1,  # tiny funnel that MUST NOT win over limit=3
+            top_n=10,
+        )
+        results = seeded_db.hybrid_search(
+            query_text="invoice",
+            query_embedding=[1.0, 0.0, 0.0, 0.0],
+            limit=3,
+            reranker=scripted,
+        )
+        # The reranker received at least ``limit`` documents, not just
+        # ``candidates``.
+        assert scripted._last_docs is not None
+        assert len(scripted._last_docs) >= min(3, 3)
+        assert len(results) == min(3, len(scripted._last_docs))
+
+    def test_reranker_failure_falls_back_to_rrf_order(self, seeded_db: Database):
+        rrf_only = seeded_db.hybrid_search(
+            query_text="invoice",
+            query_embedding=[1.0, 0.0, 0.0, 0.0],
+            limit=2,
+        )
+        with_broken = seeded_db.hybrid_search(
+            query_text="invoice",
+            query_embedding=[1.0, 0.0, 0.0, 0.0],
+            limit=2,
+            reranker=_BrokenReranker(),
+        )
+        assert [r.thread_id for r in with_broken] == [r.thread_id for r in rrf_only]
+
+
 class TestDirectLookups:
     def test_get_thread_returns_result(self, seeded_db: Database):
         thread = seeded_db.get_thread("t-alpha")

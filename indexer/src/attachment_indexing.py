@@ -34,7 +34,7 @@ from datetime import UTC, datetime, timedelta
 
 from .chunker import MessageChunk, chunk_message
 from .database import Database
-from .embedder import Embedder
+from .embedder import EmbeddingBackend
 from .extractors import (
     STATUS_EMPTY,
     STATUS_FAILED,
@@ -211,7 +211,7 @@ def prepare_attachment_writes(
     attachment: Attachment,
     message_id: str,
     db: Database,
-    embedder: Embedder,
+    embedder: EmbeddingBackend,
     chunk_target_tokens: int,
     chunk_max_tokens: int,
     chunk_overlap_tokens: int,
@@ -233,7 +233,7 @@ def prepare_attachment_writes(
     The function does not raise for benign extraction outcomes
     (``unsupported``, ``empty``, ``too_large``) — those land on the plan
     as a status-only row to persist, with no chunks. Hard failures
-    (``Database`` I/O, ``Embedder`` I/O) still propagate so the caller
+    (``Database`` I/O, embedder I/O) still propagate so the caller
     can decide whether to retry the message.
     """
     occurrence_id = attachment_occurrence_id(
@@ -379,7 +379,7 @@ def process_attachment(
     message_id: str,
     thread_id: str,
     db: Database,
-    embedder: Embedder,
+    embedder: EmbeddingBackend,
     chunk_target_tokens: int,
     chunk_max_tokens: int,
     chunk_overlap_tokens: int,

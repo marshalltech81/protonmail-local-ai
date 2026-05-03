@@ -15,11 +15,14 @@ from email.message import EmailMessage
 from pathlib import Path
 
 import pytest
-from src.database import Database
+from src.database import (
+    EMBEDDING_DIM,  # noqa: F401  -- via reuse
+    Database,
+)
 from src.reconciler import Reconciler, ReconcilerConfig, load_config_from_env, sweep_paths
 from src.threader import Threader
 
-FAKE_EMBEDDING = [0.0] * 768
+FAKE_EMBEDDING = [0.0] * EMBEDDING_DIM
 
 
 class FakeEmbedder:
@@ -493,13 +496,13 @@ class TestReap:
             message_id="co1@example.com",
             thread_id=thread_id,
             chunks=[orig_chunk],
-            embeddings_by_chunk_id={orig_chunk.chunk_id: [0.1] * 768},
+            embeddings_by_chunk_id={orig_chunk.chunk_id: [0.1] * EMBEDDING_DIM},
         )
         db.replace_message_chunks(
             message_id="co2@example.com",
             thread_id=thread_id,
             chunks=[reply_chunk],
-            embeddings_by_chunk_id={reply_chunk.chunk_id: [0.2] * 768},
+            embeddings_by_chunk_id={reply_chunk.chunk_id: [0.2] * EMBEDDING_DIM},
         )
 
         # Tombstone the original; reply survives.

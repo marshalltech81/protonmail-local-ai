@@ -8,6 +8,7 @@ and participant deduplication.
 
 from datetime import UTC, datetime
 
+from src.database import EMBEDDING_DIM  # noqa: F401  -- via reuse
 from src.threader import Thread, Threader, _normalize_subject, canonical_addr
 
 from tests.conftest import make_message, make_thread
@@ -156,7 +157,7 @@ class TestAssignThread:
             subject="Project update",
         )
         t1 = threader.assign_thread(original)
-        db.upsert_thread(t1, [0.0] * 768)
+        db.upsert_thread(t1, [0.0] * EMBEDDING_DIM)
 
         # Reply referencing the original via In-Reply-To
         reply = make_message(
@@ -175,7 +176,7 @@ class TestAssignThread:
     def test_joins_existing_thread_via_references(self, db, threader):
         original = make_message(message_id="root@example.com")
         t1 = threader.assign_thread(original)
-        db.upsert_thread(t1, [0.0] * 768)
+        db.upsert_thread(t1, [0.0] * EMBEDDING_DIM)
 
         # Second message references the original in its References header
         msg2 = make_message(
@@ -192,7 +193,7 @@ class TestAssignThread:
         """Most recent reference (last in list) is checked first."""
         msg_a = make_message(message_id="a@example.com")
         t_a = threader.assign_thread(msg_a)
-        db.upsert_thread(t_a, [0.0] * 768)
+        db.upsert_thread(t_a, [0.0] * EMBEDDING_DIM)
 
         msg_b = make_message(
             message_id="b@example.com",
@@ -211,7 +212,7 @@ class TestAssignThread:
             subject="Budget discussion",
         )
         t1 = threader.assign_thread(original)
-        db.upsert_thread(t1, [0.0] * 768)
+        db.upsert_thread(t1, [0.0] * EMBEDDING_DIM)
 
         # No In-Reply-To or References — subject match should group them
         followup = make_message(
@@ -235,7 +236,7 @@ class TestAssignThread:
             to_addrs=["bob@example.com"],
         )
         t1 = threader.assign_thread(original)
-        db.upsert_thread(t1, [0.0] * 768)
+        db.upsert_thread(t1, [0.0] * EMBEDDING_DIM)
 
         # Same subject, same folder, totally different participants.
         unrelated = make_message(
@@ -262,7 +263,7 @@ class TestAssignThread:
             date=datetime(2023, 1, 1, tzinfo=UTC),
         )
         t1 = threader.assign_thread(original)
-        db.upsert_thread(t1, [0.0] * 768)
+        db.upsert_thread(t1, [0.0] * EMBEDDING_DIM)
 
         # Shares participants but arrives well outside the fallback window.
         later = make_message(
@@ -284,7 +285,7 @@ class TestAssignThread:
             folder="INBOX",
         )
         t1 = threader.assign_thread(inbox_msg)
-        db.upsert_thread(t1, [0.0] * 768)
+        db.upsert_thread(t1, [0.0] * EMBEDDING_DIM)
 
         sent_msg = make_message(
             message_id="sent_msg@example.com",
@@ -303,7 +304,7 @@ class TestAssignThread:
             date=datetime(2024, 1, 1, tzinfo=UTC),
         )
         t1 = threader.assign_thread(original)
-        db.upsert_thread(t1, [0.0] * 768)
+        db.upsert_thread(t1, [0.0] * EMBEDDING_DIM)
 
         later = make_message(
             message_id="date_later@example.com",
@@ -325,7 +326,7 @@ class TestAssignThread:
             to_addrs=["bob@example.com"],
         )
         t1 = threader.assign_thread(original)
-        db.upsert_thread(t1, [0.0] * 768)
+        db.upsert_thread(t1, [0.0] * EMBEDDING_DIM)
 
         # Reply from a third party introduces a new participant; existing
         # participants must still be present after threader runs.
@@ -352,7 +353,7 @@ class TestAssignThread:
             date=datetime(2024, 6, 1, tzinfo=UTC),
         )
         t1 = threader.assign_thread(newer)
-        db.upsert_thread(t1, [0.0] * 768)
+        db.upsert_thread(t1, [0.0] * EMBEDDING_DIM)
 
         older = make_message(
             message_id="ooo_older@example.com",
@@ -466,7 +467,7 @@ class TestSubjectFallbackCanonicalMatching:
             to_addrs=["bob@example.com"],
         )
         t1 = threader.assign_thread(original)
-        db.upsert_thread(t1, [0.0] * 768)
+        db.upsert_thread(t1, [0.0] * EMBEDDING_DIM)
 
         # Same bob but with display name + different letter case. No
         # In-Reply-To / References headers so only subject fallback can

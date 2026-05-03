@@ -19,6 +19,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from .lib.ollama import OllamaClient
+from .lib.reranker import MlxReranker, RerankConfig
 from .lib.sqlite import Database
 from .tools.intelligence import register_intelligence_tools
 from .tools.retrieval import register_retrieval_tools
@@ -131,6 +132,18 @@ ANTHROPIC_KEY = _read_secret("anthropic_api_key", "ANTHROPIC_API_KEY")
 MCP_PORT = int(os.environ.get("MCP_PORT", "3000"))
 MCP_READ_ONLY = _env_bool("MCP_READ_ONLY", True)
 MCP_TRANSPORT = os.environ.get("MCP_TRANSPORT", "sse")
+# MLX retrieval stack — see indexer/.env.example notes for the full
+# explanation. ``USE_MLX_EMBEDDER`` routes query embeddings to
+# ``mlx-service`` (4096-dim Qwen3-Embedding-8B). ``USE_MLX_RERANKER``
+# enables the post-RRF rerank pass that takes ``RERANK_CANDIDATES``
+# from RRF and truncates to the caller's ``limit`` (defaulting to
+# ``RERANK_TOP_N`` when the caller does not specify) via the same
+# service.
+USE_MLX_EMBEDDER = _env_bool("USE_MLX_EMBEDDER", True)
+USE_MLX_RERANKER = _env_bool("USE_MLX_RERANKER", True)
+MLX_SERVICE_URL = os.environ.get("MLX_SERVICE_URL", "http://host.docker.internal:8001")
+RERANK_CANDIDATES = int(os.environ.get("RERANK_CANDIDATES", "50"))
+RERANK_TOP_N = int(os.environ.get("RERANK_TOP_N", "10"))
 
 
 def _normalize_transport(raw: str) -> str:
@@ -217,7 +230,22 @@ def _run_server(server: FastMCP, transport: str) -> None:
 def main():
     # Shared service clients
     db = Database(SQLITE_PATH)
-    ollama = OllamaClient(OLLAMA_HOST, EMBED_MODEL, LLM_MODEL)
+    ollama = OllamaClient(
+        OLLAMA_HOST,
+        EMBED_MODEL,
+        LLM_MODEL,
+        use_mlx_embedder=USE_MLX_EMBEDDER,
+        mlx_service_url=MLX_SERVICE_URL,
+    )
+    reranker: MlxReranker | None = None
+    if USE_MLX_RERANKER:
+        reranker = MlxReranker(
+            RerankConfig(
+                base_url=MLX_SERVICE_URL,
+                candidates=RERANK_CANDIDATES,
+                top_n=RERANK_TOP_N,
+            )
+        )
 
     # FastMCP server — supports @server.tool() decorator and SSE transport.
     # ``host="0.0.0.0"`` is required so the in-container bind is reachable
@@ -279,9 +307,11 @@ def main():
         return JSONResponse({"status": "ok"})
 
     # Register all tool groups
-    register_search_tools(server, db, ollama)
+    register_search_tools(server, db, ollama, reranker=reranker)
     register_retrieval_tools(server, db)
-    register_intelligence_tools(server, db, ollama, LLM_MODE, ANTHROPIC_KEY, CLAUDE_MODEL)
+    register_intelligence_tools(
+        server, db, ollama, LLM_MODE, ANTHROPIC_KEY, CLAUDE_MODEL, reranker=reranker
+    )
     if MCP_READ_ONLY:
         log.info("MCP read-only mode enabled; action tools are not registered.")
     else:
@@ -296,6 +326,14 @@ def main():
     log.info(f"MCP server starting on port {MCP_PORT}")
     log.info(f"  SQLite:   {SQLITE_PATH}")
     log.info(f"  Ollama:   {OLLAMA_HOST}")
+    if USE_MLX_EMBEDDER:
+        log.info(f"  Embedder: MLX service at {MLX_SERVICE_URL}")
+    else:
+        log.info(f"  Embedder: Ollama ({EMBED_MODEL})")
+    if USE_MLX_RERANKER:
+        log.info(f"  Reranker: MLX service (candidates={RERANK_CANDIDATES}, top_n={RERANK_TOP_N})")
+    else:
+        log.info("  Reranker: disabled")
     log.info(f"  LLM mode: {LLM_MODE}")
     log.info(f"  Transport: {transport}")
     if LLM_MODE == "cloud":

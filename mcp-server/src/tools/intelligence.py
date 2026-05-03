@@ -436,6 +436,8 @@ def register_intelligence_tools(
     llm_mode: str,
     anthropic_key: str,
     claude_model: str,
+    *,
+    reranker=None,
 ):
     secret_values = [anthropic_key]
 
@@ -514,6 +516,7 @@ def register_intelligence_tools(
                 date_to=date_to,
                 limit=max_threads,
                 with_evidence=True,
+                reranker=reranker,
             )
 
             if not results:
@@ -614,6 +617,7 @@ def register_intelligence_tools(
                     query_text=thread_id,
                     query_embedding=embedding,
                     limit=_RESOLUTION_CANDIDATE_LIMIT,
+                    reranker=reranker,
                 )
                 if not resolved:
                     return [TextContent(type="text", text=f"Thread not found: {thread_id}")]
@@ -719,6 +723,7 @@ def register_intelligence_tools(
                 date_to=date_to,
                 limit=limit,
                 with_evidence=True,
+                reranker=reranker,
             )
 
             if not results:
