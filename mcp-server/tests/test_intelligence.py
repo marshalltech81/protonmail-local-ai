@@ -164,6 +164,47 @@ class TestPickResolutionCandidate:
         ]
         assert _pick_resolution_candidate("is a thread", candidates).thread_id == "c1"
 
+    def test_short_uppercase_token_is_kept(self):
+        from src.tools.intelligence import _pick_resolution_candidate
+
+        # ``HR`` is 2 chars but all-upper — clearly a meaningful
+        # identifier (department name, acronym), not a stop word.
+        # Without this exception the fallback would refuse to resolve
+        # "summarize the HR onboarding thread" even when "HR" is in
+        # the subject.
+        candidates = [
+            _candidate("c1", "HR onboarding 2025"),
+            _candidate("c2", "lunch plans"),
+        ]
+        assert _pick_resolution_candidate("HR onboarding", candidates).thread_id == "c1"
+
+    def test_short_digit_bearing_token_is_kept(self):
+        from src.tools.intelligence import _pick_resolution_candidate
+
+        # ``Q1`` and ``W2`` are 2 chars but contain digits — keep
+        # them so phrase fallbacks like "summarize the Q1 audit" or
+        # "find the W2 thread" still resolve.
+        candidates = [
+            _candidate("c1", "Q1 audit recap"),
+            _candidate("c2", "lunch plans"),
+        ]
+        assert _pick_resolution_candidate("Q1 audit", candidates).thread_id == "c1"
+
+    def test_short_lowercase_stopword_is_still_dropped(self):
+        from src.tools.intelligence import _pick_resolution_candidate
+
+        # The identifier-shape exception above should NOT regress the
+        # original stop-word filter. ``of`` (lowercase, no digits)
+        # remains a stop word and must not produce overlap.
+        candidates = [
+            _candidate("c1", "list of plans"),  # contains "of"
+            _candidate("c2", "no match"),
+        ]
+        # Query is "of" alone — only token, all-lowercase, length 2:
+        # filter drops it, leaving zero query tokens, so the fallback
+        # returns None (correct: refuse to resolve a stop-word query).
+        assert _pick_resolution_candidate("of", candidates) is None
+
     def test_match_is_case_insensitive(self):
         from src.tools.intelligence import _pick_resolution_candidate
 
@@ -192,3 +233,54 @@ class TestPickResolutionCandidate:
 
         with pytest.raises(ValueError):
             _pick_resolution_candidate("anything", [])
+
+
+class TestIsMeaningfulQueryToken:
+    """Pin the identifier-vs-stopword discriminator independently of the
+    candidate-picking logic. Keeps the rule reviewable in one place so a
+    future tweak (e.g. adding a known-stopword set) doesn't have to be
+    inferred from integration test failures.
+    """
+
+    def test_long_token_is_kept(self):
+        from src.tools.intelligence import _is_meaningful_query_token
+
+        assert _is_meaningful_query_token("audit") is True
+
+    def test_short_lowercase_stopword_is_dropped(self):
+        from src.tools.intelligence import _is_meaningful_query_token
+
+        for stop in ("is", "of", "an", "to", "at", "in", "on", "or"):
+            assert _is_meaningful_query_token(stop) is False, stop
+
+    def test_short_uppercase_acronym_is_kept(self):
+        from src.tools.intelligence import _is_meaningful_query_token
+
+        for acronym in ("HR", "AI", "IT", "PR", "QA"):
+            assert _is_meaningful_query_token(acronym) is True, acronym
+
+    def test_short_digit_bearing_token_is_kept(self):
+        from src.tools.intelligence import _is_meaningful_query_token
+
+        for ident in ("Q1", "W2", "5G", "K9", "h1"):
+            assert _is_meaningful_query_token(ident) is True, ident
+
+    def test_empty_string_is_dropped(self):
+        from src.tools.intelligence import _is_meaningful_query_token
+
+        # ``re.findall(r"\w+", ...)`` won't normally produce an empty
+        # match, but defensively the helper should not raise on empty
+        # input — the rule "kept iff identifier-shaped" cleanly says
+        # no for an empty string.
+        assert _is_meaningful_query_token("") is False
+
+    def test_mixed_case_short_is_dropped(self):
+        from src.tools.intelligence import _is_meaningful_query_token
+
+        # ``Or`` at sentence start is still a stop word; only fully
+        # uppercase short tokens are treated as identifiers. This is
+        # a deliberate trade-off to keep the rule simple — adding a
+        # stopword set would catch the edge cases more cleanly but
+        # introduces a second knob to maintain.
+        assert _is_meaningful_query_token("Or") is False
+        assert _is_meaningful_query_token("An") is False

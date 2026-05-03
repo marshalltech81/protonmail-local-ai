@@ -22,6 +22,29 @@ from ..lib.validation import clamp_int
 _RESOLUTION_CANDIDATE_LIMIT = 3
 
 
+def _is_meaningful_query_token(token: str) -> bool:
+    """Decide whether a tokenized query word is worth matching against subjects.
+
+    Tokens of length >= 3 are always kept. Shorter tokens are kept
+    only when they look like an *identifier* rather than a stop word:
+    anything containing a digit (``Q1``, ``W2``, ``5G``, ``2FA``) or
+    rendered all-uppercase (``HR``, ``AI``, ``HOA``, ``IT``).
+    Pure-lowercase 2-char tokens are almost always English stop words
+    (``is``, ``of``, ``an``, ``or``, ``to``, ``at``, ``in``, ``on``)
+    and would otherwise produce false-positive overlaps against any
+    subject containing them.
+
+    The ``isupper()`` / ``isdigit()`` checks must happen on the
+    original-case token, BEFORE the caller lowercases for set
+    intersection — otherwise everything looks lowercase.
+    """
+    if len(token) >= 3:
+        return True
+    if not token:
+        return False
+    return any(c.isdigit() for c in token) or token.isupper()
+
+
 def _pick_resolution_candidate(query: str, candidates: list[ThreadResult]) -> ThreadResult | None:
     """Choose the best candidate for the summarize_thread phrase fallback.
 
@@ -34,20 +57,21 @@ def _pick_resolution_candidate(query: str, candidates: list[ThreadResult]) -> Th
     subject contains the most query tokens.
 
     Returns ``None`` when NO candidate shares a single subject token
-    with the query (after dropping <3-char tokens to avoid stop-word
-    noise). The caller treats that as "fallback could not confidently
-    resolve" and surfaces ``Thread not found`` rather than summarizing
-    whichever thread the vector lane happened to rank first — that
-    silent fabrication would otherwise let a typo'd opaque ID
-    (``"PH3PPF8675309xyz@invalid"``) produce a confident summary of
-    an unrelated thread, since vector KNN always returns a nearest
-    neighbor in any non-empty mailbox. The strictness is the gate:
-    if the user wants a body-only match, they should call
+    with the query (after applying ``_is_meaningful_query_token``).
+    The caller treats that as "fallback could not confidently resolve"
+    and surfaces ``Thread not found`` rather than summarizing whichever
+    thread the vector lane happened to rank first — that silent
+    fabrication would otherwise let a typo'd opaque ID
+    (``"PH3PPF8675309xyz@invalid"``) produce a confident summary of an
+    unrelated thread, since vector KNN always returns a nearest
+    neighbor in any non-empty mailbox. The strictness is the gate: if
+    the user wants a body-only match, they should call
     ``search_emails`` first and pass the resulting opaque ID.
     """
     if not candidates:
         raise ValueError("candidates must be non-empty")
-    query_tokens = {t.lower() for t in re.findall(r"\w+", query) if len(t) > 2}
+    raw_tokens = re.findall(r"\w+", query)
+    query_tokens = {t.lower() for t in raw_tokens if _is_meaningful_query_token(t)}
     if not query_tokens:
         return None
     best: ThreadResult | None = None
