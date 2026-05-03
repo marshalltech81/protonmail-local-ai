@@ -22,27 +22,238 @@ from ..lib.validation import clamp_int
 _RESOLUTION_CANDIDATE_LIMIT = 3
 
 
+# Stop words filtered from the query before scoring subject overlap.
+# Lowercase since the caller compares lowercased forms. Three buckets:
+#
+# - English function words: articles, conjunctions, prepositions,
+#   pronouns, be-verbs, modals, demonstratives, common quantifiers.
+# - Question / intent verbs: words that appear in user prompts to
+#   tell the model what to do ("summarize the X thread") but say
+#   nothing about which thread X is.
+# - Mailbox-meta nouns: the user's mental model of the mailbox
+#   ("thread", "email", "message", "inbox") that almost always
+#   appears in both the prompt and many subjects, producing
+#   garbage overlaps.
+#
+# Genuinely-meaningful overlap should come from topic / sender /
+# date / proper-noun tokens. Adding to this set is cheap; removing
+# from it is a behavioral change that should be motivated by an
+# actual eval observation.
+_QUERY_STOPWORDS = frozenset(
+    {
+        # articles + conjunctions
+        "the",
+        "a",
+        "an",
+        "and",
+        "or",
+        "but",
+        "if",
+        "so",
+        "nor",
+        "yet",
+        # prepositions
+        "of",
+        "in",
+        "on",
+        "at",
+        "by",
+        "to",
+        "for",
+        "from",
+        "with",
+        "into",
+        "onto",
+        "about",
+        "after",
+        "before",
+        "between",
+        # pronouns
+        "i",
+        "me",
+        "my",
+        "mine",
+        "you",
+        "your",
+        "yours",
+        "we",
+        "us",
+        "our",
+        "ours",
+        "they",
+        "them",
+        "their",
+        "theirs",
+        "he",
+        "him",
+        "his",
+        "she",
+        "her",
+        "hers",
+        "it",
+        "its",
+        # be-verbs / aux
+        "is",
+        "am",
+        "are",
+        "was",
+        "were",
+        "be",
+        "been",
+        "being",
+        "has",
+        "have",
+        "had",
+        "having",
+        "do",
+        "does",
+        "did",
+        "done",
+        # modal verbs
+        "can",
+        "could",
+        "will",
+        "would",
+        "should",
+        "shall",
+        "may",
+        "might",
+        "must",
+        # question / interrogative words
+        "what",
+        "when",
+        "where",
+        "who",
+        "whom",
+        "whose",
+        "why",
+        "how",
+        "which",
+        # demonstratives + quantifiers
+        "this",
+        "that",
+        "these",
+        "those",
+        "all",
+        "any",
+        "some",
+        "none",
+        "each",
+        "every",
+        "most",
+        "much",
+        "many",
+        "few",
+        "several",
+        "both",
+        "either",
+        "neither",
+        # generic time references that say "recent" not "which thread"
+        "recent",
+        "latest",
+        "last",
+        "current",
+        "today",
+        "yesterday",
+        "tomorrow",
+        "now",
+        "soon",
+        "ago",
+        "year",
+        "month",
+        "week",
+        "day",
+        # mailbox-meta nouns (singular + plural)
+        "thread",
+        "threads",
+        "message",
+        "messages",
+        "email",
+        "emails",
+        "mail",
+        "inbox",
+        "conversation",
+        "conversations",
+        "reply",
+        "replies",
+        "subject",
+        "subjects",
+        # action verbs the user uses to invoke a tool
+        "summarize",
+        "summary",
+        "summaries",
+        "find",
+        "show",
+        "list",
+        "give",
+        "tell",
+        "get",
+        "search",
+        "look",
+        "locate",
+        "identify",
+        "fetch",
+        "pull",
+        "open",
+        "read",
+        "see",
+        "check",
+        # filler / softeners
+        "please",
+        "just",
+        "kind",
+        "sort",
+        "type",
+    }
+)
+
+
 def _is_meaningful_query_token(token: str) -> bool:
     """Decide whether a tokenized query word is worth matching against subjects.
 
-    Tokens of length >= 3 are always kept. Shorter tokens are kept
-    only when they look like an *identifier* rather than a stop word:
-    anything containing a digit (``Q1``, ``W2``, ``5G``, ``2FA``) or
-    rendered all-uppercase (``HR``, ``AI``, ``HOA``, ``IT``).
-    Pure-lowercase 2-char tokens are almost always English stop words
-    (``is``, ``of``, ``an``, ``or``, ``to``, ``at``, ``in``, ``on``)
-    and would otherwise produce false-positive overlaps against any
-    subject containing them.
+    Two filters in order:
+
+    1. Identifier-shape rule (handles short tokens). Tokens of
+       length >= 3 pass; shorter tokens pass only if they contain a
+       digit (``Q1``, ``W2``, ``5G``, ``2FA``) or are all-uppercase
+       (``HR``, ``AI``, ``HOA``, ``IT``). Pure-lowercase 2-char
+       tokens are almost always English stop words.
+    2. Stopword set (handles generic long tokens). After the
+       identifier-shape filter, drop tokens in ``_QUERY_STOPWORDS``
+       — articles, conjunctions, prepositions, modals, question
+       words, mailbox-meta nouns ("thread", "email"), and the
+       imperative verbs the model invokes the tool with
+       ("summarize", "find", "show"). Without this, queries like
+       "summarize the payroll thread" would score 2 generic
+       overlaps ("the", "thread") on any subject containing those
+       words and lose to the 1-overlap candidate that actually
+       matches the meaningful token ("payroll").
 
     The ``isupper()`` / ``isdigit()`` checks must happen on the
-    original-case token, BEFORE the caller lowercases for set
-    intersection — otherwise everything looks lowercase.
+    original-case token, BEFORE the stopword check — otherwise an
+    uppercase ``THE`` (which is conceivable as a subject prefix in
+    business email) would survive the case check and then need a
+    case-aware stopword set. Lowercasing before the stopword check
+    keeps the stopword set authoritative and case-insensitive.
     """
-    if len(token) >= 3:
-        return True
     if not token:
         return False
-    return any(c.isdigit() for c in token) or token.isupper()
+    if len(token) < 3:
+        if not (any(c.isdigit() for c in token) or token.isupper()):
+            return False
+    # All-uppercase tokens skip the stopword check on purpose. The
+    # stopword set contains words like ``it`` and ``or`` that double
+    # as common acronyms / department names when written ``IT`` /
+    # ``OR`` (operations research, hospital operating room). A user
+    # who types the word in all caps almost always means the
+    # identifier, not the lowercase function-word. Mixed-case
+    # ("And", "Of") and lowercase ("and", "of") forms still flow
+    # through the stopword check.
+    if token.isupper():
+        return True
+    if token.lower() in _QUERY_STOPWORDS:
+        return False
+    return True
 
 
 def _pick_resolution_candidate(query: str, candidates: list[ThreadResult]) -> ThreadResult | None:

@@ -47,17 +47,21 @@ class _SilenceClientDisconnect(logging.Filter):
       with ``exc_info`` set to the ``ClientDisconnect`` traceback. Filter
       by exception class.
     - ``mcp.server.lowlevel.server`` emits ``"Received exception from
-      stream: "`` with NO ``exc_info`` (the SDK catches the exception
-      upstream, formats a string representation into the message, and
-      logs the result as a bare error). Filter by literal message
-      prefix — the SDK uses this exact prefix for the disconnect path
-      and nothing else.
+      stream:"`` (with NO ``exc_info`` — the SDK catches the exception
+      upstream and writes the formatted repr into the message). The
+      same prefix is also used for genuinely-different exceptions
+      caught off the stream, so we cannot suppress the prefix
+      unconditionally — that would hide real failures like
+      ``RuntimeError("boom")``. Drop only the two recognizable
+      disconnect forms: an empty trailing message (the bare
+      ``ClientDisconnect`` signature) or a trailing message that
+      explicitly names the class.
 
     Records that don't match either shape still propagate unchanged so a
     real bug surfaces normally.
     """
 
-    _SUPPRESSED_MESSAGE_PREFIXES = ("Received exception from stream:",)
+    _STREAM_PREFIX = "Received exception from stream:"
 
     def filter(self, record: logging.LogRecord) -> bool:
         if record.exc_info:
@@ -68,8 +72,15 @@ class _SilenceClientDisconnect(logging.Filter):
         # the formatter would; checking ``record.msg`` alone would miss
         # any record built with logging-format args.
         message = record.getMessage()
-        if any(message.startswith(prefix) for prefix in self._SUPPRESSED_MESSAGE_PREFIXES):
-            return False
+        if message.startswith(self._STREAM_PREFIX):
+            trailing = message[len(self._STREAM_PREFIX) :].strip()
+            # Empty trailing == the ClientDisconnect bare signature
+            # observed during eval ("Received exception from stream: ").
+            # ClientDisconnect-bearing trailing == any wording that
+            # explicitly names the class. Anything else (real exceptions
+            # the SDK chose to surface) falls through and propagates.
+            if not trailing or "ClientDisconnect" in trailing:
+                return False
         return True
 
 

@@ -155,14 +155,18 @@ class TestPickResolutionCandidate:
     def test_short_query_tokens_are_ignored_to_avoid_stop_words(self):
         from src.tools.intelligence import _pick_resolution_candidate
 
-        # ``is`` and ``a`` would otherwise create a 2-token overlap on c1
-        # for any subject containing those stop-words. Only ``thread``
-        # should count, and it appears in c1's subject.
+        # ``is`` and ``a`` are short stop words that would otherwise
+        # create false-positive overlap on any subject containing
+        # them. Only ``audit`` (a real content token, not in the
+        # stopword set) should count, and it appears in c1's
+        # subject. (``thread`` was removed from this test when it
+        # became part of the long stopword set — it's still
+        # implicitly covered by ``test_long_stopwords_are_dropped``.)
         candidates = [
-            _candidate("c1", "is a thread"),
+            _candidate("c1", "is a audit"),
             _candidate("c2", "no match"),
         ]
-        assert _pick_resolution_candidate("is a thread", candidates).thread_id == "c1"
+        assert _pick_resolution_candidate("is a audit", candidates).thread_id == "c1"
 
     def test_short_uppercase_token_is_kept(self):
         from src.tools.intelligence import _pick_resolution_candidate
@@ -204,6 +208,34 @@ class TestPickResolutionCandidate:
         # filter drops it, leaving zero query tokens, so the fallback
         # returns None (correct: refuse to resolve a stop-word query).
         assert _pick_resolution_candidate("of", candidates) is None
+
+    def test_generic_long_tokens_do_not_outscore_meaningful_match(self):
+        from src.tools.intelligence import _pick_resolution_candidate
+
+        # Codex round-3 P2 repro: under length-only filtering, "the
+        # payroll thread" gets two generic overlaps with "the lunch
+        # thread" (the+thread) and one real overlap with "payroll" —
+        # so the generic-overlap candidate would win. The stopword
+        # set drops "the" and "thread" so only "payroll" counts and
+        # the right thread wins.
+        candidates = [
+            _candidate("c1", "the lunch thread"),
+            _candidate("c2", "payroll"),
+        ]
+        assert _pick_resolution_candidate("the payroll thread", candidates).thread_id == "c2"
+
+    def test_query_of_only_stopwords_returns_none(self):
+        from src.tools.intelligence import _pick_resolution_candidate
+
+        # If every query token is a stop word, the fallback has
+        # nothing meaningful to anchor on. Refuse to resolve rather
+        # than return whatever the candidate list happens to start
+        # with — same intent as the no-overlap gate.
+        candidates = [
+            _candidate("c1", "anything goes here"),
+            _candidate("c2", "another subject"),
+        ]
+        assert _pick_resolution_candidate("summarize the thread", candidates) is None
 
     def test_match_is_case_insensitive(self):
         from src.tools.intelligence import _pick_resolution_candidate
@@ -278,9 +310,111 @@ class TestIsMeaningfulQueryToken:
         from src.tools.intelligence import _is_meaningful_query_token
 
         # ``Or`` at sentence start is still a stop word; only fully
-        # uppercase short tokens are treated as identifiers. This is
-        # a deliberate trade-off to keep the rule simple — adding a
-        # stopword set would catch the edge cases more cleanly but
-        # introduces a second knob to maintain.
+        # uppercase short tokens are treated as identifiers. The
+        # stopword set also catches ``or`` after lowercasing, so the
+        # combined rule rejects either spelling.
         assert _is_meaningful_query_token("Or") is False
         assert _is_meaningful_query_token("An") is False
+
+    def test_long_stopwords_are_dropped(self):
+        from src.tools.intelligence import _is_meaningful_query_token
+
+        # Codex round-3 P2: long English stop words ("the", "and",
+        # "for", "from") and mailbox-meta nouns ("thread", "email",
+        # "message") were previously kept by the length-only rule
+        # and produced false-positive overlaps. The stopword set
+        # rejects them now.
+        for stop in (
+            "the",
+            "and",
+            "for",
+            "from",
+            "with",
+            "what",
+            "where",
+            "when",
+        ):
+            assert _is_meaningful_query_token(stop) is False, stop
+
+    def test_mailbox_meta_nouns_are_dropped(self):
+        from src.tools.intelligence import _is_meaningful_query_token
+
+        # These nouns are how the user names the data structure they
+        # want, not which thread they want. They appear in nearly
+        # every prompt AND many subjects, so keeping them produces
+        # garbage overlaps. Drop.
+        for meta in (
+            "thread",
+            "threads",
+            "email",
+            "emails",
+            "message",
+            "messages",
+            "inbox",
+            "conversation",
+        ):
+            assert _is_meaningful_query_token(meta) is False, meta
+
+    def test_action_verbs_are_dropped(self):
+        from src.tools.intelligence import _is_meaningful_query_token
+
+        # Imperative verbs the user says to invoke a tool
+        # ("summarize the X thread") tell us nothing about which
+        # thread — drop them.
+        for verb in (
+            "summarize",
+            "find",
+            "show",
+            "list",
+            "search",
+            "tell",
+            "give",
+        ):
+            assert _is_meaningful_query_token(verb) is False, verb
+
+    def test_meaningful_topic_words_are_kept(self):
+        from src.tools.intelligence import _is_meaningful_query_token
+
+        # Sanity check: stopword set must not strip the actually-
+        # meaningful tokens the eval queries depend on. If this
+        # regresses, the stopword set is too broad.
+        for topic in (
+            "audit",
+            "taxes",
+            "regency",
+            "woods",
+            "parking",
+            "exception",
+            "accountant",
+            "schneider",
+            "insurance",
+            "terrorism",
+            "reimbursement",
+            "mailing",
+            "error",
+        ):
+            assert _is_meaningful_query_token(topic) is True, topic
+
+    def test_stopword_check_handles_mixed_case_lowercase_only(self):
+        from src.tools.intelligence import _is_meaningful_query_token
+
+        # Mixed-case stop words ("And" at sentence start) get
+        # lowercased before stopword lookup — caught.
+        assert _is_meaningful_query_token("And") is False
+        # All-uppercase deliberately bypasses the stopword check
+        # because the user likely means an acronym / proper noun
+        # (``IT`` department, ``OR`` for operating room or
+        # operations research) rather than the English function
+        # word that happens to look like its lowercase form.
+        assert _is_meaningful_query_token("IT") is True
+        assert _is_meaningful_query_token("OR") is True
+
+    def test_uppercase_stopword_lookalikes_are_kept(self):
+        from src.tools.intelligence import _is_meaningful_query_token
+
+        # Sanity check on the case bypass: every short word that
+        # also has a lowercase stopword counterpart should survive
+        # in all-uppercase form. This prevents the stopword set
+        # from accidentally clobbering legitimate acronyms.
+        for acronym in ("IT", "OR", "AT", "TO", "BE", "DO", "AS"):
+            assert _is_meaningful_query_token(acronym) is True, acronym

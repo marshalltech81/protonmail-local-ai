@@ -216,9 +216,20 @@ def heuristic_grade(response_text: str, tool_calls: list[dict]) -> str:
     text_lower = response_text.lower()
     if response_text.startswith("[error]"):
         return "ERROR"
-    # Tool calls are the strongest positive signal — if any tool fired,
-    # the response is grounded regardless of the prose, and abdication
-    # phrasing is at most a hedge inside a real answer.
+    # Mechanical failure patterns IN the response come BEFORE the
+    # tool-call positive signal, because a tool can fire and still
+    # report failure ("Thread not found: Q1" from summarize_thread,
+    # "No results found for: 'invoice'" from search_emails). Treating
+    # those as "needs human review" just because tool_calls is non-
+    # empty hides the failure on the report's summary scan.
+    if "thread not found" in text_lower:
+        return "MISS (likely FAIL or PARTIAL)"
+    if "no results found" in text_lower or "no contacts found" in text_lower:
+        return "EMPTY (PARTIAL — verify if expected)"
+    # With explicit failure patterns out of the way, a non-empty
+    # tool_calls is now a clean positive signal: a tool fired and
+    # produced content the response synthesizes from. Abdication
+    # phrasing in the wrap is at most hedging at this point.
     if tool_calls:
         return "needs human review"
     # Abdication phrases observed in real model output during eval
@@ -252,11 +263,7 @@ def heuristic_grade(response_text: str, tool_calls: list[dict]) -> str:
     )
     if any(phrase in text_lower for phrase in abdication_phrases):
         return "ABDICATION (likely FAIL)"
-    if "thread not found" in text_lower:
-        return "MISS (likely FAIL or PARTIAL)"
-    if "no results found" in text_lower or "no contacts found" in text_lower:
-        return "EMPTY (PARTIAL — verify if expected)"
-    if not tool_calls and "[1]" not in response_text and "source" not in text_lower:
+    if "[1]" not in response_text and "source" not in text_lower:
         return "NO TOOL CITATION (suspicious)"
     return "needs human review"
 

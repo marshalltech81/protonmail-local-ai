@@ -349,11 +349,12 @@ class TestSilenceClientDisconnect:
         )
         assert _SilenceClientDisconnect().filter(record) is False
 
-    def test_drops_received_exception_from_stream_with_appended_repr(self):
+    def test_drops_received_exception_from_stream_with_clientdisconnect_repr(self):
         # The SDK sometimes formats the caught exception into the
         # message itself (so the log line carries the repr after the
-        # prefix). Match by ``startswith`` rather than equality so
-        # the filter still drops these.
+        # prefix). Match by trailing-text content so the filter
+        # still drops the explicit ClientDisconnect form, but does
+        # NOT also silence other exception classes (see next test).
         from src.main import _SilenceClientDisconnect
 
         record = self._record(
@@ -361,6 +362,28 @@ class TestSilenceClientDisconnect:
             name="mcp.server.lowlevel.server",
         )
         assert _SilenceClientDisconnect().filter(record) is False
+
+    def test_lets_through_received_exception_from_stream_with_other_exception(self):
+        # Codex round-3 P2: the SDK uses the same prefix for ANY
+        # exception caught off the stream, so an unconditional
+        # prefix match would also hide RuntimeError("boom") and
+        # other genuine bugs. The filter must propagate those.
+        from src.main import _SilenceClientDisconnect
+
+        record = self._record(
+            msg="Received exception from stream: RuntimeError('boom')",
+            name="mcp.server.lowlevel.server",
+        )
+        assert _SilenceClientDisconnect().filter(record) is True
+
+    def test_lets_through_received_exception_from_stream_with_value_error(self):
+        from src.main import _SilenceClientDisconnect
+
+        record = self._record(
+            msg="Received exception from stream: ValueError: bad input",
+            name="mcp.server.lowlevel.server",
+        )
+        assert _SilenceClientDisconnect().filter(record) is True
 
     def test_lets_through_record_with_other_exception(self):
         from src.main import _SilenceClientDisconnect
