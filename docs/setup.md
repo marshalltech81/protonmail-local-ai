@@ -833,16 +833,20 @@ forward. Leaving it permanently true disables pin enforcement.
 else, so the next boot after `make clean` is treated as a first boot
 and trust-on-first-use re-pins whatever cert Bridge presents.
 
-`make clean` also truncates `.secrets/bridge_pass.txt` and
-`.secrets/open_webui_secret_key.txt` because both authenticate against
-state the volume wipe just deleted (Bridge's `vault.enc` and Open
-WebUI's session DB respectively). After `make clean` you must re-run
-`make first-run` and paste the new Bridge password into
+`make clean` also truncates `.secrets/bridge_pass.txt`,
+`.secrets/open_webui_secret_key.txt`, and
+`.secrets/open_webui_api_key.txt` because all three authenticate
+against state the volume wipe just deleted (Bridge's `vault.enc`,
+Open WebUI's session DB, and the per-install API token issued from
+Settings → Account → API Keys, respectively). After `make clean` you
+must re-run `make first-run` and paste the new Bridge password into
 `.secrets/bridge_pass.txt`; `.secrets/open_webui_secret_key.txt`
-auto-regenerates on the next `make open-webui-up`.
-`.secrets/anthropic_api_key.txt` is intentionally preserved because it
-authenticates against an external service that survives container
-rebuilds.
+auto-regenerates on the next `make open-webui-up`; if you use
+`scripts/eval_run.py`, generate a new Open WebUI API key once the new
+Open WebUI install is up and write it to
+`.secrets/open_webui_api_key.txt`. `.secrets/anthropic_api_key.txt`
+is intentionally preserved because it authenticates against an
+external service that survives container rebuilds.
 
 ### mbsync fails — TLS hostname mismatch after rebuilding Bridge image
 

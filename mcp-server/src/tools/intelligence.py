@@ -178,26 +178,28 @@ _QUERY_STOPWORDS = frozenset(
         "replies",
         "subject",
         "subjects",
-        # action verbs the user uses to invoke a tool
+        # action verbs the user uses to invoke a tool. Only include
+        # verbs that are RARELY also content tokens in real subject
+        # lines — context-dependent words like ``open`` ("open
+        # enrollment", "open positions", "open issues"), ``show``
+        # ("trade show", "tv show"), ``list`` ("mailing list",
+        # "to-do list"), ``read`` ("required read"), ``see``
+        # ("see attached"), ``check`` ("paycheck", "check engine"),
+        # and ``look`` ("the look") are explicitly NOT included
+        # because erasing them from a query also erases the user's
+        # intent ("summarize the open enrollment thread" should
+        # still resolve to "open enrollment").
         "summarize",
         "summary",
         "summaries",
         "find",
-        "show",
-        "list",
         "give",
         "tell",
         "get",
         "search",
-        "look",
         "locate",
         "identify",
         "fetch",
-        "pull",
-        "open",
-        "read",
-        "see",
-        "check",
         # filler / softeners
         "please",
         "just",

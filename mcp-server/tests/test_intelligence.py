@@ -237,6 +237,22 @@ class TestPickResolutionCandidate:
         ]
         assert _pick_resolution_candidate("summarize the thread", candidates) is None
 
+    def test_open_enrollment_resolves_to_correct_subject(self):
+        from src.tools.intelligence import _pick_resolution_candidate
+
+        # Codex round-4 P3 repro. "open" was previously in the
+        # stopword set as an action verb, leaving only "enrollment"
+        # in the query — both candidates would tie at 1 overlap and
+        # the first would win regardless of which subject the user
+        # actually meant. With "open" preserved, the c2 subject
+        # carries 2 overlaps ("open" + "enrollment") to c1's 1, and
+        # the right candidate wins.
+        candidates = [
+            _candidate("c1", "benefits enrollment"),
+            _candidate("c2", "open enrollment"),
+        ]
+        assert _pick_resolution_candidate("open enrollment", candidates).thread_id == "c2"
+
     def test_match_is_case_insensitive(self):
         from src.tools.intelligence import _pick_resolution_candidate
 
@@ -355,22 +371,39 @@ class TestIsMeaningfulQueryToken:
         ):
             assert _is_meaningful_query_token(meta) is False, meta
 
-    def test_action_verbs_are_dropped(self):
+    def test_unambiguous_action_verbs_are_dropped(self):
         from src.tools.intelligence import _is_meaningful_query_token
 
         # Imperative verbs the user says to invoke a tool
         # ("summarize the X thread") tell us nothing about which
-        # thread — drop them.
+        # thread — drop them. The set is deliberately narrow:
+        # context-dependent verbs that double as content tokens
+        # ("open" enrollment, "show" tunes, "list" of attendees,
+        # "read" required, "see" attached, "check" deposit) are
+        # NOT in the drop set, because erasing them from the query
+        # also erases the user's intent.
         for verb in (
             "summarize",
             "find",
-            "show",
-            "list",
             "search",
             "tell",
             "give",
+            "fetch",
+            "locate",
+            "identify",
         ):
             assert _is_meaningful_query_token(verb) is False, verb
+
+    def test_context_dependent_verbs_are_kept(self):
+        from src.tools.intelligence import _is_meaningful_query_token
+
+        # Codex round-4 P3 repro: "open enrollment" should resolve
+        # to the "open enrollment" thread, not the "benefits
+        # enrollment" thread. That requires "open" to remain a
+        # query token. Same logic for the other context-dependent
+        # verbs in this guard list.
+        for verb in ("open", "show", "list", "look", "read", "see", "check", "pull"):
+            assert _is_meaningful_query_token(verb) is True, verb
 
     def test_meaningful_topic_words_are_kept(self):
         from src.tools.intelligence import _is_meaningful_query_token

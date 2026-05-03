@@ -83,6 +83,19 @@ def load_api_key() -> str:
 QUERY_HEADER_RE = re.compile(r"^###\s+`?(tier\d+-[a-z0-9-]+|bonus-[a-z0-9-]+)`?\s*$")
 PROMPT_LINE_RE = re.compile(r"^>\s?(.+?)\s*$")
 
+# Empty-result phrasing across MCP tool outputs. Match
+# ``no <up to 3 words> (found|matching)`` so we catch all known
+# surface forms (``no results found``, ``no contacts found``, ``no
+# threads found in INBOX``, ``no relevant emails found``, ``no
+# matching emails found``, ``no structured data matching the
+# schema found``) plus future variants without needing to chase
+# them each time a tool adds one. Case-insensitive against the
+# already-lowercased response text.
+EMPTY_RESULT_RE = re.compile(
+    r"\bno (?:\w+\s+){0,3}(?:found|matching)\b",
+    re.IGNORECASE,
+)
+
 
 def parse_queries(markdown_path: Path) -> list[EvalQuery]:
     """Pull tier/slug/prompt triples out of eval-queries.md.
@@ -224,7 +237,17 @@ def heuristic_grade(response_text: str, tool_calls: list[dict]) -> str:
     # empty hides the failure on the report's summary scan.
     if "thread not found" in text_lower:
         return "MISS (likely FAIL or PARTIAL)"
-    if "no results found" in text_lower or "no contacts found" in text_lower:
+    # Empty-result phrasing varies by tool — search_emails returns
+    # "No results found", find_contact returns "No contacts found",
+    # list_threads returns "No threads found", ask_mailbox returns
+    # "No relevant emails found", extract_from_emails returns
+    # "No structured data matching the schema found",
+    # search_emails(matching) returns "No matching emails found".
+    # A regex over the family is more durable than chasing each
+    # phrasing — match "no <0-3 words> found" or "no <0-3 words>
+    # matching" so the heuristic stays accurate as tools add new
+    # surface forms.
+    if EMPTY_RESULT_RE.search(text_lower):
         return "EMPTY (PARTIAL — verify if expected)"
     # With explicit failure patterns out of the way, a non-empty
     # tool_calls is now a clean positive signal: a tool fired and
