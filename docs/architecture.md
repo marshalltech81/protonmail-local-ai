@@ -368,10 +368,28 @@ Each job carries `attempts`, `last_stage`, `last_error`, and a
 (`base_backoff_seconds × 2^(attempts - 1)`, capped at 6 hours). When
 `attempts` reaches `INDEXER_MAX_ATTEMPTS` (default 5), the row
 transitions to `status = 'dead'` — it stays in the table for operator
-visibility and stops being claimed. Re-enqueuing a path (for instance
-a new mbsync delivery that reuses the filename) resets the row to
-`queued` with `attempts = 0`, so `dead` is "give up for now," not
-"never try again."
+visibility and stops being claimed. Watchdog rename / create events
+(`on_moved`, `on_created`) DO reset a `dead` row to `queued` with
+`attempts = 0` because those events signal real change in the
+underlying file. The initial scan does NOT — it only proves the
+file exists on disk, not that anything about its content has
+changed since the last failure, so re-enqueuing every dead row at
+container restart would just re-run the same retry cascade against
+the same upstream condition. The scan therefore consults
+`queue.is_dead(filepath)` and skips dead-lettered files, leaving
+them dead until something explicitly resets them.
+
+Two stage outcomes short-circuit the retry path entirely:
+
+- `parse_skipped_missing` — `parse_email` raised `FileNotFoundError`,
+  almost always because mbsync renamed the file (added an IMAP flag
+  suffix) between enqueue and read. The path is permanently invalid;
+  the renamed file enters the queue under its new name via a fresh
+  `IN_MOVED_TO` event. The worker calls `mark_skipped` instead of
+  `mark_failed`: row deleted, no retry, no dead-letter.
+- `PermissionError` at parse keeps the existing retry path because
+  the file genuinely exists; the mbsync chmod race resolves on a
+  later sync cycle.
 
 Two environment variables shape the queue: `INDEXER_MAX_ATTEMPTS` and
 `INDEXER_RETRY_BASE_SECONDS`. Neither is required — the defaults are
