@@ -37,15 +37,18 @@ from pathlib import Path
 from tokenizers import Tokenizer
 
 # Path to the bundled HuggingFace tokenizer.json for
-# ``nomic-ai/nomic-embed-text-v1.5`` — the model behind the project's
-# default ``OLLAMA_EMBED_MODEL``. Used by ``estimate_tokens`` so chunk
-# size budgets reflect real BPE token counts instead of a 4-chars-per-
-# token heuristic that under-counted CJK / URL / Base64 / code text by
-# 4-6× and produced chunks past the embed model's *practical* context
-# window. The model itself supports 8192 tokens, but Ollama's default
-# ``num_ctx`` for nomic-embed-text is 2048, which is the binding limit
-# until the operator explicitly raises it. Sizing chunks to fit under
-# 2048 keeps embed calls succeeding regardless of operator config.
+# ``nomic-ai/nomic-embed-text-v1.5`` — used by ``estimate_tokens`` so
+# chunk size budgets reflect real BPE token counts instead of a
+# 4-chars-per-token heuristic that under-counted CJK / URL / Base64 /
+# code text by 4-6× and produced chunks past the embed model's
+# practical context window.
+#
+# When ``USE_MLX_EMBEDDER=true`` (default) the active embedder is
+# Qwen3-Embedding-8B served by mlx-service, *not* nomic. Both are
+# subword BPE tokenizers and produce comparable token counts on
+# English text (~similar bytes-per-token), so chunk sizing remains
+# accurate enough for routing decisions. A future swap to a bundled
+# Qwen3 tokenizer would tighten this for non-English text.
 _TOKENIZER_PATH = Path(__file__).parent / "data" / "nomic-embed-text" / "tokenizer.json"
 
 # Paragraph: one or more non-blank lines separated from the next paragraph
@@ -66,7 +69,8 @@ def mean_vector(vectors: list[list[float]]) -> list[float]:
     Lives here rather than in ``main.py`` so the reconciler's reap path
     can reuse it to compute a survivor-only thread vector after a partial
     reap. Pure Python so the indexer stays free of numpy at runtime —
-    embedding dim is small (768) and per-thread fan-out is bounded.
+    per-thread fan-out is bounded (typically <100 chunks per thread) and
+    even at 4096-dim Qwen3-Embedding the per-thread aggregate is sub-ms.
 
     Raises ``ValueError`` on empty input or mismatched dimensions; the
     caller chooses the fallback (typically embedding the subject line).

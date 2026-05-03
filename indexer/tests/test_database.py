@@ -13,11 +13,15 @@ from datetime import UTC, datetime
 
 import pytest
 from src.attachment_indexing import attachment_occurrence_id
-from src.database import SCHEMA_VERSION, Database
+from src.database import (
+    EMBEDDING_DIM,  # noqa: F401  -- via reuse
+    SCHEMA_VERSION,
+    Database,
+)
 
 from tests.conftest import make_message, make_thread
 
-FAKE_EMBEDDING = [0.1] * 768
+FAKE_EMBEDDING = [0.1] * EMBEDDING_DIM
 
 
 # ---------------------------------------------------------------------------
@@ -83,29 +87,30 @@ class TestSchema:
         second.close()
 
     def test_opening_with_stale_version_runs_migration_to_current(self, tmp_path):
-        """An existing volume one version behind ``SCHEMA_VERSION``
-        triggers the migration runner, which applies the matching
-        migration file and stamps the current version. The schema
-        change must take effect (here: ``threads.display_subject``
-        column exists after upgrade)."""
+        """An existing volume two versions behind ``SCHEMA_VERSION``
+        triggers the migration runner, which applies every shipped
+        migration in order and stamps the current version. The v13
+        schema change (``threads.display_subject``) must be present
+        after the v12→v14 catch-up, demonstrating that the runner
+        applied the v13 migration before advancing to v14."""
         db_path = tmp_path / "stale.db"
         database = Database(db_path)
         database.close()
         import sqlite3
 
         # Drop the v13 column and stamp v12 to simulate an existing
-        # install that pre-dates the v13 migration. ``ALTER TABLE
-        # DROP COLUMN`` exists in SQLite >= 3.35; the indexer's runtime
-        # already requires SQLite >= 3.43.
+        # install that pre-dates the v13 + v14 migrations. ``ALTER
+        # TABLE DROP COLUMN`` exists in SQLite >= 3.35; the indexer's
+        # runtime already requires SQLite >= 3.43.
         conn = sqlite3.connect(str(db_path))
         try:
             conn.execute("ALTER TABLE threads DROP COLUMN display_subject")
-            conn.execute("UPDATE schema_version SET version = ?", (SCHEMA_VERSION - 1,))
+            conn.execute("UPDATE schema_version SET version = ?", (12,))
             conn.commit()
         finally:
             conn.close()
 
-        # Reopening should run the v13 migration silently.
+        # Reopening should run the v13 + v14 migrations silently.
         database = Database(db_path)
         try:
             cur = database._conn.execute("PRAGMA table_info(threads)")
@@ -162,7 +167,7 @@ class TestSchema:
 class TestEmbeddingDimGuard:
     def test_upsert_rejects_wrong_dimension(self, db):
         """Passing an embedding whose length does not match EMBEDDING_DIM
-        fails fast — switching OLLAMA_EMBED_MODEL to a non-768 model would
+        fails fast — switching OLLAMA_EMBED_MODEL to a wrong-dim model would
         otherwise surface as a cryptic sqlite-vec error on insert."""
         thread = make_thread()
         with pytest.raises(ValueError, match="dims"):
@@ -1172,7 +1177,7 @@ class TestConcurrency:
         within a transaction") or silently commit partial state.
         """
         errors: list[Exception] = []
-        FAKE_EMB = [0.0] * 768
+        FAKE_EMB = [0.0] * EMBEDDING_DIM
 
         def writer(prefix: str):
             try:
@@ -1434,13 +1439,16 @@ class TestReplaceMessageChunks:
                 message_id="missing@x",
                 thread_id="missing-thread",
                 chunks=[chunk],
-                embeddings_by_chunk_id={chunk.chunk_id: [0.1] * 768},
+                embeddings_by_chunk_id={chunk.chunk_id: [0.1] * EMBEDDING_DIM},
             )
 
     def test_first_write_inserts_all_chunks_and_indexes(self, db):
         _seed_thread_for_message(db, "m1@x", "t1")
         chunks = [_make_chunk("a" * 64, 0, "first"), _make_chunk("b" * 64, 1, "second")]
-        embeds = {chunks[0].chunk_id: [0.1] * 768, chunks[1].chunk_id: [0.2] * 768}
+        embeds = {
+            chunks[0].chunk_id: [0.1] * EMBEDDING_DIM,
+            chunks[1].chunk_id: [0.2] * EMBEDDING_DIM,
+        }
 
         result = db.replace_message_chunks(
             message_id="m1@x",
@@ -1477,7 +1485,7 @@ class TestReplaceMessageChunks:
         """
         _seed_thread_for_message(db, "m2@x", "t2")
         chunks = [_make_chunk("c" * 64, 0, "stable")]
-        embeds = {chunks[0].chunk_id: [0.3] * 768}
+        embeds = {chunks[0].chunk_id: [0.3] * EMBEDDING_DIM}
 
         first = db.replace_message_chunks(
             message_id="m2@x",
@@ -1509,8 +1517,8 @@ class TestReplaceMessageChunks:
             thread_id="t3",
             chunks=[keep, drop],
             embeddings_by_chunk_id={
-                keep.chunk_id: [0.1] * 768,
-                drop.chunk_id: [0.2] * 768,
+                keep.chunk_id: [0.1] * EMBEDDING_DIM,
+                drop.chunk_id: [0.2] * EMBEDDING_DIM,
             },
         )
 
@@ -1519,7 +1527,7 @@ class TestReplaceMessageChunks:
             message_id="m3@x",
             thread_id="t3",
             chunks=[keep, new],
-            embeddings_by_chunk_id={new.chunk_id: [0.3] * 768},
+            embeddings_by_chunk_id={new.chunk_id: [0.3] * EMBEDDING_DIM},
         )
         assert result == {"inserted": 1, "deleted": 1, "kept": 1}
 
@@ -1548,7 +1556,7 @@ class TestReplaceMessageChunks:
 
     def test_wrong_dim_embedding_raises(self, db):
         chunk = _make_chunk("f" * 64, 0, "bad dim")
-        with pytest.raises(ValueError, match="EMBEDDING_DIM|reserves 768"):
+        with pytest.raises(ValueError, match="EMBEDDING_DIM|reserves 4096"):
             db.replace_message_chunks(
                 message_id="m5@x",
                 thread_id="t5",
@@ -1563,7 +1571,7 @@ class TestThreadChunkAggregation:
         _seed_thread_for_message(db, "m6a@x", "t6")
         msg = make_message(message_id="m6b@x", filepath="/maildir/INBOX/cur/m6b@x")
         db.upsert_thread(make_thread(messages=[msg], thread_id="t6"), FAKE_EMBEDDING)
-        for mid, vec in [("m6a@x", [0.5] * 768), ("m6b@x", [0.7] * 768)]:
+        for mid, vec in [("m6a@x", [0.5] * EMBEDDING_DIM), ("m6b@x", [0.7] * EMBEDDING_DIM)]:
             chunk = _make_chunk(f"x{mid}".ljust(64, "0"), 0, f"body of {mid}")
             db.replace_message_chunks(
                 message_id=mid,
@@ -1582,7 +1590,7 @@ class TestThreadChunkAggregation:
         _seed_thread_for_message(db, "m7a@x", "t7")
         msg = make_message(message_id="m7b@x", filepath="/maildir/INBOX/cur/m7b@x")
         db.upsert_thread(make_thread(messages=[msg], thread_id="t7"), FAKE_EMBEDDING)
-        for mid, vec in [("m7a@x", [0.1] * 768), ("m7b@x", [0.9] * 768)]:
+        for mid, vec in [("m7a@x", [0.1] * EMBEDDING_DIM), ("m7b@x", [0.9] * EMBEDDING_DIM)]:
             chunk = _make_chunk(f"y{mid}".ljust(64, "0"), 0, f"body of {mid}")
             db.replace_message_chunks(
                 message_id=mid,
@@ -1612,7 +1620,7 @@ class TestAtomicIndexTransaction:
                     message_id=msg.message_id,
                     thread_id=thread.thread_id,
                     chunks=[chunk],
-                    embeddings_by_chunk_id={chunk.chunk_id: [0.2] * 768},
+                    embeddings_by_chunk_id={chunk.chunk_id: [0.2] * EMBEDDING_DIM},
                 )
                 raise RuntimeError("force rollback")
 
@@ -1632,7 +1640,7 @@ class TestChunkCascadeOnMessageRemoval:
             message_id="m8@x",
             thread_id=thread.thread_id,
             chunks=[chunk],
-            embeddings_by_chunk_id={chunk.chunk_id: [0.4] * 768},
+            embeddings_by_chunk_id={chunk.chunk_id: [0.4] * EMBEDDING_DIM},
         )
 
         db.remove_message("m8@x")
@@ -1656,7 +1664,7 @@ class TestChunkCascadeOnMessageRemoval:
                 message_id=mid,
                 thread_id=t.thread_id,
                 chunks=[chunk],
-                embeddings_by_chunk_id={chunk.chunk_id: [0.5] * 768},
+                embeddings_by_chunk_id={chunk.chunk_id: [0.5] * EMBEDDING_DIM},
             )
 
         db.delete_thread_completely(t.thread_id)
@@ -1873,13 +1881,13 @@ class TestAttachmentChunkSlicing:
             message_id="slice1@x",
             thread_id=thread.thread_id,
             chunks=[body_chunk],
-            embeddings_by_chunk_id={body_chunk.chunk_id: [0.1] * 768},
+            embeddings_by_chunk_id={body_chunk.chunk_id: [0.1] * EMBEDDING_DIM},
         )
         db.replace_message_chunks(
             message_id="slice1@x",
             thread_id=thread.thread_id,
             chunks=[att_chunk],
-            embeddings_by_chunk_id={att_chunk.chunk_id: [0.2] * 768},
+            embeddings_by_chunk_id={att_chunk.chunk_id: [0.2] * EMBEDDING_DIM},
             attachment_id=attachment_id,
         )
 
@@ -1912,13 +1920,13 @@ class TestAttachmentChunkSlicing:
             message_id="slice2@x",
             thread_id=thread.thread_id,
             chunks=[body],
-            embeddings_by_chunk_id={body.chunk_id: [0.1] * 768},
+            embeddings_by_chunk_id={body.chunk_id: [0.1] * EMBEDDING_DIM},
         )
         db.replace_message_chunks(
             message_id="slice2@x",
             thread_id=thread.thread_id,
             chunks=[att],
-            embeddings_by_chunk_id={att.chunk_id: [0.2] * 768},
+            embeddings_by_chunk_id={att.chunk_id: [0.2] * EMBEDDING_DIM},
             attachment_id=att_id,
         )
 
@@ -1928,7 +1936,7 @@ class TestAttachmentChunkSlicing:
             message_id="slice2@x",
             thread_id=thread.thread_id,
             chunks=[body2],
-            embeddings_by_chunk_id={body2.chunk_id: [0.3] * 768},
+            embeddings_by_chunk_id={body2.chunk_id: [0.3] * EMBEDDING_DIM},
         )
 
         assert db.get_chunk_ids_for_message("slice2@x") == {body2.chunk_id}

@@ -210,7 +210,7 @@ class TestInitialIndexNestedFolders:
         db = Database(tmp_path / "mail.db")
         threader = Threader(db)
         embedder = MagicMock()
-        embedder.embed.return_value = [0.0] * 768
+        embedder.embed.return_value = [0.0] * EMBEDDING_DIM
 
         monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
         main.initial_index(db, embedder, threader, _make_queue(db))
@@ -229,7 +229,7 @@ class TestInitialIndexNestedFolders:
         db = Database(tmp_path / "mail.db")
         threader = Threader(db)
         embedder = MagicMock()
-        embedder.embed.return_value = [0.0] * 768
+        embedder.embed.return_value = [0.0] * EMBEDDING_DIM
         monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
 
         main.initial_index(db, embedder, threader, _make_queue(db))
@@ -487,7 +487,7 @@ class TestValidateEmbeddingDim:
         embedder.embed.assert_called_once()
 
     def test_mismatched_dim_raises_systemexit(self):
-        """A 1024-dim model (e.g. mxbai-embed-large) against a 768-reserved
+        """A 1024-dim model (e.g. mxbai-embed-large) against a 4096-reserved
         schema must fail fast at startup rather than surface later as a
         cryptic sqlite-vec insert error."""
         embedder = MagicMock()

@@ -33,7 +33,7 @@ from pathlib import Path
 
 from .chunker import mean_vector
 from .database import Database
-from .embedder import Embedder
+from .embedder import EmbeddingBackend
 from .maildir import is_trashed, resolve_current_path
 from .parser import parse_email
 from .threader import Thread, Threader
@@ -63,7 +63,7 @@ class Reconciler:
     def __init__(
         self,
         db: Database,
-        embedder: Embedder,
+        embedder: EmbeddingBackend,
         threader: Threader,
         config: ReconcilerConfig,
         maildir_root: Path | None = None,

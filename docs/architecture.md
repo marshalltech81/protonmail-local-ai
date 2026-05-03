@@ -37,17 +37,20 @@ indexer container
   - Watches maildir-volume via inotify
   - Parses .eml files: MIME, HTML→text, attachments
   - Groups messages into threads via In-Reply-To / References headers
-  - Calls Ollama for vector embeddings
+  - Calls mlx-service (default) or Ollama for vector embeddings
   - Writes to SQLite (FTS5 keyword index + sqlite-vec vector index)
         │                              │
-        │  embed API (internal)        │  writes
+        │  embed API                   │  writes
         ▼                              ▼
-ollama container              sqlite-volume
-  - nomic-embed-text            - threads table (FTS5)
-    for embeddings              - threads_vec table (sqlite-vec)
-  - qwen2.5 (or other)          - message_thread_map
-    for local Q&A               - indexed_files
+mlx-service (host process)    sqlite-volume
+  - Qwen3-Embedding-8B-mxfp8    - threads table (FTS5)
+    (4096-dim) on Apple Metal   - threads_vec table (sqlite-vec)
+  - Qwen3-Reranker-4B-mxfp8     - message_thread_map
+    on Apple Metal              - indexed_files
                                 - pending_deletions (reconciler)
+ollama (container or host)
+  - qwen2.5 (or other) for
+    local LLM inference
         │
         │  reads sqlite-volume (connection opened read-only)
         ▼
@@ -73,13 +76,14 @@ Claude Desktop (host machine)
 
 ## Container Responsibilities
 
-| Container | Reads from | Writes to | Exposes |
+| Container / process | Reads from | Writes to | Exposes |
 |---|---|---|---|
 | `protonmail-bridge` | ProtonMail Cloud | `bridge-data` vol | IMAP 1143, SMTP 1025 (internal) |
 | `mbsync` | Bridge IMAP | `maildir-volume` | nothing |
 | `ollama` | model requests | `ollama-models` vol | HTTP 11434 (internal) — *or* native macOS host process via `docker-compose.host-ollama.yml` overlay (recommended on Mac for Metal acceleration) |
-| `indexer` | `maildir-volume`, Ollama | `sqlite-volume` | nothing |
-| `mcp-server` | `sqlite-volume`, Ollama | nothing | HTTP 3000 (localhost only) |
+| `mlx-service` (host process, not Docker) | embed/rerank requests | `~/.cache/huggingface/` model cache | HTTP 8001 (loopback only); reached from Docker via `host.docker.internal`. See `docs/setup.md` for the LaunchAgent install. |
+| `indexer` | `maildir-volume`, mlx-service (or Ollama) | `sqlite-volume` | nothing |
+| `mcp-server` | `sqlite-volume`, mlx-service (or Ollama), Ollama (LLM) | nothing | HTTP 3000 (localhost only) |
 | `open-webui` (optional overlay) | Ollama, `mcp-server` | `open-webui-data` vol | HTTP 8080 (localhost only) |
 
 ## Docker Volumes
@@ -127,7 +131,8 @@ The hybrid search pipeline:
 ```
 User query
     │
-    ├─ Embed query text → nomic-embed-text → 768-dim vector
+    ├─ Embed query text → Qwen3-Embedding-8B (mlx-service) → 4096-dim vector
+    │   (USE_MLX_EMBEDDER=false falls back to Ollama nomic-embed-text @ 768)
     │
     ├─ BM25 search   → SQLite FTS5 over thread bodies      → ranked list A
     │
@@ -136,9 +141,18 @@ User query
     ├─ Vector search → sqlite-vec over per-message chunks  → ranked list C
     │                  (chunks "lifted" to parent thread_id)
     │
-    └─ Reciprocal Rank Fusion (k=60) → merged list → top-k threads
-       │
-       └─ optional: attach matching chunks per thread as evidence
+    ├─ Reciprocal Rank Fusion (k=60) → merged candidate list
+    │
+    ├─ optional: post-fusion filter (folder / sender / date / attachments)
+    │
+    ├─ optional rerank stage (USE_MLX_RERANKER=true, default):
+    │   take RRF top RERANK_CANDIDATES (default 50), score each candidate
+    │   against the query via Qwen3-Reranker-4B (yes/no logit
+    │   comparison), reorder, truncate to the caller's `limit`
+    │   (defaulting to RERANK_TOP_N when the caller doesn't specify —
+    │   so callers like extract_from_emails(limit=20) get 20, not 10)
+    │
+    └─ top-k threads (with evidence chunks if requested)
 ```
 
 RRF merges the three ranked lists without needing to normalise scores.
@@ -149,6 +163,11 @@ would dominate by accumulated score rather than by relevance.
 
 Every thread is chunked at index time, so the chunk lane is always
 populated alongside the BM25 and thread-vector lanes.
+
+The rerank stage is best-effort: a transient `mlx-service` failure
+returns an empty result set from the reranker, and `hybrid_search`
+falls back to RRF order truncated to the caller's `limit`. A rerank
+outage degrades quality without failing the whole query.
 
 ## Thread Indexing
 

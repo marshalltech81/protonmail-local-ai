@@ -373,6 +373,131 @@ reach Ollama without authentication; on a single-user dev laptop this is
 the same trust boundary the containerized stack already operates in.
 Ollama itself does not have access to the SQLite index or Maildir.
 
+## Required: mlx-service (host process for embeddings + reranking)
+
+The default retrieval stack runs the embedder (Qwen3-Embedding-8B) and
+reranker (Qwen3-Reranker-4B) natively on Apple Metal via a small
+FastAPI service in `mlx-service/`. The service is bare-metal — not in
+Docker — because MLX needs Metal access. Containers reach it through
+OrbStack's `host.docker.internal` shortcut.
+
+Set `USE_MLX_EMBEDDER=false` and `USE_MLX_RERANKER=false` in `.env` if
+you want to opt out, but note that the SQLite schema is sized for
+Qwen3-Embedding-8B's 4096-dim vectors — turning the flag off without
+restoring the prior 768-dim schema and reindexing produces an embed
+shape mismatch at startup.
+
+### One-time host setup
+
+1. Install the project's Python deps for the service. The `mlx-service`
+   directory ships its own `pyproject.toml` so it stays isolated from
+   the indexer / mcp-server uv environments:
+
+   ```bash
+   cd mlx-service && uv sync
+   ```
+
+   First run downloads MLX itself and the model handles; the model
+   weights download lazily on the first `/embed` and `/rerank` request
+   (~8 GB embedder + ~4 GB reranker into `~/.cache/huggingface/hub/`).
+
+2. Smoke-test the service before installing the LaunchAgent:
+
+   ```bash
+   uv run uvicorn src.main:app --host 127.0.0.1 --port 8001
+   # in another shell:
+   curl http://127.0.0.1:8001/health
+   curl -X POST http://127.0.0.1:8001/embed \
+        -H 'Content-Type: application/json' \
+        -d '{"input":"hello"}' | head -c 60
+   ```
+
+   The first embed call may take ~4 min on a cold cache; subsequent
+   calls are sub-second.
+
+3. Install the LaunchAgent so the service starts at login and survives
+   reboots. The plist invokes the venv's `uvicorn` directly so it does
+   not depend on `uv` being on `launchd`'s PATH:
+
+   ```bash
+   cat > ~/Library/LaunchAgents/com.local.mlx-service.plist <<'PLIST'
+   <?xml version="1.0" encoding="UTF-8"?>
+   <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+     "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+   <plist version="1.0">
+   <dict>
+       <key>Label</key>
+       <string>com.local.mlx-service</string>
+       <key>ProgramArguments</key>
+       <array>
+           <string>/ABSOLUTE/PATH/TO/mlx-service/.venv/bin/uvicorn</string>
+           <string>src.main:app</string>
+           <string>--host</string><string>127.0.0.1</string>
+           <string>--port</string><string>8001</string>
+           <string>--log-level</string><string>info</string>
+       </array>
+       <key>WorkingDirectory</key>
+       <string>/ABSOLUTE/PATH/TO/mlx-service</string>
+       <key>EnvironmentVariables</key>
+       <dict>
+           <key>PATH</key>
+           <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+       </dict>
+       <key>RunAtLoad</key><true/>
+       <key>KeepAlive</key>
+       <dict>
+           <key>SuccessfulExit</key><false/>
+       </dict>
+       <key>StandardOutPath</key>
+       <string>/Users/YOU/Library/Logs/mlx-service.log</string>
+       <key>StandardErrorPath</key>
+       <string>/Users/YOU/Library/Logs/mlx-service.log</string>
+       <key>ProcessType</key><string>Interactive</string>
+   </dict>
+   </plist>
+   PLIST
+
+   launchctl bootstrap "gui/$(id -u)" \
+       ~/Library/LaunchAgents/com.local.mlx-service.plist
+   launchctl print "gui/$(id -u)/com.local.mlx-service" | head
+   ```
+
+   No firewall rule is needed: the service binds `127.0.0.1` only and
+   loopback bypasses the macOS Application Firewall. Same-machine
+   processes (including OrbStack containers via `host.docker.internal`)
+   can reach it without prompts.
+
+4. Verify container reachability after the first `make up`:
+
+   ```bash
+   docker run --rm --add-host=host.docker.internal:host-gateway \
+       curlimages/curl:latest \
+       -s http://host.docker.internal:8001/health
+   ```
+
+   Expected: `{"status":"ok",...}`.
+
+### Threat model (mlx-service)
+
+The service binds loopback only and serves no authentication. The
+trust boundary is identical to the host-Ollama overlay above — any
+same-machine process can reach it. The service holds the model weights
+and processes embedding requests; it does not have access to the
+SQLite index, Maildir, or Bridge credentials.
+
+### Falling back
+
+To stop the LaunchAgent and free port 8001:
+
+```bash
+launchctl bootout "gui/$(id -u)/com.local.mlx-service"
+lsof -iTCP:8001 -sTCP:LISTEN  # should now print nothing
+```
+
+In `.env`, set `USE_MLX_EMBEDDER=false` and `USE_MLX_RERANKER=false`,
+and restore the prior schema (drop the 4096-dim vec tables, recreate at
+768) before bringing the indexer back up.
+
 ## Updating Bridge
 
 When you bump `BRIDGE_VERSION` in `.env`, validate the upstream patch points and

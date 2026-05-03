@@ -16,6 +16,8 @@ from pathlib import Path
 
 import sqlite_vec
 
+from .reranker import RerankerBackend
+
 log = logging.getLogger("mcp.sqlite")
 
 
@@ -223,13 +225,23 @@ class Database:
         has_attachments: bool | None = None,
         limit: int = 10,
         with_evidence: bool = False,
+        reranker: RerankerBackend | None = None,
     ) -> list[ThreadResult]:
         oversample = (
             _FILTERED_OVERSAMPLE
             if self._has_post_fusion_filter(folders, from_addr, date_from, date_to, has_attachments)
             else _UNFILTERED_OVERSAMPLE
         )
-        fetch_limit = limit * oversample
+        # When a reranker is configured the fetch must size for the
+        # rerank input window (``RERANK_CANDIDATES``), not the final
+        # ``limit``. Sizing for ``limit`` here would silently underfeed
+        # the reranker — e.g. ``ask_mailbox`` with limit=5 and
+        # oversample=10 fetches 50 lane candidates, dedupes/filters
+        # down to ~10-20 unique threads, and the rerank stage sees
+        # nowhere near its configured 50.
+        rerank_floor = reranker.candidates if reranker is not None else 0
+        target_count = max(limit, rerank_floor)
+        fetch_limit = target_count * oversample
         # Push folder / date / has_attachments filters into the keyword SQL
         # so that deep-ranked candidates aren't truncated by the fetch
         # limit before they could qualify. Vector search has no equivalent
@@ -257,22 +269,86 @@ class Database:
         filtered = self._apply_filters(
             fused, folders, from_addr, date_from, date_to, has_attachments
         )
-        top = filtered[:limit]
 
-        if with_evidence and top:
+        # Decide how many candidates to keep before any rerank. The
+        # reranker's ``candidates`` knob is a *funnel size* — how many
+        # results to feed into the rerank stage — not a result cap. A
+        # caller asking for ``limit=20`` against ``RERANK_CANDIDATES=10``
+        # must still get up to 20 results back, so the slice has to
+        # honour ``max(limit, candidates)``. Without the ``max`` an
+        # operator who tightened ``RERANK_CANDIDATES`` for latency
+        # would silently cap recall on bigger callers like
+        # ``extract_from_emails(limit=50)``.
+        if reranker is not None:
+            candidates_n = max(limit, reranker.candidates)
+        else:
+            candidates_n = limit
+        candidates = filtered[:candidates_n]
+
+        if with_evidence and candidates:
             # Reuse the chunk lane already fetched: group its hits by
             # parent thread, take the best per thread for the surfaced
             # results. Avoids a second sqlite-vec round-trip when
             # ``chunk_hits`` already covers the surfaced threads.
-            wanted = {r.thread_id for r in top}
+            wanted = {r.thread_id for r in candidates}
             grouped: dict[str, list[ChunkResult]] = {tid: [] for tid in wanted}
             for chunk in chunk_hits:
                 if chunk.thread_id in wanted and len(grouped[chunk.thread_id]) < 3:
                     grouped[chunk.thread_id].append(chunk)
-            for result in top:
+            for result in candidates:
                 result.evidence_chunks = grouped.get(result.thread_id, [])
 
-        return top
+        if reranker is not None and candidates:
+            return self._apply_rerank(query_text, candidates, reranker, limit)
+
+        return candidates[:limit]
+
+    @staticmethod
+    def _candidate_text(result: ThreadResult) -> str:
+        """The text fed to the reranker for one candidate.
+
+        Prefer the best evidence chunk (richest signal — ~1500 tokens of
+        the actual passage that lifted this thread into ranking) when
+        available; fall back to ``subject + snippet`` (which is what
+        callers without ``with_evidence=True`` have to work with). The
+        subject is included in both shapes so a query like "invoice
+        from acme" can rerank on the subject even when the body is
+        boilerplate.
+        """
+        if result.evidence_chunks:
+            return f"Subject: {result.subject}\n\n{result.evidence_chunks[0].text}"
+        return f"Subject: {result.subject}\n\n{result.snippet}"
+
+    def _apply_rerank(
+        self,
+        query: str,
+        candidates: list[ThreadResult],
+        reranker: RerankerBackend,
+        limit: int,
+    ) -> list[ThreadResult]:
+        """Reorder ``candidates`` via the reranker and truncate to ``limit``.
+
+        ``top_n`` is passed through to the reranker as the caller's
+        ``limit`` so a caller asking for 20 results doesn't get
+        silently capped at the reranker's default ``top_n=10``. The
+        outer ``[:limit]`` is then redundant for the success path but
+        kept for the rerank-failure fallback below.
+
+        On reranker failure (returns empty list), the candidates fall
+        back to RRF order — so a rerank outage degrades quality without
+        failing the whole query.
+        """
+        docs = [self._candidate_text(c) for c in candidates]
+        scored = reranker.rerank(query, docs, top_n=limit)
+        if not scored:
+            return candidates[:limit]
+        reordered: list[ThreadResult] = []
+        for orig_idx, score in scored:
+            if 0 <= orig_idx < len(candidates):
+                result = candidates[orig_idx]
+                result.score = score
+                reordered.append(result)
+        return reordered[:limit]
 
     def keyword_search(
         self,

@@ -75,18 +75,21 @@ def _dedupe_by_canonical(addrs: list[str]) -> list[str]:
 # the current version; existing installs run the migration runner to
 # catch up. See ``src/migrations/runner.py`` for the file layout and
 # transactional guarantees.
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 14
 
 # The schema uses FTS5 ``contentless_delete=1``, which SQLite added in 3.43.
 # Validate the runtime version at Database init and fail fast with a clear
 # message instead of degrading silently.
 MIN_SQLITE_VERSION = (3, 43, 0)
 
-# Vector dimension reserved by the threads_vec schema (FLOAT[768]). The
-# embedding model's output dimension must match this, or vec0 inserts fail.
-# nomic-embed-text is 768-dim and is the default. A startup-time check in
-# main.py validates the running model against this constant.
-EMBEDDING_DIM = 768
+# Vector dimension reserved by the ``*_vec`` schemas. Must match the
+# active embedding model's output dimension or vec0 inserts fail.
+# Qwen3-Embedding-8B (served by mlx-service) is 4096-dim. The legacy
+# Ollama ``nomic-embed-text`` is 768-dim — running it against this
+# schema requires switching ``USE_MLX_EMBEDDER=false`` AND restoring
+# the previous dimension; the v13→v14 migration is one-way for the
+# current MLX-default deployment.
+EMBEDDING_DIM = 4096
 
 
 class SQLiteTooOldError(RuntimeError):
