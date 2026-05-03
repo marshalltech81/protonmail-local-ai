@@ -280,8 +280,15 @@ clean:
 	docker compose -f docker-compose.yml -f docker-compose.open-webui.yml down -v
 	@# Truncate secrets tied to wiped local state. anthropic_api_key.txt is the
 	@# user's external Claude key and is intentionally preserved.
+	@# open_webui_api_key.txt was generated AGAINST the wiped Open WebUI install
+	@# (Settings -> Account -> API Keys); the new install will issue a fresh key,
+	@# so the old one is dead and should not linger on disk.
 	@if [ -f .secrets/bridge_pass.txt ]; then : > .secrets/bridge_pass.txt; fi
 	@if [ -f .secrets/open_webui_secret_key.txt ]; then : > .secrets/open_webui_secret_key.txt; fi
+	@if [ -f .secrets/open_webui_api_key.txt ]; then : > .secrets/open_webui_api_key.txt; fi
 	@echo "All containers and volumes removed."
-	@echo "Cleared .secrets/bridge_pass.txt and .secrets/open_webui_secret_key.txt."
+	@echo "Cleared .secrets/bridge_pass.txt, .secrets/open_webui_secret_key.txt,"
+	@echo "and .secrets/open_webui_api_key.txt."
 	@echo "Re-run make first-run, then paste the new Bridge password into .secrets/bridge_pass.txt."
+	@echo "If you use scripts/eval_run.py, generate a new Open WebUI API key once the new"
+	@echo "Open WebUI install is up and write it to .secrets/open_webui_api_key.txt."
