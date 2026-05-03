@@ -18,6 +18,7 @@ here:
 """
 
 import asyncio
+import logging
 
 from src.main import _env_bool, _normalize_transport, _read_secret, _run_server
 
@@ -286,3 +287,52 @@ class TestHealthEndpoint:
         # The handler is documented to keep it generic so the endpoint
         # cannot be used to probe DB paths or schema details.
         assert b"db unreachable" not in response.body
+
+
+class TestSilenceClientDisconnect:
+    """The log filter that drops ``ClientDisconnect`` traceback noise.
+
+    The filter has to do exactly two things: drop records whose
+    ``exc_info`` carries a ``ClientDisconnect`` exception, and let
+    everything else through unchanged. Anything looser would swallow real
+    errors; anything tighter (e.g. matching by the formatted message)
+    would break when the SDK rewords the log line.
+    """
+
+    @staticmethod
+    def _record(exc_info=None) -> logging.LogRecord:
+        return logging.LogRecord(
+            name="mcp.server.streamable_http",
+            level=logging.ERROR,
+            pathname="x",
+            lineno=1,
+            msg="Error handling POST request",
+            args=(),
+            exc_info=exc_info,
+        )
+
+    def test_drops_record_with_clientdisconnect_exc_info(self):
+        from src.main import _SilenceClientDisconnect
+
+        # Stand in a synthetic exception that mirrors the *type name* the
+        # filter checks for. Avoids importing starlette in the test file
+        # (which would change the dependency surface for tests).
+        class ClientDisconnect(Exception):  # noqa: N818 — mirrors starlette name
+            pass
+
+        exc = ClientDisconnect()
+        record = self._record(exc_info=(type(exc), exc, exc.__traceback__))
+        assert _SilenceClientDisconnect().filter(record) is False
+
+    def test_lets_through_record_with_other_exception(self):
+        from src.main import _SilenceClientDisconnect
+
+        exc = RuntimeError("real bug")
+        record = self._record(exc_info=(type(exc), exc, exc.__traceback__))
+        assert _SilenceClientDisconnect().filter(record) is True
+
+    def test_lets_through_record_with_no_exc_info(self):
+        from src.main import _SilenceClientDisconnect
+
+        record = self._record(exc_info=None)
+        assert _SilenceClientDisconnect().filter(record) is True

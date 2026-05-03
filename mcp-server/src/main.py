@@ -32,6 +32,40 @@ logging.basicConfig(
 log = logging.getLogger("mcp-server")
 
 
+class _SilenceClientDisconnect(logging.Filter):
+    """Drop benign ``ClientDisconnect`` noise from the MCP SDK's logs.
+
+    Open WebUI opens an MCP transport session via ``POST /mcp`` and sometimes
+    abandons it before sending the body — typically when the chat
+    coordinator decided to retry a different request shape, or the previous
+    call already returned what it needed. The MCP SDK catches the resulting
+    ``starlette.requests.ClientDisconnect`` cleanly and the connection ends
+    without harm, but the SDK logs it at ERROR level on two loggers
+    (``mcp.server.streamable_http`` and ``mcp.server.lowlevel.server``)
+    which makes routine traffic look alarming in operator logs.
+
+    Drop those specific records here. Any record without ``exc_info`` or
+    with a different exception class still propagates unchanged, so a real
+    bug surfaces normally.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.exc_info:
+            exc_type = record.exc_info[0]
+            if exc_type is not None and exc_type.__name__ == "ClientDisconnect":
+                return False
+        return True
+
+
+# Attach the filter to the two MCP SDK loggers known to surface
+# ``ClientDisconnect`` tracebacks. Limited scope on purpose: filtering at
+# the root logger would risk swallowing a future, genuinely-different
+# ``ClientDisconnect`` somewhere in the stack.
+_disconnect_filter = _SilenceClientDisconnect()
+for _logger_name in ("mcp.server.streamable_http", "mcp.server.lowlevel.server"):
+    logging.getLogger(_logger_name).addFilter(_disconnect_filter)
+
+
 def _env_bool(name: str, default: bool) -> bool:
     raw = os.environ.get(name)
     if raw is None:
