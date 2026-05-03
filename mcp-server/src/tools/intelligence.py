@@ -186,12 +186,35 @@ def register_intelligence_tools(
         max_threads: int = 5,
     ) -> list[TextContent]:
         """
-        Ask a natural language question about your email.
-        Retrieves relevant threads and generates an answer using an LLM.
+        Synthesize an answer across multiple email threads.
+
+        Use this for any topic-level summary or status question where
+        the answer needs to come from MORE THAN ONE thread —
+        "what's the status of X?", "what's open at Y?", "what
+        happened recently with Z?", "who do I owe replies to?",
+        "summarize my recent CPVA activity". The tool retrieves the
+        most relevant threads, gives the LLM the matched passages
+        from each, and produces a synthesized answer with source
+        citations.
+
+        Use search_emails (not this) when the user wants a *list* of
+        threads matching a query rather than a synthesized answer.
+        Use summarize_thread (not this) when the user wants a
+        single-thread summary. Use extract_from_emails (not this)
+        when the user wants structured records (invoices, tracking
+        numbers, RSVPs).
+
+        The ``question`` argument accepts ANY phrasing of user intent
+        — full sentences ("what's open at Regency Woods?"), topic
+        labels ("Regency Woods open issues"), or imperatives
+        ("summarize CPVA reimbursements"). Don't reword the user's
+        prompt; pass it through as-is.
 
         Args:
-            question: Your question e.g. "What did my landlord say about the deposit?"
-            from_addr: Optionally scope to a specific sender
+            question: Natural language question or topic phrase
+            from_addr: Optionally scope to a specific sender (canonical
+                       email; resolve via find_contact if you only
+                       have a name)
             date_from: Optionally scope to emails after this date (ISO 8601)
             date_to: Optionally scope to emails before this date (ISO 8601)
             folders: Optionally scope to specific folders
