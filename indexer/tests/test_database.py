@@ -233,6 +233,35 @@ class TestSchema:
         with pytest.raises(RuntimeError, match="indexed_files=1"):
             Database(db_path)
 
+    def test_v14_migration_guard_blocks_when_only_chunks_vec_populated(self, tmp_path, monkeypatch):
+        """Codex round-2 of PR #85: ``message_chunks_vec`` is a
+        vec0 virtual table the v14 migration drops + recreates, but
+        an earlier revision of the guard tuple omitted it. Normal
+        invariants tie chunk vectors to chunk rows (they're written
+        in one transaction), but a partial-restore / manual-truncate
+        scenario can produce orphan vectors with no parent
+        ``message_chunks`` row. The guard must catch that."""
+        import struct
+
+        db_path = tmp_path / "orphan_vec.db"
+        database = Database(db_path)
+        # vec0 INSERT: chunk_id PK + a serialized FLOAT[N] blob.
+        # ``struct.pack(f'{N}f', *vec)`` matches the canonical
+        # ``sqlite_vec.serialize_float32`` byte layout for FLOAT[N].
+        vec = [0.0] * EMBEDDING_DIM
+        vec_blob = struct.pack(f"{EMBEDDING_DIM}f", *vec)
+        database._conn.execute(
+            "INSERT INTO message_chunks_vec (chunk_id, embedding) VALUES (?, ?)",
+            ("orphan-chunk-id", vec_blob),
+        )
+        database._conn.execute("UPDATE schema_version SET version = ?", (13,))
+        database._conn.commit()
+        database.close()
+
+        monkeypatch.delenv("INDEXER_MIGRATION_V14_FORCE", raising=False)
+        with pytest.raises(RuntimeError, match="message_chunks_vec=1"):
+            Database(db_path)
+
     def test_v14_migration_guard_blocks_when_only_queue_populated(self, tmp_path, monkeypatch):
         """Same broader-coverage point: indexing_jobs alone trips
         the guard. A v13 install with dead-lettered jobs but no

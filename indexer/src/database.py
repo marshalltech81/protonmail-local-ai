@@ -277,14 +277,17 @@ class Database:
     # Tables the v14 migration drops / recreates / clears. Each entry
     # contributes to the "populated v13?" decision below — if any of
     # them carries rows, the operator pays for losing it on upgrade,
-    # not just ``message_chunks``. ``threads_vec`` is a vec0 virtual
-    # table, so the same SELECT shape works.
+    # not just ``message_chunks``. Both ``threads_vec`` and
+    # ``message_chunks_vec`` are vec0 virtual tables; the same
+    # ``SELECT COUNT(*)`` shape works against vec0 once sqlite-vec is
+    # loaded (which the connection always does — see ``_connect``).
     _V14_DESTRUCTIVE_TABLES = (
         "message_chunks",
         "message_chunks_fts",
         "indexed_files",
         "indexing_jobs",
         "threads_vec",
+        "message_chunks_vec",
     )
 
     def _guard_destructive_migrations(self, stored: int, target: int) -> None:
