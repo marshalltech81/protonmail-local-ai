@@ -6,6 +6,7 @@ Q&A/RAG, summarization, and structured extraction over email threads.
 import asyncio
 import json
 import logging
+import re
 
 import httpx
 from mcp.types import TextContent
@@ -13,6 +14,315 @@ from mcp.types import TextContent
 from ..lib.security import safe_exception_text
 from ..lib.sqlite import ThreadResult
 from ..lib.validation import clamp_int
+
+# Number of candidates the summarize_thread fallback pulls from
+# hybrid_search before applying the subject-overlap tiebreaker. 3 is
+# enough to pick a clearly-better match without paying for additional
+# vector / chunk fan-out.
+_RESOLUTION_CANDIDATE_LIMIT = 3
+
+
+# Stop words filtered from the query before scoring subject overlap.
+# Lowercase since the caller compares lowercased forms. Three buckets:
+#
+# - English function words: articles, conjunctions, prepositions,
+#   pronouns, be-verbs, modals, demonstratives, common quantifiers.
+# - Question / intent verbs: words that appear in user prompts to
+#   tell the model what to do ("summarize the X thread") but say
+#   nothing about which thread X is.
+# - Mailbox-meta nouns: the user's mental model of the mailbox
+#   ("thread", "email", "message", "inbox") that almost always
+#   appears in both the prompt and many subjects, producing
+#   garbage overlaps.
+#
+# Genuinely-meaningful overlap should come from topic / sender /
+# date / proper-noun tokens. Adding to this set is cheap; removing
+# from it is a behavioral change that should be motivated by an
+# actual eval observation.
+_QUERY_STOPWORDS = frozenset(
+    {
+        # articles + conjunctions
+        "the",
+        "a",
+        "an",
+        "and",
+        "or",
+        "but",
+        "if",
+        "so",
+        "nor",
+        "yet",
+        # prepositions
+        "of",
+        "in",
+        "on",
+        "at",
+        "by",
+        "to",
+        "for",
+        "from",
+        "with",
+        "into",
+        "onto",
+        "about",
+        "after",
+        "before",
+        "between",
+        # pronouns
+        "i",
+        "me",
+        "my",
+        "mine",
+        "you",
+        "your",
+        "yours",
+        "we",
+        "us",
+        "our",
+        "ours",
+        "they",
+        "them",
+        "their",
+        "theirs",
+        "he",
+        "him",
+        "his",
+        "she",
+        "her",
+        "hers",
+        "it",
+        "its",
+        # be-verbs / aux
+        "is",
+        "am",
+        "are",
+        "was",
+        "were",
+        "be",
+        "been",
+        "being",
+        "has",
+        "have",
+        "had",
+        "having",
+        "do",
+        "does",
+        "did",
+        "done",
+        # modal verbs
+        "can",
+        "could",
+        "will",
+        "would",
+        "should",
+        "shall",
+        "may",
+        "might",
+        "must",
+        # question / interrogative words
+        "what",
+        "when",
+        "where",
+        "who",
+        "whom",
+        "whose",
+        "why",
+        "how",
+        "which",
+        # demonstratives + quantifiers
+        "this",
+        "that",
+        "these",
+        "those",
+        "all",
+        "any",
+        "some",
+        "none",
+        "each",
+        "every",
+        "most",
+        "much",
+        "many",
+        "few",
+        "several",
+        "both",
+        "either",
+        "neither",
+        # generic time references that say "recent" not "which thread"
+        "recent",
+        "latest",
+        "last",
+        "current",
+        "today",
+        "yesterday",
+        "tomorrow",
+        "now",
+        "soon",
+        "ago",
+        "year",
+        "month",
+        "week",
+        "day",
+        # mailbox-meta nouns (singular + plural)
+        "thread",
+        "threads",
+        "message",
+        "messages",
+        "email",
+        "emails",
+        "mail",
+        "inbox",
+        "conversation",
+        "conversations",
+        "reply",
+        "replies",
+        "subject",
+        "subjects",
+        # action verbs the user uses to invoke a tool. Only include
+        # verbs that are RARELY also content tokens in real subject
+        # lines — context-dependent words like ``open`` ("open
+        # enrollment", "open positions", "open issues"), ``show``
+        # ("trade show", "tv show"), ``list`` ("mailing list",
+        # "to-do list"), ``read`` ("required read"), ``see``
+        # ("see attached"), ``check`` ("paycheck", "check engine"),
+        # and ``look`` ("the look") are explicitly NOT included
+        # because erasing them from a query also erases the user's
+        # intent ("summarize the open enrollment thread" should
+        # still resolve to "open enrollment").
+        "summarize",
+        "summary",
+        "summaries",
+        "find",
+        "give",
+        "tell",
+        "get",
+        "search",
+        "locate",
+        "identify",
+        "fetch",
+        # filler / softeners
+        "please",
+        "just",
+        "kind",
+        "sort",
+        "type",
+    }
+)
+
+
+# Stopwords that double as common proper nouns when titlecased. ``May``
+# is the modal verb when lowercased but a month when titlecased; ``Will``
+# is a modal verb lowercased but a given name titlecased. A query like
+# ``May invoice`` or ``Will Smith introduction`` would otherwise have
+# its only meaningful token stripped, leaving the resolver to score
+# overlap on the remaining generic word and pick the wrong candidate.
+# Lowercase ``may`` / ``will`` are still treated as modal verbs; only
+# the titlecase form bypasses the stopword filter.
+_TITLECASE_PROPER_NOUN_HOMONYMS = frozenset({"may", "will"})
+
+
+def _is_meaningful_query_token(token: str) -> bool:
+    """Decide whether a tokenized query word is worth matching against subjects.
+
+    Three filters in order:
+
+    1. Identifier-shape rule (handles short tokens). Tokens of
+       length >= 3 pass; shorter tokens pass only if they contain a
+       digit (``Q1``, ``W2``, ``5G``, ``2FA``) or are all-uppercase
+       (``HR``, ``AI``, ``HOA``, ``IT``). Pure-lowercase 2-char
+       tokens are almost always English stop words.
+    2. Titlecase proper-noun homonym carve-out. Tokens whose
+       lowercased form is in ``_TITLECASE_PROPER_NOUN_HOMONYMS`` AND
+       whose original form satisfies ``str.istitle()`` (``May``,
+       ``Will``) bypass the stopword check — these are likely a
+       month / given name, not the modal-verb the lowercase form
+       would otherwise trigger.
+    3. Stopword set (handles generic long tokens). After the
+       identifier-shape and homonym filters, drop tokens in
+       ``_QUERY_STOPWORDS`` — articles, conjunctions, prepositions,
+       modals, question words, mailbox-meta nouns ("thread",
+       "email"), and the unambiguous imperative verbs the model
+       invokes the tool with ("summarize", "find"). Without this,
+       queries like "summarize the payroll thread" would score 2
+       generic overlaps ("the", "thread") on any subject containing
+       those words and lose to the 1-overlap candidate that
+       actually matches the meaningful token ("payroll").
+
+    The ``isupper()`` / ``isdigit()`` / ``istitle()`` checks must
+    happen on the original-case token, BEFORE the stopword check —
+    otherwise an uppercase ``THE`` (which is conceivable as a
+    subject prefix in business email) would survive the case check
+    and then need a case-aware stopword set. Lowercasing before the
+    stopword check keeps the stopword set authoritative and case-
+    insensitive.
+    """
+    if not token:
+        return False
+    if len(token) < 3:
+        if not (any(c.isdigit() for c in token) or token.isupper()):
+            return False
+    # All-uppercase tokens skip the stopword check on purpose. The
+    # stopword set contains words like ``it`` and ``or`` that double
+    # as common acronyms / department names when written ``IT`` /
+    # ``OR`` (operations research, hospital operating room). A user
+    # who types the word in all caps almost always means the
+    # identifier, not the lowercase function-word. Mixed-case
+    # ("And", "Of") and lowercase ("and", "of") forms still flow
+    # through the stopword check.
+    if token.isupper():
+        return True
+    # Titlecase forms of stopwords that double as proper nouns are
+    # preserved. ``May invoice`` (month) and ``Will Smith`` (name) would
+    # otherwise have their only meaningful token erased by the modal-verb
+    # stopword entries. ``str.istitle`` is True only when the token is
+    # exactly first-letter-upper + rest-lower ("May", not "MAY" or
+    # "may"), so this never overrides the lowercase modal-verb case.
+    if token.istitle() and token.lower() in _TITLECASE_PROPER_NOUN_HOMONYMS:
+        return True
+    if token.lower() in _QUERY_STOPWORDS:
+        return False
+    return True
+
+
+def _pick_resolution_candidate(query: str, candidates: list[ThreadResult]) -> ThreadResult | None:
+    """Choose the best candidate for the summarize_thread phrase fallback.
+
+    hybrid_search ranks by RRF over BM25 + vector + chunk lanes, which
+    is dominated by *content* similarity. That's the right default for
+    search, but for resolving a phrase like "the audit & taxes thread"
+    a thread whose *subject line* contains every query token is almost
+    always what the caller meant — even if some other thread has more
+    semantically-similar body chunks. Prefer the candidate whose
+    subject contains the most query tokens.
+
+    Returns ``None`` when NO candidate shares a single subject token
+    with the query (after applying ``_is_meaningful_query_token``).
+    The caller treats that as "fallback could not confidently resolve"
+    and surfaces ``Thread not found`` rather than summarizing whichever
+    thread the vector lane happened to rank first — that silent
+    fabrication would otherwise let a typo'd opaque ID
+    (``"PH3PPF8675309xyz@invalid"``) produce a confident summary of an
+    unrelated thread, since vector KNN always returns a nearest
+    neighbor in any non-empty mailbox. The strictness is the gate: if
+    the user wants a body-only match, they should call
+    ``search_emails`` first and pass the resulting opaque ID.
+    """
+    if not candidates:
+        raise ValueError("candidates must be non-empty")
+    raw_tokens = re.findall(r"\w+", query)
+    query_tokens = {t.lower() for t in raw_tokens if _is_meaningful_query_token(t)}
+    if not query_tokens:
+        return None
+    best: ThreadResult | None = None
+    best_overlap = 0
+    for candidate in candidates:
+        subject_tokens = {t.lower() for t in re.findall(r"\w+", candidate.subject)}
+        overlap = len(query_tokens & subject_tokens)
+        if overlap > best_overlap:
+            best_overlap = overlap
+            best = candidate
+    return best
+
 
 log = logging.getLogger("mcp.tools.intelligence")
 
@@ -145,12 +455,35 @@ def register_intelligence_tools(
         max_threads: int = 5,
     ) -> list[TextContent]:
         """
-        Ask a natural language question about your email.
-        Retrieves relevant threads and generates an answer using an LLM.
+        Synthesize an answer across multiple email threads.
+
+        Use this for any topic-level summary or status question where
+        the answer needs to come from MORE THAN ONE thread —
+        "what's the status of X?", "what's open at Y?", "what
+        happened recently with Z?", "who do I owe replies to?",
+        "summarize my recent CPVA activity". The tool retrieves the
+        most relevant threads, gives the LLM the matched passages
+        from each, and produces a synthesized answer with source
+        citations.
+
+        Use search_emails (not this) when the user wants a *list* of
+        threads matching a query rather than a synthesized answer.
+        Use summarize_thread (not this) when the user wants a
+        single-thread summary. Use extract_from_emails (not this)
+        when the user wants structured records (invoices, tracking
+        numbers, RSVPs).
+
+        The ``question`` argument accepts ANY phrasing of user intent
+        — full sentences ("what's open at Regency Woods?"), topic
+        labels ("Regency Woods open issues"), or imperatives
+        ("summarize CPVA reimbursements"). Don't reword the user's
+        prompt; pass it through as-is.
 
         Args:
-            question: Your question e.g. "What did my landlord say about the deposit?"
-            from_addr: Optionally scope to a specific sender
+            question: Natural language question or topic phrase
+            from_addr: Optionally scope to a specific sender (canonical
+                       email; resolve via find_contact if you only
+                       have a name)
             date_from: Optionally scope to emails after this date (ISO 8601)
             date_to: Optionally scope to emails before this date (ISO 8601)
             folders: Optionally scope to specific folders
@@ -234,8 +567,29 @@ def register_intelligence_tools(
         """
         Summarize indexed context for an email thread.
 
+        ``thread_id`` accepts EITHER an opaque thread ID returned by
+        search_emails / list_threads / get_message, OR a subject-line
+        phrase. Opaque IDs are looked up directly. When that lookup
+        misses, the tool falls back to a hybrid keyword + vector
+        search on the same string and resolves ONLY when at least one
+        candidate's subject line shares a query token — so a call
+        like ``summarize_thread("the audit & taxes thread")`` lands
+        on the actual audit thread even when an unrelated message
+        has higher vector similarity, while a typo'd opaque ID or a
+        topic-only phrase with no subject overlap surfaces
+        ``Thread not found`` instead of fabricating a summary of
+        whichever thread happened to rank first by content
+        similarity. Opaque IDs like
+        ``summarize_thread("PH3PPF...@outlook.com")`` still go
+        straight to that specific thread without invoking the
+        fallback. For body-only matches (the relevant content is in
+        the message body, not the subject), call ``search_emails``
+        first and pass the resulting opaque ID.
+
         Args:
-            thread_id: The thread ID to summarize
+            thread_id: An opaque thread ID, or a subject / topic phrase
+                       to resolve via hybrid search if the direct
+                       lookup misses.
             style: "brief" (2-3 sentences), "detailed" (full summary),
                    "action-items" (bullet list of actions), or
                    "timeline" (chronological sequence of events)
@@ -245,8 +599,38 @@ def register_intelligence_tools(
         """
         try:
             thread = await asyncio.to_thread(db.get_thread, thread_id)
+            # Permissive fallback: when the direct lookup misses, treat
+            # ``thread_id`` as a phrase and resolve it through hybrid
+            # search. This rescues calls where the LLM passed the
+            # subject line instead of an opaque ID — observed even on
+            # 32B models when the prompt reads "summarize the X thread"
+            # rather than "find X then summarize it". The fallback
+            # path returns at most one thread so there's no ambiguity
+            # at the summarize step.
             if not thread:
-                return [TextContent(type="text", text=f"Thread not found: {thread_id}")]
+                embedding = await ollama.embed(thread_id)
+                resolved = await asyncio.to_thread(
+                    db.hybrid_search,
+                    query_text=thread_id,
+                    query_embedding=embedding,
+                    limit=_RESOLUTION_CANDIDATE_LIMIT,
+                )
+                if not resolved:
+                    return [TextContent(type="text", text=f"Thread not found: {thread_id}")]
+                # Apply the subject-overlap gate. The fallback resolves
+                # ONLY when at least one candidate's subject line shares
+                # a query token; otherwise the call surfaces "Thread not
+                # found" rather than summarizing whichever thread the
+                # vector lane happened to rank first. Vector KNN always
+                # returns a nearest neighbor in any non-empty mailbox,
+                # so without this gate a typo'd opaque ID would produce
+                # a confident summary of an unrelated thread.
+                best = _pick_resolution_candidate(thread_id, resolved)
+                if best is None:
+                    return [TextContent(type="text", text=f"Thread not found: {thread_id}")]
+                thread = await asyncio.to_thread(db.get_thread, best.thread_id)
+                if not thread:
+                    return [TextContent(type="text", text=f"Thread not found: {thread_id}")]
 
             style_instructions = {
                 "brief": "Summarize in 2-3 sentences.",
@@ -291,7 +675,14 @@ def register_intelligence_tools(
     ) -> list[TextContent]:
         """
         Extract structured data from indexed emails matching a query.
-        Example: extract all invoices with vendor name and amount.
+
+        Use this when the user wants a *structured list* across many
+        threads — invoice numbers and amounts, tracking numbers,
+        flight confirmations, RSVPs, dates of all dentist appointments.
+        Returns one record per thread that matches, fitted to the
+        schema you pass in. For prose answers across threads use
+        ask_mailbox; for one specific thread use summarize_thread or
+        get_thread.
 
         Args:
             query: What to search for e.g. "invoices", "meeting confirmations"

@@ -38,7 +38,11 @@ Stack (five containers — see `docs/architecture.md` for the data flow):
   alongside body content; the per-content-hash extraction cache
   dedups OCR / parse work for forwarded copies.
 - **Ollama** serves the embedding model (`nomic-embed-text`) and the
-  local LLM (`llama3.2`) over the internal `app-net` network.
+  local LLM (`qwen2.5:14b-instruct` by default; the same value should
+  be pinned both in `OLLAMA_LLM_MODEL` for the MCP intelligence tools
+  and in any Open WebUI chat-side selector that points at this
+  Ollama, otherwise the user sees inconsistent answers between the
+  chat and the MCP tools) over the internal `app-net` network.
 - **mcp-server** exposes search, retrieval, and intelligence tools to
   Claude Desktop over HTTP/SSE on `localhost:3000`. Read-only by
   default; mail-changing action tools are not registered. Hybrid
@@ -231,7 +235,7 @@ persisted, unsupported types log at debug. What's still open:
 - clarify `docs/setup.md` cert regeneration instructions to make explicit that removing `vault.enc` triggers a full re-authentication, not just a cert refresh; consider adding a `make refresh-cert` target with a clear warning
 - add `# syntax=docker/dockerfile:1` as the first line of `bridge/Dockerfile`; without a parser directive the BuildKit Dockerfile frontend version is unpinned and different Docker Engine or BuildKit versions may parse the same Dockerfile differently, producing subtly different images; this matters most for the multi-stage Bridge build where `--from` resolution and layer caching rely on stable parse behavior
 ### Hardening and observability
-- add resource limits (`memory`, `cpus`, `pids_limit`) to the Compose services that still lack them; `protonmail-bridge` holds live Proton credentials in memory and is the highest-priority target — a `mem_limit` prevents a runaway or exploited process from exhausting host memory; `ollama` is also missing limits. (`indexer` already has `mem_limit: 2g` and `pids_limit: 128`; the limit was tuned up from 1g after empirical OOMs during parallel embed bursts on a populated mailbox.)
+- add resource limits (`memory`, `cpus`, `pids_limit`) to the Compose services that still lack them; `protonmail-bridge` holds live Proton credentials in memory and is the highest-priority target — a `mem_limit` prevents a runaway or exploited process from exhausting host memory; `ollama` is also missing limits. (`indexer` already has `mem_limit: 6g` and `pids_limit: 128`. Empirical tuning history during a real backfill of a ~22k-message attachment-heavy mailbox: 1 GiB was too tight under normal indexing bursts; 2 GiB OOM-killed three times during initial backfill; 4 GiB OOM-killed once more on the same backfill; 6 GiB has been stable. Steady-state RSS is much lower; the right long-term fix is throttling the indexer's parallel embed dispatch — peak memory scales with concurrency, not mailbox size — at which point the cap can return to 2-3 GiB.)
 - add `docs/troubleshooting.md` covering common failure patterns: Ollama not ready, cert extraction failure, sync stalled, schema migration
 - evaluate optional bearer-token auth for `mcp-server` as defense-in-depth on top of the localhost-only bind; today any local process that can reach `127.0.0.1:MCP_PORT` can query the index. This is a posture change, not a bug fix — weigh the operational complexity of a shared token against the threat model (malware on the host, misconfigured port forward) before implementing
 - emit a loud, one-shot `LLM_MODE=cloud` warning at `mcp-server` startup reminding the operator that retrieved email excerpts will be sent to Anthropic; the cloud path is already opt-in but the warning would surface drift if someone flips the mode and forgets

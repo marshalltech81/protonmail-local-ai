@@ -91,13 +91,6 @@ class TestAskMailbox:
 
 
 class TestSummarizeThread:
-    def test_unknown_thread_returns_not_found(self, fake_server, seeded_db, fake_ollama):
-        handler = _handlers(fake_server, seeded_db, fake_ollama)["summarize_thread"]
-        out = asyncio.run(handler(thread_id="t-missing"))
-        assert "Thread not found" in _text(out)
-        # No LLM call for a non-existent thread.
-        assert fake_ollama.complete_calls == []
-
     def test_known_thread_calls_llm_with_untrusted_wrapper(
         self, fake_server, seeded_db, fake_ollama
     ):
@@ -107,6 +100,81 @@ class TestSummarizeThread:
         _system, user = fake_ollama.complete_calls[0]
         assert "<untrusted_email>" in user
         assert "</untrusted_email>" in user
+
+    def test_known_opaque_id_does_not_trigger_fallback_search(
+        self, fake_server, seeded_db, fake_ollama
+    ):
+        # A direct hit on ``get_thread`` must not call ``embed`` —
+        # otherwise the fallback path would run on every successful
+        # lookup, doubling latency. Embedding is only done when the
+        # opaque lookup misses.
+        handler = _handlers(fake_server, seeded_db, fake_ollama)["summarize_thread"]
+        asyncio.run(handler(thread_id="t-alpha"))
+        assert fake_ollama.embed_calls == []
+
+    def test_unknown_id_falls_back_to_phrase_search(self, fake_server, seeded_db, fake_ollama):
+        # The fallback rescues calls where the model passed a phrase
+        # rather than an opaque ID. The fake ollama returns the canned
+        # embedding ``[1, 0, 0, 0]`` which aligns with t-alpha's
+        # vector, so hybrid_search resolves to t-alpha and the summary
+        # is produced for that thread instead of "Thread not found".
+        handler = _handlers(fake_server, seeded_db, fake_ollama)["summarize_thread"]
+        out = asyncio.run(handler(thread_id="invoice for march"))
+        text = _text(out)
+        assert "Thread not found" not in text
+        # Subject should appear in the summary header so the caller
+        # sees which thread the fallback resolved to.
+        assert "invoice for march" in text
+        # The phrase was embedded once for the fallback search.
+        assert fake_ollama.embed_calls == ["invoice for march"]
+
+    def test_phrase_fallback_prefers_subject_overlap_over_vector_rank(
+        self, fake_server, seeded_db, fake_ollama
+    ):
+        # ``fake_ollama`` returns a fixed [1, 0, 0, 0] embedding which
+        # vector-aligns with t-alpha (subject "invoice for march"). For
+        # the phrase "lunch plans", the keyword lane surfaces t-beta
+        # (its actual subject) but the vector lane keeps pulling t-alpha
+        # to the top. Without the subject-overlap tiebreaker the
+        # fallback resolves to t-alpha and produces a summary about the
+        # wrong thread; with the tiebreaker, t-beta wins on the two
+        # subject-token overlaps.
+        handler = _handlers(fake_server, seeded_db, fake_ollama)["summarize_thread"]
+        out = asyncio.run(handler(thread_id="lunch plans"))
+        text = _text(out)
+        # Must resolve to the lunch thread, not the invoice thread.
+        assert "lunch plans" in text
+        assert "invoice for march" not in text
+
+    def test_phrase_fallback_with_no_subject_overlap_returns_not_found(
+        self, fake_server, seeded_db, fake_ollama
+    ):
+        # The fallback gate refuses to resolve when no candidate's
+        # subject shares a token with the query. seeded_db contains
+        # subjects "invoice for march", "lunch plans", "meeting notes
+        # archive"; the query "zzznosuchsubject" overlaps with none.
+        # Without this gate, vector KNN would rank t-alpha (matching
+        # the canned [1,0,0,0] embedding) and the summary would land
+        # on the invoice thread — silently wrong. Now we surface
+        # "Thread not found" instead.
+        handler = _handlers(fake_server, seeded_db, fake_ollama)["summarize_thread"]
+        out = asyncio.run(handler(thread_id="zzznosuchsubject"))
+        text = _text(out)
+        assert "Thread not found" in text
+        # And critically: no LLM was invoked, because we never
+        # resolved a thread to summarize.
+        assert fake_ollama.complete_calls == []
+
+    def test_phrase_with_empty_corpus_returns_not_found(self, fake_server, empty_db, fake_ollama):
+        # If the index is empty, the fallback hybrid_search returns no
+        # hits — return the original sentinel rather than fabricating a
+        # summary. ``empty_db`` carries the schema but no rows, so this
+        # exercises the fallback's miss branch cleanly.
+        handler = _handlers(fake_server, empty_db, fake_ollama)["summarize_thread"]
+        out = asyncio.run(handler(thread_id="anything"))
+        assert "Thread not found" in _text(out)
+        # No LLM completion call when the fallback finds nothing.
+        assert fake_ollama.complete_calls == []
 
     def test_unknown_style_falls_back_to_brief(self, fake_server, seeded_db, fake_ollama):
         handler = _handlers(fake_server, seeded_db, fake_ollama)["summarize_thread"]

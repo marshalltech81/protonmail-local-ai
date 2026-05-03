@@ -1024,3 +1024,313 @@ class TestRRFChunkLifting:
         assert fused[0].score == pytest.approx(1.0 / 61, rel=1e-6)
         beta = next(r for r in fused if r.thread_id == "t-beta")
         assert beta.score == pytest.approx(1.0 / 64, rel=1e-6)
+
+
+class TestFindContact:
+    """The find_contact aggregator powers the LLM's name → email lookup
+    so a borderline model can resolve a display-name fragment before
+    passing ``from_addr`` to search_emails. Each test pins a behavior
+    the tool description implicitly promises.
+    """
+
+    def test_match_by_address_substring(self, seeded_db: Database):
+        # ``alice@example.com`` appears in t-alpha (sender) and t-beta
+        # (participant). The query ``"alice"`` matches both — count is 2.
+        results = seeded_db.find_contact("alice")
+        assert len(results) == 1
+        assert results[0]["email"] == "alice@example.com"
+        assert results[0]["thread_count"] == 2
+
+    def test_match_by_domain_fragment(self, seeded_db: Database):
+        # ``@example.com`` should pull every distinct address sharing
+        # that domain — alice, bob, carol, dave (one each across the
+        # three seeded threads, with alice doubled).
+        results = seeded_db.find_contact("@example.com")
+        emails = {r["email"] for r in results}
+        assert emails == {
+            "alice@example.com",
+            "bob@example.com",
+            "carol@example.com",
+            "dave@example.com",
+        }
+
+    def test_match_uses_display_name_when_present(self, seeded_db: Database, tmp_path):
+        # The seeded fixtures use bare addresses with no display names,
+        # so reseed a tiny DB with a quoted display name + parenthetical
+        # role suffix to exercise the parseaddr branch that pulls a name
+        # out of the wrapper.
+        from tests.conftest import _build_schema, _insert_thread
+
+        path = tmp_path / "named.db"
+        conn = sqlite3.connect(str(path))
+        conn.enable_load_extension(True)
+        import sqlite_vec
+
+        sqlite_vec.load(conn)
+        conn.enable_load_extension(False)
+        _build_schema(conn)
+        _insert_thread(
+            conn,
+            thread_id="t-named",
+            subject="hi",
+            participants=['"Jane Smith (Acct)" <jsmith@example.com>'],
+            senders=['"Jane Smith (Acct)" <jsmith@example.com>'],
+            embedding=[1.0, 0.0, 0.0, 0.0],
+        )
+        conn.close()
+        db = Database(str(path))
+        try:
+            results = db.find_contact("jane")
+            assert len(results) == 1
+            assert results[0]["email"] == "jsmith@example.com"
+            assert "Jane Smith (Acct)" in results[0]["names"]
+        finally:
+            db.close()
+
+    def test_results_sorted_by_thread_count_desc(self, seeded_db: Database):
+        # alice appears in 2 threads; bob, carol, dave in 1 each.
+        # Sort key is ``(-count, email)`` so alice leads regardless of
+        # alphabetical position.
+        results = seeded_db.find_contact("@example.com")
+        counts = [r["thread_count"] for r in results]
+        assert counts == sorted(counts, reverse=True)
+        assert results[0]["email"] == "alice@example.com"
+
+    def test_same_thread_does_not_double_count(self, seeded_db: Database, tmp_path):
+        # If a participant appears twice in one thread's JSON (Bridge
+        # has been observed to emit duplicates after thread merges),
+        # the contact should still count once for that thread.
+        from tests.conftest import _build_schema, _insert_thread
+
+        path = tmp_path / "dup.db"
+        conn = sqlite3.connect(str(path))
+        conn.enable_load_extension(True)
+        import sqlite_vec
+
+        sqlite_vec.load(conn)
+        conn.enable_load_extension(False)
+        _build_schema(conn)
+        _insert_thread(
+            conn,
+            thread_id="t-dup",
+            subject="hi",
+            # Same address listed twice — the dedupe inside the loop
+            # must collapse this to one increment.
+            participants=["alice@example.com", "alice@example.com"],
+            embedding=[1.0, 0.0, 0.0, 0.0],
+        )
+        conn.close()
+        db = Database(str(path))
+        try:
+            results = db.find_contact("alice")
+            assert len(results) == 1
+            assert results[0]["thread_count"] == 1
+        finally:
+            db.close()
+
+    def test_no_match_returns_empty_list(self, seeded_db: Database):
+        assert seeded_db.find_contact("nobodywiththisname") == []
+
+    def test_empty_query_returns_empty_list(self, seeded_db: Database):
+        # Whitespace-only or empty query is a no-op rather than a
+        # full-table scan that returns every contact.
+        assert seeded_db.find_contact("") == []
+        assert seeded_db.find_contact("   ") == []
+
+    def test_query_is_case_insensitive(self, seeded_db: Database):
+        upper = seeded_db.find_contact("ALICE")
+        lower = seeded_db.find_contact("alice")
+        assert upper == lower
+
+    def test_limit_caps_result_count(self, seeded_db: Database):
+        # Four distinct ``@example.com`` contacts in seeded_db. With
+        # limit=2 only the two highest-ranked should return.
+        results = seeded_db.find_contact("@example.com", limit=2)
+        assert len(results) == 2
+
+    def test_malformed_participants_json_skipped(self, seeded_db: Database, tmp_path):
+        # A thread with corrupt JSON in ``participants`` should be
+        # skipped rather than crashing the whole aggregation. Drop in
+        # a row by hand to bypass the writer's normal JSON encoding.
+        from tests.conftest import _build_schema
+
+        path = tmp_path / "bad-json.db"
+        conn = sqlite3.connect(str(path))
+        conn.enable_load_extension(True)
+        import sqlite_vec
+
+        sqlite_vec.load(conn)
+        conn.enable_load_extension(False)
+        _build_schema(conn)
+        conn.execute(
+            """INSERT INTO threads (
+                thread_id, subject, participants, senders, folder,
+                date_first, date_last, message_ids, snippet,
+                has_attachments, body_text, fts_rowid, display_subject
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                "t-broken",
+                "broken",
+                "{not valid json",
+                "[]",
+                "INBOX",
+                "2024-01-01T00:00:00+00:00",
+                "2024-01-01T00:00:00+00:00",
+                "[]",
+                "",
+                0,
+                "",
+                None,
+                None,
+            ),
+        )
+        # Add a valid neighbor so we can confirm the loop continued
+        # past the broken row instead of bailing out.
+        conn.execute(
+            """INSERT INTO threads (
+                thread_id, subject, participants, senders, folder,
+                date_first, date_last, message_ids, snippet,
+                has_attachments, body_text, fts_rowid, display_subject
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                "t-good",
+                "ok",
+                '["good@example.com"]',
+                "[]",
+                "INBOX",
+                "2024-01-01T00:00:00+00:00",
+                "2024-01-01T00:00:00+00:00",
+                "[]",
+                "",
+                0,
+                "",
+                None,
+                None,
+            ),
+        )
+        conn.commit()
+        conn.close()
+
+        db = Database(str(path))
+        try:
+            results = db.find_contact("good")
+            assert len(results) == 1
+            assert results[0]["email"] == "good@example.com"
+        finally:
+            db.close()
+
+
+class TestFindContactSendersOnly:
+    """``senders_only=True`` narrows the aggregation to From-line
+    addresses. The default (False) ranks across all participants and
+    can promote a recipient-only contact above the actual sender —
+    correct for "find this person's address anywhere" but wrong for
+    "filter to messages this person sent". Each test pins the
+    distinction.
+    """
+
+    def test_senders_only_excludes_recipient_only_contact(self, tmp_path):
+        # Build a small DB where one contact is ONLY a recipient,
+        # never a sender. With the default search they should still
+        # show up; with senders_only they should not. seeded_db's
+        # fixtures are too uniform for this — we want a thread where
+        # the participants list contains a contact whose address is
+        # NOT in the senders list.
+        from tests.conftest import _build_schema, _insert_thread
+
+        path = tmp_path / "senders-only.db"
+        conn = sqlite3.connect(str(path))
+        conn.enable_load_extension(True)
+        import sqlite_vec
+
+        sqlite_vec.load(conn)
+        conn.enable_load_extension(False)
+        _build_schema(conn)
+        # One thread: alice is the sender, smith is a CC. From the
+        # ``threads.senders`` JSON only alice appears; from
+        # ``threads.participants`` both appear.
+        _insert_thread(
+            conn,
+            thread_id="t-cc",
+            subject="quarterly",
+            participants=["alice@example.com", "smith@example.com"],
+            senders=["alice@example.com"],
+            embedding=[1.0, 0.0, 0.0, 0.0],
+        )
+        conn.close()
+        db = Database(str(path))
+        try:
+            # Default behavior: smith shows up because they're a
+            # participant on a thread.
+            assert db.find_contact("smith")[0]["email"] == "smith@example.com"
+            # senders_only=True: smith disappears because they were
+            # never a From-line address.
+            assert db.find_contact("smith", senders_only=True) == []
+            # alice still resolves under both modes.
+            assert db.find_contact("alice")[0]["email"] == "alice@example.com"
+            assert db.find_contact("alice", senders_only=True)[0]["email"] == "alice@example.com"
+        finally:
+            db.close()
+
+    def test_senders_only_default_is_false_for_back_compat(self, seeded_db: Database):
+        # The standalone find_contact MCP tool relies on the broader
+        # participants ranking by default — it's used for general
+        # "find this person's email" lookups where recipient-only
+        # matches are still useful. Pin the default explicitly so a
+        # future refactor that flips it requires updating this test.
+        seeded = seeded_db.find_contact("alice")
+        explicit = seeded_db.find_contact("alice", senders_only=False)
+        assert seeded == explicit
+
+    def test_senders_only_thread_count_reflects_send_frequency(self, tmp_path):
+        # When the same address sends some threads and only receives
+        # others, senders_only's thread_count should reflect the
+        # smaller "sent" count rather than the larger "appeared on"
+        # count. A from_name caller wants the address with the most
+        # SENT messages.
+        from tests.conftest import _build_schema, _insert_thread
+
+        path = tmp_path / "send-count.db"
+        conn = sqlite3.connect(str(path))
+        conn.enable_load_extension(True)
+        import sqlite_vec
+
+        sqlite_vec.load(conn)
+        conn.enable_load_extension(False)
+        _build_schema(conn)
+        # alice sent two threads, was a participant on a third.
+        _insert_thread(
+            conn,
+            thread_id="t-1",
+            subject="one",
+            participants=["alice@example.com", "bob@example.com"],
+            senders=["alice@example.com"],
+            embedding=[1.0, 0.0, 0.0, 0.0],
+        )
+        _insert_thread(
+            conn,
+            thread_id="t-2",
+            subject="two",
+            participants=["alice@example.com", "bob@example.com"],
+            senders=["alice@example.com"],
+            embedding=[0.0, 1.0, 0.0, 0.0],
+        )
+        _insert_thread(
+            conn,
+            thread_id="t-3",
+            subject="three",
+            participants=["alice@example.com", "bob@example.com"],
+            senders=["bob@example.com"],
+            embedding=[0.0, 0.0, 1.0, 0.0],
+        )
+        conn.close()
+        db = Database(str(path))
+        try:
+            full = db.find_contact("alice", senders_only=False)
+            sent = db.find_contact("alice", senders_only=True)
+            # Default: alice on 3 threads (participant count).
+            assert full[0]["thread_count"] == 3
+            # senders_only: alice sent 2 of those 3.
+            assert sent[0]["thread_count"] == 2
+        finally:
+            db.close()

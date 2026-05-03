@@ -528,8 +528,13 @@ class TestImageExtractor:
         from src.extractors import image as image_module
 
         # 50×50 = 2500 pixels. Cap at 1500 puts the image at 1.67× the
-        # cap — inside the warning band (Error fires only past 2×).
-        monkeypatch.setattr(image_module, "_MAX_IMAGE_PIXELS", 1500)
+        # cap — inside the warning band (Error fires only past 2×). The
+        # cap lives on ``Image.MAX_IMAGE_PIXELS`` since the global
+        # extractors-module assignment in
+        # ``indexer.extractors.__init__``; monkeypatching there scopes
+        # the test override and lets pytest restore the global on
+        # teardown.
+        monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", 1500)
 
         buf = io.BytesIO()
         Image.new("RGB", (50, 50), color="white").save(buf, format="PNG")
@@ -549,7 +554,7 @@ class TestImageExtractor:
         from src.extractors import image as image_module
 
         # 50×50 = 2500 pixels. Cap at 100 → 25× the cap → Error.
-        monkeypatch.setattr(image_module, "_MAX_IMAGE_PIXELS", 100)
+        monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", 100)
 
         buf = io.BytesIO()
         Image.new("RGB", (50, 50), color="white").save(buf, format="PNG")
@@ -557,23 +562,59 @@ class TestImageExtractor:
         with pytest.raises(Image.DecompressionBombError):
             image_module.extract(buf.getvalue())
 
-    def test_max_image_pixels_restored_after_extract(self, monkeypatch):
-        """``Image.MAX_IMAGE_PIXELS`` must be restored after a call so
-        other PIL consumers in the same process aren't permanently
-        constrained by the extractor's cap."""
+    def test_extract_does_not_mutate_global_max_image_pixels(self, monkeypatch):
+        """``extract()`` must not permanently change ``Image.MAX_IMAGE_PIXELS``.
+
+        Earlier versions wrapped the body in a per-call save/restore
+        because the cap was set inside ``extract()``. The cap is now
+        global (set at ``indexer.extractors.__init__`` import time),
+        so this test exists to catch regressions where someone
+        re-introduces a per-call assignment that doesn't restore
+        cleanly — that would silently bleed into pypdf's PIL usage and
+        defeat the whole point of having a uniform cap.
+        """
         import io
 
         from PIL import Image
         from src.extractors import image as image_module
 
-        prior = Image.MAX_IMAGE_PIXELS
+        before = Image.MAX_IMAGE_PIXELS
         monkeypatch.setattr(image_module.pytesseract, "image_to_string", lambda img, **_: "ok")
 
         buf = io.BytesIO()
         Image.new("RGB", (10, 10), color="white").save(buf, format="PNG")
         image_module.extract(buf.getvalue())
 
-        assert Image.MAX_IMAGE_PIXELS == prior
+        assert Image.MAX_IMAGE_PIXELS == before
+
+
+class TestGlobalImagePixelCap:
+    """Process-wide PIL cap installed by ``indexer.extractors`` at import.
+
+    The cap protects every PIL consumer in the indexer process, not
+    just the standalone image extractor. pypdf renders embedded
+    document images through PIL; openpyxl decodes chart graphics
+    through PIL; both inherit the limit set here.
+    """
+
+    def test_global_cap_is_set_when_extractors_package_is_imported(self):
+        from PIL import Image
+        from src.extractors import GLOBAL_MAX_IMAGE_PIXELS
+
+        # The package's ``__init__.py`` performs the assignment at
+        # import time. Importing ``GLOBAL_MAX_IMAGE_PIXELS`` here also
+        # triggers / confirms the import-time side effect.
+        assert Image.MAX_IMAGE_PIXELS == GLOBAL_MAX_IMAGE_PIXELS
+
+    def test_global_cap_is_meaningfully_below_pil_default(self):
+        # PIL's default is roughly 89,478,485 pixels. The eval session
+        # observed a 94 Mpx image admitted under that default. The
+        # global cap must be materially below the default — anything
+        # above ~50 Mpx defeats the purpose since the OOM-contributing
+        # 94 Mpx image was already in that band.
+        from src.extractors import GLOBAL_MAX_IMAGE_PIXELS
+
+        assert GLOBAL_MAX_IMAGE_PIXELS < 50_000_000
 
 
 class TestDispatcherTextCap:

@@ -137,6 +137,25 @@ class IndexingQueue:
         """Remove the job row. Indexing ran through cleanly."""
         self.db.queue_delete(filepath)
 
+    def mark_skipped(self, filepath: str, *, reason: str) -> None:
+        """Drop a queue row that cannot be retried.
+
+        Distinct from ``mark_succeeded`` (the file was NOT indexed) and
+        from ``mark_failed`` (no retry, no dead-letter, no attempts
+        bump). Used for terminal non-error conditions like
+        ``FileNotFoundError`` at the parse stage — the file moved
+        between enqueue and read (typically mbsync renaming to add an
+        IMAP flag suffix), so the path is permanently invalid and the
+        renamed file will be re-enqueued via a fresh ``IN_MOVED_TO``
+        event. Burning retry budget on the original path is wasted
+        work and clutters the dead-letter set with non-bug entries.
+
+        Logs at INFO because this is normal Maildir lifecycle
+        behavior, not an indexer fault.
+        """
+        self.db.queue_delete(filepath)
+        log.info("skipped: %s reason=%s", filepath, reason)
+
     def mark_failed(self, filepath: str, *, stage: str, error: str) -> None:
         """Record a failed attempt and schedule the next retry or dead-letter.
 
@@ -193,6 +212,21 @@ class IndexingQueue:
         )
 
     # ----- reads ---------------------------------------------------------
+
+    def is_dead(self, filepath: str) -> bool:
+        """True when ``filepath`` has a row at status=``dead``.
+
+        Used by the initial scan to skip dead-lettered files instead
+        of clobbering them via ``enqueue``'s ``INSERT OR REPLACE``.
+        Without this skip, a container restart re-enqueues every
+        previously-failed file, resets its retry counter to zero, and
+        starts the 5-attempt backoff cascade over again — wasting
+        ~30 minutes of Ollama load per file with no change in
+        upstream behavior. The watchdog rename / on-created events
+        keep going through ``enqueue`` (and DO reset dead state)
+        because those signal real change in the underlying file.
+        """
+        return self.db.queue_get_status(filepath) == STATUS_DEAD
 
     def stats(self) -> dict[str, int]:
         """Return ``{'queued': n, 'dead': n}`` — surfaced through the

@@ -172,3 +172,107 @@ class TestErrorPath:
         handler = _handler(fake_server, fake_ollama, seeded_db)
         out = asyncio.run(handler(query="anything", mode="hybrid"))
         assert "Search error" in _text(out)
+
+
+class TestFromNameResolution:
+    """The ``from_name`` parameter resolves a name through find_contact
+    and applies the resulting canonical address as a strict from_addr
+    filter. Each test pins a specific contract step so a regression in
+    one path doesn't corrupt the others silently.
+    """
+
+    def test_from_name_resolves_to_top_contact_address(self, fake_server, fake_ollama, seeded_db):
+        # ``alice`` matches alice@example.com (2 threads) — the top
+        # contact in find_contact's ranking. The handler should pass
+        # that address as ``from_addr`` to hybrid_search.
+        captured: dict = {}
+        original = seeded_db.hybrid_search
+
+        def spy(**kwargs):
+            captured.update(kwargs)
+            return original(**kwargs)
+
+        seeded_db.hybrid_search = spy  # type: ignore[assignment]
+        handler = _handler(fake_server, fake_ollama, seeded_db)
+        asyncio.run(handler(query="invoice", from_name="alice"))
+        assert captured.get("from_addr") == "alice@example.com"
+
+    def test_from_name_no_match_returns_honest_empty(self, fake_server, fake_ollama, seeded_db):
+        # When find_contact returns nothing the handler must NOT silently
+        # drop the filter and run the search with no sender constraint —
+        # that would surface unrelated threads. Return a clear empty
+        # signal that names the unresolved query.
+        handler = _handler(fake_server, fake_ollama, seeded_db)
+        out = asyncio.run(handler(query="anything", from_name="zzznosuchcontact"))
+        text = _text(out)
+        assert "No results found" in text
+        assert "zzznosuchcontact" in text
+
+    def test_explicit_from_addr_wins_over_from_name(self, fake_server, fake_ollama, seeded_db):
+        # When the caller supplied both, ``from_addr`` is the explicit
+        # constraint and ``from_name`` is just a hint — explicit wins.
+        # Verify by spying on hybrid_search and confirming the explicit
+        # address was forwarded unchanged.
+        captured: dict = {}
+        original = seeded_db.hybrid_search
+
+        def spy(**kwargs):
+            captured.update(kwargs)
+            return original(**kwargs)
+
+        seeded_db.hybrid_search = spy  # type: ignore[assignment]
+        handler = _handler(fake_server, fake_ollama, seeded_db)
+        asyncio.run(
+            handler(
+                query="invoice",
+                from_addr="explicit@example.com",
+                from_name="alice",  # would resolve to alice@example.com
+            )
+        )
+        assert captured.get("from_addr") == "explicit@example.com"
+
+    def test_from_name_skipped_when_only_query_passed(self, fake_server, fake_ollama, seeded_db):
+        # No from_name -> no find_contact call -> no extra DB work. The
+        # spy on find_contact must not see any invocation when the
+        # caller doesn't pass from_name.
+        called: list = []
+        original = seeded_db.find_contact
+
+        def spy(query, limit, *, senders_only=False):
+            called.append((query, limit, senders_only))
+            return original(query, limit, senders_only=senders_only)
+
+        seeded_db.find_contact = spy  # type: ignore[assignment]
+        handler = _handler(fake_server, fake_ollama, seeded_db)
+        asyncio.run(handler(query="invoice"))
+        assert called == []
+
+    def test_from_name_resolution_uses_senders_only(self, fake_server, fake_ollama, seeded_db):
+        # The from_name -> from_addr resolution must restrict the
+        # find_contact aggregation to From-line addresses. Otherwise
+        # a frequent recipient/CC contact could outrank the actual
+        # sender in find_contact's results, and the resulting
+        # from_addr filter would return zero or wrong matches. Spy
+        # on find_contact and confirm the keyword arg is forwarded.
+        captured_kwargs: dict = {}
+        original = seeded_db.find_contact
+
+        def spy(query, limit, *, senders_only=False):
+            captured_kwargs["senders_only"] = senders_only
+            return original(query, limit, senders_only=senders_only)
+
+        seeded_db.find_contact = spy  # type: ignore[assignment]
+        handler = _handler(fake_server, fake_ollama, seeded_db)
+        asyncio.run(handler(query="invoice", from_name="alice"))
+        assert captured_kwargs.get("senders_only") is True
+
+    def test_from_name_lookup_error_surfaces_as_search_error(
+        self, fake_server, fake_ollama, seeded_db
+    ):
+        def boom(_query, _limit, *, senders_only=False):
+            raise RuntimeError("simulated find_contact failure")
+
+        seeded_db.find_contact = boom  # type: ignore[assignment]
+        handler = _handler(fake_server, fake_ollama, seeded_db)
+        out = asyncio.run(handler(query="anything", from_name="alice"))
+        assert "Search error" in _text(out)

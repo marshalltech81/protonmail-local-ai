@@ -32,6 +32,67 @@ logging.basicConfig(
 log = logging.getLogger("mcp-server")
 
 
+class _SilenceClientDisconnect(logging.Filter):
+    """Drop benign ``ClientDisconnect`` noise from the MCP SDK's logs.
+
+    Open WebUI opens an MCP transport session via ``POST /mcp`` and sometimes
+    abandons it before sending the body — typically when the chat
+    coordinator decided to retry a different request shape, or the previous
+    call already returned what it needed. The MCP SDK catches the resulting
+    ``starlette.requests.ClientDisconnect`` cleanly and the connection ends
+    without harm, but the SDK logs it at ERROR level on two loggers in two
+    different shapes:
+
+    - ``mcp.server.streamable_http`` emits ``"Error handling POST request"``
+      with ``exc_info`` set to the ``ClientDisconnect`` traceback. Filter
+      by exception class.
+    - ``mcp.server.lowlevel.server`` emits ``"Received exception from
+      stream:"`` (with NO ``exc_info`` — the SDK catches the exception
+      upstream and writes the formatted repr into the message). The
+      same prefix is also used for genuinely-different exceptions
+      caught off the stream, so we cannot suppress the prefix
+      unconditionally — that would hide real failures like
+      ``RuntimeError("boom")``. Drop only the two recognizable
+      disconnect forms: an empty trailing message (the bare
+      ``ClientDisconnect`` signature) or a trailing message that
+      explicitly names the class.
+
+    Records that don't match either shape still propagate unchanged so a
+    real bug surfaces normally.
+    """
+
+    _STREAM_PREFIX = "Received exception from stream:"
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.exc_info:
+            exc_type = record.exc_info[0]
+            if exc_type is not None and exc_type.__name__ == "ClientDisconnect":
+                return False
+        # ``getMessage`` resolves the format string + args the same way
+        # the formatter would; checking ``record.msg`` alone would miss
+        # any record built with logging-format args.
+        message = record.getMessage()
+        if message.startswith(self._STREAM_PREFIX):
+            trailing = message[len(self._STREAM_PREFIX) :].strip()
+            # Empty trailing == the ClientDisconnect bare signature
+            # observed during eval ("Received exception from stream: ").
+            # ClientDisconnect-bearing trailing == any wording that
+            # explicitly names the class. Anything else (real exceptions
+            # the SDK chose to surface) falls through and propagates.
+            if not trailing or "ClientDisconnect" in trailing:
+                return False
+        return True
+
+
+# Attach the filter to the two MCP SDK loggers known to surface
+# ``ClientDisconnect`` tracebacks. Limited scope on purpose: filtering at
+# the root logger would risk swallowing a future, genuinely-different
+# ``ClientDisconnect`` somewhere in the stack.
+_disconnect_filter = _SilenceClientDisconnect()
+for _logger_name in ("mcp.server.streamable_http", "mcp.server.lowlevel.server"):
+    logging.getLogger(_logger_name).addFilter(_disconnect_filter)
+
+
 def _env_bool(name: str, default: bool) -> bool:
     raw = os.environ.get(name)
     if raw is None:
@@ -63,7 +124,7 @@ def _read_secret(secret_name: str, env_fallback: str = "") -> str:
 SQLITE_PATH = os.environ.get("SQLITE_PATH", "/data/mail.db")
 OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://ollama:11434")
 EMBED_MODEL = os.environ.get("OLLAMA_EMBED_MODEL", "nomic-embed-text")
-LLM_MODEL = os.environ.get("OLLAMA_LLM_MODEL", "llama3.2")
+LLM_MODEL = os.environ.get("OLLAMA_LLM_MODEL", "qwen2.5:14b-instruct")
 LLM_MODE = os.environ.get("LLM_MODE", "local")
 CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL", "claude-sonnet-4-6")
 ANTHROPIC_KEY = _read_secret("anthropic_api_key", "ANTHROPIC_API_KEY")

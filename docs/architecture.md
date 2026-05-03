@@ -348,16 +348,17 @@ contentless configuration two things are true that matter here:
 - `UNINDEXED` columns always read back as `NULL`, so the MCP keyword-search
   join on `threads_fts.thread_id` could not return any rows.
 
-Schema v3 rebuilds `threads_fts` with `contentless_delete=1` (SQLite ≥ 3.43)
-and stores each row's rowid in `threads.fts_rowid`. Writes delete by rowid
+`threads_fts` is created with `contentless_delete=1` (SQLite ≥ 3.43) and
+each row's rowid is stored in `threads.fts_rowid`. Writes delete by rowid
 before re-inserting; the MCP keyword search joins on
-`threads_fts.rowid = threads.fts_rowid`. This fixes both the stale-token
+`threads_fts.rowid = threads.fts_rowid`. This avoids both the stale-token
 problem and the always-null join.
 
 ## Durable Indexing Queue
 
-Schema v8 adds the `indexing_jobs` table. The watchdog callbacks and
-`initial_index` no longer run the parse / embed / upsert pipeline
+The `indexing_jobs` table backs the durable queue. The watchdog
+callbacks and `initial_index` no longer run the parse / embed / upsert
+pipeline
 inline — they `enqueue` each filepath and return immediately. A worker
 loop in the main thread drains the queue via `drain_queue`, capped at
 `HEALTH_REFRESH_EVERY` jobs per pass so the reconciler and health-file
@@ -368,10 +369,28 @@ Each job carries `attempts`, `last_stage`, `last_error`, and a
 (`base_backoff_seconds × 2^(attempts - 1)`, capped at 6 hours). When
 `attempts` reaches `INDEXER_MAX_ATTEMPTS` (default 5), the row
 transitions to `status = 'dead'` — it stays in the table for operator
-visibility and stops being claimed. Re-enqueuing a path (for instance
-a new mbsync delivery that reuses the filename) resets the row to
-`queued` with `attempts = 0`, so `dead` is "give up for now," not
-"never try again."
+visibility and stops being claimed. Watchdog rename / create events
+(`on_moved`, `on_created`) DO reset a `dead` row to `queued` with
+`attempts = 0` because those events signal real change in the
+underlying file. The initial scan does NOT — it only proves the
+file exists on disk, not that anything about its content has
+changed since the last failure, so re-enqueuing every dead row at
+container restart would just re-run the same retry cascade against
+the same upstream condition. The scan therefore consults
+`queue.is_dead(filepath)` and skips dead-lettered files, leaving
+them dead until something explicitly resets them.
+
+Two stage outcomes short-circuit the retry path entirely:
+
+- `parse_skipped_missing` — `parse_email` raised `FileNotFoundError`,
+  almost always because mbsync renamed the file (added an IMAP flag
+  suffix) between enqueue and read. The path is permanently invalid;
+  the renamed file enters the queue under its new name via a fresh
+  `IN_MOVED_TO` event. The worker calls `mark_skipped` instead of
+  `mark_failed`: row deleted, no retry, no dead-letter.
+- `PermissionError` at parse keeps the existing retry path because
+  the file genuinely exists; the mbsync chmod race resolves on a
+  later sync cycle.
 
 Two environment variables shape the queue: `INDEXER_MAX_ATTEMPTS` and
 `INDEXER_RETRY_BASE_SECONDS`. Neither is required — the defaults are
@@ -388,8 +407,8 @@ issue).
 
 ## File Identity on `indexed_files`
 
-Schema v7 augments `indexed_files` with `size`, `mtime_ns`, and
-`content_hash` (SHA-256 over the raw file bytes) captured at
+`indexed_files` carries `size`, `mtime_ns`, and `content_hash`
+(SHA-256 over the raw file bytes) captured at
 `parse_email` time. `is_indexed` stays filepath-keyed — the hot path
 remains an O(1) primary-key lookup — and the new columns are written
 alongside. On a flag-only mbsync rename (`msg:2,S` → `msg:2,SR`)

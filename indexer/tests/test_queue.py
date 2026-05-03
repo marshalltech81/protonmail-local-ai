@@ -157,6 +157,78 @@ class TestMarkSucceededAndFailed:
         assert q.claim_next() is None
 
 
+class TestIsDead:
+    """``is_dead(filepath)`` tells the initial scan whether to skip a row.
+
+    Without this gate, every restart re-enqueues dead-lettered files
+    via ``INSERT OR REPLACE``, resetting attempts to 0 and burning
+    another full retry cascade on the same upstream condition that
+    caused the original dead-letter (e.g. Ollama embed 500s on a
+    poison-pill payload). The reset semantics on ``enqueue`` are
+    intentional for genuine watchdog rename / create events — those
+    signal actual file change — but routine startup re-discovery
+    should NOT trigger them.
+    """
+
+    def test_returns_true_for_dead_row(self, db: Database):
+        q = _queue(db, max_attempts=1)
+        q.enqueue("/m/dead", REASON_ON_CREATED)
+        q.mark_failed("/m/dead", stage="parse", error="bad")  # 1 attempt -> dead
+        assert q.is_dead("/m/dead") is True
+
+    def test_returns_false_for_queued_row(self, db: Database):
+        q = _queue(db)
+        q.enqueue("/m/active", REASON_ON_CREATED)
+        assert q.is_dead("/m/active") is False
+
+    def test_returns_false_for_unknown_filepath(self, db: Database):
+        # Path was never enqueued OR has succeeded and been deleted —
+        # both surface as "no row" and must not be reported as dead.
+        q = _queue(db)
+        assert q.is_dead("/m/never") is False
+
+
+class TestMarkSkipped:
+    """``mark_skipped`` drops a row without consuming retry budget.
+
+    Distinct from mark_failed (no attempts increment, no dead-letter)
+    and from mark_succeeded (the file was NOT indexed). Used for
+    terminal non-error conditions like FileNotFoundError at parse.
+    """
+
+    def test_mark_skipped_deletes_the_row(self, db: Database):
+        q = _queue(db)
+        q.enqueue("/m/gone", REASON_ON_CREATED)
+        q.mark_skipped("/m/gone", reason="file_missing")
+        assert q.claim_next() is None
+        row = db._conn.execute("SELECT 1 FROM indexing_jobs WHERE filepath = '/m/gone'").fetchone()
+        assert row is None
+
+    def test_mark_skipped_does_not_increment_attempts(self, db: Database):
+        # If a file was previously failed once and now goes missing,
+        # mark_skipped should drop the row outright. The attempts
+        # counter is irrelevant — there's no retry budget to spend.
+        q = _queue(db, max_attempts=5, base_backoff_seconds=0)
+        q.enqueue("/m/once", REASON_ON_CREATED)
+        q.mark_failed("/m/once", stage="embed", error="ollama")
+        row = db._conn.execute(
+            "SELECT attempts FROM indexing_jobs WHERE filepath = '/m/once'"
+        ).fetchone()
+        assert row["attempts"] == 1
+        q.mark_skipped("/m/once", reason="file_missing")
+        # Row is gone; attempts on the (now-deleted) row are not
+        # what the queue cares about — visibility is via the log line.
+        assert q.claim_next() is None
+
+    def test_mark_skipped_is_noop_for_missing_row(self, db: Database):
+        # Mirror the mark_succeeded / mark_failed contract: silent
+        # no-op on a row that's already gone (race with a different
+        # cleanup path). Must not raise.
+        q = _queue(db)
+        q.mark_skipped("/m/never_enqueued", reason="file_missing")
+        assert q.claim_next() is None
+
+
 class TestReEnqueueResetsState:
     def test_reenqueue_resets_failed_row_to_fresh_attempt(self, db: Database):
         """A newly-observed watchdog event is fresh intent. A previous

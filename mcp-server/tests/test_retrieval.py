@@ -167,3 +167,58 @@ class TestListFolders:
         handler = _handlers(fake_server, seeded_db)["list_folders"]
         out = asyncio.run(handler())
         assert "Error" in _text(out)
+
+
+class TestFindContact:
+    """The MCP tool wrapping ``Database.find_contact``. Tests focus on
+    the rendered text — what the LLM actually receives — rather than
+    re-asserting the aggregation, which is covered in ``test_sqlite.py``.
+    """
+
+    def test_renders_contacts_with_email_and_count(self, fake_server, seeded_db):
+        handler = _handlers(fake_server, seeded_db)["find_contact"]
+        # ``alice`` matches alice@example.com, who appears in t-alpha
+        # (sender) and t-beta (participant) per the seeded fixture.
+        out = asyncio.run(handler(query="alice"))
+        text = _text(out)
+        assert "alice@example.com" in text
+        # Count formatting must surface the number so the LLM can pick
+        # the most-active sender when several match.
+        assert "Threads: 2" in text
+
+    def test_no_match_returns_empty_sentinel(self, fake_server, seeded_db):
+        handler = _handlers(fake_server, seeded_db)["find_contact"]
+        out = asyncio.run(handler(query="zzznosuchname"))
+        assert "No contacts found" in _text(out)
+
+    def test_empty_query_returns_guidance_message(self, fake_server, seeded_db):
+        # An empty string would otherwise hit the DB as a no-op aggregation;
+        # the tool must short-circuit with a guidance message so the LLM
+        # gets a clear signal rather than an empty list.
+        handler = _handlers(fake_server, seeded_db)["find_contact"]
+        out = asyncio.run(handler(query=""))
+        assert "Provide a name" in _text(out)
+
+    def test_above_ceiling_limit_is_clamped(self, fake_server, seeded_db):
+        # An LLM-supplied ``limit=99999`` should clamp to the documented
+        # ceiling (50) before reaching the DB. Spy on the call to confirm.
+        seen: dict = {}
+        original = seeded_db.find_contact
+
+        def spy(query, limit):
+            seen["limit"] = limit
+            return original(query, limit)
+
+        seeded_db.find_contact = spy  # type: ignore[assignment]
+        handler = _handlers(fake_server, seeded_db)["find_contact"]
+        asyncio.run(handler(query="alice", limit=99999))
+        assert seen["limit"] == 50
+
+    def test_db_exception_returns_error_text(self, fake_server, seeded_db):
+        def boom(_query, _limit):
+            raise RuntimeError("simulated read failure")
+
+        seeded_db.find_contact = boom  # type: ignore[assignment]
+        handler = _handlers(fake_server, seeded_db)["find_contact"]
+        out = asyncio.run(handler(query="alice"))
+        assert "Error" in _text(out)

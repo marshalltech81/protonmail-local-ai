@@ -5,14 +5,19 @@ All tools are available inside Claude Desktop once the stack is running.
 ## Group 1 — Search
 
 ### `search_emails`
-Search your mailbox using semantic, keyword, or hybrid search.
+Search the mailbox and return matching **threads** (conversations), not
+individual messages. Each result bundles its messages with subject,
+participants, date range, folder, and a short snippet. To read the
+contents of a returned thread, follow up with `get_thread` or
+`summarize_thread` using the result's `Thread ID`.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `query` | string | required | Natural language or keyword query |
 | `mode` | string | `hybrid` | `hybrid`, `semantic`, or `keyword` |
 | `folders` | list | all | Scope to specific folders |
-| `from_addr` | string | none | Filter by sender (partial match) |
+| `from_addr` | string | none | Filter by canonical sender address (or domain like `@example.com`); substring fallback when the value can't canonicalize |
+| `from_name` | string | none | Filter by sender name; resolved through `find_contact` to a canonical address before applying. Use when the user names a person but not their email. `from_addr` wins if both are given. |
 | `date_from` | string | none | ISO 8601 date lower bound |
 | `date_to` | string | none | ISO 8601 date upper bound |
 | `has_attachments` | bool | none | Filter by attachment presence |
@@ -79,6 +84,26 @@ Browse threads in a folder.
 
 ### `list_folders`
 List all folders and thread counts.
+
+### `find_contact`
+Resolve a name / address / domain fragment to canonical email
+addresses found in the index. Use this **before** `search_emails`
+when the user names a person but not their address (e.g. "emails
+from Jane Smith"); pass the chosen result's email to
+`search_emails(from_addr=<email>)` for sender-filtered results.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `query` | string | required | Name, address, or domain fragment (case-insensitive) |
+| `limit` | int | `10` | Maximum contacts to return; clamped to `[1, 50]` |
+
+The aggregator iterates `threads.participants`, parses each entry
+with `parseaddr`, deduplicates by canonical email (so the same
+contact across many threads collapses to one row), and ranks
+results by `thread_count` descending with email as the tiebreaker.
+Display names are reported when the index has them. Same-thread
+duplicates (occasionally emitted by Bridge after a thread merge)
+do not double-count.
 
 ---
 

@@ -18,7 +18,7 @@ from unittest.mock import MagicMock
 import pytest
 from src import main
 from src.database import EMBEDDING_DIM, Database
-from src.queue import IndexingQueue
+from src.queue import REASON_INITIAL_SCAN, IndexingQueue
 from src.threader import Threader
 
 
@@ -274,6 +274,65 @@ class TestInitialIndexHeartbeat:
         assert len(touches) == message_count
 
 
+class TestInitialIndexDeadLetterRespect:
+    """``initial_index`` must NOT re-enqueue dead-lettered files.
+
+    The bug this guards against was observed in production: a file
+    that exhausted its retries (e.g. Ollama 500'd on a poison-pill
+    payload) would be re-enqueued on every container restart because
+    the initial scan walks the Maildir, sees the file isn't in
+    ``messages``, and clobbers the dead row via INSERT OR REPLACE.
+    Each restart then burns another 5-attempt cascade and re-deads
+    the same file. ``is_dead`` checks the queue's status before
+    re-enqueueing so dead-lettered files stay dead until something
+    really changes about them.
+    """
+
+    def test_dead_lettered_file_is_not_re_enqueued_on_initial_index(self, tmp_path, monkeypatch):
+        maildir = tmp_path / "maildir"
+        inbox = maildir / "INBOX" / "cur"
+        inbox.mkdir(parents=True)
+
+        # File exists on disk and has previously failed all retries.
+        # We synthesize the dead row directly: it's faster and more
+        # reliable than driving a real failure through the worker.
+        dest = inbox / "msg.eml"
+        _write_eml(dest, "deadletter@example.com")
+
+        db = Database(tmp_path / "mail.db")
+        threader = Threader(db)
+        embedder = MagicMock()
+        embedder.embed.return_value = [0.0] * EMBEDDING_DIM
+        queue = IndexingQueue(db, max_attempts=1, base_backoff_seconds=0)
+
+        # Drive one failure to land the row in dead state. We patch
+        # parse_email so the failure is deterministic and fast.
+        monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
+        monkeypatch.setattr(
+            main, "parse_email", lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("nope"))
+        )
+        queue.enqueue(str(dest), REASON_INITIAL_SCAN)
+        main.drain_queue(queue, db, embedder, threader)
+        assert queue.is_dead(str(dest)) is True
+
+        # Restore the real parse_email so initial_index would otherwise
+        # succeed on this file. The point of the test is that
+        # initial_index doesn't TRY to re-process it because the row
+        # is dead.
+        from src.parser import parse_email as real_parse_email
+
+        monkeypatch.setattr(main, "parse_email", real_parse_email)
+
+        # Run initial_index. The dead row should be left alone.
+        before_attempts = db.queue_get_attempts(str(dest))
+        main.initial_index(db, embedder, threader, queue)
+        after_attempts = db.queue_get_attempts(str(dest))
+
+        # Row still exists, still dead, attempts unchanged.
+        assert queue.is_dead(str(dest)) is True
+        assert before_attempts == after_attempts
+
+
 class TestDrainQueueRetryAndDeadLetter:
     """End-to-end coverage of the queue worker: transient embedding
     failure retries until it succeeds; persistent failure transitions
@@ -344,6 +403,53 @@ class TestDrainQueueRetryAndDeadLetter:
         ).fetchone()
         assert row["last_stage"] == "embed"
         assert "ollama still down" in row["last_error"]
+
+    def test_missing_file_routes_to_skip_not_retry(self, tmp_path):
+        # Models the mbsync flag-rename race: file existed at enqueue
+        # time, then mbsync renamed it (added an IMAP flag suffix)
+        # before the worker could read it. The original path is gone
+        # forever; retrying it 5 times wastes ~30 minutes of backoff
+        # before dead-lettering, and the renamed file enters the queue
+        # under its new name via a fresh IN_MOVED_TO event anyway.
+        # ``_index_one_file`` must distinguish this from EACCES so the
+        # worker can drop the row instead of consuming retry budget.
+        dest = tmp_path / "INBOX" / "cur" / "definitely-not-here.eml"
+
+        db = Database(tmp_path / "mail.db")
+        threader = Threader(db)
+        embedder = MagicMock()
+        embedder.embed.return_value = [0.0] * EMBEDDING_DIM
+
+        ok, stage, err, _ = main._index_one_file(dest, db, embedder, threader)
+
+        assert ok is False
+        assert stage == "parse_skipped_missing"
+        assert err is not None
+        assert "FileNotFoundError" in err or "No such file" in err
+
+    def test_drain_queue_skips_row_when_file_missing_at_parse(self, tmp_path):
+        # End-to-end: enqueue a path that doesn't exist on disk, drain,
+        # confirm the row was DELETED (not dead-lettered, not retained
+        # in the queue with attempts incremented). One drain pass; if
+        # this regressed and routed to mark_failed instead, attempts
+        # would be 1 and status would be queued (with backoff).
+        db = Database(tmp_path / "mail.db")
+        threader = Threader(db)
+        embedder = MagicMock()
+        embedder.embed.return_value = [0.0] * EMBEDDING_DIM
+        queue = _make_queue(db)
+
+        gone = tmp_path / "INBOX" / "cur" / "vanished.eml"
+        queue.enqueue(str(gone), REASON_INITIAL_SCAN)
+
+        main.drain_queue(queue, db, embedder, threader)
+
+        # Row is gone — no retry, no dead-letter row.
+        assert queue.stats() == {"queued": 0, "dead": 0}
+        row = db._conn.execute(
+            "SELECT 1 FROM indexing_jobs WHERE filepath = ?", (str(gone),)
+        ).fetchone()
+        assert row is None
 
     def test_unreadable_file_routes_to_retry_not_terminal_success(self, tmp_path):
         # Models the mbsync 0600→0644 chmod race: the watchdog enqueues a
