@@ -18,7 +18,7 @@ from unittest.mock import MagicMock
 import pytest
 from src import main
 from src.database import EMBEDDING_DIM, Database
-from src.queue import IndexingQueue
+from src.queue import REASON_INITIAL_SCAN, IndexingQueue
 from src.threader import Threader
 
 
@@ -344,6 +344,53 @@ class TestDrainQueueRetryAndDeadLetter:
         ).fetchone()
         assert row["last_stage"] == "embed"
         assert "ollama still down" in row["last_error"]
+
+    def test_missing_file_routes_to_skip_not_retry(self, tmp_path):
+        # Models the mbsync flag-rename race: file existed at enqueue
+        # time, then mbsync renamed it (added an IMAP flag suffix)
+        # before the worker could read it. The original path is gone
+        # forever; retrying it 5 times wastes ~30 minutes of backoff
+        # before dead-lettering, and the renamed file enters the queue
+        # under its new name via a fresh IN_MOVED_TO event anyway.
+        # ``_index_one_file`` must distinguish this from EACCES so the
+        # worker can drop the row instead of consuming retry budget.
+        dest = tmp_path / "INBOX" / "cur" / "definitely-not-here.eml"
+
+        db = Database(tmp_path / "mail.db")
+        threader = Threader(db)
+        embedder = MagicMock()
+        embedder.embed.return_value = [0.0] * EMBEDDING_DIM
+
+        ok, stage, err, _ = main._index_one_file(dest, db, embedder, threader)
+
+        assert ok is False
+        assert stage == "parse_skipped_missing"
+        assert err is not None
+        assert "FileNotFoundError" in err or "No such file" in err
+
+    def test_drain_queue_skips_row_when_file_missing_at_parse(self, tmp_path):
+        # End-to-end: enqueue a path that doesn't exist on disk, drain,
+        # confirm the row was DELETED (not dead-lettered, not retained
+        # in the queue with attempts incremented). One drain pass; if
+        # this regressed and routed to mark_failed instead, attempts
+        # would be 1 and status would be queued (with backoff).
+        db = Database(tmp_path / "mail.db")
+        threader = Threader(db)
+        embedder = MagicMock()
+        embedder.embed.return_value = [0.0] * EMBEDDING_DIM
+        queue = _make_queue(db)
+
+        gone = tmp_path / "INBOX" / "cur" / "vanished.eml"
+        queue.enqueue(str(gone), REASON_INITIAL_SCAN)
+
+        main.drain_queue(queue, db, embedder, threader)
+
+        # Row is gone — no retry, no dead-letter row.
+        assert queue.stats() == {"queued": 0, "dead": 0}
+        row = db._conn.execute(
+            "SELECT 1 FROM indexing_jobs WHERE filepath = ?", (str(gone),)
+        ).fetchone()
+        assert row is None
 
     def test_unreadable_file_routes_to_retry_not_terminal_success(self, tmp_path):
         # Models the mbsync 0600→0644 chmod race: the watchdog enqueues a

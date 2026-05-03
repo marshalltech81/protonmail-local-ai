@@ -370,12 +370,23 @@ def _index_one_file(
     t0 = time.perf_counter()
     try:
         message = parse_email(path, maildir_root=MAILDIR_PATH)
+    except FileNotFoundError as e:
+        # The file was renamed or deleted between enqueue and parse.
+        # Almost always this is mbsync appending an IMAP flag suffix
+        # (``,U=42:2`` -> ``,U=42:2,S``) the moment it sets a flag,
+        # which makes the original path permanently invalid. There is
+        # nothing to retry — the indexer's Maildir watcher will see
+        # the new path via ``IN_MOVED_TO`` and enqueue it under the
+        # correct name. Distinct stage so the worker can drop the
+        # row without consuming retry budget.
+        parse_ms = (time.perf_counter() - t0) * 1000
+        return False, "parse_skipped_missing", repr(e), StageTimings(parse_ms=parse_ms)
     except Exception as e:
-        # Transient I/O (PermissionError from the mbsync chmod race,
-        # FileNotFoundError from a mid-event rename) propagates from
-        # parse_email so the queue routes it to retry/backoff. Other
-        # parse-content failures are caught inside parse_email and
-        # surface as ``message is None`` below.
+        # Transient I/O on a path that DOES exist (PermissionError from
+        # the mbsync chmod race) propagates so the queue routes it to
+        # retry/backoff — the chmod resolves on a later sync cycle.
+        # Other parse-content failures are caught inside parse_email
+        # and surface as ``message is None`` below.
         parse_ms = (time.perf_counter() - t0) * 1000
         return False, "parse", repr(e), StageTimings(parse_ms=parse_ms)
     parse_ms = (time.perf_counter() - t0) * 1000
@@ -474,6 +485,12 @@ def drain_queue(
             timing_aggregator.record(timings)
         if succeeded:
             queue.mark_succeeded(filepath)
+        elif stage == "parse_skipped_missing":
+            # The file moved before parse could read it (mbsync flag
+            # rename). Drop the row instead of consuming retry budget;
+            # the renamed file's watchdog event re-enqueues it under
+            # the correct name.
+            queue.mark_skipped(filepath, reason="file_missing")
         else:
             queue.mark_failed(filepath, stage=stage, error=error or "")
         attempted += 1
@@ -541,6 +558,10 @@ def initial_index(
         timing_aggregator.record(timings)
         if succeeded:
             queue.mark_succeeded(filepath)
+        elif stage == "parse_skipped_missing":
+            # See drain_queue: a missing file at parse time is mbsync
+            # rename, not an indexer fault. Drop without retrying.
+            queue.mark_skipped(filepath, reason="file_missing")
         else:
             queue.mark_failed(filepath, stage=stage, error=error or "")
         processed += 1

@@ -137,6 +137,25 @@ class IndexingQueue:
         """Remove the job row. Indexing ran through cleanly."""
         self.db.queue_delete(filepath)
 
+    def mark_skipped(self, filepath: str, *, reason: str) -> None:
+        """Drop a queue row that cannot be retried.
+
+        Distinct from ``mark_succeeded`` (the file was NOT indexed) and
+        from ``mark_failed`` (no retry, no dead-letter, no attempts
+        bump). Used for terminal non-error conditions like
+        ``FileNotFoundError`` at the parse stage — the file moved
+        between enqueue and read (typically mbsync renaming to add an
+        IMAP flag suffix), so the path is permanently invalid and the
+        renamed file will be re-enqueued via a fresh ``IN_MOVED_TO``
+        event. Burning retry budget on the original path is wasted
+        work and clutters the dead-letter set with non-bug entries.
+
+        Logs at INFO because this is normal Maildir lifecycle
+        behavior, not an indexer fault.
+        """
+        self.db.queue_delete(filepath)
+        log.info("skipped: %s reason=%s", filepath, reason)
+
     def mark_failed(self, filepath: str, *, stage: str, error: str) -> None:
         """Record a failed attempt and schedule the next retry or dead-letter.
 
