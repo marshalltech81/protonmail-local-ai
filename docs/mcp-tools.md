@@ -16,7 +16,8 @@ contents of a returned thread, follow up with `get_thread` or
 | `query` | string | required | Natural language or keyword query |
 | `mode` | string | `hybrid` | `hybrid`, `semantic`, or `keyword` |
 | `folders` | list | all | Scope to specific folders |
-| `from_addr` | string | none | Filter by sender (partial match) |
+| `from_addr` | string | none | Filter by canonical sender address (or domain like `@example.com`); substring fallback when the value can't canonicalize |
+| `from_name` | string | none | Filter by sender name; resolved through `find_contact` to a canonical address before applying. Use when the user names a person but not their email. `from_addr` wins if both are given. |
 | `date_from` | string | none | ISO 8601 date lower bound |
 | `date_to` | string | none | ISO 8601 date upper bound |
 | `has_attachments` | bool | none | Filter by attachment presence |

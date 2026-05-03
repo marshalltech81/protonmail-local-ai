@@ -29,6 +29,7 @@ def register_search_tools(server, db, ollama):
         mode: str = "hybrid",
         folders: list[str] | None = None,
         from_addr: str | None = None,
+        from_name: str | None = None,
         date_from: str | None = None,
         date_to: str | None = None,
         has_attachments: bool | None = None,
@@ -60,10 +61,19 @@ def register_search_tools(server, db, ollama):
                   semantic = vector similarity only (best for conceptual queries)
                   keyword = BM25 only (best for exact names, numbers, dates)
             folders: Filter to specific folders e.g. ["INBOX", "Sent"]
-            from_addr: Filter by sender address or name (partial match).
-                       For best precision, resolve the canonical email
-                       via find_contact first when the user names a
-                       person but not their address.
+            from_addr: Filter by canonical sender address e.g.
+                       "jane@example.com" or "@example.com" for a domain.
+                       Substring match against the stored sender display
+                       string for shapes that can't canonicalize.
+            from_name: Filter by sender NAME — pass the user's words
+                       directly ("Jane Smith", "the accountant",
+                       "Smith"). The tool resolves the name through
+                       find_contact internally and applies the
+                       most-active matching contact's address as a
+                       strict from_addr filter. Use this when the user
+                       names a person but not their address. If both
+                       from_addr and from_name are given, from_addr
+                       wins (explicit beats lookup).
             date_from: ISO 8601 date lower bound e.g. "2024-01-01"
             date_to: ISO 8601 date upper bound e.g. "2024-12-31"
             has_attachments: True to only show threads with attachments
@@ -86,6 +96,32 @@ def register_search_tools(server, db, ollama):
         # raw value is missing or unparseable rather than raising a bare
         # ValueError before the try/except below.
         limit = clamp_int(limit, default=10, minimum=1, maximum=_MAX_SEARCH_LIMIT)
+
+        # Resolve ``from_name`` -> canonical address via find_contact.
+        # Skipped when the caller already passed a strict ``from_addr``
+        # — explicit always beats lookup. ``find_contact`` returns
+        # contacts ranked by thread count, so the first hit is the most
+        # active matching identity (e.g. "Smith" -> the Smith you've
+        # corresponded with most). When the lookup yields nothing,
+        # short-circuit with an honest empty result rather than
+        # silently dropping the filter and returning unrelated threads.
+        if from_name and not from_addr:
+            try:
+                contacts = await asyncio.to_thread(db.find_contact, from_name, 1)
+            except Exception as e:
+                log.error(f"search_emails: find_contact({from_name!r}) failed: {e}")
+                return [TextContent(type="text", text=f"Search error: {e}")]
+            if not contacts:
+                return [
+                    TextContent(
+                        type="text",
+                        text=(
+                            f"No results found for: '{query}' "
+                            f"(no contact matched from_name={from_name!r})"
+                        ),
+                    )
+                ]
+            from_addr = contacts[0]["email"]
 
         try:
             # All three modes accept the same filter set; keyword and
