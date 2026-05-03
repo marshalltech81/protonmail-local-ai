@@ -216,16 +216,41 @@ def heuristic_grade(response_text: str, tool_calls: list[dict]) -> str:
     text_lower = response_text.lower()
     if response_text.startswith("[error]"):
         return "ERROR"
-    if any(
-        phrase in text_lower
-        for phrase in (
-            "i don't have access",
-            "i do not have access",
-            "i cannot access",
-            "you can typically",
-            "use your email client",
-        )
-    ):
+    # Tool calls are the strongest positive signal — if any tool fired,
+    # the response is grounded regardless of the prose, and abdication
+    # phrasing is at most a hedge inside a real answer.
+    if tool_calls:
+        return "needs human review"
+    # Abdication phrases observed in real model output during eval
+    # runs. Cover the major surface forms; new variants get added
+    # here as we see them in reports rather than in the model. Each
+    # phrase is a fragment so the model can wrap it in any sentence
+    # ("I'm sorry, but I don't have direct access...") and still match.
+    abdication_phrases = (
+        # Direct denial forms
+        "i don't have access",
+        "i do not have access",
+        "i don't have direct access",
+        "i do not have direct access",
+        "i cannot access",
+        "i can't access",
+        "i'm unable to access",
+        "i am unable to access",
+        # "real-time" / "specific" hedges that always precede an
+        # abdication-style follow-up
+        "i don't have real-time",
+        "i do not have real-time",
+        "i don't have specific information",
+        "i do not have specific information",
+        "i don't have any specific information",
+        # Redirect-to-client patterns
+        "you can typically",
+        "use your email client",
+        "check your email client",
+        "your email client",
+        "your task management",
+    )
+    if any(phrase in text_lower for phrase in abdication_phrases):
         return "ABDICATION (likely FAIL)"
     if "thread not found" in text_lower:
         return "MISS (likely FAIL or PARTIAL)"
