@@ -292,21 +292,32 @@ class TestHealthEndpoint:
 class TestSilenceClientDisconnect:
     """The log filter that drops ``ClientDisconnect`` traceback noise.
 
-    The filter has to do exactly two things: drop records whose
-    ``exc_info`` carries a ``ClientDisconnect`` exception, and let
-    everything else through unchanged. Anything looser would swallow real
-    errors; anything tighter (e.g. matching by the formatted message)
-    would break when the SDK rewords the log line.
+    The MCP SDK surfaces the same disconnect event in two shapes:
+
+    1. ``mcp.server.streamable_http`` logs ``"Error handling POST
+       request"`` with the ``ClientDisconnect`` traceback in
+       ``exc_info``. Filter by exception class.
+    2. ``mcp.server.lowlevel.server`` logs ``"Received exception from
+       stream: "`` with NO ``exc_info`` (the SDK catches the
+       exception upstream and writes the formatted repr into the
+       message). Filter by literal message prefix.
+
+    Records that don't match either shape must propagate unchanged so
+    a real bug still surfaces normally.
     """
 
     @staticmethod
-    def _record(exc_info=None) -> logging.LogRecord:
+    def _record(
+        msg: str = "Error handling POST request",
+        exc_info: object = None,
+        name: str = "mcp.server.streamable_http",
+    ) -> logging.LogRecord:
         return logging.LogRecord(
-            name="mcp.server.streamable_http",
+            name=name,
             level=logging.ERROR,
             pathname="x",
             lineno=1,
-            msg="Error handling POST request",
+            msg=msg,
             args=(),
             exc_info=exc_info,
         )
@@ -324,6 +335,33 @@ class TestSilenceClientDisconnect:
         record = self._record(exc_info=(type(exc), exc, exc.__traceback__))
         assert _SilenceClientDisconnect().filter(record) is False
 
+    def test_drops_record_with_received_exception_from_stream_message(self):
+        # The lowlevel.server logger path: bare error log with the
+        # specific prefix, no exc_info attached. Without this branch
+        # the filter only caught half the disconnect events and
+        # operators saw bursts of these records on every Open WebUI
+        # session churn.
+        from src.main import _SilenceClientDisconnect
+
+        record = self._record(
+            msg="Received exception from stream: ",
+            name="mcp.server.lowlevel.server",
+        )
+        assert _SilenceClientDisconnect().filter(record) is False
+
+    def test_drops_received_exception_from_stream_with_appended_repr(self):
+        # The SDK sometimes formats the caught exception into the
+        # message itself (so the log line carries the repr after the
+        # prefix). Match by ``startswith`` rather than equality so
+        # the filter still drops these.
+        from src.main import _SilenceClientDisconnect
+
+        record = self._record(
+            msg="Received exception from stream: ClientDisconnect()",
+            name="mcp.server.lowlevel.server",
+        )
+        assert _SilenceClientDisconnect().filter(record) is False
+
     def test_lets_through_record_with_other_exception(self):
         from src.main import _SilenceClientDisconnect
 
@@ -331,8 +369,19 @@ class TestSilenceClientDisconnect:
         record = self._record(exc_info=(type(exc), exc, exc.__traceback__))
         assert _SilenceClientDisconnect().filter(record) is True
 
-    def test_lets_through_record_with_no_exc_info(self):
+    def test_lets_through_record_with_no_exc_info_and_other_message(self):
+        # No exc_info AND not the suppressed message prefix — ordinary
+        # log record on the same logger, must propagate.
         from src.main import _SilenceClientDisconnect
 
-        record = self._record(exc_info=None)
+        record = self._record(msg="Some other event the SDK might log")
+        assert _SilenceClientDisconnect().filter(record) is True
+
+    def test_lets_through_unrelated_message_starting_with_received(self):
+        # Guard against the message-prefix matcher being too greedy.
+        # A future SDK log like "Received request from peer X" must
+        # not be silenced by accident.
+        from src.main import _SilenceClientDisconnect
+
+        record = self._record(msg="Received request from peer 1.2.3.4")
         assert _SilenceClientDisconnect().filter(record) is True

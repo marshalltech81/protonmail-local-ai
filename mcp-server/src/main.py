@@ -40,20 +40,36 @@ class _SilenceClientDisconnect(logging.Filter):
     coordinator decided to retry a different request shape, or the previous
     call already returned what it needed. The MCP SDK catches the resulting
     ``starlette.requests.ClientDisconnect`` cleanly and the connection ends
-    without harm, but the SDK logs it at ERROR level on two loggers
-    (``mcp.server.streamable_http`` and ``mcp.server.lowlevel.server``)
-    which makes routine traffic look alarming in operator logs.
+    without harm, but the SDK logs it at ERROR level on two loggers in two
+    different shapes:
 
-    Drop those specific records here. Any record without ``exc_info`` or
-    with a different exception class still propagates unchanged, so a real
-    bug surfaces normally.
+    - ``mcp.server.streamable_http`` emits ``"Error handling POST request"``
+      with ``exc_info`` set to the ``ClientDisconnect`` traceback. Filter
+      by exception class.
+    - ``mcp.server.lowlevel.server`` emits ``"Received exception from
+      stream: "`` with NO ``exc_info`` (the SDK catches the exception
+      upstream, formats a string representation into the message, and
+      logs the result as a bare error). Filter by literal message
+      prefix — the SDK uses this exact prefix for the disconnect path
+      and nothing else.
+
+    Records that don't match either shape still propagate unchanged so a
+    real bug surfaces normally.
     """
+
+    _SUPPRESSED_MESSAGE_PREFIXES = ("Received exception from stream:",)
 
     def filter(self, record: logging.LogRecord) -> bool:
         if record.exc_info:
             exc_type = record.exc_info[0]
             if exc_type is not None and exc_type.__name__ == "ClientDisconnect":
                 return False
+        # ``getMessage`` resolves the format string + args the same way
+        # the formatter would; checking ``record.msg`` alone would miss
+        # any record built with logging-format args.
+        message = record.getMessage()
+        if any(message.startswith(prefix) for prefix in self._SUPPRESSED_MESSAGE_PREFIXES):
+            return False
         return True
 
 
