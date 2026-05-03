@@ -38,6 +38,14 @@ def register_search_tools(server, db, ollama):
         Search the mailbox and return matching THREADS (conversations),
         not individual messages.
 
+        Use this whenever the user asks about email, threads, messages,
+        senders, dates, attachments, or anything else stored in the
+        local mailbox index. This is the default tool for any mailbox
+        question that names a topic, keyword, sender, or date range.
+        For broad cross-thread synthesis questions (e.g. "what's open?",
+        "summarize my recent CPVA activity"), reach for ask_mailbox
+        instead — it bundles retrieval and synthesis in one call.
+
         Each result is one thread bundling its messages, with subject,
         participants, date range, folder, and a short snippet. To read
         the messages inside a returned thread, call get_thread or

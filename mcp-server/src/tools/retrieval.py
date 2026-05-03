@@ -158,6 +158,11 @@ def register_retrieval_tools(server, db):
         """
         List email threads in a folder from the local index.
 
+        Use this for browse-style requests where the user wants to see
+        what's in a folder without naming a topic — for example "show
+        me my recent emails", "what's in my inbox", "list my latest
+        threads". For keyword/topic queries, use search_emails instead.
+
         Args:
             folder: Folder name (default: INBOX)
             filter_type: Currently only "all" is supported by the local
@@ -262,6 +267,12 @@ def register_retrieval_tools(server, db):
     async def list_folders() -> list[TextContent]:
         """
         List all available email folders and their thread counts.
+
+        Use this when the user asks structural questions about the
+        mailbox — "what folders do I have?", "what mailboxes are
+        synced?", "is the Archive folder indexed?". Don't call this
+        before search_emails as a discovery step; search_emails
+        already understands folder filters when the user names them.
 
         Returns:
             All folders with thread counts from the local index.

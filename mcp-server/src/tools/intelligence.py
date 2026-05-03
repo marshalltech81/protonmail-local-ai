@@ -323,7 +323,14 @@ def register_intelligence_tools(
     ) -> list[TextContent]:
         """
         Extract structured data from indexed emails matching a query.
-        Example: extract all invoices with vendor name and amount.
+
+        Use this when the user wants a *structured list* across many
+        threads — invoice numbers and amounts, tracking numbers,
+        flight confirmations, RSVPs, dates of all dentist appointments.
+        Returns one record per thread that matches, fitted to the
+        schema you pass in. For prose answers across threads use
+        ask_mailbox; for one specific thread use summarize_thread or
+        get_thread.
 
         Args:
             query: What to search for e.g. "invoices", "meeting confirmations"
