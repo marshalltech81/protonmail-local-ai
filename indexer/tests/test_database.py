@@ -209,6 +209,58 @@ class TestSchema:
         # Should reopen without raising.
         Database(db_path).close()
 
+    def test_v14_migration_guard_blocks_when_only_indexed_files_populated(
+        self, tmp_path, monkeypatch
+    ):
+        """Codex review of PR #83 caught that the original guard only
+        counted ``message_chunks`` — a v13 install with scan state
+        (indexed_files), queue state (indexing_jobs), or thread
+        vectors (threads_vec) but zero chunk rows would have
+        bypassed the gate and silently lost that state. This test
+        pins the broader coverage: indexed_files alone is enough to
+        trip the guard."""
+        db_path = tmp_path / "scan_state_only.db"
+        database = Database(db_path)
+        database._conn.execute(
+            "INSERT INTO indexed_files (filepath, content_hash, indexed_at) VALUES (?, ?, ?)",
+            ("/maildir/cur/m1.eml", "h1", "2026-01-01"),
+        )
+        database._conn.execute("UPDATE schema_version SET version = ?", (13,))
+        database._conn.commit()
+        database.close()
+
+        monkeypatch.delenv("INDEXER_MIGRATION_V14_FORCE", raising=False)
+        with pytest.raises(RuntimeError, match="indexed_files=1"):
+            Database(db_path)
+
+    def test_v14_migration_guard_blocks_when_only_queue_populated(self, tmp_path, monkeypatch):
+        """Same broader-coverage point: indexing_jobs alone trips
+        the guard. A v13 install with dead-lettered jobs but no
+        successful chunks must not silently lose that diagnostic
+        state on upgrade."""
+        db_path = tmp_path / "queue_only.db"
+        database = Database(db_path)
+        database._conn.execute(
+            "INSERT INTO indexing_jobs (filepath, reason, status, attempts, "
+            "created_at, updated_at, next_attempt_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                "/maildir/cur/m1.eml",
+                "initial_scan",
+                "dead",
+                5,
+                "2026-01-01",
+                "2026-01-01",
+                "2026-01-01",
+            ),
+        )
+        database._conn.execute("UPDATE schema_version SET version = ?", (13,))
+        database._conn.commit()
+        database.close()
+
+        monkeypatch.delenv("INDEXER_MIGRATION_V14_FORCE", raising=False)
+        with pytest.raises(RuntimeError, match="indexing_jobs=1"):
+            Database(db_path)
+
     def test_opening_with_unreachable_lower_version_raises(self, tmp_path):
         """If the stored version is older than the oldest forward
         migration shipped, the runner raises rather than silently

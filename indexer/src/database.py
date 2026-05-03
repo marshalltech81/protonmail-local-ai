@@ -274,6 +274,19 @@ class Database:
             f"applied migrations: {applied})"
         )
 
+    # Tables the v14 migration drops / recreates / clears. Each entry
+    # contributes to the "populated v13?" decision below — if any of
+    # them carries rows, the operator pays for losing it on upgrade,
+    # not just ``message_chunks``. ``threads_vec`` is a vec0 virtual
+    # table, so the same SELECT shape works.
+    _V14_DESTRUCTIVE_TABLES = (
+        "message_chunks",
+        "message_chunks_fts",
+        "indexed_files",
+        "indexing_jobs",
+        "threads_vec",
+    )
+
     def _guard_destructive_migrations(self, stored: int, target: int) -> None:
         """Refuse known-destructive migrations against populated databases
         unless the operator has explicitly opted in.
@@ -282,24 +295,42 @@ class Database:
         and recreates the vector tables, and clears
         ``message_chunks`` / ``message_chunks_fts`` / ``indexed_files``
         / ``indexing_jobs`` so the next scan re-embeds. On a populated
-        v13 install that means hours of indexing work get reset; the
-        operator must reindex from Maildir afterward. Worth a
-        confirmation gate so a routine container restart doesn't
-        silently kick off a full backfill.
+        v13 install that means hours of indexing work + queue state +
+        scan-tracking get reset; the operator must reindex from
+        Maildir afterward. Worth a confirmation gate so a routine
+        container restart doesn't silently kick off a full backfill.
+
+        The gate counts every table the migration touches, not just
+        ``message_chunks``. A v13 install that has indexed files, a
+        non-empty queue, or thread vectors but zero chunks (e.g.
+        every chunk write failed mid-pipeline; chunk rows manually
+        truncated) would otherwise silently lose its scan / queue /
+        vector state on upgrade.
 
         Set ``INDEXER_MIGRATION_V14_FORCE=true`` to acknowledge and
-        proceed. Empty databases (no ``message_chunks`` rows) skip
-        the gate — there's nothing to lose.
+        proceed. Fresh databases (every checked table empty or
+        absent) skip the gate — there's nothing to lose.
         """
         if not (stored < 14 <= target):
             return
-        try:
-            row = self._conn.execute("SELECT COUNT(*) AS n FROM message_chunks").fetchone()
-        except sqlite3.OperationalError:
-            # Pre-v9 schemas don't have message_chunks. Nothing to lose.
-            return
-        existing = row["n"] if row is not None else 0
-        if existing == 0:
+        populated: dict[str, int] = {}
+        for table in self._V14_DESTRUCTIVE_TABLES:
+            # Table names come from the hardcoded ``_V14_DESTRUCTIVE_TABLES``
+            # tuple above — never operator input — so the f-string
+            # interpolation cannot be exploited as SQL injection.
+            # SQLite does not parameterize table names, so string
+            # formatting is the only option here.
+            try:
+                row = self._conn.execute(
+                    f"SELECT COUNT(*) AS n FROM {table}"  # nosec B608
+                ).fetchone()
+            except sqlite3.OperationalError:
+                # Table doesn't exist in this older schema — counts as empty.
+                continue
+            n = row["n"] if row is not None else 0
+            if n > 0:
+                populated[table] = n
+        if not populated:
             return
         force = os.environ.get("INDEXER_MIGRATION_V14_FORCE", "").strip().lower() in {
             "1",
@@ -307,23 +338,24 @@ class Database:
             "yes",
             "on",
         }
+        populated_summary = ", ".join(f"{t}={n}" for t, n in populated.items())
         if force:
             log.warning(
                 "INDEXER_MIGRATION_V14_FORCE=true: applying destructive "
-                "v14 migration over %d existing message_chunks rows. "
-                "All chunks, vector data, file cache, and queue state "
-                "will be cleared; the next scan will re-embed every "
-                "message.",
-                existing,
+                "v14 migration over populated tables (%s). All chunks, "
+                "vector data, file cache, and queue state will be "
+                "cleared; the next scan will re-embed every message.",
+                populated_summary,
             )
             return
         raise RuntimeError(
-            f"Refusing destructive migration v14 over {existing} existing "
-            "message_chunks rows. v14 resizes the embedding vector tables "
-            "from 768-dim to 4096-dim (Qwen3-Embedding-8B) and clears "
-            "message_chunks / message_chunks_fts / indexed_files / "
-            "indexing_jobs so the next scan re-embeds. Existing chunks, "
-            "vectors, and queue state will be DROPPED. To proceed, set "
+            f"Refusing destructive migration v14 — populated tables: "
+            f"{populated_summary}. v14 resizes the embedding vector "
+            "tables from 768-dim to 4096-dim (Qwen3-Embedding-8B) and "
+            "clears message_chunks / message_chunks_fts / indexed_files "
+            "/ indexing_jobs so the next scan re-embeds. Every existing "
+            "row in those tables will be DROPPED, plus the existing "
+            "threads_vec table itself. To proceed, set "
             "INDEXER_MIGRATION_V14_FORCE=true and restart. The next scan "
             "will re-chunk and re-embed every message — expect hours of "
             "work on a populated mailbox."
