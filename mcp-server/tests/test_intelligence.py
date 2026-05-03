@@ -253,6 +253,31 @@ class TestPickResolutionCandidate:
         ]
         assert _pick_resolution_candidate("open enrollment", candidates).thread_id == "c2"
 
+    def test_titlecase_may_resolves_to_month_subject(self):
+        from src.tools.intelligence import _pick_resolution_candidate
+
+        # Codex round-5 P3 repro. ``May`` is in the modal-verb
+        # stopword set, so before the titlecase carve-out the query
+        # ``May invoice`` would collapse to just ``invoice`` — both
+        # candidates would carry 1 overlap, and the resolver would
+        # pick whichever happened to come first. The titlecase form
+        # of ``may`` (and ``will``) is preserved as a likely month /
+        # name, giving c2 the 2-overlap win it deserves.
+        candidates = [
+            _candidate("c1", "January invoice"),
+            _candidate("c2", "May invoice"),
+        ]
+        assert _pick_resolution_candidate("May invoice", candidates).thread_id == "c2"
+
+    def test_titlecase_will_resolves_to_name_subject(self):
+        from src.tools.intelligence import _pick_resolution_candidate
+
+        candidates = [
+            _candidate("c1", "Smith introduction"),
+            _candidate("c2", "Will Smith introduction"),
+        ]
+        assert _pick_resolution_candidate("Will Smith introduction", candidates).thread_id == "c2"
+
     def test_match_is_case_insensitive(self):
         from src.tools.intelligence import _pick_resolution_candidate
 
@@ -404,6 +429,28 @@ class TestIsMeaningfulQueryToken:
         # verbs in this guard list.
         for verb in ("open", "show", "list", "look", "read", "see", "check", "pull"):
             assert _is_meaningful_query_token(verb) is True, verb
+
+    def test_titlecase_proper_noun_homonyms_are_kept(self):
+        from src.tools.intelligence import _is_meaningful_query_token
+
+        # Codex round-5 P3 repro: "May" (month) and "Will" (name)
+        # are stopwords lowercased (modal verbs) but proper nouns
+        # titlecased. Preserve the titlecase form so queries like
+        # "May invoice" and "Will Smith introduction" keep the
+        # token that disambiguates the right thread.
+        for proper in ("May", "Will"):
+            assert _is_meaningful_query_token(proper) is True, proper
+
+    def test_lowercase_modal_verbs_still_drop(self):
+        from src.tools.intelligence import _is_meaningful_query_token
+
+        # The titlecase carve-out is intentionally narrow. Lowercase
+        # ``may``/``will`` in a query like ``you may have the report``
+        # are still modal verbs and must drop, otherwise the resolver
+        # gains a 1-overlap match against any subject containing the
+        # word.
+        for modal in ("may", "will"):
+            assert _is_meaningful_query_token(modal) is False, modal
 
     def test_meaningful_topic_words_are_kept(self):
         from src.tools.intelligence import _is_meaningful_query_token

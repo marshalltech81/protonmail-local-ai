@@ -210,6 +210,17 @@ _QUERY_STOPWORDS = frozenset(
 )
 
 
+# Stopwords that double as common proper nouns when titlecased. ``May``
+# is the modal verb when lowercased but a month when titlecased; ``Will``
+# is a modal verb lowercased but a given name titlecased. A query like
+# ``May invoice`` or ``Will Smith introduction`` would otherwise have
+# its only meaningful token stripped, leaving the resolver to score
+# overlap on the remaining generic word and pick the wrong candidate.
+# Lowercase ``may`` / ``will`` are still treated as modal verbs; only
+# the titlecase form bypasses the stopword filter.
+_TITLECASE_PROPER_NOUN_HOMONYMS = frozenset({"may", "will"})
+
+
 def _is_meaningful_query_token(token: str) -> bool:
     """Decide whether a tokenized query word is worth matching against subjects.
 
@@ -252,6 +263,14 @@ def _is_meaningful_query_token(token: str) -> bool:
     # ("And", "Of") and lowercase ("and", "of") forms still flow
     # through the stopword check.
     if token.isupper():
+        return True
+    # Titlecase forms of stopwords that double as proper nouns are
+    # preserved. ``May invoice`` (month) and ``Will Smith`` (name) would
+    # otherwise have their only meaningful token erased by the modal-verb
+    # stopword entries. ``str.istitle`` is True only when the token is
+    # exactly first-letter-upper + rest-lower ("May", not "MAY" or
+    # "may"), so this never overrides the lowercase modal-verb case.
+    if token.istitle() and token.lower() in _TITLECASE_PROPER_NOUN_HOMONYMS:
         return True
     if token.lower() in _QUERY_STOPWORDS:
         return False
