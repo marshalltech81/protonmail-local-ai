@@ -450,6 +450,94 @@ class TestPdfDigitalExtractor:
         assert result.extractor is None
         assert "OCR disabled" in (result.error or "")
 
+    def test_ocr_temp_dir_is_cleaned_after_success(self, monkeypatch, tmp_path):
+        """``_extract_ocr`` must remove its per-call temp dir on success.
+
+        Repro for the production ``ENOSPC`` cascade: ``pdf2image``
+        writes one PPM per rendered page (~6 MB at 200 dpi), and the
+        previous implementation passed ``output_folder="/tmp"``
+        directly without cleanup, so every OCR call permanently leaked
+        files into the indexer container's bounded tmpfs.
+        """
+        import os
+        import tempfile as _tempfile_mod
+
+        from PIL import Image
+        from src.extractors import pdf
+
+        captured: dict[str, str] = {}
+
+        def fake_convert(payload, **kwargs):
+            output_folder = str(kwargs["output_folder"])
+            captured["output_folder"] = output_folder
+            assert os.path.isdir(output_folder), output_folder
+            # Simulate pdftoppm's spill so the test fails if cleanup
+            # only removes an empty dir.
+            with open(os.path.join(output_folder, "page-001.ppm"), "wb") as f:
+                f.write(b"P6\n1 1\n255\n\x00\x00\x00")
+            return [Image.new("RGB", (4, 4), color="white")]
+
+        monkeypatch.setattr("pdf2image.convert_from_bytes", fake_convert)
+        monkeypatch.setattr(
+            "pytesseract.image_to_string",
+            lambda image, **_: "ocr text",
+        )
+        # Reroute ``dir="/tmp"`` to a host-side tmp_path so the test
+        # works on dev machines where ``/tmp`` is the host's real /tmp
+        # (and the test would otherwise leave probe files behind on
+        # failure). Capture the real constructor before patching to
+        # avoid re-entry.
+        real_temp_dir = _tempfile_mod.TemporaryDirectory
+        monkeypatch.setattr(
+            pdf.tempfile,
+            "TemporaryDirectory",
+            lambda **kwargs: real_temp_dir(dir=str(tmp_path)),
+        )
+
+        text = pdf._extract_ocr(b"%PDF-1.7", max_ocr_pages=1)
+
+        assert text == "ocr text"
+        assert captured["output_folder"].startswith(str(tmp_path))
+        assert not os.path.exists(captured["output_folder"]), (
+            "TemporaryDirectory must be removed on success"
+        )
+
+    def test_ocr_temp_dir_is_cleaned_after_exception(self, monkeypatch, tmp_path):
+        """Same cleanup contract on the exception path — an OCR failure
+        in the middle of rendering must not leak the temp dir, otherwise
+        a single bad PDF can fill tmpfs and break every subsequent OCR
+        call until the container restarts.
+        """
+        import os
+        import tempfile as _tempfile_mod
+
+        from src.extractors import pdf
+
+        captured: dict[str, str] = {}
+
+        def fake_convert(payload, **kwargs):
+            output_folder = str(kwargs["output_folder"])
+            captured["output_folder"] = output_folder
+            with open(os.path.join(output_folder, "page-001.ppm"), "wb") as f:
+                f.write(b"P6\n1 1\n255\n\x00\x00\x00")
+            raise OSError(28, "No space left on device")
+
+        monkeypatch.setattr("pdf2image.convert_from_bytes", fake_convert)
+        real_temp_dir = _tempfile_mod.TemporaryDirectory
+        monkeypatch.setattr(
+            pdf.tempfile,
+            "TemporaryDirectory",
+            lambda **kwargs: real_temp_dir(dir=str(tmp_path)),
+        )
+
+        with pytest.raises(OSError):
+            pdf._extract_ocr(b"%PDF-1.7", max_ocr_pages=1)
+
+        assert "output_folder" in captured
+        assert not os.path.exists(captured["output_folder"]), (
+            "TemporaryDirectory must be removed even when convert raises"
+        )
+
 
 class TestImageExtractor:
     def test_invokes_pytesseract_with_oriented_image(self, monkeypatch):
