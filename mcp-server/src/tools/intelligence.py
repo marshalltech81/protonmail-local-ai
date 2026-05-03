@@ -234,8 +234,21 @@ def register_intelligence_tools(
         """
         Summarize indexed context for an email thread.
 
+        ``thread_id`` accepts EITHER an opaque thread ID returned by
+        search_emails / list_threads / get_message, OR a subject-line
+        phrase. Opaque IDs are looked up directly. When that lookup
+        misses, the tool transparently falls back to a hybrid keyword
+        + vector search on the same string and summarizes the top
+        match. So a borderline-LLM call like
+        ``summarize_thread("audit & taxes thread")`` works without
+        an explicit search step, while
+        ``summarize_thread("PH3PPF...@outlook.com")`` still goes
+        straight to that thread.
+
         Args:
-            thread_id: The thread ID to summarize
+            thread_id: An opaque thread ID, or a subject / topic phrase
+                       to resolve via hybrid search if the direct
+                       lookup misses.
             style: "brief" (2-3 sentences), "detailed" (full summary),
                    "action-items" (bullet list of actions), or
                    "timeline" (chronological sequence of events)
@@ -245,8 +258,27 @@ def register_intelligence_tools(
         """
         try:
             thread = await asyncio.to_thread(db.get_thread, thread_id)
+            # Permissive fallback: when the direct lookup misses, treat
+            # ``thread_id`` as a phrase and resolve it through hybrid
+            # search. This rescues calls where the LLM passed the
+            # subject line instead of an opaque ID — observed even on
+            # 32B models when the prompt reads "summarize the X thread"
+            # rather than "find X then summarize it". The fallback
+            # path returns at most one thread so there's no ambiguity
+            # at the summarize step.
             if not thread:
-                return [TextContent(type="text", text=f"Thread not found: {thread_id}")]
+                embedding = await ollama.embed(thread_id)
+                resolved = await asyncio.to_thread(
+                    db.hybrid_search,
+                    query_text=thread_id,
+                    query_embedding=embedding,
+                    limit=1,
+                )
+                if not resolved:
+                    return [TextContent(type="text", text=f"Thread not found: {thread_id}")]
+                thread = await asyncio.to_thread(db.get_thread, resolved[0].thread_id)
+                if not thread:
+                    return [TextContent(type="text", text=f"Thread not found: {thread_id}")]
 
             style_instructions = {
                 "brief": "Summarize in 2-3 sentences.",
