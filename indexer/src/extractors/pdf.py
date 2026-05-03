@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import io
 import logging
+import tempfile
 
 import pypdf
 
@@ -134,25 +135,24 @@ def _extract_ocr(
     OCR. Both are imported lazily so a missing system dep surfaces here
     rather than at indexer start.
 
-    ``output_folder=/tmp`` is set explicitly because the indexer
-    container runs with ``read_only: true`` and ``/tmp`` mounted as
-    tmpfs — pdf2image's default falls back to ``/var/tmp``, which is
-    not writable on the hardened image.
+    The ``output_folder`` passed to ``convert_from_bytes`` is a
+    per-call ``TemporaryDirectory`` rooted at ``/tmp``. Two reasons:
+
+    1. ``pdf2image`` writes one PPM per rendered page (a US-letter page
+       at 200 dpi is ~6 MB). Without an auto-cleaning context manager
+       these files leak into ``/tmp`` for the lifetime of the indexer
+       container, which runs ``/tmp`` as a tmpfs of bounded size. After
+       enough scanned PDFs the tmpfs reaches 100% and every subsequent
+       OCR fallback fails with ``ENOSPC`` until the container restarts.
+    2. ``/tmp`` is the only writable path on the hardened ``read_only``
+       image — ``pdf2image``'s default tempdir falls back to
+       ``/var/tmp`` which is not writable here.
+
+    The temp dir is cleaned on both success and exception, so an
+    ``ENOSPC`` mid-render or a failing tesseract call does not leak.
     """
     import pytesseract
     from pdf2image import convert_from_bytes
-
-    convert_kwargs: dict[str, object] = {
-        "dpi": 200,
-        "first_page": 1,
-        # ``output_folder`` directs pdftoppm's spill to the tmpfs
-        # mount; without it pdf2image picks an arbitrary tempdir which
-        # may be read-only on hardened images.
-        "output_folder": "/tmp",  # nosec B108 — tmpfs in the indexer container
-    }
-    if max_ocr_pages > 0:
-        convert_kwargs["last_page"] = max_ocr_pages
-    images = convert_from_bytes(payload, **convert_kwargs)  # type: ignore[arg-type]
 
     tesseract_kwargs: dict[str, float] = {}
     if ocr_timeout_seconds is not None and ocr_timeout_seconds > 0:
@@ -160,9 +160,23 @@ def _extract_ocr(
         # so a slow page does not eat the entire budget for the rest.
         tesseract_kwargs["timeout"] = float(ocr_timeout_seconds)
 
-    pages: list[str] = []
-    for image in images:
-        text = pytesseract.image_to_string(image, **tesseract_kwargs)
-        if text and text.strip():
-            pages.append(text.strip())
-    return "\n\n".join(pages)
+    # ``dir="/tmp"`` keeps the temp dir on the writable tmpfs (the
+    # hardened image's only writable path). ``TemporaryDirectory``
+    # removes the dir and its contents on context exit, including the
+    # exception path — so a leaked PPM cannot survive the OCR call.
+    with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:  # nosec B108 — tmpfs
+        convert_kwargs: dict[str, object] = {
+            "dpi": 200,
+            "first_page": 1,
+            "output_folder": tmpdir,
+        }
+        if max_ocr_pages > 0:
+            convert_kwargs["last_page"] = max_ocr_pages
+        images = convert_from_bytes(payload, **convert_kwargs)  # type: ignore[arg-type]
+
+        pages: list[str] = []
+        for image in images:
+            text = pytesseract.image_to_string(image, **tesseract_kwargs)
+            if text and text.strip():
+                pages.append(text.strip())
+        return "\n\n".join(pages)
