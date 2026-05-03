@@ -974,37 +974,63 @@ class Database:
         """).fetchall()
         return [{"name": r["folder"], "thread_count": r["thread_count"]} for r in rows]
 
-    def find_contact(self, query: str, limit: int = 10) -> list[dict]:
+    def find_contact(
+        self, query: str, limit: int = 10, *, senders_only: bool = False
+    ) -> list[dict]:
         """Resolve a name / address / domain fragment to indexed contacts.
 
-        Iterates ``threads.participants``, parses each entry with
-        ``parseaddr``, and matches the lowercased query against either
-        the display name or the email address. Aggregates by canonical
-        email so the same contact across many threads collapses to one
-        row, with ``thread_count`` reflecting how many threads they
+        Iterates ``threads.participants`` (or ``threads.senders`` when
+        ``senders_only=True``), parses each entry with ``parseaddr``,
+        and matches the lowercased query against either the display
+        name or the email address. Aggregates by canonical email so
+        the same contact across many threads collapses to one row,
+        with ``thread_count`` reflecting how many threads they
         appeared on. Same-thread duplicates do not double-count.
 
+        ``senders_only`` narrows the aggregation to the From-line
+        addresses recorded on each thread. Use this when the caller's
+        intent is "filter to messages this person SENT" rather than
+        "find this person's address anywhere in the index": the
+        broader participants ranking can promote a frequent
+        recipient/CC-only contact over the actual sender, which then
+        misses real results when the resolved address is plugged into
+        ``search_emails(from_addr=...)``. The default is
+        ``senders_only=False`` because the standalone find_contact
+        tool is also used for general "find this person's email"
+        lookups where recipient-only matches are still useful.
+
         Exists so callers (the LLM via the MCP tool) can map a
-        display-name fragment (``"Jane Smith"``) to a canonical address
-        (``"jsmith@example.com"``) before invoking
-        ``search_emails(from_addr=...)``. Without this step a borderline
-        model often abdicates when given a role label or partial name.
+        display-name fragment (``"Jane Smith"``) to a canonical
+        address (``"jsmith@example.com"``) before invoking
+        ``search_emails(from_addr=...)``. Without this step a
+        borderline model often abdicates when given a role label or
+        partial name.
         """
         if not query or not query.strip():
             return []
         needle = query.strip().lower()
 
-        rows = self._conn.execute("SELECT participants FROM threads").fetchall()
+        # ``senders`` is a JSON array of From-only addresses recorded
+        # on each thread; ``participants`` is the broader From + To +
+        # Cc + ... set. Both are stored on the same row so we can
+        # pick at query time without a separate index. Use two
+        # explicit SQL strings rather than f-string interpolation so
+        # there is no path for column to come from caller input —
+        # the choice is bounded to the senders_only flag here.
+        if senders_only:
+            rows = self._conn.execute("SELECT senders AS entries FROM threads").fetchall()
+        else:
+            rows = self._conn.execute("SELECT participants AS entries FROM threads").fetchall()
 
         # canonical email -> {"names": set[str], "thread_count": int}
         by_email: dict[str, dict] = {}
         for row in rows:
             try:
-                participants = json.loads(row["participants"])
+                entries = json.loads(row["entries"])
             except json.JSONDecodeError, TypeError:
                 continue
             seen_in_thread: set[str] = set()
-            for entry in participants:
+            for entry in entries:
                 if not isinstance(entry, str):
                     continue
                 name, addr = parseaddr(entry)

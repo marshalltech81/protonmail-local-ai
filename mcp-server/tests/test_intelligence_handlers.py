@@ -146,6 +146,25 @@ class TestSummarizeThread:
         assert "lunch plans" in text
         assert "invoice for march" not in text
 
+    def test_phrase_fallback_with_no_subject_overlap_returns_not_found(
+        self, fake_server, seeded_db, fake_ollama
+    ):
+        # The fallback gate refuses to resolve when no candidate's
+        # subject shares a token with the query. seeded_db contains
+        # subjects "invoice for march", "lunch plans", "meeting notes
+        # archive"; the query "zzznosuchsubject" overlaps with none.
+        # Without this gate, vector KNN would rank t-alpha (matching
+        # the canned [1,0,0,0] embedding) and the summary would land
+        # on the invoice thread — silently wrong. Now we surface
+        # "Thread not found" instead.
+        handler = _handlers(fake_server, seeded_db, fake_ollama)["summarize_thread"]
+        out = asyncio.run(handler(thread_id="zzznosuchsubject"))
+        text = _text(out)
+        assert "Thread not found" in text
+        # And critically: no LLM was invoked, because we never
+        # resolved a thread to summarize.
+        assert fake_ollama.complete_calls == []
+
     def test_phrase_with_empty_corpus_returns_not_found(self, fake_server, empty_db, fake_ollama):
         # If the index is empty, the fallback hybrid_search returns no
         # hits — return the original sentinel rather than fabricating a

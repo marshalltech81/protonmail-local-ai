@@ -97,17 +97,23 @@ def register_search_tools(server, db, ollama):
         # ValueError before the try/except below.
         limit = clamp_int(limit, default=10, minimum=1, maximum=_MAX_SEARCH_LIMIT)
 
-        # Resolve ``from_name`` -> canonical address via find_contact.
-        # Skipped when the caller already passed a strict ``from_addr``
-        # — explicit always beats lookup. ``find_contact`` returns
-        # contacts ranked by thread count, so the first hit is the most
-        # active matching identity (e.g. "Smith" -> the Smith you've
-        # corresponded with most). When the lookup yields nothing,
-        # short-circuit with an honest empty result rather than
-        # silently dropping the filter and returning unrelated threads.
+        # Resolve ``from_name`` -> canonical SENDER address via
+        # find_contact. Skipped when the caller already passed a
+        # strict ``from_addr`` — explicit always beats lookup. We
+        # restrict find_contact to ``senders_only=True`` because the
+        # next step plugs the resolved address into
+        # hybrid_search(from_addr=...), which filters by From-line
+        # address. Resolving over the broader participants set could
+        # promote a frequent recipient/CC contact (a name on every
+        # mailing-list reply but never a sender) and leave the
+        # search returning zero matches. Ranking by sender count
+        # picks the right Smith for the "messages from Smith" intent.
+        # When the lookup yields nothing, short-circuit with an
+        # honest empty result rather than silently dropping the
+        # filter and returning unrelated threads.
         if from_name and not from_addr:
             try:
-                contacts = await asyncio.to_thread(db.find_contact, from_name, 1)
+                contacts = await asyncio.to_thread(db.find_contact, from_name, 1, senders_only=True)
             except Exception as e:
                 log.error(f"search_emails: find_contact({from_name!r}) failed: {e}")
                 return [TextContent(type="text", text=f"Search error: {e}")]

@@ -125,16 +125,21 @@ class TestPickResolutionCandidate:
     top-ranked candidate isn't the obvious subject match.
     """
 
-    def test_returns_top_ranked_when_no_subject_overlap(self):
+    def test_returns_none_when_no_subject_overlap(self):
         from src.tools.intelligence import _pick_resolution_candidate
 
-        # ``zzz`` shares no tokens with either subject — fall back to the
-        # candidate hybrid_search ranked first.
+        # ``zzz`` shares no tokens with either subject. The fallback
+        # MUST refuse to summarize: vector KNN always returns a
+        # nearest neighbor in any non-empty mailbox, so without this
+        # gate a typo'd opaque ID or an unrelated phrase would
+        # produce a confident summary of an irrelevant thread. The
+        # caller treats None as "could not confidently resolve" and
+        # surfaces ``Thread not found``.
         candidates = [
             _candidate("c1", "alpha beta"),
             _candidate("c2", "gamma delta"),
         ]
-        assert _pick_resolution_candidate("zzz", candidates).thread_id == "c1"
+        assert _pick_resolution_candidate("zzz", candidates) is None
 
     def test_picks_higher_subject_overlap_over_top_rank(self):
         from src.tools.intelligence import _pick_resolution_candidate
@@ -168,16 +173,18 @@ class TestPickResolutionCandidate:
         ]
         assert _pick_resolution_candidate("audit", candidates).thread_id == "c1"
 
-    def test_empty_query_returns_top_ranked(self):
+    def test_empty_query_returns_none(self):
         from src.tools.intelligence import _pick_resolution_candidate
 
-        # Query with no tokens (whitespace, punctuation) shouldn't cause a
-        # divide-by-zero; just defer to the rank order.
+        # A whitespace-only or punctuation-only query yields zero
+        # query tokens after filtering — there's nothing to overlap
+        # against, so the gate refuses to resolve. Caller surfaces
+        # ``Thread not found``.
         candidates = [
             _candidate("c1", "alpha"),
             _candidate("c2", "beta"),
         ]
-        assert _pick_resolution_candidate("   ", candidates).thread_id == "c1"
+        assert _pick_resolution_candidate("   ", candidates) is None
 
     def test_raises_on_empty_candidates(self):
         import pytest

@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 import time
@@ -298,7 +299,21 @@ def write_report(
         if "_error" in response:
             lines.extend(["**Raw error:**", "", f"`{response['_error']}`", ""])
 
-    path.write_text("\n".join(lines))
+    # Reports embed mailbox-derived content (the operator's real
+    # email subjects, sender addresses, message snippets returned by
+    # the MCP tools). The .secrets directory itself is operator-
+    # configured to 700, but file-level mode under default umask is
+    # often 0644 — readable by other local users on a shared host.
+    # Force 0600 so the report stays user-private regardless of
+    # umask. ``write_text`` doesn't expose a mode arg, so write via
+    # an explicit ``open`` with ``opener`` honoring 0600 from the
+    # start (more secure than write-then-chmod, which leaves a brief
+    # window where the file is world-readable).
+    def _opener(path_arg: str, flags: int) -> int:
+        return os.open(path_arg, flags, 0o600)
+
+    with open(path, "w", encoding="utf-8", opener=_opener) as fh:
+        fh.write("\n".join(lines))
     return path
 
 

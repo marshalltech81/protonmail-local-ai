@@ -22,7 +22,7 @@ from ..lib.validation import clamp_int
 _RESOLUTION_CANDIDATE_LIMIT = 3
 
 
-def _pick_resolution_candidate(query: str, candidates: list[ThreadResult]) -> ThreadResult:
+def _pick_resolution_candidate(query: str, candidates: list[ThreadResult]) -> ThreadResult | None:
     """Choose the best candidate for the summarize_thread phrase fallback.
 
     hybrid_search ranks by RRF over BM25 + vector + chunk lanes, which
@@ -30,21 +30,27 @@ def _pick_resolution_candidate(query: str, candidates: list[ThreadResult]) -> Th
     search, but for resolving a phrase like "the audit & taxes thread"
     a thread whose *subject line* contains every query token is almost
     always what the caller meant — even if some other thread has more
-    semantically-similar body chunks. Apply a subject-token overlap
-    tiebreaker on top of the default ranking: prefer the candidate
-    whose subject contains the most query tokens, falling back to the
-    top-ranked candidate when no candidate has any subject overlap.
+    semantically-similar body chunks. Prefer the candidate whose
+    subject contains the most query tokens.
 
-    Tokens shorter than 3 chars are ignored to avoid stop-word noise
-    ("the", "is", "of"); they would otherwise produce false-positive
-    overlaps on almost any candidate.
+    Returns ``None`` when NO candidate shares a single subject token
+    with the query (after dropping <3-char tokens to avoid stop-word
+    noise). The caller treats that as "fallback could not confidently
+    resolve" and surfaces ``Thread not found`` rather than summarizing
+    whichever thread the vector lane happened to rank first — that
+    silent fabrication would otherwise let a typo'd opaque ID
+    (``"PH3PPF8675309xyz@invalid"``) produce a confident summary of
+    an unrelated thread, since vector KNN always returns a nearest
+    neighbor in any non-empty mailbox. The strictness is the gate:
+    if the user wants a body-only match, they should call
+    ``search_emails`` first and pass the resulting opaque ID.
     """
     if not candidates:
         raise ValueError("candidates must be non-empty")
     query_tokens = {t.lower() for t in re.findall(r"\w+", query) if len(t) > 2}
     if not query_tokens:
-        return candidates[0]
-    best = candidates[0]
+        return None
+    best: ThreadResult | None = None
     best_overlap = 0
     for candidate in candidates:
         subject_tokens = {t.lower() for t in re.findall(r"\w+", candidate.subject)}
@@ -301,17 +307,21 @@ def register_intelligence_tools(
         ``thread_id`` accepts EITHER an opaque thread ID returned by
         search_emails / list_threads / get_message, OR a subject-line
         phrase. Opaque IDs are looked up directly. When that lookup
-        misses, the tool transparently falls back to a hybrid keyword
-        + vector search on the same string. The fallback pulls a
-        small candidate set and applies a subject-token overlap
-        tiebreaker — preferring the thread whose subject line shares
-        the most words with the phrase — so a call like
-        ``summarize_thread("the audit & taxes thread")`` resolves to
-        the actual audit thread even when an unrelated message has a
-        higher vector similarity score. Opaque IDs like
+        misses, the tool falls back to a hybrid keyword + vector
+        search on the same string and resolves ONLY when at least one
+        candidate's subject line shares a query token — so a call
+        like ``summarize_thread("the audit & taxes thread")`` lands
+        on the actual audit thread even when an unrelated message
+        has higher vector similarity, while a typo'd opaque ID or a
+        topic-only phrase with no subject overlap surfaces
+        ``Thread not found`` instead of fabricating a summary of
+        whichever thread happened to rank first by content
+        similarity. Opaque IDs like
         ``summarize_thread("PH3PPF...@outlook.com")`` still go
         straight to that specific thread without invoking the
-        fallback.
+        fallback. For body-only matches (the relevant content is in
+        the message body, not the subject), call ``search_emails``
+        first and pass the resulting opaque ID.
 
         Args:
             thread_id: An opaque thread ID, or a subject / topic phrase
@@ -344,12 +354,17 @@ def register_intelligence_tools(
                 )
                 if not resolved:
                     return [TextContent(type="text", text=f"Thread not found: {thread_id}")]
-                # Apply the subject-overlap tiebreaker: when multiple
-                # candidates rank similarly by RRF, prefer the one whose
-                # subject line shares tokens with the query phrase. This
-                # rescues the common case where vector similarity ranks
-                # an unrelated thread above the obvious match.
+                # Apply the subject-overlap gate. The fallback resolves
+                # ONLY when at least one candidate's subject line shares
+                # a query token; otherwise the call surfaces "Thread not
+                # found" rather than summarizing whichever thread the
+                # vector lane happened to rank first. Vector KNN always
+                # returns a nearest neighbor in any non-empty mailbox,
+                # so without this gate a typo'd opaque ID would produce
+                # a confident summary of an unrelated thread.
                 best = _pick_resolution_candidate(thread_id, resolved)
+                if best is None:
+                    return [TextContent(type="text", text=f"Thread not found: {thread_id}")]
                 thread = await asyncio.to_thread(db.get_thread, best.thread_id)
                 if not thread:
                     return [TextContent(type="text", text=f"Thread not found: {thread_id}")]

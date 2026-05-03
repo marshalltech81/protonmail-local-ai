@@ -238,19 +238,38 @@ class TestFromNameResolution:
         called: list = []
         original = seeded_db.find_contact
 
-        def spy(query, limit):
-            called.append((query, limit))
-            return original(query, limit)
+        def spy(query, limit, *, senders_only=False):
+            called.append((query, limit, senders_only))
+            return original(query, limit, senders_only=senders_only)
 
         seeded_db.find_contact = spy  # type: ignore[assignment]
         handler = _handler(fake_server, fake_ollama, seeded_db)
         asyncio.run(handler(query="invoice"))
         assert called == []
 
+    def test_from_name_resolution_uses_senders_only(self, fake_server, fake_ollama, seeded_db):
+        # The from_name -> from_addr resolution must restrict the
+        # find_contact aggregation to From-line addresses. Otherwise
+        # a frequent recipient/CC contact could outrank the actual
+        # sender in find_contact's results, and the resulting
+        # from_addr filter would return zero or wrong matches. Spy
+        # on find_contact and confirm the keyword arg is forwarded.
+        captured_kwargs: dict = {}
+        original = seeded_db.find_contact
+
+        def spy(query, limit, *, senders_only=False):
+            captured_kwargs["senders_only"] = senders_only
+            return original(query, limit, senders_only=senders_only)
+
+        seeded_db.find_contact = spy  # type: ignore[assignment]
+        handler = _handler(fake_server, fake_ollama, seeded_db)
+        asyncio.run(handler(query="invoice", from_name="alice"))
+        assert captured_kwargs.get("senders_only") is True
+
     def test_from_name_lookup_error_surfaces_as_search_error(
         self, fake_server, fake_ollama, seeded_db
     ):
-        def boom(_query, _limit):
+        def boom(_query, _limit, *, senders_only=False):
             raise RuntimeError("simulated find_contact failure")
 
         seeded_db.find_contact = boom  # type: ignore[assignment]
