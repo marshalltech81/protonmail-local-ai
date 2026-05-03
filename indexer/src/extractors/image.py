@@ -10,17 +10,17 @@ landscape EXIF metadata even when shot portrait, and unrotated input
 hurts OCR accuracy materially). Anything else — language hints,
 preprocessing — is left as a future tuning concern.
 
-Decompression-bomb defense: ``INDEXER_ATTACHMENT_MAX_BYTES`` only caps
-the payload on disk. PNG / WebP / TIFF can deflate ~1000× into a
-multi-gigapixel canvas that would OOM the indexer container during
-``Image.open`` or OCR. PIL's ``MAX_IMAGE_PIXELS`` is the documented
-defense — we lower it from PIL's default (~89 Mpx) to 50 Mpx and
-promote the warning to an error so an oversize image surfaces as a
-``failed`` extraction row rather than wedging the worker.
-
-Both safeguards are scoped to ``extract()`` rather than module-import
-time so other PIL consumers in the same process keep PIL's defaults
-and the warnings filter doesn't leak across unrelated callers.
+Decompression-bomb defense: ``INDEXER_ATTACHMENT_MAX_BYTES`` caps the
+payload on disk, but PNG / WebP / TIFF can deflate ~1000× into a
+multi-gigapixel canvas that would OOM the indexer container at
+``Image.open`` time. The pixel-count cap lives at process scope in
+``indexer.extractors.__init__`` (``GLOBAL_MAX_IMAGE_PIXELS``) so it
+applies uniformly to this extractor AND to transitive PIL consumers
+(pypdf-rendered embedded images, etc.) without each module needing to
+re-do the save/restore dance. This module promotes the milder
+``DecompressionBombWarning`` to an error inside ``extract()`` so a
+between-cap-and-2x-cap image surfaces as a ``failed`` extraction row
+rather than passing through with a log line.
 """
 
 from __future__ import annotations
@@ -30,16 +30,6 @@ import warnings
 
 import pytesseract
 from PIL import Image, ImageOps
-
-# 50 Mpx covers any realistic scanned-page or smartphone photo (a 12 Mpx
-# phone shot is ~12,000,000 pixels) while keeping memory bounded —
-# decoding a 50 Mpx RGB image is ~150 MB of pixel buffer at most. PIL
-# raises ``DecompressionBombError`` past 2× this limit; the warning
-# filter inside ``extract()`` promotes the milder
-# ``DecompressionBombWarning`` (between 1× and 2×) to the same error so
-# the dispatcher records both as ``failed`` rather than letting them
-# through with a log line.
-_MAX_IMAGE_PIXELS = 50_000_000
 
 
 def extract(
@@ -60,22 +50,19 @@ def extract(
     timeout fires; the dispatcher converts that to a ``failed``
     extraction row.
     """
-    prior_max_pixels = Image.MAX_IMAGE_PIXELS
-    Image.MAX_IMAGE_PIXELS = _MAX_IMAGE_PIXELS
-    try:
-        with warnings.catch_warnings():
-            # Scope the bomb-warning promotion to this call so other
-            # callers in the same process aren't forced into the same
-            # filter state.
-            warnings.simplefilter("error", Image.DecompressionBombWarning)
-            image: Image.Image = Image.open(io.BytesIO(payload))
-            # ``exif_transpose`` reads the EXIF Orientation tag and rotates the
-            # pixels accordingly. No-op for images without EXIF.
-            image = ImageOps.exif_transpose(image)
-            tesseract_kwargs: dict[str, float] = {}
-            if ocr_timeout_seconds is not None and ocr_timeout_seconds > 0:
-                tesseract_kwargs["timeout"] = float(ocr_timeout_seconds)
-            text = pytesseract.image_to_string(image, **tesseract_kwargs)
-    finally:
-        Image.MAX_IMAGE_PIXELS = prior_max_pixels
+    with warnings.catch_warnings():
+        # Promote the bomb warning to an error so anything between the
+        # global pixel cap and PIL's hard 2x ceiling becomes a clean
+        # ``failed`` extraction. Scoped via ``catch_warnings`` so the
+        # filter doesn't leak across unrelated callers in the same
+        # process.
+        warnings.simplefilter("error", Image.DecompressionBombWarning)
+        image: Image.Image = Image.open(io.BytesIO(payload))
+        # ``exif_transpose`` reads the EXIF Orientation tag and rotates the
+        # pixels accordingly. No-op for images without EXIF.
+        image = ImageOps.exif_transpose(image)
+        tesseract_kwargs: dict[str, float] = {}
+        if ocr_timeout_seconds is not None and ocr_timeout_seconds > 0:
+            tesseract_kwargs["timeout"] = float(ocr_timeout_seconds)
+        text = pytesseract.image_to_string(image, **tesseract_kwargs)
     return text, "image-ocr"

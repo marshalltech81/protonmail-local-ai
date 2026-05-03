@@ -38,6 +38,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 import defusedxml
+from PIL import Image
 
 # ``defuse_stdlib`` swaps the standard-library XML parsers (``xml.etree``,
 # ``xml.sax``, ``xml.dom.*``, ``xml.parsers.expat``, ``xmlrpc.client``)
@@ -49,6 +50,25 @@ import defusedxml
 # construction; openpyxl uses ``defusedxml.ElementTree`` when available
 # (which adding the dep here also enables).
 defusedxml.defuse_stdlib()
+
+
+# Process-wide cap for ALL PIL consumers — the standalone image
+# extractor here AND any transitive PIL user (pypdf rendering embedded
+# document images, openpyxl chart graphics, etc.). Set at module import
+# time so the cap applies uniformly the first time any indexer code
+# path reaches PIL.
+#
+# 30 Mpx is comfortably above any legitimate attachment image (a
+# 300 DPI letter page is ~8 Mpx; a 600 DPI A3 is ~24 Mpx; a modern
+# phone shot is ~12 Mpx) and well below the host-pressure threshold
+# (decoding a 30 Mpx RGB image is ~90 MB of pixel buffer). PIL's
+# default limit (~89 Mpx) is a HINT — it emits a
+# ``DecompressionBombWarning`` and otherwise lets processing proceed —
+# and was observed during a real indexer backfill to admit a 94 Mpx
+# image embedded in a marketing PDF, contributing to OOM kills.
+# Lowering the cap converts those into a hard rejection.
+GLOBAL_MAX_IMAGE_PIXELS = 30_000_000
+Image.MAX_IMAGE_PIXELS = GLOBAL_MAX_IMAGE_PIXELS
 
 log = logging.getLogger("indexer.extractor")
 
