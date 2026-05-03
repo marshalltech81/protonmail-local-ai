@@ -1,4 +1,4 @@
-.PHONY: build up down logs first-run update pull-models pull-models-host status clean sync sync-indexer sync-mcp test test-indexer test-mcp typecheck typecheck-indexer typecheck-mcp bridge-patch-check bridge-smoke bridge-upgrade-check open-webui-up open-webui-up-host-ollama open-webui-down open-webui-logs up-host-ollama down-host-ollama logs-host-ollama init-secrets validate-env help
+.PHONY: build build-nocache up down logs first-run update pull-models pull-models-host status clean sync sync-indexer sync-mcp test test-indexer test-mcp typecheck typecheck-indexer typecheck-mcp bridge-patch-check bridge-smoke bridge-upgrade-check open-webui-up open-webui-up-host-ollama open-webui-down open-webui-logs up-host-ollama down-host-ollama logs-host-ollama init-secrets validate-env help
 
 UV_CACHE_DIR ?= /tmp/uv-cache
 export UV_CACHE_DIR
@@ -14,6 +14,7 @@ help:
 	@echo "  init-secrets Create placeholder secret files under .secrets/ (run once on setup)"
 	@echo "  validate-env Verify .env values and secret file permissions before startup"
 	@echo "  build        Build all Docker images"
+	@echo "  build-nocache Rebuild all Docker images from scratch (skips BuildKit cache)"
 	@echo "  up           Start the full stack"
 	@echo "  down         Stop the full stack"
 	@echo "  logs         Tail logs from all containers"
@@ -66,6 +67,21 @@ init-secrets:
 # Build all images from source
 build:
 	docker compose build
+
+# Build all images from source with the BuildKit cache disabled.
+# Use after a base-image tag refresh, when chasing a "stale layer"
+# bug, or when you want to confirm a Dockerfile change actually
+# rebuilds the layer you think it does. Slower than ``make build``
+# (Bridge's Go compile from upstream Proton source dominates the
+# wall-clock; expect ~5-10 min on Apple Silicon).
+#
+# Pass SERVICES=indexer (or any compose service name list) to scope
+# the rebuild — useful when only the Python services changed and you
+# want to skip the heavy Bridge rebuild:
+#
+#   make build-nocache SERVICES="indexer mcp-server"
+build-nocache:
+	docker compose build --no-cache $(SERVICES)
 
 validate-env:
 	./scripts/validate-env.sh
