@@ -224,30 +224,37 @@ _TITLECASE_PROPER_NOUN_HOMONYMS = frozenset({"may", "will"})
 def _is_meaningful_query_token(token: str) -> bool:
     """Decide whether a tokenized query word is worth matching against subjects.
 
-    Two filters in order:
+    Three filters in order:
 
     1. Identifier-shape rule (handles short tokens). Tokens of
        length >= 3 pass; shorter tokens pass only if they contain a
        digit (``Q1``, ``W2``, ``5G``, ``2FA``) or are all-uppercase
        (``HR``, ``AI``, ``HOA``, ``IT``). Pure-lowercase 2-char
        tokens are almost always English stop words.
-    2. Stopword set (handles generic long tokens). After the
-       identifier-shape filter, drop tokens in ``_QUERY_STOPWORDS``
-       — articles, conjunctions, prepositions, modals, question
-       words, mailbox-meta nouns ("thread", "email"), and the
-       imperative verbs the model invokes the tool with
-       ("summarize", "find", "show"). Without this, queries like
-       "summarize the payroll thread" would score 2 generic
-       overlaps ("the", "thread") on any subject containing those
-       words and lose to the 1-overlap candidate that actually
-       matches the meaningful token ("payroll").
+    2. Titlecase proper-noun homonym carve-out. Tokens whose
+       lowercased form is in ``_TITLECASE_PROPER_NOUN_HOMONYMS`` AND
+       whose original form satisfies ``str.istitle()`` (``May``,
+       ``Will``) bypass the stopword check — these are likely a
+       month / given name, not the modal-verb the lowercase form
+       would otherwise trigger.
+    3. Stopword set (handles generic long tokens). After the
+       identifier-shape and homonym filters, drop tokens in
+       ``_QUERY_STOPWORDS`` — articles, conjunctions, prepositions,
+       modals, question words, mailbox-meta nouns ("thread",
+       "email"), and the unambiguous imperative verbs the model
+       invokes the tool with ("summarize", "find"). Without this,
+       queries like "summarize the payroll thread" would score 2
+       generic overlaps ("the", "thread") on any subject containing
+       those words and lose to the 1-overlap candidate that
+       actually matches the meaningful token ("payroll").
 
-    The ``isupper()`` / ``isdigit()`` checks must happen on the
-    original-case token, BEFORE the stopword check — otherwise an
-    uppercase ``THE`` (which is conceivable as a subject prefix in
-    business email) would survive the case check and then need a
-    case-aware stopword set. Lowercasing before the stopword check
-    keeps the stopword set authoritative and case-insensitive.
+    The ``isupper()`` / ``isdigit()`` / ``istitle()`` checks must
+    happen on the original-case token, BEFORE the stopword check —
+    otherwise an uppercase ``THE`` (which is conceivable as a
+    subject prefix in business email) would survive the case check
+    and then need a case-aware stopword set. Lowercasing before the
+    stopword check keeps the stopword set authoritative and case-
+    insensitive.
     """
     if not token:
         return False

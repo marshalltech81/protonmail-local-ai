@@ -348,16 +348,17 @@ contentless configuration two things are true that matter here:
 - `UNINDEXED` columns always read back as `NULL`, so the MCP keyword-search
   join on `threads_fts.thread_id` could not return any rows.
 
-Schema v3 rebuilds `threads_fts` with `contentless_delete=1` (SQLite ≥ 3.43)
-and stores each row's rowid in `threads.fts_rowid`. Writes delete by rowid
+`threads_fts` is created with `contentless_delete=1` (SQLite ≥ 3.43) and
+each row's rowid is stored in `threads.fts_rowid`. Writes delete by rowid
 before re-inserting; the MCP keyword search joins on
-`threads_fts.rowid = threads.fts_rowid`. This fixes both the stale-token
+`threads_fts.rowid = threads.fts_rowid`. This avoids both the stale-token
 problem and the always-null join.
 
 ## Durable Indexing Queue
 
-Schema v8 adds the `indexing_jobs` table. The watchdog callbacks and
-`initial_index` no longer run the parse / embed / upsert pipeline
+The `indexing_jobs` table backs the durable queue. The watchdog
+callbacks and `initial_index` no longer run the parse / embed / upsert
+pipeline
 inline — they `enqueue` each filepath and return immediately. A worker
 loop in the main thread drains the queue via `drain_queue`, capped at
 `HEALTH_REFRESH_EVERY` jobs per pass so the reconciler and health-file
@@ -406,8 +407,8 @@ issue).
 
 ## File Identity on `indexed_files`
 
-Schema v7 augments `indexed_files` with `size`, `mtime_ns`, and
-`content_hash` (SHA-256 over the raw file bytes) captured at
+`indexed_files` carries `size`, `mtime_ns`, and `content_hash`
+(SHA-256 over the raw file bytes) captured at
 `parse_email` time. `is_indexed` stays filepath-keyed — the hot path
 remains an O(1) primary-key lookup — and the new columns are written
 alongside. On a flag-only mbsync rename (`msg:2,S` → `msg:2,SR`)
