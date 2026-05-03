@@ -100,3 +100,88 @@ class TestThreadContextWithChunks:
     def test_no_evidence_chunks_falls_back_to_body_text(self):
         r = _result(body_text="legacy thread body")
         assert _thread_context(r) == "legacy thread body"
+
+
+def _candidate(thread_id: str, subject: str) -> ThreadResult:
+    return ThreadResult(
+        thread_id=thread_id,
+        subject=subject,
+        participants=[],
+        folder="INBOX",
+        date_first=datetime(2024, 1, 1, tzinfo=UTC),
+        date_last=datetime(2024, 1, 1, tzinfo=UTC),
+        message_ids=[],
+        snippet="",
+        has_attachments=False,
+    )
+
+
+class TestPickResolutionCandidate:
+    """The subject-overlap tiebreaker for summarize_thread's phrase fallback.
+
+    Each test pins a specific behavior the user-visible UX depends on. The
+    function operates on hybrid_search top-N candidates, so the input list
+    is already in RRF rank order — the tiebreaker only re-ranks when the
+    top-ranked candidate isn't the obvious subject match.
+    """
+
+    def test_returns_top_ranked_when_no_subject_overlap(self):
+        from src.tools.intelligence import _pick_resolution_candidate
+
+        # ``zzz`` shares no tokens with either subject — fall back to the
+        # candidate hybrid_search ranked first.
+        candidates = [
+            _candidate("c1", "alpha beta"),
+            _candidate("c2", "gamma delta"),
+        ]
+        assert _pick_resolution_candidate("zzz", candidates).thread_id == "c1"
+
+    def test_picks_higher_subject_overlap_over_top_rank(self):
+        from src.tools.intelligence import _pick_resolution_candidate
+
+        # ``c1`` ranks first via RRF but shares no tokens with the query;
+        # ``c2`` shares two — the tiebreaker must override the rank.
+        candidates = [
+            _candidate("c1", "completely different"),
+            _candidate("c2", "exact match here"),
+        ]
+        assert _pick_resolution_candidate("exact match", candidates).thread_id == "c2"
+
+    def test_short_query_tokens_are_ignored_to_avoid_stop_words(self):
+        from src.tools.intelligence import _pick_resolution_candidate
+
+        # ``is`` and ``a`` would otherwise create a 2-token overlap on c1
+        # for any subject containing those stop-words. Only ``thread``
+        # should count, and it appears in c1's subject.
+        candidates = [
+            _candidate("c1", "is a thread"),
+            _candidate("c2", "no match"),
+        ]
+        assert _pick_resolution_candidate("is a thread", candidates).thread_id == "c1"
+
+    def test_match_is_case_insensitive(self):
+        from src.tools.intelligence import _pick_resolution_candidate
+
+        candidates = [
+            _candidate("c1", "AUDIT and TAXES"),
+            _candidate("c2", "lunch"),
+        ]
+        assert _pick_resolution_candidate("audit", candidates).thread_id == "c1"
+
+    def test_empty_query_returns_top_ranked(self):
+        from src.tools.intelligence import _pick_resolution_candidate
+
+        # Query with no tokens (whitespace, punctuation) shouldn't cause a
+        # divide-by-zero; just defer to the rank order.
+        candidates = [
+            _candidate("c1", "alpha"),
+            _candidate("c2", "beta"),
+        ]
+        assert _pick_resolution_candidate("   ", candidates).thread_id == "c1"
+
+    def test_raises_on_empty_candidates(self):
+        import pytest
+        from src.tools.intelligence import _pick_resolution_candidate
+
+        with pytest.raises(ValueError):
+            _pick_resolution_candidate("anything", [])

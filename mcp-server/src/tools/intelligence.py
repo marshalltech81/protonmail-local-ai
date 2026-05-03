@@ -6,6 +6,7 @@ Q&A/RAG, summarization, and structured extraction over email threads.
 import asyncio
 import json
 import logging
+import re
 
 import httpx
 from mcp.types import TextContent
@@ -13,6 +14,46 @@ from mcp.types import TextContent
 from ..lib.security import safe_exception_text
 from ..lib.sqlite import ThreadResult
 from ..lib.validation import clamp_int
+
+# Number of candidates the summarize_thread fallback pulls from
+# hybrid_search before applying the subject-overlap tiebreaker. 3 is
+# enough to pick a clearly-better match without paying for additional
+# vector / chunk fan-out.
+_RESOLUTION_CANDIDATE_LIMIT = 3
+
+
+def _pick_resolution_candidate(query: str, candidates: list[ThreadResult]) -> ThreadResult:
+    """Choose the best candidate for the summarize_thread phrase fallback.
+
+    hybrid_search ranks by RRF over BM25 + vector + chunk lanes, which
+    is dominated by *content* similarity. That's the right default for
+    search, but for resolving a phrase like "the audit & taxes thread"
+    a thread whose *subject line* contains every query token is almost
+    always what the caller meant — even if some other thread has more
+    semantically-similar body chunks. Apply a subject-token overlap
+    tiebreaker on top of the default ranking: prefer the candidate
+    whose subject contains the most query tokens, falling back to the
+    top-ranked candidate when no candidate has any subject overlap.
+
+    Tokens shorter than 3 chars are ignored to avoid stop-word noise
+    ("the", "is", "of"); they would otherwise produce false-positive
+    overlaps on almost any candidate.
+    """
+    if not candidates:
+        raise ValueError("candidates must be non-empty")
+    query_tokens = {t.lower() for t in re.findall(r"\w+", query) if len(t) > 2}
+    if not query_tokens:
+        return candidates[0]
+    best = candidates[0]
+    best_overlap = 0
+    for candidate in candidates:
+        subject_tokens = {t.lower() for t in re.findall(r"\w+", candidate.subject)}
+        overlap = len(query_tokens & subject_tokens)
+        if overlap > best_overlap:
+            best_overlap = overlap
+            best = candidate
+    return best
+
 
 log = logging.getLogger("mcp.tools.intelligence")
 
@@ -238,12 +279,16 @@ def register_intelligence_tools(
         search_emails / list_threads / get_message, OR a subject-line
         phrase. Opaque IDs are looked up directly. When that lookup
         misses, the tool transparently falls back to a hybrid keyword
-        + vector search on the same string and summarizes the top
-        match. So a borderline-LLM call like
-        ``summarize_thread("audit & taxes thread")`` works without
-        an explicit search step, while
-        ``summarize_thread("PH3PPF...@outlook.com")`` still goes
-        straight to that thread.
+        + vector search on the same string. The fallback pulls a
+        small candidate set and applies a subject-token overlap
+        tiebreaker — preferring the thread whose subject line shares
+        the most words with the phrase — so a call like
+        ``summarize_thread("the audit & taxes thread")`` resolves to
+        the actual audit thread even when an unrelated message has a
+        higher vector similarity score. Opaque IDs like
+        ``summarize_thread("PH3PPF...@outlook.com")`` still go
+        straight to that specific thread without invoking the
+        fallback.
 
         Args:
             thread_id: An opaque thread ID, or a subject / topic phrase
@@ -272,11 +317,17 @@ def register_intelligence_tools(
                     db.hybrid_search,
                     query_text=thread_id,
                     query_embedding=embedding,
-                    limit=1,
+                    limit=_RESOLUTION_CANDIDATE_LIMIT,
                 )
                 if not resolved:
                     return [TextContent(type="text", text=f"Thread not found: {thread_id}")]
-                thread = await asyncio.to_thread(db.get_thread, resolved[0].thread_id)
+                # Apply the subject-overlap tiebreaker: when multiple
+                # candidates rank similarly by RRF, prefer the one whose
+                # subject line shares tokens with the query phrase. This
+                # rescues the common case where vector similarity ranks
+                # an unrelated thread above the obvious match.
+                best = _pick_resolution_candidate(thread_id, resolved)
+                thread = await asyncio.to_thread(db.get_thread, best.thread_id)
                 if not thread:
                     return [TextContent(type="text", text=f"Thread not found: {thread_id}")]
 

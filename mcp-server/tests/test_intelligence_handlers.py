@@ -128,6 +128,24 @@ class TestSummarizeThread:
         # The phrase was embedded once for the fallback search.
         assert fake_ollama.embed_calls == ["invoice for march"]
 
+    def test_phrase_fallback_prefers_subject_overlap_over_vector_rank(
+        self, fake_server, seeded_db, fake_ollama
+    ):
+        # ``fake_ollama`` returns a fixed [1, 0, 0, 0] embedding which
+        # vector-aligns with t-alpha (subject "invoice for march"). For
+        # the phrase "lunch plans", the keyword lane surfaces t-beta
+        # (its actual subject) but the vector lane keeps pulling t-alpha
+        # to the top. Without the subject-overlap tiebreaker the
+        # fallback resolves to t-alpha and produces a summary about the
+        # wrong thread; with the tiebreaker, t-beta wins on the two
+        # subject-token overlaps.
+        handler = _handlers(fake_server, seeded_db, fake_ollama)["summarize_thread"]
+        out = asyncio.run(handler(thread_id="lunch plans"))
+        text = _text(out)
+        # Must resolve to the lunch thread, not the invoice thread.
+        assert "lunch plans" in text
+        assert "invoice for march" not in text
+
     def test_phrase_with_empty_corpus_returns_not_found(self, fake_server, empty_db, fake_ollama):
         # If the index is empty, the fallback hybrid_search returns no
         # hits — return the original sentinel rather than fabricating a
