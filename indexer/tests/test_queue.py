@@ -157,6 +157,37 @@ class TestMarkSucceededAndFailed:
         assert q.claim_next() is None
 
 
+class TestIsDead:
+    """``is_dead(filepath)`` tells the initial scan whether to skip a row.
+
+    Without this gate, every restart re-enqueues dead-lettered files
+    via ``INSERT OR REPLACE``, resetting attempts to 0 and burning
+    another full retry cascade on the same upstream condition that
+    caused the original dead-letter (e.g. Ollama embed 500s on a
+    poison-pill payload). The reset semantics on ``enqueue`` are
+    intentional for genuine watchdog rename / create events — those
+    signal actual file change — but routine startup re-discovery
+    should NOT trigger them.
+    """
+
+    def test_returns_true_for_dead_row(self, db: Database):
+        q = _queue(db, max_attempts=1)
+        q.enqueue("/m/dead", REASON_ON_CREATED)
+        q.mark_failed("/m/dead", stage="parse", error="bad")  # 1 attempt -> dead
+        assert q.is_dead("/m/dead") is True
+
+    def test_returns_false_for_queued_row(self, db: Database):
+        q = _queue(db)
+        q.enqueue("/m/active", REASON_ON_CREATED)
+        assert q.is_dead("/m/active") is False
+
+    def test_returns_false_for_unknown_filepath(self, db: Database):
+        # Path was never enqueued OR has succeeded and been deleted —
+        # both surface as "no row" and must not be reported as dead.
+        q = _queue(db)
+        assert q.is_dead("/m/never") is False
+
+
 class TestMarkSkipped:
     """``mark_skipped`` drops a row without consuming retry budget.
 

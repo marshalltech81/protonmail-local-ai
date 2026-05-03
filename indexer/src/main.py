@@ -540,12 +540,31 @@ def initial_index(
     """
     log.info("Running initial index scan...")
     enqueued = 0
+    skipped_dead = 0
     for filepath in _iter_maildir_messages(MAILDIR_PATH):
-        if db.is_indexed(str(filepath)):
+        path_str = str(filepath)
+        if db.is_indexed(path_str):
             continue
-        queue.enqueue(str(filepath), REASON_INITIAL_SCAN)
+        # Don't resurrect dead-lettered files on routine startup. The
+        # initial scan only proves "this file exists on disk" — not
+        # that anything about its content has changed since the last
+        # attempt failed. Watchdog IN_MOVED_TO / IN_CREATED still go
+        # through ``enqueue`` (which DOES reset prior state via
+        # INSERT OR REPLACE) because those events DO indicate the
+        # file changed. Without this skip, every container restart
+        # re-runs the same 5-attempt × 30s backoff cascade against
+        # the same poison-pill payloads — observed to add up to
+        # ~30 minutes of wasted Ollama load per dead file per restart.
+        if queue.is_dead(path_str):
+            skipped_dead += 1
+            continue
+        queue.enqueue(path_str, REASON_INITIAL_SCAN)
         enqueued += 1
-    log.info(f"Initial index: enqueued {enqueued} message(s).")
+    log.info(
+        "Initial index: enqueued %d message(s), skipped %d dead-lettered.",
+        enqueued,
+        skipped_dead,
+    )
 
     processed = 0
     timing_aggregator = TimingAggregator(window=200)

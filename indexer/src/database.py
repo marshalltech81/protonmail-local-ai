@@ -1382,6 +1382,27 @@ class Database:
         return int(row["attempts"]) if row else None
 
     @_synchronized
+    def queue_get_status(self, filepath: str) -> str | None:
+        """Return ``"queued"`` / ``"dead"`` / ``None`` for ``filepath``.
+
+        ``None`` when the row does not exist — the file has never been
+        enqueued or has succeeded and been deleted. Callers (initial
+        scan, reconciler) use this to decide whether to re-enqueue a
+        path that's known to be dead-lettered: blindly re-enqueuing
+        every dead row on every container restart turns one failed
+        payload into a recurring retry storm against the same
+        upstream (Ollama embed 500s on a poison-pill text), so the
+        initial scan should skip those rows. Genuinely-fresh events
+        (watchdog ``IN_MOVED_TO`` / ``IN_CREATED``) still go through
+        ``enqueue`` which intentionally resets prior state — those
+        signal real change in the file.
+        """
+        row = self._conn.execute(
+            "SELECT status FROM indexing_jobs WHERE filepath = ?", (filepath,)
+        ).fetchone()
+        return row["status"] if row else None
+
+    @_synchronized
     def queue_mark_failed(
         self,
         *,

@@ -213,6 +213,21 @@ class IndexingQueue:
 
     # ----- reads ---------------------------------------------------------
 
+    def is_dead(self, filepath: str) -> bool:
+        """True when ``filepath`` has a row at status=``dead``.
+
+        Used by the initial scan to skip dead-lettered files instead
+        of clobbering them via ``enqueue``'s ``INSERT OR REPLACE``.
+        Without this skip, a container restart re-enqueues every
+        previously-failed file, resets its retry counter to zero, and
+        starts the 5-attempt backoff cascade over again — wasting
+        ~30 minutes of Ollama load per file with no change in
+        upstream behavior. The watchdog rename / on-created events
+        keep going through ``enqueue`` (and DO reset dead state)
+        because those signal real change in the underlying file.
+        """
+        return self.db.queue_get_status(filepath) == STATUS_DEAD
+
     def stats(self) -> dict[str, int]:
         """Return ``{'queued': n, 'dead': n}`` — surfaced through the
         indexer health file / MCP ``get_index_status`` so operators can
