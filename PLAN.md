@@ -63,16 +63,63 @@ The previous priorities (intelligence-fidelity validation, test-coverage
 expansion, tool-behavior tightening, Tier 1 safety preservation) are
 **paused** behind the MLX rebuild. They resume after step 5 below.
 
-### Status as of 2026-05-02
+### Status as of 2026-05-03
 
-Steps 1-4 are code-complete and green across all three test suites
-(mlx-service: 6, mcp-server: 311, indexer: 460 — 777 total). Step 5
-deferred until the operator can monitor for OOM and quality
-regressions. Live subset reindex (the verify step inside step 3)
-also deferred — needs a Docker rebuild + supervised run.
+Steps 1-4 code-complete and green; PR #83 open against `main`.
+Codex round-1, round-2, round-3, round-4 review feedback addressed
+in-place. Test counts: mlx-service 7, mcp-server 315, indexer 463
+(after the v14 migration guard tests + tied-embeddings assertion
+test added in the post-Claude-Desktop-review pass). mypy + ruff
+clean across all three services. Both compose configs validate.
+
+### Pre-merge verification gates (operator-driven, not automatable)
+
+These are the checks Claude Desktop's PR review explicitly requested
+before merge. None can be done autonomously by an in-repo agent —
+each needs the operator at the keyboard.
+
+1. **Memory pressure test with all three models resident.** Load
+   Qwen 32B in Ollama, warm both MLX models via curl, then run an
+   end-to-end embed → rerank → LLM cycle. Watch
+   `vm_stat | grep "Pages free"` and the `process_resident_mb` value
+   on `/health` for swap pressure. The 36 GB box has zero margin on
+   paper (19+8+4+7≈38). If swap engages under load, fall back to
+   `mlx-community/Qwen3-Embedding-8B-4bit-DWQ` (~4 GB) for the
+   embedder.
+2. **LaunchAgent reboot stability.** Reboot once; then verify
+   ``launchctl print "gui/$(id -u)/com.local.mlx-service"`` shows
+   loaded and ``curl 127.0.0.1:8001/health`` returns ok.
+3. **Subset reindex.** `make build && make up` against a single
+   folder or date range to validate end-to-end before the full
+   backfill. Watch indexer logs for `Embedder: MLX service at ...`
+   and the warmup ping; watch its `mem_limit: 6g` against the new
+   1500-token chunk cap × concurrency.
+
+### Post-merge follow-ups
+
+1. **Step 5 — full mailbox reindex.** Hours of compute. Runs after
+   the three pre-merge gates pass.
+2. **Doc sweep.** `docs/mcp-tools.md`, `README.md`, AGENTS.md
+   non-negotiables to mention the new host service. Deferred so the
+   live reindex confirms behavior before doc decisions calcify.
+3. **One-knob-at-a-time eval.** Two retrieval-quality variables
+   moved at once (Qwen3 embedder vs nomic, and 1000/1500 chunk
+   budget vs 350/500). If the manual eval shows a regression, run a
+   diagnostic split: Qwen3 embedder at the *old* 350/500 chunk
+   budget first, then raise budgets, to attribute any quality
+   change to the right knob.
+4. **`RERANK_CANDIDATES` latency tuning.** Default 50 means 50
+   forward passes through a 4B model per query. Measure the wall
+   clock on a real query (warm cache). If a single rerank call
+   exceeds ~5 s, drop the default to 20-30 — Open WebUI's ~60 s
+   client timeout already bites on populated mailboxes (see
+   `project_ask_mailbox_slow.md`).
+5. **Rerank-side quality experiment.** Once retrieval is stable,
+   compare `USE_MLX_RERANKER=true` vs `false` on the manual eval
+   set to measure what the rerank stage actually buys you.
 
 The detailed pickup checklist lives in the project memory file
-``project_mlx_rebuild_session.md`` (autonomous-session snapshot).
+``project_mlx_rebuild_session.md``.
 
 ### 1. Build mlx-service standalone
 

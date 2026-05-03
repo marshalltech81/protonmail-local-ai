@@ -123,6 +123,92 @@ class TestSchema:
         finally:
             database.close()
 
+    def test_v14_migration_guard_blocks_populated_v13_without_force(self, tmp_path, monkeypatch):
+        """The v14 (768→4096) migration is destructive — it drops the
+        vector tables and clears message_chunks, indexed_files, and
+        the queue. On a populated v13 install that means hours of
+        indexing work get reset, so the guard refuses unless the
+        operator opts in via INDEXER_MIGRATION_V14_FORCE."""
+        db_path = tmp_path / "populated.db"
+        database = Database(db_path)
+        # Seed one message_chunks row to make the DB look "populated"
+        # from the guard's perspective. We also need the foreign-key
+        # ancestors so the FK constraint accepts the row.
+        database._conn.execute(
+            "INSERT INTO threads (thread_id, subject, participants, senders, "
+            "folder, date_first, date_last, message_ids) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            ("t1", "subj", "[]", "[]", "INBOX", "2026-01-01", "2026-01-01", "[]"),
+        )
+        database._conn.execute(
+            "INSERT INTO message_thread_map (message_id, thread_id, filepath) VALUES (?, ?, ?)",
+            ("m1", "t1", "/maildir/cur/m1.eml"),
+        )
+        database._conn.execute(
+            "INSERT INTO message_chunks (chunk_id, message_id, thread_id, "
+            "chunk_index, text, char_start, char_end, token_est, chunked_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            ("c1", "m1", "t1", 0, "body", 0, 4, 1, "2026-01-01"),
+        )
+        database._conn.execute("UPDATE schema_version SET version = ?", (12,))
+        database._conn.commit()
+        database.close()
+
+        monkeypatch.delenv("INDEXER_MIGRATION_V14_FORCE", raising=False)
+        with pytest.raises(RuntimeError, match="Refusing destructive migration v14"):
+            Database(db_path)
+
+    def test_v14_migration_guard_proceeds_with_force_env(self, tmp_path, monkeypatch):
+        """With INDEXER_MIGRATION_V14_FORCE=true the guard logs a
+        warning and lets the migration proceed."""
+        db_path = tmp_path / "populated_force.db"
+        database = Database(db_path)
+        database._conn.execute(
+            "INSERT INTO threads (thread_id, subject, participants, senders, "
+            "folder, date_first, date_last, message_ids) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            ("t1", "subj", "[]", "[]", "INBOX", "2026-01-01", "2026-01-01", "[]"),
+        )
+        database._conn.execute(
+            "INSERT INTO message_thread_map (message_id, thread_id, filepath) VALUES (?, ?, ?)",
+            ("m1", "t1", "/maildir/cur/m1.eml"),
+        )
+        database._conn.execute(
+            "INSERT INTO message_chunks (chunk_id, message_id, thread_id, "
+            "chunk_index, text, char_start, char_end, token_est, chunked_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            ("c1", "m1", "t1", 0, "body", 0, 4, 1, "2026-01-01"),
+        )
+        database._conn.execute("UPDATE schema_version SET version = ?", (13,))
+        database._conn.commit()
+        database.close()
+
+        monkeypatch.setenv("INDEXER_MIGRATION_V14_FORCE", "true")
+        # Should reopen cleanly; the migration runs and clears the chunk row.
+        database = Database(db_path)
+        try:
+            n = database._conn.execute("SELECT COUNT(*) FROM message_chunks").fetchone()[0]
+            assert n == 0
+            stored = database._conn.execute("SELECT version FROM schema_version").fetchone()[
+                "version"
+            ]
+            assert stored == SCHEMA_VERSION
+        finally:
+            database.close()
+
+    def test_v14_migration_guard_skipped_for_empty_v13(self, tmp_path, monkeypatch):
+        """Empty v13 databases don't trigger the guard — there's
+        nothing to lose, so no opt-in env required."""
+        db_path = tmp_path / "empty.db"
+        database = Database(db_path)
+        database._conn.execute("UPDATE schema_version SET version = ?", (13,))
+        database._conn.commit()
+        database.close()
+
+        monkeypatch.delenv("INDEXER_MIGRATION_V14_FORCE", raising=False)
+        # Should reopen without raising.
+        Database(db_path).close()
+
     def test_opening_with_unreachable_lower_version_raises(self, tmp_path):
         """If the stored version is older than the oldest forward
         migration shipped, the runner raises rather than silently

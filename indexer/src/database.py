@@ -7,6 +7,7 @@ Thread-level indexing: one row per thread, updated as new messages arrive.
 import functools
 import json
 import logging
+import os
 import sqlite3
 import threading
 import weakref
@@ -260,6 +261,7 @@ class Database:
             )
 
         migration_dir = Path(__file__).parent / "migrations"
+        self._guard_destructive_migrations(stored, SCHEMA_VERSION)
         log.info(f"Migrating database at {self.path}: v{stored} -> v{SCHEMA_VERSION}")
         applied = migration_runner.apply_pending(
             self._conn,
@@ -270,6 +272,61 @@ class Database:
         log.info(
             f"Database ready at {self.path} (schema v{SCHEMA_VERSION}, "
             f"applied migrations: {applied})"
+        )
+
+    def _guard_destructive_migrations(self, stored: int, target: int) -> None:
+        """Refuse known-destructive migrations against populated databases
+        unless the operator has explicitly opted in.
+
+        v14 (768→4096-dim Qwen3 embeddings) is destructive — it drops
+        and recreates the vector tables, and clears
+        ``message_chunks`` / ``message_chunks_fts`` / ``indexed_files``
+        / ``indexing_jobs`` so the next scan re-embeds. On a populated
+        v13 install that means hours of indexing work get reset; the
+        operator must reindex from Maildir afterward. Worth a
+        confirmation gate so a routine container restart doesn't
+        silently kick off a full backfill.
+
+        Set ``INDEXER_MIGRATION_V14_FORCE=true`` to acknowledge and
+        proceed. Empty databases (no ``message_chunks`` rows) skip
+        the gate — there's nothing to lose.
+        """
+        if not (stored < 14 <= target):
+            return
+        try:
+            row = self._conn.execute("SELECT COUNT(*) AS n FROM message_chunks").fetchone()
+        except sqlite3.OperationalError:
+            # Pre-v9 schemas don't have message_chunks. Nothing to lose.
+            return
+        existing = row["n"] if row is not None else 0
+        if existing == 0:
+            return
+        force = os.environ.get("INDEXER_MIGRATION_V14_FORCE", "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+        if force:
+            log.warning(
+                "INDEXER_MIGRATION_V14_FORCE=true: applying destructive "
+                "v14 migration over %d existing message_chunks rows. "
+                "All chunks, vector data, file cache, and queue state "
+                "will be cleared; the next scan will re-embed every "
+                "message.",
+                existing,
+            )
+            return
+        raise RuntimeError(
+            f"Refusing destructive migration v14 over {existing} existing "
+            "message_chunks rows. v14 resizes the embedding vector tables "
+            "from 768-dim to 4096-dim (Qwen3-Embedding-8B) and clears "
+            "message_chunks / message_chunks_fts / indexed_files / "
+            "indexing_jobs so the next scan re-embeds. Existing chunks, "
+            "vectors, and queue state will be DROPPED. To proceed, set "
+            "INDEXER_MIGRATION_V14_FORCE=true and restart. The next scan "
+            "will re-chunk and re-embed every message — expect hours of "
+            "work on a populated mailbox."
         )
 
     def _apply_initial_schema(self, cur: sqlite3.Cursor):

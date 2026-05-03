@@ -479,11 +479,26 @@ shape mismatch at startup.
 
 ### Threat model (mlx-service)
 
-The service binds loopback only and serves no authentication. The
-trust boundary is identical to the host-Ollama overlay above — any
-same-machine process can reach it. The service holds the model weights
-and processes embedding requests; it does not have access to the
-SQLite index, Maildir, or Bridge credentials.
+The service binds loopback only (`127.0.0.1:8001`) and serves no
+authentication on `/embed`, `/rerank`, or `/health`. **Any local
+user-process — Docker containers via `host.docker.internal`, browser
+tabs reaching `127.0.0.1`, ad-hoc shells — can call any endpoint
+without credentials.** The trust boundary is identical to the
+host-Ollama overlay above: a single-user laptop where same-machine
+processes are assumed trusted.
+
+What the service holds: model weights in process memory and the
+HuggingFace cache on disk. What it does NOT hold: the SQLite index,
+Maildir, or Bridge credentials. A compromise of this process leaks
+the model weights (public anyway) and the contents of recent embed /
+rerank request bodies (the queries plus, for reranking, snippets of
+threads the operator just searched). It does not give the attacker
+access to mailbox data at rest.
+
+If the trust assumption changes (multi-user host, untrusted local
+processes), the right next step is a bearer-token check in the
+FastAPI app gated on a Docker secret — same posture the project
+notes for `mcp-server` itself.
 
 ### Falling back
 
@@ -494,9 +509,31 @@ launchctl bootout "gui/$(id -u)/com.local.mlx-service"
 lsof -iTCP:8001 -sTCP:LISTEN  # should now print nothing
 ```
 
-In `.env`, set `USE_MLX_EMBEDDER=false` and `USE_MLX_RERANKER=false`,
-and restore the prior schema (drop the 4096-dim vec tables, recreate at
-768) before bringing the indexer back up.
+**Rolling back the embedder is not a configuration toggle — it is a
+reindex.** The two MLX flags do different things:
+
+- `USE_MLX_RERANKER=false` is a clean toggle. The reranker is a
+  post-RRF stage with no schema dependency, so flipping it off
+  immediately returns to RRF-only ranking. Use this for a fast
+  rerank-side rollback.
+- `USE_MLX_EMBEDDER=false` switches the embedder routing back to
+  Ollama, but the SQLite schema is sized for Qwen3-Embedding-8B's
+  4096-dim vectors. Ollama's `nomic-embed-text` produces 768-dim
+  vectors and the indexer's startup dim probe will fail-closed on
+  the mismatch. A real embedder rollback requires:
+  1. Stop the stack: `make down`
+  2. Reset the SQLite volume: `docker volume rm protonmail-local-ai_sqlite-volume`
+  3. Restore the old code (revert the v14 schema bump, set
+     `EMBEDDING_DIM = 768`)
+  4. Set `USE_MLX_EMBEDDER=false` in `.env`
+  5. `make up` and let the indexer **rebuild the index from Maildir**
+     under Ollama — multiple hours on a populated mailbox.
+
+So `USE_MLX_EMBEDDER` is an integration-level safety net for "MLX is
+down today, I want to fail-fast clearly", not a data-level rollback.
+Plan accordingly: once you've migrated to the v14 (4096-dim) schema,
+returning to Ollama-served embeddings costs a full reindex — the flag
+is not a free toggle.
 
 ## Updating Bridge
 

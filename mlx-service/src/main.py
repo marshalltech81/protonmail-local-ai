@@ -137,12 +137,32 @@ def _rerank_score(
     full_ids = meta["prefix_ids"] + body_ids + meta["suffix_ids"]
     ids = mx.array([full_ids])
     out = model(ids)
+    # Recover vocab-sized logits for the last token.
+    #
+    # ``mlx-embeddings`` loads Qwen3-Reranker-4B with the embedding
+    # head exposed (``last_hidden_state``, ``text_embeds``,
+    # ``pooler_output``) but no ``logits`` field — the lm_head
+    # projection isn't surfaced. We project the last hidden state
+    # back to vocab using the input embedding, which is correct
+    # *only because* the model card declares
+    # ``tie_word_embeddings=True`` (lm_head shares weights with
+    # ``model.embed_tokens``). ``QuantizedEmbedding.as_linear`` is the
+    # MLX-supported way to apply a tied-weight matmul against an
+    # mxfp8 embedding without manual dequant.
+    #
+    # If a future refactor swaps in a Qwen3-Reranker variant where
+    # ``tie_word_embeddings=False``, this block silently produces
+    # garbage scores. Verify ``model.config.tie_word_embeddings`` at
+    # load time before changing this code, and fall back to mlx-lm
+    # (which carries a real CausalLM head) if the assumption breaks.
     last_hidden = out.last_hidden_state[:, -1, :]
     logits = embed_layer.as_linear(last_hidden)
     yes_logit = logits[0, meta["yes_id"]].item()
     no_logit = logits[0, meta["no_id"]].item()
     # Numerically stable log-softmax over the 2-token {no, yes} subset,
-    # take exp of the yes index → P(yes | {yes, no}).
+    # take exp of the yes index → P(yes | {yes, no}). This is the
+    # documented Qwen3-Reranker scoring path (the model is *trained*
+    # to be used this way; it's not a generic LLM yes/no workaround).
     m = max(yes_logit, no_logit)
     denom = math.log(math.exp(yes_logit - m) + math.exp(no_logit - m)) + m
     return math.exp(yes_logit - denom)
@@ -188,6 +208,20 @@ def rerank(req: RerankRequest) -> dict[str, Any]:
     if not req.documents:
         raise HTTPException(status_code=400, detail="documents list is empty")
     model, tokenizer = _reranker.get()
+    # Fail-fast on the load-bearing assumption that justifies
+    # ``embed_layer.as_linear`` in ``_rerank_score``. If a future
+    # model swap breaks weight tying we want a loud error here, not
+    # silently-wrong scores in retrieval.
+    if not getattr(model.config, "tie_word_embeddings", False):
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                f"reranker model {RERANK_MODEL_ID!r} has tie_word_embeddings=False; "
+                "the embed_tokens.as_linear() logit recovery path requires tied "
+                "weights — switch the reranker to mlx-lm (which carries a real "
+                "CausalLM head) or use a tied-embedding variant."
+            ),
+        )
     meta = _rerank_metadata(tokenizer)
     embed_layer = model.model.embed_tokens
     instruction = req.instruction or RERANK_DEFAULT_INSTRUCTION

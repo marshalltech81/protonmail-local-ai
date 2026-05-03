@@ -110,8 +110,12 @@ def test_rerank_orders_by_score_desc_and_respects_top_n(
     class _ModelDot:
         embed_tokens = _Embed()
 
+    class _FakeConfig:
+        tie_word_embeddings = True
+
     class _FakeRerankerModel:
         model = _ModelDot()
+        config = _FakeConfig()
 
     monkeypatch.setattr(main._reranker, "_model", _FakeRerankerModel(), raising=False)
     monkeypatch.setattr(main._reranker, "_tokenizer", object(), raising=False)
@@ -140,3 +144,25 @@ def test_rerank_orders_by_score_desc_and_respects_top_n(
 def test_rerank_empty_documents_400(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     r = client.post("/rerank", json={"query": "q", "documents": []})
     assert r.status_code == 400
+
+
+def test_rerank_rejects_model_without_tied_embeddings(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The lm_head logit recovery via embed_tokens.as_linear() depends
+    # on tie_word_embeddings=True. A model swap that breaks this
+    # assumption must fail loudly (500) — silently using the wrong
+    # projection produces wrong scores in retrieval.
+    class _UntiedConfig:
+        tie_word_embeddings = False
+
+    class _UntiedModel:
+        config = _UntiedConfig()
+        model = type("M", (), {"embed_tokens": object()})()
+
+    monkeypatch.setattr(main._reranker, "_model", _UntiedModel(), raising=False)
+    monkeypatch.setattr(main._reranker, "_tokenizer", object(), raising=False)
+
+    r = client.post("/rerank", json={"query": "q", "documents": ["d"]})
+    assert r.status_code == 500
+    assert "tie_word_embeddings" in r.json()["detail"]

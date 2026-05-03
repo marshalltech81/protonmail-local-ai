@@ -188,6 +188,11 @@ services:
       # downloads (~4 min embedder + ~2 min reranker). Lower it on a
       # warm cache for faster startup-failure detection.
       MLX_EMBED_WARMUP_TIMEOUT_SECS: ${MLX_EMBED_WARMUP_TIMEOUT_SECS:-600}
+      # Confirmation gate for the v13→v14 destructive migration.
+      # Default false so a routine container restart on a populated v13
+      # install fails fast with an instructive error instead of
+      # silently kicking off a multi-hour rebuild. See .env.example.
+      INDEXER_MIGRATION_V14_FORCE: ${INDEXER_MIGRATION_V14_FORCE:-false}
       # Chunker token budgets. Defaults are sized for Qwen3-Embedding-8B
       # (long-context); operators on the legacy Ollama path should
       # override these back to 350 / 500 / 60.

@@ -1,3 +1,17 @@
+-- !!! DESTRUCTIVE MIGRATION !!!
+--
+-- This migration drops + recreates the ``threads_vec`` and
+-- ``message_chunks_vec`` tables and clears ``message_chunks``,
+-- ``message_chunks_fts``, ``indexed_files``, and ``indexing_jobs``.
+-- Every existing chunk + vector + scan-state row is discarded and the
+-- next indexer scan re-embeds the entire mailbox from Maildir — hours
+-- of work on a populated install.
+--
+-- The runner refuses to apply this migration on a populated v13
+-- database unless the operator sets ``INDEXER_MIGRATION_V14_FORCE=true``.
+-- See ``Database._guard_destructive_migrations`` and the .env.example
+-- entry. Empty databases skip the gate (nothing to lose).
+--
 -- Resize the vector tables from 768-dim to 4096-dim for the new
 -- MLX-served Qwen3-Embedding-8B default. The legacy Ollama
 -- ``nomic-embed-text`` was 768-dim; Qwen3-Embedding-8B is 4096.
