@@ -1024,3 +1024,197 @@ class TestRRFChunkLifting:
         assert fused[0].score == pytest.approx(1.0 / 61, rel=1e-6)
         beta = next(r for r in fused if r.thread_id == "t-beta")
         assert beta.score == pytest.approx(1.0 / 64, rel=1e-6)
+
+
+class TestFindContact:
+    """The find_contact aggregator powers the LLM's name → email lookup
+    so a borderline model can resolve a display-name fragment before
+    passing ``from_addr`` to search_emails. Each test pins a behavior
+    the tool description implicitly promises.
+    """
+
+    def test_match_by_address_substring(self, seeded_db: Database):
+        # ``alice@example.com`` appears in t-alpha (sender) and t-beta
+        # (participant). The query ``"alice"`` matches both — count is 2.
+        results = seeded_db.find_contact("alice")
+        assert len(results) == 1
+        assert results[0]["email"] == "alice@example.com"
+        assert results[0]["thread_count"] == 2
+
+    def test_match_by_domain_fragment(self, seeded_db: Database):
+        # ``@example.com`` should pull every distinct address sharing
+        # that domain — alice, bob, carol, dave (one each across the
+        # three seeded threads, with alice doubled).
+        results = seeded_db.find_contact("@example.com")
+        emails = {r["email"] for r in results}
+        assert emails == {
+            "alice@example.com",
+            "bob@example.com",
+            "carol@example.com",
+            "dave@example.com",
+        }
+
+    def test_match_uses_display_name_when_present(self, seeded_db: Database, tmp_path):
+        # The seeded fixtures use bare addresses with no display names,
+        # so reseed a tiny DB with a quoted display name + parenthetical
+        # role suffix to exercise the parseaddr branch that pulls a name
+        # out of the wrapper.
+        from tests.conftest import _build_schema, _insert_thread
+
+        path = tmp_path / "named.db"
+        conn = sqlite3.connect(str(path))
+        conn.enable_load_extension(True)
+        import sqlite_vec
+
+        sqlite_vec.load(conn)
+        conn.enable_load_extension(False)
+        _build_schema(conn)
+        _insert_thread(
+            conn,
+            thread_id="t-named",
+            subject="hi",
+            participants=['"Jane Smith (Acct)" <jsmith@example.com>'],
+            senders=['"Jane Smith (Acct)" <jsmith@example.com>'],
+            embedding=[1.0, 0.0, 0.0, 0.0],
+        )
+        conn.close()
+        db = Database(str(path))
+        try:
+            results = db.find_contact("jane")
+            assert len(results) == 1
+            assert results[0]["email"] == "jsmith@example.com"
+            assert "Jane Smith (Acct)" in results[0]["names"]
+        finally:
+            db.close()
+
+    def test_results_sorted_by_thread_count_desc(self, seeded_db: Database):
+        # alice appears in 2 threads; bob, carol, dave in 1 each.
+        # Sort key is ``(-count, email)`` so alice leads regardless of
+        # alphabetical position.
+        results = seeded_db.find_contact("@example.com")
+        counts = [r["thread_count"] for r in results]
+        assert counts == sorted(counts, reverse=True)
+        assert results[0]["email"] == "alice@example.com"
+
+    def test_same_thread_does_not_double_count(self, seeded_db: Database, tmp_path):
+        # If a participant appears twice in one thread's JSON (Bridge
+        # has been observed to emit duplicates after thread merges),
+        # the contact should still count once for that thread.
+        from tests.conftest import _build_schema, _insert_thread
+
+        path = tmp_path / "dup.db"
+        conn = sqlite3.connect(str(path))
+        conn.enable_load_extension(True)
+        import sqlite_vec
+
+        sqlite_vec.load(conn)
+        conn.enable_load_extension(False)
+        _build_schema(conn)
+        _insert_thread(
+            conn,
+            thread_id="t-dup",
+            subject="hi",
+            # Same address listed twice — the dedupe inside the loop
+            # must collapse this to one increment.
+            participants=["alice@example.com", "alice@example.com"],
+            embedding=[1.0, 0.0, 0.0, 0.0],
+        )
+        conn.close()
+        db = Database(str(path))
+        try:
+            results = db.find_contact("alice")
+            assert len(results) == 1
+            assert results[0]["thread_count"] == 1
+        finally:
+            db.close()
+
+    def test_no_match_returns_empty_list(self, seeded_db: Database):
+        assert seeded_db.find_contact("nobodywiththisname") == []
+
+    def test_empty_query_returns_empty_list(self, seeded_db: Database):
+        # Whitespace-only or empty query is a no-op rather than a
+        # full-table scan that returns every contact.
+        assert seeded_db.find_contact("") == []
+        assert seeded_db.find_contact("   ") == []
+
+    def test_query_is_case_insensitive(self, seeded_db: Database):
+        upper = seeded_db.find_contact("ALICE")
+        lower = seeded_db.find_contact("alice")
+        assert upper == lower
+
+    def test_limit_caps_result_count(self, seeded_db: Database):
+        # Four distinct ``@example.com`` contacts in seeded_db. With
+        # limit=2 only the two highest-ranked should return.
+        results = seeded_db.find_contact("@example.com", limit=2)
+        assert len(results) == 2
+
+    def test_malformed_participants_json_skipped(self, seeded_db: Database, tmp_path):
+        # A thread with corrupt JSON in ``participants`` should be
+        # skipped rather than crashing the whole aggregation. Drop in
+        # a row by hand to bypass the writer's normal JSON encoding.
+        from tests.conftest import _build_schema
+
+        path = tmp_path / "bad-json.db"
+        conn = sqlite3.connect(str(path))
+        conn.enable_load_extension(True)
+        import sqlite_vec
+
+        sqlite_vec.load(conn)
+        conn.enable_load_extension(False)
+        _build_schema(conn)
+        conn.execute(
+            """INSERT INTO threads (
+                thread_id, subject, participants, senders, folder,
+                date_first, date_last, message_ids, snippet,
+                has_attachments, body_text, fts_rowid, display_subject
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                "t-broken",
+                "broken",
+                "{not valid json",
+                "[]",
+                "INBOX",
+                "2024-01-01T00:00:00+00:00",
+                "2024-01-01T00:00:00+00:00",
+                "[]",
+                "",
+                0,
+                "",
+                None,
+                None,
+            ),
+        )
+        # Add a valid neighbor so we can confirm the loop continued
+        # past the broken row instead of bailing out.
+        conn.execute(
+            """INSERT INTO threads (
+                thread_id, subject, participants, senders, folder,
+                date_first, date_last, message_ids, snippet,
+                has_attachments, body_text, fts_rowid, display_subject
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                "t-good",
+                "ok",
+                '["good@example.com"]',
+                "[]",
+                "INBOX",
+                "2024-01-01T00:00:00+00:00",
+                "2024-01-01T00:00:00+00:00",
+                "[]",
+                "",
+                0,
+                "",
+                None,
+                None,
+            ),
+        )
+        conn.commit()
+        conn.close()
+
+        db = Database(str(path))
+        try:
+            results = db.find_contact("good")
+            assert len(results) == 1
+            assert results[0]["email"] == "good@example.com"
+        finally:
+            db.close()

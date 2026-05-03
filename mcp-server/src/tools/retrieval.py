@@ -27,8 +27,14 @@ def register_retrieval_tools(server, db):
         """
         Get indexed context for an email thread by thread ID.
 
+        ``thread_id`` is OPAQUE. Obtain it from search_emails,
+        list_threads, or get_message. Do NOT pass a subject line, a
+        slugged phrase like ``"weekly_status_update"``, or any other
+        human-readable string — those are not valid thread IDs and
+        will return ``Thread not found``.
+
         Args:
-            thread_id: The thread ID returned by search_emails
+            thread_id: The opaque thread ID returned by search_emails
             include_attachments_metadata: Include the local attachment availability note
 
         Returns:
@@ -87,6 +93,12 @@ def register_retrieval_tools(server, db):
     ) -> list[TextContent]:
         """
         Get local index context for a single email message.
+
+        ``message_id`` is the RFC 5322 Message-ID header value
+        (e.g. ``"<CAH2Z4_a...@mail.gmail.com>"``). Obtain it from a
+        thread's message list (via get_thread or search_emails). Do
+        NOT pass a subject line or a phrase — invented IDs return
+        ``Message not found``.
 
         Args:
             message_id: The Message-ID header value
@@ -192,6 +204,59 @@ def register_retrieval_tools(server, db):
         except Exception as e:
             log.error(f"list_threads error: {e}")
             return [TextContent(type="text", text=f"Error: {e}")]
+
+    @server.tool()
+    async def find_contact(
+        query: str,
+        limit: int = 10,
+    ) -> list[TextContent]:
+        """
+        Resolve a name / address / domain fragment to indexed contacts.
+
+        Use this BEFORE search_emails when the user names a person but
+        not their email address (e.g. "emails from Jane Smith"). Returns
+        a ranked list of (email, display name(s), thread count) so you
+        can pick the right canonical email and pass it to
+        search_emails(from_addr=<email>). Without this step the LLM
+        often guesses or abdicates on sender-centric queries.
+
+        Args:
+            query: Name, address, or domain fragment (case-insensitive).
+                   Examples: "Smith", "@example.com", "Jane".
+            limit: Maximum contacts to return (default 10, capped at 50).
+
+        Returns:
+            Ranked contact list with thread counts. Empty result for
+            unknown names.
+        """
+        # Same clamp ceiling as list_threads — a hallucinated
+        # ``limit=10000`` shouldn't drive a giant aggregation/sort.
+        limit = clamp_int(limit, default=10, minimum=1, maximum=50)
+
+        if not query or not query.strip():
+            return [
+                TextContent(
+                    type="text",
+                    text="Provide a name, address, or domain fragment to search for.",
+                )
+            ]
+
+        try:
+            contacts = await asyncio.to_thread(db.find_contact, query, limit)
+        except Exception as e:
+            log.error(f"find_contact error: {e}")
+            return [TextContent(type="text", text=f"Error: {e}")]
+
+        if not contacts:
+            return [TextContent(type="text", text=f"No contacts found matching: '{query}'")]
+
+        lines = [f"Contacts matching '{query}' ({len(contacts)} shown):\n"]
+        for i, c in enumerate(contacts, 1):
+            names = ", ".join(c["names"]) if c["names"] else "(no display name)"
+            lines.append(
+                f"{i}. {c['email']}\n   Name(s): {names}\n   Threads: {c['thread_count']}\n"
+            )
+        return [TextContent(type="text", text="\n".join(lines))]
 
     @server.tool()
     async def list_folders() -> list[TextContent]:

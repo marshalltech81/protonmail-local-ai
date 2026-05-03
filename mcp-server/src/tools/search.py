@@ -35,7 +35,15 @@ def register_search_tools(server, db, ollama):
         limit: int = 10,
     ) -> list[TextContent]:
         """
-        Search emails in the local index.
+        Search the mailbox and return matching THREADS (conversations),
+        not individual messages.
+
+        Each result is one thread bundling its messages, with subject,
+        participants, date range, folder, and a short snippet. To read
+        the messages inside a returned thread, call get_thread or
+        summarize_thread with the result's ``Thread ID``. Never invent
+        a thread_id from the subject — IDs are opaque values returned
+        only from this tool, list_threads, or get_message.
 
         Args:
             query: Natural language or keyword query
@@ -44,7 +52,10 @@ def register_search_tools(server, db, ollama):
                   semantic = vector similarity only (best for conceptual queries)
                   keyword = BM25 only (best for exact names, numbers, dates)
             folders: Filter to specific folders e.g. ["INBOX", "Sent"]
-            from_addr: Filter by sender address or name (partial match)
+            from_addr: Filter by sender address or name (partial match).
+                       For best precision, resolve the canonical email
+                       via find_contact first when the user names a
+                       person but not their address.
             date_from: ISO 8601 date lower bound e.g. "2024-01-01"
             date_to: ISO 8601 date upper bound e.g. "2024-12-31"
             has_attachments: True to only show threads with attachments

@@ -974,6 +974,72 @@ class Database:
         """).fetchall()
         return [{"name": r["folder"], "thread_count": r["thread_count"]} for r in rows]
 
+    def find_contact(self, query: str, limit: int = 10) -> list[dict]:
+        """Resolve a name / address / domain fragment to indexed contacts.
+
+        Iterates ``threads.participants``, parses each entry with
+        ``parseaddr``, and matches the lowercased query against either
+        the display name or the email address. Aggregates by canonical
+        email so the same contact across many threads collapses to one
+        row, with ``thread_count`` reflecting how many threads they
+        appeared on. Same-thread duplicates do not double-count.
+
+        Exists so callers (the LLM via the MCP tool) can map a
+        display-name fragment (``"Jane Smith"``) to a canonical address
+        (``"jsmith@example.com"``) before invoking
+        ``search_emails(from_addr=...)``. Without this step a borderline
+        model often abdicates when given a role label or partial name.
+        """
+        if not query or not query.strip():
+            return []
+        needle = query.strip().lower()
+
+        rows = self._conn.execute("SELECT participants FROM threads").fetchall()
+
+        # canonical email -> {"names": set[str], "thread_count": int}
+        by_email: dict[str, dict] = {}
+        for row in rows:
+            try:
+                participants = json.loads(row["participants"])
+            except json.JSONDecodeError, TypeError:
+                continue
+            seen_in_thread: set[str] = set()
+            for entry in participants:
+                if not isinstance(entry, str):
+                    continue
+                name, addr = parseaddr(entry)
+                addr = addr.strip().lower()
+                if "@" not in addr:
+                    continue
+                # Match against either the display name or the address so
+                # "smith", "Jane", and "@example.com" all surface the
+                # same contact.
+                haystack = f"{name} {addr}".lower()
+                if needle not in haystack:
+                    continue
+                if addr in seen_in_thread:
+                    continue
+                seen_in_thread.add(addr)
+                bucket = by_email.setdefault(addr, {"names": set(), "thread_count": 0})
+                stripped_name = name.strip()
+                if stripped_name:
+                    bucket["names"].add(stripped_name)
+                bucket["thread_count"] += 1
+
+        results = [
+            {
+                "email": addr,
+                "names": sorted(bucket["names"]),
+                "thread_count": bucket["thread_count"],
+            }
+            for addr, bucket in by_email.items()
+        ]
+        # Most-active contact first; tiebreak on email so the order is
+        # stable across runs (important for both eval reproducibility
+        # and the unit tests below).
+        results.sort(key=lambda x: (-x["thread_count"], x["email"]))
+        return results[:limit]
+
     # -------------------------------------------------------------------------
     # Helpers
     # -------------------------------------------------------------------------
