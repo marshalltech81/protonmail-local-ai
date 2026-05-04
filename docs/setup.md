@@ -586,10 +586,12 @@ MCP server in Open WebUI:
 - Server URL: `http://mcp-server:3000/mcp`
 - Auth: `None`
 
-Because Open WebUI is running in Docker on the Compose network, it should use
-container DNS names: `http://ollama:11434` for the model backend and
-`http://mcp-server:3000/mcp` for the MCP server. Both are set by
-`docker-compose.open-webui.yml`.
+Open WebUI runs in Docker on the Compose network and reaches Ollama on the
+host via OrbStack's `host.docker.internal`: use
+`http://host.docker.internal:11434` for the model backend and
+`http://mcp-server:3000/mcp` for the MCP server. Both defaults are set by
+`docker-compose.open-webui.yml` (override `OLLAMA_BASE_URL` only if you serve
+Ollama from a different host).
 
 After creating the admin account, restart the UI **without** the signup
 override so the default-deny posture is back in effect:

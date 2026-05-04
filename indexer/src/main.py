@@ -45,7 +45,7 @@ log = logging.getLogger("indexer")
 
 MAILDIR_PATH = Path(os.environ.get("MAILDIR_PATH", "/maildir"))
 SQLITE_PATH = Path(os.environ.get("SQLITE_PATH", "/data/mail.db"))
-OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://ollama:11434")
+OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://host.docker.internal:11434")
 EMBED_MODEL = os.environ.get("OLLAMA_EMBED_MODEL", "nomic-embed-text")
 
 # MLX-service-backed embedder (default). When ``USE_MLX_EMBEDDER`` is

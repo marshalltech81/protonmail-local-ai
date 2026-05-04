@@ -486,7 +486,8 @@ Notes:
 
 - defined only in `docker-compose.open-webui.yml`; do not add it to the default
   stack unless explicitly asked
-- reuse the existing `ollama` service via `http://ollama:11434`
+- reach the host-installed Ollama via `http://host.docker.internal:11434`
+  (override `OLLAMA_BASE_URL` only if Ollama lives on a different host)
 - connect to the MCP server via `http://mcp-server:3000/mcp`
 - keep the UI bound to localhost only
 - require the Open WebUI session key as a Docker Compose secret backed by

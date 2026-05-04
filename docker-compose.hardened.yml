@@ -1,20 +1,40 @@
 # =============================================================================
 # Hardened network overlay — optional, local-only mode
 # =============================================================================
-# Marks app-net as internal so indexer, Ollama, and mcp-server cannot reach
-# the internet, limiting exfiltration surface if a container is compromised.
+# Marks app-net as internal so indexer and mcp-server cannot reach the
+# public internet, limiting exfiltration surface if a container is
+# compromised.
 #
-# Prerequisites:
-#   - Pull Ollama models BEFORE applying this overlay — Ollama cannot reach
-#     the internet for model downloads while this overlay is active.
-#     Run: make pull-models
-#   - Use LLM_MODE=local only — mcp-server also loses internet access, so
-#     ANTHROPIC_API_KEY cloud calls will fail under this overlay.
+# !!! INCOMPATIBLE with host model services as currently wired !!!
 #
-# Usage:
+# After PR #86 (host-Ollama-as-default), the indexer + mcp-server reach
+# Ollama at ``host.docker.internal:11434`` and the indexer + mcp-server
+# reach mlx-service at ``host.docker.internal:8001``. Whether
+# ``host.docker.internal`` is reachable from a network with
+# ``internal: true`` depends on the runtime: in some Docker Desktop
+# configurations the host alias still resolves through the bridge IP,
+# but on OrbStack the behavior is not currently verified and the
+# overlay should be assumed broken until tested.
+#
+# Until this overlay is reworked to either (a) move both Ollama and
+# mlx-service into containers on app-net, or (b) explicitly punch
+# host.docker.internal through, treat it as **broken in the default
+# stack**. It will likely cut off:
+#
+#   - Ollama LLM calls (LLM_MODE=local) and Ollama embed fallback
+#     (USE_MLX_EMBEDDER=false)
+#   - mlx-service /embed and /rerank calls (USE_MLX_EMBEDDER=true,
+#     USE_MLX_RERANKER=true — both default)
+#   - LLM_MODE=cloud Anthropic API calls (the only intended block)
+#
+# Prerequisites (if you fix the host-alias question and want to use it):
+#   - Pull Ollama models on the host BEFORE applying — `make pull-models`
+#   - Use LLM_MODE=local only — cloud calls will fail under this overlay
+#
+# Usage (post-fix):
 #   docker compose -f docker-compose.yml -f docker-compose.hardened.yml up -d
 #
-# To revert (e.g. to pull new models):
+# To revert:
 #   docker compose down
 #   docker compose up -d   # base config, internet access restored
 # =============================================================================

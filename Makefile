@@ -171,7 +171,7 @@ open-webui-up: init-secrets validate-env
 	@port="$$(./scripts/validate-env.sh --get OPEN_WEBUI_PORT)"; \
 	port="$${port:-8080}"; \
 	printf '\n  Starting Open WebUI on http://localhost:%s\n' "$$port"; \
-	printf '  Open WebUI uses the existing ollama container and MCP at http://mcp-server:3000/mcp.\n\n'
+	printf '  Open WebUI uses the host-installed Ollama via host.docker.internal:11434 and MCP at http://mcp-server:3000/mcp.\n\n'
 	docker compose -f docker-compose.yml -f docker-compose.open-webui.yml up -d open-webui
 
 open-webui-down:
