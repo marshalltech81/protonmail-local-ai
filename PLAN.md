@@ -94,21 +94,16 @@ removed. See "Recently Completed" below for the detailed entry.
 Independent of the consolidation work above. These are tuning /
 validation tasks that should happen regardless of the LLM-engine swap.
 
-1. **One-knob-at-a-time eval.** Two retrieval-quality variables
-   moved at once in PR #83 (Qwen3 embedder vs nomic, and 1000/1500
-   chunk budget vs 350/500). If the manual eval shows a regression,
-   run a diagnostic split: Qwen3 embedder at the *old* 350/500
-   chunk budget first, then raise budgets, to attribute any
-   quality change to the right knob.
-2. **Rerank-side quality experiment.** Once retrieval is stable,
+1. **Rerank-side quality experiment.** Once retrieval is stable,
    compare `RERANK_ENABLED=true` vs `false` on the manual eval
    set to measure what the rerank stage actually buys you.
-3. **Indexer healthcheck threshold.** Currently flagged
+2. **Indexer healthcheck threshold.** Currently flagged
    "unhealthy" during sustained MLX-pace indexing because
-   `HEALTH_MAX_AGE_SECONDS` was tuned for Ollama's ~50-200ms
-   embeddings, not Qwen3-Embedding's ~1-3s per chunk. Functional
-   impact zero; small follow-up to bump the threshold default
-   and/or call `touch_health_file()` more aggressively.
+   `HEALTH_MAX_AGE_SECONDS` was tuned for the prior fast-embed
+   path (~50-200ms per call), not Qwen3-Embedding's ~1-3s per
+   chunk. Functional impact zero; small follow-up to bump the
+   threshold default and/or call `touch_health_file()` more
+   aggressively.
 
 The detailed PR-#83 session notes live in the project memory file
 ``project_mlx_rebuild_session.md``.
