@@ -44,9 +44,16 @@ The stack now runs:
   default path.
 - **mcp-server** — Docker, hybrid search + intelligence tools.
   `hybrid_search` calls the MLX reranker (`Qwen3-Reranker-4B-mxfp8`)
-  after RRF. **Currently the LLM-synthesis step still calls
-  Ollama** via `OllamaClient.complete()` — this is the next thing to
-  swap.
+  after RRF. The LLM-synthesis step is dispatched by `LLM_MODE`:
+  `local` → `OllamaClient.complete()` (Ollama on the host),
+  `cloud` → Anthropic Claude API (the daily-driver mode at the
+  moment — `LLM_MODE=cloud` in `.env`, model
+  `claude-sonnet-4-6`). The MLX-consolidation objective adds a
+  third option, `mlx`, and the long-term plan retires the Ollama
+  branch; cloud stays as an explicit user-facing escape hatch. The
+  Tier-2–11 manual-eval pass on 2026-05-04 was run with
+  `LLM_MODE=cloud`, so the captured answers are a cloud-Claude
+  baseline that Phase B can compare against once MLX-LM ships.
 - **Ollama** — host install via LaunchAgent (no longer an in-stack
   container; PR #86 inverted the defaults so containers reach
   `host.docker.internal:11434` directly without a host-Ollama
@@ -116,16 +123,24 @@ Goal:
 Tasks:
 - flip `LLM_MODE=mlx` in `.env`
 - run the manual eval set (`mcp-server/tests/eval/eval-queries.md`,
-  Tiers 2–11) and compare answers vs the Ollama baseline captured
-  in earlier sessions
+  Tiers 2–11) and compare answers against the most recent captured
+  baseline. The 2026-05-04 cloud-Claude pass is the current standing
+  baseline (Tiers 2–11 all functional pass, the specific bar
+  recorded in PR #89). Cloud-Claude sets a high quality bar; MLX-LM
+  doesn't have to match it identically, but it does have to clear a
+  baseline of "answer is correct and grounded" the same way
+  cloud-Claude's responses were graded.
 - watch wall-clock latency; tune mlx-lm server flags (`--max-tokens`,
   context size, KV cache type) if needed
 - track for at least a few days of normal use before declaring it
   the new default
 
 Verify:
-- eval set is at least as good as the Ollama path on Tiers 2–7
-- p95 latency for `ask_mailbox` is comparable or better
+- eval set passes Tiers 2–7 with grounded, specific answers — same
+  rubric the 2026-05-04 cloud-Claude pass cleared
+- p95 latency for `ask_mailbox` is comparable to the post-index-fix
+  numbers (sub-1 s SQL stage, 5–10 s end-to-end with rerank +
+  synthesis)
 - no MLX OOM-kills, no LLM-side error spike
 
 Definition of done:
@@ -553,30 +568,20 @@ Need final decision on the long-term home for live Bridge smoke tests:
 
 ## Open follow-ups surfaced during the 2026-05-04 manual eval session
 
-These were uncovered while running Tiers 2–10 against the live mailbox.
-Tracking them here so they don't get lost when the eval session ends.
+The two retrieval/perf bugs the session uncovered (missing `fts_rowid`
+indexes, mcp-server WAL pinning) are fixed in PR #89; the docstring
+tightening that followed Tier 4 / Tier 10 routing misses is also in
+that PR. The one item that landed *partially* and is worth a polish
+pass:
 
-1. **Tool-routing docstring iteration.** Two routing failures
-   surfaced in the eval session and were addressed with docstring
-   tightenings, but the work is ongoing because the model's priors
-   are stronger than a single docstring nudge:
-     - `from_name` vs `from_addr` for sender filters — caught at
-       Tier 4 #2 (model iterated 7 search variants instead of using
-       `from_name`); first docstring rewrite fixed Tier 6 #1 on the
-       next try
-     - `ask_mailbox` for attachment content vs `search_emails` /
-       `get_thread` — caught at Tier 10 #1 (model didn't surface a
-       149 KB extracted PDF, then on retry tried Google Drive
-       instead); second pass made the leading sentence of
-       `ask_mailbox` mention attachments explicitly
-   Treat tool docstrings as living artifacts the model's behavior
-   tells you to keep tightening.
-2. **Tool-call instrumentation.** Each registered MCP tool now logs
-   its name + arguments at INFO level via `log.info("tool=... %s",
-   {locals filtered to non-None})`. The current implementation
-   leaks closure-captured server-side objects (`db`, `ollama`,
-   `reranker`) into the log line — minor noise; tighten the
-   filter to a known-arg whitelist when convenient.
+- **Tool-call instrumentation noise.** Each registered MCP tool now
+  logs its name + arguments at INFO level via `log.info("tool=... %s",
+  {locals filtered to non-None})`. The `locals()` snapshot leaks
+  closure-captured server-side objects (`db`, `ollama`, `reranker`,
+  `llm_complete`) into the log line. Minor — the model-supplied args
+  are still readable — but it would be cleaner to filter to a
+  known-arg whitelist per tool. Low priority; do when next near
+  these files.
 
 ## Recently Completed
 
