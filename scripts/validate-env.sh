@@ -121,8 +121,8 @@ require_file "$ANTHROPIC_KEY_FILE" "Anthropic API key secret file"
 
 BRIDGE_USER="$(get_env_value BRIDGE_USER)"
 BRIDGE_VERSION="$(get_env_value BRIDGE_VERSION)"
-OLLAMA_EMBED_MODEL="$(get_env_value OLLAMA_EMBED_MODEL)"
-OLLAMA_LLM_MODEL="$(get_env_value OLLAMA_LLM_MODEL)"
+LLM_BASE_URL="$(get_env_value LLM_BASE_URL)"
+LLM_MODEL="$(get_env_value LLM_MODEL)"
 SYNC_INTERVAL="$(get_env_value SYNC_INTERVAL)"
 MCP_PORT="$(get_env_value MCP_PORT)"
 MCP_TRANSPORT="$(get_env_value MCP_TRANSPORT)"
@@ -140,13 +140,18 @@ OPEN_WEBUI_PORT="$(get_env_value OPEN_WEBUI_PORT)"
     exit 1
 }
 
-[[ -n "$OLLAMA_EMBED_MODEL" ]] || {
-    echo "ERROR: OLLAMA_EMBED_MODEL must be set in .env." >&2
+[[ -n "$LLM_BASE_URL" ]] || {
+    echo "ERROR: LLM_BASE_URL must be set in .env (OpenAI-compatible base URL, e.g. http://host.docker.internal:8002/v1)." >&2
     exit 1
 }
 
-[[ -n "$OLLAMA_LLM_MODEL" ]] || {
-    echo "ERROR: OLLAMA_LLM_MODEL must be set in .env." >&2
+[[ "$LLM_BASE_URL" =~ ^https?:// ]] || {
+    echo "ERROR: LLM_BASE_URL must start with http:// or https://." >&2
+    exit 1
+}
+
+[[ -n "$LLM_MODEL" ]] || {
+    echo "ERROR: LLM_MODEL must be set in .env (model id served at LLM_BASE_URL, e.g. mlx-community/Qwen3-32B-4bit)." >&2
     exit 1
 }
 

@@ -18,7 +18,7 @@ from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-from .lib.ollama import OllamaClient
+from .lib.local_llm import LocalLLMClient
 from .lib.reranker import MlxReranker, RerankConfig
 from .lib.sqlite import Database
 from .tools.intelligence import register_intelligence_tools
@@ -123,9 +123,13 @@ def _read_secret(secret_name: str, env_fallback: str = "") -> str:
 # Configuration from environment
 # ---------------------------------------------------------------------------
 SQLITE_PATH = os.environ.get("SQLITE_PATH", "/data/mail.db")
-OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://host.docker.internal:11434")
-EMBED_MODEL = os.environ.get("OLLAMA_EMBED_MODEL", "nomic-embed-text")
-LLM_MODEL = os.environ.get("OLLAMA_LLM_MODEL", "qwen2.5:14b-instruct")
+# Local-LLM endpoint, OpenAI-compatible (``/v1/chat/completions`` is
+# appended by ``LocalLLMClient.complete``). Default points at the
+# host-side ``mlx-lm-server`` LaunchAgent on port 8002. Any
+# OpenAI-compatible chat-completions server works (e.g. Ollama at
+# ``:11434/v1``) — the LLM client never branches on backend.
+LLM_BASE_URL = os.environ.get("LLM_BASE_URL", "http://host.docker.internal:8002/v1")
+LLM_MODEL = os.environ.get("LLM_MODEL", "mlx-community/Qwen3-32B-4bit")
 LLM_MODE = os.environ.get("LLM_MODE", "local")
 CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL", "claude-sonnet-4-6")
 ANTHROPIC_KEY = _read_secret("anthropic_api_key", "ANTHROPIC_API_KEY")
@@ -133,15 +137,13 @@ MCP_PORT = int(os.environ.get("MCP_PORT", "3000"))
 MCP_READ_ONLY = _env_bool("MCP_READ_ONLY", True)
 MCP_TRANSPORT = os.environ.get("MCP_TRANSPORT", "sse")
 # MLX retrieval stack — see indexer/.env.example notes for the full
-# explanation. ``USE_MLX_EMBEDDER`` routes query embeddings to
-# ``mlx-service`` (4096-dim Qwen3-Embedding-8B). ``USE_MLX_RERANKER``
-# enables the post-RRF rerank pass that takes ``RERANK_CANDIDATES``
-# from RRF and truncates to the caller's ``limit`` (defaulting to
-# ``RERANK_TOP_N`` when the caller does not specify) via the same
-# service.
-USE_MLX_EMBEDDER = _env_bool("USE_MLX_EMBEDDER", True)
-USE_MLX_RERANKER = _env_bool("USE_MLX_RERANKER", True)
-MLX_SERVICE_URL = os.environ.get("MLX_SERVICE_URL", "http://host.docker.internal:8001")
+# explanation. Query embeddings go through ``mlx-service`` ``/embed``
+# (4096-dim Qwen3-Embedding-8B). ``RERANK_ENABLED`` enables the
+# post-RRF rerank pass that takes ``RERANK_CANDIDATES`` from RRF and
+# truncates to the caller's ``limit`` (defaulting to ``RERANK_TOP_N``
+# when the caller does not specify) via the same service.
+RERANK_ENABLED = _env_bool("RERANK_ENABLED", True)
+EMBED_SERVICE_URL = os.environ.get("EMBED_SERVICE_URL", "http://host.docker.internal:8001")
 RERANK_CANDIDATES = int(os.environ.get("RERANK_CANDIDATES", "20"))
 RERANK_TOP_N = int(os.environ.get("RERANK_TOP_N", "10"))
 
@@ -230,18 +232,16 @@ def _run_server(server: FastMCP, transport: str) -> None:
 def main():
     # Shared service clients
     db = Database(SQLITE_PATH)
-    ollama = OllamaClient(
-        OLLAMA_HOST,
-        EMBED_MODEL,
+    llm = LocalLLMClient(
+        EMBED_SERVICE_URL,
         LLM_MODEL,
-        use_mlx_embedder=USE_MLX_EMBEDDER,
-        mlx_service_url=MLX_SERVICE_URL,
+        llm_base_url=LLM_BASE_URL,
     )
     reranker: MlxReranker | None = None
-    if USE_MLX_RERANKER:
+    if RERANK_ENABLED:
         reranker = MlxReranker(
             RerankConfig(
-                base_url=MLX_SERVICE_URL,
+                base_url=EMBED_SERVICE_URL,
                 candidates=RERANK_CANDIDATES,
                 top_n=RERANK_TOP_N,
             )
@@ -307,10 +307,10 @@ def main():
         return JSONResponse({"status": "ok"})
 
     # Register all tool groups
-    register_search_tools(server, db, ollama, reranker=reranker)
+    register_search_tools(server, db, llm, reranker=reranker)
     register_retrieval_tools(server, db)
     register_intelligence_tools(
-        server, db, ollama, LLM_MODE, ANTHROPIC_KEY, CLAUDE_MODEL, reranker=reranker
+        server, db, llm, LLM_MODE, ANTHROPIC_KEY, CLAUDE_MODEL, reranker=reranker
     )
     if MCP_READ_ONLY:
         log.info("MCP read-only mode enabled; action tools are not registered.")
@@ -325,19 +325,17 @@ def main():
 
     log.info(f"MCP server starting on port {MCP_PORT}")
     log.info(f"  SQLite:   {SQLITE_PATH}")
-    log.info(f"  Ollama:   {OLLAMA_HOST}")
-    if USE_MLX_EMBEDDER:
-        log.info(f"  Embedder: MLX service at {MLX_SERVICE_URL}")
-    else:
-        log.info(f"  Embedder: Ollama ({EMBED_MODEL})")
-    if USE_MLX_RERANKER:
+    log.info(f"  Embedder: MLX service at {EMBED_SERVICE_URL}")
+    if RERANK_ENABLED:
         log.info(f"  Reranker: MLX service (candidates={RERANK_CANDIDATES}, top_n={RERANK_TOP_N})")
     else:
         log.info("  Reranker: disabled")
     log.info(f"  LLM mode: {LLM_MODE}")
-    log.info(f"  Transport: {transport}")
-    if LLM_MODE == "cloud":
+    if LLM_MODE == "local":
+        log.info(f"  LLM:      {LLM_BASE_URL} ({LLM_MODEL})")
+    elif LLM_MODE == "cloud":
         log.info(f"  Claude model: {CLAUDE_MODEL}")
+    log.info(f"  Transport: {transport}")
     log.info("  Retrieval: local SQLite index only")
 
     _run_server(server, transport)

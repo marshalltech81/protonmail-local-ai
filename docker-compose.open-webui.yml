@@ -2,9 +2,11 @@ services:
 
   # ---------------------------------------------------------------------------
   # Open WebUI (optional)
-  # Local browser UI for Ollama-backed chats and Streamable HTTP MCP tools.
-  # Reaches Ollama on the host via OrbStack's host.docker.internal:11434
-  # (override OLLAMA_BASE_URL in .env to point elsewhere).
+  # Local browser UI for chats against an OpenAI-compatible local LLM
+  # plus Streamable HTTP MCP tools. Reaches the host-side
+  # ``mlx-lm-server`` LaunchAgent on ``host.docker.internal:8002``
+  # (override ``LLM_BASE_URL`` in ``.env`` to point at any other
+  # OpenAI-compatible endpoint, e.g. host Ollama at ``:11434/v1``).
   # Start with: make open-webui-up
   # ---------------------------------------------------------------------------
   open-webui:
@@ -29,10 +31,10 @@ services:
       - ALL
     pids_limit: 256
     # Cap memory for the same reason indexer is capped: an unbounded
-    # process can starve other containers (notably Ollama, which is
-    # memory-hungry) on the shared docker host. 1 GiB covers ordinary
-    # web-UI session state + a tokenizer load with headroom; tune via
-    # ``OPEN_WEBUI_MEM_LIMIT`` if a workload needs more.
+    # process can starve other containers on the shared docker host
+    # and squeeze the host MLX servers' RAM headroom. 1 GiB covers
+    # ordinary web-UI session state + a tokenizer load with headroom;
+    # tune via ``OPEN_WEBUI_MEM_LIMIT`` if a workload needs more.
     mem_limit: ${OPEN_WEBUI_MEM_LIMIT:-1g}
     tmpfs:
       - /tmp
@@ -66,12 +68,32 @@ services:
       # operator.
       ENABLE_SIGNUP: ${OPEN_WEBUI_ENABLE_SIGNUP:-false}
       # Default the chat model to whatever the rest of the stack uses
-      # for ``OLLAMA_LLM_MODEL`` so an operator who changes that env
-      # var doesn't have to also remember to change it in two places.
-      DEFAULT_MODELS: ${OPEN_WEBUI_DEFAULT_MODEL:-${OLLAMA_LLM_MODEL:-llama3.2}}
-      ENABLE_OLLAMA_API: "true"
-      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
-      ENABLE_OPENAI_API: "false"
+      # for ``LLM_MODEL`` so an operator who changes that env var
+      # doesn't have to also remember to change it in two places.
+      # ``LLM_MODEL`` is the model id served at ``LLM_BASE_URL``; for
+      # MLX-LM it's the HuggingFace id (e.g.
+      # ``mlx-community/Qwen3-32B-4bit``).
+      DEFAULT_MODELS: ${OPEN_WEBUI_DEFAULT_MODEL:-${LLM_MODEL:-mlx-community/Qwen3-32B-4bit}}
+      # Talk to the host-side LLM server via OpenAI-compatible API.
+      # ``mlx-lm-server`` doesn't authenticate, but Open WebUI requires
+      # OPENAI_API_KEY be non-empty — any sentinel string works.
+      #
+      # NOTE: ``ENABLE_OLLAMA_API``, ``ENABLE_OPENAI_API``,
+      # ``OPENAI_API_BASE_URL``, ``OPENAI_API_KEY``, and
+      # ``DEFAULT_MODELS`` above are all PersistentConfig in Open
+      # WebUI: on FIRST start the env values are loaded into the
+      # SQLite config and on subsequent starts the DB-stored values
+      # win. Changing these env vars on an existing
+      # ``open-webui-data`` volume therefore has no effect — the
+      # operator either edits via Admin → Settings → Connections, or
+      # wipes ``open-webui-data`` to re-seed from env. This project is
+      # single-operator so no migration recipe is documented here;
+      # see https://docs.openwebui.com/reference/env-configuration/
+      # for the full PersistentConfig list.
+      ENABLE_OLLAMA_API: "false"
+      ENABLE_OPENAI_API: "true"
+      OPENAI_API_BASE_URL: ${LLM_BASE_URL:-http://host.docker.internal:8002/v1}
+      OPENAI_API_KEY: ${OPEN_WEBUI_OPENAI_API_KEY:-not-used}
       # Pre-wire the local mcp-server as an MCP tool source so chats can
       # call mailbox tools out of the box without an admin clicking
       # through Settings → Tools after first login. Open WebUI uses

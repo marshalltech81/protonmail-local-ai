@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.local.mlx-lm-server</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>__REPO_ROOT__/mlx-lm-server/.venv/bin/mlx_lm.server</string>
+		<string>--model</string>
+		<string>mlx-community/Qwen3-32B-4bit</string>
+		<string>--host</string>
+		<string>127.0.0.1</string>
+		<string>--port</string>
+		<string>8002</string>
+		<string>--log-level</string>
+		<string>INFO</string>
+		<!--
+			Bump the per-request token budget so Qwen3's thinking-mode
+			answers don't get truncated when callers (e.g. the
+			mcp-server LocalLLMClient) don't override the per-request
+			``max_tokens``. Reasoning + final answer fits in 4096 for
+			this project's email-summarization / extraction prompts.
+		-->
+		<string>--max-tokens</string>
+		<string>4096</string>
+	</array>
+	<key>WorkingDirectory</key>
+	<string>__REPO_ROOT__/mlx-lm-server</string>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>PATH</key>
+		<string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+	</dict>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<dict>
+		<key>SuccessfulExit</key>
+		<false/>
+	</dict>
+	<key>StandardOutPath</key>
+	<string>__USER_HOME__/Library/Logs/mlx-lm-server.log</string>
+	<key>StandardErrorPath</key>
+	<string>__USER_HOME__/Library/Logs/mlx-lm-server.log</string>
+	<key>ProcessType</key>
+	<string>Interactive</string>
+</dict>
+</plist>

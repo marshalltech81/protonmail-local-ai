@@ -169,7 +169,7 @@ def test_hybrid_search_finds_expected_thread(eval_db: Database, eval_query: Eval
         pytest.skip(f"{eval_query.id}: no expected_thread_ids — skip.")
     # Hybrid needs an embedding; we synthesize a deterministic placeholder
     # so this test is purely a retrieval check on the indexed vectors and
-    # does not require a live Ollama. Real "ask_mailbox quality" is a
+    # does not require a live mlx-service. Real "ask_mailbox quality" is a
     # separate eval (not in this PR) that exercises the LLM end-to-end.
     placeholder = [0.0] * 768
     results = eval_db.hybrid_search(

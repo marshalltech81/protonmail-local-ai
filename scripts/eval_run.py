@@ -14,7 +14,7 @@ through the browser, just programmatically.
 Stdlib-only on purpose — no extra dep to maintain. Run from the repo
 root::
 
-    python3 scripts/eval_run.py [--tiers 1,2,3] [--model qwen2.5:32b-instruct]
+    python3 scripts/eval_run.py [--tiers 1,2,3] [--model mlx-community/Qwen3-32B-4bit]
 
 Operator setup (one-time):
 
@@ -42,7 +42,7 @@ QUERIES_FILE = REPO_ROOT / "mcp-server" / "tests" / "eval" / "eval-queries.md"
 API_KEY_FILE = REPO_ROOT / ".secrets" / "open_webui_api_key.txt"
 RESULTS_DIR = REPO_ROOT / ".secrets"
 DEFAULT_BASE_URL = "http://localhost:8080"
-DEFAULT_MODEL = "qwen2.5:32b-instruct"
+DEFAULT_MODEL = "mlx-community/Qwen3-32B-4bit"
 # Open WebUI binds tool sets to a chat conversation in the UI; the
 # /api/chat/completions endpoint does NOT auto-inherit those bindings.
 # Without ``tool_ids`` the model can't see the MCP tools and abdicates

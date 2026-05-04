@@ -1,7 +1,8 @@
 """
 Indexer entry point.
 Watches the Maildir for new/changed emails, parses and threads them,
-generates embeddings via Ollama, and writes to the SQLite index.
+generates embeddings via the host-side mlx-service, and writes to the
+SQLite index.
 
 When ``INDEXER_DELETION_ENABLED=true`` the indexer also runs a reconciler
 that records tombstones for mbsync-flagged (``T``) Maildir files and reaps
@@ -23,7 +24,7 @@ from .attachment_indexing import (
 )
 from .chunker import chunk_message, mean_vector
 from .database import EMBEDDING_DIM, Database
-from .embedder import Embedder, EmbeddingBackend, MlxEmbedder
+from .embedder import EmbeddingBackend, MlxEmbedder
 from .parser import parse_email
 from .queue import (
     REASON_INITIAL_SCAN,
@@ -45,17 +46,12 @@ log = logging.getLogger("indexer")
 
 MAILDIR_PATH = Path(os.environ.get("MAILDIR_PATH", "/maildir"))
 SQLITE_PATH = Path(os.environ.get("SQLITE_PATH", "/data/mail.db"))
-OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://host.docker.internal:11434")
-EMBED_MODEL = os.environ.get("OLLAMA_EMBED_MODEL", "nomic-embed-text")
 
-# MLX-service-backed embedder (default). When ``USE_MLX_EMBEDDER`` is
-# false, the indexer falls back to the legacy Ollama path above —
-# useful as an integration rollback without a full reindex *only when
-# the schema dim still matches the Ollama model*. Qwen3-Embedding-8B
-# is 4096-dim and ``nomic-embed-text`` is 768-dim, so a real fallback
-# requires both flipping this flag AND restoring the prior schema /
-# reindexing.
-MLX_SERVICE_URL = os.environ.get("MLX_SERVICE_URL", "http://host.docker.internal:8001")
+# MLX-service-backed embedder. The indexer reaches the host-side
+# ``mlx-service`` over OrbStack's ``host.docker.internal``; the service
+# binds ``127.0.0.1:8001`` and serves Qwen3-Embedding-8B at the schema's
+# 4096-dim shape.
+EMBED_SERVICE_URL = os.environ.get("EMBED_SERVICE_URL", "http://host.docker.internal:8001")
 # /tmp default is safe: container tmpfs, non-root user, overridable via env.
 INDEXER_HEALTH_FILE = Path(os.environ.get("INDEXER_HEALTH_FILE", "/tmp/indexer-health"))  # nosec B108
 
@@ -81,13 +77,9 @@ def _int_env(name: str, default: int, minimum: int = 1) -> int:
 
 # Chunker token budgets — see ``chunker.chunk_message`` for semantics.
 # Defaults are sized for the MLX-served Qwen3-Embedding-8B context
-# window. The legacy ``nomic-embed-text`` cap (max=500) was a binding
-# limit imposed by Ollama's default ``num_ctx=2048``; Qwen3-Embedding
-# handles much longer context cleanly, so the default ``max`` is
-# 1500 — fewer, larger chunks reduce embed call count and produce
-# better mean-of-chunks thread vectors. Operators on the legacy Ollama
-# path should override these back to 350 / 500 / 60 in ``.env`` until
-# a custom Ollama Modelfile raises ``num_ctx``.
+# window. Qwen3-Embedding handles long context cleanly, so the
+# default ``max`` is 1500 — fewer, larger chunks reduce embed call
+# count and produce better mean-of-chunks thread vectors.
 CHUNK_TARGET_TOKENS = _int_env("INDEXER_CHUNK_TARGET_TOKENS", 1000)
 CHUNK_MAX_TOKENS = _int_env("INDEXER_CHUNK_MAX_TOKENS", 1500)
 CHUNK_OVERLAP_TOKENS = _int_env("INDEXER_CHUNK_OVERLAP_TOKENS", 150, minimum=0)
@@ -139,7 +131,7 @@ class MaildirHandler(FileSystemEventHandler):
     The callback path only enqueues — the actual parse / embed / upsert
     pipeline runs in the main loop via ``drain_queue``. Enqueue is a
     single SQLite write, so the watchdog's internal thread no longer
-    blocks on a slow Ollama round-trip and a Watchdog event storm
+    blocks on a slow embed round-trip and a Watchdog event storm
     cannot overflow whatever buffer ``watchdog`` uses internally while
     an embed is in flight.
     """
@@ -168,7 +160,7 @@ class MaildirHandler(FileSystemEventHandler):
         #    directory when flags change (e.g. ``msg:2,S`` → ``msg:2,SR``
         #    when the message is replied to). The source path is already
         #    in ``indexed_files``. Re-parsing and re-embedding would waste
-        #    an Ollama round-trip and leave stale rows behind — the
+        #    an embed round-trip and leave stale rows behind — the
         #    reconciler (or fall-through ``update_filepath``) just has to
         #    move the stored filepath to the new name.
         # 2. Maildir delivery: a message is first written under ``tmp/``
@@ -633,39 +625,6 @@ def _validate_embedding_dim(embedder: EmbeddingBackend) -> None:
         )
 
 
-def _validate_embed_model_tokenizer() -> None:
-    """Verify ``OLLAMA_EMBED_MODEL`` matches the bundled tokenizer.
-
-    The chunker counts tokens with the
-    ``nomic-ai/nomic-embed-text-v1.5`` BPE tokenizer bundled at
-    ``src/data/nomic-embed-text/tokenizer.json``. A different
-    embedding model with the same 768-dim output would pass the
-    dimension check but tokenize text differently — chunk size
-    estimates would silently drift back into the
-    ``input length exceeds the context length`` failure mode the
-    real tokenizer was added to fix.
-
-    Until tokenizer selection becomes model-coupled (operator
-    chooses both, or we ship multiple bundled tokenizers and
-    dispatch by model), restrict ``OLLAMA_EMBED_MODEL`` to
-    nomic-embed-text variants. The check is a substring match on
-    the canonical model family name so aliases like
-    ``nomic-embed-text:latest`` and ``nomic-embed-text-v1.5``
-    still pass.
-    """
-    if "nomic-embed-text" not in EMBED_MODEL.lower():
-        raise SystemExit(
-            f"OLLAMA_EMBED_MODEL={EMBED_MODEL!r} is not a nomic-embed-text "
-            "variant. The chunker's token counting uses the bundled "
-            "nomic-embed-text-v1.5 tokenizer; using a different embed "
-            "model would silently mis-size chunks and reintroduce "
-            "'input length exceeds the context length' embed errors. "
-            "Either switch back to nomic-embed-text or extend the "
-            "indexer to bundle the new model's tokenizer and dispatch "
-            "by OLLAMA_EMBED_MODEL."
-        )
-
-
 def _log_reconciler_config(cfg: ReconcilerConfig) -> None:
     if not cfg.enabled:
         log.info("Deletion reconciliation: disabled (set INDEXER_DELETION_ENABLED=true to enable)")
@@ -681,29 +640,14 @@ def _log_reconciler_config(cfg: ReconcilerConfig) -> None:
     )
 
 
-def _make_embedder() -> EmbeddingBackend:
-    """Pick the embedder backend based on ``USE_MLX_EMBEDDER``.
-
-    Default is the host-side MLX service, the new production path for
-    4096-dim Qwen3 embeddings. The Ollama backend remains as a feature-
-    flagged fallback so a temporary MLX outage can be routed around
-    without code changes — though see the ``MLX_SERVICE_URL`` doc for
-    the schema-dim caveat that makes a true rollback non-trivial.
-    """
-    if _bool_env("USE_MLX_EMBEDDER", True):
-        log.info(f"  Embedder: MLX service at {MLX_SERVICE_URL}")
-        return MlxEmbedder(MLX_SERVICE_URL)
-    log.info(f"  Embedder: Ollama at {OLLAMA_HOST} ({EMBED_MODEL})")
-    return Embedder(OLLAMA_HOST, EMBED_MODEL)
-
-
 def main():
     log.info("Starting indexer...")
     log.info(f"  Maildir: {MAILDIR_PATH}")
     log.info(f"  SQLite:  {SQLITE_PATH}")
+    log.info(f"  Embedder: MLX service at {EMBED_SERVICE_URL}")
 
     db = Database(SQLITE_PATH)
-    embedder = _make_embedder()
+    embedder = MlxEmbedder(EMBED_SERVICE_URL)
     threader = Threader(db)
     touch_health_file()
 
@@ -734,17 +678,7 @@ def main():
             db, embedder, threader, reconciler_config, maildir_root=MAILDIR_PATH
         )
 
-    # Validate the configured embed model name BEFORE waiting on Ollama
-    # — only on the Ollama path. The MLX path uses Qwen3-Embedding-8B
-    # (architecturally compatible with the bundled BPE tokenizer for
-    # English-text chunk sizing — both subword BPE, similar bytes-per-
-    # token; long-form non-English may want a Qwen3-bundled tokenizer
-    # later). On the Ollama path, a swap to a non-nomic model would
-    # otherwise mis-size chunks and reintroduce embed-context errors.
-    if not _bool_env("USE_MLX_EMBEDDER", True):
-        _validate_embed_model_tokenizer()
-
-    # Wait for Ollama to be ready
+    # Wait for the mlx-service /health endpoint, then warm the model.
     embedder.wait_for_ready()
 
     # Verify the running model matches the schema's reserved vector dim.

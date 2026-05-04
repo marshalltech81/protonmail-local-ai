@@ -10,15 +10,21 @@ The default stack consists of four containers plus two host processes:
 - mbsync (container)
 - indexer (container)
 - MCP server (container)
-- mlx-service (host process — embedder + reranker on Apple Metal)
-- Ollama (host process — `brew install ollama`, LLM serving on
-  `*:11434` reached from containers via
-  `host.docker.internal:11434`. Not an in-stack container.)
+- mlx-service (host process — embedder + reranker on Apple Metal,
+  port 8001)
+- mlx-lm-server (host process — LLM serving on Apple Metal via
+  upstream `mlx_lm.server`, port 8002, OpenAI-compatible
+  `/v1/chat/completions`)
+
+Both host processes run as LaunchAgents bound to `127.0.0.1` and are
+reached from containers via OrbStack's `host.docker.internal`. They
+are required because MLX needs Metal access, which Docker on macOS
+cannot provide.
 
 An optional Open WebUI overlay can be started for a local browser UI.
-It reuses the existing host Ollama (via `host.docker.internal:11434`)
-and the MCP server container; do not add a second Ollama instance for
-the UI.
+It reuses the existing mlx-lm-server (via the OpenAI-compatible API)
+and the MCP server container; do not add a second LLM serving process
+for the UI.
 
 Core behavior:
 
@@ -58,7 +64,7 @@ High-level data flow:
 
 1. ProtonBridge connects to ProtonMail.
 2. mbsync pulls from Bridge into Maildir.
-3. indexer parses Maildir messages, builds conversation threads, generates embeddings via Ollama, and writes SQLite.
+3. indexer parses Maildir messages, builds conversation threads, generates embeddings via the host-side mlx-service, and writes SQLite.
 4. MCP server reads from SQLite and exposes tools over SSE and/or Streamable HTTP.
 5. Only the MCP server is exposed to the host on `localhost:3000` by default.
    The optional Open WebUI overlay may additionally expose a localhost-only
@@ -71,14 +77,14 @@ Important architecture facts:
 - indexing is thread-level, not message-level
 - MCP defaults to SSE transport; `MCP_TRANSPORT=streamable-http` enables
   Streamable HTTP, and `MCP_TRANSPORT=dual` serves both `/sse` and `/mcp`
-- Ollama is served from a host install (`brew install ollama`) — not an
-  in-stack container. Containers reach it via OrbStack's
-  `host.docker.internal:11434`. This is the only supported deployment
-  shape because containerized Ollama on macOS cannot use Metal GPU
-  acceleration; the in-stack `ollama` service was removed once host
-  install was always the right answer for this project's target hardware.
-  See `docs/setup.md` for the required host-side setup (LaunchAgent +
-  firewall + listener bind).
+- LLM inference for `LLM_MODE=local` is served by `mlx-lm-server`
+  (upstream `mlx_lm.server` wrapped in a LaunchAgent), bound to
+  `127.0.0.1:8002` and reached from containers via
+  `host.docker.internal:8002`. Embeddings + reranking go through the
+  separate `mlx-service` LaunchAgent on `127.0.0.1:8001`. Both run on
+  the host because MLX needs Metal access, which Docker on macOS
+  cannot provide. See `mlx-service/README.md` and
+  `mlx-lm-server/README.md` for the LaunchAgent install.
 
 ## Non-Negotiable Constraints
 
@@ -96,26 +102,18 @@ Do not make any of the following changes unless the repository owner explicitly 
 - Do not expose any container port other than `mcp-server:3000` to the host.
   Exception: the optional Open WebUI overlay may expose only
   `127.0.0.1:${OPEN_WEBUI_PORT:-8080}:8080`.
-- The host Ollama install introduces a *host process* listener on
-  `0.0.0.0:11434`, not a published container port — the rule above is
-  preserved literally. That host-side bind is only safe when paired with
-  the macOS Application Firewall steps in `docs/setup.md` (stealth mode
-  + a binary-level block on the Ollama binary). Do not document or
-  recommend host Ollama without those steps. Do not configure containers
-  to use the host's LAN IP — `host.docker.internal` is required so the
-  wiring survives changing networks.
-- After a `brew upgrade` (or any reinstall of the `ollama` formula),
-  verify three things before relying on the stack again:
-  1. The custom LaunchAgent (`~/Library/LaunchAgents/com.local.ollama-host.plist`)
-     is still loaded: `launchctl print "gui/$(id -u)/com.local.ollama-host"`.
-  2. The listener is bound on `*:11434`, not `127.0.0.1:11434`:
-     `lsof -iTCP:11434 -sTCP:LISTEN`. A loopback bind means brew's plist
-     is winning — confirm `brew services list` does not show `ollama`
-     started, and re-bootstrap the custom LaunchAgent if needed.
-  3. The Application Firewall block on `/opt/homebrew/bin/ollama` is still
-     in place (a brew upgrade can replace the binary at the same path,
-     which preserves the rule, but a path change would silently void it):
-     `/usr/libexec/ApplicationFirewall/socketfilterfw --getappblocked /opt/homebrew/bin/ollama`.
+- The host MLX LaunchAgents (`mlx-service` on `:8001`,
+  `mlx-lm-server` on `:8002`) bind to `127.0.0.1` and are exempt from
+  macOS' loopback firewall, so no LAN exposure exists by default. Do
+  not change either bind to `0.0.0.0` or a LAN IP. Do not configure
+  containers to use the host's LAN IP — `host.docker.internal` is
+  required so the wiring survives changing networks.
+- After `uv sync` rebuilds either host venv (the operator-side LM
+  serving in `mlx-lm-server/.venv` or the FastAPI service in
+  `mlx-service/.venv`), `launchctl kickstart -k` the matching agent
+  so it picks up the rebuilt binary path. Confirm the service is up:
+  `launchctl print "gui/$(id -u)/com.local.mlx-lm-server"` and
+  `lsof -iTCP:8002 -sTCP:LISTEN`.
 - Do not add `network_mode: host`.
 - Do not give `mcp-server` direct IMAP access to Bridge.
 - Do not give `indexer` direct IMAP access to Bridge.
@@ -236,7 +234,8 @@ Secrets are a hard boundary.
 
 - `BRIDGE_USER` comes from Bridge CLI `info`, not the Proton account password
 - `BRIDGE_PASS` belongs in `.secrets/bridge_pass.txt`, not `.env`
-- `LLM_MODE=local` uses Ollama
+- `LLM_MODE=local` uses the host-side `mlx-lm-server` (or any
+  OpenAI-compatible endpoint at `LLM_BASE_URL`)
 - `LLM_MODE=cloud` uses Claude API
 
 ### Commit hygiene
@@ -291,7 +290,6 @@ Examples:
 ```bash
 make build
 make first-run
-make pull-models
 make up
 make logs
 make status
@@ -456,7 +454,7 @@ Purpose:
 
 - parses Maildir messages
 - threads messages into conversations
-- embeds content through Ollama
+- embeds content through the host-side mlx-service
 - writes SQLite, FTS5, and vector data
 
 Notes:
@@ -484,14 +482,16 @@ Notes:
 
 Purpose:
 
-- provides a local browser UI for Ollama-backed chat and MCP tools
+- provides a local browser UI for chat (against the host-side
+  mlx-lm-server) and MCP tools
 
 Notes:
 
 - defined only in `docker-compose.open-webui.yml`; do not add it to the default
   stack unless explicitly asked
-- reach the host-installed Ollama via `http://host.docker.internal:11434`
-  (override `OLLAMA_BASE_URL` only if Ollama lives on a different host)
+- reach the host mlx-lm-server via `http://host.docker.internal:8002/v1`
+  using Open WebUI's OpenAI-compatible client (override `LLM_BASE_URL`
+  only if you want to point at a different OpenAI-compatible endpoint)
 - connect to the MCP server via `http://mcp-server:3000/mcp`
 - keep the UI bound to localhost only
 - require the Open WebUI session key as a Docker Compose secret backed by

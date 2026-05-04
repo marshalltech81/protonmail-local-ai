@@ -37,7 +37,7 @@ indexer container
   - Watches maildir-volume via inotify
   - Parses .eml files: MIME, HTML→text, attachments
   - Groups messages into threads via In-Reply-To / References headers
-  - Calls mlx-service (default) or Ollama for vector embeddings
+  - Calls mlx-service for vector embeddings
   - Writes to SQLite (FTS5 keyword index + sqlite-vec vector index)
         │                              │
         │  embed API                   │  writes
@@ -48,11 +48,12 @@ mlx-service (host process)    sqlite-volume
   - Qwen3-Reranker-4B-mxfp8     - message_thread_map
     on Apple Metal              - indexed_files
                                 - pending_deletions (reconciler)
-ollama (host process)
-  - qwen2.5 (or other) for
+mlx-lm-server (host process)
+  - Qwen3-32B-4bit (or other) for
     local LLM inference (LLM_MODE=local)
+  - OpenAI-compatible /v1/chat/completions
   - reached from containers via
-    host.docker.internal:11434
+    host.docker.internal:8002
         │
         │  reads sqlite-volume (connection opened read-only)
         ▼
@@ -61,7 +62,7 @@ mcp-server container
   - Serves GET /health for the container healthcheck (200 when the
     read-only SQLite connection answers, 503 otherwise)
   - Hybrid search: BM25 + vector → RRF merge
-  - Q&A: retrieves threads → prompts Ollama or Claude API
+  - Q&A: retrieves threads → prompts the local LLM or Claude API
   - Retrieval: serves indexed mailbox data from SQLite
   - Email excerpts sent to the LLM are wrapped in <untrusted_email>
     tags and framed as untrusted data — defense against prompt
@@ -82,11 +83,11 @@ Claude Desktop (host machine)
 |---|---|---|---|
 | `protonmail-bridge` | ProtonMail Cloud | `bridge-data` vol | IMAP 1143, SMTP 1025 (internal) |
 | `mbsync` | Bridge IMAP | `maildir-volume` | nothing |
-| `ollama` (host process, not Docker) | model requests | `~/.ollama/` model cache | HTTP 11434 (host bind, reached from Docker via `host.docker.internal`). See `docs/setup.md` for the LaunchAgent + firewall install. |
 | `mlx-service` (host process, not Docker) | embed/rerank requests | `~/.cache/huggingface/` model cache | HTTP 8001 (loopback only); reached from Docker via `host.docker.internal`. See `docs/setup.md` for the LaunchAgent install. |
-| `indexer` | `maildir-volume`, mlx-service (or Ollama) | `sqlite-volume` | nothing |
-| `mcp-server` | `sqlite-volume`, mlx-service (or Ollama), Ollama (LLM) | nothing | HTTP 3000 (localhost only) |
-| `open-webui` (optional overlay) | Ollama, `mcp-server` | `open-webui-data` vol | HTTP 8080 (localhost only) |
+| `mlx-lm-server` (host process, not Docker) | LLM chat requests | `~/.cache/huggingface/` model cache | HTTP 8002 (loopback only); reached from Docker via `host.docker.internal`. OpenAI-compatible `/v1/chat/completions`. See `docs/setup.md` for the LaunchAgent install. |
+| `indexer` | `maildir-volume`, mlx-service | `sqlite-volume` | nothing |
+| `mcp-server` | `sqlite-volume`, mlx-service, mlx-lm-server (LLM) | nothing | HTTP 3000 (localhost only) |
+| `open-webui` (optional overlay) | mlx-lm-server, `mcp-server` | `open-webui-data` vol | HTTP 8080 (localhost only) |
 
 ## Docker Volumes
 
@@ -102,41 +103,43 @@ Claude Desktop (host machine)
 The stack uses two isolated bridge networks:
 
 - `bridge-net` for ProtonBridge ↔ `mbsync`
-- `app-net` for `indexer` ↔ `mcp-server`. Both reach the host Ollama
-  via `host.docker.internal:11434` rather than an in-stack container.
+- `app-net` for `indexer` ↔ `mcp-server`. Both reach the host MLX
+  servers (`mlx-service` on `:8001`, `mlx-lm-server` on `:8002`) via
+  `host.docker.internal`.
 - The optional Open WebUI overlay joins `app-net` and reaches the
-  same host Ollama via `host.docker.internal:11434`; it does not run
-  its own Ollama.
+  same host mlx-lm-server via `host.docker.internal:8002`.
 
 For stricter local-only deployments, `docker-compose.hardened.yml` marks
 `app-net` as `internal: true` so those services cannot reach the internet.
 
-> **Currently broken in the default stack.** After the host-Ollama-as-default
-> change (PR #86), the indexer + mcp-server reach Ollama and mlx-service via
-> `host.docker.internal`. Whether `host.docker.internal` resolves through a
-> network with `internal: true` is runtime-dependent (Docker Desktop and
-> OrbStack behave differently and the OrbStack case is unverified). Until the
-> overlay is reworked to either move both Ollama and mlx-service into
-> containers on `app-net` or explicitly punch `host.docker.internal` through,
-> applying it will likely cut off Ollama LLM calls (`LLM_MODE=local`), the
-> Ollama embed fallback, and the MLX `/embed` and `/rerank` calls. The
-> compose file itself carries the same warning. Do not apply it as-is.
+> **Currently broken in the default stack.** The indexer + mcp-server
+> reach the host MLX servers via `host.docker.internal`. Whether
+> `host.docker.internal` resolves through a network with
+> `internal: true` is runtime-dependent (Docker Desktop and OrbStack
+> behave differently and the OrbStack case is unverified). Until the
+> overlay is reworked to either move both MLX services into containers
+> on `app-net` or explicitly punch `host.docker.internal` through,
+> applying it will likely cut off the LLM (`LLM_MODE=local`) and the
+> MLX `/embed` and `/rerank` calls. The compose file itself carries
+> the same warning. Do not apply it as-is.
 
 The default stack exposes only `127.0.0.1:3000` for the MCP server. The
 optional Open WebUI overlay also exposes `127.0.0.1:8080` for the browser UI.
 No container is reachable from outside the machine.
 
-### Ollama (host install, not containerized)
+### Host-side MLX servers (not containerized)
 
-Ollama runs as a host process — `brew install ollama` plus the
-LaunchAgent + firewall setup in `docs/setup.md`. Containers reach it
-via OrbStack's `host.docker.internal:11434`. This is the only
-supported deployment shape: containerized Ollama on macOS cannot use
-Metal, so an in-stack Ollama would silently lose Metal acceleration.
-The host listener must be bound to `0.0.0.0:11434` so OrbStack
-containers can reach it; the macOS Application Firewall must be
-enabled with a binary-level block on `/opt/homebrew/bin/ollama` so
-the listener is not reachable from the LAN.
+Both the embedder/reranker (`mlx-service`) and the LLM
+(`mlx-lm-server`) run as host LaunchAgents — see
+[`mlx-service/README.md`](../mlx-service/README.md) and
+[`mlx-lm-server/README.md`](../mlx-lm-server/README.md). Containers
+reach them via OrbStack's `host.docker.internal`. This is the only
+supported deployment shape: containerized MLX on macOS cannot use
+Metal, so an in-stack equivalent would silently lose Metal
+acceleration. Both LaunchAgents bind to `127.0.0.1`, exempt from the
+macOS Application Firewall via the loopback exemption, so they're
+reachable from OrbStack containers (which route through the loopback
+exemption) but not from LAN neighbors.
 
 ## Search Architecture
 
@@ -146,7 +149,6 @@ The hybrid search pipeline:
 User query
     │
     ├─ Embed query text → Qwen3-Embedding-8B (mlx-service) → 4096-dim vector
-    │   (USE_MLX_EMBEDDER=false falls back to Ollama nomic-embed-text @ 768)
     │
     ├─ BM25 search   → SQLite FTS5 over thread bodies      → ranked list A
     │
@@ -159,7 +161,7 @@ User query
     │
     ├─ optional: post-fusion filter (folder / sender / date / attachments)
     │
-    ├─ optional rerank stage (USE_MLX_RERANKER=true, default):
+    ├─ optional rerank stage (RERANK_ENABLED=true, default):
     │   take RRF top RERANK_CANDIDATES (default 20), score each candidate
     │   against the query via Qwen3-Reranker-4B (yes/no logit
     │   comparison), reorder, truncate to the caller's `limit`
@@ -317,7 +319,7 @@ The indexer ships an opt-in reconciler
    reaped message's rows from `message_thread_map` / `indexed_files`, and
    either rebuilds the parent thread from the surviving messages on disk
    (re-parsed, re-embedded) or deletes the thread entirely when nothing
-   remains. Ollama failures during rebuild cause the reaper to back off and
+   remains. MLX-service failures during rebuild cause the reaper to back off and
    retry on the next pass.
 
 A **mass-delete brake** (`INDEXER_DELETION_MAX_BATCH_PCT`, default 5%) caps
@@ -429,7 +431,7 @@ Two environment variables shape the queue: `INDEXER_MAX_ATTEMPTS` and
 `INDEXER_RETRY_BASE_SECONDS`. Neither is required — the defaults are
 suitable for typical mailboxes, and both are documented in
 `docs/setup.md` for operators who need to tune retry aggressiveness
-against an unreliable Ollama or a flaky mailbox.
+against an unreliable embed service or a flaky mailbox.
 
 Observability: `queue.stats()` returns `{queued, dead}` counts and is
 logged at startup when the queue carries non-zero depth from a prior
@@ -470,7 +472,7 @@ walkthrough; the table below is the per-operation reference.
 | Operation | Local only | Leaves machine |
 |---|---|---|
 | Email storage | ✅ | Never |
-| Embedding generation | ✅ (Ollama) | Never |
+| Embedding generation | ✅ (mlx-service) | Never |
 | Vector index | ✅ (SQLite) | Never |
 | Keyword search | ✅ (SQLite FTS5) | Never |
 | Send/Move/Flag | Disabled by default | Never |
@@ -479,7 +481,7 @@ walkthrough; the table below is the per-operation reference.
 
 | Operation | Local only | Leaves machine |
 |---|---|---|
-| Q&A — `LLM_MODE=local` | ✅ (Ollama LLM) | Never |
+| Q&A — `LLM_MODE=local` | ✅ (mlx-lm-server) | Never |
 | Q&A — `LLM_MODE=cloud` | Retrieval local | Retrieved chunks → Anthropic Claude API |
 
 ### MCP client layer (governed by which client you connect)
@@ -493,7 +495,7 @@ content regardless of `LLM_MODE`.
 | Client | What sees tool results |
 |---|---|
 | Claude Desktop | Anthropic (Claude runs in the cloud; tool results go back as conversation context) |
-| Local-LLM MCP client (e.g. Open WebUI backed by Ollama) | Stays on machine |
+| Local-LLM MCP client (e.g. Open WebUI backed by mlx-lm-server) | Stays on machine |
 | Direct `docker exec` into mcp-server | Stays on machine |
 
 `LLM_MODE` and the MCP client choice are independent boundaries and must
@@ -508,7 +510,7 @@ localhost-bound port.
 
 Set `LLM_MODE` in `.env`:
 
-- `local` — all LLM inference via Ollama. Fully private. Slower on CPU.
+- `local` — all LLM inference via the host mlx-lm-server (or any OpenAI-compatible endpoint at `LLM_BASE_URL`). Fully private.
 - `cloud` — Q&A and agentic tasks use Claude API. Better quality. Retrieved
   email chunks are sent to Anthropic's servers.
 

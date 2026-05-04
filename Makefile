@@ -1,4 +1,4 @@
-.PHONY: build build-nocache up down logs first-run update pull-models status clean sync sync-indexer sync-mcp sync-mlx test test-indexer test-mcp test-mlx typecheck typecheck-indexer typecheck-mcp typecheck-mlx bridge-patch-check bridge-smoke bridge-upgrade-check open-webui-up open-webui-down open-webui-logs init-secrets validate-env help
+.PHONY: build build-nocache up down logs first-run update status clean sync sync-indexer sync-mcp sync-mlx sync-mlx-lm test test-indexer test-mcp test-mlx typecheck typecheck-indexer typecheck-mcp typecheck-mlx bridge-patch-check bridge-smoke bridge-upgrade-check open-webui-up open-webui-down open-webui-logs init-secrets validate-env help
 
 UV_CACHE_DIR ?= /tmp/uv-cache
 export UV_CACHE_DIR
@@ -26,9 +26,8 @@ help:
 	@echo "  open-webui-down Stop optional local Open WebUI"
 	@echo "  open-webui-logs Tail optional Open WebUI logs"
 	@echo "  update       Rebuild and restart Bridge with new version"
-	@echo "  pull-models  Pull Ollama embedding and LLM models on the host (requires brew install ollama)"
 	@echo "  status       Show container and index status"
-	@echo "  sync         Sync local uv environments for all three Python services"
+	@echo "  sync         Sync local uv environments for indexer, mcp-server, mlx-service, and mlx-lm-server"
 	@echo "  test         Run indexer, mcp-server, and mlx-service unit tests locally with uv"
 	@echo "  typecheck    Run mypy over all three Python services"
 	@echo "  test-indexer Run indexer unit tests only"
@@ -119,26 +118,6 @@ first-run: init-secrets
 	docker compose -f docker-compose.yml -f docker-compose.first-run.yml \
 		run --rm --no-deps protonmail-bridge
 
-# Pull Ollama models defined in .env via the host-installed Ollama.
-# Containers reach this same instance through host.docker.internal, so
-# pulling here populates the cache the indexer + mcp-server (legacy
-# fallback paths) and Open WebUI all read from.
-#
-# Requires ``brew install ollama`` and the LaunchAgent serving on
-# ``0.0.0.0:11434`` so containers can reach it through
-# ``host.docker.internal``. See docs/setup.md for the host-side setup.
-pull-models:
-	@if ! command -v ollama >/dev/null 2>&1; then \
-		printf 'ERROR: ollama CLI not found on host. Install with: brew install ollama\n' >&2; \
-		printf 'See docs/setup.md for the LaunchAgent + firewall setup.\n' >&2; \
-		exit 1; \
-	fi
-	@./scripts/check-host-ollama.sh
-	@echo "Pulling embedding model..."
-	ollama pull "$$(./scripts/validate-env.sh --get OLLAMA_EMBED_MODEL)"
-	@echo "Pulling LLM model..."
-	ollama pull "$$(./scripts/validate-env.sh --get OLLAMA_LLM_MODEL)"
-
 # Update Bridge to a new version
 # 1. Bump BRIDGE_VERSION in .env
 # 2. Run: make update
@@ -172,7 +151,7 @@ open-webui-up: init-secrets validate-env
 	@port="$$(./scripts/validate-env.sh --get OPEN_WEBUI_PORT)"; \
 	port="$${port:-8080}"; \
 	printf '\n  Starting Open WebUI on http://localhost:%s\n' "$$port"; \
-	printf '  Open WebUI uses the host-installed Ollama via host.docker.internal:11434 and MCP at http://mcp-server:3000/mcp.\n\n'
+	printf '  Open WebUI uses the host mlx-lm-server via host.docker.internal:8002/v1 (OpenAI-compatible) and MCP at http://mcp-server:3000/mcp.\n\n'
 	docker compose -f docker-compose.yml -f docker-compose.open-webui.yml up -d open-webui
 
 open-webui-down:
@@ -182,7 +161,7 @@ open-webui-logs:
 	docker compose -f docker-compose.yml -f docker-compose.open-webui.yml logs -f open-webui
 
 # Sync local Python environments using per-service uv projects
-sync: sync-indexer sync-mcp sync-mlx
+sync: sync-indexer sync-mcp sync-mlx sync-mlx-lm
 
 sync-indexer:
 	cd indexer && uv sync --locked --dev
@@ -192,6 +171,13 @@ sync-mcp:
 
 sync-mlx:
 	cd mlx-service && uv sync --locked --dev
+
+# mlx-lm-server is a thin wrapper around upstream ``mlx_lm.server``
+# (no project source, no tests/typecheck targets); ``sync-mlx-lm``
+# just installs the pinned ``mlx-lm`` so the LaunchAgent has a venv
+# to run from after a fresh clone.
+sync-mlx-lm:
+	cd mlx-lm-server && uv sync --locked
 
 # Show running containers and basic index status
 status:

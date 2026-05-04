@@ -112,32 +112,27 @@ docker compose run --rm protonmail-bridge \
   su -s /bin/bash bridge -c 'bridge-v3 info'
 ```
 
-### 5. Pull Ollama models
+### 5. Set up the host-side MLX servers
 
-```bash
-make pull-models
-```
+Two LaunchAgents run on the host (not in Docker — MLX needs Metal
+access):
 
-This pulls whichever models are configured in `.env`. With the shipped
-defaults that means:
+- `mlx-service` on `127.0.0.1:8001` — embeddings (Qwen3-Embedding-8B)
+  and reranking (Qwen3-Reranker-4B). See
+  [`mlx-service/README.md`](../mlx-service/README.md).
+- `mlx-lm-server` on `127.0.0.1:8002` — local LLM for `LLM_MODE=local`
+  (default `mlx-community/Qwen3-32B-4bit`), OpenAI-compatible
+  `/v1/chat/completions`. See
+  [`mlx-lm-server/README.md`](../mlx-lm-server/README.md).
 
-- `OLLAMA_EMBED_MODEL` — embedding model for search
-  (default `nomic-embed-text`, ~274 MB)
-- `OLLAMA_LLM_MODEL` — local LLM for Q&A and the MCP intelligence tools
-  (default `qwen2.5:14b-instruct`, ~9 GB at Q4_K_M)
+Containers reach both via OrbStack's `host.docker.internal`. Both load
+their models lazily on first request and stay resident — no
+pre-pull step.
 
-The Q&A model dominates the download. On a low-VRAM host (8 GB or less of
-allocatable GPU memory) edit `.env` to set `OLLAMA_LLM_MODEL=llama3.2`
-(~2 GB) before running `make pull-models` — the smaller model produces
-weaker synthesis from `ask_mailbox` / `summarize_thread` /
-`extract_from_emails` but fits comfortably alongside the embed model on
-modest hardware.
-
-`make pull-models` runs `ollama pull` against the host install. The
-host Ollama setup (LaunchAgent + firewall + listener bind) is required
-before this step succeeds — see the **Ollama (host install, required)**
-section below for the one-time host setup. If you have not done that
-yet, do it now and come back.
+Default models download into `~/.cache/huggingface/hub/` on first use
+(~12 GB for embedder + reranker, ~17 GB for the 32B LLM). On a host
+with less RAM headroom, point `LLM_MODEL` at a smaller variant in
+`.env` (e.g. `mlx-community/Qwen3-14B-4bit` ~ 8 GB).
 
 ### 6. Start the full stack
 
@@ -164,8 +159,9 @@ You should see:
 - `indexer` — "Running initial index scan..."
 - `mcp-server` — "MCP server starting on port 3000"
 
-Ollama is not in this list — it runs on the host, not as a container.
-Verify it separately with `lsof -iTCP:11434 -sTCP:LISTEN` if needed.
+The MLX LaunchAgents are not in this list — they run on the host,
+not as containers. Verify them separately with
+`lsof -iTCP:8001 -iTCP:8002 -sTCP:LISTEN` if needed.
 
 The initial index scan may take several minutes depending on mailbox size.
 
@@ -189,142 +185,60 @@ docker run --rm \
 Bridge writes sync progress into its structured log file in the `bridge-data`
 volume.
 
-## Ollama (host install, required)
+## Required: mlx-lm-server (host process for the local LLM)
 
-Ollama runs as a host process, not as a stack container. This is the
-only supported deployment shape — containerized Ollama on Apple
-Silicon cannot use Metal GPU acceleration (OrbStack runs the
-linux/arm64 build inside a Linux VM with no Metal passthrough), so
-the in-stack option would silently lose Metal and produce inference
-several times slower than the host install.
-
-The default `docker-compose.yml` points indexer + mcp-server at
-`host.docker.internal:11434` so containers reach the host Ollama
-without further configuration. Open WebUI's overlay does the same
-for chat. The setup below is one-time.
+`mlx-lm-server` runs upstream Apple's `mlx_lm.server` CLI as a
+LaunchAgent on `127.0.0.1:8002`. It serves the local LLM
+(`LLM_MODE=local`) over OpenAI-compatible
+`/v1/chat/completions`. Containers reach it via OrbStack's
+`host.docker.internal:8002`. The setup below is one-time; see
+[`mlx-lm-server/README.md`](../mlx-lm-server/README.md) for the
+authoritative install steps.
 
 ### One-time host setup
 
-1. **Install Ollama:**
+All commands below run from the repo root; the parenthesized
+subshells keep your cwd there so step 2 can find the install script
+on the relative path it expects.
+
+1. Install the project's pinned `mlx-lm` venv:
 
    ```bash
-   brew install ollama
+   (cd mlx-lm-server && uv sync)
    ```
 
-2. **Bind the listener on `0.0.0.0:11434`** so OrbStack containers can reach
-   it via `host.docker.internal`. Containers cannot reach the host's
-   `127.0.0.1`.
-
-   `brew services` regenerates `~/Library/LaunchAgents/homebrew.mxcl.ollama.plist`
-   from its template on every `start` / `restart` and discards user edits, so
-   the durable pattern is to run Ollama under a separate user-owned LaunchAgent
-   that brew does not manage.
-
-   First, stop the brew-managed service:
+2. Generate and install the LaunchAgent plist. The vendored template
+   carries `__REPO_ROOT__` / `__USER_HOME__` placeholders so it stays
+   portable; the install script substitutes them and writes the
+   result to `~/Library/LaunchAgents/`:
 
    ```bash
-   brew services stop ollama
-   ```
-
-   Then write `~/Library/LaunchAgents/com.local.ollama-host.plist` with the
-   following contents (preserves brew's flash-attention + KV cache defaults
-   and adds `OLLAMA_HOST`):
-
-   ```xml
-   <?xml version="1.0" encoding="UTF-8"?>
-   <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-   <plist version="1.0">
-   <dict>
-     <key>Label</key>
-     <string>com.local.ollama-host</string>
-     <key>EnvironmentVariables</key>
-     <dict>
-       <key>OLLAMA_HOST</key>
-       <string>0.0.0.0:11434</string>
-       <key>OLLAMA_FLASH_ATTENTION</key>
-       <string>1</string>
-       <key>OLLAMA_KV_CACHE_TYPE</key>
-       <string>q8_0</string>
-     </dict>
-     <key>ProgramArguments</key>
-     <array>
-       <string>/opt/homebrew/opt/ollama/bin/ollama</string>
-       <string>serve</string>
-     </array>
-     <key>KeepAlive</key>
-     <true/>
-     <key>RunAtLoad</key>
-     <true/>
-     <key>StandardErrorPath</key>
-     <string>/opt/homebrew/var/log/ollama.log</string>
-     <key>StandardOutPath</key>
-     <string>/opt/homebrew/var/log/ollama.log</string>
-     <key>WorkingDirectory</key>
-     <string>/opt/homebrew/var</string>
-   </dict>
-   </plist>
-   ```
-
-   Load it with launchd directly:
-
-   ```bash
+   ./mlx-lm-server/install-launchagent.sh
    launchctl bootstrap "gui/$(id -u)" \
-     ~/Library/LaunchAgents/com.local.ollama-host.plist
+     ~/Library/LaunchAgents/com.local.mlx-lm-server.plist
    ```
 
-   To stop or reload the service later:
+   Re-run the install script after `uv sync` rebuilds the venv so
+   the plist re-points at the regenerated binary path; then
+   `launchctl kickstart -k "gui/$(id -u)/com.local.mlx-lm-server"`.
+
+3. Verify the bind:
 
    ```bash
-   launchctl bootout "gui/$(id -u)/com.local.ollama-host"
-   launchctl bootstrap "gui/$(id -u)" \
-     ~/Library/LaunchAgents/com.local.ollama-host.plist
+   lsof -iTCP:8002 -sTCP:LISTEN  # should show 127.0.0.1:8002
+   curl -s http://127.0.0.1:8002/v1/models | jq .
    ```
 
-   Verify the bind:
-
-   ```bash
-   curl -s http://127.0.0.1:11434/api/tags
-   lsof -iTCP:11434 -sTCP:LISTEN  # should show *:11434, not 127.0.0.1:11434
-   ```
-
-   Do not run `brew services start ollama` after this point — it would
-   spawn a second listener on the same port and the bootstrap will fight
-   with brew. If you need to revert, `launchctl bootout` the custom label
-   first, then `brew services start ollama` to fall back to the brew
-   default (loopback bind).
-
-3. **Enable the macOS Application Firewall** so the listener is not exposed
-   to LAN neighbors:
-
-   - System Settings → Network → Firewall → On
-   - Click **Options** and enable **Stealth mode**
-   - Add an explicit block on the Ollama binary (loopback and the OrbStack
-     vmnet bridge are not affected by the Application Firewall, so containers
-     still reach Ollama; the LAN does not):
-
-     ```bash
-     sudo /usr/libexec/ApplicationFirewall/socketfilterfw \
-       --add /opt/homebrew/bin/ollama
-     sudo /usr/libexec/ApplicationFirewall/socketfilterfw \
-       --blockapp /opt/homebrew/bin/ollama
-     ```
-
-4. **Verify reachability from a container** before changing how you start
-   the stack:
+4. Verify reachability from a container:
 
    ```bash
    docker run --rm curlimages/curl:latest \
-     -fsS http://host.docker.internal:11434/api/tags
+     -fsS http://host.docker.internal:8002/v1/models
    ```
 
-   This should return a JSON tag list.
-
-5. **Pull the models on the host** (replaces `make pull-models`, which pulls
-   into the container):
-
-   ```bash
-   make pull-models
-   ```
+5. The first chat-completion call triggers a model download from
+   `mlx-community/Qwen3-32B-4bit` into
+   `~/.cache/huggingface/hub/`. Subsequent calls reuse the cache.
 
 ### Day-to-day commands
 
@@ -333,34 +247,27 @@ for chat. The setup below is one-time.
 | Start the stack | `make up` |
 | Stop the stack | `make down` |
 | Tail logs | `make logs` |
-| Pull / refresh Ollama models | `make pull-models` |
+| Restart the LLM server | `launchctl kickstart -k "gui/$(id -u)/com.local.mlx-lm-server"` |
+| Tail LLM server log | `tail -f ~/Library/Logs/mlx-lm-server.log` |
 
-### Stopping the host Ollama LaunchAgent
+### Stopping the host LLM LaunchAgent
 
-The Ollama LaunchAgent runs independently of the Docker stack —
-`make down` only stops the containers. To free port `11434` and
-undo the wildcard bind:
+The mlx-lm-server LaunchAgent runs independently of the Docker stack —
+`make down` only stops the containers. To free port 8002:
 
 ```bash
-launchctl bootout "gui/$(id -u)/com.local.ollama-host"
-lsof -iTCP:11434 -sTCP:LISTEN  # should now print nothing
+launchctl bootout "gui/$(id -u)/com.local.mlx-lm-server"
+lsof -iTCP:8002 -sTCP:LISTEN  # should now print nothing
 ```
-
-`brew services stop ollama` does **not** stop the custom LaunchAgent —
-brew does not manage the `com.local.ollama-host` label. Use `launchctl
-bootout` as shown above. After the LaunchAgent is stopped you can
-leave the brew formula installed; the next `launchctl bootstrap`
-re-arms it.
 
 ### Threat model
 
-The host-bound `0.0.0.0:11434` listener is the only externally-
-reachable interface this setup introduces. The mitigations above
-(stealth mode + binary block) close the LAN exposure. Same-machine
-processes can still reach Ollama without authentication; on a
-single-user dev laptop this is the same trust boundary the rest of
-the stack operates in. Ollama itself does not have access to the
-SQLite index or Maildir.
+The 127.0.0.1-bound listener is reachable only from the host (and from
+OrbStack containers via `host.docker.internal`, which routes through
+the loopback exemption). LAN neighbors cannot reach it. Same-machine
+processes can call the API without authentication; on a single-user
+dev laptop this is the same trust boundary the rest of the stack
+operates in. The LLM has no access to the SQLite index or Maildir.
 
 ## Required: mlx-service (host process for embeddings + reranking)
 
@@ -370,20 +277,19 @@ FastAPI service in `mlx-service/`. The service is bare-metal — not in
 Docker — because MLX needs Metal access. Containers reach it through
 OrbStack's `host.docker.internal` shortcut.
 
-Set `USE_MLX_EMBEDDER=false` and `USE_MLX_RERANKER=false` in `.env` if
-you want to opt out, but note that the SQLite schema is sized for
-Qwen3-Embedding-8B's 4096-dim vectors — turning the flag off without
-restoring the prior 768-dim schema and reindexing produces an embed
-shape mismatch at startup.
+Set `RERANK_ENABLED=false` in `.env` to keep RRF-only ranking (the
+embedder path is required and has no toggle — the SQLite schema is
+sized for Qwen3-Embedding-8B's 4096-dim vectors and the indexer talks
+to `mlx-service` directly).
 
 ### One-time host setup
 
 1. Install the project's Python deps for the service. The `mlx-service`
    directory ships its own `pyproject.toml` so it stays isolated from
-   the indexer / mcp-server uv environments:
+   the indexer / mcp-server uv environments. Run from the repo root:
 
    ```bash
-   cd mlx-service && uv sync
+   (cd mlx-service && uv sync)
    ```
 
    First run downloads MLX itself and the model handles; the model
@@ -473,8 +379,8 @@ authentication on `/embed`, `/rerank`, or `/health`. **Any local
 user-process — Docker containers via `host.docker.internal`, browser
 tabs reaching `127.0.0.1`, ad-hoc shells — can call any endpoint
 without credentials.** The trust boundary is identical to the
-host Ollama install above: a single-user laptop where same-machine
-processes are assumed trusted.
+mlx-lm-server LaunchAgent above: a single-user laptop where
+same-machine processes are assumed trusted.
 
 What the service holds: model weights in process memory and the
 HuggingFace cache on disk. What it does NOT hold: the SQLite index,
@@ -498,31 +404,19 @@ launchctl bootout "gui/$(id -u)/com.local.mlx-service"
 lsof -iTCP:8001 -sTCP:LISTEN  # should now print nothing
 ```
 
-**Rolling back the embedder is not a configuration toggle — it is a
-reindex.** The two MLX flags do different things:
+### Reranker rollback
 
-- `USE_MLX_RERANKER=false` is a clean toggle. The reranker is a
-  post-RRF stage with no schema dependency, so flipping it off
-  immediately returns to RRF-only ranking. Use this for a fast
-  rerank-side rollback.
-- `USE_MLX_EMBEDDER=false` switches the embedder routing back to
-  Ollama, but the SQLite schema is sized for Qwen3-Embedding-8B's
-  4096-dim vectors. Ollama's `nomic-embed-text` produces 768-dim
-  vectors and the indexer's startup dim probe will fail-closed on
-  the mismatch. A real embedder rollback requires:
-  1. Stop the stack: `make down`
-  2. Reset the SQLite volume: `docker volume rm protonmail-local-ai_sqlite-volume`
-  3. Restore the old code (revert the v14 schema bump, set
-     `EMBEDDING_DIM = 768`)
-  4. Set `USE_MLX_EMBEDDER=false` in `.env`
-  5. `make up` and let the indexer **rebuild the index from Maildir**
-     under Ollama — multiple hours on a populated mailbox.
+`RERANK_ENABLED=false` is a clean runtime toggle. The reranker is a
+post-RRF stage with no schema dependency, so flipping it off
+immediately returns to RRF-only ranking — useful as a fast diagnostic
+for "is the rerank stage hurting or helping" without disturbing
+indexing or embeddings.
 
-So `USE_MLX_EMBEDDER` is an integration-level safety net for "MLX is
-down today, I want to fail-fast clearly", not a data-level rollback.
-Plan accordingly: once you've migrated to the v14 (4096-dim) schema,
-returning to Ollama-served embeddings costs a full reindex — the flag
-is not a free toggle.
+The embedder has no equivalent toggle: the SQLite schema is sized for
+Qwen3-Embedding-8B's 4096-dim vectors and the indexer talks to
+`mlx-service` directly. Stepping off the MLX embedder would require a
+schema rollback plus a full reindex from Maildir, so it's a code
+change, not a flip.
 
 ## Updating Bridge
 
@@ -555,8 +449,9 @@ Test with: *"What is the status of my email index?"*
 
 ### Optional: Run Open WebUI
 
-Open WebUI can provide a local browser UI backed by the existing Ollama
-container. It does **not** need a second Ollama instance.
+Open WebUI can provide a local browser UI backed by the host-side
+`mlx-lm-server`. It uses Open WebUI's OpenAI-compatible client
+pointed at the same `LLM_BASE_URL` as mcp-server.
 
 Open WebUI's native MCP integration uses Streamable HTTP, not SSE. To expose
 both transports from this server, set this in `.env`:
@@ -586,12 +481,13 @@ MCP server in Open WebUI:
 - Server URL: `http://mcp-server:3000/mcp`
 - Auth: `None`
 
-Open WebUI runs in Docker on the Compose network and reaches Ollama on the
-host via OrbStack's `host.docker.internal`: use
-`http://host.docker.internal:11434` for the model backend and
-`http://mcp-server:3000/mcp` for the MCP server. Both defaults are set by
-`docker-compose.open-webui.yml` (override `OLLAMA_BASE_URL` only if you serve
-Ollama from a different host).
+Open WebUI runs in Docker on the Compose network and reaches the host
+mlx-lm-server via OrbStack's `host.docker.internal`: use
+`http://host.docker.internal:8002/v1` (Open WebUI's OpenAI-compatible
+client) for the model backend and `http://mcp-server:3000/mcp` for
+the MCP server. Both defaults are set by
+`docker-compose.open-webui.yml` (override `LLM_BASE_URL` only if you
+want to point at a different OpenAI-compatible endpoint).
 
 After creating the admin account, restart the UI **without** the signup
 override so the default-deny posture is back in effect:
@@ -600,8 +496,8 @@ override so the default-deny posture is back in effect:
 make open-webui-up
 ```
 
-Keep Open WebUI bound to localhost and backed by Ollama if your goal is fully
-local mail conversations.
+Keep Open WebUI bound to localhost and backed by the local LLM if
+your goal is fully local mail conversations.
 
 ## Troubleshooting
 
@@ -830,26 +726,28 @@ If you want Docker's view of the current state:
 docker inspect mbsync --format='{{json .State.Health}}'
 ```
 
-### Ollama (host) is not reachable from containers
+### mlx-lm-server (host) is not reachable from containers
 
-Indexer or mcp-server reports a connection error against
-`host.docker.internal:11434`. Verify the host listener and firewall:
+mcp-server reports a connection error against
+`host.docker.internal:8002`. Verify the host listener:
 
 ```bash
-launchctl print "gui/$(id -u)/com.local.ollama-host" | head    # LaunchAgent loaded
-lsof -iTCP:11434 -sTCP:LISTEN                                  # bound on *:11434
-/usr/libexec/ApplicationFirewall/socketfilterfw \
-    --getappblocked /opt/homebrew/bin/ollama                   # firewall block in place
+launchctl print "gui/$(id -u)/com.local.mlx-lm-server" | head    # LaunchAgent loaded
+lsof -iTCP:8002 -sTCP:LISTEN                                     # bound on 127.0.0.1:8002
+curl -s http://127.0.0.1:8002/v1/models | jq .                   # serving the loaded model
 ```
 
 If the LaunchAgent is missing, re-bootstrap from the plist in the
-"Ollama (host install, required)" section above.
+"Required: mlx-lm-server" section above. After `uv sync` rebuilds
+the venv, run `launchctl kickstart -k "gui/$(id -u)/com.local.mlx-lm-server"`
+so it picks up the new binary path.
 
-### Ollama model not found
+### LLM model not loaded yet
 
-```bash
-make pull-models
-```
+The first chat-completion call after a fresh install triggers a
+HuggingFace download (~17 GB for the default 32B model). Watch the
+progress in `~/Library/Logs/mlx-lm-server.log`. Subsequent calls
+reuse the cache and load in seconds.
 
 ### sqlite-vec fails with "wrong ELF class: ELFCLASS32" (ARM64 / Apple Silicon)
 
@@ -910,9 +808,9 @@ immediately for testing, drop the grace window to `0` and restart.
 ### Tuning indexing retries
 
 Every discovered Maildir file is written to an `indexing_jobs` table
-and drained by a worker loop. Transient failures (Ollama down, SQLite
-lock contention) get exponential backoff; a persistent parser or
-schema error transitions the row to `dead` after
+and drained by a worker loop. Transient failures (embed service
+down, SQLite lock contention) get exponential backoff; a persistent
+parser or schema error transitions the row to `dead` after
 `INDEXER_MAX_ATTEMPTS` attempts and stops being retried.
 
 | Variable | Default | Purpose |
@@ -931,7 +829,7 @@ docker run --rm -v protonmail-local-ai_sqlite-volume:/data:ro \
 ```
 
 A `dead` row carries the last `last_stage` / `last_error` so you can
-tell an Ollama outage from a parser bug without digging through logs.
+tell an embed-service outage from a parser bug without digging through logs.
 Re-enqueueing (for example by touching the file so mbsync re-delivers)
 resets the row to `queued` with `attempts = 0`.
 

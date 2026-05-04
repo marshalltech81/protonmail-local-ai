@@ -53,22 +53,22 @@ class TestEstimateTokens:
         # size for repeated content. Just confirm monotonicity.
         assert estimate_tokens("a" * 100) > estimate_tokens("a" * 10)
 
-    def test_cjk_text_costs_more_tokens_than_chars_per_4_heuristic(self):
-        """The previous 4-chars/token heuristic massively under-counted
-        CJK because BPE tokenizes CJK characters roughly 1:1. A 500-
-        char Chinese passage that the heuristic estimated at ~125
-        tokens is actually ~500-1000 real tokens — enough to blow past
-        nomic-embed-text's 2048 ceiling when packed into a chunk.
-
-        This test pins the relationship qualitatively so a future
-        regression to a char-based heuristic gets caught."""
+    def test_cjk_text_uses_real_bpe_not_char_heuristic(self):
+        """A regression to a 4-chars/token heuristic would return
+        ``char_count // 4`` regardless of script. CJK is the cleanest
+        discriminator: even Qwen3's efficient multilingual BPE produces
+        noticeably more tokens for dense multi-byte text than the naive
+        heuristic, so a comfortable margin above ``char_count // 4``
+        catches a silent fallback without being brittle to tokenizer
+        upgrades."""
         cjk = "中文测试字符串" * 50  # 350 CJK characters
         char_based_4 = len(cjk) // 4
         real = estimate_tokens(cjk)
-        assert real > char_based_4 * 2, (
-            f"BPE token count for CJK ({real}) should be at least 2x the "
-            f"naive chars-per-4 heuristic ({char_based_4}); a regression "
-            "to char-based estimation would re-open the embed-stage 500s."
+        assert real > int(char_based_4 * 1.5), (
+            f"BPE token count for CJK ({real}) should comfortably exceed "
+            f"the naive chars-per-4 heuristic ({char_based_4}); a "
+            "regression to char-based estimation would silently undersize "
+            "CJK chunks."
         )
 
     def test_english_text_estimate_is_in_realistic_range(self):

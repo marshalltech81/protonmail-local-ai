@@ -5,13 +5,12 @@ repos:
       - id: check-added-large-files
         args: ['--maxkb=500']
         # Bundled embedding-model tokenizers are intentional source data,
-        # not accidental binary commits. The nomic-embed-text BPE
-        # tokenizer is ~700 KB and ships with the indexer image so
+        # not accidental binary commits. The Qwen3-Embedding-8B BPE
+        # tokenizer is ~11 MB and ships with the indexer image so
         # ``estimate_tokens`` never needs network at startup.
         exclude: '^indexer/src/data/.*/tokenizer\.json$'
       - id: check-merge-conflict
       - id: check-yaml
-        exclude: '^docker-compose\..*host-ollama\.yml$'
       - id: check-json
       - id: end-of-file-fixer
       - id: trailing-whitespace
