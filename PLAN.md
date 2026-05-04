@@ -17,12 +17,15 @@ Detailed design and operational docs belong in `docs/`.
 ## Current Objective
 
 Consolidate the local-inference layer onto MLX. PR #83 landed the
-embedder + reranker on MLX; the LLM is still served by Ollama, which
-leaves three independent inference engines on the host (MLX for
-embed/rerank, Ollama-via-llama.cpp for the LLM, plus the optional
-host-Ollama overlay scaffolding). The goal is to swap the LLM onto
-MLX-LM behind the same `LLMClient` interface used today, then remove
-the now-vestigial Ollama scaffolding in phases. Net result: one MLX
+embedder + reranker on MLX; PR #86 made the host-Ollama install the
+default and removed the in-stack `ollama` container plus the
+host-Ollama overlay files. The remaining work: the LLM is still
+served by host Ollama via `OllamaClient.complete()`, which leaves
+two independent inference engines on the host (MLX for embed/rerank,
+Ollama-via-llama.cpp for the LLM) plus the residual env / Makefile /
+diagnostic-script wiring that supports them. The goal is to swap the
+LLM onto MLX-LM behind the same `LLMClient` interface used today,
+then remove the residual Ollama wiring in phases. Net result: one MLX
 host process serves all three model heads (embed, rerank, LLM), and
 the project's "local-first AI" non-negotiable is satisfied with one
 inference framework instead of two.
@@ -222,10 +225,17 @@ Tasks:
   download
 - `docs/architecture.md`: redraw the data-flow diagram so Ollama
   doesn't appear; describe the unified MLX host process
-- `AGENTS.md`: rewrite the non-negotiables that mention Ollama
-  (host-Ollama overlay constraints, host-bind firewall steps);
-  keep the post-`brew upgrade` verification rules but retarget them
-  at the mlx-service binary
+- `AGENTS.md`: delete the non-negotiables that mention Ollama
+  (host-bind firewall steps, post-`brew upgrade` verification
+  rules) — they no longer apply once Ollama is gone. Replace with
+  mlx-service operational guidance: re-bootstrap the LaunchAgent
+  after `uv sync` rebuilds the venv (the plist's
+  `ProgramArguments` path can become stale), the tied-embedding
+  invariant the reranker depends on, and the
+  `~/Library/Logs/mlx-service.log` location. mlx-service is not
+  brew-managed, so the "after `brew upgrade`" framing of the old
+  Ollama rules does not carry over — the trigger is "after `uv
+  sync` rebuilds the venv" instead.
 - `README.md`: update the stack description; the project is no
   longer "five containers" — it's "Bridge + mbsync + indexer +
   mcp-server in Docker, mlx-service on the host"
