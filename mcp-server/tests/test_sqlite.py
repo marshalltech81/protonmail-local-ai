@@ -32,10 +32,22 @@ class TestPing:
         # Returns None on success; no exception is the signal.
         assert seeded_db.ping() is None
 
-    def test_ping_raises_when_connection_closed(self, seeded_db: Database):
-        seeded_db._conn.close()
-        with pytest.raises(sqlite3.ProgrammingError):
-            seeded_db.ping()
+    def test_close_is_idempotent_noop_under_per_access_connections(self, seeded_db: Database):
+        """Database opens a fresh sqlite3.Connection per ``self._conn``
+        access (the WAL-pinning fix), so ``close()`` no longer disables
+        the handle — there is no persistent connection to close. The
+        method is preserved as a no-op for API compatibility with test
+        fixtures and main-shutdown paths that still call it; subsequent
+        operations on the same Database continue to work, and calling
+        ``close()`` twice is harmless.
+        """
+        seeded_db.close()
+        # Subsequent reads keep working — each call opens its own
+        # short-lived connection.
+        assert seeded_db.ping() is None
+        # Idempotent.
+        seeded_db.close()
+        assert seeded_db.ping() is None
 
 
 class TestFailFastOnMissingIndex:

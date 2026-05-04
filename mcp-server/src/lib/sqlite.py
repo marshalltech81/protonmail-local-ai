@@ -8,7 +8,6 @@ import json
 import logging
 import re
 import sqlite3
-import weakref
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from email.utils import parseaddr
@@ -19,10 +18,6 @@ import sqlite_vec
 from .reranker import RerankerBackend
 
 log = logging.getLogger("mcp.sqlite")
-
-
-def _close_connection(conn: sqlite3.Connection) -> None:
-    conn.close()
 
 
 def canonical_addr(value: str) -> str:
@@ -154,26 +149,53 @@ class ThreadResult:
 
 
 class Database:
+    """Read-only handle to the indexer's SQLite output.
+
+    Opens a *fresh* ``sqlite3.Connection`` per access via the
+    ``self._conn`` property, instead of holding one persistent
+    connection for the lifetime of the process. The fresh connection
+    lives only as long as the calling expression; CPython
+    refcounting closes it when the
+    ``self._conn.execute(...).fetchall()`` chain completes.
+
+    Why per-access: a long-lived ``?mode=ro`` reader holds a WAL
+    read mark that blocks ``PRAGMA wal_checkpoint(TRUNCATE)`` from
+    the indexer (writer) side — so ``mail.db-wal`` grew unbounded
+    under sustained writer activity (159 MB observed). Per-access
+    connections release the read mark when the expression returns,
+    letting the next checkpoint succeed and keeping the WAL bounded.
+    Cost is the per-call connection setup (path stat, sqlite3
+    open, ``sqlite_vec.load``, ``query_only`` pragma) — a few ms;
+    negligible against the search/rerank work each call already
+    does. Snapshot consistency is unchanged: each fresh connection
+    sees the latest committed state, same as the prior single
+    persistent reader.
+    """
+
     def __init__(self, path: str):
         self.path = path
-        self._conn = self._connect()
         self._closed = False
-        self._finalizer = weakref.finalize(self, _close_connection, self._conn)
+        # Fail fast at startup with the same checks ``_connect`` runs
+        # on every access. Catches a missing volume / typo'd
+        # SQLITE_PATH / unhealthy indexer at process start instead of
+        # waiting for the first tool call.
+        self._validate_path()
 
     def close(self) -> None:
-        if self._closed:
-            return
-        self._finalizer.detach()
-        self._conn.close()
+        # No-op kept for API compatibility — per-access connections
+        # close themselves when the calling expression's refcount
+        # drops, so there is no persistent resource to release.
+        # Existing test fixtures and main-shutdown code that call
+        # ``db.close()`` continue to work; the flag is preserved so
+        # any caller inspecting it sees the historical semantics.
         self._closed = True
 
-    # Note: no ``__del__`` — ``weakref.finalize`` registered in ``__init__``
-    # is the documented modern pattern for "close on GC" and runs even
-    # when the interpreter is shutting down. Adding ``__del__`` on top
-    # would either fight the finalizer (calling close twice) or swallow
-    # genuine shutdown errors via a bare ``except``.
+    @property
+    def _conn(self) -> sqlite3.Connection:
+        """Open a fresh per-access connection. See class docstring."""
+        return self._connect()
 
-    def _connect(self) -> sqlite3.Connection:
+    def _validate_path(self) -> None:
         # MCP is a read-only consumer of the indexer's output; the indexer
         # is the only component allowed to create the data directory or
         # initialize the SQLite file. If either is missing at MCP startup,
@@ -196,6 +218,9 @@ class Database:
                 "initialize the database before mcp-server starts; check "
                 "'docker compose logs indexer' for migration errors."
             )
+
+    def _connect(self) -> sqlite3.Connection:
+        self._validate_path()
         # Open the SQLite file in read-only URI mode so the MCP server never
         # attempts to mutate the shared index and so WAL readers can operate
         # without the connection trying to create or write a journal sidecar.
