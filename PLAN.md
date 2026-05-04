@@ -16,290 +16,283 @@ Detailed design and operational docs belong in `docs/`.
 
 ## Current Objective
 
-Rebuild the embedding + reranking layer to run natively on MLX (Apple
-Metal) on the host, while keeping Ollama as the LLM. The existing
-SQLite index has already been wiped — this is a fresh-start rebuild,
-not a migration. Goal is meaningfully better retrieval (richer
-embeddings + a true cross-encoder rerank stage) for `ask_mailbox` and
-the rest of the intelligence surface.
+Consolidate the local-inference layer onto MLX. PR #83 landed the
+embedder + reranker on MLX; PR #86 made the host-Ollama install the
+default and removed the in-stack `ollama` container plus the
+host-Ollama overlay files. The remaining work: the LLM is still
+served by host Ollama via `OllamaClient.complete()`, which leaves
+two independent inference engines on the host (MLX for embed/rerank,
+Ollama-via-llama.cpp for the LLM) plus the residual env / Makefile /
+diagnostic-script wiring that supports them. The goal is to swap the
+LLM onto MLX-LM behind the same `LLMClient` interface used today,
+then remove the residual Ollama wiring in phases. Net result: one MLX
+host process serves all three model heads (embed, rerank, LLM), and
+the project's "local-first AI" non-negotiable is satisfied with one
+inference framework instead of two.
 
 ## Current State
 
-Stack today is unchanged in shape (see `docs/architecture.md` for the
-data flow). The change in this objective is to **add a sixth service**
-running bare-metal on the host:
+The MLX-rebuild objective (PR #83 + #84 + #85) is **merged to main**.
+The stack now runs:
 
 - **ProtonBridge** — Docker, headless, IMAP/SMTP on `bridge-net` only.
 - **mbsync** — Docker, pulls into Maildir, `chmod go+r` after each sync.
-- **indexer** — Docker, parses Maildir, threads, embeds, writes SQLite
-  (FTS5 + `sqlite-vec`). Embedding client will be redirected to MLX.
-- **Ollama** — host or Docker depending on overlay. **Stays as the LLM**.
-  Existing `OLLAMA_EMBED_MODEL` (`nomic-embed-text`) becomes a fallback
-  path only, gated by `USE_MLX_EMBEDDER=false`.
-- **mcp-server** — Docker, hybrid search + intelligence tools on
-  `localhost:3000`. Hybrid search gains a rerank stage after RRF.
-- **mlx-service** *(new)* — host process, FastAPI, Metal-backed, binds
-  `127.0.0.1:8001`. Serves `/embed`
-  (`mlx-community/Qwen3-Embedding-8B-mxfp8`, 4096-dim, ~8 GB resident)
-  and `/rerank` (`mlx-community/Qwen3-Reranker-4B-mxfp8`, ~4 GB
-  resident, generation-style yes/no logit scoring per Qwen3-Reranker's
-  trained behavior — *not* a yes/no workaround) via `mlx-embeddings`.
-  Lazy-loads each model on first request, keeps resident. Started by
-  LaunchAgent at login. Reachable from Docker via
+- **indexer** — Docker, parses Maildir, threads, embeds via the MLX
+  service (default), writes SQLite. Schema is at v14 with 4096-dim
+  vectors. Ollama embed (`nomic-embed-text`) remains as a feature-
+  flagged fallback (`USE_MLX_EMBEDDER=false`) but is no longer the
+  default path.
+- **mcp-server** — Docker, hybrid search + intelligence tools.
+  `hybrid_search` calls the MLX reranker (`Qwen3-Reranker-4B-mxfp8`)
+  after RRF. **Currently the LLM-synthesis step still calls
+  Ollama** via `OllamaClient.complete()` — this is the next thing to
+  swap.
+- **Ollama** — host install via LaunchAgent (no longer an in-stack
+  container; PR #86 inverted the defaults so containers reach
+  `host.docker.internal:11434` directly without a host-Ollama
+  overlay). **Sole remaining role: LLM serving** (qwen2.5:32b-
+  instruct or whatever `OLLAMA_LLM_MODEL` is pinned to). Embeddings
+  have already moved off; the LLM is what this objective swaps.
+- **mlx-service** — host LaunchAgent on `127.0.0.1:8001`, serves
+  `/embed` (Qwen3-Embedding-8B-mxfp8, 4096-dim) and `/rerank`
+  (Qwen3-Reranker-4B-mxfp8). Reachable from Docker via
   `host.docker.internal:8001`.
 
-  Memory budget on the 36 GB M5 Max: LLM ~19 GB + embedder ~8 GB +
-  reranker ~4 GB + macOS baseline ~7 GB ≈ 38 GB nominal, with mxfp8
-  model footprints typically a bit under nameplate in practice. If
-  steady-state pressure shows, fallback is `Qwen3-Embedding-8B-4bit-DWQ`
-  (~4 GB) for the embedder.
-
-The index is empty. Schema will be rebuilt from scratch with the new
-4096-dim vector tables; no migration tooling needed for this objective.
+Memory reality (36 GB M5 Max): the three-engine state (Ollama LLM
+~26 GB + MLX embed/rerank ~12 GB + macOS ~7 GB) overflows physical
+RAM and uses swap heavily. Switching the LLM to MLX-LM doesn't
+shrink the LLM's footprint, but consolidating onto one engine
+removes wrapper overhead and lets us tune the entire memory budget
+in one place.
 
 ## Active Priorities
 
 The previous priorities (intelligence-fidelity validation, test-coverage
-expansion, tool-behavior tightening, Tier 1 safety preservation) are
-**paused** behind the MLX rebuild. They resume after step 5 below.
+expansion, tool-behavior tightening, Tier 1 safety preservation) remain
+**paused** behind the consolidation. They resume after Phase F.
 
-### Status as of 2026-05-03
+### Phase A — Wire MLX-LM behind a feature flag (additive, behind `LLM_MODE=mlx`)
 
-Steps 1-4 code-complete and green; PR #83 open against `main`.
-Codex round-1, round-2, round-3, round-4 review feedback addressed
-in-place. Test counts: mlx-service 7, mcp-server 315, indexer 463
-(after the v14 migration guard tests + tied-embeddings assertion
-test added in the post-Claude-Desktop-review pass). mypy + ruff
-clean across all three services. Both compose configs validate.
+Goal:
+- New `MlxLLMClient` mirroring `OllamaClient.complete()` interface;
+  selected at startup when `LLM_MODE=mlx` (alongside existing
+  `local`/`cloud`). Doesn't remove anything yet.
 
-### Pre-merge verification gates (operator-driven, not automatable)
+Tasks:
+- decide on the MLX-LM serving model (`mlx-community/Qwen3-32B-Instruct-4bit`
+  or similar — the current Ollama LLM equivalent on MLX). Pick based
+  on memory headroom alongside the existing embedder + reranker
+- extend `mlx-service` with a `/chat` endpoint that wraps `mlx_lm.generate`,
+  OR run a separate `mlx_lm.server` process on `:8002` and treat it
+  as a peer service. Probably the latter — keeps `mlx-service` small
+  and lets the LLM model load/unload independently
+- add `MlxLLMClient` in `mcp-server/src/lib/` that hits the new
+  endpoint with the OpenAI-compatible chat-completions shape
+- factory in `mcp-server/src/main.py`: `LLM_MODE in {local, cloud, mlx}`
+  selects between `OllamaClient.complete`, the Claude API path,
+  or `MlxLLMClient.complete`
+- doc `LLM_MODE=mlx` in `.env.example` with the same caveats pattern
+  used for `USE_MLX_EMBEDDER`
+- new tests for `MlxLLMClient` (HTTP shape, error path) mirroring
+  the round-1/2 reranker test pattern
 
-These are the checks Claude Desktop's PR review explicitly requested
-before merge. None can be done autonomously by an in-repo agent —
-each needs the operator at the keyboard.
+Verify:
+- `LLM_MODE=mlx` makes `ask_mailbox` answer correctly through the
+  new path
+- `LLM_MODE=local` (default) is unchanged; existing tests still pass
+- failure path (MLX server down) surfaces a clear error rather than
+  silently falling back
 
-1. **Memory pressure test with all three models resident.** Load
-   Qwen 32B in Ollama, warm both MLX models via curl, then run an
-   end-to-end embed → rerank → LLM cycle. Watch
-   `vm_stat | grep "Pages free"` and the `process_resident_mb` value
-   on `/health` for swap pressure. The 36 GB box has zero margin on
-   paper (19+8+4+7≈38). If swap engages under load, fall back to
-   `mlx-community/Qwen3-Embedding-8B-4bit-DWQ` (~4 GB) for the
-   embedder.
-2. **LaunchAgent reboot stability.** Reboot once; then verify
-   ``launchctl print "gui/$(id -u)/com.local.mlx-service"`` shows
-   loaded and ``curl 127.0.0.1:8001/health`` returns ok.
-3. **Subset reindex.** `make build && make up` against a single
-   folder or date range to validate end-to-end before the full
-   backfill. Watch indexer logs for `Embedder: MLX service at ...`
-   and the warmup ping; watch its `mem_limit: 6g` against the new
-   1500-token chunk cap × concurrency.
+Definition of done:
+- additive PR merged; nothing removed yet
+- **stop and confirm before Phase B**
 
-### Post-merge follow-ups
+### Phase B — Switch to MLX-LM in production + bake operational learning
 
-1. **Step 5 — full mailbox reindex.** Hours of compute. Runs after
-   the three pre-merge gates pass.
-2. **Doc sweep.** `docs/mcp-tools.md`, `README.md`, AGENTS.md
-   non-negotiables to mention the new host service. Deferred so the
-   live reindex confirms behavior before doc decisions calcify.
-3. **One-knob-at-a-time eval.** Two retrieval-quality variables
-   moved at once (Qwen3 embedder vs nomic, and 1000/1500 chunk
-   budget vs 350/500). If the manual eval shows a regression, run a
-   diagnostic split: Qwen3 embedder at the *old* 350/500 chunk
-   budget first, then raise budgets, to attribute any quality
-   change to the right knob.
-4. **`RERANK_CANDIDATES` latency tuning.** Default 50 means 50
-   forward passes through a 4B model per query. Measure the wall
-   clock on a real query (warm cache). If a single rerank call
-   exceeds ~5 s, drop the default to 20-30 — Open WebUI's ~60 s
-   client timeout already bites on populated mailboxes (see
+Goal:
+- Run with `LLM_MODE=mlx` for the daily workflow long enough to
+  confirm quality, latency, and stability vs Ollama.
+
+Tasks:
+- flip `LLM_MODE=mlx` in `.env`
+- run the manual eval set (`mcp-server/tests/eval/eval-queries.md`,
+  Tiers 2–11) and compare answers vs the Ollama baseline captured
+  in earlier sessions
+- watch wall-clock latency; tune mlx-lm server flags (`--max-tokens`,
+  context size, KV cache type) if needed
+- track for at least a few days of normal use before declaring it
+  the new default
+
+Verify:
+- eval set is at least as good as the Ollama path on Tiers 2–7
+- p95 latency for `ask_mailbox` is comparable or better
+- no MLX OOM-kills, no LLM-side error spike
+
+Definition of done:
+- daily-driver mode is `LLM_MODE=mlx`; no regression caught
+- **stop and confirm before Phase C**
+
+### Phase C — Remove the Ollama LLM code path
+
+Goal:
+- `OllamaClient` becomes embed-only (or the whole class goes away if
+  the embed path is also retired by Phase D). Remove the LLM-specific
+  branches.
+
+Tasks:
+- delete `OllamaClient.complete()` (or refactor `OllamaClient` →
+  `LLMClient` with implementations split per backend)
+- remove `OLLAMA_LLM_MODEL` env var and its compose passthrough
+- remove `LLM_MODE=local` (or rename — the new "local" IS MLX)
+- update tests that mocked `OllamaClient.complete` (`test_ollama.py`,
+  `test_intelligence_handlers.py`, `test_search.py`, `conftest.py`)
+- bandit + mypy + ruff clean
+
+Verify:
+- mcp-server starts and serves with `LLM_MODE` removed or only
+  `mlx`/`cloud` accepted
+- no test references the removed methods/env
+
+Definition of done:
+- LLM-side Ollama dependency gone from mcp-server
+- **stop and confirm before Phase D**
+
+### Phase D — Decide the fate of the Ollama embed-fallback path
+
+Goal:
+- Either keep `class Embedder` (Ollama embed) as the documented
+  rollback safety net OR remove it once you've decided MLX
+  embeddings are permanent.
+
+Tasks:
+- if removing: delete `class Embedder`, the `_make_embedder` Ollama
+  branch, `OLLAMA_EMBED_MODEL`, `_validate_embed_model_tokenizer()`,
+  and the bundled `indexer/src/data/nomic-embed-text/tokenizer.json`
+  (replace with a Qwen3 tokenizer for accurate chunk-budgeting)
+- if keeping: document explicitly in `.env.example` that
+  `USE_MLX_EMBEDDER=false` requires schema rollback + reindex (the
+  current note in `docs/setup.md` is good; promote it to AGENTS.md)
+
+Decision input: how much do you trust the MLX embedder? After Phase
+B real-world use, a yes/no answer should be obvious.
+
+Definition of done:
+- the embed-fallback path is either truly gone or truly documented;
+  no half-state where the env flag exists but isn't usable
+
+### Phase E — Remove residual Ollama scaffolding
+
+Goal:
+- Drop the remaining Ollama wiring once Phases C and D have removed
+  the LLM and embed-fallback code paths. Most of the operational
+  surface — the in-stack `ollama` service, the host-Ollama overlay
+  files, the five `*-host-ollama` Makefile targets — was already
+  removed by PR #86 (the host-Ollama-as-default cleanup). What
+  remains here is the env wiring and the host-bind diagnostic
+  script that PR #86 deliberately kept because the LLM and embed-
+  fallback paths still used them.
+
+Tasks:
+- remove `OLLAMA_HOST` / `OLLAMA_EMBED_MODEL` / `OLLAMA_LLM_MODEL`
+  env passthrough from `docker-compose.yml` (indexer + mcp-server)
+  and `docker-compose.open-webui.yml` (`OLLAMA_BASE_URL`)
+- remove `OLLAMA_*` defaults + comments from `.env.example`
+- delete `scripts/check-host-ollama.sh` (was kept as a diagnostic
+  even after PR #86 since the host install was still in active use;
+  drop once nothing in the stack talks to host Ollama)
+- delete the `pull-models` Makefile target (Ollama is gone — there
+  is nothing to pull); replace help text with an MLX-LM equivalent
+  if Phase A introduced one
+- update `scripts/validate-env.sh` to drop `OLLAMA_*` checks
+
+Definition of done:
+- `git grep -i ollama` returns hits only in changelog / Recently
+  Completed sections, not in source / config / docs of the live
+  stack
+- the project no longer has any code path that calls Ollama
+
+### Phase F — Documentation sweep
+
+Goal:
+- Bring `docs/setup.md`, `docs/architecture.md`, `README.md`,
+  `AGENTS.md`, `.env.example`, and `mcp-server/tests/eval/README.md`
+  in line with the consolidated single-engine reality.
+
+Tasks:
+- `docs/setup.md`: replace the host-Ollama section with the
+  expanded mlx-service section (already partially there from PR #83);
+  remove `make pull-models` instructions in favor of `mlx_lm` model
+  download
+- `docs/architecture.md`: redraw the data-flow diagram so Ollama
+  doesn't appear; describe the unified MLX host process
+- `AGENTS.md`: delete the non-negotiables that mention Ollama
+  (host-bind firewall steps, post-`brew upgrade` verification
+  rules) — they no longer apply once Ollama is gone. Replace with
+  mlx-service operational guidance: re-bootstrap the LaunchAgent
+  after `uv sync` rebuilds the venv (the plist's
+  `ProgramArguments` path can become stale), the tied-embedding
+  invariant the reranker depends on, and the
+  `~/Library/Logs/mlx-service.log` location. mlx-service is not
+  brew-managed, so the "after `brew upgrade`" framing of the old
+  Ollama rules does not carry over — the trigger is "after `uv
+  sync` rebuilds the venv" instead.
+- `README.md`: update the stack description; the project is no
+  longer "five containers" — it's "Bridge + mbsync + indexer +
+  mcp-server in Docker, mlx-service on the host"
+- `.env.example`: remove `OLLAMA_*` vars Phase C/D dropped, add
+  `MLX_LM_*` vars
+- update `PLAN.md` to mark consolidation complete and unpause the
+  Tier-1-safety priorities below
+
+Definition of done:
+- a fresh contributor reading the docs would not learn that Ollama
+  was ever part of the stack (except as a note in the changelog /
+  Recently Completed section)
+
+### Out of scope for this objective
+
+- Any change to retrieval quality (embedder, reranker, chunker
+  defaults). The retrieval stack ships unchanged from PR #83.
+- Switching off MLX entirely. If MLX-LM doesn't pan out in Phase B,
+  `LLM_MODE=cloud` (Claude API) is the escape hatch — go back to
+  Ollama only as a last resort.
+- Adding new MCP tools or changing the MCP API surface.
+
+### MLX-rebuild carryover (still-pending follow-ups from PRs #83/#84/#85)
+
+Independent of the consolidation work above. These are tuning /
+validation tasks that should happen as the full backfill completes,
+regardless of the LLM-engine swap.
+
+1. **Full mailbox reindex.** In progress at time of writing — 18k+
+   messages indexed, ~10k still queued. Track via the recurring
+   indexer-snapshot job (cron `f3c38d3a`).
+2. **One-knob-at-a-time eval.** Two retrieval-quality variables
+   moved at once in PR #83 (Qwen3 embedder vs nomic, and 1000/1500
+   chunk budget vs 350/500). If the manual eval shows a regression,
+   run a diagnostic split: Qwen3 embedder at the *old* 350/500
+   chunk budget first, then raise budgets, to attribute any
+   quality change to the right knob.
+3. **`RERANK_CANDIDATES` latency tuning.** Default 50 means 50
+   forward passes through a 4B model per query. Measure wall clock
+   on a real query (warm cache). If a single rerank call exceeds
+   ~5 s, drop the default to 20-30 — Open WebUI's ~60 s client
+   timeout already bites on populated mailboxes (see
    `project_ask_mailbox_slow.md`).
-5. **Rerank-side quality experiment.** Once retrieval is stable,
+4. **Rerank-side quality experiment.** Once retrieval is stable,
    compare `USE_MLX_RERANKER=true` vs `false` on the manual eval
    set to measure what the rerank stage actually buys you.
+5. **Indexer healthcheck threshold.** Currently flagged
+   "unhealthy" during sustained MLX-pace indexing because
+   `HEALTH_MAX_AGE_SECONDS` was tuned for Ollama's ~50-200ms
+   embeddings, not Qwen3-Embedding's ~1-3s per chunk. Functional
+   impact zero; small follow-up to bump the threshold default
+   and/or call `touch_health_file()` more aggressively.
 
-The detailed pickup checklist lives in the project memory file
+The detailed PR-#83 session notes live in the project memory file
 ``project_mlx_rebuild_session.md``.
 
-### 1. Build mlx-service standalone
-
-Goal:
-- a working host-side FastAPI app that serves `/embed`, `/rerank`,
-  and `/health` against Qwen3-Embedding-8B and BGE-reranker-v2-m3,
-  validated by curl, with no indexer or mcp-server changes yet.
-
-Tasks:
-- create a new top-level `mlx-service/` directory (uv-managed Python
-  project, follows `~/.claude/memory/tools/uv-python-stack.md`)
-- pick the Qwen3-Embedding-8B precision (mxfp8 vs bf16) based on M5 Max
-  memory headroom alongside the current Ollama LLM
-- implement endpoints:
-  - `POST /embed` — `{"input": str | list[str]}` → response shape
-    matching Ollama's `/api/embeddings` so the indexer's parser is
-    URL-only change
-  - `POST /rerank` — `{"query": str, "documents": list[str], "top_n": int?}`
-    → `[{index, score}, ...]` sorted desc; cross-encoder scoring via
-    the model's classification head (`pooler_output`), not embedding
-    cosine
-  - `GET /health` — which models are loaded, approximate resident memory
-    per model
-- lazy-load each model on first request; keep resident across calls
-- bind `127.0.0.1:8001` only
-- run as a `uvicorn` app inside a single process
-
-Verify:
-- `curl` against `/embed` returns a 4096-dim float vector for a known
-  string; deterministic across calls
-- `curl` against `/rerank` for a known (query, [docs]) tuple returns
-  scores that rank an obviously-relevant doc above an obviously-
-  irrelevant one
-- `/health` reflects model load state and memory before/after first call
-- the process holds memory steady (no leak) across ~50 mixed calls
-
-Definition of done:
-- `mlx-service/` runs on the host with `uv run uvicorn ...` and passes
-  the three curl checks above
-- **stop and confirm with the operator before step 2**
-
-### 2. LaunchAgent + firewall
-
-Goal:
-- mlx-service starts at login, survives reboot, and does not produce
-  Mac firewall prompts on every restart.
-
-Tasks:
-- write `~/Library/LaunchAgents/com.local.mlx-service.plist` modeled on
-  the existing `com.local.ollama-host.plist` pattern
-  (`~/.claude/memory/tools/brew-services.md` — separate-label LaunchAgent
-  so we own the lifecycle, not brew)
-- decide between codesigning the `python` / `uvicorn` binary or adding
-  an explicit `socketfilterfw` allow rule for the venv interpreter
-  (`~/.claude/memory/tools/macos-firewall.md`); pick whichever is
-  reproducible across `uv` venv rebuilds
-- redirect stdout/stderr to a rotated log file under `~/Library/Logs/`
-
-Verify:
-- `launchctl print "gui/$(id -u)/com.local.mlx-service"` shows loaded
-- `lsof -iTCP:8001 -sTCP:LISTEN` shows bind on `127.0.0.1` only
-- reboot, then re-run both checks plus the curl checks from step 1
-- no firewall prompt appears across at least two restarts
-
-Definition of done:
-- LaunchAgent installed and reboot-stable
-- **stop and confirm before step 3**
-
-### 3. Wire indexer to mlx-service behind a feature flag
-
-Goal:
-- indexer embedding calls route to MLX when `USE_MLX_EMBEDDER=true`
-  (the new default), and fall back to Ollama embed when `false`.
-
-Tasks:
-- add env vars (and document them in `.env.example` with brief comments):
-  - `USE_MLX_EMBEDDER` (default `true`)
-  - `MLX_SERVICE_URL` (default `http://host.docker.internal:8001`)
-  - `RERANK_CANDIDATES` (default `50`)
-  - `RERANK_TOP_N` (default `10`)
-  - `INDEXER_CHUNK_MAX_TOKENS` (raise from current ~500 to `1500` —
-    Qwen3-Embedding handles long context; the prior cap was a nomic
-    constraint)
-- introduce a thin `EmbeddingClient` interface in the indexer with two
-  implementations (Ollama, MLX); select at startup from `USE_MLX_EMBEDDER`
-- update SQLite schema for 4096-dim vectors; bump `SCHEMA_VERSION` and
-  add a forward-migration file even though no live data exists, per
-  the AGENTS.md schema rule
-- update `indexer/pyproject.toml` if needed; keep it minimal
-- run an end-to-end fresh index against a small subset (a single folder
-  or a date range — operator picks) to validate before full reindex
-
-Verify:
-- `make build && make up` plus a small-subset reindex finishes without
-  errors; vector rows have the expected dimension
-- toggling `USE_MLX_EMBEDDER=false` falls back cleanly to Ollama for a
-  separate test database
-- per-message and per-chunk vector counts match what the chunker emits
-
-Definition of done:
-- subset reindex green on MLX path
-- **stop and confirm before step 4**
-
-### 4. Wire mcp-server hybrid search to call /rerank
-
-Goal:
-- hybrid search returns `RERANK_CANDIDATES` from RRF, sends
-  `(query, candidate_texts)` to `/rerank`, takes `RERANK_TOP_N`, and
-  hands those to the LLM. No new MCP tools, no API surface change.
-
-Tasks:
-- add `RerankerClient` in mcp-server (mirrors EmbeddingClient pattern
-  in the indexer)
-- thread `query` text through to the rerank stage (today's RRF stage
-  already has it; just plumb to the new step)
-- add unit tests for the rerank stage with a fake reranker that
-  returns deterministic scores; verify ordering, top_n cutoff, and
-  failure behavior (rerank service down → degrade to RRF order, log
-  the failure, do not silently return zero results)
-- exercise `ask_mailbox`, `summarize_thread`, and `extract_from_emails`
-  against the small-subset index from step 3; capture before/after
-  responses for the manual eval set
-  (`mcp-server/tests/eval/eval-queries.md`,
-  `feedback_manual_eval_preference.md`)
-- watch the `ask_mailbox slow on populated mailbox` failure mode
-  (project memory `project_ask_mailbox_slow.md`) — reranking on top of
-  hybrid retrieval can make this worse if `RERANK_CANDIDATES` is too
-  high; tune accordingly
-
-Verify:
-- existing mcp-server unit tests still pass; coverage stays ≥90%
-- new rerank-stage tests cover the success path, the cutoff, and the
-  degraded-when-rerank-down path
-- manual eval shows a noticeable quality lift on at least the queries
-  that previously failed under snippet-only / nomic embeddings
-
-Definition of done:
-- subset-index manual eval looks meaningfully better
-- **stop and confirm before step 5**
-
-### 5. Full reindex of the whole mailbox
-
-Goal:
-- production-shape index built from scratch on the MLX path, against
-  the entire Maildir.
-
-Tasks:
-- `make clean` (or equivalent volume reset) to ensure no half-state,
-  then full `make up` and indexer backfill
-- watch `mlx-service` resident memory across the run; restart and tune
-  precision (mxfp8 vs bf16) if memory headroom is tight
-- watch the indexer's `mem_limit: 6g` against the new chunk-token cap
-  (1500 vs 500 raises peak memory per concurrent embed call); tune
-  concurrency or bump the cap if OOMs reappear
-- after the reindex, re-run the manual eval set against the full mailbox
-
-Verify:
-- backfill completes without OOM or queue dead-lettering
-- `ask_mailbox` against full mailbox stays under the Open WebUI ~60s
-  client timeout for typical queries (project memory
-  `project_ask_mailbox_slow.md`)
-- manual eval is at least as good on the full mailbox as on the subset
-
-Definition of done:
-- full mailbox indexed and searched on MLX
-- documentation updated (`docs/architecture.md`, `docs/setup.md`,
-  `docs/mcp-tools.md`, `README.md`, `AGENTS.md` non-negotiables for
-  the new host service, `.env.example`) per the AGENTS.md doc rule
-- **stop, confirm, and unpause the previously paused priorities**
-
-## Out of Scope for This Objective
-
-- migrating chat to MLX — Ollama stays as the LLM
-- alongside-and-swap reindex tooling — the index is already gone
-- adding new MCP tools or changing the MCP API surface — this is
-  purely a retrieval-quality upgrade
-- removing the Ollama embed code path — it remains as a feature-flag
-  fallback so we can roll back integration without re-indexing
-
-Operational baseline:
+## Operational baseline (unchanged regardless of consolidation)
 
 - Python services use per-service `uv` projects with pinned
   `pyproject.toml` + `uv.lock`. Both meet a 90% coverage floor in CI.
@@ -318,7 +311,7 @@ Operational baseline:
   exponential backoff and dead-letters persistent ones for operator
   visibility.
 
-Known limitations:
+## Known limitations
 
 - initial sync may take a long time on large mailboxes
 - audio / video attachment transcription is not yet supported; other
@@ -337,9 +330,13 @@ Known limitations:
   only removes the `.eml` when Maildir is mounted read-write (the
   default is read-only)
 
-## Active Priorities
+## Previously paused priorities (resume after Phase F)
 
-Work these in order.
+These four pre-MLX priorities stay paused until the consolidation
+above lands. Don't start them mid-Phase.
+
+_(The four priority blocks below were the active workstream before the MLX rebuild displaced them. They resume after Phase F lands — i.e. after the Ollama LLM + scaffolding is fully removed.)_
+
 
 ### 1. Validate intelligence fidelity end-to-end
 
@@ -485,7 +482,7 @@ persisted, unsupported types log at debug. What's still open:
 - clarify `docs/setup.md` cert regeneration instructions to make explicit that removing `vault.enc` triggers a full re-authentication, not just a cert refresh; consider adding a `make refresh-cert` target with a clear warning
 - add `# syntax=docker/dockerfile:1` as the first line of `bridge/Dockerfile`; without a parser directive the BuildKit Dockerfile frontend version is unpinned and different Docker Engine or BuildKit versions may parse the same Dockerfile differently, producing subtly different images; this matters most for the multi-stage Bridge build where `--from` resolution and layer caching rely on stable parse behavior
 ### Hardening and observability
-- add resource limits (`memory`, `cpus`, `pids_limit`) to the Compose services that still lack them; `protonmail-bridge` holds live Proton credentials in memory and is the highest-priority target — a `mem_limit` prevents a runaway or exploited process from exhausting host memory; `ollama` is also missing limits. (`indexer` already has `mem_limit: 6g` and `pids_limit: 128`. Empirical tuning history during a real backfill of a ~22k-message attachment-heavy mailbox: 1 GiB was too tight under normal indexing bursts; 2 GiB OOM-killed three times during initial backfill; 4 GiB OOM-killed once more on the same backfill; 6 GiB has been stable. Steady-state RSS is much lower; the right long-term fix is throttling the indexer's parallel embed dispatch — peak memory scales with concurrency, not mailbox size — at which point the cap can return to 2-3 GiB.)
+- add resource limits (`memory`, `cpus`, `pids_limit`) to the Compose services that still lack them; `protonmail-bridge` holds live Proton credentials in memory and is the highest-priority target — a `mem_limit` prevents a runaway or exploited process from exhausting host memory. (`indexer` already has `mem_limit: 6g` and `pids_limit: 128`. Empirical tuning history during a real backfill of a ~22k-message attachment-heavy mailbox: 1 GiB was too tight under normal indexing bursts; 2 GiB OOM-killed three times during initial backfill; 4 GiB OOM-killed once more on the same backfill; 6 GiB has been stable. Steady-state RSS is much lower; the right long-term fix is throttling the indexer's parallel embed dispatch — peak memory scales with concurrency, not mailbox size — at which point the cap can return to 2-3 GiB. The in-stack `ollama` container was removed by PR #86, so the prior note about Ollama lacking limits no longer applies.)
 - add `docs/troubleshooting.md` covering common failure patterns: Ollama not ready, cert extraction failure, sync stalled, schema migration
 - evaluate optional bearer-token auth for `mcp-server` as defense-in-depth on top of the localhost-only bind; today any local process that can reach `127.0.0.1:MCP_PORT` can query the index. This is a posture change, not a bug fix — weigh the operational complexity of a shared token against the threat model (malware on the host, misconfigured port forward) before implementing
 - emit a loud, one-shot `LLM_MODE=cloud` warning at `mcp-server` startup reminding the operator that retrieved email excerpts will be sent to Anthropic; the cloud path is already opt-in but the warning would surface drift if someone flips the mode and forgets
