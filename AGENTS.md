@@ -4,17 +4,21 @@
 
 This repository provides a fully local, privacy-first AI search and intelligence layer for ProtonMail.
 
-The default stack consists of five containers:
+The default stack consists of four containers plus two host processes:
 
-- ProtonBridge
-- mbsync
-- Ollama
-- indexer
-- MCP server
+- ProtonBridge (container)
+- mbsync (container)
+- indexer (container)
+- MCP server (container)
+- mlx-service (host process — embedder + reranker on Apple Metal)
+- Ollama (host process — `brew install ollama`, LLM serving on
+  `*:11434` reached from containers via
+  `host.docker.internal:11434`. Not an in-stack container.)
 
-An optional Open WebUI overlay can be started for a local browser UI. It must
-reuse the existing Ollama and MCP server containers; do not add a second Ollama
-instance for the UI.
+An optional Open WebUI overlay can be started for a local browser UI.
+It reuses the existing host Ollama (via `host.docker.internal:11434`)
+and the MCP server container; do not add a second Ollama instance for
+the UI.
 
 Core behavior:
 
@@ -67,13 +71,14 @@ Important architecture facts:
 - indexing is thread-level, not message-level
 - MCP defaults to SSE transport; `MCP_TRANSPORT=streamable-http` enables
   Streamable HTTP, and `MCP_TRANSPORT=dual` serves both `/sse` and `/mcp`
-- `ollama` uses the official image with no custom Dockerfile in the default
-  stack. An optional `docker-compose.host-ollama.yml` overlay drops the
-  `ollama` container and points the indexer + mcp-server at a Homebrew-
-  installed Ollama on the host via OrbStack's `host.docker.internal`. This
-  exists because containerized Ollama on macOS cannot use Metal GPU
-  acceleration. See `docs/setup.md` for the required host-side setup
-  (firewall + listener bind).
+- Ollama is served from a host install (`brew install ollama`) — not an
+  in-stack container. Containers reach it via OrbStack's
+  `host.docker.internal:11434`. This is the only supported deployment
+  shape because containerized Ollama on macOS cannot use Metal GPU
+  acceleration; the in-stack `ollama` service was removed once host
+  install was always the right answer for this project's target hardware.
+  See `docs/setup.md` for the required host-side setup (LaunchAgent +
+  firewall + listener bind).
 
 ## Non-Negotiable Constraints
 
@@ -91,17 +96,16 @@ Do not make any of the following changes unless the repository owner explicitly 
 - Do not expose any container port other than `mcp-server:3000` to the host.
   Exception: the optional Open WebUI overlay may expose only
   `127.0.0.1:${OPEN_WEBUI_PORT:-8080}:8080`.
-- The host-Ollama overlay (`docker-compose.host-ollama.yml`) introduces a
-  *host process* listener on `0.0.0.0:11434`, not a published container
-  port — the rule above is preserved literally. That host-side bind is
-  only safe when paired with the macOS Application Firewall steps in
-  `docs/setup.md` (stealth mode + a binary-level block on the Ollama
-  binary). Do not document or recommend the overlay without those steps.
-  Do not switch the overlay to use the host's LAN IP — `host.docker.internal`
-  is required so the wiring survives changing networks.
-- After a `brew upgrade` (or any reinstall of the `ollama` formula) on a
-  host running the host-Ollama overlay, verify three things before relying
-  on the stack again:
+- The host Ollama install introduces a *host process* listener on
+  `0.0.0.0:11434`, not a published container port — the rule above is
+  preserved literally. That host-side bind is only safe when paired with
+  the macOS Application Firewall steps in `docs/setup.md` (stealth mode
+  + a binary-level block on the Ollama binary). Do not document or
+  recommend host Ollama without those steps. Do not configure containers
+  to use the host's LAN IP — `host.docker.internal` is required so the
+  wiring survives changing networks.
+- After a `brew upgrade` (or any reinstall of the `ollama` formula),
+  verify three things before relying on the stack again:
   1. The custom LaunchAgent (`~/Library/LaunchAgents/com.local.ollama-host.plist`)
      is still loaded: `launchctl print "gui/$(id -u)/com.local.ollama-host"`.
   2. The listener is bound on `*:11434`, not `127.0.0.1:11434`:
@@ -486,7 +490,8 @@ Notes:
 
 - defined only in `docker-compose.open-webui.yml`; do not add it to the default
   stack unless explicitly asked
-- reuse the existing `ollama` service via `http://ollama:11434`
+- reach the host-installed Ollama via `http://host.docker.internal:11434`
+  (override `OLLAMA_BASE_URL` only if Ollama lives on a different host)
 - connect to the MCP server via `http://mcp-server:3000/mcp`
 - keep the UI bound to localhost only
 - require the Open WebUI session key as a Docker Compose secret backed by

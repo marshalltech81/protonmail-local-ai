@@ -133,16 +133,11 @@ weaker synthesis from `ask_mailbox` / `summarize_thread` /
 `extract_from_emails` but fits comfortably alongside the embed model on
 modest hardware.
 
-`make pull-models` brings the `ollama` container up first (if not already
-running) and waits up to 120 seconds for it to report ready before
-pulling, so this step works from a clean stack — you do not need to run
-`make up` first.
-
-If you plan to use the host-Ollama overlay on macOS (recommended on Apple
-Silicon for Metal acceleration), use `make pull-models-host` instead. It
-pulls into the native Ollama install via `ollama pull` rather than
-`docker exec ollama ollama pull`. See the "Optional: native (host) Ollama
-on macOS" section below for one-time host setup.
+`make pull-models` runs `ollama pull` against the host install. The
+host Ollama setup (LaunchAgent + firewall + listener bind) is required
+before this step succeeds — see the **Ollama (host install, required)**
+section below for the one-time host setup. If you have not done that
+yet, do it now and come back.
 
 ### 6. Start the full stack
 
@@ -167,8 +162,10 @@ You should see:
 - `protonmail-bridge` — "Starting Bridge in noninteractive mode"
 - `mbsync` — "Bridge IMAP is ready" then "Syncing..."
 - `indexer` — "Running initial index scan..."
-- `ollama` — serving on port 11434
 - `mcp-server` — "MCP server starting on port 3000"
+
+Ollama is not in this list — it runs on the host, not as a container.
+Verify it separately with `lsof -iTCP:11434 -sTCP:LISTEN` if needed.
 
 The initial index scan may take several minutes depending on mailbox size.
 
@@ -192,17 +189,19 @@ docker run --rm \
 Bridge writes sync progress into its structured log file in the `bridge-data`
 volume.
 
-## Optional: native (host) Ollama on macOS
+## Ollama (host install, required)
 
-Containerized Ollama on Apple Silicon cannot use Metal GPU acceleration —
-OrbStack runs the linux/arm64 build inside a Linux VM that has no Metal pass-
-through. Native Homebrew Ollama uses Metal directly and is typically several
-times faster for both inference and embedding.
+Ollama runs as a host process, not as a stack container. This is the
+only supported deployment shape — containerized Ollama on Apple
+Silicon cannot use Metal GPU acceleration (OrbStack runs the
+linux/arm64 build inside a Linux VM with no Metal passthrough), so
+the in-stack option would silently lose Metal and produce inference
+several times slower than the host install.
 
-The repository ships an overlay (`docker-compose.host-ollama.yml`) that drops
-the in-stack `ollama` container and points the indexer + mcp-server at a
-host-resident Ollama via OrbStack's `host.docker.internal`. The default stack
-(`make up`) is unchanged; the overlay opts in.
+The default `docker-compose.yml` points indexer + mcp-server at
+`host.docker.internal:11434` so containers reach the host Ollama
+without further configuration. Open WebUI's overlay does the same
+for chat. The setup below is one-time.
 
 ### One-time host setup
 
@@ -324,34 +323,23 @@ host-resident Ollama via OrbStack's `host.docker.internal`. The default stack
    into the container):
 
    ```bash
-   make pull-models-host
+   make pull-models
    ```
 
 ### Day-to-day commands
 
-| Mode | Start | Stop | Logs | Pull models |
-|---|---|---|---|---|
-| Containerized Ollama (default) | `make up` | `make down` | `make logs` | `make pull-models` |
-| Host-Ollama overlay (macOS) | `make up-host-ollama` | `make down-host-ollama` | `make logs-host-ollama` | `make pull-models-host` |
+| Action | Command |
+|---|---|
+| Start the stack | `make up` |
+| Stop the stack | `make down` |
+| Tail logs | `make logs` |
+| Pull / refresh Ollama models | `make pull-models` |
 
-The Open WebUI overlay has a host-Ollama variant too:
+### Stopping the host Ollama LaunchAgent
 
-```bash
-make open-webui-up-host-ollama
-```
-
-### Falling back
-
-The overlay is purely additive. To return to the containerized path:
-
-```bash
-make down-host-ollama
-make up
-```
-
-The host LaunchAgent keeps running independently — `make down-host-ollama`
-only changes how containers are wired. To free port `11434` and undo the
-wildcard bind, stop the LaunchAgent too:
+The Ollama LaunchAgent runs independently of the Docker stack —
+`make down` only stops the containers. To free port `11434` and
+undo the wildcard bind:
 
 ```bash
 launchctl bootout "gui/$(id -u)/com.local.ollama-host"
@@ -360,18 +348,19 @@ lsof -iTCP:11434 -sTCP:LISTEN  # should now print nothing
 
 `brew services stop ollama` does **not** stop the custom LaunchAgent —
 brew does not manage the `com.local.ollama-host` label. Use `launchctl
-bootout` as shown above. After the LaunchAgent is stopped you can leave
-the brew formula installed; the default stack will start its own
-container as before.
+bootout` as shown above. After the LaunchAgent is stopped you can
+leave the brew formula installed; the next `launchctl bootstrap`
+re-arms it.
 
 ### Threat model
 
-The host-bound `0.0.0.0:11434` listener is the only externally-reachable
-interface this overlay introduces. The mitigations above (stealth mode +
-binary block) close the LAN exposure. Same-machine processes can still
-reach Ollama without authentication; on a single-user dev laptop this is
-the same trust boundary the containerized stack already operates in.
-Ollama itself does not have access to the SQLite index or Maildir.
+The host-bound `0.0.0.0:11434` listener is the only externally-
+reachable interface this setup introduces. The mitigations above
+(stealth mode + binary block) close the LAN exposure. Same-machine
+processes can still reach Ollama without authentication; on a
+single-user dev laptop this is the same trust boundary the rest of
+the stack operates in. Ollama itself does not have access to the
+SQLite index or Maildir.
 
 ## Required: mlx-service (host process for embeddings + reranking)
 
@@ -484,7 +473,7 @@ authentication on `/embed`, `/rerank`, or `/health`. **Any local
 user-process — Docker containers via `host.docker.internal`, browser
 tabs reaching `127.0.0.1`, ad-hoc shells — can call any endpoint
 without credentials.** The trust boundary is identical to the
-host-Ollama overlay above: a single-user laptop where same-machine
+host Ollama install above: a single-user laptop where same-machine
 processes are assumed trusted.
 
 What the service holds: model weights in process memory and the
@@ -597,10 +586,12 @@ MCP server in Open WebUI:
 - Server URL: `http://mcp-server:3000/mcp`
 - Auth: `None`
 
-Because Open WebUI is running in Docker on the Compose network, it should use
-container DNS names: `http://ollama:11434` for the model backend and
-`http://mcp-server:3000/mcp` for the MCP server. Both are set by
-`docker-compose.open-webui.yml`.
+Open WebUI runs in Docker on the Compose network and reaches Ollama on the
+host via OrbStack's `host.docker.internal`: use
+`http://host.docker.internal:11434` for the model backend and
+`http://mcp-server:3000/mcp` for the MCP server. Both defaults are set by
+`docker-compose.open-webui.yml` (override `OLLAMA_BASE_URL` only if you serve
+Ollama from a different host).
 
 After creating the admin account, restart the UI **without** the signup
 override so the default-deny posture is back in effect:
@@ -839,14 +830,20 @@ If you want Docker's view of the current state:
 docker inspect mbsync --format='{{json .State.Health}}'
 ```
 
-### Ollama container is unhealthy
+### Ollama (host) is not reachable from containers
 
-The official `ollama/ollama` image does not include `curl` or `wget`.
-The healthcheck uses `ollama list` — if you see repeated health failures, check:
+Indexer or mcp-server reports a connection error against
+`host.docker.internal:11434`. Verify the host listener and firewall:
 
 ```bash
-docker inspect ollama --format='{{json .State.Health.Log}}'
+launchctl print "gui/$(id -u)/com.local.ollama-host" | head    # LaunchAgent loaded
+lsof -iTCP:11434 -sTCP:LISTEN                                  # bound on *:11434
+/usr/libexec/ApplicationFirewall/socketfilterfw \
+    --getappblocked /opt/homebrew/bin/ollama                   # firewall block in place
 ```
+
+If the LaunchAgent is missing, re-bootstrap from the plist in the
+"Ollama (host install, required)" section above.
 
 ### Ollama model not found
 

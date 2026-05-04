@@ -1,32 +1,40 @@
 #!/bin/bash
 set -Eeuo pipefail
 
-# Preflight check for host-Ollama mode. Three failure surfaces:
+# Preflight check for the host-Ollama install (the required LLM
+# backend per docs/setup.md "Ollama (host install, required)" — the
+# in-stack ``ollama`` container was removed by PR #86 and is no
+# longer an alternative). Three failure surfaces:
 #
-#   1. Listener responding on 127.0.0.1:11434 — the operator forgot to
-#      bootstrap the LaunchAgent or the brew formula was upgraded and the
-#      plist regenerated. Caught by a curl probe.
+#   1. Listener responding on 127.0.0.1:11434 — the operator forgot
+#      to bootstrap the custom LaunchAgent
+#      (``com.local.ollama-host``) or a brew upgrade replaced its
+#      binary path. Caught by a curl probe.
 #
 #   2. Listener bound to loopback only — brew's default plist binds
 #      `127.0.0.1:11434`, but OrbStack containers reach the host via
-#      `host.docker.internal` which only resolves to a non-loopback bind.
-#      A loopback-only listener passes the curl probe above and then
-#      fails minutes later inside docker compose with a confusing
-#      "connection refused". Catch it up front via `lsof`.
+#      `host.docker.internal` which only resolves to a non-loopback
+#      bind. A loopback-only listener passes the curl probe above
+#      and then fails minutes later inside docker compose with a
+#      confusing "connection refused". Catch it up front via `lsof`.
 #
-#   3. Application Firewall not closing the LAN exposure that the wildcard
-#      bind opens. AGENTS.md treats the wildcard bind as safe only when
-#      paired with global firewall on, stealth mode on, and a binary-level
-#      block on the Ollama binary. Catch any of those being off via
-#      `socketfilterfw`.
+#   3. Application Firewall not closing the LAN exposure that the
+#      wildcard bind opens. AGENTS.md treats the wildcard bind as
+#      safe only when paired with global firewall on, stealth mode
+#      on, and a binary-level block on the Ollama binary. Catch any
+#      of those being off via `socketfilterfw`.
 #
-# See docs/setup.md "Optional: native (host) Ollama on macOS" for the
-# LaunchAgent layout that produces a wildcard bind and the firewall
-# steps that close the LAN exposure.
+# See docs/setup.md "Ollama (host install, required)" for the
+# custom LaunchAgent layout that produces the wildcard bind and the
+# firewall steps that close the LAN exposure. Do NOT use
+# ``brew services start ollama`` — brew's default plist binds
+# loopback only, which fails check (2) and conflicts with the
+# wildcard-bind requirement.
 
 if ! curl -fsS --max-time 3 http://127.0.0.1:11434/api/tags >/dev/null 2>&1; then
     printf 'ERROR: native Ollama is not responding on 127.0.0.1:11434.\n' >&2
-    printf 'Bootstrap the LaunchAgent per docs/setup.md, or run: brew services start ollama\n' >&2
+    printf 'Bootstrap the custom LaunchAgent per docs/setup.md "Ollama (host install, required)".\n' >&2
+    printf 'Do NOT run "brew services start ollama" — brew binds loopback only, which fails the wildcard-bind requirement.\n' >&2
     exit 1
 fi
 
@@ -47,7 +55,7 @@ if [[ -n "$listens" ]] \
     && ! printf '%s\n' "$listens" | grep -qE 'TCP (\*|\[::\]):11434'; then
     printf 'ERROR: Ollama is bound to loopback only.\n' >&2
     printf 'OrbStack containers reach the host via host.docker.internal, which requires *:11434.\n' >&2
-    printf 'See docs/setup.md "Optional: native (host) Ollama on macOS" for the LaunchAgent setup.\n' >&2
+    printf 'See docs/setup.md "Ollama (host install, required)" for the custom LaunchAgent setup.\n' >&2
     exit 1
 fi
 
@@ -60,7 +68,7 @@ fi
 # route to this host. Read commands below do not require sudo.
 SOCKETFILTERFW="/usr/libexec/ApplicationFirewall/socketfilterfw"
 OLLAMA_BIN="/opt/homebrew/bin/ollama"
-SETUP_REF='docs/setup.md "Optional: native (host) Ollama on macOS" step 3'
+SETUP_REF='docs/setup.md "Ollama (host install, required)" step 3'
 
 # Skip-with-warning rather than fail-closed when the binary is absent:
 # the script must remain usable on non-Darwin hosts (e.g. CI containers

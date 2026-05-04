@@ -123,7 +123,7 @@ def _read_secret(secret_name: str, env_fallback: str = "") -> str:
 # Configuration from environment
 # ---------------------------------------------------------------------------
 SQLITE_PATH = os.environ.get("SQLITE_PATH", "/data/mail.db")
-OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://ollama:11434")
+OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://host.docker.internal:11434")
 EMBED_MODEL = os.environ.get("OLLAMA_EMBED_MODEL", "nomic-embed-text")
 LLM_MODEL = os.environ.get("OLLAMA_LLM_MODEL", "qwen2.5:14b-instruct")
 LLM_MODE = os.environ.get("LLM_MODE", "local")

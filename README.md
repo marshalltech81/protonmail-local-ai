@@ -73,17 +73,16 @@ chmod 600 .secrets/bridge_pass.txt
 
 ### 4. Pull Ollama models
 
+Ollama runs on the host (`brew install ollama`) — not as a stack
+container — so MLX/Metal acceleration is available. Containers reach
+the host Ollama via OrbStack's `host.docker.internal:11434`.
+[docs/setup.md](docs/setup.md#ollama-host-install-required) covers
+the one-time setup (LaunchAgent + firewall) before the first model
+pull.
+
 ```bash
 make pull-models
 ```
-
-> **Apple Silicon performance tip:** containerized Ollama on macOS cannot use
-> Metal GPU acceleration. Inference is typically several times faster on
-> M-series when Ollama runs natively (`brew install ollama`); start the stack
-> with `make up-host-ollama` instead of `make up`. See
-> [docs/setup.md](docs/setup.md#optional-native-host-ollama-on-macos) for
-> the one-time host setup (firewall + bind) and use `make pull-models-host`
-> in place of `make pull-models`.
 
 ### 5. Start the stack
 
@@ -189,11 +188,10 @@ If you want end-to-end local conversations:
   the session-key secret on first run; for the very first launch, prepend
   `OPEN_WEBUI_ENABLE_SIGNUP=true` to create the admin account — see
   `docs/setup.md` for the full first-run flow including MCP server
-  registration). It connects to the existing Ollama container and uses
+  registration). Open WebUI reaches the host-installed Ollama via
+  `host.docker.internal:11434` for chat, and uses
   `http://mcp-server:3000/mcp` as a Streamable HTTP MCP server. Quality
-  varies. When running the host-Ollama overlay on macOS, use
-  `make open-webui-up-host-ollama` so Open WebUI is rewired to the
-  native Ollama on `host.docker.internal:11434`.
+  varies.
 
 Most users accept the Claude-Desktop-as-frontend tradeoff because the
 alternative is much less useful, but it is a real tradeoff and it is not
@@ -238,11 +236,7 @@ make first-run    # One-time Bridge login
 make bridge-patch-check   # Verify Bridge patch points against upstream source
 make bridge-smoke         # Build and smoke test the Bridge image
 make bridge-upgrade-check # Run both Bridge upgrade guard checks
-make pull-models  # Pull Ollama models (containerized Ollama)
-make pull-models-host     # Pull Ollama models via the native macOS Ollama
-make up-host-ollama       # Start the stack pointed at native macOS Ollama
-make down-host-ollama     # Stop the host-Ollama stack
-make open-webui-up-host-ollama # Open WebUI variant for the host-Ollama stack
+make pull-models  # Pull Ollama models on the host (requires brew install ollama)
 make update       # Update Bridge to new version
 make status       # Container and index status
 make clean        # Remove everything (destructive)
