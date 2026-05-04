@@ -55,7 +55,13 @@ def register_retrieval_tools(server, db):
         Returns:
             Indexed thread context, participants, and timeline from the local index.
         """
-        log.info("tool=get_thread %s", {k: v for k, v in locals().items() if v is not None})
+        log.info(
+            "tool=get_thread %s",
+            {
+                "thread_id": thread_id,
+                "include_attachments_metadata": include_attachments_metadata,
+            },
+        )
         try:
             thread = await asyncio.to_thread(db.get_thread, thread_id)
             if not thread:
@@ -124,7 +130,10 @@ def register_retrieval_tools(server, db):
         Returns:
             Local index context for the message and its parent thread.
         """
-        log.info("tool=get_message %s", {k: v for k, v in locals().items() if v is not None})
+        log.info(
+            "tool=get_message %s",
+            {"message_id": message_id, "folder": folder, "body_format": body_format},
+        )
         try:
             thread_id = await asyncio.to_thread(db.find_thread_by_message_id, message_id)
             if not thread_id:
@@ -197,7 +206,10 @@ def register_retrieval_tools(server, db):
         Returns:
             List of threads sorted by most recent activity.
         """
-        log.info("tool=list_threads %s", {k: v for k, v in locals().items() if v is not None})
+        log.info(
+            "tool=list_threads %s",
+            {"folder": folder, "filter_type": filter_type, "limit": limit, "offset": offset},
+        )
         # Clamp both values so a caller-supplied ``limit=100000``,
         # ``offset=-1``, or non-numeric value can't drive an unbounded
         # or malformed query. 100 is well above any reasonable
@@ -264,7 +276,7 @@ def register_retrieval_tools(server, db):
             Ranked contact list with thread counts. Empty result for
             unknown names.
         """
-        log.info("tool=find_contact %s", {k: v for k, v in locals().items() if v is not None})
+        log.info("tool=find_contact %s", {"query": query, "limit": limit})
         # Same clamp ceiling as list_threads — a hallucinated
         # ``limit=10000`` shouldn't drive a giant aggregation/sort.
         limit = clamp_int(limit, default=10, minimum=1, maximum=50)

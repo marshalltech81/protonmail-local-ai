@@ -506,7 +506,21 @@ def register_intelligence_tools(
         Returns:
             A synthesized answer with source thread references.
         """
-        log.info("tool=ask_mailbox %s", {k: v for k, v in locals().items() if v is not None})
+        log.info(
+            "tool=ask_mailbox %s",
+            {
+                k: v
+                for k, v in {
+                    "question": question,
+                    "from_addr": from_addr,
+                    "date_from": date_from,
+                    "date_to": date_to,
+                    "folders": folders,
+                    "max_threads": max_threads,
+                }.items()
+                if v is not None
+            },
+        )
         # Clamp to [1, _MAX_ASK_THREADS] so a caller-supplied
         # ``max_threads=5000`` (or a non-numeric value) can't expand
         # into a massive prompt or raise before the try/except below.
@@ -613,7 +627,7 @@ def register_intelligence_tools(
         Returns:
             A summary of the available indexed thread context in the requested style.
         """
-        log.info("tool=summarize_thread %s", {k: v for k, v in locals().items() if v is not None})
+        log.info("tool=summarize_thread %s", {"thread_id": thread_id, "style": style})
         try:
             thread = await asyncio.to_thread(db.get_thread, thread_id)
             # Permissive fallback: when the direct lookup misses, treat
@@ -715,7 +729,19 @@ def register_intelligence_tools(
             A JSON array of extracted records found in the available indexed thread context.
         """
         log.info(
-            "tool=extract_from_emails %s", {k: v for k, v in locals().items() if v is not None}
+            "tool=extract_from_emails %s",
+            {
+                k: v
+                for k, v in {
+                    "query": query,
+                    "schema": schema,
+                    "folders": folders,
+                    "date_from": date_from,
+                    "date_to": date_to,
+                    "limit": limit,
+                }.items()
+                if v is not None
+            },
         )
         # Clamp to [1, _MAX_EXTRACT_LIMIT]. Structured extraction loops
         # one LLM call per retrieved thread; an inflated or non-numeric

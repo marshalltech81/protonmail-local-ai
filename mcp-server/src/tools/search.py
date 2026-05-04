@@ -102,14 +102,24 @@ def register_search_tools(server, db, ollama, *, reranker=None):
             List of matching email threads with subject, participants,
             dates, folder, and a short snippet.
         """
-        # Tool-call audit: ``locals()`` at the top of an async tool
-        # function captures only the call arguments (no other locals
-        # exist yet). Logging non-None args lets us see *which tool +
-        # what filters* the model actually invoked, which is the
-        # difference between "model picked search_emails(from_name=...)"
-        # vs "model picked search_emails(query=...)" when debugging
-        # routing. Same one-liner is added to every registered tool.
-        log.info("tool=search_emails %s", {k: v for k, v in locals().items() if v is not None})
+        log.info(
+            "tool=search_emails %s",
+            {
+                k: v
+                for k, v in {
+                    "query": query,
+                    "mode": mode,
+                    "folders": folders,
+                    "from_addr": from_addr,
+                    "from_name": from_name,
+                    "date_from": date_from,
+                    "date_to": date_to,
+                    "has_attachments": has_attachments,
+                    "limit": limit,
+                }.items()
+                if v is not None
+            },
+        )
         if mode not in _VALID_SEARCH_MODES:
             return [
                 TextContent(

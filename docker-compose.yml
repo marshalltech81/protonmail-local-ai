@@ -238,7 +238,7 @@ services:
       USE_MLX_EMBEDDER: ${USE_MLX_EMBEDDER:-true}
       USE_MLX_RERANKER: ${USE_MLX_RERANKER:-true}
       MLX_SERVICE_URL: ${MLX_SERVICE_URL:-http://host.docker.internal:8001}
-      RERANK_CANDIDATES: ${RERANK_CANDIDATES:-50}
+      RERANK_CANDIDATES: ${RERANK_CANDIDATES:-20}
       RERANK_TOP_N: ${RERANK_TOP_N:-10}
     volumes:
       # Mounted writable so SQLite can create the WAL ``-shm`` sidecar needed

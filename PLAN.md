@@ -566,23 +566,6 @@ Need final decision on the long-term home for live Bridge smoke tests:
 - GitHub-hosted manual/nightly workflow using a dedicated no-2FA Proton test account
 - or a trusted self-hosted runner with persistent authenticated Bridge state
 
-## Open follow-ups surfaced during the 2026-05-04 manual eval session
-
-The two retrieval/perf bugs the session uncovered (missing `fts_rowid`
-indexes, mcp-server WAL pinning) are fixed in PR #89; the docstring
-tightening that followed Tier 4 / Tier 10 routing misses is also in
-that PR. The one item that landed *partially* and is worth a polish
-pass:
-
-- **Tool-call instrumentation noise.** Each registered MCP tool now
-  logs its name + arguments at INFO level via `log.info("tool=... %s",
-  {locals filtered to non-None})`. The `locals()` snapshot leaks
-  closure-captured server-side objects (`db`, `ollama`, `reranker`,
-  `llm_complete`) into the log line. Minor — the model-supplied args
-  are still readable — but it would be cleaner to filter to a
-  known-arg whitelist per tool. Low priority; do when next near
-  these files.
-
 ## Recently Completed
 
 The repository was simplified end-to-end to drop migration debt that had
@@ -649,10 +632,10 @@ chunk-lane fetch cost (`fetch_limit = max(limit, candidates) × 10`).
 that pinned a WAL read mark and blocked `PRAGMA
 wal_checkpoint(TRUNCATE)` from the indexer (writer) side, letting
 `mail.db-wal` grow unbounded under sustained writer activity (159 MB
-observed). Refactored to a `@property` that returns a fresh
-connection per access; the connection lives only as long as the
-calling expression. Verified live: checkpoint now returns `(0, 0,
-0)` SUCCESS with mcp-server running, WAL truncates to 0 bytes.
+observed). Refactored production reads to open a fresh connection and
+close it explicitly after each query. Verified live: checkpoint now
+returns `(0, 0, 0)` SUCCESS with mcp-server running, WAL truncates to
+0 bytes.
 All 314 mcp-server tests pass at 92.81% coverage. Memory:
 `project_mcp_wal_pinning.md`.
 
