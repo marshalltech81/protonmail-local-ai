@@ -289,7 +289,7 @@ def _pick_resolution_candidate(query: str, candidates: list[ThreadResult]) -> Th
 
     hybrid_search ranks by RRF over BM25 + vector + chunk lanes, which
     is dominated by *content* similarity. That's the right default for
-    search, but for resolving a phrase like "the audit & taxes thread"
+    search, but for resolving a phrase like "the Q3 budget thread"
     a thread whose *subject line* contains every query token is almost
     always what the caller meant — even if some other thread has more
     semantically-similar body chunks. Prefer the candidate whose
@@ -463,7 +463,7 @@ def register_intelligence_tools(
         the answer needs to come from MORE THAN ONE thread —
         "what's the status of X?", "what's open at Y?", "what
         happened recently with Z?", "who do I owe replies to?",
-        "summarize my recent CPVA activity". The tool retrieves the
+        "summarize my recent vendor activity". The tool retrieves the
         most relevant threads, gives the LLM the matched passages
         from each, and produces a synthesized answer with source
         citations.
@@ -476,9 +476,9 @@ def register_intelligence_tools(
         numbers, RSVPs).
 
         The ``question`` argument accepts ANY phrasing of user intent
-        — full sentences ("what's open at Regency Woods?"), topic
-        labels ("Regency Woods open issues"), or imperatives
-        ("summarize CPVA reimbursements"). Don't reword the user's
+        — full sentences ("what's open with Project Phoenix?"), topic
+        labels ("Project Phoenix open issues"), or imperatives
+        ("summarize vendor reimbursements"). Don't reword the user's
         prompt; pass it through as-is.
 
         Args:
@@ -576,8 +576,8 @@ def register_intelligence_tools(
         misses, the tool falls back to a hybrid keyword + vector
         search on the same string and resolves ONLY when at least one
         candidate's subject line shares a query token — so a call
-        like ``summarize_thread("the audit & taxes thread")`` lands
-        on the actual audit thread even when an unrelated message
+        like ``summarize_thread("the Q3 budget thread")`` lands
+        on the actual budget thread even when an unrelated message
         has higher vector similarity, while a typo'd opaque ID or a
         topic-only phrase with no subject overlap surfaces
         ``Thread not found`` instead of fabricating a summary of

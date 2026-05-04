@@ -44,7 +44,7 @@ def register_search_tools(server, db, ollama, *, reranker=None):
         local mailbox index. This is the default tool for any mailbox
         question that names a topic, keyword, sender, or date range.
         For broad cross-thread synthesis questions (e.g. "what's open?",
-        "summarize my recent CPVA activity"), reach for ask_mailbox
+        "summarize my recent vendor activity"), reach for ask_mailbox
         instead — it bundles retrieval and synthesis in one call.
 
         Each result is one thread bundling its messages, with subject,
