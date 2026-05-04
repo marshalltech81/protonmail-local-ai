@@ -23,6 +23,7 @@ def register_system_tools(server, db, bridge_enabled: bool = False):
         Returns:
             Total threads and messages indexed, date range, and last sync info.
         """
+        log.info("tool=get_index_status")
         try:
             stats = db.get_stats()
 
@@ -52,6 +53,7 @@ def register_system_tools(server, db, bridge_enabled: bool = False):
         Returns:
             Connection status for Bridge IMAP and sync daemon health.
         """
+        log.info("tool=get_sync_status")
         if not bridge_enabled:
             lines = [
                 "=== Sync Status ===",
