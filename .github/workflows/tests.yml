@@ -76,3 +76,38 @@ jobs:
           path: mcp-server/coverage.xml
           if-no-files-found: error
           retention-days: 14
+
+  mlx-service-pytest:
+    name: mlx-service pytest
+    # macOS runner is required: the mlx PyPI manylinux wheel installs on
+    # Ubuntu but fails at import with ``libmlx.so: cannot open shared
+    # object file`` — the wheel does not bundle the C++ runtime and
+    # there is no apt package for it on the GitHub-hosted Ubuntu image.
+    # mlx is fundamentally an Apple Silicon framework; the Linux wheel
+    # appears built for a downstream-controlled environment with libmlx
+    # pre-installed system-wide. Endpoint tests already monkeypatch the
+    # model handles to fakes, so no Metal is exercised at test time —
+    # macOS is just where ``import mlx.core`` succeeds. If mlx ever
+    # ships a self-contained Linux wheel, switch back to ubuntu-latest.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version-file: ".python-version"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+        with:
+          version: "0.11.6"
+          enable-cache: true
+          cache-dependency-glob: "mlx-service/uv.lock"
+
+      - name: Sync mlx-service environment
+        working-directory: mlx-service
+        run: uv sync --locked --dev
+
+      - name: Run pytest
+        working-directory: mlx-service
+        run: uv run pytest -q

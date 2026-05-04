@@ -9,6 +9,7 @@ on:
       - "**/Dockerfile"
       - "indexer/src/**"
       - "mcp-server/src/**"
+      - "mlx-service/src/**"
       - ".github/workflows/security.yml"
   pull_request:
     branches: [main]
@@ -18,6 +19,7 @@ on:
       - "**/Dockerfile"
       - "indexer/src/**"
       - "mcp-server/src/**"
+      - "mlx-service/src/**"
       - ".github/workflows/security.yml"
   schedule:
     - cron: "0 8 * * 0"
@@ -61,6 +63,17 @@ jobs:
           exit-code: "1"
           severity: CRITICAL,HIGH
 
+      - name: Scan mlx-service dependencies
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          skip-setup-trivy: true
+          scan-type: fs
+          scan-ref: mlx-service
+          scanners: vuln
+          format: table
+          exit-code: "1"
+          severity: CRITICAL,HIGH
+
   bandit:
     name: Bandit static analysis
     runs-on: ubuntu-latest
@@ -79,6 +92,9 @@ jobs:
 
       - name: Scan mcp-server source
         run: bandit -r mcp-server/src -ll
+
+      - name: Scan mlx-service source
+        run: bandit -r mlx-service/src -ll
 
   trivy-misconfig:
     name: Trivy misconfiguration scan
@@ -102,4 +118,4 @@ jobs:
           format: table
           exit-code: "1"
           severity: CRITICAL,HIGH
-          skip-dirs: .git,.ruff_cache,.pytest_cache,.venv,indexer/.venv,mcp-server/.venv
+          skip-dirs: .git,.ruff_cache,.pytest_cache,.venv,indexer/.venv,mcp-server/.venv,mlx-service/.venv

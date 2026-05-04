@@ -1481,6 +1481,61 @@ class TestRebuildThread:
         assert "First message body." not in row["body_text"]
         assert "Second message body." in row["body_text"]
 
+    def test_rebuild_refreshes_display_subject_when_root_message_reaped(self, db, threader):
+        """Codex review of main caught that ``_rewrite_thread_row`` did
+        not refresh ``display_subject`` — reaping the original root of a
+        thread (which contributed the user-facing label via
+        ``upsert_thread``) would leave search results rendering with the
+        deleted message's subject. The rewrite now derives
+        ``display_subject`` from the surviving messages the same way
+        ``upsert_thread`` does (oldest message's original subject)."""
+        from src.threader import Thread
+
+        original = make_message(
+            message_id="ds-original@x",
+            subject="Original Display Subject",
+            filepath="/ds/1",
+            date=datetime(2024, 1, 1, tzinfo=UTC),
+        )
+        reply = make_message(
+            message_id="ds-reply@x",
+            subject="Re: Original Display Subject",
+            in_reply_to="ds-original@x",
+            filepath="/ds/2",
+            date=datetime(2024, 2, 1, tzinfo=UTC),
+        )
+        t1 = threader.assign_thread(original)
+        db.upsert_thread(t1, FAKE_EMBEDDING)
+        t2 = threader.assign_thread(reply)
+        db.upsert_thread(t2, FAKE_EMBEDDING)
+
+        # Sanity check: the original's subject is the display label.
+        row = db._conn.execute(
+            "SELECT display_subject FROM threads WHERE thread_id = ?",
+            (t1.thread_id,),
+        ).fetchone()
+        assert row["display_subject"] == "Original Display Subject"
+
+        # Reap the original — rebuild from the reply only.
+        rebuilt = Thread(
+            thread_id=t1.thread_id,
+            subject=t1.subject,
+            participants=[reply.from_addr] + reply.to_addrs,
+            messages=[reply],
+            folder="INBOX",
+            date_first=reply.date,
+            date_last=reply.date,
+        )
+        db.rebuild_thread(rebuilt, FAKE_EMBEDDING)
+
+        # The display label must now reflect the surviving message,
+        # not the reaped root.
+        row = db._conn.execute(
+            "SELECT display_subject FROM threads WHERE thread_id = ?",
+            (t1.thread_id,),
+        ).fetchone()
+        assert row["display_subject"] == "Re: Original Display Subject"
+
     def test_rebuild_updates_fts_and_vec_rows(self, db, threader):
         original = make_message(message_id="r3@x", filepath="/r/3")
         t1 = threader.assign_thread(original)
