@@ -1830,14 +1830,25 @@ class Database:
         date_last = thread.date_last.isoformat()
         has_attachments = int(any(m.has_attachments for m in thread.messages))
         body = thread.text_for_embedding()
+        # display_subject: derive from the surviving messages the same way
+        # ``upsert_thread`` derives it (oldest message's original subject).
+        # Without this rewrite, reaping the original root of a thread
+        # leaves the dead message's subject as the user-facing label —
+        # search results would render with text from a message that no
+        # longer exists in the index. None when the thread has no
+        # messages (the deletion-reconciler then drops the thread row
+        # entirely a few lines below; the value never reaches storage).
+        display_subject: str | None = None
+        if thread.messages:
+            display_subject = min(thread.messages, key=lambda m: m.date).subject or None
 
         cur.execute(
             """
             INSERT INTO threads
                 (thread_id, subject, participants, senders, folder,
                  date_first, date_last, message_ids, snippet, has_attachments,
-                 body_text)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 body_text, display_subject)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(thread_id) DO UPDATE SET
                 subject         = excluded.subject,
                 participants    = excluded.participants,
@@ -1847,7 +1858,8 @@ class Database:
                 message_ids     = excluded.message_ids,
                 snippet         = excluded.snippet,
                 has_attachments = excluded.has_attachments,
-                body_text       = excluded.body_text
+                body_text       = excluded.body_text,
+                display_subject = excluded.display_subject
             """,
             (
                 thread.thread_id,
@@ -1861,6 +1873,7 @@ class Database:
                 snippet,
                 has_attachments,
                 body,
+                display_subject,
             ),
         )
 
