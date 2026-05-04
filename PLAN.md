@@ -38,15 +38,22 @@ The stack now runs:
 - **ProtonBridge** — Docker, headless, IMAP/SMTP on `bridge-net` only.
 - **mbsync** — Docker, pulls into Maildir, `chmod go+r` after each sync.
 - **indexer** — Docker, parses Maildir, threads, embeds via the MLX
-  service (default), writes SQLite. Schema is at v14 with 4096-dim
+  service (default), writes SQLite. Schema is at v15 with 4096-dim
   vectors. Ollama embed (`nomic-embed-text`) remains as a feature-
   flagged fallback (`USE_MLX_EMBEDDER=false`) but is no longer the
   default path.
 - **mcp-server** — Docker, hybrid search + intelligence tools.
   `hybrid_search` calls the MLX reranker (`Qwen3-Reranker-4B-mxfp8`)
-  after RRF. **Currently the LLM-synthesis step still calls
-  Ollama** via `OllamaClient.complete()` — this is the next thing to
-  swap.
+  after RRF. The LLM-synthesis step is dispatched by `LLM_MODE`:
+  `local` → `OllamaClient.complete()` (Ollama on the host),
+  `cloud` → Anthropic Claude API (the daily-driver mode at the
+  moment — `LLM_MODE=cloud` in `.env`, model
+  `claude-sonnet-4-6`). The MLX-consolidation objective adds a
+  third option, `mlx`, and the long-term plan retires the Ollama
+  branch; cloud stays as an explicit user-facing escape hatch. The
+  Tier-2–11 manual-eval pass on 2026-05-04 was run with
+  `LLM_MODE=cloud`, so the captured answers are a cloud-Claude
+  baseline that Phase B can compare against once MLX-LM ships.
 - **Ollama** — host install via LaunchAgent (no longer an in-stack
   container; PR #86 inverted the defaults so containers reach
   `host.docker.internal:11434` directly without a host-Ollama
@@ -116,16 +123,24 @@ Goal:
 Tasks:
 - flip `LLM_MODE=mlx` in `.env`
 - run the manual eval set (`mcp-server/tests/eval/eval-queries.md`,
-  Tiers 2–11) and compare answers vs the Ollama baseline captured
-  in earlier sessions
+  Tiers 2–11) and compare answers against the most recent captured
+  baseline. The 2026-05-04 cloud-Claude pass is the current standing
+  baseline (Tiers 2–11 all functional pass, the specific bar
+  recorded in PR #89). Cloud-Claude sets a high quality bar; MLX-LM
+  doesn't have to match it identically, but it does have to clear a
+  baseline of "answer is correct and grounded" the same way
+  cloud-Claude's responses were graded.
 - watch wall-clock latency; tune mlx-lm server flags (`--max-tokens`,
   context size, KV cache type) if needed
 - track for at least a few days of normal use before declaring it
   the new default
 
 Verify:
-- eval set is at least as good as the Ollama path on Tiers 2–7
-- p95 latency for `ask_mailbox` is comparable or better
+- eval set passes Tiers 2–7 with grounded, specific answers — same
+  rubric the 2026-05-04 cloud-Claude pass cleared
+- p95 latency for `ask_mailbox` is comparable to the post-index-fix
+  numbers (sub-1 s SQL stage, 5–10 s end-to-end with rerank +
+  synthesis)
 - no MLX OOM-kills, no LLM-side error spike
 
 Definition of done:
@@ -261,28 +276,18 @@ Definition of done:
 ### MLX-rebuild carryover (still-pending follow-ups from PRs #83/#84/#85)
 
 Independent of the consolidation work above. These are tuning /
-validation tasks that should happen as the full backfill completes,
-regardless of the LLM-engine swap.
+validation tasks that should happen regardless of the LLM-engine swap.
 
-1. **Full mailbox reindex.** In progress at time of writing — 18k+
-   messages indexed, ~10k still queued. Track via the recurring
-   indexer-snapshot job (cron `f3c38d3a`).
-2. **One-knob-at-a-time eval.** Two retrieval-quality variables
+1. **One-knob-at-a-time eval.** Two retrieval-quality variables
    moved at once in PR #83 (Qwen3 embedder vs nomic, and 1000/1500
    chunk budget vs 350/500). If the manual eval shows a regression,
    run a diagnostic split: Qwen3 embedder at the *old* 350/500
    chunk budget first, then raise budgets, to attribute any
    quality change to the right knob.
-3. **`RERANK_CANDIDATES` latency tuning.** Default 50 means 50
-   forward passes through a 4B model per query. Measure wall clock
-   on a real query (warm cache). If a single rerank call exceeds
-   ~5 s, drop the default to 20-30 — Open WebUI's ~60 s client
-   timeout already bites on populated mailboxes (see
-   `project_ask_mailbox_slow.md`).
-4. **Rerank-side quality experiment.** Once retrieval is stable,
+2. **Rerank-side quality experiment.** Once retrieval is stable,
    compare `USE_MLX_RERANKER=true` vs `false` on the manual eval
    set to measure what the rerank stage actually buys you.
-5. **Indexer healthcheck threshold.** Currently flagged
+3. **Indexer healthcheck threshold.** Currently flagged
    "unhealthy" during sustained MLX-pace indexing because
    `HEALTH_MAX_AGE_SECONDS` was tuned for Ollama's ~50-200ms
    embeddings, not Qwen3-Embedding's ~1-3s per chunk. Functional
@@ -594,6 +599,45 @@ The functional surface — chunker, attachment extractors (PDF/DOCX/
 XLSX/HTML/TXT/image-OCR), per-occurrence + per-content-hash dedup,
 hybrid RRF retrieval with chunk lane, intelligence-tool chunk
 evidence, deletion reconciler, durable indexing queue — all stays.
+
+### 2026-05-04 — Hybrid-search index fix (schema v15)
+
+The chunk- and thread-keyword lanes of `hybrid_search` were JOINing
+their FTS5 virtual tables back to base tables on `<base>.fts_rowid`
+without an index on that column. SQLite planned `SCAN <base>` per
+FTS5 hit; on a populated mailbox (~15k FTS hits × 73k chunk rows)
+that produced ~1.1B row comparisons per query, blocking
+`search_emails` for 5–7 minutes and blowing Claude Desktop's 4-min
+MCP request timeout. Fix shipped as `SCHEMA_VERSION = 15` plus
+`indexer/src/migrations/0015_fts_rowid_indexes.sql`, with the same
+indexes added to `_apply_initial_schema` for fresh installs and an
+`ANALYZE` so the planner picks them up immediately. End-to-end
+`hybrid_search` went from ~400 s to ~0.5 s (≈800× speedup); the
+isolated chunk-keyword lane went 350 s → 21 ms (≈17,500×). Memory:
+`project_fts5_join_missing_index.md`. Misdiagnoses logged at the
+bottom of that memory so future regressions don't re-walk WAL
+pinning / FTS5 fragmentation as causes.
+
+### 2026-05-04 — RERANK_CANDIDATES tuning (carryover #3)
+
+Defaulted to 50, tuned during the session. While diagnosing the
+slow-search bug above, lowered to 8 under a wrong rerank-cost
+theory, then restored to 20 once the SQL stage was identified as
+the real bottleneck. Final value of 20 balances funnel size against
+chunk-lane fetch cost (`fetch_limit = max(limit, candidates) × 10`).
+
+### 2026-05-04 — mcp-server WAL pinning fix
+
+`Database._conn` was a single shared `?mode=ro` `sqlite3.Connection`
+that pinned a WAL read mark and blocked `PRAGMA
+wal_checkpoint(TRUNCATE)` from the indexer (writer) side, letting
+`mail.db-wal` grow unbounded under sustained writer activity (159 MB
+observed). Refactored production reads to open a fresh connection and
+close it explicitly after each query. Verified live: checkpoint now
+returns `(0, 0, 0)` SUCCESS with mcp-server running, WAL truncates to
+0 bytes.
+All 314 mcp-server tests pass at 92.81% coverage. Memory:
+`project_mcp_wal_pinning.md`.
 
 ## Notes for Agents
 

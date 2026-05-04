@@ -142,7 +142,7 @@ MCP_TRANSPORT = os.environ.get("MCP_TRANSPORT", "sse")
 USE_MLX_EMBEDDER = _env_bool("USE_MLX_EMBEDDER", True)
 USE_MLX_RERANKER = _env_bool("USE_MLX_RERANKER", True)
 MLX_SERVICE_URL = os.environ.get("MLX_SERVICE_URL", "http://host.docker.internal:8001")
-RERANK_CANDIDATES = int(os.environ.get("RERANK_CANDIDATES", "50"))
+RERANK_CANDIDATES = int(os.environ.get("RERANK_CANDIDATES", "20"))
 RERANK_TOP_N = int(os.environ.get("RERANK_TOP_N", "10"))
 
 

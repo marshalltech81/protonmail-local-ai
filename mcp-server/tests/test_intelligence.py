@@ -458,17 +458,21 @@ class TestIsMeaningfulQueryToken:
         # Sanity check: stopword set must not strip the actually-
         # meaningful tokens the eval queries depend on. If this
         # regresses, the stopword set is too broad.
+        # Synthetic content-bearing tokens — picked to be obvious
+        # placeholders so the test stays evergreen instead of leaking
+        # specifics from any one operator's mailbox. The point is just
+        # to exercise the contentful side of the stopword filter.
         for topic in (
-            "audit",
-            "taxes",
-            "regency",
-            "woods",
-            "parking",
+            "budget",
+            "invoice",
+            "alpha",
+            "beta",
+            "logistics",
             "exception",
             "accountant",
-            "schneider",
+            "smithers",
             "insurance",
-            "terrorism",
+            "compliance",
             "reimbursement",
             "mailing",
             "error",

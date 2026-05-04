@@ -25,7 +25,22 @@ def register_retrieval_tools(server, db):
         include_attachments_metadata: bool = True,
     ) -> list[TextContent]:
         """
-        Get indexed context for an email thread by thread ID.
+        Get one thread's body content by thread ID — body only,
+        no attachment content.
+
+        DO NOT use this to read attachment content (PDFs, OCR'd
+        images, scans). It returns the message bodies only; the
+        attachment chunks are not in the result. For any question
+        that requires the text of an attached PDF or image — "what
+        does the quote PDF say?", "compare the attached statement
+        against the email body" — call ``ask_mailbox`` instead.
+        Iterating ``get_thread`` across multiple threads to find
+        attachment content is the wrong shape and will not surface
+        it; the extracted attachment text lives in the chunk lane
+        that only ``ask_mailbox`` consumes. Reaching for an external
+        tool (Google Drive, web search) to read a PDF that arrived
+        as an email attachment is also wrong — the local index has
+        already extracted that PDF's text.
 
         ``thread_id`` is OPAQUE. Obtain it from search_emails,
         list_threads, or get_message. Do NOT pass a subject line, a
@@ -40,6 +55,13 @@ def register_retrieval_tools(server, db):
         Returns:
             Indexed thread context, participants, and timeline from the local index.
         """
+        log.info(
+            "tool=get_thread %s",
+            {
+                "thread_id": thread_id,
+                "include_attachments_metadata": include_attachments_metadata,
+            },
+        )
         try:
             thread = await asyncio.to_thread(db.get_thread, thread_id)
             if not thread:
@@ -108,6 +130,10 @@ def register_retrieval_tools(server, db):
         Returns:
             Local index context for the message and its parent thread.
         """
+        log.info(
+            "tool=get_message %s",
+            {"message_id": message_id, "folder": folder, "body_format": body_format},
+        )
         try:
             thread_id = await asyncio.to_thread(db.find_thread_by_message_id, message_id)
             if not thread_id:
@@ -158,10 +184,17 @@ def register_retrieval_tools(server, db):
         """
         List email threads in a folder from the local index.
 
-        Use this for browse-style requests where the user wants to see
-        what's in a folder without naming a topic — for example "show
-        me my recent emails", "what's in my inbox", "list my latest
-        threads". For keyword/topic queries, use search_emails instead.
+        Use this ONLY for unfiltered browse-style requests — "show me
+        my recent emails", "what's in my inbox", "list my latest
+        threads". This tool has no keyword, sender, date, or topic
+        filter; it returns threads sorted by most recent activity.
+
+        For ANY filtered request — by topic, keyword, sender (name OR
+        address), date range, or attachment status — use
+        ``search_emails`` instead, which exposes all of those filters.
+        In particular, "5 most recent from <person>" is a
+        ``search_emails(from_name=..., limit=5)`` call, not a
+        ``list_threads`` call.
 
         Args:
             folder: Folder name (default: INBOX)
@@ -173,6 +206,10 @@ def register_retrieval_tools(server, db):
         Returns:
             List of threads sorted by most recent activity.
         """
+        log.info(
+            "tool=list_threads %s",
+            {"folder": folder, "filter_type": filter_type, "limit": limit, "offset": offset},
+        )
         # Clamp both values so a caller-supplied ``limit=100000``,
         # ``offset=-1``, or non-numeric value can't drive an unbounded
         # or malformed query. 100 is well above any reasonable
@@ -218,12 +255,17 @@ def register_retrieval_tools(server, db):
         """
         Resolve a name / address / domain fragment to indexed contacts.
 
-        Use this BEFORE search_emails when the user names a person but
-        not their email address (e.g. "emails from Jane Smith"). Returns
-        a ranked list of (email, display name(s), thread count) so you
-        can pick the right canonical email and pass it to
-        search_emails(from_addr=<email>). Without this step the LLM
-        often guesses or abdicates on sender-centric queries.
+        Use this when the user is asking ABOUT a person — "do I have
+        Jane Smith's email?", "show me everyone at example.com", "who
+        is the accountant?". Returns a ranked list of
+        (email, display name(s), thread count).
+
+        For "emails FROM <person>" — i.e. you want messages from them,
+        not the contact record itself — call ``search_emails`` directly
+        with ``from_name=<the user's words>``. ``search_emails`` resolves
+        the name through this tool internally, so chaining
+        ``find_contact`` → ``search_emails(from_addr=...)`` is an extra
+        round-trip with no quality benefit.
 
         Args:
             query: Name, address, or domain fragment (case-insensitive).
@@ -234,6 +276,7 @@ def register_retrieval_tools(server, db):
             Ranked contact list with thread counts. Empty result for
             unknown names.
         """
+        log.info("tool=find_contact %s", {"query": query, "limit": limit})
         # Same clamp ceiling as list_threads — a hallucinated
         # ``limit=10000`` shouldn't drive a giant aggregation/sort.
         limit = clamp_int(limit, default=10, minimum=1, maximum=50)
@@ -277,6 +320,7 @@ def register_retrieval_tools(server, db):
         Returns:
             All folders with thread counts from the local index.
         """
+        log.info("tool=list_folders")
         try:
             folders = await asyncio.to_thread(db.list_folders)
             if not folders:

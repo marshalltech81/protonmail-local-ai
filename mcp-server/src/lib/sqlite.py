@@ -8,7 +8,7 @@ import json
 import logging
 import re
 import sqlite3
-import weakref
+from contextlib import closing
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from email.utils import parseaddr
@@ -19,10 +19,6 @@ import sqlite_vec
 from .reranker import RerankerBackend
 
 log = logging.getLogger("mcp.sqlite")
-
-
-def _close_connection(conn: sqlite3.Connection) -> None:
-    conn.close()
 
 
 def canonical_addr(value: str) -> str:
@@ -154,26 +150,52 @@ class ThreadResult:
 
 
 class Database:
+    """Read-only handle to the indexer's SQLite output.
+
+    Opens a fresh ``sqlite3.Connection`` for each read helper instead
+    of holding one persistent connection for the lifetime of the
+    process. Every production query uses an explicit ``closing(...)``
+    context so file descriptors and WAL read marks are released
+    immediately when the query finishes.
+
+    Why per-access: a long-lived ``?mode=ro`` reader holds a WAL
+    read mark that blocks ``PRAGMA wal_checkpoint(TRUNCATE)`` from
+    the indexer (writer) side — so ``mail.db-wal`` grew unbounded
+    under sustained writer activity (159 MB observed). Per-access
+    connections release the read mark when the expression returns,
+    letting the next checkpoint succeed and keeping the WAL bounded.
+    Cost is the per-call connection setup (path stat, sqlite3
+    open, ``sqlite_vec.load``, ``query_only`` pragma) — a few ms;
+    negligible against the search/rerank work each call already
+    does. Snapshot consistency is unchanged: each fresh connection
+    sees the latest committed state, same as the prior single
+    persistent reader.
+    """
+
     def __init__(self, path: str):
         self.path = path
-        self._conn = self._connect()
         self._closed = False
-        self._finalizer = weakref.finalize(self, _close_connection, self._conn)
+        # Fail fast at startup with the same checks ``_connect`` runs
+        # on every access. Catches a missing volume / typo'd
+        # SQLITE_PATH / unhealthy indexer at process start instead of
+        # waiting for the first tool call.
+        self._validate_path()
 
     def close(self) -> None:
-        if self._closed:
-            return
-        self._finalizer.detach()
-        self._conn.close()
+        # No-op kept for API compatibility — per-access connections
+        # are opened and closed inside each read helper, so there is
+        # no persistent resource to release.
+        # Existing test fixtures and main-shutdown code that call
+        # ``db.close()`` continue to work; the flag is preserved so
+        # any caller inspecting it sees the historical semantics.
         self._closed = True
 
-    # Note: no ``__del__`` — ``weakref.finalize`` registered in ``__init__``
-    # is the documented modern pattern for "close on GC" and runs even
-    # when the interpreter is shutting down. Adding ``__del__`` on top
-    # would either fight the finalizer (calling close twice) or swallow
-    # genuine shutdown errors via a bare ``except``.
+    @property
+    def _conn(self) -> sqlite3.Connection:
+        """Compatibility escape hatch; caller owns closing this connection."""
+        return self._connect()
 
-    def _connect(self) -> sqlite3.Connection:
+    def _validate_path(self) -> None:
         # MCP is a read-only consumer of the indexer's output; the indexer
         # is the only component allowed to create the data directory or
         # initialize the SQLite file. If either is missing at MCP startup,
@@ -196,6 +218,9 @@ class Database:
                 "initialize the database before mcp-server starts; check "
                 "'docker compose logs indexer' for migration errors."
             )
+
+    def _connect(self) -> sqlite3.Connection:
+        self._validate_path()
         # Open the SQLite file in read-only URI mode so the MCP server never
         # attempts to mutate the shared index and so WAL readers can operate
         # without the connection trying to create or write a journal sidecar.
@@ -209,6 +234,14 @@ class Database:
         conn.enable_load_extension(False)
         conn.execute("PRAGMA query_only = ON")
         return conn
+
+    def _fetchall(self, sql: str, params=()) -> list[sqlite3.Row]:
+        with closing(self._connect()) as conn:
+            return conn.execute(sql, params).fetchall()
+
+    def _fetchone(self, sql: str, params=()) -> sqlite3.Row | None:
+        with closing(self._connect()) as conn:
+            return conn.execute(sql, params).fetchone()
 
     # -------------------------------------------------------------------------
     # Hybrid search — BM25 + vector, merged via Reciprocal Rank Fusion
@@ -517,7 +550,7 @@ class Database:
         params.append(limit)
 
         try:
-            rows = self._conn.execute(sql, params).fetchall()
+            rows = self._fetchall(sql, params)
             return [self._row_to_result(r) for r in rows]
         except sqlite3.OperationalError as e:
             # Defense-in-depth: if the sanitized query still trips FTS5, fall
@@ -570,7 +603,7 @@ class Database:
         )
         params.append(limit * _CHUNK_LANE_OVERSAMPLE)
         try:
-            rows = self._conn.execute(sql, params).fetchall()
+            rows = self._fetchall(sql, params)
         except sqlite3.OperationalError as e:
             # Indexer fails fast on schema-version mismatch, so an older
             # DB is impossible at runtime. Reaching this branch implies
@@ -620,7 +653,7 @@ class Database:
         )
         params.append(limit * _CHUNK_LANE_OVERSAMPLE)
         try:
-            rows = self._conn.execute(sql, params).fetchall()
+            rows = self._fetchall(sql, params)
         except sqlite3.OperationalError as e:
             # Indexer fails fast on schema-version mismatch, so an older
             # DB is impossible at runtime. Reaching this branch implies
@@ -744,7 +777,7 @@ class Database:
         params.append(limit)
 
         try:
-            rows = self._conn.execute(sql, params).fetchall()
+            rows = self._fetchall(sql, params)
             return [self._row_to_result(r) for r in rows]
         except sqlite3.OperationalError as e:
             log.warning(f"LIKE fallback search error: {e}")
@@ -760,7 +793,7 @@ class Database:
         """
         try:
             serialized = sqlite_vec.serialize_float32(embedding)
-            rows = self._conn.execute(
+            rows = self._fetchall(
                 """
                 SELECT
                     c.chunk_id, c.message_id, c.thread_id, c.chunk_index,
@@ -773,7 +806,7 @@ class Database:
                 ORDER BY v.distance
                 """,
                 (serialized, limit),
-            ).fetchall()
+            )
             return [
                 ChunkResult(
                     chunk_id=r["chunk_id"],
@@ -829,7 +862,7 @@ class Database:
     def _vector_search(self, embedding: list[float], limit: int) -> list[ThreadResult]:
         try:
             serialized = sqlite_vec.serialize_float32(embedding)
-            rows = self._conn.execute(
+            rows = self._fetchall(
                 """
                 SELECT
                     t.thread_id, t.subject, t.participants, t.senders, t.folder,
@@ -843,7 +876,7 @@ class Database:
                 ORDER BY v.distance
             """,
                 (serialized, limit),
-            ).fetchall()
+            )
             return [self._row_to_result(r) for r in rows]
         except (sqlite3.Error, ValueError) as e:
             # Same catch surface as ``_chunk_vector_search`` —
@@ -983,22 +1016,18 @@ class Database:
     # -------------------------------------------------------------------------
 
     def get_thread(self, thread_id: str) -> ThreadResult | None:
-        row = self._conn.execute(
-            "SELECT * FROM threads WHERE thread_id = ?", (thread_id,)
-        ).fetchone()
+        row = self._fetchone("SELECT * FROM threads WHERE thread_id = ?", (thread_id,))
         return self._row_to_result(row) if row else None
 
     def get_thread_message_ids(self, thread_id: str) -> list[str]:
-        row = self._conn.execute(
-            "SELECT message_ids FROM threads WHERE thread_id = ?", (thread_id,)
-        ).fetchone()
+        row = self._fetchone("SELECT message_ids FROM threads WHERE thread_id = ?", (thread_id,))
         return json.loads(row["message_ids"]) if row else []
 
     def find_thread_by_message_id(self, message_id: str) -> str | None:
-        row = self._conn.execute(
+        row = self._fetchone(
             "SELECT thread_id FROM message_thread_map WHERE message_id = ?",
             (message_id,),
-        ).fetchone()
+        )
         return row["thread_id"] if row else None
 
     def list_threads(
@@ -1010,7 +1039,7 @@ class Database:
     ) -> list[ThreadResult]:
         if filter_type != "all":
             raise ValueError("filter_type must be 'all'; unread/flagged state is not indexed")
-        rows = self._conn.execute(
+        rows = self._fetchall(
             """
             SELECT * FROM threads
             WHERE folder = ?
@@ -1018,7 +1047,7 @@ class Database:
             LIMIT ? OFFSET ?
         """,
             (folder, limit, offset),
-        ).fetchall()
+        )
         return [self._row_to_result(r) for r in rows]
 
     def ping(self) -> None:
@@ -1028,26 +1057,27 @@ class Database:
         application table so it stays cheap under a per-30s healthcheck
         interval and surfaces a missing/unreadable DB as an exception.
         """
-        self._conn.execute("SELECT 1").fetchone()
+        self._fetchone("SELECT 1")
 
     def get_stats(self) -> dict:
         stats = {}
-        stats["total_threads"] = self._conn.execute("SELECT COUNT(*) FROM threads").fetchone()[0]
-        stats["total_messages"] = self._conn.execute(
-            "SELECT COUNT(*) FROM message_thread_map"
-        ).fetchone()[0]
-        row = self._conn.execute("SELECT MIN(date_first), MAX(date_last) FROM threads").fetchone()
+        with closing(self._connect()) as conn:
+            stats["total_threads"] = conn.execute("SELECT COUNT(*) FROM threads").fetchone()[0]
+            stats["total_messages"] = conn.execute(
+                "SELECT COUNT(*) FROM message_thread_map"
+            ).fetchone()[0]
+            row = conn.execute("SELECT MIN(date_first), MAX(date_last) FROM threads").fetchone()
         stats["oldest_message"] = row[0]
         stats["newest_message"] = row[1]
         return stats
 
     def list_folders(self) -> list[dict]:
-        rows = self._conn.execute("""
+        rows = self._fetchall("""
             SELECT folder, COUNT(*) as thread_count
             FROM threads
             GROUP BY folder
             ORDER BY thread_count DESC
-        """).fetchall()
+        """)
         return [{"name": r["folder"], "thread_count": r["thread_count"]} for r in rows]
 
     def find_contact(
@@ -1094,9 +1124,9 @@ class Database:
         # there is no path for column to come from caller input —
         # the choice is bounded to the senders_only flag here.
         if senders_only:
-            rows = self._conn.execute("SELECT senders AS entries FROM threads").fetchall()
+            rows = self._fetchall("SELECT senders AS entries FROM threads")
         else:
-            rows = self._conn.execute("SELECT participants AS entries FROM threads").fetchall()
+            rows = self._fetchall("SELECT participants AS entries FROM threads")
 
         # canonical email -> {"names": set[str], "thread_count": int}
         by_email: dict[str, dict] = {}

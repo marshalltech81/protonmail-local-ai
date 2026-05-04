@@ -44,15 +44,32 @@ def register_search_tools(server, db, ollama, *, reranker=None):
         local mailbox index. This is the default tool for any mailbox
         question that names a topic, keyword, sender, or date range.
         For broad cross-thread synthesis questions (e.g. "what's open?",
-        "summarize my recent CPVA activity"), reach for ask_mailbox
+        "summarize my recent vendor activity"), reach for ask_mailbox
         instead — it bundles retrieval and synthesis in one call.
 
+        Filtering by sender — read this before iterating queries:
+            - User said a NAME or ROLE ("Jane Smith", "the accountant",
+              "Smith"): pass it as ``from_name``. Do NOT pass it as
+              ``from_addr``; the address filter is exact and a name
+              won't match. Do NOT call ``find_contact`` first either —
+              ``from_name`` already resolves the name internally.
+            - User said an EMAIL ADDRESS ("jane@example.com") or a
+              DOMAIN ("@example.com"): pass it as ``from_addr``.
+            - If a sender filter returns no hits, do not silently fall
+              back to a query without a filter — surface the empty
+              result. Iterating broader keyword queries to compensate
+              for a missing sender match is the wrong shape.
+
         Each result is one thread bundling its messages, with subject,
-        participants, date range, folder, and a short snippet. To read
-        the messages inside a returned thread, call get_thread or
-        summarize_thread with the result's ``Thread ID``. Never invent
-        a thread_id from the subject — IDs are opaque values returned
-        only from this tool, list_threads, or get_message.
+        participants, date range, folder, and a short snippet. The
+        snippet is BODY content only — attachment text (PDFs, OCR'd
+        images) is not in the result. To read messages inside a thread,
+        call get_thread or summarize_thread with the result's
+        ``Thread ID``. To read attachment content, the only path is
+        ``ask_mailbox`` — neither this tool nor get_thread surface
+        attachment chunks. Never invent a thread_id from the subject —
+        IDs are opaque values returned only from this tool,
+        list_threads, or get_message.
 
         Args:
             query: Natural language or keyword query
@@ -61,19 +78,21 @@ def register_search_tools(server, db, ollama, *, reranker=None):
                   semantic = vector similarity only (best for conceptual queries)
                   keyword = BM25 only (best for exact names, numbers, dates)
             folders: Filter to specific folders e.g. ["INBOX", "Sent"]
-            from_addr: Filter by canonical sender address e.g.
-                       "jane@example.com" or "@example.com" for a domain.
+            from_addr: Filter by canonical sender ADDRESS — only use when
+                       the user gave an email address or domain
+                       ("jane@example.com", "@example.com"). For names
+                       or role descriptors, use ``from_name`` instead.
                        Substring match against the stored sender display
                        string for shapes that can't canonicalize.
-            from_name: Filter by sender NAME — pass the user's words
-                       directly ("Jane Smith", "the accountant",
-                       "Smith"). The tool resolves the name through
-                       find_contact internally and applies the
-                       most-active matching contact's address as a
-                       strict from_addr filter. Use this when the user
-                       names a person but not their address. If both
-                       from_addr and from_name are given, from_addr
-                       wins (explicit beats lookup).
+            from_name: PREFERRED sender filter when the user names a
+                       person or role. Pass the user's exact words
+                       ("Jane Smith", "the accountant", "Smith",
+                       "my CPA"). The tool resolves through
+                       find_contact and applies the most-active
+                       matching contact's canonical address — you do
+                       not need to call find_contact yourself. If both
+                       ``from_addr`` and ``from_name`` are given,
+                       ``from_addr`` wins.
             date_from: ISO 8601 date lower bound e.g. "2024-01-01"
             date_to: ISO 8601 date upper bound e.g. "2024-12-31"
             has_attachments: True to only show threads with attachments
@@ -83,6 +102,24 @@ def register_search_tools(server, db, ollama, *, reranker=None):
             List of matching email threads with subject, participants,
             dates, folder, and a short snippet.
         """
+        log.info(
+            "tool=search_emails %s",
+            {
+                k: v
+                for k, v in {
+                    "query": query,
+                    "mode": mode,
+                    "folders": folders,
+                    "from_addr": from_addr,
+                    "from_name": from_name,
+                    "date_from": date_from,
+                    "date_to": date_to,
+                    "has_attachments": has_attachments,
+                    "limit": limit,
+                }.items()
+                if v is not None
+            },
+        )
         if mode not in _VALID_SEARCH_MODES:
             return [
                 TextContent(

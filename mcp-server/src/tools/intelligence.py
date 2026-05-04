@@ -289,7 +289,7 @@ def _pick_resolution_candidate(query: str, candidates: list[ThreadResult]) -> Th
 
     hybrid_search ranks by RRF over BM25 + vector + chunk lanes, which
     is dominated by *content* similarity. That's the right default for
-    search, but for resolving a phrase like "the audit & taxes thread"
+    search, but for resolving a phrase like "the Q3 budget thread"
     a thread whose *subject line* contains every query token is almost
     always what the caller meant — even if some other thread has more
     semantically-similar body chunks. Prefer the candidate whose
@@ -457,28 +457,40 @@ def register_intelligence_tools(
         max_threads: int = 5,
     ) -> list[TextContent]:
         """
-        Synthesize an answer across multiple email threads.
+        Synthesize an answer from email threads — including the
+        text content of their PDF and image attachments.
 
-        Use this for any topic-level summary or status question where
-        the answer needs to come from MORE THAN ONE thread —
-        "what's the status of X?", "what's open at Y?", "what
-        happened recently with Z?", "who do I owe replies to?",
-        "summarize my recent CPVA activity". The tool retrieves the
-        most relevant threads, gives the LLM the matched passages
-        from each, and produces a synthesized answer with source
-        citations.
+        This is the ONLY mailbox tool that reads attachment content.
+        The local index extracts text from every PDF (digital and
+        OCR'd) and runs OCR on every image, then makes those
+        passages available to ``ask_mailbox`` as evidence chunks.
+        ``search_emails`` and ``get_thread`` see only message
+        bodies; their snippets and indexed text exclude attachment
+        extracts. Reaching for an external tool (Google Drive, web
+        search, etc.) to read a PDF that arrived as an email
+        attachment is the wrong shape — that PDF's text is already
+        in the local index, and ``ask_mailbox`` will surface it.
+
+        Use this whenever the question needs:
+          - attachment content (PDFs, scans, OCR'd images, statements,
+            quotes, reports, signed forms)
+          - synthesis across MORE THAN ONE thread ("what's the
+            status of X?", "what's open at Y?", "summarize my recent
+            vendor activity")
+          - comparison between an email body and its attachment
+            ("does the carrier email match the quote PDF?")
 
         Use search_emails (not this) when the user wants a *list* of
-        threads matching a query rather than a synthesized answer.
-        Use summarize_thread (not this) when the user wants a
-        single-thread summary. Use extract_from_emails (not this)
-        when the user wants structured records (invoices, tracking
-        numbers, RSVPs).
+        threads matching a query rather than a synthesized answer or
+        any attachment content. Use summarize_thread (not this) when
+        the user wants a single-thread body summary. Use
+        extract_from_emails (not this) when the user wants
+        structured records (invoices, tracking numbers, RSVPs).
 
         The ``question`` argument accepts ANY phrasing of user intent
-        — full sentences ("what's open at Regency Woods?"), topic
-        labels ("Regency Woods open issues"), or imperatives
-        ("summarize CPVA reimbursements"). Don't reword the user's
+        — full sentences ("what's open with Project Phoenix?"), topic
+        labels ("Project Phoenix open issues"), or imperatives
+        ("summarize vendor reimbursements"). Don't reword the user's
         prompt; pass it through as-is.
 
         Args:
@@ -494,6 +506,21 @@ def register_intelligence_tools(
         Returns:
             A synthesized answer with source thread references.
         """
+        log.info(
+            "tool=ask_mailbox %s",
+            {
+                k: v
+                for k, v in {
+                    "question": question,
+                    "from_addr": from_addr,
+                    "date_from": date_from,
+                    "date_to": date_to,
+                    "folders": folders,
+                    "max_threads": max_threads,
+                }.items()
+                if v is not None
+            },
+        )
         # Clamp to [1, _MAX_ASK_THREADS] so a caller-supplied
         # ``max_threads=5000`` (or a non-numeric value) can't expand
         # into a massive prompt or raise before the try/except below.
@@ -576,8 +603,8 @@ def register_intelligence_tools(
         misses, the tool falls back to a hybrid keyword + vector
         search on the same string and resolves ONLY when at least one
         candidate's subject line shares a query token — so a call
-        like ``summarize_thread("the audit & taxes thread")`` lands
-        on the actual audit thread even when an unrelated message
+        like ``summarize_thread("the Q3 budget thread")`` lands
+        on the actual budget thread even when an unrelated message
         has higher vector similarity, while a typo'd opaque ID or a
         topic-only phrase with no subject overlap surfaces
         ``Thread not found`` instead of fabricating a summary of
@@ -600,6 +627,7 @@ def register_intelligence_tools(
         Returns:
             A summary of the available indexed thread context in the requested style.
         """
+        log.info("tool=summarize_thread %s", {"thread_id": thread_id, "style": style})
         try:
             thread = await asyncio.to_thread(db.get_thread, thread_id)
             # Permissive fallback: when the direct lookup misses, treat
@@ -700,6 +728,21 @@ def register_intelligence_tools(
         Returns:
             A JSON array of extracted records found in the available indexed thread context.
         """
+        log.info(
+            "tool=extract_from_emails %s",
+            {
+                k: v
+                for k, v in {
+                    "query": query,
+                    "schema": schema,
+                    "folders": folders,
+                    "date_from": date_from,
+                    "date_to": date_to,
+                    "limit": limit,
+                }.items()
+                if v is not None
+            },
+        )
         # Clamp to [1, _MAX_EXTRACT_LIMIT]. Structured extraction loops
         # one LLM call per retrieved thread; an inflated or non-numeric
         # ``limit`` would otherwise fan out into that many model calls

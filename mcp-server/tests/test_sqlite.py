@@ -5,6 +5,7 @@ real read queries against an in-memory-style database seeded via conftest.
 """
 
 import sqlite3
+from contextlib import closing
 
 import pytest
 from src.lib.sqlite import Database
@@ -15,15 +16,15 @@ class TestReadOnlyConnection:
         """The MCP reader opens SQLite via ``?mode=ro`` URI — any attempt
         to mutate the shared index must fail at the SQLite API level, not
         rely only on ``PRAGMA query_only`` being honored."""
-        with pytest.raises(sqlite3.OperationalError, match="readonly|read-only"):
-            seeded_db._conn.execute(
-                "UPDATE threads SET subject = 'hijacked' WHERE thread_id = 't-alpha'"
-            )
+        with closing(seeded_db._conn) as conn:
+            with pytest.raises(sqlite3.OperationalError, match="readonly|read-only"):
+                conn.execute("UPDATE threads SET subject = 'hijacked' WHERE thread_id = 't-alpha'")
 
     def test_reads_still_work(self, seeded_db: Database):
-        row = seeded_db._conn.execute(
-            "SELECT subject FROM threads WHERE thread_id = ?", ("t-alpha",)
-        ).fetchone()
+        with closing(seeded_db._conn) as conn:
+            row = conn.execute(
+                "SELECT subject FROM threads WHERE thread_id = ?", ("t-alpha",)
+            ).fetchone()
         assert row["subject"] == "invoice for march"
 
 
@@ -32,10 +33,22 @@ class TestPing:
         # Returns None on success; no exception is the signal.
         assert seeded_db.ping() is None
 
-    def test_ping_raises_when_connection_closed(self, seeded_db: Database):
-        seeded_db._conn.close()
-        with pytest.raises(sqlite3.ProgrammingError):
-            seeded_db.ping()
+    def test_close_is_idempotent_noop_under_per_access_connections(self, seeded_db: Database):
+        """Database opens and closes short-lived sqlite3 connections per read
+        helper (the WAL-pinning fix), so ``close()`` no longer disables the
+        handle — there is no persistent connection to close. The method is
+        preserved as a no-op for API compatibility with test fixtures and
+        main-shutdown paths that still call it; subsequent operations on the
+        same Database continue to work, and calling ``close()`` twice is
+        harmless.
+        """
+        seeded_db.close()
+        # Subsequent reads keep working — each call opens its own
+        # short-lived connection.
+        assert seeded_db.ping() is None
+        # Idempotent.
+        seeded_db.close()
+        assert seeded_db.ping() is None
 
 
 class TestFailFastOnMissingIndex:

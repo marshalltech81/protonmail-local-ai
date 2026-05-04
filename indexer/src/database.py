@@ -76,7 +76,7 @@ def _dedupe_by_canonical(addrs: list[str]) -> list[str]:
 # the current version; existing installs run the migration runner to
 # catch up. See ``src/migrations/runner.py`` for the file layout and
 # transactional guarantees.
-SCHEMA_VERSION = 14
+SCHEMA_VERSION = 15
 
 # The schema uses FTS5 ``contentless_delete=1``, which SQLite added in 3.43.
 # Validate the runtime version at Database init and fail fast with a clear
@@ -412,6 +412,13 @@ class Database:
                 display_subject TEXT                     -- original-cased subject for retrieval; NULL on legacy rows, COALESCE'd back to subject by readers
             );
 
+            -- mcp-server hybrid-search joins ``threads`` back from ``threads_fts``
+            -- on ``threads_fts.rowid = threads.fts_rowid``. Without this index
+            -- SQLite planned ``SCAN threads`` for every FTS hit, which turned
+            -- search_emails O(N_fts × N_threads) and blew the 4-min MCP timeout
+            -- on populated mailboxes. See migration 0015 for context.
+            CREATE INDEX idx_threads_fts_rowid ON threads(fts_rowid);
+
             CREATE VIRTUAL TABLE threads_fts USING fts5(
                 subject,
                 participants,
@@ -448,6 +455,10 @@ class Database:
             CREATE INDEX idx_message_chunks_message ON message_chunks(message_id);
             CREATE INDEX idx_message_chunks_thread ON message_chunks(thread_id);
             CREATE INDEX idx_message_chunks_attachment ON message_chunks(attachment_id);
+            -- Hybrid-search chunk lane joins ``message_chunks`` back from
+            -- ``message_chunks_fts`` on ``fts_rowid``. Critical for query
+            -- latency on populated mailboxes; see migration 0015.
+            CREATE INDEX idx_message_chunks_fts_rowid ON message_chunks(fts_rowid);
 
             CREATE VIRTUAL TABLE message_chunks_fts USING fts5(
                 text,
@@ -481,6 +492,9 @@ class Database:
             CREATE INDEX idx_attachments_attachment_id ON attachments(attachment_id);
             CREATE INDEX idx_attachments_thread ON attachments(thread_id);
             CREATE INDEX idx_attachments_message ON attachments(message_id);
+            -- Hybrid-search attachment lane joins ``attachments`` back from
+            -- ``attachments_fts`` on ``fts_rowid``; see migration 0015.
+            CREATE INDEX idx_attachments_fts_rowid ON attachments(fts_rowid);
 
             CREATE TABLE attachment_extractions (
                 attachment_id      TEXT PRIMARY KEY,

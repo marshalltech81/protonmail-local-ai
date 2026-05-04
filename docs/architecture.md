@@ -160,7 +160,7 @@ User query
     ├─ optional: post-fusion filter (folder / sender / date / attachments)
     │
     ├─ optional rerank stage (USE_MLX_RERANKER=true, default):
-    │   take RRF top RERANK_CANDIDATES (default 50), score each candidate
+    │   take RRF top RERANK_CANDIDATES (default 20), score each candidate
     │   against the query via Qwen3-Reranker-4B (yes/no logit
     │   comparison), reorder, truncate to the caller's `limit`
     │   (defaulting to RERANK_TOP_N when the caller doesn't specify —
