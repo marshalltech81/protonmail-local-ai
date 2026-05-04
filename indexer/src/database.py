@@ -85,11 +85,7 @@ MIN_SQLITE_VERSION = (3, 43, 0)
 
 # Vector dimension reserved by the ``*_vec`` schemas. Must match the
 # active embedding model's output dimension or vec0 inserts fail.
-# Qwen3-Embedding-8B (served by mlx-service) is 4096-dim. The legacy
-# Ollama ``nomic-embed-text`` is 768-dim — running it against this
-# schema requires switching ``USE_MLX_EMBEDDER=false`` AND restoring
-# the previous dimension; the v13→v14 migration is one-way for the
-# current MLX-default deployment.
+# Qwen3-Embedding-8B (served by mlx-service) is 4096-dim.
 EMBEDDING_DIM = 4096
 
 
@@ -608,7 +604,7 @@ class Database:
         if len(embedding) != EMBEDDING_DIM:
             raise ValueError(
                 f"embedding has {len(embedding)} dims but threads_vec reserves "
-                f"{EMBEDDING_DIM}. Check OLLAMA_EMBED_MODEL."
+                f"{EMBEDDING_DIM}. Check the embedder's output dimension."
             )
 
         cur = self._conn.cursor()
@@ -1146,7 +1142,7 @@ class Database:
         if len(embedding) != EMBEDDING_DIM:
             raise ValueError(
                 f"embedding has {len(embedding)} dims but threads_vec reserves "
-                f"{EMBEDDING_DIM}. Check OLLAMA_EMBED_MODEL."
+                f"{EMBEDDING_DIM}. Check the embedder's output dimension."
             )
         cur = self._conn.cursor()
         started = False
@@ -1831,7 +1827,7 @@ class Database:
         if len(embedding) != EMBEDDING_DIM:
             raise ValueError(
                 f"embedding has {len(embedding)} dims but threads_vec reserves "
-                f"{EMBEDDING_DIM}. Check OLLAMA_EMBED_MODEL."
+                f"{EMBEDDING_DIM}. Check the embedder's output dimension."
             )
 
         participants_json = json.dumps(_dedupe_by_canonical(thread.participants))

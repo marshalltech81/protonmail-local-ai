@@ -20,7 +20,8 @@ Ask questions about your inbox in plain English. Everything stays on your machin
 | ProtonBridge | Decrypts ProtonMail, exposes local IMAP/SMTP |
 | mbsync | Real-time incremental sync to local Maildir |
 | Indexer | Parses threads, generates embeddings, builds SQLite index |
-| Ollama | Local embedding model (`nomic-embed-text`) and LLM |
+| mlx-service (host) | Apple Metal embedder (Qwen3-Embedding-8B) + reranker (Qwen3-Reranker-4B) on `:8001` |
+| mlx-lm-server (host) | Apple Metal LLM serving (default Qwen3-32B-4bit) for `LLM_MODE=local`, OpenAI-compatible at `:8002/v1` |
 | SQLite (FTS5 + sqlite-vec) | Hybrid keyword + vector search index |
 | MCP Server | Exposes tools to Claude Desktop via HTTP/SSE |
 
@@ -71,18 +72,17 @@ printf '%s' 'bridge-generated-pass' > .secrets/bridge_pass.txt
 chmod 600 .secrets/bridge_pass.txt
 ```
 
-### 4. Pull Ollama models
+### 4. Set up the host-side MLX servers
 
-Ollama runs on the host (`brew install ollama`) — not as a stack
-container — so MLX/Metal acceleration is available. Containers reach
-the host Ollama via OrbStack's `host.docker.internal:11434`.
-[docs/setup.md](docs/setup.md#ollama-host-install-required) covers
-the one-time setup (LaunchAgent + firewall) before the first model
-pull.
+Two LaunchAgents run on the host (not in Docker — MLX needs Metal
+access): `mlx-service` for embeddings + reranking on `:8001`, and
+`mlx-lm-server` for the local LLM on `:8002`. Containers reach both
+via OrbStack's `host.docker.internal`.
 
-```bash
-make pull-models
-```
+See [`mlx-service/README.md`](mlx-service/README.md) and
+[`mlx-lm-server/README.md`](mlx-lm-server/README.md) for the install
+steps. Models download lazily on first use into
+`~/.cache/huggingface/hub/`.
 
 ### 5. Start the stack
 
@@ -139,7 +139,7 @@ use and which `LLM_MODE` you select. Be deliberate about all three layers.
 | Data | Where it lives |
 |---|---|
 | Your emails (Maildir) | Local Docker volume — never leaves your machine |
-| Embeddings | Generated locally by Ollama — never sent anywhere |
+| Embeddings | Generated locally by mlx-service on Apple Metal — never sent anywhere |
 | Search index (SQLite FTS5 + sqlite-vec) | Local Docker volume |
 | Bridge ↔ Proton traffic | The only path off your machine for mail data |
 
@@ -154,7 +154,7 @@ The MCP server's intelligence tools (`ask_mailbox`, `summarize_thread`,
 
 | Mode | What happens to retrieved email content |
 |---|---|
-| `local` (default) | Sent to local Ollama inside the Docker stack. Stays on your machine. |
+| `local` (default) | Sent to the host-side mlx-lm-server (Apple Metal) at `LLM_BASE_URL`. Stays on your machine. |
 | `cloud` | Sent to Anthropic's Claude API for generation. Requires `.secrets/anthropic_api_key.txt`. |
 
 This setting only governs what the MCP server does *internally* during a tool
@@ -168,7 +168,8 @@ LLM.** When you wire it up to this MCP server:
 1. You ask Claude Desktop a question.
 2. Claude (running on Anthropic's servers) decides to call an MCP tool.
 3. Claude Desktop relays the call to your local MCP server. The tool runs
-   locally — including, in `LLM_MODE=local`, any LLM work via Ollama.
+   locally — including, in `LLM_MODE=local`, any LLM work via the host
+   mlx-lm-server.
 4. The tool's *return value* (which often contains email snippets, thread
    bodies, or LLM-generated answers grounded in your mail) is sent back to
    Claude on Anthropic's servers as part of the conversation context.
@@ -188,8 +189,8 @@ If you want end-to-end local conversations:
   the session-key secret on first run; for the very first launch, prepend
   `OPEN_WEBUI_ENABLE_SIGNUP=true` to create the admin account — see
   `docs/setup.md` for the full first-run flow including MCP server
-  registration). Open WebUI reaches the host-installed Ollama via
-  `host.docker.internal:11434` for chat, and uses
+  registration). Open WebUI reaches the host-side mlx-lm-server via
+  `host.docker.internal:8002/v1` (OpenAI-compatible) for chat, and uses
   `http://mcp-server:3000/mcp` as a Streamable HTTP MCP server. Quality
   varies.
 
@@ -236,7 +237,6 @@ make first-run    # One-time Bridge login
 make bridge-patch-check   # Verify Bridge patch points against upstream source
 make bridge-smoke         # Build and smoke test the Bridge image
 make bridge-upgrade-check # Run both Bridge upgrade guard checks
-make pull-models  # Pull Ollama models on the host (requires brew install ollama)
 make update       # Update Bridge to new version
 make status       # Container and index status
 make clean        # Remove everything (destructive)

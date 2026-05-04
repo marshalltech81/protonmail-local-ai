@@ -16,19 +16,15 @@ Detailed design and operational docs belong in `docs/`.
 
 ## Current Objective
 
-Consolidate the local-inference layer onto MLX. PR #83 landed the
-embedder + reranker on MLX; PR #86 made the host-Ollama install the
-default and removed the in-stack `ollama` container plus the
-host-Ollama overlay files. The remaining work: the LLM is still
-served by host Ollama via `OllamaClient.complete()`, which leaves
-two independent inference engines on the host (MLX for embed/rerank,
-Ollama-via-llama.cpp for the LLM) plus the residual env / Makefile /
-diagnostic-script wiring that supports them. The goal is to swap the
-LLM onto MLX-LM behind the same `LLMClient` interface used today,
-then remove the residual Ollama wiring in phases. Net result: one MLX
-host process serves all three model heads (embed, rerank, LLM), and
-the project's "local-first AI" non-negotiable is satisfied with one
-inference framework instead of two.
+The local-inference layer is fully consolidated onto MLX. The LLM
+runs on `mlx-lm-server` (`mlx_lm.server` LaunchAgent on port 8002)
+alongside the existing `mlx-service` LaunchAgent (embeddings +
+reranking on port 8001). Both reach Apple Metal directly; neither
+goes through Ollama. Cloud-Claude (`LLM_MODE=cloud`) remains as the
+user-facing quality escape hatch.
+
+What remains: documentation polish (Phase D below) and the previously
+paused pre-MLX priorities resume after that.
 
 ## Current State
 
@@ -38,239 +34,59 @@ The stack now runs:
 - **ProtonBridge** — Docker, headless, IMAP/SMTP on `bridge-net` only.
 - **mbsync** — Docker, pulls into Maildir, `chmod go+r` after each sync.
 - **indexer** — Docker, parses Maildir, threads, embeds via the MLX
-  service (default), writes SQLite. Schema is at v15 with 4096-dim
-  vectors. Ollama embed (`nomic-embed-text`) remains as a feature-
-  flagged fallback (`USE_MLX_EMBEDDER=false`) but is no longer the
-  default path.
+  service, writes SQLite. Schema is at v15 with 4096-dim vectors.
+  The Ollama embed-fallback path was removed in Phase C; embedding
+  is MLX-only.
 - **mcp-server** — Docker, hybrid search + intelligence tools.
   `hybrid_search` calls the MLX reranker (`Qwen3-Reranker-4B-mxfp8`)
   after RRF. The LLM-synthesis step is dispatched by `LLM_MODE`:
-  `local` → `OllamaClient.complete()` (Ollama on the host),
+  `local` → `LocalLLMClient.complete()` against the OpenAI-compatible
+  `/v1/chat/completions` endpoint at `LLM_BASE_URL` (default
+  `http://host.docker.internal:8002/v1`, served by mlx-lm-server),
   `cloud` → Anthropic Claude API (the daily-driver mode at the
-  moment — `LLM_MODE=cloud` in `.env`, model
-  `claude-sonnet-4-6`). The MLX-consolidation objective adds a
-  third option, `mlx`, and the long-term plan retires the Ollama
-  branch; cloud stays as an explicit user-facing escape hatch. The
-  Tier-2–11 manual-eval pass on 2026-05-04 was run with
-  `LLM_MODE=cloud`, so the captured answers are a cloud-Claude
-  baseline that Phase B can compare against once MLX-LM ships.
-- **Ollama** — host install via LaunchAgent (no longer an in-stack
-  container; PR #86 inverted the defaults so containers reach
-  `host.docker.internal:11434` directly without a host-Ollama
-  overlay). **Sole remaining role: LLM serving** (qwen2.5:32b-
-  instruct or whatever `OLLAMA_LLM_MODEL` is pinned to). Embeddings
-  have already moved off; the LLM is what this objective swaps.
+  moment — `LLM_MODE=cloud` in `.env`, model `claude-sonnet-4-6`).
+  The Tier-2–11 manual-eval pass on 2026-05-04 was run with
+  `LLM_MODE=cloud`; that remains the standing quality baseline.
 - **mlx-service** — host LaunchAgent on `127.0.0.1:8001`, serves
   `/embed` (Qwen3-Embedding-8B-mxfp8, 4096-dim) and `/rerank`
   (Qwen3-Reranker-4B-mxfp8). Reachable from Docker via
   `host.docker.internal:8001`.
+- **mlx-lm-server** — host LaunchAgent on `127.0.0.1:8002`, serves
+  the local LLM (default `mlx-community/Qwen3-32B-4bit`) over
+  OpenAI-compatible `/v1/chat/completions`. Reachable from Docker
+  via `host.docker.internal:8002`.
 
-Memory reality (36 GB M5 Max): the three-engine state (Ollama LLM
-~26 GB + MLX embed/rerank ~12 GB + macOS ~7 GB) overflows physical
-RAM and uses swap heavily. Switching the LLM to MLX-LM doesn't
-shrink the LLM's footprint, but consolidating onto one engine
-removes wrapper overhead and lets us tune the entire memory budget
-in one place.
+Memory reality (36 GB M5 Max): the active state (Qwen3-32B-4bit
+~17 GB + MLX embed/rerank ~12 GB + macOS ~7 GB) is tight but fits
+in physical RAM. With `LLM_MODE=cloud` daily, the local LLM only
+loads when the operator explicitly switches modes, so steady-state
+RAM is closer to ~19 GB. The single-inference-framework win lands
+here: one runtime to tune memory budgets against, no llama.cpp
+wrapper overhead.
 
 ## Active Priorities
 
-The previous priorities (intelligence-fidelity validation, test-coverage
-expansion, tool-behavior tightening, Tier 1 safety preservation) remain
-**paused** behind the consolidation. They resume after Phase F.
+The MLX consolidation is complete; the four pre-MLX priorities below
+(intelligence-fidelity validation, test-coverage expansion,
+tool-behavior tightening, Tier 1 safety preservation) are now
+unpaused.
 
-### Phase A — Wire MLX-LM behind a feature flag (additive, behind `LLM_MODE=mlx`)
-
-Goal:
-- New `MlxLLMClient` mirroring `OllamaClient.complete()` interface;
-  selected at startup when `LLM_MODE=mlx` (alongside existing
-  `local`/`cloud`). Doesn't remove anything yet.
-
-Tasks:
-- decide on the MLX-LM serving model (`mlx-community/Qwen3-32B-Instruct-4bit`
-  or similar — the current Ollama LLM equivalent on MLX). Pick based
-  on memory headroom alongside the existing embedder + reranker
-- extend `mlx-service` with a `/chat` endpoint that wraps `mlx_lm.generate`,
-  OR run a separate `mlx_lm.server` process on `:8002` and treat it
-  as a peer service. Probably the latter — keeps `mlx-service` small
-  and lets the LLM model load/unload independently
-- add `MlxLLMClient` in `mcp-server/src/lib/` that hits the new
-  endpoint with the OpenAI-compatible chat-completions shape
-- factory in `mcp-server/src/main.py`: `LLM_MODE in {local, cloud, mlx}`
-  selects between `OllamaClient.complete`, the Claude API path,
-  or `MlxLLMClient.complete`
-- doc `LLM_MODE=mlx` in `.env.example` with the same caveats pattern
-  used for `USE_MLX_EMBEDDER`
-- new tests for `MlxLLMClient` (HTTP shape, error path) mirroring
-  the round-1/2 reranker test pattern
-
-Verify:
-- `LLM_MODE=mlx` makes `ask_mailbox` answer correctly through the
-  new path
-- `LLM_MODE=local` (default) is unchanged; existing tests still pass
-- failure path (MLX server down) surfaces a clear error rather than
-  silently falling back
-
-Definition of done:
-- additive PR merged; nothing removed yet
-- **stop and confirm before Phase B**
-
-### Phase B — Switch to MLX-LM in production + bake operational learning
-
-Goal:
-- Run with `LLM_MODE=mlx` for the daily workflow long enough to
-  confirm quality, latency, and stability vs Ollama.
-
-Tasks:
-- flip `LLM_MODE=mlx` in `.env`
-- run the manual eval set (`mcp-server/tests/eval/eval-queries.md`,
-  Tiers 2–11) and compare answers against the most recent captured
-  baseline. The 2026-05-04 cloud-Claude pass is the current standing
-  baseline (Tiers 2–11 all functional pass, the specific bar
-  recorded in PR #89). Cloud-Claude sets a high quality bar; MLX-LM
-  doesn't have to match it identically, but it does have to clear a
-  baseline of "answer is correct and grounded" the same way
-  cloud-Claude's responses were graded.
-- watch wall-clock latency; tune mlx-lm server flags (`--max-tokens`,
-  context size, KV cache type) if needed
-- track for at least a few days of normal use before declaring it
-  the new default
-
-Verify:
-- eval set passes Tiers 2–7 with grounded, specific answers — same
-  rubric the 2026-05-04 cloud-Claude pass cleared
-- p95 latency for `ask_mailbox` is comparable to the post-index-fix
-  numbers (sub-1 s SQL stage, 5–10 s end-to-end with rerank +
-  synthesis)
-- no MLX OOM-kills, no LLM-side error spike
-
-Definition of done:
-- daily-driver mode is `LLM_MODE=mlx`; no regression caught
-- **stop and confirm before Phase C**
-
-### Phase C — Remove the Ollama LLM code path
-
-Goal:
-- `OllamaClient` becomes embed-only (or the whole class goes away if
-  the embed path is also retired by Phase D). Remove the LLM-specific
-  branches.
-
-Tasks:
-- delete `OllamaClient.complete()` (or refactor `OllamaClient` →
-  `LLMClient` with implementations split per backend)
-- remove `OLLAMA_LLM_MODEL` env var and its compose passthrough
-- remove `LLM_MODE=local` (or rename — the new "local" IS MLX)
-- update tests that mocked `OllamaClient.complete` (`test_ollama.py`,
-  `test_intelligence_handlers.py`, `test_search.py`, `conftest.py`)
-- bandit + mypy + ruff clean
-
-Verify:
-- mcp-server starts and serves with `LLM_MODE` removed or only
-  `mlx`/`cloud` accepted
-- no test references the removed methods/env
-
-Definition of done:
-- LLM-side Ollama dependency gone from mcp-server
-- **stop and confirm before Phase D**
-
-### Phase D — Decide the fate of the Ollama embed-fallback path
-
-Goal:
-- Either keep `class Embedder` (Ollama embed) as the documented
-  rollback safety net OR remove it once you've decided MLX
-  embeddings are permanent.
-
-Tasks:
-- if removing: delete `class Embedder`, the `_make_embedder` Ollama
-  branch, `OLLAMA_EMBED_MODEL`, `_validate_embed_model_tokenizer()`,
-  and the bundled `indexer/src/data/nomic-embed-text/tokenizer.json`
-  (replace with a Qwen3 tokenizer for accurate chunk-budgeting)
-- if keeping: document explicitly in `.env.example` that
-  `USE_MLX_EMBEDDER=false` requires schema rollback + reindex (the
-  current note in `docs/setup.md` is good; promote it to AGENTS.md)
-
-Decision input: how much do you trust the MLX embedder? After Phase
-B real-world use, a yes/no answer should be obvious.
-
-Definition of done:
-- the embed-fallback path is either truly gone or truly documented;
-  no half-state where the env flag exists but isn't usable
-
-### Phase E — Remove residual Ollama scaffolding
-
-Goal:
-- Drop the remaining Ollama wiring once Phases C and D have removed
-  the LLM and embed-fallback code paths. Most of the operational
-  surface — the in-stack `ollama` service, the host-Ollama overlay
-  files, the five `*-host-ollama` Makefile targets — was already
-  removed by PR #86 (the host-Ollama-as-default cleanup). What
-  remains here is the env wiring and the host-bind diagnostic
-  script that PR #86 deliberately kept because the LLM and embed-
-  fallback paths still used them.
-
-Tasks:
-- remove `OLLAMA_HOST` / `OLLAMA_EMBED_MODEL` / `OLLAMA_LLM_MODEL`
-  env passthrough from `docker-compose.yml` (indexer + mcp-server)
-  and `docker-compose.open-webui.yml` (`OLLAMA_BASE_URL`)
-- remove `OLLAMA_*` defaults + comments from `.env.example`
-- delete `scripts/check-host-ollama.sh` (was kept as a diagnostic
-  even after PR #86 since the host install was still in active use;
-  drop once nothing in the stack talks to host Ollama)
-- delete the `pull-models` Makefile target (Ollama is gone — there
-  is nothing to pull); replace help text with an MLX-LM equivalent
-  if Phase A introduced one
-- update `scripts/validate-env.sh` to drop `OLLAMA_*` checks
-
-Definition of done:
-- `git grep -i ollama` returns hits only in changelog / Recently
-  Completed sections, not in source / config / docs of the live
-  stack
-- the project no longer has any code path that calls Ollama
-
-### Phase F — Documentation sweep
-
-Goal:
-- Bring `docs/setup.md`, `docs/architecture.md`, `README.md`,
-  `AGENTS.md`, `.env.example`, and `mcp-server/tests/eval/README.md`
-  in line with the consolidated single-engine reality.
-
-Tasks:
-- `docs/setup.md`: replace the host-Ollama section with the
-  expanded mlx-service section (already partially there from PR #83);
-  remove `make pull-models` instructions in favor of `mlx_lm` model
-  download
-- `docs/architecture.md`: redraw the data-flow diagram so Ollama
-  doesn't appear; describe the unified MLX host process
-- `AGENTS.md`: delete the non-negotiables that mention Ollama
-  (host-bind firewall steps, post-`brew upgrade` verification
-  rules) — they no longer apply once Ollama is gone. Replace with
-  mlx-service operational guidance: re-bootstrap the LaunchAgent
-  after `uv sync` rebuilds the venv (the plist's
-  `ProgramArguments` path can become stale), the tied-embedding
-  invariant the reranker depends on, and the
-  `~/Library/Logs/mlx-service.log` location. mlx-service is not
-  brew-managed, so the "after `brew upgrade`" framing of the old
-  Ollama rules does not carry over — the trigger is "after `uv
-  sync` rebuilds the venv" instead.
-- `README.md`: update the stack description; the project is no
-  longer "five containers" — it's "Bridge + mbsync + indexer +
-  mcp-server in Docker, mlx-service on the host"
-- `.env.example`: remove `OLLAMA_*` vars Phase C/D dropped, add
-  `MLX_LM_*` vars
-- update `PLAN.md` to mark consolidation complete and unpause the
-  Tier-1-safety priorities below
-
-Definition of done:
-- a fresh contributor reading the docs would not learn that Ollama
-  was ever part of the stack (except as a note in the changelog /
-  Recently Completed section)
+The MLX consolidation (Phases A–C of the prior plan) shipped together
+in 2026-05-04: the LLM client moved to OpenAI-compatible
+`/v1/chat/completions`, the class was renamed `OllamaClient` →
+`LocalLLMClient`, the Ollama embed-fallback path was deleted (chunker
+now bundles the Qwen3-Embedding-8B tokenizer), `mlx_lm.server` was
+stood up as a host LaunchAgent on port 8002 serving
+`mlx-community/Qwen3-32B-4bit`, and the host Ollama LaunchAgent + the
+`pull-models` Makefile target + `scripts/check-host-ollama.sh` were
+removed. See "Recently Completed" below for the detailed entry.
 
 ### Out of scope for this objective
 
 - Any change to retrieval quality (embedder, reranker, chunker
   defaults). The retrieval stack ships unchanged from PR #83.
-- Switching off MLX entirely. If MLX-LM doesn't pan out in Phase B,
-  `LLM_MODE=cloud` (Claude API) is the escape hatch — go back to
-  Ollama only as a last resort.
+- Switching off MLX entirely. The escape hatch is `LLM_MODE=cloud`
+  (Claude API) — flip the env var, no code revert needed.
 - Adding new MCP tools or changing the MCP API surface.
 
 ### MLX-rebuild carryover (still-pending follow-ups from PRs #83/#84/#85)
@@ -285,7 +101,7 @@ validation tasks that should happen regardless of the LLM-engine swap.
    chunk budget first, then raise budgets, to attribute any
    quality change to the right knob.
 2. **Rerank-side quality experiment.** Once retrieval is stable,
-   compare `USE_MLX_RERANKER=true` vs `false` on the manual eval
+   compare `RERANK_ENABLED=true` vs `false` on the manual eval
    set to measure what the rerank stage actually buys you.
 3. **Indexer healthcheck threshold.** Currently flagged
    "unhealthy" during sustained MLX-pace indexing because
@@ -335,12 +151,12 @@ The detailed PR-#83 session notes live in the project memory file
   only removes the `.eml` when Maildir is mounted read-write (the
   default is read-only)
 
-## Previously paused priorities (resume after Phase F)
+## Active priorities (unpaused after MLX consolidation)
 
 These four pre-MLX priorities stay paused until the consolidation
 above lands. Don't start them mid-Phase.
 
-_(The four priority blocks below were the active workstream before the MLX rebuild displaced them. They resume after Phase F lands — i.e. after the Ollama LLM + scaffolding is fully removed.)_
+_(The four priority blocks below were the active workstream before the MLX rebuild displaced them. With the MLX consolidation now landed, they resume here.)_
 
 
 ### 1. Validate intelligence fidelity end-to-end
@@ -638,6 +454,77 @@ returns `(0, 0, 0)` SUCCESS with mcp-server running, WAL truncates to
 0 bytes.
 All 314 mcp-server tests pass at 92.81% coverage. Memory:
 `project_mcp_wal_pinning.md`.
+
+### 2026-05-04 — MLX consolidation Phases A + B + C (Ollama abandoned)
+
+The local-inference layer is fully consolidated onto MLX. Phase A
+(LLM-client OpenAI-compat refactor), Phase B (operational MLX-LM
+swap), and Phase C (Ollama embed-fallback + scaffolding teardown)
+all shipped together.
+
+- **Phase B — Stand up `mlx_lm.server` and abandon Ollama.** New
+  ``mlx-lm-server/`` peer to ``mlx-service/``: pinned ``mlx-lm==0.31.3``
+  in its own uv project, ``com.local.mlx-lm-server`` LaunchAgent
+  bound to ``127.0.0.1:8002`` serving
+  ``mlx-community/Qwen3-32B-4bit`` over OpenAI-compatible
+  ``/v1/chat/completions``. ``--max-tokens 4096`` set as the server
+  default to give Qwen3's thinking-mode answers headroom when
+  callers don't override per-request. ``.env.example`` and
+  ``docker-compose.yml`` defaults flipped to point at MLX-LM
+  (``LLM_BASE_URL=http://host.docker.internal:8002/v1``,
+  ``LLM_MODEL=mlx-community/Qwen3-32B-4bit``). End-to-end smoke
+  test confirmed: ``LocalLLMClient.complete()`` against the live
+  server returns a correct grounded answer in production shape.
+  Open WebUI overlay reconfigured to use Open WebUI's
+  OpenAI-compatible client pointed at the same ``LLM_BASE_URL``
+  (``ENABLE_OLLAMA_API=false``, ``ENABLE_OPENAI_API=true``).
+- **Ollama teardown.** ``com.local.ollama-host`` LaunchAgent
+  bootout'd, plist deleted from ``~/Library/LaunchAgents/``.
+  ``scripts/check-host-ollama.sh`` deleted. ``pull-models``
+  Makefile target deleted along with its help-text entry and the
+  ``.PHONY`` listing. ``AGENTS.md`` non-negotiables rewritten to
+  reflect the host MLX servers (no more brew-upgrade verification
+  rules, no more 0.0.0.0:11434 firewall guidance — both
+  LaunchAgents bind 127.0.0.1 with macOS' loopback exemption).
+  ``docs/setup.md`` and ``docs/architecture.md`` rewritten end-to-end
+  to remove the Ollama section and document the
+  mlx-service / mlx-lm-server pair as the supported deployment shape.
+
+#### Earlier in the same session — Phase A + Phase C "remove" branch
+
+Phase A (LLM-client OpenAI-compat refactor + class rename) and the
+Phase C "remove embed fallback" branch shipped together as the
+preparatory work for Phase B's operational MLX-LM swap.
+
+- **Phase A — Decouple the local-LLM client.** ``OllamaClient`` →
+  ``LocalLLMClient`` (file ``mcp-server/src/lib/ollama.py`` →
+  ``local_llm.py``). ``complete()`` now POSTs the OpenAI-compatible
+  ``/v1/chat/completions`` shape and unwraps
+  ``choices[0].message.content``; new ``LLM_BASE_URL`` and
+  ``LLM_MODEL`` env vars replace ``OLLAMA_LLM_MODEL``. The same
+  client targets both Ollama (``:11434/v1``) and ``mlx_lm.server``
+  with no per-backend branching, so the engine swap in Phase B
+  becomes an env-var change.
+- **Phase C — Remove the Ollama embed fallback.** Deleted ``class
+  Embedder``, ``_make_embedder``, ``_validate_embed_model_tokenizer``,
+  ``USE_MLX_EMBEDDER``, ``OLLAMA_EMBED_MODEL``, ``OLLAMA_HOST`` (from
+  indexer + mcp-server), the ``LocalLLMClient.embed()`` Ollama
+  branch, and the bundled ``nomic-embed-text/tokenizer.json``.
+  Replaced the chunker's bundled tokenizer with the
+  ``Qwen3-Embedding-8B`` BPE tokenizer (matches the production
+  embedder; chunk budgets recomputed against real tokens). Updated
+  the CJK regression test threshold to reflect Qwen3's more efficient
+  multilingual BPE.
+- **Test surface.** ``FakeOllama`` → ``FakeLocalLLM``, ``fake_ollama``
+  fixture → ``fake_llm``; tests dropped for the deleted Ollama
+  embed-readiness model-pull paths.
+
+Verified end-to-end: 455 indexer tests + 315 mcp-server tests pass
+(both at 93%+ coverage), ``make typecheck`` and ``ruff check`` clean,
+``docker compose config`` validates. The diff is net-removal: the
+slimmed embedder module shrinks from 193 → 75 lines, the slimmed LLM
+client constructor goes from 7 params (with two optional Ollama-embed
+kwargs) to 3 required ones.
 
 ## Notes for Agents
 

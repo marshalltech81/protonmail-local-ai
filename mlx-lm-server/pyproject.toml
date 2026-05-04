@@ -1,0 +1,13 @@
+[project]
+name = "protonmail-local-ai-mlx-lm-server"
+version = "0.0.0"
+requires-python = ">=3.14"
+dependencies = [
+    # mlx-lm ships an OpenAI-compatible HTTP server (``mlx_lm.server``)
+    # and the model loader for Apple-Metal-served LLMs. Pinned to a
+    # specific version for reproducible deploys; bump deliberately.
+    "mlx-lm==0.31.3",
+]
+
+[tool.uv]
+package = false

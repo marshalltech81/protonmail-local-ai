@@ -22,7 +22,7 @@ _MAX_SEARCH_LIMIT = 50
 _VALID_SEARCH_MODES = frozenset({"hybrid", "semantic", "keyword"})
 
 
-def register_search_tools(server, db, ollama, *, reranker=None):
+def register_search_tools(server, db, llm, *, reranker=None):
     @server.tool()
     async def search_emails(
         query: str,
@@ -189,7 +189,7 @@ def register_search_tools(server, db, ollama, *, reranker=None):
                     limit=limit,
                 )
             elif mode == "semantic":
-                embedding = await ollama.embed(query)
+                embedding = await llm.embed(query)
                 results = await asyncio.to_thread(
                     db.semantic_search,
                     query_embedding=embedding,
@@ -201,7 +201,7 @@ def register_search_tools(server, db, ollama, *, reranker=None):
                     limit=limit,
                 )
             else:  # hybrid (default)
-                embedding = await ollama.embed(query)
+                embedding = await llm.embed(query)
                 results = await asyncio.to_thread(
                     db.hybrid_search,
                     query_text=query,

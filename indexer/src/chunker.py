@@ -37,19 +37,15 @@ from pathlib import Path
 from tokenizers import Tokenizer
 
 # Path to the bundled HuggingFace tokenizer.json for
-# ``nomic-ai/nomic-embed-text-v1.5`` — used by ``estimate_tokens`` so
-# chunk size budgets reflect real BPE token counts instead of a
+# ``Qwen/Qwen3-Embedding-8B`` — used by ``estimate_tokens`` so chunk
+# size budgets reflect real BPE token counts instead of a
 # 4-chars-per-token heuristic that under-counted CJK / URL / Base64 /
 # code text by 4-6× and produced chunks past the embed model's
-# practical context window.
-#
-# When ``USE_MLX_EMBEDDER=true`` (default) the active embedder is
-# Qwen3-Embedding-8B served by mlx-service, *not* nomic. Both are
-# subword BPE tokenizers and produce comparable token counts on
-# English text (~similar bytes-per-token), so chunk sizing remains
-# accurate enough for routing decisions. A future swap to a bundled
-# Qwen3 tokenizer would tighten this for non-English text.
-_TOKENIZER_PATH = Path(__file__).parent / "data" / "nomic-embed-text" / "tokenizer.json"
+# practical context window. Tokenizer is matched to the production
+# embedder (Qwen3-Embedding-8B served via mlx-service); the file is
+# vendored from the model's HuggingFace repo so the indexer never
+# performs a runtime download.
+_TOKENIZER_PATH = Path(__file__).parent / "data" / "qwen3-embedding" / "tokenizer.json"
 
 # Paragraph: one or more non-blank lines separated from the next paragraph
 # by one or more entirely-blank lines. A "blank" line is empty or
@@ -111,13 +107,13 @@ class _Span:
 
 @lru_cache(maxsize=1)
 def _load_tokenizer() -> Tokenizer:
-    """Load the bundled nomic-embed-text tokenizer once per process.
+    """Load the bundled Qwen3-Embedding tokenizer once per process.
 
-    Cached because ``Tokenizer.from_file`` parses ~700 KB of JSON and
-    builds the BPE merge tables; doing that per ``estimate_tokens`` call
-    would dominate the chunker's runtime. The lazy load also keeps unit
-    tests that never call ``estimate_tokens`` (``mean_vector`` / dataclass
-    construction tests) free from any I/O.
+    Cached because ``Tokenizer.from_file`` parses ~11 MB of JSON and
+    builds the BPE merge tables; doing that per ``estimate_tokens``
+    call would dominate the chunker's runtime. The lazy load also
+    keeps unit tests that never call ``estimate_tokens`` (``mean_vector``
+    / dataclass construction tests) free from any I/O.
     """
     return Tokenizer.from_file(str(_TOKENIZER_PATH))
 
@@ -125,18 +121,14 @@ def _load_tokenizer() -> Tokenizer:
 def estimate_tokens(text: str) -> int:
     """Return the real BPE token count for ``text``.
 
-    Uses the bundled nomic-embed-text tokenizer so chunk-size budgets
-    line up with the embed model's practical context window (Ollama
-    serves nomic-embed-text with a default ``num_ctx=2048``; the model
-    itself supports 8192 but raising it requires explicit operator
-    config). The
+    Uses the bundled Qwen3-Embedding-8B tokenizer so chunk-size budgets
+    line up with the embed model's practical context window. The
     previous char-count heuristic under-counted CJK / URL / Base64 /
-    dense code text by 4-6×, which produced chunks the embed model
-    rejected with HTTP 500 ("input length exceeds the context length").
+    dense code text by 4-6×, producing chunks that exceeded the embed
+    model's context.
 
-    Special tokens (``[CLS]`` / ``[SEP]``) are not added — Ollama's
-    embedding endpoint adds those on the server side, so counting them
-    here would double-count by two tokens per chunk.
+    Special tokens are not added — the embed service adds those on the
+    server side, so counting them here would double-count.
     """
     if not text:
         return 0

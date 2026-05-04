@@ -539,13 +539,13 @@ class FakeMCPServer:
         return decorator
 
 
-class FakeOllama:
-    """Async stub of ``src.lib.ollama.OllamaClient``.
+class FakeLocalLLM:
+    """Async stub of ``src.lib.local_llm.LocalLLMClient``.
 
     Returns a canned 4-dim embedding that matches ``seeded_db`` /
     ``empty_db`` vec0 schema, and a canned ``complete()`` response so
-    intelligence tools can be exercised without hitting a live Ollama
-    instance. ``complete_responses`` lets a test queue up successive
+    intelligence tools can be exercised without hitting a live LLM
+    backend. ``complete_responses`` lets a test queue up successive
     distinct responses for the per-thread ``extract_from_emails`` loop.
     """
 
@@ -607,8 +607,8 @@ def fake_server() -> FakeMCPServer:
 
 
 @pytest.fixture
-def fake_ollama() -> FakeOllama:
-    return FakeOllama()
+def fake_llm() -> FakeLocalLLM:
+    return FakeLocalLLM()
 
 
 @pytest.fixture

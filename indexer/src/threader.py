@@ -86,10 +86,11 @@ class Thread:
         for msg in self.messages:
             parts.append(f"From: {msg.from_addr}")
             parts.append(f"Date: {msg.date.isoformat()}")
-            # nomic-embed-text has a 2048-token context window (~4 chars/token).
-            # 500 chars ≈ 125 tokens per message keeps per-message input
-            # bounded while the joined output is capped at the shared
-            # THREAD_BODY_TEXT_MAX_CHARS limit below.
+            # Cap per-message body so the joined string stays bounded
+            # before the THREAD_BODY_TEXT_MAX_CHARS truncation below;
+            # 500 chars per message is large enough to contain the bulk
+            # of typical email content without one outlier dominating
+            # the thread vector.
             parts.append(msg.body_text[:500])
             parts.append("")
 

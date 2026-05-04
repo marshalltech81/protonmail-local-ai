@@ -1,11 +1,10 @@
 """
-Embedder — generates vector embeddings via either the local Ollama API
-(legacy ``Embedder``) or the host-side MLX service (``MlxEmbedder``).
+Embedder — generates vector embeddings via the host-side MLX service.
 
-Both backends implement the same ``EmbeddingBackend`` protocol so the
-indexer hot path is backend-agnostic. The factory in ``main.py`` picks
-one based on the ``USE_MLX_EMBEDDER`` env flag. Retries on failure to
-handle service startup latency.
+``MlxEmbedder`` implements the ``EmbeddingBackend`` Protocol so callers
+in ``main.py``, ``reconciler.py``, and ``attachment_indexing.py`` stay
+backend-agnostic and tests can substitute a duck-typed fake. Retries
+on failure to handle service startup latency.
 """
 
 import logging
@@ -20,98 +19,15 @@ log = logging.getLogger("indexer.embedder")
 
 
 class EmbeddingBackend(Protocol):
-    """Common contract every embedder backend implements.
+    """Structural contract the embedder satisfies.
 
-    Defined as a structural ``Protocol`` rather than an inheritance
-    base so the existing ``Embedder`` (Ollama) does not need to grow a
-    superclass dependency, and tests can pass plain duck-typed fakes.
+    Defined as a ``Protocol`` (not an inheritance base) so test fakes
+    can stay duck-typed without depending on httpx or any concrete
+    backend.
     """
 
     def wait_for_ready(self, timeout: int = 120) -> None: ...
     def embed(self, text: str) -> list[float]: ...
-
-
-def _model_matches(configured: str, available: str) -> bool:
-    """Return True when ``available`` refers to the same model as ``configured``.
-
-    Ollama lists models with an explicit ``:tag`` suffix (``:latest`` by
-    default). A bare configured name like ``nomic-embed-text`` should match
-    the exact string and also ``nomic-embed-text:latest``. Substring
-    matching is avoided because it produced false positives for models
-    that share a prefix (e.g. ``llama3`` matching ``llama3.2``).
-    """
-    if available == configured:
-        return True
-    if ":" in configured:
-        return False
-    return available == f"{configured}:latest"
-
-
-class Embedder:
-    def __init__(self, ollama_host: str, model: str):
-        self.host = ollama_host.rstrip("/")
-        self.model = model
-        self.client = httpx.Client(timeout=60.0)
-
-    def wait_for_ready(self, timeout: int = 120):
-        """Block until Ollama is available and the model is pulled.
-
-        The readiness loop tolerates connection errors to `/api/tags`
-        because Ollama may still be starting. Once the server answers,
-        the pull is a definitive step — any error raised by `_pull_model`
-        propagates to the caller rather than being swallowed, so a
-        missing or misnamed model surfaces as a real failure instead of
-        a misleading readiness timeout.
-        """
-        log.info(f"Waiting for Ollama at {self.host}...")
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            try:
-                r = self.client.get(f"{self.host}/api/tags")
-            except httpx.HTTPError:
-                time.sleep(3)
-                continue
-            if r.status_code != 200:
-                time.sleep(3)
-                continue
-            models = [m["name"] for m in r.json().get("models", [])]
-            if any(_model_matches(self.model, m) for m in models):
-                log.info(f"Ollama ready. Model '{self.model}' available.")
-                return
-            log.info(f"Ollama ready but model '{self.model}' not found. Pulling now...")
-            self._pull_model()
-            return
-        raise RuntimeError(f"Ollama did not become ready within {timeout}s. Run: make pull-models")
-
-    def _pull_model(self):
-        log.info(f"Pulling model: {self.model}")
-        with self.client.stream(
-            "POST",
-            f"{self.host}/api/pull",
-            json={"name": self.model},
-            timeout=600.0,
-        ) as r:
-            # Raise on non-2xx before iterating the body so a 4xx/5xx pull
-            # (e.g. unknown model name) is surfaced as a RuntimeError rather
-            # than silently logged as a successful "ready" state.
-            r.raise_for_status()
-            for line in r.iter_lines():
-                if line:
-                    log.debug(f"pull: {line}")
-        log.info(f"Model '{self.model}' ready.")
-
-    @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=2, max=10),
-    )
-    def embed(self, text: str) -> list[float]:
-        """Generate an embedding vector for the given text."""
-        r = self.client.post(
-            f"{self.host}/api/embeddings",
-            json={"model": self.model, "prompt": text},
-        )
-        r.raise_for_status()
-        return r.json()["embedding"]
 
 
 class MlxEmbedder:
@@ -133,7 +49,7 @@ class MlxEmbedder:
     # mxfp8 ≈ 4 min, Qwen3-Reranker-4B mxfp8 ≈ 2 min. Cached subsequent
     # loads run in <30 s. The default warmup ceiling sits comfortably
     # above the cold-start observation; operators on slow links can
-    # raise it via ``MLX_EMBED_WARMUP_TIMEOUT_SECS``.
+    # raise it via ``EMBED_WARMUP_TIMEOUT_SECS``.
     DEFAULT_WARMUP_TIMEOUT_SECS = 600.0
 
     def wait_for_ready(self, timeout: int = 120) -> None:
@@ -162,7 +78,7 @@ class MlxEmbedder:
             )
         warmup_timeout = float(
             os.environ.get(
-                "MLX_EMBED_WARMUP_TIMEOUT_SECS",
+                "EMBED_WARMUP_TIMEOUT_SECS",
                 self.DEFAULT_WARMUP_TIMEOUT_SECS,
             )
         )

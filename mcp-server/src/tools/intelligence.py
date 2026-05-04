@@ -432,7 +432,7 @@ def _thread_context(thread: ThreadResult, limit: int = PER_THREAD_CHAR_BUDGET) -
 def register_intelligence_tools(
     server,
     db,
-    ollama,
+    llm,
     llm_mode: str,
     anthropic_key: str,
     claude_model: str,
@@ -442,10 +442,11 @@ def register_intelligence_tools(
     secret_values = [anthropic_key]
 
     async def llm_complete(system: str, user: str) -> str:
-        """Route to local Ollama or Claude API based on llm_mode."""
+        """Route to the local LLM (Ollama or MLX-LM, OpenAI-compatible)
+        or the Claude API based on ``llm_mode``."""
         if llm_mode == "cloud" and anthropic_key:
             return await _claude_complete(system, user, anthropic_key, claude_model)
-        return await ollama.complete(system, user)
+        return await llm.complete(system, user)
 
     @server.tool()
     async def ask_mailbox(
@@ -532,7 +533,7 @@ def register_intelligence_tools(
             # per-message chunks to each surfaced thread, so the LLM
             # context below is the precise passages that drove ranking
             # rather than the truncated accumulated thread body.
-            embedding = await ollama.embed(question)
+            embedding = await llm.embed(question)
             results = await asyncio.to_thread(
                 db.hybrid_search,
                 query_text=question,
@@ -639,7 +640,7 @@ def register_intelligence_tools(
             # path returns at most one thread so there's no ambiguity
             # at the summarize step.
             if not thread:
-                embedding = await ollama.embed(thread_id)
+                embedding = await llm.embed(thread_id)
                 resolved = await asyncio.to_thread(
                     db.hybrid_search,
                     query_text=thread_id,
@@ -750,7 +751,7 @@ def register_intelligence_tools(
         limit = clamp_int(limit, default=20, minimum=1, maximum=_MAX_EXTRACT_LIMIT)
 
         try:
-            embedding = await ollama.embed(query)
+            embedding = await llm.embed(query)
             # ``with_evidence`` attaches the chunk(s) that ranked each
             # thread, so the per-thread extraction prompt below sees the
             # exact passages relevant to ``query`` rather than the whole

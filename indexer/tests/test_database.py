@@ -334,8 +334,9 @@ class TestSchema:
 class TestEmbeddingDimGuard:
     def test_upsert_rejects_wrong_dimension(self, db):
         """Passing an embedding whose length does not match EMBEDDING_DIM
-        fails fast — switching OLLAMA_EMBED_MODEL to a wrong-dim model would
-        otherwise surface as a cryptic sqlite-vec error on insert."""
+        fails fast — switching to an embed model with a different output
+        dimension would otherwise surface as a cryptic sqlite-vec error
+        on insert."""
         thread = make_thread()
         with pytest.raises(ValueError, match="dims"):
             db.upsert_thread(thread, [0.1] * 512)  # wrong dim
