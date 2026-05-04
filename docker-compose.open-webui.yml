@@ -77,6 +77,19 @@ services:
       # Talk to the host-side LLM server via OpenAI-compatible API.
       # ``mlx-lm-server`` doesn't authenticate, but Open WebUI requires
       # OPENAI_API_KEY be non-empty — any sentinel string works.
+      #
+      # NOTE: ``ENABLE_OLLAMA_API``, ``ENABLE_OPENAI_API``,
+      # ``OPENAI_API_BASE_URL``, ``OPENAI_API_KEY``, and
+      # ``DEFAULT_MODELS`` above are all PersistentConfig in Open
+      # WebUI: on FIRST start the env values are loaded into the
+      # SQLite config and on subsequent starts the DB-stored values
+      # win. Changing these env vars on an existing
+      # ``open-webui-data`` volume therefore has no effect — the
+      # operator either edits via Admin → Settings → Connections, or
+      # wipes ``open-webui-data`` to re-seed from env. This project is
+      # single-operator so no migration recipe is documented here;
+      # see https://docs.openwebui.com/reference/env-configuration/
+      # for the full PersistentConfig list.
       ENABLE_OLLAMA_API: "false"
       ENABLE_OPENAI_API: "true"
       OPENAI_API_BASE_URL: ${LLM_BASE_URL:-http://host.docker.internal:8002/v1}
