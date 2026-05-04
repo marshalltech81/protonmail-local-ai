@@ -85,47 +85,15 @@ services:
       - bridge-net
 
   # ---------------------------------------------------------------------------
-  # Ollama
-  # Serves local embedding and LLM models.
-  # GPU passthrough: uncomment the deploy block below if you have NVIDIA GPU.
-  #
-  # Memory planning: Ollama loads the full embedding + LLM weights into RAM
-  # on first use. Rough per-model footprint (model weights + ~20% runtime):
-  #   - nomic-embed-text         ~0.5 GB  (embedding, always loaded)
-  #   - llama3.2:3b              ~3 GB
-  #   - llama3.1:8b              ~6 GB
-  #   - qwen2.5:14b / mixtral    ~10 GB+
-  # Budget host RAM for the embedding model plus whichever LLM you pull, and
-  # add ~2 GB headroom so the kernel can keep a page cache. If the host is
-  # memory-tight, add a hard ceiling with `mem_limit` (e.g. `mem_limit: 6g`)
-  # — Ollama will error cleanly rather than triggering the OOM killer on
-  # another service.
+  # Note: Ollama is no longer an in-stack container. Containers reach a
+  # host-installed Ollama via OrbStack's ``host.docker.internal:11434``
+  # (default) for any code path that still routes there
+  # (``USE_MLX_EMBEDDER=false`` fallback; ``LLM_MODE=local``). The host
+  # bind + macOS Application Firewall + LaunchAgent setup lives in
+  # ``docs/setup.md`` (the section that used to be marked "Optional:
+  # native (host) Ollama on macOS"). Override ``OLLAMA_HOST`` in ``.env``
+  # if you serve Ollama from somewhere other than the host.
   # ---------------------------------------------------------------------------
-  ollama:
-    image: ollama/ollama:0.21.2
-    container_name: ollama
-    restart: unless-stopped
-    init: true
-    volumes:
-      - ollama-models:/root/.ollama
-    networks:
-      - app-net
-    # Uncomment and tune based on your model and host budget:
-    # mem_limit: 6g
-    # Uncomment for NVIDIA GPU support:
-    # deploy:
-    #   resources:
-    #     reservations:
-    #       devices:
-    #         - driver: nvidia
-    #           count: 1
-    #           capabilities: [gpu]
-    healthcheck:
-      test: ["CMD", "ollama", "list"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 20s
 
   # ---------------------------------------------------------------------------
   # Indexer
@@ -166,13 +134,11 @@ services:
       - /tmp
       - /home/indexer:uid=1002,gid=1002,mode=700
     depends_on:
-      ollama:
-        condition: service_healthy
       mbsync:
         condition: service_healthy
     environment:
       HOME: /home/indexer
-      OLLAMA_HOST: http://ollama:11434
+      OLLAMA_HOST: ${OLLAMA_HOST:-http://host.docker.internal:11434}
       OLLAMA_EMBED_MODEL: ${OLLAMA_EMBED_MODEL:-nomic-embed-text}
       MAILDIR_PATH: /maildir
       SQLITE_PATH: /data/mail.db
@@ -253,13 +219,11 @@ services:
     depends_on:
       indexer:
         condition: service_healthy
-      ollama:
-        condition: service_healthy
     secrets:
       - anthropic_api_key
     environment:
       SQLITE_PATH: /data/mail.db
-      OLLAMA_HOST: http://ollama:11434
+      OLLAMA_HOST: ${OLLAMA_HOST:-http://host.docker.internal:11434}
       OLLAMA_EMBED_MODEL: ${OLLAMA_EMBED_MODEL:-nomic-embed-text}
       OLLAMA_LLM_MODEL: ${OLLAMA_LLM_MODEL:-qwen2.5:14b-instruct}
       LLM_MODE: ${LLM_MODE:-local}
@@ -299,7 +263,6 @@ volumes:
   bridge-data:       # Bridge credentials, config, and cache
   maildir-volume:    # Raw email in Maildir format
   mbsync-state:      # Persistent mbsync state (pinned Bridge cert fingerprint)
-  ollama-models:     # Downloaded Ollama models
   sqlite-volume:     # SQLite database (FTS5 + vector index)
 
 # =============================================================================

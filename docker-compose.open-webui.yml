@@ -3,6 +3,8 @@ services:
   # ---------------------------------------------------------------------------
   # Open WebUI (optional)
   # Local browser UI for Ollama-backed chats and Streamable HTTP MCP tools.
+  # Reaches Ollama on the host via OrbStack's host.docker.internal:11434
+  # (override OLLAMA_BASE_URL in .env to point elsewhere).
   # Start with: make open-webui-up
   # ---------------------------------------------------------------------------
   open-webui:
@@ -47,8 +49,6 @@ services:
     secrets:
       - open_webui_secret_key
     depends_on:
-      ollama:
-        condition: service_healthy
       mcp-server:
         condition: service_healthy
     environment:
@@ -70,7 +70,7 @@ services:
       # var doesn't have to also remember to change it in two places.
       DEFAULT_MODELS: ${OPEN_WEBUI_DEFAULT_MODEL:-${OLLAMA_LLM_MODEL:-llama3.2}}
       ENABLE_OLLAMA_API: "true"
-      OLLAMA_BASE_URL: http://ollama:11434
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
       ENABLE_OPENAI_API: "false"
       # Pre-wire the local mcp-server as an MCP tool source so chats can
       # call mailbox tools out of the box without an admin clicking

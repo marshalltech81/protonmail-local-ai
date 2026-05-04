@@ -48,9 +48,11 @@ mlx-service (host process)    sqlite-volume
   - Qwen3-Reranker-4B-mxfp8     - message_thread_map
     on Apple Metal              - indexed_files
                                 - pending_deletions (reconciler)
-ollama (container or host)
+ollama (host process)
   - qwen2.5 (or other) for
-    local LLM inference
+    local LLM inference (LLM_MODE=local)
+  - reached from containers via
+    host.docker.internal:11434
         │
         │  reads sqlite-volume (connection opened read-only)
         ▼
@@ -80,7 +82,7 @@ Claude Desktop (host machine)
 |---|---|---|---|
 | `protonmail-bridge` | ProtonMail Cloud | `bridge-data` vol | IMAP 1143, SMTP 1025 (internal) |
 | `mbsync` | Bridge IMAP | `maildir-volume` | nothing |
-| `ollama` | model requests | `ollama-models` vol | HTTP 11434 (internal) — *or* native macOS host process via `docker-compose.host-ollama.yml` overlay (recommended on Mac for Metal acceleration) |
+| `ollama` (host process, not Docker) | model requests | `~/.ollama/` model cache | HTTP 11434 (host bind, reached from Docker via `host.docker.internal`). See `docs/setup.md` for the LaunchAgent + firewall install. |
 | `mlx-service` (host process, not Docker) | embed/rerank requests | `~/.cache/huggingface/` model cache | HTTP 8001 (loopback only); reached from Docker via `host.docker.internal`. See `docs/setup.md` for the LaunchAgent install. |
 | `indexer` | `maildir-volume`, mlx-service (or Ollama) | `sqlite-volume` | nothing |
 | `mcp-server` | `sqlite-volume`, mlx-service (or Ollama), Ollama (LLM) | nothing | HTTP 3000 (localhost only) |
@@ -92,7 +94,6 @@ Claude Desktop (host machine)
 |---|---|---|
 | `bridge-data` | Bridge credentials, GPG key, config | Yes — losing this requires re-login |
 | `maildir-volume` | Raw email in Maildir format | Optional — mbsync can re-sync |
-| `ollama-models` | Downloaded Ollama model weights | Optional — can re-pull |
 | `sqlite-volume` | SQLite index (FTS5 + vectors) | Optional — indexer can rebuild |
 | `open-webui-data` | Optional Open WebUI accounts, settings, and chats | Yes, if you want to preserve UI state |
 
@@ -101,9 +102,11 @@ Claude Desktop (host machine)
 The stack uses two isolated bridge networks:
 
 - `bridge-net` for ProtonBridge ↔ `mbsync`
-- `app-net` for `indexer` ↔ `ollama` ↔ `mcp-server`
-- The optional Open WebUI overlay joins `app-net` and reuses the existing
-  `ollama` service; it does not run a second Ollama instance.
+- `app-net` for `indexer` ↔ `mcp-server`. Both reach the host Ollama
+  via `host.docker.internal:11434` rather than an in-stack container.
+- The optional Open WebUI overlay joins `app-net` and reaches the
+  same host Ollama via `host.docker.internal:11434`; it does not run
+  its own Ollama.
 
 For stricter local-only deployments, `docker-compose.hardened.yml` marks
 `app-net` as `internal: true` so those services cannot reach the internet.
@@ -113,16 +116,17 @@ The default stack exposes only `127.0.0.1:3000` for the MCP server. The
 optional Open WebUI overlay also exposes `127.0.0.1:8080` for the browser UI.
 No container is reachable from outside the machine.
 
-### Optional: native (host) Ollama on macOS
+### Ollama (host install, not containerized)
 
-On macOS, the `docker-compose.host-ollama.yml` overlay removes the in-stack
-`ollama` container and points the indexer + mcp-server at a Homebrew-installed
-Ollama on the host (reached via OrbStack's `host.docker.internal`). This is
-recommended when running on Apple Silicon because containerized Ollama cannot
-use Metal. The native listener must be bound to `0.0.0.0:11434` so containers
-can reach it; the macOS Application Firewall must be enabled (with a block
-rule on the `ollama` binary) so the listener is not exposed to the LAN. See
-`docs/setup.md` for one-time host setup.
+Ollama runs as a host process — `brew install ollama` plus the
+LaunchAgent + firewall setup in `docs/setup.md`. Containers reach it
+via OrbStack's `host.docker.internal:11434`. This is the only
+supported deployment shape: containerized Ollama on macOS cannot use
+Metal, so an in-stack Ollama would silently lose Metal acceleration.
+The host listener must be bound to `0.0.0.0:11434` so OrbStack
+containers can reach it; the macOS Application Firewall must be
+enabled with a binary-level block on `/opt/homebrew/bin/ollama` so
+the listener is not reachable from the LAN.
 
 ## Search Architecture
 
