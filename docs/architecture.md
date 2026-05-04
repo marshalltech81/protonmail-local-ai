@@ -110,7 +110,17 @@ The stack uses two isolated bridge networks:
 
 For stricter local-only deployments, `docker-compose.hardened.yml` marks
 `app-net` as `internal: true` so those services cannot reach the internet.
-Use it only after pulling Ollama models and only with `LLM_MODE=local`.
+
+> **Currently broken in the default stack.** After the host-Ollama-as-default
+> change (PR #86), the indexer + mcp-server reach Ollama and mlx-service via
+> `host.docker.internal`. Whether `host.docker.internal` resolves through a
+> network with `internal: true` is runtime-dependent (Docker Desktop and
+> OrbStack behave differently and the OrbStack case is unverified). Until the
+> overlay is reworked to either move both Ollama and mlx-service into
+> containers on `app-net` or explicitly punch `host.docker.internal` through,
+> applying it will likely cut off Ollama LLM calls (`LLM_MODE=local`), the
+> Ollama embed fallback, and the MLX `/embed` and `/rerank` calls. The
+> compose file itself carries the same warning. Do not apply it as-is.
 
 The default stack exposes only `127.0.0.1:3000` for the MCP server. The
 optional Open WebUI overlay also exposes `127.0.0.1:8080` for the browser UI.

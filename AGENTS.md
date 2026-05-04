@@ -4,17 +4,22 @@
 
 This repository provides a fully local, privacy-first AI search and intelligence layer for ProtonMail.
 
-The default stack consists of five containers:
+The default stack consists of four containers plus one host process:
 
-- ProtonBridge
-- mbsync
-- Ollama
-- indexer
-- MCP server
+- ProtonBridge (container)
+- mbsync (container)
+- indexer (container)
+- MCP server (container)
+- mlx-service (host process — embedder + reranker on Apple Metal)
 
-An optional Open WebUI overlay can be started for a local browser UI. It must
-reuse the existing Ollama and MCP server containers; do not add a second Ollama
-instance for the UI.
+Ollama is also a host process (`brew install ollama`), reached from
+the containers via OrbStack's `host.docker.internal:11434`. It is not
+an in-stack container.
+
+An optional Open WebUI overlay can be started for a local browser UI.
+It reuses the existing host Ollama (via `host.docker.internal:11434`)
+and the MCP server container; do not add a second Ollama instance for
+the UI.
 
 Core behavior:
 
