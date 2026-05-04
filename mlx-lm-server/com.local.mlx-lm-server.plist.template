@@ -6,7 +6,7 @@
 	<string>com.local.mlx-lm-server</string>
 	<key>ProgramArguments</key>
 	<array>
-		<string>/Users/marshall/src/github.com/marshalltech81/protonmail-local-ai/mlx-lm-server/.venv/bin/mlx_lm.server</string>
+		<string>__REPO_ROOT__/mlx-lm-server/.venv/bin/mlx_lm.server</string>
 		<string>--model</string>
 		<string>mlx-community/Qwen3-32B-4bit</string>
 		<string>--host</string>
@@ -26,7 +26,7 @@
 		<string>4096</string>
 	</array>
 	<key>WorkingDirectory</key>
-	<string>/Users/marshall/src/github.com/marshalltech81/protonmail-local-ai/mlx-lm-server</string>
+	<string>__REPO_ROOT__/mlx-lm-server</string>
 	<key>EnvironmentVariables</key>
 	<dict>
 		<key>PATH</key>
@@ -40,9 +40,9 @@
 		<false/>
 	</dict>
 	<key>StandardOutPath</key>
-	<string>/Users/marshall/Library/Logs/mlx-lm-server.log</string>
+	<string>__USER_HOME__/Library/Logs/mlx-lm-server.log</string>
 	<key>StandardErrorPath</key>
-	<string>/Users/marshall/Library/Logs/mlx-lm-server.log</string>
+	<string>__USER_HOME__/Library/Logs/mlx-lm-server.log</string>
 	<key>ProcessType</key>
 	<string>Interactive</string>
 </dict>

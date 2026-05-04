@@ -203,13 +203,20 @@ authoritative install steps.
    cd mlx-lm-server && uv sync
    ```
 
-2. Copy the LaunchAgent plist into your user LaunchAgents dir and load it:
+2. Generate and install the LaunchAgent plist. The vendored template
+   carries `__REPO_ROOT__` / `__USER_HOME__` placeholders so it stays
+   portable; the install script substitutes them and writes the
+   result to `~/Library/LaunchAgents/`:
 
    ```bash
-   cp mlx-lm-server/com.local.mlx-lm-server.plist ~/Library/LaunchAgents/
+   ./mlx-lm-server/install-launchagent.sh
    launchctl bootstrap "gui/$(id -u)" \
      ~/Library/LaunchAgents/com.local.mlx-lm-server.plist
    ```
+
+   Re-run the install script after `uv sync` rebuilds the venv so
+   the plist re-points at the regenerated binary path; then
+   `launchctl kickstart -k "gui/$(id -u)/com.local.mlx-lm-server"`.
 
 3. Verify the bind:
 

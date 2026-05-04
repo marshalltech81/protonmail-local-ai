@@ -37,16 +37,27 @@ uv run mlx_lm.server \
     --model mlx-community/Qwen3-32B-4bit \
     --host 127.0.0.1 \
     --port 8002 \
-    --log-level INFO
+    --log-level INFO \
+    --max-tokens 4096
 ```
+
+`--max-tokens 4096` matches the LaunchAgent setting and gives Qwen3's
+thinking-mode answers headroom; without it `mlx_lm.server` falls back
+to its 512-token default and long answers truncate.
 
 First run downloads the model from `mlx-community` into
 `~/.cache/huggingface/hub/`. Subsequent runs reuse the cached weights.
 
 ## LaunchAgent install
 
+The vendored
+[`com.local.mlx-lm-server.plist.template`](com.local.mlx-lm-server.plist.template)
+contains `__REPO_ROOT__` and `__USER_HOME__` placeholders so it stays
+portable across clones. Run the install script to substitute them and
+write the result to `~/Library/LaunchAgents/`:
+
 ```bash
-cp com.local.mlx-lm-server.plist ~/Library/LaunchAgents/
+./mlx-lm-server/install-launchagent.sh
 launchctl bootstrap "gui/$(id -u)" ~/Library/LaunchAgents/com.local.mlx-lm-server.plist
 launchctl print "gui/$(id -u)/com.local.mlx-lm-server" | head
 ```
@@ -64,6 +75,7 @@ launchctl bootout "gui/$(id -u)/com.local.mlx-lm-server"
 rm ~/Library/LaunchAgents/com.local.mlx-lm-server.plist
 ```
 
-After `uv sync` rebuilds the venv, re-run `launchctl kickstart` so the
-agent picks up the new binary path. The plist references the absolute
-path of `.venv/bin/mlx_lm.server`, which uv recreates on rebuild.
+After `uv sync` rebuilds the venv, re-run `./install-launchagent.sh`
+to regenerate the plist and then `launchctl kickstart` to restart the
+agent. The plist references absolute paths in `.venv/`, which uv
+recreates on rebuild.
