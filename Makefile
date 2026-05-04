@@ -1,4 +1,4 @@
-.PHONY: build build-nocache up down logs first-run update pull-models status clean sync sync-indexer sync-mcp test test-indexer test-mcp typecheck typecheck-indexer typecheck-mcp bridge-patch-check bridge-smoke bridge-upgrade-check open-webui-up open-webui-down open-webui-logs init-secrets validate-env help
+.PHONY: build build-nocache up down logs first-run update pull-models status clean sync sync-indexer sync-mcp sync-mlx test test-indexer test-mcp test-mlx typecheck typecheck-indexer typecheck-mcp typecheck-mlx bridge-patch-check bridge-smoke bridge-upgrade-check open-webui-up open-webui-down open-webui-logs init-secrets validate-env help
 
 UV_CACHE_DIR ?= /tmp/uv-cache
 export UV_CACHE_DIR
@@ -28,11 +28,12 @@ help:
 	@echo "  update       Rebuild and restart Bridge with new version"
 	@echo "  pull-models  Pull Ollama embedding and LLM models on the host (requires brew install ollama)"
 	@echo "  status       Show container and index status"
-	@echo "  sync         Sync local uv environments for Python services"
-	@echo "  test         Run indexer and mcp-server unit tests locally with uv"
-	@echo "  typecheck    Run mypy over both Python services"
+	@echo "  sync         Sync local uv environments for all three Python services"
+	@echo "  test         Run indexer, mcp-server, and mlx-service unit tests locally with uv"
+	@echo "  typecheck    Run mypy over all three Python services"
 	@echo "  test-indexer Run indexer unit tests only"
 	@echo "  test-mcp     Run mcp-server unit tests only"
+	@echo "  test-mlx     Run mlx-service unit tests only"
 	@echo "  clean        Remove all containers and volumes (destructive)"
 	@echo ""
 
@@ -181,13 +182,16 @@ open-webui-logs:
 	docker compose -f docker-compose.yml -f docker-compose.open-webui.yml logs -f open-webui
 
 # Sync local Python environments using per-service uv projects
-sync: sync-indexer sync-mcp
+sync: sync-indexer sync-mcp sync-mlx
 
 sync-indexer:
 	cd indexer && uv sync --locked --dev
 
 sync-mcp:
 	cd mcp-server && uv sync --locked --dev
+
+sync-mlx:
+	cd mlx-service && uv sync --locked --dev
 
 # Show running containers and basic index status
 status:
@@ -203,7 +207,7 @@ status:
 	@echo ""
 
 # Run unit tests locally using uv
-test: test-indexer test-mcp
+test: test-indexer test-mcp test-mlx
 
 test-indexer: sync-indexer
 	cd indexer && uv run pytest -q
@@ -211,13 +215,19 @@ test-indexer: sync-indexer
 test-mcp: sync-mcp
 	cd mcp-server && uv run pytest -q
 
-typecheck: typecheck-indexer typecheck-mcp
+test-mlx: sync-mlx
+	cd mlx-service && uv run pytest -q
+
+typecheck: typecheck-indexer typecheck-mcp typecheck-mlx
 
 typecheck-indexer: sync-indexer
 	cd indexer && uv run mypy src
 
 typecheck-mcp: sync-mcp
 	cd mcp-server && uv run mypy src
+
+typecheck-mlx: sync-mlx
+	cd mlx-service && uv run mypy src
 
 # Remove all containers and volumes
 # WARNING: This deletes your email index and Bridge credentials.

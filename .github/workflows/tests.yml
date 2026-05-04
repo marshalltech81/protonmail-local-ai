@@ -76,3 +76,33 @@ jobs:
           path: mcp-server/coverage.xml
           if-no-files-found: error
           retention-days: 14
+
+  mlx-service-pytest:
+    name: mlx-service pytest
+    # Ubuntu runner is fine here: mlx ships manylinux wheels (CPU mode)
+    # for the Python versions this project pins, so ``uv sync`` resolves
+    # cleanly on Linux. The endpoint tests monkeypatch the model handles
+    # to fakes — no Metal needed at test time. If a future mlx release
+    # ever drops Linux wheels, switch to ``runs-on: macos-latest``.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version-file: ".python-version"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+        with:
+          version: "0.11.6"
+          enable-cache: true
+          cache-dependency-glob: "mlx-service/uv.lock"
+
+      - name: Sync mlx-service environment
+        working-directory: mlx-service
+        run: uv sync --locked --dev
+
+      - name: Run pytest
+        working-directory: mlx-service
+        run: uv run pytest -q
