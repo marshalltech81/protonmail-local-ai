@@ -29,9 +29,16 @@ import resource
 import threading
 from typing import Any
 
-import mlx.core as mx
+# NB: ``mlx.core`` and ``mlx_embeddings`` are deliberately *not* imported
+# at module load. ``import mlx.core`` triggers Metal device initialization
+# on macOS, which fails on headless / CI environments without a GPU
+# (e.g. ``RuntimeError: [metal::load_device] No Metal device available``).
+# Tests need to be able to ``from src import main`` without hitting Metal,
+# so model and tokenizer use of MLX is gated to the lazy-load path inside
+# ``_ModelHandle.get`` and the per-call helpers ``_embed_one`` /
+# ``_rerank_score`` below. Production behavior is unchanged: the first
+# real ``/embed`` or ``/rerank`` request still triggers the same load.
 from fastapi import FastAPI, HTTPException
-from mlx_embeddings import load
 from pydantic import BaseModel, Field
 
 log = logging.getLogger("mlx-service")
@@ -78,6 +85,11 @@ class _ModelHandle:
                     log.info(
                         "loading %s (%s) — first call, may take ~30-60s", self.label, self.model_id
                     )
+                    # Lazy: see module-top docstring on why MLX imports
+                    # are deferred. First call here is the first place
+                    # production touches Metal.
+                    from mlx_embeddings import load
+
                     self._model, self._tokenizer = load(self.model_id)
                     log.info("loaded %s", self.label)
         return self._model, self._tokenizer
@@ -107,6 +119,8 @@ def _rerank_metadata(tokenizer: Any) -> dict[str, Any]:
 
 
 def _embed_one(model: Any, tokenizer: Any, text: str) -> list[float]:
+    import mlx.core as mx  # lazy — see module-top docstring
+
     ids = tokenizer.encode(text, return_tensors="mlx")
     out = model(ids)
     vec = out.text_embeds[0]
@@ -129,6 +143,8 @@ def _rerank_score(
     document: str,
     instruction: str,
 ) -> float:
+    import mlx.core as mx  # lazy — see module-top docstring
+
     body = f"<Instruct>: {instruction}\n<Query>: {query}\n<Document>: {document}"
     body_ids = tokenizer.encode(body, add_special_tokens=False)
     budget = RERANK_MAX_LENGTH - len(meta["prefix_ids"]) - len(meta["suffix_ids"])

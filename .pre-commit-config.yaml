@@ -55,5 +55,5 @@ repos:
     rev: 1.9.4
     hooks:
       - id: bandit
-        args: ['-r', 'indexer/src', 'mcp-server/src', '--severity-level', 'medium']
+        args: ['-r', 'indexer/src', 'mcp-server/src', 'mlx-service/src', '--severity-level', 'medium']
         pass_filenames: false

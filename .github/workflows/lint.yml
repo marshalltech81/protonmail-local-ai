@@ -83,6 +83,9 @@ jobs:
       - name: Compile mcp-server sources
         run: python -m compileall -q -f mcp-server/src
 
+      - name: Compile mlx-service sources
+        run: python -m compileall -q -f mlx-service/src
+
   mypy:
     name: mypy
     runs-on: ubuntu-latest
@@ -101,6 +104,7 @@ jobs:
           cache-dependency-glob: |
             indexer/uv.lock
             mcp-server/uv.lock
+            mlx-service/uv.lock
 
       - name: Typecheck indexer
         working-directory: indexer
@@ -108,4 +112,19 @@ jobs:
 
       - name: Typecheck mcp-server
         working-directory: mcp-server
+        run: uv run mypy src
+
+      - name: Typecheck mlx-service
+        working-directory: mlx-service
+        # mlx-service depends on the ``mlx`` Python package, whose
+        # PyPI manylinux wheel installs but fails at import on
+        # Ubuntu (``libmlx.so: cannot open shared object file``;
+        # see ``.github/workflows/tests.yml`` mlx-service-pytest
+        # job for the same constraint and the macos-latest fallback
+        # used there). mypy itself doesn't load mlx — its
+        # ``ignore_missing_imports`` override on ``mlx.*`` and
+        # ``mlx_embeddings.*`` (see ``mlx-service/pyproject.toml``)
+        # means type-checking the source doesn't require the
+        # package to be importable. ``uv sync`` installs but never
+        # imports it; mypy then runs purely on the source AST.
         run: uv run mypy src
