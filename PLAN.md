@@ -38,7 +38,7 @@ The stack now runs:
 - **ProtonBridge** — Docker, headless, IMAP/SMTP on `bridge-net` only.
 - **mbsync** — Docker, pulls into Maildir, `chmod go+r` after each sync.
 - **indexer** — Docker, parses Maildir, threads, embeds via the MLX
-  service (default), writes SQLite. Schema is at v14 with 4096-dim
+  service (default), writes SQLite. Schema is at v15 with 4096-dim
   vectors. Ollama embed (`nomic-embed-text`) remains as a feature-
   flagged fallback (`USE_MLX_EMBEDDER=false`) but is no longer the
   default path.
@@ -261,28 +261,18 @@ Definition of done:
 ### MLX-rebuild carryover (still-pending follow-ups from PRs #83/#84/#85)
 
 Independent of the consolidation work above. These are tuning /
-validation tasks that should happen as the full backfill completes,
-regardless of the LLM-engine swap.
+validation tasks that should happen regardless of the LLM-engine swap.
 
-1. **Full mailbox reindex.** In progress at time of writing — 18k+
-   messages indexed, ~10k still queued. Track via the recurring
-   indexer-snapshot job (cron `f3c38d3a`).
-2. **One-knob-at-a-time eval.** Two retrieval-quality variables
+1. **One-knob-at-a-time eval.** Two retrieval-quality variables
    moved at once in PR #83 (Qwen3 embedder vs nomic, and 1000/1500
    chunk budget vs 350/500). If the manual eval shows a regression,
    run a diagnostic split: Qwen3 embedder at the *old* 350/500
    chunk budget first, then raise budgets, to attribute any
    quality change to the right knob.
-3. **`RERANK_CANDIDATES` latency tuning.** Default 50 means 50
-   forward passes through a 4B model per query. Measure wall clock
-   on a real query (warm cache). If a single rerank call exceeds
-   ~5 s, drop the default to 20-30 — Open WebUI's ~60 s client
-   timeout already bites on populated mailboxes (see
-   `project_ask_mailbox_slow.md`).
-4. **Rerank-side quality experiment.** Once retrieval is stable,
+2. **Rerank-side quality experiment.** Once retrieval is stable,
    compare `USE_MLX_RERANKER=true` vs `false` on the manual eval
    set to measure what the rerank stage actually buys you.
-5. **Indexer healthcheck threshold.** Currently flagged
+3. **Indexer healthcheck threshold.** Currently flagged
    "unhealthy" during sustained MLX-pace indexing because
    `HEALTH_MAX_AGE_SECONDS` was tuned for Ollama's ~50-200ms
    embeddings, not Qwen3-Embedding's ~1-3s per chunk. Functional
@@ -561,6 +551,33 @@ Need final decision on the long-term home for live Bridge smoke tests:
 - GitHub-hosted manual/nightly workflow using a dedicated no-2FA Proton test account
 - or a trusted self-hosted runner with persistent authenticated Bridge state
 
+## Open follow-ups surfaced during the 2026-05-04 manual eval session
+
+These were uncovered while running Tiers 2–10 against the live mailbox.
+Tracking them here so they don't get lost when the eval session ends.
+
+1. **Tool-routing docstring iteration.** Two routing failures
+   surfaced in the eval session and were addressed with docstring
+   tightenings, but the work is ongoing because the model's priors
+   are stronger than a single docstring nudge:
+     - `from_name` vs `from_addr` for sender filters — caught at
+       Tier 4 #2 (model iterated 7 search variants instead of using
+       `from_name`); first docstring rewrite fixed Tier 6 #1 on the
+       next try
+     - `ask_mailbox` for attachment content vs `search_emails` /
+       `get_thread` — caught at Tier 10 #1 (model didn't surface a
+       149 KB extracted PDF, then on retry tried Google Drive
+       instead); second pass made the leading sentence of
+       `ask_mailbox` mention attachments explicitly
+   Treat tool docstrings as living artifacts the model's behavior
+   tells you to keep tightening.
+2. **Tool-call instrumentation.** Each registered MCP tool now logs
+   its name + arguments at INFO level via `log.info("tool=... %s",
+   {locals filtered to non-None})`. The current implementation
+   leaks closure-captured server-side objects (`db`, `ollama`,
+   `reranker`) into the log line — minor noise; tighten the
+   filter to a known-arg whitelist when convenient.
+
 ## Recently Completed
 
 The repository was simplified end-to-end to drop migration debt that had
@@ -594,6 +611,45 @@ The functional surface — chunker, attachment extractors (PDF/DOCX/
 XLSX/HTML/TXT/image-OCR), per-occurrence + per-content-hash dedup,
 hybrid RRF retrieval with chunk lane, intelligence-tool chunk
 evidence, deletion reconciler, durable indexing queue — all stays.
+
+### 2026-05-04 — Hybrid-search index fix (schema v15)
+
+The chunk- and thread-keyword lanes of `hybrid_search` were JOINing
+their FTS5 virtual tables back to base tables on `<base>.fts_rowid`
+without an index on that column. SQLite planned `SCAN <base>` per
+FTS5 hit; on a populated mailbox (~15k FTS hits × 73k chunk rows)
+that produced ~1.1B row comparisons per query, blocking
+`search_emails` for 5–7 minutes and blowing Claude Desktop's 4-min
+MCP request timeout. Fix shipped as `SCHEMA_VERSION = 15` plus
+`indexer/src/migrations/0015_fts_rowid_indexes.sql`, with the same
+indexes added to `_apply_initial_schema` for fresh installs and an
+`ANALYZE` so the planner picks them up immediately. End-to-end
+`hybrid_search` went from ~400 s to ~0.5 s (≈800× speedup); the
+isolated chunk-keyword lane went 350 s → 21 ms (≈17,500×). Memory:
+`project_fts5_join_missing_index.md`. Misdiagnoses logged at the
+bottom of that memory so future regressions don't re-walk WAL
+pinning / FTS5 fragmentation as causes.
+
+### 2026-05-04 — RERANK_CANDIDATES tuning (carryover #3)
+
+Defaulted to 50, tuned during the session. While diagnosing the
+slow-search bug above, lowered to 8 under a wrong rerank-cost
+theory, then restored to 20 once the SQL stage was identified as
+the real bottleneck. Final value of 20 balances funnel size against
+chunk-lane fetch cost (`fetch_limit = max(limit, candidates) × 10`).
+
+### 2026-05-04 — mcp-server WAL pinning fix
+
+`Database._conn` was a single shared `?mode=ro` `sqlite3.Connection`
+that pinned a WAL read mark and blocked `PRAGMA
+wal_checkpoint(TRUNCATE)` from the indexer (writer) side, letting
+`mail.db-wal` grow unbounded under sustained writer activity (159 MB
+observed). Refactored to a `@property` that returns a fresh
+connection per access; the connection lives only as long as the
+calling expression. Verified live: checkpoint now returns `(0, 0,
+0)` SUCCESS with mcp-server running, WAL truncates to 0 bytes.
+All 314 mcp-server tests pass at 92.81% coverage. Memory:
+`project_mcp_wal_pinning.md`.
 
 ## Notes for Agents
 
