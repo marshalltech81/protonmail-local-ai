@@ -197,10 +197,14 @@ authoritative install steps.
 
 ### One-time host setup
 
+All commands below run from the repo root; the parenthesized
+subshells keep your cwd there so step 2 can find the install script
+on the relative path it expects.
+
 1. Install the project's pinned `mlx-lm` venv:
 
    ```bash
-   cd mlx-lm-server && uv sync
+   (cd mlx-lm-server && uv sync)
    ```
 
 2. Generate and install the LaunchAgent plist. The vendored template
@@ -282,10 +286,10 @@ to `mlx-service` directly).
 
 1. Install the project's Python deps for the service. The `mlx-service`
    directory ships its own `pyproject.toml` so it stays isolated from
-   the indexer / mcp-server uv environments:
+   the indexer / mcp-server uv environments. Run from the repo root:
 
    ```bash
-   cd mlx-service && uv sync
+   (cd mlx-service && uv sync)
    ```
 
    First run downloads MLX itself and the model handles; the model

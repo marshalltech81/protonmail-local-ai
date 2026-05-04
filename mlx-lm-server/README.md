@@ -31,6 +31,8 @@ that the project's `LocalLLMClient.complete()` posts to:
 
 ## Local run (foreground)
 
+Run from this directory (`mlx-lm-server/`):
+
 ```bash
 uv sync
 uv run mlx_lm.server \
@@ -53,11 +55,16 @@ First run downloads the model from `mlx-community` into
 The vendored
 [`com.local.mlx-lm-server.plist.template`](com.local.mlx-lm-server.plist.template)
 contains `__REPO_ROOT__` and `__USER_HOME__` placeholders so it stays
-portable across clones. Run the install script to substitute them and
-write the result to `~/Library/LaunchAgents/`:
+portable across clones. The install script auto-detects the repo
+root from its own location, so it works from either the repo root or
+this directory:
 
 ```bash
+# From the repo root:
 ./mlx-lm-server/install-launchagent.sh
+# Or from inside this directory:
+./install-launchagent.sh
+
 launchctl bootstrap "gui/$(id -u)" ~/Library/LaunchAgents/com.local.mlx-lm-server.plist
 launchctl print "gui/$(id -u)/com.local.mlx-lm-server" | head
 ```
