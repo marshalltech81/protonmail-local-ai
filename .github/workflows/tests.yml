@@ -79,12 +79,17 @@ jobs:
 
   mlx-service-pytest:
     name: mlx-service pytest
-    # Ubuntu runner is fine here: mlx ships manylinux wheels (CPU mode)
-    # for the Python versions this project pins, so ``uv sync`` resolves
-    # cleanly on Linux. The endpoint tests monkeypatch the model handles
-    # to fakes — no Metal needed at test time. If a future mlx release
-    # ever drops Linux wheels, switch to ``runs-on: macos-latest``.
-    runs-on: ubuntu-latest
+    # macOS runner is required: the mlx PyPI manylinux wheel installs on
+    # Ubuntu but fails at import with ``libmlx.so: cannot open shared
+    # object file`` — the wheel does not bundle the C++ runtime and
+    # there is no apt package for it on the GitHub-hosted Ubuntu image.
+    # mlx is fundamentally an Apple Silicon framework; the Linux wheel
+    # appears built for a downstream-controlled environment with libmlx
+    # pre-installed system-wide. Endpoint tests already monkeypatch the
+    # model handles to fakes, so no Metal is exercised at test time —
+    # macOS is just where ``import mlx.core`` succeeds. If mlx ever
+    # ships a self-contained Linux wheel, switch back to ubuntu-latest.
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v6
 
