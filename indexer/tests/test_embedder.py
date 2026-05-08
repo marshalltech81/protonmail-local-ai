@@ -271,6 +271,44 @@ class TestOpenAIEmbedder:
                 with pytest.raises(RuntimeError, match="did not become ready"):
                     emb.wait_for_ready(timeout=0)
 
+    def test_wait_for_ready_connect_deadline_independent_of_warmup_timeout(self):
+        # Regression: the connect-phase deadline must use ``timeout``,
+        # not ``max(timeout, EMBED_WARMUP_TIMEOUT_SECS)``. The earlier
+        # ``max()`` form let a default 600s warmup ceiling extend the
+        # connect-phase budget — a missing service would hang for 10
+        # minutes instead of failing in ~timeout. Drive a deterministic
+        # virtual clock so the assertion cannot itself wait out 600s
+        # if the regression returns.
+        emb = OpenAIEmbedder("http://host.docker.internal:8001/v1", "test-model")
+        handler_calls = {"n": 0}
+
+        def handler(_request: httpx.Request) -> httpx.Response:
+            handler_calls["n"] += 1
+            raise httpx.ConnectError("refused")
+
+        _install_mock(emb, handler)
+
+        # Each time.time() call advances 1 virtual second.
+        virtual_now = [1000.0]
+
+        def fake_time() -> float:
+            virtual_now[0] += 1.0
+            return virtual_now[0]
+
+        with patch("src.embedder.time.sleep", lambda _: None):
+            with patch("src.embedder.time.time", fake_time):
+                with patch.dict("os.environ", {"EMBED_WARMUP_TIMEOUT_SECS": "600"}):
+                    with pytest.raises(RuntimeError, match="did not become ready"):
+                        emb.wait_for_ready(timeout=2)
+
+        # With the fix (deadline = start + 2 virtual seconds): at most a
+        # couple of attempts fit in the budget. With the regression
+        # (deadline = start + 600 virtual seconds): hundreds of attempts.
+        assert handler_calls["n"] <= 3, (
+            f"connect deadline should respect timeout=2 regardless of "
+            f"EMBED_WARMUP_TIMEOUT_SECS=600, got {handler_calls['n']} attempts"
+        )
+
     def test_wait_for_ready_fails_fast_on_4xx_auth_error(self):
         # 401/403/404/422 won't recover by retrying; surface immediately
         # so the operator fixes config rather than waiting out the

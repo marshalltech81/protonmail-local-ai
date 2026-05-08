@@ -88,14 +88,25 @@ class OpenAIEmbedder:
         HuggingFace download for mlx-service, and a single fast probe
         for cloud providers.
 
-        ``timeout`` is the connect-phase budget; the per-call request
-        timeout is ``EMBED_WARMUP_TIMEOUT_SECS`` (default 600 s) to
-        absorb a multi-minute first-time model download. The total
-        wall-clock can therefore exceed ``timeout`` once a connection
-        succeeds — by design.
+        Two independent deadlines:
+
+        - ``timeout`` (default 120 s) bounds the **connect-phase** —
+          how long we keep retrying ``ConnectError`` / refused TCP
+          before declaring the service unreachable. A service that
+          isn't bound on the port should fail in ~``timeout`` seconds,
+          not 10 minutes.
+        - ``EMBED_WARMUP_TIMEOUT_SECS`` (default 600 s) bounds **one
+          successful response** — once TCP connects the request can
+          take this long before httpx times out, absorbing a
+          multi-minute first-time HF model download.
+
+        Total wall-clock can exceed ``timeout`` only when a connection
+        succeeded but the response is in flight. A 5xx after a long
+        warmup wait still surfaces as failure because the connect
+        deadline has by then passed.
 
         4xx auth/model/quota errors fail fast (won't recover); 5xx and
-        connection errors retry until the deadline.
+        connection errors retry until the connect deadline.
         """
         warmup_timeout = float(
             os.environ.get(
@@ -104,14 +115,15 @@ class OpenAIEmbedder:
             )
         )
         log.info(
-            "Waiting for embedder at %s (model=%s, warmup_timeout=%.0fs)...",
+            "Waiting for embedder at %s (model=%s, connect_timeout=%ds, warmup_timeout=%.0fs)...",
             self.base_url,
             self.model,
+            timeout,
             warmup_timeout,
         )
-        deadline = time.time() + max(float(timeout), warmup_timeout)
+        connect_deadline = time.time() + float(timeout)
         last_err: Exception | None = None
-        while time.time() < deadline:
+        while time.time() < connect_deadline:
             try:
                 r = self.client.post(
                     f"{self.base_url}/embeddings",
