@@ -126,8 +126,8 @@ SQLITE_PATH = os.environ.get("SQLITE_PATH", "/data/mail.db")
 # Local-LLM endpoint, OpenAI-compatible (``/v1/chat/completions`` is
 # appended by ``LocalLLMClient.complete``). Default points at the
 # host-side ``mlx-lm-server`` LaunchAgent on port 8002. Any
-# OpenAI-compatible chat-completions server works (e.g. Ollama at
-# ``:11434/v1``) — the LLM client never branches on backend.
+# OpenAI-compatible chat-completions server works — the LLM client
+# never branches on backend.
 LLM_BASE_URL = os.environ.get("LLM_BASE_URL", "http://host.docker.internal:8002/v1")
 LLM_MODEL = os.environ.get("LLM_MODEL", "mlx-community/Qwen3-32B-4bit")
 LLM_MODE = os.environ.get("LLM_MODE", "local")

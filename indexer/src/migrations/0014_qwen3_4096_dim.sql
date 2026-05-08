@@ -13,8 +13,8 @@
 -- entry. Empty databases skip the gate (nothing to lose).
 --
 -- Resize the vector tables from 768-dim to 4096-dim for the new
--- MLX-served Qwen3-Embedding-8B default. The legacy Ollama
--- ``nomic-embed-text`` was 768-dim; Qwen3-Embedding-8B is 4096.
+-- MLX-served Qwen3-Embedding-8B default. The legacy embedding service
+-- defaulted to ``nomic-embed-text`` at 768-dim; Qwen3-Embedding-8B is 4096.
 --
 -- ``vec0`` virtual tables store the dimension as part of their schema
 -- and do not support ``ALTER`` to change it — drop-and-recreate is the

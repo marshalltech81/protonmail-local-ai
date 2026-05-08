@@ -301,7 +301,7 @@ class Reconciler:
                 fallback = rebuilt_thread.subject.strip() or "(empty thread)"
                 embedding = self.embedder.embed(fallback)
         except Exception as e:
-            # Ollama unavailable or embedding failed — leave state untouched
+            # Embedding service unavailable or embedding failed — leave state untouched
             # and retry on the next sweep rather than committing partial work.
             log.warning(
                 "reaper: embedding failed for thread %s (%s); will retry next pass",

@@ -422,9 +422,9 @@ def _kwargs(attachment, **overrides):
 class TestPrepareApplyBoundary:
     """``prepare_attachment_writes`` must do all extraction + embedding
     before any DB write happens, and ``apply_attachment_writes`` must
-    do only DB writes — no extractor, no Ollama. This boundary is what
-    keeps the SQLite write transaction off the critical path of slow
-    Ollama HTTP roundtrips."""
+    do only DB writes — no extractor, no embedding service. This boundary
+    is what keeps the SQLite write transaction off the critical path of
+    slow embedding service HTTP roundtrips."""
 
     def test_prepare_does_not_call_extract_or_embed_when_cache_hits(self, tmp_path, monkeypatch):
         db = _setup_db_for_attachment(tmp_path)

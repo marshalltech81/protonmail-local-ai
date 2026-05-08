@@ -328,7 +328,7 @@ log = logging.getLogger("mcp.tools.intelligence")
 
 # Per-thread character budget when assembling LLM prompts from retrieved
 # threads. The indexer caps ``body_text`` at 8000 chars per thread; feeding
-# multiple full-length threads to a local Ollama model easily exceeds its
+# multiple full-length threads to a local LLM easily exceeds its
 # context. 2000 chars ≈ 500 tokens per thread keeps five-thread contexts
 # well under an 8k-token model window while still giving the LLM the
 # accumulated thread body instead of the 200-char snippet.
@@ -442,8 +442,8 @@ def register_intelligence_tools(
     secret_values = [anthropic_key]
 
     async def llm_complete(system: str, user: str) -> str:
-        """Route to the local LLM (Ollama or MLX-LM, OpenAI-compatible)
-        or the Claude API based on ``llm_mode``."""
+        """Route to the local LLM (any OpenAI-compatible endpoint, default
+        ``mlx-lm-server``) or the Claude API based on ``llm_mode``."""
         if llm_mode == "cloud" and anthropic_key:
             return await _claude_complete(system, user, anthropic_key, claude_model)
         return await llm.complete(system, user)

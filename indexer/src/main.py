@@ -338,7 +338,7 @@ def _build_attachment_plans(
     """Pre-compute per-message attachment plans outside any transaction.
 
     ``prepare_attachment_writes`` runs the extractor (OCR / pypdf /
-    openpyxl) and the per-chunk Ollama embed calls — both too slow to
+    openpyxl) and the per-chunk embedding service calls — both too slow to
     hold inside a ``BEGIN IMMEDIATE``, since every outbound roundtrip
     would block the watchdog observer and the reconciler on the same
     DB lock. The caller applies the resulting plans inside the
@@ -433,7 +433,7 @@ def _commit_indexing_writes(
                 embeddings_by_chunk_id=embeddings_by_chunk_id,
             )
             # Plans were prepared outside this transaction, so the
-            # apply loop only does DB writes — no Ollama, no extractor.
+            # apply loop only does DB writes — no embedding service, no extractor.
             # Benign extractor outcomes (unsupported, empty, too_large,
             # failed parse) land as status rows here. Hard DB failures
             # propagate so the outer transaction rolls back and the
@@ -1220,7 +1220,7 @@ def initial_index(
     """Enqueue every unindexed Maildir message and drain the queue.
 
     Refreshes the health file after every processed message so that
-    long initial indexes (large mailboxes, slow Ollama embeddings, OCR
+    long initial indexes (large mailboxes, slow embedding service, OCR
     on scanned PDFs) do not exceed ``HEALTH_MAX_AGE_SECONDS`` in the
     healthcheck and cause the container to be reported unhealthy
     mid-scan. (A single message that itself takes longer than
@@ -1228,7 +1228,7 @@ def initial_index(
     case would need a heartbeat hook inside ``_index_one_file``.)
 
     Routing the initial scan through the queue — rather than indexing
-    files inline — means a crash or Ollama outage mid-scan leaves the
+    files inline — means a crash or embedding service outage mid-scan leaves the
     untouched work durably queued instead of dropped. The next restart
     resumes from ``indexing_jobs`` rather than rescanning the whole
     Maildir and relying on ``is_indexed`` to filter.
@@ -1249,7 +1249,7 @@ def initial_index(
         # file changed. Without this skip, every container restart
         # re-runs the same 5-attempt × 30s backoff cascade against
         # the same poison-pill payloads — observed to add up to
-        # ~30 minutes of wasted Ollama load per dead file per restart.
+        # ~30 minutes of wasted embedding service load per dead file per restart.
         if queue.is_dead(path_str):
             skipped_dead += 1
             continue
