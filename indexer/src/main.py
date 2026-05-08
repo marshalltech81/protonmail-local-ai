@@ -1096,43 +1096,47 @@ def _drain_queue_batched(
 
 
 def _recover_zero_vector_threads(
-    db: Database, queue: IndexingQueue, *, resurrect_dead: bool = True
+    db: Database, queue: IndexingQueue, *, resurrect_dead: bool = False
 ) -> int:
     """Re-enqueue messages stuck on chunkless zero-vector threads.
 
-    The batched indexer's Phase 1 commits thread membership +
-    ``indexed_files`` durably before Phase 2 runs. If the indexer is
-    killed (SIGKILL, OOM, power loss) between Phase 1 and Phase 2c on
-    a thread that had no prior chunks, or if the Phase 2 retry
-    cascade exhausts ``max_attempts`` and dead-letters the file, the
-    thread is left text-indexed but vectorless — and ``is_indexed``
-    returns True so the normal ``initial_index`` walk won't
-    re-enqueue it. This sweep finds those files and gives them a
-    fresh attempt budget so the next drain pass can complete the
-    indexing.
+    Policy: dead-lettered rows are an operator-visible terminal state
+    and are NOT auto-resurrected. The recovery sweep only rescues
+    files in queued / no-row state — those represent in-flight or
+    cleaned-up work the indexer can safely retry. A row at
+    ``status='dead'`` stayed in ``indexing_jobs`` precisely so the
+    operator could see that ``max_attempts`` was exhausted; clearing
+    that state without operator intent would burn embedder quota
+    against the same payload on every container restart and undo
+    ``initial_index``'s deliberate ``is_dead`` skip.
 
-    Skips files that already have a 'queued' row — the normal retry
-    cascade is in flight and clobbering its row would reset the
-    attempts counter mid-cascade.
+    What the sweep handles:
 
-    ``resurrect_dead`` controls whether dead-lettered rows are
-    cleared and re-enqueued:
+    * **No queue row** (Phase 1 committed but the row was somehow
+      cleaned up out-of-band) — re-enqueue with a fresh budget.
+    * **Crash mid-batch** (process killed between Phase 1 and
+      ``mark_failed``/``mark_succeeded``) — the row stays at
+      ``status='queued'`` with the same attempts count as when the
+      worker claimed it, and the next ``_drain_queue_batched`` will
+      pick it up. ``has_pending_row`` returns True so this branch
+      is skipped here, and that's correct — the queue itself owns
+      the recovery.
+    * **Healthy chunkless subject-fallback threads** (non-zero
+      ``threads_vec``) are filtered out at the DB query level.
 
-    * ``True`` (default; the startup path uses this) — covers the
-      crash-mid-batch case where Phase 1 committed but the queue
-      row was dead-lettered before Phase 2c ran. Resetting attempts
-      is correct: the prior dead status reflected a process death,
-      not message-content unfit-ness.
-    * ``False`` (the periodic main-loop path uses this) — preserves
-      the durable queue's bounded-retry contract. A deterministic
-      Phase 2 failure that has already exhausted ``max_attempts``
-      stays dead until the operator intervenes or a fresh watchdog
-      event re-surfaces the file. Without this gate, periodic
-      recovery would resurrect the same poison-pill message every
-      sweep interval forever, burning embedder quota indefinitely.
+    What the sweep does NOT handle by default:
 
-    Healthy chunkless subject-fallback threads (non-zero
-    ``threads_vec``) are NOT touched — the DB query filters them out.
+    * **Dead-lettered rows** — left alone. To rescue a dead-lettered
+      file, an operator confirms the underlying cause is fixed and
+      either re-enqueues manually (e.g. ``DELETE FROM indexing_jobs
+      WHERE filepath=...; <touch the Maildir file>``) or calls this
+      function with ``resurrect_dead=True``. The opt-in flag stays
+      on the API for that future operator tool, but no production
+      call site uses it.
+
+    Skips files that already have a 'queued' row (active retry
+    cascade in flight; clobbering its row would reset the attempts
+    counter mid-cascade).
 
     Returns the number of files re-enqueued for visibility in logs.
     """
@@ -1220,10 +1224,15 @@ def initial_index(
     )
 
     # Recovery sweep — re-enqueue messages stuck on chunkless zero-vector
-    # threads from a prior crash mid-batch or Phase 2 dead-letter. The
-    # standard walk above misses these because is_indexed=True. Run BEFORE
-    # the drain so recovery rows ride the same batched-index pass as fresh
-    # enqueues.
+    # threads from a prior crash mid-batch (queued row that mark_failed /
+    # mark_succeeded never reached). The standard walk above misses these
+    # because ``is_indexed=True``. Dead-lettered rows are intentionally
+    # NOT touched here — that policy is uniform across startup and
+    # periodic, matching ``initial_index``'s ``is_dead`` skip and the
+    # durable queue's bounded-retry contract. See
+    # ``_recover_zero_vector_threads`` for the rationale and the
+    # ``resurrect_dead=True`` opt-in path. Run BEFORE the drain so
+    # recovery rows ride the same batched-index pass as fresh enqueues.
     _recover_zero_vector_threads(db, queue)
 
     timing_aggregator = TimingAggregator(window=200)
@@ -1422,17 +1431,15 @@ def main():
                     last_reconcile = now
 
             # Recovery sweep: re-enqueue messages on chunkless
-            # zero-vector threads that are STILL retryable
-            # (``resurrect_dead=False``). A transient embedder bug
-            # that left a row queued-but-stuck heals on its own once
-            # the underlying cause clears. Dead-lettered rows are
-            # left alone — that's the durable queue's
-            # bounded-retry contract — and only the startup path
-            # rescues them (the dead status there reflected a
-            # process death, not message-content unfit-ness).
+            # zero-vector threads that are STILL retryable. A
+            # transient embedder bug that left a row queued-but-stuck
+            # heals on its own once the underlying cause clears.
+            # Dead-lettered rows are left alone (default policy,
+            # uniform with the startup path) — see
+            # ``_recover_zero_vector_threads`` for why.
             if now - last_recovery_sweep >= RECOVERY_SWEEP_INTERVAL_SECS:
                 try:
-                    _recover_zero_vector_threads(db, queue, resurrect_dead=False)
+                    _recover_zero_vector_threads(db, queue)
                 except Exception as e:
                     log.error(f"periodic recovery sweep failed: {e}")
                 last_recovery_sweep = now

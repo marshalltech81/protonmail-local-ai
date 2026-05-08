@@ -1152,30 +1152,32 @@ class TestBatchedInitialIndex:
             "sanity: stored vector must not be the zero placeholder"
         )
 
-    def test_recovery_sweep_re_enqueues_stuck_zero_vector_threads(self, tmp_path, monkeypatch):
-        # End-to-end recovery: simulate a crash mid-batch (Phase 1
-        # commits land but Phase 2 never runs) by running a first
-        # initial_index pass with a failing embedder. Verify the
-        # message is left text-indexed but vectorless. Then run a
-        # second pass with a working embedder — the recovery sweep
-        # must find the stuck thread, re-enqueue the message, and
-        # the drain must complete the indexing.
+    def test_dead_lettered_zero_vector_thread_is_not_auto_recovered(self, tmp_path, monkeypatch):
+        # Policy: a dead-lettered row from a deterministic Phase 2
+        # failure stays dead until the operator intervenes. Without
+        # this gate, every container restart (and every periodic
+        # sweep) would resurrect the same poison-pill payload,
+        # burning embedder quota indefinitely and undoing
+        # ``initial_index``'s deliberate ``is_dead`` skip.
+        #
+        # Construction: first pass dead-letters via a deterministic
+        # embedder failure → stuck thread (chunkless + zero vec) +
+        # ``status='dead'`` queue row. Second pass with a healthy
+        # embedder must NOT auto-recover the dead row.
         import struct
 
         maildir, inbox, db, threader = self._setup(tmp_path)
         _write_eml(inbox / "m.eml", "m@example.com", subject="Quarterly review")
 
         # First pass: embedder fails. Phase 1 commits, Phase 2 fails,
-        # message dead-lettered after retries. Thread is now stuck.
+        # message dead-lettered after retries.
         embedder_fail = make_mock_embedder()
         embedder_fail.embed_batch.side_effect = RuntimeError("simulated outage")
         queue = _make_queue(db)
         monkeypatch.setattr("src.embedder.wait_exponential", lambda **_: lambda *_: 0)
         self._run(db, embedder_fail, threader, queue, monkeypatch, maildir)
 
-        # Confirm the stuck state precisely: indexed_files row exists,
-        # threads_vec is zero, message has no chunks, queue row is
-        # dead.
+        # Confirm the stuck state: dead row, zero vec, no chunks.
         thread_id = db.find_thread_by_message_id("m@example.com")
         assert thread_id is not None
         assert db.is_indexed(str(inbox / "m.eml"))
@@ -1188,30 +1190,79 @@ class TestBatchedInitialIndex:
         assert all(v == 0.0 for v in stuck_vec), "first pass should leave zero vector"
         assert queue.is_dead(str(inbox / "m.eml")), "first pass should dead-letter the file"
 
-        # Second pass: working embedder. The recovery sweep should
-        # detect the stuck thread, re-enqueue the file (clearing the
-        # dead-letter row), and the drain should complete the
-        # indexing — non-zero vector, chunks present, queue empty.
-        sentinel = [0.5] * EMBEDDING_DIM
+        # Second pass with a working embedder: the dead row stays
+        # dead, the thread stays at zero vec, no chunks materialize.
+        # The ``initial_index`` walk skips because ``is_dead``, and the
+        # recovery sweep skips because the file is dead-lettered.
         embedder_ok = make_mock_embedder()
-        embedder_ok.embed.return_value = sentinel
-        # _make_queue gives a fresh attempts budget; recovery
-        # re-enqueue resets attempts via INSERT OR REPLACE.
+        embedder_ok.embed.return_value = [0.5] * EMBEDDING_DIM
         self._run(db, embedder_ok, threader, queue, monkeypatch, maildir)
 
-        # After recovery: non-zero vec + chunks committed.
+        assert queue.is_dead(str(inbox / "m.eml")), (
+            "dead-lettered file must remain dead until operator intervention"
+        )
         row_after = db._conn.execute(
             "SELECT embedding FROM threads_vec WHERE thread_id = ?", (thread_id,)
         ).fetchone()
         raw_after = row_after["embedding"]
         vec_after = list(struct.unpack(f"<{len(raw_after) // 4}f", raw_after))
-        assert any(v != 0.0 for v in vec_after), (
-            "recovery sweep + drain should populate the thread vector"
+        assert all(v == 0.0 for v in vec_after), (
+            "thread vector must stay at zero — no auto-resurrection"
         )
-        assert db.get_chunk_ids_for_message("m@example.com"), (
-            "recovery should produce committed chunk rows"
+        assert not db.get_chunk_ids_for_message("m@example.com"), (
+            "no chunks should materialize without operator intervention"
         )
-        # Queue cleaned: no row remains for the recovered file.
+
+    def test_resurrect_dead_opt_in_recovers_dead_lettered_thread(self, tmp_path, monkeypatch):
+        # The opt-in escape hatch — for a future operator tool that
+        # confirms the underlying cause is fixed and clears the dead
+        # state intentionally. Same precondition as the policy test
+        # above; this one calls ``_recover_zero_vector_threads`` with
+        # ``resurrect_dead=True`` directly to verify the path still
+        # works when invoked deliberately.
+        import struct
+
+        from src.timings import TimingAggregator
+
+        maildir, inbox, db, threader = self._setup(tmp_path)
+        _write_eml(inbox / "m.eml", "m@example.com", subject="Quarterly review")
+
+        embedder_fail = make_mock_embedder()
+        embedder_fail.embed_batch.side_effect = RuntimeError("simulated outage")
+        queue = _make_queue(db)
+        monkeypatch.setattr("src.embedder.wait_exponential", lambda **_: lambda *_: 0)
+        self._run(db, embedder_fail, threader, queue, monkeypatch, maildir)
+        assert queue.is_dead(str(inbox / "m.eml"))
+
+        # Operator action: resurrect the dead row, then drain with a
+        # working embedder.
+        re_enqueued = main._recover_zero_vector_threads(db, queue, resurrect_dead=True)
+        assert re_enqueued == 1
+        assert queue.has_pending_row(str(inbox / "m.eml"))
+
+        embedder_ok = make_mock_embedder()
+        embedder_ok.embed.return_value = [0.5] * EMBEDDING_DIM
+        monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
+        monkeypatch.setattr(main, "touch_health_file", lambda: None)
+        main._drain_queue_batched(
+            db,
+            embedder_ok,
+            threader,
+            queue,
+            batch_size=8,
+            timing_aggregator=TimingAggregator(window=10),
+            max_passes=1,
+        )
+
+        thread_id = db.find_thread_by_message_id("m@example.com")
+        row_after = db._conn.execute(
+            "SELECT embedding FROM threads_vec WHERE thread_id = ?", (thread_id,)
+        ).fetchone()
+        vec_after = list(
+            struct.unpack(f"<{len(row_after['embedding']) // 4}f", row_after["embedding"])
+        )
+        assert any(v != 0.0 for v in vec_after)
+        assert db.get_chunk_ids_for_message("m@example.com")
         assert queue.stats() == {"queued": 0, "dead": 0}
 
     def test_recovery_sweep_skips_chunkless_subject_fallback_threads(self, tmp_path, monkeypatch):
@@ -1443,17 +1494,27 @@ class TestPeriodicRecoverySkipsDeadLetter:
             )
         assert queue.is_dead(str(inbox / "stuck.eml"))
 
-        # Periodic call: dead row must remain dead, no enqueue.
+        # Default call (no kwarg): dead row must remain dead. The
+        # default policy is uniform across startup and periodic —
+        # dead = operator-visible terminal state.
+        re_enqueued = main._recover_zero_vector_threads(db, queue)
+        assert re_enqueued == 0
+        assert queue.is_dead(str(inbox / "stuck.eml"))
+        assert not queue.has_pending_row(str(inbox / "stuck.eml"))
+
+        # Explicit ``resurrect_dead=False`` must do the same thing —
+        # the parameter exists for the opt-in opposite (operator-
+        # initiated rescue), and the default-False case should match
+        # the explicit-False case exactly.
         re_enqueued = main._recover_zero_vector_threads(db, queue, resurrect_dead=False)
         assert re_enqueued == 0
         assert queue.is_dead(str(inbox / "stuck.eml"))
-        # And the periodic call must not have queued a fresh row either.
-        assert not queue.has_pending_row(str(inbox / "stuck.eml"))
 
-        # Sanity: the same call with the startup default (resurrect_dead=True)
-        # DOES rescue the file. That's the crash-mid-batch contract — the
-        # dead status reflects a process death, not message-content
-        # unfit-ness.
+        # Explicit ``resurrect_dead=True`` IS the operator-rescue
+        # opt-in path. When called deliberately, the dead row gets
+        # cleared and re-enqueued with a fresh attempts budget. This
+        # is the only way to auto-clear a dead row in the current
+        # codebase; no production call site uses it.
         re_enqueued = main._recover_zero_vector_threads(db, queue, resurrect_dead=True)
         assert re_enqueued == 1
         assert queue.has_pending_row(str(inbox / "stuck.eml"))
