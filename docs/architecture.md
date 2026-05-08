@@ -413,6 +413,97 @@ loop in the main thread drains the queue via `drain_queue`, capped at
 `HEALTH_REFRESH_EVERY` jobs per pass so the reconciler and health-file
 refresh aren't starved by a large event burst.
 
+The initial-scan drainer uses a **two-phase batched** path
+(`_drain_queue_batched`) instead of per-message drain so a single
+`embed_batch` call can amortize the embed round-trip across many
+messages. The two paths cooperate cleanly because they hit different
+queue states:
+
+- **Phase 1 (per message)**: parse → thread → `upsert_thread` with a
+  seed thread vector chosen by a three-case priority chain:
+  1. Thread has chunk vectors → `mean(chunks)`. Canonical seed for
+     already-indexed threads with content.
+  2. No chunks but a prior `threads_vec` row exists with a non-zero
+     embedding → preserve that. Covers chunkless threads whose vector
+     came from Phase 2c's subject-fallback path (an earlier blank-body
+     message in the same thread).
+  3. Neither → placeholder zero. Truly new threads, or post-crash
+     recovery on a thread that already had a zero row.
+
+  Cases 1 and 2 are what make a Phase 2 failure non-corrupting: if the
+  bulk embed fails on a new sibling message, the parent thread retains
+  its prior valid vector — chunk-derived or subject-fallback — instead
+  of being clobbered to zero. Threading state is durable before the
+  next message in the batch's threader runs, so a reply B that arrives
+  in the same batch as its parent A correctly threads into A's
+  thread — not a sibling.
+- **Phase 2a (per message, no DB)**: chunk body + extract attachments
+  WITHOUT embedding. New chunks accumulate into a flat batch-wide
+  texts list with offsets recorded on each per-message state object.
+- **Phase 2b (batched)**: a single `embedder.embed_batch` over every
+  new chunk's text across the batch. ~25k single-message HTTP
+  round-trips collapse to ~500 multi-message ones at the default
+  `INITIAL_INDEX_BATCH_SIZE=50`, plus the embedder client's own
+  per-call chunking via `EMBED_BATCH_SIZE` (default 64).
+- **Phase 2c (per message)**: write chunks/vectors/attachments inside
+  one per-message transaction, then replace the Phase 1 seed thread
+  vector with the real mean-of-chunks vector (or the subject-fallback
+  embed when this message contributes no chunks to a chunk-less
+  thread).
+
+The two-phase split is what makes a cloud-embedder reindex tolerable:
+~1 hour against a 25k-message mailbox with a remote provider drops to
+~5–10 minutes. Steady-state (watchdog) ingestion stays per-message
+because the watchdog typically sees 1–3 messages at a time; the
+batched path's win is concentrated in the initial scan.
+
+Failure isolation is preserved across phases:
+
+- Phase 1 error for one message → that message marked failed, the
+  rest of the batch continues.
+- Phase 2a error (chunk/extract) → marked failed, batch continues.
+- Phase 2b (embed) error → all in-flight messages marked failed
+  (queue retries on next pass). Phase 1 commits are idempotent —
+  `upsert_thread` merges existing rows — so the next pass re-runs
+  Phase 1 + Phase 2 cleanly.
+- Phase 2c (DB write) error for one message → marked failed, others
+  succeed.
+
+A `claim_batch(N)` queue method (vs. the per-message `claim_next`)
+fetches a snapshot of N distinct due rows in one query so the gather
+phase cannot re-claim the same row repeatedly while Phase 2c is
+deferred.
+
+### Recovery sweep for crashed-mid-batch threads
+
+A startup recovery sweep
+(`_recover_zero_vector_threads`) runs at the head of every
+`initial_index` call to catch the one failure mode the queue retry
+path can't fix on its own:
+
+- **Symptom**: Phase 1 commits (thread + `message_thread_map` +
+  `indexed_files` rows) landed, but Phase 2c never wrote chunks.
+  `is_indexed` returns True so the standard Maildir walk skips the
+  file. The thread carries the placeholder zero `threads_vec` row.
+- **Causes**: a hard crash (SIGKILL, OOM, power loss) between
+  Phase 1 and Phase 2c on a thread that had no prior chunks; or a
+  Phase 2 retry cascade that exhausted `max_attempts` and
+  dead-lettered the file.
+- **Detection**: `Database.find_zero_vector_chunkless_thread_filepaths`
+  finds threads with no `message_chunks` rows and an all-zero
+  `threads_vec` blob, then maps them back to filepaths via
+  `message_thread_map`.
+- **Repair**: each stuck filepath is re-enqueued with reason
+  `recovery`. Files that already have a `queued` row (active retry
+  cascade) are skipped to avoid clobbering attempts mid-cascade;
+  dead-lettered or no-row files get a fresh attempt budget via
+  `enqueue`'s `INSERT OR REPLACE`. The next drain pass completes
+  Phase 2 for them.
+
+Healthy chunkless threads (e.g., subject-fallback threads from
+blank-body messages) are not touched — the DB query filters out
+non-zero `threads_vec` rows.
+
 Each job carries `attempts`, `last_stage`, `last_error`, and a
 `next_attempt_at` scheduled via exponential backoff
 (`base_backoff_seconds × 2^(attempts - 1)`, capped at 6 hours). When

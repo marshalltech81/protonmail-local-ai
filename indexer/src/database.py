@@ -11,7 +11,7 @@ import os
 import sqlite3
 import threading
 import weakref
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from pathlib import Path
 
 import sqlite_vec
@@ -166,10 +166,11 @@ class Database:
         self._closed = True
 
     def __del__(self) -> None:
-        try:
+        # Best-effort cleanup during GC; never raise from a destructor
+        # (interpreter shutdown can leave referenced modules torn down,
+        # so any exception here would be unactionable noise).
+        with suppress(Exception):
             self.close()
-        except Exception:
-            pass
 
     def _begin_if_needed(self, cur: sqlite3.Cursor) -> bool:
         if self._transaction_depth > 0:
@@ -1197,6 +1198,136 @@ class Database:
         return result
 
     @_synchronized
+    def get_thread_vector(self, thread_id: str) -> list[float] | None:
+        """Return the stored ``threads_vec`` embedding for ``thread_id``.
+
+        Returns ``None`` when the thread has no row in ``threads_vec``
+        (a brand-new thread, or one whose row was deleted out of band).
+        Used by the batched indexer's Phase 1 seed logic to preserve a
+        pre-existing thread vector — including subject-fallback vectors
+        for chunkless threads — across a Phase 2 failure.
+        """
+        import struct
+
+        row = self._conn.execute(
+            "SELECT embedding FROM threads_vec WHERE thread_id = ?",
+            (thread_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        blob = row["embedding"]
+        count = len(blob) // 4
+        return list(struct.unpack(f"{count}f", blob))
+
+    @_synchronized
+    def get_phase1_seed_state(self, thread_id: str) -> tuple[list[list[float]], list[float] | None]:
+        """Combined fetch for the batched indexer's Phase 1 seed selection.
+
+        Returns ``(chunk_embeddings, prior_thread_vector)`` so the caller
+        applies the three-case priority chain:
+        non-empty chunks → ``mean(chunks)``; empty chunks + non-zero
+        prior → prior; else → zero placeholder.
+
+        For genuinely new threads (the bulk case during an initial scan
+        of an unseeded mailbox), a cheap PK existence check on
+        ``threads`` short-circuits both reads. The chunk-embeddings JOIN
+        and the ``threads_vec`` lookup only run when the thread row
+        already exists, avoiding two pointless empty queries per
+        new-thread message.
+        """
+        if (
+            self._conn.execute("SELECT 1 FROM threads WHERE thread_id = ?", (thread_id,)).fetchone()
+            is None
+        ):
+            return [], None
+        return (
+            self.get_thread_chunk_embeddings(thread_id),
+            self.get_thread_vector(thread_id),
+        )
+
+    @_synchronized
+    def find_zero_vector_chunkless_thread_filepaths(self) -> list[str]:
+        """Return Maildir filepaths of messages stuck on a chunkless,
+        zero-vector thread.
+
+        Symptom: thread + ``message_thread_map`` + ``indexed_files``
+        rows committed (so ``is_indexed`` returns True; the normal
+        ``initial_index`` walk won't re-enqueue them), but
+        ``message_chunks`` is empty for the thread AND
+        ``threads_vec`` carries the all-zero placeholder. The cause
+        is one of:
+
+          1. A hard crash (SIGKILL, OOM, power loss) between the
+             batched indexer's Phase 1 and Phase 2c, on a thread
+             that had no prior chunk vectors. Phase 1's commits
+             durably landed but Phase 2c never ran. Queue
+             state on restart depends on whether the queue row was
+             already mark_failed'd before the crash; in either case
+             the file is text-indexed but vectorless.
+          2. A Phase 2 retry cascade that exhausted ``max_attempts``
+             and dead-lettered the file. Phase 1's commits remain
+             but ``claim_batch`` no longer returns a 'dead' row.
+
+        Used by the indexer's startup recovery sweep
+        (``_recover_zero_vector_threads``) to re-enqueue these
+        files so the next drain pass can complete the indexing.
+
+        Excludes chunkless threads with a non-zero ``threads_vec``
+        row — those are healthy subject-fallback threads from
+        blank-body messages and must not be re-indexed.
+        """
+        import struct
+
+        # Step 1: chunkless threads (typically a small set vs. the
+        # full thread table on a healthy mailbox).
+        chunkless_rows = self._conn.execute(
+            """
+            SELECT t.thread_id
+            FROM threads t
+            WHERE NOT EXISTS (
+                SELECT 1 FROM message_chunks c WHERE c.thread_id = t.thread_id
+            )
+            """
+        ).fetchall()
+        if not chunkless_rows:
+            return []
+
+        # Step 2: pull every chunkless thread's stored vector in ONE
+        # query, then filter all-zero rows in Python. vec0 supports
+        # PK ``WHERE thread_id IN (...)`` lookups (each becomes an
+        # internal PK seek), so this is a single SELECT instead of
+        # one per thread. The all-zero check stays in Python because
+        # vec0 doesn't expose equality predicates against the
+        # embedding payload itself.
+        chunkless_ids = [r["thread_id"] for r in chunkless_rows]
+        placeholders = ",".join(["?"] * len(chunkless_ids))
+        vec_rows = self._conn.execute(
+            f"SELECT thread_id, embedding FROM threads_vec WHERE thread_id IN ({placeholders})",  # nosec B608
+            chunkless_ids,
+        ).fetchall()
+        stuck_thread_ids: list[str] = []
+        for row in vec_rows:
+            blob = row["embedding"]
+            count = len(blob) // 4
+            vec = struct.unpack(f"{count}f", blob)
+            if all(v == 0.0 for v in vec):
+                stuck_thread_ids.append(row["thread_id"])
+
+        if not stuck_thread_ids:
+            return []
+
+        # Step 3: gather the Maildir filepaths for messages on stuck
+        # threads. ``message_thread_map.filepath`` is the same value
+        # the queue uses, so re-enqueueing routes through the same
+        # parse → thread → embed → commit pipeline as a fresh scan.
+        placeholders = ",".join(["?"] * len(stuck_thread_ids))
+        rows = self._conn.execute(
+            f"SELECT filepath FROM message_thread_map WHERE thread_id IN ({placeholders})",  # nosec B608
+            stuck_thread_ids,
+        ).fetchall()
+        return [r["filepath"] for r in rows]
+
+    @_synchronized
     def get_thread_chunk_embeddings(self, thread_id: str) -> list[list[float]]:
         """Return every chunk embedding stored for ``thread_id``.
 
@@ -1473,6 +1604,29 @@ class Database:
             """,
             (status, now_iso),
         ).fetchone()
+
+    @_synchronized
+    def queue_fetch_due_batch(self, status: str, now_iso: str, limit: int) -> list[sqlite3.Row]:
+        """Return up to ``limit`` due ``status`` rows ordered by oldest-due first.
+
+        Like ``queue_claim_next`` but in one SELECT, so the batched
+        indexer's gather phase can pick up N distinct rows without
+        repeatedly calling ``claim_next`` (which has no in-flight
+        tracking and would return the same row N times until the caller
+        marks it).
+        """
+        return self._conn.execute(
+            """
+            SELECT filepath, reason, status, attempts,
+                   last_error, last_stage,
+                   created_at, updated_at, next_attempt_at
+            FROM indexing_jobs
+            WHERE status = ? AND next_attempt_at <= ?
+            ORDER BY next_attempt_at ASC
+            LIMIT ?
+            """,
+            (status, now_iso, limit),
+        ).fetchall()
 
     @_synchronized
     def queue_delete(self, filepath: str) -> None:

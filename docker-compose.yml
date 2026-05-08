@@ -148,6 +148,9 @@ services:
       EMBED_BASE_URL: ${EMBED_BASE_URL:-http://host.docker.internal:8001/v1}
       EMBED_MODEL: ${EMBED_MODEL:-mlx-community/Qwen3-Embedding-8B-mxfp8}
       EMBED_BATCH_SIZE: ${EMBED_BATCH_SIZE:-64}
+      # Cross-message batch size for the initial-index drainer. See
+      # .env.example for the two-phase pipeline that this tunes.
+      INITIAL_INDEX_BATCH_SIZE: ${INITIAL_INDEX_BATCH_SIZE:-50}
       # Warmup POST timeout for the first embed call after container
       # start. Default 600s in code accounts for first-time HF model
       # downloads (~4 min embedder + ~2 min reranker). Lower it on a

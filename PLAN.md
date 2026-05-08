@@ -33,10 +33,24 @@ The stack now runs:
 
 - **ProtonBridge** — Docker, headless, IMAP/SMTP on `bridge-net` only.
 - **mbsync** — Docker, pulls into Maildir, `chmod go+r` after each sync.
-- **indexer** — Docker, parses Maildir, threads, embeds via the MLX
-  service, writes SQLite. Schema is at v15 with 4096-dim vectors.
-  The Ollama embed-fallback path was removed in Phase C; embedding
-  is MLX-only.
+- **indexer** — Docker, parses Maildir, threads, embeds via any
+  OpenAI-compatible `/v1/embeddings` provider (default: host-side
+  mlx-service), writes SQLite. Schema is at v15 with 4096-dim
+  vectors. The Ollama embed-fallback path was removed in Phase C.
+  Initial-scan drainer uses a two-phase batched path (`Phase 1`
+  commits thread membership per message — seeded by a three-case
+  priority chain: mean of existing chunk vectors when the thread is
+  already indexed with content; the prior `threads_vec` row when the
+  thread is chunkless but has a non-zero vector (subject-fallback
+  threads); placeholder zero only for genuinely new threads. `Phase
+  2b` issues one batched embed_batch across the whole batch; `Phase
+  2c` commits chunks/vectors per message and replaces the seed
+  thread vector). The non-zero-preserving seed means a Phase 2
+  failure on a new sibling message cannot regress the parent
+  thread's vector — even for chunkless subject-fallback threads.
+  This collapses ~25k single-message embed round-trips into ~500
+  multi-message ones against a cloud embedder at the default
+  `INITIAL_INDEX_BATCH_SIZE=50`.
 - **mcp-server** — Docker, hybrid search + intelligence tools.
   `hybrid_search` calls the MLX reranker (`Qwen3-Reranker-4B-mxfp8`)
   after RRF. The LLM-synthesis step is dispatched by `LLM_MODE`:
@@ -313,6 +327,22 @@ persisted, unsupported types log at debug. What's still open:
 - extract Bridge container work into standalone repo after stabilization
 - improve operational observability and health reporting
 - decide whether `mcp-server` should eventually use live IMAP retrieval only as fallback once richer thread context is available locally
+- swap the raw-httpx OpenAI clients (`indexer/src/embedder.OpenAIEmbedder`,
+  `mcp-server/src/lib/local_llm.LocalLLMClient`) for the official `openai`
+  Python SDK (`OpenAI` / `AsyncOpenAI`). Triggers that justify the swap (do
+  NOT do it pre-emptively): (a) routing chat through a rate-limited cloud
+  provider where missing `Retry-After` and `x-ratelimit-reset-*`
+  honoring causes real backoff misbehavior; (b) adding token-by-token
+  streaming to the intelligence tools (requires MCP `mcp/progress`
+  plumbing too — SDK alone isn't enough); (c) enabling local-LLM
+  function-calling so Qwen3-32B can self-route between mcp-server
+  sub-tools (architecture change, not just transport). Preserve the
+  split-client pattern (one `(Async)OpenAI` instance per upstream:
+  embed / chat) — the auth-header leak Codex caught in PR #95 lives in
+  business logic, not the transport, and would re-emerge with a single
+  shared client. Cost: ~150 LOC across the two client classes plus a
+  test rewrite (current tests use `httpx.MockTransport`; SDK testing is
+  `respx`-style). Not worth it without one of the three triggers above.
 
 ### Search and intelligence expansion
 - add attachment-aware retrieval with provenance so results can cite message ID, attachment filename, and page/time range where applicable

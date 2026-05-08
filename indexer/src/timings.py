@@ -22,28 +22,36 @@ from threading import Lock
 # Stages match the four try/except blocks in ``_index_one_file``. Adding
 # a new stage there means adding it here too — the field set is the
 # contract that ties the timer at the call site to the aggregator.
-STAGES: tuple[str, ...] = ("parse", "thread", "embed", "db_write")
+STAGES: tuple[str, ...] = ("parse", "thread", "chunk", "embed", "db_write")
 
 
 @dataclass(frozen=True)
 class StageTimings:
-    """Per-stage wall-clock costs for one ``_index_one_file`` invocation.
+    """Per-stage wall-clock costs for one indexing pipeline invocation.
 
     Stages that did not run (because an earlier stage failed and the
     function returned early) report ``0.0`` rather than ``None`` so the
     aggregator math stays branch-free. Callers that want to distinguish
     "ran but was fast" from "did not run" should also look at the
     ``stage`` returned from ``_index_one_file``.
+
+    ``chunk_ms`` covers the body chunker plus attachment extraction
+    (PDF parse, OCR, etc.). It only fires for messages with body text
+    or attachments and is the dominant cost on attachment-heavy
+    mailboxes — the batched indexer's Phase 2a runs this work
+    sequentially across the batch, so dropping it from the summary
+    underreports total scan cost.
     """
 
     parse_ms: float = 0.0
     thread_ms: float = 0.0
+    chunk_ms: float = 0.0
     embed_ms: float = 0.0
     db_write_ms: float = 0.0
 
     @property
     def total_ms(self) -> float:
-        return self.parse_ms + self.thread_ms + self.embed_ms + self.db_write_ms
+        return self.parse_ms + self.thread_ms + self.chunk_ms + self.embed_ms + self.db_write_ms
 
 
 def percentile(values: list[float], p: float) -> float:

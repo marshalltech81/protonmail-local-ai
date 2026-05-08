@@ -59,6 +59,7 @@ STATUS_DEAD = "dead"
 REASON_ON_CREATED = "on_created"
 REASON_ON_MOVED = "on_moved"
 REASON_INITIAL_SCAN = "initial_scan"
+REASON_RECOVERY = "recovery"
 
 DEFAULT_MAX_ATTEMPTS = 5
 DEFAULT_BASE_BACKOFF_SECONDS = 30
@@ -132,6 +133,18 @@ class IndexingQueue:
         exercised the parse/embed/write pipeline.
         """
         return self.db.queue_claim_next(STATUS_QUEUED, _now_iso())
+
+    def claim_batch(self, limit: int) -> list[sqlite3.Row]:
+        """Return up to ``limit`` distinct oldest-due queued rows.
+
+        Like ``claim_next`` but fetches a snapshot of N rows in one
+        query — so the batched initial indexer's gather phase can pick
+        up distinct messages without re-claiming the same row before
+        marking it succeeded. Rows stay in 'queued' state; the caller
+        must mark each one (succeeded / failed / skipped) by the end of
+        the batch or they will be returned again on the next call.
+        """
+        return self.db.queue_fetch_due_batch(STATUS_QUEUED, _now_iso(), limit)
 
     def mark_succeeded(self, filepath: str) -> None:
         """Remove the job row. Indexing ran through cleanly."""
@@ -227,6 +240,18 @@ class IndexingQueue:
         because those signal real change in the underlying file.
         """
         return self.db.queue_get_status(filepath) == STATUS_DEAD
+
+    def has_pending_row(self, filepath: str) -> bool:
+        """True when ``filepath`` has a row in 'queued' state.
+
+        ``mark_failed`` keeps a row at status=``queued`` with a
+        future ``next_attempt_at`` (the retry cascade is in-band
+        with the queue, not a separate state), so 'queued' covers
+        both fresh enqueues and the active retry tail. Used by the
+        recovery sweep to avoid clobbering a row that the normal
+        retry path is already handling.
+        """
+        return self.db.queue_get_status(filepath) == STATUS_QUEUED
 
     def stats(self) -> dict[str, int]:
         """Return ``{'queued': n, 'dead': n}`` — surfaced through the

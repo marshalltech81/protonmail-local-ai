@@ -16,7 +16,9 @@ them after a grace window. See ``src/reconciler.py``.
 
 import logging
 import os
+import sqlite3
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from watchdog.events import FileSystemEventHandler
@@ -27,20 +29,21 @@ from .attachment_indexing import (
     apply_attachment_writes,
     prepare_attachment_writes,
 )
-from .chunker import chunk_message, mean_vector
+from .chunker import MessageChunk, chunk_message, mean_vector
 from .database import EMBEDDING_DIM, Database
 from .embedder import EmbeddingBackend, OpenAIEmbedder
-from .parser import parse_email
+from .parser import Message, parse_email
 from .queue import (
     REASON_INITIAL_SCAN,
     REASON_ON_CREATED,
     REASON_ON_MOVED,
+    REASON_RECOVERY,
     IndexingQueue,
 )
 from .queue import load_config_from_env as load_queue_config_from_env
 from .quoting import strip_for_embedding
 from .reconciler import Reconciler, ReconcilerConfig, load_config_from_env, sweep_paths
-from .threader import Threader
+from .threader import Thread, Threader
 from .timings import StageTimings, TimingAggregator, format_summary
 
 logging.basicConfig(
@@ -125,6 +128,30 @@ EMBED_BATCH_SIZE = _int_env("EMBED_BATCH_SIZE", 64)
 CHUNK_TARGET_TOKENS = _int_env("INDEXER_CHUNK_TARGET_TOKENS", 1000)
 CHUNK_MAX_TOKENS = _int_env("INDEXER_CHUNK_MAX_TOKENS", 1500)
 CHUNK_OVERLAP_TOKENS = _int_env("INDEXER_CHUNK_OVERLAP_TOKENS", 150, minimum=0)
+
+# How many messages the initial-scan drainer accumulates before issuing
+# a single batched embed call. Larger batches amortize the cloud-embedder
+# round-trip across more messages — meaningful when EMBED_BASE_URL points
+# at a remote provider (~150 ms RTT each), marginal against loopback
+# mlx-service. Steady-state (watchdog) ingestion is unaffected: the
+# watchdog path stays per-message because it sees 1-3 messages at a time.
+INITIAL_INDEX_BATCH_SIZE = _int_env("INITIAL_INDEX_BATCH_SIZE", 50)
+
+# Phase 1 seed for genuinely new threads (the only branch that uses
+# this constant). Phase 1's seed-selection runs a three-case priority
+# chain:
+#   1. Thread has chunk vectors → mean(chunks).
+#   2. No chunks but a prior threads_vec row carries a non-zero
+#      embedding → preserve that. Covers chunkless subject-fallback
+#      threads — protects them from Phase 2 failure clobbering.
+#   3. Neither → this zero placeholder. Truly new threads, or
+#      post-crash recovery on a thread that already had a zero row.
+# A zero vector is safe between phases: cosine/L2 similarity to a
+# normalized query vector is constant, so a zero-vec thread cannot
+# inflate ranking on any specific query — it just deprioritizes
+# uniformly until Phase 2c lands the real vector. Keyword search via
+# threads_fts is unaffected.
+_ZERO_THREAD_VECTOR = [0.0] * EMBEDDING_DIM
 
 
 def _bool_env(name: str, default: bool) -> bool:
@@ -566,6 +593,517 @@ def _iter_maildir_messages(root: Path):
             yield filepath
 
 
+@dataclass
+class _BatchedMsg:
+    """Per-message state carried through the two-phase batched indexer.
+
+    Phase 1 populates ``msg`` and ``thread`` and commits the thread
+    membership with a seed thread vector chosen from a three-case
+    priority chain: ``mean(existing chunk vectors)`` when the thread
+    is already indexed with content; the prior ``threads_vec`` row
+    when the thread is chunkless but has a non-zero embedding (covers
+    subject-fallback threads); placeholder zero only for genuinely
+    new threads. Phase 2a populates the chunk + attachment-plan
+    fields and the offsets that point each new chunk into the batch's
+    flat embed-input list. Phase 2c reads the bulk-embedded vectors
+    back through those offsets and applies the per-message DB writes,
+    replacing the seed with the real mean-of-chunks (or
+    subject-fallback) vector.
+    """
+
+    row: sqlite3.Row
+    msg: Message
+    thread: Thread
+    body_chunks: list[MessageChunk] = field(default_factory=list)
+    new_body_chunks: list[MessageChunk] = field(default_factory=list)
+    new_body_offsets: list[int] = field(default_factory=list)
+    attach_plans: list[AttachmentWritePlan] = field(default_factory=list)
+    attach_new_chunks: list[list[MessageChunk]] = field(default_factory=list)
+    attach_offsets: list[list[int]] = field(default_factory=list)
+    # Offset of this message's subject-fallback text in the batch's flat
+    # ``all_texts`` list, or ``None`` when no fallback is needed. The
+    # fallback is added in Phase 2a only when the message contributes
+    # zero new chunks AND its parent thread has no existing chunks —
+    # i.e. exactly the case where the Phase 1 seed is the placeholder
+    # zero. Without this fallback the thread vector would be
+    # permanently stuck at zero (search quality regression). Mirrors
+    # the old ``_seed_thread_embedding`` subject fallback.
+    subject_fallback_offset: int | None = None
+    parse_ms: float = 0.0
+    thread_ms: float = 0.0
+    phase1_ms: float = 0.0
+    chunk_ms: float = 0.0
+
+
+def _phase1_commit_thread(
+    row: sqlite3.Row,
+    db: Database,
+    threader: Threader,
+    queue: IndexingQueue,
+) -> _BatchedMsg | None:
+    """Phase 1 of the batched indexer for one message.
+
+    Parse → thread → ``upsert_thread`` with a seed vector
+    (``mean`` of the thread's existing chunk vectors when the thread
+    is already indexed; placeholder zero for new / chunk-less
+    threads). Returns a populated ``_BatchedMsg`` on success. On any
+    failure, marks the queue row appropriately and returns ``None`` so
+    the caller skips the message without aborting the whole batch.
+    """
+    filepath = row["filepath"]
+
+    t0 = time.perf_counter()
+    try:
+        msg = parse_email(Path(filepath), maildir_root=MAILDIR_PATH)
+    except FileNotFoundError:
+        # mbsync flag-rename race: file moved between enqueue and parse.
+        # Watchdog's IN_MOVED_TO will re-enqueue under the new name.
+        queue.mark_skipped(filepath, reason="file_missing")
+        return None
+    except Exception as e:
+        queue.mark_failed(filepath, stage="parse", error=repr(e))
+        return None
+    parse_ms = (time.perf_counter() - t0) * 1000
+    if msg is None:
+        # Parser returned None for a terminal reason (no Message-ID, etc.)
+        # — drop the row so the queue does not retry indefinitely.
+        queue.mark_succeeded(filepath)
+        return None
+
+    t0 = time.perf_counter()
+    try:
+        thread = threader.assign_thread(msg)
+    except Exception as e:
+        queue.mark_failed(filepath, stage="thread", error=repr(e))
+        return None
+    thread_ms = (time.perf_counter() - t0) * 1000
+
+    t0 = time.perf_counter()
+    # Seed the Phase 1 thread vector. Three cases, in priority order:
+    #   1. Thread has chunk vectors — use their mean. This is the
+    #      canonical seed for already-indexed threads with content.
+    #   2. No chunk vectors but a prior threads_vec row exists with
+    #      a non-zero embedding — preserve that. Covers chunkless
+    #      threads whose vector came from a subject fallback (an
+    #      earlier blank-body message in the same thread). Without
+    #      this branch, a new sibling message's Phase 1 commit would
+    #      clobber the subject vector with zero, and a Phase 2
+    #      failure or dead-letter would leave it permanently zero.
+    #   3. Neither — truly new thread, or existing thread with a
+    #      zero-vector row from a prior crashed batch. Use the
+    #      placeholder zero; Phase 2c will replace it with either
+    #      mean-of-new-chunks or the subject fallback.
+    # ``get_phase1_seed_state`` short-circuits with empty/None for
+    # brand-new threads via a cheap PK existence check, so the bulk
+    # case during an initial scan does one PK lookup instead of two
+    # empty reads.
+    existing_chunk_embs, prior_vec = db.get_phase1_seed_state(thread.thread_id)
+    if existing_chunk_embs:
+        seed_vector = mean_vector(existing_chunk_embs)
+    elif prior_vec is not None and any(v != 0.0 for v in prior_vec):
+        seed_vector = prior_vec
+    else:
+        seed_vector = _ZERO_THREAD_VECTOR
+    try:
+        # Phase 1 commit: write thread + message_thread_map + indexed_files
+        # with the seed vector. Threading state is durable before
+        # Phase 2 runs, so the next message in the batch sees this
+        # message's thread when computing its own thread assignment.
+        db.upsert_thread(thread, seed_vector)
+    except Exception as e:
+        queue.mark_failed(filepath, stage="thread_commit", error=repr(e))
+        return None
+    phase1_ms = (time.perf_counter() - t0) * 1000
+
+    return _BatchedMsg(
+        row=row,
+        msg=msg,
+        thread=thread,
+        parse_ms=parse_ms,
+        thread_ms=thread_ms,
+        phase1_ms=phase1_ms,
+    )
+
+
+def _phase2a_collect_chunks(
+    state: _BatchedMsg,
+    db: Database,
+    all_texts: list[str],
+    threads_with_pending_chunks: set[str],
+) -> tuple[bool, str | None]:
+    """Phase 2a: chunk the body and attachments WITHOUT embedding.
+
+    Appends every new chunk's text to the shared ``all_texts`` list and
+    records the offsets on ``state`` so Phase 2c can read its vectors
+    back. Returns ``(True, None)`` on success or ``(False, error)`` on
+    a chunk/extract failure (rare — usually only attachment OCR errors)
+    so the caller can mark the queue row failed without aborting the
+    rest of the batch.
+
+    ``threads_with_pending_chunks`` is the set of thread IDs that
+    earlier survivors in this batch already queued new chunks for.
+    A chunkless message on one of those threads can skip its own
+    subject fallback — the earlier sibling's chunks will overwrite
+    the seed in Phase 2c (case 1 wins over case 2). This avoids
+    wasting an embed-batch slot on a fallback that Phase 2c would
+    silently ignore.
+    """
+    msg = state.msg
+    t0 = time.perf_counter()
+    try:
+        body_chunks = chunk_message(
+            message_pk=msg.message_id,
+            body_text=strip_for_embedding(msg.body_text or ""),
+            target_tokens=CHUNK_TARGET_TOKENS,
+            max_tokens=CHUNK_MAX_TOKENS,
+            overlap_tokens=CHUNK_OVERLAP_TOKENS,
+        )
+        stored_ids = db.get_chunk_ids_for_message(msg.message_id)
+        new_body = [c for c in body_chunks if c.chunk_id not in stored_ids]
+        new_body_offsets: list[int] = []
+        for c in new_body:
+            new_body_offsets.append(len(all_texts))
+            all_texts.append(c.text)
+
+        attach_plans: list[AttachmentWritePlan] = []
+        attach_new_chunks: list[list[MessageChunk]] = []
+        attach_offsets: list[list[int]] = []
+        if INDEXER_ATTACHMENT_EXTRACTION_ENABLED and msg.attachments:
+            cap = (
+                INDEXER_ATTACHMENT_MAX_EXTRACTED_CHARS
+                if INDEXER_ATTACHMENT_MAX_EXTRACTED_CHARS > 0
+                else None
+            )
+            for occurrence_index, attachment in enumerate(msg.attachments):
+                # ``embedder=None`` defers the embed step — the plan
+                # comes back with empty embeddings_by_chunk_id and
+                # Phase 2c populates it from the batched embed result.
+                plan = prepare_attachment_writes(
+                    attachment=attachment,
+                    message_id=msg.message_id,
+                    db=db,
+                    embedder=None,
+                    chunk_target_tokens=CHUNK_TARGET_TOKENS,
+                    chunk_max_tokens=CHUNK_MAX_TOKENS,
+                    chunk_overlap_tokens=CHUNK_OVERLAP_TOKENS,
+                    ocr_enabled=INDEXER_OCR_ENABLED,
+                    max_bytes=INDEXER_ATTACHMENT_MAX_BYTES,
+                    max_ocr_pages=INDEXER_OCR_MAX_PAGES,
+                    ocr_timeout_seconds=INDEXER_OCR_TIMEOUT_SECONDS or None,
+                    max_pdf_pages=INDEXER_PDF_MAX_DIGITAL_PAGES or None,
+                    occurrence_index=occurrence_index,
+                    max_extracted_chars=cap,
+                )
+                if plan.chunks:
+                    stored_attach_ids = db.get_chunk_ids_for_message(
+                        msg.message_id, attachment_id=attachment.content_hash
+                    )
+                    plan_new = [c for c in plan.chunks if c.chunk_id not in stored_attach_ids]
+                else:
+                    plan_new = []
+                plan_offsets: list[int] = []
+                for c in plan_new:
+                    plan_offsets.append(len(all_texts))
+                    all_texts.append(c.text)
+                attach_plans.append(plan)
+                attach_new_chunks.append(plan_new)
+                attach_offsets.append(plan_offsets)
+        # Subject-fallback path: when this message contributes zero new
+        # chunks AND the parent thread has no existing chunks AND no
+        # earlier batch sibling has queued chunks for the same thread,
+        # embed the subject (or a sentinel string) so the thread vector
+        # is not permanently stuck at the Phase 1 placeholder zero.
+        # Mirrors the old ``_seed_thread_embedding`` per-message
+        # behavior. The fallback text rides through Phase 2b inside the
+        # same batched embed call as everyone else's chunks.
+        has_new_chunks = bool(new_body) or any(plan_new for plan_new in attach_new_chunks)
+        if has_new_chunks:
+            threads_with_pending_chunks.add(state.thread.thread_id)
+        elif (
+            state.thread.thread_id not in threads_with_pending_chunks
+            and not db.get_thread_chunk_embeddings(state.thread.thread_id)
+        ):
+            fallback_text = state.thread.subject.strip() if state.thread.subject else ""
+            if not fallback_text:
+                fallback_text = "(empty thread)"
+            state.subject_fallback_offset = len(all_texts)
+            all_texts.append(fallback_text)
+    except Exception as e:
+        # Phase 2a is "extract + chunk" only — no DB writes. A failure
+        # here marks this message failed but leaves Phase 1's thread
+        # commit in place (keyword-searchable but vectorless until
+        # retry succeeds or the operator dead-letters this row).
+        return False, repr(e)
+
+    state.body_chunks = body_chunks
+    state.new_body_chunks = new_body
+    state.new_body_offsets = new_body_offsets
+    state.attach_plans = attach_plans
+    state.attach_new_chunks = attach_new_chunks
+    state.attach_offsets = attach_offsets
+    state.chunk_ms = (time.perf_counter() - t0) * 1000
+    return True, None
+
+
+def _phase2c_commit_vectors(
+    state: _BatchedMsg,
+    db: Database,
+    vectors: list[list[float]],
+) -> tuple[bool, str | None]:
+    """Phase 2c: per-message DB transaction for body + attachments + thread vec.
+
+    Reads vectors out of the shared batch result via the offsets
+    captured in Phase 2a, then writes everything inside one
+    ``with db.transaction()`` block so chunks/vectors/thread-vector
+    either all land or all roll back for this message.
+    """
+    msg = state.msg
+    thread = state.thread
+
+    body_embs = {
+        c.chunk_id: vectors[i] for c, i in zip(state.new_body_chunks, state.new_body_offsets)
+    }
+    for plan, plan_new, plan_offsets in zip(
+        state.attach_plans, state.attach_new_chunks, state.attach_offsets
+    ):
+        plan.embeddings_by_chunk_id = {
+            c.chunk_id: vectors[i] for c, i in zip(plan_new, plan_offsets)
+        }
+
+    try:
+        with db.transaction():
+            db.replace_message_chunks(
+                message_id=msg.message_id,
+                thread_id=thread.thread_id,
+                chunks=state.body_chunks,
+                embeddings_by_chunk_id=body_embs,
+            )
+            for plan in state.attach_plans:
+                apply_attachment_writes(
+                    plan=plan,
+                    message_id=msg.message_id,
+                    thread_id=thread.thread_id,
+                    db=db,
+                )
+            # Replace the Phase 1 seed thread vector. Three cases
+            # mirror the old ``_seed_thread_embedding`` logic:
+            #   1. Thread now has chunks (this message contributed
+            #      some, or earlier messages already had them) → use
+            #      the mean of those chunk vectors.
+            #   2. No chunks anywhere on the thread, but Phase 2a
+            #      reserved a subject-fallback slot in the embed batch
+            #      (blank-body, no-attachment-chunks message — would
+            #      otherwise be permanently stuck at zero) → use the
+            #      subject-embedded vector.
+            #   3. Neither — leave the placeholder zero in place.
+            #      Should not occur in practice; if it does, the next
+            #      message on the thread will overwrite via case 1.
+            chunk_embs = db.get_thread_chunk_embeddings(thread.thread_id)
+            if chunk_embs:
+                db.replace_thread_vector(thread.thread_id, mean_vector(chunk_embs))
+            elif state.subject_fallback_offset is not None:
+                db.replace_thread_vector(thread.thread_id, vectors[state.subject_fallback_offset])
+    except Exception as e:
+        return False, repr(e)
+    return True, None
+
+
+def _drain_queue_batched(
+    db: Database,
+    embedder: EmbeddingBackend,
+    threader: Threader,
+    queue: IndexingQueue,
+    *,
+    batch_size: int,
+    timing_aggregator: TimingAggregator,
+) -> int:
+    """Drain the queue in two-phase batches.
+
+    Phase 1 commits thread membership per-message with a seed thread
+    vector — ``mean(existing chunk vectors)`` for already-indexed
+    threads, placeholder zero for new ones — so (a) the next message
+    in the batch's threader can see this message's thread, and (b) a
+    Phase 2 failure cannot regress an already-good thread vector to
+    zero.
+    Phase 2a chunks the body + attachment text without embedding.
+    Phase 2b issues a single ``embed_batch`` covering every new chunk
+    across the whole batch — this is the optimization: ~25k single-
+    HTTP-call messages becomes ~500 multi-message HTTP calls against a
+    cloud embedder.
+    Phase 2c commits the chunk + vector writes per message and
+    overwrites the Phase 1 seed thread vector with the real
+    mean-of-chunks vector.
+
+    Failure isolation:
+
+    * Phase 1 error for one message — that message marked failed,
+      others continue.
+    * Phase 2a (chunk/extract) error for one message — marked failed,
+      Phase 1's commit stays. Vector-less but text-searchable.
+    * Phase 2b (embed) error — entire in-flight batch's queue rows
+      marked failed (queue retry on next pass). Phase 1 commits
+      remain; the next pass re-runs Phase 1 (idempotent upsert) plus
+      Phase 2.
+    * Phase 2c (DB write) error for one message — marked failed,
+      others succeed.
+    """
+    processed = 0
+    while True:
+        # ---- Gather batch + Phase 1 ----
+        # Snapshot up to batch_size distinct queued rows in one query
+        # so the gather loop cannot re-claim the same row repeatedly
+        # while we defer mark_succeeded to Phase 2c.
+        rows = queue.claim_batch(batch_size)
+        if not rows:
+            break
+        batch: list[_BatchedMsg] = []
+        for row in rows:
+            entry = _phase1_commit_thread(row, db, threader, queue)
+            processed += 1
+            if entry is not None:
+                batch.append(entry)
+            touch_health_file()
+
+        if not batch:
+            continue
+
+        # ---- Phase 2a: collect chunks across batch (no embed) ----
+        # Each entry can take seconds to many tens of seconds for a
+        # large attachment-heavy message (PDF chunking, OCR, etc.). The
+        # cumulative wall-clock for a batch_size=50 batch can blow past
+        # HEALTH_MAX_AGE_SECONDS, so touch the heartbeat after every
+        # entry — not just before/after the bulk embed.
+        all_texts: list[str] = []
+        survivors: list[_BatchedMsg] = []
+        # Track thread IDs that earlier survivors already queued new
+        # chunks for, so a chunkless sibling on the same thread later
+        # in the batch skips reserving a redundant subject-fallback
+        # slot in ``all_texts``.
+        threads_with_pending_chunks: set[str] = set()
+        for entry in batch:
+            ok, err = _phase2a_collect_chunks(entry, db, all_texts, threads_with_pending_chunks)
+            if ok:
+                survivors.append(entry)
+            else:
+                queue.mark_failed(entry.row["filepath"], stage="chunk", error=err or "")
+            touch_health_file()
+
+        if not survivors:
+            continue
+
+        # Refresh the heartbeat just before the bulk embed so a slow
+        # cloud-embedder round-trip (potentially tens of seconds for a
+        # full batch of chunks) doesn't age the health file past
+        # HEALTH_MAX_AGE_SECONDS while no per-message touch fires.
+        touch_health_file()
+
+        # ---- Phase 2b: bulk embed across batch ----
+        t_embed_start = time.perf_counter()
+        try:
+            vectors = embedder.embed_batch(all_texts) if all_texts else []
+        except Exception as e:
+            log.error(
+                "batched embed failed for %d texts (batch=%d msgs): %r",
+                len(all_texts),
+                len(survivors),
+                e,
+            )
+            for entry in survivors:
+                queue.mark_failed(entry.row["filepath"], stage="embed", error=repr(e))
+            continue
+        embed_ms = (time.perf_counter() - t_embed_start) * 1000
+        # Attribute embed time evenly across the batch for telemetry.
+        per_msg_embed_ms = embed_ms / max(1, len(survivors))
+
+        # ---- Phase 2c: per-message vector commits ----
+        for entry in survivors:
+            t0 = time.perf_counter()
+            ok, err = _phase2c_commit_vectors(entry, db, vectors)
+            db_write_ms = (time.perf_counter() - t0) * 1000
+            if ok:
+                queue.mark_succeeded(entry.row["filepath"])
+                # ``db_write_ms`` aggregates BOTH DB-write phases:
+                # Phase 1's ``upsert_thread`` (recorded as
+                # ``entry.phase1_ms``) plus the Phase 2c per-message
+                # transaction (``db_write_ms`` measured above). Without
+                # the Phase 1 contribution the ``db_write`` and
+                # ``total`` columns in the periodic summary
+                # under-report wall-clock — Phase 1 commits are
+                # idempotent upserts but still cost SQLite IO time.
+                timing_aggregator.record(
+                    StageTimings(
+                        parse_ms=entry.parse_ms,
+                        thread_ms=entry.thread_ms,
+                        chunk_ms=entry.chunk_ms,
+                        embed_ms=per_msg_embed_ms,
+                        db_write_ms=entry.phase1_ms + db_write_ms,
+                    )
+                )
+            else:
+                queue.mark_failed(entry.row["filepath"], stage="db_write", error=err or "")
+            touch_health_file()
+
+        if processed and processed % TIMING_LOG_EVERY < batch_size:
+            line = format_summary(timing_aggregator.summary())
+            if line:
+                log.info(line)
+
+    return processed
+
+
+def _recover_zero_vector_threads(db: Database, queue: IndexingQueue) -> int:
+    """Re-enqueue messages stuck on chunkless zero-vector threads.
+
+    The batched indexer's Phase 1 commits thread membership +
+    ``indexed_files`` durably before Phase 2 runs. If the indexer is
+    killed (SIGKILL, OOM, power loss) between Phase 1 and Phase 2c on
+    a thread that had no prior chunks, or if the Phase 2 retry
+    cascade exhausts ``max_attempts`` and dead-letters the file, the
+    thread is left text-indexed but vectorless — and ``is_indexed``
+    returns True so the normal ``initial_index`` walk won't
+    re-enqueue it. This sweep finds those files and gives them a
+    fresh attempt budget so the next drain pass can complete the
+    indexing.
+
+    Skips files that already have a 'queued' row — the normal retry
+    cascade is in flight and clobbering its row would reset the
+    attempts counter mid-cascade. Re-enqueue covers the
+    no-row case (Phase 1 succeeded but the queue row was somehow
+    cleaned up) and the dead-letter case (``enqueue``'s
+    ``INSERT OR REPLACE`` clears the dead row and resets attempts).
+
+    Healthy chunkless subject-fallback threads (non-zero
+    ``threads_vec``) are NOT touched — the DB query filters them out.
+
+    Returns the number of files re-enqueued for visibility in
+    startup logs.
+    """
+    candidates = db.find_zero_vector_chunkless_thread_filepaths()
+    if not candidates:
+        return 0
+
+    re_enqueued = 0
+    skipped_pending = 0
+    for filepath in candidates:
+        if queue.has_pending_row(filepath):
+            skipped_pending += 1
+            continue
+        queue.enqueue(filepath, REASON_RECOVERY)
+        re_enqueued += 1
+
+    if re_enqueued or skipped_pending:
+        log.warning(
+            "recovery sweep: re-enqueued %d message(s) on threads with "
+            "zero-vector + no chunks (Phase 1 committed but Phase 2 "
+            "did not — likely a crash mid-batch or a Phase 2 dead-letter); "
+            "skipped %d already in active retry. Their next drain pass "
+            "should complete the indexing.",
+            re_enqueued,
+            skipped_pending,
+        )
+    return re_enqueued
+
+
 def initial_index(
     db: Database,
     embedder: EmbeddingBackend,
@@ -616,36 +1154,26 @@ def initial_index(
         skipped_dead,
     )
 
-    processed = 0
+    # Recovery sweep — re-enqueue messages stuck on chunkless zero-vector
+    # threads from a prior crash mid-batch or Phase 2 dead-letter. The
+    # standard walk above misses these because is_indexed=True. Run BEFORE
+    # the drain so recovery rows ride the same batched-index pass as fresh
+    # enqueues.
+    _recover_zero_vector_threads(db, queue)
+
     timing_aggregator = TimingAggregator(window=200)
-    while True:
-        row = queue.claim_next()
-        if row is None:
-            break
-        filepath = row["filepath"]
-        succeeded, stage, error, timings = _index_one_file(Path(filepath), db, embedder, threader)
-        timing_aggregator.record(timings)
-        if succeeded:
-            queue.mark_succeeded(filepath)
-        elif stage == "parse_skipped_missing":
-            # See drain_queue: a missing file at parse time is mbsync
-            # rename, not an indexer fault. Drop without retrying.
-            queue.mark_skipped(filepath, reason="file_missing")
-        else:
-            queue.mark_failed(filepath, stage=stage, error=error or "")
-        processed += 1
-        # Touch the heartbeat after every job rather than every
-        # ``HEALTH_REFRESH_EVERY`` jobs. ``HEALTH_MAX_AGE_SECONDS`` is 90s
-        # in the healthcheck script; a 25-job batch can exceed that on
-        # mailboxes with large attachments (PDF chunking + OCR), flipping
-        # the container to unhealthy mid-work and blocking compose
-        # dependency-gated starts. A single ``Path.touch()`` per job is
-        # negligible relative to parse + embed + upsert cost.
-        touch_health_file()
-        if processed % TIMING_LOG_EVERY == 0:
-            line = format_summary(timing_aggregator.summary())
-            if line:
-                log.info(line)
+    log.info(
+        "Initial index: draining queue with batch_size=%d (cross-message embed batching).",
+        INITIAL_INDEX_BATCH_SIZE,
+    )
+    processed = _drain_queue_batched(
+        db,
+        embedder,
+        threader,
+        queue,
+        batch_size=INITIAL_INDEX_BATCH_SIZE,
+        timing_aggregator=timing_aggregator,
+    )
     # Always emit a final summary at the end of the initial scan, even
     # if the count was not a multiple of ``TIMING_LOG_EVERY`` — the
     # operator wants to see the cost of the scan they just ran.
