@@ -420,15 +420,23 @@ messages. The two paths cooperate cleanly because they hit different
 queue states:
 
 - **Phase 1 (per message)**: parse → thread → `upsert_thread` with a
-  seed thread vector. The seed is `mean(existing chunk vectors)` when
-  the thread already has chunks indexed, falling back to a placeholder
-  zero-vector for genuinely new (or chunk-less) threads. The
-  mean-of-existing seed is what makes a Phase 2 failure non-corrupting:
-  if the bulk embed fails on a new sibling message, the parent thread
-  retains its prior valid vector instead of being clobbered to zero.
-  Threading state is durable before the next message in the batch's
-  threader runs, so a reply B that arrives in the same batch as its
-  parent A correctly threads into A's thread — not a sibling.
+  seed thread vector chosen by a three-case priority chain:
+  1. Thread has chunk vectors → `mean(chunks)`. Canonical seed for
+     already-indexed threads with content.
+  2. No chunks but a prior `threads_vec` row exists with a non-zero
+     embedding → preserve that. Covers chunkless threads whose vector
+     came from Phase 2c's subject-fallback path (an earlier blank-body
+     message in the same thread).
+  3. Neither → placeholder zero. Truly new threads, or post-crash
+     recovery on a thread that already had a zero row.
+
+  Cases 1 and 2 are what make a Phase 2 failure non-corrupting: if the
+  bulk embed fails on a new sibling message, the parent thread retains
+  its prior valid vector — chunk-derived or subject-fallback — instead
+  of being clobbered to zero. Threading state is durable before the
+  next message in the batch's threader runs, so a reply B that arrives
+  in the same batch as its parent A correctly threads into A's
+  thread — not a sibling.
 - **Phase 2a (per message, no DB)**: chunk body + extract attachments
   WITHOUT embedding. New chunks accumulate into a flat batch-wide
   texts list with offsets recorded on each per-message state object.

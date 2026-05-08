@@ -1218,6 +1218,7 @@ class Database:
         count = len(blob) // 4
         return list(struct.unpack(f"{count}f", blob))
 
+    @_synchronized
     def get_thread_chunk_embeddings(self, thread_id: str) -> list[list[float]]:
         """Return every chunk embedding stored for ``thread_id``.
 
@@ -1495,6 +1496,7 @@ class Database:
             (status, now_iso),
         ).fetchone()
 
+    @_synchronized
     def queue_fetch_due_batch(self, status: str, now_iso: str, limit: int) -> list[sqlite3.Row]:
         """Return up to ``limit`` due ``status`` rows ordered by oldest-due first.
 
