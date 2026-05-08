@@ -31,12 +31,16 @@ Create the secrets directory and placeholder files:
 make init-secrets
 ```
 
-This creates `.secrets/bridge_pass.txt` and `.secrets/anthropic_api_key.txt`
-as empty placeholders with `600` permissions. Docker Compose requires both files
-to exist before starting. You will overwrite them with real values:
+This creates `.secrets/bridge_pass.txt`, `.secrets/anthropic_api_key.txt`,
+and `.secrets/embed_api_key.txt` as empty placeholders with `600`
+permissions. Docker Compose requires all three files to exist before
+starting. You will overwrite them with real values only as needed:
 
 - `bridge_pass.txt` — after the Bridge login step below
 - `anthropic_api_key.txt` — only if you use `LLM_MODE=cloud`; leave empty for local-only mode
+- `embed_api_key.txt` — only if `EMBED_BASE_URL` points at a cloud
+  embedder (DeepInfra, OpenRouter, etc.); leave empty for the default
+  local mlx-service path which does not authenticate
 
 ### 3. Build all Docker images
 
