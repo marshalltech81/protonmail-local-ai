@@ -95,6 +95,83 @@ def test_embed_empty_list_400(client: TestClient) -> None:
     assert r.status_code == 400
 
 
+def test_openai_embeddings_single_string(client: TestClient) -> None:
+    # OpenAI clients always wrap single inputs in a length-1 ``data``
+    # array, even when the request input was a bare string. The shape
+    # MUST match so any compliant client (httpx, OpenAI SDK) parses
+    # the response without special-casing.
+    r = client.post("/v1/embeddings", json={"input": "hello", "model": "ignored"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["object"] == "list"
+    assert body["model"] == main.EMBED_MODEL_ID
+    assert len(body["data"]) == 1
+    datum = body["data"][0]
+    assert datum["object"] == "embedding"
+    assert datum["index"] == 0
+    assert len(datum["embedding"]) == 4096
+    assert body["usage"] == {"prompt_tokens": 0, "total_tokens": 0}
+
+
+def test_openai_embeddings_batch_preserves_order(client: TestClient) -> None:
+    r = client.post(
+        "/v1/embeddings",
+        json={"input": ["a", "b", "c"], "model": "ignored"},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert len(body["data"]) == 3
+    # ``index`` must reflect input order so clients can map vectors back
+    # to source texts even if a future provider reorders ``data``.
+    assert [d["index"] for d in body["data"]] == [0, 1, 2]
+    assert all(len(d["embedding"]) == 4096 for d in body["data"])
+
+
+def test_openai_embeddings_empty_400(client: TestClient) -> None:
+    r = client.post("/v1/embeddings", json={"input": [], "model": "ignored"})
+    assert r.status_code == 400
+
+
+def test_openai_embeddings_ignores_authorization_header(client: TestClient) -> None:
+    # The service binds 127.0.0.1 only and does not authenticate. Cloud
+    # OpenAI clients always send ``Authorization: Bearer ...``; the
+    # service must accept the header and not 401/403 on it.
+    r = client.post(
+        "/v1/embeddings",
+        json={"input": "hello", "model": "ignored"},
+        headers={"Authorization": "Bearer some-cloud-key"},
+    )
+    assert r.status_code == 200
+
+
+def test_openai_embeddings_accepts_optional_fields(client: TestClient) -> None:
+    # ``encoding_format`` and ``dimensions`` are accepted for
+    # protocol-compatibility and ignored. A request that includes them
+    # must not 422.
+    r = client.post(
+        "/v1/embeddings",
+        json={
+            "input": "hello",
+            "model": "ignored",
+            "encoding_format": "float",
+            "dimensions": 1536,
+            "user": "anything",
+        },
+    )
+    assert r.status_code == 200
+
+
+def test_openai_models_lists_embedder(client: TestClient) -> None:
+    r = client.get("/v1/models")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["object"] == "list"
+    ids = [m["id"] for m in body["data"]]
+    assert main.EMBED_MODEL_ID in ids
+    # Reranker is not OpenAI-shaped and must not be advertised here.
+    assert main.RERANK_MODEL_ID not in ids
+
+
 def test_rerank_orders_by_score_desc_and_respects_top_n(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:

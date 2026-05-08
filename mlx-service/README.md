@@ -16,13 +16,28 @@ Both load lazily on first request and stay resident.
 
 ## Endpoints
 
-- `POST /embed` — `{"input": str | list[str]}` → for single string,
-  returns `{"embedding": [...]}` (matches Ollama `/api/embeddings`); for
-  list input, returns `{"embeddings": [[...], ...]}`
+- `POST /v1/embeddings` — OpenAI-compatible. Body
+  `{"model": str?, "input": str | list[str]}` → returns
+  `{"object": "list", "data": [{"object": "embedding", "embedding": [...], "index": int}, ...], "model": str, "usage": {...}}`.
+  `model` is accepted for protocol-compatibility and ignored — this
+  service hosts a single embedder (`MLX_EMBED_MODEL`). The
+  `Authorization` header is accepted and ignored (loopback service).
+  This is the canonical embed endpoint; the indexer's `OpenAIEmbedder`
+  client and mcp-server's `LocalLLMClient.embed()` both speak this
+  shape against any compliant provider (mlx-service, DeepInfra,
+  OpenRouter, LM Studio, vLLM, TEI).
+- `GET /v1/models` — minimal OpenAI shim listing the embedder's id so
+  OpenAI clients that probe model availability do not 404. The
+  reranker is not OpenAI-shaped and is not advertised here.
 - `POST /rerank` — `{"query": str, "documents": [str, ...], "top_n": int?}`
   → `{"results": [{"index": int, "score": float}, ...]}` sorted desc by
-  score
-- `GET /health` — model load state + approximate process resident memory
+  score. There is no OpenAI rerank standard, so this stays in the
+  service's own namespace.
+- `POST /embed` — **deprecated.** Legacy Ollama-shaped endpoint kept
+  for one release as a transitional alias for `/v1/embeddings`.
+  Slated for removal in a follow-up PR once every consumer is on
+  `/v1/embeddings`.
+- `GET /health` — model load state + approximate process resident memory.
 
 ## Local run
 

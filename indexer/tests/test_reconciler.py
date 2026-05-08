@@ -33,8 +33,11 @@ class FakeEmbedder:
     def embed(self, text: str) -> list[float]:
         self.calls += 1
         if self.should_fail:
-            raise RuntimeError("simulated Ollama outage")
+            raise RuntimeError("simulated embedder outage")
         return FAKE_EMBEDDING
+
+    def embed_batch(self, texts: list[str]) -> list[list[float]]:
+        return [self.embed(t) for t in texts]
 
 
 def _default_config(**overrides) -> ReconcilerConfig:

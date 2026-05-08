@@ -83,7 +83,7 @@ Claude Desktop (host machine)
 |---|---|---|---|
 | `protonmail-bridge` | ProtonMail Cloud | `bridge-data` vol | IMAP 1143, SMTP 1025 (internal) |
 | `mbsync` | Bridge IMAP | `maildir-volume` | nothing |
-| `mlx-service` (host process, not Docker) | embed/rerank requests | `~/.cache/huggingface/` model cache | HTTP 8001 (loopback only); reached from Docker via `host.docker.internal`. See `docs/setup.md` for the LaunchAgent install. |
+| `mlx-service` (host process, not Docker) | embed (OpenAI `/v1/embeddings`) + rerank requests | `~/.cache/huggingface/` model cache | HTTP 8001 (loopback only); reached from Docker via `host.docker.internal`. The embed surface is OpenAI-compatible — operators can swap to any compliant provider via `EMBED_BASE_URL`. The reranker stays on the service's custom `/rerank`. See `docs/setup.md` for the LaunchAgent install. |
 | `mlx-lm-server` (host process, not Docker) | LLM chat requests | `~/.cache/huggingface/` model cache | HTTP 8002 (loopback only); reached from Docker via `host.docker.internal`. OpenAI-compatible `/v1/chat/completions`. See `docs/setup.md` for the LaunchAgent install. |
 | `indexer` | `maildir-volume`, mlx-service | `sqlite-volume` | nothing |
 | `mcp-server` | `sqlite-volume`, mlx-service, mlx-lm-server (LLM) | nothing | HTTP 3000 (localhost only) |
@@ -120,8 +120,8 @@ For stricter local-only deployments, `docker-compose.hardened.yml` marks
 > overlay is reworked to either move both MLX services into containers
 > on `app-net` or explicitly punch `host.docker.internal` through,
 > applying it will likely cut off the LLM (`LLM_MODE=local`) and the
-> MLX `/embed` and `/rerank` calls. The compose file itself carries
-> the same warning. Do not apply it as-is.
+> MLX `/v1/embeddings` and `/rerank` calls. The compose file itself
+> carries the same warning. Do not apply it as-is.
 
 The default stack exposes only `127.0.0.1:3000` for the MCP server. The
 optional Open WebUI overlay also exposes `127.0.0.1:8080` for the browser UI.
@@ -141,6 +141,20 @@ macOS Application Firewall via the loopback exemption, so they're
 reachable from OrbStack containers (which route through the loopback
 exemption) but not from LAN neighbors.
 
+The embedder surface is OpenAI-compatible (`/v1/embeddings`). The
+indexer's `OpenAIEmbedder` client and mcp-server's
+`LocalLLMClient.embed()` both speak this dialect, so an operator can
+point `EMBED_BASE_URL` at any compliant provider — DeepInfra,
+OpenRouter, LM Studio, vLLM, TEI — without changing any code. The
+schema reserves a fixed 4096-dim vector, so `EMBED_MODEL` must keep
+producing 4096-dim vectors (Qwen3-Embedding-8B variants) or a schema
+migration is required. Indexer and mcp-server must point at the same
+provider + model so query vectors are comparable to indexed vectors.
+
+The reranker uses a custom `/rerank` shape — there is no OpenAI
+rerank standard — so `RERANK_BASE_URL` is independent of
+`EMBED_BASE_URL`.
+
 ## Search Architecture
 
 The hybrid search pipeline:
@@ -148,7 +162,7 @@ The hybrid search pipeline:
 ```
 User query
     │
-    ├─ Embed query text → Qwen3-Embedding-8B (mlx-service) → 4096-dim vector
+    ├─ Embed query text → OpenAI /v1/embeddings (default: mlx-service / Qwen3-Embedding-8B) → 4096-dim vector
     │
     ├─ BM25 search   → SQLite FTS5 over thread bodies      → ranked list A
     │
@@ -472,10 +486,19 @@ walkthrough; the table below is the per-operation reference.
 | Operation | Local only | Leaves machine |
 |---|---|---|
 | Email storage | ✅ | Never |
-| Embedding generation | ✅ (mlx-service) | Never |
+| Embedding generation — default `EMBED_BASE_URL` (mlx-service on `127.0.0.1`) | ✅ | Never |
+| Embedding generation — cloud `EMBED_BASE_URL` (DeepInfra, OpenRouter, etc.) | Retrieval queries + indexed content | Email body chunks → cloud provider |
 | Vector index | ✅ (SQLite) | Never |
 | Keyword search | ✅ (SQLite FTS5) | Never |
+| Reranker — default `RERANK_BASE_URL` (mlx-service on `127.0.0.1`) | ✅ | Never |
 | Send/Move/Flag | Disabled by default | Never |
+
+> **Note on cloud embedders.** Pointing `EMBED_BASE_URL` at a remote
+> provider sends every email body chunk through that provider at index
+> time and every search query string at retrieval time. This is a
+> deliberate departure from the local-first default and should be done
+> with the privacy implications understood. The local mlx-service
+> default is what makes "all retrieval stays local" hold.
 
 ### MCP server intelligence tools (governed by `LLM_MODE`)
 

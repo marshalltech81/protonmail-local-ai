@@ -20,7 +20,7 @@ Ask questions about your inbox in plain English. Everything stays on your machin
 | ProtonBridge | Decrypts ProtonMail, exposes local IMAP/SMTP |
 | mbsync | Real-time incremental sync to local Maildir |
 | Indexer | Parses threads, generates embeddings, builds SQLite index |
-| mlx-service (host) | Apple Metal embedder (Qwen3-Embedding-8B) + reranker (Qwen3-Reranker-4B) on `:8001` |
+| mlx-service (host) | Apple Metal embedder (Qwen3-Embedding-8B) + reranker (Qwen3-Reranker-4B) on `:8001`. Embedder surface is OpenAI-compatible (`/v1/embeddings`); swappable via `EMBED_BASE_URL` to any compliant provider |
 | mlx-lm-server (host) | Apple Metal LLM serving (default Qwen3-32B-4bit) for `LLM_MODE=local`, OpenAI-compatible at `:8002/v1` |
 | SQLite (FTS5 + sqlite-vec) | Hybrid keyword + vector search index |
 | MCP Server | Exposes tools to Claude Desktop via HTTP/SSE |
@@ -139,7 +139,7 @@ use and which `LLM_MODE` you select. Be deliberate about all three layers.
 | Data | Where it lives |
 |---|---|
 | Your emails (Maildir) | Local Docker volume — never leaves your machine |
-| Embeddings | Generated locally by mlx-service on Apple Metal — never sent anywhere |
+| Embeddings | Default: generated locally by mlx-service on Apple Metal — never sent anywhere. Pointing `EMBED_BASE_URL` at a cloud provider (DeepInfra, OpenRouter, etc.) ships email body chunks to that provider — opt-in only, not the default. |
 | Search index (SQLite FTS5 + sqlite-vec) | Local Docker volume |
 | Bridge ↔ Proton traffic | The only path off your machine for mail data |
 

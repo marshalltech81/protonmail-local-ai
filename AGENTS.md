@@ -64,7 +64,7 @@ High-level data flow:
 
 1. ProtonBridge connects to ProtonMail.
 2. mbsync pulls from Bridge into Maildir.
-3. indexer parses Maildir messages, builds conversation threads, generates embeddings via the host-side mlx-service, and writes SQLite.
+3. indexer parses Maildir messages, builds conversation threads, generates embeddings via an OpenAI-compatible `/v1/embeddings` endpoint (default: host-side mlx-service), and writes SQLite.
 4. MCP server reads from SQLite and exposes tools over SSE and/or Streamable HTTP.
 5. Only the MCP server is exposed to the host on `localhost:3000` by default.
    The optional Open WebUI overlay may additionally expose a localhost-only
@@ -80,10 +80,17 @@ Important architecture facts:
 - LLM inference for `LLM_MODE=local` is served by `mlx-lm-server`
   (upstream `mlx_lm.server` wrapped in a LaunchAgent), bound to
   `127.0.0.1:8002` and reached from containers via
-  `host.docker.internal:8002`. Embeddings + reranking go through the
-  separate `mlx-service` LaunchAgent on `127.0.0.1:8001`. Both run on
-  the host because MLX needs Metal access, which Docker on macOS
-  cannot provide. See `mlx-service/README.md` and
+  `host.docker.internal:8002`. Embeddings go through the
+  OpenAI-compatible `/v1/embeddings` endpoint at `EMBED_BASE_URL`
+  (default: `mlx-service` LaunchAgent on `127.0.0.1:8001/v1`).
+  Reranking goes through `RERANK_BASE_URL` against the same
+  `mlx-service` `/rerank` endpoint by default. Both LaunchAgents run
+  on the host because MLX needs Metal access, which Docker on macOS
+  cannot provide. The embedder is swappable to any OpenAI-compatible
+  provider (DeepInfra, OpenRouter, LM Studio, vLLM, TEI) by changing
+  `EMBED_BASE_URL` + `EMBED_MODEL` (+ `embed_api_key` Docker secret);
+  the reranker stays on mlx-service's custom `/rerank` shape (no
+  OpenAI rerank standard exists). See `mlx-service/README.md` and
   `mlx-lm-server/README.md` for the LaunchAgent install.
 
 ## Non-Negotiable Constraints
@@ -454,13 +461,18 @@ Purpose:
 
 - parses Maildir messages
 - threads messages into conversations
-- embeds content through the host-side mlx-service
+- embeds content through an OpenAI-compatible `/v1/embeddings` endpoint
+  (default: host-side mlx-service)
 - writes SQLite, FTS5, and vector data
 
 Notes:
 
 - preserve thread-level indexing
 - review schema implications before changing embedding or storage assumptions
+- indexer and mcp-server must point at the same `EMBED_BASE_URL` +
+  `EMBED_MODEL` so query vectors are comparable to indexed vectors —
+  swapping the embedder requires a full reindex if the new model
+  produces vectors of a different shape or distribution
 
 ### `mcp-server/`
 

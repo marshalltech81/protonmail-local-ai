@@ -1,8 +1,13 @@
 """
 Indexer entry point.
 Watches the Maildir for new/changed emails, parses and threads them,
-generates embeddings via the host-side mlx-service, and writes to the
-SQLite index.
+generates embeddings via an OpenAI-compatible /v1/embeddings endpoint,
+and writes to the SQLite index.
+
+The default embedder is the host-side mlx-service on Apple Metal, but
+any OpenAI-compatible provider works (DeepInfra, OpenRouter, LM Studio,
+vLLM, TEI, etc.) — only ``EMBED_BASE_URL`` + ``EMBED_MODEL`` (+ optional
+``EMBED_API_KEY`` Docker secret) change.
 
 When ``INDEXER_DELETION_ENABLED=true`` the indexer also runs a reconciler
 that records tombstones for mbsync-flagged (``T``) Maildir files and reaps
@@ -24,7 +29,7 @@ from .attachment_indexing import (
 )
 from .chunker import chunk_message, mean_vector
 from .database import EMBEDDING_DIM, Database
-from .embedder import EmbeddingBackend, MlxEmbedder
+from .embedder import EmbeddingBackend, OpenAIEmbedder
 from .parser import parse_email
 from .queue import (
     REASON_INITIAL_SCAN,
@@ -47,11 +52,40 @@ log = logging.getLogger("indexer")
 MAILDIR_PATH = Path(os.environ.get("MAILDIR_PATH", "/maildir"))
 SQLITE_PATH = Path(os.environ.get("SQLITE_PATH", "/data/mail.db"))
 
-# MLX-service-backed embedder. The indexer reaches the host-side
-# ``mlx-service`` over OrbStack's ``host.docker.internal``; the service
-# binds ``127.0.0.1:8001`` and serves Qwen3-Embedding-8B at the schema's
-# 4096-dim shape.
-EMBED_SERVICE_URL = os.environ.get("EMBED_SERVICE_URL", "http://host.docker.internal:8001")
+# OpenAI-compatible embedder configuration.
+#
+# The default points at the host-side ``mlx-service`` on Apple Metal,
+# reached from containers via OrbStack's ``host.docker.internal``. The
+# service binds ``127.0.0.1:8001`` and exposes ``/v1/embeddings``.
+#
+# Any OpenAI-compatible provider works: replace ``EMBED_BASE_URL`` with
+# the provider's base URL and set ``EMBED_API_KEY`` (Docker secret).
+# The schema reserves a fixed 4096-dim vector — keep ``EMBED_MODEL``
+# pointed at a 4096-dim model (Qwen3-Embedding-8B variants) or a schema
+# migration is required.
+EMBED_BASE_URL = os.environ.get("EMBED_BASE_URL", "http://host.docker.internal:8001/v1")
+EMBED_MODEL = os.environ.get("EMBED_MODEL", "mlx-community/Qwen3-Embedding-8B-mxfp8")
+
+
+def _read_embed_api_key() -> str:
+    """Read the embedder API key from a Docker secret, then env, then empty.
+
+    Mirrors the secret-then-env pattern used in mcp-server. An empty key
+    is the local mlx-service case (no auth on loopback) and is not an
+    error. The Docker secret path follows the existing
+    ``/run/secrets/<name>`` convention; ``EMBED_API_KEY`` env is the
+    fallback for non-Docker deployments.
+    """
+    secret_path = Path("/run/secrets/embed_api_key")
+    if secret_path.exists():
+        try:
+            return secret_path.read_text(encoding="utf-8").strip()
+        except OSError as e:
+            log.warning("could not read /run/secrets/embed_api_key: %s", e)
+    return os.environ.get("EMBED_API_KEY", "").strip()
+
+
+EMBED_API_KEY = _read_embed_api_key()
 # /tmp default is safe: container tmpfs, non-root user, overridable via env.
 INDEXER_HEALTH_FILE = Path(os.environ.get("INDEXER_HEALTH_FILE", "/tmp/indexer-health"))  # nosec B108
 
@@ -73,6 +107,14 @@ def _int_env(name: str, default: int, minimum: int = 1) -> int:
         log.warning("invalid %s=%r; falling back to %d", name, raw, default)
         return default
     return max(minimum, value)
+
+
+# How many texts the embedder client packs into a single
+# ``/v1/embeddings`` HTTP call. Larger batches amortize per-request
+# overhead — meaningful for cloud providers, marginal for the local
+# mlx-service. The provider's own per-request input cap is the upper
+# bound (DeepInfra accepts 100; OpenAI accepts 2048).
+EMBED_BATCH_SIZE = _int_env("EMBED_BATCH_SIZE", 64)
 
 
 # Chunker token budgets — see ``chunker.chunk_message`` for semantics.
@@ -222,9 +264,15 @@ def _build_chunk_writes(
         )
         stored_ids = db.get_chunk_ids_for_message(msg.message_id)
         new_chunks = [c for c in chunks if c.chunk_id not in stored_ids]
-        embeddings_by_chunk_id = {
-            chunk.chunk_id: embedder.embed(chunk.text) for chunk in new_chunks
-        }
+        if new_chunks:
+            # One batched HTTP call per message instead of one call per
+            # chunk. Critical against cloud embedders where per-call
+            # latency dominates; meaningful but smaller win against
+            # mlx-service on loopback.
+            vectors = embedder.embed_batch([c.text for c in new_chunks])
+            embeddings_by_chunk_id = {c.chunk_id: v for c, v in zip(new_chunks, vectors)}
+        else:
+            embeddings_by_chunk_id = {}
         chunk_writes.append((msg, chunks, embeddings_by_chunk_id))
     return chunk_writes
 
@@ -644,10 +692,17 @@ def main():
     log.info("Starting indexer...")
     log.info(f"  Maildir: {MAILDIR_PATH}")
     log.info(f"  SQLite:  {SQLITE_PATH}")
-    log.info(f"  Embedder: MLX service at {EMBED_SERVICE_URL}")
+    log.info(f"  Embedder: {EMBED_BASE_URL} (model={EMBED_MODEL}, batch={EMBED_BATCH_SIZE})")
+    if EMBED_API_KEY:
+        log.info("  Embedder API key: present (Bearer auth enabled)")
 
     db = Database(SQLITE_PATH)
-    embedder = MlxEmbedder(EMBED_SERVICE_URL)
+    embedder = OpenAIEmbedder(
+        base_url=EMBED_BASE_URL,
+        model=EMBED_MODEL,
+        api_key=EMBED_API_KEY,
+        batch_size=EMBED_BATCH_SIZE,
+    )
     threader = Threader(db)
     touch_health_file()
 
