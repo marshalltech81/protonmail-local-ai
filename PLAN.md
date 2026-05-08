@@ -508,9 +508,6 @@ all shipped together.
   ``LLM_MODEL=mlx-community/Qwen3-32B-4bit``). End-to-end smoke
   test confirmed: ``LocalLLMClient.complete()`` against the live
   server returns a correct grounded answer in production shape.
-  Open WebUI overlay reconfigured to use Open WebUI's
-  OpenAI-compatible client pointed at the same ``LLM_BASE_URL``
-  (``ENABLE_OLLAMA_API=false``, ``ENABLE_OPENAI_API=true``).
 - **Ollama teardown.** ``com.local.ollama-host`` LaunchAgent
   bootout'd, plist deleted from ``~/Library/LaunchAgents/``.
   ``scripts/check-host-ollama.sh`` deleted. ``pull-models``

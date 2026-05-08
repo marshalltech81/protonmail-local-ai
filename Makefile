@@ -1,4 +1,4 @@
-.PHONY: build build-nocache up down logs first-run update status clean sync sync-indexer sync-mcp sync-mlx sync-mlx-lm test test-indexer test-mcp test-mlx typecheck typecheck-indexer typecheck-mcp typecheck-mlx bridge-patch-check bridge-smoke bridge-upgrade-check open-webui-up open-webui-down open-webui-logs init-secrets validate-env help
+.PHONY: build build-nocache up down logs first-run update status clean sync sync-indexer sync-mcp sync-mlx sync-mlx-lm test test-indexer test-mcp test-mlx typecheck typecheck-indexer typecheck-mcp typecheck-mlx bridge-patch-check bridge-smoke bridge-upgrade-check init-secrets validate-env help
 
 UV_CACHE_DIR ?= /tmp/uv-cache
 export UV_CACHE_DIR
@@ -22,9 +22,6 @@ help:
 	@echo "  bridge-patch-check  Verify Bridge source patch points still match upstream"
 	@echo "  bridge-smoke        Build and smoke test the Bridge runtime image"
 	@echo "  bridge-upgrade-check  Run Bridge patch-drift and smoke checks"
-	@echo "  open-webui-up Start optional local Open WebUI on localhost"
-	@echo "  open-webui-down Stop optional local Open WebUI"
-	@echo "  open-webui-logs Tail optional Open WebUI logs"
 	@echo "  update       Rebuild and restart Bridge with new version"
 	@echo "  status       Show container and index status"
 	@echo "  sync         Sync local uv environments for indexer, mcp-server, mlx-service, and mlx-lm-server"
@@ -144,32 +141,6 @@ bridge-smoke:
 
 bridge-upgrade-check: bridge-patch-check bridge-smoke
 
-open-webui-up: init-secrets validate-env
-	@if [ ! -s .secrets/open_webui_secret_key.txt ]; then \
-		if ! command -v openssl >/dev/null 2>&1; then \
-			printf 'ERROR: openssl not found on host; cannot generate Open WebUI session key.\n' >&2; \
-			printf 'Install openssl, or write 32+ random bytes to .secrets/open_webui_secret_key.txt manually.\n' >&2; \
-			exit 1; \
-		fi; \
-		( \
-			umask 077; \
-			openssl rand -base64 32 | tr -d '\n' > .secrets/open_webui_secret_key.txt; \
-		); \
-		echo "  generated .secrets/open_webui_secret_key.txt"; \
-	fi
-	@./scripts/check-mcp-streamable.sh
-	@port="$$(./scripts/validate-env.sh --get OPEN_WEBUI_PORT)"; \
-	port="$${port:-8080}"; \
-	printf '\n  Starting Open WebUI on http://localhost:%s\n' "$$port"; \
-	printf '  Open WebUI uses the host mlx-lm-server via host.docker.internal:8002/v1 (OpenAI-compatible) and MCP at http://mcp-server:3000/mcp.\n\n'
-	docker compose -f docker-compose.yml -f docker-compose.open-webui.yml up -d open-webui
-
-open-webui-down:
-	docker compose -f docker-compose.yml -f docker-compose.open-webui.yml stop open-webui
-
-open-webui-logs:
-	docker compose -f docker-compose.yml -f docker-compose.open-webui.yml logs -f open-webui
-
 # Sync local Python environments using per-service uv projects
 sync: sync-indexer sync-mcp sync-mlx sync-mlx-lm
 
@@ -229,25 +200,15 @@ typecheck-mlx: sync-mlx
 # WARNING: This deletes your email index and Bridge credentials.
 # You will need to run first-run again after this.
 #
-# The open-webui overlay is layered in so that an open-webui container and
-# its named volume (created by `make open-webui-up`) are also removed.
 clean:
 	@echo "WARNING: This will delete all containers, volumes, your email index,"
 	@echo "         and Bridge credentials. You will need to run make first-run"
 	@echo "         again to re-authenticate with Proton."
 	@read -p "Are you sure? (yes/no): " confirm && [ "$$confirm" = "yes" ]
-	docker compose -f docker-compose.yml -f docker-compose.open-webui.yml down -v
+	docker compose down -v
 	@# Truncate secrets tied to wiped local state. anthropic_api_key.txt is the
 	@# user's external Claude key and is intentionally preserved.
-	@# open_webui_api_key.txt was generated AGAINST the wiped Open WebUI install
-	@# (Settings -> Account -> API Keys); the new install will issue a fresh key,
-	@# so the old one is dead and should not linger on disk.
 	@if [ -f .secrets/bridge_pass.txt ]; then : > .secrets/bridge_pass.txt; fi
-	@if [ -f .secrets/open_webui_secret_key.txt ]; then : > .secrets/open_webui_secret_key.txt; fi
-	@if [ -f .secrets/open_webui_api_key.txt ]; then : > .secrets/open_webui_api_key.txt; fi
 	@echo "All containers and volumes removed."
-	@echo "Cleared .secrets/bridge_pass.txt, .secrets/open_webui_secret_key.txt,"
-	@echo "and .secrets/open_webui_api_key.txt."
+	@echo "Cleared .secrets/bridge_pass.txt."
 	@echo "Re-run make first-run, then paste the new Bridge password into .secrets/bridge_pass.txt."
-	@echo "If you use scripts/eval_run.py, generate a new Open WebUI API key once the new"
-	@echo "Open WebUI install is up and write it to .secrets/open_webui_api_key.txt."

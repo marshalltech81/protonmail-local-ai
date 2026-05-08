@@ -21,11 +21,6 @@ reached from containers via OrbStack's `host.docker.internal`. They
 are required because MLX needs Metal access, which Docker on macOS
 cannot provide.
 
-An optional Open WebUI overlay can be started for a local browser UI.
-It reuses the existing mlx-lm-server (via the OpenAI-compatible API)
-and the MCP server container; do not add a second LLM serving process
-for the UI.
-
 Core behavior:
 
 - email stays local by default
@@ -67,8 +62,6 @@ High-level data flow:
 3. indexer parses Maildir messages, builds conversation threads, generates embeddings via an OpenAI-compatible `/v1/embeddings` endpoint (default: host-side mlx-service), and writes SQLite.
 4. MCP server reads from SQLite and exposes tools over SSE and/or Streamable HTTP.
 5. Only the MCP server is exposed to the host on `localhost:3000` by default.
-   The optional Open WebUI overlay may additionally expose a localhost-only
-   browser UI on `localhost:8080`.
 
 Important architecture facts:
 
@@ -107,8 +100,6 @@ Do not make any of the following changes unless the repository owner explicitly 
 ### Network and exposure constraints
 
 - Do not expose any container port other than `mcp-server:3000` to the host.
-  Exception: the optional Open WebUI overlay may expose only
-  `127.0.0.1:${OPEN_WEBUI_PORT:-8080}:8080`.
 - The host MLX LaunchAgents (`mlx-service` on `:8001`,
   `mlx-lm-server` on `:8002`) bind to `127.0.0.1` and are exempt from
   macOS' loopback firewall, so no LAN exposure exists by default. Do
@@ -125,10 +116,6 @@ Do not make any of the following changes unless the repository owner explicitly 
 - Do not give `mcp-server` direct IMAP access to Bridge.
 - Do not give `indexer` direct IMAP access to Bridge.
 - mbsync is the only container that should talk directly to Bridge IMAP.
-- Do not give Open WebUI direct access to Bridge, Maildir, or SQLite volumes.
-- Do not expose Open WebUI on `0.0.0.0` or a LAN interface without explicit
-  owner approval.
-
 ### Mail sync and safety constraints
 
 - Do not change mbsync to write back to Proton.
@@ -488,29 +475,8 @@ Notes:
 - preserve read-only posture as the default design direction
 - do not broaden direct access to Bridge
 - keep `MCP_TRANSPORT=sse` as the default unless the owner asks to change the
-  default client posture; use `dual` for Claude Desktop plus Open WebUI.
-
-### `open-webui` optional overlay
-
-Purpose:
-
-- provides a local browser UI for chat (against the host-side
-  mlx-lm-server) and MCP tools
-
-Notes:
-
-- defined only in `docker-compose.open-webui.yml`; do not add it to the default
-  stack unless explicitly asked
-- reach the host mlx-lm-server via `http://host.docker.internal:8002/v1`
-  using Open WebUI's OpenAI-compatible client (override `LLM_BASE_URL`
-  only if you want to point at a different OpenAI-compatible endpoint)
-- connect to the MCP server via `http://mcp-server:3000/mcp`
-- keep the UI bound to localhost only
-- require the Open WebUI session key as a Docker Compose secret backed by
-  `.secrets/open_webui_secret_key.txt` (consumed via `WEBUI_SECRET_KEY_FILE`);
-  do not move it into `.env` or hardcode a real value
-- leave signup enabled only for first local admin creation, then document or
-  default toward `OPEN_WEBUI_ENABLE_SIGNUP=false`
+  default client posture; use `dual` only when a client needs both SSE and
+  Streamable HTTP on the same localhost-bound port.
 
 ## Testing Expectations
 
