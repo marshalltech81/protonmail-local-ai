@@ -217,19 +217,25 @@ discovery, with **per-message chunks** as the precise unit of retrieval.
    write keyed on deterministic chunk IDs) and rewrite the parent
    thread's vector
 
-The indexer writes a thread in two phases. **Phase 1** commits the thread
-row, message map, body chunks, and attachment occurrences as a seed —
-the thread vector is left as either a chunks-mean placeholder or a zero
-vector at this point so the row exists for downstream lookups. **Phase
-2c** then commits the final thread vector once chunk embeddings have
-been computed (the chunks-mean of newly-embedded vectors, normalized at
-the DB write boundary). The two phases are separate transactions so a
-crash between them leaves a thread row with a stale-but-non-NaN vector
-rather than an orphaned partial write. Within each phase, chunk and
-attachment rows have foreign-key parents in `threads` /
-`message_thread_map`, and SQLite foreign-key enforcement is enabled on
-the indexer connection, so partial sidecar rows fail closed instead of
-becoming orphan retrieval state.
+The indexer writes a thread in two phases. **Phase 1** commits the
+thread row, `message_thread_map` entry, and `indexed_files` row in a
+single `upsert_thread` call, with a seed thread vector chosen from a
+three-case priority chain (chunks-mean of any pre-existing chunks,
+preserved non-zero prior `threads_vec` row, or a placeholder zero).
+Threading state is durable at this point so the next message in the
+batch sees this thread when computing its own assignment. **Phase 2c**
+then commits the body chunks (`message_chunks` + `message_chunks_fts`
++ `message_chunks_vec`), attachment occurrences, attachment-extraction
+cache rows, attachment chunks, and the final normalized thread vector
+in one per-message transaction. The two phases are separate
+transactions so a crash between them leaves a thread row + message map
++ indexed-file marker with the seed vector but no chunks or attachment
+rows yet — the queue retries Phase 2c on the next pass and the
+seed-vector chain converges. Within each phase, chunk and attachment
+rows have foreign-key parents in `threads` / `message_thread_map`, and
+SQLite foreign-key enforcement is enabled on the indexer connection,
+so partial sidecar rows fail closed instead of becoming orphan
+retrieval state.
 
 Every vector written to `threads_vec` and `message_chunks_vec` is
 L2-normalized at the DB write boundary (`upsert_thread`,
