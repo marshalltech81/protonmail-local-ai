@@ -13,7 +13,6 @@ stay backend-agnostic and tests can substitute a duck-typed fake.
 """
 
 import logging
-import math
 import os
 import time
 from typing import Protocol
@@ -21,42 +20,9 @@ from typing import Protocol
 import httpx
 from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
 
+from .chunker import l2_normalize
+
 log = logging.getLogger("indexer.embedder")
-
-
-# Tolerance for "vector is already unit-norm". A model that already
-# emits L2-normalized output (Qwen3-Embedding-8B does, per its model
-# card) lands within float32's relative precision of 1.0; the cheap
-# sqrt + compare lets us skip the division entirely when no
-# correction is needed. Float32 round-trip noise is well under 1e-6.
-_UNIT_NORM_TOLERANCE = 1e-6
-
-
-def _l2_normalize(vec: list[float]) -> list[float]:
-    """Return ``vec`` scaled to unit L2 norm.
-
-    Idempotent: a vector that's already within
-    ``_UNIT_NORM_TOLERANCE`` of unit-norm is returned unchanged
-    (no division, no float churn). Zero vectors are also returned
-    unchanged — dividing by zero would NaN-poison the storage. The
-    indexer's seed-vector logic intentionally writes a zero
-    placeholder for genuinely-new threads (Phase 1 seed before
-    Phase 2 lands the real chunk-mean vector); preserving it through
-    this normalization keeps the three-case priority chain working.
-
-    Cost is one O(dim) sum-of-squares plus a sqrt — negligible
-    against the embed HTTP round-trip and inputs are already in
-    Python list form post-deserialization.
-    """
-    norm_sq = 0.0
-    for x in vec:
-        norm_sq += x * x
-    if norm_sq <= 0.0:
-        return vec
-    norm = math.sqrt(norm_sq)
-    if abs(norm - 1.0) < _UNIT_NORM_TOLERANCE:
-        return vec
-    return [x / norm for x in vec]
 
 
 def _is_transient_embed_error(exc: BaseException) -> bool:
@@ -289,13 +255,14 @@ class OpenAIEmbedder:
                 f"({self.base_url}, model={self.model!r})"
             )
         data.sort(key=lambda d: d["index"])
-        # Enforce the storage invariant: every vector stored in
-        # ``threads_vec`` / ``message_chunks_vec`` is L2-unit-norm.
-        # Doing this at the embedder client (not per-caller) keeps the
-        # invariant in one place and survives a future provider swap
-        # whose output may not be normalized by default. ``_l2_normalize``
-        # short-circuits when the input is already unit-norm, so this is
-        # a no-op against Qwen3-Embedding-8B (the default mlx-service
-        # model) and a corrective step against any provider that emits
-        # raw embeddings.
-        return [_l2_normalize(d["embedding"]) for d in data]
+        # Normalize raw provider output here so chunk vectors land
+        # unit-normed regardless of provider. The DB write boundary
+        # in ``database.py`` also normalizes thread vectors at
+        # ``upsert_thread`` / ``replace_thread_vector`` /
+        # ``_rewrite_thread_row`` (because ``mean_vector`` of unit
+        # chunk vectors generally has norm < 1), so the storage
+        # invariant — every vector in ``threads_vec`` /
+        # ``message_chunks_vec`` is unit-norm — holds end-to-end.
+        # ``l2_normalize`` short-circuits already-unit-norm inputs,
+        # so this is a no-op against Qwen3-Embedding-8B.
+        return [l2_normalize(d["embedding"]) for d in data]

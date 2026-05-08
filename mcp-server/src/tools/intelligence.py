@@ -327,11 +327,13 @@ def _pick_resolution_candidate(query: str, candidates: list[ThreadResult]) -> Th
 log = logging.getLogger("mcp.tools.intelligence")
 
 # Per-thread character budget when assembling LLM prompts from retrieved
-# threads. The indexer caps ``body_text`` at 8000 chars per thread; feeding
-# multiple full-length threads to a local Ollama model easily exceeds its
-# context. 2000 chars ≈ 500 tokens per thread keeps five-thread contexts
-# well under an 8k-token model window while still giving the LLM the
-# accumulated thread body instead of the 200-char snippet.
+# threads. The indexer caps each thread's accumulated ``body_text`` at
+# ``THREAD_BODY_TEXT_MAX_TOKENS`` (4000 tokens, ~16k chars at typical
+# English ratios); feeding multiple full-length threads to a local LLM
+# easily exceeds its context. 2000 chars ≈ 500 tokens per thread keeps
+# five-thread contexts well under an 8k-token model window while still
+# giving the LLM the accumulated thread body instead of the 200-char
+# snippet.
 PER_THREAD_CHAR_BUDGET = 2000
 
 # Hard ceilings on caller-supplied limits. MCP tool calls can be generated
@@ -400,11 +402,12 @@ def _thread_context(thread: ThreadResult, limit: int = PER_THREAD_CHAR_BUDGET) -
     with a ``[chunk N: chars X-Y]`` header so the model can cite the
     specific passage rather than the whole thread.
 
-    Falls back to the accumulated ``body_text`` (capped at 8000 chars
-    per thread in the indexer) when no evidence chunks were attached —
-    typically because the caller did not request them, or the thread
-    has no chunks (empty body, extraction failure). Final fallback is
-    the short ``snippet`` row for empty-body threads.
+    Falls back to the accumulated ``body_text`` (capped at
+    ``THREAD_BODY_TEXT_MAX_TOKENS`` tokens per thread in the indexer)
+    when no evidence chunks were attached — typically because the
+    caller did not request them, or the thread has no chunks (empty
+    body, extraction failure). Final fallback is the short ``snippet``
+    row for empty-body threads.
     """
     if thread.evidence_chunks:
         # Render the matched chunks with provenance. Cap the total at

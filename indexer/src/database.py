@@ -18,7 +18,7 @@ from pathlib import Path
 
 import sqlite_vec
 
-from .chunker import truncate_to_tokens
+from .chunker import l2_normalize, truncate_to_tokens
 from .threader import THREAD_BODY_TEXT_MAX_TOKENS, Thread, canonical_addr
 
 log = logging.getLogger("indexer.database")
@@ -661,6 +661,13 @@ class Database:
                 f"embedding has {len(embedding)} dims but threads_vec reserves "
                 f"{EMBEDDING_DIM}. Check the embedder's output dimension."
             )
+        # Storage invariant: every vector in ``threads_vec`` is unit-norm
+        # so cosine similarity equals dot product downstream. Callers
+        # like Phase 1 seed (``mean_vector(existing_chunks)``) pass
+        # non-unit means; normalize at the boundary so no caller has to
+        # remember. The placeholder all-zero seed survives — see
+        # ``l2_normalize``.
+        embedding = l2_normalize(embedding)
 
         cur = self._conn.cursor()
 
@@ -1193,6 +1200,10 @@ class Database:
                 f"embedding has {len(embedding)} dims but threads_vec reserves "
                 f"{EMBEDDING_DIM}. Check the embedder's output dimension."
             )
+        # Storage invariant — see the matching note in ``upsert_thread``.
+        # Phase 2c writes ``mean_vector(chunk_embs)`` here, which is
+        # generally non-unit; normalize at the boundary.
+        embedding = l2_normalize(embedding)
         cur = self._conn.cursor()
         started = False
         try:
@@ -2048,6 +2059,10 @@ class Database:
                 f"embedding has {len(embedding)} dims but threads_vec reserves "
                 f"{EMBEDDING_DIM}. Check the embedder's output dimension."
             )
+        # Storage invariant — see ``upsert_thread``. The reconciler reap
+        # path passes ``mean_vector(survivor_chunks)``, which is
+        # generally non-unit; normalize before the vec0 insert.
+        embedding = l2_normalize(embedding)
 
         participants_json = json.dumps(_dedupe_by_canonical(thread.participants))
         senders_json = json.dumps(

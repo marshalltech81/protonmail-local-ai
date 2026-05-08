@@ -7,7 +7,8 @@ from unittest.mock import patch
 
 import httpx
 import pytest
-from src.embedder import OpenAIEmbedder, _is_transient_embed_error, _l2_normalize
+from src.chunker import l2_normalize
+from src.embedder import OpenAIEmbedder, _is_transient_embed_error
 
 OPENAI_DATA_KEY = "data"
 
@@ -556,19 +557,18 @@ class TestRetryPredicate:
 
 
 class TestL2Normalize:
-    """Storage invariant: every vector returned by ``_embed_one_batch``
-    is L2-unit-norm. The defensive normalization step at the embedder
-    client survives a future provider swap whose output isn't already
-    normalized, and lets ``vec_distance_cosine`` collapse to a plain
-    dot product on stored vectors. Idempotent on Qwen3-Embedding-8B
-    output (already normalized per its model card)."""
+    """Pure-function behavior of ``l2_normalize`` (defined in
+    ``src.chunker``). The embedder client uses this defensively on raw
+    provider output; the DB write boundary in ``src.database`` uses it
+    on thread vectors derived from ``mean_vector``. Both rely on the
+    same idempotence + zero-vector-preserved guarantees verified here."""
 
     def test_zero_vector_is_returned_unchanged(self):
         # The seed-vector logic intentionally writes a zero placeholder
         # for genuinely-new threads; dividing by zero would NaN-poison
         # storage. Preserving it keeps the three-case priority chain
         # intact.
-        result = _l2_normalize([0.0, 0.0, 0.0])
+        result = l2_normalize([0.0, 0.0, 0.0])
         assert result == [0.0, 0.0, 0.0]
 
     def test_already_unit_norm_short_circuits(self):
@@ -576,12 +576,12 @@ class TestL2Normalize:
         # must return the SAME list object (identity preserved) when
         # the input is within tolerance of unit norm.
         v = [1.0, 0.0, 0.0]
-        result = _l2_normalize(v)
+        result = l2_normalize(v)
         assert result is v, "unit-norm input must skip the divide branch"
 
     def test_non_unit_vector_is_normalized(self):
         # Classic 3-4-5 right triangle: norm = 5, unit vector = (3/5, 4/5).
-        result = _l2_normalize([3.0, 4.0])
+        result = l2_normalize([3.0, 4.0])
         assert result[0] == pytest.approx(0.6)
         assert result[1] == pytest.approx(0.8)
         # And the result IS unit-norm.

@@ -481,6 +481,89 @@ class TestEmbeddingDimGuard:
             db.upsert_thread(thread, [0.1] * 1024)  # wrong dim
 
 
+class TestThreadVectorUnitNormInvariant:
+    """Every vector written to ``threads_vec`` must be L2-unit-norm so
+    the cosine-equals-dot-product assumption holds for downstream
+    retrieval. The three thread-vector write boundaries
+    (``upsert_thread``, ``replace_thread_vector``, and
+    ``_rewrite_thread_row`` via ``rebuild_thread`` /
+    ``reap_thread_messages``) all normalize at the boundary so callers
+    that pass a non-unit ``mean_vector(...)`` cannot bypass the
+    invariant. Zero placeholders survive normalization because the
+    Phase 1 seed logic depends on them as a sentinel."""
+
+    @staticmethod
+    def _read_thread_vec(db, thread_id: str) -> list[float]:
+        import struct
+
+        from src.database import EMBEDDING_DIM
+
+        row = db._conn.execute(
+            "SELECT embedding FROM threads_vec WHERE thread_id = ?",
+            (thread_id,),
+        ).fetchone()
+        assert row is not None, f"no threads_vec row for {thread_id}"
+        return list(struct.unpack(f"{EMBEDDING_DIM}f", row["embedding"]))
+
+    @staticmethod
+    def _norm(vec: list[float]) -> float:
+        return sum(x * x for x in vec) ** 0.5
+
+    def test_upsert_thread_normalizes_non_unit_input(self, db):
+        # Magnitude-2 input: every component is 2.0/sqrt(EMBEDDING_DIM),
+        # so the vector's L2 norm is 2.0. Without normalization, vec0
+        # stores it raw and ``vec_distance_cosine`` no longer collapses
+        # to a dot product. After this PR the boundary normalizes.
+        from src.database import EMBEDDING_DIM
+
+        thread = make_thread()
+        scaled = [2.0 / (EMBEDDING_DIM**0.5)] * EMBEDDING_DIM
+        db.upsert_thread(thread, scaled)
+        stored = self._read_thread_vec(db, thread.thread_id)
+        assert self._norm(stored) == pytest.approx(1.0, abs=1e-6)
+
+    def test_replace_thread_vector_normalizes_non_unit_input(self, db):
+        # Phase 2c writes ``mean_vector(chunk_embs)`` here; mean of unit
+        # vectors generally has norm < 1. Use a 3-4-5 style scaled
+        # vector to make the normalization observable.
+        from src.database import EMBEDDING_DIM
+
+        thread = make_thread()
+        db.upsert_thread(thread, [0.0] * EMBEDDING_DIM)  # placeholder seed
+        scaled = [0.5] * EMBEDDING_DIM  # norm = 0.5 * sqrt(EMBEDDING_DIM) ≠ 1
+        db.replace_thread_vector(thread.thread_id, scaled)
+        stored = self._read_thread_vec(db, thread.thread_id)
+        assert self._norm(stored) == pytest.approx(1.0, abs=1e-6)
+
+    def test_reap_thread_messages_normalizes_non_unit_input(self, db):
+        # The reconciler reap path passes ``mean_vector(survivor_chunks)``
+        # through ``_rewrite_thread_row``. Verify the same normalize
+        # boundary fires on that code path so reap-then-search returns
+        # comparable cosine scores against still-live threads.
+        from src.database import EMBEDDING_DIM
+
+        msg = make_message(message_id="m1@x")
+        thread = make_thread(messages=[msg], thread_id="t-reap")
+        db.upsert_thread(thread, [0.0] * EMBEDDING_DIM)
+        scaled = [3.0 / (EMBEDDING_DIM**0.5)] * EMBEDDING_DIM  # norm 3.0
+        db.reap_thread_messages(thread, scaled, reaped_message_ids=[])
+        stored = self._read_thread_vec(db, "t-reap")
+        assert self._norm(stored) == pytest.approx(1.0, abs=1e-6)
+
+    def test_zero_placeholder_seed_is_preserved(self, db):
+        # Phase 1 writes an all-zero seed for genuinely-new threads;
+        # ``l2_normalize`` deliberately preserves zero vectors so the
+        # three-case priority chain in ``main._batched_phase1`` keeps
+        # working. Normalizing to NaN here would corrupt every brand-
+        # new thread.
+        from src.database import EMBEDDING_DIM
+
+        thread = make_thread()
+        db.upsert_thread(thread, [0.0] * EMBEDDING_DIM)
+        stored = self._read_thread_vec(db, thread.thread_id)
+        assert all(v == 0.0 for v in stored)
+
+
 class TestUpsertThreadInsert:
     def test_inserts_thread_record(self, db):
         thread = make_thread()

@@ -739,11 +739,16 @@ class TestIndexOneFileChunking:
             encoding="utf-8",
         )
 
-        # MagicMock returns the SAME embedding for every call. The thread
-        # vector — computed as the mean of all chunk embeddings — must
-        # therefore equal that embedding regardless of how many chunks
-        # the chunker emitted.
-        chunk_vec = [0.42] * EMBEDDING_DIM
+        # MagicMock returns the SAME (already unit-norm) embedding for
+        # every call. The thread vector — computed as the mean of all
+        # chunk embeddings, then unit-normalized at the DB write
+        # boundary — must therefore equal that embedding regardless of
+        # how many chunks the chunker emitted. Using a unit-norm
+        # chunk_vec keeps the assertion direct: mean-of-identical-unit-
+        # vectors is itself unit-norm, so the normalize step is a
+        # no-op against this fixture.
+        unit_component = 1.0 / (EMBEDDING_DIM**0.5)
+        chunk_vec = [unit_component] * EMBEDDING_DIM
         embedder = make_mock_embedder()
         embedder.embed.return_value = chunk_vec
 
@@ -1062,11 +1067,18 @@ class TestBatchedInitialIndex:
             "Phase 2c should have used it instead of leaving the placeholder"
         )
         # The fallback should embed the subject string. Our mock
-        # returns the same vector regardless of input, so the vector
-        # equals the sentinel exactly when the fallback path ran.
-        assert stored_vec == sentinel, (
-            "thread vector should equal the embedder's return value for "
-            "the subject fallback, not be derived from chunks (none exist)"
+        # returns the same (non-unit) vector regardless of input.
+        # ``replace_thread_vector`` normalizes at the boundary, so the
+        # stored vector is the L2-normalized sentinel — that's enough
+        # to prove the fallback path ran (vs. chunks-mean, which never
+        # got chunks here, or the placeholder zero).
+        from src.chunker import l2_normalize
+
+        expected = l2_normalize(sentinel)
+        assert stored_vec == pytest.approx(expected, abs=1e-6), (
+            "thread vector should equal the L2-normalized embedder "
+            "return value for the subject fallback, not be derived "
+            "from chunks (none exist)"
         )
 
     def test_phase2_failure_preserves_existing_thread_vector(self, tmp_path, monkeypatch):
@@ -1102,7 +1114,13 @@ class TestBatchedInitialIndex:
         ).fetchone()
         raw = row["embedding"]
         prior_vec = list(struct.unpack(f"<{len(raw) // 4}f", raw))
-        assert prior_vec == sentinel, "first-pass vector should be the embedder's response"
+        # Stored thread vectors are L2-normalized at the DB write
+        # boundary; compare against the normalized sentinel.
+        from src.chunker import l2_normalize
+
+        assert prior_vec == pytest.approx(l2_normalize(sentinel), abs=1e-6), (
+            "first-pass vector should be the L2-normalized embedder response"
+        )
 
         # Second pass: a reply B arrives that threads into A. The new
         # embedder fails during embed_batch (simulated cloud outage).
@@ -1192,7 +1210,11 @@ class TestBatchedInitialIndex:
         ).fetchone()
         raw = row["embedding"]
         prior_vec = list(struct.unpack(f"<{len(raw) // 4}f", raw))
-        assert prior_vec == sentinel
+        # Stored thread vectors are L2-normalized at the DB write
+        # boundary; compare against the normalized sentinel.
+        from src.chunker import l2_normalize
+
+        assert prior_vec == pytest.approx(l2_normalize(sentinel), abs=1e-6)
 
         # Second pass: a blank-body reply B threads into A. The new
         # embedder fails. Phase 1 must NOT seed with zero — there is no
