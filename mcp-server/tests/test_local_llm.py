@@ -1,7 +1,7 @@
-"""Tests for src.lib.local_llm — async local-LLM and embed client.
+"""Tests for src.lib.local_llm — async OpenAI-compatible embed + chat client.
 
 Uses httpx.MockTransport against the AsyncClient so tests are self-contained
-and never touch a real mlx-service / mlx_lm.server / Ollama process or the
+and never touch a real mlx-service / mlx_lm.server / cloud provider or the
 network. Async calls are driven with asyncio.run() to keep the dep
 footprint minimal (no pytest-asyncio).
 """
@@ -14,24 +14,46 @@ import pytest
 from src.lib.local_llm import LocalLLMClient
 
 LLM_BASE = "http://llm:11434/v1"
-EMBED_BASE = "http://mlx:8001"
+EMBED_BASE = "http://mlx:8001/v1"
+EMBED_MODEL = "mlx-community/Qwen3-Embedding-8B-mxfp8"
 
 
 def _make(**overrides) -> LocalLLMClient:
     """Construct a ``LocalLLMClient`` with sensible test defaults."""
     return LocalLLMClient(
-        overrides.pop("embed_service_url", EMBED_BASE),
-        overrides.pop("llm_model", "llm"),
+        embed_base_url=overrides.pop("embed_base_url", EMBED_BASE),
+        llm_model=overrides.pop("llm_model", "llm"),
         llm_base_url=overrides.pop("llm_base_url", LLM_BASE),
+        embed_model=overrides.pop("embed_model", EMBED_MODEL),
+        embed_api_key=overrides.pop("embed_api_key", ""),
         **overrides,
     )
 
 
 def _install_mock(client: LocalLLMClient, handler) -> None:
-    """Replace the client's AsyncClient with one backed by a mock transport."""
-    # Close the existing real client synchronously by running its aclose.
+    """Replace the client's AsyncClient with one backed by a mock transport.
+
+    Preserves construction-time headers (notably Authorization) so tests
+    that exercise auth behavior reflect the real wire format.
+    """
+    headers = dict(client.client.headers)
     asyncio.run(client.client.aclose())
-    client.client = httpx.AsyncClient(transport=httpx.MockTransport(handler), timeout=120.0)
+    client.client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        timeout=120.0,
+        headers=headers,
+    )
+
+
+def _openai_embed_response(vectors: list[list[float]]) -> dict:
+    return {
+        "object": "list",
+        "data": [
+            {"object": "embedding", "embedding": v, "index": i} for i, v in enumerate(vectors)
+        ],
+        "model": EMBED_MODEL,
+        "usage": {"prompt_tokens": 0, "total_tokens": 0},
+    }
 
 
 def _run(coro):
@@ -39,9 +61,9 @@ def _run(coro):
 
 
 class TestLocalLLMClientInit:
-    def test_strips_trailing_slash_from_embed_service_url(self):
-        c = _make(embed_service_url="http://mlx:8001/")
-        assert c.embed_service_url == "http://mlx:8001"
+    def test_strips_trailing_slash_from_embed_base_url(self):
+        c = _make(embed_base_url="http://mlx:8001/v1/")
+        assert c.embed_base_url == "http://mlx:8001/v1"
         _run(c.client.aclose())
 
     def test_strips_trailing_slash_from_llm_base_url(self):
@@ -54,20 +76,63 @@ class TestLocalLLMClientInit:
         assert c.llm_model == "llm-y"
         _run(c.client.aclose())
 
+    def test_stores_embed_model(self):
+        c = _make(embed_model="cohere/embed-v4")
+        assert c.embed_model == "cohere/embed-v4"
+        _run(c.client.aclose())
+
 
 class TestEmbed:
-    def test_returns_embedding_on_success(self):
+    def test_posts_openai_shape_and_returns_embedding(self):
         c = _make()
 
         def handler(request: httpx.Request) -> httpx.Response:
-            assert str(request.url) == f"{EMBED_BASE}/embed"
-            return httpx.Response(200, json={"embedding": [0.5, 0.6]})
+            # OpenAI-compatible: same wire format as DeepInfra, OpenRouter,
+            # mlx-service /v1/embeddings, etc.
+            assert str(request.url) == f"{EMBED_BASE}/embeddings"
+            import json
+
+            body = json.loads(request.content)
+            assert body == {"model": EMBED_MODEL, "input": "q"}
+            return httpx.Response(200, json=_openai_embed_response([[0.5, 0.6]]))
 
         _install_mock(c, handler)
         try:
             assert _run(c.embed("q")) == [0.5, 0.6]
         finally:
             _run(c.client.aclose())
+
+    def test_authorization_header_set_when_api_key_provided(self):
+        c = _make(embed_api_key="sk-test")  # pragma: allowlist secret
+        seen: dict[str, str] = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen["auth"] = request.headers.get("authorization", "")
+            return httpx.Response(200, json=_openai_embed_response([[0.0]]))
+
+        _install_mock(c, handler)
+        try:
+            _run(c.embed("q"))
+        finally:
+            _run(c.client.aclose())
+        assert seen["auth"] == "Bearer sk-test"  # pragma: allowlist secret
+
+    def test_authorization_header_omitted_when_api_key_empty(self):
+        # Local mlx-service does not authenticate; sending a bare
+        # ``Authorization: Bearer`` (no token) would be malformed.
+        c = _make()
+        seen: dict[str, str | None] = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen["auth"] = request.headers.get("authorization")
+            return httpx.Response(200, json=_openai_embed_response([[0.0]]))
+
+        _install_mock(c, handler)
+        try:
+            _run(c.embed("q"))
+        finally:
+            _run(c.client.aclose())
+        assert seen["auth"] is None
 
     def test_retries_on_server_error_then_succeeds(self):
         c = _make()
@@ -77,7 +142,7 @@ class TestEmbed:
             calls["n"] += 1
             if calls["n"] < 2:
                 return httpx.Response(503, json={"error": "warming up"})
-            return httpx.Response(200, json={"embedding": [1.0]})
+            return httpx.Response(200, json=_openai_embed_response([[1.0]]))
 
         _install_mock(c, handler)
         try:

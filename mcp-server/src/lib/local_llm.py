@@ -1,18 +1,19 @@
 """
 Local-LLM and embedding client for the MCP server.
 
-Two HTTP backends live here:
+Two HTTP backends live here, both speaking OpenAI-compatible wire
+formats so the same client serves any compliant provider (mlx-service
+on Apple Metal, mlx_lm.server, DeepInfra, OpenRouter, LM Studio, vLLM,
+TEI, etc.) without per-backend branching:
 
 - **Embed**: query embedding for hybrid search. Posts to
-  ``mlx-service`` ``/embed``; the response shape carries the
-  vector under ``embedding``.
+  ``{embed_base_url}/embeddings`` with ``{"model", "input"}`` and reads
+  the response under ``data[0].embedding``. Indexer and mcp-server
+  must point at the same provider + model so vectors are comparable.
 - **Complete**: local LLM inference (Q&A, agentic). Speaks the
   OpenAI-compatible ``/v1/chat/completions`` shape against
-  ``llm_base_url``, so the same client serves Ollama (which exposes
-  the OpenAI compat API alongside ``/api/chat``) and ``mlx_lm.server``
-  without per-backend branching. The local-engine choice is
-  operational config (``LLM_BASE_URL`` + ``LLM_MODEL`` env vars), not
-  a code path.
+  ``llm_base_url``. The local-engine choice is operational config
+  (``LLM_BASE_URL`` + ``LLM_MODEL`` env vars), not a code path.
 """
 
 import logging
@@ -45,29 +46,37 @@ _COMPLETE_TIMEOUT_SECS = 300.0
 class LocalLLMClient:
     def __init__(
         self,
-        embed_service_url: str,
+        embed_base_url: str,
         llm_model: str,
         *,
         llm_base_url: str,
+        embed_model: str,
+        embed_api_key: str = "",
     ):
-        self.embed_service_url = embed_service_url.rstrip("/")
+        self.embed_base_url = embed_base_url.rstrip("/")
+        self.embed_model = embed_model
         self.llm_model = llm_model
         self.llm_base_url = llm_base_url.rstrip("/")
         # Client-level timeout is a fallback only; ``embed`` and
-        # ``complete`` set per-call deadlines above.
-        self.client = httpx.AsyncClient(timeout=120.0)
+        # ``complete`` set per-call deadlines above. The Authorization
+        # header is set once at construction so retries don't need to
+        # re-decorate every request; an empty key means the local
+        # mlx-service path which does not authenticate.
+        headers = {"Authorization": f"Bearer {embed_api_key}"} if embed_api_key else {}
+        self.client = httpx.AsyncClient(timeout=120.0, headers=headers)
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=8))
     async def embed(self, text: str) -> list[float]:
-        """Embed a query string for vector search via the
-        ``mlx-service`` ``/embed`` endpoint."""
+        """Embed a query string for vector search via the OpenAI-compatible
+        ``/v1/embeddings`` endpoint. Same wire format as the indexer so
+        vectors are comparable when both point at the same provider."""
         r = await self.client.post(
-            f"{self.embed_service_url}/embed",
-            json={"input": text},
+            f"{self.embed_base_url}/embeddings",
+            json={"model": self.embed_model, "input": text},
             timeout=_EMBED_TIMEOUT_SECS,
         )
         r.raise_for_status()
-        return r.json()["embedding"]
+        return r.json()["data"][0]["embedding"]
 
     @retry(stop=stop_after_attempt(2), wait=wait_exponential(min=2, max=10))
     async def complete(self, system: str, user: str) -> str:

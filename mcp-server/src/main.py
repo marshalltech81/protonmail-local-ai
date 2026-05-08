@@ -136,14 +136,25 @@ ANTHROPIC_KEY = _read_secret("anthropic_api_key", "ANTHROPIC_API_KEY")
 MCP_PORT = int(os.environ.get("MCP_PORT", "3000"))
 MCP_READ_ONLY = _env_bool("MCP_READ_ONLY", True)
 MCP_TRANSPORT = os.environ.get("MCP_TRANSPORT", "sse")
-# MLX retrieval stack — see indexer/.env.example notes for the full
-# explanation. Query embeddings go through ``mlx-service`` ``/embed``
-# (4096-dim Qwen3-Embedding-8B). ``RERANK_ENABLED`` enables the
-# post-RRF rerank pass that takes ``RERANK_CANDIDATES`` from RRF and
-# truncates to the caller's ``limit`` (defaulting to ``RERANK_TOP_N``
-# when the caller does not specify) via the same service.
+# Retrieval stack URLs. Embeddings and reranking are independent
+# surfaces — mcp-server may point at any OpenAI-compatible embedder
+# (``EMBED_BASE_URL`` + ``EMBED_MODEL``) while keeping the reranker on
+# mlx-service's custom ``/rerank`` (``RERANK_BASE_URL``). The schema
+# reserves a fixed 4096-dim vector — keep ``EMBED_MODEL`` pointed at a
+# 4096-dim model (Qwen3-Embedding-8B variants) or a schema migration
+# is required. Indexer and mcp-server must point at the same embedder
+# so query vectors are comparable to indexed vectors.
+EMBED_BASE_URL = os.environ.get("EMBED_BASE_URL", "http://host.docker.internal:8001/v1")
+EMBED_MODEL = os.environ.get("EMBED_MODEL", "mlx-community/Qwen3-Embedding-8B-mxfp8")
+EMBED_API_KEY = _read_secret("embed_api_key", "EMBED_API_KEY")
+# Reranker is not OpenAI-shaped — there is no OpenAI rerank standard —
+# so it gets its own URL knob. Defaults to the local mlx-service.
+RERANK_BASE_URL = os.environ.get("RERANK_BASE_URL", "http://host.docker.internal:8001")
+# ``RERANK_ENABLED`` enables the post-RRF rerank pass that takes
+# ``RERANK_CANDIDATES`` from RRF and truncates to the caller's
+# ``limit`` (defaulting to ``RERANK_TOP_N`` when the caller does not
+# specify) via the reranker service.
 RERANK_ENABLED = _env_bool("RERANK_ENABLED", True)
-EMBED_SERVICE_URL = os.environ.get("EMBED_SERVICE_URL", "http://host.docker.internal:8001")
 RERANK_CANDIDATES = int(os.environ.get("RERANK_CANDIDATES", "20"))
 RERANK_TOP_N = int(os.environ.get("RERANK_TOP_N", "10"))
 
@@ -233,15 +244,17 @@ def main():
     # Shared service clients
     db = Database(SQLITE_PATH)
     llm = LocalLLMClient(
-        EMBED_SERVICE_URL,
-        LLM_MODEL,
+        embed_base_url=EMBED_BASE_URL,
+        llm_model=LLM_MODEL,
         llm_base_url=LLM_BASE_URL,
+        embed_model=EMBED_MODEL,
+        embed_api_key=EMBED_API_KEY,
     )
     reranker: MlxReranker | None = None
     if RERANK_ENABLED:
         reranker = MlxReranker(
             RerankConfig(
-                base_url=EMBED_SERVICE_URL,
+                base_url=RERANK_BASE_URL,
                 candidates=RERANK_CANDIDATES,
                 top_n=RERANK_TOP_N,
             )
@@ -325,9 +338,13 @@ def main():
 
     log.info(f"MCP server starting on port {MCP_PORT}")
     log.info(f"  SQLite:   {SQLITE_PATH}")
-    log.info(f"  Embedder: MLX service at {EMBED_SERVICE_URL}")
+    log.info(f"  Embedder: {EMBED_BASE_URL} (model={EMBED_MODEL})")
+    if EMBED_API_KEY:
+        log.info("  Embedder API key: present (Bearer auth enabled)")
     if RERANK_ENABLED:
-        log.info(f"  Reranker: MLX service (candidates={RERANK_CANDIDATES}, top_n={RERANK_TOP_N})")
+        log.info(
+            f"  Reranker: {RERANK_BASE_URL} (candidates={RERANK_CANDIDATES}, top_n={RERANK_TOP_N})"
+        )
     else:
         log.info("  Reranker: disabled")
     log.info(f"  LLM mode: {LLM_MODE}")
