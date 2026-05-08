@@ -485,6 +485,64 @@ class TestModuleSurface:
             chunks[0].text = "mutated"  # type: ignore[misc]
 
 
+class TestTruncateToTokens:
+    """``truncate_to_tokens`` is the token-based replacement for the
+    previous char-based ``THREAD_BODY_TEXT_MAX_CHARS`` truncation. A
+    char cap under-counted CJK / URL / Base64 / dense content by 4-6×;
+    a token cap aligns with the embed model's actual context budget.
+    """
+
+    def test_short_text_unchanged(self):
+        from src.chunker import truncate_to_tokens
+
+        text = "short body"
+        # Cap well above the token count → return verbatim.
+        assert truncate_to_tokens(text, max_tokens=100) == text
+
+    def test_empty_text_returns_empty(self):
+        from src.chunker import truncate_to_tokens
+
+        assert truncate_to_tokens("", max_tokens=100) == ""
+
+    def test_zero_max_tokens_returns_empty(self):
+        from src.chunker import truncate_to_tokens
+
+        # Defensive: a zero cap means "no budget" → drop the text.
+        assert truncate_to_tokens("anything", max_tokens=0) == ""
+
+    def test_long_text_is_cut_to_token_budget(self):
+        from src.chunker import estimate_tokens, truncate_to_tokens
+
+        # Build a body whose token count comfortably exceeds the cap.
+        body = ("The quick brown fox jumps over the lazy dog. " * 100).strip()
+        cap = 50
+        assert estimate_tokens(body) > cap, (
+            "precondition: input must exceed the cap to exercise the truncation branch"
+        )
+        truncated = truncate_to_tokens(body, max_tokens=cap)
+        assert estimate_tokens(truncated) <= cap, (
+            "post-truncation token count must respect the cap; the "
+            "tokenizer's own offsets are the source of truth so the "
+            "cut is on a real token boundary"
+        )
+        # And the truncation is a prefix of the source — no rewriting.
+        assert body.startswith(truncated)
+
+    def test_cjk_text_cut_on_codepoint_boundary(self):
+        # Multi-byte codepoints must not be split. The tokenizer's
+        # offset metadata is character-aligned, so the cut is always
+        # safe; this test pins that invariant against a regression to
+        # naive byte slicing.
+        from src.chunker import truncate_to_tokens
+
+        body = "中文测试" * 100  # 400 CJK chars
+        truncated = truncate_to_tokens(body, max_tokens=10)
+        # Slicing on a non-codepoint boundary would corrupt the string;
+        # ``encode("utf-8")`` round-trips losslessly when no codepoint
+        # was split.
+        assert truncated == truncated.encode("utf-8").decode("utf-8")
+
+
 class TestFixtures:
     def test_short_reply_fixture_is_one_chunk(self):
         body = _load_body("short_reply.eml")

@@ -292,164 +292,15 @@ class MaildirHandler(FileSystemEventHandler):
             self.queue.enqueue(dest_path, REASON_ON_MOVED)
 
 
-def _build_chunk_writes(
-    thread,
-    db: Database,
-    embedder: EmbeddingBackend,
-) -> list[tuple[object, list, dict[str, list[float]]]]:
-    """Chunk + embed every newly-arrived message in ``thread``.
-
-    ``thread.messages`` is the new arrivals only — existing messages
-    already have chunks on disk and re-chunking them would burn embed
-    cycles for no gain (chunk ids are deterministic from
-    ``message_pk + index + text``, so the diff would be empty anyway).
-    For new threads, ``thread.messages`` is the full thread (one
-    message); for updates, it is the single newly-arrived reply.
-    """
-    chunk_writes: list[tuple[object, list, dict[str, list[float]]]] = []
-    for msg in thread.messages:
-        chunks = chunk_message(
-            message_pk=msg.message_id,
-            body_text=strip_for_embedding(msg.body_text or ""),
-            target_tokens=CHUNK_TARGET_TOKENS,
-            max_tokens=CHUNK_MAX_TOKENS,
-            overlap_tokens=CHUNK_OVERLAP_TOKENS,
-        )
-        stored_ids = db.get_chunk_ids_for_message(msg.message_id)
-        new_chunks = [c for c in chunks if c.chunk_id not in stored_ids]
-        if new_chunks:
-            # One batched HTTP call per message instead of one call per
-            # chunk. Critical against cloud embedders where per-call
-            # latency dominates; meaningful but smaller win against
-            # mlx-service on loopback.
-            vectors = embedder.embed_batch([c.text for c in new_chunks])
-            embeddings_by_chunk_id = {c.chunk_id: v for c, v in zip(new_chunks, vectors)}
-        else:
-            embeddings_by_chunk_id = {}
-        chunk_writes.append((msg, chunks, embeddings_by_chunk_id))
-    return chunk_writes
-
-
-def _build_attachment_plans(
-    thread,
-    db: Database,
-    embedder: EmbeddingBackend,
-) -> dict[str, list[AttachmentWritePlan]]:
-    """Pre-compute per-message attachment plans outside any transaction.
-
-    ``prepare_attachment_writes`` runs the extractor (OCR / pypdf /
-    openpyxl) and the per-chunk Ollama embed calls — both too slow to
-    hold inside a ``BEGIN IMMEDIATE``, since every outbound roundtrip
-    would block the watchdog observer and the reconciler on the same
-    DB lock. The caller applies the resulting plans inside the
-    transaction.
-    """
-    plans_by_msg: dict[str, list[AttachmentWritePlan]] = {}
-    if not INDEXER_ATTACHMENT_EXTRACTION_ENABLED:
-        return plans_by_msg
-    cap = (
-        INDEXER_ATTACHMENT_MAX_EXTRACTED_CHARS
-        if INDEXER_ATTACHMENT_MAX_EXTRACTED_CHARS > 0
-        else None
-    )
-    for msg in thread.messages:
-        if not msg.attachments:
-            continue
-        plans: list[AttachmentWritePlan] = []
-        for occurrence_index, attachment in enumerate(msg.attachments):
-            plans.append(
-                prepare_attachment_writes(
-                    attachment=attachment,
-                    message_id=msg.message_id,
-                    db=db,
-                    embedder=embedder,
-                    chunk_target_tokens=CHUNK_TARGET_TOKENS,
-                    chunk_max_tokens=CHUNK_MAX_TOKENS,
-                    chunk_overlap_tokens=CHUNK_OVERLAP_TOKENS,
-                    ocr_enabled=INDEXER_OCR_ENABLED,
-                    max_bytes=INDEXER_ATTACHMENT_MAX_BYTES,
-                    max_ocr_pages=INDEXER_OCR_MAX_PAGES,
-                    ocr_timeout_seconds=INDEXER_OCR_TIMEOUT_SECONDS or None,
-                    max_pdf_pages=INDEXER_PDF_MAX_DIGITAL_PAGES or None,
-                    occurrence_index=occurrence_index,
-                    max_extracted_chars=cap,
-                )
-            )
-        plans_by_msg[msg.message_id] = plans
-    return plans_by_msg
-
-
-def _seed_thread_embedding(
-    thread,
-    db: Database,
-    embedder: EmbeddingBackend,
-    chunk_writes,
-    attachment_plans_by_msg: dict[str, list[AttachmentWritePlan]],
-) -> list[float]:
-    """Pick the seed thread vector to write inside the transaction.
-
-    The final vector is replaced after the chunk writes inside the same
-    transaction (see ``_commit_indexing_writes``), so this seed only has
-    to satisfy the ``threads_vec`` insert. Use the existing chunk mean
-    when available, a zero vector if new chunks are about to land in
-    this transaction (the post-write replace will overwrite it), and
-    fall through to embedding the subject line only when there is no
-    body or attachment text at all.
-    """
-    chunk_embeddings = db.get_thread_chunk_embeddings(thread.thread_id)
-    if chunk_embeddings:
-        return mean_vector(chunk_embeddings)
-    has_incoming_chunks = any(chunks for _, chunks, _ in chunk_writes)
-    has_incoming_attachment_chunks = any(
-        plan.chunks for plans in attachment_plans_by_msg.values() for plan in plans
-    )
-    if has_incoming_chunks or has_incoming_attachment_chunks:
-        return [0.0] * EMBEDDING_DIM
-    fallback = thread.subject.strip() if thread.subject else "(empty thread)"
-    return embedder.embed(fallback)
-
-
-def _commit_indexing_writes(
-    thread,
-    db: Database,
-    chunk_writes,
-    attachment_plans_by_msg: dict[str, list[AttachmentWritePlan]],
-    seed_embedding: list[float],
-) -> None:
-    """Persist a fully-prepared indexing payload inside one transaction.
-
-    Body chunks, attachment chunks, and the recomputed thread vector
-    all land or all roll back together. No network or extractor work
-    happens here — every slow operation has already run during
-    ``_build_chunk_writes`` / ``_build_attachment_plans``.
-    """
-    with db.transaction():
-        db.upsert_thread(thread, seed_embedding)
-        for msg, chunks, embeddings_by_chunk_id in chunk_writes:
-            db.replace_message_chunks(
-                message_id=msg.message_id,
-                thread_id=thread.thread_id,
-                chunks=chunks,
-                embeddings_by_chunk_id=embeddings_by_chunk_id,
-            )
-            # Plans were prepared outside this transaction, so the
-            # apply loop only does DB writes — no Ollama, no extractor.
-            # Benign extractor outcomes (unsupported, empty, too_large,
-            # failed parse) land as status rows here. Hard DB failures
-            # propagate so the outer transaction rolls back and the
-            # queue retries the whole message rather than committing a
-            # half-indexed attachment.
-            for plan in attachment_plans_by_msg.get(msg.message_id, ()):
-                apply_attachment_writes(
-                    plan=plan,
-                    message_id=msg.message_id,
-                    thread_id=thread.thread_id,
-                    db=db,
-                )
-
-        updated_chunk_embeddings = db.get_thread_chunk_embeddings(thread.thread_id)
-        if updated_chunk_embeddings:
-            db.replace_thread_vector(thread.thread_id, mean_vector(updated_chunk_embeddings))
+# ``_index_one_file`` and ``drain_queue`` below are compatibility shims
+# that delegate to the canonical batched pipeline. The previous
+# per-message orchestration (``_build_chunk_writes``,
+# ``_build_attachment_plans``, ``_seed_thread_embedding``, and
+# ``_commit_indexing_writes``) was deleted to eliminate the
+# seed-vector duplication across the two paths. Phase 1's three-case
+# priority chain (chunks-mean / preserved non-zero prior / zero
+# placeholder) and Phase 2c's subject-fallback path now drive every
+# write, regardless of whether one file or fifty arrive together.
 
 
 def _index_one_file(
@@ -458,111 +309,59 @@ def _index_one_file(
     embedder: EmbeddingBackend,
     threader: Threader,
 ) -> tuple[bool, str, str | None, StageTimings]:
-    """Run the parse → thread → embed → upsert pipeline for ``path``.
+    """Run one file through the unified batched pipeline.
 
-    Returns ``(succeeded, stage, error_message, timings)`` so the caller
-    can record the specific failure stage in ``indexing_jobs.last_stage``
-    and feed the per-stage durations into a rolling aggregator. A
-    ``None`` ``Message`` from the parser is treated as a terminal
-    success (no Message-ID, nothing retries will fix) — the queue row
-    is deleted rather than retried indefinitely. Timings reflect only
-    stages that ran; stages skipped due to an earlier failure stay 0.
+    Compatibility shim that pre-dates the path consolidation. Returns
+    ``(succeeded, stage, error_message, timings)`` by inspecting the
+    queue state after a single-row drain. The four-tuple shape is
+    preserved for tests that pre-date the consolidation; the
+    ``timings`` member is a zero ``StageTimings`` because per-stage
+    timing now flows through the ``TimingAggregator`` plumbed into
+    ``_drain_queue_batched``, not through this entrypoint.
+
+    A private 1-attempt queue is used so any failure transitions
+    immediately to ``status='dead'``, mirroring the prior
+    "fail-on-first-error" semantics callers expected from
+    ``_index_one_file`` (the original returned ``(False, stage, ...)``
+    on the first exception).
     """
-    parse_ms = thread_ms = embed_ms = db_write_ms = 0.0
-
-    t0 = time.perf_counter()
-    try:
-        message = parse_email(path, maildir_root=MAILDIR_PATH)
-    except FileNotFoundError as e:
-        # The file was renamed or deleted between enqueue and parse.
-        # Almost always this is mbsync appending an IMAP flag suffix
-        # (``,U=42:2`` -> ``,U=42:2,S``) the moment it sets a flag,
-        # which makes the original path permanently invalid. There is
-        # nothing to retry — the indexer's Maildir watcher will see
-        # the new path via ``IN_MOVED_TO`` and enqueue it under the
-        # correct name. Distinct stage so the worker can drop the
-        # row without consuming retry budget.
-        parse_ms = (time.perf_counter() - t0) * 1000
-        return False, "parse_skipped_missing", repr(e), StageTimings(parse_ms=parse_ms)
-    except Exception as e:
-        # Two cases land here:
-        # 1. Transient I/O on a path that DOES exist
-        #    (``PermissionError`` from the mbsync 0600→0644 chmod race)
-        #    — propagates so the queue routes it to retry/backoff and
-        #    the chmod resolves on a later sync cycle.
-        # 2. Content-pathology failures in ``parse_email`` (malformed
-        #    MIME, html2text blowup, decode errors). Earlier versions
-        #    of the parser caught these locally and returned ``None``,
-        #    which the worker treated as terminal success and silently
-        #    un-indexed the file. The parser now re-raises, so the
-        #    queue's retry + dead-letter cascade fires and operators
-        #    see persistent parser bugs instead of a quietly shrinking
-        #    index.
-        parse_ms = (time.perf_counter() - t0) * 1000
-        return False, "parse", repr(e), StageTimings(parse_ms=parse_ms)
-    parse_ms = (time.perf_counter() - t0) * 1000
-    if message is None:
-        return True, "parse", None, StageTimings(parse_ms=parse_ms)
-
-    t0 = time.perf_counter()
-    try:
-        thread = threader.assign_thread(message)
-    except Exception as e:
-        thread_ms = (time.perf_counter() - t0) * 1000
-        return (
-            False,
-            "thread",
-            repr(e),
-            StageTimings(parse_ms=parse_ms, thread_ms=thread_ms),
-        )
-    thread_ms = (time.perf_counter() - t0) * 1000
-
-    t0 = time.perf_counter()
-    try:
-        chunk_writes = _build_chunk_writes(thread, db, embedder)
-        attachment_plans_by_msg = _build_attachment_plans(thread, db, embedder)
-        embedding = _seed_thread_embedding(
-            thread, db, embedder, chunk_writes, attachment_plans_by_msg
-        )
-    except Exception as e:
-        embed_ms = (time.perf_counter() - t0) * 1000
-        return (
-            False,
-            "embed",
-            repr(e),
-            StageTimings(parse_ms=parse_ms, thread_ms=thread_ms, embed_ms=embed_ms),
-        )
-    embed_ms = (time.perf_counter() - t0) * 1000
-
-    t0 = time.perf_counter()
-    try:
-        _commit_indexing_writes(thread, db, chunk_writes, attachment_plans_by_msg, embedding)
-    except Exception as e:
-        db_write_ms = (time.perf_counter() - t0) * 1000
-        return (
-            False,
-            "db_write",
-            repr(e),
-            StageTimings(
-                parse_ms=parse_ms,
-                thread_ms=thread_ms,
-                embed_ms=embed_ms,
-                db_write_ms=db_write_ms,
-            ),
-        )
-    db_write_ms = (time.perf_counter() - t0) * 1000
-
-    log.info(f"Indexed: {message.subject[:60]}")
+    private_queue = IndexingQueue(db, max_attempts=1, base_backoff_seconds=0)
+    private_queue.enqueue(str(path), reason="index_one_file")
+    aggregator = TimingAggregator(window=4)
+    _drain_queue_batched(
+        db,
+        embedder,
+        threader,
+        private_queue,
+        batch_size=1,
+        max_passes=1,
+        timing_aggregator=aggregator,
+    )
+    row = db._conn.execute(
+        "SELECT status, last_stage, last_error FROM indexing_jobs WHERE filepath = ?",
+        (str(path),),
+    ).fetchone()
+    if row is None:
+        # Row deleted: succeeded, terminal-success (no Message-ID), or
+        # mark_skipped (file vanished between enqueue and parse —
+        # mbsync flag-rename race). Distinguish via filesystem check:
+        # file missing → skip; file present → succeeded.
+        if not path.exists():
+            return (
+                False,
+                "parse_skipped_missing",
+                "FileNotFoundError(file moved between enqueue and parse)",
+                StageTimings(),
+            )
+        return True, "db_write", None, StageTimings()
+    # Row exists at status='dead' (max_attempts=1 above transitions on
+    # the first failure) or rarely 'queued' (mid-cascade if a future
+    # change relaxes max_attempts). Either way the file is not indexed.
     return (
-        True,
-        "db_write",
-        None,
-        StageTimings(
-            parse_ms=parse_ms,
-            thread_ms=thread_ms,
-            embed_ms=embed_ms,
-            db_write_ms=db_write_ms,
-        ),
+        False,
+        row["last_stage"] or "unknown",
+        row["last_error"] or "",
+        StageTimings(),
     )
 
 
@@ -575,37 +374,34 @@ def drain_queue(
     max_batch: int | None = None,
     timing_aggregator: TimingAggregator | None = None,
 ) -> int:
-    """Process queued jobs until nothing is due, or ``max_batch`` have run.
+    """Compatibility shim that delegates to ``_drain_queue_batched``.
 
-    Returns the number of jobs attempted. Each iteration claims the
-    next due row, runs the pipeline, and records success (delete row)
-    or failure (increment attempts, schedule backoff, or dead-letter).
-    Running with ``max_batch`` lets the main loop interleave reconciler
-    passes and health-file refreshes with queue work so neither starves
-    the other. ``timing_aggregator`` is fed every per-file timing so
-    operators can see p50/p95 of each stage in the periodic summary.
+    Production code paths (``initial_index`` and the steady-state
+    main loop) call ``_drain_queue_batched`` directly. This wrapper
+    preserves the older signature for tests that pre-date the
+    consolidation. ``max_batch=None`` drains to empty in batches of
+    8; ``max_batch=N`` runs at most one pass with ``batch_size=N``.
     """
-    attempted = 0
-    while max_batch is None or attempted < max_batch:
-        row = queue.claim_next()
-        if row is None:
-            break
-        filepath = row["filepath"]
-        succeeded, stage, error, timings = _index_one_file(Path(filepath), db, embedder, threader)
-        if timing_aggregator is not None:
-            timing_aggregator.record(timings)
-        if succeeded:
-            queue.mark_succeeded(filepath)
-        elif stage == "parse_skipped_missing":
-            # The file moved before parse could read it (mbsync flag
-            # rename). Drop the row instead of consuming retry budget;
-            # the renamed file's watchdog event re-enqueues it under
-            # the correct name.
-            queue.mark_skipped(filepath, reason="file_missing")
-        else:
-            queue.mark_failed(filepath, stage=stage, error=error or "")
-        attempted += 1
-    return attempted
+    if timing_aggregator is None:
+        timing_aggregator = TimingAggregator(window=4)
+    if max_batch is None:
+        return _drain_queue_batched(
+            db,
+            embedder,
+            threader,
+            queue,
+            batch_size=8,
+            timing_aggregator=timing_aggregator,
+        )
+    return _drain_queue_batched(
+        db,
+        embedder,
+        threader,
+        queue,
+        batch_size=max_batch,
+        max_passes=1,
+        timing_aggregator=timing_aggregator,
+    )
 
 
 HEALTH_REFRESH_EVERY = 25

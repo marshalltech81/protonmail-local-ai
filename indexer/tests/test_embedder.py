@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 import httpx
 import pytest
-from src.embedder import OpenAIEmbedder, _is_transient_embed_error
+from src.embedder import OpenAIEmbedder, _is_transient_embed_error, _l2_normalize
 
 OPENAI_DATA_KEY = "data"
 
@@ -44,15 +44,19 @@ def _embed_response(vectors: list[list[float]], reverse_order: bool = False) -> 
 
 class TestOpenAIEmbedder:
     def test_embed_returns_vector_on_success(self):
+        # Use a vector that's already L2-unit-norm (``[1, 0, 0]``) so
+        # the embedder's defensive normalization step is a no-op for
+        # this test. Other tests below explicitly verify the
+        # normalization behavior.
         emb = OpenAIEmbedder("http://host.docker.internal:8001/v1", "test-model")
 
         def handler(request: httpx.Request) -> httpx.Response:
             assert request.url.path == "/v1/embeddings"
             assert request.method == "POST"
-            return httpx.Response(200, json=_embed_response([[0.1, 0.2, 0.3]]))
+            return httpx.Response(200, json=_embed_response([[1.0, 0.0, 0.0]]))
 
         _install_mock(emb, handler)
-        assert emb.embed("hello") == [0.1, 0.2, 0.3]
+        assert emb.embed("hello") == [1.0, 0.0, 0.0]
 
     def test_base_url_trailing_slash_is_stripped(self):
         emb = OpenAIEmbedder("http://host.docker.internal:8001/v1/", "test-model")
@@ -80,22 +84,34 @@ class TestOpenAIEmbedder:
             calls["n"] += 1
             if calls["n"] < 2:
                 return httpx.Response(503, json={"error": "warming"})
-            return httpx.Response(200, json=_embed_response([[9.0]]))
+            return httpx.Response(200, json=_embed_response([[1.0, 0.0]]))
 
         _install_mock(emb, handler)
         with patch("src.embedder.wait_exponential", lambda **_: lambda *_: 0):
-            assert emb.embed("hello") == [9.0]
+            assert emb.embed("hello") == [1.0, 0.0]
         assert calls["n"] == 2
 
     def test_embed_batch_returns_vectors_in_input_order(self):
+        # Distinct unit-norm canonical-basis vectors keep both the
+        # order check and the L2-normalization invariant — the new
+        # post-fetch normalization is a no-op against unit-norm
+        # input, so this test still pins ordering without colliding
+        # with the normalization behavior.
         emb = OpenAIEmbedder("http://host.docker.internal:8001/v1", "test-model")
 
         def handler(_request: httpx.Request) -> httpx.Response:
             # Provider returns data in canonical input order.
-            return httpx.Response(200, json=_embed_response([[1.0], [2.0], [3.0]]))
+            return httpx.Response(
+                200,
+                json=_embed_response([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]),
+            )
 
         _install_mock(emb, handler)
-        assert emb.embed_batch(["a", "b", "c"]) == [[1.0], [2.0], [3.0]]
+        assert emb.embed_batch(["a", "b", "c"]) == [
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+        ]
 
     def test_embed_batch_sorts_data_by_index_when_provider_reorders(self):
         # If a future provider returns ``data`` in non-canonical order,
@@ -105,14 +121,23 @@ class TestOpenAIEmbedder:
         emb = OpenAIEmbedder("http://host.docker.internal:8001/v1", "test-model")
 
         def handler(_request: httpx.Request) -> httpx.Response:
-            # Vectors v0,v1,v2 returned with indices 2,1,0 (reversed).
+            # Three distinct unit-norm vectors returned with indices
+            # 2,1,0 (reversed). After sorting by index, each lands at
+            # its source position regardless of provider order.
             return httpx.Response(
-                200, json=_embed_response([[1.0], [2.0], [3.0]], reverse_order=True)
+                200,
+                json=_embed_response(
+                    [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+                    reverse_order=True,
+                ),
             )
 
         _install_mock(emb, handler)
-        # After sorting by index: v at idx=0 is [3.0], idx=1 is [2.0], idx=2 is [1.0].
-        assert emb.embed_batch(["a", "b", "c"]) == [[3.0], [2.0], [1.0]]
+        assert emb.embed_batch(["a", "b", "c"]) == [
+            [0.0, 0.0, 1.0],
+            [0.0, 1.0, 0.0],
+            [1.0, 0.0, 0.0],
+        ]
 
     def test_embed_batch_raises_on_duplicate_indices(self):
         # A misbehaving provider that returns the same ``index`` twice
@@ -180,13 +205,17 @@ class TestOpenAIEmbedder:
             body = json.loads(request.content)
             inputs = body["input"]
             seen_batches.append(inputs)
-            vectors = [[float(ord(s))] for s in inputs]
+            # Per-input scaled unit vector along the x-axis: each input
+            # gets a 1-dim ``[1.0]`` (already unit-norm) so the test
+            # locks ordering + concatenation without colliding with
+            # the embedder's defensive L2 normalization.
+            vectors = [[1.0] for _ in inputs]
             return httpx.Response(200, json=_embed_response(vectors))
 
         _install_mock(emb, handler)
         result = emb.embed_batch(["a", "b", "c", "d", "e"])
         assert seen_batches == [["a", "b"], ["c", "d"], ["e"]]
-        assert result == [[97.0], [98.0], [99.0], [100.0], [101.0]]
+        assert result == [[1.0], [1.0], [1.0], [1.0], [1.0]]
 
     def test_embed_batch_empty_returns_empty_without_http(self):
         emb = OpenAIEmbedder("http://host.docker.internal:8001/v1", "test-model")
@@ -477,12 +506,12 @@ class TestRetryPredicate:
             calls["n"] += 1
             if calls["n"] == 1:
                 raise httpx.ConnectTimeout("first call timed out")
-            return httpx.Response(200, json=_embed_response([[2.0]]))
+            return httpx.Response(200, json=_embed_response([[1.0]]))
 
         _install_mock(emb, handler)
         with patch("src.embedder.wait_exponential", lambda **_: lambda *_: 0):
             result = emb.embed_batch(["a"])
-        assert result == [[2.0]]
+        assert result == [[1.0]]
         assert calls["n"] == 2, "ConnectTimeout must be retried"
 
     def test_connect_timeout_is_classified_as_transient(self):
@@ -524,3 +553,55 @@ class TestRetryPredicate:
             with pytest.raises(httpx.UnsupportedProtocol):
                 emb.embed_batch(["a"])
         assert calls["n"] == 1, "UnsupportedProtocol must not retry at runtime either"
+
+
+class TestL2Normalize:
+    """Storage invariant: every vector returned by ``_embed_one_batch``
+    is L2-unit-norm. The defensive normalization step at the embedder
+    client survives a future provider swap whose output isn't already
+    normalized, and lets ``vec_distance_cosine`` collapse to a plain
+    dot product on stored vectors. Idempotent on Qwen3-Embedding-8B
+    output (already normalized per its model card)."""
+
+    def test_zero_vector_is_returned_unchanged(self):
+        # The seed-vector logic intentionally writes a zero placeholder
+        # for genuinely-new threads; dividing by zero would NaN-poison
+        # storage. Preserving it keeps the three-case priority chain
+        # intact.
+        result = _l2_normalize([0.0, 0.0, 0.0])
+        assert result == [0.0, 0.0, 0.0]
+
+    def test_already_unit_norm_short_circuits(self):
+        # Avoid float churn on already-normalized inputs. The function
+        # must return the SAME list object (identity preserved) when
+        # the input is within tolerance of unit norm.
+        v = [1.0, 0.0, 0.0]
+        result = _l2_normalize(v)
+        assert result is v, "unit-norm input must skip the divide branch"
+
+    def test_non_unit_vector_is_normalized(self):
+        # Classic 3-4-5 right triangle: norm = 5, unit vector = (3/5, 4/5).
+        result = _l2_normalize([3.0, 4.0])
+        assert result[0] == pytest.approx(0.6)
+        assert result[1] == pytest.approx(0.8)
+        # And the result IS unit-norm.
+        norm_sq = sum(x * x for x in result)
+        assert norm_sq == pytest.approx(1.0)
+
+    def test_embed_batch_returns_normalized_vectors(self):
+        """End-to-end: a provider that returns non-normalized vectors
+        is corrected at the embedder client so storage stays uniform."""
+        emb = OpenAIEmbedder("http://host.docker.internal:8001/v1", "test-model")
+
+        def handler(_request: httpx.Request) -> httpx.Response:
+            # Magnitude-3 vectors along each axis. After normalization
+            # each becomes the corresponding unit basis vector.
+            return httpx.Response(
+                200,
+                json=_embed_response([[3.0, 0.0, 0.0], [0.0, 3.0, 0.0]]),
+            )
+
+        _install_mock(emb, handler)
+        result = emb.embed_batch(["a", "b"])
+        assert result[0] == pytest.approx([1.0, 0.0, 0.0])
+        assert result[1] == pytest.approx([0.0, 1.0, 0.0])

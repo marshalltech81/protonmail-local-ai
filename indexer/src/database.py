@@ -18,7 +18,8 @@ from pathlib import Path
 
 import sqlite_vec
 
-from .threader import THREAD_BODY_TEXT_MAX_CHARS, Thread, canonical_addr
+from .chunker import truncate_to_tokens
+from .threader import THREAD_BODY_TEXT_MAX_TOKENS, Thread, canonical_addr
 
 log = logging.getLogger("indexer.database")
 
@@ -630,7 +631,10 @@ class Database:
                     f"From: {m.from_addr}\nDate: {m.date.isoformat()}\n{m.body_text[:2000]}"
                     for m in new_messages
                 )
-                return (existing["body_text"] + "\n" + new_content)[:THREAD_BODY_TEXT_MAX_CHARS]
+                return truncate_to_tokens(
+                    existing["body_text"] + "\n" + new_content,
+                    THREAD_BODY_TEXT_MAX_TOKENS,
+                )
             return existing["body_text"]
         return thread.text_for_embedding()
 

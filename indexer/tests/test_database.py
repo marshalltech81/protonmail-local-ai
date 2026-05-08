@@ -901,7 +901,17 @@ class TestUpsertThreadUpdate:
         ).fetchone()
         assert "Second message" in row["snippet"]
 
-    def test_accumulated_body_capped_at_8000_chars(self, db, threader):
+    def test_accumulated_body_capped_at_token_budget(self, db, threader):
+        # The accumulated thread body must respect the same token-based
+        # cap (``THREAD_BODY_TEXT_MAX_TOKENS``) on update that the
+        # fresh-insert ``Thread.text_for_embedding`` applies. Without
+        # the shared cap, replies arriving after the initial insert
+        # could expand the stored body well past what the insert path
+        # would have kept, drifting FTS / embedding inputs across the
+        # two code paths.
+        from src.chunker import estimate_tokens
+        from src.threader import THREAD_BODY_TEXT_MAX_TOKENS
+
         original = make_message(
             message_id="long_orig@example.com",
             body_text="A" * 500,
@@ -923,7 +933,7 @@ class TestUpsertThreadUpdate:
         row = db._conn.execute(
             "SELECT body_text FROM threads WHERE thread_id = 'long_orig@example.com'"
         ).fetchone()
-        assert len(row["body_text"]) <= 8000
+        assert estimate_tokens(row["body_text"]) <= THREAD_BODY_TEXT_MAX_TOKENS
 
 
 # ---------------------------------------------------------------------------

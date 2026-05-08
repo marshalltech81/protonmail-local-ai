@@ -55,7 +55,14 @@ SUBJECT_FALLBACK_WINDOW = timedelta(days=60)
 # a reply that arrives after the initial insert could expand the stored
 # body well past what the insert path would have kept, and the FTS /
 # embedding input would drift between the two code paths.
-THREAD_BODY_TEXT_MAX_CHARS = 8000
+#
+# Token-based, not char-based: a char cap under-counts CJK / URL /
+# Base64 / dense code text by 4-6× and forces unnecessarily aggressive
+# truncation in ASCII-heavy threads. ``Qwen3-Embedding-8B`` (the
+# default embedder) accepts up to 32K tokens; 4000 leaves wide
+# headroom while still bounding the FTS / vector-input size on
+# pathological threads.
+THREAD_BODY_TEXT_MAX_TOKENS = 4000
 
 log = logging.getLogger("indexer.threader")
 
@@ -74,10 +81,13 @@ class Thread:
         """
         Build a single text representation of the thread for embedding.
         Includes subject, participants, and all message bodies.
-        Trimmed to ``THREAD_BODY_TEXT_MAX_CHARS`` to stay within the
-        embedding model context, matching the cap the accumulation path
-        in ``Database._compute_body`` applies on update.
+        Trimmed to ``THREAD_BODY_TEXT_MAX_TOKENS`` real BPE tokens to
+        stay within the embedding model context, matching the cap the
+        accumulation path in ``Database._compute_body`` applies on
+        update.
         """
+        from .chunker import truncate_to_tokens
+
         parts = [
             f"Subject: {self.subject}",
             f"Participants: {', '.join(self.participants)}",
@@ -87,14 +97,14 @@ class Thread:
             parts.append(f"From: {msg.from_addr}")
             parts.append(f"Date: {msg.date.isoformat()}")
             # Cap per-message body so the joined string stays bounded
-            # before the THREAD_BODY_TEXT_MAX_CHARS truncation below;
-            # 500 chars per message is large enough to contain the bulk
-            # of typical email content without one outlier dominating
-            # the thread vector.
+            # before the thread-level truncation below. 500 chars is a
+            # crude but effective limiter — one outlier message cannot
+            # dominate the thread vector before the token-based cap
+            # below claims its real budget.
             parts.append(msg.body_text[:500])
             parts.append("")
 
-        return "\n".join(parts)[:THREAD_BODY_TEXT_MAX_CHARS]
+        return truncate_to_tokens("\n".join(parts), THREAD_BODY_TEXT_MAX_TOKENS)
 
     def snippet(self) -> str:
         """Short preview for search results."""

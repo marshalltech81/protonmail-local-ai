@@ -148,6 +148,34 @@ def _cached_estimate_tokens(text: str) -> int:
     return len(_load_tokenizer().encode(text, add_special_tokens=False).ids)
 
 
+def truncate_to_tokens(text: str, max_tokens: int) -> str:
+    """Return ``text`` cut to at most ``max_tokens`` BPE tokens.
+
+    Uses the bundled Qwen3-Embedding tokenizer's per-token character
+    offsets to slice on a real token boundary (not an arbitrary char
+    index that might split a multi-byte codepoint or a token mid-way).
+    Returns the input unchanged when it already fits.
+
+    Used for thread-level body caps (``THREAD_BODY_TEXT_MAX_TOKENS``)
+    so the cap aligns with the embed model's actual context budget.
+    A char-based cap under-counted CJK / URL / Base64 / dense code
+    text by 4-6× and forced unnecessarily aggressive truncation in
+    ASCII-heavy threads.
+    """
+    if not text or max_tokens <= 0:
+        return ""
+    tokenizer = _load_tokenizer()
+    encoding = tokenizer.encode(text, add_special_tokens=False)
+    if len(encoding.ids) <= max_tokens:
+        return text
+    # ``offsets`` is parallel to ``ids``; ``offsets[max_tokens][0]`` is
+    # the character index where the (max_tokens+1)-th token starts. The
+    # tokenizer's character offsets respect codepoint boundaries, so
+    # this slice is always safe.
+    cut = encoding.offsets[max_tokens][0]
+    return text[:cut]
+
+
 def estimate_tokens(text: str) -> int:
     """Return the real BPE token count for ``text``.
 
