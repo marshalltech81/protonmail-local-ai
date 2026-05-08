@@ -93,8 +93,8 @@ def _write_eml_with_text_attachment(path: Path, message_id: str) -> None:
     )
 
 
-class TestReadEmbedApiKey:
-    """Coverage for ``main._read_embed_api_key``.
+class TestReadEmbedOpenAIApiKey:
+    """Coverage for ``main._read_embed_openai_api_key``.
 
     The Docker secret path takes precedence over the env var; when the
     secret file is unreadable the function falls back to env rather
@@ -102,26 +102,26 @@ class TestReadEmbedApiKey:
     """
 
     def test_returns_secret_file_contents_stripped(self, tmp_path, monkeypatch):
-        secret = tmp_path / "embed_api_key"
+        secret = tmp_path / "embed_openai_api_key"
         secret.write_text("  sk-abc123\n", encoding="utf-8")  # pragma: allowlist secret
         monkeypatch.setattr(main, "Path", lambda _p: secret)
-        monkeypatch.delenv("EMBED_API_KEY", raising=False)
-        assert main._read_embed_api_key() == "sk-abc123"  # pragma: allowlist secret
+        monkeypatch.delenv("EMBED_OPENAI_API_KEY", raising=False)
+        assert main._read_embed_openai_api_key() == "sk-abc123"  # pragma: allowlist secret
 
     def test_falls_back_to_env_when_secret_missing(self, tmp_path, monkeypatch):
         monkeypatch.setattr(main, "Path", lambda _p: tmp_path / "does-not-exist")
-        monkeypatch.setenv("EMBED_API_KEY", "  env-key  ")
-        assert main._read_embed_api_key() == "env-key"
+        monkeypatch.setenv("EMBED_OPENAI_API_KEY", "  env-key  ")
+        assert main._read_embed_openai_api_key() == "env-key"
 
     def test_returns_empty_when_neither_source_set(self, tmp_path, monkeypatch):
         monkeypatch.setattr(main, "Path", lambda _p: tmp_path / "does-not-exist")
-        monkeypatch.delenv("EMBED_API_KEY", raising=False)
-        assert main._read_embed_api_key() == ""
+        monkeypatch.delenv("EMBED_OPENAI_API_KEY", raising=False)
+        assert main._read_embed_openai_api_key() == ""
 
     def test_falls_back_to_env_on_oserror_reading_secret(self, monkeypatch, caplog):
         # If the secret file exists but can't be read (perms regression
-        # in a future deploy), don't crash — log and fall through to
-        # env so the operator can recover by setting EMBED_API_KEY.
+        # in a future deploy), don't crash — log and fall through to env
+        # so the operator can recover by setting EMBED_OPENAI_API_KEY.
 
         class _UnreadableSecretPath:
             def exists(self) -> bool:
@@ -131,9 +131,9 @@ class TestReadEmbedApiKey:
                 raise PermissionError("simulated perms regression")
 
         monkeypatch.setattr(main, "Path", lambda _p: _UnreadableSecretPath())
-        monkeypatch.setenv("EMBED_API_KEY", "fallback-key")
+        monkeypatch.setenv("EMBED_OPENAI_API_KEY", "fallback-key")
         with caplog.at_level("WARNING"):
-            assert main._read_embed_api_key() == "fallback-key"
+            assert main._read_embed_openai_api_key() == "fallback-key"
         assert "could not read" in caplog.text
 
 

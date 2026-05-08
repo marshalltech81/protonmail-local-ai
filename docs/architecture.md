@@ -4,8 +4,9 @@
 
 protonmail-local-ai is a fully containerised, privacy-first AI search and
 intelligence layer for ProtonMail. Every component runs locally in Docker.
-The only optional external call is to the Claude API for Q&A, and that is
-opt-in at deployment time via `LLM_MODE=cloud`.
+The optional external inference path is an Anthropic-compatible Messages
+API for Q&A, and that is opt-in at deployment time via
+`INFERENCE_MODE=anthropic`.
 
 ## Data Flow
 
@@ -50,7 +51,7 @@ mlx-service (host process)    sqlite-volume
                                 - pending_deletions (reconciler)
 mlx-lm-server (host process)
   - Qwen3-32B-4bit (or other) for
-    local LLM inference (LLM_MODE=local)
+    local LLM inference (INFERENCE_MODE=openai)
   - OpenAI-compatible /v1/chat/completions
   - reached from containers via
     host.docker.internal:8002
@@ -62,7 +63,7 @@ mcp-server container
   - Serves GET /health for the container healthcheck (200 when the
     read-only SQLite connection answers, 503 otherwise)
   - Hybrid search: BM25 + vector → RRF merge
-  - Q&A: retrieves threads → prompts the local LLM or Claude API
+  - Q&A: retrieves threads → prompts the configured inference provider
   - Retrieval: serves indexed mailbox data from SQLite
   - Email excerpts sent to the LLM are wrapped in <untrusted_email>
     tags and framed as untrusted data — defense against prompt
@@ -83,7 +84,7 @@ Claude Desktop (host machine)
 |---|---|---|---|
 | `protonmail-bridge` | ProtonMail Cloud | `bridge-data` vol | IMAP 1143, SMTP 1025 (internal) |
 | `mbsync` | Bridge IMAP | `maildir-volume` | nothing |
-| `mlx-service` (host process, not Docker) | embed (OpenAI `/v1/embeddings`) + rerank requests | `~/.cache/huggingface/` model cache | HTTP 8001 (loopback only); reached from Docker via `host.docker.internal`. The embed surface is OpenAI-compatible — operators can swap to any compliant provider via `EMBED_BASE_URL`. The reranker stays on the service's custom `/rerank`. See `docs/setup.md` for the LaunchAgent install. |
+| `mlx-service` (host process, not Docker) | embed (OpenAI `/v1/embeddings`) + rerank requests | `~/.cache/huggingface/` model cache | HTTP 8001 (loopback only); reached from Docker via `host.docker.internal`. The embed surface is OpenAI-compatible — operators can swap to any compliant provider via `EMBED_OPENAI_BASE_URL`. The reranker stays on the service's custom `/rerank`. See `docs/setup.md` for the LaunchAgent install. |
 | `mlx-lm-server` (host process, not Docker) | LLM chat requests | `~/.cache/huggingface/` model cache | HTTP 8002 (loopback only); reached from Docker via `host.docker.internal`. OpenAI-compatible `/v1/chat/completions`. See `docs/setup.md` for the LaunchAgent install. |
 | `indexer` | `maildir-volume`, mlx-service | `sqlite-volume` | nothing |
 | `mcp-server` | `sqlite-volume`, mlx-service, mlx-lm-server (LLM) | nothing | HTTP 3000 (localhost only) |
@@ -115,7 +116,7 @@ For stricter local-only deployments, `docker-compose.hardened.yml` marks
 > behave differently and the OrbStack case is unverified). Until the
 > overlay is reworked to either move both MLX services into containers
 > on `app-net` or explicitly punch `host.docker.internal` through,
-> applying it will likely cut off the LLM (`LLM_MODE=local`) and the
+> applying it will likely cut off the LLM (`INFERENCE_MODE=openai`) and the
 > MLX `/v1/embeddings` and `/rerank` calls. The compose file itself
 > carries the same warning. Do not apply it as-is.
 
@@ -139,16 +140,17 @@ exemption) but not from LAN neighbors.
 The embedder surface is OpenAI-compatible (`/v1/embeddings`). The
 indexer's `OpenAIEmbedder` client and mcp-server's
 `LocalLLMClient.embed()` both speak this dialect, so an operator can
-point `EMBED_BASE_URL` at any compliant provider — DeepInfra,
+point `EMBED_OPENAI_BASE_URL` at any compliant provider — DeepInfra,
 OpenRouter, LM Studio, vLLM, TEI — without changing any code. The
-schema reserves a fixed 4096-dim vector, so `EMBED_MODEL` must keep
-producing 4096-dim vectors (Qwen3-Embedding-8B variants) or a schema
-migration is required. Indexer and mcp-server must point at the same
-provider + model so query vectors are comparable to indexed vectors.
+schema reserves a fixed 4096-dim vector, so `EMBED_OPENAI_MODEL` must
+keep producing 4096-dim vectors (Qwen3-Embedding-8B variants) or a
+schema migration is required. Indexer and mcp-server must point at the
+same provider + model so query vectors are comparable to indexed
+vectors.
 
 The reranker uses a custom `/rerank` shape — there is no OpenAI
 rerank standard — so `RERANK_BASE_URL` is independent of
-`EMBED_BASE_URL`.
+`EMBED_OPENAI_BASE_URL`.
 
 ## Search Architecture
 
@@ -616,26 +618,27 @@ walkthrough; the table below is the per-operation reference.
 | Operation | Local only | Leaves machine |
 |---|---|---|
 | Email storage | ✅ | Never |
-| Embedding generation — default `EMBED_BASE_URL` (mlx-service on `127.0.0.1`) | ✅ | Never |
-| Embedding generation — cloud `EMBED_BASE_URL` (DeepInfra, OpenRouter, etc.) | Retrieval queries + indexed content | Email body chunks → cloud provider |
+| Embedding generation — default `EMBED_OPENAI_BASE_URL` (mlx-service on `127.0.0.1`) | ✅ | Never |
+| Embedding generation — cloud `EMBED_OPENAI_BASE_URL` (DeepInfra, OpenRouter, etc.) | Retrieval queries + indexed content | Email body chunks → cloud provider |
 | Vector index | ✅ (SQLite) | Never |
 | Keyword search | ✅ (SQLite FTS5) | Never |
 | Reranker — default `RERANK_BASE_URL` (mlx-service on `127.0.0.1`) | ✅ | Never |
 | Send/Move/Flag | Disabled by default | Never |
 
-> **Note on cloud embedders.** Pointing `EMBED_BASE_URL` at a remote
+> **Note on cloud embedders.** Pointing `EMBED_OPENAI_BASE_URL` at a remote
 > provider sends every email body chunk through that provider at index
 > time and every search query string at retrieval time. This is a
 > deliberate departure from the local-first default and should be done
 > with the privacy implications understood. The local mlx-service
 > default is what makes "all retrieval stays local" hold.
 
-### MCP server intelligence tools (governed by `LLM_MODE`)
+### MCP server intelligence tools (governed by `INFERENCE_MODE`)
 
 | Operation | Local only | Leaves machine |
 |---|---|---|
-| Q&A — `LLM_MODE=local` | ✅ (mlx-lm-server) | Never |
-| Q&A — `LLM_MODE=cloud` | Retrieval local | Retrieved chunks → Anthropic Claude API |
+| Q&A — `INFERENCE_MODE=openai`, default `INFERENCE_OPENAI_BASE_URL` | ✅ (mlx-lm-server) | Never |
+| Q&A — `INFERENCE_MODE=openai`, remote `INFERENCE_OPENAI_BASE_URL` | Retrieval local | Retrieved chunks → OpenAI-compatible provider |
+| Q&A — `INFERENCE_MODE=anthropic` | Retrieval local | Retrieved chunks → Anthropic-compatible provider |
 
 ### MCP client layer (governed by which client you connect)
 
@@ -643,7 +646,7 @@ When the MCP server is consumed by a cloud-backed client, the tool *return
 values* are sent to that client's backend as part of the conversation
 context. Tool results often contain email snippets, full thread bodies, or
 LLM-generated answers grounded in mail — so the client's backend sees that
-content regardless of `LLM_MODE`.
+content regardless of `INFERENCE_MODE`.
 
 | Client | What sees tool results |
 |---|---|
@@ -651,7 +654,7 @@ content regardless of `LLM_MODE`.
 | Local-LLM MCP client | Stays on machine |
 | Direct `docker exec` into mcp-server | Stays on machine |
 
-`LLM_MODE` and the MCP client choice are independent boundaries and must
+`INFERENCE_MODE` and the MCP client choice are independent boundaries and must
 both be set deliberately if "fully local conversations" is a goal.
 
 The MCP server defaults to SSE for existing Claude Desktop compatibility.
@@ -659,12 +662,16 @@ Set `MCP_TRANSPORT=streamable-http` for clients that only speak Streamable
 HTTP, or `MCP_TRANSPORT=dual` to serve both `/sse` and `/mcp` on the same
 localhost-bound port.
 
-## LLM Mode Toggle
+## Inference Mode Toggle
 
-Set `LLM_MODE` in `.env`:
+Set `INFERENCE_MODE` in `.env`:
 
-- `local` — all LLM inference via the host mlx-lm-server (or any OpenAI-compatible endpoint at `LLM_BASE_URL`). Fully private.
-- `cloud` — Q&A and agentic tasks use Claude API. Better quality. Retrieved
-  email chunks are sent to Anthropic's servers.
+- `openai` — OpenAI-compatible chat completions via
+  `INFERENCE_OPENAI_BASE_URL`. The default endpoint is the host
+  mlx-lm-server and is fully local, but this can also point at a
+  remote compatible provider.
+- `anthropic` — Anthropic-compatible Messages API via
+  `INFERENCE_ANTHROPIC_BASE_URL`. Retrieved email chunks are sent to
+  that provider.
 
 The toggle applies per-deployment. A per-session toggle is on the roadmap.

@@ -5,7 +5,8 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 readonly ROOT_DIR
 readonly ENV_FILE="${ROOT_DIR}/.env"
 readonly BRIDGE_PASS_FILE="${ROOT_DIR}/.secrets/bridge_pass.txt"
-readonly ANTHROPIC_KEY_FILE="${ROOT_DIR}/.secrets/anthropic_api_key.txt"
+readonly INFERENCE_OPENAI_KEY_FILE="${ROOT_DIR}/.secrets/inference_openai_api_key.txt"
+readonly INFERENCE_ANTHROPIC_KEY_FILE="${ROOT_DIR}/.secrets/inference_anthropic_api_key.txt"
 
 require_file() {
     local path="$1"
@@ -54,6 +55,19 @@ require_mode_600() {
     actual_mode="$(file_mode "$path")"
     [[ "$actual_mode" == "600" ]] || {
         printf 'ERROR: %s must have mode 600, found %s.\n' "$path" "$actual_mode" >&2
+        exit 1
+    }
+}
+
+reject_deprecated_env() {
+    local old_name="$1"
+    local new_name="$2"
+    local value
+
+    value="$(get_env_value "$old_name")"
+    [[ -z "$value" ]] || {
+        printf 'ERROR: %s has been renamed to %s. Update .env before starting.\n' \
+            "$old_name" "$new_name" >&2
         exit 1
     }
 }
@@ -117,17 +131,26 @@ fi
 
 require_file "$ENV_FILE" ".env"
 require_file "$BRIDGE_PASS_FILE" "Bridge password secret"
-require_file "$ANTHROPIC_KEY_FILE" "Anthropic API key secret file"
+require_file "$INFERENCE_OPENAI_KEY_FILE" "OpenAI-compatible inference API key secret file"
+require_file "$INFERENCE_ANTHROPIC_KEY_FILE" "Anthropic-compatible inference API key secret file"
+
+reject_deprecated_env "LLM_BASE_URL" "INFERENCE_OPENAI_BASE_URL"
+reject_deprecated_env "LLM_MODEL" "INFERENCE_OPENAI_MODEL"
+reject_deprecated_env "LLM_MODE" "INFERENCE_MODE"
+reject_deprecated_env "CLAUDE_MODEL" "INFERENCE_ANTHROPIC_MODEL"
+reject_deprecated_env "ANTHROPIC_API_KEY" "INFERENCE_ANTHROPIC_API_KEY"
 
 BRIDGE_USER="$(get_env_value BRIDGE_USER)"
 BRIDGE_VERSION="$(get_env_value BRIDGE_VERSION)"
-LLM_BASE_URL="$(get_env_value LLM_BASE_URL)"
-LLM_MODEL="$(get_env_value LLM_MODEL)"
+INFERENCE_MODE="$(get_env_value INFERENCE_MODE)"
+INFERENCE_OPENAI_BASE_URL="$(get_env_value INFERENCE_OPENAI_BASE_URL)"
+INFERENCE_OPENAI_MODEL="$(get_env_value INFERENCE_OPENAI_MODEL)"
+INFERENCE_ANTHROPIC_BASE_URL="$(get_env_value INFERENCE_ANTHROPIC_BASE_URL)"
+INFERENCE_ANTHROPIC_MODEL="$(get_env_value INFERENCE_ANTHROPIC_MODEL)"
 SYNC_INTERVAL="$(get_env_value SYNC_INTERVAL)"
 MCP_PORT="$(get_env_value MCP_PORT)"
 MCP_TRANSPORT="$(get_env_value MCP_TRANSPORT)"
 MCP_READ_ONLY="$(get_env_value MCP_READ_ONLY)"
-LLM_MODE="$(get_env_value LLM_MODE)"
 
 [[ -n "$BRIDGE_USER" && "$BRIDGE_USER" != "your@proton.me" ]] || {
     echo "ERROR: BRIDGE_USER in .env must be set to the Bridge username from 'bridge --cli info'." >&2
@@ -139,18 +162,39 @@ LLM_MODE="$(get_env_value LLM_MODE)"
     exit 1
 }
 
-[[ -n "$LLM_BASE_URL" ]] || {
-    echo "ERROR: LLM_BASE_URL must be set in .env (OpenAI-compatible base URL, e.g. http://host.docker.internal:8002/v1)." >&2
+INFERENCE_MODE="${INFERENCE_MODE:-openai}"
+[[ "$INFERENCE_MODE" =~ ^(openai|anthropic)$ ]] || {
+    echo "ERROR: INFERENCE_MODE must be 'openai' or 'anthropic'." >&2
     exit 1
 }
 
-[[ "$LLM_BASE_URL" =~ ^https?:// ]] || {
-    echo "ERROR: LLM_BASE_URL must start with http:// or https://." >&2
+[[ -n "$INFERENCE_OPENAI_BASE_URL" ]] || {
+    echo "ERROR: INFERENCE_OPENAI_BASE_URL must be set in .env (OpenAI-compatible base URL, e.g. http://host.docker.internal:8002/v1)." >&2
     exit 1
 }
 
-[[ -n "$LLM_MODEL" ]] || {
-    echo "ERROR: LLM_MODEL must be set in .env (model id served at LLM_BASE_URL, e.g. mlx-community/Qwen3-32B-4bit)." >&2
+[[ "$INFERENCE_OPENAI_BASE_URL" =~ ^https?:// ]] || {
+    echo "ERROR: INFERENCE_OPENAI_BASE_URL must start with http:// or https://." >&2
+    exit 1
+}
+
+[[ -n "$INFERENCE_OPENAI_MODEL" ]] || {
+    echo "ERROR: INFERENCE_OPENAI_MODEL must be set in .env (model id served at INFERENCE_OPENAI_BASE_URL, e.g. mlx-community/Qwen3-32B-4bit)." >&2
+    exit 1
+}
+
+[[ -n "$INFERENCE_ANTHROPIC_BASE_URL" ]] || {
+    echo "ERROR: INFERENCE_ANTHROPIC_BASE_URL must be set in .env (Anthropic-compatible base URL, e.g. https://api.anthropic.com/v1)." >&2
+    exit 1
+}
+
+[[ "$INFERENCE_ANTHROPIC_BASE_URL" =~ ^https?:// ]] || {
+    echo "ERROR: INFERENCE_ANTHROPIC_BASE_URL must start with http:// or https://." >&2
+    exit 1
+}
+
+[[ -n "$INFERENCE_ANTHROPIC_MODEL" ]] || {
+    echo "ERROR: INFERENCE_ANTHROPIC_MODEL must be set in .env (model id served at INFERENCE_ANTHROPIC_BASE_URL, e.g. claude-sonnet-4-6)." >&2
     exit 1
 }
 
@@ -177,17 +221,15 @@ MCP_TRANSPORT="${MCP_TRANSPORT:-sse}"
     exit 1
 }
 
-[[ "$LLM_MODE" =~ ^(local|cloud)$ ]] || {
-    echo "ERROR: LLM_MODE must be 'local' or 'cloud'." >&2
-    exit 1
-}
-
 require_nonempty_file "$BRIDGE_PASS_FILE" "Bridge password secret"
 require_mode_600 "$BRIDGE_PASS_FILE"
+require_mode_600 "$INFERENCE_OPENAI_KEY_FILE"
+require_mode_600 "$INFERENCE_ANTHROPIC_KEY_FILE"
 
-if [[ "$LLM_MODE" == "cloud" ]]; then
-    require_nonempty_file "$ANTHROPIC_KEY_FILE" "Anthropic API key secret"
-    require_mode_600 "$ANTHROPIC_KEY_FILE"
+if [[ "$INFERENCE_MODE" == "anthropic" ]]; then
+    require_nonempty_file \
+        "$INFERENCE_ANTHROPIC_KEY_FILE" \
+        "Anthropic-compatible inference API key secret"
 fi
 
 printf 'Environment validation passed.\n'

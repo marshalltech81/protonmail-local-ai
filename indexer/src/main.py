@@ -6,8 +6,8 @@ and writes to the SQLite index.
 
 The default embedder is the host-side mlx-service on Apple Metal, but
 any OpenAI-compatible provider works (DeepInfra, OpenRouter, LM Studio,
-vLLM, TEI, etc.) — only ``EMBED_BASE_URL`` + ``EMBED_MODEL`` (+ optional
-``EMBED_API_KEY`` Docker secret) change.
+vLLM, TEI, etc.) — only ``EMBED_OPENAI_BASE_URL`` + ``EMBED_OPENAI_MODEL``
+(+ optional ``EMBED_OPENAI_API_KEY`` Docker secret) change.
 
 When ``INDEXER_DELETION_ENABLED=true`` the indexer also runs a reconciler
 that records tombstones for mbsync-flagged (``T``) Maildir files and reaps
@@ -61,34 +61,36 @@ SQLITE_PATH = Path(os.environ.get("SQLITE_PATH", "/data/mail.db"))
 # reached from containers via OrbStack's ``host.docker.internal``. The
 # service binds ``127.0.0.1:8001`` and exposes ``/v1/embeddings``.
 #
-# Any OpenAI-compatible provider works: replace ``EMBED_BASE_URL`` with
-# the provider's base URL and set ``EMBED_API_KEY`` (Docker secret).
-# The schema reserves a fixed 4096-dim vector — keep ``EMBED_MODEL``
-# pointed at a 4096-dim model (Qwen3-Embedding-8B variants) or a schema
-# migration is required.
-EMBED_BASE_URL = os.environ.get("EMBED_BASE_URL", "http://host.docker.internal:8001/v1")
-EMBED_MODEL = os.environ.get("EMBED_MODEL", "mlx-community/Qwen3-Embedding-8B-mxfp8")
+# Any OpenAI-compatible provider works: replace ``EMBED_OPENAI_BASE_URL``
+# with the provider's base URL and set ``EMBED_OPENAI_API_KEY`` (Docker
+# secret). The schema reserves a fixed 4096-dim vector — keep
+# ``EMBED_OPENAI_MODEL`` pointed at a 4096-dim model (Qwen3-Embedding-8B
+# variants) or a schema migration is required.
+EMBED_OPENAI_BASE_URL = os.environ.get(
+    "EMBED_OPENAI_BASE_URL", "http://host.docker.internal:8001/v1"
+)
+EMBED_OPENAI_MODEL = os.environ.get("EMBED_OPENAI_MODEL", "mlx-community/Qwen3-Embedding-8B-mxfp8")
 
 
-def _read_embed_api_key() -> str:
+def _read_embed_openai_api_key() -> str:
     """Read the embedder API key from a Docker secret, then env, then empty.
 
     Mirrors the secret-then-env pattern used in mcp-server. An empty key
     is the local mlx-service case (no auth on loopback) and is not an
     error. The Docker secret path follows the existing
-    ``/run/secrets/<name>`` convention; ``EMBED_API_KEY`` env is the
-    fallback for non-Docker deployments.
+    ``/run/secrets/<name>`` convention; ``EMBED_OPENAI_API_KEY`` env is
+    the fallback for non-Docker deployments.
     """
-    secret_path = Path("/run/secrets/embed_api_key")
+    secret_path = Path("/run/secrets/embed_openai_api_key")
     if secret_path.exists():
         try:
             return secret_path.read_text(encoding="utf-8").strip()
         except OSError as e:
-            log.warning("could not read /run/secrets/embed_api_key: %s", e)
-    return os.environ.get("EMBED_API_KEY", "").strip()
+            log.warning("could not read /run/secrets/embed_openai_api_key: %s", e)
+    return os.environ.get("EMBED_OPENAI_API_KEY", "").strip()
 
 
-EMBED_API_KEY = _read_embed_api_key()
+EMBED_OPENAI_API_KEY = _read_embed_openai_api_key()
 # /tmp default is safe: container tmpfs, non-root user, overridable via env.
 INDEXER_HEALTH_FILE = Path(os.environ.get("INDEXER_HEALTH_FILE", "/tmp/indexer-health"))  # nosec B108
 
@@ -131,8 +133,8 @@ CHUNK_OVERLAP_TOKENS = _int_env("INDEXER_CHUNK_OVERLAP_TOKENS", 150, minimum=0)
 
 # How many messages the initial-scan drainer accumulates before issuing
 # a single batched embed call. Larger batches amortize the cloud-embedder
-# round-trip across more messages — meaningful when EMBED_BASE_URL points
-# at a remote provider (~150 ms RTT each), marginal against loopback
+# round-trip across more messages — meaningful when EMBED_OPENAI_BASE_URL
+# points at a remote provider (~150 ms RTT each), marginal against loopback
 # mlx-service.
 INITIAL_INDEX_BATCH_SIZE = _int_env("INITIAL_INDEX_BATCH_SIZE", 50)
 
@@ -1128,15 +1130,18 @@ def main():
     log.info("Starting indexer...")
     log.info(f"  Maildir: {MAILDIR_PATH}")
     log.info(f"  SQLite:  {SQLITE_PATH}")
-    log.info(f"  Embedder: {EMBED_BASE_URL} (model={EMBED_MODEL}, batch={EMBED_BATCH_SIZE})")
-    if EMBED_API_KEY:
+    log.info(
+        f"  Embedder: {EMBED_OPENAI_BASE_URL} "
+        f"(model={EMBED_OPENAI_MODEL}, batch={EMBED_BATCH_SIZE})"
+    )
+    if EMBED_OPENAI_API_KEY:
         log.info("  Embedder API key: present (Bearer auth enabled)")
 
     db = Database(SQLITE_PATH)
     embedder = OpenAIEmbedder(
-        base_url=EMBED_BASE_URL,
-        model=EMBED_MODEL,
-        api_key=EMBED_API_KEY,
+        base_url=EMBED_OPENAI_BASE_URL,
+        model=EMBED_OPENAI_MODEL,
+        api_key=EMBED_OPENAI_API_KEY,
         batch_size=EMBED_BATCH_SIZE,
     )
     threader = Threader(db)

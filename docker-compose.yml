@@ -85,12 +85,12 @@ services:
       - bridge-net
 
   # ---------------------------------------------------------------------------
-  # Note: when ``LLM_MODE=local`` the mcp-server reaches the host-side
-  # ``mlx-lm-server`` LaunchAgent (OpenAI-compatible
+  # Note: when ``INFERENCE_MODE=openai`` the mcp-server reaches the
+  # host-side ``mlx-lm-server`` LaunchAgent (OpenAI-compatible
   # ``/v1/chat/completions`` on port 8002) via OrbStack's
-  # ``host.docker.internal``. Override ``LLM_BASE_URL`` in ``.env`` to
-  # point at any other OpenAI-compatible endpoint. The mlx-lm-server
-  # LaunchAgent setup lives in ``mlx-lm-server/README.md``.
+  # ``host.docker.internal``. Override ``INFERENCE_OPENAI_BASE_URL`` in
+  # ``.env`` to point at any other OpenAI-compatible endpoint. The
+  # mlx-lm-server LaunchAgent setup lives in ``mlx-lm-server/README.md``.
   # ---------------------------------------------------------------------------
 
   # ---------------------------------------------------------------------------
@@ -135,7 +135,7 @@ services:
       mbsync:
         condition: service_healthy
     secrets:
-      - embed_api_key
+      - embed_openai_api_key
     environment:
       HOME: /home/indexer
       MAILDIR_PATH: /maildir
@@ -145,8 +145,8 @@ services:
       # provider that speaks /v1/embeddings works (DeepInfra, OpenRouter,
       # LM Studio, vLLM, TEI). Indexer + mcp-server must point at the
       # same provider + model so vectors are comparable.
-      EMBED_BASE_URL: ${EMBED_BASE_URL:-http://host.docker.internal:8001/v1}
-      EMBED_MODEL: ${EMBED_MODEL:-mlx-community/Qwen3-Embedding-8B-mxfp8}
+      EMBED_OPENAI_BASE_URL: ${EMBED_OPENAI_BASE_URL:-http://host.docker.internal:8001/v1}
+      EMBED_OPENAI_MODEL: ${EMBED_OPENAI_MODEL:-mlx-community/Qwen3-Embedding-8B-mxfp8}
       EMBED_BATCH_SIZE: ${EMBED_BATCH_SIZE:-64}
       # Cross-message batch size for the initial-index drainer. See
       # .env.example for the two-phase pipeline that this tunes.
@@ -244,17 +244,19 @@ services:
       indexer:
         condition: service_healthy
     secrets:
-      - anthropic_api_key
-      - embed_api_key
+      - inference_openai_api_key
+      - inference_anthropic_api_key
+      - embed_openai_api_key
     environment:
       SQLITE_PATH: /data/mail.db
-      # LLM_BASE_URL is the OpenAI-compatible chat-completions endpoint
-      # served by the host-side ``mlx-lm-server`` LaunchAgent. Any
-      # OpenAI-compatible endpoint works (point at a different host /
-      # port to swap backends) — see ``mlx-lm-server/``.
-      LLM_BASE_URL: ${LLM_BASE_URL:-http://host.docker.internal:8002/v1}
-      LLM_MODEL: ${LLM_MODEL:-mlx-community/Qwen3-32B-4bit}
-      LLM_MODE: ${LLM_MODE:-local}
+      # INFERENCE_MODE chooses protocol/client:
+      # - openai: OpenAI-compatible chat completions
+      # - anthropic: Anthropic-compatible Messages API
+      INFERENCE_MODE: ${INFERENCE_MODE:-openai}
+      INFERENCE_OPENAI_BASE_URL: ${INFERENCE_OPENAI_BASE_URL:-http://host.docker.internal:8002/v1}
+      INFERENCE_OPENAI_MODEL: ${INFERENCE_OPENAI_MODEL:-mlx-community/Qwen3-32B-4bit}
+      INFERENCE_ANTHROPIC_BASE_URL: ${INFERENCE_ANTHROPIC_BASE_URL:-https://api.anthropic.com/v1}
+      INFERENCE_ANTHROPIC_MODEL: ${INFERENCE_ANTHROPIC_MODEL:-claude-sonnet-4-6}
       MCP_PORT: ${MCP_PORT:-3000}
       MCP_TRANSPORT: ${MCP_TRANSPORT:-sse}
       MCP_READ_ONLY: ${MCP_READ_ONLY:-true}
@@ -268,10 +270,10 @@ services:
       # at the same provider + model as the indexer; otherwise query
       # vectors and indexed vectors are produced by different models
       # and hybrid search degrades.
-      EMBED_BASE_URL: ${EMBED_BASE_URL:-http://host.docker.internal:8001/v1}
-      EMBED_MODEL: ${EMBED_MODEL:-mlx-community/Qwen3-Embedding-8B-mxfp8}
+      EMBED_OPENAI_BASE_URL: ${EMBED_OPENAI_BASE_URL:-http://host.docker.internal:8001/v1}
+      EMBED_OPENAI_MODEL: ${EMBED_OPENAI_MODEL:-mlx-community/Qwen3-Embedding-8B-mxfp8}
       # Reranker stays on mlx-service's custom /rerank — no OpenAI standard
-      # exists for rerank, so this URL is independent of EMBED_BASE_URL.
+      # exists for rerank, so this URL is independent of EMBED_OPENAI_BASE_URL.
       RERANK_BASE_URL: ${RERANK_BASE_URL:-http://host.docker.internal:8001}
       RERANK_CANDIDATES: ${RERANK_CANDIDATES:-20}
       RERANK_TOP_N: ${RERANK_TOP_N:-10}
@@ -314,14 +316,19 @@ networks:
 secrets:
   bridge_pass:
     file: ./.secrets/bridge_pass.txt
-  # Claude API key — required when LLM_MODE=cloud.
-  # For local-only mode, leave the file empty: printf '' > .secrets/anthropic_api_key.txt
+  # OpenAI-compatible inference API key — empty by default for local
+  # mlx-lm-server, only required when INFERENCE_OPENAI_BASE_URL points
+  # at a provider that authenticates.
+  inference_openai_api_key:
+    file: ./.secrets/inference_openai_api_key.txt
+  # Anthropic-compatible inference API key — required when
+  # INFERENCE_MODE=anthropic. Leave empty for the default openai mode.
   # Never put this value in .env — it will appear in docker inspect output.
-  anthropic_api_key:
-    file: ./.secrets/anthropic_api_key.txt
+  inference_anthropic_api_key:
+    file: ./.secrets/inference_anthropic_api_key.txt
   # OpenAI-compatible embedder API key — empty by default, only required
-  # when EMBED_BASE_URL points at a cloud provider that authenticates
+  # when EMBED_OPENAI_BASE_URL points at a cloud provider that authenticates
   # (DeepInfra, OpenRouter, etc.). Local mlx-service ignores it.
   # Never put this value in .env — it will appear in docker inspect output.
-  embed_api_key:
-    file: ./.secrets/embed_api_key.txt
+  embed_openai_api_key:
+    file: ./.secrets/embed_openai_api_key.txt

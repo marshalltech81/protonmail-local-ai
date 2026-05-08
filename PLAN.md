@@ -20,7 +20,7 @@ The local-inference layer is fully consolidated onto MLX. The LLM
 runs on `mlx-lm-server` (`mlx_lm.server` LaunchAgent on port 8002)
 alongside the existing `mlx-service` LaunchAgent (embeddings +
 reranking on port 8001). Both reach Apple Metal directly; neither
-goes through Ollama. Cloud-Claude (`LLM_MODE=cloud`) remains as the
+goes through Ollama. Cloud-Claude (`INFERENCE_MODE=anthropic`) remains as the
 user-facing quality escape hatch.
 
 What remains: documentation polish (Phase D below) and the previously
@@ -63,19 +63,19 @@ The stack now runs:
   mbsync burst into one round-trip during steady state.
 - **mcp-server** — Docker, hybrid search + intelligence tools.
   `hybrid_search` calls the MLX reranker (`Qwen3-Reranker-4B-mxfp8`)
-  after RRF. The LLM-synthesis step is dispatched by `LLM_MODE`:
-  `local` → `LocalLLMClient.complete()` against the OpenAI-compatible
-  `/v1/chat/completions` endpoint at `LLM_BASE_URL` (default
+  after RRF. The LLM-synthesis step is dispatched by `INFERENCE_MODE`:
+  `openai` → `LocalLLMClient.complete()` against the OpenAI-compatible
+  `/v1/chat/completions` endpoint at `INFERENCE_OPENAI_BASE_URL` (default
   `http://host.docker.internal:8002/v1`, served by mlx-lm-server),
-  `cloud` → Anthropic Claude API (the daily-driver mode at the
-  moment — `LLM_MODE=cloud` in `.env`, model `claude-sonnet-4-6`).
+  `anthropic` → Anthropic-compatible Messages API (the daily-driver mode at the
+  moment — `INFERENCE_MODE=anthropic` in `.env`, model `claude-sonnet-4-6`).
   The Tier-2–11 manual-eval pass on 2026-05-04 was run with
-  `LLM_MODE=cloud`; that remains the standing quality baseline.
+  `INFERENCE_MODE=anthropic`; that remains the standing quality baseline.
 - **mlx-service** — host LaunchAgent on `127.0.0.1:8001`, serves the
   OpenAI-compatible `/v1/embeddings` (Qwen3-Embedding-8B-mxfp8,
   4096-dim) and the custom `/rerank` (Qwen3-Reranker-4B-mxfp8).
   Reachable from Docker via `host.docker.internal:8001`. The embedder
-  surface is provider-agnostic — `EMBED_BASE_URL` can point at any
+  surface is provider-agnostic — `EMBED_OPENAI_BASE_URL` can point at any
   OpenAI-compatible provider (DeepInfra, OpenRouter, etc.) without
   code changes.
 - **mlx-lm-server** — host LaunchAgent on `127.0.0.1:8002`, serves
@@ -85,7 +85,7 @@ The stack now runs:
 
 Memory reality (36 GB M5 Max): the active state (Qwen3-32B-4bit
 ~17 GB + MLX embed/rerank ~12 GB + macOS ~7 GB) is tight but fits
-in physical RAM. With `LLM_MODE=cloud` daily, the local LLM only
+in physical RAM. With `INFERENCE_MODE=anthropic` daily, the local LLM only
 loads when the operator explicitly switches modes, so steady-state
 RAM is closer to ~19 GB. The single-inference-framework win lands
 here: one runtime to tune memory budgets against, no llama.cpp
@@ -112,8 +112,8 @@ removed. See "Recently Completed" below for the detailed entry.
 
 - Any change to retrieval quality (embedder, reranker, chunker
   defaults). The retrieval stack ships unchanged from PR #83.
-- Switching off MLX entirely. The escape hatch is `LLM_MODE=cloud`
-  (Claude API) — flip the env var, no code revert needed.
+- Switching off MLX inference entirely. The escape hatch is
+  `INFERENCE_MODE=anthropic` — flip the env var, no code revert needed.
 - Adding new MCP tools or changing the MCP API surface.
 
 ### MLX-rebuild carryover (still-pending follow-ups from PRs #83/#84/#85)
@@ -326,12 +326,12 @@ persisted, unsupported types log at debug. What's still open:
 - add resource limits (`memory`, `cpus`, `pids_limit`) to the Compose services that still lack them; `protonmail-bridge` holds live Proton credentials in memory and is the highest-priority target — a `mem_limit` prevents a runaway or exploited process from exhausting host memory. (`indexer` already has `mem_limit: 6g` and `pids_limit: 128`. Empirical tuning history during a real backfill of a ~22k-message attachment-heavy mailbox: 1 GiB was too tight under normal indexing bursts; 2 GiB OOM-killed three times during initial backfill; 4 GiB OOM-killed once more on the same backfill; 6 GiB has been stable. Steady-state RSS is much lower; the right long-term fix is throttling the indexer's parallel embed dispatch — peak memory scales with concurrency, not mailbox size — at which point the cap can return to 2-3 GiB. The in-stack `ollama` container was removed by PR #86, so the prior note about Ollama lacking limits no longer applies.)
 - add `docs/troubleshooting.md` covering common failure patterns: embed/LLM service not ready (mlx-service/mlx-lm-server LaunchAgent down or HuggingFace cold-start in flight), cert extraction failure, sync stalled, schema migration
 - evaluate optional bearer-token auth for `mcp-server` as defense-in-depth on top of the localhost-only bind; today any local process that can reach `127.0.0.1:MCP_PORT` can query the index. This is a posture change, not a bug fix — weigh the operational complexity of a shared token against the threat model (malware on the host, misconfigured port forward) before implementing
-- emit a loud, one-shot `LLM_MODE=cloud` warning at `mcp-server` startup reminding the operator that retrieved email excerpts will be sent to Anthropic; the cloud path is already opt-in but the warning would surface drift if someone flips the mode and forgets
+- emit a loud, one-shot `INFERENCE_MODE=anthropic` warning at `mcp-server` startup reminding the operator that retrieved email excerpts will be sent to the Anthropic-compatible inference provider; the external inference path is already opt-in but the warning would surface drift if someone flips the mode and forgets
 - migrate the Python type checker from `mypy` to `pyright` for both `indexer` and `mcp-server`; the user's global default for personal Python projects (`~/.claude/memory/tools/uv-python-stack.md`) is `pyright` and this project is the outlier. The trigger should be a real signal (mypy gets slow, mypy misses a bug, friction from context-switching against other projects), not a pre-emptive sweep — pyright is generally stricter at narrowing and will surface a multi-PR cleanup before CI is green again. When migrating, touch `pyproject.toml` (both services), `.pre-commit-config.yaml`, the `make typecheck*` targets, the relevant CI workflow, and the AGENTS.md typecheck guidance in one branch.
 
 ## Later Backlog
 
-- per-session LLM mode toggle
+- per-session inference-mode toggle
 - extract Bridge container work into standalone repo after stabilization
 - improve operational observability and health reporting
 - decide whether `mcp-server` should eventually use live IMAP retrieval only as fallback once richer thread context is available locally
@@ -459,8 +459,9 @@ the storage contract:
 
 - **PR #95** — OpenAIEmbedder client (mlx-service, indexer,
   mcp-server) speaks the OpenAI `/v1/embeddings` wire format directly.
-  Provider swap is now `EMBED_BASE_URL` + `EMBED_MODEL` + an optional
-  `embed_api_key` Docker secret with no per-provider code path.
+  Provider swap is now `EMBED_OPENAI_BASE_URL` + `EMBED_OPENAI_MODEL` + an
+  optional `embed_openai_api_key` Docker secret with no per-provider
+  code path.
 - **PR #96** — cross-message embed batching for initial_index ("C1").
   Phase 1 commits thread membership per message; Phase 2b issues one
   `embed_batch` across the whole batch; Phase 2c commits chunks +
@@ -553,8 +554,8 @@ all shipped together.
   default to give Qwen3's thinking-mode answers headroom when
   callers don't override per-request. ``.env.example`` and
   ``docker-compose.yml`` defaults flipped to point at MLX-LM
-  (``LLM_BASE_URL=http://host.docker.internal:8002/v1``,
-  ``LLM_MODEL=mlx-community/Qwen3-32B-4bit``). End-to-end smoke
+  (``INFERENCE_OPENAI_BASE_URL=http://host.docker.internal:8002/v1``,
+  ``INFERENCE_OPENAI_MODEL=mlx-community/Qwen3-32B-4bit``). End-to-end smoke
   test confirmed: ``LocalLLMClient.complete()`` against the live
   server returns a correct grounded answer in production shape.
 - **Ollama teardown.** ``com.local.ollama-host`` LaunchAgent
@@ -579,8 +580,8 @@ preparatory work for Phase B's operational MLX-LM swap.
   ``LocalLLMClient`` (file ``mcp-server/src/lib/ollama.py`` →
   ``local_llm.py``). ``complete()`` now POSTs the OpenAI-compatible
   ``/v1/chat/completions`` shape and unwraps
-  ``choices[0].message.content``; new ``LLM_BASE_URL`` and
-  ``LLM_MODEL`` env vars replace ``OLLAMA_LLM_MODEL``. The same
+  ``choices[0].message.content``; new ``INFERENCE_OPENAI_BASE_URL`` and
+  ``INFERENCE_OPENAI_MODEL`` env vars replace ``OLLAMA_LLM_MODEL``. The same
   client targets both Ollama (``:11434/v1``) and ``mlx_lm.server``
   with no per-backend branching, so the engine swap in Phase B
   becomes an env-var change.

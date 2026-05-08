@@ -31,16 +31,22 @@ Create the secrets directory and placeholder files:
 make init-secrets
 ```
 
-This creates `.secrets/bridge_pass.txt`, `.secrets/anthropic_api_key.txt`,
-and `.secrets/embed_api_key.txt` as empty placeholders with `600`
-permissions. Docker Compose requires all three files to exist before
+This creates `.secrets/bridge_pass.txt`, `.secrets/inference_openai_api_key.txt`,
+`.secrets/inference_anthropic_api_key.txt`, and
+`.secrets/embed_openai_api_key.txt` as empty placeholders with `600`
+permissions. Docker Compose requires all four files to exist before
 starting. You will overwrite them with real values only as needed:
 
 - `bridge_pass.txt` — after the Bridge login step below
-- `anthropic_api_key.txt` — only if you use `LLM_MODE=cloud`; leave empty for local-only mode
-- `embed_api_key.txt` — only if `EMBED_BASE_URL` points at a cloud
-  embedder (DeepInfra, OpenRouter, etc.); leave empty for the default
-  local mlx-service path which does not authenticate
+- `inference_openai_api_key.txt` — only if `INFERENCE_OPENAI_BASE_URL`
+  points at an authenticated OpenAI-compatible inference provider; leave
+  empty for the default local mlx-lm-server path
+- `inference_anthropic_api_key.txt` — only if you use
+  `INFERENCE_MODE=anthropic`; leave empty for the default
+  `INFERENCE_MODE=openai`
+- `embed_openai_api_key.txt` — only if `EMBED_OPENAI_BASE_URL` points at a
+  cloud embedder (DeepInfra, OpenRouter, etc.); leave empty for the
+  default local mlx-service path which does not authenticate
 
 ### 3. Build all Docker images
 
@@ -124,7 +130,7 @@ access):
 - `mlx-service` on `127.0.0.1:8001` — embeddings (Qwen3-Embedding-8B)
   and reranking (Qwen3-Reranker-4B). See
   [`mlx-service/README.md`](../mlx-service/README.md).
-- `mlx-lm-server` on `127.0.0.1:8002` — local LLM for `LLM_MODE=local`
+- `mlx-lm-server` on `127.0.0.1:8002` — local LLM for `INFERENCE_MODE=openai`
   (default `mlx-community/Qwen3-32B-4bit`), OpenAI-compatible
   `/v1/chat/completions`. See
   [`mlx-lm-server/README.md`](../mlx-lm-server/README.md).
@@ -135,7 +141,7 @@ pre-pull step.
 
 Default models download into `~/.cache/huggingface/hub/` on first use
 (~12 GB for embedder + reranker, ~17 GB for the 32B LLM). On a host
-with less RAM headroom, point `LLM_MODEL` at a smaller variant in
+with less RAM headroom, point `INFERENCE_OPENAI_MODEL` at a smaller variant in
 `.env` (e.g. `mlx-community/Qwen3-14B-4bit` ~ 8 GB).
 
 ### 6. Start the full stack
@@ -148,8 +154,9 @@ make up
 
 - `BRIDGE_USER` is still unset or left at the placeholder value
 - `.secrets/bridge_pass.txt` is missing, empty, or not `600`
-- `LLM_MODE=cloud` but `.secrets/anthropic_api_key.txt` is missing, empty, or not `600`
-- numeric or enum settings such as `SYNC_INTERVAL`, `MCP_PORT`, `MCP_READ_ONLY`, or `LLM_MODE` are invalid
+- `INFERENCE_MODE=anthropic` but `.secrets/inference_anthropic_api_key.txt` is missing, empty, or not `600`
+- inference secret placeholder files are missing or not `600`
+- numeric or enum settings such as `SYNC_INTERVAL`, `MCP_PORT`, `MCP_READ_ONLY`, or `INFERENCE_MODE` are invalid
 
 Verify everything is running:
 
@@ -193,7 +200,7 @@ volume.
 
 `mlx-lm-server` runs upstream Apple's `mlx_lm.server` CLI as a
 LaunchAgent on `127.0.0.1:8002`. It serves the local LLM
-(`LLM_MODE=local`) over OpenAI-compatible
+(`INFERENCE_MODE=openai`) over OpenAI-compatible
 `/v1/chat/completions`. Containers reach it via OrbStack's
 `host.docker.internal:8002`. The setup below is one-time; see
 [`mlx-lm-server/README.md`](../mlx-lm-server/README.md) for the
@@ -429,31 +436,31 @@ a single env change away. Examples:
 
 ```bash
 # Local mlx-service (default)
-EMBED_BASE_URL=http://host.docker.internal:8001/v1
-EMBED_MODEL=mlx-community/Qwen3-Embedding-8B-mxfp8
+EMBED_OPENAI_BASE_URL=http://host.docker.internal:8001/v1
+EMBED_OPENAI_MODEL=mlx-community/Qwen3-Embedding-8B-mxfp8
 
 # DeepInfra
-EMBED_BASE_URL=https://api.deepinfra.com/v1/openai
-EMBED_MODEL=Qwen/Qwen3-Embedding-8B
-# put the API key in .secrets/embed_api_key.txt — never .env
+EMBED_OPENAI_BASE_URL=https://api.deepinfra.com/v1/openai
+EMBED_OPENAI_MODEL=Qwen/Qwen3-Embedding-8B
+# put the API key in .secrets/embed_openai_api_key.txt — never .env
 
 # OpenRouter
-EMBED_BASE_URL=https://openrouter.ai/api/v1
-EMBED_MODEL=qwen/qwen3-embedding-8b
+EMBED_OPENAI_BASE_URL=https://openrouter.ai/api/v1
+EMBED_OPENAI_MODEL=qwen/qwen3-embedding-8b
 ```
 
 After changing provider:
 
 1. Set the new vars in `.env`.
 2. If the provider authenticates, write the API key to
-   `.secrets/embed_api_key.txt` (`chmod 600`). `make init-secrets`
+   `.secrets/embed_openai_api_key.txt` (`chmod 600`). `make init-secrets`
    creates an empty placeholder.
 3. **Indexer and mcp-server must point at the same provider + model**
    so query vectors are comparable to indexed vectors. Mixing them
    silently degrades hybrid search.
-4. The schema reserves a fixed 4096-dim vector. `EMBED_MODEL` must
-   keep producing 4096-dim vectors (Qwen3-Embedding-8B variants) or a
-   schema migration is required.
+4. The schema reserves a fixed 4096-dim vector. `EMBED_OPENAI_MODEL`
+   must keep producing 4096-dim vectors (Qwen3-Embedding-8B variants)
+   or a schema migration is required.
 5. Switching to a model with a different vector distribution requires
    a full reindex (the existing 4096-dim index isn't comparable to the
    new model's 4096-dim space).
@@ -892,9 +899,10 @@ and trust-on-first-use re-pins whatever cert Bridge presents.
 authenticates against Bridge state that the volume wipe just deleted
 (`vault.enc`). After `make clean` you must re-run `make first-run`
 and paste the new Bridge password into `.secrets/bridge_pass.txt`.
-`.secrets/anthropic_api_key.txt` is intentionally preserved because
-it authenticates against an external service that survives container
-rebuilds.
+Inference provider keys (`.secrets/inference_openai_api_key.txt` and
+`.secrets/inference_anthropic_api_key.txt`) are intentionally preserved
+because they authenticate against external services that survive
+container rebuilds.
 
 ### mbsync fails — TLS hostname mismatch after rebuilding Bridge image
 

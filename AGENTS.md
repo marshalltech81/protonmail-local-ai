@@ -70,18 +70,19 @@ Important architecture facts:
 - indexing is thread-level, not message-level
 - MCP defaults to SSE transport; `MCP_TRANSPORT=streamable-http` enables
   Streamable HTTP, and `MCP_TRANSPORT=dual` serves both `/sse` and `/mcp`
-- LLM inference for `LLM_MODE=local` is served by `mlx-lm-server`
+- LLM inference for `INFERENCE_MODE=openai` is served by `mlx-lm-server`
   (upstream `mlx_lm.server` wrapped in a LaunchAgent), bound to
   `127.0.0.1:8002` and reached from containers via
   `host.docker.internal:8002`. Embeddings go through the
-  OpenAI-compatible `/v1/embeddings` endpoint at `EMBED_BASE_URL`
+  OpenAI-compatible `/v1/embeddings` endpoint at `EMBED_OPENAI_BASE_URL`
   (default: `mlx-service` LaunchAgent on `127.0.0.1:8001/v1`).
   Reranking goes through `RERANK_BASE_URL` against the same
   `mlx-service` `/rerank` endpoint by default. Both LaunchAgents run
   on the host because MLX needs Metal access, which Docker on macOS
   cannot provide. The embedder is swappable to any OpenAI-compatible
   provider (DeepInfra, OpenRouter, LM Studio, vLLM, TEI) by changing
-  `EMBED_BASE_URL` + `EMBED_MODEL` (+ `embed_api_key` Docker secret);
+  `EMBED_OPENAI_BASE_URL` + `EMBED_OPENAI_MODEL` (+ `embed_openai_api_key`
+  Docker secret);
   the reranker stays on mlx-service's custom `/rerank` shape (no
   OpenAI rerank standard exists). See `mlx-service/README.md` and
   `mlx-lm-server/README.md` for the LaunchAgent install.
@@ -228,9 +229,10 @@ Secrets are a hard boundary.
 
 - `BRIDGE_USER` comes from Bridge CLI `info`, not the Proton account password
 - `BRIDGE_PASS` belongs in `.secrets/bridge_pass.txt`, not `.env`
-- `LLM_MODE=local` uses the host-side `mlx-lm-server` (or any
-  OpenAI-compatible endpoint at `LLM_BASE_URL`)
-- `LLM_MODE=cloud` uses Claude API
+- `INFERENCE_MODE=openai` uses the host-side `mlx-lm-server` (or any
+  OpenAI-compatible chat-completions endpoint at `INFERENCE_OPENAI_BASE_URL`)
+- `INFERENCE_MODE=anthropic` uses an Anthropic-compatible Messages API at
+  `INFERENCE_ANTHROPIC_BASE_URL`
 
 ### Commit hygiene
 
@@ -456,8 +458,8 @@ Notes:
 
 - preserve thread-level indexing
 - review schema implications before changing embedding or storage assumptions
-- indexer and mcp-server must point at the same `EMBED_BASE_URL` +
-  `EMBED_MODEL` so query vectors are comparable to indexed vectors —
+- indexer and mcp-server must point at the same `EMBED_OPENAI_BASE_URL` +
+  `EMBED_OPENAI_MODEL` so query vectors are comparable to indexed vectors —
   swapping the embedder requires a full reindex if the new model
   produces vectors of a different shape or distribution
 

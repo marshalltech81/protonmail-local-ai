@@ -20,8 +20,8 @@ Ask questions about your inbox in plain English. Everything stays on your machin
 | ProtonBridge | Decrypts ProtonMail, exposes local IMAP/SMTP |
 | mbsync | Real-time incremental sync to local Maildir |
 | Indexer | Parses threads, generates embeddings, builds SQLite index |
-| mlx-service (host) | Apple Metal embedder (Qwen3-Embedding-8B) + reranker (Qwen3-Reranker-4B) on `:8001`. Embedder surface is OpenAI-compatible (`/v1/embeddings`); swappable via `EMBED_BASE_URL` to any compliant provider |
-| mlx-lm-server (host) | Apple Metal LLM serving (default Qwen3-32B-4bit) for `LLM_MODE=local`, OpenAI-compatible at `:8002/v1` |
+| mlx-service (host) | Apple Metal embedder (Qwen3-Embedding-8B) + reranker (Qwen3-Reranker-4B) on `:8001`. Embedder surface is OpenAI-compatible (`/v1/embeddings`); swappable via `EMBED_OPENAI_BASE_URL` to any compliant provider |
+| mlx-lm-server (host) | Apple Metal LLM serving (default Qwen3-32B-4bit) for `INFERENCE_MODE=openai`, OpenAI-compatible at `:8002/v1` |
 | SQLite (FTS5 + sqlite-vec) | Hybrid keyword + vector search index |
 | MCP Server | Exposes tools to Claude Desktop via HTTP/SSE |
 
@@ -132,30 +132,30 @@ Once connected, ask Claude Desktop:
 
 This stack is local-first for **storage, sync, indexing, and embeddings**.
 Whether your *conversations* are also local depends on which MCP client you
-use and which `LLM_MODE` you select. Be deliberate about all three layers.
+use and which `INFERENCE_MODE` you select. Be deliberate about all three layers.
 
 ### 1. Storage and indexing layer — always local
 
 | Data | Where it lives |
 |---|---|
 | Your emails (Maildir) | Local Docker volume — never leaves your machine |
-| Embeddings | Default: generated locally by mlx-service on Apple Metal — never sent anywhere. Pointing `EMBED_BASE_URL` at a cloud provider (DeepInfra, OpenRouter, etc.) ships email body chunks to that provider — opt-in only, not the default. |
+| Embeddings | Default: generated locally by mlx-service on Apple Metal — never sent anywhere. Pointing `EMBED_OPENAI_BASE_URL` at a cloud provider (DeepInfra, OpenRouter, etc.) ships email body chunks to that provider — opt-in only, not the default. |
 | Search index (SQLite FTS5 + sqlite-vec) | Local Docker volume |
 | Bridge ↔ Proton traffic | The only path off your machine for mail data |
 
 The MCP server itself binds to `127.0.0.1:3000` only — nothing else on your
 network can reach it.
 
-### 2. Project-internal LLM layer — controlled by `LLM_MODE`
+### 2. Project-internal LLM layer — controlled by `INFERENCE_MODE`
 
 The MCP server's intelligence tools (`ask_mailbox`, `summarize_thread`,
 `extract_from_emails`) need an LLM for generation. Where that runs depends on
-`LLM_MODE` in `.env`:
+`INFERENCE_MODE` in `.env`:
 
 | Mode | What happens to retrieved email content |
 |---|---|
-| `local` (default) | Sent to the host-side mlx-lm-server (Apple Metal) at `LLM_BASE_URL`. Stays on your machine. |
-| `cloud` | Sent to Anthropic's Claude API for generation. Requires `.secrets/anthropic_api_key.txt`. |
+| `openai` (default) | Sent to the OpenAI-compatible chat completions endpoint at `INFERENCE_OPENAI_BASE_URL`; default is host-side mlx-lm-server on Apple Metal, so it stays on your machine. |
+| `anthropic` | Sent to the Anthropic-compatible Messages API at `INFERENCE_ANTHROPIC_BASE_URL`. Requires `.secrets/inference_anthropic_api_key.txt`. |
 
 This setting only governs what the MCP server does *internally* during a tool
 call. It does not govern what your MCP *client* does with the result.
@@ -168,7 +168,7 @@ LLM.** When you wire it up to this MCP server:
 1. You ask Claude Desktop a question.
 2. Claude (running on Anthropic's servers) decides to call an MCP tool.
 3. Claude Desktop relays the call to your local MCP server. The tool runs
-   locally — including, in `LLM_MODE=local`, any LLM work via the host
+   locally — including, in `INFERENCE_MODE=openai`, any LLM work via the host
    mlx-lm-server.
 4. The tool's *return value* (which often contains email snippets, thread
    bodies, or LLM-generated answers grounded in your mail) is sent back to
@@ -176,7 +176,7 @@ LLM.** When you wire it up to this MCP server:
 5. Claude generates the next response using that data as input.
 
 So: **using Claude Desktop as your client transmits email content (whatever
-the called tools return) to Anthropic, regardless of `LLM_MODE`.** Anthropic's
+the called tools return) to Anthropic, regardless of `INFERENCE_MODE`.** Anthropic's
 data handling for Claude Desktop applies — see Anthropic's current privacy
 policy for retention and training-use details.
 

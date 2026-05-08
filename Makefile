@@ -36,11 +36,15 @@ help:
 # Create placeholder secret files required by Docker Compose.
 # Run this once during initial setup before make first-run or make up.
 # bridge_pass.txt — overwrite with real Bridge password after make first-run.
-# anthropic_api_key.txt — overwrite with your Claude API key for LLM_MODE=cloud,
-#                         or leave empty for local-only mode.
-# embed_api_key.txt    — overwrite with your provider key when EMBED_BASE_URL
-#                         points at a cloud embedder (DeepInfra, OpenRouter,
-#                         etc.); leave empty for the local mlx-service path.
+# inference_openai_api_key.txt — overwrite only when INFERENCE_OPENAI_BASE_URL
+#                         points at an authenticated provider; leave empty
+#                         for the local mlx-lm-server path.
+# inference_anthropic_api_key.txt — overwrite with your Anthropic-compatible
+#                         provider key when INFERENCE_MODE=anthropic.
+# embed_openai_api_key.txt — overwrite with your provider key when
+#                         EMBED_OPENAI_BASE_URL points at a cloud embedder
+#                         (DeepInfra, OpenRouter, etc.); leave empty for
+#                         the local mlx-service path.
 init-secrets:
 	@mkdir -p .secrets
 	@chmod 700 .secrets
@@ -51,19 +55,26 @@ init-secrets:
 	else \
 		echo "  .secrets/bridge_pass.txt already exists, skipping"; \
 	fi
-	@if [ ! -f .secrets/anthropic_api_key.txt ]; then \
-		printf '' > .secrets/anthropic_api_key.txt; \
-		chmod 600 .secrets/anthropic_api_key.txt; \
-		echo "  created .secrets/anthropic_api_key.txt (empty — fill in if LLM_MODE=cloud)"; \
+	@if [ ! -f .secrets/inference_openai_api_key.txt ]; then \
+		printf '' > .secrets/inference_openai_api_key.txt; \
+		chmod 600 .secrets/inference_openai_api_key.txt; \
+		echo "  created .secrets/inference_openai_api_key.txt (empty — fill in only for authenticated OpenAI-compatible inference)"; \
 	else \
-		echo "  .secrets/anthropic_api_key.txt already exists, skipping"; \
+		echo "  .secrets/inference_openai_api_key.txt already exists, skipping"; \
 	fi
-	@if [ ! -f .secrets/embed_api_key.txt ]; then \
-		printf '' > .secrets/embed_api_key.txt; \
-		chmod 600 .secrets/embed_api_key.txt; \
-		echo "  created .secrets/embed_api_key.txt (empty — fill in only for cloud embedder)"; \
+	@if [ ! -f .secrets/inference_anthropic_api_key.txt ]; then \
+		printf '' > .secrets/inference_anthropic_api_key.txt; \
+		chmod 600 .secrets/inference_anthropic_api_key.txt; \
+		echo "  created .secrets/inference_anthropic_api_key.txt (empty — fill in if INFERENCE_MODE=anthropic)"; \
 	else \
-		echo "  .secrets/embed_api_key.txt already exists, skipping"; \
+		echo "  .secrets/inference_anthropic_api_key.txt already exists, skipping"; \
+	fi
+	@if [ ! -f .secrets/embed_openai_api_key.txt ]; then \
+		printf '' > .secrets/embed_openai_api_key.txt; \
+		chmod 600 .secrets/embed_openai_api_key.txt; \
+		echo "  created .secrets/embed_openai_api_key.txt (empty — fill in only for cloud embedder)"; \
+	else \
+		echo "  .secrets/embed_openai_api_key.txt already exists, skipping"; \
 	fi
 
 # Build all images from source
@@ -206,8 +217,8 @@ clean:
 	@echo "         again to re-authenticate with Proton."
 	@read -p "Are you sure? (yes/no): " confirm && [ "$$confirm" = "yes" ]
 	docker compose down -v
-	@# Truncate secrets tied to wiped local state. anthropic_api_key.txt is the
-	@# user's external Claude key and is intentionally preserved.
+	@# Truncate secrets tied to wiped local state. Inference provider keys are
+	@# external credentials and are intentionally preserved.
 	@if [ -f .secrets/bridge_pass.txt ]; then : > .secrets/bridge_pass.txt; fi
 	@echo "All containers and volumes removed."
 	@echo "Cleared .secrets/bridge_pass.txt."

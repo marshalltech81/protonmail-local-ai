@@ -436,19 +436,30 @@ def register_intelligence_tools(
     server,
     db,
     llm,
-    llm_mode: str,
-    anthropic_key: str,
-    claude_model: str,
+    inference_mode: str,
+    anthropic_api_key: str,
+    anthropic_model: str,
+    anthropic_base_url: str,
     *,
     reranker=None,
 ):
-    secret_values = [anthropic_key]
+    secret_values = [anthropic_api_key]
 
     async def llm_complete(system: str, user: str) -> str:
-        """Route to the local LLM (any OpenAI-compatible endpoint, default
-        ``mlx-lm-server``) or the Claude API based on ``llm_mode``."""
-        if llm_mode == "cloud" and anthropic_key:
-            return await _claude_complete(system, user, anthropic_key, claude_model)
+        """Route by inference protocol/client.
+
+        ``INFERENCE_MODE=openai`` uses the OpenAI-compatible chat
+        completions client. ``INFERENCE_MODE=anthropic`` uses the
+        Anthropic-compatible Messages API.
+        """
+        if inference_mode == "anthropic" and anthropic_api_key:
+            return await _anthropic_complete(
+                system,
+                user,
+                anthropic_api_key,
+                anthropic_model,
+                anthropic_base_url,
+            )
         return await llm.complete(system, user)
 
     @server.tool()
@@ -830,16 +841,22 @@ def register_intelligence_tools(
             return [TextContent(type="text", text=f"Error: {safe_error}")]
 
 
-async def _claude_complete(system: str, user: str, api_key: str, model: str) -> str:
-    """Call the Claude API for higher-quality reasoning."""
+async def _anthropic_complete(
+    system: str,
+    user: str,
+    api_key: str,
+    model: str,
+    base_url: str,
+) -> str:
+    """Call an Anthropic-compatible Messages API."""
     # Explicit per-call timeout — connect quickly, allow the read budget
-    # to span Claude's reasoning. Setting on the call rather than relying
-    # on the client-level default keeps the semantics correct if the
-    # client is ever shared across requests.
+    # to span the model's reasoning. Setting on the call rather than
+    # relying on the client-level default keeps the semantics correct if
+    # the client is ever shared across requests.
     timeout = httpx.Timeout(60.0, connect=5.0)
     async with httpx.AsyncClient() as client:
         r = await client.post(
-            "https://api.anthropic.com/v1/messages",
+            f"{base_url.rstrip('/')}/messages",
             headers={
                 "x-api-key": api_key,
                 "anthropic-version": "2023-06-01",

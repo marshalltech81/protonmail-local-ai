@@ -133,7 +133,7 @@ commands. The intelligence tools mitigate this two ways:
    boundary between trusted task and untrusted evidence.
 
 These are defense-in-depth measures — they do not guarantee immunity.
-Operators running `LLM_MODE=cloud` should still treat retrieved email
+Operators running `INFERENCE_MODE=anthropic` should still treat retrieved email
 content as potentially hostile.
 
 ### `ask_mailbox`

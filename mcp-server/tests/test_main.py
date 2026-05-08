@@ -20,7 +20,13 @@ here:
 import asyncio
 import logging
 
-from src.main import _env_bool, _normalize_transport, _read_secret, _run_server
+from src.main import (
+    _env_bool,
+    _normalize_inference_mode,
+    _normalize_transport,
+    _read_secret,
+    _run_server,
+)
 
 
 class TestEnvBool:
@@ -231,6 +237,20 @@ class TestMcpTransport:
         # The stubbed uvicorn raises SystemExit-equivalent so serve()
         # never actually starts a listener — just enough to capture.
         await _run_dual_transport_async(server_stub)
+
+
+class TestInferenceMode:
+    def test_supported_modes_are_normalized(self):
+        assert _normalize_inference_mode("openai") == "openai"
+        assert _normalize_inference_mode(" ANTHROPIC ") == "anthropic"
+
+    def test_unknown_mode_fails_closed(self):
+        try:
+            _normalize_inference_mode("local")
+        except ValueError as exc:
+            assert "INFERENCE_MODE" in str(exc)
+        else:
+            raise AssertionError("expected ValueError")
 
 
 class TestHealthEndpoint:

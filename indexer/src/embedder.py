@@ -101,7 +101,7 @@ class OpenAIEmbedder:
     For the local mlx-service, ``base_url`` is ``http://host.docker.internal:8001/v1``
     and ``api_key`` is empty. For DeepInfra, ``base_url`` is
     ``https://api.deepinfra.com/v1/openai`` and ``api_key`` comes from the
-    ``embed_api_key`` Docker secret. The class itself is provider-agnostic.
+    ``embed_openai_api_key`` Docker secret. The class itself is provider-agnostic.
     """
 
     # First-call model warmup may include a HuggingFace download for
