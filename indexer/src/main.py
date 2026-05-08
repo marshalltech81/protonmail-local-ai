@@ -154,11 +154,13 @@ STEADY_STATE_BATCH_SIZE = _int_env("INDEXER_STEADY_STATE_BATCH_SIZE", 8)
 WAL_CHECKPOINT_INTERVAL_SECS = _int_env("INDEXER_WAL_CHECKPOINT_INTERVAL_SECS", 600, minimum=60)
 
 # How often (seconds) the main loop runs ``_recover_zero_vector_threads``.
-# Phase 2 dead-letters that fire during steady-state operation leave
-# threads text-indexed but vectorless until the next container restart.
-# Periodically re-running the recovery sweep means an embedder bug that
-# blew through the retry cascade heals on its own once the underlying
-# cause clears, without operator action.
+# The periodic sweep recovers retryable shapes — chunkless zero-vector
+# threads whose queue row is still 'queued' or has been cleaned up —
+# but does NOT auto-resurrect dead-lettered rows. Dead = operator-
+# visible terminal state; clearing it requires explicit intervention
+# (or a future operator-rescue tool that calls
+# ``_recover_zero_vector_threads(..., resurrect_dead=True)``).
+# See ``_recover_zero_vector_threads`` for the full policy.
 RECOVERY_SWEEP_INTERVAL_SECS = _int_env("INDEXER_RECOVERY_SWEEP_INTERVAL_SECS", 1800, minimum=60)
 
 # Phase 1 seed for genuinely new threads (the only branch that uses

@@ -129,6 +129,44 @@ class TestEstimateTokens:
             "every greedy-pack and overlap-tail evaluation."
         )
 
+    def test_non_ascii_text_obeys_byte_threshold_not_char_threshold(self):
+        """Regression: the cache threshold is a memory bound, so it
+        must gate on UTF-8 byte length — not character count. A
+        multilingual attachment whose char count is under the threshold
+        but whose UTF-8 size is several multiples of it would otherwise
+        bypass the documented memory cap, defeating the defense against
+        attacker-controlled multilingual content pinning megabytes of
+        strings in the LRU.
+        """
+        from src.chunker import (
+            _TOKEN_ESTIMATE_CACHE_THRESHOLD_BYTES,
+            _cached_estimate_tokens,
+        )
+
+        # Each emoji "🚀" is 4 UTF-8 bytes. A 3000-char string of them is
+        # ~12 KB UTF-8 — over the 8 KB threshold — but ``len(text)`` is
+        # 3000 (well under the threshold if we naively gated on char
+        # count). The cache must NOT accept it.
+        big_emoji = "🚀" * 3000
+        assert len(big_emoji) < _TOKEN_ESTIMATE_CACHE_THRESHOLD_BYTES, (
+            "precondition: char count must be below threshold to exercise "
+            "the bytes-vs-chars distinction"
+        )
+        assert len(big_emoji.encode("utf-8")) > _TOKEN_ESTIMATE_CACHE_THRESHOLD_BYTES, (
+            "precondition: UTF-8 byte length must exceed threshold so the "
+            "byte-gate has something to defend against"
+        )
+
+        _cached_estimate_tokens.cache_clear()
+        before = _cached_estimate_tokens.cache_info().currsize
+        _ = estimate_tokens(big_emoji)
+        after = _cached_estimate_tokens.cache_info().currsize
+        assert after == before, (
+            "non-ASCII string above the BYTE threshold must NOT enter the "
+            "LRU even when char count is below threshold; otherwise an "
+            "attacker can pin megabytes of multilingual content in cache"
+        )
+
 
 class TestNormalizeBody:
     def test_empty_returns_empty(self):

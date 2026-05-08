@@ -126,6 +126,12 @@ def _load_tokenizer() -> Tokenizer:
 # would let an attacker-controlled email pin megabytes of strings via
 # the lru_cache. 8192 bytes covers any realistic paragraph and bounds
 # worst-case cache memory at roughly maxsize × threshold.
+#
+# The gate must be byte-size, not character count: a 4096-char emoji
+# string is ~16 KB UTF-8 (each emoji is 4 bytes), and a 4096-char CJK
+# string is ~12 KB. Gating on ``len(text)`` would let multilingual
+# content bypass the documented memory bound — exactly the
+# attacker-controlled-input case the threshold exists to defend.
 _TOKEN_ESTIMATE_CACHE_THRESHOLD_BYTES = 8192
 
 
@@ -154,18 +160,20 @@ def estimate_tokens(text: str) -> int:
     Special tokens are not added — the embed service adds those on the
     server side, so counting them here would double-count.
 
-    Caching is gated by string size: short inputs (paragraph-sized,
+    Caching is gated by UTF-8 byte size: short inputs (paragraph-sized,
     under ``_TOKEN_ESTIMATE_CACHE_THRESHOLD_BYTES``) go through the
     bounded ``_cached_estimate_tokens`` LRU because the packer evaluates
     the same paragraph repeatedly while greedy-packing and computing
     overlap tails. Larger inputs (a pasted log file, a long attachment
     text) bypass the cache: re-encoding once is cheap and caching them
     would let an attacker-controlled email pin megabytes of strings in
-    the LRU.
+    the LRU. Byte-size — not ``len(text)`` — is the right gate because
+    a 4096-char CJK or emoji string is multiples of that in UTF-8 bytes,
+    and the threshold is a memory bound.
     """
     if not text:
         return 0
-    if len(text) <= _TOKEN_ESTIMATE_CACHE_THRESHOLD_BYTES:
+    if len(text.encode("utf-8")) <= _TOKEN_ESTIMATE_CACHE_THRESHOLD_BYTES:
         return _cached_estimate_tokens(text)
     return len(_load_tokenizer().encode(text, add_special_tokens=False).ids)
 
