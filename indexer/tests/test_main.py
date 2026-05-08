@@ -911,6 +911,77 @@ class TestBatchedInitialIndex:
             "the subject fallback, not be derived from chunks (none exist)"
         )
 
+    def test_phase2_failure_preserves_existing_thread_vector(self, tmp_path, monkeypatch):
+        # Regression: Phase 1 used to seed every upsert_thread with
+        # _ZERO_THREAD_VECTOR. For a NEW message on an EXISTING thread
+        # that already had a valid mean-of-chunks vector, the upsert
+        # destroyed the prior vector before Phase 2 ran. If Phase 2
+        # then failed (embed outage, queue retry, dead-letter), the
+        # thread was left permanently zero — a real retrieval-quality
+        # regression on the parent thread, triggered by a transient
+        # embed error on a single new sibling message.
+        import struct
+
+        maildir = tmp_path / "maildir"
+        inbox = maildir / "INBOX" / "cur"
+        inbox.mkdir(parents=True)
+
+        # First pass: index message A successfully so the thread has a
+        # real, non-zero vector in threads_vec.
+        _write_eml(inbox / "a.eml", "a@example.com", subject="Project alpha")
+        sentinel = [0.25] * EMBEDDING_DIM  # exactly representable in float32
+        embedder_ok = make_mock_embedder()
+        embedder_ok.embed.return_value = sentinel
+        db = Database(tmp_path / "mail.db")
+        threader = Threader(db)
+        queue = _make_queue(db)
+        self._run(db, embedder_ok, threader, queue, monkeypatch, maildir)
+
+        thread_id = db.find_thread_by_message_id("a@example.com")
+        assert thread_id is not None
+        row = db._conn.execute(
+            "SELECT embedding FROM threads_vec WHERE thread_id = ?", (thread_id,)
+        ).fetchone()
+        raw = row["embedding"]
+        prior_vec = list(struct.unpack(f"<{len(raw) // 4}f", raw))
+        assert prior_vec == sentinel, "first-pass vector should be the embedder's response"
+
+        # Second pass: a reply B arrives that threads into A. The new
+        # embedder fails during embed_batch (simulated cloud outage).
+        # Phase 1 must seed the upsert with the existing thread's
+        # chunk-mean so Phase 2's failure cannot regress the vector.
+        _write_eml(
+            inbox / "b.eml",
+            "b@example.com",
+            subject="Re: Project alpha",
+            in_reply_to="a@example.com",
+            date="Mon, 01 Jan 2024 13:00:00 +0000",
+            from_addr="bob@example.com",
+            to_addr="alice@example.com",
+        )
+        embedder_fail = make_mock_embedder()
+        embedder_fail.embed_batch.side_effect = RuntimeError("simulated cloud outage")
+        # Patch wait_exponential so retry-cascade tests don't sleep.
+        monkeypatch.setattr("src.embedder.wait_exponential", lambda **_: lambda *_: 0)
+        self._run(db, embedder_fail, threader, queue, monkeypatch, maildir)
+
+        # B should NOT be indexed (Phase 2 failed). A's thread vector
+        # MUST still match prior_vec — Phase 1's seed preserves it.
+        row_after = db._conn.execute(
+            "SELECT embedding FROM threads_vec WHERE thread_id = ?", (thread_id,)
+        ).fetchone()
+        assert row_after is not None, "thread row must still exist"
+        raw_after = row_after["embedding"]
+        vec_after = list(struct.unpack(f"<{len(raw_after) // 4}f", raw_after))
+        assert vec_after == prior_vec, (
+            "existing thread vector must survive a Phase 2 embed failure on a "
+            "new sibling message — Phase 1 must seed with the existing "
+            "chunk-mean, not the placeholder zero"
+        )
+        assert any(v != 0.0 for v in vec_after), (
+            "sanity: stored vector must not be the zero placeholder"
+        )
+
     def test_phase2c_commit_failure_isolates_to_one_message(self, tmp_path, monkeypatch):
         # If replace_message_chunks fails for one message in the
         # batch, that message is marked failed but the others succeed.

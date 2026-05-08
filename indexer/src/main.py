@@ -663,14 +663,24 @@ def _phase1_commit_thread(
     thread_ms = (time.perf_counter() - t0) * 1000
 
     t0 = time.perf_counter()
+    # Seed the Phase 1 thread vector. Two cases:
+    #   1. Thread already exists with chunk vectors — use their mean
+    #      so a Phase 2 failure (embed outage, etc.) does not corrupt
+    #      a previously-good vector. Without this, every new message
+    #      on an existing thread temporarily zeroes the parent's
+    #      vector during Phase 1, and a queue retry / dead-letter
+    #      would leave it permanently zero.
+    #   2. New thread (or existing thread with no chunk vectors yet)
+    #      — use the placeholder zero. Phase 2c will replace it via
+    #      either mean-of-new-chunks or the subject fallback.
+    existing_chunk_embs = db.get_thread_chunk_embeddings(thread.thread_id)
+    seed_vector = mean_vector(existing_chunk_embs) if existing_chunk_embs else _ZERO_THREAD_VECTOR
     try:
         # Phase 1 commit: write thread + message_thread_map + indexed_files
-        # with a placeholder zero-vector. Threading state is durable
-        # before Phase 2 runs, so the next message in the batch sees this
+        # with the seed vector. Threading state is durable before
+        # Phase 2 runs, so the next message in the batch sees this
         # message's thread when computing its own thread assignment.
-        # Phase 2c will replace the placeholder with the real mean-of-
-        # chunks vector once embeddings are available.
-        db.upsert_thread(thread, _ZERO_THREAD_VECTOR)
+        db.upsert_thread(thread, seed_vector)
     except Exception as e:
         queue.mark_failed(filepath, stage="thread_commit", error=repr(e))
         return None
