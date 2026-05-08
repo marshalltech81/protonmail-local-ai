@@ -1,9 +1,8 @@
 """Tests for src.lib.local_llm — async OpenAI-compatible embed + chat client.
 
 Uses httpx.MockTransport against the AsyncClient so tests are self-contained
-and never touch a real mlx-service / mlx_lm.server / cloud provider or the
-network. Async calls are driven with asyncio.run() to keep the dep
-footprint minimal (no pytest-asyncio).
+and never touch a real provider or the network. Async calls are driven with
+asyncio.run() to keep the dep footprint minimal (no pytest-asyncio).
 """
 
 import asyncio
@@ -113,7 +112,8 @@ class TestEmbed:
 
         def handler(request: httpx.Request) -> httpx.Response:
             # OpenAI-compatible: same wire format as DeepInfra, OpenRouter,
-            # mlx-service /v1/embeddings, etc.
+            # any host-side /v1/embeddings server (LM Studio / vLLM /
+            # mlx_lm.server / TEI), etc.
             assert str(request.url) == f"{EMBED_BASE}/embeddings"
             import json
 
@@ -143,8 +143,8 @@ class TestEmbed:
         assert seen["auth"] == "Bearer sk-test"  # pragma: allowlist secret
 
     def test_authorization_header_omitted_when_api_key_empty(self):
-        # Local mlx-service does not authenticate; sending a bare
-        # ``Authorization: Bearer`` (no token) would be malformed.
+        # An unauthenticated host-side embedder won't accept a bare
+        # ``Authorization: Bearer`` (no token) — it's malformed.
         c = _make()
         seen: dict[str, str | None] = {}
 

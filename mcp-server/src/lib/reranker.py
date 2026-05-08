@@ -1,4 +1,4 @@
-"""Reranker client for the host-side ``mlx-service`` (Qwen3-Reranker-4B).
+"""Reranker client for an mlx-shaped ``/rerank`` HTTP service.
 
 The hybrid_search RRF stage produces a candidate set ordered by lane
 fusion. The reranker re-scores those candidates against the query
@@ -7,6 +7,11 @@ sharper top-K. The cutoff is the caller's ``limit`` (passed through
 ``rerank(..., top_n=limit)``); ``RERANK_TOP_N`` is only the default
 applied when a caller doesn't specify one. The candidate count fed
 in is ``RERANK_CANDIDATES``.
+
+The wire format is the mlx-service ``/rerank`` shape (no OpenAI rerank
+standard exists). Operators stand up a compatible service themselves
+and point ``RERANK_BASE_URL`` at it; the rerank stage is opt-in via
+``RERANK_ENABLED``.
 
 Failure handling is best-effort: if the rerank service errors or
 returns malformed output, ``rerank()`` returns an empty list and the
@@ -62,7 +67,7 @@ class RerankerBackend(Protocol):
 
 
 class MlxReranker:
-    """HTTP client for ``mlx-service`` ``/rerank`` (Qwen3-Reranker-4B)."""
+    """HTTP client for an mlx-shaped ``/rerank`` service."""
 
     def __init__(self, config: RerankConfig):
         self.config = config

@@ -130,11 +130,11 @@ def _read_secret(secret_name: str, env_fallback: str = "") -> str:
 # Configuration from environment
 # ---------------------------------------------------------------------------
 SQLITE_PATH = os.environ.get("SQLITE_PATH", "/data/mail.db")
-# Inference protocol/client selection. ``openai`` means an
-# OpenAI-compatible ``/v1/chat/completions`` endpoint (local
-# mlx-lm-server by default, but any compliant provider works).
-# ``anthropic`` means an Anthropic-compatible Messages API.
-INFERENCE_MODE = _normalize_inference_mode(os.environ.get("INFERENCE_MODE", "openai"))
+# Inference protocol/client selection. ``anthropic`` (default) calls
+# an Anthropic-compatible Messages API. ``openai`` calls an
+# OpenAI-compatible ``/v1/chat/completions`` endpoint at an
+# operator-supplied URL (a remote provider or a host-side server).
+INFERENCE_MODE = _normalize_inference_mode(os.environ.get("INFERENCE_MODE", "anthropic"))
 INFERENCE_OPENAI_BASE_URL = os.environ.get(
     "INFERENCE_OPENAI_BASE_URL", "http://host.docker.internal:8002/v1"
 )
@@ -151,27 +151,27 @@ MCP_PORT = int(os.environ.get("MCP_PORT", "3000"))
 MCP_READ_ONLY = _env_bool("MCP_READ_ONLY", True)
 MCP_TRANSPORT = os.environ.get("MCP_TRANSPORT", "sse")
 # Retrieval stack URLs. Embeddings and reranking are independent
-# surfaces — mcp-server may point at any OpenAI-compatible embedder
-# (``EMBED_OPENAI_BASE_URL`` + ``EMBED_OPENAI_MODEL``) while keeping the
-# reranker on mlx-service's custom ``/rerank`` (``RERANK_BASE_URL``).
-# The schema reserves a fixed 4096-dim vector — keep
-# ``EMBED_OPENAI_MODEL`` pointed at a 4096-dim model (Qwen3-Embedding-8B
-# variants) or a schema migration is required. Indexer and mcp-server
-# must point at the same embedder so query vectors are comparable to
-# indexed vectors.
+# operator-supplied surfaces — mcp-server points at any OpenAI-compatible
+# embedder (``EMBED_OPENAI_BASE_URL`` + ``EMBED_OPENAI_MODEL``) and at
+# any mlx-shaped /rerank service (``RERANK_BASE_URL``). The schema
+# reserves a fixed 4096-dim vector — keep ``EMBED_OPENAI_MODEL`` pointed
+# at a 4096-dim model (Qwen3-Embedding-8B variants) or a schema
+# migration is required. Indexer and mcp-server must point at the same
+# embedder so query vectors are comparable to indexed vectors.
 EMBED_OPENAI_BASE_URL = os.environ.get(
     "EMBED_OPENAI_BASE_URL", "http://host.docker.internal:8001/v1"
 )
 EMBED_OPENAI_MODEL = os.environ.get("EMBED_OPENAI_MODEL", "mlx-community/Qwen3-Embedding-8B-mxfp8")
 EMBED_OPENAI_API_KEY = _read_secret("embed_openai_api_key", "EMBED_OPENAI_API_KEY")
 # Reranker is not OpenAI-shaped — there is no OpenAI rerank standard —
-# so it gets its own URL knob. Defaults to the local mlx-service.
-RERANK_BASE_URL = os.environ.get("RERANK_BASE_URL", "http://host.docker.internal:8001")
+# so it gets its own URL knob. The wire format follows the mlx-service
+# /rerank shape (see ``src/lib/reranker.py``).
+RERANK_BASE_URL = os.environ.get("RERANK_BASE_URL", "")
 # ``RERANK_ENABLED`` enables the post-RRF rerank pass that takes
 # ``RERANK_CANDIDATES`` from RRF and truncates to the caller's
 # ``limit`` (defaulting to ``RERANK_TOP_N`` when the caller does not
-# specify) via the reranker service.
-RERANK_ENABLED = _env_bool("RERANK_ENABLED", True)
+# specify) via the reranker service. Disabled by default.
+RERANK_ENABLED = _env_bool("RERANK_ENABLED", False)
 RERANK_CANDIDATES = int(os.environ.get("RERANK_CANDIDATES", "20"))
 RERANK_TOP_N = int(os.environ.get("RERANK_TOP_N", "10"))
 

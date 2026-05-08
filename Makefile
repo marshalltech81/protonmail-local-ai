@@ -1,4 +1,4 @@
-.PHONY: build build-nocache up down logs first-run update status clean sync sync-indexer sync-mcp sync-mlx sync-mlx-lm test test-indexer test-mcp test-mlx typecheck typecheck-indexer typecheck-mcp typecheck-mlx bridge-patch-check bridge-smoke bridge-upgrade-check init-secrets validate-env help
+.PHONY: build build-nocache up down logs first-run update status clean sync sync-indexer sync-mcp test test-indexer test-mcp typecheck typecheck-indexer typecheck-mcp bridge-patch-check bridge-smoke bridge-upgrade-check init-secrets validate-env help
 
 UV_CACHE_DIR ?= /tmp/uv-cache
 export UV_CACHE_DIR
@@ -24,27 +24,28 @@ help:
 	@echo "  bridge-upgrade-check  Run Bridge patch-drift and smoke checks"
 	@echo "  update       Rebuild and restart Bridge with new version"
 	@echo "  status       Show container and index status"
-	@echo "  sync         Sync local uv environments for indexer, mcp-server, mlx-service, and mlx-lm-server"
-	@echo "  test         Run indexer, mcp-server, and mlx-service unit tests locally with uv"
-	@echo "  typecheck    Run mypy over all three Python services"
+	@echo "  sync         Sync local uv environments for indexer and mcp-server"
+	@echo "  test         Run indexer and mcp-server unit tests locally with uv"
+	@echo "  typecheck    Run mypy over the indexer and mcp-server Python services"
 	@echo "  test-indexer Run indexer unit tests only"
 	@echo "  test-mcp     Run mcp-server unit tests only"
-	@echo "  test-mlx     Run mlx-service unit tests only"
 	@echo "  clean        Remove all containers and volumes (destructive)"
 	@echo ""
 
 # Create placeholder secret files required by Docker Compose.
 # Run this once during initial setup before make first-run or make up.
 # bridge_pass.txt — overwrite with real Bridge password after make first-run.
-# inference_openai_api_key.txt — overwrite only when INFERENCE_OPENAI_BASE_URL
-#                         points at an authenticated provider; leave empty
-#                         for the local mlx-lm-server path.
+# inference_openai_api_key.txt — overwrite when INFERENCE_OPENAI_BASE_URL
+#                         points at an authenticated provider (or leave
+#                         empty if pointing at an unauthenticated host
+#                         server like a local mlx_lm.server install).
 # inference_anthropic_api_key.txt — overwrite with your Anthropic-compatible
 #                         provider key when INFERENCE_MODE=anthropic.
 # embed_openai_api_key.txt — overwrite with your provider key when
-#                         EMBED_OPENAI_BASE_URL points at a cloud embedder
-#                         (DeepInfra, OpenRouter, etc.); leave empty for
-#                         the local mlx-service path.
+#                         EMBED_OPENAI_BASE_URL points at an authenticated
+#                         provider (DeepInfra, OpenRouter, etc.); leave
+#                         empty when pointing at an unauthenticated host
+#                         embedder.
 init-secrets:
 	@mkdir -p .secrets
 	@chmod 700 .secrets
@@ -153,23 +154,13 @@ bridge-smoke:
 bridge-upgrade-check: bridge-patch-check bridge-smoke
 
 # Sync local Python environments using per-service uv projects
-sync: sync-indexer sync-mcp sync-mlx sync-mlx-lm
+sync: sync-indexer sync-mcp
 
 sync-indexer:
 	cd indexer && uv sync --locked --dev
 
 sync-mcp:
 	cd mcp-server && uv sync --locked --dev
-
-sync-mlx:
-	cd mlx-service && uv sync --locked --dev
-
-# mlx-lm-server is a thin wrapper around upstream ``mlx_lm.server``
-# (no project source, no tests/typecheck targets); ``sync-mlx-lm``
-# just installs the pinned ``mlx-lm`` so the LaunchAgent has a venv
-# to run from after a fresh clone.
-sync-mlx-lm:
-	cd mlx-lm-server && uv sync --locked
 
 # Show running containers and basic index status
 status:
@@ -185,7 +176,7 @@ status:
 	@echo ""
 
 # Run unit tests locally using uv
-test: test-indexer test-mcp test-mlx
+test: test-indexer test-mcp
 
 test-indexer: sync-indexer
 	cd indexer && uv run pytest -q
@@ -193,19 +184,13 @@ test-indexer: sync-indexer
 test-mcp: sync-mcp
 	cd mcp-server && uv run pytest -q
 
-test-mlx: sync-mlx
-	cd mlx-service && uv run pytest -q
-
-typecheck: typecheck-indexer typecheck-mcp typecheck-mlx
+typecheck: typecheck-indexer typecheck-mcp
 
 typecheck-indexer: sync-indexer
 	cd indexer && uv run mypy src
 
 typecheck-mcp: sync-mcp
 	cd mcp-server && uv run mypy src
-
-typecheck-mlx: sync-mlx
-	cd mlx-service && uv run mypy src
 
 # Remove all containers and volumes
 # WARNING: This deletes your email index and Bridge credentials.

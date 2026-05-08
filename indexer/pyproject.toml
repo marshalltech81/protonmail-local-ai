@@ -14,7 +14,7 @@ dependencies = [
     # text by 4-6×, producing chunks that blow past the embed model's
     # context. The tokenizer.json bundled under ``src/data/qwen3-embedding/``
     # is the upstream HuggingFace tokenizer for ``Qwen/Qwen3-Embedding-8B``
-    # (the model served by ``mlx-service``). If the embed model is
+    # (the schema-default embedding model). If the embed model is
     # changed, the bundled tokenizer file must be updated to match.
     "tokenizers==0.23.1",
     # Attachment text extraction (schema v10). Each library is required

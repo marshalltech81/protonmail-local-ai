@@ -296,8 +296,8 @@ class TestLLMRouting:
         ]
         asyncio.run(handler(question="invoice"))
         # ``INFERENCE_MODE=openai`` uses the OpenAI-compatible chat
-        # completions client. The default endpoint happens to be local
-        # mlx-lm-server, but the mode names the protocol/client.
+        # completions client regardless of where the operator points
+        # ``INFERENCE_OPENAI_BASE_URL``.
         assert fake_llm.complete_calls
 
     def test_anthropic_mode_without_api_key_falls_back_to_openai_client(

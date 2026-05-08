@@ -2,11 +2,14 @@
 
 ## Overview
 
-protonmail-local-ai is a fully containerised, privacy-first AI search and
-intelligence layer for ProtonMail. Every component runs locally in Docker.
-The optional external inference path is an Anthropic-compatible Messages
-API for Q&A, and that is opt-in at deployment time via
-`INFERENCE_MODE=anthropic`.
+protonmail-local-ai is a containerised, privacy-first AI search and
+intelligence layer for ProtonMail. The four containers (Bridge, mbsync,
+indexer, mcp-server) all run locally; storage, sync, and indexing
+never leave the host. Embedding and inference are operator-supplied
+external dependencies — the project itself ships no model-serving
+components, and whether they run on the host (LM Studio, vLLM,
+`mlx_lm.server`, etc.) or against a remote provider is a deployment
+choice.
 
 ## Data Flow
 
@@ -38,23 +41,25 @@ indexer container
   - Watches maildir-volume via inotify
   - Parses .eml files: MIME, HTML→text, attachments
   - Groups messages into threads via In-Reply-To / References headers
-  - Calls mlx-service for vector embeddings
+  - Calls EMBED_OPENAI_BASE_URL for vector embeddings
   - Writes to SQLite (FTS5 keyword index + sqlite-vec vector index)
         │                              │
         │  embed API                   │  writes
         ▼                              ▼
-mlx-service (host process)    sqlite-volume
-  - Qwen3-Embedding-8B-mxfp8    - threads table (FTS5)
-    (4096-dim) on Apple Metal   - threads_vec table (sqlite-vec)
-  - Qwen3-Reranker-4B-mxfp8     - message_thread_map
-    on Apple Metal              - indexed_files
-                                - pending_deletions (reconciler)
-mlx-lm-server (host process)
-  - Qwen3-32B-4bit (or other) for
-    local LLM inference (INFERENCE_MODE=openai)
-  - OpenAI-compatible /v1/chat/completions
-  - reached from containers via
-    host.docker.internal:8002
+embedder (operator-supplied)  sqlite-volume
+  - OpenAI-compatible            - threads table (FTS5)
+    /v1/embeddings at            - threads_vec table (sqlite-vec)
+    EMBED_OPENAI_BASE_URL        - message_thread_map
+  - 4096-dim vectors required    - indexed_files
+    by current schema            - pending_deletions (reconciler)
+
+inference (operator-supplied)
+  - INFERENCE_MODE=anthropic →
+    Messages API at
+    INFERENCE_ANTHROPIC_BASE_URL
+  - INFERENCE_MODE=openai →
+    /v1/chat/completions at
+    INFERENCE_OPENAI_BASE_URL
         │
         │  reads sqlite-volume (connection opened read-only)
         ▼
@@ -62,7 +67,8 @@ mcp-server container
   - Exposes MCP tools via HTTP/SSE on port 3000
   - Serves GET /health for the container healthcheck (200 when the
     read-only SQLite connection answers, 503 otherwise)
-  - Hybrid search: BM25 + vector → RRF merge
+  - Hybrid search: BM25 + vector → RRF merge (optional rerank stage
+    when RERANK_ENABLED=true and RERANK_BASE_URL is configured)
   - Q&A: retrieves threads → prompts the configured inference provider
   - Retrieval: serves indexed mailbox data from SQLite
   - Email excerpts sent to the LLM are wrapped in <untrusted_email>
@@ -84,10 +90,11 @@ Claude Desktop (host machine)
 |---|---|---|---|
 | `protonmail-bridge` | ProtonMail Cloud | `bridge-data` vol | IMAP 1143, SMTP 1025 (internal) |
 | `mbsync` | Bridge IMAP | `maildir-volume` | nothing |
-| `mlx-service` (host process, not Docker) | embed (OpenAI `/v1/embeddings`) + rerank requests | `~/.cache/huggingface/` model cache | HTTP 8001 (loopback only); reached from Docker via `host.docker.internal`. The embed surface is OpenAI-compatible — operators can swap to any compliant provider via `EMBED_OPENAI_BASE_URL`. The reranker stays on the service's custom `/rerank`. See `docs/setup.md` for the LaunchAgent install. |
-| `mlx-lm-server` (host process, not Docker) | LLM chat requests | `~/.cache/huggingface/` model cache | HTTP 8002 (loopback only); reached from Docker via `host.docker.internal`. OpenAI-compatible `/v1/chat/completions`. See `docs/setup.md` for the LaunchAgent install. |
-| `indexer` | `maildir-volume`, mlx-service | `sqlite-volume` | nothing |
-| `mcp-server` | `sqlite-volume`, mlx-service, mlx-lm-server (LLM) | nothing | HTTP 3000 (localhost only) |
+| `indexer` | `maildir-volume`, embedder | `sqlite-volume` | nothing |
+| `mcp-server` | `sqlite-volume`, embedder, inference provider, optional reranker | nothing | HTTP 3000 (localhost only) |
+| Embedder (operator-supplied) | indexer + mcp-server requests | depends on provider | OpenAI-compatible `/v1/embeddings` at `EMBED_OPENAI_BASE_URL`. A host-side server reachable via `host.docker.internal`, or a remote provider. |
+| Inference (operator-supplied) | mcp-server intelligence-tool requests | depends on provider | Anthropic Messages API or OpenAI `/v1/chat/completions` selected by `INFERENCE_MODE`. |
+| Reranker (operator-supplied, optional) | mcp-server hybrid-search requests | depends on provider | mlx-shaped `/rerank` at `RERANK_BASE_URL` when `RERANK_ENABLED=true`. |
 
 ## Docker Volumes
 
@@ -102,55 +109,49 @@ Claude Desktop (host machine)
 The stack uses two isolated bridge networks:
 
 - `bridge-net` for ProtonBridge ↔ `mbsync`
-- `app-net` for `indexer` ↔ `mcp-server`. Both reach the host MLX
-  servers (`mlx-service` on `:8001`, `mlx-lm-server` on `:8002`) via
-  `host.docker.internal`.
+- `app-net` for `indexer` ↔ `mcp-server`. Both reach the
+  operator-supplied embedder, inference, and (optional) reranker —
+  either at remote URLs or, when the operator runs a host-side server,
+  via OrbStack's `host.docker.internal`.
 
-For stricter local-only deployments, `docker-compose.hardened.yml` marks
-`app-net` as `internal: true` so those services cannot reach the internet.
-
-> **Currently broken in the default stack.** The indexer + mcp-server
-> reach the host MLX servers via `host.docker.internal`. Whether
-> `host.docker.internal` resolves through a network with
-> `internal: true` is runtime-dependent (Docker Desktop and OrbStack
-> behave differently and the OrbStack case is unverified). Until the
-> overlay is reworked to either move both MLX services into containers
-> on `app-net` or explicitly punch `host.docker.internal` through,
-> applying it will likely cut off the LLM (`INFERENCE_MODE=openai`) and the
-> MLX `/v1/embeddings` and `/rerank` calls. The compose file itself
-> carries the same warning. Do not apply it as-is.
+For stricter deployments, `docker-compose.hardened.yml` marks `app-net`
+as `internal: true`. This is compatible with operator-installed
+host-side providers (subject to Docker runtime behaviour around
+`host.docker.internal` under `internal: true`) and intentionally
+incompatible with any remote provider — the overlay is meant for the
+"keep all retrieval traffic on the box" posture.
 
 The default stack exposes only `127.0.0.1:3000` for the MCP server.
 No container is reachable from outside the machine.
 
-### Host-side MLX servers (not containerized)
-
-Both the embedder/reranker (`mlx-service`) and the LLM
-(`mlx-lm-server`) run as host LaunchAgents — see
-[`mlx-service/README.md`](../mlx-service/README.md) and
-[`mlx-lm-server/README.md`](../mlx-lm-server/README.md). Containers
-reach them via OrbStack's `host.docker.internal`. This is the only
-supported deployment shape: containerized MLX on macOS cannot use
-Metal, so an in-stack equivalent would silently lose Metal
-acceleration. Both LaunchAgents bind to `127.0.0.1`, exempt from the
-macOS Application Firewall via the loopback exemption, so they're
-reachable from OrbStack containers (which route through the loopback
-exemption) but not from LAN neighbors.
+### Operator-supplied providers
 
 The embedder surface is OpenAI-compatible (`/v1/embeddings`). The
 indexer's `OpenAIEmbedder` client and mcp-server's
 `LocalLLMClient.embed()` both speak this dialect, so an operator can
 point `EMBED_OPENAI_BASE_URL` at any compliant provider — DeepInfra,
-OpenRouter, LM Studio, vLLM, TEI — without changing any code. The
-schema reserves a fixed 4096-dim vector, so `EMBED_OPENAI_MODEL` must
-keep producing 4096-dim vectors (Qwen3-Embedding-8B variants) or a
-schema migration is required. Indexer and mcp-server must point at the
-same provider + model so query vectors are comparable to indexed
-vectors.
+OpenRouter, LM Studio, vLLM, TEI, `mlx_lm.server` — without changing
+any code. The schema reserves a fixed 4096-dim vector, so
+`EMBED_OPENAI_MODEL` must keep producing 4096-dim vectors
+(Qwen3-Embedding-8B variants) or a schema migration is required.
+Indexer and mcp-server must point at the same provider + model so
+query vectors are comparable to indexed vectors.
+
+For inference, `INFERENCE_MODE=anthropic` (default) calls an
+Anthropic-compatible Messages API at `INFERENCE_ANTHROPIC_BASE_URL`;
+`INFERENCE_MODE=openai` calls an OpenAI-compatible
+`/v1/chat/completions` endpoint at `INFERENCE_OPENAI_BASE_URL`.
 
 The reranker uses a custom `/rerank` shape — there is no OpenAI
 rerank standard — so `RERANK_BASE_URL` is independent of
-`EMBED_OPENAI_BASE_URL`.
+`EMBED_OPENAI_BASE_URL`. Reranking is opt-in (`RERANK_ENABLED=false`
+by default).
+
+When operator-installed servers run on the host, they should bind to
+`127.0.0.1` only. Containers reach them via OrbStack's
+`host.docker.internal` — this is the project's expectation. Binding a
+host-side server to `0.0.0.0` or a LAN IP exposes it to the network
+beyond what the project intends.
 
 ## Search Architecture
 
@@ -159,7 +160,7 @@ The hybrid search pipeline:
 ```
 User query
     │
-    ├─ Embed query text → OpenAI /v1/embeddings (default: mlx-service / Qwen3-Embedding-8B) → 4096-dim vector
+    ├─ Embed query text → OpenAI /v1/embeddings at EMBED_OPENAI_BASE_URL → 4096-dim vector
     │
     ├─ BM25 search   → SQLite FTS5 over thread bodies      → ranked list A
     │
@@ -172,12 +173,13 @@ User query
     │
     ├─ optional: post-fusion filter (folder / sender / date / attachments)
     │
-    ├─ optional rerank stage (RERANK_ENABLED=true, default):
+    ├─ optional rerank stage (RERANK_ENABLED=true, default false):
     │   take RRF top RERANK_CANDIDATES (default 20), score each candidate
-    │   against the query via Qwen3-Reranker-4B (yes/no logit
-    │   comparison), reorder, truncate to the caller's `limit`
-    │   (defaulting to RERANK_TOP_N when the caller doesn't specify —
-    │   so callers like extract_from_emails(limit=20) get 20, not 10)
+    │   against the query via the cross-encoder served at
+    │   RERANK_BASE_URL (mlx-shaped /rerank), reorder, truncate to the
+    │   caller's `limit` (defaulting to RERANK_TOP_N when the caller
+    │   doesn't specify — so callers like extract_from_emails(limit=20)
+    │   get 20, not 10)
     │
     └─ top-k threads (with evidence chunks if requested)
 ```
@@ -191,7 +193,7 @@ would dominate by accumulated score rather than by relevance.
 Every thread is chunked at index time, so the chunk lane is always
 populated alongside the BM25 and thread-vector lanes.
 
-The rerank stage is best-effort: a transient `mlx-service` failure
+The rerank stage is best-effort: a transient rerank-service failure
 returns an empty result set from the reranker, and `hybrid_search`
 falls back to RRF order truncated to the caller's `limit`. A rerank
 outage degrades quality without failing the whole query.
@@ -618,27 +620,30 @@ walkthrough; the table below is the per-operation reference.
 | Operation | Local only | Leaves machine |
 |---|---|---|
 | Email storage | ✅ | Never |
-| Embedding generation — default `EMBED_OPENAI_BASE_URL` (mlx-service on `127.0.0.1`) | ✅ | Never |
-| Embedding generation — cloud `EMBED_OPENAI_BASE_URL` (DeepInfra, OpenRouter, etc.) | Retrieval queries + indexed content | Email body chunks → cloud provider |
 | Vector index | ✅ (SQLite) | Never |
 | Keyword search | ✅ (SQLite FTS5) | Never |
-| Reranker — default `RERANK_BASE_URL` (mlx-service on `127.0.0.1`) | ✅ | Never |
 | Send/Move/Flag | Disabled by default | Never |
 
-> **Note on cloud embedders.** Pointing `EMBED_OPENAI_BASE_URL` at a remote
-> provider sends every email body chunk through that provider at index
-> time and every search query string at retrieval time. This is a
-> deliberate departure from the local-first default and should be done
-> with the privacy implications understood. The local mlx-service
-> default is what makes "all retrieval stays local" hold.
-
-### MCP server intelligence tools (governed by `INFERENCE_MODE`)
+### Embedder, reranker, and inference (operator-supplied)
 
 | Operation | Local only | Leaves machine |
 |---|---|---|
-| Q&A — `INFERENCE_MODE=openai`, default `INFERENCE_OPENAI_BASE_URL` | ✅ (mlx-lm-server) | Never |
+| Embedding — `EMBED_OPENAI_BASE_URL` points at a host-side server | ✅ | Never |
+| Embedding — `EMBED_OPENAI_BASE_URL` points at a remote provider | Retrieval queries + indexed content | Email body chunks → provider |
+| Reranking — `RERANK_BASE_URL` points at a host-side server | ✅ | Never |
+| Reranking — `RERANK_BASE_URL` points at a remote provider | Retrieval queries | Retrieved chunks → provider |
+| Q&A — `INFERENCE_MODE=openai`, host-side `INFERENCE_OPENAI_BASE_URL` | Retrieval local | Never |
 | Q&A — `INFERENCE_MODE=openai`, remote `INFERENCE_OPENAI_BASE_URL` | Retrieval local | Retrieved chunks → OpenAI-compatible provider |
-| Q&A — `INFERENCE_MODE=anthropic` | Retrieval local | Retrieved chunks → Anthropic-compatible provider |
+| Q&A — `INFERENCE_MODE=anthropic` (default) | Retrieval local | Retrieved chunks → Anthropic-compatible provider |
+
+> **Note on remote providers.** Pointing any of these at a remote
+> provider ships data over the network: every email body chunk
+> through the embedder at index time, every search-query string
+> through the embedder at retrieval time, and every retrieved chunk
+> through the inference and reranker endpoints. This is a deliberate
+> departure from a fully-local posture; choose the provider URLs
+> accordingly. To keep all retrieval traffic on the box, point each
+> URL at a host-side server you install yourself.
 
 ### MCP client layer (governed by which client you connect)
 
@@ -666,12 +671,12 @@ localhost-bound port.
 
 Set `INFERENCE_MODE` in `.env`:
 
-- `openai` — OpenAI-compatible chat completions via
-  `INFERENCE_OPENAI_BASE_URL`. The default endpoint is the host
-  mlx-lm-server and is fully local, but this can also point at a
-  remote compatible provider.
-- `anthropic` — Anthropic-compatible Messages API via
+- `anthropic` (default) — Anthropic-compatible Messages API via
   `INFERENCE_ANTHROPIC_BASE_URL`. Retrieved email chunks are sent to
   that provider.
+- `openai` — OpenAI-compatible chat completions via
+  `INFERENCE_OPENAI_BASE_URL`. Point this at a remote provider or at
+  a host-side server you install yourself; only the latter keeps
+  retrieved chunks on your machine.
 
 The toggle applies per-deployment. A per-session toggle is on the roadmap.

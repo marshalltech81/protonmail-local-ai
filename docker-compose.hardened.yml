@@ -5,32 +5,26 @@
 # public internet, limiting exfiltration surface if a container is
 # compromised.
 #
-# !!! INCOMPATIBLE with host model services as currently wired !!!
+# !!! Compatible only with fully-local providers !!!
 #
-# The indexer + mcp-server reach the host MLX servers
-# (``host.docker.internal:8001`` for mlx-service, and
-# ``host.docker.internal:8002`` for mlx-lm-server when
-# ``INFERENCE_MODE=openai``). Whether ``host.docker.internal`` is reachable
-# from a network with ``internal: true`` depends on the runtime:
-# in some Docker Desktop configurations the host alias still resolves
-# through the bridge IP, but on OrbStack the behavior is not currently
-# verified and the overlay should be assumed broken until tested.
+# Whether the indexer + mcp-server can still reach the embedder, the
+# inference endpoint, and the optional reranker depends on where they
+# are configured to run:
 #
-# Until this overlay is reworked to either (a) move both MLX services
-# into containers on app-net, or (b) explicitly punch
-# host.docker.internal through, treat it as **broken in the default
-# stack**. It will likely cut off:
+#   - Host-side endpoint via ``host.docker.internal`` — reachability
+#     under ``internal: true`` is runtime-dependent. On Docker Desktop
+#     the host alias may still resolve through the bridge IP; on
+#     OrbStack the behavior is not currently verified and should be
+#     assumed broken until tested. Until this is verified end-to-end,
+#     treat the overlay as broken when host-side endpoints are in use.
+#   - Containerized OpenAI-compatible / rerank service on app-net —
+#     reachable as expected.
+#   - Any remote provider (Anthropic, DeepInfra, OpenRouter, etc.) —
+#     blocked by design. INFERENCE_MODE=anthropic and any cloud-pointed
+#     EMBED_OPENAI_BASE_URL / RERANK_BASE_URL will fail under this
+#     overlay, which is the point.
 #
-#   - OpenAI-compatible inference calls (INFERENCE_MODE=openai) reaching
-#     ``INFERENCE_OPENAI_BASE_URL`` on the host
-#   - mlx-service /embed and /rerank calls
-#   - INFERENCE_MODE=anthropic calls to the Anthropic-compatible API
-#     (the only intended block)
-#
-# Prerequisites (if you fix the host-alias question and want to use it):
-#   - Use INFERENCE_MODE=openai only — anthropic calls will fail under this overlay
-#
-# Usage (post-fix):
+# Usage:
 #   docker compose -f docker-compose.yml -f docker-compose.hardened.yml up -d
 #
 # To revert:

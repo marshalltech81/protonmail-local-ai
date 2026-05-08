@@ -4,10 +4,11 @@ Watches the Maildir for new/changed emails, parses and threads them,
 generates embeddings via an OpenAI-compatible /v1/embeddings endpoint,
 and writes to the SQLite index.
 
-The default embedder is the host-side mlx-service on Apple Metal, but
-any OpenAI-compatible provider works (DeepInfra, OpenRouter, LM Studio,
-vLLM, TEI, etc.) — only ``EMBED_OPENAI_BASE_URL`` + ``EMBED_OPENAI_MODEL``
-(+ optional ``EMBED_OPENAI_API_KEY`` Docker secret) change.
+The embedder is operator-supplied: any OpenAI-compatible provider
+works (remote — DeepInfra, OpenRouter, etc. — or a host-side server
+the operator installs themselves: LM Studio, vLLM, ``mlx_lm.server``,
+TEI). Configure via ``EMBED_OPENAI_BASE_URL`` + ``EMBED_OPENAI_MODEL``
+(+ optional ``EMBED_OPENAI_API_KEY`` Docker secret).
 
 When ``INDEXER_DELETION_ENABLED=true`` the indexer also runs a reconciler
 that records tombstones for mbsync-flagged (``T``) Maildir files and reaps
@@ -55,17 +56,17 @@ log = logging.getLogger("indexer")
 MAILDIR_PATH = Path(os.environ.get("MAILDIR_PATH", "/maildir"))
 SQLITE_PATH = Path(os.environ.get("SQLITE_PATH", "/data/mail.db"))
 
-# OpenAI-compatible embedder configuration.
-#
-# The default points at the host-side ``mlx-service`` on Apple Metal,
-# reached from containers via OrbStack's ``host.docker.internal``. The
-# service binds ``127.0.0.1:8001`` and exposes ``/v1/embeddings``.
-#
-# Any OpenAI-compatible provider works: replace ``EMBED_OPENAI_BASE_URL``
-# with the provider's base URL and set ``EMBED_OPENAI_API_KEY`` (Docker
-# secret). The schema reserves a fixed 4096-dim vector — keep
-# ``EMBED_OPENAI_MODEL`` pointed at a 4096-dim model (Qwen3-Embedding-8B
-# variants) or a schema migration is required.
+# OpenAI-compatible embedder configuration. The operator supplies the
+# provider — set ``EMBED_OPENAI_BASE_URL`` to any compliant /v1 base
+# URL and ``EMBED_OPENAI_MODEL`` to a model id served there. The schema
+# reserves a fixed 4096-dim vector — pick a 4096-dim model
+# (Qwen3-Embedding-8B variants) or run a schema migration. Authentication
+# (when needed) is loaded from the ``embed_openai_api_key`` Docker secret
+# or ``EMBED_OPENAI_API_KEY`` env. The local-dev default below points at
+# the conventional host-side port (``host.docker.internal:8001/v1``);
+# in containerized deployments docker-compose passes the env through
+# unconditionally so an unset .env value becomes empty and validate-env
+# refuses to start.
 EMBED_OPENAI_BASE_URL = os.environ.get(
     "EMBED_OPENAI_BASE_URL", "http://host.docker.internal:8001/v1"
 )
@@ -76,10 +77,10 @@ def _read_embed_openai_api_key() -> str:
     """Read the embedder API key from a Docker secret, then env, then empty.
 
     Mirrors the secret-then-env pattern used in mcp-server. An empty key
-    is the local mlx-service case (no auth on loopback) and is not an
-    error. The Docker secret path follows the existing
-    ``/run/secrets/<name>`` convention; ``EMBED_OPENAI_API_KEY`` env is
-    the fallback for non-Docker deployments.
+    is the unauthenticated-host-server case (e.g. a local OpenAI-compat
+    server bound to loopback) and is not an error. The Docker secret
+    path follows the existing ``/run/secrets/<name>`` convention;
+    ``EMBED_OPENAI_API_KEY`` env is the fallback for non-Docker deployments.
     """
     secret_path = Path("/run/secrets/embed_openai_api_key")
     if secret_path.exists():
@@ -116,9 +117,9 @@ def _int_env(name: str, default: int, minimum: int = 1) -> int:
 
 # How many texts the embedder client packs into a single
 # ``/v1/embeddings`` HTTP call. Larger batches amortize per-request
-# overhead — meaningful for cloud providers, marginal for the local
-# mlx-service. The provider's own per-request input cap is the upper
-# bound (DeepInfra accepts 100; OpenAI accepts 2048).
+# overhead — meaningful for remote providers, marginal for a host-side
+# server on loopback. The provider's own per-request input cap is the
+# upper bound (DeepInfra accepts 100; OpenAI accepts 2048).
 EMBED_BATCH_SIZE = _int_env("EMBED_BATCH_SIZE", 64)
 
 
@@ -132,10 +133,10 @@ CHUNK_MAX_TOKENS = _int_env("INDEXER_CHUNK_MAX_TOKENS", 1500)
 CHUNK_OVERLAP_TOKENS = _int_env("INDEXER_CHUNK_OVERLAP_TOKENS", 150, minimum=0)
 
 # How many messages the initial-scan drainer accumulates before issuing
-# a single batched embed call. Larger batches amortize the cloud-embedder
+# a single batched embed call. Larger batches amortize the embed
 # round-trip across more messages — meaningful when EMBED_OPENAI_BASE_URL
-# points at a remote provider (~150 ms RTT each), marginal against loopback
-# mlx-service.
+# points at a remote provider (~150 ms RTT each), marginal against a
+# host-side server on loopback.
 INITIAL_INDEX_BATCH_SIZE = _int_env("INITIAL_INDEX_BATCH_SIZE", 50)
 
 # Steady-state (post-initial-scan) batch size for the main-loop drain.
@@ -1174,7 +1175,7 @@ def main():
             db, embedder, threader, reconciler_config, maildir_root=MAILDIR_PATH
         )
 
-    # Wait for the mlx-service /health endpoint, then warm the model.
+    # Wait for the embedder to answer, then warm the model.
     embedder.wait_for_ready()
 
     # Verify the running model matches the schema's reserved vector dim.

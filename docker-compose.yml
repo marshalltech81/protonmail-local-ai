@@ -85,12 +85,12 @@ services:
       - bridge-net
 
   # ---------------------------------------------------------------------------
-  # Note: when ``INFERENCE_MODE=openai`` the mcp-server reaches the
-  # host-side ``mlx-lm-server`` LaunchAgent (OpenAI-compatible
-  # ``/v1/chat/completions`` on port 8002) via OrbStack's
-  # ``host.docker.internal``. Override ``INFERENCE_OPENAI_BASE_URL`` in
-  # ``.env`` to point at any other OpenAI-compatible endpoint. The
-  # mlx-lm-server LaunchAgent setup lives in ``mlx-lm-server/README.md``.
+  # Note: ``INFERENCE_MODE`` selects the chat-completions client.
+  # ``anthropic`` (default) calls an Anthropic-compatible Messages API.
+  # ``openai`` calls an OpenAI-compatible chat-completions endpoint at
+  # ``INFERENCE_OPENAI_BASE_URL`` — point this at a remote provider or
+  # at a host-side server you install yourself. Containers reach a
+  # host-side server via OrbStack's ``host.docker.internal``.
   # ---------------------------------------------------------------------------
 
   # ---------------------------------------------------------------------------
@@ -115,8 +115,8 @@ services:
     # XML payload that lxml expands in core) cannot pressure the host.
     # Peak memory scales with ``concurrency × largest_in_flight_message``
     # because parsed attachment text and per-chunk float vectors are
-    # held in memory while waiting on mlx-service embed RPCs. Empirical
-    # tuning history (May 2026 eval session, ~22k-message mailbox with
+    # held in memory while waiting on embedder RPCs. Empirical tuning
+    # history (May 2026 eval session, ~22k-message mailbox with
     # attachment-heavy threads):
     #
     #   - 1 GiB was too tight under normal indexing bursts.
@@ -140,13 +140,14 @@ services:
       HOME: /home/indexer
       MAILDIR_PATH: /maildir
       SQLITE_PATH: /data/mail.db
-      # OpenAI-compatible embedder. Default points at the host-side
-      # mlx-service over OrbStack's host.docker.internal shortcut. Any
-      # provider that speaks /v1/embeddings works (DeepInfra, OpenRouter,
-      # LM Studio, vLLM, TEI). Indexer + mcp-server must point at the
-      # same provider + model so vectors are comparable.
-      EMBED_OPENAI_BASE_URL: ${EMBED_OPENAI_BASE_URL:-http://host.docker.internal:8001/v1}
-      EMBED_OPENAI_MODEL: ${EMBED_OPENAI_MODEL:-mlx-community/Qwen3-Embedding-8B-mxfp8}
+      # OpenAI-compatible embedder. No built-in default — operator
+      # configures EMBED_OPENAI_BASE_URL + EMBED_OPENAI_MODEL in .env.
+      # Any provider that speaks /v1/embeddings works (DeepInfra,
+      # OpenRouter, LM Studio, vLLM, TEI, or a host-side mlx_lm.server).
+      # Indexer + mcp-server must point at the same provider + model so
+      # vectors are comparable.
+      EMBED_OPENAI_BASE_URL: ${EMBED_OPENAI_BASE_URL}
+      EMBED_OPENAI_MODEL: ${EMBED_OPENAI_MODEL}
       EMBED_BATCH_SIZE: ${EMBED_BATCH_SIZE:-64}
       # Cross-message batch size for the initial-index drainer. See
       # .env.example for the two-phase pipeline that this tunes.
@@ -174,9 +175,9 @@ services:
       # full policy and rescue paths.
       INDEXER_RECOVERY_SWEEP_INTERVAL_SECS: ${INDEXER_RECOVERY_SWEEP_INTERVAL_SECS:-1800}
       # Warmup POST timeout for the first embed call after container
-      # start. Default 600s in code accounts for first-time HF model
-      # downloads (~4 min embedder + ~2 min reranker). Lower it on a
-      # warm cache for faster startup-failure detection.
+      # start. Default 600s absorbs cold-start latency on host-side
+      # providers; lower it on warm caches or fast remote endpoints
+      # for faster startup-failure detection.
       EMBED_WARMUP_TIMEOUT_SECS: ${EMBED_WARMUP_TIMEOUT_SECS:-600}
       # Confirmation gate for the v13→v14 destructive migration.
       # Default false so a routine container restart on a populated v13
@@ -250,31 +251,32 @@ services:
     environment:
       SQLITE_PATH: /data/mail.db
       # INFERENCE_MODE chooses protocol/client:
-      # - openai: OpenAI-compatible chat completions
-      # - anthropic: Anthropic-compatible Messages API
-      INFERENCE_MODE: ${INFERENCE_MODE:-openai}
-      INFERENCE_OPENAI_BASE_URL: ${INFERENCE_OPENAI_BASE_URL:-http://host.docker.internal:8002/v1}
-      INFERENCE_OPENAI_MODEL: ${INFERENCE_OPENAI_MODEL:-mlx-community/Qwen3-32B-4bit}
+      # - anthropic (default): Anthropic-compatible Messages API
+      # - openai: OpenAI-compatible chat completions (operator-configured
+      #   base URL — remote provider or host-side server)
+      INFERENCE_MODE: ${INFERENCE_MODE:-anthropic}
+      INFERENCE_OPENAI_BASE_URL: ${INFERENCE_OPENAI_BASE_URL}
+      INFERENCE_OPENAI_MODEL: ${INFERENCE_OPENAI_MODEL}
       INFERENCE_ANTHROPIC_BASE_URL: ${INFERENCE_ANTHROPIC_BASE_URL:-https://api.anthropic.com/v1}
       INFERENCE_ANTHROPIC_MODEL: ${INFERENCE_ANTHROPIC_MODEL:-claude-sonnet-4-6}
       MCP_PORT: ${MCP_PORT:-3000}
       MCP_TRANSPORT: ${MCP_TRANSPORT:-sse}
       MCP_READ_ONLY: ${MCP_READ_ONLY:-true}
-      # MLX retrieval stack — embedding + reranking over the host-side
-      # mlx-service. See .env.example. RERANK_CANDIDATES governs how
-      # many RRF results are fed to the cross-encoder before
-      # truncation to the caller's ``limit`` (defaulting to
-      # RERANK_TOP_N when the caller doesn't specify).
-      RERANK_ENABLED: ${RERANK_ENABLED:-true}
+      # Cross-encoder rerank stage in hybrid search. Disabled by default;
+      # set RERANK_BASE_URL + flip RERANK_ENABLED=true when you stand up
+      # a compatible /rerank service (mlx-shaped wire format — see
+      # mcp-server/src/lib/reranker.py). RERANK_CANDIDATES governs how
+      # many RRF results are fed to the cross-encoder before truncation
+      # to the caller's ``limit`` (defaulting to RERANK_TOP_N when the
+      # caller doesn't specify).
+      RERANK_ENABLED: ${RERANK_ENABLED:-false}
       # OpenAI-compatible embedder for query-time embedding. Must point
       # at the same provider + model as the indexer; otherwise query
       # vectors and indexed vectors are produced by different models
       # and hybrid search degrades.
-      EMBED_OPENAI_BASE_URL: ${EMBED_OPENAI_BASE_URL:-http://host.docker.internal:8001/v1}
-      EMBED_OPENAI_MODEL: ${EMBED_OPENAI_MODEL:-mlx-community/Qwen3-Embedding-8B-mxfp8}
-      # Reranker stays on mlx-service's custom /rerank — no OpenAI standard
-      # exists for rerank, so this URL is independent of EMBED_OPENAI_BASE_URL.
-      RERANK_BASE_URL: ${RERANK_BASE_URL:-http://host.docker.internal:8001}
+      EMBED_OPENAI_BASE_URL: ${EMBED_OPENAI_BASE_URL}
+      EMBED_OPENAI_MODEL: ${EMBED_OPENAI_MODEL}
+      RERANK_BASE_URL: ${RERANK_BASE_URL}
       RERANK_CANDIDATES: ${RERANK_CANDIDATES:-20}
       RERANK_TOP_N: ${RERANK_TOP_N:-10}
     volumes:
@@ -316,19 +318,20 @@ networks:
 secrets:
   bridge_pass:
     file: ./.secrets/bridge_pass.txt
-  # OpenAI-compatible inference API key — empty by default for local
-  # mlx-lm-server, only required when INFERENCE_OPENAI_BASE_URL points
-  # at a provider that authenticates.
+  # OpenAI-compatible inference API key — only required when
+  # INFERENCE_MODE=openai and INFERENCE_OPENAI_BASE_URL points at a
+  # provider that authenticates. Leave empty otherwise.
   inference_openai_api_key:
     file: ./.secrets/inference_openai_api_key.txt
   # Anthropic-compatible inference API key — required when
-  # INFERENCE_MODE=anthropic. Leave empty for the default openai mode.
-  # Never put this value in .env — it will appear in docker inspect output.
+  # INFERENCE_MODE=anthropic (the default). Never put this value in
+  # .env — it will appear in docker inspect output.
   inference_anthropic_api_key:
     file: ./.secrets/inference_anthropic_api_key.txt
-  # OpenAI-compatible embedder API key — empty by default, only required
-  # when EMBED_OPENAI_BASE_URL points at a cloud provider that authenticates
-  # (DeepInfra, OpenRouter, etc.). Local mlx-service ignores it.
-  # Never put this value in .env — it will appear in docker inspect output.
+  # OpenAI-compatible embedder API key — only required when
+  # EMBED_OPENAI_BASE_URL points at a provider that authenticates
+  # (DeepInfra, OpenRouter, etc.). Leave empty when pointing at an
+  # unauthenticated host server. Never put this value in .env — it
+  # will appear in docker inspect output.
   embed_openai_api_key:
     file: ./.secrets/embed_openai_api_key.txt

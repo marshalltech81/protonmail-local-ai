@@ -16,104 +16,77 @@ Detailed design and operational docs belong in `docs/`.
 
 ## Current Objective
 
-The local-inference layer is fully consolidated onto MLX. The LLM
-runs on `mlx-lm-server` (`mlx_lm.server` LaunchAgent on port 8002)
-alongside the existing `mlx-service` LaunchAgent (embeddings +
-reranking on port 8001). Both reach Apple Metal directly; neither
-goes through Ollama. Cloud-Claude (`INFERENCE_MODE=anthropic`) remains as the
-user-facing quality escape hatch.
+The project no longer ships its own model-serving components. The
+`mlx-service/` and `mlx-lm-server/` directories were removed; the
+indexer + mcp-server now consume an operator-supplied OpenAI-compatible
+embedder and choose between an Anthropic-compatible Messages API
+(default daily-driver) or any OpenAI-compatible chat-completions
+endpoint for inference. The reranker is opt-in (`RERANK_ENABLED=false`
+by default).
 
-What remains: documentation polish (Phase D below) and the previously
-paused pre-MLX priorities resume after that.
+What remains: the previously paused pre-MLX priorities resume from
+here.
 
 ## Current State
 
-The MLX-rebuild objective (PR #83 + #84 + #85) is **merged to main**.
 The stack now runs:
 
 - **ProtonBridge** — Docker, headless, IMAP/SMTP on `bridge-net` only.
 - **mbsync** — Docker, pulls into Maildir, `chmod go+r` after each sync.
 - **indexer** — Docker, parses Maildir, threads, embeds via any
-  OpenAI-compatible `/v1/embeddings` provider (default: host-side
-  mlx-service), writes SQLite. Schema is at v17 with 4096-dim
-  L2-unit-norm vectors (the v17 backfill normalizes any pre-existing
-  non-unit `threads_vec` / `message_chunks_vec` rows in place via
-  `vec_normalize`, gated to skip the zero placeholder). The Ollama
-  embed-fallback path was removed in Phase C. Both the initial scan
-  and the steady-state main loop drain the queue through the same
-  unified two-phase batched path (`Phase 1` commits thread membership
-  per message — seeded by a three-case priority chain: mean of
-  existing chunk vectors when the thread is already indexed with
-  content; the prior `threads_vec` row when the thread is chunkless
-  but has a non-zero vector (subject-fallback threads); placeholder
-  zero only for genuinely new threads. `Phase 2b` issues one batched
-  embed_batch across the whole batch; `Phase 2c` commits chunks /
-  attachment occurrences / attachment chunks per message inside one
-  transaction and replaces the seed thread vector with the L2-normalized
-  mean of chunk vectors).
-  Initial scan drains to empty at `INITIAL_INDEX_BATCH_SIZE=50`;
-  steady-state runs `max_passes=1` per main-loop tick at
-  `INDEXER_STEADY_STATE_BATCH_SIZE=8` so the reconciler / WAL
-  checkpoint / recovery sweep interleave cleanly. The
-  non-zero-preserving seed means a Phase 2 failure on a new sibling
-  message cannot regress the parent thread's vector — even for
-  chunkless subject-fallback threads. This collapses ~25k
+  OpenAI-compatible `/v1/embeddings` provider (operator-supplied),
+  writes SQLite. Schema is at v17 with 4096-dim L2-unit-norm vectors
+  (the v17 backfill normalizes any pre-existing non-unit
+  `threads_vec` / `message_chunks_vec` rows in place via
+  `vec_normalize`, gated to skip the zero placeholder). Both the
+  initial scan and the steady-state main loop drain the queue through
+  the same unified two-phase batched path (`Phase 1` commits thread
+  membership per message — seeded by a three-case priority chain:
+  mean of existing chunk vectors when the thread is already indexed
+  with content; the prior `threads_vec` row when the thread is
+  chunkless but has a non-zero vector (subject-fallback threads);
+  placeholder zero only for genuinely new threads. `Phase 2b` issues
+  one batched embed_batch across the whole batch; `Phase 2c` commits
+  chunks / attachment occurrences / attachment chunks per message
+  inside one transaction and replaces the seed thread vector with the
+  L2-normalized mean of chunk vectors). Initial scan drains to empty
+  at `INITIAL_INDEX_BATCH_SIZE=50`; steady-state runs `max_passes=1`
+  per main-loop tick at `INDEXER_STEADY_STATE_BATCH_SIZE=8` so the
+  reconciler / WAL checkpoint / recovery sweep interleave cleanly.
+  The non-zero-preserving seed means a Phase 2 failure on a new
+  sibling message cannot regress the parent thread's vector — even
+  for chunkless subject-fallback threads. This collapses ~25k
   single-message embed round-trips into ~500 multi-message ones
-  against a cloud embedder during initial scan, and a 5+ message
-  mbsync burst into one round-trip during steady state.
-- **mcp-server** — Docker, hybrid search + intelligence tools.
-  `hybrid_search` calls the MLX reranker (`Qwen3-Reranker-4B-mxfp8`)
-  after RRF. The LLM-synthesis step is dispatched by `INFERENCE_MODE`:
-  `openai` → `LocalLLMClient.complete()` against the OpenAI-compatible
-  `/v1/chat/completions` endpoint at `INFERENCE_OPENAI_BASE_URL` (default
-  `http://host.docker.internal:8002/v1`, served by mlx-lm-server),
-  `anthropic` → Anthropic-compatible Messages API (the daily-driver mode at the
-  moment — `INFERENCE_MODE=anthropic` in `.env`, model `claude-sonnet-4-6`).
-  The Tier-2–11 manual-eval pass on 2026-05-04 was run with
-  `INFERENCE_MODE=anthropic`; that remains the standing quality baseline.
-- **mlx-service** — host LaunchAgent on `127.0.0.1:8001`, serves the
-  OpenAI-compatible `/v1/embeddings` (Qwen3-Embedding-8B-mxfp8,
-  4096-dim) and the custom `/rerank` (Qwen3-Reranker-4B-mxfp8).
-  Reachable from Docker via `host.docker.internal:8001`. The embedder
-  surface is provider-agnostic — `EMBED_OPENAI_BASE_URL` can point at any
-  OpenAI-compatible provider (DeepInfra, OpenRouter, etc.) without
-  code changes.
-- **mlx-lm-server** — host LaunchAgent on `127.0.0.1:8002`, serves
-  the local LLM (default `mlx-community/Qwen3-32B-4bit`) over
-  OpenAI-compatible `/v1/chat/completions`. Reachable from Docker
-  via `host.docker.internal:8002`.
+  during initial scan, and a 5+ message mbsync burst into one
+  round-trip during steady state.
+- **mcp-server** — Docker, hybrid search + intelligence tools. The
+  LLM-synthesis step is dispatched by `INFERENCE_MODE`: `anthropic`
+  (default daily-driver) → Anthropic-compatible Messages API at
+  `INFERENCE_ANTHROPIC_BASE_URL` (default model `claude-sonnet-4-6`);
+  `openai` → `LocalLLMClient.complete()` against any OpenAI-compatible
+  `/v1/chat/completions` endpoint at `INFERENCE_OPENAI_BASE_URL`. The
+  optional cross-encoder rerank stage runs against `RERANK_BASE_URL`
+  when `RERANK_ENABLED=true`; the default is off. The Tier-2–11
+  manual-eval pass on 2026-05-04 was run with `INFERENCE_MODE=anthropic`;
+  that remains the standing quality baseline.
 
-Memory reality (36 GB M5 Max): the active state (Qwen3-32B-4bit
-~17 GB + MLX embed/rerank ~12 GB + macOS ~7 GB) is tight but fits
-in physical RAM. With `INFERENCE_MODE=anthropic` daily, the local LLM only
-loads when the operator explicitly switches modes, so steady-state
-RAM is closer to ~19 GB. The single-inference-framework win lands
-here: one runtime to tune memory budgets against, no llama.cpp
-wrapper overhead.
+Inference and embedding endpoints are operator-supplied — the project
+itself ships no model-serving components. Running an OpenAI-compatible
+server on the host (LM Studio, vLLM, `mlx_lm.server`, TEI, etc.) keeps
+retrieval traffic on the box; pointing at a remote provider crosses
+that boundary. The two postures are documented but not provisioned by
+this repo.
 
 ## Active Priorities
 
-The MLX consolidation is complete; the four pre-MLX priorities below
+The MLX consolidation is complete and the host MLX provisioning has
+been removed from this project. The four pre-MLX priorities
 (intelligence-fidelity validation, test-coverage expansion,
-tool-behavior tightening, Tier 1 safety preservation) are now
-unpaused.
-
-The MLX consolidation (Phases A–C of the prior plan) shipped together
-in 2026-05-04: the LLM client moved to OpenAI-compatible
-`/v1/chat/completions`, the class was renamed `OllamaClient` →
-`LocalLLMClient`, the Ollama embed-fallback path was deleted (chunker
-now bundles the Qwen3-Embedding-8B tokenizer), `mlx_lm.server` was
-stood up as a host LaunchAgent on port 8002 serving
-`mlx-community/Qwen3-32B-4bit`, and the host Ollama LaunchAgent + the
-`pull-models` Makefile target + `scripts/check-host-ollama.sh` were
-removed. See "Recently Completed" below for the detailed entry.
+tool-behavior tightening, Tier 1 safety preservation) are now unpaused.
 
 ### Out of scope for this objective
 
-- Any change to retrieval quality (embedder, reranker, chunker
-  defaults). The retrieval stack ships unchanged from PR #83.
-- Switching off MLX inference entirely. The escape hatch is
-  `INFERENCE_MODE=anthropic` — flip the env var, no code revert needed.
+- Reintroducing project-shipped model-serving components.
 - Adding new MCP tools or changing the MCP API surface.
 
 ### MLX-rebuild carryover (still-pending follow-ups from PRs #83/#84/#85)
@@ -324,7 +297,7 @@ persisted, unsupported types log at debug. What's still open:
 - add `# syntax=docker/dockerfile:1` as the first line of `bridge/Dockerfile`; without a parser directive the BuildKit Dockerfile frontend version is unpinned and different Docker Engine or BuildKit versions may parse the same Dockerfile differently, producing subtly different images; this matters most for the multi-stage Bridge build where `--from` resolution and layer caching rely on stable parse behavior
 ### Hardening and observability
 - add resource limits (`memory`, `cpus`, `pids_limit`) to the Compose services that still lack them; `protonmail-bridge` holds live Proton credentials in memory and is the highest-priority target — a `mem_limit` prevents a runaway or exploited process from exhausting host memory. (`indexer` already has `mem_limit: 6g` and `pids_limit: 128`. Empirical tuning history during a real backfill of a ~22k-message attachment-heavy mailbox: 1 GiB was too tight under normal indexing bursts; 2 GiB OOM-killed three times during initial backfill; 4 GiB OOM-killed once more on the same backfill; 6 GiB has been stable. Steady-state RSS is much lower; the right long-term fix is throttling the indexer's parallel embed dispatch — peak memory scales with concurrency, not mailbox size — at which point the cap can return to 2-3 GiB. The in-stack `ollama` container was removed by PR #86, so the prior note about Ollama lacking limits no longer applies.)
-- add `docs/troubleshooting.md` covering common failure patterns: embed/LLM service not ready (mlx-service/mlx-lm-server LaunchAgent down or HuggingFace cold-start in flight), cert extraction failure, sync stalled, schema migration
+- add `docs/troubleshooting.md` covering common failure patterns: embed/inference endpoint unreachable (operator-supplied provider down or cold-starting), cert extraction failure, sync stalled, schema migration
 - evaluate optional bearer-token auth for `mcp-server` as defense-in-depth on top of the localhost-only bind; today any local process that can reach `127.0.0.1:MCP_PORT` can query the index. This is a posture change, not a bug fix — weigh the operational complexity of a shared token against the threat model (malware on the host, misconfigured port forward) before implementing
 - emit a loud, one-shot `INFERENCE_MODE=anthropic` warning at `mcp-server` startup reminding the operator that retrieved email excerpts will be sent to the Anthropic-compatible inference provider; the external inference path is already opt-in but the warning would surface drift if someone flips the mode and forgets
 - migrate the Python type checker from `mypy` to `pyright` for both `indexer` and `mcp-server`; the user's global default for personal Python projects (`~/.claude/memory/tools/uv-python-stack.md`) is `pyright` and this project is the outlier. The trigger should be a real signal (mypy gets slow, mypy misses a bug, friction from context-switching against other projects), not a pre-emptive sweep — pyright is generally stricter at narrowing and will surface a multi-PR cleanup before CI is green again. When migrating, touch `pyproject.toml` (both services), `.pre-commit-config.yaml`, the `make typecheck*` targets, the relevant CI workflow, and the AGENTS.md typecheck guidance in one branch.
@@ -451,6 +424,42 @@ The functional surface — chunker, attachment extractors (PDF/DOCX/
 XLSX/HTML/TXT/image-OCR), per-occurrence + per-content-hash dedup,
 hybrid RRF retrieval with chunk lane, intelligence-tool chunk
 evidence, deletion reconciler, durable indexing queue — all stays.
+
+### 2026-05-08 — Remove host MLX provisioning from project
+
+The `mlx-service/` and `mlx-lm-server/` directories were deleted. The
+project no longer ships its own model-serving components. Operators
+now supply their own OpenAI-compatible embedder and choose between an
+Anthropic-compatible Messages API (default daily-driver) or any
+OpenAI-compatible chat-completions endpoint for inference. The
+reranker becomes opt-in (`RERANK_ENABLED=false`).
+
+Concretely:
+
+- Repo: `mlx-service/`, `mlx-lm-server/` removed, plus their CI
+  jobs, sync targets, bandit scans, and the dual-mac-runner test
+  workflow that existed only because the `mlx` Linux wheel doesn't
+  import.
+- Defaults: `INFERENCE_MODE=anthropic`, `RERANK_ENABLED=false`,
+  `EMBED_OPENAI_BASE_URL` / `EMBED_OPENAI_MODEL` /
+  `INFERENCE_OPENAI_BASE_URL` / `RERANK_BASE_URL` ship empty so
+  validate-env.sh fails closed unless the operator wires up a
+  provider. Anthropic mode is fully default-configured; openai mode
+  needs the URL/model knobs filled in.
+- Validation: validate-env.sh now mode-conditional — `INFERENCE_OPENAI_*`
+  required only when `INFERENCE_MODE=openai`, `RERANK_BASE_URL`
+  required only when `RERANK_ENABLED=true`, and `EMBED_OPENAI_*`
+  always required (the indexer can't run without an embedder).
+- Hardened overlay: warning rewritten — `internal: true` is intended
+  to block remote providers, and is compatible with operator-installed
+  host-side providers (subject to runtime `host.docker.internal`
+  behaviour under `internal: true`).
+- Docs: `docs/setup.md` no longer carries the LaunchAgent install
+  walkthroughs; instead one "Configure your embedder and inference
+  providers" section. README, AGENTS.md, docs/architecture.md all
+  reframed around operator-supplied providers.
+- No data-model or schema change. The indexer pipeline is unchanged
+  from PR #98; what's swapped is who owns the model-serving layer.
 
 ### 2026-05-08 — Indexer pipeline unification + unit-norm invariant (PRs #95-#100)
 

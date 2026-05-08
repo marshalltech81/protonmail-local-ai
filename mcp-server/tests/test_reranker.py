@@ -1,4 +1,4 @@
-"""Tests for src.lib.reranker — HTTP client for mlx-service /rerank.
+"""Tests for src.lib.reranker — HTTP client for an mlx-shaped /rerank service.
 
 Uses httpx.MockTransport to avoid any real network or service
 dependency. Failure paths are exercised explicitly because the rerank

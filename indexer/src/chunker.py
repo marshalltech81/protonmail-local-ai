@@ -42,10 +42,10 @@ from tokenizers import Tokenizer
 # size budgets reflect real BPE token counts instead of a
 # 4-chars-per-token heuristic that under-counted CJK / URL / Base64 /
 # code text by 4-6× and produced chunks past the embed model's
-# practical context window. Tokenizer is matched to the production
-# embedder (Qwen3-Embedding-8B served via mlx-service); the file is
-# vendored from the model's HuggingFace repo so the indexer never
-# performs a runtime download.
+# practical context window. Tokenizer is matched to Qwen3-Embedding-8B
+# (the schema-default embedding model); the file is vendored from the
+# model's HuggingFace repo so the indexer never performs a runtime
+# download.
 _TOKENIZER_PATH = Path(__file__).parent / "data" / "qwen3-embedding" / "tokenizer.json"
 
 # Paragraph: one or more non-blank lines separated from the next paragraph

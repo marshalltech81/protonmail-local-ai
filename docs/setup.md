@@ -38,15 +38,14 @@ permissions. Docker Compose requires all four files to exist before
 starting. You will overwrite them with real values only as needed:
 
 - `bridge_pass.txt` — after the Bridge login step below
-- `inference_openai_api_key.txt` — only if `INFERENCE_OPENAI_BASE_URL`
-  points at an authenticated OpenAI-compatible inference provider; leave
-  empty for the default local mlx-lm-server path
-- `inference_anthropic_api_key.txt` — only if you use
-  `INFERENCE_MODE=anthropic`; leave empty for the default
-  `INFERENCE_MODE=openai`
-- `embed_openai_api_key.txt` — only if `EMBED_OPENAI_BASE_URL` points at a
-  cloud embedder (DeepInfra, OpenRouter, etc.); leave empty for the
-  default local mlx-service path which does not authenticate
+- `inference_anthropic_api_key.txt` — required when `INFERENCE_MODE=anthropic`
+  (the default). Write your Anthropic-compatible provider key here.
+- `inference_openai_api_key.txt` — only when `INFERENCE_MODE=openai` and
+  `INFERENCE_OPENAI_BASE_URL` points at a provider that authenticates;
+  leave empty when pointing at an unauthenticated host server.
+- `embed_openai_api_key.txt` — only when `EMBED_OPENAI_BASE_URL` points
+  at a provider that authenticates (DeepInfra, OpenRouter, etc.); leave
+  empty when pointing at an unauthenticated host server.
 
 ### 3. Build all Docker images
 
@@ -122,27 +121,63 @@ docker compose run --rm protonmail-bridge \
   su -s /bin/bash bridge -c 'bridge-v3 info'
 ```
 
-### 5. Set up the host-side MLX servers
+### 5. Configure your embedder and inference providers
 
-Two LaunchAgents run on the host (not in Docker — MLX needs Metal
-access):
+This project does not ship its own model-serving components. You point
+the indexer + mcp-server at any OpenAI-compatible embedder and choose
+between an Anthropic-compatible Messages API or any OpenAI-compatible
+chat-completions endpoint for inference.
 
-- `mlx-service` on `127.0.0.1:8001` — embeddings (Qwen3-Embedding-8B)
-  and reranking (Qwen3-Reranker-4B). See
-  [`mlx-service/README.md`](../mlx-service/README.md).
-- `mlx-lm-server` on `127.0.0.1:8002` — local LLM for `INFERENCE_MODE=openai`
-  (default `mlx-community/Qwen3-32B-4bit`), OpenAI-compatible
-  `/v1/chat/completions`. See
-  [`mlx-lm-server/README.md`](../mlx-lm-server/README.md).
+**Embedder** — required, indexer cannot run without it.
 
-Containers reach both via OrbStack's `host.docker.internal`. Both load
-their models lazily on first request and stay resident — no
-pre-pull step.
+```bash
+# Edit .env:
+EMBED_OPENAI_BASE_URL=...     # OpenAI-compatible /v1 base URL
+EMBED_OPENAI_MODEL=...         # 4096-dim model (Qwen3-Embedding-8B variants)
+```
 
-Default models download into `~/.cache/huggingface/hub/` on first use
-(~12 GB for embedder + reranker, ~17 GB for the 32B LLM). On a host
-with less RAM headroom, point `INFERENCE_OPENAI_MODEL` at a smaller variant in
-`.env` (e.g. `mlx-community/Qwen3-14B-4bit` ~ 8 GB).
+The schema reserves a fixed 4096-dim vector — pick a model that
+produces 4096-dim vectors or run a schema migration. See "Pointing at
+a different embedder provider" below for examples (DeepInfra,
+OpenRouter, host-side servers like LM Studio / vLLM / `mlx_lm.server`).
+If the provider authenticates, write the key to
+`.secrets/embed_openai_api_key.txt` (`chmod 600`).
+
+**Inference** — choose one mode:
+
+```bash
+# Anthropic-compatible (default daily-driver)
+INFERENCE_MODE=anthropic
+INFERENCE_ANTHROPIC_BASE_URL=https://api.anthropic.com/v1
+INFERENCE_ANTHROPIC_MODEL=claude-sonnet-4-6
+# write the key to .secrets/inference_anthropic_api_key.txt
+
+# OpenAI-compatible (local or remote)
+INFERENCE_MODE=openai
+INFERENCE_OPENAI_BASE_URL=...   # any /v1 base URL
+INFERENCE_OPENAI_MODEL=...
+# .secrets/inference_openai_api_key.txt only if the endpoint authenticates
+```
+
+When pointing at a host-side server, bind it to `127.0.0.1` and use
+`http://host.docker.internal:<port>/v1` from the container's
+perspective. The project does not provision these servers — install
+them with the tool of your choice (LM Studio, vLLM, TEI,
+`mlx_lm.server`, etc.).
+
+**Reranker** — optional; off by default.
+
+```bash
+# Default (off):
+RERANK_ENABLED=false
+
+# Enable:
+RERANK_ENABLED=true
+RERANK_BASE_URL=...   # mlx-shaped /rerank service (operator-supplied)
+```
+
+The reranker uses an mlx-shaped wire format (no OpenAI rerank
+standard). When disabled, hybrid search returns RRF-only ranking.
 
 ### 6. Start the full stack
 
@@ -196,237 +231,15 @@ docker run --rm \
 Bridge writes sync progress into its structured log file in the `bridge-data`
 volume.
 
-## Required: mlx-lm-server (host process for the local LLM)
 
-`mlx-lm-server` runs upstream Apple's `mlx_lm.server` CLI as a
-LaunchAgent on `127.0.0.1:8002`. It serves the local LLM
-(`INFERENCE_MODE=openai`) over OpenAI-compatible
-`/v1/chat/completions`. Containers reach it via OrbStack's
-`host.docker.internal:8002`. The setup below is one-time; see
-[`mlx-lm-server/README.md`](../mlx-lm-server/README.md) for the
-authoritative install steps.
+### Reranker toggle
 
-### One-time host setup
-
-All commands below run from the repo root; the parenthesized
-subshells keep your cwd there so step 2 can find the install script
-on the relative path it expects.
-
-1. Install the project's pinned `mlx-lm` venv:
-
-   ```bash
-   (cd mlx-lm-server && uv sync)
-   ```
-
-2. Generate and install the LaunchAgent plist. The vendored template
-   carries `__REPO_ROOT__` / `__USER_HOME__` placeholders so it stays
-   portable; the install script substitutes them and writes the
-   result to `~/Library/LaunchAgents/`:
-
-   ```bash
-   ./mlx-lm-server/install-launchagent.sh
-   launchctl bootstrap "gui/$(id -u)" \
-     ~/Library/LaunchAgents/com.local.mlx-lm-server.plist
-   ```
-
-   Re-run the install script after `uv sync` rebuilds the venv so
-   the plist re-points at the regenerated binary path; then
-   `launchctl kickstart -k "gui/$(id -u)/com.local.mlx-lm-server"`.
-
-3. Verify the bind:
-
-   ```bash
-   lsof -iTCP:8002 -sTCP:LISTEN  # should show 127.0.0.1:8002
-   curl -s http://127.0.0.1:8002/v1/models | jq .
-   ```
-
-4. Verify reachability from a container:
-
-   ```bash
-   docker run --rm curlimages/curl:latest \
-     -fsS http://host.docker.internal:8002/v1/models
-   ```
-
-5. The first chat-completion call triggers a model download from
-   `mlx-community/Qwen3-32B-4bit` into
-   `~/.cache/huggingface/hub/`. Subsequent calls reuse the cache.
-
-### Day-to-day commands
-
-| Action | Command |
-|---|---|
-| Start the stack | `make up` |
-| Stop the stack | `make down` |
-| Tail logs | `make logs` |
-| Restart the LLM server | `launchctl kickstart -k "gui/$(id -u)/com.local.mlx-lm-server"` |
-| Tail LLM server log | `tail -f ~/Library/Logs/mlx-lm-server.log` |
-
-### Stopping the host LLM LaunchAgent
-
-The mlx-lm-server LaunchAgent runs independently of the Docker stack —
-`make down` only stops the containers. To free port 8002:
-
-```bash
-launchctl bootout "gui/$(id -u)/com.local.mlx-lm-server"
-lsof -iTCP:8002 -sTCP:LISTEN  # should now print nothing
-```
-
-### Threat model
-
-The 127.0.0.1-bound listener is reachable only from the host (and from
-OrbStack containers via `host.docker.internal`, which routes through
-the loopback exemption). LAN neighbors cannot reach it. Same-machine
-processes can call the API without authentication; on a single-user
-dev laptop this is the same trust boundary the rest of the stack
-operates in. The LLM has no access to the SQLite index or Maildir.
-
-## Required: mlx-service (host process for embeddings + reranking)
-
-The default retrieval stack runs the embedder (Qwen3-Embedding-8B) and
-reranker (Qwen3-Reranker-4B) natively on Apple Metal via a small
-FastAPI service in `mlx-service/`. The service is bare-metal — not in
-Docker — because MLX needs Metal access. Containers reach it through
-OrbStack's `host.docker.internal` shortcut.
-
-Set `RERANK_ENABLED=false` in `.env` to keep RRF-only ranking (the
-embedder path is required and has no toggle — the SQLite schema is
-sized for Qwen3-Embedding-8B's 4096-dim vectors and the indexer talks
-to `mlx-service` directly).
-
-### One-time host setup
-
-1. Install the project's Python deps for the service. The `mlx-service`
-   directory ships its own `pyproject.toml` so it stays isolated from
-   the indexer / mcp-server uv environments. Run from the repo root:
-
-   ```bash
-   (cd mlx-service && uv sync)
-   ```
-
-   First run downloads MLX itself and the model handles; the model
-   weights download lazily on the first `/v1/embeddings` and `/rerank`
-   request (~8 GB embedder + ~4 GB reranker into
-   `~/.cache/huggingface/hub/`).
-
-2. Smoke-test the service before installing the LaunchAgent:
-
-   ```bash
-   uv run uvicorn src.main:app --host 127.0.0.1 --port 8001
-   # in another shell:
-   curl http://127.0.0.1:8001/health
-   curl -X POST http://127.0.0.1:8001/v1/embeddings \
-        -H 'Content-Type: application/json' \
-        -d '{"model":"mlx-community/Qwen3-Embedding-8B-mxfp8","input":"hello"}' \
-        | head -c 80
-   ```
-
-   The first embed call may take ~4 min on a cold cache; subsequent
-   calls are sub-second.
-
-3. Install the LaunchAgent so the service starts at login and survives
-   reboots. The plist invokes the venv's `uvicorn` directly so it does
-   not depend on `uv` being on `launchd`'s PATH:
-
-   ```bash
-   cat > ~/Library/LaunchAgents/com.local.mlx-service.plist <<'PLIST'
-   <?xml version="1.0" encoding="UTF-8"?>
-   <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
-     "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-   <plist version="1.0">
-   <dict>
-       <key>Label</key>
-       <string>com.local.mlx-service</string>
-       <key>ProgramArguments</key>
-       <array>
-           <string>/ABSOLUTE/PATH/TO/mlx-service/.venv/bin/uvicorn</string>
-           <string>src.main:app</string>
-           <string>--host</string><string>127.0.0.1</string>
-           <string>--port</string><string>8001</string>
-           <string>--log-level</string><string>info</string>
-       </array>
-       <key>WorkingDirectory</key>
-       <string>/ABSOLUTE/PATH/TO/mlx-service</string>
-       <key>EnvironmentVariables</key>
-       <dict>
-           <key>PATH</key>
-           <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
-       </dict>
-       <key>RunAtLoad</key><true/>
-       <key>KeepAlive</key>
-       <dict>
-           <key>SuccessfulExit</key><false/>
-       </dict>
-       <key>StandardOutPath</key>
-       <string>/Users/YOU/Library/Logs/mlx-service.log</string>
-       <key>StandardErrorPath</key>
-       <string>/Users/YOU/Library/Logs/mlx-service.log</string>
-       <key>ProcessType</key><string>Interactive</string>
-   </dict>
-   </plist>
-   PLIST
-
-   launchctl bootstrap "gui/$(id -u)" \
-       ~/Library/LaunchAgents/com.local.mlx-service.plist
-   launchctl print "gui/$(id -u)/com.local.mlx-service" | head
-   ```
-
-   No firewall rule is needed: the service binds `127.0.0.1` only and
-   loopback bypasses the macOS Application Firewall. Same-machine
-   processes (including OrbStack containers via `host.docker.internal`)
-   can reach it without prompts.
-
-4. Verify container reachability after the first `make up`:
-
-   ```bash
-   docker run --rm --add-host=host.docker.internal:host-gateway \
-       curlimages/curl:latest \
-       -s http://host.docker.internal:8001/health
-   ```
-
-   Expected: `{"status":"ok",...}`.
-
-### Threat model (mlx-service)
-
-The service binds loopback only (`127.0.0.1:8001`) and serves no
-authentication on `/v1/embeddings`, `/v1/models`, `/embed` (legacy),
-`/rerank`, or `/health`. The `Authorization` header is accepted and
-ignored on the OpenAI-shaped endpoints so cloud-style clients don't
-need to special-case the local path. **Any local
-user-process — Docker containers via `host.docker.internal`, browser
-tabs reaching `127.0.0.1`, ad-hoc shells — can call any endpoint
-without credentials.** The trust boundary is identical to the
-mlx-lm-server LaunchAgent above: a single-user laptop where
-same-machine processes are assumed trusted.
-
-What the service holds: model weights in process memory and the
-HuggingFace cache on disk. What it does NOT hold: the SQLite index,
-Maildir, or Bridge credentials. A compromise of this process leaks
-the model weights (public anyway) and the contents of recent embed /
-rerank request bodies (the queries plus, for reranking, snippets of
-threads the operator just searched). It does not give the attacker
-access to mailbox data at rest.
-
-If the trust assumption changes (multi-user host, untrusted local
-processes), the right next step is a bearer-token check in the
-FastAPI app gated on a Docker secret — same posture the project
-notes for `mcp-server` itself.
-
-### Falling back
-
-To stop the LaunchAgent and free port 8001:
-
-```bash
-launchctl bootout "gui/$(id -u)/com.local.mlx-service"
-lsof -iTCP:8001 -sTCP:LISTEN  # should now print nothing
-```
-
-### Reranker rollback
-
-`RERANK_ENABLED=false` is a clean runtime toggle. The reranker is a
-post-RRF stage with no schema dependency, so flipping it off
-immediately returns to RRF-only ranking — useful as a fast diagnostic
-for "is the rerank stage hurting or helping" without disturbing
-indexing or embeddings.
+`RERANK_ENABLED` is a clean runtime toggle. The reranker is a
+post-RRF stage with no schema dependency, so flipping it on or off
+takes effect on the next request without touching indexing or
+embeddings. The default is `false`; to use it, stand up a compatible
+mlx-shaped `/rerank` service, set `RERANK_BASE_URL`, and flip
+`RERANK_ENABLED=true`.
 
 ### Pointing at a different embedder provider
 
@@ -435,7 +248,7 @@ OpenAI-compatible `/v1/embeddings` shape, so any compliant provider is
 a single env change away. Examples:
 
 ```bash
-# Local mlx-service (default)
+# Host-side server (LM Studio, vLLM, mlx_lm.server, TEI, etc.)
 EMBED_OPENAI_BASE_URL=http://host.docker.internal:8001/v1
 EMBED_OPENAI_MODEL=mlx-community/Qwen3-Embedding-8B-mxfp8
 
@@ -465,10 +278,10 @@ After changing provider:
    a full reindex (the existing 4096-dim index isn't comparable to the
    new model's 4096-dim space).
 
-Privacy note: cloud embedders ship every email body chunk to the
-provider at index time and every search query at retrieval time. The
-local mlx-service default is what makes "all retrieval stays local"
-hold; cloud is an opt-in that crosses that boundary deliberately.
+Privacy note: remote embedders ship every email body chunk to the
+provider at index time and every search query at retrieval time.
+Pointing at a host-side server keeps that traffic on your machine.
+Choose accordingly.
 
 The embedder has no enable/disable toggle equivalent to
 `RERANK_ENABLED`. The SQLite schema is sized for 4096-dim vectors and
@@ -731,28 +544,33 @@ If you want Docker's view of the current state:
 docker inspect mbsync --format='{{json .State.Health}}'
 ```
 
-### mlx-lm-server (host) is not reachable from containers
+### Embedder or inference endpoint unreachable from containers
 
-mcp-server reports a connection error against
-`host.docker.internal:8002`. Verify the host listener:
+The indexer or mcp-server reports a connection error against
+`EMBED_OPENAI_BASE_URL` / `INFERENCE_OPENAI_BASE_URL` /
+`INFERENCE_ANTHROPIC_BASE_URL`. The project does not run those
+servers, so the diagnostic depends on where you pointed it:
 
-```bash
-launchctl print "gui/$(id -u)/com.local.mlx-lm-server" | head    # LaunchAgent loaded
-lsof -iTCP:8002 -sTCP:LISTEN                                     # bound on 127.0.0.1:8002
-curl -s http://127.0.0.1:8002/v1/models | jq .                   # serving the loaded model
-```
+- Host-side server: confirm it is listening on the configured port
+  (`lsof -iTCP:<port> -sTCP:LISTEN`) and bound to `127.0.0.1`.
+  Containers reach `127.0.0.1` on the host as
+  `host.docker.internal:<port>` via OrbStack.
+- Remote provider: verify outbound networking from a container:
 
-If the LaunchAgent is missing, re-bootstrap from the plist in the
-"Required: mlx-lm-server" section above. After `uv sync` rebuilds
-the venv, run `launchctl kickstart -k "gui/$(id -u)/com.local.mlx-lm-server"`
-so it picks up the new binary path.
+  ```bash
+  docker run --rm curlimages/curl:latest -fsS https://example.com
+  ```
 
-### LLM model not loaded yet
+  If the hardened compose overlay is active (`internal: true` on
+  `app-net`), all remote provider calls are blocked by design.
 
-The first chat-completion call after a fresh install triggers a
-HuggingFace download (~17 GB for the default 32B model). Watch the
-progress in `~/Library/Logs/mlx-lm-server.log`. Subsequent calls
-reuse the cache and load in seconds.
+### Inference / embedder cold start
+
+The first call after a fresh install often triggers a model load on
+host-side servers (or a per-provider warmup on remote endpoints).
+`EMBED_WARMUP_TIMEOUT_SECS` (default 600) bounds how long the indexer
+waits before failing the first warmup POST. Watch the relevant
+provider's log for download / load progress.
 
 ### sqlite-vec fails with "wrong ELF class: ELFCLASS32" (ARM64 / Apple Silicon)
 
