@@ -33,10 +33,11 @@ Both load lazily on first request and stay resident.
   → `{"results": [{"index": int, "score": float}, ...]}` sorted desc by
   score. There is no OpenAI rerank standard, so this stays in the
   service's own namespace.
-- `POST /embed` — **deprecated.** Legacy Ollama-shaped endpoint kept
-  for one release as a transitional alias for `/v1/embeddings`.
-  Slated for removal in a follow-up PR once every consumer is on
-  `/v1/embeddings`.
+- `POST /embed` — **deprecated.** Legacy single-key endpoint
+  (`{"embedding": [...]}` for a single input, `{"embeddings": [...]}`
+  for a list) kept for one release as a transitional alias for
+  `/v1/embeddings`. Slated for removal in a follow-up PR once every
+  consumer is on `/v1/embeddings`.
 - `GET /health` — model load state + approximate process resident memory.
 
 ## Local run

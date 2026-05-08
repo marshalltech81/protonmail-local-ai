@@ -87,7 +87,6 @@ Claude Desktop (host machine)
 | `mlx-lm-server` (host process, not Docker) | LLM chat requests | `~/.cache/huggingface/` model cache | HTTP 8002 (loopback only); reached from Docker via `host.docker.internal`. OpenAI-compatible `/v1/chat/completions`. See `docs/setup.md` for the LaunchAgent install. |
 | `indexer` | `maildir-volume`, mlx-service | `sqlite-volume` | nothing |
 | `mcp-server` | `sqlite-volume`, mlx-service, mlx-lm-server (LLM) | nothing | HTTP 3000 (localhost only) |
-| `open-webui` (optional overlay) | mlx-lm-server, `mcp-server` | `open-webui-data` vol | HTTP 8080 (localhost only) |
 
 ## Docker Volumes
 
@@ -96,7 +95,6 @@ Claude Desktop (host machine)
 | `bridge-data` | Bridge credentials, GPG key, config | Yes — losing this requires re-login |
 | `maildir-volume` | Raw email in Maildir format | Optional — mbsync can re-sync |
 | `sqlite-volume` | SQLite index (FTS5 + vectors) | Optional — indexer can rebuild |
-| `open-webui-data` | Optional Open WebUI accounts, settings, and chats | Yes, if you want to preserve UI state |
 
 ## Networking
 
@@ -106,8 +104,6 @@ The stack uses two isolated bridge networks:
 - `app-net` for `indexer` ↔ `mcp-server`. Both reach the host MLX
   servers (`mlx-service` on `:8001`, `mlx-lm-server` on `:8002`) via
   `host.docker.internal`.
-- The optional Open WebUI overlay joins `app-net` and reaches the
-  same host mlx-lm-server via `host.docker.internal:8002`.
 
 For stricter local-only deployments, `docker-compose.hardened.yml` marks
 `app-net` as `internal: true` so those services cannot reach the internet.
@@ -123,8 +119,7 @@ For stricter local-only deployments, `docker-compose.hardened.yml` marks
 > MLX `/v1/embeddings` and `/rerank` calls. The compose file itself
 > carries the same warning. Do not apply it as-is.
 
-The default stack exposes only `127.0.0.1:3000` for the MCP server. The
-optional Open WebUI overlay also exposes `127.0.0.1:8080` for the browser UI.
+The default stack exposes only `127.0.0.1:3000` for the MCP server.
 No container is reachable from outside the machine.
 
 ### Host-side MLX servers (not containerized)
@@ -653,7 +648,7 @@ content regardless of `LLM_MODE`.
 | Client | What sees tool results |
 |---|---|
 | Claude Desktop | Anthropic (Claude runs in the cloud; tool results go back as conversation context) |
-| Local-LLM MCP client (e.g. Open WebUI backed by mlx-lm-server) | Stays on machine |
+| Local-LLM MCP client | Stays on machine |
 | Direct `docker exec` into mcp-server | Stays on machine |
 
 `LLM_MODE` and the MCP client choice are independent boundaries and must

@@ -445,8 +445,8 @@ def register_intelligence_tools(
     secret_values = [anthropic_key]
 
     async def llm_complete(system: str, user: str) -> str:
-        """Route to the local LLM (Ollama or MLX-LM, OpenAI-compatible)
-        or the Claude API based on ``llm_mode``."""
+        """Route to the local LLM (any OpenAI-compatible endpoint, default
+        ``mlx-lm-server``) or the Claude API based on ``llm_mode``."""
         if llm_mode == "cloud" and anthropic_key:
             return await _claude_complete(system, user, anthropic_key, claude_model)
         return await llm.complete(system, user)

@@ -376,7 +376,7 @@ def _split_by_sentence(span: _Span, source: str, max_tokens: int) -> list[_Span]
     # uses the embed model's tokenizer to slice at exact token
     # boundaries. Without that final layer, runaway non-whitespace
     # spans pass through and trigger ``input length exceeds the
-    # context length`` from Ollama at embed time.
+    # context length`` from the embedding service at embed time.
     final: list[_Span] = []
     for sub in sub_spans:
         if estimate_tokens(sub.text) <= max_tokens:

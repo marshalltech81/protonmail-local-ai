@@ -1737,7 +1737,7 @@ class Database:
         path that's known to be dead-lettered: blindly re-enqueuing
         every dead row on every container restart turns one failed
         payload into a recurring retry storm against the same
-        upstream (Ollama embed 500s on a poison-pill text), so the
+        upstream (embedding service 500s on a poison-pill text), so the
         initial scan should skip those rows. Genuinely-fresh events
         (watchdog ``IN_MOVED_TO`` / ``IN_CREATED``) still go through
         ``enqueue`` which intentionally resets prior state — those

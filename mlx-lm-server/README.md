@@ -21,8 +21,8 @@ resident.
 
 ## Endpoints
 
-OpenAI-compatible. The same shape Ollama exposes at `:11434/v1` and
-that the project's `LocalLLMClient.complete()` posts to:
+OpenAI-compatible. The shape that the project's
+`LocalLLMClient.complete()` posts to:
 
 - `POST /v1/chat/completions` — body `{"model": "...", "messages": [...]}` →
   `{"choices": [{"message": {"content": "..."}}]}`

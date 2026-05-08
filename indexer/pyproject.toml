@@ -82,7 +82,7 @@ source = ["src"]
 omit = [
     "tests/*",
     # main.py is the service entrypoint: argument parsing, logging setup,
-    # Ollama wait, watchdog registration. It is covered by docker-compose
+    # embedding service wait, watchdog registration. It is covered by docker-compose
     # integration rather than unit tests; excluding it keeps unit-test
     # coverage numbers honest.
     "src/main.py",

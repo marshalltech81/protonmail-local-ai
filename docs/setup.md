@@ -497,58 +497,6 @@ Restart Claude Desktop.
 In a new conversation, you should see the ProtonMail tools available.
 Test with: *"What is the status of my email index?"*
 
-### Optional: Run Open WebUI
-
-Open WebUI can provide a local browser UI backed by the host-side
-`mlx-lm-server`. It uses Open WebUI's OpenAI-compatible client
-pointed at the same `LLM_BASE_URL` as mcp-server.
-
-Open WebUI's native MCP integration uses Streamable HTTP, not SSE. To expose
-both transports from this server, set this in `.env`:
-
-```bash
-MCP_TRANSPORT=dual
-```
-
-The Open WebUI session key is a Docker Compose secret (not an env var, so it
-stays out of `docker inspect` metadata). `make open-webui-up` auto-generates
-`.secrets/open_webui_secret_key.txt` via `openssl rand -base64 32` on first
-run; to rotate it later, delete the file and re-run the target.
-
-Start the UI. Signup is **disabled by default** (Open WebUI grants admin to
-whoever signs up first; on a multi-user workstation a default-allow posture
-risks another local user racing you to admin). For the very first run, flip
-the switch on for the admin-creation pass:
-
-```bash
-OPEN_WEBUI_ENABLE_SIGNUP=true make open-webui-up
-```
-
-Open `http://localhost:8080`, create the first admin account, then add the
-MCP server in Open WebUI:
-
-- Type: `MCP (Streamable HTTP)`
-- Server URL: `http://mcp-server:3000/mcp`
-- Auth: `None`
-
-Open WebUI runs in Docker on the Compose network and reaches the host
-mlx-lm-server via OrbStack's `host.docker.internal`: use
-`http://host.docker.internal:8002/v1` (Open WebUI's OpenAI-compatible
-client) for the model backend and `http://mcp-server:3000/mcp` for
-the MCP server. Both defaults are set by
-`docker-compose.open-webui.yml` (override `LLM_BASE_URL` only if you
-want to point at a different OpenAI-compatible endpoint).
-
-After creating the admin account, restart the UI **without** the signup
-override so the default-deny posture is back in effect:
-
-```bash
-make open-webui-up
-```
-
-Keep Open WebUI bound to localhost and backed by the local LLM if
-your goal is fully local mail conversations.
-
 ## Troubleshooting
 
 ### Bridge won't start — "Failed to launch exit status 1"
@@ -940,20 +888,13 @@ forward. Leaving it permanently true disables pin enforcement.
 else, so the next boot after `make clean` is treated as a first boot
 and trust-on-first-use re-pins whatever cert Bridge presents.
 
-`make clean` also truncates `.secrets/bridge_pass.txt`,
-`.secrets/open_webui_secret_key.txt`, and
-`.secrets/open_webui_api_key.txt` because all three authenticate
-against state the volume wipe just deleted (Bridge's `vault.enc`,
-Open WebUI's session DB, and the per-install API token issued from
-Settings → Account → API Keys, respectively). After `make clean` you
-must re-run `make first-run` and paste the new Bridge password into
-`.secrets/bridge_pass.txt`; `.secrets/open_webui_secret_key.txt`
-auto-regenerates on the next `make open-webui-up`; if you use
-`scripts/eval_run.py`, generate a new Open WebUI API key once the new
-Open WebUI install is up and write it to
-`.secrets/open_webui_api_key.txt`. `.secrets/anthropic_api_key.txt`
-is intentionally preserved because it authenticates against an
-external service that survives container rebuilds.
+`make clean` also truncates `.secrets/bridge_pass.txt` because it
+authenticates against Bridge state that the volume wipe just deleted
+(`vault.enc`). After `make clean` you must re-run `make first-run`
+and paste the new Bridge password into `.secrets/bridge_pass.txt`.
+`.secrets/anthropic_api_key.txt` is intentionally preserved because
+it authenticates against an external service that survives container
+rebuilds.
 
 ### mbsync fails — TLS hostname mismatch after rebuilding Bridge image
 

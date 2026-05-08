@@ -294,8 +294,8 @@ class TestPackingAndSplitting:
         """Regression: ``_split_by_word`` cannot reduce a single
         non-whitespace span. CJK text typically has no spaces, so a
         long Chinese passage used to pass straight through to the
-        embedder as a single oversized chunk and trigger Ollama 500
-        ('input length exceeds the context length'). The
+        embedder as a single oversized chunk and trigger an embedding
+        service 500 ('input length exceeds the context length'). The
         ``_split_by_tokens`` fallback handles this by slicing at
         embed-tokenizer boundaries."""
         # ~5,000 real BPE tokens worth of Chinese with no Latin

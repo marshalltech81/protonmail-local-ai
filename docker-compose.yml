@@ -250,8 +250,8 @@ services:
       SQLITE_PATH: /data/mail.db
       # LLM_BASE_URL is the OpenAI-compatible chat-completions endpoint
       # served by the host-side ``mlx-lm-server`` LaunchAgent. Any
-      # OpenAI-compatible endpoint works (e.g. point at Ollama's
-      # ``:11434/v1`` if you'd rather run that) — see ``mlx-lm-server/``.
+      # OpenAI-compatible endpoint works (point at a different host /
+      # port to swap backends) — see ``mlx-lm-server/``.
       LLM_BASE_URL: ${LLM_BASE_URL:-http://host.docker.internal:8002/v1}
       LLM_MODEL: ${LLM_MODEL:-mlx-community/Qwen3-32B-4bit}
       LLM_MODE: ${LLM_MODE:-local}

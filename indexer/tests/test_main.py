@@ -8,7 +8,7 @@ do not exceed ``HEALTH_MAX_AGE_SECONDS``, and that the startup probe
 validates the running embedding model's output dimension against the
 schema-reserved vector dimension.
 
-``main`` orchestrates watchdog, Ollama, and filesystem I/O; these tests
+``main`` orchestrates watchdog, the embedding service, and filesystem I/O; these tests
 exercise it with stub collaborators rather than booting a live indexer.
 """
 
@@ -411,7 +411,7 @@ class TestInitialIndexDeadLetterRespect:
     """``initial_index`` must NOT re-enqueue dead-lettered files.
 
     The bug this guards against was observed in production: a file
-    that exhausted its retries (e.g. Ollama 500'd on a poison-pill
+    that exhausted its retries (e.g. embedding service 500'd on a poison-pill
     payload) would be re-enqueued on every container restart because
     the initial scan walks the Maildir, sees the file isn't in
     ``messages``, and clobbers the dead row via INSERT OR REPLACE.
@@ -480,9 +480,9 @@ class TestDrainQueueRetryAndDeadLetter:
         queue = _make_queue(db)
 
         embedder = make_mock_embedder()
-        # First embed call raises (Ollama transient); second call succeeds.
+        # First embed call raises (transient embedding service error); second call succeeds.
         embedder.embed.side_effect = [
-            RuntimeError("ollama unavailable"),
+            RuntimeError("embedding service unavailable"),
             [0.0] * EMBEDDING_DIM,
         ]
 
@@ -581,7 +581,7 @@ class TestDrainQueueRetryAndDeadLetter:
         queue = _make_queue(db)  # max_attempts=3
 
         embedder = make_mock_embedder()
-        embedder.embed.side_effect = RuntimeError("ollama still down")
+        embedder.embed.side_effect = RuntimeError("embedding service still down")
 
         queue.enqueue(str(dest), "test")
 
@@ -611,7 +611,7 @@ class TestDrainQueueRetryAndDeadLetter:
             (str(dest),),
         ).fetchone()
         assert row["last_stage"] == "embed"
-        assert "ollama still down" in row["last_error"]
+        assert "embedding service still down" in row["last_error"]
 
     def test_missing_file_routes_to_skip_not_retry(self, tmp_path):
         # Models the mbsync flag-rename race: file existed at enqueue
@@ -790,8 +790,8 @@ class TestIndexOneFileChunking:
     def test_replay_same_message_skips_re_embedding_existing_chunks(self, tmp_path):
         """Idempotency: chunking the same body twice must not re-embed
         chunks that are already stored. The diff path keys on
-        deterministic chunk_ids so a re-index burns zero extra Ollama
-        round-trips."""
+        deterministic chunk_ids so a re-index burns zero extra embedding
+        service round-trips."""
         db_path = tmp_path / "db" / "mail.db"
         db = Database(db_path)
         threader = Threader(db)
@@ -854,7 +854,7 @@ class TestIndexOneFileChunking:
         embedder = make_mock_embedder()
         embedder.embed.side_effect = [
             [0.1] * EMBEDDING_DIM,  # body chunk
-            RuntimeError("ollama attachment failure"),
+            RuntimeError("embedding service attachment failure"),
         ]
 
         import src.main as main_mod
@@ -872,7 +872,7 @@ class TestIndexOneFileChunking:
         # ``embed`` rather than ``db_write``.
         assert stage == "embed"
         assert err is not None
-        assert "ollama attachment failure" in err
+        assert "embedding service attachment failure" in err
         # Phase 1 commit is durable (thread membership + indexed_files);
         # Phase 2c never ran, so chunks / attachments / extractions
         # remain unwritten and the queue retry can replay cleanly.

@@ -10,8 +10,10 @@ Endpoints:
     GET  /v1/models      — minimal OpenAI ``/v1/models`` shim so OpenAI
                            clients that probe model availability do not
                            404 against this service.
-    POST /embed          — legacy Ollama-shaped endpoint. Kept as a
-                           deprecated alias during the OpenAI cutover;
+    POST /embed          — legacy single-key embedding endpoint
+                           (``{"embedding": [...]}`` for a single input,
+                           ``{"embeddings": [...]}`` for a list). Kept as
+                           a deprecated alias during the OpenAI cutover;
                            slated for removal in a follow-up PR once
                            every consumer is on /v1/embeddings.
     POST /rerank         — Qwen3-Reranker yes/no logit scoring over

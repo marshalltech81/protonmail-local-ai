@@ -73,7 +73,7 @@ def test_health_initial(client: TestClient) -> None:
     assert isinstance(body["process_resident_mb"], (int, float))
 
 
-def test_embed_single_string_matches_ollama_shape(client: TestClient) -> None:
+def test_embed_single_string_matches_legacy_shape(client: TestClient) -> None:
     r = client.post("/embed", json={"input": "hello"})
     assert r.status_code == 200
     body = r.json()

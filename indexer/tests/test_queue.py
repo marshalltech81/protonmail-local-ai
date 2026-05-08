@@ -73,7 +73,7 @@ class TestEnqueueClaim:
         q = _queue(db, max_attempts=5, base_backoff_seconds=3600)
         q.enqueue("/m/backoff", REASON_ON_CREATED)
         # First failure schedules a 1-hour backoff (base_backoff × 2^0).
-        q.mark_failed("/m/backoff", stage="embed", error="ollama down")
+        q.mark_failed("/m/backoff", stage="embed", error="embedding service down")
         row = db._conn.execute(
             "SELECT next_attempt_at FROM indexing_jobs WHERE filepath = '/m/backoff'"
         ).fetchone()
@@ -120,14 +120,14 @@ class TestMarkSucceededAndFailed:
     def test_mark_failed_increments_attempts_and_schedules_backoff(self, db: Database):
         q = _queue(db, max_attempts=5, base_backoff_seconds=60)
         q.enqueue("/m/fail", REASON_ON_CREATED)
-        q.mark_failed("/m/fail", stage="embed", error="ollama down")
+        q.mark_failed("/m/fail", stage="embed", error="embedding service down")
         row = db._conn.execute(
             "SELECT attempts, last_stage, last_error, status, next_attempt_at "
             "FROM indexing_jobs WHERE filepath = '/m/fail'"
         ).fetchone()
         assert row["attempts"] == 1
         assert row["last_stage"] == "embed"
-        assert row["last_error"] == "ollama down"
+        assert row["last_error"] == "embedding service down"
         assert row["status"] == STATUS_QUEUED
         # base_backoff_seconds × 2^0 = 60s
         expected = datetime.now(UTC) + timedelta(seconds=60)
@@ -163,7 +163,7 @@ class TestIsDead:
     Without this gate, every restart re-enqueues dead-lettered files
     via ``INSERT OR REPLACE``, resetting attempts to 0 and burning
     another full retry cascade on the same upstream condition that
-    caused the original dead-letter (e.g. Ollama embed 500s on a
+    caused the original dead-letter (e.g. embedding service 500s on a
     poison-pill payload). The reset semantics on ``enqueue`` are
     intentional for genuine watchdog rename / create events — those
     signal actual file change — but routine startup re-discovery
@@ -210,7 +210,7 @@ class TestMarkSkipped:
         # counter is irrelevant — there's no retry budget to spend.
         q = _queue(db, max_attempts=5, base_backoff_seconds=0)
         q.enqueue("/m/once", REASON_ON_CREATED)
-        q.mark_failed("/m/once", stage="embed", error="ollama")
+        q.mark_failed("/m/once", stage="embed", error="embedding service")
         row = db._conn.execute(
             "SELECT attempts FROM indexing_jobs WHERE filepath = '/m/once'"
         ).fetchone()
@@ -236,7 +236,7 @@ class TestReEnqueueResetsState:
         now — so the worker picks it up immediately."""
         q = _queue(db, max_attempts=5, base_backoff_seconds=3600)
         q.enqueue("/m/reset", REASON_ON_CREATED)
-        q.mark_failed("/m/reset", stage="embed", error="ollama")
+        q.mark_failed("/m/reset", stage="embed", error="embedding service")
         # After failure the row is backoff'd for an hour.
         assert q.claim_next() is None
 
@@ -306,7 +306,7 @@ class TestBackoffCap:
         q.enqueue("/m/sustained", REASON_ON_CREATED)
         # Hammer mark_failed so 2^attempts × base exceeds the cap.
         for _ in range(10):
-            q.mark_failed("/m/sustained", stage="embed", error="ollama")
+            q.mark_failed("/m/sustained", stage="embed", error="embedding service")
         row = db._conn.execute(
             "SELECT next_attempt_at FROM indexing_jobs WHERE filepath = '/m/sustained'"
         ).fetchone()

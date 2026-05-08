@@ -36,10 +36,10 @@ log = logging.getLogger("mcp-server")
 class _SilenceClientDisconnect(logging.Filter):
     """Drop benign ``ClientDisconnect`` noise from the MCP SDK's logs.
 
-    Open WebUI opens an MCP transport session via ``POST /mcp`` and sometimes
-    abandons it before sending the body — typically when the chat
-    coordinator decided to retry a different request shape, or the previous
-    call already returned what it needed. The MCP SDK catches the resulting
+    Streamable HTTP clients can open an MCP transport session via ``POST /mcp``
+    and sometimes abandon it before sending the body — typically when a client
+    retries a different request shape, or the previous call already returned
+    what it needed. The MCP SDK catches the resulting
     ``starlette.requests.ClientDisconnect`` cleanly and the connection ends
     without harm, but the SDK logs it at ERROR level on two loggers in two
     different shapes:
@@ -126,8 +126,8 @@ SQLITE_PATH = os.environ.get("SQLITE_PATH", "/data/mail.db")
 # Local-LLM endpoint, OpenAI-compatible (``/v1/chat/completions`` is
 # appended by ``LocalLLMClient.complete``). Default points at the
 # host-side ``mlx-lm-server`` LaunchAgent on port 8002. Any
-# OpenAI-compatible chat-completions server works (e.g. Ollama at
-# ``:11434/v1``) — the LLM client never branches on backend.
+# OpenAI-compatible chat-completions server works — the LLM client
+# never branches on backend.
 LLM_BASE_URL = os.environ.get("LLM_BASE_URL", "http://host.docker.internal:8002/v1")
 LLM_MODEL = os.environ.get("LLM_MODEL", "mlx-community/Qwen3-32B-4bit")
 LLM_MODE = os.environ.get("LLM_MODE", "local")
@@ -270,8 +270,8 @@ def main():
     # one of ``127.0.0.1``/``localhost``/``::1``; binding to ``0.0.0.0``
     # silently disables it. We re-enable Host/Origin allow-listing
     # explicitly so a malicious local browser page cannot DNS-rebind to
-    # this listener — relevant once the optional Open WebUI overlay
-    # shares the ``app-net`` network with the MCP server.
+    # this listener, even though the Docker port mapping keeps the
+    # host-facing endpoint loopback-only.
     transport_security = TransportSecuritySettings(
         enable_dns_rebinding_protection=True,
         allowed_hosts=[
