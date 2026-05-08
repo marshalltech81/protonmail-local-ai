@@ -327,6 +327,22 @@ persisted, unsupported types log at debug. What's still open:
 - extract Bridge container work into standalone repo after stabilization
 - improve operational observability and health reporting
 - decide whether `mcp-server` should eventually use live IMAP retrieval only as fallback once richer thread context is available locally
+- swap the raw-httpx OpenAI clients (`indexer/src/embedder.OpenAIEmbedder`,
+  `mcp-server/src/lib/local_llm.LocalLLMClient`) for the official `openai`
+  Python SDK (`OpenAI` / `AsyncOpenAI`). Triggers that justify the swap (do
+  NOT do it pre-emptively): (a) routing chat through a rate-limited cloud
+  provider where missing `Retry-After` and `x-ratelimit-reset-*`
+  honoring causes real backoff misbehavior; (b) adding token-by-token
+  streaming to the intelligence tools (requires MCP `mcp/progress`
+  plumbing too — SDK alone isn't enough); (c) enabling local-LLM
+  function-calling so Qwen3-32B can self-route between mcp-server
+  sub-tools (architecture change, not just transport). Preserve the
+  split-client pattern (one `(Async)OpenAI` instance per upstream:
+  embed / chat) — the auth-header leak Codex caught in PR #95 lives in
+  business logic, not the transport, and would re-emerge with a single
+  shared client. Cost: ~150 LOC across the two client classes plus a
+  test rewrite (current tests use `httpx.MockTransport`; SDK testing is
+  `respx`-style). Not worth it without one of the three triggers above.
 
 ### Search and intelligence expansion
 - add attachment-aware retrieval with provenance so results can cite message ID, attachment filename, and page/time range where applicable
