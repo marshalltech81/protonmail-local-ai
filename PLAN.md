@@ -33,10 +33,17 @@ The stack now runs:
 
 - **ProtonBridge** — Docker, headless, IMAP/SMTP on `bridge-net` only.
 - **mbsync** — Docker, pulls into Maildir, `chmod go+r` after each sync.
-- **indexer** — Docker, parses Maildir, threads, embeds via the MLX
-  service, writes SQLite. Schema is at v15 with 4096-dim vectors.
-  The Ollama embed-fallback path was removed in Phase C; embedding
-  is MLX-only.
+- **indexer** — Docker, parses Maildir, threads, embeds via any
+  OpenAI-compatible `/v1/embeddings` provider (default: host-side
+  mlx-service), writes SQLite. Schema is at v15 with 4096-dim
+  vectors. The Ollama embed-fallback path was removed in Phase C.
+  Initial-scan drainer uses a two-phase batched path (`Phase 1`
+  commits thread membership with placeholder vec per message; `Phase
+  2b` issues one batched embed_batch across the whole batch; `Phase
+  2c` commits chunks/vectors per message and replaces the placeholder
+  thread vector). This collapses ~25k single-message embed
+  round-trips into ~500 multi-message ones against a cloud embedder
+  at the default `INITIAL_INDEX_BATCH_SIZE=50`.
 - **mcp-server** — Docker, hybrid search + intelligence tools.
   `hybrid_search` calls the MLX reranker (`Qwen3-Reranker-4B-mxfp8`)
   after RRF. The LLM-synthesis step is dispatched by `LLM_MODE`:
