@@ -246,7 +246,7 @@ class TestHealthEndpoint:
     def _build_main_with_db_stub(self, db_stub, fake_server, monkeypatch):
         """Drive the relevant slice of ``main.main()`` against a stub DB.
 
-        The function does much more (Ollama clients, tool registration,
+        The function does much more (LLM clients, tool registration,
         ``server.run``); we only want the health route, so the test
         re-implements the registration step using the fake server.
         """

@@ -2,7 +2,7 @@
 Durable indexing queue backed by the ``indexing_jobs`` SQLite table.
 
 Before the indexing_jobs queue, the indexer processed files inline inside the
-watchdog callback: any crash mid-embed or Ollama outage left the file
+watchdog callback: any crash mid-embed or embedding service outage left the file
 unindexed with no durable record of the failure, and a parser bug on a
 single message was silently retried on every restart without ever
 giving up. The queue makes both cases observable and bounded:
@@ -10,7 +10,7 @@ giving up. The queue makes both cases observable and bounded:
 - Every discovered filepath (watchdog event, initial scan, future
   reconciler-driven reindex) is ``enqueue``d instead of processed
   inline. Enqueue is fast — a single SQLite write — so the watchdog
-  callback thread no longer blocks on an Ollama round-trip.
+  callback thread no longer blocks on an embedding service round-trip.
 - A worker loop in the main thread calls ``claim_next`` and runs the
   existing parse → thread → embed → upsert pipeline against the
   returned path. Success deletes the row (``mark_succeeded``); failure
@@ -234,7 +234,7 @@ class IndexingQueue:
         Without this skip, a container restart re-enqueues every
         previously-failed file, resets its retry counter to zero, and
         starts the 5-attempt backoff cascade over again — wasting
-        ~30 minutes of Ollama load per file with no change in
+        ~30 minutes of embedding service load per file with no change in
         upstream behavior. The watchdog rename / on-created events
         keep going through ``enqueue`` (and DO reset dead state)
         because those signal real change in the underlying file.

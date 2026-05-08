@@ -1,11 +1,11 @@
 """
 Tests for src/reconciler.py — tombstone detection, live on_moved handling,
 reap behavior (full-thread and rebuild paths), grace window, mass-delete
-brake, and Ollama-failure backoff.
+brake, and embedding-service-failure backoff.
 
 The reconciler is exercised end-to-end against a real SQLite database and
 real .eml files in tmp_path. Embedding is stubbed with FakeEmbedder so the
-tests do not require Ollama.
+tests do not require a live embedding service.
 """
 
 from __future__ import annotations

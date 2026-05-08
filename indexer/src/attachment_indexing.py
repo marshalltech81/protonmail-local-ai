@@ -9,8 +9,8 @@ Two-phase shape:
 * ``prepare_attachment_writes`` runs everything that must NOT happen
   inside a SQLite write transaction — extractor (OCR / pypdf / openpyxl)
   CPU work and the per-chunk ``embedder.embed`` HTTP roundtrips against
-  Ollama. It only reads the DB (cache lookups and existing chunk-id
-  diffing). The output is a fully-materialised ``AttachmentWritePlan``
+  the embedding service. It only reads the DB (cache lookups and existing
+  chunk-id diffing). The output is a fully-materialised ``AttachmentWritePlan``
   that the caller can hold in memory until it's ready to commit.
 
 * ``apply_attachment_writes`` performs only DB writes and is intended
@@ -21,8 +21,8 @@ Two-phase shape:
 * ``process_attachment`` is a thin convenience wrapper that runs both
   phases back-to-back. Tests and any caller that doesn't need the
   split go through this. The indexer pipeline does NOT use it because
-  conflating phases reintroduces the original bug where Ollama latency
-  blocks the SQLite write transaction.
+  conflating phases reintroduces the original bug where embedding service
+  latency blocks the SQLite write transaction.
 """
 
 from __future__ import annotations
