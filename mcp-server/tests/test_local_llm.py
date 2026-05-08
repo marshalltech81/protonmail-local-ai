@@ -13,7 +13,7 @@ import httpx
 import pytest
 from src.lib.local_llm import LocalLLMClient
 
-LLM_BASE = "http://llm:11434/v1"
+LLM_BASE = "http://llm:8002/v1"
 EMBED_BASE = "http://mlx:8001/v1"
 EMBED_MODEL = "mlx-community/Qwen3-Embedding-8B-mxfp8"
 
