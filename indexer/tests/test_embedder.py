@@ -284,28 +284,30 @@ class TestOpenAIEmbedder:
         assert calls["n"] == 2
 
     def test_wait_for_ready_fails_fast_on_unsupported_protocol(self):
-        """Sanity counterpart to the timeout-class test: a
-        deterministic non-transient error (here, a synthetic
-        ``ValueError`` standing in for any non-httpx config bug)
-        must propagate immediately rather than retry until the
-        connect deadline. ``_is_transient_embed_error`` returns
-        False for non-httpx exceptions, so the wrapping
-        ``except httpx.HTTPError`` doesn't even see it — it
-        surfaces directly to the caller, which is the right
-        behavior for operator-visible config issues.
+        """Counterpart to the timeout-class test: an
+        ``httpx.UnsupportedProtocol`` (raised when ``base_url`` lacks
+        a scheme — e.g. ``EMBED_BASE_URL=host.docker.internal:8001/v1``
+        instead of ``http://...``) must propagate immediately rather
+        than retry until the connect deadline. The earlier shape
+        retried every ``TransportError`` subclass, so a misconfigured
+        URL would silently retry for ``timeout`` seconds before the
+        operator saw the actionable error.
         """
         emb = OpenAIEmbedder("http://host.docker.internal:8001/v1", "test-model")
         calls = {"n": 0}
 
         def handler(_request: httpx.Request) -> httpx.Response:
             calls["n"] += 1
-            raise ValueError("synthetic config error")
+            raise httpx.UnsupportedProtocol("bad URL scheme")
 
         _install_mock(emb, handler)
         with patch("src.embedder.time.sleep", lambda _: None):
-            with pytest.raises(ValueError, match="synthetic config error"):
+            with pytest.raises(httpx.UnsupportedProtocol):
                 emb.wait_for_ready(timeout=30)
-        assert calls["n"] == 1, "non-transient errors must not retry"
+        assert calls["n"] == 1, (
+            "UnsupportedProtocol must NOT retry — it's a deterministic "
+            "config error and the operator needs the failure surfaced fast"
+        )
 
     def test_wait_for_ready_times_out_when_never_responds(self):
         emb = OpenAIEmbedder("http://host.docker.internal:8001/v1", "test-model")
@@ -493,3 +495,32 @@ class TestRetryPredicate:
 
     def test_pool_timeout_is_classified_as_transient(self):
         assert _is_transient_embed_error(httpx.PoolTimeout("pool exhausted"))
+
+    def test_unsupported_protocol_is_NOT_transient(self):
+        # ``base_url`` lacks scheme (e.g. ``host.docker.internal:8001``);
+        # a deterministic config error, not a transient outage.
+        # Retrying just delays the actionable failure.
+        assert not _is_transient_embed_error(httpx.UnsupportedProtocol("no scheme"))
+
+    def test_local_protocol_error_is_NOT_transient(self):
+        # Client built a malformed request (HTTP/2 framing bug, illegal
+        # header value); almost always a code or config issue.
+        assert not _is_transient_embed_error(httpx.LocalProtocolError("bad request"))
+
+    def test_unsupported_protocol_at_call_site_is_not_retried(self):
+        """End-to-end: ``embed_batch`` against an UnsupportedProtocol
+        must propagate after a single attempt. Regression guard for
+        the ``base_url`` typo case where the previous predicate
+        retried the whole TransportError family indiscriminately."""
+        emb = OpenAIEmbedder("http://host.docker.internal:8001/v1", "test-model")
+        calls = {"n": 0}
+
+        def handler(_request: httpx.Request) -> httpx.Response:
+            calls["n"] += 1
+            raise httpx.UnsupportedProtocol("bad URL scheme")
+
+        _install_mock(emb, handler)
+        with patch("src.embedder.wait_exponential", lambda **_: lambda *_: 0):
+            with pytest.raises(httpx.UnsupportedProtocol):
+                emb.embed_batch(["a"])
+        assert calls["n"] == 1, "UnsupportedProtocol must not retry at runtime either"

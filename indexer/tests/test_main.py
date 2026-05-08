@@ -375,9 +375,9 @@ class TestInitialIndexHeartbeat:
         # touch must fire.
         original_phase2a = main_mod._phase2a_collect_chunks
 
-        def slow_phase2a(state, db_arg, all_texts, threads_with_pending_chunks):
+        def slow_phase2a(state, db_arg, all_texts):
             marker_touches.append("phase2a:enter")
-            result = original_phase2a(state, db_arg, all_texts, threads_with_pending_chunks)
+            result = original_phase2a(state, db_arg, all_texts)
             marker_touches.append("phase2a:exit")
             return result
 
@@ -1365,6 +1365,90 @@ class TestBatchedInitialIndex:
         assert db.get_chunk_ids_for_message("ok2@example.com")
         # Victim never got chunks (Phase 2c rolled back its transaction)
         assert not db.get_chunk_ids_for_message("victim@example.com")
+
+    def test_same_thread_phase2c_failure_does_not_leave_sibling_with_zero_vec(
+        self, tmp_path, monkeypatch
+    ):
+        # Regression for the pending-vs-committed conflation: when
+        # message A (with body chunks) and message B (blank reply, same
+        # thread) arrive in the same batch and A's Phase 2c
+        # ``replace_message_chunks`` fails, B used to skip its subject
+        # fallback because Phase 2a saw "an earlier sibling already
+        # queued chunks for this thread". With A rolled back, the
+        # thread had NO committed chunks AND no fallback embed slot,
+        # so B's Phase 2c left ``threads_vec`` at the Phase 1 zero
+        # placeholder. B was marked succeeded.
+        #
+        # Fix: fallback gating is now on COMMITTED chunks only. B
+        # reserves a fallback slot regardless of A's pending chunks.
+        # Phase 2c's three-case priority chain still prefers
+        # mean(committed chunks) when A succeeds, so the extra slot
+        # is harmless on the happy path.
+        import struct
+
+        maildir, inbox, db, threader = self._setup(tmp_path)
+        _write_eml(
+            inbox / "a.eml",
+            "a@example.com",
+            subject="Project status",
+            from_addr="alice@example.com",
+            to_addr="bob@example.com",
+        )
+        # B is a blank-body reply on the same thread (chunkless).
+        eml_b = inbox / "b.eml"
+        eml_b.write_text(
+            "From: bob@example.com\r\n"
+            "To: alice@example.com\r\n"
+            "Subject: Re: Project status\r\n"
+            "Message-ID: <b@example.com>\r\n"
+            "In-Reply-To: <a@example.com>\r\n"
+            "Date: Mon, 01 Jan 2024 13:00:00 +0000\r\n"
+            "Content-Type: text/plain; charset=utf-8\r\n\r\n",
+            encoding="utf-8",
+        )
+
+        embedder = make_mock_embedder()
+        # Use a sentinel value so we can verify it landed via the
+        # subject-fallback path rather than a zero placeholder.
+        sentinel = [0.7] * EMBEDDING_DIM
+        embedder.embed.return_value = sentinel
+        embedder.embed_batch.return_value = [sentinel]
+        # Fall back to per-message embed call shape: when Phase 2b
+        # asks for N texts, return N copies of the sentinel.
+        embedder.embed_batch.side_effect = lambda texts: [list(sentinel) for _ in texts]
+        queue = _make_queue(db)
+
+        original = db.replace_message_chunks
+
+        def fail_for_a(*args, **kwargs):
+            if kwargs.get("message_id") == "a@example.com":
+                raise RuntimeError("simulated Phase 2c failure for A")
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(db, "replace_message_chunks", fail_for_a)
+        self._run(db, embedder, threader, queue, monkeypatch, maildir)
+
+        # A failed Phase 2c → marked failed, queue retains a row.
+        assert not db.get_chunk_ids_for_message("a@example.com"), (
+            "A's chunk write rolled back via per-message transaction"
+        )
+        # B is chunkless by construction, but its thread vector must
+        # NOT be the zero placeholder. The fix reserves a subject-
+        # fallback slot for B independently of A's pending state.
+        thread_id = db.find_thread_by_message_id("b@example.com")
+        assert thread_id is not None
+        row = db._conn.execute(
+            "SELECT embedding FROM threads_vec WHERE thread_id = ?", (thread_id,)
+        ).fetchone()
+        vec = list(struct.unpack(f"<{len(row['embedding']) // 4}f", row["embedding"]))
+        assert any(v != 0.0 for v in vec), (
+            "thread vector must not be the Phase 1 zero placeholder; "
+            "with A's chunks rolled back, B's subject fallback is the "
+            "only path that lifts the thread out of zero. The earlier "
+            "shape suppressed B's fallback because A had pending "
+            "chunks, leaving the thread permanently degraded after "
+            "A's Phase 2c rolled back."
+        )
 
 
 class TestSteadyStateBatchedDrain:

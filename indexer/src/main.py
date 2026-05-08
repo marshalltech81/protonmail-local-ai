@@ -763,7 +763,6 @@ def _phase2a_collect_chunks(
     state: _BatchedMsg,
     db: Database,
     all_texts: list[str],
-    threads_with_pending_chunks: set[str],
 ) -> tuple[bool, str | None]:
     """Phase 2a: chunk the body and attachments WITHOUT embedding.
 
@@ -774,13 +773,19 @@ def _phase2a_collect_chunks(
     so the caller can mark the queue row failed without aborting the
     rest of the batch.
 
-    ``threads_with_pending_chunks`` is the set of thread IDs that
-    earlier survivors in this batch already queued new chunks for.
-    A chunkless message on one of those threads can skip its own
-    subject fallback — the earlier sibling's chunks will overwrite
-    the seed in Phase 2c (case 1 wins over case 2). This avoids
-    wasting an embed-batch slot on a fallback that Phase 2c would
-    silently ignore.
+    Subject fallback gating depends ONLY on COMMITTED state — the
+    earlier-shape "skip fallback if an earlier batch sibling queued
+    chunks for the same thread" optimization conflated pending and
+    committed work: if that earlier sibling's Phase 2c then failed,
+    the chunkless successor would commit cleanly with no chunks, no
+    fallback, and a thread vector stuck at the Phase 1 zero
+    placeholder (operator-invisible retrieval-quality regression).
+    Reserving an extra embed-batch slot per chunkless sibling on a
+    chunk-bearing thread costs one BPE encode and one embed payload
+    entry — negligible compared to the bulk-embed savings, and the
+    correctness story is straightforward: fallback is reserved iff
+    the message has no new chunks AND the thread has no committed
+    chunks at the moment of the check.
     """
     msg = state.msg
     t0 = time.perf_counter()
@@ -843,20 +848,26 @@ def _phase2a_collect_chunks(
                 attach_new_chunks.append(plan_new)
                 attach_offsets.append(plan_offsets)
         # Subject-fallback path: when this message contributes zero new
-        # chunks AND the parent thread has no existing chunks AND no
-        # earlier batch sibling has queued chunks for the same thread,
-        # embed the subject (or a sentinel string) so the thread vector
-        # is not permanently stuck at the Phase 1 placeholder zero.
+        # chunks AND the parent thread has no committed chunks, embed
+        # the subject (or a sentinel string) so the thread vector is
+        # not permanently stuck at the Phase 1 placeholder zero.
         # Mirrors the old ``_seed_thread_embedding`` per-message
         # behavior. The fallback text rides through Phase 2b inside the
         # same batched embed call as everyone else's chunks.
+        #
+        # The check is on COMMITTED chunks only
+        # (``get_thread_chunk_embeddings``), not on pending in-batch
+        # chunks. An earlier batch sibling that queued chunks for the
+        # same thread but whose Phase 2c then fails would otherwise
+        # leave this chunkless successor committing cleanly with a
+        # zero thread vector — see the docstring rationale above.
+        # Reserving an extra fallback slot when an earlier sibling
+        # also produced chunks is harmless: Phase 2c's three-case
+        # priority chain prefers ``mean(committed chunks)`` over the
+        # fallback embedding, so the fallback only takes effect when
+        # nothing else committed.
         has_new_chunks = bool(new_body) or any(plan_new for plan_new in attach_new_chunks)
-        if has_new_chunks:
-            threads_with_pending_chunks.add(state.thread.thread_id)
-        elif (
-            state.thread.thread_id not in threads_with_pending_chunks
-            and not db.get_thread_chunk_embeddings(state.thread.thread_id)
-        ):
+        if not has_new_chunks and not db.get_thread_chunk_embeddings(state.thread.thread_id):
             fallback_text = state.thread.subject.strip() if state.thread.subject else ""
             if not fallback_text:
                 fallback_text = "(empty thread)"
@@ -1021,13 +1032,8 @@ def _drain_queue_batched(
         # entry — not just before/after the bulk embed.
         all_texts: list[str] = []
         survivors: list[_BatchedMsg] = []
-        # Track thread IDs that earlier survivors already queued new
-        # chunks for, so a chunkless sibling on the same thread later
-        # in the batch skips reserving a redundant subject-fallback
-        # slot in ``all_texts``.
-        threads_with_pending_chunks: set[str] = set()
         for entry in batch:
-            ok, err = _phase2a_collect_chunks(entry, db, all_texts, threads_with_pending_chunks)
+            ok, err = _phase2a_collect_chunks(entry, db, all_texts)
             if ok:
                 survivors.append(entry)
             else:

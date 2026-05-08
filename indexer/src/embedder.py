@@ -29,12 +29,11 @@ def _is_transient_embed_error(exc: BaseException) -> bool:
     Retry transport-level failures that a fresh attempt could plausibly
     fix:
 
-    * Any subclass of ``httpx.TransportError`` — covers ``TimeoutException``
+    * Most subclasses of ``httpx.TransportError`` — ``TimeoutException``
       (``ConnectTimeout`` / ``ReadTimeout`` / ``WriteTimeout`` /
       ``PoolTimeout``), ``NetworkError`` (``ConnectError`` / ``ReadError``
-      / ``WriteError`` / ``CloseError``), ``ProtocolError``
-      (``RemoteProtocolError`` / ``LocalProtocolError``), ``ProxyError``,
-      and ``UnsupportedProtocol``. The earlier explicit allowlist
+      / ``WriteError`` / ``CloseError``), ``RemoteProtocolError``,
+      and ``ProxyError``. The earlier explicit allowlist
       (``ConnectError``, ``ReadTimeout``, ``RemoteProtocolError``)
       missed ``ConnectTimeout`` / ``WriteTimeout`` / ``PoolTimeout``
       and made the call fail immediately on common transient
@@ -42,15 +41,25 @@ def _is_transient_embed_error(exc: BaseException) -> bool:
     * 5xx ``HTTPStatusError`` — the provider failed to serve a
       well-formed request and might recover.
 
-    Do NOT retry:
+    Do NOT retry — deterministic config errors that retrying only
+    delays:
 
-    * 4xx ``HTTPStatusError`` (auth, model id, quota, request shape) —
-      deterministic config issues; retrying just delays the visible
-      failure.
+    * ``httpx.UnsupportedProtocol`` — raised when ``base_url`` lacks
+      a scheme (e.g. ``host.docker.internal:8001/v1`` instead of
+      ``http://host.docker.internal:8001/v1``). A typo, not a
+      transient outage. Retrying buys nothing but startup-timeout
+      latency before the operator sees the actionable error.
+    * ``httpx.LocalProtocolError`` — raised when the client itself
+      builds a malformed request (HTTP/2 framing bug, illegal header
+      value). Almost always a code or config issue, not a network
+      issue.
+    * 4xx ``HTTPStatusError`` (auth, model id, quota, request shape).
     * Our own ``RuntimeError`` from index-integrity checks — the
       provider returned a malformed batch and a retry would produce
       the same shape.
     """
+    if isinstance(exc, (httpx.UnsupportedProtocol, httpx.LocalProtocolError)):
+        return False
     if isinstance(exc, httpx.TransportError):
         return True
     if isinstance(exc, httpx.HTTPStatusError):
