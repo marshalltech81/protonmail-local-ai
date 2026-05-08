@@ -89,7 +89,7 @@ def _dedupe_by_canonical(addrs: list[str]) -> list[str]:
 # the current version; existing installs run the migration runner to
 # catch up. See ``src/migrations/runner.py`` for the file layout and
 # transactional guarantees.
-SCHEMA_VERSION = 16
+SCHEMA_VERSION = 17
 
 # The schema uses FTS5 ``contentless_delete=1``, which SQLite added in 3.43.
 # Validate the runtime version at Database init and fail fast with a clear
@@ -981,6 +981,15 @@ class Database:
                         f"chunk embedding has {len(embedding)} dims but "
                         f"message_chunks_vec reserves {EMBEDDING_DIM}"
                     )
+                # Storage invariant — see ``upsert_thread``. Production
+                # writes flow through ``OpenAIEmbedder`` which already
+                # normalizes provider output, but the ``EmbeddingBackend``
+                # contract is a generic ``embed_batch`` call — a fake
+                # backend in a test or a future caller computing
+                # embeddings outside that path could pass non-unit
+                # vectors. Enforce here so ``message_chunks_vec`` shares
+                # the same end-to-end invariant as ``threads_vec``.
+                normalized = l2_normalize(embedding)
                 cur.execute(
                     "INSERT INTO message_chunks_fts (text) VALUES (?)",
                     (chunk.text,),
@@ -988,7 +997,7 @@ class Database:
                 fts_rowid = cur.lastrowid
                 cur.execute(
                     "INSERT INTO message_chunks_vec (chunk_id, embedding) VALUES (?, ?)",
-                    (chunk.chunk_id, sqlite_vec.serialize_float32(embedding)),
+                    (chunk.chunk_id, sqlite_vec.serialize_float32(normalized)),
                 )
                 cur.execute(
                     """

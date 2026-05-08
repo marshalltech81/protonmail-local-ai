@@ -257,12 +257,15 @@ class OpenAIEmbedder:
         data.sort(key=lambda d: d["index"])
         # Normalize raw provider output here so chunk vectors land
         # unit-normed regardless of provider. The DB write boundary
-        # in ``database.py`` also normalizes thread vectors at
-        # ``upsert_thread`` / ``replace_thread_vector`` /
-        # ``_rewrite_thread_row`` (because ``mean_vector`` of unit
-        # chunk vectors generally has norm < 1), so the storage
-        # invariant — every vector in ``threads_vec`` /
-        # ``message_chunks_vec`` is unit-norm — holds end-to-end.
-        # ``l2_normalize`` short-circuits already-unit-norm inputs,
-        # so this is a no-op against Qwen3-Embedding-8B.
+        # in ``database.py`` also normalizes at ``upsert_thread`` /
+        # ``replace_thread_vector`` / ``_rewrite_thread_row``
+        # (because ``mean_vector`` of unit chunk vectors generally
+        # has norm < 1) and at ``replace_message_chunks`` (because
+        # the ``EmbeddingBackend`` contract accepts arbitrary callers
+        # — fakes, future non-OpenAI backends — that may not
+        # normalize), so the storage invariant — every vector in
+        # ``threads_vec`` / ``message_chunks_vec`` is unit-norm —
+        # holds end-to-end. ``l2_normalize`` short-circuits
+        # already-unit-norm inputs, so this is a no-op against
+        # Qwen3-Embedding-8B.
         return [l2_normalize(d["embedding"]) for d in data]
