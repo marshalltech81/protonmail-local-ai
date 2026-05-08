@@ -41,6 +41,9 @@ help:
 # bridge_pass.txt — overwrite with real Bridge password after make first-run.
 # anthropic_api_key.txt — overwrite with your Claude API key for LLM_MODE=cloud,
 #                         or leave empty for local-only mode.
+# embed_api_key.txt    — overwrite with your provider key when EMBED_BASE_URL
+#                         points at a cloud embedder (DeepInfra, OpenRouter,
+#                         etc.); leave empty for the local mlx-service path.
 init-secrets:
 	@mkdir -p .secrets
 	@chmod 700 .secrets
@@ -57,6 +60,13 @@ init-secrets:
 		echo "  created .secrets/anthropic_api_key.txt (empty — fill in if LLM_MODE=cloud)"; \
 	else \
 		echo "  .secrets/anthropic_api_key.txt already exists, skipping"; \
+	fi
+	@if [ ! -f .secrets/embed_api_key.txt ]; then \
+		printf '' > .secrets/embed_api_key.txt; \
+		chmod 600 .secrets/embed_api_key.txt; \
+		echo "  created .secrets/embed_api_key.txt (empty — fill in only for cloud embedder)"; \
+	else \
+		echo "  .secrets/embed_api_key.txt already exists, skipping"; \
 	fi
 
 # Build all images from source
