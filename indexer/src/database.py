@@ -11,7 +11,7 @@ import os
 import sqlite3
 import threading
 import weakref
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from pathlib import Path
 
 import sqlite_vec
@@ -166,10 +166,11 @@ class Database:
         self._closed = True
 
     def __del__(self) -> None:
-        try:
+        # Best-effort cleanup during GC; never raise from a destructor
+        # (interpreter shutdown can leave referenced modules torn down,
+        # so any exception here would be unactionable noise).
+        with suppress(Exception):
             self.close()
-        except Exception:
-            pass
 
     def _begin_if_needed(self, cur: sqlite3.Cursor) -> bool:
         if self._transaction_depth > 0:
