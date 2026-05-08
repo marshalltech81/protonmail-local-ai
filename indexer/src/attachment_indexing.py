@@ -288,9 +288,15 @@ def prepare_attachment_writes(
     stored_ids = db.get_chunk_ids_for_message(message_id, attachment_id=attachment.content_hash)
     new_chunks = [c for c in chunks if c.chunk_id not in stored_ids]
     # Embedding happens HERE — outside any DB transaction the caller owns.
-    # A multi-page PDF with N new chunks runs N synchronous Ollama calls
-    # before the apply phase needs to grab the SQLite write lock.
-    embeddings_by_chunk_id = {chunk.chunk_id: embedder.embed(chunk.text) for chunk in new_chunks}
+    # A multi-page PDF with N new chunks issues a single batched embed
+    # call instead of N sequential round-trips. Critical against cloud
+    # embedders where per-call latency dominates; harmless against
+    # mlx-service on loopback.
+    if new_chunks:
+        vectors = embedder.embed_batch([c.text for c in new_chunks])
+        embeddings_by_chunk_id = {c.chunk_id: v for c, v in zip(new_chunks, vectors)}
+    else:
+        embeddings_by_chunk_id = {}
 
     return AttachmentWritePlan(
         attachment=attachment,

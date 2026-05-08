@@ -13,13 +13,14 @@ exercise it with stub collaborators rather than booting a live indexer.
 """
 
 from pathlib import Path
-from unittest.mock import MagicMock
 
 import pytest
 from src import main
 from src.database import EMBEDDING_DIM, Database
 from src.queue import REASON_INITIAL_SCAN, IndexingQueue
 from src.threader import Threader
+
+from tests.conftest import make_mock_embedder
 
 
 class _FakeEvent:
@@ -77,6 +78,50 @@ def _write_eml_with_text_attachment(path: Path, message_id: str) -> None:
     )
 
 
+class TestReadEmbedApiKey:
+    """Coverage for ``main._read_embed_api_key``.
+
+    The Docker secret path takes precedence over the env var; when the
+    secret file is unreadable the function falls back to env rather
+    than crashing the indexer at import time.
+    """
+
+    def test_returns_secret_file_contents_stripped(self, tmp_path, monkeypatch):
+        secret = tmp_path / "embed_api_key"
+        secret.write_text("  sk-abc123\n", encoding="utf-8")  # pragma: allowlist secret
+        monkeypatch.setattr(main, "Path", lambda _p: secret)
+        monkeypatch.delenv("EMBED_API_KEY", raising=False)
+        assert main._read_embed_api_key() == "sk-abc123"  # pragma: allowlist secret
+
+    def test_falls_back_to_env_when_secret_missing(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(main, "Path", lambda _p: tmp_path / "does-not-exist")
+        monkeypatch.setenv("EMBED_API_KEY", "  env-key  ")
+        assert main._read_embed_api_key() == "env-key"
+
+    def test_returns_empty_when_neither_source_set(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(main, "Path", lambda _p: tmp_path / "does-not-exist")
+        monkeypatch.delenv("EMBED_API_KEY", raising=False)
+        assert main._read_embed_api_key() == ""
+
+    def test_falls_back_to_env_on_oserror_reading_secret(self, monkeypatch, caplog):
+        # If the secret file exists but can't be read (perms regression
+        # in a future deploy), don't crash — log and fall through to
+        # env so the operator can recover by setting EMBED_API_KEY.
+
+        class _UnreadableSecretPath:
+            def exists(self) -> bool:
+                return True
+
+            def read_text(self, **_kwargs) -> str:
+                raise PermissionError("simulated perms regression")
+
+        monkeypatch.setattr(main, "Path", lambda _p: _UnreadableSecretPath())
+        monkeypatch.setenv("EMBED_API_KEY", "fallback-key")
+        with caplog.at_level("WARNING"):
+            assert main._read_embed_api_key() == "fallback-key"
+        assert "could not read" in caplog.text
+
+
 class TestOnMovedIndexesDestination:
     def test_rename_into_new_indexes_destination(self, tmp_path, monkeypatch):
         """Regression: Maildir delivery writes a file under ``tmp/`` then
@@ -94,7 +139,7 @@ class TestOnMovedIndexesDestination:
         dest = tmp_path / "INBOX" / "new" / "msg.eml"
         _write_eml(dest, "moved@example.com")
 
-        embedder = MagicMock()
+        embedder = make_mock_embedder()
         embedder.embed.return_value = [0.0] * EMBEDDING_DIM
 
         handler = main.MaildirHandler(db, queue)
@@ -135,7 +180,7 @@ class TestOnMovedIndexesDestination:
         dest = tmp_path / "INBOX" / "cur" / "msg.eml"
         _write_eml(dest, "flag_change@example.com")
 
-        embedder = MagicMock()
+        embedder = make_mock_embedder()
         embedder.embed.return_value = [0.0] * EMBEDDING_DIM
 
         handler = main.MaildirHandler(db, queue)
@@ -168,7 +213,7 @@ class TestOnMovedIndexesDestination:
         original_path = tmp_path / "INBOX" / "cur" / "1738500000.uniq.proton:2,S"
         _write_eml(original_path, "flag@example.com")
 
-        embedder = MagicMock()
+        embedder = make_mock_embedder()
         embedder.embed.return_value = [0.0] * EMBEDDING_DIM
 
         handler = main.MaildirHandler(db, queue)
@@ -209,7 +254,7 @@ class TestInitialIndexNestedFolders:
 
         db = Database(tmp_path / "mail.db")
         threader = Threader(db)
-        embedder = MagicMock()
+        embedder = make_mock_embedder()
         embedder.embed.return_value = [0.0] * EMBEDDING_DIM
 
         monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
@@ -228,7 +273,7 @@ class TestInitialIndexNestedFolders:
 
         db = Database(tmp_path / "mail.db")
         threader = Threader(db)
-        embedder = MagicMock()
+        embedder = make_mock_embedder()
         embedder.embed.return_value = [0.0] * EMBEDDING_DIM
         monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
 
@@ -259,7 +304,7 @@ class TestInitialIndexHeartbeat:
         db = Database(tmp_path / "mail.db")
         threader = Threader(db)
 
-        embedder = MagicMock()
+        embedder = make_mock_embedder()
         embedder.embed.return_value = [0.0] * EMBEDDING_DIM
 
         touches: list[None] = []
@@ -301,7 +346,7 @@ class TestInitialIndexDeadLetterRespect:
 
         db = Database(tmp_path / "mail.db")
         threader = Threader(db)
-        embedder = MagicMock()
+        embedder = make_mock_embedder()
         embedder.embed.return_value = [0.0] * EMBEDDING_DIM
         queue = IndexingQueue(db, max_attempts=1, base_backoff_seconds=0)
 
@@ -346,7 +391,7 @@ class TestDrainQueueRetryAndDeadLetter:
         threader = Threader(db)
         queue = _make_queue(db)
 
-        embedder = MagicMock()
+        embedder = make_mock_embedder()
         # First embed call raises (Ollama transient); second call succeeds.
         embedder.embed.side_effect = [
             RuntimeError("ollama unavailable"),
@@ -384,7 +429,7 @@ class TestDrainQueueRetryAndDeadLetter:
         threader = Threader(db)
         queue = _make_queue(db)  # max_attempts=3
 
-        embedder = MagicMock()
+        embedder = make_mock_embedder()
         embedder.embed.side_effect = RuntimeError("ollama still down")
 
         queue.enqueue(str(dest), "test")
@@ -417,7 +462,7 @@ class TestDrainQueueRetryAndDeadLetter:
 
         db = Database(tmp_path / "mail.db")
         threader = Threader(db)
-        embedder = MagicMock()
+        embedder = make_mock_embedder()
         embedder.embed.return_value = [0.0] * EMBEDDING_DIM
 
         ok, stage, err, _ = main._index_one_file(dest, db, embedder, threader)
@@ -435,7 +480,7 @@ class TestDrainQueueRetryAndDeadLetter:
         # would be 1 and status would be queued (with backoff).
         db = Database(tmp_path / "mail.db")
         threader = Threader(db)
-        embedder = MagicMock()
+        embedder = make_mock_embedder()
         embedder.embed.return_value = [0.0] * EMBEDDING_DIM
         queue = _make_queue(db)
 
@@ -466,7 +511,7 @@ class TestDrainQueueRetryAndDeadLetter:
 
         db = Database(tmp_path / "mail.db")
         threader = Threader(db)
-        embedder = MagicMock()
+        embedder = make_mock_embedder()
         embedder.embed.return_value = [0.0] * EMBEDDING_DIM
         try:
             ok, stage, err, _ = main._index_one_file(dest, db, embedder, threader)
@@ -481,7 +526,7 @@ class TestDrainQueueRetryAndDeadLetter:
 
 class TestValidateEmbeddingDim:
     def test_matching_dim_passes_silently(self):
-        embedder = MagicMock()
+        embedder = make_mock_embedder()
         embedder.embed.return_value = [0.0] * EMBEDDING_DIM
         main._validate_embedding_dim(embedder)
         embedder.embed.assert_called_once()
@@ -490,7 +535,7 @@ class TestValidateEmbeddingDim:
         """A 1024-dim model (e.g. mxbai-embed-large) against a 4096-reserved
         schema must fail fast at startup rather than surface later as a
         cryptic sqlite-vec insert error."""
-        embedder = MagicMock()
+        embedder = make_mock_embedder()
         embedder.embed.return_value = [0.0] * (EMBEDDING_DIM + 256)
         with pytest.raises(SystemExit) as exc_info:
             main._validate_embedding_dim(embedder)
@@ -535,7 +580,7 @@ class TestIndexOneFileChunking:
         # therefore equal that embedding regardless of how many chunks
         # the chunker emitted.
         chunk_vec = [0.42] * EMBEDDING_DIM
-        embedder = MagicMock()
+        embedder = make_mock_embedder()
         embedder.embed.return_value = chunk_vec
 
         # Patch MAILDIR_PATH so parse_email's relative-folder calculation
@@ -596,7 +641,7 @@ class TestIndexOneFileChunking:
             encoding="utf-8",
         )
 
-        embedder = MagicMock()
+        embedder = make_mock_embedder()
         embedder.embed.return_value = [0.1] * EMBEDDING_DIM
 
         import src.main as main_mod
@@ -634,7 +679,7 @@ class TestIndexOneFileChunking:
         dest = tmp_path / "INBOX" / "cur" / "msg.eml"
         _write_eml_with_text_attachment(dest, "attachment-retry@x")
 
-        embedder = MagicMock()
+        embedder = make_mock_embedder()
         embedder.embed.side_effect = [
             [0.1] * EMBEDDING_DIM,  # body chunk
             RuntimeError("ollama attachment failure"),

@@ -264,9 +264,15 @@ def _build_chunk_writes(
         )
         stored_ids = db.get_chunk_ids_for_message(msg.message_id)
         new_chunks = [c for c in chunks if c.chunk_id not in stored_ids]
-        embeddings_by_chunk_id = {
-            chunk.chunk_id: embedder.embed(chunk.text) for chunk in new_chunks
-        }
+        if new_chunks:
+            # One batched HTTP call per message instead of one call per
+            # chunk. Critical against cloud embedders where per-call
+            # latency dominates; meaningful but smaller win against
+            # mlx-service on loopback.
+            vectors = embedder.embed_batch([c.text for c in new_chunks])
+            embeddings_by_chunk_id = {c.chunk_id: v for c, v in zip(new_chunks, vectors)}
+        else:
+            embeddings_by_chunk_id = {}
         chunk_writes.append((msg, chunks, embeddings_by_chunk_id))
     return chunk_writes
 

@@ -23,7 +23,7 @@ from src.extractors import (
 )
 from src.parser import Attachment
 
-from tests.conftest import make_message, make_thread
+from tests.conftest import make_message, make_mock_embedder, make_thread
 
 
 def _attachment(
@@ -60,7 +60,7 @@ def test_successful_cached_extraction_is_reused(tmp_path, monkeypatch):
     extractor = MagicMock()
     monkeypatch.setattr(attachment_indexing, "extract_attachment", extractor)
 
-    embedder = MagicMock()
+    embedder = make_mock_embedder()
     embedder.embed.return_value = [0.1] * EMBEDDING_DIM
 
     summary = process_attachment(
@@ -108,7 +108,7 @@ def _run_process_with_cached_status(
     )
     extractor = MagicMock()
     monkeypatch.setattr(attachment_indexing, "extract_attachment", extractor)
-    embedder = MagicMock()
+    embedder = make_mock_embedder()
     embedder.embed.return_value = [0.2] * EMBEDDING_DIM
     summary = process_attachment(
         attachment=attachment,
@@ -196,7 +196,7 @@ def test_recent_failed_cached_extraction_is_honored(tmp_path, monkeypatch):
     extractor = MagicMock()
     monkeypatch.setattr(attachment_indexing, "extract_attachment", extractor)
 
-    embedder = MagicMock()
+    embedder = make_mock_embedder()
     embedder.embed.return_value = [0.2] * EMBEDDING_DIM
 
     summary = process_attachment(
@@ -260,7 +260,7 @@ def test_stale_failed_cached_extraction_is_retried(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(attachment_indexing, "extract_attachment", extractor)
 
-    embedder = MagicMock()
+    embedder = make_mock_embedder()
     embedder.embed.return_value = [0.2] * EMBEDDING_DIM
 
     summary = process_attachment(
@@ -316,7 +316,7 @@ def test_ocr_disabled_unsupported_is_re_run_when_ocr_re_enabled(tmp_path, monkey
     )
     monkeypatch.setattr(attachment_indexing, "extract_attachment", extractor)
 
-    embedder = MagicMock()
+    embedder = make_mock_embedder()
     embedder.embed.return_value = [0.2] * EMBEDDING_DIM
 
     summary = process_attachment(
@@ -368,7 +368,7 @@ def test_ocr_disabled_pdf_cache_is_re_run_when_ocr_re_enabled(tmp_path, monkeypa
     )
     monkeypatch.setattr(attachment_indexing, "extract_attachment", extractor)
 
-    embedder = MagicMock()
+    embedder = make_mock_embedder()
     embedder.embed.return_value = [0.2] * EMBEDDING_DIM
 
     summary = process_attachment(
@@ -439,7 +439,7 @@ class TestPrepareApplyBoundary:
 
         extractor = MagicMock()
         monkeypatch.setattr(attachment_indexing, "extract_attachment", extractor)
-        embedder = MagicMock()
+        embedder = make_mock_embedder()
         embedder.embed.return_value = [0.1] * EMBEDDING_DIM
 
         plan = prepare_attachment_writes(db=db, embedder=embedder, **_kwargs(attachment))
@@ -454,7 +454,7 @@ class TestPrepareApplyBoundary:
     def test_apply_does_no_extraction_or_embedding(self, tmp_path, monkeypatch):
         db = _setup_db_for_attachment(tmp_path)
         attachment = _attachment()
-        embedder = MagicMock()
+        embedder = make_mock_embedder()
         embedder.embed.return_value = [0.1] * EMBEDDING_DIM
         plan = prepare_attachment_writes(db=db, embedder=embedder, **_kwargs(attachment))
 
@@ -476,7 +476,7 @@ class TestMultiOccurrenceDeterminism:
         ``attachments`` rows so every forwarded copy can coexist."""
         db = _setup_db_for_attachment(tmp_path)
         attachment = _attachment()
-        embedder = MagicMock()
+        embedder = make_mock_embedder()
         embedder.embed.return_value = [0.1] * EMBEDDING_DIM
 
         plan_a = prepare_attachment_writes(
@@ -492,7 +492,7 @@ class TestMultiOccurrenceDeterminism:
         occurrence ID so the apply phase's upsert is idempotent."""
         db = _setup_db_for_attachment(tmp_path)
         attachment = _attachment()
-        embedder = MagicMock()
+        embedder = make_mock_embedder()
         embedder.embed.return_value = [0.1] * EMBEDDING_DIM
 
         plan_a = prepare_attachment_writes(
@@ -509,7 +509,7 @@ class TestMultiOccurrenceDeterminism:
         diff-write let the second run skip every existing chunk."""
         db = _setup_db_for_attachment(tmp_path)
         attachment = _attachment(payload=b"first paragraph.\n\nsecond paragraph.")
-        embedder = MagicMock()
+        embedder = make_mock_embedder()
         embedder.embed.return_value = [0.1] * EMBEDDING_DIM
 
         process_attachment(
@@ -552,7 +552,7 @@ class TestNonSuccessPlanPaths:
                 )
             ),
         )
-        embedder = MagicMock()
+        embedder = make_mock_embedder()
         embedder.embed.return_value = [0.1] * EMBEDDING_DIM
 
         summary = process_attachment(
@@ -582,7 +582,7 @@ class TestNonSuccessPlanPaths:
                 )
             ),
         )
-        embedder = MagicMock()
+        embedder = make_mock_embedder()
 
         summary = process_attachment(
             db=db,
@@ -607,7 +607,7 @@ class TestExtractedTextCap:
         db = _setup_db_for_attachment(tmp_path)
         long_payload = ("paragraph one. " * 1000).encode()
         attachment = _attachment(payload=long_payload)
-        embedder = MagicMock()
+        embedder = make_mock_embedder()
         embedder.embed.return_value = [0.1] * EMBEDDING_DIM
 
         process_attachment(
@@ -627,7 +627,7 @@ class TestExtractedTextCap:
         db = _setup_db_for_attachment(tmp_path)
         long_payload = ("paragraph one. " * 200).encode()
         attachment = _attachment(payload=long_payload)
-        embedder = MagicMock()
+        embedder = make_mock_embedder()
         embedder.embed.return_value = [0.1] * EMBEDDING_DIM
 
         process_attachment(

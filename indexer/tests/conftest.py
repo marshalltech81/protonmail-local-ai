@@ -4,11 +4,33 @@ Shared fixtures for indexer tests.
 
 from datetime import UTC, datetime
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 from src.database import Database
 from src.parser import Message
 from src.threader import Thread, Threader
+
+
+def make_mock_embedder(vector: list[float] | None = None) -> MagicMock:
+    """MagicMock that satisfies the EmbeddingBackend Protocol.
+
+    Production hot paths now call ``embed_batch(texts)`` instead of
+    ``embed(text)`` per chunk. A bare ``MagicMock()`` would auto-create
+    ``embed_batch`` as a child Mock that returns another Mock — which
+    iterates as length 0, silently producing empty embedding dicts and
+    unrelated downstream test failures.
+
+    This helper wires ``embed_batch`` to delegate to ``embed`` per input
+    so tests that set ``.embed.return_value`` or ``.embed.side_effect``
+    keep working unchanged. Tests that need to inspect batched calls
+    can override ``embed_batch.side_effect`` directly.
+    """
+    m = MagicMock()
+    if vector is not None:
+        m.embed.return_value = vector
+    m.embed_batch.side_effect = lambda texts: [m.embed(t) for t in texts]
+    return m
 
 
 def make_message(
