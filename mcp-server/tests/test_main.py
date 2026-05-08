@@ -339,8 +339,8 @@ class TestSilenceClientDisconnect:
         # The lowlevel.server logger path: bare error log with the
         # specific prefix, no exc_info attached. Without this branch
         # the filter only caught half the disconnect events and
-        # operators saw bursts of these records on every Open WebUI
-        # session churn.
+        # operators saw bursts of these records during Streamable
+        # HTTP client session churn.
         from src.main import _SilenceClientDisconnect
 
         record = self._record(

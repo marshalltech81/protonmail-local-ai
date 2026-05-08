@@ -36,10 +36,10 @@ log = logging.getLogger("mcp-server")
 class _SilenceClientDisconnect(logging.Filter):
     """Drop benign ``ClientDisconnect`` noise from the MCP SDK's logs.
 
-    Open WebUI opens an MCP transport session via ``POST /mcp`` and sometimes
-    abandons it before sending the body — typically when the chat
-    coordinator decided to retry a different request shape, or the previous
-    call already returned what it needed. The MCP SDK catches the resulting
+    Streamable HTTP clients can open an MCP transport session via ``POST /mcp``
+    and sometimes abandon it before sending the body — typically when a client
+    retries a different request shape, or the previous call already returned
+    what it needed. The MCP SDK catches the resulting
     ``starlette.requests.ClientDisconnect`` cleanly and the connection ends
     without harm, but the SDK logs it at ERROR level on two loggers in two
     different shapes:
@@ -270,8 +270,8 @@ def main():
     # one of ``127.0.0.1``/``localhost``/``::1``; binding to ``0.0.0.0``
     # silently disables it. We re-enable Host/Origin allow-listing
     # explicitly so a malicious local browser page cannot DNS-rebind to
-    # this listener — relevant once the optional Open WebUI overlay
-    # shares the ``app-net`` network with the MCP server.
+    # this listener, even though the Docker port mapping keeps the
+    # host-facing endpoint loopback-only.
     transport_security = TransportSecuritySettings(
         enable_dns_rebinding_protection=True,
         allowed_hosts=[

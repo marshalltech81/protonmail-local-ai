@@ -184,15 +184,9 @@ If you want end-to-end local conversations:
 
 - Drive the MCP intelligence tools directly via `docker exec mcp-server
   python -c "..."`. Less ergonomic; nothing leaves your laptop.
-- Or use a different MCP client backed by a local LLM. For Open WebUI, set
-  `MCP_TRANSPORT=dual` and run `make open-webui-up` (the target auto-generates
-  the session-key secret on first run; for the very first launch, prepend
-  `OPEN_WEBUI_ENABLE_SIGNUP=true` to create the admin account — see
-  `docs/setup.md` for the full first-run flow including MCP server
-  registration). Open WebUI reaches the host-side mlx-lm-server via
-  `host.docker.internal:8002/v1` (OpenAI-compatible) for chat, and uses
-  `http://mcp-server:3000/mcp` as a Streamable HTTP MCP server. Quality
-  varies.
+- Or use another MCP client backed by a local LLM. Keep the client bound to
+  localhost and point it at the MCP server transport it supports (`/sse` by
+  default, or `/mcp` when `MCP_TRANSPORT=streamable-http` or `dual`).
 
 Most users accept the Claude-Desktop-as-frontend tradeoff because the
 alternative is much less useful, but it is a real tradeoff and it is not

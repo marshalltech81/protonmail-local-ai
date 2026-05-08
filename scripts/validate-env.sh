@@ -128,7 +128,6 @@ MCP_PORT="$(get_env_value MCP_PORT)"
 MCP_TRANSPORT="$(get_env_value MCP_TRANSPORT)"
 MCP_READ_ONLY="$(get_env_value MCP_READ_ONLY)"
 LLM_MODE="$(get_env_value LLM_MODE)"
-OPEN_WEBUI_PORT="$(get_env_value OPEN_WEBUI_PORT)"
 
 [[ -n "$BRIDGE_USER" && "$BRIDGE_USER" != "your@proton.me" ]] || {
     echo "ERROR: BRIDGE_USER in .env must be set to the Bridge username from 'bridge --cli info'." >&2
@@ -189,14 +188,6 @@ require_mode_600 "$BRIDGE_PASS_FILE"
 if [[ "$LLM_MODE" == "cloud" ]]; then
     require_nonempty_file "$ANTHROPIC_KEY_FILE" "Anthropic API key secret"
     require_mode_600 "$ANTHROPIC_KEY_FILE"
-fi
-
-if [[ -n "$OPEN_WEBUI_PORT" ]]; then
-    require_integer "OPEN_WEBUI_PORT" "$OPEN_WEBUI_PORT"
-    [[ "$OPEN_WEBUI_PORT" -ge 1 && "$OPEN_WEBUI_PORT" -le 65535 ]] || {
-        echo "ERROR: OPEN_WEBUI_PORT must be between 1 and 65535." >&2
-        exit 1
-    }
 fi
 
 printf 'Environment validation passed.\n'
