@@ -1130,11 +1130,25 @@ def _recover_zero_vector_threads(
 
     * **Dead-lettered rows** — left alone. To rescue a dead-lettered
       file, an operator confirms the underlying cause is fixed and
-      either re-enqueues manually (e.g. ``DELETE FROM indexing_jobs
-      WHERE filepath=...; <touch the Maildir file>``) or calls this
-      function with ``resurrect_dead=True``. The opt-in flag stays
-      on the API for that future operator tool, but no production
-      call site uses it.
+      either:
+
+      - deletes the dead row directly (``DELETE FROM indexing_jobs
+        WHERE filepath = '...';``), after which the next periodic
+        recovery sweep — or the next ``initial_index`` at restart
+        — sees the file as a no-row zero-vector candidate and
+        re-enqueues it via the ``no queue row`` branch above; or
+      - calls this function with ``resurrect_dead=True`` from a
+        one-off rescue tool, which clears the dead status via
+        ``enqueue``'s ``INSERT OR REPLACE`` in one step.
+
+      Note: simply touching the Maildir file does NOT re-enqueue
+      it. The watchdog handles ``on_created`` and ``on_moved``
+      events but not ``on_modified``, and ``initial_index``
+      consults ``queue.is_dead`` and skips dead-lettered paths
+      regardless of file activity.
+
+      The ``resurrect_dead=True`` flag stays on the API for that
+      operator tool; no production call site uses it.
 
     Skips files that already have a 'queued' row (active retry
     cascade in flight; clobbering its row would reset the attempts
@@ -1160,18 +1174,34 @@ def _recover_zero_vector_threads(
         re_enqueued += 1
 
     if re_enqueued or skipped_pending or skipped_dead:
+        # Log shape: split the "what happened" facts from the
+        # "what's next" implication so the implication only applies
+        # to the rows that will actually move. The previous wording
+        # ("Their next drain pass should complete the indexing")
+        # incorrectly suggested skipped-dead rows would also drain;
+        # they will not until an operator intervenes.
         log.warning(
-            "recovery sweep: re-enqueued %d message(s) on threads with "
-            "zero-vector + no chunks (Phase 1 committed but Phase 2 "
-            "did not — likely a crash mid-batch or a Phase 2 dead-letter); "
-            "skipped %d already in active retry, %d dead-lettered "
-            "(resurrect_dead=%s). Their next drain pass should complete "
-            "the indexing.",
+            "recovery sweep: re-enqueued %d zero-vector chunkless "
+            "message(s); skipped %d already in active retry; skipped %d "
+            "dead-lettered (resurrect_dead=%s).",
             re_enqueued,
             skipped_pending,
             skipped_dead,
             resurrect_dead,
         )
+        if re_enqueued:
+            log.info(
+                "recovery sweep: %d re-enqueued file(s) will be processed on the next drain pass.",
+                re_enqueued,
+            )
+        if skipped_dead and not resurrect_dead:
+            log.warning(
+                "recovery sweep: %d dead-lettered file(s) remain parked. "
+                "They will NOT be drained automatically — see "
+                "_recover_zero_vector_threads docstring for the operator "
+                "rescue paths.",
+                skipped_dead,
+            )
     return re_enqueued
 
 

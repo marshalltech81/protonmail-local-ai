@@ -476,31 +476,48 @@ fetches a snapshot of N distinct due rows in one query so the gather
 phase cannot re-claim the same row repeatedly while Phase 2c is
 deferred.
 
-### Recovery sweep for crashed-mid-batch threads
+### Recovery sweep for chunkless zero-vector threads
 
-A startup recovery sweep
-(`_recover_zero_vector_threads`) runs at the head of every
-`initial_index` call to catch the one failure mode the queue retry
-path can't fix on its own:
+A recovery sweep (`_recover_zero_vector_threads`) runs at the head
+of every `initial_index` call AND periodically from the main loop
+on `INDEXER_RECOVERY_SWEEP_INTERVAL_SECS` (default 30 min). It
+catches the failure modes the queue retry path can't fix on its own
+without breaking the durable queue's bounded-retry contract:
 
 - **Symptom**: Phase 1 commits (thread + `message_thread_map` +
   `indexed_files` rows) landed, but Phase 2c never wrote chunks.
   `is_indexed` returns True so the standard Maildir walk skips the
   file. The thread carries the placeholder zero `threads_vec` row.
-- **Causes**: a hard crash (SIGKILL, OOM, power loss) between
-  Phase 1 and Phase 2c on a thread that had no prior chunks; or a
-  Phase 2 retry cascade that exhausted `max_attempts` and
-  dead-lettered the file.
 - **Detection**: `Database.find_zero_vector_chunkless_thread_filepaths`
   finds threads with no `message_chunks` rows and an all-zero
   `threads_vec` blob, then maps them back to filepaths via
   `message_thread_map`.
-- **Repair**: each stuck filepath is re-enqueued with reason
-  `recovery`. Files that already have a `queued` row (active retry
-  cascade) are skipped to avoid clobbering attempts mid-cascade;
-  dead-lettered or no-row files get a fresh attempt budget via
-  `enqueue`'s `INSERT OR REPLACE`. The next drain pass completes
-  Phase 2 for them.
+- **Repair policy** — uniform across the startup and periodic
+  paths, both calling `_recover_zero_vector_threads(...,
+  resurrect_dead=False)` (the default). What each queue state
+  triggers:
+  - **No queue row** (the row was cleaned up out-of-band; rare): the
+    file is re-enqueued with reason `recovery` and the next drain
+    pass completes Phase 2.
+  - **`queued` row** (the durable retry cascade is in flight):
+    skipped, because clobbering the row would reset `attempts`
+    mid-cascade. The queue itself owns the recovery and the next
+    drain claims the row once `next_attempt_at` is due. This is
+    also the genuine crash-mid-batch case: a process killed
+    between Phase 1 and `mark_failed`/`mark_succeeded` leaves the
+    row at `queued` with the worker's pre-claim attempts count.
+  - **`dead` row** (deterministic Phase 2 failure exhausted
+    `max_attempts`): skipped — left alone as an operator-visible
+    terminal state. Auto-resurrecting would burn embedder load
+    against the same poison-pill payload on every container
+    restart and contradict `initial_index`'s own `is_dead` skip.
+    To rescue a dead-lettered file, an operator confirms the
+    underlying cause is fixed and either deletes the row
+    explicitly (`DELETE FROM indexing_jobs WHERE filepath=...;`,
+    after which the next recovery pass sees the no-row state and
+    re-enqueues) or invokes the opt-in API
+    `_recover_zero_vector_threads(..., resurrect_dead=True)` from
+    a one-off rescue tool.
 
 Healthy chunkless threads (e.g., subject-fallback threads from
 blank-body messages) are not touched — the DB query filters out
