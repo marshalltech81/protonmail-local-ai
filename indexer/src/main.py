@@ -38,6 +38,7 @@ from .queue import (
     REASON_INITIAL_SCAN,
     REASON_ON_CREATED,
     REASON_ON_MOVED,
+    REASON_RECOVERY,
     IndexingQueue,
 )
 from .queue import load_config_from_env as load_queue_config_from_env
@@ -1029,6 +1030,59 @@ def _drain_queue_batched(
     return processed
 
 
+def _recover_zero_vector_threads(db: Database, queue: IndexingQueue) -> int:
+    """Re-enqueue messages stuck on chunkless zero-vector threads.
+
+    The batched indexer's Phase 1 commits thread membership +
+    ``indexed_files`` durably before Phase 2 runs. If the indexer is
+    killed (SIGKILL, OOM, power loss) between Phase 1 and Phase 2c on
+    a thread that had no prior chunks, or if the Phase 2 retry
+    cascade exhausts ``max_attempts`` and dead-letters the file, the
+    thread is left text-indexed but vectorless — and ``is_indexed``
+    returns True so the normal ``initial_index`` walk won't
+    re-enqueue it. This sweep finds those files and gives them a
+    fresh attempt budget so the next drain pass can complete the
+    indexing.
+
+    Skips files that already have a 'queued' row — the normal retry
+    cascade is in flight and clobbering its row would reset the
+    attempts counter mid-cascade. Re-enqueue covers the
+    no-row case (Phase 1 succeeded but the queue row was somehow
+    cleaned up) and the dead-letter case (``enqueue``'s
+    ``INSERT OR REPLACE`` clears the dead row and resets attempts).
+
+    Healthy chunkless subject-fallback threads (non-zero
+    ``threads_vec``) are NOT touched — the DB query filters them out.
+
+    Returns the number of files re-enqueued for visibility in
+    startup logs.
+    """
+    candidates = db.find_zero_vector_chunkless_thread_filepaths()
+    if not candidates:
+        return 0
+
+    re_enqueued = 0
+    skipped_pending = 0
+    for filepath in candidates:
+        if queue.has_pending_row(filepath):
+            skipped_pending += 1
+            continue
+        queue.enqueue(filepath, REASON_RECOVERY)
+        re_enqueued += 1
+
+    if re_enqueued or skipped_pending:
+        log.warning(
+            "recovery sweep: re-enqueued %d message(s) on threads with "
+            "zero-vector + no chunks (Phase 1 committed but Phase 2 "
+            "did not — likely a crash mid-batch or a Phase 2 dead-letter); "
+            "skipped %d already in active retry. Their next drain pass "
+            "should complete the indexing.",
+            re_enqueued,
+            skipped_pending,
+        )
+    return re_enqueued
+
+
 def initial_index(
     db: Database,
     embedder: EmbeddingBackend,
@@ -1078,6 +1132,13 @@ def initial_index(
         enqueued,
         skipped_dead,
     )
+
+    # Recovery sweep — re-enqueue messages stuck on chunkless zero-vector
+    # threads from a prior crash mid-batch or Phase 2 dead-letter. The
+    # standard walk above misses these because is_indexed=True. Run BEFORE
+    # the drain so recovery rows ride the same batched-index pass as fresh
+    # enqueues.
+    _recover_zero_vector_threads(db, queue)
 
     timing_aggregator = TimingAggregator(window=200)
     log.info(

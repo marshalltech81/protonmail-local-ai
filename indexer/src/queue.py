@@ -59,6 +59,7 @@ STATUS_DEAD = "dead"
 REASON_ON_CREATED = "on_created"
 REASON_ON_MOVED = "on_moved"
 REASON_INITIAL_SCAN = "initial_scan"
+REASON_RECOVERY = "recovery"
 
 DEFAULT_MAX_ATTEMPTS = 5
 DEFAULT_BASE_BACKOFF_SECONDS = 30
@@ -239,6 +240,18 @@ class IndexingQueue:
         because those signal real change in the underlying file.
         """
         return self.db.queue_get_status(filepath) == STATUS_DEAD
+
+    def has_pending_row(self, filepath: str) -> bool:
+        """True when ``filepath`` has a row in 'queued' state.
+
+        ``mark_failed`` keeps a row at status=``queued`` with a
+        future ``next_attempt_at`` (the retry cascade is in-band
+        with the queue, not a separate state), so 'queued' covers
+        both fresh enqueues and the active retry tail. Used by the
+        recovery sweep to avoid clobbering a row that the normal
+        retry path is already handling.
+        """
+        return self.db.queue_get_status(filepath) == STATUS_QUEUED
 
     def stats(self) -> dict[str, int]:
         """Return ``{'queued': n, 'dead': n}`` — surfaced through the

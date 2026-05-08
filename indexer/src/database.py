@@ -1219,6 +1219,88 @@ class Database:
         return list(struct.unpack(f"{count}f", blob))
 
     @_synchronized
+    def find_zero_vector_chunkless_thread_filepaths(self) -> list[str]:
+        """Return Maildir filepaths of messages stuck on a chunkless,
+        zero-vector thread.
+
+        Symptom: thread + ``message_thread_map`` + ``indexed_files``
+        rows committed (so ``is_indexed`` returns True; the normal
+        ``initial_index`` walk won't re-enqueue them), but
+        ``message_chunks`` is empty for the thread AND
+        ``threads_vec`` carries the all-zero placeholder. The cause
+        is one of:
+
+          1. A hard crash (SIGKILL, OOM, power loss) between the
+             batched indexer's Phase 1 and Phase 2c, on a thread
+             that had no prior chunk vectors. Phase 1's Phase 1
+             commits durably landed but Phase 2c never ran. Queue
+             state on restart depends on whether the queue row was
+             already mark_failed'd before the crash; in either case
+             the file is text-indexed but vectorless.
+          2. A Phase 2 retry cascade that exhausted ``max_attempts``
+             and dead-lettered the file. Phase 1's commits remain
+             but ``claim_batch`` no longer returns a 'dead' row.
+
+        Used by the indexer's startup recovery sweep
+        (``_recover_zero_vector_threads``) to re-enqueue these
+        files so the next drain pass can complete the indexing.
+
+        Excludes chunkless threads with a non-zero ``threads_vec``
+        row — those are healthy subject-fallback threads from
+        blank-body messages and must not be re-indexed.
+        """
+        import struct
+
+        # Step 1: chunkless threads (typically a small set vs. the
+        # full thread table on a healthy mailbox).
+        chunkless_rows = self._conn.execute(
+            """
+            SELECT t.thread_id
+            FROM threads t
+            WHERE NOT EXISTS (
+                SELECT 1 FROM message_chunks c WHERE c.thread_id = t.thread_id
+            )
+            """
+        ).fetchall()
+        if not chunkless_rows:
+            return []
+
+        # Step 2: filter to threads whose ``threads_vec`` row is
+        # all-zero. vec0 doesn't support equality predicates so the
+        # comparison runs in Python over a typically-small set.
+        stuck_thread_ids: list[str] = []
+        for row in chunkless_rows:
+            tid = row["thread_id"]
+            vec_row = self._conn.execute(
+                "SELECT embedding FROM threads_vec WHERE thread_id = ?",
+                (tid,),
+            ).fetchone()
+            if vec_row is None:
+                continue
+            blob = vec_row["embedding"]
+            count = len(blob) // 4
+            vec = struct.unpack(f"{count}f", blob)
+            if all(v == 0.0 for v in vec):
+                stuck_thread_ids.append(tid)
+
+        if not stuck_thread_ids:
+            return []
+
+        # Step 3: gather the Maildir filepaths for messages on stuck
+        # threads. ``message_thread_map.filepath`` is the same value
+        # the queue uses, so re-enqueueing routes through the same
+        # parse → thread → embed → commit pipeline as a fresh scan.
+        placeholders = ",".join("?" * len(stuck_thread_ids))
+        rows = self._conn.execute(
+            f"""
+            SELECT filepath FROM message_thread_map
+            WHERE thread_id IN ({placeholders})
+            """,  # nosec B608  -- placeholders are int-count ?-tokens
+            stuck_thread_ids,
+        ).fetchall()
+        return [r["filepath"] for r in rows]
+
+    @_synchronized
     def get_thread_chunk_embeddings(self, thread_id: str) -> list[list[float]]:
         """Return every chunk embedding stored for ``thread_id``.
 

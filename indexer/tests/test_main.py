@@ -1152,6 +1152,138 @@ class TestBatchedInitialIndex:
             "sanity: stored vector must not be the zero placeholder"
         )
 
+    def test_recovery_sweep_re_enqueues_stuck_zero_vector_threads(self, tmp_path, monkeypatch):
+        # End-to-end recovery: simulate a crash mid-batch (Phase 1
+        # commits land but Phase 2 never runs) by running a first
+        # initial_index pass with a failing embedder. Verify the
+        # message is left text-indexed but vectorless. Then run a
+        # second pass with a working embedder — the recovery sweep
+        # must find the stuck thread, re-enqueue the message, and
+        # the drain must complete the indexing.
+        import struct
+
+        maildir, inbox, db, threader = self._setup(tmp_path)
+        _write_eml(inbox / "m.eml", "m@example.com", subject="Quarterly review")
+
+        # First pass: embedder fails. Phase 1 commits, Phase 2 fails,
+        # message dead-lettered after retries. Thread is now stuck.
+        embedder_fail = make_mock_embedder()
+        embedder_fail.embed_batch.side_effect = RuntimeError("simulated outage")
+        queue = _make_queue(db)
+        monkeypatch.setattr("src.embedder.wait_exponential", lambda **_: lambda *_: 0)
+        self._run(db, embedder_fail, threader, queue, monkeypatch, maildir)
+
+        # Confirm the stuck state precisely: indexed_files row exists,
+        # threads_vec is zero, message has no chunks, queue row is
+        # dead.
+        thread_id = db.find_thread_by_message_id("m@example.com")
+        assert thread_id is not None
+        assert db.is_indexed(str(inbox / "m.eml"))
+        assert not db.get_chunk_ids_for_message("m@example.com")
+        row = db._conn.execute(
+            "SELECT embedding FROM threads_vec WHERE thread_id = ?", (thread_id,)
+        ).fetchone()
+        raw = row["embedding"]
+        stuck_vec = list(struct.unpack(f"<{len(raw) // 4}f", raw))
+        assert all(v == 0.0 for v in stuck_vec), "first pass should leave zero vector"
+        assert queue.is_dead(str(inbox / "m.eml")), "first pass should dead-letter the file"
+
+        # Second pass: working embedder. The recovery sweep should
+        # detect the stuck thread, re-enqueue the file (clearing the
+        # dead-letter row), and the drain should complete the
+        # indexing — non-zero vector, chunks present, queue empty.
+        sentinel = [0.5] * EMBEDDING_DIM
+        embedder_ok = make_mock_embedder()
+        embedder_ok.embed.return_value = sentinel
+        # _make_queue gives a fresh attempts budget; recovery
+        # re-enqueue resets attempts via INSERT OR REPLACE.
+        self._run(db, embedder_ok, threader, queue, monkeypatch, maildir)
+
+        # After recovery: non-zero vec + chunks committed.
+        row_after = db._conn.execute(
+            "SELECT embedding FROM threads_vec WHERE thread_id = ?", (thread_id,)
+        ).fetchone()
+        raw_after = row_after["embedding"]
+        vec_after = list(struct.unpack(f"<{len(raw_after) // 4}f", raw_after))
+        assert any(v != 0.0 for v in vec_after), (
+            "recovery sweep + drain should populate the thread vector"
+        )
+        assert db.get_chunk_ids_for_message("m@example.com"), (
+            "recovery should produce committed chunk rows"
+        )
+        # Queue cleaned: no row remains for the recovered file.
+        assert queue.stats() == {"queued": 0, "dead": 0}
+
+    def test_recovery_sweep_skips_chunkless_subject_fallback_threads(self, tmp_path, monkeypatch):
+        # Healthy chunkless threads (blank-body messages whose vector
+        # came from Phase 2c's subject fallback) have no chunks but a
+        # NON-ZERO threads_vec row. They must NOT be re-enqueued —
+        # they're already correctly indexed.
+        maildir, inbox, db, threader = self._setup(tmp_path)
+        # Blank body → subject fallback path. Chunkless but non-zero
+        # vector after a successful pass.
+        eml = inbox / "blank.eml"
+        eml.write_text(
+            "From: alice@example.com\r\n"
+            "To: bob@example.com\r\n"
+            "Subject: Quarterly review\r\n"
+            "Message-ID: <blank@example.com>\r\n"
+            "Date: Mon, 01 Jan 2024 12:00:00 +0000\r\n"
+            "Content-Type: text/plain; charset=utf-8\r\n"
+            "\r\n",
+            encoding="utf-8",
+        )
+        embedder = make_mock_embedder()
+        embedder.embed.return_value = [0.5] * EMBEDDING_DIM
+        queue = _make_queue(db)
+        self._run(db, embedder, threader, queue, monkeypatch, maildir)
+
+        # Sanity: chunkless but non-zero vector, queue empty.
+        thread_id = db.find_thread_by_message_id("blank@example.com")
+        assert thread_id is not None
+        assert not db.get_chunk_ids_for_message("blank@example.com")
+        assert queue.stats() == {"queued": 0, "dead": 0}
+
+        # Recovery sweep should be a no-op — the DB query filters out
+        # non-zero-vec chunkless threads.
+        recovered = main._recover_zero_vector_threads(db, queue)
+        assert recovered == 0
+        assert queue.stats() == {"queued": 0, "dead": 0}
+
+    def test_recovery_sweep_skips_files_with_active_queued_row(self, tmp_path, monkeypatch):
+        # If the file is already in 'queued' state (active retry
+        # cascade), the recovery sweep must NOT clobber its row —
+        # that would reset attempts mid-cascade and could let a
+        # genuinely-broken file loop forever.
+        maildir, inbox, db, threader = self._setup(tmp_path)
+        _write_eml(inbox / "m.eml", "m@example.com")
+
+        # Manually create the stuck state: Phase 1 commits + zero vec
+        # + no chunks + an ACTIVE queued row. (Mimic Phase 2 failing
+        # but not yet exhausting retries.)
+        from src.threader import Threader as _Threader
+
+        threader_local = _Threader(db)
+        from src.parser import parse_email
+
+        msg = parse_email(inbox / "m.eml", maildir_root=maildir)
+        thread = threader_local.assign_thread(msg)
+        db.upsert_thread(thread, [0.0] * EMBEDDING_DIM)  # zero seed
+
+        queue = _make_queue(db)
+        # Insert an active 'queued' row mimicking a retry attempt
+        # mid-cascade: enqueue resets attempts to 0 by design.
+        queue.enqueue(str(inbox / "m.eml"), reason="initial_scan")
+        assert queue.has_pending_row(str(inbox / "m.eml"))
+        attempts_before = db.queue_get_attempts(str(inbox / "m.eml"))
+
+        recovered = main._recover_zero_vector_threads(db, queue)
+        # Active row → skipped, NOT re-enqueued.
+        assert recovered == 0
+        # Row still queued, attempts unchanged.
+        assert queue.has_pending_row(str(inbox / "m.eml"))
+        assert db.queue_get_attempts(str(inbox / "m.eml")) == attempts_before
+
     def test_phase2c_commit_failure_isolates_to_one_message(self, tmp_path, monkeypatch):
         # If replace_message_chunks fails for one message in the
         # batch, that message is marked failed but the others succeed.

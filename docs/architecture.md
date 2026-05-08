@@ -474,6 +474,36 @@ fetches a snapshot of N distinct due rows in one query so the gather
 phase cannot re-claim the same row repeatedly while Phase 2c is
 deferred.
 
+### Recovery sweep for crashed-mid-batch threads
+
+A startup recovery sweep
+(`_recover_zero_vector_threads`) runs at the head of every
+`initial_index` call to catch the one failure mode the queue retry
+path can't fix on its own:
+
+- **Symptom**: Phase 1 commits (thread + `message_thread_map` +
+  `indexed_files` rows) landed, but Phase 2c never wrote chunks.
+  `is_indexed` returns True so the standard Maildir walk skips the
+  file. The thread carries the placeholder zero `threads_vec` row.
+- **Causes**: a hard crash (SIGKILL, OOM, power loss) between
+  Phase 1 and Phase 2c on a thread that had no prior chunks; or a
+  Phase 2 retry cascade that exhausted `max_attempts` and
+  dead-lettered the file.
+- **Detection**: `Database.find_zero_vector_chunkless_thread_filepaths`
+  finds threads with no `message_chunks` rows and an all-zero
+  `threads_vec` blob, then maps them back to filepaths via
+  `message_thread_map`.
+- **Repair**: each stuck filepath is re-enqueued with reason
+  `recovery`. Files that already have a `queued` row (active retry
+  cascade) are skipped to avoid clobbering attempts mid-cascade;
+  dead-lettered or no-row files get a fresh attempt budget via
+  `enqueue`'s `INSERT OR REPLACE`. The next drain pass completes
+  Phase 2 for them.
+
+Healthy chunkless threads (e.g., subject-fallback threads from
+blank-body messages) are not touched — the DB query filters out
+non-zero `threads_vec` rows.
+
 Each job carries `attempts`, `last_stage`, `last_error`, and a
 `next_attempt_at` scheduled via exponential backoff
 (`base_backoff_seconds × 2^(attempts - 1)`, capped at 6 hours). When
