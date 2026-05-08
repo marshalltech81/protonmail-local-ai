@@ -211,7 +211,7 @@ def prepare_attachment_writes(
     attachment: Attachment,
     message_id: str,
     db: Database,
-    embedder: EmbeddingBackend,
+    embedder: EmbeddingBackend | None,
     chunk_target_tokens: int,
     chunk_max_tokens: int,
     chunk_overlap_tokens: int,
@@ -226,9 +226,17 @@ def prepare_attachment_writes(
     """Compute everything needed to write one attachment occurrence.
 
     Reads the extraction cache, runs the extractor when needed, then
-    chunks and embeds. Pure read + CPU + outbound HTTP — no DB writes.
-    Safe to call before opening the indexer's outer transaction; the
-    apply phase will commit the DB writes inside that transaction.
+    chunks and (optionally) embeds. Pure read + CPU + outbound HTTP —
+    no DB writes. Safe to call before opening the indexer's outer
+    transaction; the apply phase will commit the DB writes inside that
+    transaction.
+
+    Pass ``embedder=None`` to defer the embed step entirely — the
+    returned plan's ``embeddings_by_chunk_id`` is empty and the caller
+    is responsible for populating it before calling
+    ``apply_attachment_writes``. This is what the cross-message batched
+    indexer does so a single ``embed_batch`` call can cover chunks
+    from many messages in one HTTP round-trip.
 
     The function does not raise for benign extraction outcomes
     (``unsupported``, ``empty``, ``too_large``) — those land on the plan
@@ -291,8 +299,10 @@ def prepare_attachment_writes(
     # A multi-page PDF with N new chunks issues a single batched embed
     # call instead of N sequential round-trips. Critical against cloud
     # embedders where per-call latency dominates; harmless against
-    # mlx-service on loopback.
-    if new_chunks:
+    # mlx-service on loopback. ``embedder=None`` defers this step so
+    # the cross-message batched indexer can pack chunks from many
+    # messages into a single embed_batch call upstream.
+    if embedder is not None and new_chunks:
         vectors = embedder.embed_batch([c.text for c in new_chunks])
         embeddings_by_chunk_id = {c.chunk_id: v for c, v in zip(new_chunks, vectors)}
     else:

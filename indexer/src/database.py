@@ -1474,6 +1474,28 @@ class Database:
             (status, now_iso),
         ).fetchone()
 
+    def queue_fetch_due_batch(self, status: str, now_iso: str, limit: int) -> list[sqlite3.Row]:
+        """Return up to ``limit`` due ``status`` rows ordered by oldest-due first.
+
+        Like ``queue_claim_next`` but in one SELECT, so the batched
+        indexer's gather phase can pick up N distinct rows without
+        repeatedly calling ``claim_next`` (which has no in-flight
+        tracking and would return the same row N times until the caller
+        marks it).
+        """
+        return self._conn.execute(
+            """
+            SELECT filepath, reason, status, attempts,
+                   last_error, last_stage,
+                   created_at, updated_at, next_attempt_at
+            FROM indexing_jobs
+            WHERE status = ? AND next_attempt_at <= ?
+            ORDER BY next_attempt_at ASC
+            LIMIT ?
+            """,
+            (status, now_iso, limit),
+        ).fetchall()
+
     @_synchronized
     def queue_delete(self, filepath: str) -> None:
         self._conn.execute("DELETE FROM indexing_jobs WHERE filepath = ?", (filepath,))

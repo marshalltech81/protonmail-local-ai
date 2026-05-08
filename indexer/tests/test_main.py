@@ -36,17 +36,32 @@ def _make_queue(db: Database) -> IndexingQueue:
     return IndexingQueue(db, max_attempts=3, base_backoff_seconds=0)
 
 
-def _write_eml(path: Path, message_id: str, subject: str = "Hello") -> None:
+def _write_eml(
+    path: Path,
+    message_id: str,
+    subject: str = "Hello",
+    *,
+    in_reply_to: str | None = None,
+    references: list[str] | None = None,
+    date: str = "Mon, 01 Jan 2024 12:00:00 +0000",
+    from_addr: str = "alice@example.com",
+    to_addr: str = "bob@example.com",
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    headers = [
+        f"From: {from_addr}",
+        f"To: {to_addr}",
+        f"Subject: {subject}",
+        f"Message-ID: <{message_id}>",
+        f"Date: {date}",
+        "Content-Type: text/plain; charset=utf-8",
+    ]
+    if in_reply_to:
+        headers.append(f"In-Reply-To: <{in_reply_to}>")
+    if references:
+        headers.append("References: " + " ".join(f"<{r}>" for r in references))
     path.write_text(
-        f"From: alice@example.com\r\n"
-        f"To: bob@example.com\r\n"
-        f"Subject: {subject}\r\n"
-        f"Message-ID: <{message_id}>\r\n"
-        f"Date: Mon, 01 Jan 2024 12:00:00 +0000\r\n"
-        f"Content-Type: text/plain; charset=utf-8\r\n"
-        f"\r\n"
-        f"Body of {message_id}.\r\n",
+        "\r\n".join(headers) + f"\r\n\r\nBody of {message_id}.\r\n",
         encoding="utf-8",
     )
 
@@ -286,13 +301,16 @@ class TestInitialIndexNestedFolders:
 
 
 class TestInitialIndexHeartbeat:
-    def test_health_file_refreshed_after_every_processed_message(self, tmp_path, monkeypatch):
-        """``initial_index`` must refresh the heartbeat after every
-        processed message so that embedding a large mailbox does not
-        exceed ``HEALTH_MAX_AGE_SECONDS`` mid-scan. A single batch of 25
-        jobs at ~5 embeds/sec with chunky attachments easily exceeds the
-        90s threshold; per-job touch decouples healthcheck cadence from
-        per-batch duration."""
+    def test_health_file_refreshed_at_least_once_per_processed_message(self, tmp_path, monkeypatch):
+        """``initial_index`` must refresh the heartbeat often enough
+        that embedding a large mailbox does not exceed
+        ``HEALTH_MAX_AGE_SECONDS`` mid-scan. The batched two-phase
+        indexer touches the heartbeat in three places per batch: once
+        per Phase 1 commit, once before the bulk embed call (so a slow
+        cloud-embedder round-trip doesn't starve the heartbeat), and
+        once per Phase 2c commit. The exact count varies with batch
+        boundaries but must be at least N to prove the heartbeat keeps
+        up with progress."""
         maildir = tmp_path / "maildir"
         inbox = maildir / "INBOX" / "cur"
         inbox.mkdir(parents=True)
@@ -313,10 +331,11 @@ class TestInitialIndexHeartbeat:
 
         main.initial_index(db, embedder, threader, _make_queue(db))
 
-        # One touch per processed message in the drain loop. (The
-        # outer ``main()`` adds two more touches — pre-call and
-        # post-call — but those are not exercised by this test.)
-        assert len(touches) == message_count
+        # At least one touch per processed message — Phase 1 + Phase 2c
+        # each fire once per message, plus one pre-embed touch per
+        # batch. The lower bound matches the spec; an upper bound
+        # would over-pin the implementation.
+        assert len(touches) >= message_count
 
 
 class TestInitialIndexDeadLetterRespect:
@@ -706,3 +725,148 @@ class TestIndexOneFileChunking:
         assert not db.get_chunk_ids_for_message("attachment-retry@x")
         assert db._conn.execute("SELECT COUNT(*) FROM attachments").fetchone()[0] == 0
         assert db._conn.execute("SELECT COUNT(*) FROM attachment_extractions").fetchone()[0] == 0
+
+
+class TestBatchedInitialIndex:
+    """C1 invariants for the cross-message batched initial indexer.
+
+    Phase 1 (per message) commits thread membership with a placeholder
+    zero-vector so the next message in the batch sees this message's
+    thread when computing its own assignment. Phase 2 batches the
+    embed call across the whole batch; Phase 2c per-message commits
+    the chunk + vector writes and replaces the placeholder thread
+    vector with the real mean-of-chunks vector. The tests below pin
+    the load-bearing correctness properties: in-batch sibling
+    threading, partial-failure isolation, and embed-failure recovery.
+    """
+
+    def _setup(self, tmp_path):
+        maildir = tmp_path / "maildir"
+        inbox = maildir / "INBOX" / "cur"
+        inbox.mkdir(parents=True)
+        db = Database(tmp_path / "mail.db")
+        threader = Threader(db)
+        return maildir, inbox, db, threader
+
+    def _run(self, db, embedder, threader, queue, monkeypatch, maildir):
+        monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
+        monkeypatch.setattr(main, "touch_health_file", lambda: None)
+        main.initial_index(db, embedder, threader, queue)
+
+    def test_in_batch_reply_chain_merges_into_single_thread(self, tmp_path, monkeypatch):
+        # The headline correctness test for C1: when message A and its
+        # reply B land in the same batch, B must thread into A's thread
+        # rather than creating a sibling. Phase 1 commits A's thread
+        # before B's threader runs, so B's In-Reply-To lookup hits A's
+        # message_id in message_thread_map.
+        maildir, inbox, db, threader = self._setup(tmp_path)
+        _write_eml(inbox / "a.eml", "a@example.com", subject="Project kickoff")
+        _write_eml(
+            inbox / "b.eml",
+            "b@example.com",
+            subject="Re: Project kickoff",
+            in_reply_to="a@example.com",
+            date="Mon, 01 Jan 2024 13:00:00 +0000",
+            from_addr="bob@example.com",
+            to_addr="alice@example.com",
+        )
+
+        embedder = make_mock_embedder()
+        embedder.embed.return_value = [0.1] * EMBEDDING_DIM
+        queue = _make_queue(db)
+        self._run(db, embedder, threader, queue, monkeypatch, maildir)
+
+        thread_a = db.find_thread_by_message_id("a@example.com")
+        thread_b = db.find_thread_by_message_id("b@example.com")
+        assert thread_a is not None and thread_b is not None
+        assert thread_a == thread_b, (
+            "Reply B must thread into A's thread when both arrive in the "
+            "same batch — Phase 1 must commit A's thread membership before "
+            "B's threader runs"
+        )
+
+    def test_partial_phase1_parse_failure_does_not_stall_batch(self, tmp_path, monkeypatch):
+        # One message in the batch has a corrupt header; the other two
+        # must still index successfully. The corrupt one ends up
+        # marked failed (or skipped) without aborting Phase 2 for the
+        # survivors.
+        maildir, inbox, db, threader = self._setup(tmp_path)
+        _write_eml(inbox / "ok1.eml", "ok1@example.com")
+        # Corrupt — no headers at all, parser will return None or raise.
+        (inbox / "bad.eml").write_text("not a real email", encoding="utf-8")
+        _write_eml(inbox / "ok2.eml", "ok2@example.com")
+
+        embedder = make_mock_embedder()
+        embedder.embed.return_value = [0.2] * EMBEDDING_DIM
+        queue = _make_queue(db)
+        self._run(db, embedder, threader, queue, monkeypatch, maildir)
+
+        # Survivors should be indexed end-to-end (chunks + vectors).
+        assert db.is_indexed(str(inbox / "ok1.eml"))
+        assert db.is_indexed(str(inbox / "ok2.eml"))
+        # Bad message should not be indexed.
+        assert not db.is_indexed(str(inbox / "bad.eml"))
+        # Survivors have at least one chunk vector each (Phase 2c
+        # actually wrote chunks, not just Phase 1 placeholder).
+        assert db.get_chunk_ids_for_message("ok1@example.com")
+        assert db.get_chunk_ids_for_message("ok2@example.com")
+
+    def test_phase2_embed_failure_leaves_phase1_state_and_requeues(self, tmp_path, monkeypatch):
+        # When the bulk embed call fails, every message in the batch
+        # has Phase 1 commits (thread + map + indexed_files with a
+        # placeholder zero-vector) but no chunks/vectors. The queue
+        # rows go back to 'queued' (via mark_failed) so the next pass
+        # retries Phase 2.
+        maildir, inbox, db, threader = self._setup(tmp_path)
+        for i in range(3):
+            _write_eml(inbox / f"m{i}.eml", f"m{i}@example.com")
+
+        embedder = make_mock_embedder()
+        embedder.embed_batch.side_effect = RuntimeError("simulated cloud outage")
+        queue = _make_queue(db)
+        self._run(db, embedder, threader, queue, monkeypatch, maildir)
+
+        # Phase 1 commits persisted: thread membership exists.
+        for i in range(3):
+            assert db.find_thread_by_message_id(f"m{i}@example.com") is not None
+        # Phase 2 never wrote chunks, so search-by-chunks misses these.
+        for i in range(3):
+            assert not db.get_chunk_ids_for_message(f"m{i}@example.com")
+        # Queue rows are marked failed (advancing attempts), eligible for
+        # retry on the next pass. With max_attempts=3 and the embed
+        # always failing, they end up dead-lettered after retries.
+        stats = queue.stats()
+        # All 3 messages exhausted retries (3 attempts each) → dead.
+        assert stats["dead"] == 3
+        assert stats["queued"] == 0
+
+    def test_phase2c_commit_failure_isolates_to_one_message(self, tmp_path, monkeypatch):
+        # If replace_message_chunks fails for one message in the
+        # batch, that message is marked failed but the others succeed.
+        # Per-message transactions in Phase 2c provide the isolation.
+        maildir, inbox, db, threader = self._setup(tmp_path)
+        _write_eml(inbox / "ok1.eml", "ok1@example.com")
+        _write_eml(inbox / "victim.eml", "victim@example.com")
+        _write_eml(inbox / "ok2.eml", "ok2@example.com")
+
+        embedder = make_mock_embedder()
+        embedder.embed.return_value = [0.3] * EMBEDDING_DIM
+        queue = _make_queue(db)
+
+        original = db.replace_message_chunks
+
+        def selective_fail(*args, **kwargs):
+            if kwargs.get("message_id") == "victim@example.com":
+                raise RuntimeError("simulated db error for victim")
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(db, "replace_message_chunks", selective_fail)
+        self._run(db, embedder, threader, queue, monkeypatch, maildir)
+
+        # Survivors fully indexed
+        assert db.is_indexed(str(inbox / "ok1.eml"))
+        assert db.is_indexed(str(inbox / "ok2.eml"))
+        assert db.get_chunk_ids_for_message("ok1@example.com")
+        assert db.get_chunk_ids_for_message("ok2@example.com")
+        # Victim never got chunks (Phase 2c rolled back its transaction)
+        assert not db.get_chunk_ids_for_message("victim@example.com")
