@@ -164,6 +164,7 @@ class OpenAIEmbedder:
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=2, max=10),
+        reraise=True,
     )
     def _embed_one_batch(self, texts: list[str]) -> list[list[float]]:
         r = self.client.post(
@@ -173,5 +174,23 @@ class OpenAIEmbedder:
         r.raise_for_status()
         body = r.json()
         data = list(body["data"])
+        # Hard-validate the index integrity before zipping vectors
+        # back onto chunks. A provider that returns duplicate or
+        # missing indices would silently attach the wrong vector to
+        # the wrong chunk text — a far worse failure mode than a
+        # raised exception, since the index commits and stores
+        # mis-aligned vectors that survive every later restart.
+        if len(data) != len(texts):
+            raise RuntimeError(
+                f"embedder returned {len(data)} vectors for {len(texts)} inputs "
+                f"({self.base_url}, model={self.model!r})"
+            )
+        seen_indices = sorted(d["index"] for d in data)
+        if seen_indices != list(range(len(texts))):
+            raise RuntimeError(
+                f"embedder returned non-contiguous or duplicate indices "
+                f"{seen_indices} for {len(texts)} inputs "
+                f"({self.base_url}, model={self.model!r})"
+            )
         data.sort(key=lambda d: d["index"])
         return [d["embedding"] for d in data]

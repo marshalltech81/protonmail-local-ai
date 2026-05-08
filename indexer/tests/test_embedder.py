@@ -114,6 +114,60 @@ class TestOpenAIEmbedder:
         # After sorting by index: v at idx=0 is [3.0], idx=1 is [2.0], idx=2 is [1.0].
         assert emb.embed_batch(["a", "b", "c"]) == [[3.0], [2.0], [1.0]]
 
+    def test_embed_batch_raises_on_duplicate_indices(self):
+        # A misbehaving provider that returns the same ``index`` twice
+        # must surface as a loud RuntimeError rather than silently
+        # attaching the wrong vector to a chunk. The indexer would
+        # otherwise commit mis-aligned vectors that survive every later
+        # restart.
+        emb = OpenAIEmbedder("http://host.docker.internal:8001/v1", "test-model")
+
+        def handler(_request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json={
+                    "object": "list",
+                    "data": [
+                        {"object": "embedding", "embedding": [1.0], "index": 0},
+                        {"object": "embedding", "embedding": [2.0], "index": 0},
+                        {"object": "embedding", "embedding": [3.0], "index": 2},
+                    ],
+                    "model": "test-model",
+                    "usage": {"prompt_tokens": 0, "total_tokens": 0},
+                },
+            )
+
+        _install_mock(emb, handler)
+        with patch("src.embedder.wait_exponential", lambda **_: lambda *_: 0):
+            with pytest.raises(RuntimeError, match="non-contiguous or duplicate"):
+                emb.embed_batch(["a", "b", "c"])
+
+    def test_embed_batch_raises_on_missing_index(self):
+        # A provider that drops a ``data`` entry (returning N-1 vectors
+        # for N inputs) must also fail loud. Same rationale as duplicate
+        # indices: silent zip-misalignment is a worse outcome than an
+        # exception that triggers the queue retry path.
+        emb = OpenAIEmbedder("http://host.docker.internal:8001/v1", "test-model")
+
+        def handler(_request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json={
+                    "object": "list",
+                    "data": [
+                        {"object": "embedding", "embedding": [1.0], "index": 0},
+                        {"object": "embedding", "embedding": [3.0], "index": 2},
+                    ],
+                    "model": "test-model",
+                    "usage": {"prompt_tokens": 0, "total_tokens": 0},
+                },
+            )
+
+        _install_mock(emb, handler)
+        with patch("src.embedder.wait_exponential", lambda **_: lambda *_: 0):
+            with pytest.raises(RuntimeError, match=r"returned 2 vectors for 3 inputs"):
+                emb.embed_batch(["a", "b", "c"])
+
     def test_embed_batch_chunks_at_batch_size_boundary(self):
         # 5 inputs at batch_size=2 must produce 3 HTTP calls
         # (sizes 2, 2, 1) and concatenate results in input order.
