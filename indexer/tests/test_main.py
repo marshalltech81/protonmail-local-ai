@@ -840,6 +840,77 @@ class TestBatchedInitialIndex:
         assert stats["dead"] == 3
         assert stats["queued"] == 0
 
+    def test_no_chunk_message_uses_subject_fallback_for_thread_vector(self, tmp_path, monkeypatch):
+        # Regression: a message with no body chunks and no attachment
+        # chunks (blank body, only-quoted body that strips to empty,
+        # all-unsupported attachments) must NOT leave its thread
+        # permanently stuck at the Phase 1 placeholder zero-vector.
+        # The pre-batched path embedded the subject as a fallback via
+        # _seed_thread_embedding; the batched path threads the same
+        # fallback through Phase 2b in the shared embed_batch call.
+        import struct
+
+        maildir = tmp_path / "maildir"
+        inbox = maildir / "INBOX" / "cur"
+        inbox.mkdir(parents=True)
+
+        # Empty body — no chunks emitted by chunk_message — and no
+        # attachments. The fallback path is the only way this thread
+        # gets a non-zero vector.
+        eml = inbox / "blank.eml"
+        eml.write_text(
+            "From: alice@example.com\r\n"
+            "To: bob@example.com\r\n"
+            "Subject: Quarterly review\r\n"
+            "Message-ID: <blank@example.com>\r\n"
+            "Date: Mon, 01 Jan 2024 12:00:00 +0000\r\n"
+            "Content-Type: text/plain; charset=utf-8\r\n"
+            "\r\n",
+            encoding="utf-8",
+        )
+
+        db = Database(tmp_path / "mail.db")
+        threader = Threader(db)
+
+        # Embedder returns a deterministic non-zero vector so the
+        # post-write check can distinguish "fallback embed ran" from
+        # "placeholder zero stayed". 0.5 is exactly representable in
+        # float32 so it round-trips through threads_vec storage
+        # without the ~1e-8 quantization noise of less-friendly
+        # constants like 0.42.
+        sentinel = [0.5] * EMBEDDING_DIM
+        embedder = make_mock_embedder()
+        embedder.embed.return_value = sentinel
+
+        queue = _make_queue(db)
+        self._run(db, embedder, threader, queue, monkeypatch, maildir)
+
+        # Find the thread for the blank message.
+        thread_id = db.find_thread_by_message_id("blank@example.com")
+        assert thread_id is not None
+
+        row = db._conn.execute(
+            "SELECT embedding FROM threads_vec WHERE thread_id = ?", (thread_id,)
+        ).fetchone()
+        assert row is not None
+        # ``sqlite_vec.serialize_float32`` writes the array as
+        # little-endian float32 bytes; unpack the same shape for
+        # comparison.
+        raw = row["embedding"]
+        stored_vec = list(struct.unpack(f"<{len(raw) // 4}f", raw))
+        assert any(v != 0.0 for v in stored_vec), (
+            "thread vector must NOT be the placeholder zero — Phase 2a "
+            "should have added a subject fallback to the embed batch and "
+            "Phase 2c should have used it instead of leaving the placeholder"
+        )
+        # The fallback should embed the subject string. Our mock
+        # returns the same vector regardless of input, so the vector
+        # equals the sentinel exactly when the fallback path ran.
+        assert stored_vec == sentinel, (
+            "thread vector should equal the embedder's return value for "
+            "the subject fallback, not be derived from chunks (none exist)"
+        )
+
     def test_phase2c_commit_failure_isolates_to_one_message(self, tmp_path, monkeypatch):
         # If replace_message_chunks fails for one message in the
         # batch, that message is marked failed but the others succeed.

@@ -607,6 +607,14 @@ class _BatchedMsg:
     attach_plans: list[AttachmentWritePlan] = field(default_factory=list)
     attach_new_chunks: list[list[Any]] = field(default_factory=list)
     attach_offsets: list[list[int]] = field(default_factory=list)
+    # Offset of this message's subject-fallback text in the batch's flat
+    # ``all_texts`` list, or ``None`` when no fallback is needed. The
+    # fallback is added in Phase 2a only when the message contributes
+    # zero new chunks AND its parent thread has no existing chunks —
+    # otherwise the thread vector would be permanently stuck at the
+    # Phase 1 placeholder zero-vector (search quality regression).
+    # Mirrors the old ``_seed_thread_embedding`` subject fallback.
+    subject_fallback_offset: int | None = None
     parse_ms: float = 0.0
     thread_ms: float = 0.0
     phase1_ms: float = 0.0
@@ -752,6 +760,20 @@ def _phase2a_collect_chunks(
                 attach_plans.append(plan)
                 attach_new_chunks.append(plan_new)
                 attach_offsets.append(plan_offsets)
+        # Subject-fallback path: when this message contributes zero new
+        # chunks AND the parent thread has no existing chunks, embed the
+        # subject (or a sentinel string) so the thread vector is not
+        # permanently stuck at the Phase 1 placeholder zero-vector.
+        # Mirrors the old ``_seed_thread_embedding`` per-message
+        # behavior. The fallback text rides through Phase 2b inside the
+        # same batched embed call as everyone else's chunks.
+        has_new_chunks = bool(new_body) or any(plan_new for plan_new in attach_new_chunks)
+        if not has_new_chunks and not db.get_thread_chunk_embeddings(state.thread.thread_id):
+            fallback_text = state.thread.subject.strip() if state.thread.subject else ""
+            if not fallback_text:
+                fallback_text = "(empty thread)"
+            state.subject_fallback_offset = len(all_texts)
+            all_texts.append(fallback_text)
     except Exception as e:
         # Phase 2a is "extract + chunk" only — no DB writes. A failure
         # here marks this message failed but leaves Phase 1's thread
@@ -809,11 +831,24 @@ def _phase2c_commit_vectors(
                     thread_id=thread.thread_id,
                     db=db,
                 )
-            # Replace the Phase 1 placeholder thread vector with the
-            # real mean-of-chunks vector now that chunks are in place.
+            # Replace the Phase 1 placeholder thread vector. Three
+            # cases mirror the old ``_seed_thread_embedding`` logic:
+            #   1. Thread now has chunks (this message contributed
+            #      some, or earlier messages already had them) → use
+            #      the mean of those chunk vectors.
+            #   2. No chunks anywhere on the thread, but Phase 2a
+            #      reserved a subject-fallback slot in the embed batch
+            #      (blank-body, no-attachment-chunks message — would
+            #      otherwise be permanently stuck at zero) → use the
+            #      subject-embedded vector.
+            #   3. Neither — leave the placeholder zero in place.
+            #      Should not occur in practice; if it does, the next
+            #      message on the thread will overwrite via case 1.
             chunk_embs = db.get_thread_chunk_embeddings(thread.thread_id)
             if chunk_embs:
                 db.replace_thread_vector(thread.thread_id, mean_vector(chunk_embs))
+            elif state.subject_fallback_offset is not None:
+                db.replace_thread_vector(thread.thread_id, vectors[state.subject_fallback_offset])
     except Exception as e:
         return False, repr(e)
     return True, None
