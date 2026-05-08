@@ -137,13 +137,16 @@ CHUNK_OVERLAP_TOKENS = _int_env("INDEXER_CHUNK_OVERLAP_TOKENS", 150, minimum=0)
 # watchdog path stays per-message because it sees 1-3 messages at a time.
 INITIAL_INDEX_BATCH_SIZE = _int_env("INITIAL_INDEX_BATCH_SIZE", 50)
 
-# Placeholder thread vector written by Phase 1 of the batched
-# initial index. Phase 2c overwrites this with the mean of the
-# thread's chunk embeddings once they're available. A zero vector is
-# safe between phases: cosine/L2 similarity to a normalized query
-# vector is constant, so a zero-vec thread cannot inflate ranking on
-# any specific query — it just deprioritizes uniformly until the real
-# vector lands. Keyword search via threads_fts is unaffected.
+# Phase 1 seed for genuinely new (or chunk-less) threads. Phase 1
+# always seeds upsert_thread with a vector — for already-indexed
+# threads it uses the mean of the thread's existing chunk embeddings
+# (so a Phase 2 failure cannot regress a previously-good vector); for
+# new threads with no existing chunks it falls back to this zero. A
+# zero vector is safe between phases: cosine/L2 similarity to a
+# normalized query vector is constant, so a zero-vec thread cannot
+# inflate ranking on any specific query — it just deprioritizes
+# uniformly until Phase 2c lands the real vector. Keyword search via
+# threads_fts is unaffected.
 _ZERO_THREAD_VECTOR = [0.0] * EMBEDDING_DIM
 
 
@@ -930,6 +933,11 @@ def _drain_queue_batched(
             continue
 
         # ---- Phase 2a: collect chunks across batch (no embed) ----
+        # Each entry can take seconds to many tens of seconds for a
+        # large attachment-heavy message (PDF chunking, OCR, etc.). The
+        # cumulative wall-clock for a batch_size=50 batch can blow past
+        # HEALTH_MAX_AGE_SECONDS, so touch the heartbeat after every
+        # entry — not just before/after the bulk embed.
         all_texts: list[str] = []
         survivors: list[_BatchedMsg] = []
         for entry in batch:
@@ -938,6 +946,7 @@ def _drain_queue_batched(
                 survivors.append(entry)
             else:
                 queue.mark_failed(entry.row["filepath"], stage="chunk", error=err or "")
+            touch_health_file()
 
         if not survivors:
             continue
@@ -977,6 +986,7 @@ def _drain_queue_batched(
                     StageTimings(
                         parse_ms=entry.parse_ms,
                         thread_ms=entry.thread_ms,
+                        chunk_ms=entry.chunk_ms,
                         embed_ms=per_msg_embed_ms,
                         db_write_ms=db_write_ms,
                     )

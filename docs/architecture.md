@@ -438,8 +438,10 @@ queue states:
   `INITIAL_INDEX_BATCH_SIZE=50`, plus the embedder client's own
   per-call chunking via `EMBED_BATCH_SIZE` (default 64).
 - **Phase 2c (per message)**: write chunks/vectors/attachments inside
-  one per-message transaction, then replace the Phase 1 placeholder
-  thread vector with the real mean-of-chunks vector.
+  one per-message transaction, then replace the Phase 1 seed thread
+  vector with the real mean-of-chunks vector (or the subject-fallback
+  embed when this message contributes no chunks to a chunk-less
+  thread).
 
 The two-phase split is what makes a cloud-embedder reindex tolerable:
 ~1 hour against a 25k-message mailbox with a remote provider drops to

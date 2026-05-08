@@ -305,10 +305,11 @@ class TestInitialIndexHeartbeat:
         """``initial_index`` must refresh the heartbeat often enough
         that embedding a large mailbox does not exceed
         ``HEALTH_MAX_AGE_SECONDS`` mid-scan. The batched two-phase
-        indexer touches the heartbeat in three places per batch: once
-        per Phase 1 commit, once before the bulk embed call (so a slow
-        cloud-embedder round-trip doesn't starve the heartbeat), and
-        once per Phase 2c commit. The exact count varies with batch
+        indexer touches the heartbeat at four points per batch: once
+        per Phase 1 commit, once per Phase 2a entry (slow attachment
+        OCR cannot starve the heartbeat), once before the bulk embed
+        call (slow cloud round-trip cannot starve it either), and once
+        per Phase 2c commit. The exact count varies with batch
         boundaries but must be at least N to prove the heartbeat keeps
         up with progress."""
         maildir = tmp_path / "maildir"
@@ -331,11 +332,79 @@ class TestInitialIndexHeartbeat:
 
         main.initial_index(db, embedder, threader, _make_queue(db))
 
-        # At least one touch per processed message — Phase 1 + Phase 2c
-        # each fire once per message, plus one pre-embed touch per
-        # batch. The lower bound matches the spec; an upper bound
-        # would over-pin the implementation.
+        # At least one touch per processed message — Phase 1 + Phase 2a
+        # + Phase 2c each fire once per message, plus one pre-embed
+        # touch per batch. The lower bound matches the spec; an upper
+        # bound would over-pin the implementation.
         assert len(touches) >= message_count
+
+    def test_phase2a_per_entry_heartbeat_does_not_starve_during_slow_chunking(
+        self, tmp_path, monkeypatch
+    ):
+        """Phase 2a runs chunk + extract + OCR sequentially across the
+        batch before Phase 2b's pre-embed touch. With
+        ``INITIAL_INDEX_BATCH_SIZE=50`` and an attachment-heavy mailbox
+        the cumulative Phase 2a work can exceed
+        ``HEALTH_MAX_AGE_SECONDS`` (90 s in the healthcheck script).
+        The drainer must touch the heartbeat after every Phase 2a
+        entry; this test pins that contract by making each entry
+        observably slow and asserting the touch count grows
+        commensurately during Phase 2a."""
+        maildir = tmp_path / "maildir"
+        inbox = maildir / "INBOX" / "cur"
+        inbox.mkdir(parents=True)
+
+        # 5 messages so Phase 2a runs the loop body 5 times within a
+        # single batch (default batch_size=50 holds them all).
+        for i in range(5):
+            _write_eml(inbox / f"m{i}.eml", f"m{i}@example.com")
+
+        db = Database(tmp_path / "mail.db")
+        threader = Threader(db)
+
+        embedder = make_mock_embedder()
+        embedder.embed.return_value = [0.0] * EMBEDDING_DIM
+
+        # Track touches with phase markers so the assertion can prove
+        # touches happened DURING Phase 2a, not just before/after.
+        marker_touches: list[str] = []
+        from src import main as main_mod
+
+        # Wrap _phase2a_collect_chunks so each call records a marker
+        # before AND after, sandwiching where the per-entry heartbeat
+        # touch must fire.
+        original_phase2a = main_mod._phase2a_collect_chunks
+
+        def slow_phase2a(state, db_arg, all_texts):
+            marker_touches.append("phase2a:enter")
+            result = original_phase2a(state, db_arg, all_texts)
+            marker_touches.append("phase2a:exit")
+            return result
+
+        def recording_touch():
+            marker_touches.append("touch")
+
+        monkeypatch.setattr(main_mod, "_phase2a_collect_chunks", slow_phase2a)
+        monkeypatch.setattr(main_mod, "touch_health_file", recording_touch)
+        monkeypatch.setattr(main_mod, "MAILDIR_PATH", maildir)
+
+        main.initial_index(db, embedder, threader, _make_queue(db))
+
+        # Find each Phase 2a entry's exit and the next event after it.
+        # A "touch" must appear after every "phase2a:exit" before the
+        # next "phase2a:enter" or the bulk-embed touch — that's the
+        # per-entry heartbeat we're asserting on.
+        phase2a_exits = [i for i, m in enumerate(marker_touches) if m == "phase2a:exit"]
+        assert len(phase2a_exits) == 5, f"expected 5 Phase 2a calls, got {len(phase2a_exits)}"
+        for exit_idx in phase2a_exits:
+            # The very next event after exit must be a touch.
+            assert exit_idx + 1 < len(marker_touches), "no event followed Phase 2a exit"
+            assert marker_touches[exit_idx + 1] == "touch", (
+                f"Phase 2a entry at index {exit_idx} was not followed by a "
+                f"heartbeat touch — got {marker_touches[exit_idx + 1]!r} "
+                f"instead. Without a per-entry touch, a 50-message batch with "
+                f"slow OCR can age the health file past HEALTH_MAX_AGE_SECONDS."
+            )
 
 
 class TestInitialIndexDeadLetterRespect:
@@ -730,14 +799,19 @@ class TestIndexOneFileChunking:
 class TestBatchedInitialIndex:
     """C1 invariants for the cross-message batched initial indexer.
 
-    Phase 1 (per message) commits thread membership with a placeholder
-    zero-vector so the next message in the batch sees this message's
-    thread when computing its own assignment. Phase 2 batches the
-    embed call across the whole batch; Phase 2c per-message commits
-    the chunk + vector writes and replaces the placeholder thread
-    vector with the real mean-of-chunks vector. The tests below pin
-    the load-bearing correctness properties: in-batch sibling
-    threading, partial-failure isolation, and embed-failure recovery.
+    Phase 1 (per message) commits thread membership with a seed thread
+    vector — the mean of the thread's existing chunk vectors when the
+    thread is already indexed, otherwise a placeholder zero — so the
+    next message in the batch sees this message's thread when
+    computing its own assignment, and a Phase 2 failure cannot regress
+    an already-good thread vector. Phase 2 batches the embed call
+    across the whole batch; Phase 2c per-message commits the chunk +
+    vector writes and replaces the seed thread vector with the real
+    mean-of-chunks vector (or a subject-fallback embed for chunk-less
+    threads). The tests below pin the load-bearing correctness
+    properties: in-batch sibling threading, no-chunk subject fallback,
+    Phase 2 failure preservation of existing thread vectors, and
+    partial-failure isolation across phases.
     """
 
     def _setup(self, tmp_path):
