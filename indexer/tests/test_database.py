@@ -123,6 +123,143 @@ class TestSchema:
         finally:
             database.close()
 
+    def test_v15_to_v16_migration_creates_subject_folder_index(self, tmp_path):
+        """Direct test for migration 0016: a v15-stamped database
+        without ``idx_threads_subject_folder`` must gain the index
+        when reopened. The earlier
+        ``test_opening_with_stale_version_runs_migration_to_current``
+        starts from a current schema and only asserts the column +
+        version after the catch-up — the index already exists in that
+        path because ``_apply_initial_schema`` includes it. A no-op
+        or wrong v16 migration would pass that test silently while
+        leaving existing v15 installs without the index that
+        ``find_threads_by_subject`` depends on for
+        ``_synchronized``-friendly performance."""
+        db_path = tmp_path / "v15.db"
+        database = Database(db_path)
+        database.close()
+        import sqlite3
+
+        # Drop the index and stamp v15 to simulate the pre-v16 state.
+        conn = sqlite3.connect(str(db_path))
+        try:
+            conn.execute("DROP INDEX IF EXISTS idx_threads_subject_folder")
+            conn.execute("UPDATE schema_version SET version = ?", (15,))
+            conn.commit()
+            # Precondition: the index does NOT exist before reopen.
+            row = conn.execute(
+                "SELECT name FROM sqlite_master "
+                "WHERE type='index' AND name='idx_threads_subject_folder'"
+            ).fetchone()
+            assert row is None, "precondition: v15 simulation must drop the index"
+        finally:
+            conn.close()
+
+        # Reopening through ``Database`` runs the v16 migration.
+        database = Database(db_path)
+        try:
+            row = database._conn.execute(
+                "SELECT name FROM sqlite_master "
+                "WHERE type='index' AND name='idx_threads_subject_folder'"
+            ).fetchone()
+            assert row is not None, (
+                "migration 0016 must create idx_threads_subject_folder; "
+                "without it find_threads_by_subject does a full table scan "
+                "serialized through _synchronized, blocking watchdog + "
+                "reconciler on every initial-scan miss"
+            )
+
+            # The behavioral value of v16 is the COVERING shape — the
+            # exact column order matters. ``PRAGMA index_info`` returns
+            # one row per key column with ``(seqno, cid, name)``, so the
+            # name list in seqno order is the index's column order. A
+            # regression that keeps the index name but drops the
+            # ``thread_id`` covering column (or reorders the prefix
+            # away from the WHERE/ORDER BY shape) would leave the
+            # planner doing a per-match table seek for the projected
+            # thread_id — a real perf regression that "the index
+            # exists" alone would not catch.
+            info = database._conn.execute(
+                "PRAGMA index_info(idx_threads_subject_folder)"
+            ).fetchall()
+            columns_in_order = [r["name"] for r in info]
+            assert columns_in_order == ["subject", "folder", "date_last", "thread_id"], (
+                f"v16 index must have exact covering shape "
+                f"[subject, folder, date_last, thread_id]; got "
+                f"{columns_in_order}. The fourth column makes the "
+                f"index actually covering for find_threads_by_subject's "
+                f"projection — without it SQLite still has to seek the "
+                f"table per match."
+            )
+
+            stored = database._conn.execute("SELECT version FROM schema_version").fetchone()[
+                "version"
+            ]
+            assert stored == SCHEMA_VERSION
+        finally:
+            database.close()
+
+    def test_v16_migration_replaces_wrong_shape_same_name_index(self, tmp_path):
+        """A v15 database with an out-of-band same-name index that has
+        the wrong (three-column, non-covering) shape must be repaired
+        on upgrade, not silently kept. The earlier migration shape
+        used ``CREATE INDEX IF NOT EXISTS`` which accepts whatever
+        same-named index already exists — and would have stamped
+        v16 against a non-covering index, defeating the migration's
+        behavioral contract. The current migration drops first +
+        unconditionally re-creates so the canonical four-column
+        shape is guaranteed regardless of pre-state.
+        """
+        db_path = tmp_path / "v15_wrong_index.db"
+        database = Database(db_path)
+        database.close()
+        import sqlite3
+
+        # Simulate a v15 install with an out-of-band three-column index
+        # under the same name (operator hot-fixed before v16 shipped, or
+        # a different branch's experiment landed an older shape).
+        conn = sqlite3.connect(str(db_path))
+        try:
+            conn.execute("DROP INDEX IF EXISTS idx_threads_subject_folder")
+            conn.execute(
+                "CREATE INDEX idx_threads_subject_folder ON threads(subject, folder, date_last)"
+            )
+            conn.execute("UPDATE schema_version SET version = ?", (15,))
+            conn.commit()
+            # Precondition: the wrong-shape index is in place.
+            wrong_info = conn.execute("PRAGMA index_info(idx_threads_subject_folder)").fetchall()
+            wrong_columns = [r[2] for r in wrong_info]  # PRAGMA returns (seqno, cid, name)
+            assert wrong_columns == ["subject", "folder", "date_last"], (
+                f"precondition: wrong-shape simulation must produce a "
+                f"three-column index, got {wrong_columns}"
+            )
+        finally:
+            conn.close()
+
+        # Reopening through Database runs migration 0016, which
+        # MUST replace the wrong-shape index rather than skip it.
+        database = Database(db_path)
+        try:
+            info = database._conn.execute(
+                "PRAGMA index_info(idx_threads_subject_folder)"
+            ).fetchall()
+            columns = [r["name"] for r in info]
+            assert columns == ["subject", "folder", "date_last", "thread_id"], (
+                f"migration 0016 must REPLACE a wrong-shape same-name "
+                f"index with the canonical four-column covering shape, "
+                f"not keep it. Got {columns}. Without the DROP step, "
+                f"an out-of-band three-column index would survive the "
+                f"migration and the database would be stamped v16 with "
+                f"a non-covering index — operator-invisible perf "
+                f"regression on subject-fallback lookups."
+            )
+            stored = database._conn.execute("SELECT version FROM schema_version").fetchone()[
+                "version"
+            ]
+            assert stored == SCHEMA_VERSION
+        finally:
+            database.close()
+
     def test_v14_migration_guard_blocks_populated_v13_without_force(self, tmp_path, monkeypatch):
         """The v14 (768→4096) migration is destructive — it drops the
         vector tables and clears message_chunks, indexed_files, and
@@ -2266,3 +2403,49 @@ class TestAttachmentCascadeOnMessageRemoval:
             "SELECT COUNT(*) FROM attachments WHERE thread_id = ?", (t.thread_id,)
         ).fetchone()[0]
         assert cnt == 0
+
+
+class TestWalCheckpoint:
+    """``Database.wal_checkpoint_truncate`` shrinks the WAL file.
+
+    The single shared connection used by every ``Database`` method
+    keeps a WAL read snapshot live for the duration of the indexer
+    process. SQLite's automatic checkpoint at the page-count threshold
+    can run, but it cannot truncate the file while the snapshot is
+    live — so the WAL grows monotonically. The main-loop periodic
+    truncate-checkpoint is what reclaims that space.
+    """
+
+    def test_returns_three_int_tuple(self, tmp_path):
+        db = Database(tmp_path / "mail.db")
+        try:
+            result = db.wal_checkpoint_truncate()
+            assert isinstance(result, tuple) and len(result) == 3
+            busy, log_pages, ckpt_pages = result
+            assert isinstance(busy, int)
+            assert isinstance(log_pages, int)
+            assert isinstance(ckpt_pages, int)
+        finally:
+            db.close()
+
+    def test_checkpoint_after_writes_truncates_wal(self, tmp_path):
+        """Sanity check: write some data, run the checkpoint, and the
+        WAL file is either gone or zero-length. Without the explicit
+        truncate the WAL persists across writes for the lifetime of
+        the connection."""
+        db_path = tmp_path / "mail.db"
+        db = Database(db_path)
+        try:
+            db.upsert_thread(make_thread([make_message(message_id="m1@x")]), FAKE_EMBEDDING)
+            wal_path = tmp_path / "mail.db-wal"
+            assert wal_path.exists() and wal_path.stat().st_size > 0
+            busy, _log, _ckpt = db.wal_checkpoint_truncate()
+            # busy=0 expected since the writer's own connection is the
+            # only reader and the cursor has been released by now.
+            assert busy == 0
+            # After TRUNCATE the WAL is either deleted or zero-length
+            # (SQLite 3.43+ leaves the file at 0 bytes).
+            if wal_path.exists():
+                assert wal_path.stat().st_size == 0
+        finally:
+            db.close()

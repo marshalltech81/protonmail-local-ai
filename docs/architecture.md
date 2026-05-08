@@ -408,16 +408,16 @@ problem and the always-null join.
 The `indexing_jobs` table backs the durable queue. The watchdog
 callbacks and `initial_index` no longer run the parse / embed / upsert
 pipeline
-inline — they `enqueue` each filepath and return immediately. A worker
-loop in the main thread drains the queue via `drain_queue`, capped at
-`HEALTH_REFRESH_EVERY` jobs per pass so the reconciler and health-file
-refresh aren't starved by a large event burst.
-
-The initial-scan drainer uses a **two-phase batched** path
-(`_drain_queue_batched`) instead of per-message drain so a single
-`embed_batch` call can amortize the embed round-trip across many
-messages. The two paths cooperate cleanly because they hit different
-queue states:
+inline — they `enqueue` each filepath and return immediately. The main
+thread drains the queue via the **two-phase batched** path
+(`_drain_queue_batched`); the initial scan runs to empty
+(`max_passes=None`, `batch_size=INITIAL_INDEX_BATCH_SIZE`), while the
+steady-state main loop runs one bounded pass per tick
+(`max_passes=1`, `batch_size=INDEXER_STEADY_STATE_BATCH_SIZE`) so the
+reconciler, periodic recovery sweep, periodic WAL checkpoint, and
+health-file refresh all interleave cleanly with indexing work. Both
+paths share the Phase 1 / Phase 2 implementation so seed-vector
+selection and failure isolation behave identically:
 
 - **Phase 1 (per message)**: parse → thread → `upsert_thread` with a
   seed thread vector chosen by a three-case priority chain:
@@ -453,9 +453,11 @@ queue states:
 
 The two-phase split is what makes a cloud-embedder reindex tolerable:
 ~1 hour against a 25k-message mailbox with a remote provider drops to
-~5–10 minutes. Steady-state (watchdog) ingestion stays per-message
-because the watchdog typically sees 1–3 messages at a time; the
-batched path's win is concentrated in the initial scan.
+~5–10 minutes. Steady-state (watchdog) ingestion runs through the same
+path with `max_passes=1` and a smaller batch size, so a 1-message
+delivery still produces just one HTTP call (no overhead) while a 5+
+message burst from an mbsync sync collapses into one bulk embed call
+instead of N round-trips.
 
 Failure isolation is preserved across phases:
 
@@ -474,31 +476,48 @@ fetches a snapshot of N distinct due rows in one query so the gather
 phase cannot re-claim the same row repeatedly while Phase 2c is
 deferred.
 
-### Recovery sweep for crashed-mid-batch threads
+### Recovery sweep for chunkless zero-vector threads
 
-A startup recovery sweep
-(`_recover_zero_vector_threads`) runs at the head of every
-`initial_index` call to catch the one failure mode the queue retry
-path can't fix on its own:
+A recovery sweep (`_recover_zero_vector_threads`) runs at the head
+of every `initial_index` call AND periodically from the main loop
+on `INDEXER_RECOVERY_SWEEP_INTERVAL_SECS` (default 30 min). It
+catches the failure modes the queue retry path can't fix on its own
+without breaking the durable queue's bounded-retry contract:
 
 - **Symptom**: Phase 1 commits (thread + `message_thread_map` +
   `indexed_files` rows) landed, but Phase 2c never wrote chunks.
   `is_indexed` returns True so the standard Maildir walk skips the
   file. The thread carries the placeholder zero `threads_vec` row.
-- **Causes**: a hard crash (SIGKILL, OOM, power loss) between
-  Phase 1 and Phase 2c on a thread that had no prior chunks; or a
-  Phase 2 retry cascade that exhausted `max_attempts` and
-  dead-lettered the file.
 - **Detection**: `Database.find_zero_vector_chunkless_thread_filepaths`
   finds threads with no `message_chunks` rows and an all-zero
   `threads_vec` blob, then maps them back to filepaths via
   `message_thread_map`.
-- **Repair**: each stuck filepath is re-enqueued with reason
-  `recovery`. Files that already have a `queued` row (active retry
-  cascade) are skipped to avoid clobbering attempts mid-cascade;
-  dead-lettered or no-row files get a fresh attempt budget via
-  `enqueue`'s `INSERT OR REPLACE`. The next drain pass completes
-  Phase 2 for them.
+- **Repair policy** — uniform across the startup and periodic
+  paths, both calling `_recover_zero_vector_threads(...,
+  resurrect_dead=False)` (the default). What each queue state
+  triggers:
+  - **No queue row** (the row was cleaned up out-of-band; rare): the
+    file is re-enqueued with reason `recovery` and the next drain
+    pass completes Phase 2.
+  - **`queued` row** (the durable retry cascade is in flight):
+    skipped, because clobbering the row would reset `attempts`
+    mid-cascade. The queue itself owns the recovery and the next
+    drain claims the row once `next_attempt_at` is due. This is
+    also the genuine crash-mid-batch case: a process killed
+    between Phase 1 and `mark_failed`/`mark_succeeded` leaves the
+    row at `queued` with the worker's pre-claim attempts count.
+  - **`dead` row** (deterministic Phase 2 failure exhausted
+    `max_attempts`): skipped — left alone as an operator-visible
+    terminal state. Auto-resurrecting would burn embedder load
+    against the same poison-pill payload on every container
+    restart and contradict `initial_index`'s own `is_dead` skip.
+    To rescue a dead-lettered file, an operator confirms the
+    underlying cause is fixed and either deletes the row
+    explicitly (`DELETE FROM indexing_jobs WHERE filepath=...;`,
+    after which the next recovery pass sees the no-row state and
+    re-enqueues) or invokes the opt-in API
+    `_recover_zero_vector_threads(..., resurrect_dead=True)` from
+    a one-off rescue tool.
 
 Healthy chunkless threads (e.g., subject-fallback threads from
 blank-body messages) are not touched — the DB query filters out

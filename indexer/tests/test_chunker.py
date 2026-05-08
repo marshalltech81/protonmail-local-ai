@@ -84,6 +84,89 @@ class TestEstimateTokens:
         # characters, or counting words).
         assert n_chars // 8 < n_tokens < n_chars // 2
 
+    def test_large_inputs_do_not_pollute_lru_cache(self):
+        """Large strings (above the cache-threshold) are computed but
+        NOT inserted into the LRU. Without this gate, an attacker-
+        controlled email body or attachment text could pin megabytes
+        of strings in ``_cached_estimate_tokens.cache``, pushing the
+        indexer toward OOM during a backfill.
+        """
+        from src.chunker import (
+            _TOKEN_ESTIMATE_CACHE_THRESHOLD_BYTES,
+            _cached_estimate_tokens,
+        )
+
+        _cached_estimate_tokens.cache_clear()
+        # A unique large string that nothing else in the test process
+        # has cached. Use a distinct prefix so other tests' inputs
+        # cannot collide with this one's cache key.
+        big = "z" * (_TOKEN_ESTIMATE_CACHE_THRESHOLD_BYTES + 1)
+        before = _cached_estimate_tokens.cache_info().currsize
+        _ = estimate_tokens(big)
+        after = _cached_estimate_tokens.cache_info().currsize
+        assert after == before, (
+            "estimate_tokens must not insert oversized strings into the "
+            "LRU; doing so would let attacker-controlled inputs pin "
+            "megabytes of memory in the cache."
+        )
+
+    def test_small_inputs_do_use_lru_cache(self):
+        """Counterpart to the threshold test: a string under the
+        threshold is cached, so a second call hits the cache (not
+        the tokenizer) and the LRU's hit counter advances.
+        """
+        from src.chunker import _cached_estimate_tokens
+
+        _cached_estimate_tokens.cache_clear()
+        small = "small string under threshold"
+        estimate_tokens(small)
+        hits_before = _cached_estimate_tokens.cache_info().hits
+        estimate_tokens(small)
+        hits_after = _cached_estimate_tokens.cache_info().hits
+        assert hits_after == hits_before + 1, (
+            "second call on the same short text must hit the LRU; "
+            "without caching the chunker re-encodes every span at "
+            "every greedy-pack and overlap-tail evaluation."
+        )
+
+    def test_non_ascii_text_obeys_byte_threshold_not_char_threshold(self):
+        """Regression: the cache threshold is a memory bound, so it
+        must gate on UTF-8 byte length — not character count. A
+        multilingual attachment whose char count is under the threshold
+        but whose UTF-8 size is several multiples of it would otherwise
+        bypass the documented memory cap, defeating the defense against
+        attacker-controlled multilingual content pinning megabytes of
+        strings in the LRU.
+        """
+        from src.chunker import (
+            _TOKEN_ESTIMATE_CACHE_THRESHOLD_BYTES,
+            _cached_estimate_tokens,
+        )
+
+        # Each emoji "🚀" is 4 UTF-8 bytes. A 3000-char string of them is
+        # ~12 KB UTF-8 — over the 8 KB threshold — but ``len(text)`` is
+        # 3000 (well under the threshold if we naively gated on char
+        # count). The cache must NOT accept it.
+        big_emoji = "🚀" * 3000
+        assert len(big_emoji) < _TOKEN_ESTIMATE_CACHE_THRESHOLD_BYTES, (
+            "precondition: char count must be below threshold to exercise "
+            "the bytes-vs-chars distinction"
+        )
+        assert len(big_emoji.encode("utf-8")) > _TOKEN_ESTIMATE_CACHE_THRESHOLD_BYTES, (
+            "precondition: UTF-8 byte length must exceed threshold so the "
+            "byte-gate has something to defend against"
+        )
+
+        _cached_estimate_tokens.cache_clear()
+        before = _cached_estimate_tokens.cache_info().currsize
+        _ = estimate_tokens(big_emoji)
+        after = _cached_estimate_tokens.cache_info().currsize
+        assert after == before, (
+            "non-ASCII string above the BYTE threshold must NOT enter the "
+            "LRU even when char count is below threshold; otherwise an "
+            "attacker can pin megabytes of multilingual content in cache"
+        )
+
 
 class TestNormalizeBody:
     def test_empty_returns_empty(self):

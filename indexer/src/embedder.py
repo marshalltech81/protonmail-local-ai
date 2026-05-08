@@ -18,9 +18,53 @@ import time
 from typing import Protocol
 
 import httpx
-from tenacity import retry, stop_after_attempt, wait_exponential
+from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
 
 log = logging.getLogger("indexer.embedder")
+
+
+def _is_transient_embed_error(exc: BaseException) -> bool:
+    """Decide whether tenacity should retry ``exc``.
+
+    Retry transport-level failures that a fresh attempt could plausibly
+    fix:
+
+    * Most subclasses of ``httpx.TransportError`` — ``TimeoutException``
+      (``ConnectTimeout`` / ``ReadTimeout`` / ``WriteTimeout`` /
+      ``PoolTimeout``), ``NetworkError`` (``ConnectError`` / ``ReadError``
+      / ``WriteError`` / ``CloseError``), ``RemoteProtocolError``,
+      and ``ProxyError``. The earlier explicit allowlist
+      (``ConnectError``, ``ReadTimeout``, ``RemoteProtocolError``)
+      missed ``ConnectTimeout`` / ``WriteTimeout`` / ``PoolTimeout``
+      and made the call fail immediately on common transient
+      provider hiccups.
+    * 5xx ``HTTPStatusError`` — the provider failed to serve a
+      well-formed request and might recover.
+
+    Do NOT retry — deterministic config errors that retrying only
+    delays:
+
+    * ``httpx.UnsupportedProtocol`` — raised when ``base_url`` lacks
+      a scheme (e.g. ``host.docker.internal:8001/v1`` instead of
+      ``http://host.docker.internal:8001/v1``). A typo, not a
+      transient outage. Retrying buys nothing but startup-timeout
+      latency before the operator sees the actionable error.
+    * ``httpx.LocalProtocolError`` — raised when the client itself
+      builds a malformed request (HTTP/2 framing bug, illegal header
+      value). Almost always a code or config issue, not a network
+      issue.
+    * 4xx ``HTTPStatusError`` (auth, model id, quota, request shape).
+    * Our own ``RuntimeError`` from index-integrity checks — the
+      provider returned a malformed batch and a retry would produce
+      the same shape.
+    """
+    if isinstance(exc, (httpx.UnsupportedProtocol, httpx.LocalProtocolError)):
+        return False
+    if isinstance(exc, httpx.TransportError):
+        return True
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code >= 500
+    return False
 
 
 class EmbeddingBackend(Protocol):
@@ -91,7 +135,7 @@ class OpenAIEmbedder:
         Two independent deadlines:
 
         - ``timeout`` (default 120 s) bounds the **connect-phase** —
-          how long we keep retrying ``ConnectError`` / refused TCP
+          how long we keep retrying transient transport failures
           before declaring the service unreachable. A service that
           isn't bound on the port should fail in ~``timeout`` seconds,
           not 10 minutes.
@@ -105,8 +149,16 @@ class OpenAIEmbedder:
         warmup wait still surfaces as failure because the connect
         deadline has by then passed.
 
-        4xx auth/model/quota errors fail fast (won't recover); 5xx and
-        connection errors retry until the connect deadline.
+        Retry classification delegates to ``_is_transient_embed_error``
+        — the same predicate ``_embed_one_batch`` uses — so startup and
+        runtime share one definition of "transient". 4xx auth / model /
+        quota errors fail fast (deterministic config), as does any
+        non-httpx exception. 5xx and most of the
+        ``httpx.TransportError`` family (connect / read / write / pool
+        timeouts, network errors, ``RemoteProtocolError``) retry until
+        the connect deadline; deterministic config errors
+        (``UnsupportedProtocol``, ``LocalProtocolError``) bypass retry
+        because no fresh attempt would change the outcome.
         """
         warmup_timeout = float(
             os.environ.get(
@@ -130,20 +182,15 @@ class OpenAIEmbedder:
                     json={"model": self.model, "input": "warmup"},
                     timeout=warmup_timeout,
                 )
-                if 400 <= r.status_code < 500:
-                    # Auth, model id, request-shape errors won't recover
-                    # by retrying. Surface immediately so the operator
-                    # fixes config rather than waiting out the timeout.
-                    r.raise_for_status()
                 r.raise_for_status()
                 log.info("Embedder ready: %s (%s)", self.base_url, self.model)
                 return
-            except httpx.HTTPStatusError as e:
-                code = e.response.status_code
-                if 400 <= code < 500:
+            except httpx.HTTPError as e:
+                if not _is_transient_embed_error(e):
+                    # 4xx config errors and any other non-transient
+                    # httpx error surface immediately so the operator
+                    # fixes config rather than waiting out the timeout.
                     raise
-                last_err = e
-            except (httpx.ConnectError, httpx.ReadTimeout, httpx.RemoteProtocolError) as e:
                 last_err = e
             time.sleep(3)
         raise RuntimeError(
@@ -176,6 +223,7 @@ class OpenAIEmbedder:
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=2, max=10),
+        retry=retry_if_exception(_is_transient_embed_error),
         reraise=True,
     )
     def _embed_one_batch(self, texts: list[str]) -> list[list[float]]:

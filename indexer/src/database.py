@@ -9,14 +9,16 @@ import json
 import logging
 import os
 import sqlite3
+import struct
 import threading
 import weakref
 from contextlib import contextmanager, suppress
+from datetime import UTC, datetime
 from pathlib import Path
 
 import sqlite_vec
 
-from .threader import THREAD_BODY_TEXT_MAX_CHARS, canonical_addr
+from .threader import THREAD_BODY_TEXT_MAX_CHARS, Thread, canonical_addr
 
 log = logging.getLogger("indexer.database")
 
@@ -70,13 +72,23 @@ def _dedupe_by_canonical(addrs: list[str]) -> list[str]:
 #         coalesces back to ``subject`` so old threads render with the
 #         legacy normalized value until a future indexer pass refreshes
 #         them.
+#   v16 — ``idx_threads_subject_folder`` covering index on
+#         ``threads(subject, folder, date_last, thread_id)``: the
+#         threader's subject-fallback lookup
+#         (``find_threads_by_subject``) is run once per message that
+#         misses on In-Reply-To/References, which on initial scan is
+#         most messages. Without an index SQLite did a full ``threads``
+#         scan per call, serialized through the ``_synchronized`` lock
+#         and blocking the watchdog + reconciler. Including
+#         ``thread_id`` in the index makes it actually covering for the
+#         SELECT (no per-match table seek).
 # Bumping this constant requires shipping a forward migration file at
 # ``src/migrations/<NNNN>_<slug>.sql`` covering the new version. Fresh
 # installs continue to apply ``_apply_initial_schema`` directly and stamp
 # the current version; existing installs run the migration runner to
 # catch up. See ``src/migrations/runner.py`` for the file layout and
 # transactional guarantees.
-SCHEMA_VERSION = 15
+SCHEMA_VERSION = 16
 
 # The schema uses FTS5 ``contentless_delete=1``, which SQLite added in 3.43.
 # Validate the runtime version at Database init and fail fast with a clear
@@ -171,6 +183,30 @@ class Database:
         # so any exception here would be unactionable noise).
         with suppress(Exception):
             self.close()
+
+    @_synchronized
+    def wal_checkpoint_truncate(self) -> tuple[int, int, int]:
+        """Run ``PRAGMA wal_checkpoint(TRUNCATE)`` and return the counters.
+
+        Returns ``(busy, log_pages, checkpointed_pages)`` straight from
+        SQLite. ``busy`` is non-zero when a concurrent reader holds a
+        WAL frame open and the checkpoint could not complete — the
+        next pass will retry. The single shared connection used by
+        every ``Database`` method tends to keep one read snapshot live
+        for the duration of the indexer process; without this periodic
+        truncate the WAL file grows monotonically and never reclaims
+        space, which on a long-running container has been observed to
+        balloon to hundreds of MB.
+
+        Goes through ``_synchronized`` so a checkpoint cannot interleave
+        with an open writer's transaction. The PRAGMA itself is a
+        single SQL statement so the lock hold is short.
+        """
+        row = self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+        if row is None:
+            return 0, 0, 0
+        # Row order is (busy, log, checkpointed) per SQLite docs.
+        return int(row[0]), int(row[1]), int(row[2])
 
     def _begin_if_needed(self, cur: sqlite3.Cursor) -> bool:
         if self._transaction_depth > 0:
@@ -415,6 +451,20 @@ class Database:
             -- search_emails O(N_fts × N_threads) and blew the 4-min MCP timeout
             -- on populated mailboxes. See migration 0015 for context.
             CREATE INDEX idx_threads_fts_rowid ON threads(fts_rowid);
+
+            -- Threader subject-fallback lookup runs once per incoming
+            -- message that fails In-Reply-To and References lookups —
+            -- equality on subject + folder, DESC by date_last, projects
+            -- thread_id (see find_threads_by_subject). The first three
+            -- columns satisfy filter + sort in one B-tree walk;
+            -- including thread_id as the fourth key column makes the
+            -- index COVERING for the projection, so SQLite returns the
+            -- thread_id straight from the index without a per-match
+            -- table seek. A 50k-message initial scan does not serialize
+            -- 50k full table scans through the ``_synchronized`` writer
+            -- lock. See migration 0016.
+            CREATE INDEX idx_threads_subject_folder
+                ON threads(subject, folder, date_last, thread_id);
 
             CREATE VIRTUAL TABLE threads_fts USING fts5(
                 subject,
@@ -871,8 +921,6 @@ class Database:
         one transaction so the three indexes never disagree about which
         chunks exist for a (message, slice) pair.
         """
-        from datetime import UTC, datetime
-
         incoming_ids = {c.chunk_id for c in chunks}
         cur = self._conn.cursor()
 
@@ -996,8 +1044,6 @@ class Database:
         of payload bytes) is what links the occurrence to its single
         cached extraction in ``attachment_extractions``.
         """
-        from datetime import UTC, datetime
-
         cur = self._conn.cursor()
         started = False
         try:
@@ -1084,8 +1130,6 @@ class Database:
         can upgrade a prior ``unsupported`` / ``empty`` status without
         churning the schema.
         """
-        from datetime import UTC, datetime
-
         cur = self._conn.cursor()
         started = False
         try:
@@ -1171,8 +1215,6 @@ class Database:
         reconciler's pre-transaction read cheap on threads with a long
         tail of historical messages.
         """
-        import struct
-
         if not message_ids:
             return []
         placeholders = ",".join(["?"] * len(message_ids))
@@ -1207,8 +1249,6 @@ class Database:
         pre-existing thread vector — including subject-fallback vectors
         for chunkless threads — across a Phase 2 failure.
         """
-        import struct
-
         row = self._conn.execute(
             "SELECT embedding FROM threads_vec WHERE thread_id = ?",
             (thread_id,),
@@ -1228,22 +1268,53 @@ class Database:
         non-empty chunks → ``mean(chunks)``; empty chunks + non-zero
         prior → prior; else → zero placeholder.
 
-        For genuinely new threads (the bulk case during an initial scan
-        of an unseeded mailbox), a cheap PK existence check on
-        ``threads`` short-circuits both reads. The chunk-embeddings JOIN
-        and the ``threads_vec`` lookup only run when the thread row
-        already exists, avoiding two pointless empty queries per
-        new-thread message.
+        Folds three reads into one method body (PK existence check + chunk
+        embeddings JOIN + ``threads_vec`` lookup) under a single lock
+        acquisition. The previous shape called ``get_thread_chunk_embeddings``
+        and ``get_thread_vector`` after the existence check, each
+        re-entering the ``_synchronized`` RLock and adding Python frames
+        per Phase 1 message — measurable on a 50-message batch. The
+        ``LEFT JOIN`` from ``threads`` collapses the PK check and the
+        chunk fetch into a single statement: zero rows means no thread
+        (new-thread fast path); one row with NULL ``chunk_emb`` means
+        thread exists but is chunkless; N rows means N chunk vectors,
+        ordered by ``chunk_id`` so the downstream mean is deterministic.
         """
-        if (
-            self._conn.execute("SELECT 1 FROM threads WHERE thread_id = ?", (thread_id,)).fetchone()
-            is None
-        ):
+        rows = self._conn.execute(
+            """
+            SELECT v.embedding AS chunk_emb
+            FROM threads t
+            LEFT JOIN message_chunks c ON c.thread_id = t.thread_id
+            LEFT JOIN message_chunks_vec v ON v.chunk_id = c.chunk_id
+            WHERE t.thread_id = ?
+            ORDER BY c.chunk_id
+            """,
+            (thread_id,),
+        ).fetchall()
+        if not rows:
             return [], None
-        return (
-            self.get_thread_chunk_embeddings(thread_id),
-            self.get_thread_vector(thread_id),
-        )
+        chunk_embeddings: list[list[float]] = []
+        for row in rows:
+            blob = row["chunk_emb"]
+            if blob is None:
+                # Thread exists but has no chunks — the LEFT JOIN emits a
+                # single NULL-bearing row in that case. Don't mistake it
+                # for an empty embedding.
+                continue
+            count = len(blob) // 4
+            chunk_embeddings.append(list(struct.unpack(f"{count}f", blob)))
+
+        vec_row = self._conn.execute(
+            "SELECT embedding FROM threads_vec WHERE thread_id = ?",
+            (thread_id,),
+        ).fetchone()
+        prior_vec: list[float] | None = None
+        if vec_row is not None:
+            blob = vec_row["embedding"]
+            count = len(blob) // 4
+            prior_vec = list(struct.unpack(f"{count}f", blob))
+
+        return chunk_embeddings, prior_vec
 
     @_synchronized
     def find_zero_vector_chunkless_thread_filepaths(self) -> list[str]:
@@ -1276,8 +1347,6 @@ class Database:
         row — those are healthy subject-fallback threads from
         blank-body messages and must not be re-indexed.
         """
-        import struct
-
         # Step 1: chunkless threads (typically a small set vs. the
         # full thread table on a healthy mailbox).
         chunkless_rows = self._conn.execute(
@@ -1338,8 +1407,6 @@ class Database:
         message had an empty body, or where every embed previously
         failed).
         """
-        import struct
-
         # ``ORDER BY c.chunk_id`` pins read order — see the matching note
         # in ``get_chunk_embeddings_for_messages`` for why a deterministic
         # mean read matters.
@@ -1506,10 +1573,6 @@ class Database:
         ).fetchone()
         if not row:
             return None
-
-        from datetime import datetime
-
-        from .threader import Thread
 
         return Thread(
             thread_id=row["thread_id"],
@@ -1814,8 +1877,6 @@ class Database:
         lexicographically before ``T``-separated ISO strings and would
         cause tombstones to be reaped up to a day early.
         """
-        from datetime import UTC, datetime
-
         cur = self._conn.cursor()
         marked_at = datetime.now(UTC).isoformat()
         cur.execute(

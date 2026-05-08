@@ -35,22 +35,27 @@ The stack now runs:
 - **mbsync** — Docker, pulls into Maildir, `chmod go+r` after each sync.
 - **indexer** — Docker, parses Maildir, threads, embeds via any
   OpenAI-compatible `/v1/embeddings` provider (default: host-side
-  mlx-service), writes SQLite. Schema is at v15 with 4096-dim
+  mlx-service), writes SQLite. Schema is at v16 with 4096-dim
   vectors. The Ollama embed-fallback path was removed in Phase C.
-  Initial-scan drainer uses a two-phase batched path (`Phase 1`
-  commits thread membership per message — seeded by a three-case
-  priority chain: mean of existing chunk vectors when the thread is
-  already indexed with content; the prior `threads_vec` row when the
-  thread is chunkless but has a non-zero vector (subject-fallback
-  threads); placeholder zero only for genuinely new threads. `Phase
-  2b` issues one batched embed_batch across the whole batch; `Phase
-  2c` commits chunks/vectors per message and replaces the seed
-  thread vector). The non-zero-preserving seed means a Phase 2
-  failure on a new sibling message cannot regress the parent
-  thread's vector — even for chunkless subject-fallback threads.
-  This collapses ~25k single-message embed round-trips into ~500
-  multi-message ones against a cloud embedder at the default
-  `INITIAL_INDEX_BATCH_SIZE=50`.
+  Both the initial scan and the steady-state main loop drain the
+  queue through the same two-phase batched path (`Phase 1` commits
+  thread membership per message — seeded by a three-case priority
+  chain: mean of existing chunk vectors when the thread is already
+  indexed with content; the prior `threads_vec` row when the thread
+  is chunkless but has a non-zero vector (subject-fallback threads);
+  placeholder zero only for genuinely new threads. `Phase 2b` issues
+  one batched embed_batch across the whole batch; `Phase 2c` commits
+  chunks/vectors per message and replaces the seed thread vector).
+  Initial scan drains to empty at `INITIAL_INDEX_BATCH_SIZE=50`;
+  steady-state runs `max_passes=1` per main-loop tick at
+  `INDEXER_STEADY_STATE_BATCH_SIZE=8` so the reconciler / WAL
+  checkpoint / recovery sweep interleave cleanly. The
+  non-zero-preserving seed means a Phase 2 failure on a new sibling
+  message cannot regress the parent thread's vector — even for
+  chunkless subject-fallback threads. This collapses ~25k
+  single-message embed round-trips into ~500 multi-message ones
+  against a cloud embedder during initial scan, and a 5+ message
+  mbsync burst into one round-trip during steady state.
 - **mcp-server** — Docker, hybrid search + intelligence tools.
   `hybrid_search` calls the MLX reranker (`Qwen3-Reranker-4B-mxfp8`)
   after RRF. The LLM-synthesis step is dispatched by `LLM_MODE`:

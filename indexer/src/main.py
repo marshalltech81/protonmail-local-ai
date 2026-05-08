@@ -133,9 +133,35 @@ CHUNK_OVERLAP_TOKENS = _int_env("INDEXER_CHUNK_OVERLAP_TOKENS", 150, minimum=0)
 # a single batched embed call. Larger batches amortize the cloud-embedder
 # round-trip across more messages — meaningful when EMBED_BASE_URL points
 # at a remote provider (~150 ms RTT each), marginal against loopback
-# mlx-service. Steady-state (watchdog) ingestion is unaffected: the
-# watchdog path stays per-message because it sees 1-3 messages at a time.
+# mlx-service.
 INITIAL_INDEX_BATCH_SIZE = _int_env("INITIAL_INDEX_BATCH_SIZE", 50)
+
+# Steady-state (post-initial-scan) batch size for the main-loop drain.
+# Smaller than the initial-scan size because steady-state typically sees
+# 1-3 messages per pass, but routing through the same batched path means
+# (a) a burst from an mbsync sync still gets one bulk embed call instead
+# of one HTTP round-trip per message (decisive against any cloud
+# embedder), and (b) the initial-scan and steady-state code paths share
+# one Phase 1/2 implementation rather than diverging on seed-vector
+# selection.
+STEADY_STATE_BATCH_SIZE = _int_env("INDEXER_STEADY_STATE_BATCH_SIZE", 8)
+
+# How often (seconds) the main loop calls ``Database.wal_checkpoint_truncate``.
+# The single shared sqlite3 connection used by ``Database`` keeps a WAL
+# read snapshot open for the duration of the indexer process; without an
+# explicit truncate-checkpoint the WAL file grows monotonically. 10 min
+# keeps the file size bounded without churning IO.
+WAL_CHECKPOINT_INTERVAL_SECS = _int_env("INDEXER_WAL_CHECKPOINT_INTERVAL_SECS", 600, minimum=60)
+
+# How often (seconds) the main loop runs ``_recover_zero_vector_threads``.
+# The periodic sweep recovers retryable shapes — chunkless zero-vector
+# threads whose queue row is still 'queued' or has been cleaned up —
+# but does NOT auto-resurrect dead-lettered rows. Dead = operator-
+# visible terminal state; clearing it requires explicit intervention
+# (or a future operator-rescue tool that calls
+# ``_recover_zero_vector_threads(..., resurrect_dead=True)``).
+# See ``_recover_zero_vector_threads`` for the full policy.
+RECOVERY_SWEEP_INTERVAL_SECS = _int_env("INDEXER_RECOVERY_SWEEP_INTERVAL_SECS", 1800, minimum=60)
 
 # Phase 1 seed for genuinely new threads (the only branch that uses
 # this constant). Phase 1's seed-selection runs a three-case priority
@@ -459,11 +485,19 @@ def _index_one_file(
         parse_ms = (time.perf_counter() - t0) * 1000
         return False, "parse_skipped_missing", repr(e), StageTimings(parse_ms=parse_ms)
     except Exception as e:
-        # Transient I/O on a path that DOES exist (PermissionError from
-        # the mbsync chmod race) propagates so the queue routes it to
-        # retry/backoff — the chmod resolves on a later sync cycle.
-        # Other parse-content failures are caught inside parse_email
-        # and surface as ``message is None`` below.
+        # Two cases land here:
+        # 1. Transient I/O on a path that DOES exist
+        #    (``PermissionError`` from the mbsync 0600→0644 chmod race)
+        #    — propagates so the queue routes it to retry/backoff and
+        #    the chmod resolves on a later sync cycle.
+        # 2. Content-pathology failures in ``parse_email`` (malformed
+        #    MIME, html2text blowup, decode errors). Earlier versions
+        #    of the parser caught these locally and returned ``None``,
+        #    which the worker treated as terminal success and silently
+        #    un-indexed the file. The parser now re-raises, so the
+        #    queue's retry + dead-letter cascade fires and operators
+        #    see persistent parser bugs instead of a quietly shrinking
+        #    index.
         parse_ms = (time.perf_counter() - t0) * 1000
         return False, "parse", repr(e), StageTimings(parse_ms=parse_ms)
     parse_ms = (time.perf_counter() - t0) * 1000
@@ -729,7 +763,6 @@ def _phase2a_collect_chunks(
     state: _BatchedMsg,
     db: Database,
     all_texts: list[str],
-    threads_with_pending_chunks: set[str],
 ) -> tuple[bool, str | None]:
     """Phase 2a: chunk the body and attachments WITHOUT embedding.
 
@@ -740,13 +773,19 @@ def _phase2a_collect_chunks(
     so the caller can mark the queue row failed without aborting the
     rest of the batch.
 
-    ``threads_with_pending_chunks`` is the set of thread IDs that
-    earlier survivors in this batch already queued new chunks for.
-    A chunkless message on one of those threads can skip its own
-    subject fallback — the earlier sibling's chunks will overwrite
-    the seed in Phase 2c (case 1 wins over case 2). This avoids
-    wasting an embed-batch slot on a fallback that Phase 2c would
-    silently ignore.
+    Subject fallback gating depends ONLY on COMMITTED state — the
+    earlier-shape "skip fallback if an earlier batch sibling queued
+    chunks for the same thread" optimization conflated pending and
+    committed work: if that earlier sibling's Phase 2c then failed,
+    the chunkless successor would commit cleanly with no chunks, no
+    fallback, and a thread vector stuck at the Phase 1 zero
+    placeholder (operator-invisible retrieval-quality regression).
+    Reserving an extra embed-batch slot per chunkless sibling on a
+    chunk-bearing thread costs one BPE encode and one embed payload
+    entry — negligible compared to the bulk-embed savings, and the
+    correctness story is straightforward: fallback is reserved iff
+    the message has no new chunks AND the thread has no committed
+    chunks at the moment of the check.
     """
     msg = state.msg
     t0 = time.perf_counter()
@@ -809,20 +848,26 @@ def _phase2a_collect_chunks(
                 attach_new_chunks.append(plan_new)
                 attach_offsets.append(plan_offsets)
         # Subject-fallback path: when this message contributes zero new
-        # chunks AND the parent thread has no existing chunks AND no
-        # earlier batch sibling has queued chunks for the same thread,
-        # embed the subject (or a sentinel string) so the thread vector
-        # is not permanently stuck at the Phase 1 placeholder zero.
+        # chunks AND the parent thread has no committed chunks, embed
+        # the subject (or a sentinel string) so the thread vector is
+        # not permanently stuck at the Phase 1 placeholder zero.
         # Mirrors the old ``_seed_thread_embedding`` per-message
         # behavior. The fallback text rides through Phase 2b inside the
         # same batched embed call as everyone else's chunks.
+        #
+        # The check is on COMMITTED chunks only
+        # (``get_thread_chunk_embeddings``), not on pending in-batch
+        # chunks. An earlier batch sibling that queued chunks for the
+        # same thread but whose Phase 2c then fails would otherwise
+        # leave this chunkless successor committing cleanly with a
+        # zero thread vector — see the docstring rationale above.
+        # Reserving an extra fallback slot when an earlier sibling
+        # also produced chunks is harmless: Phase 2c's three-case
+        # priority chain prefers ``mean(committed chunks)`` over the
+        # fallback embedding, so the fallback only takes effect when
+        # nothing else committed.
         has_new_chunks = bool(new_body) or any(plan_new for plan_new in attach_new_chunks)
-        if has_new_chunks:
-            threads_with_pending_chunks.add(state.thread.thread_id)
-        elif (
-            state.thread.thread_id not in threads_with_pending_chunks
-            and not db.get_thread_chunk_embeddings(state.thread.thread_id)
-        ):
+        if not has_new_chunks and not db.get_thread_chunk_embeddings(state.thread.thread_id):
             fallback_text = state.thread.subject.strip() if state.thread.subject else ""
             if not fallback_text:
                 fallback_text = "(empty thread)"
@@ -916,6 +961,7 @@ def _drain_queue_batched(
     *,
     batch_size: int,
     timing_aggregator: TimingAggregator,
+    max_passes: int | None = None,
 ) -> int:
     """Drain the queue in two-phase batches.
 
@@ -934,6 +980,13 @@ def _drain_queue_batched(
     overwrites the Phase 1 seed thread vector with the real
     mean-of-chunks vector.
 
+    ``max_passes`` bounds how many ``claim_batch`` rounds run before
+    returning. ``None`` (the default) drains until the queue is empty
+    — the right shape for ``initial_index``. Steady-state callers in
+    the main loop pass ``max_passes=1`` so each tick interleaves
+    cleanly with the reconciler sweep, WAL checkpoint, and health-file
+    refresh instead of starving them on a long burst.
+
     Failure isolation:
 
     * Phase 1 error for one message — that message marked failed,
@@ -948,7 +1001,11 @@ def _drain_queue_batched(
       others succeed.
     """
     processed = 0
+    passes = 0
     while True:
+        if max_passes is not None and passes >= max_passes:
+            break
+        passes += 1
         # ---- Gather batch + Phase 1 ----
         # Snapshot up to batch_size distinct queued rows in one query
         # so the gather loop cannot re-claim the same row repeatedly
@@ -975,13 +1032,8 @@ def _drain_queue_batched(
         # entry — not just before/after the bulk embed.
         all_texts: list[str] = []
         survivors: list[_BatchedMsg] = []
-        # Track thread IDs that earlier survivors already queued new
-        # chunks for, so a chunkless sibling on the same thread later
-        # in the batch skips reserving a redundant subject-fallback
-        # slot in ``all_texts``.
-        threads_with_pending_chunks: set[str] = set()
         for entry in batch:
-            ok, err = _phase2a_collect_chunks(entry, db, all_texts, threads_with_pending_chunks)
+            ok, err = _phase2a_collect_chunks(entry, db, all_texts)
             if ok:
                 survivors.append(entry)
             else:
@@ -1051,32 +1103,64 @@ def _drain_queue_batched(
     return processed
 
 
-def _recover_zero_vector_threads(db: Database, queue: IndexingQueue) -> int:
+def _recover_zero_vector_threads(
+    db: Database, queue: IndexingQueue, *, resurrect_dead: bool = False
+) -> int:
     """Re-enqueue messages stuck on chunkless zero-vector threads.
 
-    The batched indexer's Phase 1 commits thread membership +
-    ``indexed_files`` durably before Phase 2 runs. If the indexer is
-    killed (SIGKILL, OOM, power loss) between Phase 1 and Phase 2c on
-    a thread that had no prior chunks, or if the Phase 2 retry
-    cascade exhausts ``max_attempts`` and dead-letters the file, the
-    thread is left text-indexed but vectorless — and ``is_indexed``
-    returns True so the normal ``initial_index`` walk won't
-    re-enqueue it. This sweep finds those files and gives them a
-    fresh attempt budget so the next drain pass can complete the
-    indexing.
+    Policy: dead-lettered rows are an operator-visible terminal state
+    and are NOT auto-resurrected. The recovery sweep only rescues
+    files in queued / no-row state — those represent in-flight or
+    cleaned-up work the indexer can safely retry. A row at
+    ``status='dead'`` stayed in ``indexing_jobs`` precisely so the
+    operator could see that ``max_attempts`` was exhausted; clearing
+    that state without operator intent would burn embedder quota
+    against the same payload on every container restart and undo
+    ``initial_index``'s deliberate ``is_dead`` skip.
 
-    Skips files that already have a 'queued' row — the normal retry
-    cascade is in flight and clobbering its row would reset the
-    attempts counter mid-cascade. Re-enqueue covers the
-    no-row case (Phase 1 succeeded but the queue row was somehow
-    cleaned up) and the dead-letter case (``enqueue``'s
-    ``INSERT OR REPLACE`` clears the dead row and resets attempts).
+    What the sweep handles:
 
-    Healthy chunkless subject-fallback threads (non-zero
-    ``threads_vec``) are NOT touched — the DB query filters them out.
+    * **No queue row** (Phase 1 committed but the row was somehow
+      cleaned up out-of-band) — re-enqueue with a fresh budget.
+    * **Crash mid-batch** (process killed between Phase 1 and
+      ``mark_failed``/``mark_succeeded``) — the row stays at
+      ``status='queued'`` with the same attempts count as when the
+      worker claimed it, and the next ``_drain_queue_batched`` will
+      pick it up. ``has_pending_row`` returns True so this branch
+      is skipped here, and that's correct — the queue itself owns
+      the recovery.
+    * **Healthy chunkless subject-fallback threads** (non-zero
+      ``threads_vec``) are filtered out at the DB query level.
 
-    Returns the number of files re-enqueued for visibility in
-    startup logs.
+    What the sweep does NOT handle by default:
+
+    * **Dead-lettered rows** — left alone. To rescue a dead-lettered
+      file, an operator confirms the underlying cause is fixed and
+      either:
+
+      - deletes the dead row directly (``DELETE FROM indexing_jobs
+        WHERE filepath = '...';``), after which the next periodic
+        recovery sweep — or the next ``initial_index`` at restart
+        — sees the file as a no-row zero-vector candidate and
+        re-enqueues it via the ``no queue row`` branch above; or
+      - calls this function with ``resurrect_dead=True`` from a
+        one-off rescue tool, which clears the dead status via
+        ``enqueue``'s ``INSERT OR REPLACE`` in one step.
+
+      Note: simply touching the Maildir file does NOT re-enqueue
+      it. The watchdog handles ``on_created`` and ``on_moved``
+      events but not ``on_modified``, and ``initial_index``
+      consults ``queue.is_dead`` and skips dead-lettered paths
+      regardless of file activity.
+
+      The ``resurrect_dead=True`` flag stays on the API for that
+      operator tool; no production call site uses it.
+
+    Skips files that already have a 'queued' row (active retry
+    cascade in flight; clobbering its row would reset the attempts
+    counter mid-cascade).
+
+    Returns the number of files re-enqueued for visibility in logs.
     """
     candidates = db.find_zero_vector_chunkless_thread_filepaths()
     if not candidates:
@@ -1084,23 +1168,46 @@ def _recover_zero_vector_threads(db: Database, queue: IndexingQueue) -> int:
 
     re_enqueued = 0
     skipped_pending = 0
+    skipped_dead = 0
     for filepath in candidates:
         if queue.has_pending_row(filepath):
             skipped_pending += 1
             continue
+        if not resurrect_dead and queue.is_dead(filepath):
+            skipped_dead += 1
+            continue
         queue.enqueue(filepath, REASON_RECOVERY)
         re_enqueued += 1
 
-    if re_enqueued or skipped_pending:
+    if re_enqueued or skipped_pending or skipped_dead:
+        # Log shape: split the "what happened" facts from the
+        # "what's next" implication so the implication only applies
+        # to the rows that will actually move. The previous wording
+        # ("Their next drain pass should complete the indexing")
+        # incorrectly suggested skipped-dead rows would also drain;
+        # they will not until an operator intervenes.
         log.warning(
-            "recovery sweep: re-enqueued %d message(s) on threads with "
-            "zero-vector + no chunks (Phase 1 committed but Phase 2 "
-            "did not — likely a crash mid-batch or a Phase 2 dead-letter); "
-            "skipped %d already in active retry. Their next drain pass "
-            "should complete the indexing.",
+            "recovery sweep: re-enqueued %d zero-vector chunkless "
+            "message(s); skipped %d already in active retry; skipped %d "
+            "dead-lettered (resurrect_dead=%s).",
             re_enqueued,
             skipped_pending,
+            skipped_dead,
+            resurrect_dead,
         )
+        if re_enqueued:
+            log.info(
+                "recovery sweep: %d re-enqueued file(s) will be processed on the next drain pass.",
+                re_enqueued,
+            )
+        if skipped_dead and not resurrect_dead:
+            log.warning(
+                "recovery sweep: %d dead-lettered file(s) remain parked. "
+                "They will NOT be drained automatically — see "
+                "_recover_zero_vector_threads docstring for the operator "
+                "rescue paths.",
+                skipped_dead,
+            )
     return re_enqueued
 
 
@@ -1155,10 +1262,15 @@ def initial_index(
     )
 
     # Recovery sweep — re-enqueue messages stuck on chunkless zero-vector
-    # threads from a prior crash mid-batch or Phase 2 dead-letter. The
-    # standard walk above misses these because is_indexed=True. Run BEFORE
-    # the drain so recovery rows ride the same batched-index pass as fresh
-    # enqueues.
+    # threads from a prior crash mid-batch (queued row that mark_failed /
+    # mark_succeeded never reached). The standard walk above misses these
+    # because ``is_indexed=True``. Dead-lettered rows are intentionally
+    # NOT touched here — that policy is uniform across startup and
+    # periodic, matching ``initial_index``'s ``is_dead`` skip and the
+    # durable queue's bounded-retry contract. See
+    # ``_recover_zero_vector_threads`` for the rationale and the
+    # ``resurrect_dead=True`` opt-in path. Run BEFORE the drain so
+    # recovery rows ride the same batched-index pass as fresh enqueues.
     _recover_zero_vector_threads(db, queue)
 
     timing_aggregator = TimingAggregator(window=200)
@@ -1302,6 +1414,8 @@ def main():
     log.info("Watching Maildir for new emails...")
 
     last_reconcile = time.monotonic()
+    last_recovery_sweep = time.monotonic()
+    last_wal_checkpoint = time.monotonic()
     timing_aggregator = TimingAggregator(window=200)
     drained_since_log = 0
     try:
@@ -1309,28 +1423,43 @@ def main():
             touch_health_file()
             # Drain any queued indexing jobs before yielding to the
             # reconciler so newly-arrived mail is visible in search
-            # quickly. ``max_batch`` caps each pass so a large initial
-            # enqueue (or a burst from an mbsync sync) does not starve
-            # the reconciler or the health-file refresh.
+            # quickly. Steady state goes through the same batched path
+            # initial_index uses, with ``max_passes=1`` so each tick
+            # processes at most ``STEADY_STATE_BATCH_SIZE`` messages
+            # before yielding to the reconciler / WAL checkpoint /
+            # recovery sweep. A burst from an mbsync sync still lands
+            # in one bulk embed call instead of N per-message HTTP
+            # round-trips.
             try:
-                drained = drain_queue(
-                    queue,
+                drained = _drain_queue_batched(
                     db,
                     embedder,
                     threader,
-                    max_batch=HEALTH_REFRESH_EVERY,
+                    queue,
+                    batch_size=STEADY_STATE_BATCH_SIZE,
                     timing_aggregator=timing_aggregator,
+                    max_passes=1,
                 )
                 drained_since_log += drained
                 if drained_since_log >= TIMING_LOG_EVERY:
                     line = format_summary(timing_aggregator.summary())
                     if line:
-                        log.info(line)
+                        # Tag the periodic timing summary with current
+                        # queue depth so operators see when work is
+                        # backing up without grepping a separate log.
+                        depth = queue.stats()
+                        log.info(
+                            "%s queued=%d dead=%d",
+                            line,
+                            depth["queued"],
+                            depth["dead"],
+                        )
                     drained_since_log = 0
             except Exception as e:
                 log.error(f"queue drain failed: {e}")
+
+            now = time.monotonic()
             if reconciler is not None:
-                now = time.monotonic()
                 if now - last_reconcile >= reconciler_config.sweep_interval_secs:
                     try:
                         reconciler.sweep()
@@ -1338,6 +1467,40 @@ def main():
                     except Exception as e:
                         log.error(f"periodic reconciliation failed: {e}")
                     last_reconcile = now
+
+            # Recovery sweep: re-enqueue messages on chunkless
+            # zero-vector threads that are STILL retryable. A
+            # transient embedder bug that left a row queued-but-stuck
+            # heals on its own once the underlying cause clears.
+            # Dead-lettered rows are left alone (default policy,
+            # uniform with the startup path) — see
+            # ``_recover_zero_vector_threads`` for why.
+            if now - last_recovery_sweep >= RECOVERY_SWEEP_INTERVAL_SECS:
+                try:
+                    _recover_zero_vector_threads(db, queue)
+                except Exception as e:
+                    log.error(f"periodic recovery sweep failed: {e}")
+                last_recovery_sweep = now
+
+            # WAL checkpoint: keep the WAL file size bounded over a
+            # long-running container. The single shared connection
+            # otherwise pins a read snapshot that prevents WAL
+            # truncation at SQLite's automatic checkpoint thresholds.
+            if now - last_wal_checkpoint >= WAL_CHECKPOINT_INTERVAL_SECS:
+                try:
+                    busy, _log_pages, ckpt_pages = db.wal_checkpoint_truncate()
+                    if busy:
+                        log.debug(
+                            "wal_checkpoint busy=%d (a reader pinned WAL frames; "
+                            "next pass will retry)",
+                            busy,
+                        )
+                    elif ckpt_pages:
+                        log.debug("wal_checkpoint truncated %d page(s)", ckpt_pages)
+                except Exception as e:
+                    log.error(f"wal checkpoint failed: {e}")
+                last_wal_checkpoint = now
+
             time.sleep(1)
     except KeyboardInterrupt:
         observer.stop()

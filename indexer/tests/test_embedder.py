@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 import httpx
 import pytest
-from src.embedder import OpenAIEmbedder
+from src.embedder import OpenAIEmbedder, _is_transient_embed_error
 
 OPENAI_DATA_KEY = "data"
 
@@ -259,6 +259,56 @@ class TestOpenAIEmbedder:
             emb.wait_for_ready(timeout=30)
         assert calls["n"] == 2
 
+    def test_wait_for_ready_retries_on_connect_timeout(self):
+        """Regression for the timeout-class gap: the previous explicit
+        allowlist (``ConnectError`` / ``ReadTimeout`` /
+        ``RemoteProtocolError``) missed the entire ``TimeoutException``
+        hierarchy — ``ConnectTimeout`` / ``WriteTimeout`` /
+        ``PoolTimeout`` would propagate uncaught and crash startup
+        instead of triggering a retry. ``wait_for_ready`` now
+        delegates to ``_is_transient_embed_error`` so its retry
+        classification matches ``_embed_one_batch`` exactly.
+        """
+        emb = OpenAIEmbedder("http://host.docker.internal:8001/v1", "test-model")
+        calls = {"n": 0}
+
+        def handler(_request: httpx.Request) -> httpx.Response:
+            calls["n"] += 1
+            if calls["n"] < 2:
+                raise httpx.ConnectTimeout("first probe timed out")
+            return httpx.Response(200, json=_embed_response([[0.0]]))
+
+        _install_mock(emb, handler)
+        with patch("src.embedder.time.sleep", lambda _: None):
+            emb.wait_for_ready(timeout=30)
+        assert calls["n"] == 2
+
+    def test_wait_for_ready_fails_fast_on_unsupported_protocol(self):
+        """Counterpart to the timeout-class test: an
+        ``httpx.UnsupportedProtocol`` (raised when ``base_url`` lacks
+        a scheme — e.g. ``EMBED_BASE_URL=host.docker.internal:8001/v1``
+        instead of ``http://...``) must propagate immediately rather
+        than retry until the connect deadline. The earlier shape
+        retried every ``TransportError`` subclass, so a misconfigured
+        URL would silently retry for ``timeout`` seconds before the
+        operator saw the actionable error.
+        """
+        emb = OpenAIEmbedder("http://host.docker.internal:8001/v1", "test-model")
+        calls = {"n": 0}
+
+        def handler(_request: httpx.Request) -> httpx.Response:
+            calls["n"] += 1
+            raise httpx.UnsupportedProtocol("bad URL scheme")
+
+        _install_mock(emb, handler)
+        with patch("src.embedder.time.sleep", lambda _: None):
+            with pytest.raises(httpx.UnsupportedProtocol):
+                emb.wait_for_ready(timeout=30)
+        assert calls["n"] == 1, (
+            "UnsupportedProtocol must NOT retry — it's a deterministic "
+            "config error and the operator needs the failure surfaced fast"
+        )
+
     def test_wait_for_ready_times_out_when_never_responds(self):
         emb = OpenAIEmbedder("http://host.docker.internal:8001/v1", "test-model")
 
@@ -325,3 +375,152 @@ class TestOpenAIEmbedder:
         _install_mock(emb, handler)
         with pytest.raises(httpx.HTTPStatusError):
             emb.wait_for_ready(timeout=30)
+
+
+class TestRetryPredicate:
+    """``_is_transient_embed_error`` decides whether tenacity retries.
+
+    The predicate exists to keep ``_embed_one_batch`` from retrying its
+    own integrity-check ``RuntimeError`` (deterministic; retry burns
+    latency before the same failure resurfaces) while still retrying
+    transport-level failures (connection drop, 5xx, read timeout).
+    """
+
+    def test_retries_connect_error(self):
+        assert _is_transient_embed_error(httpx.ConnectError("conn refused"))
+
+    def test_retries_read_timeout(self):
+        assert _is_transient_embed_error(httpx.ReadTimeout("read timed out"))
+
+    def test_retries_remote_protocol_error(self):
+        assert _is_transient_embed_error(httpx.RemoteProtocolError("proto"))
+
+    def test_retries_5xx_http_status_error(self):
+        response = httpx.Response(503, request=httpx.Request("POST", "http://x/"))
+        exc = httpx.HTTPStatusError(
+            "Service Unavailable", request=response.request, response=response
+        )
+        assert _is_transient_embed_error(exc)
+
+    def test_does_not_retry_4xx_http_status_error(self):
+        response = httpx.Response(401, request=httpx.Request("POST", "http://x/"))
+        exc = httpx.HTTPStatusError("Unauthorized", request=response.request, response=response)
+        assert not _is_transient_embed_error(exc)
+
+    def test_does_not_retry_runtime_error(self):
+        # Self-raised integrity-check failures (malformed batch, missing
+        # indices) are deterministic. Retrying just delays the same
+        # exception surfacing.
+        assert not _is_transient_embed_error(RuntimeError("bad data"))
+
+    def test_does_not_retry_value_error(self):
+        # Any non-transport exception class falls through to ``False``.
+        assert not _is_transient_embed_error(ValueError("nope"))
+
+    def test_runtime_error_is_not_retried_at_call_site(self):
+        """End-to-end: ``embed_batch`` raises a RuntimeError on a
+        malformed provider response and the handler is invoked exactly
+        once — proving tenacity does not retry the integrity check."""
+        emb = OpenAIEmbedder("http://host.docker.internal:8001/v1", "test-model")
+        calls = {"n": 0}
+
+        def handler(_request: httpx.Request) -> httpx.Response:
+            calls["n"] += 1
+            return httpx.Response(
+                200,
+                json={
+                    "object": "list",
+                    "data": [
+                        {"object": "embedding", "embedding": [1.0], "index": 0},
+                    ],
+                    "model": "test-model",
+                    "usage": {"prompt_tokens": 0, "total_tokens": 0},
+                },
+            )
+
+        _install_mock(emb, handler)
+        with pytest.raises(RuntimeError):
+            emb.embed_batch(["a", "b"])  # asks for 2, provider returns 1
+        assert calls["n"] == 1, "RuntimeError must not be retried"
+
+    def test_5xx_is_retried_at_call_site(self):
+        """End-to-end: a 5xx on the first call followed by a clean 200
+        succeeds via the tenacity retry."""
+        emb = OpenAIEmbedder("http://host.docker.internal:8001/v1", "test-model")
+        calls = {"n": 0}
+
+        def handler(_request: httpx.Request) -> httpx.Response:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return httpx.Response(503, json={"error": "down"})
+            return httpx.Response(200, json=_embed_response([[1.0]]))
+
+        _install_mock(emb, handler)
+        with patch("src.embedder.wait_exponential", lambda **_: lambda *_: 0):
+            result = emb.embed_batch(["a"])
+        assert result == [[1.0]]
+        assert calls["n"] == 2, "5xx HTTPStatusError must be retried"
+
+    def test_connect_timeout_is_retried_at_call_site(self):
+        """End-to-end: a ConnectTimeout on the first call followed by a
+        clean 200 succeeds via the tenacity retry. The earlier predicate
+        only listed ``ConnectError`` / ``ReadTimeout`` /
+        ``RemoteProtocolError`` and missed the timeout subclasses
+        (``ConnectTimeout`` / ``WriteTimeout`` / ``PoolTimeout``), making
+        a common transient provider hiccup fail the whole embed batch
+        immediately. ``httpx.TransportError`` is the right base class
+        to catch all of them."""
+        emb = OpenAIEmbedder("http://host.docker.internal:8001/v1", "test-model")
+        calls = {"n": 0}
+
+        def handler(_request: httpx.Request) -> httpx.Response:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise httpx.ConnectTimeout("first call timed out")
+            return httpx.Response(200, json=_embed_response([[2.0]]))
+
+        _install_mock(emb, handler)
+        with patch("src.embedder.wait_exponential", lambda **_: lambda *_: 0):
+            result = emb.embed_batch(["a"])
+        assert result == [[2.0]]
+        assert calls["n"] == 2, "ConnectTimeout must be retried"
+
+    def test_connect_timeout_is_classified_as_transient(self):
+        # Direct predicate test for the exact subclass that motivated
+        # the switch from the explicit allowlist to ``TransportError``.
+        assert _is_transient_embed_error(httpx.ConnectTimeout("connect timeout"))
+
+    def test_write_timeout_is_classified_as_transient(self):
+        assert _is_transient_embed_error(httpx.WriteTimeout("write timeout"))
+
+    def test_pool_timeout_is_classified_as_transient(self):
+        assert _is_transient_embed_error(httpx.PoolTimeout("pool exhausted"))
+
+    def test_unsupported_protocol_is_NOT_transient(self):
+        # ``base_url`` lacks scheme (e.g. ``host.docker.internal:8001``);
+        # a deterministic config error, not a transient outage.
+        # Retrying just delays the actionable failure.
+        assert not _is_transient_embed_error(httpx.UnsupportedProtocol("no scheme"))
+
+    def test_local_protocol_error_is_NOT_transient(self):
+        # Client built a malformed request (HTTP/2 framing bug, illegal
+        # header value); almost always a code or config issue.
+        assert not _is_transient_embed_error(httpx.LocalProtocolError("bad request"))
+
+    def test_unsupported_protocol_at_call_site_is_not_retried(self):
+        """End-to-end: ``embed_batch`` against an UnsupportedProtocol
+        must propagate after a single attempt. Regression guard for
+        the ``base_url`` typo case where the previous predicate
+        retried the whole TransportError family indiscriminately."""
+        emb = OpenAIEmbedder("http://host.docker.internal:8001/v1", "test-model")
+        calls = {"n": 0}
+
+        def handler(_request: httpx.Request) -> httpx.Response:
+            calls["n"] += 1
+            raise httpx.UnsupportedProtocol("bad URL scheme")
+
+        _install_mock(emb, handler)
+        with patch("src.embedder.wait_exponential", lambda **_: lambda *_: 0):
+            with pytest.raises(httpx.UnsupportedProtocol):
+                emb.embed_batch(["a"])
+        assert calls["n"] == 1, "UnsupportedProtocol must not retry at runtime either"
