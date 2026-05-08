@@ -29,6 +29,7 @@ Input contract:
 """
 
 import hashlib
+import math
 import re
 from dataclasses import dataclass
 from functools import lru_cache
@@ -59,6 +60,41 @@ _PARAGRAPH_RE = re.compile(r"[^\n]+(?:\n(?![ \t]*\n)[^\n]*)*")
 _SENTENCE_END_RE = re.compile(r"[.!?]+(?=\s|$)")
 
 
+# Tolerance for "vector is already unit-norm". A model that already
+# emits L2-normalized output (Qwen3-Embedding-8B does, per its model
+# card) lands within float32's relative precision of 1.0; the cheap
+# sqrt + compare lets us skip the division entirely when no
+# correction is needed. Float32 round-trip noise is well under 1e-6.
+_UNIT_NORM_TOLERANCE = 1e-6
+
+
+def l2_normalize(vec: list[float]) -> list[float]:
+    """Return ``vec`` scaled to unit L2 norm.
+
+    Idempotent: a vector that's already within
+    ``_UNIT_NORM_TOLERANCE`` of unit-norm is returned unchanged
+    (no division, no float churn). Zero vectors are also returned
+    unchanged — dividing by zero would NaN-poison the storage. The
+    indexer's seed-vector logic intentionally writes a zero
+    placeholder for genuinely-new threads (Phase 1 seed before
+    Phase 2 lands the real chunk-mean vector); preserving it through
+    this normalization keeps the three-case priority chain working.
+
+    Cost is one O(dim) sum-of-squares plus a sqrt — negligible
+    against the embed HTTP round-trip and inputs are already in
+    Python list form post-deserialization.
+    """
+    norm_sq = 0.0
+    for x in vec:
+        norm_sq += x * x
+    if norm_sq <= 0.0:
+        return vec
+    norm = math.sqrt(norm_sq)
+    if abs(norm - 1.0) < _UNIT_NORM_TOLERANCE:
+        return vec
+    return [x / norm for x in vec]
+
+
 def mean_vector(vectors: list[list[float]]) -> list[float]:
     """Element-wise mean of equal-length float vectors.
 
@@ -67,6 +103,12 @@ def mean_vector(vectors: list[list[float]]) -> list[float]:
     reap. Pure Python so the indexer stays free of numpy at runtime —
     per-thread fan-out is bounded (typically <100 chunks per thread) and
     even at 4096-dim Qwen3-Embedding the per-thread aggregate is sub-ms.
+
+    The result is *not* L2-normalized — averaging unit vectors yields a
+    vector with norm < 1 in the general case. Callers that need to
+    enforce the ``threads_vec`` / ``message_chunks_vec`` unit-norm
+    invariant should pass through ``l2_normalize`` (the DB write
+    boundary in ``database.py`` does this automatically).
 
     Raises ``ValueError`` on empty input or mismatched dimensions; the
     caller chooses the fallback (typically embedding the subject line).
@@ -146,6 +188,34 @@ def _cached_estimate_tokens(text: str) -> int:
     keeps total cache memory below ~8 MB worst-case.
     """
     return len(_load_tokenizer().encode(text, add_special_tokens=False).ids)
+
+
+def truncate_to_tokens(text: str, max_tokens: int) -> str:
+    """Return ``text`` cut to at most ``max_tokens`` BPE tokens.
+
+    Uses the bundled Qwen3-Embedding tokenizer's per-token character
+    offsets to slice on a real token boundary (not an arbitrary char
+    index that might split a multi-byte codepoint or a token mid-way).
+    Returns the input unchanged when it already fits.
+
+    Used for thread-level body caps (``THREAD_BODY_TEXT_MAX_TOKENS``)
+    so the cap aligns with the embed model's actual context budget.
+    A char-based cap under-counted CJK / URL / Base64 / dense code
+    text by 4-6× and forced unnecessarily aggressive truncation in
+    ASCII-heavy threads.
+    """
+    if not text or max_tokens <= 0:
+        return ""
+    tokenizer = _load_tokenizer()
+    encoding = tokenizer.encode(text, add_special_tokens=False)
+    if len(encoding.ids) <= max_tokens:
+        return text
+    # ``offsets`` is parallel to ``ids``; ``offsets[max_tokens][0]`` is
+    # the character index where the (max_tokens+1)-th token starts. The
+    # tokenizer's character offsets respect codepoint boundaries, so
+    # this slice is always safe.
+    cut = encoding.offsets[max_tokens][0]
+    return text[:cut]
 
 
 def estimate_tokens(text: str) -> int:

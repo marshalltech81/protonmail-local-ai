@@ -467,6 +467,148 @@ class TestSchema:
         with pytest.raises(RuntimeError, match="Downgrade migrations are not supported"):
             Database(db_path)
 
+    def test_v16_to_v17_migration_normalizes_existing_thread_vectors(self, tmp_path):
+        """Direct test for migration 0017: a v16-stamped database with
+        non-unit ``threads_vec`` rows must have those rows normalized
+        to unit-norm on reopen, so an upgraded install does not mix
+        normalized (newly-touched) and non-normalized (untouched)
+        thread vectors. Without the backfill, retrieval ranking after
+        upgrade depends on which threads happened to be re-embedded
+        since the schema bump — exactly the kind of silent corruption
+        Codex flagged in PR #98 review."""
+        import struct
+
+        from src.database import EMBEDDING_DIM
+
+        db_path = tmp_path / "v16_non_unit.db"
+        database = Database(db_path)
+        database.close()
+
+        # Stamp v16 and seed a non-unit thread vector + an already-unit
+        # vector + a zero placeholder. The migration must normalize the
+        # first two and preserve the third unchanged (NaN poisoning a
+        # zero-seed row would corrupt every brand-new thread).
+        conn = sqlite3.connect(str(db_path))
+        try:
+            import sqlite_vec
+
+            conn.enable_load_extension(True)
+            sqlite_vec.load(conn)
+            non_unit = [2.0 / (EMBEDDING_DIM**0.5)] * EMBEDDING_DIM  # norm = 2.0
+            already_unit = [1.0 / (EMBEDDING_DIM**0.5)] * EMBEDDING_DIM  # norm = 1.0
+            zero_seed = [0.0] * EMBEDDING_DIM
+            for tid, vec in (
+                ("t-non-unit", non_unit),
+                ("t-already-unit", already_unit),
+                ("t-zero-seed", zero_seed),
+            ):
+                conn.execute(
+                    "INSERT INTO threads_vec (thread_id, embedding) VALUES (?, ?)",
+                    (tid, sqlite_vec.serialize_float32(vec)),
+                )
+            conn.execute("UPDATE schema_version SET version = ?", (16,))
+            conn.commit()
+        finally:
+            conn.close()
+
+        # Reopen — runs the v17 migration.
+        database = Database(db_path)
+        try:
+
+            def read_norm(thread_id: str) -> float:
+                row = database._conn.execute(
+                    "SELECT embedding FROM threads_vec WHERE thread_id = ?",
+                    (thread_id,),
+                ).fetchone()
+                vec = list(struct.unpack(f"{EMBEDDING_DIM}f", row["embedding"]))
+                return sum(x * x for x in vec) ** 0.5
+
+            assert read_norm("t-non-unit") == pytest.approx(1.0, abs=1e-5), (
+                "v17 migration must normalize pre-existing non-unit "
+                "thread vectors so cosine == dot product downstream"
+            )
+            assert read_norm("t-already-unit") == pytest.approx(1.0, abs=1e-5), (
+                "vec_normalize is idempotent on already-unit input — "
+                "running it twice must not drift the row"
+            )
+
+            # Zero placeholder must survive the migration. A NaN here
+            # would corrupt every later cosine query that touches the
+            # row, including phase-2c-not-yet-run brand-new threads.
+            row = database._conn.execute(
+                "SELECT embedding FROM threads_vec WHERE thread_id = ?",
+                ("t-zero-seed",),
+            ).fetchone()
+            zero_vec = list(struct.unpack(f"{EMBEDDING_DIM}f", row["embedding"]))
+            assert all(v == 0.0 for v in zero_vec), (
+                "v17 migration must preserve the all-zero phase-1 seed "
+                "placeholder unchanged — vec_normalize would NaN-poison it"
+            )
+
+            stored = database._conn.execute("SELECT version FROM schema_version").fetchone()[
+                "version"
+            ]
+            assert stored == SCHEMA_VERSION
+        finally:
+            database.close()
+
+    def test_v16_to_v17_migration_normalizes_existing_chunk_vectors(self, tmp_path):
+        """The v17 backfill also covers ``message_chunks_vec``: an
+        operator on an alternate OpenAI-compatible provider (DeepInfra,
+        OpenRouter, vLLM, TEI) may have indexed against a model that
+        does not normalize, leaving non-unit chunk vectors. Production
+        Qwen3-Embedding-8B emits unit-norm output so the typical
+        upgrade path is a no-op, but we verify the predicate fires on
+        non-unit chunk rows too."""
+        import struct
+
+        from src.database import EMBEDDING_DIM
+
+        db_path = tmp_path / "v16_chunks_non_unit.db"
+        database = Database(db_path)
+        # Need a parent message + thread for the chunk row's FK.
+        _seed_thread_for_message(database, "m-cv@x", "t-cv")
+        database._conn.execute(
+            "INSERT INTO message_chunks (chunk_id, message_id, thread_id, "
+            "chunk_index, text, char_start, char_end, token_est, chunked_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            ("c-non-unit", "m-cv@x", "t-cv", 0, "body", 0, 4, 1, "2026-01-01"),
+        )
+        database._conn.commit()
+        database.close()
+
+        conn = sqlite3.connect(str(db_path))
+        try:
+            import sqlite_vec
+
+            conn.enable_load_extension(True)
+            sqlite_vec.load(conn)
+            non_unit = [3.0 / (EMBEDDING_DIM**0.5)] * EMBEDDING_DIM  # norm = 3.0
+            conn.execute(
+                "INSERT INTO message_chunks_vec (chunk_id, embedding) VALUES (?, ?)",
+                ("c-non-unit", sqlite_vec.serialize_float32(non_unit)),
+            )
+            conn.execute("UPDATE schema_version SET version = ?", (16,))
+            conn.commit()
+        finally:
+            conn.close()
+
+        database = Database(db_path)
+        try:
+            row = database._conn.execute(
+                "SELECT embedding FROM message_chunks_vec WHERE chunk_id = ?",
+                ("c-non-unit",),
+            ).fetchone()
+            vec = list(struct.unpack(f"{EMBEDDING_DIM}f", row["embedding"]))
+            norm = sum(x * x for x in vec) ** 0.5
+            assert norm == pytest.approx(1.0, abs=1e-5), (
+                "v17 migration must normalize pre-existing non-unit "
+                "chunk vectors so message_chunks_vec shares the same "
+                "end-to-end unit-norm invariant as threads_vec"
+            )
+        finally:
+            database.close()
+
 
 class TestEmbeddingDimGuard:
     def test_upsert_rejects_wrong_dimension(self, db):
@@ -479,6 +621,89 @@ class TestEmbeddingDimGuard:
             db.upsert_thread(thread, [0.1] * 512)  # wrong dim
         with pytest.raises(ValueError, match="dims"):
             db.upsert_thread(thread, [0.1] * 1024)  # wrong dim
+
+
+class TestThreadVectorUnitNormInvariant:
+    """Every vector written to ``threads_vec`` must be L2-unit-norm so
+    the cosine-equals-dot-product assumption holds for downstream
+    retrieval. The three thread-vector write boundaries
+    (``upsert_thread``, ``replace_thread_vector``, and
+    ``_rewrite_thread_row`` via ``rebuild_thread`` /
+    ``reap_thread_messages``) all normalize at the boundary so callers
+    that pass a non-unit ``mean_vector(...)`` cannot bypass the
+    invariant. Zero placeholders survive normalization because the
+    Phase 1 seed logic depends on them as a sentinel."""
+
+    @staticmethod
+    def _read_thread_vec(db, thread_id: str) -> list[float]:
+        import struct
+
+        from src.database import EMBEDDING_DIM
+
+        row = db._conn.execute(
+            "SELECT embedding FROM threads_vec WHERE thread_id = ?",
+            (thread_id,),
+        ).fetchone()
+        assert row is not None, f"no threads_vec row for {thread_id}"
+        return list(struct.unpack(f"{EMBEDDING_DIM}f", row["embedding"]))
+
+    @staticmethod
+    def _norm(vec: list[float]) -> float:
+        return sum(x * x for x in vec) ** 0.5
+
+    def test_upsert_thread_normalizes_non_unit_input(self, db):
+        # Magnitude-2 input: every component is 2.0/sqrt(EMBEDDING_DIM),
+        # so the vector's L2 norm is 2.0. Without normalization, vec0
+        # stores it raw and ``vec_distance_cosine`` no longer collapses
+        # to a dot product. After this PR the boundary normalizes.
+        from src.database import EMBEDDING_DIM
+
+        thread = make_thread()
+        scaled = [2.0 / (EMBEDDING_DIM**0.5)] * EMBEDDING_DIM
+        db.upsert_thread(thread, scaled)
+        stored = self._read_thread_vec(db, thread.thread_id)
+        assert self._norm(stored) == pytest.approx(1.0, abs=1e-6)
+
+    def test_replace_thread_vector_normalizes_non_unit_input(self, db):
+        # Phase 2c writes ``mean_vector(chunk_embs)`` here; mean of unit
+        # vectors generally has norm < 1. Use a 3-4-5 style scaled
+        # vector to make the normalization observable.
+        from src.database import EMBEDDING_DIM
+
+        thread = make_thread()
+        db.upsert_thread(thread, [0.0] * EMBEDDING_DIM)  # placeholder seed
+        scaled = [0.5] * EMBEDDING_DIM  # norm = 0.5 * sqrt(EMBEDDING_DIM) ≠ 1
+        db.replace_thread_vector(thread.thread_id, scaled)
+        stored = self._read_thread_vec(db, thread.thread_id)
+        assert self._norm(stored) == pytest.approx(1.0, abs=1e-6)
+
+    def test_reap_thread_messages_normalizes_non_unit_input(self, db):
+        # The reconciler reap path passes ``mean_vector(survivor_chunks)``
+        # through ``_rewrite_thread_row``. Verify the same normalize
+        # boundary fires on that code path so reap-then-search returns
+        # comparable cosine scores against still-live threads.
+        from src.database import EMBEDDING_DIM
+
+        msg = make_message(message_id="m1@x")
+        thread = make_thread(messages=[msg], thread_id="t-reap")
+        db.upsert_thread(thread, [0.0] * EMBEDDING_DIM)
+        scaled = [3.0 / (EMBEDDING_DIM**0.5)] * EMBEDDING_DIM  # norm 3.0
+        db.reap_thread_messages(thread, scaled, reaped_message_ids=[])
+        stored = self._read_thread_vec(db, "t-reap")
+        assert self._norm(stored) == pytest.approx(1.0, abs=1e-6)
+
+    def test_zero_placeholder_seed_is_preserved(self, db):
+        # Phase 1 writes an all-zero seed for genuinely-new threads;
+        # ``l2_normalize`` deliberately preserves zero vectors so the
+        # three-case priority chain in ``main._batched_phase1`` keeps
+        # working. Normalizing to NaN here would corrupt every brand-
+        # new thread.
+        from src.database import EMBEDDING_DIM
+
+        thread = make_thread()
+        db.upsert_thread(thread, [0.0] * EMBEDDING_DIM)
+        stored = self._read_thread_vec(db, thread.thread_id)
+        assert all(v == 0.0 for v in stored)
 
 
 class TestUpsertThreadInsert:
@@ -901,7 +1126,17 @@ class TestUpsertThreadUpdate:
         ).fetchone()
         assert "Second message" in row["snippet"]
 
-    def test_accumulated_body_capped_at_8000_chars(self, db, threader):
+    def test_accumulated_body_capped_at_token_budget(self, db, threader):
+        # The accumulated thread body must respect the same token-based
+        # cap (``THREAD_BODY_TEXT_MAX_TOKENS``) on update that the
+        # fresh-insert ``Thread.text_for_embedding`` applies. Without
+        # the shared cap, replies arriving after the initial insert
+        # could expand the stored body well past what the insert path
+        # would have kept, drifting FTS / embedding inputs across the
+        # two code paths.
+        from src.chunker import estimate_tokens
+        from src.threader import THREAD_BODY_TEXT_MAX_TOKENS
+
         original = make_message(
             message_id="long_orig@example.com",
             body_text="A" * 500,
@@ -923,7 +1158,7 @@ class TestUpsertThreadUpdate:
         row = db._conn.execute(
             "SELECT body_text FROM threads WHERE thread_id = 'long_orig@example.com'"
         ).fetchone()
-        assert len(row["body_text"]) <= 8000
+        assert estimate_tokens(row["body_text"]) <= THREAD_BODY_TEXT_MAX_TOKENS
 
 
 # ---------------------------------------------------------------------------
@@ -1914,6 +2149,47 @@ class TestReplaceMessageChunks:
                 embeddings_by_chunk_id={},
             )
 
+    def test_normalizes_non_unit_chunk_embedding_at_db_boundary(self, db):
+        """Storage invariant: every vector written to
+        ``message_chunks_vec`` must be L2-unit-norm so cosine ranking
+        does not depend on per-row magnitude. Production writes flow
+        through ``OpenAIEmbedder._extract_embeddings`` which already
+        normalizes provider output, but the ``EmbeddingBackend``
+        contract is generic — a fake backend in a test or a future
+        non-OpenAI caller could pass non-unit vectors. Enforce the
+        invariant at the DB write boundary so it cannot be silently
+        bypassed."""
+        import struct
+
+        _seed_thread_for_message(db, "m-norm@x", "t-norm")
+        chunk = _make_chunk("n" * 64, 0, "non-unit chunk")
+        # Magnitude-2 vector: each component is 2.0/sqrt(EMBEDDING_DIM)
+        # so the L2 norm is 2.0. Without normalization at the DB
+        # boundary the row lands raw and downstream cosine ranking
+        # weights this chunk twice as heavily as a unit-norm peer.
+        scaled = [2.0 / (EMBEDDING_DIM**0.5)] * EMBEDDING_DIM
+
+        db.replace_message_chunks(
+            message_id="m-norm@x",
+            thread_id="t-norm",
+            chunks=[chunk],
+            embeddings_by_chunk_id={chunk.chunk_id: scaled},
+        )
+
+        row = db._conn.execute(
+            "SELECT embedding FROM message_chunks_vec WHERE chunk_id = ?",
+            (chunk.chunk_id,),
+        ).fetchone()
+        stored = list(struct.unpack(f"{EMBEDDING_DIM}f", row["embedding"]))
+        norm = sum(x * x for x in stored) ** 0.5
+        assert norm == pytest.approx(1.0, abs=1e-6), (
+            f"replace_message_chunks must L2-normalize at the DB write "
+            f"boundary; stored norm was {norm} (expected ~1.0). The "
+            f"OpenAIEmbedder happens to pre-normalize today, but the "
+            f"persistence boundary itself is what protects the invariant "
+            f"from arbitrary EmbeddingBackend callers."
+        )
+
     def test_wrong_dim_embedding_raises(self, db):
         chunk = _make_chunk("f" * 64, 0, "bad dim")
         with pytest.raises(ValueError, match="EMBEDDING_DIM|reserves 4096"):
@@ -1925,43 +2201,62 @@ class TestReplaceMessageChunks:
             )
 
 
+def _one_hot(slot: int) -> list[float]:
+    """Build a unit-norm vector with a single 1.0 at ``slot``.
+
+    Used by aggregation tests that need vectors that survive the
+    DB-write boundary's L2 normalization with distinguishable shapes.
+    Magnitude-only inputs like ``[0.5] * EMBEDDING_DIM`` and
+    ``[0.7] * EMBEDDING_DIM`` collapse to the same normalized shape
+    (``[1/sqrt(N)] * N``) once the storage invariant fires, so a
+    test that distinguished them by per-element value would no
+    longer be valid. One-hot vectors are already unit-norm and
+    survive normalization byte-identical.
+    """
+    vec = [0.0] * EMBEDDING_DIM
+    vec[slot] = 1.0
+    return vec
+
+
 class TestThreadChunkAggregation:
     def test_get_thread_chunk_embeddings_returns_per_message_vectors(self, db):
-        # Two messages in the same thread, each with one chunk.
+        # Two messages in the same thread, each with one chunk. Use
+        # one-hot vectors with distinct active slots so the round-trip
+        # is checkable through the normalize-at-boundary path: the
+        # active slot identifies which input the vector came from.
         _seed_thread_for_message(db, "m6a@x", "t6")
         msg = make_message(message_id="m6b@x", filepath="/maildir/INBOX/cur/m6b@x")
         db.upsert_thread(make_thread(messages=[msg], thread_id="t6"), FAKE_EMBEDDING)
-        for mid, vec in [("m6a@x", [0.5] * EMBEDDING_DIM), ("m6b@x", [0.7] * EMBEDDING_DIM)]:
+        for mid, slot in [("m6a@x", 0), ("m6b@x", 1)]:
             chunk = _make_chunk(f"x{mid}".ljust(64, "0"), 0, f"body of {mid}")
             db.replace_message_chunks(
                 message_id=mid,
                 thread_id="t6",
                 chunks=[chunk],
-                embeddings_by_chunk_id={chunk.chunk_id: vec},
+                embeddings_by_chunk_id={chunk.chunk_id: _one_hot(slot)},
             )
 
         results = db.get_thread_chunk_embeddings("t6")
         assert len(results) == 2
-        # Both vectors round-trip with their original values.
-        sums = sorted(round(sum(v) / len(v), 3) for v in results)
-        assert sums == [0.5, 0.7]
+        active_slots = sorted(v.index(1.0) for v in results)
+        assert active_slots == [0, 1]
 
     def test_get_chunk_embeddings_for_messages_filters_correctly(self, db):
         _seed_thread_for_message(db, "m7a@x", "t7")
         msg = make_message(message_id="m7b@x", filepath="/maildir/INBOX/cur/m7b@x")
         db.upsert_thread(make_thread(messages=[msg], thread_id="t7"), FAKE_EMBEDDING)
-        for mid, vec in [("m7a@x", [0.1] * EMBEDDING_DIM), ("m7b@x", [0.9] * EMBEDDING_DIM)]:
+        for mid, slot in [("m7a@x", 2), ("m7b@x", 3)]:
             chunk = _make_chunk(f"y{mid}".ljust(64, "0"), 0, f"body of {mid}")
             db.replace_message_chunks(
                 message_id=mid,
                 thread_id="t7",
                 chunks=[chunk],
-                embeddings_by_chunk_id={chunk.chunk_id: vec},
+                embeddings_by_chunk_id={chunk.chunk_id: _one_hot(slot)},
             )
 
         survivors = db.get_chunk_embeddings_for_messages(["m7a@x"])
         assert len(survivors) == 1
-        assert round(sum(survivors[0]) / len(survivors[0]), 3) == 0.1
+        assert survivors[0].index(1.0) == 2
 
     def test_get_chunk_embeddings_for_messages_empty_input_returns_empty(self, db):
         assert db.get_chunk_embeddings_for_messages([]) == []

@@ -496,7 +496,13 @@ class TestDrainQueueRetryAndDeadLetter:
         # deleted) on separate passes.
         attempted_first = main.drain_queue(queue, db, embedder, threader, max_batch=1)
         assert attempted_first == 1
-        assert not db.is_indexed(str(dest))
+        # Phase 1 commits thread membership + indexed_files eagerly so
+        # subsequent batch members can thread against this message; a
+        # Phase 2 (embed) failure leaves the file ``is_indexed`` but
+        # chunkless until the retry succeeds. The queue's retry
+        # cascade is the contract that closes the loop.
+        assert db.is_indexed(str(dest))
+        assert not db.get_chunk_ids_for_message("retry@example.com")
         row = db._conn.execute(
             "SELECT attempts, status FROM indexing_jobs WHERE filepath = ?",
             (str(dest),),
@@ -585,7 +591,20 @@ class TestDrainQueueRetryAndDeadLetter:
         main.drain_queue(queue, db, embedder, threader)
         main.drain_queue(queue, db, embedder, threader)
 
-        assert not db.is_indexed(str(dest))
+        # Under the batched pipeline, Phase 1 commits thread membership
+        # + indexed_files before Phase 2 (embed) runs. A persistent
+        # Phase 2 failure leaves the file ``is_indexed=True`` (the
+        # thread row is durable) but chunkless and dead-lettered. The
+        # ``_recover_zero_vector_threads`` sweep picks this up later
+        # if the underlying cause clears; until then, the dead-letter
+        # row is the operator-visible signal.
+        assert db.is_indexed(str(dest)), (
+            "Phase 1 commit lands eagerly even when Phase 2 fails — "
+            "see _drain_queue_batched failure isolation"
+        )
+        assert not db.get_chunk_ids_for_message("giveup@example.com"), (
+            "Phase 2c never ran, so no chunks for this message"
+        )
         assert queue.stats() == {"queued": 0, "dead": 1}
         row = db._conn.execute(
             "SELECT last_stage, last_error FROM indexing_jobs WHERE filepath = ?",
@@ -720,11 +739,16 @@ class TestIndexOneFileChunking:
             encoding="utf-8",
         )
 
-        # MagicMock returns the SAME embedding for every call. The thread
-        # vector — computed as the mean of all chunk embeddings — must
-        # therefore equal that embedding regardless of how many chunks
-        # the chunker emitted.
-        chunk_vec = [0.42] * EMBEDDING_DIM
+        # MagicMock returns the SAME (already unit-norm) embedding for
+        # every call. The thread vector — computed as the mean of all
+        # chunk embeddings, then unit-normalized at the DB write
+        # boundary — must therefore equal that embedding regardless of
+        # how many chunks the chunker emitted. Using a unit-norm
+        # chunk_vec keeps the assertion direct: mean-of-identical-unit-
+        # vectors is itself unit-norm, so the normalize step is a
+        # no-op against this fixture.
+        unit_component = 1.0 / (EMBEDDING_DIM**0.5)
+        chunk_vec = [unit_component] * EMBEDDING_DIM
         embedder = make_mock_embedder()
         embedder.embed.return_value = chunk_vec
 
@@ -811,12 +835,15 @@ class TestIndexOneFileChunking:
         # The second pass should not have triggered any new embed calls.
         assert embedder.embed.call_count == first_call_count
 
-    def test_attachment_embed_failure_does_not_persist_partial_state(self, tmp_path):
-        """Attachment chunk embedding now runs in the embed phase, before the
-        DB write transaction opens. A failing embedding service call must surface as a
-        retryable embed-stage failure and leave zero rows behind — neither
-        the body, nor the attachment row, nor the extraction cache should
-        be persisted, so the queue can replay the whole message cleanly."""
+    def test_attachment_embed_failure_does_not_persist_partial_chunks(self, tmp_path):
+        """A failing attachment embed must surface as a retryable
+        embed-stage failure and leave NO chunk / attachment / extraction
+        rows behind. Phase 1's thread + indexed_files commits land
+        eagerly (the C1 batched-pipeline contract), so ``is_indexed``
+        is True after Phase 2 fails — but the chunk / attachment /
+        extraction tables are guarded by Phase 2c's per-message
+        transaction and must remain empty so the queue retry replays
+        the whole message cleanly when the embedder recovers."""
         db_path = tmp_path / "db" / "mail.db"
         db = Database(db_path)
         threader = Threader(db)
@@ -840,14 +867,15 @@ class TestIndexOneFileChunking:
             main_mod.MAILDIR_PATH = original_root
 
         assert not ok
-        # Attachment embedding now happens in the embed phase, outside the
-        # ``with db.transaction()`` block, so the failure surfaces as
-        # ``embed`` rather than ``db_write``. The queue retries on either.
+        # Attachment embedding happens in the embed phase, outside the
+        # Phase 2c write transaction, so the failure surfaces as
+        # ``embed`` rather than ``db_write``.
         assert stage == "embed"
         assert err is not None
         assert "embedding service attachment failure" in err
-        assert not db.is_indexed(str(dest))
-        assert db.count_total_messages() == 0
+        # Phase 1 commit is durable (thread membership + indexed_files);
+        # Phase 2c never ran, so chunks / attachments / extractions
+        # remain unwritten and the queue retry can replay cleanly.
         assert not db.get_chunk_ids_for_message("attachment-retry@x")
         assert db._conn.execute("SELECT COUNT(*) FROM attachments").fetchone()[0] == 0
         assert db._conn.execute("SELECT COUNT(*) FROM attachment_extractions").fetchone()[0] == 0
@@ -1039,11 +1067,18 @@ class TestBatchedInitialIndex:
             "Phase 2c should have used it instead of leaving the placeholder"
         )
         # The fallback should embed the subject string. Our mock
-        # returns the same vector regardless of input, so the vector
-        # equals the sentinel exactly when the fallback path ran.
-        assert stored_vec == sentinel, (
-            "thread vector should equal the embedder's return value for "
-            "the subject fallback, not be derived from chunks (none exist)"
+        # returns the same (non-unit) vector regardless of input.
+        # ``replace_thread_vector`` normalizes at the boundary, so the
+        # stored vector is the L2-normalized sentinel — that's enough
+        # to prove the fallback path ran (vs. chunks-mean, which never
+        # got chunks here, or the placeholder zero).
+        from src.chunker import l2_normalize
+
+        expected = l2_normalize(sentinel)
+        assert stored_vec == pytest.approx(expected, abs=1e-6), (
+            "thread vector should equal the L2-normalized embedder "
+            "return value for the subject fallback, not be derived "
+            "from chunks (none exist)"
         )
 
     def test_phase2_failure_preserves_existing_thread_vector(self, tmp_path, monkeypatch):
@@ -1079,7 +1114,13 @@ class TestBatchedInitialIndex:
         ).fetchone()
         raw = row["embedding"]
         prior_vec = list(struct.unpack(f"<{len(raw) // 4}f", raw))
-        assert prior_vec == sentinel, "first-pass vector should be the embedder's response"
+        # Stored thread vectors are L2-normalized at the DB write
+        # boundary; compare against the normalized sentinel.
+        from src.chunker import l2_normalize
+
+        assert prior_vec == pytest.approx(l2_normalize(sentinel), abs=1e-6), (
+            "first-pass vector should be the L2-normalized embedder response"
+        )
 
         # Second pass: a reply B arrives that threads into A. The new
         # embedder fails during embed_batch (simulated cloud outage).
@@ -1169,7 +1210,11 @@ class TestBatchedInitialIndex:
         ).fetchone()
         raw = row["embedding"]
         prior_vec = list(struct.unpack(f"<{len(raw) // 4}f", raw))
-        assert prior_vec == sentinel
+        # Stored thread vectors are L2-normalized at the DB write
+        # boundary; compare against the normalized sentinel.
+        from src.chunker import l2_normalize
+
+        assert prior_vec == pytest.approx(l2_normalize(sentinel), abs=1e-6)
 
         # Second pass: a blank-body reply B threads into A. The new
         # embedder fails. Phase 1 must NOT seed with zero — there is no

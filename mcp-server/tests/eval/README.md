@@ -7,7 +7,7 @@ arguments.
 
 ## When to use this
 
-- Before changing `PER_THREAD_CHAR_BUDGET`, `THREAD_BODY_TEXT_MAX_CHARS`,
+- Before changing `PER_THREAD_CHAR_BUDGET`, `THREAD_BODY_TEXT_MAX_TOKENS`,
   the embedding model, or RRF weights.
 - Before merging a search-layer change.
 - When debugging "why did the LLM give the wrong answer?" — if the

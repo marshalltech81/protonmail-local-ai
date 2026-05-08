@@ -204,17 +204,42 @@ discovery, with **per-message chunks** as the precise unit of retrieval.
 3. Each message's body is sliced into paragraph-packed chunks
    (`indexer/src/chunker.py`); each chunk is FTS-indexed and gets its
    own vector embedding stored in `message_chunks_vec`
-4. The thread's vector in `threads_vec` is the **mean** of its chunk
-   vectors — coarse and precise retrieval derive from the same source
+4. The thread's vector in `threads_vec` is the **L2-normalized mean**
+   of its chunk vectors — coarse and precise retrieval derive from
+   the same source, and storing a unit-norm vector lets cosine
+   similarity downstream collapse to a dot product
 5. New messages joining a thread emit new chunks (idempotent diff
    write keyed on deterministic chunk IDs) and rewrite the parent
    thread's vector
 
-The indexer commits the thread row, message map, body chunks, attachment
-occurrences, and final thread vector inside one SQLite transaction. Chunk and
-attachment rows have foreign-key parents in `threads` / `message_thread_map`,
-and SQLite foreign-key enforcement is enabled on the indexer connection, so
-partial sidecar rows fail closed instead of becoming orphan retrieval state.
+The indexer writes a thread in two phases. **Phase 1** commits the
+thread row, `message_thread_map` entry, and `indexed_files` row in a
+single `upsert_thread` call, with a seed thread vector chosen from a
+three-case priority chain (chunks-mean of any pre-existing chunks,
+preserved non-zero prior `threads_vec` row, or a placeholder zero).
+Threading state is durable at this point so the next message in the
+batch sees this thread when computing its own assignment. **Phase 2c**
+then commits the body chunks (`message_chunks` + `message_chunks_fts`
++ `message_chunks_vec`), attachment occurrences, attachment-extraction
+cache rows, attachment chunks, and the final normalized thread vector
+in one per-message transaction. The two phases are separate
+transactions so a crash between them leaves a thread row + message map
++ indexed-file marker with the seed vector but no chunks or attachment
+rows yet — the queue retries Phase 2c on the next pass and the
+seed-vector chain converges. Within each phase, chunk and attachment
+rows have foreign-key parents in `threads` / `message_thread_map`, and
+SQLite foreign-key enforcement is enabled on the indexer connection,
+so partial sidecar rows fail closed instead of becoming orphan
+retrieval state.
+
+Every vector written to `threads_vec` and `message_chunks_vec` is
+L2-normalized at the DB write boundary (`upsert_thread`,
+`replace_thread_vector`, `_rewrite_thread_row`,
+`replace_message_chunks`). A genuine zero placeholder — the Phase 1
+seed for a brand-new thread before Phase 2c lands real chunk embeddings
+— is preserved unchanged; dividing by zero would NaN-poison the row.
+The storage invariant is end-to-end so cosine ranking does not depend
+on per-row magnitude.
 
 The stored `body_text` on `threads` still feeds FTS5 over the full
 accumulated thread content (users legitimately search quoted text and

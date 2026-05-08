@@ -39,13 +39,18 @@ class TestTextForEmbedding:
         assert "x" * 500 in text
         assert "x" * 501 not in text
 
-    def test_thread_output_capped_at_shared_max_chars(self):
+    def test_thread_output_capped_at_shared_max_tokens(self):
         """Both the fresh-insert embedding text and the accumulated body
         written on update must respect the same cap so updated threads
-        don't silently retain more context than brand-new ones."""
+        don't silently retain more context than brand-new ones. The
+        cap is now token-based (``THREAD_BODY_TEXT_MAX_TOKENS``) — a
+        char-based cap under-counted CJK / dense content by 4-6× and
+        forced unnecessarily aggressive truncation in ASCII-heavy
+        threads."""
         from datetime import timedelta
 
-        from src.threader import THREAD_BODY_TEXT_MAX_CHARS
+        from src.chunker import estimate_tokens
+        from src.threader import THREAD_BODY_TEXT_MAX_TOKENS
 
         base_date = datetime(2024, 1, 1, tzinfo=UTC)
         msgs = [
@@ -58,7 +63,7 @@ class TestTextForEmbedding:
             for i in range(40)
         ]
         thread = make_thread(messages=msgs)
-        assert len(thread.text_for_embedding()) <= THREAD_BODY_TEXT_MAX_CHARS
+        assert estimate_tokens(thread.text_for_embedding()) <= THREAD_BODY_TEXT_MAX_TOKENS
 
     def test_multiple_messages_all_represented(self):
         msg1 = make_message(

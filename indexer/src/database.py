@@ -18,7 +18,8 @@ from pathlib import Path
 
 import sqlite_vec
 
-from .threader import THREAD_BODY_TEXT_MAX_CHARS, Thread, canonical_addr
+from .chunker import l2_normalize, truncate_to_tokens
+from .threader import THREAD_BODY_TEXT_MAX_TOKENS, Thread, canonical_addr
 
 log = logging.getLogger("indexer.database")
 
@@ -88,7 +89,7 @@ def _dedupe_by_canonical(addrs: list[str]) -> list[str]:
 # the current version; existing installs run the migration runner to
 # catch up. See ``src/migrations/runner.py`` for the file layout and
 # transactional guarantees.
-SCHEMA_VERSION = 16
+SCHEMA_VERSION = 17
 
 # The schema uses FTS5 ``contentless_delete=1``, which SQLite added in 3.43.
 # Validate the runtime version at Database init and fail fast with a clear
@@ -630,7 +631,10 @@ class Database:
                     f"From: {m.from_addr}\nDate: {m.date.isoformat()}\n{m.body_text[:2000]}"
                     for m in new_messages
                 )
-                return (existing["body_text"] + "\n" + new_content)[:THREAD_BODY_TEXT_MAX_CHARS]
+                return truncate_to_tokens(
+                    existing["body_text"] + "\n" + new_content,
+                    THREAD_BODY_TEXT_MAX_TOKENS,
+                )
             return existing["body_text"]
         return thread.text_for_embedding()
 
@@ -657,6 +661,13 @@ class Database:
                 f"embedding has {len(embedding)} dims but threads_vec reserves "
                 f"{EMBEDDING_DIM}. Check the embedder's output dimension."
             )
+        # Storage invariant: every vector in ``threads_vec`` is unit-norm
+        # so cosine similarity equals dot product downstream. Callers
+        # like Phase 1 seed (``mean_vector(existing_chunks)``) pass
+        # non-unit means; normalize at the boundary so no caller has to
+        # remember. The placeholder all-zero seed survives — see
+        # ``l2_normalize``.
+        embedding = l2_normalize(embedding)
 
         cur = self._conn.cursor()
 
@@ -970,6 +981,15 @@ class Database:
                         f"chunk embedding has {len(embedding)} dims but "
                         f"message_chunks_vec reserves {EMBEDDING_DIM}"
                     )
+                # Storage invariant — see ``upsert_thread``. Production
+                # writes flow through ``OpenAIEmbedder`` which already
+                # normalizes provider output, but the ``EmbeddingBackend``
+                # contract is a generic ``embed_batch`` call — a fake
+                # backend in a test or a future caller computing
+                # embeddings outside that path could pass non-unit
+                # vectors. Enforce here so ``message_chunks_vec`` shares
+                # the same end-to-end invariant as ``threads_vec``.
+                normalized = l2_normalize(embedding)
                 cur.execute(
                     "INSERT INTO message_chunks_fts (text) VALUES (?)",
                     (chunk.text,),
@@ -977,7 +997,7 @@ class Database:
                 fts_rowid = cur.lastrowid
                 cur.execute(
                     "INSERT INTO message_chunks_vec (chunk_id, embedding) VALUES (?, ?)",
-                    (chunk.chunk_id, sqlite_vec.serialize_float32(embedding)),
+                    (chunk.chunk_id, sqlite_vec.serialize_float32(normalized)),
                 )
                 cur.execute(
                     """
@@ -1189,6 +1209,10 @@ class Database:
                 f"embedding has {len(embedding)} dims but threads_vec reserves "
                 f"{EMBEDDING_DIM}. Check the embedder's output dimension."
             )
+        # Storage invariant — see the matching note in ``upsert_thread``.
+        # Phase 2c writes ``mean_vector(chunk_embs)`` here, which is
+        # generally non-unit; normalize at the boundary.
+        embedding = l2_normalize(embedding)
         cur = self._conn.cursor()
         started = False
         try:
@@ -2044,6 +2068,10 @@ class Database:
                 f"embedding has {len(embedding)} dims but threads_vec reserves "
                 f"{EMBEDDING_DIM}. Check the embedder's output dimension."
             )
+        # Storage invariant — see ``upsert_thread``. The reconciler reap
+        # path passes ``mean_vector(survivor_chunks)``, which is
+        # generally non-unit; normalize before the vec0 insert.
+        embedding = l2_normalize(embedding)
 
         participants_json = json.dumps(_dedupe_by_canonical(thread.participants))
         senders_json = json.dumps(

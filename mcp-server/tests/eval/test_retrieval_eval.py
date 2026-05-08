@@ -6,7 +6,7 @@ Why this is separate from the unit suite:
 The chunker / threader / search-knob discussions in this repo keep hitting
 the same wall: there's no held-out set of "query → expected message"
 mappings to measure whether a change actually helped retrieval. Without
-that signal, every change to ``PER_THREAD_CHAR_BUDGET``, ``THREAD_BODY_TEXT_MAX_CHARS``,
+that signal, every change to ``PER_THREAD_CHAR_BUDGET``, ``THREAD_BODY_TEXT_MAX_TOKENS``,
 embedding model, or RRF weights is shipped on faith.
 
 This harness fills that gap with a tiny, JSON-driven loop the operator
