@@ -799,19 +799,23 @@ class TestIndexOneFileChunking:
 class TestBatchedInitialIndex:
     """C1 invariants for the cross-message batched initial indexer.
 
-    Phase 1 (per message) commits thread membership with a seed thread
-    vector — the mean of the thread's existing chunk vectors when the
-    thread is already indexed, otherwise a placeholder zero — so the
-    next message in the batch sees this message's thread when
-    computing its own assignment, and a Phase 2 failure cannot regress
-    an already-good thread vector. Phase 2 batches the embed call
-    across the whole batch; Phase 2c per-message commits the chunk +
-    vector writes and replaces the seed thread vector with the real
-    mean-of-chunks vector (or a subject-fallback embed for chunk-less
-    threads). The tests below pin the load-bearing correctness
-    properties: in-batch sibling threading, no-chunk subject fallback,
-    Phase 2 failure preservation of existing thread vectors, and
-    partial-failure isolation across phases.
+    Phase 1 (per message) commits thread membership with a seed
+    thread vector chosen from a three-case priority chain: mean of
+    existing chunk vectors when the thread is already indexed with
+    content; the prior threads_vec row when the thread is chunkless
+    but has a non-zero vector (subject-fallback threads); placeholder
+    zero only for genuinely new threads. So (a) the next message in
+    the batch sees this message's thread when computing its own
+    assignment, and (b) a Phase 2 failure cannot regress an
+    already-good thread vector — chunk-derived OR subject-fallback.
+    Phase 2 batches the embed call across the whole batch; Phase 2c
+    per-message commits the chunk + vector writes and replaces the
+    seed thread vector with the real mean-of-chunks vector (or a
+    subject-fallback embed for chunk-less threads). The tests below
+    pin the load-bearing correctness properties: in-batch sibling
+    threading, no-chunk subject fallback, Phase 2 failure
+    preservation of both chunk-bearing and chunkless thread vectors,
+    and partial-failure isolation across phases.
     """
 
     def _setup(self, tmp_path):

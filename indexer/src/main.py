@@ -137,12 +137,16 @@ CHUNK_OVERLAP_TOKENS = _int_env("INDEXER_CHUNK_OVERLAP_TOKENS", 150, minimum=0)
 # watchdog path stays per-message because it sees 1-3 messages at a time.
 INITIAL_INDEX_BATCH_SIZE = _int_env("INITIAL_INDEX_BATCH_SIZE", 50)
 
-# Phase 1 seed for genuinely new (or chunk-less) threads. Phase 1
-# always seeds upsert_thread with a vector — for already-indexed
-# threads it uses the mean of the thread's existing chunk embeddings
-# (so a Phase 2 failure cannot regress a previously-good vector); for
-# new threads with no existing chunks it falls back to this zero. A
-# zero vector is safe between phases: cosine/L2 similarity to a
+# Phase 1 seed for genuinely new threads (the only branch that uses
+# this constant). Phase 1's seed-selection runs a three-case priority
+# chain:
+#   1. Thread has chunk vectors → mean(chunks).
+#   2. No chunks but a prior threads_vec row carries a non-zero
+#      embedding → preserve that. Covers chunkless subject-fallback
+#      threads — protects them from Phase 2 failure clobbering.
+#   3. Neither → this zero placeholder. Truly new threads, or
+#      post-crash recovery on a thread that already had a zero row.
+# A zero vector is safe between phases: cosine/L2 similarity to a
 # normalized query vector is constant, so a zero-vec thread cannot
 # inflate ranking on any specific query — it just deprioritizes
 # uniformly until Phase 2c lands the real vector. Keyword search via
@@ -594,14 +598,17 @@ class _BatchedMsg:
     """Per-message state carried through the two-phase batched indexer.
 
     Phase 1 populates ``msg`` and ``thread`` and commits the thread
-    membership with a seed thread vector — the mean of the thread's
-    existing chunk vectors when the thread is already indexed,
-    otherwise a placeholder zero. Phase 2a populates the chunk +
-    attachment-plan fields and the offsets that point each new chunk
-    into the batch's flat embed-input list. Phase 2c reads the
-    bulk-embedded vectors back through those offsets and applies the
-    per-message DB writes, replacing the seed with the real
-    mean-of-chunks (or subject-fallback) vector.
+    membership with a seed thread vector chosen from a three-case
+    priority chain: ``mean(existing chunk vectors)`` when the thread
+    is already indexed with content; the prior ``threads_vec`` row
+    when the thread is chunkless but has a non-zero embedding (covers
+    subject-fallback threads); placeholder zero only for genuinely
+    new threads. Phase 2a populates the chunk + attachment-plan
+    fields and the offsets that point each new chunk into the batch's
+    flat embed-input list. Phase 2c reads the bulk-embedded vectors
+    back through those offsets and applies the per-message DB writes,
+    replacing the seed with the real mean-of-chunks (or
+    subject-fallback) vector.
     """
 
     row: sqlite3.Row
@@ -993,13 +1000,21 @@ def _drain_queue_batched(
             db_write_ms = (time.perf_counter() - t0) * 1000
             if ok:
                 queue.mark_succeeded(entry.row["filepath"])
+                # ``db_write_ms`` aggregates BOTH DB-write phases:
+                # Phase 1's ``upsert_thread`` (recorded as
+                # ``entry.phase1_ms``) plus the Phase 2c per-message
+                # transaction (``db_write_ms`` measured above). Without
+                # the Phase 1 contribution the ``db_write`` and
+                # ``total`` columns in the periodic summary
+                # under-report wall-clock — Phase 1 commits are
+                # idempotent upserts but still cost SQLite IO time.
                 timing_aggregator.record(
                     StageTimings(
                         parse_ms=entry.parse_ms,
                         thread_ms=entry.thread_ms,
                         chunk_ms=entry.chunk_ms,
                         embed_ms=per_msg_embed_ms,
-                        db_write_ms=db_write_ms,
+                        db_write_ms=entry.phase1_ms + db_write_ms,
                     )
                 )
             else:
