@@ -1,12 +1,12 @@
 """
 Per-stage timing for the indexing hot path.
 
-The indexer's `_index_one_file` runs four serial stages (parse, thread,
-embed, db_write) but until now exposed no per-stage cost. An operator
-investigating "why is indexing slow?" had no way to distinguish a slow
-embed call from a slow SQLite write. The aggregator collects timings in
-a bounded ring buffer and emits p50/p95 summaries on demand so the
-overhead stays trivial regardless of mailbox size.
+The batched indexer runs five serial stages per message (parse,
+thread, chunk, embed, db_write) but until now exposed no per-stage
+cost. An operator investigating "why is indexing slow?" had no way to
+distinguish a slow embed call from a slow SQLite write. The aggregator
+collects timings in a bounded ring buffer and emits p50/p95 summaries
+on demand so the overhead stays trivial regardless of mailbox size.
 
 The aggregator is intentionally tiny — a deque, a copy-and-sort
 percentile, and a dict — so it can run on the indexing hot path without
@@ -19,9 +19,11 @@ from collections import deque
 from dataclasses import dataclass
 from threading import Lock
 
-# Stages match the four try/except blocks in ``_index_one_file``. Adding
-# a new stage there means adding it here too — the field set is the
-# contract that ties the timer at the call site to the aggregator.
+# Stages match the per-message try/except blocks across the batched
+# pipeline (``_phase1_commit_thread`` / ``_phase2a_collect_chunks`` /
+# ``_phase2b_embed_batch`` / ``_phase2c_commit_vectors``). Adding a new
+# stage there means adding it here too — the field set is the contract
+# that ties the timer at the call site to the aggregator.
 STAGES: tuple[str, ...] = ("parse", "thread", "chunk", "embed", "db_write")
 
 

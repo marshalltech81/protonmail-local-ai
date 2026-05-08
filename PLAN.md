@@ -35,17 +35,22 @@ The stack now runs:
 - **mbsync** — Docker, pulls into Maildir, `chmod go+r` after each sync.
 - **indexer** — Docker, parses Maildir, threads, embeds via any
   OpenAI-compatible `/v1/embeddings` provider (default: host-side
-  mlx-service), writes SQLite. Schema is at v16 with 4096-dim
-  vectors. The Ollama embed-fallback path was removed in Phase C.
-  Both the initial scan and the steady-state main loop drain the
-  queue through the same two-phase batched path (`Phase 1` commits
-  thread membership per message — seeded by a three-case priority
-  chain: mean of existing chunk vectors when the thread is already
-  indexed with content; the prior `threads_vec` row when the thread
-  is chunkless but has a non-zero vector (subject-fallback threads);
-  placeholder zero only for genuinely new threads. `Phase 2b` issues
-  one batched embed_batch across the whole batch; `Phase 2c` commits
-  chunks/vectors per message and replaces the seed thread vector).
+  mlx-service), writes SQLite. Schema is at v17 with 4096-dim
+  L2-unit-norm vectors (the v17 backfill normalizes any pre-existing
+  non-unit `threads_vec` / `message_chunks_vec` rows in place via
+  `vec_normalize`, gated to skip the zero placeholder). The Ollama
+  embed-fallback path was removed in Phase C. Both the initial scan
+  and the steady-state main loop drain the queue through the same
+  unified two-phase batched path (`Phase 1` commits thread membership
+  per message — seeded by a three-case priority chain: mean of
+  existing chunk vectors when the thread is already indexed with
+  content; the prior `threads_vec` row when the thread is chunkless
+  but has a non-zero vector (subject-fallback threads); placeholder
+  zero only for genuinely new threads. `Phase 2b` issues one batched
+  embed_batch across the whole batch; `Phase 2c` commits chunks /
+  attachment occurrences / attachment chunks per message inside one
+  transaction and replaces the seed thread vector with the L2-normalized
+  mean of chunk vectors).
   Initial scan drains to empty at `INITIAL_INDEX_BATCH_SIZE=50`;
   steady-state runs `max_passes=1` per main-loop tick at
   `INDEXER_STEADY_STATE_BATCH_SIZE=8` so the reconciler / WAL
@@ -170,10 +175,8 @@ The detailed PR-#83 session notes live in the project memory file
 
 ## Active priorities (unpaused after MLX consolidation)
 
-These four pre-MLX priorities stay paused until the consolidation
-above lands. Don't start them mid-Phase.
-
-_(The four priority blocks below were the active workstream before the MLX rebuild displaced them. With the MLX consolidation now landed, they resume here.)_
+The MLX consolidation has landed. These four priorities were active
+before the MLX rebuild displaced them and resume here.
 
 
 ### 1. Validate intelligence fidelity end-to-end
@@ -321,7 +324,7 @@ persisted, unsupported types log at debug. What's still open:
 - add `# syntax=docker/dockerfile:1` as the first line of `bridge/Dockerfile`; without a parser directive the BuildKit Dockerfile frontend version is unpinned and different Docker Engine or BuildKit versions may parse the same Dockerfile differently, producing subtly different images; this matters most for the multi-stage Bridge build where `--from` resolution and layer caching rely on stable parse behavior
 ### Hardening and observability
 - add resource limits (`memory`, `cpus`, `pids_limit`) to the Compose services that still lack them; `protonmail-bridge` holds live Proton credentials in memory and is the highest-priority target — a `mem_limit` prevents a runaway or exploited process from exhausting host memory. (`indexer` already has `mem_limit: 6g` and `pids_limit: 128`. Empirical tuning history during a real backfill of a ~22k-message attachment-heavy mailbox: 1 GiB was too tight under normal indexing bursts; 2 GiB OOM-killed three times during initial backfill; 4 GiB OOM-killed once more on the same backfill; 6 GiB has been stable. Steady-state RSS is much lower; the right long-term fix is throttling the indexer's parallel embed dispatch — peak memory scales with concurrency, not mailbox size — at which point the cap can return to 2-3 GiB. The in-stack `ollama` container was removed by PR #86, so the prior note about Ollama lacking limits no longer applies.)
-- add `docs/troubleshooting.md` covering common failure patterns: Ollama not ready, cert extraction failure, sync stalled, schema migration
+- add `docs/troubleshooting.md` covering common failure patterns: embed/LLM service not ready (mlx-service/mlx-lm-server LaunchAgent down or HuggingFace cold-start in flight), cert extraction failure, sync stalled, schema migration
 - evaluate optional bearer-token auth for `mcp-server` as defense-in-depth on top of the localhost-only bind; today any local process that can reach `127.0.0.1:MCP_PORT` can query the index. This is a posture change, not a bug fix — weigh the operational complexity of a shared token against the threat model (malware on the host, misconfigured port forward) before implementing
 - emit a loud, one-shot `LLM_MODE=cloud` warning at `mcp-server` startup reminding the operator that retrieved email excerpts will be sent to Anthropic; the cloud path is already opt-in but the warning would surface drift if someone flips the mode and forgets
 - migrate the Python type checker from `mypy` to `pyright` for both `indexer` and `mcp-server`; the user's global default for personal Python projects (`~/.claude/memory/tools/uv-python-stack.md`) is `pyright` and this project is the outlier. The trigger should be a real signal (mypy gets slow, mypy misses a bug, friction from context-switching against other projects), not a pre-emptive sweep — pyright is generally stricter at narrowing and will surface a multi-PR cleanup before CI is green again. When migrating, touch `pyproject.toml` (both services), `.pre-commit-config.yaml`, the `make typecheck*` targets, the relevant CI workflow, and the AGENTS.md typecheck guidance in one branch.
@@ -448,6 +451,52 @@ The functional surface — chunker, attachment extractors (PDF/DOCX/
 XLSX/HTML/TXT/image-OCR), per-occurrence + per-content-hash dedup,
 hybrid RRF retrieval with chunk lane, intelligence-tool chunk
 evidence, deletion reconciler, durable indexing queue — all stays.
+
+### 2026-05-08 — Indexer pipeline unification + unit-norm invariant (PRs #95-#100)
+
+Six landings that converged the indexer onto one shape and tightened
+the storage contract:
+
+- **PR #95** — OpenAIEmbedder client (mlx-service, indexer,
+  mcp-server) speaks the OpenAI `/v1/embeddings` wire format directly.
+  Provider swap is now `EMBED_BASE_URL` + `EMBED_MODEL` + an optional
+  `embed_api_key` Docker secret with no per-provider code path.
+- **PR #96** — cross-message embed batching for initial_index ("C1").
+  Phase 1 commits thread membership per message; Phase 2b issues one
+  `embed_batch` across the whole batch; Phase 2c commits chunks +
+  vectors per message. Initial scan now collapses ~25k single-message
+  embed round-trips into ~500 multi-message ones against a cloud
+  embedder.
+- **PR #97** — Codex review followups on the C1 pipeline. The
+  three-case seed-vector priority chain (chunks-mean / preserved
+  non-zero prior / placeholder zero) hardened so a Phase 2 failure on
+  a new sibling message cannot regress the parent thread's vector,
+  even for chunkless subject-fallback threads.
+- **PR #98** — pipeline unification, L2-normalize storage invariant,
+  token-based body cap, schema v17. Single-file and batched paths
+  collapse to one batched implementation
+  (`_phase1_commit_thread` / `_phase2c_commit_vectors`); every vector
+  written to `threads_vec` and `message_chunks_vec` is L2-unit-norm
+  at the DB write boundary so cosine similarity collapses to a dot
+  product downstream; v17 backfill migration normalizes existing
+  rows in place via sqlite-vec `vec_normalize`, gated on
+  `vec_distance_l2(embedding, zeroblob(16384)) > 1e-9` so the Phase 1
+  zero placeholder survives unchanged. Thread `body_text` cap moved
+  from a char-count to a real BPE token count
+  (`THREAD_BODY_TEXT_MAX_TOKENS = 4000`) using the bundled
+  Qwen3-Embedding-8B tokenizer, fixing a 4-6× under-count on CJK /
+  URL / Base64 / dense code text.
+- **PR #99** — open-webui integration removed (compose overlay,
+  Makefile targets, eval scaffolding). The OWUI experiment helped
+  bound model-size thresholds for tool routing but is no longer in
+  the supported deployment shape.
+- **PR #100** — Ollama-specific wording in comments / docstrings /
+  test fixture URLs / READMEs replaced with generic "embedder",
+  "embedding service", and "LLM service" terminology now that the
+  stack is OpenAI-compatible end-to-end.
+
+Verified at merge: 528 indexer tests + 319 mcp-server tests pass at
+93%+ coverage on each service, mypy clean, pre-commit clean.
 
 ### 2026-05-04 — Hybrid-search index fix (schema v15)
 
