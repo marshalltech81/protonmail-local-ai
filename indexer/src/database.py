@@ -1197,6 +1197,27 @@ class Database:
         return result
 
     @_synchronized
+    def get_thread_vector(self, thread_id: str) -> list[float] | None:
+        """Return the stored ``threads_vec`` embedding for ``thread_id``.
+
+        Returns ``None`` when the thread has no row in ``threads_vec``
+        (a brand-new thread, or one whose row was deleted out of band).
+        Used by the batched indexer's Phase 1 seed logic to preserve a
+        pre-existing thread vector — including subject-fallback vectors
+        for chunkless threads — across a Phase 2 failure.
+        """
+        import struct
+
+        row = self._conn.execute(
+            "SELECT embedding FROM threads_vec WHERE thread_id = ?",
+            (thread_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        blob = row["embedding"]
+        count = len(blob) // 4
+        return list(struct.unpack(f"{count}f", blob))
+
     def get_thread_chunk_embeddings(self, thread_id: str) -> list[list[float]]:
         """Return every chunk embedding stored for ``thread_id``.
 

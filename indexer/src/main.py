@@ -672,18 +672,29 @@ def _phase1_commit_thread(
     thread_ms = (time.perf_counter() - t0) * 1000
 
     t0 = time.perf_counter()
-    # Seed the Phase 1 thread vector. Two cases:
-    #   1. Thread already exists with chunk vectors — use their mean
-    #      so a Phase 2 failure (embed outage, etc.) does not corrupt
-    #      a previously-good vector. Without this, every new message
-    #      on an existing thread temporarily zeroes the parent's
-    #      vector during Phase 1, and a queue retry / dead-letter
-    #      would leave it permanently zero.
-    #   2. New thread (or existing thread with no chunk vectors yet)
-    #      — use the placeholder zero. Phase 2c will replace it via
-    #      either mean-of-new-chunks or the subject fallback.
+    # Seed the Phase 1 thread vector. Three cases, in priority order:
+    #   1. Thread has chunk vectors — use their mean. This is the
+    #      canonical seed for already-indexed threads with content.
+    #   2. No chunk vectors but a prior threads_vec row exists with
+    #      a non-zero embedding — preserve that. Covers chunkless
+    #      threads whose vector came from a subject fallback (an
+    #      earlier blank-body message in the same thread). Without
+    #      this branch, a new sibling message's Phase 1 commit would
+    #      clobber the subject vector with zero, and a Phase 2
+    #      failure or dead-letter would leave it permanently zero.
+    #   3. Neither — truly new thread, or existing thread with a
+    #      zero-vector row from a prior crashed batch. Use the
+    #      placeholder zero; Phase 2c will replace it with either
+    #      mean-of-new-chunks or the subject fallback.
     existing_chunk_embs = db.get_thread_chunk_embeddings(thread.thread_id)
-    seed_vector = mean_vector(existing_chunk_embs) if existing_chunk_embs else _ZERO_THREAD_VECTOR
+    if existing_chunk_embs:
+        seed_vector = mean_vector(existing_chunk_embs)
+    else:
+        prior_vec = db.get_thread_vector(thread.thread_id)
+        if prior_vec is not None and any(v != 0.0 for v in prior_vec):
+            seed_vector = prior_vec
+        else:
+            seed_vector = _ZERO_THREAD_VECTOR
     try:
         # Phase 1 commit: write thread + message_thread_map + indexed_files
         # with the seed vector. Threading state is durable before

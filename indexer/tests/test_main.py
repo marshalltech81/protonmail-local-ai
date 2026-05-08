@@ -1056,6 +1056,98 @@ class TestBatchedInitialIndex:
             "sanity: stored vector must not be the zero placeholder"
         )
 
+    def test_phase2_failure_preserves_chunkless_subject_fallback_vector(
+        self, tmp_path, monkeypatch
+    ):
+        # Regression: Phase 1's seed used to fall through to
+        # _ZERO_THREAD_VECTOR whenever the thread had no chunk
+        # embeddings — including the case where a prior blank-body
+        # message had stored a valid subject-fallback vector. A new
+        # sibling on that chunkless thread + a transient embed
+        # failure would then leave the parent thread permanently
+        # zero, and is_indexed=True on the new message blocks normal
+        # restart re-indexing. Pinned by reading the existing
+        # threads_vec row in Phase 1 and preserving any non-zero
+        # value when no chunks are available.
+        import struct
+
+        maildir = tmp_path / "maildir"
+        inbox = maildir / "INBOX" / "cur"
+        inbox.mkdir(parents=True)
+
+        # First pass: blank-body message A. Phase 2a's subject fallback
+        # writes a non-zero thread vector (no chunks committed).
+        eml_a = inbox / "a.eml"
+        eml_a.write_text(
+            "From: alice@example.com\r\n"
+            "To: bob@example.com\r\n"
+            "Subject: Quarterly review\r\n"
+            "Message-ID: <a@example.com>\r\n"
+            "Date: Mon, 01 Jan 2024 12:00:00 +0000\r\n"
+            "Content-Type: text/plain; charset=utf-8\r\n"
+            "\r\n",
+            encoding="utf-8",
+        )
+        sentinel = [0.5] * EMBEDDING_DIM
+        embedder_ok = make_mock_embedder()
+        embedder_ok.embed.return_value = sentinel
+        db = Database(tmp_path / "mail.db")
+        threader = Threader(db)
+        queue = _make_queue(db)
+        self._run(db, embedder_ok, threader, queue, monkeypatch, maildir)
+
+        thread_id = db.find_thread_by_message_id("a@example.com")
+        assert thread_id is not None
+        # Sanity: thread is chunkless but its vector is the subject
+        # fallback, not zero.
+        assert not db.get_thread_chunk_embeddings(thread_id), (
+            "blank-body message must not leave chunks on the thread"
+        )
+        row = db._conn.execute(
+            "SELECT embedding FROM threads_vec WHERE thread_id = ?", (thread_id,)
+        ).fetchone()
+        raw = row["embedding"]
+        prior_vec = list(struct.unpack(f"<{len(raw) // 4}f", raw))
+        assert prior_vec == sentinel
+
+        # Second pass: a blank-body reply B threads into A. The new
+        # embedder fails. Phase 1 must NOT seed with zero — there is no
+        # chunk-mean to fall back to, but the prior subject-fallback
+        # vector on threads_vec is the right thing to preserve.
+        eml_b = inbox / "b.eml"
+        eml_b.write_text(
+            "From: bob@example.com\r\n"
+            "To: alice@example.com\r\n"
+            "Subject: Re: Quarterly review\r\n"
+            "Message-ID: <b@example.com>\r\n"
+            "In-Reply-To: <a@example.com>\r\n"
+            "Date: Mon, 01 Jan 2024 13:00:00 +0000\r\n"
+            "Content-Type: text/plain; charset=utf-8\r\n"
+            "\r\n",
+            encoding="utf-8",
+        )
+        embedder_fail = make_mock_embedder()
+        embedder_fail.embed_batch.side_effect = RuntimeError("simulated cloud outage")
+        monkeypatch.setattr("src.embedder.wait_exponential", lambda **_: lambda *_: 0)
+        self._run(db, embedder_fail, threader, queue, monkeypatch, maildir)
+
+        # Existing chunkless thread MUST still carry the subject vector,
+        # even though Phase 2 never produced a new vector for B.
+        row_after = db._conn.execute(
+            "SELECT embedding FROM threads_vec WHERE thread_id = ?", (thread_id,)
+        ).fetchone()
+        assert row_after is not None
+        raw_after = row_after["embedding"]
+        vec_after = list(struct.unpack(f"<{len(raw_after) // 4}f", raw_after))
+        assert vec_after == prior_vec, (
+            "chunkless thread's subject-fallback vector must survive a Phase 2 "
+            "failure on a new sibling message — Phase 1 must read the existing "
+            "threads_vec row, not seed unconditionally with zero"
+        )
+        assert any(v != 0.0 for v in vec_after), (
+            "sanity: stored vector must not be the zero placeholder"
+        )
+
     def test_phase2c_commit_failure_isolates_to_one_message(self, tmp_path, monkeypatch):
         # If replace_message_chunks fails for one message in the
         # batch, that message is marked failed but the others succeed.
