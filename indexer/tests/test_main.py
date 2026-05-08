@@ -1314,3 +1314,146 @@ class TestBatchedInitialIndex:
         assert db.get_chunk_ids_for_message("ok2@example.com")
         # Victim never got chunks (Phase 2c rolled back its transaction)
         assert not db.get_chunk_ids_for_message("victim@example.com")
+
+
+class TestSteadyStateBatchedDrain:
+    """The production main loop calls
+    ``_drain_queue_batched(..., max_passes=1, batch_size=STEADY_STATE_BATCH_SIZE)``.
+    These tests exercise that exact shape so a regression in the
+    steady-state path cannot pass while only the initial-scan path
+    is covered.
+    """
+
+    def _setup(self, tmp_path, monkeypatch):
+        maildir = tmp_path / "maildir"
+        inbox = maildir / "INBOX" / "cur"
+        inbox.mkdir(parents=True)
+        db = Database(tmp_path / "mail.db")
+        threader = Threader(db)
+        monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
+        monkeypatch.setattr(main, "touch_health_file", lambda: None)
+        return maildir, inbox, db, threader
+
+    def test_max_passes_one_indexes_a_burst_in_a_single_call(self, tmp_path, monkeypatch):
+        # Three Maildir files arrive together — the steady-state path
+        # has to drain all three in one tick (batch_size>=3, max_passes=1).
+        # Verifies the production wiring: queue rows removed, chunks
+        # committed, indexed_files populated.
+        from src.timings import TimingAggregator
+
+        maildir, inbox, db, threader = self._setup(tmp_path, monkeypatch)
+        _write_eml(inbox / "m1.eml", "m1@example.com")
+        _write_eml(inbox / "m2.eml", "m2@example.com")
+        _write_eml(inbox / "m3.eml", "m3@example.com")
+
+        embedder = make_mock_embedder()
+        embedder.embed.return_value = [0.1] * EMBEDDING_DIM
+        queue = _make_queue(db)
+        for path in (inbox / "m1.eml", inbox / "m2.eml", inbox / "m3.eml"):
+            queue.enqueue(str(path), REASON_INITIAL_SCAN)
+
+        processed = main._drain_queue_batched(
+            db,
+            embedder,
+            threader,
+            queue,
+            batch_size=8,
+            timing_aggregator=TimingAggregator(window=10),
+            max_passes=1,
+        )
+        assert processed == 3
+        for mid, path in (
+            ("m1@example.com", inbox / "m1.eml"),
+            ("m2@example.com", inbox / "m2.eml"),
+            ("m3@example.com", inbox / "m3.eml"),
+        ):
+            assert db.is_indexed(str(path))
+            assert db.get_chunk_ids_for_message(mid)
+        assert queue.stats() == {"queued": 0, "dead": 0}
+
+    def test_max_passes_one_yields_after_one_batch(self, tmp_path, monkeypatch):
+        # 5 files, batch_size=2, max_passes=1 → exactly 2 indexed,
+        # 3 still queued for the next tick. Proves the steady-state
+        # path interleaves with the reconciler / WAL / recovery sweeps
+        # instead of draining greedily to empty (the initial-scan
+        # behavior).
+        from src.timings import TimingAggregator
+
+        maildir, inbox, db, threader = self._setup(tmp_path, monkeypatch)
+        for i in range(5):
+            _write_eml(inbox / f"m{i}.eml", f"m{i}@example.com")
+        queue = _make_queue(db)
+        for i in range(5):
+            queue.enqueue(str(inbox / f"m{i}.eml"), REASON_INITIAL_SCAN)
+
+        embedder = make_mock_embedder()
+        embedder.embed.return_value = [0.2] * EMBEDDING_DIM
+
+        processed = main._drain_queue_batched(
+            db,
+            embedder,
+            threader,
+            queue,
+            batch_size=2,
+            timing_aggregator=TimingAggregator(window=10),
+            max_passes=1,
+        )
+        assert processed == 2
+        assert queue.stats() == {"queued": 3, "dead": 0}
+
+
+class TestPeriodicRecoverySkipsDeadLetter:
+    """``_recover_zero_vector_threads(resurrect_dead=False)`` must
+    preserve the durable queue's bounded-retry contract.
+
+    Without the gate, a deterministic Phase 2 failure that has
+    already exhausted ``max_attempts`` would be resurrected every
+    sweep interval, burning embedder quota indefinitely.
+    """
+
+    def test_dead_letter_left_alone_when_resurrect_dead_false(self, tmp_path, monkeypatch):
+        from src.parser import parse_email
+
+        maildir = tmp_path / "maildir"
+        inbox = maildir / "INBOX" / "cur"
+        inbox.mkdir(parents=True)
+        monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
+
+        # Set up a stuck zero-vector chunkless thread by routing through
+        # the real ``upsert_thread`` with the placeholder zero seed.
+        _write_eml(inbox / "stuck.eml", "stuck@example.com")
+        msg = parse_email(inbox / "stuck.eml", maildir_root=maildir)
+        assert msg is not None
+        db = Database(tmp_path / "mail.db")
+        threader = Threader(db)
+        thread = threader.assign_thread(msg)
+        db.upsert_thread(thread, [0.0] * EMBEDDING_DIM)
+        # Confirm the precondition: chunkless + zero-vec thread visible
+        # to the recovery query.
+        assert db.find_zero_vector_chunkless_thread_filepaths() == [str(inbox / "stuck.eml")]
+
+        # Push the queue row to status='dead' (simulate exhausted retries).
+        queue = _make_queue(db)
+        queue.enqueue(str(inbox / "stuck.eml"), REASON_INITIAL_SCAN)
+        for _ in range(queue.max_attempts):
+            queue.mark_failed(
+                str(inbox / "stuck.eml"),
+                stage="embed",
+                error="deterministic provider failure",
+            )
+        assert queue.is_dead(str(inbox / "stuck.eml"))
+
+        # Periodic call: dead row must remain dead, no enqueue.
+        re_enqueued = main._recover_zero_vector_threads(db, queue, resurrect_dead=False)
+        assert re_enqueued == 0
+        assert queue.is_dead(str(inbox / "stuck.eml"))
+        # And the periodic call must not have queued a fresh row either.
+        assert not queue.has_pending_row(str(inbox / "stuck.eml"))
+
+        # Sanity: the same call with the startup default (resurrect_dead=True)
+        # DOES rescue the file. That's the crash-mid-batch contract — the
+        # dead status reflects a process death, not message-content
+        # unfit-ness.
+        re_enqueued = main._recover_zero_vector_threads(db, queue, resurrect_dead=True)
+        assert re_enqueued == 1
+        assert queue.has_pending_row(str(inbox / "stuck.eml"))

@@ -26,13 +26,32 @@ log = logging.getLogger("indexer.embedder")
 def _is_transient_embed_error(exc: BaseException) -> bool:
     """Decide whether tenacity should retry ``exc``.
 
-    Retry only transport-level failures that a fresh attempt could plausibly
-    fix: connection errors, read timeouts, and 5xx responses. 4xx
-    (auth/model/quota/request-shape) and our own ``RuntimeError``s raised
-    when the provider returns a malformed batch are deterministic — retrying
-    just burns latency before the same failure surfaces.
+    Retry transport-level failures that a fresh attempt could plausibly
+    fix:
+
+    * Any subclass of ``httpx.TransportError`` — covers ``TimeoutException``
+      (``ConnectTimeout`` / ``ReadTimeout`` / ``WriteTimeout`` /
+      ``PoolTimeout``), ``NetworkError`` (``ConnectError`` / ``ReadError``
+      / ``WriteError`` / ``CloseError``), ``ProtocolError``
+      (``RemoteProtocolError`` / ``LocalProtocolError``), ``ProxyError``,
+      and ``UnsupportedProtocol``. The earlier explicit allowlist
+      (``ConnectError``, ``ReadTimeout``, ``RemoteProtocolError``)
+      missed ``ConnectTimeout`` / ``WriteTimeout`` / ``PoolTimeout``
+      and made the call fail immediately on common transient
+      provider hiccups.
+    * 5xx ``HTTPStatusError`` — the provider failed to serve a
+      well-formed request and might recover.
+
+    Do NOT retry:
+
+    * 4xx ``HTTPStatusError`` (auth, model id, quota, request shape) —
+      deterministic config issues; retrying just delays the visible
+      failure.
+    * Our own ``RuntimeError`` from index-integrity checks — the
+      provider returned a malformed batch and a retry would produce
+      the same shape.
     """
-    if isinstance(exc, (httpx.ConnectError, httpx.ReadTimeout, httpx.RemoteProtocolError)):
+    if isinstance(exc, httpx.TransportError):
         return True
     if isinstance(exc, httpx.HTTPStatusError):
         return exc.response.status_code >= 500

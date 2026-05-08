@@ -151,6 +151,23 @@ services:
       # Cross-message batch size for the initial-index drainer. See
       # .env.example for the two-phase pipeline that this tunes.
       INITIAL_INDEX_BATCH_SIZE: ${INITIAL_INDEX_BATCH_SIZE:-50}
+      # Steady-state main-loop batch size. Smaller than the initial-scan
+      # size because steady-state typically sees 1-3 messages per pass;
+      # the value is the upper bound, not a target. Routing through the
+      # batched path means a 5+ message mbsync burst still collapses
+      # into one embed call.
+      INDEXER_STEADY_STATE_BATCH_SIZE: ${INDEXER_STEADY_STATE_BATCH_SIZE:-8}
+      # How often the main loop runs PRAGMA wal_checkpoint(TRUNCATE).
+      # The single shared sqlite3 connection pins a WAL read snapshot for
+      # the duration of the indexer process; without an explicit
+      # truncate-checkpoint the WAL grows monotonically.
+      INDEXER_WAL_CHECKPOINT_INTERVAL_SECS: ${INDEXER_WAL_CHECKPOINT_INTERVAL_SECS:-600}
+      # How often the main loop re-runs the chunkless-zero-vector
+      # recovery sweep. Periodic sweeps respect the dead-letter
+      # boundary; only the startup sweep can resurrect dead-lettered
+      # rows (those reflect a process death, not message-content
+      # unfit-ness). See indexer/src/main.py:_recover_zero_vector_threads.
+      INDEXER_RECOVERY_SWEEP_INTERVAL_SECS: ${INDEXER_RECOVERY_SWEEP_INTERVAL_SECS:-1800}
       # Warmup POST timeout for the first embed call after container
       # start. Default 600s in code accounts for first-time HF model
       # downloads (~4 min embedder + ~2 min reranker). Lower it on a

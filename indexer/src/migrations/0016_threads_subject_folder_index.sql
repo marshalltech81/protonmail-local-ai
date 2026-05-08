@@ -24,4 +24,9 @@
 CREATE INDEX IF NOT EXISTS idx_threads_subject_folder
     ON threads(subject, folder, date_last);
 
-ANALYZE;
+-- Narrow ANALYZE to the new index only. A bare ``ANALYZE;`` rebuilds
+-- ``sqlite_stat1`` for every table + index in the database, which on a
+-- 100k+ thread mailbox can take tens of seconds at startup. ``ANALYZE
+-- <index_name>`` updates only the rows that describe the just-created
+-- index — which is all the planner needs to start picking it up.
+ANALYZE idx_threads_subject_folder;

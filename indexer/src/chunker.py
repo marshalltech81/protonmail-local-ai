@@ -118,7 +118,30 @@ def _load_tokenizer() -> Tokenizer:
     return Tokenizer.from_file(str(_TOKENIZER_PATH))
 
 
-@lru_cache(maxsize=4096)
+# Upper bound on the byte-size of strings we cache token counts for.
+# The packer's redundancy is in repeated lookups of the same paragraph-
+# sized spans (a paragraph carried as overlap is re-encoded for every
+# chunk it appears in). A pasted log file or a 200 KB attachment text
+# is encoded once and never benefits from the cache, but caching it
+# would let an attacker-controlled email pin megabytes of strings via
+# the lru_cache. 8192 bytes covers any realistic paragraph and bounds
+# worst-case cache memory at roughly maxsize × threshold.
+_TOKEN_ESTIMATE_CACHE_THRESHOLD_BYTES = 8192
+
+
+@lru_cache(maxsize=1024)
+def _cached_estimate_tokens(text: str) -> int:
+    """Cached path for ``estimate_tokens`` — only invoked for short text.
+
+    The size-gating wrapper above ensures we never insert a large
+    string into the cache, so the entry-count-based ``maxsize`` is
+    also a memory bound. ``maxsize=1024`` is well above the typical
+    chunker working set per message (a few dozen unique spans) and
+    keeps total cache memory below ~8 MB worst-case.
+    """
+    return len(_load_tokenizer().encode(text, add_special_tokens=False).ids)
+
+
 def estimate_tokens(text: str) -> int:
     """Return the real BPE token count for ``text``.
 
@@ -131,16 +154,19 @@ def estimate_tokens(text: str) -> int:
     Special tokens are not added — the embed service adds those on the
     server side, so counting them here would double-count.
 
-    Cached because the chunker's packer evaluates the same span text
-    repeatedly while greedy-packing and computing overlap tails — a
-    paragraph carried as overlap is re-encoded for every chunk it
-    appears in, and oversized-paragraph splitting checks each
-    candidate sub-span. Maxsize is bounded so a pathological input
-    cannot hold the whole mailbox in memory; the upstream chunker
-    operates on at most a few hundred span texts per message.
+    Caching is gated by string size: short inputs (paragraph-sized,
+    under ``_TOKEN_ESTIMATE_CACHE_THRESHOLD_BYTES``) go through the
+    bounded ``_cached_estimate_tokens`` LRU because the packer evaluates
+    the same paragraph repeatedly while greedy-packing and computing
+    overlap tails. Larger inputs (a pasted log file, a long attachment
+    text) bypass the cache: re-encoding once is cheap and caching them
+    would let an attacker-controlled email pin megabytes of strings in
+    the LRU.
     """
     if not text:
         return 0
+    if len(text) <= _TOKEN_ESTIMATE_CACHE_THRESHOLD_BYTES:
+        return _cached_estimate_tokens(text)
     return len(_load_tokenizer().encode(text, add_special_tokens=False).ids)
 
 

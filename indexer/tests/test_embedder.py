@@ -410,3 +410,38 @@ class TestRetryPredicate:
             result = emb.embed_batch(["a"])
         assert result == [[1.0]]
         assert calls["n"] == 2, "5xx HTTPStatusError must be retried"
+
+    def test_connect_timeout_is_retried_at_call_site(self):
+        """End-to-end: a ConnectTimeout on the first call followed by a
+        clean 200 succeeds via the tenacity retry. The earlier predicate
+        only listed ``ConnectError`` / ``ReadTimeout`` /
+        ``RemoteProtocolError`` and missed the timeout subclasses
+        (``ConnectTimeout`` / ``WriteTimeout`` / ``PoolTimeout``), making
+        a common transient provider hiccup fail the whole embed batch
+        immediately. ``httpx.TransportError`` is the right base class
+        to catch all of them."""
+        emb = OpenAIEmbedder("http://host.docker.internal:8001/v1", "test-model")
+        calls = {"n": 0}
+
+        def handler(_request: httpx.Request) -> httpx.Response:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise httpx.ConnectTimeout("first call timed out")
+            return httpx.Response(200, json=_embed_response([[2.0]]))
+
+        _install_mock(emb, handler)
+        with patch("src.embedder.wait_exponential", lambda **_: lambda *_: 0):
+            result = emb.embed_batch(["a"])
+        assert result == [[2.0]]
+        assert calls["n"] == 2, "ConnectTimeout must be retried"
+
+    def test_connect_timeout_is_classified_as_transient(self):
+        # Direct predicate test for the exact subclass that motivated
+        # the switch from the explicit allowlist to ``TransportError``.
+        assert _is_transient_embed_error(httpx.ConnectTimeout("connect timeout"))
+
+    def test_write_timeout_is_classified_as_transient(self):
+        assert _is_transient_embed_error(httpx.WriteTimeout("write timeout"))
+
+    def test_pool_timeout_is_classified_as_transient(self):
+        assert _is_transient_embed_error(httpx.PoolTimeout("pool exhausted"))

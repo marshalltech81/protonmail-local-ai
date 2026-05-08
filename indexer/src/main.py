@@ -483,11 +483,19 @@ def _index_one_file(
         parse_ms = (time.perf_counter() - t0) * 1000
         return False, "parse_skipped_missing", repr(e), StageTimings(parse_ms=parse_ms)
     except Exception as e:
-        # Transient I/O on a path that DOES exist (PermissionError from
-        # the mbsync chmod race) propagates so the queue routes it to
-        # retry/backoff — the chmod resolves on a later sync cycle.
-        # Other parse-content failures are caught inside parse_email
-        # and surface as ``message is None`` below.
+        # Two cases land here:
+        # 1. Transient I/O on a path that DOES exist
+        #    (``PermissionError`` from the mbsync 0600→0644 chmod race)
+        #    — propagates so the queue routes it to retry/backoff and
+        #    the chmod resolves on a later sync cycle.
+        # 2. Content-pathology failures in ``parse_email`` (malformed
+        #    MIME, html2text blowup, decode errors). Earlier versions
+        #    of the parser caught these locally and returned ``None``,
+        #    which the worker treated as terminal success and silently
+        #    un-indexed the file. The parser now re-raises, so the
+        #    queue's retry + dead-letter cascade fires and operators
+        #    see persistent parser bugs instead of a quietly shrinking
+        #    index.
         parse_ms = (time.perf_counter() - t0) * 1000
         return False, "parse", repr(e), StageTimings(parse_ms=parse_ms)
     parse_ms = (time.perf_counter() - t0) * 1000
@@ -1087,7 +1095,9 @@ def _drain_queue_batched(
     return processed
 
 
-def _recover_zero_vector_threads(db: Database, queue: IndexingQueue) -> int:
+def _recover_zero_vector_threads(
+    db: Database, queue: IndexingQueue, *, resurrect_dead: bool = True
+) -> int:
     """Re-enqueue messages stuck on chunkless zero-vector threads.
 
     The batched indexer's Phase 1 commits thread membership +
@@ -1103,16 +1113,28 @@ def _recover_zero_vector_threads(db: Database, queue: IndexingQueue) -> int:
 
     Skips files that already have a 'queued' row — the normal retry
     cascade is in flight and clobbering its row would reset the
-    attempts counter mid-cascade. Re-enqueue covers the
-    no-row case (Phase 1 succeeded but the queue row was somehow
-    cleaned up) and the dead-letter case (``enqueue``'s
-    ``INSERT OR REPLACE`` clears the dead row and resets attempts).
+    attempts counter mid-cascade.
+
+    ``resurrect_dead`` controls whether dead-lettered rows are
+    cleared and re-enqueued:
+
+    * ``True`` (default; the startup path uses this) — covers the
+      crash-mid-batch case where Phase 1 committed but the queue
+      row was dead-lettered before Phase 2c ran. Resetting attempts
+      is correct: the prior dead status reflected a process death,
+      not message-content unfit-ness.
+    * ``False`` (the periodic main-loop path uses this) — preserves
+      the durable queue's bounded-retry contract. A deterministic
+      Phase 2 failure that has already exhausted ``max_attempts``
+      stays dead until the operator intervenes or a fresh watchdog
+      event re-surfaces the file. Without this gate, periodic
+      recovery would resurrect the same poison-pill message every
+      sweep interval forever, burning embedder quota indefinitely.
 
     Healthy chunkless subject-fallback threads (non-zero
     ``threads_vec``) are NOT touched — the DB query filters them out.
 
-    Returns the number of files re-enqueued for visibility in
-    startup logs.
+    Returns the number of files re-enqueued for visibility in logs.
     """
     candidates = db.find_zero_vector_chunkless_thread_filepaths()
     if not candidates:
@@ -1120,22 +1142,29 @@ def _recover_zero_vector_threads(db: Database, queue: IndexingQueue) -> int:
 
     re_enqueued = 0
     skipped_pending = 0
+    skipped_dead = 0
     for filepath in candidates:
         if queue.has_pending_row(filepath):
             skipped_pending += 1
             continue
+        if not resurrect_dead and queue.is_dead(filepath):
+            skipped_dead += 1
+            continue
         queue.enqueue(filepath, REASON_RECOVERY)
         re_enqueued += 1
 
-    if re_enqueued or skipped_pending:
+    if re_enqueued or skipped_pending or skipped_dead:
         log.warning(
             "recovery sweep: re-enqueued %d message(s) on threads with "
             "zero-vector + no chunks (Phase 1 committed but Phase 2 "
             "did not — likely a crash mid-batch or a Phase 2 dead-letter); "
-            "skipped %d already in active retry. Their next drain pass "
-            "should complete the indexing.",
+            "skipped %d already in active retry, %d dead-lettered "
+            "(resurrect_dead=%s). Their next drain pass should complete "
+            "the indexing.",
             re_enqueued,
             skipped_pending,
+            skipped_dead,
+            resurrect_dead,
         )
     return re_enqueued
 
@@ -1393,14 +1422,17 @@ def main():
                     last_reconcile = now
 
             # Recovery sweep: re-enqueue messages on chunkless
-            # zero-vector threads from a Phase 2 dead-letter or a
-            # crash-mid-batch. Running periodically (not just at
-            # startup) means a transient embedder bug that exhausted
-            # the retry cascade heals on its own once the underlying
-            # cause clears.
+            # zero-vector threads that are STILL retryable
+            # (``resurrect_dead=False``). A transient embedder bug
+            # that left a row queued-but-stuck heals on its own once
+            # the underlying cause clears. Dead-lettered rows are
+            # left alone — that's the durable queue's
+            # bounded-retry contract — and only the startup path
+            # rescues them (the dead status there reflected a
+            # process death, not message-content unfit-ness).
             if now - last_recovery_sweep >= RECOVERY_SWEEP_INTERVAL_SECS:
                 try:
-                    _recover_zero_vector_threads(db, queue)
+                    _recover_zero_vector_threads(db, queue, resurrect_dead=False)
                 except Exception as e:
                     log.error(f"periodic recovery sweep failed: {e}")
                 last_recovery_sweep = now
