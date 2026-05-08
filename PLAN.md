@@ -38,12 +38,16 @@ The stack now runs:
   mlx-service), writes SQLite. Schema is at v15 with 4096-dim
   vectors. The Ollama embed-fallback path was removed in Phase C.
   Initial-scan drainer uses a two-phase batched path (`Phase 1`
-  commits thread membership with placeholder vec per message; `Phase
-  2b` issues one batched embed_batch across the whole batch; `Phase
-  2c` commits chunks/vectors per message and replaces the placeholder
-  thread vector). This collapses ~25k single-message embed
-  round-trips into ~500 multi-message ones against a cloud embedder
-  at the default `INITIAL_INDEX_BATCH_SIZE=50`.
+  commits thread membership per message — seeded with the mean of
+  the thread's existing chunk vectors when the thread is already
+  indexed, or a placeholder zero for new threads; `Phase 2b` issues
+  one batched embed_batch across the whole batch; `Phase 2c` commits
+  chunks/vectors per message and replaces the seed thread vector).
+  Seeding from existing chunks means a Phase 2 failure on a new
+  sibling message cannot regress the parent thread's vector. This
+  collapses ~25k single-message embed round-trips into ~500
+  multi-message ones against a cloud embedder at the default
+  `INITIAL_INDEX_BATCH_SIZE=50`.
 - **mcp-server** — Docker, hybrid search + intelligence tools.
   `hybrid_search` calls the MLX reranker (`Qwen3-Reranker-4B-mxfp8`)
   after RRF. The LLM-synthesis step is dispatched by `LLM_MODE`:
