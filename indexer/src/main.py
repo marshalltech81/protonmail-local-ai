@@ -133,9 +133,33 @@ CHUNK_OVERLAP_TOKENS = _int_env("INDEXER_CHUNK_OVERLAP_TOKENS", 150, minimum=0)
 # a single batched embed call. Larger batches amortize the cloud-embedder
 # round-trip across more messages — meaningful when EMBED_BASE_URL points
 # at a remote provider (~150 ms RTT each), marginal against loopback
-# mlx-service. Steady-state (watchdog) ingestion is unaffected: the
-# watchdog path stays per-message because it sees 1-3 messages at a time.
+# mlx-service.
 INITIAL_INDEX_BATCH_SIZE = _int_env("INITIAL_INDEX_BATCH_SIZE", 50)
+
+# Steady-state (post-initial-scan) batch size for the main-loop drain.
+# Smaller than the initial-scan size because steady-state typically sees
+# 1-3 messages per pass, but routing through the same batched path means
+# (a) a burst from an mbsync sync still gets one bulk embed call instead
+# of one HTTP round-trip per message (decisive against any cloud
+# embedder), and (b) the initial-scan and steady-state code paths share
+# one Phase 1/2 implementation rather than diverging on seed-vector
+# selection.
+STEADY_STATE_BATCH_SIZE = _int_env("INDEXER_STEADY_STATE_BATCH_SIZE", 8)
+
+# How often (seconds) the main loop calls ``Database.wal_checkpoint_truncate``.
+# The single shared sqlite3 connection used by ``Database`` keeps a WAL
+# read snapshot open for the duration of the indexer process; without an
+# explicit truncate-checkpoint the WAL file grows monotonically. 10 min
+# keeps the file size bounded without churning IO.
+WAL_CHECKPOINT_INTERVAL_SECS = _int_env("INDEXER_WAL_CHECKPOINT_INTERVAL_SECS", 600, minimum=60)
+
+# How often (seconds) the main loop runs ``_recover_zero_vector_threads``.
+# Phase 2 dead-letters that fire during steady-state operation leave
+# threads text-indexed but vectorless until the next container restart.
+# Periodically re-running the recovery sweep means an embedder bug that
+# blew through the retry cascade heals on its own once the underlying
+# cause clears, without operator action.
+RECOVERY_SWEEP_INTERVAL_SECS = _int_env("INDEXER_RECOVERY_SWEEP_INTERVAL_SECS", 1800, minimum=60)
 
 # Phase 1 seed for genuinely new threads (the only branch that uses
 # this constant). Phase 1's seed-selection runs a three-case priority
@@ -916,6 +940,7 @@ def _drain_queue_batched(
     *,
     batch_size: int,
     timing_aggregator: TimingAggregator,
+    max_passes: int | None = None,
 ) -> int:
     """Drain the queue in two-phase batches.
 
@@ -934,6 +959,13 @@ def _drain_queue_batched(
     overwrites the Phase 1 seed thread vector with the real
     mean-of-chunks vector.
 
+    ``max_passes`` bounds how many ``claim_batch`` rounds run before
+    returning. ``None`` (the default) drains until the queue is empty
+    — the right shape for ``initial_index``. Steady-state callers in
+    the main loop pass ``max_passes=1`` so each tick interleaves
+    cleanly with the reconciler sweep, WAL checkpoint, and health-file
+    refresh instead of starving them on a long burst.
+
     Failure isolation:
 
     * Phase 1 error for one message — that message marked failed,
@@ -948,7 +980,11 @@ def _drain_queue_batched(
       others succeed.
     """
     processed = 0
+    passes = 0
     while True:
+        if max_passes is not None and passes >= max_passes:
+            break
+        passes += 1
         # ---- Gather batch + Phase 1 ----
         # Snapshot up to batch_size distinct queued rows in one query
         # so the gather loop cannot re-claim the same row repeatedly
@@ -1302,6 +1338,8 @@ def main():
     log.info("Watching Maildir for new emails...")
 
     last_reconcile = time.monotonic()
+    last_recovery_sweep = time.monotonic()
+    last_wal_checkpoint = time.monotonic()
     timing_aggregator = TimingAggregator(window=200)
     drained_since_log = 0
     try:
@@ -1309,28 +1347,43 @@ def main():
             touch_health_file()
             # Drain any queued indexing jobs before yielding to the
             # reconciler so newly-arrived mail is visible in search
-            # quickly. ``max_batch`` caps each pass so a large initial
-            # enqueue (or a burst from an mbsync sync) does not starve
-            # the reconciler or the health-file refresh.
+            # quickly. Steady state goes through the same batched path
+            # initial_index uses, with ``max_passes=1`` so each tick
+            # processes at most ``STEADY_STATE_BATCH_SIZE`` messages
+            # before yielding to the reconciler / WAL checkpoint /
+            # recovery sweep. A burst from an mbsync sync still lands
+            # in one bulk embed call instead of N per-message HTTP
+            # round-trips.
             try:
-                drained = drain_queue(
-                    queue,
+                drained = _drain_queue_batched(
                     db,
                     embedder,
                     threader,
-                    max_batch=HEALTH_REFRESH_EVERY,
+                    queue,
+                    batch_size=STEADY_STATE_BATCH_SIZE,
                     timing_aggregator=timing_aggregator,
+                    max_passes=1,
                 )
                 drained_since_log += drained
                 if drained_since_log >= TIMING_LOG_EVERY:
                     line = format_summary(timing_aggregator.summary())
                     if line:
-                        log.info(line)
+                        # Tag the periodic timing summary with current
+                        # queue depth so operators see when work is
+                        # backing up without grepping a separate log.
+                        depth = queue.stats()
+                        log.info(
+                            "%s queued=%d dead=%d",
+                            line,
+                            depth["queued"],
+                            depth["dead"],
+                        )
                     drained_since_log = 0
             except Exception as e:
                 log.error(f"queue drain failed: {e}")
+
+            now = time.monotonic()
             if reconciler is not None:
-                now = time.monotonic()
                 if now - last_reconcile >= reconciler_config.sweep_interval_secs:
                     try:
                         reconciler.sweep()
@@ -1338,6 +1391,39 @@ def main():
                     except Exception as e:
                         log.error(f"periodic reconciliation failed: {e}")
                     last_reconcile = now
+
+            # Recovery sweep: re-enqueue messages on chunkless
+            # zero-vector threads from a Phase 2 dead-letter or a
+            # crash-mid-batch. Running periodically (not just at
+            # startup) means a transient embedder bug that exhausted
+            # the retry cascade heals on its own once the underlying
+            # cause clears.
+            if now - last_recovery_sweep >= RECOVERY_SWEEP_INTERVAL_SECS:
+                try:
+                    _recover_zero_vector_threads(db, queue)
+                except Exception as e:
+                    log.error(f"periodic recovery sweep failed: {e}")
+                last_recovery_sweep = now
+
+            # WAL checkpoint: keep the WAL file size bounded over a
+            # long-running container. The single shared connection
+            # otherwise pins a read snapshot that prevents WAL
+            # truncation at SQLite's automatic checkpoint thresholds.
+            if now - last_wal_checkpoint >= WAL_CHECKPOINT_INTERVAL_SECS:
+                try:
+                    busy, _log_pages, ckpt_pages = db.wal_checkpoint_truncate()
+                    if busy:
+                        log.debug(
+                            "wal_checkpoint busy=%d (a reader pinned WAL frames; "
+                            "next pass will retry)",
+                            busy,
+                        )
+                    elif ckpt_pages:
+                        log.debug("wal_checkpoint truncated %d page(s)", ckpt_pages)
+                except Exception as e:
+                    log.error(f"wal checkpoint failed: {e}")
+                last_wal_checkpoint = now
+
             time.sleep(1)
     except KeyboardInterrupt:
         observer.stop()

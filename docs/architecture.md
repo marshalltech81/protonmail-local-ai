@@ -408,16 +408,16 @@ problem and the always-null join.
 The `indexing_jobs` table backs the durable queue. The watchdog
 callbacks and `initial_index` no longer run the parse / embed / upsert
 pipeline
-inline — they `enqueue` each filepath and return immediately. A worker
-loop in the main thread drains the queue via `drain_queue`, capped at
-`HEALTH_REFRESH_EVERY` jobs per pass so the reconciler and health-file
-refresh aren't starved by a large event burst.
-
-The initial-scan drainer uses a **two-phase batched** path
-(`_drain_queue_batched`) instead of per-message drain so a single
-`embed_batch` call can amortize the embed round-trip across many
-messages. The two paths cooperate cleanly because they hit different
-queue states:
+inline — they `enqueue` each filepath and return immediately. The main
+thread drains the queue via the **two-phase batched** path
+(`_drain_queue_batched`); the initial scan runs to empty
+(`max_passes=None`, `batch_size=INITIAL_INDEX_BATCH_SIZE`), while the
+steady-state main loop runs one bounded pass per tick
+(`max_passes=1`, `batch_size=INDEXER_STEADY_STATE_BATCH_SIZE`) so the
+reconciler, periodic recovery sweep, periodic WAL checkpoint, and
+health-file refresh all interleave cleanly with indexing work. Both
+paths share the Phase 1 / Phase 2 implementation so seed-vector
+selection and failure isolation behave identically:
 
 - **Phase 1 (per message)**: parse → thread → `upsert_thread` with a
   seed thread vector chosen by a three-case priority chain:
@@ -453,9 +453,11 @@ queue states:
 
 The two-phase split is what makes a cloud-embedder reindex tolerable:
 ~1 hour against a 25k-message mailbox with a remote provider drops to
-~5–10 minutes. Steady-state (watchdog) ingestion stays per-message
-because the watchdog typically sees 1–3 messages at a time; the
-batched path's win is concentrated in the initial scan.
+~5–10 minutes. Steady-state (watchdog) ingestion runs through the same
+path with `max_passes=1` and a smaller batch size, so a 1-message
+delivery still produces just one HTTP call (no overhead) while a 5+
+message burst from an mbsync sync collapses into one bulk embed call
+instead of N round-trips.
 
 Failure isolation is preserved across phases:
 

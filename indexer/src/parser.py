@@ -98,65 +98,70 @@ def parse_email(path: Path, maildir_root: Path | None = None) -> Message | None:
     than collapsing them into ``None`` — which the worker treats as
     "terminal success, no Message-ID" and would silently drop the file
     from the index.
+
+    Content-pathology errors (a malformed MIME structure ``email`` cannot
+    decompose, an html2text blowup, anything raised by the body /
+    attachment walker that is not already caught locally) also propagate.
+    The previous bare ``except Exception`` collapsed those into the same
+    ``None`` channel as missing-Message-ID, which silently un-indexed
+    every affected file with no dead-letter visibility. Letting the
+    exception escape routes the row through the queue's retry +
+    dead-letter cascade so operators see persistent parser bugs instead
+    of a quietly shrinking index.
     """
     raw = path.read_bytes()
-    try:
-        msg = email.message_from_bytes(raw)
+    msg = email.message_from_bytes(raw)
 
-        message_id = _clean_id(msg.get("Message-ID", ""))
-        if not message_id:
-            log.debug(f"Skipping message with no Message-ID: {path}")
-            return None
-
-        in_reply_to = _clean_id(msg.get("In-Reply-To", ""))
-        references = [_clean_id(r) for r in msg.get("References", "").split() if r.strip()]
-
-        subject = _decode_header(msg.get("Subject", "(no subject)"))
-        from_addr = _decode_header(msg.get("From", ""))
-        to_addrs = _parse_addrs(msg.get("To", ""))
-        cc_addrs = _parse_addrs(msg.get("Cc", ""))
-        date = _parse_date(msg.get("Date", ""))
-
-        body_text, attachments = _extract_body_and_attachments(msg)
-
-        folder = _derive_folder(path, maildir_root)
-
-        # Capture file identity. ``size`` is the length of the
-        # bytes we actually hashed; ``content_hash`` is computed over the
-        # raw file — not the decoded body — so flag-only renames keep the
-        # same hash while any real content mutation shows up as a mismatch.
-        # A ``stat`` failure is treated as "identity unknown" rather than a
-        # parse failure: the file was just read successfully, so the row
-        # still belongs in the index. Future passes can backfill.
-        size = len(raw)
-        content_hash = hashlib.sha256(raw).hexdigest()
-        try:
-            mtime_ns = os.stat(path).st_mtime_ns
-        except OSError:
-            mtime_ns = None
-
-        return Message(
-            message_id=message_id,
-            in_reply_to=in_reply_to or None,
-            references=references,
-            subject=subject,
-            from_addr=from_addr,
-            to_addrs=to_addrs,
-            cc_addrs=cc_addrs,
-            date=date,
-            body_text=body_text,
-            folder=folder,
-            filepath=str(path),
-            attachments=attachments,
-            has_attachments=len(attachments) > 0,
-            size=size,
-            mtime_ns=mtime_ns,
-            content_hash=content_hash,
-        )
-
-    except Exception as e:
-        log.error(f"Failed to parse {path}: {e}")
+    message_id = _clean_id(msg.get("Message-ID", ""))
+    if not message_id:
+        log.debug(f"Skipping message with no Message-ID: {path}")
         return None
+
+    in_reply_to = _clean_id(msg.get("In-Reply-To", ""))
+    references = [_clean_id(r) for r in msg.get("References", "").split() if r.strip()]
+
+    subject = _decode_header(msg.get("Subject", "(no subject)"))
+    from_addr = _decode_header(msg.get("From", ""))
+    to_addrs = _parse_addrs(msg.get("To", ""))
+    cc_addrs = _parse_addrs(msg.get("Cc", ""))
+    date = _parse_date(msg.get("Date", ""))
+
+    body_text, attachments = _extract_body_and_attachments(msg)
+
+    folder = _derive_folder(path, maildir_root)
+
+    # Capture file identity. ``size`` is the length of the
+    # bytes we actually hashed; ``content_hash`` is computed over the
+    # raw file — not the decoded body — so flag-only renames keep the
+    # same hash while any real content mutation shows up as a mismatch.
+    # A ``stat`` failure is treated as "identity unknown" rather than a
+    # parse failure: the file was just read successfully, so the row
+    # still belongs in the index. Future passes can backfill.
+    size = len(raw)
+    content_hash = hashlib.sha256(raw).hexdigest()
+    try:
+        mtime_ns = os.stat(path).st_mtime_ns
+    except OSError:
+        mtime_ns = None
+
+    return Message(
+        message_id=message_id,
+        in_reply_to=in_reply_to or None,
+        references=references,
+        subject=subject,
+        from_addr=from_addr,
+        to_addrs=to_addrs,
+        cc_addrs=cc_addrs,
+        date=date,
+        body_text=body_text,
+        folder=folder,
+        filepath=str(path),
+        attachments=attachments,
+        has_attachments=len(attachments) > 0,
+        size=size,
+        mtime_ns=mtime_ns,
+        content_hash=content_hash,
+    )
 
 
 def _derive_folder(path: Path, maildir_root: Path | None) -> str:

@@ -18,9 +18,25 @@ import time
 from typing import Protocol
 
 import httpx
-from tenacity import retry, stop_after_attempt, wait_exponential
+from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
 
 log = logging.getLogger("indexer.embedder")
+
+
+def _is_transient_embed_error(exc: BaseException) -> bool:
+    """Decide whether tenacity should retry ``exc``.
+
+    Retry only transport-level failures that a fresh attempt could plausibly
+    fix: connection errors, read timeouts, and 5xx responses. 4xx
+    (auth/model/quota/request-shape) and our own ``RuntimeError``s raised
+    when the provider returns a malformed batch are deterministic — retrying
+    just burns latency before the same failure surfaces.
+    """
+    if isinstance(exc, (httpx.ConnectError, httpx.ReadTimeout, httpx.RemoteProtocolError)):
+        return True
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code >= 500
+    return False
 
 
 class EmbeddingBackend(Protocol):
@@ -176,6 +192,7 @@ class OpenAIEmbedder:
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=2, max=10),
+        retry=retry_if_exception(_is_transient_embed_error),
         reraise=True,
     )
     def _embed_one_batch(self, texts: list[str]) -> list[list[float]]:

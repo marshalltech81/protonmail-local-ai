@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 import httpx
 import pytest
-from src.embedder import OpenAIEmbedder
+from src.embedder import OpenAIEmbedder, _is_transient_embed_error
 
 OPENAI_DATA_KEY = "data"
 
@@ -325,3 +325,88 @@ class TestOpenAIEmbedder:
         _install_mock(emb, handler)
         with pytest.raises(httpx.HTTPStatusError):
             emb.wait_for_ready(timeout=30)
+
+
+class TestRetryPredicate:
+    """``_is_transient_embed_error`` decides whether tenacity retries.
+
+    The predicate exists to keep ``_embed_one_batch`` from retrying its
+    own integrity-check ``RuntimeError`` (deterministic; retry burns
+    latency before the same failure resurfaces) while still retrying
+    transport-level failures (connection drop, 5xx, read timeout).
+    """
+
+    def test_retries_connect_error(self):
+        assert _is_transient_embed_error(httpx.ConnectError("conn refused"))
+
+    def test_retries_read_timeout(self):
+        assert _is_transient_embed_error(httpx.ReadTimeout("read timed out"))
+
+    def test_retries_remote_protocol_error(self):
+        assert _is_transient_embed_error(httpx.RemoteProtocolError("proto"))
+
+    def test_retries_5xx_http_status_error(self):
+        response = httpx.Response(503, request=httpx.Request("POST", "http://x/"))
+        exc = httpx.HTTPStatusError(
+            "Service Unavailable", request=response.request, response=response
+        )
+        assert _is_transient_embed_error(exc)
+
+    def test_does_not_retry_4xx_http_status_error(self):
+        response = httpx.Response(401, request=httpx.Request("POST", "http://x/"))
+        exc = httpx.HTTPStatusError("Unauthorized", request=response.request, response=response)
+        assert not _is_transient_embed_error(exc)
+
+    def test_does_not_retry_runtime_error(self):
+        # Self-raised integrity-check failures (malformed batch, missing
+        # indices) are deterministic. Retrying just delays the same
+        # exception surfacing.
+        assert not _is_transient_embed_error(RuntimeError("bad data"))
+
+    def test_does_not_retry_value_error(self):
+        # Any non-transport exception class falls through to ``False``.
+        assert not _is_transient_embed_error(ValueError("nope"))
+
+    def test_runtime_error_is_not_retried_at_call_site(self):
+        """End-to-end: ``embed_batch`` raises a RuntimeError on a
+        malformed provider response and the handler is invoked exactly
+        once — proving tenacity does not retry the integrity check."""
+        emb = OpenAIEmbedder("http://host.docker.internal:8001/v1", "test-model")
+        calls = {"n": 0}
+
+        def handler(_request: httpx.Request) -> httpx.Response:
+            calls["n"] += 1
+            return httpx.Response(
+                200,
+                json={
+                    "object": "list",
+                    "data": [
+                        {"object": "embedding", "embedding": [1.0], "index": 0},
+                    ],
+                    "model": "test-model",
+                    "usage": {"prompt_tokens": 0, "total_tokens": 0},
+                },
+            )
+
+        _install_mock(emb, handler)
+        with pytest.raises(RuntimeError):
+            emb.embed_batch(["a", "b"])  # asks for 2, provider returns 1
+        assert calls["n"] == 1, "RuntimeError must not be retried"
+
+    def test_5xx_is_retried_at_call_site(self):
+        """End-to-end: a 5xx on the first call followed by a clean 200
+        succeeds via the tenacity retry."""
+        emb = OpenAIEmbedder("http://host.docker.internal:8001/v1", "test-model")
+        calls = {"n": 0}
+
+        def handler(_request: httpx.Request) -> httpx.Response:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return httpx.Response(503, json={"error": "down"})
+            return httpx.Response(200, json=_embed_response([[1.0]]))
+
+        _install_mock(emb, handler)
+        with patch("src.embedder.wait_exponential", lambda **_: lambda *_: 0):
+            result = emb.embed_batch(["a"])
+        assert result == [[1.0]]
+        assert calls["n"] == 2, "5xx HTTPStatusError must be retried"

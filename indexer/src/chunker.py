@@ -118,6 +118,7 @@ def _load_tokenizer() -> Tokenizer:
     return Tokenizer.from_file(str(_TOKENIZER_PATH))
 
 
+@lru_cache(maxsize=4096)
 def estimate_tokens(text: str) -> int:
     """Return the real BPE token count for ``text``.
 
@@ -129,6 +130,14 @@ def estimate_tokens(text: str) -> int:
 
     Special tokens are not added — the embed service adds those on the
     server side, so counting them here would double-count.
+
+    Cached because the chunker's packer evaluates the same span text
+    repeatedly while greedy-packing and computing overlap tails — a
+    paragraph carried as overlap is re-encoded for every chunk it
+    appears in, and oversized-paragraph splitting checks each
+    candidate sub-span. Maxsize is bounded so a pathological input
+    cannot hold the whole mailbox in memory; the upstream chunker
+    operates on at most a few hundred span texts per message.
     """
     if not text:
         return 0

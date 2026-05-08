@@ -2266,3 +2266,49 @@ class TestAttachmentCascadeOnMessageRemoval:
             "SELECT COUNT(*) FROM attachments WHERE thread_id = ?", (t.thread_id,)
         ).fetchone()[0]
         assert cnt == 0
+
+
+class TestWalCheckpoint:
+    """``Database.wal_checkpoint_truncate`` shrinks the WAL file.
+
+    The single shared connection used by every ``Database`` method
+    keeps a WAL read snapshot live for the duration of the indexer
+    process. SQLite's automatic checkpoint at the page-count threshold
+    can run, but it cannot truncate the file while the snapshot is
+    live — so the WAL grows monotonically. The main-loop periodic
+    truncate-checkpoint is what reclaims that space.
+    """
+
+    def test_returns_three_int_tuple(self, tmp_path):
+        db = Database(tmp_path / "mail.db")
+        try:
+            result = db.wal_checkpoint_truncate()
+            assert isinstance(result, tuple) and len(result) == 3
+            busy, log_pages, ckpt_pages = result
+            assert isinstance(busy, int)
+            assert isinstance(log_pages, int)
+            assert isinstance(ckpt_pages, int)
+        finally:
+            db.close()
+
+    def test_checkpoint_after_writes_truncates_wal(self, tmp_path):
+        """Sanity check: write some data, run the checkpoint, and the
+        WAL file is either gone or zero-length. Without the explicit
+        truncate the WAL persists across writes for the lifetime of
+        the connection."""
+        db_path = tmp_path / "mail.db"
+        db = Database(db_path)
+        try:
+            db.upsert_thread(make_thread([make_message(message_id="m1@x")]), FAKE_EMBEDDING)
+            wal_path = tmp_path / "mail.db-wal"
+            assert wal_path.exists() and wal_path.stat().st_size > 0
+            busy, _log, _ckpt = db.wal_checkpoint_truncate()
+            # busy=0 expected since the writer's own connection is the
+            # only reader and the cursor has been released by now.
+            assert busy == 0
+            # After TRUNCATE the WAL is either deleted or zero-length
+            # (SQLite 3.43+ leaves the file at 0 bytes).
+            if wal_path.exists():
+                assert wal_path.stat().st_size == 0
+        finally:
+            db.close()
