@@ -591,11 +591,14 @@ class _BatchedMsg:
     """Per-message state carried through the two-phase batched indexer.
 
     Phase 1 populates ``msg`` and ``thread`` and commits the thread
-    membership (with a placeholder vector). Phase 2a populates the
-    chunk + attachment-plan fields and the offsets that point each new
-    chunk into the batch's flat embed-input list. Phase 2c reads the
+    membership with a seed thread vector — the mean of the thread's
+    existing chunk vectors when the thread is already indexed,
+    otherwise a placeholder zero. Phase 2a populates the chunk +
+    attachment-plan fields and the offsets that point each new chunk
+    into the batch's flat embed-input list. Phase 2c reads the
     bulk-embedded vectors back through those offsets and applies the
-    per-message DB writes.
+    per-message DB writes, replacing the seed with the real
+    mean-of-chunks (or subject-fallback) vector.
     """
 
     row: sqlite3.Row
@@ -611,9 +614,10 @@ class _BatchedMsg:
     # ``all_texts`` list, or ``None`` when no fallback is needed. The
     # fallback is added in Phase 2a only when the message contributes
     # zero new chunks AND its parent thread has no existing chunks —
-    # otherwise the thread vector would be permanently stuck at the
-    # Phase 1 placeholder zero-vector (search quality regression).
-    # Mirrors the old ``_seed_thread_embedding`` subject fallback.
+    # i.e. exactly the case where the Phase 1 seed is the placeholder
+    # zero. Without this fallback the thread vector would be
+    # permanently stuck at zero (search quality regression). Mirrors
+    # the old ``_seed_thread_embedding`` subject fallback.
     subject_fallback_offset: int | None = None
     parse_ms: float = 0.0
     thread_ms: float = 0.0
@@ -629,10 +633,12 @@ def _phase1_commit_thread(
 ) -> _BatchedMsg | None:
     """Phase 1 of the batched indexer for one message.
 
-    Parse → thread → upsert_thread(placeholder vec). Returns a
-    populated ``_BatchedMsg`` on success. On any failure, marks the
-    queue row appropriately and returns ``None`` so the caller skips
-    the message without aborting the whole batch.
+    Parse → thread → ``upsert_thread`` with a seed vector
+    (``mean`` of the thread's existing chunk vectors when the thread
+    is already indexed; placeholder zero for new / chunk-less
+    threads). Returns a populated ``_BatchedMsg`` on success. On any
+    failure, marks the queue row appropriately and returns ``None`` so
+    the caller skips the message without aborting the whole batch.
     """
     filepath = row["filepath"]
 
@@ -841,8 +847,8 @@ def _phase2c_commit_vectors(
                     thread_id=thread.thread_id,
                     db=db,
                 )
-            # Replace the Phase 1 placeholder thread vector. Three
-            # cases mirror the old ``_seed_thread_embedding`` logic:
+            # Replace the Phase 1 seed thread vector. Three cases
+            # mirror the old ``_seed_thread_embedding`` logic:
             #   1. Thread now has chunks (this message contributed
             #      some, or earlier messages already had them) → use
             #      the mean of those chunk vectors.
@@ -875,15 +881,19 @@ def _drain_queue_batched(
 ) -> int:
     """Drain the queue in two-phase batches.
 
-    Phase 1 commits thread membership per-message with a placeholder
-    vector so the next message in the batch's threader can see it.
+    Phase 1 commits thread membership per-message with a seed thread
+    vector — ``mean(existing chunk vectors)`` for already-indexed
+    threads, placeholder zero for new ones — so (a) the next message
+    in the batch's threader can see this message's thread, and (b) a
+    Phase 2 failure cannot regress an already-good thread vector to
+    zero.
     Phase 2a chunks the body + attachment text without embedding.
     Phase 2b issues a single ``embed_batch`` covering every new chunk
     across the whole batch — this is the optimization: ~25k single-
     HTTP-call messages becomes ~500 multi-message HTTP calls against a
     cloud embedder.
     Phase 2c commits the chunk + vector writes per message and
-    overwrites the Phase 1 placeholder thread vector with the real
+    overwrites the Phase 1 seed thread vector with the real
     mean-of-chunks vector.
 
     Failure isolation:
