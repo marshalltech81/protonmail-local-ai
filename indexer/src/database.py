@@ -1219,6 +1219,32 @@ class Database:
         return list(struct.unpack(f"{count}f", blob))
 
     @_synchronized
+    def get_phase1_seed_state(self, thread_id: str) -> tuple[list[list[float]], list[float] | None]:
+        """Combined fetch for the batched indexer's Phase 1 seed selection.
+
+        Returns ``(chunk_embeddings, prior_thread_vector)`` so the caller
+        applies the three-case priority chain:
+        non-empty chunks → ``mean(chunks)``; empty chunks + non-zero
+        prior → prior; else → zero placeholder.
+
+        For genuinely new threads (the bulk case during an initial scan
+        of an unseeded mailbox), a cheap PK existence check on
+        ``threads`` short-circuits both reads. The chunk-embeddings JOIN
+        and the ``threads_vec`` lookup only run when the thread row
+        already exists, avoiding two pointless empty queries per
+        new-thread message.
+        """
+        if (
+            self._conn.execute("SELECT 1 FROM threads WHERE thread_id = ?", (thread_id,)).fetchone()
+            is None
+        ):
+            return [], None
+        return (
+            self.get_thread_chunk_embeddings(thread_id),
+            self.get_thread_vector(thread_id),
+        )
+
+    @_synchronized
     def find_zero_vector_chunkless_thread_filepaths(self) -> list[str]:
         """Return Maildir filepaths of messages stuck on a chunkless,
         zero-vector thread.
@@ -1232,8 +1258,8 @@ class Database:
 
           1. A hard crash (SIGKILL, OOM, power loss) between the
              batched indexer's Phase 1 and Phase 2c, on a thread
-             that had no prior chunk vectors. Phase 1's Phase 1
-             commits durably landed but Phase 2c never ran. Queue
+             that had no prior chunk vectors. Phase 1's commits
+             durably landed but Phase 2c never ran. Queue
              state on restart depends on whether the queue row was
              already mark_failed'd before the crash; in either case
              the file is text-indexed but vectorless.
@@ -1265,23 +1291,26 @@ class Database:
         if not chunkless_rows:
             return []
 
-        # Step 2: filter to threads whose ``threads_vec`` row is
-        # all-zero. vec0 doesn't support equality predicates so the
-        # comparison runs in Python over a typically-small set.
+        # Step 2: pull every chunkless thread's stored vector in ONE
+        # query, then filter all-zero rows in Python. vec0 supports
+        # PK ``WHERE thread_id IN (...)`` lookups (each becomes an
+        # internal PK seek), so this is a single SELECT instead of
+        # one per thread. The all-zero check stays in Python because
+        # vec0 doesn't expose equality predicates against the
+        # embedding payload itself.
+        chunkless_ids = [r["thread_id"] for r in chunkless_rows]
+        placeholders = ",".join(["?"] * len(chunkless_ids))
+        vec_rows = self._conn.execute(
+            f"SELECT thread_id, embedding FROM threads_vec WHERE thread_id IN ({placeholders})",  # nosec B608
+            chunkless_ids,
+        ).fetchall()
         stuck_thread_ids: list[str] = []
-        for row in chunkless_rows:
-            tid = row["thread_id"]
-            vec_row = self._conn.execute(
-                "SELECT embedding FROM threads_vec WHERE thread_id = ?",
-                (tid,),
-            ).fetchone()
-            if vec_row is None:
-                continue
-            blob = vec_row["embedding"]
+        for row in vec_rows:
+            blob = row["embedding"]
             count = len(blob) // 4
             vec = struct.unpack(f"{count}f", blob)
             if all(v == 0.0 for v in vec):
-                stuck_thread_ids.append(tid)
+                stuck_thread_ids.append(row["thread_id"])
 
         if not stuck_thread_ids:
             return []
@@ -1290,12 +1319,9 @@ class Database:
         # threads. ``message_thread_map.filepath`` is the same value
         # the queue uses, so re-enqueueing routes through the same
         # parse → thread → embed → commit pipeline as a fresh scan.
-        placeholders = ",".join("?" * len(stuck_thread_ids))
+        placeholders = ",".join(["?"] * len(stuck_thread_ids))
         rows = self._conn.execute(
-            f"""
-            SELECT filepath FROM message_thread_map
-            WHERE thread_id IN ({placeholders})
-            """,  # nosec B608  -- placeholders are int-count ?-tokens
+            f"SELECT filepath FROM message_thread_map WHERE thread_id IN ({placeholders})",  # nosec B608
             stuck_thread_ids,
         ).fetchall()
         return [r["filepath"] for r in rows]

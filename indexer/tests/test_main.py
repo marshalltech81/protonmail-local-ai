@@ -375,9 +375,9 @@ class TestInitialIndexHeartbeat:
         # touch must fire.
         original_phase2a = main_mod._phase2a_collect_chunks
 
-        def slow_phase2a(state, db_arg, all_texts):
+        def slow_phase2a(state, db_arg, all_texts, threads_with_pending_chunks):
             marker_touches.append("phase2a:enter")
-            result = original_phase2a(state, db_arg, all_texts)
+            result = original_phase2a(state, db_arg, all_texts, threads_with_pending_chunks)
             marker_touches.append("phase2a:exit")
             return result
 
