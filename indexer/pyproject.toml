@@ -16,7 +16,7 @@ dependencies = [
     # is the upstream HuggingFace tokenizer for ``Qwen/Qwen3-Embedding-8B``
     # (the model served by ``mlx-service``). If the embed model is
     # changed, the bundled tokenizer file must be updated to match.
-    "tokenizers==0.22.1",
+    "tokenizers==0.23.1",
     # Attachment text extraction (schema v10). Each library is required
     # by exactly one extractor module under src/extractors/; lazy import
     # there means a missing one downgrades to ``unsupported`` rather
