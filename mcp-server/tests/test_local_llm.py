@@ -30,19 +30,33 @@ def _make(**overrides) -> LocalLLMClient:
     )
 
 
-def _install_mock(client: LocalLLMClient, handler) -> None:
-    """Replace the client's AsyncClient with one backed by a mock transport.
+def _install_mock(client: LocalLLMClient, handler, *, llm_handler=None) -> None:
+    """Replace the client's AsyncClients with mock-transport-backed versions.
 
-    Preserves construction-time headers (notably Authorization) so tests
-    that exercise auth behavior reflect the real wire format.
+    Preserves construction-time headers on each client (notably
+    Authorization on the embed client) so tests that exercise auth
+    behavior reflect the real wire format. ``handler`` always backs the
+    embed client; ``llm_handler`` (when given) backs the LLM/chat
+    client — useful for tests that need to inspect requests against the
+    chat endpoint independently of the embed endpoint. When
+    ``llm_handler`` is omitted the same handler routes both clients,
+    which is what most tests want.
     """
-    headers = dict(client.client.headers)
-    asyncio.run(client.client.aclose())
-    client.client = httpx.AsyncClient(
+    embed_headers = dict(client.embed_client.headers)
+    llm_headers = dict(client.llm_client.headers)
+    asyncio.run(client.embed_client.aclose())
+    asyncio.run(client.llm_client.aclose())
+    client.embed_client = httpx.AsyncClient(
         transport=httpx.MockTransport(handler),
         timeout=120.0,
-        headers=headers,
+        headers=embed_headers,
     )
+    client.llm_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(llm_handler or handler),
+        timeout=120.0,
+        headers=llm_headers,
+    )
+    client.client = client.embed_client
 
 
 def _openai_embed_response(vectors: list[list[float]]) -> dict:
@@ -60,26 +74,37 @@ def _run(coro):
     return asyncio.run(coro)
 
 
+def _close(c: LocalLLMClient) -> None:
+    """Close both AsyncClients owned by a ``LocalLLMClient``.
+
+    The class now keeps a separate embed client and LLM/chat client so
+    the embed API key cannot leak across services; tests must close
+    both to avoid lingering open connections in the asyncio loop.
+    """
+    asyncio.run(c.embed_client.aclose())
+    asyncio.run(c.llm_client.aclose())
+
+
 class TestLocalLLMClientInit:
     def test_strips_trailing_slash_from_embed_base_url(self):
         c = _make(embed_base_url="http://mlx:8001/v1/")
         assert c.embed_base_url == "http://mlx:8001/v1"
-        _run(c.client.aclose())
+        _close(c)
 
     def test_strips_trailing_slash_from_llm_base_url(self):
         c = _make(llm_base_url="http://llm:8002/v1/")
         assert c.llm_base_url == "http://llm:8002/v1"
-        _run(c.client.aclose())
+        _close(c)
 
     def test_stores_llm_model(self):
         c = _make(llm_model="llm-y")
         assert c.llm_model == "llm-y"
-        _run(c.client.aclose())
+        _close(c)
 
     def test_stores_embed_model(self):
         c = _make(embed_model="cohere/embed-v4")
         assert c.embed_model == "cohere/embed-v4"
-        _run(c.client.aclose())
+        _close(c)
 
 
 class TestEmbed:
@@ -100,7 +125,7 @@ class TestEmbed:
         try:
             assert _run(c.embed("q")) == [0.5, 0.6]
         finally:
-            _run(c.client.aclose())
+            _close(c)
 
     def test_authorization_header_set_when_api_key_provided(self):
         c = _make(embed_api_key="sk-test")  # pragma: allowlist secret
@@ -114,7 +139,7 @@ class TestEmbed:
         try:
             _run(c.embed("q"))
         finally:
-            _run(c.client.aclose())
+            _close(c)
         assert seen["auth"] == "Bearer sk-test"  # pragma: allowlist secret
 
     def test_authorization_header_omitted_when_api_key_empty(self):
@@ -131,7 +156,7 @@ class TestEmbed:
         try:
             _run(c.embed("q"))
         finally:
-            _run(c.client.aclose())
+            _close(c)
         assert seen["auth"] is None
 
     def test_retries_on_server_error_then_succeeds(self):
@@ -149,7 +174,7 @@ class TestEmbed:
             with patch("src.lib.local_llm.wait_exponential", lambda **_: lambda *_: 0):
                 assert _run(c.embed("retry")) == [1.0]
         finally:
-            _run(c.client.aclose())
+            _close(c)
         assert calls["n"] == 2
 
     def test_raises_after_retry_exhaustion(self):
@@ -163,7 +188,7 @@ class TestEmbed:
             with pytest.raises(Exception):
                 _run(c.embed("dead"))
         finally:
-            _run(c.client.aclose())
+            _close(c)
 
 
 class TestComplete:
@@ -186,7 +211,7 @@ class TestComplete:
         try:
             assert _run(c.complete("sys", "user")) == "hi there"
         finally:
-            _run(c.client.aclose())
+            _close(c)
 
     def test_retries_then_raises(self):
         c = _make()
@@ -199,4 +224,33 @@ class TestComplete:
             with pytest.raises(Exception):
                 _run(c.complete("sys", "user"))
         finally:
-            _run(c.client.aclose())
+            _close(c)
+
+    def test_complete_does_not_carry_embed_api_key(self):
+        # Regression for the cross-service auth-header leak: when
+        # ``embed_api_key`` is set (cloud embedder), the chat path must
+        # not forward that bearer token to ``LLM_BASE_URL`` — which
+        # would expose the embedder key to whatever provider is serving
+        # chat. Splitting the embed and LLM clients enforces this; this
+        # test pins the contract.
+        c = _make(embed_api_key="leaky-embed-key")  # pragma: allowlist secret
+        seen_llm_auth: dict[str, str | None] = {}
+
+        def embed_handler(_request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json=_openai_embed_response([[0.0]]))
+
+        def llm_handler(request: httpx.Request) -> httpx.Response:
+            seen_llm_auth["auth"] = request.headers.get("authorization")
+            return httpx.Response(
+                200,
+                json={"choices": [{"message": {"role": "assistant", "content": "ok"}}]},
+            )
+
+        _install_mock(c, embed_handler, llm_handler=llm_handler)
+        try:
+            _run(c.complete("sys", "user"))
+        finally:
+            _close(c)
+        assert seen_llm_auth["auth"] is None, (
+            "complete() must not send the embed API key to LLM_BASE_URL"
+        )

@@ -57,20 +57,28 @@ class LocalLLMClient:
         self.embed_model = embed_model
         self.llm_model = llm_model
         self.llm_base_url = llm_base_url.rstrip("/")
-        # Client-level timeout is a fallback only; ``embed`` and
-        # ``complete`` set per-call deadlines above. The Authorization
-        # header is set once at construction so retries don't need to
-        # re-decorate every request; an empty key means the local
-        # mlx-service path which does not authenticate.
-        headers = {"Authorization": f"Bearer {embed_api_key}"} if embed_api_key else {}
-        self.client = httpx.AsyncClient(timeout=120.0, headers=headers)
+        # Two separate AsyncClients — one per upstream service — so the
+        # embedder API key cannot leak to LLM_BASE_URL. A single shared
+        # client with a default Authorization header would forward the
+        # embed key to the chat-completions provider whenever
+        # ``embed_base_url`` and ``llm_base_url`` point at different
+        # services (e.g. cloud embedder + local LLM). Splitting the
+        # clients also keeps the per-service connection pools and
+        # client-level timeout fallbacks independent.
+        embed_headers = {"Authorization": f"Bearer {embed_api_key}"} if embed_api_key else {}
+        self.embed_client = httpx.AsyncClient(timeout=120.0, headers=embed_headers)
+        self.llm_client = httpx.AsyncClient(timeout=120.0)
+        # Backwards-compatible alias used by tests that swap a mock
+        # transport into the embed client. The chat path uses
+        # ``llm_client`` directly.
+        self.client = self.embed_client
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=8))
     async def embed(self, text: str) -> list[float]:
         """Embed a query string for vector search via the OpenAI-compatible
         ``/v1/embeddings`` endpoint. Same wire format as the indexer so
         vectors are comparable when both point at the same provider."""
-        r = await self.client.post(
+        r = await self.embed_client.post(
             f"{self.embed_base_url}/embeddings",
             json={"model": self.embed_model, "input": text},
             timeout=_EMBED_TIMEOUT_SECS,
@@ -82,7 +90,7 @@ class LocalLLMClient:
     async def complete(self, system: str, user: str) -> str:
         """Run a completion using the local LLM via the OpenAI-compatible
         ``/v1/chat/completions`` endpoint."""
-        r = await self.client.post(
+        r = await self.llm_client.post(
             f"{self.llm_base_url}/chat/completions",
             json={
                 "model": self.llm_model,
