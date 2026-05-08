@@ -126,7 +126,7 @@ class OpenAIEmbedder:
         Two independent deadlines:
 
         - ``timeout`` (default 120 s) bounds the **connect-phase** —
-          how long we keep retrying ``ConnectError`` / refused TCP
+          how long we keep retrying transient transport failures
           before declaring the service unreachable. A service that
           isn't bound on the port should fail in ~``timeout`` seconds,
           not 10 minutes.
@@ -140,8 +140,18 @@ class OpenAIEmbedder:
         warmup wait still surfaces as failure because the connect
         deadline has by then passed.
 
-        4xx auth/model/quota errors fail fast (won't recover); 5xx and
-        connection errors retry until the connect deadline.
+        Retry classification delegates to ``_is_transient_embed_error``
+        — the same predicate ``_embed_one_batch`` uses — so startup and
+        runtime share one definition of "transient". 4xx auth / model /
+        quota errors fail fast (deterministic config), as does any
+        non-httpx exception. 5xx and the full ``httpx.TransportError``
+        family (connect / read / write / pool timeouts, network errors,
+        protocol errors) retry until the connect deadline. The
+        previous explicit allowlist
+        (``ConnectError``/``ReadTimeout``/``RemoteProtocolError``)
+        carried the same gap that ``_embed_one_batch`` did before
+        round-2: ``ConnectTimeout`` would propagate uncaught and crash
+        startup instead of triggering a retry.
         """
         warmup_timeout = float(
             os.environ.get(
@@ -165,20 +175,15 @@ class OpenAIEmbedder:
                     json={"model": self.model, "input": "warmup"},
                     timeout=warmup_timeout,
                 )
-                if 400 <= r.status_code < 500:
-                    # Auth, model id, request-shape errors won't recover
-                    # by retrying. Surface immediately so the operator
-                    # fixes config rather than waiting out the timeout.
-                    r.raise_for_status()
                 r.raise_for_status()
                 log.info("Embedder ready: %s (%s)", self.base_url, self.model)
                 return
-            except httpx.HTTPStatusError as e:
-                code = e.response.status_code
-                if 400 <= code < 500:
+            except httpx.HTTPError as e:
+                if not _is_transient_embed_error(e):
+                    # 4xx config errors and any other non-transient
+                    # httpx error surface immediately so the operator
+                    # fixes config rather than waiting out the timeout.
                     raise
-                last_err = e
-            except (httpx.ConnectError, httpx.ReadTimeout, httpx.RemoteProtocolError) as e:
                 last_err = e
             time.sleep(3)
         raise RuntimeError(

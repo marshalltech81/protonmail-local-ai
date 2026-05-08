@@ -259,6 +259,54 @@ class TestOpenAIEmbedder:
             emb.wait_for_ready(timeout=30)
         assert calls["n"] == 2
 
+    def test_wait_for_ready_retries_on_connect_timeout(self):
+        """Regression for the timeout-class gap: the previous explicit
+        allowlist (``ConnectError`` / ``ReadTimeout`` /
+        ``RemoteProtocolError``) missed the entire ``TimeoutException``
+        hierarchy — ``ConnectTimeout`` / ``WriteTimeout`` /
+        ``PoolTimeout`` would propagate uncaught and crash startup
+        instead of triggering a retry. ``wait_for_ready`` now
+        delegates to ``_is_transient_embed_error`` so its retry
+        classification matches ``_embed_one_batch`` exactly.
+        """
+        emb = OpenAIEmbedder("http://host.docker.internal:8001/v1", "test-model")
+        calls = {"n": 0}
+
+        def handler(_request: httpx.Request) -> httpx.Response:
+            calls["n"] += 1
+            if calls["n"] < 2:
+                raise httpx.ConnectTimeout("first probe timed out")
+            return httpx.Response(200, json=_embed_response([[0.0]]))
+
+        _install_mock(emb, handler)
+        with patch("src.embedder.time.sleep", lambda _: None):
+            emb.wait_for_ready(timeout=30)
+        assert calls["n"] == 2
+
+    def test_wait_for_ready_fails_fast_on_unsupported_protocol(self):
+        """Sanity counterpart to the timeout-class test: a
+        deterministic non-transient error (here, a synthetic
+        ``ValueError`` standing in for any non-httpx config bug)
+        must propagate immediately rather than retry until the
+        connect deadline. ``_is_transient_embed_error`` returns
+        False for non-httpx exceptions, so the wrapping
+        ``except httpx.HTTPError`` doesn't even see it — it
+        surfaces directly to the caller, which is the right
+        behavior for operator-visible config issues.
+        """
+        emb = OpenAIEmbedder("http://host.docker.internal:8001/v1", "test-model")
+        calls = {"n": 0}
+
+        def handler(_request: httpx.Request) -> httpx.Response:
+            calls["n"] += 1
+            raise ValueError("synthetic config error")
+
+        _install_mock(emb, handler)
+        with patch("src.embedder.time.sleep", lambda _: None):
+            with pytest.raises(ValueError, match="synthetic config error"):
+                emb.wait_for_ready(timeout=30)
+        assert calls["n"] == 1, "non-transient errors must not retry"
+
     def test_wait_for_ready_times_out_when_never_responds(self):
         emb = OpenAIEmbedder("http://host.docker.internal:8001/v1", "test-model")
 

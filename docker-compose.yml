@@ -163,10 +163,15 @@ services:
       # truncate-checkpoint the WAL grows monotonically.
       INDEXER_WAL_CHECKPOINT_INTERVAL_SECS: ${INDEXER_WAL_CHECKPOINT_INTERVAL_SECS:-600}
       # How often the main loop re-runs the chunkless-zero-vector
-      # recovery sweep. Periodic sweeps respect the dead-letter
-      # boundary; only the startup sweep can resurrect dead-lettered
-      # rows (those reflect a process death, not message-content
-      # unfit-ness). See indexer/src/main.py:_recover_zero_vector_threads.
+      # recovery sweep. Both startup and periodic sweeps respect the
+      # dead-letter boundary — neither auto-resurrects dead-lettered
+      # rows. To rescue a dead-lettered file, an operator confirms
+      # the underlying cause is fixed and either deletes the dead
+      # row (the next sweep then sees the no-row state and re-enqueues)
+      # or invokes the opt-in `resurrect_dead=True` path from a
+      # one-off rescue tool. See
+      # indexer/src/main.py:_recover_zero_vector_threads for the
+      # full policy and rescue paths.
       INDEXER_RECOVERY_SWEEP_INTERVAL_SECS: ${INDEXER_RECOVERY_SWEEP_INTERVAL_SECS:-1800}
       # Warmup POST timeout for the first embed call after container
       # start. Default 600s in code accounts for first-time HF model

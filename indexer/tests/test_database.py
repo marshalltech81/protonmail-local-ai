@@ -123,6 +123,58 @@ class TestSchema:
         finally:
             database.close()
 
+    def test_v15_to_v16_migration_creates_subject_folder_index(self, tmp_path):
+        """Direct test for migration 0016: a v15-stamped database
+        without ``idx_threads_subject_folder`` must gain the index
+        when reopened. The earlier
+        ``test_opening_with_stale_version_runs_migration_to_current``
+        starts from a current schema and only asserts the column +
+        version after the catch-up — the index already exists in that
+        path because ``_apply_initial_schema`` includes it. A no-op
+        or wrong v16 migration would pass that test silently while
+        leaving existing v15 installs without the index that
+        ``find_threads_by_subject`` depends on for
+        ``_synchronized``-friendly performance."""
+        db_path = tmp_path / "v15.db"
+        database = Database(db_path)
+        database.close()
+        import sqlite3
+
+        # Drop the index and stamp v15 to simulate the pre-v16 state.
+        conn = sqlite3.connect(str(db_path))
+        try:
+            conn.execute("DROP INDEX IF EXISTS idx_threads_subject_folder")
+            conn.execute("UPDATE schema_version SET version = ?", (15,))
+            conn.commit()
+            # Precondition: the index does NOT exist before reopen.
+            row = conn.execute(
+                "SELECT name FROM sqlite_master "
+                "WHERE type='index' AND name='idx_threads_subject_folder'"
+            ).fetchone()
+            assert row is None, "precondition: v15 simulation must drop the index"
+        finally:
+            conn.close()
+
+        # Reopening through ``Database`` runs the v16 migration.
+        database = Database(db_path)
+        try:
+            row = database._conn.execute(
+                "SELECT name FROM sqlite_master "
+                "WHERE type='index' AND name='idx_threads_subject_folder'"
+            ).fetchone()
+            assert row is not None, (
+                "migration 0016 must create idx_threads_subject_folder; "
+                "without it find_threads_by_subject does a full table scan "
+                "serialized through _synchronized, blocking watchdog + "
+                "reconciler on every initial-scan miss"
+            )
+            stored = database._conn.execute("SELECT version FROM schema_version").fetchone()[
+                "version"
+            ]
+            assert stored == SCHEMA_VERSION
+        finally:
+            database.close()
+
     def test_v14_migration_guard_blocks_populated_v13_without_force(self, tmp_path, monkeypatch):
         """The v14 (768→4096) migration is destructive — it drops the
         vector tables and clears message_chunks, indexed_files, and
