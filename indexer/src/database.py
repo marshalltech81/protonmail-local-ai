@@ -73,12 +73,15 @@ def _dedupe_by_canonical(addrs: list[str]) -> list[str]:
 #         legacy normalized value until a future indexer pass refreshes
 #         them.
 #   v16 — ``idx_threads_subject_folder`` covering index on
-#         ``threads(subject, folder, date_last)``: the threader's
-#         subject-fallback lookup (``find_threads_by_subject``) is run
-#         once per message that misses on In-Reply-To/References, which
-#         on initial scan is most messages. Without an index SQLite did
-#         a full ``threads`` scan per call, serialized through the
-#         ``_synchronized`` lock and blocking the watchdog + reconciler.
+#         ``threads(subject, folder, date_last, thread_id)``: the
+#         threader's subject-fallback lookup
+#         (``find_threads_by_subject``) is run once per message that
+#         misses on In-Reply-To/References, which on initial scan is
+#         most messages. Without an index SQLite did a full ``threads``
+#         scan per call, serialized through the ``_synchronized`` lock
+#         and blocking the watchdog + reconciler. Including
+#         ``thread_id`` in the index makes it actually covering for the
+#         SELECT (no per-match table seek).
 # Bumping this constant requires shipping a forward migration file at
 # ``src/migrations/<NNNN>_<slug>.sql`` covering the new version. Fresh
 # installs continue to apply ``_apply_initial_schema`` directly and stamp
@@ -449,15 +452,19 @@ class Database:
             -- on populated mailboxes. See migration 0015 for context.
             CREATE INDEX idx_threads_fts_rowid ON threads(fts_rowid);
 
-            -- Threader subject-fallback lookup
-            -- (``WHERE subject = ? AND folder = ? ORDER BY date_last DESC``)
-            -- runs once per incoming message that fails In-Reply-To and
-            -- References lookups. The composite index keeps the equality
-            -- filter + DESC sort in the same B-tree walk so a 50k-message
-            -- initial scan does not serialize 50k full table scans through
-            -- the ``_synchronized`` writer lock. See migration 0016.
+            -- Threader subject-fallback lookup runs once per incoming
+            -- message that fails In-Reply-To and References lookups —
+            -- equality on subject + folder, DESC by date_last, projects
+            -- thread_id (see find_threads_by_subject). The first three
+            -- columns satisfy filter + sort in one B-tree walk;
+            -- including thread_id as the fourth key column makes the
+            -- index COVERING for the projection, so SQLite returns the
+            -- thread_id straight from the index without a per-match
+            -- table seek. A 50k-message initial scan does not serialize
+            -- 50k full table scans through the ``_synchronized`` writer
+            -- lock. See migration 0016.
             CREATE INDEX idx_threads_subject_folder
-                ON threads(subject, folder, date_last);
+                ON threads(subject, folder, date_last, thread_id);
 
             CREATE VIRTUAL TABLE threads_fts USING fts5(
                 subject,

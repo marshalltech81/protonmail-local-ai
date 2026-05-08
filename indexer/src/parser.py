@@ -268,10 +268,14 @@ def _decode_header(value: str) -> str:
         if isinstance(part, bytes):
             # ``charset`` is whatever the sender claimed in the MIME header;
             # obscure or invalid labels ("x-mac-romanian", typos, historical
-            # aliases) raise LookupError here, propagate up through
-            # parse_email's broad except, and cause the whole message to be
-            # silently dropped from the index. Fall back to utf-8 with
-            # replacement on decode errors instead.
+            # aliases) raise LookupError. Handle that locally with a utf-8
+            # fallback and ``errors="replace"`` so a single bad header does
+            # not affect the rest of the message. Anything we DON'T catch
+            # here propagates out of ``parse_email``: the function does
+            # not have a blanket ``except Exception`` precisely so
+            # unanticipated parser failures route through the durable
+            # queue's retry + dead-letter cascade instead of silently
+            # dropping the file as terminal success.
             encoding = charset or "utf-8"
             try:
                 decoded.append(part.decode(encoding, errors="replace"))

@@ -168,6 +168,30 @@ class TestSchema:
                 "serialized through _synchronized, blocking watchdog + "
                 "reconciler on every initial-scan miss"
             )
+
+            # The behavioral value of v16 is the COVERING shape — the
+            # exact column order matters. ``PRAGMA index_info`` returns
+            # one row per key column with ``(seqno, cid, name)``, so the
+            # name list in seqno order is the index's column order. A
+            # regression that keeps the index name but drops the
+            # ``thread_id`` covering column (or reorders the prefix
+            # away from the WHERE/ORDER BY shape) would leave the
+            # planner doing a per-match table seek for the projected
+            # thread_id — a real perf regression that "the index
+            # exists" alone would not catch.
+            info = database._conn.execute(
+                "PRAGMA index_info(idx_threads_subject_folder)"
+            ).fetchall()
+            columns_in_order = [r["name"] for r in info]
+            assert columns_in_order == ["subject", "folder", "date_last", "thread_id"], (
+                f"v16 index must have exact covering shape "
+                f"[subject, folder, date_last, thread_id]; got "
+                f"{columns_in_order}. The fourth column makes the "
+                f"index actually covering for find_threads_by_subject's "
+                f"projection — without it SQLite still has to seek the "
+                f"table per match."
+            )
+
             stored = database._conn.execute("SELECT version FROM schema_version").fetchone()[
                 "version"
             ]

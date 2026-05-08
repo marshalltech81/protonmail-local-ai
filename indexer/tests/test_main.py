@@ -509,6 +509,63 @@ class TestDrainQueueRetryAndDeadLetter:
         assert db.is_indexed(str(dest))
         assert queue.stats() == {"queued": 0, "dead": 0}
 
+    def test_parser_content_pathology_routes_to_queue_retry(self, tmp_path, monkeypatch):
+        # Behavior contract: an exception raised mid-parse (malformed
+        # MIME the ``email`` module cannot decompose, html2text
+        # blowup, anything the body / attachment walker raises and
+        # does not catch locally) routes through the queue's retry +
+        # dead-letter cascade. ``parse_email`` does NOT have a blanket
+        # ``except Exception`` that would collapse such failures into
+        # ``None`` — that shape silently un-indexed every affected
+        # file with no operator visibility. After ``max_attempts``
+        # failures the queue row is ``status='dead'`` and
+        # ``indexed_files`` has no row for the file (the worker did
+        # NOT mark it successfully processed).
+        dest = tmp_path / "INBOX" / "new" / "broken.eml"
+        _write_eml(dest, "broken@example.com")
+
+        db = Database(tmp_path / "mail.db")
+        threader = Threader(db)
+        queue = _make_queue(db)  # max_attempts=3
+        embedder = make_mock_embedder()
+        embedder.embed.return_value = [0.0] * EMBEDDING_DIM
+
+        # Simulate a parser content-pathology failure by patching the
+        # body/attachment walker to raise. ``parse_email`` no longer
+        # has a broad ``except Exception`` to catch this, so it
+        # propagates out and the worker marks the queue row failed.
+        from src import parser
+
+        def boom(msg):
+            raise RuntimeError("simulated html2text runaway")
+
+        monkeypatch.setattr(parser, "_extract_body_and_attachments", boom)
+
+        queue.enqueue(str(dest), "test")
+        main.drain_queue(queue, db, embedder, threader)
+        main.drain_queue(queue, db, embedder, threader)
+        main.drain_queue(queue, db, embedder, threader)
+
+        # Critical: the file must NOT be in indexed_files. A blanket
+        # ``except Exception`` in the parser would collapse the
+        # exception into ``message is None`` and the worker would
+        # call ``mark_succeeded``, leaving indexed_files populated
+        # and the message permanently invisible to retrieval. The
+        # current parser propagates so the worker treats this as a
+        # real parse-stage failure.
+        assert not db.is_indexed(str(dest)), (
+            "parser content-pathology must NOT be treated as terminal "
+            "success — silently dropping the file is the regression "
+            "this contract guards against"
+        )
+        assert queue.stats() == {"queued": 0, "dead": 1}
+        row = db._conn.execute(
+            "SELECT last_stage, last_error FROM indexing_jobs WHERE filepath = ?",
+            (str(dest),),
+        ).fetchone()
+        assert row["last_stage"] == "parse"
+        assert "simulated html2text runaway" in row["last_error"]
+
     def test_persistent_embed_failure_transitions_to_dead(self, tmp_path):
         dest = tmp_path / "INBOX" / "new" / "msg.eml"
         _write_eml(dest, "giveup@example.com")

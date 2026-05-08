@@ -602,10 +602,14 @@ class TestDecodeHeader:
         assert _decode_header("") == ""
 
     def test_unknown_charset_falls_back_to_utf8(self):
-        """Regression: an obscure or invalid charset label used to raise
-        LookupError inside _decode_header, which propagated up through
-        parse_email's broad except and silently dropped the whole message
-        from the index. Fall back to utf-8 with replacement instead."""
+        """Behavior contract: invalid / obscure charset labels do NOT
+        drop the message. ``_decode_header`` falls back to utf-8 with
+        ``errors="replace"`` locally, so a recoverable header pathology
+        stays inside the function rather than escaping into the queue's
+        dead-letter path. This complements the broader contract that
+        unanticipated parser failures DO escape ``parse_email`` (no
+        blanket ``except Exception``) so the queue can retry / dead-
+        letter them with operator visibility."""
         encoded = "=?not-a-real-charset?q?Hello?="
         result = _decode_header(encoded)
         assert "Hello" in result

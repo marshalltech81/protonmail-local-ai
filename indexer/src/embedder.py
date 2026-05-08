@@ -153,14 +153,12 @@ class OpenAIEmbedder:
         — the same predicate ``_embed_one_batch`` uses — so startup and
         runtime share one definition of "transient". 4xx auth / model /
         quota errors fail fast (deterministic config), as does any
-        non-httpx exception. 5xx and the full ``httpx.TransportError``
-        family (connect / read / write / pool timeouts, network errors,
-        protocol errors) retry until the connect deadline. The
-        previous explicit allowlist
-        (``ConnectError``/``ReadTimeout``/``RemoteProtocolError``)
-        carried the same gap that ``_embed_one_batch`` did before
-        round-2: ``ConnectTimeout`` would propagate uncaught and crash
-        startup instead of triggering a retry.
+        non-httpx exception. 5xx and most of the
+        ``httpx.TransportError`` family (connect / read / write / pool
+        timeouts, network errors, ``RemoteProtocolError``) retry until
+        the connect deadline; deterministic config errors
+        (``UnsupportedProtocol``, ``LocalProtocolError``) bypass retry
+        because no fresh attempt would change the outcome.
         """
         warmup_timeout = float(
             os.environ.get(
