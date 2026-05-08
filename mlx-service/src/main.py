@@ -2,11 +2,31 @@
 Apple Metal via MLX.
 
 Endpoints:
-    POST /embed   — Ollama /api/embeddings response shape for a single
-                    string; batch shape for a list.
-    POST /rerank  — Qwen3-Reranker yes/no logit scoring over (query,
-                    documents) pairs.
-    GET  /health  — model load state + approximate RSS.
+    POST /v1/embeddings  — OpenAI-compatible embeddings. The single
+                           supported call shape across local and cloud
+                           backends; the indexer's embedder client
+                           (``OpenAIEmbedder``) speaks this dialect
+                           against any compliant provider.
+    GET  /v1/models      — minimal OpenAI ``/v1/models`` shim so OpenAI
+                           clients that probe model availability do not
+                           404 against this service.
+    POST /embed          — legacy Ollama-shaped endpoint. Kept as a
+                           deprecated alias during the OpenAI cutover;
+                           slated for removal in a follow-up PR once
+                           every consumer is on /v1/embeddings.
+    POST /rerank         — Qwen3-Reranker yes/no logit scoring over
+                           (query, documents) pairs. No OpenAI standard
+                           exists for rerank, so this stays in the
+                           service's own namespace.
+    GET  /health         — model load state + approximate RSS.
+
+Authorization:
+    The service binds 127.0.0.1 only and is intended for loopback use
+    from the indexer (via host.docker.internal from containers). The
+    ``Authorization`` header is accepted and ignored — OpenAI-style
+    clients that always send a Bearer token still work, and clients
+    that omit it work too. Do NOT change the bind address without
+    revisiting this assumption.
 
 Design notes:
     - Both models load lazily on first request and stay resident; the
@@ -194,6 +214,22 @@ class EmbedRequest(BaseModel):
     input: str | list[str]
 
 
+class OpenAIEmbedRequest(BaseModel):
+    """Subset of OpenAI's /v1/embeddings request body.
+
+    ``model`` is accepted for protocol-compatibility but ignored — this
+    service hosts a single embedder (``EMBED_MODEL_ID``). ``dimensions``
+    and ``encoding_format`` are accepted but ignored: the embedder
+    always returns the model's native dimension as floats.
+    """
+
+    input: str | list[str]
+    model: str | None = None
+    encoding_format: str | None = None
+    dimensions: int | None = None
+    user: str | None = None
+
+
 class RerankRequest(BaseModel):
     query: str
     documents: list[str]
@@ -217,6 +253,53 @@ def embed(req: EmbedRequest) -> dict[str, Any]:
     if not req.input:
         raise HTTPException(status_code=400, detail="input list is empty")
     return {"embeddings": _embed_batch(model, tokenizer, req.input)}
+
+
+@app.post("/v1/embeddings")
+def openai_embeddings(req: OpenAIEmbedRequest) -> dict[str, Any]:
+    """OpenAI-compatible embeddings endpoint.
+
+    Accepts the standard ``{"model", "input"}`` body and returns the
+    ``{"object": "list", "data": [...]}`` shape so the same indexer
+    client works against this service, DeepInfra, OpenRouter, LM Studio,
+    vLLM, TEI, etc. ``model`` is accepted for protocol-compatibility
+    and ignored — this service hosts a single embedder.
+    """
+    inputs = [req.input] if isinstance(req.input, str) else req.input
+    if not inputs:
+        raise HTTPException(status_code=400, detail="input is empty")
+    model, tokenizer = _embedder.get()
+    vectors = _embed_batch(model, tokenizer, inputs)
+    return {
+        "object": "list",
+        "data": [
+            {"object": "embedding", "embedding": v, "index": i} for i, v in enumerate(vectors)
+        ],
+        "model": EMBED_MODEL_ID,
+        # Token accounting is not tracked by mlx-embeddings; report 0
+        # rather than synthesizing an estimate the operator might rely
+        # on for billing reconciliation.
+        "usage": {"prompt_tokens": 0, "total_tokens": 0},
+    }
+
+
+@app.get("/v1/models")
+def openai_models() -> dict[str, Any]:
+    """Minimal OpenAI /v1/models shim so OpenAI clients that probe
+    model availability do not 404 against this service. Lists only the
+    embedder; the reranker is not OpenAI-shaped and is not advertised
+    here.
+    """
+    return {
+        "object": "list",
+        "data": [
+            {
+                "id": EMBED_MODEL_ID,
+                "object": "model",
+                "owned_by": "mlx-service",
+            },
+        ],
+    }
 
 
 @app.post("/rerank")
