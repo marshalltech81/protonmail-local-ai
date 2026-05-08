@@ -47,10 +47,13 @@ The stack now runs:
   moment — `LLM_MODE=cloud` in `.env`, model `claude-sonnet-4-6`).
   The Tier-2–11 manual-eval pass on 2026-05-04 was run with
   `LLM_MODE=cloud`; that remains the standing quality baseline.
-- **mlx-service** — host LaunchAgent on `127.0.0.1:8001`, serves
-  `/embed` (Qwen3-Embedding-8B-mxfp8, 4096-dim) and `/rerank`
-  (Qwen3-Reranker-4B-mxfp8). Reachable from Docker via
-  `host.docker.internal:8001`.
+- **mlx-service** — host LaunchAgent on `127.0.0.1:8001`, serves the
+  OpenAI-compatible `/v1/embeddings` (Qwen3-Embedding-8B-mxfp8,
+  4096-dim) and the custom `/rerank` (Qwen3-Reranker-4B-mxfp8).
+  Reachable from Docker via `host.docker.internal:8001`. The embedder
+  surface is provider-agnostic — `EMBED_BASE_URL` can point at any
+  OpenAI-compatible provider (DeepInfra, OpenRouter, etc.) without
+  code changes.
 - **mlx-lm-server** — host LaunchAgent on `127.0.0.1:8002`, serves
   the local LLM (default `mlx-community/Qwen3-32B-4bit`) over
   OpenAI-compatible `/v1/chat/completions`. Reachable from Docker

@@ -293,8 +293,9 @@ to `mlx-service` directly).
    ```
 
    First run downloads MLX itself and the model handles; the model
-   weights download lazily on the first `/embed` and `/rerank` request
-   (~8 GB embedder + ~4 GB reranker into `~/.cache/huggingface/hub/`).
+   weights download lazily on the first `/v1/embeddings` and `/rerank`
+   request (~8 GB embedder + ~4 GB reranker into
+   `~/.cache/huggingface/hub/`).
 
 2. Smoke-test the service before installing the LaunchAgent:
 
@@ -302,9 +303,10 @@ to `mlx-service` directly).
    uv run uvicorn src.main:app --host 127.0.0.1 --port 8001
    # in another shell:
    curl http://127.0.0.1:8001/health
-   curl -X POST http://127.0.0.1:8001/embed \
+   curl -X POST http://127.0.0.1:8001/v1/embeddings \
         -H 'Content-Type: application/json' \
-        -d '{"input":"hello"}' | head -c 60
+        -d '{"model":"mlx-community/Qwen3-Embedding-8B-mxfp8","input":"hello"}' \
+        | head -c 80
    ```
 
    The first embed call may take ~4 min on a cold cache; subsequent
@@ -375,7 +377,10 @@ to `mlx-service` directly).
 ### Threat model (mlx-service)
 
 The service binds loopback only (`127.0.0.1:8001`) and serves no
-authentication on `/embed`, `/rerank`, or `/health`. **Any local
+authentication on `/v1/embeddings`, `/v1/models`, `/embed` (legacy),
+`/rerank`, or `/health`. The `Authorization` header is accepted and
+ignored on the OpenAI-shaped endpoints so cloud-style clients don't
+need to special-case the local path. **Any local
 user-process — Docker containers via `host.docker.internal`, browser
 tabs reaching `127.0.0.1`, ad-hoc shells — can call any endpoint
 without credentials.** The trust boundary is identical to the
@@ -412,11 +417,52 @@ immediately returns to RRF-only ranking — useful as a fast diagnostic
 for "is the rerank stage hurting or helping" without disturbing
 indexing or embeddings.
 
-The embedder has no equivalent toggle: the SQLite schema is sized for
-Qwen3-Embedding-8B's 4096-dim vectors and the indexer talks to
-`mlx-service` directly. Stepping off the MLX embedder would require a
-schema rollback plus a full reindex from Maildir, so it's a code
-change, not a flip.
+### Pointing at a different embedder provider
+
+The embedder client (indexer + mcp-server query path) speaks the
+OpenAI-compatible `/v1/embeddings` shape, so any compliant provider is
+a single env change away. Examples:
+
+```bash
+# Local mlx-service (default)
+EMBED_BASE_URL=http://host.docker.internal:8001/v1
+EMBED_MODEL=mlx-community/Qwen3-Embedding-8B-mxfp8
+
+# DeepInfra
+EMBED_BASE_URL=https://api.deepinfra.com/v1/openai
+EMBED_MODEL=Qwen/Qwen3-Embedding-8B
+# put the API key in .secrets/embed_api_key.txt — never .env
+
+# OpenRouter
+EMBED_BASE_URL=https://openrouter.ai/api/v1
+EMBED_MODEL=qwen/qwen3-embedding-8b
+```
+
+After changing provider:
+
+1. Set the new vars in `.env`.
+2. If the provider authenticates, write the API key to
+   `.secrets/embed_api_key.txt` (`chmod 600`). `make init-secrets`
+   creates an empty placeholder.
+3. **Indexer and mcp-server must point at the same provider + model**
+   so query vectors are comparable to indexed vectors. Mixing them
+   silently degrades hybrid search.
+4. The schema reserves a fixed 4096-dim vector. `EMBED_MODEL` must
+   keep producing 4096-dim vectors (Qwen3-Embedding-8B variants) or a
+   schema migration is required.
+5. Switching to a model with a different vector distribution requires
+   a full reindex (the existing 4096-dim index isn't comparable to the
+   new model's 4096-dim space).
+
+Privacy note: cloud embedders ship every email body chunk to the
+provider at index time and every search query at retrieval time. The
+local mlx-service default is what makes "all retrieval stays local"
+hold; cloud is an opt-in that crosses that boundary deliberately.
+
+The embedder has no enable/disable toggle equivalent to
+`RERANK_ENABLED`. The SQLite schema is sized for 4096-dim vectors and
+the indexer needs an embedder — falling back to "no embedder" would
+mean a schema rollback plus a full reindex from Maildir.
 
 ## Updating Bridge
 
