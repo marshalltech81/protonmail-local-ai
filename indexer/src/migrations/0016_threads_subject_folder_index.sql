@@ -20,12 +20,26 @@
 -- watchdog observer and the reconciler for the duration. The index is
 -- small (a few MB on a 100k-thread mailbox) and removes the contention.
 --
--- ``IF NOT EXISTS`` keeps the migration idempotent if an operator
--- pre-created the index out of band. ``ANALYZE`` refreshes
--- ``sqlite_stat1`` so the planner picks the new index immediately
--- instead of waiting for stat refresh on first hit.
+-- ``DROP INDEX IF EXISTS`` + unconditional ``CREATE INDEX`` is
+-- deliberate. A bare ``CREATE INDEX IF NOT EXISTS`` would silently
+-- accept any same-named pre-existing index — including a hand-rolled
+-- three-column variant from before the covering shape was decided.
+-- That would stamp ``schema_version=16`` while leaving the database
+-- with a non-covering index, defeating the migration's
+-- behavioral contract. Dropping first guarantees the index is built
+-- with the canonical four-column shape regardless of pre-state. The
+-- DROP runs in the same per-migration ``BEGIN IMMEDIATE`` /
+-- ``COMMIT`` as the CREATE, so a crash between them leaves the
+-- database stamped at v15 with no index — the next startup retries
+-- the migration cleanly.
+--
+-- ``ANALYZE`` refreshes ``sqlite_stat1`` so the planner picks the
+-- new index immediately instead of waiting for stat refresh on
+-- first hit.
 
-CREATE INDEX IF NOT EXISTS idx_threads_subject_folder
+DROP INDEX IF EXISTS idx_threads_subject_folder;
+
+CREATE INDEX idx_threads_subject_folder
     ON threads(subject, folder, date_last, thread_id);
 
 -- Narrow ANALYZE to the new index only. A bare ``ANALYZE;`` rebuilds

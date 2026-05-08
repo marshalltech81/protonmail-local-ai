@@ -199,6 +199,67 @@ class TestSchema:
         finally:
             database.close()
 
+    def test_v16_migration_replaces_wrong_shape_same_name_index(self, tmp_path):
+        """A v15 database with an out-of-band same-name index that has
+        the wrong (three-column, non-covering) shape must be repaired
+        on upgrade, not silently kept. The earlier migration shape
+        used ``CREATE INDEX IF NOT EXISTS`` which accepts whatever
+        same-named index already exists — and would have stamped
+        v16 against a non-covering index, defeating the migration's
+        behavioral contract. The current migration drops first +
+        unconditionally re-creates so the canonical four-column
+        shape is guaranteed regardless of pre-state.
+        """
+        db_path = tmp_path / "v15_wrong_index.db"
+        database = Database(db_path)
+        database.close()
+        import sqlite3
+
+        # Simulate a v15 install with an out-of-band three-column index
+        # under the same name (operator hot-fixed before v16 shipped, or
+        # a different branch's experiment landed an older shape).
+        conn = sqlite3.connect(str(db_path))
+        try:
+            conn.execute("DROP INDEX IF EXISTS idx_threads_subject_folder")
+            conn.execute(
+                "CREATE INDEX idx_threads_subject_folder ON threads(subject, folder, date_last)"
+            )
+            conn.execute("UPDATE schema_version SET version = ?", (15,))
+            conn.commit()
+            # Precondition: the wrong-shape index is in place.
+            wrong_info = conn.execute("PRAGMA index_info(idx_threads_subject_folder)").fetchall()
+            wrong_columns = [r[2] for r in wrong_info]  # PRAGMA returns (seqno, cid, name)
+            assert wrong_columns == ["subject", "folder", "date_last"], (
+                f"precondition: wrong-shape simulation must produce a "
+                f"three-column index, got {wrong_columns}"
+            )
+        finally:
+            conn.close()
+
+        # Reopening through Database runs migration 0016, which
+        # MUST replace the wrong-shape index rather than skip it.
+        database = Database(db_path)
+        try:
+            info = database._conn.execute(
+                "PRAGMA index_info(idx_threads_subject_folder)"
+            ).fetchall()
+            columns = [r["name"] for r in info]
+            assert columns == ["subject", "folder", "date_last", "thread_id"], (
+                f"migration 0016 must REPLACE a wrong-shape same-name "
+                f"index with the canonical four-column covering shape, "
+                f"not keep it. Got {columns}. Without the DROP step, "
+                f"an out-of-band three-column index would survive the "
+                f"migration and the database would be stamped v16 with "
+                f"a non-covering index — operator-invisible perf "
+                f"regression on subject-fallback lookups."
+            )
+            stored = database._conn.execute("SELECT version FROM schema_version").fetchone()[
+                "version"
+            ]
+            assert stored == SCHEMA_VERSION
+        finally:
+            database.close()
+
     def test_v14_migration_guard_blocks_populated_v13_without_force(self, tmp_path, monkeypatch):
         """The v14 (768→4096) migration is destructive — it drops the
         vector tables and clears message_chunks, indexed_files, and
