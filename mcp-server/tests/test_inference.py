@@ -45,11 +45,23 @@ class TestFactory:
         assert c.mode == "anthropic"
         assert isinstance(c._backend, _AnthropicBackend)
 
-    def test_anthropic_with_empty_base_url_omits_kwarg_so_sdk_default_applies(self):
+    def test_anthropic_with_empty_base_url_omits_kwarg_so_sdk_default_applies(self, monkeypatch):
         # The Anthropic SDK's default endpoint is the documented contract
         # for INFERENCE_MODE=anthropic when INFERENCE_BASE_URL is empty.
-        # The backend must NOT substitute a hardcoded URL constant —
-        # otherwise a future SDK endpoint move would silently drift.
+        # The backend must NOT substitute a hardcoded URL constant or
+        # pass an empty ``base_url`` kwarg — either would override the
+        # SDK default. Verify the kwarg is genuinely ABSENT from the
+        # construction call by intercepting ``AsyncAnthropic`` itself.
+        captured: dict = {}
+
+        class FakeAsyncAnthropic:
+            def __init__(self, **kwargs):
+                captured["kwargs"] = kwargs
+
+        import anthropic
+
+        monkeypatch.setattr(anthropic, "AsyncAnthropic", FakeAsyncAnthropic)
+
         c = InferenceClient.create(
             mode="anthropic",
             base_url="",
@@ -57,7 +69,33 @@ class TestFactory:
             api_key="sk-ant-test",  # pragma: allowlist secret
         )
         assert isinstance(c._backend, _AnthropicBackend)
-        assert c._backend.base_url == ""
+        # The contract: no ``base_url`` kwarg reaches AsyncAnthropic
+        # when the operator left INFERENCE_BASE_URL empty. ``api_key``
+        # and ``timeout`` still flow through.
+        assert "base_url" not in captured["kwargs"]
+        assert captured["kwargs"]["api_key"] == "sk-ant-test"  # pragma: allowlist secret
+
+    def test_anthropic_with_explicit_base_url_passes_kwarg(self, monkeypatch):
+        # Counterpart to the empty-base_url test: when the operator DOES
+        # set INFERENCE_BASE_URL (compatible gateway, region override,
+        # proxy), that exact value must reach AsyncAnthropic.
+        captured: dict = {}
+
+        class FakeAsyncAnthropic:
+            def __init__(self, **kwargs):
+                captured["kwargs"] = kwargs
+
+        import anthropic
+
+        monkeypatch.setattr(anthropic, "AsyncAnthropic", FakeAsyncAnthropic)
+
+        InferenceClient.create(
+            mode="anthropic",
+            base_url="https://gateway.example.com/anthropic",
+            model="claude-x",
+            api_key="sk-ant-test",  # pragma: allowlist secret
+        )
+        assert captured["kwargs"]["base_url"] == "https://gateway.example.com/anthropic"
 
     def test_unknown_mode_raises(self):
         with pytest.raises(ValueError, match="unsupported mode"):
@@ -180,5 +218,28 @@ class TestComplete:
             return SimpleNamespace(content=[SimpleNamespace(type="text", text="ok")])
 
         c._backend.client.messages.create = fake_create  # type: ignore[assignment]
+        asyncio.run(c.complete("sys", "user"))
+        assert captured["max_tokens"] == 4096
+
+    def test_openai_backend_passes_max_tokens_through(self):
+        # The Chat Completions API accepts ``max_tokens`` and most
+        # OpenAI-compatible servers (vLLM, mlx_lm.server, LM Studio,
+        # DeepInfra) honor it. INFERENCE_MAX_TOKENS must reach the
+        # OpenAI path too — pre-fix the kwarg was silently dropped, so
+        # an operator who set the env var saw no effect in OpenAI mode.
+        c = InferenceClient.create(
+            mode="openai",
+            base_url="http://x/v1",
+            model="qwen",
+            api_key="sk-test",  # pragma: allowlist secret
+            max_tokens=4096,
+        )
+        captured: dict = {}
+
+        async def fake_create(**kwargs):
+            captured.update(kwargs)
+            return _openai_response("ok")
+
+        c._backend.client.chat.completions.create = fake_create  # type: ignore[assignment]
         asyncio.run(c.complete("sys", "user"))
         assert captured["max_tokens"] == 4096

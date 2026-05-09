@@ -9,7 +9,7 @@ import contextlib
 import logging
 import os
 from pathlib import Path
-from typing import Literal, cast
+from typing import Literal
 
 import uvicorn
 from mcp.server.fastmcp import FastMCP
@@ -231,10 +231,17 @@ MCP_READ_ONLY = _env_bool("MCP_READ_ONLY", True)
 MCP_TRANSPORT = os.environ.get("MCP_TRANSPORT", "sse")
 
 
-def _normalize_transport(raw: str) -> str:
+_Transport = Literal["sse", "streamable-http", "dual"]
+
+
+def _normalize_transport(raw: str) -> _Transport:
     transport = raw.strip().lower()
-    if transport in {"sse", "streamable-http", "dual"}:
-        return transport
+    if transport == "sse":
+        return "sse"
+    if transport == "streamable-http":
+        return "streamable-http"
+    if transport == "dual":
+        return "dual"
     raise ValueError("MCP_TRANSPORT must be one of: sse, streamable-http, dual")
 
 
@@ -302,21 +309,22 @@ async def _run_dual_transport_async(server: FastMCP) -> None:
     await uvicorn.Server(config).serve()
 
 
-def _run_server(server: FastMCP, transport: str) -> None:
+def _run_server(server: FastMCP, transport: _Transport) -> None:
     """Run ``server`` on ``transport``.
 
-    Caller is expected to have normalized ``transport`` already (the
-    module-level startup path does this once before logging it). Tests
-    pass raw values, so a final ``_normalize_transport`` defends against
-    a misuse without doing the work twice in production.
+    The ``_Transport`` Literal type forces every caller — production
+    or test — to pass a value already returned by ``_normalize_transport``.
+    mypy catches a raw-string call site, so the runtime never re-does
+    work the caller already did.
     """
-    normalized = _normalize_transport(transport)
-    if normalized == "dual":
+    if transport == "dual":
         import anyio
 
         anyio.run(lambda: _run_dual_transport_async(server))
         return
-    server.run(transport=cast(Literal["sse", "streamable-http"], normalized))
+    # Type narrowing on the Literal handles the dispatch; transport is
+    # provably "sse" | "streamable-http" here, no cast needed.
+    server.run(transport=transport)
 
 
 def main():

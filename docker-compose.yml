@@ -269,10 +269,11 @@ services:
       # 300 absorbs reasoning-heavy prompts; raise it for slow remote
       # providers or on-host models in thinking mode.
       INFERENCE_TIMEOUT_SECS: ${INFERENCE_TIMEOUT_SECS:-300}
-      # Anthropic Messages API ``max_tokens`` (also caps OpenAI when
-      # the operator points the OpenAI mode at a server that honors
-      # it). Default 1024 fits "brief" / "action-items" summaries;
-      # raise for "detailed" summaries on long threads or for
+      # Output token cap. Required by the Anthropic Messages API; the
+      # OpenAI Chat Completions API accepts it too and most compatible
+      # servers (vLLM, mlx_lm.server, LM Studio, DeepInfra) honor it.
+      # Default 1024 fits "brief" / "action-items" summaries; raise
+      # for "detailed" summaries on long threads or for
       # extract_from_emails over rich schemas.
       INFERENCE_MAX_TOKENS: ${INFERENCE_MAX_TOKENS:-1024}
       MCP_PORT: ${MCP_PORT:-3000}

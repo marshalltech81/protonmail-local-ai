@@ -54,15 +54,18 @@ class EmbedClient:
         # cleanly; for unauthenticated host-side servers we pass a
         # placeholder. The Authorization header still goes out, but
         # compat servers that don't require auth ignore it.
-        # ``max_retries=0`` matches the indexer's "no implicit SDK
-        # retry" posture: the calling agent retries at the tool-
-        # invocation layer, so a transient embed failure surfaces
-        # cleanly instead of being doubled by built-in SDK backoff.
+        # SDK default retry posture (2 attempts with exponential backoff)
+        # is kept on the mcp-server side because the query path is a
+        # single user-visible embed call — silently absorbing one
+        # transient 5xx prevents a tool-call error the calling agent
+        # may not retry. The indexer side runs custom retry logic via
+        # tenacity (``indexer/src/embedder.py``) because its batched
+        # embed loop benefits from explicit 4xx-fast / 5xx-retry
+        # classification across many texts per call.
         self.client = AsyncOpenAI(
             base_url=self.base_url,
             api_key=api_key or "unauthenticated",
             timeout=timeout_secs,
-            max_retries=0,
         )
 
     async def embed(self, text: str) -> list[float]:

@@ -41,9 +41,12 @@ log = logging.getLogger("mcp.inference")
 # library code stays env-free for tests.
 DEFAULT_COMPLETE_TIMEOUT_SECS = 300.0
 
-# Default Anthropic ``max_tokens``. The Messages API requires the field;
-# OpenAI mode omits the kwarg entirely (server-side default applies).
-# Operator overrides via ``INFERENCE_MAX_TOKENS``.
+# Default ``max_tokens``. The Anthropic Messages API requires the
+# field; the OpenAI Chat Completions API accepts it too (most
+# OpenAI-compatible servers — vLLM, mlx_lm.server, LM Studio,
+# DeepInfra — honor it). 1024 fits brief summaries and per-thread
+# extraction; raise for detailed summaries on long threads. Operator
+# overrides via ``INFERENCE_MAX_TOKENS``.
 DEFAULT_MAX_TOKENS = 1024
 
 
@@ -59,25 +62,35 @@ class _Backend(Protocol):
 
 
 class _OpenAIBackend:
-    def __init__(self, *, base_url: str, model: str, api_key: str, timeout_secs: float) -> None:
+    def __init__(
+        self,
+        *,
+        base_url: str,
+        model: str,
+        api_key: str,
+        max_tokens: int,
+        timeout_secs: float,
+    ) -> None:
         from openai import AsyncOpenAI
 
         self.base_url = base_url.rstrip("/")
         self.model = model
+        self.max_tokens = max_tokens
         # ``api_key`` must be a non-empty string for the SDK to construct
         # cleanly; for unauthenticated host-side servers we pass a
         # placeholder. The Authorization header still goes out, but compat
         # servers ignore it. Production providers reject it as expected.
-        # ``max_retries=0`` disables the SDK's built-in retry: the
-        # mcp-server is a tool-call path, the calling agent already
-        # retries at the tool-invocation layer, and matching the
-        # indexer's "no implicit SDK retry" stance keeps observability
-        # uniform across services.
+        # SDK default retry posture (2 attempts with exponential backoff)
+        # is kept on the mcp-server side because the query path is a
+        # single user-visible request — silently absorbing one transient
+        # 5xx prevents a tool-call error the calling agent may not retry.
+        # The indexer is structurally different (batch embed loops, custom
+        # 4xx-fast / 5xx-retry classification) and owns retries via
+        # tenacity there.
         self.client = AsyncOpenAI(
             base_url=self.base_url,
             api_key=api_key or "unauthenticated",
             timeout=timeout_secs,
-            max_retries=0,
         )
 
     async def complete(self, system: str, user: str) -> str:
@@ -87,6 +100,7 @@ class _OpenAIBackend:
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
             ],
+            max_tokens=self.max_tokens,
             stream=False,
         )
         content = resp.choices[0].message.content or ""
@@ -112,22 +126,18 @@ class _AnthropicBackend:
         # default URL is used when the operator left the env var empty
         # (the documented contract for INFERENCE_MODE=anthropic).
         # Passing an empty string would override the SDK default with a
-        # malformed URL. ``max_retries=0`` matches the indexer's "no
-        # implicit SDK retry" stance — the calling agent already
-        # retries at the tool-invocation layer, so transient failures
-        # surface cleanly instead of being doubled by built-in backoff.
+        # malformed URL. SDK default retries (2 attempts, exponential
+        # backoff) are kept — see ``_OpenAIBackend`` for the rationale.
         if self.base_url:
             self.client = AsyncAnthropic(
                 base_url=self.base_url,
                 api_key=api_key,
                 timeout=timeout_secs,
-                max_retries=0,
             )
         else:
             self.client = AsyncAnthropic(
                 api_key=api_key,
                 timeout=timeout_secs,
-                max_retries=0,
             )
 
     async def complete(self, system: str, user: str) -> str:
@@ -183,6 +193,7 @@ class InferenceClient:
                     base_url=base_url,
                     model=model,
                     api_key=api_key,
+                    max_tokens=max_tokens,
                     timeout_secs=timeout_secs,
                 ),
                 mode,
