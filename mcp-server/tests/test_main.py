@@ -20,6 +20,7 @@ here:
 import asyncio
 import logging
 
+import pytest
 from src.main import (
     _INFERENCE_MODES,
     _env_bool,
@@ -51,12 +52,8 @@ class TestEnvBool:
         # A malformed safety flag should fail startup rather than silently
         # flipping the deployment posture.
         monkeypatch.setenv("FAKE_BOOL_FLAG", "maybe")
-        try:
+        with pytest.raises(ValueError, match="FAKE_BOOL_FLAG"):
             _env_bool("FAKE_BOOL_FLAG", default=True)
-        except ValueError as exc:
-            assert "FAKE_BOOL_FLAG" in str(exc)
-        else:
-            raise AssertionError("expected ValueError")
 
     def test_whitespace_around_value_is_tolerated(self, monkeypatch):
         monkeypatch.setenv("FAKE_BOOL_FLAG", "  true  ")
@@ -110,12 +107,8 @@ class TestMcpTransport:
         assert _normalize_transport("DUAL") == "dual"
 
     def test_unknown_transport_fails_closed(self):
-        try:
+        with pytest.raises(ValueError, match="MCP_TRANSPORT"):
             _normalize_transport("websocket")
-        except ValueError as exc:
-            assert "MCP_TRANSPORT" in str(exc)
-        else:
-            raise AssertionError("expected ValueError")
 
     def test_sse_and_streamable_delegate_to_fastmcp_run(self):
         class FakeServer:
@@ -248,12 +241,8 @@ class TestNormalizeMode:
         assert _normalize_mode("INFERENCE_MODE", "none", _INFERENCE_MODES) == "none"
 
     def test_unknown_mode_fails_closed(self):
-        try:
+        with pytest.raises(ValueError, match="INFERENCE_MODE"):
             _normalize_mode("INFERENCE_MODE", "local", _INFERENCE_MODES)
-        except ValueError as exc:
-            assert "INFERENCE_MODE" in str(exc)
-        else:
-            raise AssertionError("expected ValueError")
 
 
 class TestRequireEnv:
@@ -265,15 +254,12 @@ class TestRequireEnv:
     def test_empty_value_raises_with_actionable_message(self):
         # The no-fallback rule: a chosen mode without its required vars
         # must surface here, not silently route to a different provider.
-        try:
+        with pytest.raises(ValueError) as excinfo:
             _require_env("INFERENCE_MODE", "anthropic", "INFERENCE_API_KEY", "")
-        except ValueError as exc:
-            msg = str(exc)
-            assert "INFERENCE_API_KEY" in msg
-            assert "INFERENCE_MODE" in msg
-            assert "anthropic" in msg
-        else:
-            raise AssertionError("expected ValueError")
+        msg = str(excinfo.value)
+        assert "INFERENCE_API_KEY" in msg
+        assert "INFERENCE_MODE" in msg
+        assert "anthropic" in msg
 
 
 class TestHealthEndpoint:

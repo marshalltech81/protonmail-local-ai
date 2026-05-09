@@ -9,7 +9,7 @@ import asyncio
 from types import SimpleNamespace
 
 import pytest
-from src.lib.inference import InferenceClient
+from src.lib.inference import InferenceClient, _AnthropicBackend, _OpenAIBackend
 
 
 def _openai_response(text: str) -> SimpleNamespace:
@@ -25,7 +25,7 @@ def _anthropic_response(text: str) -> SimpleNamespace:
 
 
 class TestFactory:
-    def test_openai_mode_dispatches_to_openai_backend(self):
+    def test_openai_mode_constructs_openai_backend(self):
         c = InferenceClient.create(
             mode="openai",
             base_url="http://x/v1",
@@ -33,8 +33,9 @@ class TestFactory:
             api_key="sk-test",  # pragma: allowlist secret
         )
         assert c.mode == "openai"
+        assert isinstance(c._backend, _OpenAIBackend)
 
-    def test_anthropic_mode_dispatches_to_anthropic_backend(self):
+    def test_anthropic_mode_constructs_anthropic_backend(self):
         c = InferenceClient.create(
             mode="anthropic",
             base_url="https://api.anthropic.com",
@@ -42,6 +43,21 @@ class TestFactory:
             api_key="sk-ant-test",  # pragma: allowlist secret
         )
         assert c.mode == "anthropic"
+        assert isinstance(c._backend, _AnthropicBackend)
+
+    def test_anthropic_with_empty_base_url_omits_kwarg_so_sdk_default_applies(self):
+        # The Anthropic SDK's default endpoint is the documented contract
+        # for INFERENCE_MODE=anthropic when INFERENCE_BASE_URL is empty.
+        # The backend must NOT substitute a hardcoded URL constant —
+        # otherwise a future SDK endpoint move would silently drift.
+        c = InferenceClient.create(
+            mode="anthropic",
+            base_url="",
+            model="claude-x",
+            api_key="sk-ant-test",  # pragma: allowlist secret
+        )
+        assert isinstance(c._backend, _AnthropicBackend)
+        assert c._backend.base_url == ""
 
     def test_unknown_mode_raises(self):
         with pytest.raises(ValueError, match="unsupported mode"):
@@ -120,3 +136,49 @@ class TestComplete:
         c._backend.client.messages.create = fake_create  # type: ignore[assignment]
         out = asyncio.run(c.complete("sys", "user"))
         assert out == ""
+
+    def test_anthropic_backend_concatenates_multiple_text_blocks(self):
+        # A future model might return multiple text blocks (or thinking
+        # + text). The backend joins all text-typed blocks so the full
+        # answer reaches the caller; non-text blocks are skipped.
+        c = InferenceClient.create(
+            mode="anthropic",
+            base_url="https://api.anthropic.com",
+            model="claude-x",
+            api_key="sk-ant-test",  # pragma: allowlist secret
+        )
+
+        async def fake_create(**_kwargs):
+            return SimpleNamespace(
+                content=[
+                    SimpleNamespace(type="thinking", text="reasoning trace"),
+                    SimpleNamespace(type="text", text="part one. "),
+                    SimpleNamespace(type="text", text="part two."),
+                    SimpleNamespace(type="tool_use", text=None),
+                ],
+            )
+
+        c._backend.client.messages.create = fake_create  # type: ignore[assignment]
+        out = asyncio.run(c.complete("sys", "user"))
+        assert out == "part one. part two."
+
+    def test_anthropic_backend_passes_max_tokens_through(self):
+        # Operator override of INFERENCE_MAX_TOKENS must reach the
+        # Messages API call so the model is allowed to produce longer
+        # outputs (e.g. detailed summaries on long threads).
+        c = InferenceClient.create(
+            mode="anthropic",
+            base_url="https://api.anthropic.com",
+            model="claude-x",
+            api_key="sk-ant-test",  # pragma: allowlist secret
+            max_tokens=4096,
+        )
+        captured: dict = {}
+
+        async def fake_create(**kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(content=[SimpleNamespace(type="text", text="ok")])
+
+        c._backend.client.messages.create = fake_create  # type: ignore[assignment]
+        asyncio.run(c.complete("sys", "user"))
+        assert captured["max_tokens"] == 4096

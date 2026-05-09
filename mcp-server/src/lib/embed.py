@@ -28,8 +28,10 @@ log = logging.getLogger("mcp.embed")
 # call after model load) can take a few seconds. 60 s is generous
 # headroom while still bounding a stuck call (per the AGENTS.md rule
 # that outbound async HTTP calls must not rely solely on a client-level
-# default).
-_EMBED_TIMEOUT_SECS = 60.0
+# default). Operators on slow networks can override via
+# ``EMBED_TIMEOUT_SECS``; resolution happens in ``main.py`` so the
+# library code stays env-free for tests.
+DEFAULT_EMBED_TIMEOUT_SECS = 60.0
 
 
 class EmbedClient:
@@ -41,6 +43,7 @@ class EmbedClient:
         base_url: str,
         model: str,
         api_key: str = "",
+        timeout_secs: float = DEFAULT_EMBED_TIMEOUT_SECS,
     ) -> None:
         # Lazy import: only paid when EMBED_MODE!=none.
         from openai import AsyncOpenAI
@@ -51,10 +54,15 @@ class EmbedClient:
         # cleanly; for unauthenticated host-side servers we pass a
         # placeholder. The Authorization header still goes out, but
         # compat servers that don't require auth ignore it.
+        # ``max_retries=0`` matches the indexer's "no implicit SDK
+        # retry" posture: the calling agent retries at the tool-
+        # invocation layer, so a transient embed failure surfaces
+        # cleanly instead of being doubled by built-in SDK backoff.
         self.client = AsyncOpenAI(
             base_url=self.base_url,
             api_key=api_key or "unauthenticated",
-            timeout=_EMBED_TIMEOUT_SECS,
+            timeout=timeout_secs,
+            max_retries=0,
         )
 
     async def embed(self, text: str) -> list[float]:

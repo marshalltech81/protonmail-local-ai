@@ -157,6 +157,15 @@ reject_deprecated_env "EMBED_OPENAI_BASE_URL" "EMBED_BASE_URL"
 reject_deprecated_env "EMBED_OPENAI_MODEL" "EMBED_MODEL"
 reject_deprecated_env "EMBED_OPENAI_API_KEY" "EMBED_API_KEY"
 reject_deprecated_env "RERANK_ENABLED" "RERANK_MODE"
+# Earlier-era names that predate the *_MODE shape entirely. Carrying
+# any of these in .env would silently get the *_MODE default applied;
+# rejecting them keeps the migration message unambiguous.
+reject_deprecated_env "EMBED_SERVICE_URL" "EMBED_BASE_URL"
+reject_deprecated_env "MLX_SERVICE_URL" "EMBED_BASE_URL"
+reject_deprecated_env "OLLAMA_EMBED_MODEL" "EMBED_MODEL"
+reject_deprecated_env "OLLAMA_LLM_MODEL" "INFERENCE_MODEL"
+reject_deprecated_env "USE_MLX_EMBEDDER" "EMBED_MODE"
+reject_deprecated_env "USE_MLX_RERANKER" "RERANK_MODE"
 
 BRIDGE_USER="$(get_env_value BRIDGE_USER)"
 BRIDGE_VERSION="$(get_env_value BRIDGE_VERSION)"

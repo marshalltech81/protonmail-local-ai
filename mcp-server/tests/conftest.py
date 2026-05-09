@@ -584,13 +584,17 @@ class FakeInferenceClient:
 
 
 class FakeLocalLLM:
-    """Compatibility facade combining ``FakeEmbedClient`` +
-    ``FakeInferenceClient`` for tests that assert on both surfaces.
+    """DEPRECATED — compatibility facade kept only for legacy callers.
 
-    Mirrors the legacy ``LocalLLMClient`` surface so existing tests can
-    keep their assertion shape while the production code uses the new
-    split clients. New tests should construct ``FakeEmbedClient`` and
-    ``FakeInferenceClient`` directly.
+    Combines ``FakeEmbedClient`` + ``FakeInferenceClient`` so tests
+    written against the pre-split ``LocalLLMClient`` surface keep
+    passing without rewrite. **Do not use in new tests** — construct
+    ``FakeEmbedClient`` and ``FakeInferenceClient`` directly so the
+    test pins the same client split production uses.
+
+    Existing call sites live in ``tests/test_search.py`` and
+    ``tests/test_intelligence_handlers.py``; migrating them is a
+    follow-up task that should not silently grow.
     """
 
     def __init__(

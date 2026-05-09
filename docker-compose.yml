@@ -265,6 +265,16 @@ services:
       INFERENCE_MODE: ${INFERENCE_MODE:-anthropic}
       INFERENCE_BASE_URL: ${INFERENCE_BASE_URL}
       INFERENCE_MODEL: ${INFERENCE_MODEL:-claude-sonnet-4-6}
+      # Per-call deadline for inference completions (seconds). Default
+      # 300 absorbs reasoning-heavy prompts; raise it for slow remote
+      # providers or on-host models in thinking mode.
+      INFERENCE_TIMEOUT_SECS: ${INFERENCE_TIMEOUT_SECS:-300}
+      # Anthropic Messages API ``max_tokens`` (also caps OpenAI when
+      # the operator points the OpenAI mode at a server that honors
+      # it). Default 1024 fits "brief" / "action-items" summaries;
+      # raise for "detailed" summaries on long threads or for
+      # extract_from_emails over rich schemas.
+      INFERENCE_MAX_TOKENS: ${INFERENCE_MAX_TOKENS:-1024}
       MCP_PORT: ${MCP_PORT:-3000}
       MCP_TRANSPORT: ${MCP_TRANSPORT:-sse}
       MCP_READ_ONLY: ${MCP_READ_ONLY:-true}
@@ -277,6 +287,12 @@ services:
       EMBED_MODE: ${EMBED_MODE:-openai}
       EMBED_BASE_URL: ${EMBED_BASE_URL}
       EMBED_MODEL: ${EMBED_MODEL}
+      # Per-call deadline for query-time embed (seconds). Default 60s
+      # is generous headroom over Qwen3-Embedding-8B's sub-second
+      # steady-state. Cold-start in the indexer is governed separately
+      # by EMBED_WARMUP_TIMEOUT_SECS — operator overrides reach this
+      # var here and the warmup constant in the indexer service block.
+      EMBED_TIMEOUT_SECS: ${EMBED_TIMEOUT_SECS:-60}
       # Cross-encoder rerank stage in hybrid search. ``RERANK_MODE=cohere``
       # enables Cohere's rerank API via the official cohere SDK;
       # ``RERANK_MODE=none`` (default) returns RRF order directly.

@@ -18,8 +18,12 @@ from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-from .lib.embed import EmbedClient
-from .lib.inference import InferenceClient
+from .lib.embed import DEFAULT_EMBED_TIMEOUT_SECS, EmbedClient
+from .lib.inference import (
+    DEFAULT_COMPLETE_TIMEOUT_SECS,
+    DEFAULT_MAX_TOKENS,
+    InferenceClient,
+)
 from .lib.reranker import CohereReranker, RerankConfig
 from .lib.sqlite import Database
 from .tools.intelligence import register_intelligence_tools
@@ -150,6 +154,7 @@ def _read_secret(secret_name: str, env_fallback: str = "") -> str:
 # ---------------------------------------------------------------------------
 SQLITE_PATH = os.environ.get("SQLITE_PATH", "/data/mail.db")
 
+
 # Each layer (inference / embed / rerank) is selected by its ``*_MODE``
 # variable. The same shape applies across all three:
 #
@@ -166,17 +171,53 @@ SQLITE_PATH = os.environ.get("SQLITE_PATH", "/data/mail.db")
 # required vars raises at startup. There is no inter-mode fallback —
 # choosing ``anthropic`` and forgetting the API key surfaces here, not
 # silently as a reroute to the OpenAI-shaped client.
+def _float_env(name: str, default: float, minimum: float = 0.0) -> float:
+    """Read a positive float from the environment with a fallback.
+
+    Used for per-call HTTP deadlines so a typo or empty string falls back
+    to the library default rather than raising at startup.
+    """
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a number, got {raw!r}") from exc
+    if value < minimum:
+        raise ValueError(f"{name} must be >= {minimum}, got {value}")
+    return value
+
+
+def _int_env(name: str, default: int, minimum: int = 1) -> int:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be an integer, got {raw!r}") from exc
+    if value < minimum:
+        raise ValueError(f"{name} must be >= {minimum}, got {value}")
+    return value
+
+
 INFERENCE_MODE = _normalize_mode(
     "INFERENCE_MODE", os.environ.get("INFERENCE_MODE", "anthropic"), _INFERENCE_MODES
 )
 INFERENCE_BASE_URL = os.environ.get("INFERENCE_BASE_URL", "")
 INFERENCE_MODEL = os.environ.get("INFERENCE_MODEL", "")
 INFERENCE_API_KEY = _read_secret("inference_api_key", "INFERENCE_API_KEY")
+INFERENCE_TIMEOUT_SECS = _float_env(
+    "INFERENCE_TIMEOUT_SECS", DEFAULT_COMPLETE_TIMEOUT_SECS, minimum=1.0
+)
+INFERENCE_MAX_TOKENS = _int_env("INFERENCE_MAX_TOKENS", DEFAULT_MAX_TOKENS, minimum=1)
 
 EMBED_MODE = _normalize_mode("EMBED_MODE", os.environ.get("EMBED_MODE", "openai"), _EMBED_MODES)
 EMBED_BASE_URL = os.environ.get("EMBED_BASE_URL", "")
 EMBED_MODEL = os.environ.get("EMBED_MODEL", "")
 EMBED_API_KEY = _read_secret("embed_api_key", "EMBED_API_KEY")
+EMBED_TIMEOUT_SECS = _float_env("EMBED_TIMEOUT_SECS", DEFAULT_EMBED_TIMEOUT_SECS, minimum=1.0)
 
 RERANK_MODE = _normalize_mode("RERANK_MODE", os.environ.get("RERANK_MODE", "none"), _RERANK_MODES)
 RERANK_BASE_URL = os.environ.get("RERANK_BASE_URL", "")
@@ -262,6 +303,13 @@ async def _run_dual_transport_async(server: FastMCP) -> None:
 
 
 def _run_server(server: FastMCP, transport: str) -> None:
+    """Run ``server`` on ``transport``.
+
+    Caller is expected to have normalized ``transport`` already (the
+    module-level startup path does this once before logging it). Tests
+    pass raw values, so a final ``_normalize_transport`` defends against
+    a misuse without doing the work twice in production.
+    """
     normalized = _normalize_transport(transport)
     if normalized == "dual":
         import anyio
@@ -286,6 +334,7 @@ def main():
             base_url=EMBED_BASE_URL,
             model=EMBED_MODEL,
             api_key=EMBED_API_KEY,
+            timeout_secs=EMBED_TIMEOUT_SECS,
         )
 
     inference_client: InferenceClient | None = None
@@ -295,15 +344,17 @@ def main():
         if INFERENCE_MODE == "openai":
             # OpenAI-compatible mode points at an operator-supplied endpoint
             # (remote provider or host-side server), so a base URL is
-            # required. Anthropic mode falls through to the SDK default
-            # (api.anthropic.com) when ``INFERENCE_BASE_URL`` is empty.
+            # required. Anthropic mode passes an empty base_url through
+            # to the SDK so its real default applies — we never substitute
+            # a hardcoded constant the SDK might later drift from.
             _require_env("INFERENCE_MODE", INFERENCE_MODE, "INFERENCE_BASE_URL", INFERENCE_BASE_URL)
-        inference_base_url = INFERENCE_BASE_URL or "https://api.anthropic.com"
         inference_client = InferenceClient.create(
             mode=INFERENCE_MODE,
-            base_url=inference_base_url,
+            base_url=INFERENCE_BASE_URL,
             model=INFERENCE_MODEL,
             api_key=INFERENCE_API_KEY,
+            max_tokens=INFERENCE_MAX_TOKENS,
+            timeout_secs=INFERENCE_TIMEOUT_SECS,
         )
 
     reranker: CohereReranker | None = None

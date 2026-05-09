@@ -9,6 +9,7 @@ behavior without hitting a live provider.
 import asyncio
 from types import SimpleNamespace
 
+import pytest
 from src.lib.embed import EmbedClient
 
 
@@ -65,9 +66,5 @@ class TestEmbed:
             raise Boom("simulated upstream failure")
 
         c.client.embeddings.create = fake_create  # type: ignore[assignment]
-        try:
+        with pytest.raises(Boom):
             asyncio.run(c.embed("query"))
-        except Boom:
-            pass
-        else:
-            raise AssertionError("expected SDK exception to surface")
