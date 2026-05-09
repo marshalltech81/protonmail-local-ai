@@ -7,8 +7,13 @@ hitting Cohere's hosted API.
 """
 
 from types import SimpleNamespace
+from unittest.mock import patch
 
-from src.lib.reranker import CohereReranker, RerankConfig
+from src.lib.reranker import (
+    DEFAULT_RERANK_TIMEOUT_SECS,
+    CohereReranker,
+    RerankConfig,
+)
 
 
 def _make_reranker(top_n: int = 5, candidates: int = 50) -> CohereReranker:
@@ -85,6 +90,48 @@ class TestRerank:
 
         r.client.rerank = fake_rerank  # type: ignore[assignment]
         assert r.rerank("q", ["a", "b"]) == []
+
+    def test_timeout_is_passed_to_sdk_client(self):
+        # A stalled Cohere request must not be allowed to pin the
+        # hybrid_search worker thread on the SDK's 300s default —
+        # ``RerankConfig.timeout_secs`` flows through to ClientV2 so a
+        # bounded deadline triggers and the rerank stage degrades to
+        # RRF order on timeout.
+        with patch("cohere.ClientV2") as mock_client:
+            CohereReranker(
+                RerankConfig(
+                    base_url="",
+                    model="rerank-v4.0-pro",
+                    api_key="ck-test",  # pragma: allowlist secret
+                    candidates=20,
+                    top_n=5,
+                    timeout_secs=42.5,
+                )
+            )
+            mock_client.assert_called_once()
+            assert mock_client.call_args.kwargs["timeout"] == 42.5
+
+        with patch("cohere.ClientV2") as mock_client:
+            CohereReranker(
+                RerankConfig(
+                    base_url="https://gateway.example/v1",
+                    model="rerank-v4.0-pro",
+                    api_key="ck-test",  # pragma: allowlist secret
+                    candidates=20,
+                    top_n=5,
+                    timeout_secs=15.0,
+                )
+            )
+            assert mock_client.call_args.kwargs["timeout"] == 15.0
+            assert mock_client.call_args.kwargs["base_url"] == "https://gateway.example/v1"
+
+    def test_default_timeout_is_below_sdk_default(self):
+        # Pin the default so a regression that drops timeout passthrough
+        # (and falls back to the SDK's 300s) trips this test rather
+        # than reaching production. 60s is well above typical Cohere
+        # latency but tight enough to keep a stalled call from holding
+        # a worker pool slot for minutes.
+        assert DEFAULT_RERANK_TIMEOUT_SECS == 60.0
 
     def test_malformed_score_returns_empty(self):
         # If the SDK ever returns a score that can't be coerced to

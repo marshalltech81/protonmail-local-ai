@@ -35,6 +35,14 @@ from typing import Protocol
 
 log = logging.getLogger("mcp.reranker")
 
+# Cohere's SDK default is 300s — too long for a synchronous worker
+# thread inside ``hybrid_search``. A stalled rerank request would pin
+# the pool slot and hang user-visible RAG tools instead of degrading
+# cleanly to RRF order. 60s is well above the typical Cohere rerank
+# latency (~1–5s) and matches the embed default; operators can tune
+# via ``RERANK_TIMEOUT_SECS``.
+DEFAULT_RERANK_TIMEOUT_SECS = 60.0
+
 
 @dataclass
 class RerankConfig:
@@ -43,6 +51,7 @@ class RerankConfig:
     api_key: str
     candidates: int
     top_n: int
+    timeout_secs: float = DEFAULT_RERANK_TIMEOUT_SECS
 
 
 class RerankerBackend(Protocol):
@@ -89,13 +98,20 @@ class CohereReranker:
         self.top_n = config.top_n
         # Pass ``base_url`` only when explicitly set — passing an empty
         # string would override the SDK default with a malformed URL.
+        # ``timeout`` is always passed: the SDK default (300s) is longer
+        # than we want a hybrid_search worker thread to wait on a
+        # stalled Cohere call.
         if config.base_url:
             self.client = cohere.ClientV2(
                 api_key=config.api_key,
                 base_url=config.base_url.rstrip("/"),
+                timeout=config.timeout_secs,
             )
         else:
-            self.client = cohere.ClientV2(api_key=config.api_key)
+            self.client = cohere.ClientV2(
+                api_key=config.api_key,
+                timeout=config.timeout_secs,
+            )
 
     def rerank(
         self,

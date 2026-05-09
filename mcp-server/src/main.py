@@ -24,7 +24,7 @@ from .lib.inference import (
     DEFAULT_MAX_TOKENS,
     InferenceClient,
 )
-from .lib.reranker import CohereReranker, RerankConfig
+from .lib.reranker import DEFAULT_RERANK_TIMEOUT_SECS, CohereReranker, RerankConfig
 from .lib.sqlite import Database
 from .tools.intelligence import register_intelligence_tools
 from .tools.retrieval import register_retrieval_tools
@@ -225,6 +225,7 @@ RERANK_MODEL = os.environ.get("RERANK_MODEL", "")
 RERANK_API_KEY = _read_secret("rerank_api_key", "RERANK_API_KEY")
 RERANK_CANDIDATES = int(os.environ.get("RERANK_CANDIDATES", "20"))
 RERANK_TOP_N = int(os.environ.get("RERANK_TOP_N", "10"))
+RERANK_TIMEOUT_SECS = _float_env("RERANK_TIMEOUT_SECS", DEFAULT_RERANK_TIMEOUT_SECS, minimum=1.0)
 
 MCP_PORT = int(os.environ.get("MCP_PORT", "3000"))
 MCP_READ_ONLY = _env_bool("MCP_READ_ONLY", True)
@@ -376,6 +377,7 @@ def main():
                 api_key=RERANK_API_KEY,
                 candidates=RERANK_CANDIDATES,
                 top_n=RERANK_TOP_N,
+                timeout_secs=RERANK_TIMEOUT_SECS,
             )
         )
 
