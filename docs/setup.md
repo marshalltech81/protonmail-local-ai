@@ -38,14 +38,14 @@ permissions. Docker Compose requires all four files to exist before
 starting. You will overwrite them with real values only as needed:
 
 - `bridge_pass.txt` — after the Bridge login step below
-- `inference_api_key.txt` — required when `INFERENCE_MODE` is
-  `anthropic` (default) or `openai` against an authenticated provider.
-  Leave empty when `INFERENCE_MODE=none` or when pointing `openai` at
-  an unauthenticated host server.
-- `embed_api_key.txt` — only when `EMBED_BASE_URL` points at a
-  provider that authenticates (DeepInfra, OpenRouter, etc.); leave
-  empty when pointing at an unauthenticated host server or when
-  `EMBED_MODE=none`.
+- `inference_api_key.txt` — required (non-empty) whenever
+  `INFERENCE_MODE` is not `none`. Leave empty only when
+  `INFERENCE_MODE=none`. For unauthenticated host servers (LM Studio,
+  vLLM, `mlx_lm.server`) write any non-empty placeholder — the
+  official SDK refuses to construct without a key.
+- `embed_api_key.txt` — required (non-empty) whenever `EMBED_MODE`
+  is not `none`. Same placeholder guidance as above for
+  unauthenticated host embedders.
 - `rerank_api_key.txt` — required when `RERANK_MODE=cohere`.
   Leave empty when `RERANK_MODE=none`.
 
@@ -200,8 +200,11 @@ make up
 
 - `BRIDGE_USER` is still unset or left at the placeholder value
 - `.secrets/bridge_pass.txt` is missing, empty, or not `600`
-- `INFERENCE_MODE=anthropic` but `.secrets/inference_api_key.txt` is missing, empty, or not `600`
-- inference secret placeholder files are missing or not `600`
+- any active layer's secret file is missing, empty, or not `600`
+  (`inference_api_key.txt` when `INFERENCE_MODE!=none`,
+  `embed_api_key.txt` when `EMBED_MODE!=none`,
+  `rerank_api_key.txt` when `RERANK_MODE=cohere`)
+- inference / embed / rerank secret placeholder files are missing or not `600`
 - numeric or enum settings such as `SYNC_INTERVAL`, `MCP_PORT`, `MCP_READ_ONLY`, or `INFERENCE_MODE` are invalid
 
 Verify everything is running:

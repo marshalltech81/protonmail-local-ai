@@ -298,11 +298,21 @@ require_mode_600 "$INFERENCE_KEY_FILE"
 require_mode_600 "$EMBED_KEY_FILE"
 require_mode_600 "$RERANK_KEY_FILE"
 
-# Each active mode's secret file must contain a real value. Disabled
-# layers can leave the file empty (it must still exist with mode 600 so
-# the docker-compose ``secrets:`` reference resolves cleanly).
+# Each active mode's secret file must contain a real value. Even
+# OpenAI-compatible host-side servers (LM Studio, vLLM, ``mlx_lm.server``)
+# routed through the official SDK ultimately need a non-empty key —
+# the SDK refuses to construct without one, and most compat servers
+# validate the Authorization header rather than ignoring it. Operators
+# pointing at an unauthenticated server should still write any
+# non-empty placeholder into the secret file. Disabled layers
+# (``*_MODE=none``) can leave the file empty (it must still exist
+# with mode 600 so the docker-compose ``secrets:`` reference resolves
+# cleanly).
 if [[ "$INFERENCE_MODE" != "none" ]]; then
     require_nonempty_file "$INFERENCE_KEY_FILE" "Inference API key"
+fi
+if [[ "$EMBED_MODE" != "none" ]]; then
+    require_nonempty_file "$EMBED_KEY_FILE" "Embed API key"
 fi
 if [[ "$RERANK_MODE" != "none" ]]; then
     require_nonempty_file "$RERANK_KEY_FILE" "Rerank API key"
