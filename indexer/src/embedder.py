@@ -36,6 +36,44 @@ from .chunker import l2_normalize
 log = logging.getLogger("indexer.embedder")
 
 
+def _float_env(name: str, default: float) -> float:
+    """Read a float env var with a graceful fallback.
+
+    Mirrors ``main._int_env`` and ``reconciler._int`` / ``_pct``: an
+    empty / unset / malformed value logs a warning and falls back
+    rather than raising at startup. A typo in a tunable knob should
+    not crash the indexer.
+    """
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        log.warning("invalid %s=%r; falling back to %.1f", name, raw, default)
+        return default
+
+
+def scrub_embed_error(exc: BaseException) -> str:
+    """Render an embedder exception into a log/DB-safe string.
+
+    The OpenAI SDK's ``APIStatusError`` carries the provider's response
+    body, which can echo input fragments back on 4xx — for the indexer
+    that means email body text from the failing batch can flow into
+    ``indexing_jobs.last_error`` and any operator log sink. The repo
+    is public and the ``last_error`` row + truncated log line both
+    travel further than callers usually expect, so trim
+    ``APIStatusError`` down to type + status_code only.
+
+    Connection / timeout / our own ``RuntimeError`` (index-integrity
+    check) carry no email content, so their full ``repr`` is safe to
+    keep.
+    """
+    if isinstance(exc, APIStatusError):
+        return f"{type(exc).__name__}: status={exc.status_code}"
+    return repr(exc)
+
+
 def _is_transient_embed_error(exc: BaseException) -> bool:
     """Decide whether tenacity should retry ``exc``.
 
@@ -122,13 +160,18 @@ class OpenAIEmbedder:
         self.batch_size = batch_size
         # The SDK requires a non-empty ``api_key`` to construct cleanly.
         # Unauthenticated host-side servers ignore the resulting
-        # Authorization header. ``max_retries=0`` because retry policy
-        # is owned by the tenacity wrapper below — the SDK's built-in
-        # retry would double-up exponential backoff and obscure the
+        # Authorization header; the ``"placeholder"`` literal is
+        # deliberately self-descriptive so it cannot be mistaken for a
+        # real credential if it ever surfaces in a provider's request
+        # log (which would happen only if ``EMBED_BASE_URL`` were
+        # misconfigured to a remote provider while ``EMBED_API_KEY``
+        # was empty). ``max_retries=0`` because retry policy is owned
+        # by the tenacity wrapper below — the SDK's built-in retry
+        # would double-up exponential backoff and obscure the
         # 4xx-fast-fail / 5xx-retry classification.
         self.client = OpenAI(
             base_url=self.base_url,
-            api_key=api_key or "unauthenticated",
+            api_key=api_key or "placeholder",
             timeout=request_timeout,
             max_retries=0,
         )
@@ -163,11 +206,9 @@ class OpenAIEmbedder:
         any non-SDK exception. 5xx and the SDK's connection / timeout
         families retry until the connect deadline.
         """
-        warmup_timeout = float(
-            os.environ.get(
-                "EMBED_WARMUP_TIMEOUT_SECS",
-                self.DEFAULT_WARMUP_TIMEOUT_SECS,
-            )
+        warmup_timeout = _float_env(
+            "EMBED_WARMUP_TIMEOUT_SECS",
+            self.DEFAULT_WARMUP_TIMEOUT_SECS,
         )
         log.info(
             "Waiting for embedder at %s (model=%s, connect_timeout=%ds, warmup_timeout=%.0fs)...",

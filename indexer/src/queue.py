@@ -73,13 +73,29 @@ def load_config_from_env(env: dict[str, str] | os._Environ) -> dict[str, int]:
 
     Exposed as a helper so ``main.py`` and tests share the same parsing
     rather than each re-implementing int coercion with the same default.
+
+    Malformed values fall back to the documented default with a warning
+    rather than raising at startup — matches the lenient parser shape
+    used by ``reconciler.load_config_from_env`` and ``main._int_env``
+    so a typo in any one knob doesn't crash the indexer.
     """
     return {
-        "max_attempts": int(env.get("INDEXER_MAX_ATTEMPTS", DEFAULT_MAX_ATTEMPTS)),
-        "base_backoff_seconds": int(
-            env.get("INDEXER_RETRY_BASE_SECONDS", DEFAULT_BASE_BACKOFF_SECONDS)
+        "max_attempts": _int_env(env, "INDEXER_MAX_ATTEMPTS", DEFAULT_MAX_ATTEMPTS),
+        "base_backoff_seconds": _int_env(
+            env, "INDEXER_RETRY_BASE_SECONDS", DEFAULT_BASE_BACKOFF_SECONDS
         ),
     }
+
+
+def _int_env(env: dict[str, str] | os._Environ, name: str, default: int) -> int:
+    raw = env.get(name)
+    if raw is None or not str(raw).strip():
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        log.warning("invalid %s=%r; falling back to %d", name, raw, default)
+        return default
 
 
 class IndexingQueue:

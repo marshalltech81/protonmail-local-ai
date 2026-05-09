@@ -36,7 +36,7 @@ from .attachment_indexing import (
 )
 from .chunker import MessageChunk, chunk_message, mean_vector
 from .database import EMBEDDING_DIM, Database
-from .embedder import EmbeddingBackend, OpenAIEmbedder
+from .embedder import EmbeddingBackend, OpenAIEmbedder, scrub_embed_error
 from .parser import Message, parse_email
 from .queue import (
     REASON_INITIAL_SCAN,
@@ -315,7 +315,7 @@ class MaildirHandler(FileSystemEventHandler):
                 try:
                     self.reconciler.handle_moved(src_path, dest_path)
                 except Exception as e:
-                    log.error(f"reconciler on_moved failed: {e}")
+                    log.error("reconciler on_moved failed: %s", e)
             else:
                 # Default deployment has no reconciler; still move the
                 # indexed_files / message_thread_map filepath forward so
@@ -323,7 +323,7 @@ class MaildirHandler(FileSystemEventHandler):
                 try:
                     self.db.update_filepath(src_path, dest_path)
                 except Exception as e:
-                    log.error(f"update_filepath failed on rename: {e}")
+                    log.error("update_filepath failed on rename: %s", e)
             return
 
         # Case 2: new delivery — enqueue for the worker.
@@ -889,14 +889,22 @@ def _drain_queue_batched(
         try:
             vectors = embedder.embed_batch(all_texts) if all_texts else []
         except Exception as e:
+            # Scrub the error before persistence: ``APIStatusError`` can
+            # echo input fragments (email body text) on 4xx, and
+            # ``last_error`` rides into ``indexing_jobs.last_error`` +
+            # operator log sinks. ``scrub_embed_error`` keeps full repr
+            # for safe error shapes (connection / timeout / our own
+            # integrity-check ``RuntimeError``) and trims SDK status
+            # errors to type + status_code.
+            err_repr = scrub_embed_error(e)
             log.error(
-                "batched embed failed for %d texts (batch=%d msgs): %r",
+                "batched embed failed for %d texts (batch=%d msgs): %s",
                 len(all_texts),
                 len(survivors),
-                e,
+                err_repr,
             )
             for entry in survivors:
-                queue.mark_failed(entry.row["filepath"], stage="embed", error=repr(e))
+                queue.mark_failed(entry.row["filepath"], stage="embed", error=err_repr)
             continue
         embed_ms = (time.perf_counter() - t_embed_start) * 1000
         # Attribute embed time evenly across the batch for telemetry.
@@ -1127,7 +1135,7 @@ def initial_index(
     final_line = format_summary(timing_aggregator.summary())
     if final_line:
         log.info(final_line)
-    log.info(f"Initial index complete: {processed} job(s) processed.")
+    log.info("Initial index complete: %d job(s) processed.", processed)
 
 
 def _validate_embedding_dim(embedder: EmbeddingBackend) -> None:
@@ -1166,9 +1174,14 @@ def _log_reconciler_config(cfg: ReconcilerConfig) -> None:
 def main():
     _validate_embed_config()
     log.info("Starting indexer...")
-    log.info(f"  Maildir: {MAILDIR_PATH}")
-    log.info(f"  SQLite:  {SQLITE_PATH}")
-    log.info(f"  Embedder: {EMBED_BASE_URL} (model={EMBED_MODEL}, batch={EMBED_BATCH_SIZE})")
+    log.info("  Maildir: %s", MAILDIR_PATH)
+    log.info("  SQLite:  %s", SQLITE_PATH)
+    log.info(
+        "  Embedder: %s (model=%s, batch=%d)",
+        EMBED_BASE_URL,
+        EMBED_MODEL,
+        EMBED_BATCH_SIZE,
+    )
     if EMBED_API_KEY:
         log.info("  Embedder API key: present (Bearer auth enabled)")
 
@@ -1230,7 +1243,7 @@ def main():
     try:
         sweep_paths(db)
     except Exception as e:
-        log.error(f"startup rename sweep failed: {e}")
+        log.error("startup rename sweep failed: %s", e)
 
     # Startup reconciliation sweep — detect tombstones and path renames that
     # landed while the indexer was offline. Safe to run every startup: it only
@@ -1240,7 +1253,7 @@ def main():
             reconciler.sweep()
             reconciler.reap()
         except Exception as e:
-            log.error(f"startup reconciliation failed: {e}")
+            log.error("startup reconciliation failed: %s", e)
 
     # Watch for new emails
     handler = MaildirHandler(db, queue, reconciler=reconciler)
@@ -1292,7 +1305,7 @@ def main():
                         )
                     drained_since_log = 0
             except Exception as e:
-                log.error(f"queue drain failed: {e}")
+                log.error("queue drain failed: %s", e)
 
             now = time.monotonic()
             if reconciler is not None:
@@ -1301,7 +1314,7 @@ def main():
                         reconciler.sweep()
                         reconciler.reap()
                     except Exception as e:
-                        log.error(f"periodic reconciliation failed: {e}")
+                        log.error("periodic reconciliation failed: %s", e)
                     last_reconcile = now
 
             # Recovery sweep: re-enqueue messages on chunkless
@@ -1315,13 +1328,16 @@ def main():
                 try:
                     _recover_zero_vector_threads(db, queue)
                 except Exception as e:
-                    log.error(f"periodic recovery sweep failed: {e}")
+                    log.error("periodic recovery sweep failed: %s", e)
                 last_recovery_sweep = now
 
             # WAL checkpoint: keep the WAL file size bounded over a
-            # long-running container. The single shared connection
-            # otherwise pins a read snapshot that prevents WAL
-            # truncation at SQLite's automatic checkpoint thresholds.
+            # long-running container. The indexer holds a single
+            # writer connection for the life of the process; that
+            # connection's read snapshot prevents SQLite's automatic
+            # checkpoint thresholds from truncating the WAL, so an
+            # explicit periodic ``wal_checkpoint(TRUNCATE)`` is what
+            # reclaims space on the writer side.
             if now - last_wal_checkpoint >= WAL_CHECKPOINT_INTERVAL_SECS:
                 try:
                     busy, _log_pages, ckpt_pages = db.wal_checkpoint_truncate()
@@ -1334,7 +1350,7 @@ def main():
                     elif ckpt_pages:
                         log.debug("wal_checkpoint truncated %d page(s)", ckpt_pages)
                 except Exception as e:
-                    log.error(f"wal checkpoint failed: {e}")
+                    log.error("wal checkpoint failed: %s", e)
                 last_wal_checkpoint = now
 
             time.sleep(1)

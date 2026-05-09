@@ -255,8 +255,6 @@ def extract(
         # attachment that decompressed past the indexer container's
         # memory ceiling) instead of caching a misleading ``failed``
         # row that retries on every reappearance of the same payload.
-        # PEP 758 makes the parens optional in 3.14, but the historic
-        # form is unambiguous to readers and survives older linters.
         raise
     except Exception as exc:  # noqa: BLE001 — see comment below
         # Per-payload extractor errors (broken PDFs, malformed DOCX,
