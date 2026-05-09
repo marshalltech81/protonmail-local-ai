@@ -230,6 +230,44 @@ Definition of done:
 - add attachment download support once the read-only action path is defined
 - verify action tools respect read-only guardrails
 
+### RAG quality — inline-reply quote stripping
+
+`indexer/src/quoting.py:_HARD_CUT_PATTERNS` treats `On … wrote:` as a
+hard cut and `break`s out of the loop, so any inline reply text that
+appears AFTER the cut line is silently dropped from the embedding
+input. Two failure shapes:
+
+- **Pure inline reply** (no top-posted prefix): the very first line
+  is `On … wrote:`, the loop breaks immediately, `kept` is empty, and
+  the empty-fallback at quoting.py:76-83 returns the original
+  body_text unchanged — so the embedder sees the questions and
+  answers tangled together with quoted questions appearing twice.
+- **Top-posted reply with inline annotations on the quoted history**:
+  everything after the cut line — including the user's inline answers
+  between `>` blocks — is dropped. The thread vector keeps only the
+  top-posted prefix.
+
+Both shapes regress retrieval quality compared to the file's stated
+philosophy ("conservative stripper that occasionally leaves quoted
+text in is better than aggressive one that eats real body content").
+For the inline case the current implementation does the opposite of
+that.
+
+Three options, ordered by complexity:
+
+1. Drop `On … wrote:` from `_HARD_CUT_PATTERNS`. Conservative — the
+   `>`-line filter still removes most quoted history. Slight RAG-noise
+   increase on top-posts.
+2. Two-pass: stop *cutting* at the marker but keep filtering `>` lines
+   after it. Preserves inline answers without bringing back the full
+   quoted history. Fits the file's "no ML, simple line rules" stance.
+3. Defer to a real reply-parser library (`mailparser-reply`, `talon`).
+   Higher dependency cost, broader inbox-shape coverage.
+
+Option 2 is the natural fit. Surfaced during the indexer line-by-line
+review on 2026-05-08; not blocking any active priority but a real
+RAG-quality regression on inbox-shape replies.
+
 ### Attachment indexing — remaining work
 Most of this section is implemented: filenames/MIME indexed in
 `attachments_fts`, per-format extraction (PDF / DOCX / XLSX / HTML / TXT /
@@ -267,7 +305,6 @@ persisted, unsupported types log at debug. What's still open:
 ### Bridge build and operations
 - consolidate `BRIDGE_VERSION` to a single source of truth (`.env.example`) and remove the duplicate hardcoded defaults from `docker-compose.yml` and `bridge/Dockerfile` so version bumps only require one change
 - parameterize the Go toolchain version as an `ARG` in `bridge/Dockerfile` alongside `BRIDGE_VERSION` for consistency
-- pin all apt packages in `bridge/Dockerfile` to exact versions in both the builder stage (`git`, `make`, `gcc`, `pkg-config`, `libsecret-1-dev`, `libfido2-dev`, `libcbor-dev`) and the runtime stage (`bash`, `pass`, `gnupg2`, `libfido2-1`, `libsecret-1-0`) so a Debian package update cannot silently change the build or runtime environment between identical `BRIDGE_VERSION` builds
 - add OCI image labels (`org.opencontainers.image.source`, `org.opencontainers.image.version`, `org.opencontainers.image.revision`) to `bridge/Dockerfile` so every built image carries build provenance that can be traced back to the exact Bridge release and Dockerfile revision
 - verify the Proton release tag signature before building: import Proton's published signing key into the builder stage, hardcode the expected fingerprint, and run `git verify-tag ${BRIDGE_VERSION}` after cloning so a tampered or substituted tag fails the build
 - add a pre-flight check to `make first-run` that detects an existing `bridge-data` volume and warns the operator before proceeding, since a populated volume means Bridge is already logged in and the interactive CLI will not behave as expected
