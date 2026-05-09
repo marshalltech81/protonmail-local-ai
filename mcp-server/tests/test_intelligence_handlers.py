@@ -24,24 +24,12 @@ from src.tools.intelligence import register_intelligence_tools
 from tests.conftest import FakeLocalLLM
 
 
-def _handlers(
-    fake_server,
-    db,
-    llm,
-    *,
-    inference_mode="openai",
-    api_key="",
-    model="claude-x",
-    base_url="https://api.anthropic.com/v1",
-):
+def _handlers(fake_server, db, llm):
     register_intelligence_tools(
         fake_server,
         db,
-        llm,
-        inference_mode,
-        api_key,
-        model,
-        base_url,
+        llm.embed_client,
+        llm.inference_client,
     )
     return fake_server.tools
 
@@ -287,32 +275,12 @@ class TestExtractFromEmails:
         assert "Error" in _text(out)
 
 
-class TestLLMRouting:
-    def test_openai_mode_routes_to_openai_compatible_complete(
-        self, fake_server, seeded_db, fake_llm
-    ):
-        handler = _handlers(fake_server, seeded_db, fake_llm, inference_mode="openai")[
-            "ask_mailbox"
-        ]
-        asyncio.run(handler(question="invoice"))
-        # ``INFERENCE_MODE=openai`` uses the OpenAI-compatible chat
-        # completions client regardless of where the operator points
-        # ``INFERENCE_OPENAI_BASE_URL``.
-        assert fake_llm.complete_calls
-
-    def test_anthropic_mode_without_api_key_falls_back_to_openai_client(
-        self, fake_server, seeded_db, fake_llm
-    ):
-        # anthropic + empty key must not call an Anthropic-compatible
-        # endpoint; instead it falls through to llm.complete. Startup
-        # validation catches the missing key in production, but this
-        # protects direct unit-level use of the registration helper too.
-        handler = _handlers(
-            fake_server,
-            seeded_db,
-            fake_llm,
-            inference_mode="anthropic",
-            api_key="",
-        )["ask_mailbox"]
+class TestInferenceDispatch:
+    def test_inference_client_is_invoked_for_ask_mailbox(self, fake_server, seeded_db, fake_llm):
+        # Intelligence tools delegate to the inference client without
+        # branching by mode — the client itself encapsulates the
+        # protocol/SDK choice. Validation that a misconfigured mode
+        # surfaces at startup (no fallback) lives in test_main.py.
+        handler = _handlers(fake_server, seeded_db, fake_llm)["ask_mailbox"]
         asyncio.run(handler(question="invoice"))
         assert fake_llm.complete_calls

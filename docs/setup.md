@@ -31,21 +31,23 @@ Create the secrets directory and placeholder files:
 make init-secrets
 ```
 
-This creates `.secrets/bridge_pass.txt`, `.secrets/inference_openai_api_key.txt`,
-`.secrets/inference_anthropic_api_key.txt`, and
-`.secrets/embed_openai_api_key.txt` as empty placeholders with `600`
+This creates `.secrets/bridge_pass.txt`, `.secrets/inference_api_key.txt`,
+`.secrets/inference_api_key.txt`, and
+`.secrets/embed_api_key.txt` as empty placeholders with `600`
 permissions. Docker Compose requires all four files to exist before
 starting. You will overwrite them with real values only as needed:
 
 - `bridge_pass.txt` — after the Bridge login step below
-- `inference_anthropic_api_key.txt` — required when `INFERENCE_MODE=anthropic`
-  (the default). Write your Anthropic-compatible provider key here.
-- `inference_openai_api_key.txt` — only when `INFERENCE_MODE=openai` and
-  `INFERENCE_OPENAI_BASE_URL` points at a provider that authenticates;
-  leave empty when pointing at an unauthenticated host server.
-- `embed_openai_api_key.txt` — only when `EMBED_OPENAI_BASE_URL` points
-  at a provider that authenticates (DeepInfra, OpenRouter, etc.); leave
-  empty when pointing at an unauthenticated host server.
+- `inference_api_key.txt` — required when `INFERENCE_MODE` is
+  `anthropic` (default) or `openai` against an authenticated provider.
+  Leave empty when `INFERENCE_MODE=none` or when pointing `openai` at
+  an unauthenticated host server.
+- `embed_api_key.txt` — only when `EMBED_BASE_URL` points at a
+  provider that authenticates (DeepInfra, OpenRouter, etc.); leave
+  empty when pointing at an unauthenticated host server or when
+  `EMBED_MODE=none`.
+- `rerank_api_key.txt` — required when `RERANK_MODE=cohere`.
+  Leave empty when `RERANK_MODE=none`.
 
 ### 3. Build all Docker images
 
@@ -132,8 +134,8 @@ chat-completions endpoint for inference.
 
 ```bash
 # Edit .env:
-EMBED_OPENAI_BASE_URL=...     # OpenAI-compatible /v1 base URL
-EMBED_OPENAI_MODEL=...         # 4096-dim model (Qwen3-Embedding-8B variants)
+EMBED_BASE_URL=...     # OpenAI-compatible /v1 base URL
+EMBED_MODEL=...         # 4096-dim model (Qwen3-Embedding-8B variants)
 ```
 
 The schema reserves a fixed 4096-dim vector — pick a model that
@@ -141,22 +143,28 @@ produces 4096-dim vectors or run a schema migration. See "Pointing at
 a different embedder provider" below for examples (DeepInfra,
 OpenRouter, host-side servers like LM Studio / vLLM / `mlx_lm.server`).
 If the provider authenticates, write the key to
-`.secrets/embed_openai_api_key.txt` (`chmod 600`).
+`.secrets/embed_api_key.txt` (`chmod 600`).
 
 **Inference** — choose one mode:
 
 ```bash
-# Anthropic-compatible (default daily-driver)
+# Anthropic-compatible via the official anthropic SDK (default).
+# Leave INFERENCE_BASE_URL empty to hit api.anthropic.com.
 INFERENCE_MODE=anthropic
-INFERENCE_ANTHROPIC_BASE_URL=https://api.anthropic.com/v1
-INFERENCE_ANTHROPIC_MODEL=claude-sonnet-4-6
-# write the key to .secrets/inference_anthropic_api_key.txt
+INFERENCE_BASE_URL=
+INFERENCE_MODEL=claude-sonnet-4-6
+# write the key to .secrets/inference_api_key.txt
 
-# OpenAI-compatible (local or remote)
+# OpenAI-compatible via the official openai SDK (local or remote).
 INFERENCE_MODE=openai
-INFERENCE_OPENAI_BASE_URL=...   # any /v1 base URL
-INFERENCE_OPENAI_MODEL=...
-# .secrets/inference_openai_api_key.txt only if the endpoint authenticates
+INFERENCE_BASE_URL=...   # any /v1 base URL
+INFERENCE_MODEL=...
+# write the key to .secrets/inference_api_key.txt
+# (the SDK accepts an unauth placeholder against host servers that
+# ignore the Authorization header)
+
+# Disabled — intelligence tools are not registered.
+INFERENCE_MODE=none
 ```
 
 When pointing at a host-side server, bind it to `127.0.0.1` and use
@@ -169,15 +177,18 @@ them with the tool of your choice (LM Studio, vLLM, TEI,
 
 ```bash
 # Default (off):
-RERANK_ENABLED=false
+RERANK_MODE=none
 
-# Enable:
-RERANK_ENABLED=true
-RERANK_BASE_URL=...   # mlx-shaped /rerank service (operator-supplied)
+# Cohere via the official cohere SDK.
+# Leave RERANK_BASE_URL empty for the SDK default; set it for
+# proxies, gateways, or region overrides.
+RERANK_MODE=cohere
+RERANK_BASE_URL=
+RERANK_MODEL=rerank-v4.0-pro
+# write the key to .secrets/rerank_api_key.txt
 ```
 
-The reranker uses an mlx-shaped wire format (no OpenAI rerank
-standard). When disabled, hybrid search returns RRF-only ranking.
+When disabled, hybrid search returns RRF-only ranking.
 
 ### 6. Start the full stack
 
@@ -189,7 +200,7 @@ make up
 
 - `BRIDGE_USER` is still unset or left at the placeholder value
 - `.secrets/bridge_pass.txt` is missing, empty, or not `600`
-- `INFERENCE_MODE=anthropic` but `.secrets/inference_anthropic_api_key.txt` is missing, empty, or not `600`
+- `INFERENCE_MODE=anthropic` but `.secrets/inference_api_key.txt` is missing, empty, or not `600`
 - inference secret placeholder files are missing or not `600`
 - numeric or enum settings such as `SYNC_INTERVAL`, `MCP_PORT`, `MCP_READ_ONLY`, or `INFERENCE_MODE` are invalid
 
@@ -234,12 +245,13 @@ volume.
 
 ### Reranker toggle
 
-`RERANK_ENABLED` is a clean runtime toggle. The reranker is a
-post-RRF stage with no schema dependency, so flipping it on or off
-takes effect on the next request without touching indexing or
-embeddings. The default is `false`; to use it, stand up a compatible
-mlx-shaped `/rerank` service, set `RERANK_BASE_URL`, and flip
-`RERANK_ENABLED=true`.
+`RERANK_MODE` is a clean runtime toggle. The reranker is a post-RRF
+stage with no schema dependency, so flipping it on or off takes
+effect on the next request without touching indexing or embeddings.
+The default is `none`; to use it, set `RERANK_MODE=cohere`, set
+`RERANK_MODEL` (e.g. `rerank-v4.0-pro`), and write the API key to
+`.secrets/rerank_api_key.txt`. `RERANK_BASE_URL` is optional —
+leave empty for the Cohere SDK default.
 
 ### Pointing at a different embedder provider
 
@@ -249,29 +261,29 @@ a single env change away. Examples:
 
 ```bash
 # Host-side server (LM Studio, vLLM, mlx_lm.server, TEI, etc.)
-EMBED_OPENAI_BASE_URL=http://host.docker.internal:8001/v1
-EMBED_OPENAI_MODEL=mlx-community/Qwen3-Embedding-8B-mxfp8
+EMBED_BASE_URL=http://host.docker.internal:8001/v1
+EMBED_MODEL=mlx-community/Qwen3-Embedding-8B-mxfp8
 
 # DeepInfra
-EMBED_OPENAI_BASE_URL=https://api.deepinfra.com/v1/openai
-EMBED_OPENAI_MODEL=Qwen/Qwen3-Embedding-8B
-# put the API key in .secrets/embed_openai_api_key.txt — never .env
+EMBED_BASE_URL=https://api.deepinfra.com/v1/openai
+EMBED_MODEL=Qwen/Qwen3-Embedding-8B
+# put the API key in .secrets/embed_api_key.txt — never .env
 
 # OpenRouter
-EMBED_OPENAI_BASE_URL=https://openrouter.ai/api/v1
-EMBED_OPENAI_MODEL=qwen/qwen3-embedding-8b
+EMBED_BASE_URL=https://openrouter.ai/api/v1
+EMBED_MODEL=qwen/qwen3-embedding-8b
 ```
 
 After changing provider:
 
 1. Set the new vars in `.env`.
 2. If the provider authenticates, write the API key to
-   `.secrets/embed_openai_api_key.txt` (`chmod 600`). `make init-secrets`
+   `.secrets/embed_api_key.txt` (`chmod 600`). `make init-secrets`
    creates an empty placeholder.
 3. **Indexer and mcp-server must point at the same provider + model**
    so query vectors are comparable to indexed vectors. Mixing them
    silently degrades hybrid search.
-4. The schema reserves a fixed 4096-dim vector. `EMBED_OPENAI_MODEL`
+4. The schema reserves a fixed 4096-dim vector. `EMBED_MODEL`
    must keep producing 4096-dim vectors (Qwen3-Embedding-8B variants)
    or a schema migration is required.
 5. Switching to a model with a different vector distribution requires
@@ -284,7 +296,7 @@ Pointing at a host-side server keeps that traffic on your machine.
 Choose accordingly.
 
 The embedder has no enable/disable toggle equivalent to
-`RERANK_ENABLED`. The SQLite schema is sized for 4096-dim vectors and
+`RERANK_MODE`. The SQLite schema is sized for 4096-dim vectors and
 the indexer needs an embedder — falling back to "no embedder" would
 mean a schema rollback plus a full reindex from Maildir.
 
@@ -547,8 +559,8 @@ docker inspect mbsync --format='{{json .State.Health}}'
 ### Embedder or inference endpoint unreachable from containers
 
 The indexer or mcp-server reports a connection error against
-`EMBED_OPENAI_BASE_URL` / `INFERENCE_OPENAI_BASE_URL` /
-`INFERENCE_ANTHROPIC_BASE_URL`. The project does not run those
+`EMBED_BASE_URL` / `INFERENCE_BASE_URL` /
+`INFERENCE_BASE_URL`. The project does not run those
 servers, so the diagnostic depends on where you pointed it:
 
 - Host-side server: confirm it is listening on the configured port
@@ -717,8 +729,8 @@ and trust-on-first-use re-pins whatever cert Bridge presents.
 authenticates against Bridge state that the volume wipe just deleted
 (`vault.enc`). After `make clean` you must re-run `make first-run`
 and paste the new Bridge password into `.secrets/bridge_pass.txt`.
-Inference provider keys (`.secrets/inference_openai_api_key.txt` and
-`.secrets/inference_anthropic_api_key.txt`) are intentionally preserved
+Inference provider keys (`.secrets/inference_api_key.txt` and
+`.secrets/inference_api_key.txt`) are intentionally preserved
 because they authenticate against external services that survive
 container rebuilds.
 

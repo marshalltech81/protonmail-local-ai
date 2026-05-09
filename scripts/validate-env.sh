@@ -5,9 +5,9 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 readonly ROOT_DIR
 readonly ENV_FILE="${ROOT_DIR}/.env"
 readonly BRIDGE_PASS_FILE="${ROOT_DIR}/.secrets/bridge_pass.txt"
-readonly INFERENCE_OPENAI_KEY_FILE="${ROOT_DIR}/.secrets/inference_openai_api_key.txt"
-readonly INFERENCE_ANTHROPIC_KEY_FILE="${ROOT_DIR}/.secrets/inference_anthropic_api_key.txt"
-readonly EMBED_OPENAI_KEY_FILE="${ROOT_DIR}/.secrets/embed_openai_api_key.txt"
+readonly INFERENCE_KEY_FILE="${ROOT_DIR}/.secrets/inference_api_key.txt"
+readonly EMBED_KEY_FILE="${ROOT_DIR}/.secrets/embed_api_key.txt"
+readonly RERANK_KEY_FILE="${ROOT_DIR}/.secrets/rerank_api_key.txt"
 
 require_file() {
     local path="$1"
@@ -132,30 +132,43 @@ fi
 
 require_file "$ENV_FILE" ".env"
 require_file "$BRIDGE_PASS_FILE" "Bridge password secret"
-require_file "$INFERENCE_OPENAI_KEY_FILE" "OpenAI-compatible inference API key secret file"
-require_file "$INFERENCE_ANTHROPIC_KEY_FILE" "Anthropic-compatible inference API key secret file"
-require_file "$EMBED_OPENAI_KEY_FILE" "OpenAI-compatible embedder API key secret file"
+require_file "$INFERENCE_KEY_FILE" "Inference API key secret file"
+require_file "$EMBED_KEY_FILE" "Embed API key secret file"
+require_file "$RERANK_KEY_FILE" "Rerank API key secret file"
 
-reject_deprecated_env "LLM_BASE_URL" "INFERENCE_OPENAI_BASE_URL"
-reject_deprecated_env "LLM_MODEL" "INFERENCE_OPENAI_MODEL"
+# Inference / embed / rerank env vars collapsed into one *_MODE-based shape
+# (no provider-namespaced vars). Mode selects the wire protocol; the
+# remaining vars (BASE_URL, MODEL, API_KEY) configure that mode. ``none``
+# disables a layer entirely. There is no inter-mode fallback — choosing
+# a mode without its required vars is a startup error here, not a silent
+# reroute to a different provider.
+reject_deprecated_env "LLM_BASE_URL" "INFERENCE_BASE_URL"
+reject_deprecated_env "LLM_MODEL" "INFERENCE_MODEL"
 reject_deprecated_env "LLM_MODE" "INFERENCE_MODE"
-reject_deprecated_env "CLAUDE_MODEL" "INFERENCE_ANTHROPIC_MODEL"
-reject_deprecated_env "ANTHROPIC_API_KEY" "INFERENCE_ANTHROPIC_API_KEY"
-reject_deprecated_env "EMBED_BASE_URL" "EMBED_OPENAI_BASE_URL"
-reject_deprecated_env "EMBED_MODEL" "EMBED_OPENAI_MODEL"
-reject_deprecated_env "EMBED_API_KEY" "EMBED_OPENAI_API_KEY"
+reject_deprecated_env "CLAUDE_MODEL" "INFERENCE_MODEL"
+reject_deprecated_env "ANTHROPIC_API_KEY" "INFERENCE_API_KEY"
+reject_deprecated_env "INFERENCE_OPENAI_BASE_URL" "INFERENCE_BASE_URL"
+reject_deprecated_env "INFERENCE_OPENAI_MODEL" "INFERENCE_MODEL"
+reject_deprecated_env "INFERENCE_OPENAI_API_KEY" "INFERENCE_API_KEY"
+reject_deprecated_env "INFERENCE_ANTHROPIC_BASE_URL" "INFERENCE_BASE_URL"
+reject_deprecated_env "INFERENCE_ANTHROPIC_MODEL" "INFERENCE_MODEL"
+reject_deprecated_env "INFERENCE_ANTHROPIC_API_KEY" "INFERENCE_API_KEY"
+reject_deprecated_env "EMBED_OPENAI_BASE_URL" "EMBED_BASE_URL"
+reject_deprecated_env "EMBED_OPENAI_MODEL" "EMBED_MODEL"
+reject_deprecated_env "EMBED_OPENAI_API_KEY" "EMBED_API_KEY"
+reject_deprecated_env "RERANK_ENABLED" "RERANK_MODE"
 
 BRIDGE_USER="$(get_env_value BRIDGE_USER)"
 BRIDGE_VERSION="$(get_env_value BRIDGE_VERSION)"
 INFERENCE_MODE="$(get_env_value INFERENCE_MODE)"
-INFERENCE_OPENAI_BASE_URL="$(get_env_value INFERENCE_OPENAI_BASE_URL)"
-INFERENCE_OPENAI_MODEL="$(get_env_value INFERENCE_OPENAI_MODEL)"
-INFERENCE_ANTHROPIC_BASE_URL="$(get_env_value INFERENCE_ANTHROPIC_BASE_URL)"
-INFERENCE_ANTHROPIC_MODEL="$(get_env_value INFERENCE_ANTHROPIC_MODEL)"
-EMBED_OPENAI_BASE_URL="$(get_env_value EMBED_OPENAI_BASE_URL)"
-EMBED_OPENAI_MODEL="$(get_env_value EMBED_OPENAI_MODEL)"
-RERANK_ENABLED="$(get_env_value RERANK_ENABLED)"
+INFERENCE_BASE_URL="$(get_env_value INFERENCE_BASE_URL)"
+INFERENCE_MODEL="$(get_env_value INFERENCE_MODEL)"
+EMBED_MODE="$(get_env_value EMBED_MODE)"
+EMBED_BASE_URL="$(get_env_value EMBED_BASE_URL)"
+EMBED_MODEL="$(get_env_value EMBED_MODEL)"
+RERANK_MODE="$(get_env_value RERANK_MODE)"
 RERANK_BASE_URL="$(get_env_value RERANK_BASE_URL)"
+RERANK_MODEL="$(get_env_value RERANK_MODEL)"
 SYNC_INTERVAL="$(get_env_value SYNC_INTERVAL)"
 MCP_PORT="$(get_env_value MCP_PORT)"
 MCP_TRANSPORT="$(get_env_value MCP_TRANSPORT)"
@@ -171,85 +184,80 @@ MCP_READ_ONLY="$(get_env_value MCP_READ_ONLY)"
     exit 1
 }
 
+# ----- INFERENCE -----
 INFERENCE_MODE="${INFERENCE_MODE:-anthropic}"
-[[ "$INFERENCE_MODE" =~ ^(openai|anthropic)$ ]] || {
-    echo "ERROR: INFERENCE_MODE must be 'openai' or 'anthropic'." >&2
+[[ "$INFERENCE_MODE" =~ ^(openai|anthropic|none)$ ]] || {
+    echo "ERROR: INFERENCE_MODE must be one of: anthropic, openai, none." >&2
     exit 1
 }
 
-# Embedder is always required — the indexer cannot run without it,
-# regardless of which inference mode is in use.
-[[ -n "$EMBED_OPENAI_BASE_URL" ]] || {
-    echo "ERROR: EMBED_OPENAI_BASE_URL must be set in .env (OpenAI-compatible /v1 base URL of your embedder)." >&2
-    exit 1
-}
-
-[[ "$EMBED_OPENAI_BASE_URL" =~ ^https?:// ]] || {
-    echo "ERROR: EMBED_OPENAI_BASE_URL must start with http:// or https://." >&2
-    exit 1
-}
-
-[[ -n "$EMBED_OPENAI_MODEL" ]] || {
-    echo "ERROR: EMBED_OPENAI_MODEL must be set in .env (model id served at EMBED_OPENAI_BASE_URL)." >&2
-    exit 1
-}
-
-# OpenAI-compatible inference vars are required only when that client
-# is selected.
-if [[ "$INFERENCE_MODE" == "openai" ]]; then
-    [[ -n "$INFERENCE_OPENAI_BASE_URL" ]] || {
-        echo "ERROR: INFERENCE_OPENAI_BASE_URL must be set in .env when INFERENCE_MODE=openai." >&2
+if [[ "$INFERENCE_MODE" != "none" ]]; then
+    [[ -n "$INFERENCE_MODEL" ]] || {
+        echo "ERROR: INFERENCE_MODEL must be set when INFERENCE_MODE=$INFERENCE_MODE." >&2
         exit 1
     }
+    if [[ "$INFERENCE_MODE" == "openai" ]]; then
+        # OpenAI-compatible mode requires an explicit endpoint; anthropic
+        # mode falls through to the SDK default when INFERENCE_BASE_URL
+        # is empty, so URL validation only fires when a value was set.
+        [[ -n "$INFERENCE_BASE_URL" ]] || {
+            echo "ERROR: INFERENCE_BASE_URL must be set when INFERENCE_MODE=openai." >&2
+            exit 1
+        }
+    fi
+    if [[ -n "$INFERENCE_BASE_URL" ]]; then
+        [[ "$INFERENCE_BASE_URL" =~ ^https?:// ]] || {
+            echo "ERROR: INFERENCE_BASE_URL must start with http:// or https://." >&2
+            exit 1
+        }
+    fi
+fi
 
-    [[ "$INFERENCE_OPENAI_BASE_URL" =~ ^https?:// ]] || {
-        echo "ERROR: INFERENCE_OPENAI_BASE_URL must start with http:// or https://." >&2
+# ----- EMBED -----
+# Indexer + mcp-server share these vars. mcp-server accepts ``none`` for a
+# keyword-only retrieval surface; the indexer rejects ``none`` at startup
+# because it cannot ingest mail without an embedder. Validate the shape
+# here — the indexer / mcp-server containers each enforce their own
+# tighter rule.
+EMBED_MODE="${EMBED_MODE:-openai}"
+[[ "$EMBED_MODE" =~ ^(openai|none)$ ]] || {
+    echo "ERROR: EMBED_MODE must be one of: openai, none." >&2
+    exit 1
+}
+
+if [[ "$EMBED_MODE" != "none" ]]; then
+    [[ -n "$EMBED_BASE_URL" ]] || {
+        echo "ERROR: EMBED_BASE_URL must be set when EMBED_MODE=$EMBED_MODE." >&2
         exit 1
     }
-
-    [[ -n "$INFERENCE_OPENAI_MODEL" ]] || {
-        echo "ERROR: INFERENCE_OPENAI_MODEL must be set in .env (model id served at INFERENCE_OPENAI_BASE_URL)." >&2
+    [[ "$EMBED_BASE_URL" =~ ^https?:// ]] || {
+        echo "ERROR: EMBED_BASE_URL must start with http:// or https://." >&2
+        exit 1
+    }
+    [[ -n "$EMBED_MODEL" ]] || {
+        echo "ERROR: EMBED_MODEL must be set when EMBED_MODE=$EMBED_MODE." >&2
         exit 1
     }
 fi
 
-# Anthropic-compatible inference vars must be syntactically valid even
-# in openai mode (the values are still wired into the container env so
-# a flip to anthropic mode doesn't require a stack rebuild). The
-# nonempty-key check below only fires when the mode is actually anthropic.
-[[ -n "$INFERENCE_ANTHROPIC_BASE_URL" ]] || {
-    echo "ERROR: INFERENCE_ANTHROPIC_BASE_URL must be set in .env (Anthropic-compatible base URL, e.g. https://api.anthropic.com/v1)." >&2
+# ----- RERANK -----
+RERANK_MODE="${RERANK_MODE:-none}"
+[[ "$RERANK_MODE" =~ ^(cohere|none)$ ]] || {
+    echo "ERROR: RERANK_MODE must be one of: cohere, none." >&2
     exit 1
 }
 
-[[ "$INFERENCE_ANTHROPIC_BASE_URL" =~ ^https?:// ]] || {
-    echo "ERROR: INFERENCE_ANTHROPIC_BASE_URL must start with http:// or https://." >&2
-    exit 1
-}
-
-[[ -n "$INFERENCE_ANTHROPIC_MODEL" ]] || {
-    echo "ERROR: INFERENCE_ANTHROPIC_MODEL must be set in .env (model id served at INFERENCE_ANTHROPIC_BASE_URL, e.g. claude-sonnet-4-6)." >&2
-    exit 1
-}
-
-# Reranker is opt-in. Default to false when unset, validate the URL
-# only when the flag is true.
-RERANK_ENABLED="${RERANK_ENABLED:-false}"
-[[ "$RERANK_ENABLED" =~ ^(true|false)$ ]] || {
-    echo "ERROR: RERANK_ENABLED must be 'true' or 'false'." >&2
-    exit 1
-}
-
-if [[ "$RERANK_ENABLED" == "true" ]]; then
-    [[ -n "$RERANK_BASE_URL" ]] || {
-        echo "ERROR: RERANK_BASE_URL must be set in .env when RERANK_ENABLED=true." >&2
+if [[ "$RERANK_MODE" != "none" ]]; then
+    [[ -n "$RERANK_MODEL" ]] || {
+        echo "ERROR: RERANK_MODEL must be set when RERANK_MODE=$RERANK_MODE." >&2
         exit 1
     }
-
-    [[ "$RERANK_BASE_URL" =~ ^https?:// ]] || {
-        echo "ERROR: RERANK_BASE_URL must start with http:// or https://." >&2
-        exit 1
-    }
+    if [[ -n "$RERANK_BASE_URL" ]]; then
+        [[ "$RERANK_BASE_URL" =~ ^https?:// ]] || {
+            echo "ERROR: RERANK_BASE_URL must start with http:// or https://." >&2
+            exit 1
+        }
+    fi
 fi
 
 require_integer "SYNC_INTERVAL" "$SYNC_INTERVAL"
@@ -277,14 +285,18 @@ MCP_TRANSPORT="${MCP_TRANSPORT:-sse}"
 
 require_nonempty_file "$BRIDGE_PASS_FILE" "Bridge password secret"
 require_mode_600 "$BRIDGE_PASS_FILE"
-require_mode_600 "$INFERENCE_OPENAI_KEY_FILE"
-require_mode_600 "$INFERENCE_ANTHROPIC_KEY_FILE"
-require_mode_600 "$EMBED_OPENAI_KEY_FILE"
+require_mode_600 "$INFERENCE_KEY_FILE"
+require_mode_600 "$EMBED_KEY_FILE"
+require_mode_600 "$RERANK_KEY_FILE"
 
-if [[ "$INFERENCE_MODE" == "anthropic" ]]; then
-    require_nonempty_file \
-        "$INFERENCE_ANTHROPIC_KEY_FILE" \
-        "Anthropic-compatible inference API key secret"
+# Each active mode's secret file must contain a real value. Disabled
+# layers can leave the file empty (it must still exist with mode 600 so
+# the docker-compose ``secrets:`` reference resolves cleanly).
+if [[ "$INFERENCE_MODE" != "none" ]]; then
+    require_nonempty_file "$INFERENCE_KEY_FILE" "Inference API key"
+fi
+if [[ "$RERANK_MODE" != "none" ]]; then
+    require_nonempty_file "$RERANK_KEY_FILE" "Rerank API key"
 fi
 
 printf 'Environment validation passed.\n'

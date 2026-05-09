@@ -8,7 +8,6 @@ import json
 import logging
 import re
 
-import httpx
 from mcp.types import TextContent
 
 from ..lib.security import safe_exception_text
@@ -435,32 +434,27 @@ def _thread_context(thread: ThreadResult, limit: int = PER_THREAD_CHAR_BUDGET) -
 def register_intelligence_tools(
     server,
     db,
-    llm,
-    inference_mode: str,
-    anthropic_api_key: str,
-    anthropic_model: str,
-    anthropic_base_url: str,
+    embed_client,
+    inference_client,
     *,
     reranker=None,
 ):
-    secret_values = [anthropic_api_key]
+    """Register intelligence tools.
+
+    ``embed_client`` and ``inference_client`` must both be present —
+    intelligence tools require both retrieval and inference. ``main.py``
+    only calls this registrar when ``EMBED_MODE`` and ``INFERENCE_MODE``
+    are both active; ``mode=none`` on either layer skips this group
+    entirely.
+
+    There is no inter-mode fallback: ``inference_client`` already
+    encapsulates the chosen protocol/SDK. A misconfigured mode is
+    caught at startup, not silently rerouted to a different provider.
+    """
+    secret_values: list[str] = []
 
     async def llm_complete(system: str, user: str) -> str:
-        """Route by inference protocol/client.
-
-        ``INFERENCE_MODE=openai`` uses the OpenAI-compatible chat
-        completions client. ``INFERENCE_MODE=anthropic`` uses the
-        Anthropic-compatible Messages API.
-        """
-        if inference_mode == "anthropic" and anthropic_api_key:
-            return await _anthropic_complete(
-                system,
-                user,
-                anthropic_api_key,
-                anthropic_model,
-                anthropic_base_url,
-            )
-        return await llm.complete(system, user)
+        return await inference_client.complete(system, user)
 
     @server.tool()
     async def ask_mailbox(
@@ -547,7 +541,7 @@ def register_intelligence_tools(
             # per-message chunks to each surfaced thread, so the LLM
             # context below is the precise passages that drove ranking
             # rather than the truncated accumulated thread body.
-            embedding = await llm.embed(question)
+            embedding = await embed_client.embed(question)
             results = await asyncio.to_thread(
                 db.hybrid_search,
                 query_text=question,
@@ -654,7 +648,7 @@ def register_intelligence_tools(
             # path returns at most one thread so there's no ambiguity
             # at the summarize step.
             if not thread:
-                embedding = await llm.embed(thread_id)
+                embedding = await embed_client.embed(thread_id)
                 resolved = await asyncio.to_thread(
                     db.hybrid_search,
                     query_text=thread_id,
@@ -765,7 +759,7 @@ def register_intelligence_tools(
         limit = clamp_int(limit, default=20, minimum=1, maximum=_MAX_EXTRACT_LIMIT)
 
         try:
-            embedding = await llm.embed(query)
+            embedding = await embed_client.embed(query)
             # ``with_evidence`` attaches the chunk(s) that ranked each
             # thread, so the per-thread extraction prompt below sees the
             # exact passages relevant to ``query`` rather than the whole
@@ -839,36 +833,3 @@ def register_intelligence_tools(
             safe_error = safe_exception_text(e, secret_values)
             log.error("extract_from_emails error: %s", safe_error)
             return [TextContent(type="text", text=f"Error: {safe_error}")]
-
-
-async def _anthropic_complete(
-    system: str,
-    user: str,
-    api_key: str,
-    model: str,
-    base_url: str,
-) -> str:
-    """Call an Anthropic-compatible Messages API."""
-    # Explicit per-call timeout — connect quickly, allow the read budget
-    # to span the model's reasoning. Setting on the call rather than
-    # relying on the client-level default keeps the semantics correct if
-    # the client is ever shared across requests.
-    timeout = httpx.Timeout(60.0, connect=5.0)
-    async with httpx.AsyncClient() as client:
-        r = await client.post(
-            f"{base_url.rstrip('/')}/messages",
-            headers={
-                "x-api-key": api_key,
-                "anthropic-version": "2023-06-01",
-                "content-type": "application/json",
-            },
-            json={
-                "model": model,
-                "max_tokens": 1024,
-                "system": system,
-                "messages": [{"role": "user", "content": user}],
-            },
-            timeout=timeout,
-        )
-        r.raise_for_status()
-        return r.json()["content"][0]["text"]

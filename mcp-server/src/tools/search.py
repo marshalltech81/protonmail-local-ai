@@ -22,7 +22,17 @@ _MAX_SEARCH_LIMIT = 50
 _VALID_SEARCH_MODES = frozenset({"hybrid", "semantic", "keyword"})
 
 
-def register_search_tools(server, db, llm, *, reranker=None):
+def register_search_tools(server, db, embed_client, *, reranker=None):
+    """Register search tools.
+
+    ``embed_client`` may be ``None`` when ``EMBED_MODE=none`` — in that
+    case ``search_emails`` accepts only ``mode="keyword"`` and returns
+    a clear error for ``"hybrid"``/``"semantic"`` calls. This is the
+    no-fallback behavior the operator opts into by setting the mode
+    explicitly: a missing embed layer is surfaced, not silently
+    rerouted to FTS-only.
+    """
+
     @server.tool()
     async def search_emails(
         query: str,
@@ -189,7 +199,17 @@ def register_search_tools(server, db, llm, *, reranker=None):
                     limit=limit,
                 )
             elif mode == "semantic":
-                embedding = await llm.embed(query)
+                if embed_client is None:
+                    return [
+                        TextContent(
+                            type="text",
+                            text=(
+                                "Semantic search is unavailable: EMBED_MODE=none. "
+                                "Use mode='keyword' instead, or configure EMBED_MODE."
+                            ),
+                        )
+                    ]
+                embedding = await embed_client.embed(query)
                 results = await asyncio.to_thread(
                     db.semantic_search,
                     query_embedding=embedding,
@@ -201,7 +221,17 @@ def register_search_tools(server, db, llm, *, reranker=None):
                     limit=limit,
                 )
             else:  # hybrid (default)
-                embedding = await llm.embed(query)
+                if embed_client is None:
+                    return [
+                        TextContent(
+                            type="text",
+                            text=(
+                                "Hybrid search is unavailable: EMBED_MODE=none. "
+                                "Use mode='keyword' instead, or configure EMBED_MODE."
+                            ),
+                        )
+                    ]
+                embedding = await embed_client.embed(query)
                 results = await asyncio.to_thread(
                     db.hybrid_search,
                     query_text=query,

@@ -19,10 +19,10 @@
 #     treat the overlay as broken when host-side endpoints are in use.
 #   - Containerized OpenAI-compatible / rerank service on app-net —
 #     reachable as expected.
-#   - Any remote provider (Anthropic, DeepInfra, OpenRouter, etc.) —
-#     blocked by design. INFERENCE_MODE=anthropic and any cloud-pointed
-#     EMBED_OPENAI_BASE_URL / RERANK_BASE_URL will fail under this
-#     overlay, which is the point.
+#   - Any remote provider (Anthropic, DeepInfra, OpenRouter, Cohere,
+#     etc.) — blocked by design. INFERENCE_MODE=anthropic, any
+#     cloud-pointed EMBED_BASE_URL, and RERANK_MODE=cohere will fail
+#     under this overlay, which is the point.
 #
 # Usage:
 #   docker compose -f docker-compose.yml -f docker-compose.hardened.yml up -d

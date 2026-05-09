@@ -539,14 +539,58 @@ class FakeMCPServer:
         return decorator
 
 
-class FakeLocalLLM:
-    """Async stub of ``src.lib.local_llm.LocalLLMClient``.
+class FakeEmbedClient:
+    """Async stub of ``src.lib.embed.EmbedClient``.
 
     Returns a canned 4-dim embedding that matches ``seeded_db`` /
-    ``empty_db`` vec0 schema, and a canned ``complete()`` response so
-    intelligence tools can be exercised without hitting a live LLM
-    backend. ``complete_responses`` lets a test queue up successive
-    distinct responses for the per-thread ``extract_from_emails`` loop.
+    ``empty_db`` vec0 schema so retrieval tests can run without hitting
+    a live embedding backend.
+    """
+
+    def __init__(self, embedding: list[float] | None = None) -> None:
+        self._embedding = embedding if embedding is not None else [1.0, 0.0, 0.0, 0.0]
+        self.embed_calls: list[str] = []
+
+    async def embed(self, text: str) -> list[float]:
+        self.embed_calls.append(text)
+        return list(self._embedding)
+
+
+class FakeInferenceClient:
+    """Async stub of ``src.lib.inference.InferenceClient``.
+
+    Returns a canned ``complete()`` response so intelligence tools can
+    be exercised without hitting a live LLM backend.
+    ``complete_responses`` lets a test queue up successive distinct
+    responses for the per-thread ``extract_from_emails`` loop.
+    """
+
+    def __init__(
+        self,
+        response: str = "mock answer",
+        complete_responses: list[str] | None = None,
+        mode: str = "anthropic",
+    ) -> None:
+        self._default_response = response
+        self._queued = list(complete_responses) if complete_responses is not None else []
+        self.mode = mode
+        self.complete_calls: list[tuple[str, str]] = []
+
+    async def complete(self, system: str, user: str) -> str:
+        self.complete_calls.append((system, user))
+        if self._queued:
+            return self._queued.pop(0)
+        return self._default_response
+
+
+class FakeLocalLLM:
+    """Compatibility facade combining ``FakeEmbedClient`` +
+    ``FakeInferenceClient`` for tests that assert on both surfaces.
+
+    Mirrors the legacy ``LocalLLMClient`` surface so existing tests can
+    keep their assertion shape while the production code uses the new
+    split clients. New tests should construct ``FakeEmbedClient`` and
+    ``FakeInferenceClient`` directly.
     """
 
     def __init__(
@@ -555,21 +599,32 @@ class FakeLocalLLM:
         response: str = "mock answer",
         complete_responses: list[str] | None = None,
     ) -> None:
-        self._embedding = embedding if embedding is not None else [1.0, 0.0, 0.0, 0.0]
-        self._default_response = response
-        self._queued = list(complete_responses) if complete_responses is not None else []
-        self.embed_calls: list[str] = []
-        self.complete_calls: list[tuple[str, str]] = []
+        self._embed = FakeEmbedClient(embedding=embedding)
+        self._inference = FakeInferenceClient(
+            response=response, complete_responses=complete_responses
+        )
+
+    @property
+    def embed_calls(self) -> list[str]:
+        return self._embed.embed_calls
+
+    @property
+    def complete_calls(self) -> list[tuple[str, str]]:
+        return self._inference.complete_calls
 
     async def embed(self, text: str) -> list[float]:
-        self.embed_calls.append(text)
-        return list(self._embedding)
+        return await self._embed.embed(text)
 
     async def complete(self, system: str, user: str) -> str:
-        self.complete_calls.append((system, user))
-        if self._queued:
-            return self._queued.pop(0)
-        return self._default_response
+        return await self._inference.complete(system, user)
+
+    @property
+    def embed_client(self) -> FakeEmbedClient:
+        return self._embed
+
+    @property
+    def inference_client(self) -> FakeInferenceClient:
+        return self._inference
 
 
 class FakeIMAP:

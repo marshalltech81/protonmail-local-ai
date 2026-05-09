@@ -18,8 +18,9 @@ from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-from .lib.local_llm import LocalLLMClient
-from .lib.reranker import MlxReranker, RerankConfig
+from .lib.embed import EmbedClient
+from .lib.inference import InferenceClient
+from .lib.reranker import CohereReranker, RerankConfig
 from .lib.sqlite import Database
 from .tools.intelligence import register_intelligence_tools
 from .tools.retrieval import register_retrieval_tools
@@ -106,11 +107,29 @@ def _env_bool(name: str, default: bool) -> bool:
     raise ValueError(f"{name} must be a boolean value")
 
 
-def _normalize_inference_mode(raw: str) -> str:
+_INFERENCE_MODES = frozenset({"anthropic", "openai", "none"})
+_EMBED_MODES = frozenset({"openai", "none"})
+_RERANK_MODES = frozenset({"cohere", "none"})
+
+
+def _normalize_mode(name: str, raw: str, allowed: frozenset[str]) -> str:
     mode = raw.strip().lower()
-    if mode in {"openai", "anthropic"}:
+    if mode in allowed:
         return mode
-    raise ValueError("INFERENCE_MODE must be one of: openai, anthropic")
+    allowed_repr = ", ".join(sorted(allowed))
+    raise ValueError(f"{name} must be one of: {allowed_repr}")
+
+
+def _require_env(mode_name: str, mode: str, var_name: str, value: str) -> str:
+    """Fail fast at startup when a layer is active but its config is missing.
+
+    This is the no-fallback rule: choosing a mode is intentional. A mode
+    selected without its required vars surfaces as a startup error, never
+    a silent reroute to a different provider.
+    """
+    if not value:
+        raise ValueError(f"{var_name} must be set when {mode_name}={mode!r}")
+    return value
 
 
 def _read_secret(secret_name: str, env_fallback: str = "") -> str:
@@ -130,50 +149,45 @@ def _read_secret(secret_name: str, env_fallback: str = "") -> str:
 # Configuration from environment
 # ---------------------------------------------------------------------------
 SQLITE_PATH = os.environ.get("SQLITE_PATH", "/data/mail.db")
-# Inference protocol/client selection. ``anthropic`` (default) calls
-# an Anthropic-compatible Messages API. ``openai`` calls an
-# OpenAI-compatible ``/v1/chat/completions`` endpoint at an
-# operator-supplied URL (a remote provider or a host-side server).
-INFERENCE_MODE = _normalize_inference_mode(os.environ.get("INFERENCE_MODE", "anthropic"))
-INFERENCE_OPENAI_BASE_URL = os.environ.get(
-    "INFERENCE_OPENAI_BASE_URL", "http://host.docker.internal:8002/v1"
+
+# Each layer (inference / embed / rerank) is selected by its ``*_MODE``
+# variable. The same shape applies across all three:
+#
+#   {LAYER}_MODE      = anthropic|openai|none / openai|none / cohere|none
+#   {LAYER}_BASE_URL  = endpoint URL (when the chosen mode needs one)
+#   {LAYER}_MODEL     = model id served at that endpoint
+#   {LAYER}_API_KEY   = bearer credential (Docker secret preferred)
+#
+# ``mode=none`` disables the layer: the client is not constructed and
+# tools that depend on it are either not registered (inference) or
+# refuse the dependent operations (embed / rerank).
+#
+# Validation is strict and fail-closed: a chosen mode without its
+# required vars raises at startup. There is no inter-mode fallback —
+# choosing ``anthropic`` and forgetting the API key surfaces here, not
+# silently as a reroute to the OpenAI-shaped client.
+INFERENCE_MODE = _normalize_mode(
+    "INFERENCE_MODE", os.environ.get("INFERENCE_MODE", "anthropic"), _INFERENCE_MODES
 )
-INFERENCE_OPENAI_MODEL = os.environ.get("INFERENCE_OPENAI_MODEL", "mlx-community/Qwen3-32B-4bit")
-INFERENCE_OPENAI_API_KEY = _read_secret("inference_openai_api_key", "INFERENCE_OPENAI_API_KEY")
-INFERENCE_ANTHROPIC_BASE_URL = os.environ.get(
-    "INFERENCE_ANTHROPIC_BASE_URL", "https://api.anthropic.com/v1"
-)
-INFERENCE_ANTHROPIC_MODEL = os.environ.get("INFERENCE_ANTHROPIC_MODEL", "claude-sonnet-4-6")
-INFERENCE_ANTHROPIC_API_KEY = _read_secret(
-    "inference_anthropic_api_key", "INFERENCE_ANTHROPIC_API_KEY"
-)
+INFERENCE_BASE_URL = os.environ.get("INFERENCE_BASE_URL", "")
+INFERENCE_MODEL = os.environ.get("INFERENCE_MODEL", "")
+INFERENCE_API_KEY = _read_secret("inference_api_key", "INFERENCE_API_KEY")
+
+EMBED_MODE = _normalize_mode("EMBED_MODE", os.environ.get("EMBED_MODE", "openai"), _EMBED_MODES)
+EMBED_BASE_URL = os.environ.get("EMBED_BASE_URL", "")
+EMBED_MODEL = os.environ.get("EMBED_MODEL", "")
+EMBED_API_KEY = _read_secret("embed_api_key", "EMBED_API_KEY")
+
+RERANK_MODE = _normalize_mode("RERANK_MODE", os.environ.get("RERANK_MODE", "none"), _RERANK_MODES)
+RERANK_BASE_URL = os.environ.get("RERANK_BASE_URL", "")
+RERANK_MODEL = os.environ.get("RERANK_MODEL", "")
+RERANK_API_KEY = _read_secret("rerank_api_key", "RERANK_API_KEY")
+RERANK_CANDIDATES = int(os.environ.get("RERANK_CANDIDATES", "20"))
+RERANK_TOP_N = int(os.environ.get("RERANK_TOP_N", "10"))
+
 MCP_PORT = int(os.environ.get("MCP_PORT", "3000"))
 MCP_READ_ONLY = _env_bool("MCP_READ_ONLY", True)
 MCP_TRANSPORT = os.environ.get("MCP_TRANSPORT", "sse")
-# Retrieval stack URLs. Embeddings and reranking are independent
-# operator-supplied surfaces — mcp-server points at any OpenAI-compatible
-# embedder (``EMBED_OPENAI_BASE_URL`` + ``EMBED_OPENAI_MODEL``) and at
-# any mlx-shaped /rerank service (``RERANK_BASE_URL``). The schema
-# reserves a fixed 4096-dim vector — keep ``EMBED_OPENAI_MODEL`` pointed
-# at a 4096-dim model (Qwen3-Embedding-8B variants) or a schema
-# migration is required. Indexer and mcp-server must point at the same
-# embedder so query vectors are comparable to indexed vectors.
-EMBED_OPENAI_BASE_URL = os.environ.get(
-    "EMBED_OPENAI_BASE_URL", "http://host.docker.internal:8001/v1"
-)
-EMBED_OPENAI_MODEL = os.environ.get("EMBED_OPENAI_MODEL", "mlx-community/Qwen3-Embedding-8B-mxfp8")
-EMBED_OPENAI_API_KEY = _read_secret("embed_openai_api_key", "EMBED_OPENAI_API_KEY")
-# Reranker is not OpenAI-shaped — there is no OpenAI rerank standard —
-# so it gets its own URL knob. The wire format follows the mlx-service
-# /rerank shape (see ``src/lib/reranker.py``).
-RERANK_BASE_URL = os.environ.get("RERANK_BASE_URL", "")
-# ``RERANK_ENABLED`` enables the post-RRF rerank pass that takes
-# ``RERANK_CANDIDATES`` from RRF and truncates to the caller's
-# ``limit`` (defaulting to ``RERANK_TOP_N`` when the caller does not
-# specify) via the reranker service. Disabled by default.
-RERANK_ENABLED = _env_bool("RERANK_ENABLED", False)
-RERANK_CANDIDATES = int(os.environ.get("RERANK_CANDIDATES", "20"))
-RERANK_TOP_N = int(os.environ.get("RERANK_TOP_N", "10"))
 
 
 def _normalize_transport(raw: str) -> str:
@@ -260,19 +274,47 @@ def _run_server(server: FastMCP, transport: str) -> None:
 def main():
     # Shared service clients
     db = Database(SQLITE_PATH)
-    llm = LocalLLMClient(
-        embed_base_url=EMBED_OPENAI_BASE_URL,
-        llm_model=INFERENCE_OPENAI_MODEL,
-        llm_base_url=INFERENCE_OPENAI_BASE_URL,
-        embed_model=EMBED_OPENAI_MODEL,
-        embed_api_key=EMBED_OPENAI_API_KEY,
-        llm_api_key=INFERENCE_OPENAI_API_KEY,
-    )
-    reranker: MlxReranker | None = None
-    if RERANK_ENABLED:
-        reranker = MlxReranker(
+
+    # Validate per-mode required vars at startup. A chosen mode with
+    # missing config raises here so the operator sees a precise error
+    # rather than a runtime fallback to a different provider.
+    embed_client: EmbedClient | None = None
+    if EMBED_MODE == "openai":
+        _require_env("EMBED_MODE", EMBED_MODE, "EMBED_BASE_URL", EMBED_BASE_URL)
+        _require_env("EMBED_MODE", EMBED_MODE, "EMBED_MODEL", EMBED_MODEL)
+        embed_client = EmbedClient(
+            base_url=EMBED_BASE_URL,
+            model=EMBED_MODEL,
+            api_key=EMBED_API_KEY,
+        )
+
+    inference_client: InferenceClient | None = None
+    if INFERENCE_MODE in {"openai", "anthropic"}:
+        _require_env("INFERENCE_MODE", INFERENCE_MODE, "INFERENCE_MODEL", INFERENCE_MODEL)
+        _require_env("INFERENCE_MODE", INFERENCE_MODE, "INFERENCE_API_KEY", INFERENCE_API_KEY)
+        if INFERENCE_MODE == "openai":
+            # OpenAI-compatible mode points at an operator-supplied endpoint
+            # (remote provider or host-side server), so a base URL is
+            # required. Anthropic mode falls through to the SDK default
+            # (api.anthropic.com) when ``INFERENCE_BASE_URL`` is empty.
+            _require_env("INFERENCE_MODE", INFERENCE_MODE, "INFERENCE_BASE_URL", INFERENCE_BASE_URL)
+        inference_base_url = INFERENCE_BASE_URL or "https://api.anthropic.com"
+        inference_client = InferenceClient.create(
+            mode=INFERENCE_MODE,
+            base_url=inference_base_url,
+            model=INFERENCE_MODEL,
+            api_key=INFERENCE_API_KEY,
+        )
+
+    reranker: CohereReranker | None = None
+    if RERANK_MODE == "cohere":
+        _require_env("RERANK_MODE", RERANK_MODE, "RERANK_MODEL", RERANK_MODEL)
+        _require_env("RERANK_MODE", RERANK_MODE, "RERANK_API_KEY", RERANK_API_KEY)
+        reranker = CohereReranker(
             RerankConfig(
                 base_url=RERANK_BASE_URL,
+                model=RERANK_MODEL,
+                api_key=RERANK_API_KEY,
                 candidates=RERANK_CANDIDATES,
                 top_n=RERANK_TOP_N,
             )
@@ -337,19 +379,26 @@ def main():
             return JSONResponse({"status": "unhealthy"}, status_code=503)
         return JSONResponse({"status": "ok"})
 
-    # Register all tool groups
-    register_search_tools(server, db, llm, reranker=reranker)
+    # Register all tool groups. Intelligence tools require both embed and
+    # inference; the group is skipped when either layer is disabled so a
+    # mailbox with retrieval-only or inference-only configuration still
+    # serves keyword search and retrieval cleanly.
+    register_search_tools(server, db, embed_client, reranker=reranker)
     register_retrieval_tools(server, db)
-    register_intelligence_tools(
-        server,
-        db,
-        llm,
-        INFERENCE_MODE,
-        INFERENCE_ANTHROPIC_API_KEY,
-        INFERENCE_ANTHROPIC_MODEL,
-        INFERENCE_ANTHROPIC_BASE_URL,
-        reranker=reranker,
-    )
+    if embed_client is not None and inference_client is not None:
+        register_intelligence_tools(
+            server,
+            db,
+            embed_client,
+            inference_client,
+            reranker=reranker,
+        )
+    else:
+        log.info(
+            "Intelligence tools not registered (EMBED_MODE=%s, INFERENCE_MODE=%s).",
+            EMBED_MODE,
+            INFERENCE_MODE,
+        )
     if MCP_READ_ONLY:
         log.info("MCP read-only mode enabled; action tools are not registered.")
     else:
@@ -363,23 +412,22 @@ def main():
 
     log.info(f"MCP server starting on port {MCP_PORT}")
     log.info(f"  SQLite:   {SQLITE_PATH}")
-    log.info(f"  Embedder: {EMBED_OPENAI_BASE_URL} (model={EMBED_OPENAI_MODEL})")
-    if EMBED_OPENAI_API_KEY:
-        log.info("  Embedder API key: present (Bearer auth enabled)")
-    if RERANK_ENABLED:
-        log.info(
-            f"  Reranker: {RERANK_BASE_URL} (candidates={RERANK_CANDIDATES}, top_n={RERANK_TOP_N})"
-        )
-    else:
-        log.info("  Reranker: disabled")
+    log.info(f"  Embed mode:     {EMBED_MODE}")
+    if embed_client is not None:
+        log.info(f"  Embed:          {EMBED_BASE_URL} (model={EMBED_MODEL})")
     log.info(f"  Inference mode: {INFERENCE_MODE}")
-    if INFERENCE_MODE == "openai":
-        log.info(f"  Inference OpenAI: {INFERENCE_OPENAI_BASE_URL} ({INFERENCE_OPENAI_MODEL})")
-        if INFERENCE_OPENAI_API_KEY:
-            log.info("  Inference OpenAI API key: present (Bearer auth enabled)")
-    elif INFERENCE_MODE == "anthropic":
+    if inference_client is not None:
+        # Anthropic mode may use the SDK default URL when INFERENCE_BASE_URL
+        # is empty; surface what was actually wired so the log doesn't
+        # imply a configured value when none was set.
         log.info(
-            f"  Inference Anthropic: {INFERENCE_ANTHROPIC_BASE_URL} ({INFERENCE_ANTHROPIC_MODEL})"
+            f"  Inference:      {INFERENCE_BASE_URL or '(SDK default)'} (model={INFERENCE_MODEL})"
+        )
+    log.info(f"  Rerank mode:    {RERANK_MODE}")
+    if reranker is not None:
+        log.info(
+            f"  Rerank:         {RERANK_BASE_URL or '(SDK default)'} "
+            f"(model={RERANK_MODEL}, candidates={RERANK_CANDIDATES}, top_n={RERANK_TOP_N})"
         )
     log.info(f"  Transport: {transport}")
     log.info("  Retrieval: local SQLite index only")

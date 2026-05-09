@@ -21,7 +21,7 @@ The project no longer ships its own model-serving components. The
 indexer + mcp-server now consume an operator-supplied OpenAI-compatible
 embedder and choose between an Anthropic-compatible Messages API
 (default daily-driver) or any OpenAI-compatible chat-completions
-endpoint for inference. The reranker is opt-in (`RERANK_ENABLED=false`
+endpoint for inference. The reranker is opt-in (`RERANK_MODE=none`
 by default).
 
 What remains: the previously paused pre-MLX priorities resume from
@@ -62,11 +62,11 @@ The stack now runs:
 - **mcp-server** — Docker, hybrid search + intelligence tools. The
   LLM-synthesis step is dispatched by `INFERENCE_MODE`: `anthropic`
   (default daily-driver) → Anthropic-compatible Messages API at
-  `INFERENCE_ANTHROPIC_BASE_URL` (default model `claude-sonnet-4-6`);
+  `INFERENCE_BASE_URL` (default model `claude-sonnet-4-6`);
   `openai` → `LocalLLMClient.complete()` against any OpenAI-compatible
-  `/v1/chat/completions` endpoint at `INFERENCE_OPENAI_BASE_URL`. The
+  `/v1/chat/completions` endpoint at `INFERENCE_BASE_URL`. The
   optional cross-encoder rerank stage runs against `RERANK_BASE_URL`
-  when `RERANK_ENABLED=true`; the default is off. The Tier-2–11
+  when `RERANK_MODE=cohere`; the default is off. The Tier-2–11
   manual-eval pass on 2026-05-04 was run with `INFERENCE_MODE=anthropic`;
   that remains the standing quality baseline.
 
@@ -95,7 +95,7 @@ Independent of the consolidation work above. These are tuning /
 validation tasks that should happen regardless of the LLM-engine swap.
 
 1. **Rerank-side quality experiment.** Once retrieval is stable,
-   compare `RERANK_ENABLED=true` vs `false` on the manual eval
+   compare `RERANK_MODE=cohere` vs `false` on the manual eval
    set to measure what the rerank stage actually buys you.
 2. **Indexer healthcheck threshold.** Currently flagged
    "unhealthy" during sustained MLX-pace indexing because
@@ -432,7 +432,7 @@ project no longer ships its own model-serving components. Operators
 now supply their own OpenAI-compatible embedder and choose between an
 Anthropic-compatible Messages API (default daily-driver) or any
 OpenAI-compatible chat-completions endpoint for inference. The
-reranker becomes opt-in (`RERANK_ENABLED=false`).
+reranker becomes opt-in (`RERANK_MODE=none`).
 
 Concretely:
 
@@ -440,16 +440,17 @@ Concretely:
   jobs, sync targets, bandit scans, and the dual-mac-runner test
   workflow that existed only because the `mlx` Linux wheel doesn't
   import.
-- Defaults: `INFERENCE_MODE=anthropic`, `RERANK_ENABLED=false`,
-  `EMBED_OPENAI_BASE_URL` / `EMBED_OPENAI_MODEL` /
-  `INFERENCE_OPENAI_BASE_URL` / `RERANK_BASE_URL` ship empty so
+- Defaults: `INFERENCE_MODE=anthropic`, `RERANK_MODE=none`,
+  `EMBED_BASE_URL` / `EMBED_MODEL` /
+  `INFERENCE_BASE_URL` / `RERANK_BASE_URL` ship empty so
   validate-env.sh fails closed unless the operator wires up a
   provider. Anthropic mode is fully default-configured; openai mode
   needs the URL/model knobs filled in.
-- Validation: validate-env.sh now mode-conditional — `INFERENCE_OPENAI_*`
-  required only when `INFERENCE_MODE=openai`, `RERANK_BASE_URL`
-  required only when `RERANK_ENABLED=true`, and `EMBED_OPENAI_*`
-  always required (the indexer can't run without an embedder).
+- Validation: validate-env.sh now mode-conditional — `INFERENCE_*`
+  required only when `INFERENCE_MODE != none`, `RERANK_*` required
+  only when `RERANK_MODE=cohere`, and `EMBED_*` always required by
+  the indexer (which rejects `EMBED_MODE=none` at startup; the
+  mcp-server side accepts `none` for keyword-only retrieval).
 - Hardened overlay: warning rewritten — `internal: true` is intended
   to block remote providers, and is compatible with operator-installed
   host-side providers (subject to runtime `host.docker.internal`
@@ -468,8 +469,8 @@ the storage contract:
 
 - **PR #95** — OpenAIEmbedder client (mlx-service, indexer,
   mcp-server) speaks the OpenAI `/v1/embeddings` wire format directly.
-  Provider swap is now `EMBED_OPENAI_BASE_URL` + `EMBED_OPENAI_MODEL` + an
-  optional `embed_openai_api_key` Docker secret with no per-provider
+  Provider swap is now `EMBED_BASE_URL` + `EMBED_MODEL` + an
+  optional `embed_api_key` Docker secret with no per-provider
   code path.
 - **PR #96** — cross-message embed batching for initial_index ("C1").
   Phase 1 commits thread membership per message; Phase 2b issues one
@@ -563,8 +564,8 @@ all shipped together.
   default to give Qwen3's thinking-mode answers headroom when
   callers don't override per-request. ``.env.example`` and
   ``docker-compose.yml`` defaults flipped to point at MLX-LM
-  (``INFERENCE_OPENAI_BASE_URL=http://host.docker.internal:8002/v1``,
-  ``INFERENCE_OPENAI_MODEL=mlx-community/Qwen3-32B-4bit``). End-to-end smoke
+  (``INFERENCE_BASE_URL=http://host.docker.internal:8002/v1``,
+  ``INFERENCE_MODEL=mlx-community/Qwen3-32B-4bit``). End-to-end smoke
   test confirmed: ``LocalLLMClient.complete()`` against the live
   server returns a correct grounded answer in production shape.
 - **Ollama teardown.** ``com.local.ollama-host`` LaunchAgent
@@ -589,8 +590,8 @@ preparatory work for Phase B's operational MLX-LM swap.
   ``LocalLLMClient`` (file ``mcp-server/src/lib/ollama.py`` →
   ``local_llm.py``). ``complete()`` now POSTs the OpenAI-compatible
   ``/v1/chat/completions`` shape and unwraps
-  ``choices[0].message.content``; new ``INFERENCE_OPENAI_BASE_URL`` and
-  ``INFERENCE_OPENAI_MODEL`` env vars replace ``OLLAMA_LLM_MODEL``. The same
+  ``choices[0].message.content``; new ``INFERENCE_BASE_URL`` and
+  ``INFERENCE_MODEL`` env vars replace ``OLLAMA_LLM_MODEL``. The same
   client targets both Ollama (``:11434/v1``) and ``mlx_lm.server``
   with no per-backend branching, so the engine swap in Phase B
   becomes an env-var change.

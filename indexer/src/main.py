@@ -7,8 +7,12 @@ and writes to the SQLite index.
 The embedder is operator-supplied: any OpenAI-compatible provider
 works (remote — DeepInfra, OpenRouter, etc. — or a host-side server
 the operator installs themselves: LM Studio, vLLM, ``mlx_lm.server``,
-TEI). Configure via ``EMBED_OPENAI_BASE_URL`` + ``EMBED_OPENAI_MODEL``
-(+ optional ``EMBED_OPENAI_API_KEY`` Docker secret).
+TEI). Configure via ``EMBED_BASE_URL`` + ``EMBED_MODEL`` (+ optional
+``EMBED_API_KEY`` Docker secret). ``EMBED_MODE`` selects the wire
+shape; the indexer requires an active embedder so ``EMBED_MODE=none``
+is a startup error here (the mcp-server side accepts ``none`` to
+serve keyword-only search, but the indexer cannot index without
+embeddings).
 
 When ``INDEXER_DELETION_ENABLED=true`` the indexer also runs a reconciler
 that records tombstones for mbsync-flagged (``T``) Maildir files and reaps
@@ -57,41 +61,69 @@ MAILDIR_PATH = Path(os.environ.get("MAILDIR_PATH", "/maildir"))
 SQLITE_PATH = Path(os.environ.get("SQLITE_PATH", "/data/mail.db"))
 
 # OpenAI-compatible embedder configuration. The operator supplies the
-# provider — set ``EMBED_OPENAI_BASE_URL`` to any compliant /v1 base
-# URL and ``EMBED_OPENAI_MODEL`` to a model id served there. The schema
-# reserves a fixed 4096-dim vector — pick a 4096-dim model
-# (Qwen3-Embedding-8B variants) or run a schema migration. Authentication
-# (when needed) is loaded from the ``embed_openai_api_key`` Docker secret
-# or ``EMBED_OPENAI_API_KEY`` env. The local-dev default below points at
-# the conventional host-side port (``host.docker.internal:8001/v1``);
-# in containerized deployments docker-compose passes the env through
-# unconditionally so an unset .env value becomes empty and validate-env
-# refuses to start.
-EMBED_OPENAI_BASE_URL = os.environ.get(
-    "EMBED_OPENAI_BASE_URL", "http://host.docker.internal:8001/v1"
-)
-EMBED_OPENAI_MODEL = os.environ.get("EMBED_OPENAI_MODEL", "mlx-community/Qwen3-Embedding-8B-mxfp8")
+# provider — set ``EMBED_BASE_URL`` to any compliant /v1 base URL and
+# ``EMBED_MODEL`` to a model id served there. The schema reserves a
+# fixed 4096-dim vector — pick a 4096-dim model (Qwen3-Embedding-8B
+# variants) or run a schema migration. Authentication (when needed) is
+# loaded from the ``embed_api_key`` Docker secret or ``EMBED_API_KEY``
+# env. ``EMBED_MODE`` selects the wire shape (``openai`` is the only
+# active value here; ``none`` fails closed because the indexer cannot
+# function without embeddings).
+_EMBED_MODES = frozenset({"openai", "none"})
 
 
-def _read_embed_openai_api_key() -> str:
+def _normalize_embed_mode(raw: str) -> str:
+    mode = raw.strip().lower()
+    if mode in _EMBED_MODES:
+        return mode
+    raise ValueError("EMBED_MODE must be one of: none, openai")
+
+
+EMBED_MODE = _normalize_embed_mode(os.environ.get("EMBED_MODE", "openai"))
+EMBED_BASE_URL = os.environ.get("EMBED_BASE_URL", "")
+EMBED_MODEL = os.environ.get("EMBED_MODEL", "")
+
+
+def _validate_embed_config() -> None:
+    """Raise at startup when the embedder is misconfigured.
+
+    Validation runs in ``main()`` rather than at module load so test
+    files can ``from src import main`` to import helper functions
+    without supplying a full embedder config. The container entrypoint
+    always reaches ``main()`` first, so the operator-facing failure
+    surface is identical.
+    """
+    if EMBED_MODE == "none":
+        raise ValueError(
+            "EMBED_MODE=none is not supported by the indexer — the indexer "
+            "cannot ingest mail without an embedder. Set EMBED_MODE=openai "
+            "and configure EMBED_BASE_URL / EMBED_MODEL."
+        )
+    if not EMBED_BASE_URL:
+        raise ValueError("EMBED_BASE_URL must be set when EMBED_MODE='openai'")
+    if not EMBED_MODEL:
+        raise ValueError("EMBED_MODEL must be set when EMBED_MODE='openai'")
+
+
+def _read_embed_api_key() -> str:
     """Read the embedder API key from a Docker secret, then env, then empty.
 
     Mirrors the secret-then-env pattern used in mcp-server. An empty key
     is the unauthenticated-host-server case (e.g. a local OpenAI-compat
     server bound to loopback) and is not an error. The Docker secret
     path follows the existing ``/run/secrets/<name>`` convention;
-    ``EMBED_OPENAI_API_KEY`` env is the fallback for non-Docker deployments.
+    ``EMBED_API_KEY`` env is the fallback for non-Docker deployments.
     """
-    secret_path = Path("/run/secrets/embed_openai_api_key")
+    secret_path = Path("/run/secrets/embed_api_key")
     if secret_path.exists():
         try:
             return secret_path.read_text(encoding="utf-8").strip()
         except OSError as e:
-            log.warning("could not read /run/secrets/embed_openai_api_key: %s", e)
-    return os.environ.get("EMBED_OPENAI_API_KEY", "").strip()
+            log.warning("could not read /run/secrets/embed_api_key: %s", e)
+    return os.environ.get("EMBED_API_KEY", "").strip()
 
 
-EMBED_OPENAI_API_KEY = _read_embed_openai_api_key()
+EMBED_API_KEY = _read_embed_api_key()
 # /tmp default is safe: container tmpfs, non-root user, overridable via env.
 INDEXER_HEALTH_FILE = Path(os.environ.get("INDEXER_HEALTH_FILE", "/tmp/indexer-health"))  # nosec B108
 
@@ -123,6 +155,10 @@ def _int_env(name: str, default: int, minimum: int = 1) -> int:
 EMBED_BATCH_SIZE = _int_env("EMBED_BATCH_SIZE", 64)
 
 
+# Acquire the OpenAI client at module load so a misconfigured base URL
+# fails closed before any indexing thread starts.
+
+
 # Chunker token budgets — see ``chunker.chunk_message`` for semantics.
 # Defaults are sized for the MLX-served Qwen3-Embedding-8B context
 # window. Qwen3-Embedding handles long context cleanly, so the
@@ -134,7 +170,7 @@ CHUNK_OVERLAP_TOKENS = _int_env("INDEXER_CHUNK_OVERLAP_TOKENS", 150, minimum=0)
 
 # How many messages the initial-scan drainer accumulates before issuing
 # a single batched embed call. Larger batches amortize the embed
-# round-trip across more messages — meaningful when EMBED_OPENAI_BASE_URL
+# round-trip across more messages — meaningful when EMBED_BASE_URL
 # points at a remote provider (~150 ms RTT each), marginal against a
 # host-side server on loopback.
 INITIAL_INDEX_BATCH_SIZE = _int_env("INITIAL_INDEX_BATCH_SIZE", 50)
@@ -1128,21 +1164,19 @@ def _log_reconciler_config(cfg: ReconcilerConfig) -> None:
 
 
 def main():
+    _validate_embed_config()
     log.info("Starting indexer...")
     log.info(f"  Maildir: {MAILDIR_PATH}")
     log.info(f"  SQLite:  {SQLITE_PATH}")
-    log.info(
-        f"  Embedder: {EMBED_OPENAI_BASE_URL} "
-        f"(model={EMBED_OPENAI_MODEL}, batch={EMBED_BATCH_SIZE})"
-    )
-    if EMBED_OPENAI_API_KEY:
+    log.info(f"  Embedder: {EMBED_BASE_URL} (model={EMBED_MODEL}, batch={EMBED_BATCH_SIZE})")
+    if EMBED_API_KEY:
         log.info("  Embedder API key: present (Bearer auth enabled)")
 
     db = Database(SQLITE_PATH)
     embedder = OpenAIEmbedder(
-        base_url=EMBED_OPENAI_BASE_URL,
-        model=EMBED_OPENAI_MODEL,
-        api_key=EMBED_OPENAI_API_KEY,
+        base_url=EMBED_BASE_URL,
+        model=EMBED_MODEL,
+        api_key=EMBED_API_KEY,
         batch_size=EMBED_BATCH_SIZE,
     )
     threader = Threader(db)

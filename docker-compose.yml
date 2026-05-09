@@ -85,12 +85,14 @@ services:
       - bridge-net
 
   # ---------------------------------------------------------------------------
-  # Note: ``INFERENCE_MODE`` selects the chat-completions client.
-  # ``anthropic`` (default) calls an Anthropic-compatible Messages API.
-  # ``openai`` calls an OpenAI-compatible chat-completions endpoint at
-  # ``INFERENCE_OPENAI_BASE_URL`` — point this at a remote provider or
-  # at a host-side server you install yourself. Containers reach a
-  # host-side server via OrbStack's ``host.docker.internal``.
+  # Inference / embed / rerank are operator-supplied. Each layer has a
+  # ``*_MODE`` env var (anthropic|openai|none, openai|none, cohere|none)
+  # plus matching ``*_BASE_URL`` / ``*_MODEL`` / ``*_API_KEY``. ``none``
+  # disables the layer; missing required vars fail at startup with no
+  # inter-mode fallback. Inference and rerank go through official SDKs
+  # (openai, anthropic, cohere); embed uses the openai SDK pointed at a
+  # custom ``base_url``. See .env.example for examples and AGENTS.md for
+  # the full shape.
   # ---------------------------------------------------------------------------
 
   # ---------------------------------------------------------------------------
@@ -135,19 +137,21 @@ services:
       mbsync:
         condition: service_healthy
     secrets:
-      - embed_openai_api_key
+      - embed_api_key
     environment:
       HOME: /home/indexer
       MAILDIR_PATH: /maildir
       SQLITE_PATH: /data/mail.db
-      # OpenAI-compatible embedder. No built-in default — operator
-      # configures EMBED_OPENAI_BASE_URL + EMBED_OPENAI_MODEL in .env.
-      # Any provider that speaks /v1/embeddings works (DeepInfra,
-      # OpenRouter, LM Studio, vLLM, TEI, or a host-side mlx_lm.server).
-      # Indexer + mcp-server must point at the same provider + model so
-      # vectors are comparable.
-      EMBED_OPENAI_BASE_URL: ${EMBED_OPENAI_BASE_URL}
-      EMBED_OPENAI_MODEL: ${EMBED_OPENAI_MODEL}
+      # OpenAI-compatible embedder via the openai SDK with a custom
+      # ``base_url``. No built-in default — operator configures
+      # EMBED_BASE_URL + EMBED_MODEL in .env. Any provider that speaks
+      # /v1/embeddings works (DeepInfra, OpenRouter, LM Studio, vLLM,
+      # TEI, or a host-side mlx_lm.server). Indexer + mcp-server must
+      # point at the same provider + model so vectors are comparable.
+      # ``EMBED_MODE=none`` is rejected by the indexer at startup.
+      EMBED_MODE: ${EMBED_MODE:-openai}
+      EMBED_BASE_URL: ${EMBED_BASE_URL}
+      EMBED_MODEL: ${EMBED_MODEL}
       EMBED_BATCH_SIZE: ${EMBED_BATCH_SIZE:-64}
       # Cross-message batch size for the initial-index drainer. See
       # .env.example for the two-phase pipeline that this tunes.
@@ -245,38 +249,43 @@ services:
       indexer:
         condition: service_healthy
     secrets:
-      - inference_openai_api_key
-      - inference_anthropic_api_key
-      - embed_openai_api_key
+      - inference_api_key
+      - embed_api_key
+      - rerank_api_key
     environment:
       SQLITE_PATH: /data/mail.db
-      # INFERENCE_MODE chooses protocol/client:
-      # - anthropic (default): Anthropic-compatible Messages API
-      # - openai: OpenAI-compatible chat completions (operator-configured
-      #   base URL — remote provider or host-side server)
+      # INFERENCE_MODE selects the inference client/SDK:
+      # - anthropic (default): Anthropic Messages API via the official
+      #   anthropic SDK. Empty INFERENCE_BASE_URL falls through to the
+      #   SDK default (api.anthropic.com).
+      # - openai: OpenAI-compatible chat completions via the official
+      #   openai SDK with a custom base_url (remote provider or
+      #   host-side server). INFERENCE_BASE_URL required.
+      # - none: intelligence tools are not registered.
       INFERENCE_MODE: ${INFERENCE_MODE:-anthropic}
-      INFERENCE_OPENAI_BASE_URL: ${INFERENCE_OPENAI_BASE_URL}
-      INFERENCE_OPENAI_MODEL: ${INFERENCE_OPENAI_MODEL}
-      INFERENCE_ANTHROPIC_BASE_URL: ${INFERENCE_ANTHROPIC_BASE_URL:-https://api.anthropic.com/v1}
-      INFERENCE_ANTHROPIC_MODEL: ${INFERENCE_ANTHROPIC_MODEL:-claude-sonnet-4-6}
+      INFERENCE_BASE_URL: ${INFERENCE_BASE_URL}
+      INFERENCE_MODEL: ${INFERENCE_MODEL:-claude-sonnet-4-6}
       MCP_PORT: ${MCP_PORT:-3000}
       MCP_TRANSPORT: ${MCP_TRANSPORT:-sse}
       MCP_READ_ONLY: ${MCP_READ_ONLY:-true}
-      # Cross-encoder rerank stage in hybrid search. Disabled by default;
-      # set RERANK_BASE_URL + flip RERANK_ENABLED=true when you stand up
-      # a compatible /rerank service (mlx-shaped wire format — see
-      # mcp-server/src/lib/reranker.py). RERANK_CANDIDATES governs how
-      # many RRF results are fed to the cross-encoder before truncation
-      # to the caller's ``limit`` (defaulting to RERANK_TOP_N when the
-      # caller doesn't specify).
-      RERANK_ENABLED: ${RERANK_ENABLED:-false}
-      # OpenAI-compatible embedder for query-time embedding. Must point
-      # at the same provider + model as the indexer; otherwise query
-      # vectors and indexed vectors are produced by different models
-      # and hybrid search degrades.
-      EMBED_OPENAI_BASE_URL: ${EMBED_OPENAI_BASE_URL}
-      EMBED_OPENAI_MODEL: ${EMBED_OPENAI_MODEL}
+      # OpenAI-compatible embedder for query-time embedding via the
+      # openai SDK. Must point at the same provider + model as the
+      # indexer; otherwise query and indexed vectors are produced by
+      # different models and hybrid search degrades. ``EMBED_MODE=none``
+      # serves keyword-only retrieval (search tools refuse semantic /
+      # hybrid modes).
+      EMBED_MODE: ${EMBED_MODE:-openai}
+      EMBED_BASE_URL: ${EMBED_BASE_URL}
+      EMBED_MODEL: ${EMBED_MODEL}
+      # Cross-encoder rerank stage in hybrid search. ``RERANK_MODE=cohere``
+      # enables Cohere's rerank API via the official cohere SDK;
+      # ``RERANK_MODE=none`` (default) returns RRF order directly.
+      # RERANK_CANDIDATES governs how many RRF results are fed to the
+      # cross-encoder before truncation to the caller's ``limit``
+      # (defaulting to RERANK_TOP_N when the caller doesn't specify).
+      RERANK_MODE: ${RERANK_MODE:-none}
       RERANK_BASE_URL: ${RERANK_BASE_URL}
+      RERANK_MODEL: ${RERANK_MODEL}
       RERANK_CANDIDATES: ${RERANK_CANDIDATES:-20}
       RERANK_TOP_N: ${RERANK_TOP_N:-10}
     volumes:
@@ -318,20 +327,17 @@ networks:
 secrets:
   bridge_pass:
     file: ./.secrets/bridge_pass.txt
-  # OpenAI-compatible inference API key — only required when
-  # INFERENCE_MODE=openai and INFERENCE_OPENAI_BASE_URL points at a
-  # provider that authenticates. Leave empty otherwise.
-  inference_openai_api_key:
-    file: ./.secrets/inference_openai_api_key.txt
-  # Anthropic-compatible inference API key — required when
-  # INFERENCE_MODE=anthropic (the default). Never put this value in
-  # .env — it will appear in docker inspect output.
-  inference_anthropic_api_key:
-    file: ./.secrets/inference_anthropic_api_key.txt
-  # OpenAI-compatible embedder API key — only required when
-  # EMBED_OPENAI_BASE_URL points at a provider that authenticates
-  # (DeepInfra, OpenRouter, etc.). Leave empty when pointing at an
-  # unauthenticated host server. Never put this value in .env — it
-  # will appear in docker inspect output.
-  embed_openai_api_key:
-    file: ./.secrets/embed_openai_api_key.txt
+  # Inference API key — required when INFERENCE_MODE is ``openai`` or
+  # ``anthropic``. Leave the file empty when INFERENCE_MODE=none. Never
+  # put this value in .env (it appears in docker inspect output).
+  inference_api_key:
+    file: ./.secrets/inference_api_key.txt
+  # Embed API key — required only when EMBED_BASE_URL points at a
+  # provider that authenticates (DeepInfra, OpenRouter, etc.). Leave
+  # empty when pointing at an unauthenticated host server.
+  embed_api_key:
+    file: ./.secrets/embed_api_key.txt
+  # Rerank API key — required when RERANK_MODE=cohere. Leave the file
+  # empty when RERANK_MODE=none.
+  rerank_api_key:
+    file: ./.secrets/rerank_api_key.txt

@@ -21,10 +21,12 @@ import asyncio
 import logging
 
 from src.main import (
+    _INFERENCE_MODES,
     _env_bool,
-    _normalize_inference_mode,
+    _normalize_mode,
     _normalize_transport,
     _read_secret,
+    _require_env,
     _run_server,
 )
 
@@ -239,16 +241,37 @@ class TestMcpTransport:
         await _run_dual_transport_async(server_stub)
 
 
-class TestInferenceMode:
+class TestNormalizeMode:
     def test_supported_modes_are_normalized(self):
-        assert _normalize_inference_mode("openai") == "openai"
-        assert _normalize_inference_mode(" ANTHROPIC ") == "anthropic"
+        assert _normalize_mode("INFERENCE_MODE", "openai", _INFERENCE_MODES) == "openai"
+        assert _normalize_mode("INFERENCE_MODE", " ANTHROPIC ", _INFERENCE_MODES) == "anthropic"
+        assert _normalize_mode("INFERENCE_MODE", "none", _INFERENCE_MODES) == "none"
 
     def test_unknown_mode_fails_closed(self):
         try:
-            _normalize_inference_mode("local")
+            _normalize_mode("INFERENCE_MODE", "local", _INFERENCE_MODES)
         except ValueError as exc:
             assert "INFERENCE_MODE" in str(exc)
+        else:
+            raise AssertionError("expected ValueError")
+
+
+class TestRequireEnv:
+    def test_passes_through_present_value(self):
+        assert _require_env("INFERENCE_MODE", "openai", "INFERENCE_BASE_URL", "https://x") == (
+            "https://x"
+        )
+
+    def test_empty_value_raises_with_actionable_message(self):
+        # The no-fallback rule: a chosen mode without its required vars
+        # must surface here, not silently route to a different provider.
+        try:
+            _require_env("INFERENCE_MODE", "anthropic", "INFERENCE_API_KEY", "")
+        except ValueError as exc:
+            msg = str(exc)
+            assert "INFERENCE_API_KEY" in msg
+            assert "INFERENCE_MODE" in msg
+            assert "anthropic" in msg
         else:
             raise AssertionError("expected ValueError")
 

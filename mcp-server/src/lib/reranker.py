@@ -1,23 +1,30 @@
-"""Reranker client for an mlx-shaped ``/rerank`` HTTP service.
+"""Reranker client for the MCP server.
 
 The hybrid_search RRF stage produces a candidate set ordered by lane
 fusion. The reranker re-scores those candidates against the query
-using a cross-encoder-style yes/no logit comparison, returning a
-sharper top-K. The cutoff is the caller's ``limit`` (passed through
+using a cross-encoder-style relevance score and returns a sharper
+top-K. The cutoff is the caller's ``limit`` (passed through
 ``rerank(..., top_n=limit)``); ``RERANK_TOP_N`` is only the default
 applied when a caller doesn't specify one. The candidate count fed
 in is ``RERANK_CANDIDATES``.
 
-The wire format is the mlx-service ``/rerank`` shape (no OpenAI rerank
-standard exists). Operators stand up a compatible service themselves
-and point ``RERANK_BASE_URL`` at it; the rerank stage is opt-in via
-``RERANK_ENABLED``.
+``RERANK_MODE`` selects the provider:
 
-Failure handling is best-effort: if the rerank service errors or
+- ``cohere``: Cohere's hosted rerank API via the official ``cohere``
+  SDK. ``RERANK_BASE_URL`` overrides the SDK default for proxies /
+  gateways; leave empty to hit the SDK default
+  (``https://api.cohere.com``).
+- ``none``: rerank disabled. ``main.py`` does not instantiate this
+  client and ``hybrid_search`` skips the rerank stage.
+
+Failure handling is best-effort: if the rerank call errors or
 returns malformed output, ``rerank()`` returns an empty list and the
-caller is expected to fall back to the original RRF ordering. This
-preserves search results during a rerank outage instead of failing
-the whole query — the cost is a quality regression, not a hard error.
+caller falls back to the original RRF ordering. Preserves search
+results during a rerank outage instead of failing the whole query.
+
+The ``cohere`` SDK is imported inside ``__init__`` so deployments with
+``RERANK_MODE=none`` never pay the import cost — and never depend on
+the SDK installing cleanly.
 """
 
 from __future__ import annotations
@@ -26,17 +33,16 @@ import logging
 from dataclasses import dataclass
 from typing import Protocol
 
-import httpx
-
 log = logging.getLogger("mcp.reranker")
 
 
 @dataclass
 class RerankConfig:
     base_url: str
+    model: str
+    api_key: str
     candidates: int
     top_n: int
-    timeout_seconds: float = 120.0
 
 
 class RerankerBackend(Protocol):
@@ -66,15 +72,30 @@ class RerankerBackend(Protocol):
         ...
 
 
-class MlxReranker:
-    """HTTP client for an mlx-shaped ``/rerank`` service."""
+class CohereReranker:
+    """Cohere ``rerank`` client using the official SDK.
+
+    The base URL is forwarded only when the operator explicitly sets
+    ``RERANK_BASE_URL`` (proxies, gateways, EU region overrides). An
+    empty value means "use the SDK default" — the cleanest path for
+    the standard public endpoint.
+    """
 
     def __init__(self, config: RerankConfig):
+        import cohere
+
         self.config = config
-        self.base_url = config.base_url.rstrip("/")
         self.candidates = config.candidates
         self.top_n = config.top_n
-        self.client = httpx.Client(timeout=config.timeout_seconds)
+        # Pass ``base_url`` only when explicitly set — passing an empty
+        # string would override the SDK default with a malformed URL.
+        if config.base_url:
+            self.client = cohere.ClientV2(
+                api_key=config.api_key,
+                base_url=config.base_url.rstrip("/"),
+            )
+        else:
+            self.client = cohere.ClientV2(api_key=config.api_key)
 
     def rerank(
         self,
@@ -86,19 +107,14 @@ class MlxReranker:
             return []
         effective_top_n = top_n if top_n is not None else self.top_n
         try:
-            r = self.client.post(
-                f"{self.base_url}/rerank",
-                json={
-                    "query": query,
-                    "documents": documents,
-                    "top_n": effective_top_n,
-                },
+            resp = self.client.rerank(
+                model=self.config.model,
+                query=query,
+                documents=documents,
+                top_n=effective_top_n,
             )
-            r.raise_for_status()
-            payload = r.json()
-            results = payload.get("results", [])
-            return [(int(item["index"]), float(item["score"])) for item in results]
-        except (httpx.HTTPError, KeyError, ValueError, TypeError) as exc:
+            return [(int(item.index), float(item.relevance_score)) for item in resp.results]
+        except Exception as exc:
             # Best-effort: log and signal "no rerank available" so the
             # caller can degrade to RRF order rather than fail the query.
             log.warning("rerank failed (%s); falling back to RRF order", exc)
