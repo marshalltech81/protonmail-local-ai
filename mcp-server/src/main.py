@@ -223,8 +223,8 @@ RERANK_MODE = _normalize_mode("RERANK_MODE", os.environ.get("RERANK_MODE", "none
 RERANK_BASE_URL = os.environ.get("RERANK_BASE_URL", "")
 RERANK_MODEL = os.environ.get("RERANK_MODEL", "")
 RERANK_API_KEY = _read_secret("rerank_api_key", "RERANK_API_KEY")
-RERANK_CANDIDATES = int(os.environ.get("RERANK_CANDIDATES", "20"))
-RERANK_TOP_N = int(os.environ.get("RERANK_TOP_N", "10"))
+RERANK_CANDIDATES = _int_env("RERANK_CANDIDATES", 20, minimum=1)
+RERANK_TOP_N = _int_env("RERANK_TOP_N", 10, minimum=1)
 RERANK_TIMEOUT_SECS = _float_env("RERANK_TIMEOUT_SECS", DEFAULT_RERANK_TIMEOUT_SECS, minimum=1.0)
 
 MCP_PORT = int(os.environ.get("MCP_PORT", "3000"))
@@ -440,11 +440,17 @@ def main():
             return JSONResponse({"status": "unhealthy"}, status_code=503)
         return JSONResponse({"status": "ok"})
 
+    # All operator-configured API keys, scrubbed from any exception
+    # text echoed back to the caller or written to logs. The empty
+    # filter strips disabled-layer placeholders so ``redact_sensitive_text``
+    # doesn't waste a no-op replace pass on them.
+    secret_values = [k for k in (INFERENCE_API_KEY, EMBED_API_KEY, RERANK_API_KEY) if k]
+
     # Register all tool groups. Intelligence tools require both embed and
     # inference; the group is skipped when either layer is disabled so a
     # mailbox with retrieval-only or inference-only configuration still
     # serves keyword search and retrieval cleanly.
-    register_search_tools(server, db, embed_client, reranker=reranker)
+    register_search_tools(server, db, embed_client, reranker=reranker, secret_values=secret_values)
     register_retrieval_tools(server, db)
     if embed_client is not None and inference_client is not None:
         register_intelligence_tools(
@@ -453,6 +459,7 @@ def main():
             embed_client,
             inference_client,
             reranker=reranker,
+            secret_values=secret_values,
         )
     else:
         log.info(

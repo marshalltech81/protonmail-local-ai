@@ -173,6 +173,24 @@ class TestErrorPath:
         out = asyncio.run(handler(query="anything", mode="hybrid"))
         assert "Search error" in _text(out)
 
+    def test_secret_values_are_scrubbed_from_exception_text(self, fake_server, fake_llm, seeded_db):
+        # A provider SDK exception that quotes the operator's API key
+        # (e.g. an auth-header echo in the error body) must not leak
+        # to the caller. Pinning this here covers the main.py wiring
+        # of secret_values into the search registrar.
+        leaked_key = "sk-leakedABC123"  # pragma: allowlist secret
+
+        def boom(**_kwargs):
+            raise RuntimeError(f"upstream auth: Bearer {leaked_key}")
+
+        seeded_db.hybrid_search = boom  # type: ignore[assignment]
+        register_search_tools(fake_server, seeded_db, fake_llm, secret_values=[leaked_key])
+        handler = fake_server.tools["search_emails"]
+        out = asyncio.run(handler(query="anything", mode="hybrid"))
+        text = _text(out)
+        assert leaked_key not in text
+        assert "[REDACTED]" in text
+
 
 class TestFromNameResolution:
     """The ``from_name`` parameter resolves a name through find_contact

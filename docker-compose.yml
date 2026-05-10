@@ -213,6 +213,15 @@ services:
       INDEXER_OCR_TIMEOUT_SECONDS: ${INDEXER_OCR_TIMEOUT_SECONDS:-60}
       INDEXER_PDF_MAX_DIGITAL_PAGES: ${INDEXER_PDF_MAX_DIGITAL_PAGES:-500}
       INDEXER_ATTACHMENT_MAX_EXTRACTED_CHARS: ${INDEXER_ATTACHMENT_MAX_EXTRACTED_CHARS:-2000000}
+      # Per-message parse byte cap. Files larger than this are rejected
+      # with a dead-letter row rather than read into memory; sized below
+      # the container ``mem_limit`` so a single oversized message
+      # cannot OOM the indexer. ``0`` disables the cap. The default
+      # matches indexer/src/parser.py; this passthrough is required
+      # because compose does not propagate operator overrides in
+      # ``.env`` into ``os.environ`` inside the container without an
+      # explicit binding.
+      INDEXER_PARSE_MAX_BYTES: ${INDEXER_PARSE_MAX_BYTES:-50000000}
     volumes:
       # Maildir is mounted read-only by default: the indexer's job is to read
       # .eml files and build the SQLite index. INDEXER_UNLINK_ON_REAP needs
@@ -305,6 +314,12 @@ services:
       RERANK_MODEL: ${RERANK_MODEL}
       RERANK_CANDIDATES: ${RERANK_CANDIDATES:-20}
       RERANK_TOP_N: ${RERANK_TOP_N:-10}
+      # Per-call deadline for the Cohere rerank API (seconds). Default
+      # 60 s is shorter than the SDK's 300 s default so a stalled
+      # rerank call doesn't pin a hybrid_search worker thread for five
+      # minutes; rerank failures fall back to RRF order so a tighter
+      # ceiling is safe.
+      RERANK_TIMEOUT_SECS: ${RERANK_TIMEOUT_SECS:-60}
     volumes:
       # Mounted writable so SQLite can create the WAL ``-shm`` sidecar needed
       # for readers on a WAL-mode database. The mcp-server process opens the

@@ -100,6 +100,22 @@ require_integer() {
     }
 }
 
+# Validate as integer (>= minimum). Accept int form only — the python
+# *_env helpers will tolerate floats for timeout-style vars, but the
+# operator-facing default in .env.example is always an integer and
+# rejecting decimal values here keeps the validation contract simple.
+require_integer_min() {
+    local name="$1"
+    local value="$2"
+    local minimum="$3"
+
+    require_integer "$name" "$value"
+    [[ "$value" -ge "$minimum" ]] || {
+        printf 'ERROR: %s must be >= %s, found %s.\n' "$name" "$minimum" "$value" >&2
+        exit 1
+    }
+}
+
 # Read a single KEY=VALUE from .env without shell-sourcing.
 # Shell-sourcing would evaluate command substitutions in values, so a
 # malformed or hostile .env line could execute arbitrary commands from the
@@ -210,6 +226,10 @@ EMBED_MODEL="$(get_env_value EMBED_MODEL)"
 RERANK_MODE="$(get_env_value RERANK_MODE)"
 RERANK_BASE_URL="$(get_env_value RERANK_BASE_URL)"
 RERANK_MODEL="$(get_env_value RERANK_MODEL)"
+RERANK_CANDIDATES="$(get_env_value RERANK_CANDIDATES)"
+RERANK_TOP_N="$(get_env_value RERANK_TOP_N)"
+RERANK_TIMEOUT_SECS="$(get_env_value RERANK_TIMEOUT_SECS)"
+INDEXER_PARSE_MAX_BYTES="$(get_env_value INDEXER_PARSE_MAX_BYTES)"
 SYNC_INTERVAL="$(get_env_value SYNC_INTERVAL)"
 MCP_PORT="$(get_env_value MCP_PORT)"
 MCP_TRANSPORT="$(get_env_value MCP_TRANSPORT)"
@@ -301,6 +321,30 @@ if [[ "$RERANK_MODE" != "none" ]]; then
     fi
 fi
 
+# Optional rerank tuning knobs. Validate only when set so the
+# defaults in mcp-server/src/main.py remain authoritative when the
+# operator leaves the value blank. ``RERANK_CANDIDATES`` and
+# ``RERANK_TOP_N`` must be >= 1 — zero or negative values would feed
+# the rerank stage an empty candidate set or ask for an empty top-K.
+# ``RERANK_TIMEOUT_SECS`` must be >= 1 to bound a stalled rerank
+# call without rejecting routine sub-second failures.
+if [[ -n "$RERANK_CANDIDATES" ]]; then
+    require_integer_min "RERANK_CANDIDATES" "$RERANK_CANDIDATES" 1
+fi
+if [[ -n "$RERANK_TOP_N" ]]; then
+    require_integer_min "RERANK_TOP_N" "$RERANK_TOP_N" 1
+fi
+if [[ -n "$RERANK_TIMEOUT_SECS" ]]; then
+    require_integer_min "RERANK_TIMEOUT_SECS" "$RERANK_TIMEOUT_SECS" 1
+fi
+
+# Per-message parse byte cap. ``0`` disables the cap, so the
+# minimum is 0 rather than 1. Validated only when the operator
+# overrides the indexer/src/parser.py default.
+if [[ -n "$INDEXER_PARSE_MAX_BYTES" ]]; then
+    require_integer_min "INDEXER_PARSE_MAX_BYTES" "$INDEXER_PARSE_MAX_BYTES" 0
+fi
+
 require_integer "SYNC_INTERVAL" "$SYNC_INTERVAL"
 [[ "$SYNC_INTERVAL" -gt 0 ]] || {
     echo "ERROR: SYNC_INTERVAL must be greater than zero." >&2
@@ -330,23 +374,30 @@ require_mode_600 "$INFERENCE_KEY_FILE"
 require_mode_600 "$EMBED_KEY_FILE"
 require_mode_600 "$RERANK_KEY_FILE"
 
-# Each active mode's secret file must contain a real value. Even
-# OpenAI-compatible host-side servers (LM Studio, vLLM, ``mlx_lm.server``)
-# routed through the official SDK ultimately need a non-empty key —
-# the SDK refuses to construct without one, and most compat servers
-# validate the Authorization header rather than ignoring it. Operators
-# pointing at an unauthenticated server should still write any
-# non-empty placeholder into the secret file. Disabled layers
-# (``*_MODE=none``) can leave the file empty (it must still exist
-# with mode 600 so the docker-compose ``secrets:`` reference resolves
-# cleanly).
-if [[ "$INFERENCE_MODE" != "none" ]]; then
+# Each active mode's secret file requirement depends on whether the
+# mode targets an authenticated provider or can also point at an
+# unauthenticated host-side server (LM Studio, vLLM, ``mlx_lm.server``).
+#
+# - ``INFERENCE_MODE=anthropic``: Anthropic-only, always authenticated.
+#   Requires a non-empty key.
+# - ``INFERENCE_MODE=openai``: may target a remote provider OR an
+#   unauthenticated host server. The openai SDK requires a non-empty
+#   ``api_key`` to construct, but ``InferenceClient`` (mcp-server) and
+#   ``OpenAIEmbedder`` (indexer) supply ``"unauthenticated"`` as a
+#   placeholder when the configured key is empty, so the operator can
+#   leave the secret file empty for unauthenticated host servers.
+# - ``EMBED_MODE=openai``: same dual case as ``INFERENCE_MODE=openai``.
+#   ``EmbedClient`` supplies the SDK placeholder when empty.
+# - ``RERANK_MODE=cohere``: Cohere-only, always authenticated.
+#   Requires a non-empty key.
+#
+# Disabled layers (``*_MODE=none``) can leave the file empty (it must
+# still exist with mode 600 so the docker-compose ``secrets:``
+# reference resolves cleanly).
+if [[ "$INFERENCE_MODE" == "anthropic" ]]; then
     require_nonempty_file "$INFERENCE_KEY_FILE" "Inference API key"
 fi
-if [[ "$EMBED_MODE" != "none" ]]; then
-    require_nonempty_file "$EMBED_KEY_FILE" "Embed API key"
-fi
-if [[ "$RERANK_MODE" != "none" ]]; then
+if [[ "$RERANK_MODE" == "cohere" ]]; then
     require_nonempty_file "$RERANK_KEY_FILE" "Rerank API key"
 fi
 

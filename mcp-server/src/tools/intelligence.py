@@ -438,6 +438,7 @@ def register_intelligence_tools(
     inference_client,
     *,
     reranker=None,
+    secret_values=None,
 ):
     """Register intelligence tools.
 
@@ -450,8 +451,14 @@ def register_intelligence_tools(
     There is no inter-mode fallback: ``inference_client`` already
     encapsulates the chosen protocol/SDK. A misconfigured mode is
     caught at startup, not silently rerouted to a different provider.
+
+    ``secret_values`` is the list of operator-configured API keys
+    (inference / embed / rerank) to scrub from any exception text
+    echoed back to the caller or written to logs. Populated by
+    ``main.py`` from the same env/secret reads used to construct the
+    clients above.
     """
-    secret_values: list[str] = []
+    secret_values = list(secret_values or ())
 
     async def llm_complete(system: str, user: str) -> str:
         return await inference_client.complete(system, user)

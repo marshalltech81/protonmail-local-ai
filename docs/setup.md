@@ -38,14 +38,18 @@ permissions. Docker Compose requires all four files to exist before
 starting. You will overwrite them with real values only as needed:
 
 - `bridge_pass.txt` — after the Bridge login step below
-- `inference_api_key.txt` — required (non-empty) whenever
-  `INFERENCE_MODE` is not `none`. Leave empty only when
-  `INFERENCE_MODE=none`. For unauthenticated host servers (LM Studio,
-  vLLM, `mlx_lm.server`) write any non-empty placeholder — the
-  official SDK refuses to construct without a key.
-- `embed_api_key.txt` — required (non-empty) whenever `EMBED_MODE`
-  is not `none`. Same placeholder guidance as above for
-  unauthenticated host embedders.
+- `inference_api_key.txt` — required (non-empty) when
+  `INFERENCE_MODE=anthropic` or `INFERENCE_MODE=openai` against an
+  authenticated provider. Leave empty when `INFERENCE_MODE=none` or
+  when pointing `INFERENCE_MODE=openai` at an unauthenticated
+  host-side server (LM Studio, vLLM, `mlx_lm.server`); the official
+  SDK requires a non-empty `api_key` to construct, so the inference
+  client substitutes a placeholder string in that case.
+- `embed_api_key.txt` — required (non-empty) only when `EMBED_MODE=openai`
+  points at an authenticated provider (DeepInfra, OpenRouter, etc.).
+  Leave empty when pointing at an unauthenticated host server or when
+  `EMBED_MODE=none`; the embed client substitutes a placeholder string
+  for the SDK constructor in that case.
 - `rerank_api_key.txt` — required when `RERANK_MODE=cohere`.
   Leave empty when `RERANK_MODE=none`.
 
@@ -200,11 +204,13 @@ make up
 
 - `BRIDGE_USER` is still unset or left at the placeholder value
 - `.secrets/bridge_pass.txt` is missing, empty, or not `600`
-- any active layer's secret file is missing, empty, or not `600`
-  (`inference_api_key.txt` when `INFERENCE_MODE!=none`,
-  `embed_api_key.txt` when `EMBED_MODE!=none`,
+- any always-authenticated layer's secret file is missing, empty, or not `600`
+  (`inference_api_key.txt` when `INFERENCE_MODE=anthropic`,
   `rerank_api_key.txt` when `RERANK_MODE=cohere`)
 - inference / embed / rerank secret placeholder files are missing or not `600`
+  (validation requires the files to exist with `600` permissions even when the
+  matching layer is `none` or pointing at an unauthenticated host server, so
+  the docker-compose `secrets:` references resolve cleanly)
 - numeric or enum settings such as `SYNC_INTERVAL`, `MCP_PORT`, `MCP_READ_ONLY`, or `INFERENCE_MODE` are invalid
 
 Verify everything is running:

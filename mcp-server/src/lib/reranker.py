@@ -33,6 +33,8 @@ import logging
 from dataclasses import dataclass
 from typing import Protocol
 
+from .security import safe_exception_text
+
 log = logging.getLogger("mcp.reranker")
 
 # Cohere's SDK default is 300s — too long for a synchronous worker
@@ -133,5 +135,9 @@ class CohereReranker:
         except Exception as exc:
             # Best-effort: log and signal "no rerank available" so the
             # caller can degrade to RRF order rather than fail the query.
-            log.warning("rerank failed (%s); falling back to RRF order", exc)
+            # Scrub the configured Cohere API key out of the stringified
+            # exception so an SDK error that quotes the auth header
+            # doesn't land in operator logs verbatim.
+            safe_exc = safe_exception_text(exc, [self.config.api_key])
+            log.warning("rerank failed (%s); falling back to RRF order", safe_exc)
             return []

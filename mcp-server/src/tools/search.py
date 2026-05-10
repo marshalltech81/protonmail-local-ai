@@ -8,6 +8,7 @@ import logging
 
 from mcp.types import TextContent
 
+from ..lib.security import safe_exception_text
 from ..lib.validation import clamp_int
 
 log = logging.getLogger("mcp.tools.search")
@@ -22,7 +23,7 @@ _MAX_SEARCH_LIMIT = 50
 _VALID_SEARCH_MODES = frozenset({"hybrid", "semantic", "keyword"})
 
 
-def register_search_tools(server, db, embed_client, *, reranker=None):
+def register_search_tools(server, db, embed_client, *, reranker=None, secret_values=None):
     """Register search tools.
 
     ``embed_client`` may be ``None`` when ``EMBED_MODE=none`` — in that
@@ -31,7 +32,15 @@ def register_search_tools(server, db, embed_client, *, reranker=None):
     no-fallback behavior the operator opts into by setting the mode
     explicitly: a missing embed layer is surfaced, not silently
     rerouted to FTS-only.
+
+    ``secret_values`` is the list of operator-configured API keys
+    (embed / rerank) to scrub from any exception text echoed back to
+    the caller or written to logs. Provider-SDK exceptions can include
+    auth headers and request/response body fragments; passing the
+    configured keys here means a stringified exception that happens to
+    quote the bearer token gets redacted before it leaves the process.
     """
+    secrets = list(secret_values or ())
 
     @server.tool()
     async def search_emails(
@@ -162,8 +171,9 @@ def register_search_tools(server, db, embed_client, *, reranker=None):
             try:
                 contacts = await asyncio.to_thread(db.find_contact, from_name, 1, senders_only=True)
             except Exception as e:
-                log.error(f"search_emails: find_contact({from_name!r}) failed: {e}")
-                return [TextContent(type="text", text=f"Search error: {e}")]
+                safe_error = safe_exception_text(e, secrets)
+                log.error("search_emails: find_contact(%r) failed: %s", from_name, safe_error)
+                return [TextContent(type="text", text=f"Search error: {safe_error}")]
             if not contacts:
                 return [
                     TextContent(
@@ -264,5 +274,6 @@ def register_search_tools(server, db, embed_client, *, reranker=None):
             return [TextContent(type="text", text="\n".join(output))]
 
         except Exception as e:
-            log.error(f"search_emails error: {e}")
-            return [TextContent(type="text", text=f"Search error: {e}")]
+            safe_error = safe_exception_text(e, secrets)
+            log.error("search_emails error: %s", safe_error)
+            return [TextContent(type="text", text=f"Search error: {safe_error}")]

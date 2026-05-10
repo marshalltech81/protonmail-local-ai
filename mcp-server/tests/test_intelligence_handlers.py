@@ -94,6 +94,30 @@ class TestAskMailbox:
         out = asyncio.run(handler(question="anything"))
         assert "Error" in _text(out)
 
+    def test_secret_values_are_scrubbed_from_exception_text(self, fake_server, seeded_db, fake_llm):
+        # Pin the main.py wiring of secret_values into the intelligence
+        # registrar — a provider SDK exception that quotes the operator's
+        # API key (e.g. an auth-header echo in the error body) must not
+        # leak to the caller via the user-visible Error: response.
+        leaked_key = "sk-leakedXYZ789"  # pragma: allowlist secret
+
+        def boom(**_kwargs):
+            raise RuntimeError(f"upstream auth: Bearer {leaked_key}")
+
+        seeded_db.hybrid_search = boom  # type: ignore[assignment]
+        register_intelligence_tools(
+            fake_server,
+            seeded_db,
+            fake_llm.embed_client,
+            fake_llm.inference_client,
+            secret_values=[leaked_key],
+        )
+        handler = fake_server.tools["ask_mailbox"]
+        out = asyncio.run(handler(question="anything"))
+        text = _text(out)
+        assert leaked_key not in text
+        assert "[REDACTED]" in text
+
 
 class TestSummarizeThread:
     def test_known_thread_calls_llm_with_untrusted_wrapper(self, fake_server, seeded_db, fake_llm):
