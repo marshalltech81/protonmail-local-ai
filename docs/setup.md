@@ -32,19 +32,20 @@ make init-secrets
 ```
 
 This creates `.secrets/bridge_pass.txt`, `.secrets/inference_api_key.txt`,
-`.secrets/inference_api_key.txt`, and
-`.secrets/embed_api_key.txt` as empty placeholders with `600`
-permissions. Docker Compose requires all four files to exist before
-starting. You will overwrite them with real values only as needed:
+`.secrets/embed_api_key.txt`, and `.secrets/rerank_api_key.txt` as
+empty placeholders with `600` permissions. Docker Compose requires
+all four files to exist before starting. You will overwrite them
+with real values only as needed:
 
 - `bridge_pass.txt` — after the Bridge login step below
 - `inference_api_key.txt` — required (non-empty) when
-  `INFERENCE_MODE=anthropic` or `INFERENCE_MODE=openai` against an
-  authenticated provider. Leave empty when `INFERENCE_MODE=none` or
-  when pointing `INFERENCE_MODE=openai` at an unauthenticated
+  `INFERENCE_MODE=anthropic`. Leave empty when `INFERENCE_MODE=none`
+  or when pointing `INFERENCE_MODE=openai` at an unauthenticated
   host-side server (LM Studio, vLLM, `mlx_lm.server`); the official
   SDK requires a non-empty `api_key` to construct, so the inference
-  client substitutes a placeholder string in that case.
+  client substitutes a placeholder string in that case. Set a real
+  key for `INFERENCE_MODE=openai` only when the endpoint actually
+  requires authentication (a remote OpenAI-compatible provider).
 - `embed_api_key.txt` — required (non-empty) only when `EMBED_MODE=openai`
   points at an authenticated provider (DeepInfra, OpenRouter, etc.).
   Leave empty when pointing at an unauthenticated host server or when
@@ -738,10 +739,11 @@ and trust-on-first-use re-pins whatever cert Bridge presents.
 authenticates against Bridge state that the volume wipe just deleted
 (`vault.enc`). After `make clean` you must re-run `make first-run`
 and paste the new Bridge password into `.secrets/bridge_pass.txt`.
-Inference provider keys (`.secrets/inference_api_key.txt` and
-`.secrets/inference_api_key.txt`) are intentionally preserved
-because they authenticate against external services that survive
-container rebuilds.
+Inference / embed / rerank provider keys
+(`.secrets/inference_api_key.txt`, `.secrets/embed_api_key.txt`,
+`.secrets/rerank_api_key.txt`) are intentionally preserved because
+they authenticate against external services that survive container
+rebuilds.
 
 ### mbsync fails — TLS hostname mismatch after rebuilding Bridge image
 

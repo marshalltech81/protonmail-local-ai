@@ -46,14 +46,38 @@ class TestRerank:
             )
 
         r.client.rerank = fake_rerank  # type: ignore[assignment]
-        out = r.rerank("q", ["a", "b", "c"])
+        # Five documents so the default ``top_n=5`` flows through
+        # unclamped — the clamp behavior has its own dedicated test.
+        out = r.rerank("q", ["a", "b", "c", "d", "e"])
         assert out == [(2, 0.9), (0, 0.4), (1, 0.1)]
         # Caller-supplied ``top_n`` defaults to ``self.top_n`` when not
         # provided — the reranker must never silently cap below the
-        # caller's requested limit.
+        # caller's requested limit when the candidate set supports it.
         assert captured["top_n"] == 5
         assert captured["query"] == "q"
-        assert captured["documents"] == ["a", "b", "c"]
+        assert captured["documents"] == ["a", "b", "c", "d", "e"]
+
+    def test_top_n_clamped_to_document_count(self):
+        # Cohere rejects ``top_n > len(documents)`` with a 400, which
+        # would otherwise propagate as a generic rerank failure and
+        # silently degrade to RRF. The reranker clamps before the call
+        # so the caller's "give me up to N" intent is honored against
+        # smaller candidate sets.
+        r = _make_reranker(top_n=20)
+        captured: dict = {}
+
+        def fake_rerank(**kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(results=[_result(0, 0.5), _result(1, 0.3)])
+
+        r.client.rerank = fake_rerank  # type: ignore[assignment]
+        r.rerank("q", ["a", "b"])
+        assert captured["top_n"] == 2
+
+        # Same clamp applies when the caller explicitly overrides top_n.
+        captured.clear()
+        r.rerank("q", ["a", "b"], top_n=50)
+        assert captured["top_n"] == 2
 
     def test_caller_top_n_overrides_default(self):
         r = _make_reranker(top_n=5)
@@ -63,8 +87,12 @@ class TestRerank:
             captured.update(kwargs)
             return SimpleNamespace(results=[])
 
+        # Provide enough documents that ``top_n=20`` survives the
+        # ``min(top_n, len(documents))`` clamp — this test is about
+        # the caller-override path, not the clamp.
+        documents = [f"doc-{i}" for i in range(20)]
         r.client.rerank = fake_rerank  # type: ignore[assignment]
-        r.rerank("q", ["a"], top_n=20)
+        r.rerank("q", documents, top_n=20)
         assert captured["top_n"] == 20
 
     def test_empty_documents_short_circuits_without_calling_sdk(self):

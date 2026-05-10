@@ -37,7 +37,7 @@ from .attachment_indexing import (
 from .chunker import MessageChunk, chunk_message, mean_vector
 from .database import EMBEDDING_DIM, Database
 from .embedder import EmbeddingBackend, OpenAIEmbedder, scrub_embed_error
-from .parser import Message, parse_email
+from .parser import Message, OversizedMessageError, parse_email
 from .queue import (
     REASON_INITIAL_SCAN,
     REASON_ON_CREATED,
@@ -528,6 +528,13 @@ def _phase1_commit_thread(
         # mbsync flag-rename race: file moved between enqueue and parse.
         # Watchdog's IN_MOVED_TO will re-enqueue under the new name.
         queue.mark_skipped(filepath, reason="file_missing")
+        return None
+    except OversizedMessageError:
+        # File exceeds INDEXER_PARSE_MAX_BYTES. Terminal — retrying will
+        # find the same oversized file and burn embed budget. Skip
+        # rather than silently mark_succeeded so operators can see
+        # oversized entries in the indexer log.
+        queue.mark_skipped(filepath, reason="oversized")
         return None
     except Exception as e:
         queue.mark_failed(filepath, stage="parse", error=repr(e))

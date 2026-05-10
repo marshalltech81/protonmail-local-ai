@@ -10,7 +10,7 @@ import re
 
 from mcp.types import TextContent
 
-from ..lib.security import safe_exception_text
+from ..lib.security import safe_provider_exception_text
 from ..lib.sqlite import ThreadResult
 from ..lib.validation import clamp_int
 
@@ -601,7 +601,7 @@ def register_intelligence_tools(
             return [TextContent(type="text", text=f"{answer}\n\nSources searched:\n{sources}")]
 
         except Exception as e:
-            safe_error = safe_exception_text(e, secret_values)
+            safe_error = safe_provider_exception_text(e, secret_values)
             log.error("ask_mailbox error: %s", safe_error)
             return [TextContent(type="text", text=f"Error: {safe_error}")]
 
@@ -708,7 +708,7 @@ def register_intelligence_tools(
             ]
 
         except Exception as e:
-            safe_error = safe_exception_text(e, secret_values)
+            safe_error = safe_provider_exception_text(e, secret_values)
             log.error("summarize_thread error: %s", safe_error)
             return [TextContent(type="text", text=f"Error: {safe_error}")]
 
@@ -837,6 +837,6 @@ def register_intelligence_tools(
             return [TextContent(type="text", text=json.dumps(extracted_records, indent=2))]
 
         except Exception as e:
-            safe_error = safe_exception_text(e, secret_values)
+            safe_error = safe_provider_exception_text(e, secret_values)
             log.error("extract_from_emails error: %s", safe_error)
             return [TextContent(type="text", text=f"Error: {safe_error}")]

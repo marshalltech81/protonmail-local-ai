@@ -19,6 +19,27 @@ import html2text
 
 log = logging.getLogger("indexer.parser")
 
+
+class OversizedMessageError(Exception):
+    """Raised when an ``.eml`` exceeds ``INDEXER_PARSE_MAX_BYTES``.
+
+    Distinct from the parser's other ``None``-return paths (no
+    Message-ID, etc.) so the indexer worker can route oversized files
+    through ``mark_skipped(reason="oversized")`` rather than
+    ``mark_succeeded`` — the file was never indexed, and the queue
+    log line should reflect that for operator visibility.
+    """
+
+    def __init__(self, path: Path, size: int, cap: int) -> None:
+        super().__init__(
+            f"oversized email {path} ({size} bytes > {cap} cap); "
+            "raise INDEXER_PARSE_MAX_BYTES to ingest, or 0 to disable."
+        )
+        self.path = path
+        self.size = size
+        self.cap = cap
+
+
 # Hard ceiling on the size of a single ``.eml`` we will read into
 # memory. Bridge inbound usually caps at ~25 MB, but a malicious /
 # corrupt Maildir file with no such bound would otherwise let a
@@ -136,12 +157,13 @@ def parse_email(path: Path, maildir_root: Path | None = None) -> Message | None:
     dead-letter cascade so operators see persistent parser bugs instead
     of a quietly shrinking index.
 
-    Files larger than ``INDEXER_PARSE_MAX_BYTES`` (default 50 MB) are
-    skipped before ``read_bytes`` so a malicious or corrupt Maildir
-    entry cannot exhaust container memory. A skipped file returns
-    ``None`` so the queue marks the row succeeded and stops retrying —
-    the file will not shrink on retry, and an unbounded retry against
-    the cap would just burn embed-budget without progress.
+    Files larger than ``INDEXER_PARSE_MAX_BYTES`` (default 50 MB) raise
+    ``OversizedMessageError`` before ``read_bytes`` so a malicious or
+    corrupt Maildir entry cannot exhaust container memory. The worker
+    catches the error and routes the row through
+    ``mark_skipped(reason="oversized")`` — terminal, no retry, but
+    visible in operator logs as a skip rather than a silent
+    success-deletion.
     """
     # ``stat`` doubles as the size-cap pre-check AND the source of the
     # ``mtime_ns`` we capture below. A single OSError covers both.
@@ -159,7 +181,7 @@ def parse_email(path: Path, maildir_root: Path | None = None) -> Message | None:
             stat.st_size,
             cap,
         )
-        return None
+        raise OversizedMessageError(path, stat.st_size, cap)
 
     raw = path.read_bytes()
     msg = email.message_from_bytes(raw)

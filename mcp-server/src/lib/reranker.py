@@ -33,7 +33,7 @@ import logging
 from dataclasses import dataclass
 from typing import Protocol
 
-from .security import safe_exception_text
+from .security import safe_provider_exception_text
 
 log = logging.getLogger("mcp.reranker")
 
@@ -124,6 +124,12 @@ class CohereReranker:
         if not documents:
             return []
         effective_top_n = top_n if top_n is not None else self.top_n
+        # Clamp to the candidate count: Cohere rejects top_n > len(documents)
+        # with a 400, which would otherwise propagate as a generic rerank
+        # failure and silently degrade to RRF. The caller's intent is
+        # "give me up to ``effective_top_n``" — when fewer candidates are
+        # available, return what we have.
+        effective_top_n = min(effective_top_n, len(documents))
         try:
             resp = self.client.rerank(
                 model=self.config.model,
@@ -135,9 +141,12 @@ class CohereReranker:
         except Exception as exc:
             # Best-effort: log and signal "no rerank available" so the
             # caller can degrade to RRF order rather than fail the query.
-            # Scrub the configured Cohere API key out of the stringified
-            # exception so an SDK error that quotes the auth header
-            # doesn't land in operator logs verbatim.
-            safe_exc = safe_exception_text(exc, [self.config.api_key])
+            # ``safe_provider_exception_text`` trims Cohere SDK status
+            # errors to ``type + status`` so the response body — which
+            # can echo the documents (email-chunk text) we just sent —
+            # never lands in operator logs or downstream callers.
+            # Connection / timeout failures fall through to the standard
+            # secret-redacting formatter and keep diagnostic detail.
+            safe_exc = safe_provider_exception_text(exc, [self.config.api_key])
             log.warning("rerank failed (%s); falling back to RRF order", safe_exc)
             return []

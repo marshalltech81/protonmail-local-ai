@@ -10,6 +10,7 @@ from datetime import datetime
 from pathlib import Path
 
 from src.parser import (
+    OversizedMessageError,
     _clean_id,
     _decode_header,
     _parse_addrs,
@@ -190,6 +191,36 @@ class TestParseEmail:
 
         with pytest.raises(FileNotFoundError):
             parse_email(tmp_path / "ghost.eml")
+
+    def test_oversized_file_raises_oversized_message_error(self, tmp_path, monkeypatch):
+        # Files past INDEXER_PARSE_MAX_BYTES must raise so the worker
+        # routes them through ``mark_skipped(reason="oversized")``
+        # instead of the previous silent ``return None`` /
+        # ``mark_succeeded`` path that hid oversized entries from
+        # operator-visible logs.
+        import pytest
+
+        # Force a small cap so we don't have to write a 50 MB fixture.
+        monkeypatch.setenv("INDEXER_PARSE_MAX_BYTES", "100")
+        path = write_eml(
+            tmp_path,
+            """
+            From: a@example.com
+            To: b@example.com
+            Subject: huge
+            Message-ID: <huge@example.com>
+            Date: Mon, 01 Jan 2024 12:00:00 +0000
+            Content-Type: text/plain; charset=utf-8
+
+            """
+            + ("X" * 500),
+            name="huge.eml",
+        )
+        with pytest.raises(OversizedMessageError) as excinfo:
+            parse_email(path)
+        assert excinfo.value.cap == 100
+        assert excinfo.value.size > 100
+        assert excinfo.value.path == path
 
     def test_permission_denied_propagates_for_queue_retry(self, tmp_path):
         # Models the mbsync 0600→0644 chmod race: the file exists but

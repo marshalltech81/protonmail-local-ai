@@ -349,14 +349,21 @@ def main():
     inference_client: InferenceClient | None = None
     if INFERENCE_MODE in {"openai", "anthropic"}:
         _require_env("INFERENCE_MODE", INFERENCE_MODE, "INFERENCE_MODEL", INFERENCE_MODEL)
-        _require_env("INFERENCE_MODE", INFERENCE_MODE, "INFERENCE_API_KEY", INFERENCE_API_KEY)
         if INFERENCE_MODE == "openai":
             # OpenAI-compatible mode points at an operator-supplied endpoint
             # (remote provider or host-side server), so a base URL is
             # required. Anthropic mode passes an empty base_url through
             # to the SDK so its real default applies — we never substitute
             # a hardcoded constant the SDK might later drift from.
+            #
+            # INFERENCE_API_KEY is only required for anthropic. openai
+            # mode accepts an empty key so the local-only path (LM Studio,
+            # vLLM, mlx_lm.server, etc.) works without a placeholder
+            # value the operator has to invent. _OpenAIBackend substitutes
+            # ``"unauthenticated"`` to satisfy the SDK constructor.
             _require_env("INFERENCE_MODE", INFERENCE_MODE, "INFERENCE_BASE_URL", INFERENCE_BASE_URL)
+        else:
+            _require_env("INFERENCE_MODE", INFERENCE_MODE, "INFERENCE_API_KEY", INFERENCE_API_KEY)
         inference_client = InferenceClient.create(
             mode=INFERENCE_MODE,
             base_url=INFERENCE_BASE_URL,
