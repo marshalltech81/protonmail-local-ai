@@ -1,9 +1,8 @@
 """Tests for src.lib.local_llm — async OpenAI-compatible embed + chat client.
 
 Uses httpx.MockTransport against the AsyncClient so tests are self-contained
-and never touch a real mlx-service / mlx_lm.server / cloud provider or the
-network. Async calls are driven with asyncio.run() to keep the dep
-footprint minimal (no pytest-asyncio).
+and never touch a real provider or the network. Async calls are driven with
+asyncio.run() to keep the dep footprint minimal (no pytest-asyncio).
 """
 
 import asyncio
@@ -113,7 +112,8 @@ class TestEmbed:
 
         def handler(request: httpx.Request) -> httpx.Response:
             # OpenAI-compatible: same wire format as DeepInfra, OpenRouter,
-            # mlx-service /v1/embeddings, etc.
+            # any host-side /v1/embeddings server (LM Studio / vLLM /
+            # mlx_lm.server / TEI), etc.
             assert str(request.url) == f"{EMBED_BASE}/embeddings"
             import json
 
@@ -143,8 +143,8 @@ class TestEmbed:
         assert seen["auth"] == "Bearer sk-test"  # pragma: allowlist secret
 
     def test_authorization_header_omitted_when_api_key_empty(self):
-        # Local mlx-service does not authenticate; sending a bare
-        # ``Authorization: Bearer`` (no token) would be malformed.
+        # An unauthenticated host-side embedder won't accept a bare
+        # ``Authorization: Bearer`` (no token) — it's malformed.
         c = _make()
         seen: dict[str, str | None] = {}
 
@@ -158,6 +158,13 @@ class TestEmbed:
         finally:
             _close(c)
         assert seen["auth"] is None
+
+    def test_inference_openai_authorization_header_set_when_api_key_provided(self):
+        c = _make(llm_api_key="sk-inference")  # pragma: allowlist secret
+        try:
+            assert c.llm_client.headers["authorization"] == "Bearer sk-inference"
+        finally:
+            _close(c)
 
     def test_retries_on_server_error_then_succeeds(self):
         c = _make()
@@ -229,10 +236,10 @@ class TestComplete:
     def test_complete_does_not_carry_embed_api_key(self):
         # Regression for the cross-service auth-header leak: when
         # ``embed_api_key`` is set (cloud embedder), the chat path must
-        # not forward that bearer token to ``LLM_BASE_URL`` — which
-        # would expose the embedder key to whatever provider is serving
-        # chat. Splitting the embed and LLM clients enforces this; this
-        # test pins the contract.
+        # not forward that bearer token to ``INFERENCE_OPENAI_BASE_URL``.
+        # That would expose the embedder key to whatever provider is
+        # serving chat. Splitting the embed and LLM clients enforces
+        # this; this test pins the contract.
         c = _make(embed_api_key="leaky-embed-key")  # pragma: allowlist secret
         seen_llm_auth: dict[str, str | None] = {}
 
@@ -252,5 +259,5 @@ class TestComplete:
         finally:
             _close(c)
         assert seen_llm_auth["auth"] is None, (
-            "complete() must not send the embed API key to LLM_BASE_URL"
+            "complete() must not send the embed API key to INFERENCE_OPENAI_BASE_URL"
         )

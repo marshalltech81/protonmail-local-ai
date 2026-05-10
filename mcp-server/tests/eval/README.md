@@ -65,10 +65,10 @@ query is suspicious — chase the regression before celebrating.
 ## What this harness does NOT do
 
 - It does not run `ask_mailbox` end-to-end or grade LLM answers.
-  That requires a live mlx-lm-server (or Claude) call per query and a way to
-  judge answer quality, which is a separate problem. Retrieval-only
-  is the load-bearing piece — if the right thread shows up in the
-  top-K, the LLM has the material it needs.
+  That requires a live inference call per query and a way to judge
+  answer quality, which is a separate problem. Retrieval-only is the
+  load-bearing piece — if the right thread shows up in the top-K, the
+  LLM has the material it needs.
 - It does not auto-discover queries from your mailbox. The point is
   for *you* to curate questions you have actually asked or expect
   to ask, with known correct answers.

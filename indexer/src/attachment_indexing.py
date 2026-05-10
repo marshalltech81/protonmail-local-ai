@@ -297,10 +297,10 @@ def prepare_attachment_writes(
     new_chunks = [c for c in chunks if c.chunk_id not in stored_ids]
     # Embedding happens HERE — outside any DB transaction the caller owns.
     # A multi-page PDF with N new chunks issues a single batched embed
-    # call instead of N sequential round-trips. Critical against cloud
-    # embedders where per-call latency dominates; harmless against
-    # mlx-service on loopback. ``embedder=None`` defers this step so
-    # the cross-message batched indexer can pack chunks from many
+    # call instead of N sequential round-trips. Critical against remote
+    # embedders where per-call latency dominates; harmless against a
+    # host-side server on loopback. ``embedder=None`` defers this step
+    # so the cross-message batched indexer can pack chunks from many
     # messages into a single embed_batch call upstream.
     if embedder is not None and new_chunks:
         vectors = embedder.embed_batch([c.text for c in new_chunks])

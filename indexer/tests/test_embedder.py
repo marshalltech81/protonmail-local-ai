@@ -316,7 +316,7 @@ class TestOpenAIEmbedder:
     def test_wait_for_ready_fails_fast_on_unsupported_protocol(self):
         """Counterpart to the timeout-class test: an
         ``httpx.UnsupportedProtocol`` (raised when ``base_url`` lacks
-        a scheme — e.g. ``EMBED_BASE_URL=host.docker.internal:8001/v1``
+        a scheme — e.g. ``EMBED_OPENAI_BASE_URL=host.docker.internal:8001/v1``
         instead of ``http://...``) must propagate immediately rather
         than retry until the connect deadline. The earlier shape
         retried every ``TransportError`` subclass, so a misconfigured

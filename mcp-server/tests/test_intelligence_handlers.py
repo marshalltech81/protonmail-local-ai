@@ -24,8 +24,25 @@ from src.tools.intelligence import register_intelligence_tools
 from tests.conftest import FakeLocalLLM
 
 
-def _handlers(fake_server, db, llm, *, llm_mode="local", api_key="", model="claude-x"):
-    register_intelligence_tools(fake_server, db, llm, llm_mode, api_key, model)
+def _handlers(
+    fake_server,
+    db,
+    llm,
+    *,
+    inference_mode="openai",
+    api_key="",
+    model="claude-x",
+    base_url="https://api.anthropic.com/v1",
+):
+    register_intelligence_tools(
+        fake_server,
+        db,
+        llm,
+        inference_mode,
+        api_key,
+        model,
+        base_url,
+    )
     return fake_server.tools
 
 
@@ -271,22 +288,31 @@ class TestExtractFromEmails:
 
 
 class TestLLMRouting:
-    def test_local_mode_routes_to_local_llm_complete(self, fake_server, seeded_db, fake_llm):
-        handler = _handlers(fake_server, seeded_db, fake_llm, llm_mode="local")["ask_mailbox"]
-        asyncio.run(handler(question="invoice"))
-        # The local LLM client's complete() must have been called even
-        # though llm_mode=local — the local path is the documented
-        # default for the ``LLM_MODE`` env var.
-        assert fake_llm.complete_calls
-
-    def test_cloud_mode_without_api_key_falls_back_to_local_llm(
+    def test_openai_mode_routes_to_openai_compatible_complete(
         self, fake_server, seeded_db, fake_llm
     ):
-        # cloud + empty key must not call Anthropic; instead it falls
-        # through to llm.complete. Otherwise a misconfigured deployment
-        # would silently make outbound HTTPS calls with an empty key.
-        handler = _handlers(fake_server, seeded_db, fake_llm, llm_mode="cloud", api_key="")[
+        handler = _handlers(fake_server, seeded_db, fake_llm, inference_mode="openai")[
             "ask_mailbox"
         ]
+        asyncio.run(handler(question="invoice"))
+        # ``INFERENCE_MODE=openai`` uses the OpenAI-compatible chat
+        # completions client regardless of where the operator points
+        # ``INFERENCE_OPENAI_BASE_URL``.
+        assert fake_llm.complete_calls
+
+    def test_anthropic_mode_without_api_key_falls_back_to_openai_client(
+        self, fake_server, seeded_db, fake_llm
+    ):
+        # anthropic + empty key must not call an Anthropic-compatible
+        # endpoint; instead it falls through to llm.complete. Startup
+        # validation catches the missing key in production, but this
+        # protects direct unit-level use of the registration helper too.
+        handler = _handlers(
+            fake_server,
+            seeded_db,
+            fake_llm,
+            inference_mode="anthropic",
+            api_key="",
+        )["ask_mailbox"]
         asyncio.run(handler(question="invoice"))
         assert fake_llm.complete_calls

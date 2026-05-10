@@ -1,7 +1,11 @@
 # protonmail-local-ai
 
-A fully local, privacy-first AI search and intelligence layer for ProtonMail.
-Ask questions about your inbox in plain English. Everything stays on your machine.
+A privacy-first AI search and intelligence layer for ProtonMail. Ask
+questions about your inbox in plain English. Email storage, sync, and
+indexing always stay on your machine; whether the LLM and embedder
+calls are local or remote is your choice — point them at any
+OpenAI-compatible / Anthropic-compatible provider, including a
+host-side server you install yourself.
 
 ## What It Does
 
@@ -20,8 +24,8 @@ Ask questions about your inbox in plain English. Everything stays on your machin
 | ProtonBridge | Decrypts ProtonMail, exposes local IMAP/SMTP |
 | mbsync | Real-time incremental sync to local Maildir |
 | Indexer | Parses threads, generates embeddings, builds SQLite index |
-| mlx-service (host) | Apple Metal embedder (Qwen3-Embedding-8B) + reranker (Qwen3-Reranker-4B) on `:8001`. Embedder surface is OpenAI-compatible (`/v1/embeddings`); swappable via `EMBED_BASE_URL` to any compliant provider |
-| mlx-lm-server (host) | Apple Metal LLM serving (default Qwen3-32B-4bit) for `LLM_MODE=local`, OpenAI-compatible at `:8002/v1` |
+| Embedder (operator-supplied) | OpenAI-compatible `/v1/embeddings`. Point `EMBED_OPENAI_BASE_URL` at any compliant provider — remote (DeepInfra, OpenRouter) or a host-side server you install yourself (LM Studio, vLLM, TEI, `mlx_lm.server`) |
+| Inference (operator-supplied) | Anthropic-compatible Messages API by default (`INFERENCE_MODE=anthropic`); switch to `INFERENCE_MODE=openai` for any OpenAI-compatible chat-completions endpoint at `INFERENCE_OPENAI_BASE_URL` |
 | SQLite (FTS5 + sqlite-vec) | Hybrid keyword + vector search index |
 | MCP Server | Exposes tools to Claude Desktop via HTTP/SSE |
 
@@ -72,17 +76,27 @@ printf '%s' 'bridge-generated-pass' > .secrets/bridge_pass.txt
 chmod 600 .secrets/bridge_pass.txt
 ```
 
-### 4. Set up the host-side MLX servers
+### 4. Configure your embedder and inference provider
 
-Two LaunchAgents run on the host (not in Docker — MLX needs Metal
-access): `mlx-service` for embeddings + reranking on `:8001`, and
-`mlx-lm-server` for the local LLM on `:8002`. Containers reach both
-via OrbStack's `host.docker.internal`.
+Edit `.env` to point at the providers you want to use:
 
-See [`mlx-service/README.md`](mlx-service/README.md) and
-[`mlx-lm-server/README.md`](mlx-lm-server/README.md) for the install
-steps. Models download lazily on first use into
-`~/.cache/huggingface/hub/`.
+- `EMBED_OPENAI_BASE_URL` + `EMBED_OPENAI_MODEL` — OpenAI-compatible
+  embedder. Remote (DeepInfra, OpenRouter) or a host-side server you
+  install yourself (LM Studio, vLLM, TEI, `mlx_lm.server`). Containers
+  reach a host-side server via OrbStack's `host.docker.internal`.
+  The schema reserves a fixed 4096-dim vector — pick a model that
+  produces 4096-dim vectors (Qwen3-Embedding-8B variants) or run a
+  schema migration.
+- `INFERENCE_MODE` — `anthropic` (default) calls an Anthropic-compatible
+  Messages API at `INFERENCE_ANTHROPIC_BASE_URL`. `openai` calls an
+  OpenAI-compatible chat-completions endpoint at
+  `INFERENCE_OPENAI_BASE_URL`.
+- API keys go in `.secrets/inference_anthropic_api_key.txt`,
+  `.secrets/inference_openai_api_key.txt`, and
+  `.secrets/embed_openai_api_key.txt` (`chmod 600`). Leave any unused
+  ones empty.
+
+See [`docs/setup.md`](docs/setup.md) for end-to-end examples.
 
 ### 5. Start the stack
 
@@ -130,32 +144,34 @@ Once connected, ask Claude Desktop:
 
 ## Privacy Boundaries
 
-This stack is local-first for **storage, sync, indexing, and embeddings**.
-Whether your *conversations* are also local depends on which MCP client you
-use and which `LLM_MODE` you select. Be deliberate about all three layers.
+Email storage, sync, and indexing always stay on your machine. Whether
+embeddings, inference, and your *conversations* leave the host depends
+on three independent choices: which embedder URL you wire up, which
+`INFERENCE_MODE` you select, and which MCP client you connect. Be
+deliberate about all three layers.
 
 ### 1. Storage and indexing layer — always local
 
 | Data | Where it lives |
 |---|---|
 | Your emails (Maildir) | Local Docker volume — never leaves your machine |
-| Embeddings | Default: generated locally by mlx-service on Apple Metal — never sent anywhere. Pointing `EMBED_BASE_URL` at a cloud provider (DeepInfra, OpenRouter, etc.) ships email body chunks to that provider — opt-in only, not the default. |
+| Embeddings | Wherever `EMBED_OPENAI_BASE_URL` points. A host-side server (LM Studio, vLLM, `mlx_lm.server`, TEI, etc.) keeps email body chunks on your machine; a remote provider (DeepInfra, OpenRouter, etc.) ships chunks to that provider at index time and search-query strings at retrieval time. |
 | Search index (SQLite FTS5 + sqlite-vec) | Local Docker volume |
-| Bridge ↔ Proton traffic | The only path off your machine for mail data |
+| Bridge ↔ Proton traffic | The only mandatory path off your machine for mail data |
 
 The MCP server itself binds to `127.0.0.1:3000` only — nothing else on your
 network can reach it.
 
-### 2. Project-internal LLM layer — controlled by `LLM_MODE`
+### 2. Project-internal LLM layer — controlled by `INFERENCE_MODE`
 
 The MCP server's intelligence tools (`ask_mailbox`, `summarize_thread`,
 `extract_from_emails`) need an LLM for generation. Where that runs depends on
-`LLM_MODE` in `.env`:
+`INFERENCE_MODE` in `.env`:
 
 | Mode | What happens to retrieved email content |
 |---|---|
-| `local` (default) | Sent to the host-side mlx-lm-server (Apple Metal) at `LLM_BASE_URL`. Stays on your machine. |
-| `cloud` | Sent to Anthropic's Claude API for generation. Requires `.secrets/anthropic_api_key.txt`. |
+| `anthropic` (default) | Sent to the Anthropic-compatible Messages API at `INFERENCE_ANTHROPIC_BASE_URL`. Requires `.secrets/inference_anthropic_api_key.txt`. |
+| `openai` | Sent to the OpenAI-compatible chat-completions endpoint at `INFERENCE_OPENAI_BASE_URL`. If that endpoint is a host-side server you install yourself (LM Studio, vLLM, `mlx_lm.server`), retrieved chunks stay on your machine; if it's a remote provider, they ship to that provider. |
 
 This setting only governs what the MCP server does *internally* during a tool
 call. It does not govern what your MCP *client* does with the result.
@@ -168,15 +184,15 @@ LLM.** When you wire it up to this MCP server:
 1. You ask Claude Desktop a question.
 2. Claude (running on Anthropic's servers) decides to call an MCP tool.
 3. Claude Desktop relays the call to your local MCP server. The tool runs
-   locally — including, in `LLM_MODE=local`, any LLM work via the host
-   mlx-lm-server.
+   locally — including any LLM work the tool does internally against the
+   endpoint you configured for `INFERENCE_MODE`.
 4. The tool's *return value* (which often contains email snippets, thread
    bodies, or LLM-generated answers grounded in your mail) is sent back to
    Claude on Anthropic's servers as part of the conversation context.
 5. Claude generates the next response using that data as input.
 
 So: **using Claude Desktop as your client transmits email content (whatever
-the called tools return) to Anthropic, regardless of `LLM_MODE`.** Anthropic's
+the called tools return) to Anthropic, regardless of `INFERENCE_MODE`.** Anthropic's
 data handling for Claude Desktop applies — see Anthropic's current privacy
 policy for retention and training-use details.
 

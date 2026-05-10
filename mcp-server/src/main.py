@@ -106,6 +106,13 @@ def _env_bool(name: str, default: bool) -> bool:
     raise ValueError(f"{name} must be a boolean value")
 
 
+def _normalize_inference_mode(raw: str) -> str:
+    mode = raw.strip().lower()
+    if mode in {"openai", "anthropic"}:
+        return mode
+    raise ValueError("INFERENCE_MODE must be one of: openai, anthropic")
+
+
 def _read_secret(secret_name: str, env_fallback: str = "") -> str:
     """Read a Docker secret file, falling back to an environment variable.
 
@@ -123,38 +130,48 @@ def _read_secret(secret_name: str, env_fallback: str = "") -> str:
 # Configuration from environment
 # ---------------------------------------------------------------------------
 SQLITE_PATH = os.environ.get("SQLITE_PATH", "/data/mail.db")
-# Local-LLM endpoint, OpenAI-compatible (``/v1/chat/completions`` is
-# appended by ``LocalLLMClient.complete``). Default points at the
-# host-side ``mlx-lm-server`` LaunchAgent on port 8002. Any
-# OpenAI-compatible chat-completions server works — the LLM client
-# never branches on backend.
-LLM_BASE_URL = os.environ.get("LLM_BASE_URL", "http://host.docker.internal:8002/v1")
-LLM_MODEL = os.environ.get("LLM_MODEL", "mlx-community/Qwen3-32B-4bit")
-LLM_MODE = os.environ.get("LLM_MODE", "local")
-CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL", "claude-sonnet-4-6")
-ANTHROPIC_KEY = _read_secret("anthropic_api_key", "ANTHROPIC_API_KEY")
+# Inference protocol/client selection. ``anthropic`` (default) calls
+# an Anthropic-compatible Messages API. ``openai`` calls an
+# OpenAI-compatible ``/v1/chat/completions`` endpoint at an
+# operator-supplied URL (a remote provider or a host-side server).
+INFERENCE_MODE = _normalize_inference_mode(os.environ.get("INFERENCE_MODE", "anthropic"))
+INFERENCE_OPENAI_BASE_URL = os.environ.get(
+    "INFERENCE_OPENAI_BASE_URL", "http://host.docker.internal:8002/v1"
+)
+INFERENCE_OPENAI_MODEL = os.environ.get("INFERENCE_OPENAI_MODEL", "mlx-community/Qwen3-32B-4bit")
+INFERENCE_OPENAI_API_KEY = _read_secret("inference_openai_api_key", "INFERENCE_OPENAI_API_KEY")
+INFERENCE_ANTHROPIC_BASE_URL = os.environ.get(
+    "INFERENCE_ANTHROPIC_BASE_URL", "https://api.anthropic.com/v1"
+)
+INFERENCE_ANTHROPIC_MODEL = os.environ.get("INFERENCE_ANTHROPIC_MODEL", "claude-sonnet-4-6")
+INFERENCE_ANTHROPIC_API_KEY = _read_secret(
+    "inference_anthropic_api_key", "INFERENCE_ANTHROPIC_API_KEY"
+)
 MCP_PORT = int(os.environ.get("MCP_PORT", "3000"))
 MCP_READ_ONLY = _env_bool("MCP_READ_ONLY", True)
 MCP_TRANSPORT = os.environ.get("MCP_TRANSPORT", "sse")
 # Retrieval stack URLs. Embeddings and reranking are independent
-# surfaces — mcp-server may point at any OpenAI-compatible embedder
-# (``EMBED_BASE_URL`` + ``EMBED_MODEL``) while keeping the reranker on
-# mlx-service's custom ``/rerank`` (``RERANK_BASE_URL``). The schema
-# reserves a fixed 4096-dim vector — keep ``EMBED_MODEL`` pointed at a
-# 4096-dim model (Qwen3-Embedding-8B variants) or a schema migration
-# is required. Indexer and mcp-server must point at the same embedder
-# so query vectors are comparable to indexed vectors.
-EMBED_BASE_URL = os.environ.get("EMBED_BASE_URL", "http://host.docker.internal:8001/v1")
-EMBED_MODEL = os.environ.get("EMBED_MODEL", "mlx-community/Qwen3-Embedding-8B-mxfp8")
-EMBED_API_KEY = _read_secret("embed_api_key", "EMBED_API_KEY")
+# operator-supplied surfaces — mcp-server points at any OpenAI-compatible
+# embedder (``EMBED_OPENAI_BASE_URL`` + ``EMBED_OPENAI_MODEL``) and at
+# any mlx-shaped /rerank service (``RERANK_BASE_URL``). The schema
+# reserves a fixed 4096-dim vector — keep ``EMBED_OPENAI_MODEL`` pointed
+# at a 4096-dim model (Qwen3-Embedding-8B variants) or a schema
+# migration is required. Indexer and mcp-server must point at the same
+# embedder so query vectors are comparable to indexed vectors.
+EMBED_OPENAI_BASE_URL = os.environ.get(
+    "EMBED_OPENAI_BASE_URL", "http://host.docker.internal:8001/v1"
+)
+EMBED_OPENAI_MODEL = os.environ.get("EMBED_OPENAI_MODEL", "mlx-community/Qwen3-Embedding-8B-mxfp8")
+EMBED_OPENAI_API_KEY = _read_secret("embed_openai_api_key", "EMBED_OPENAI_API_KEY")
 # Reranker is not OpenAI-shaped — there is no OpenAI rerank standard —
-# so it gets its own URL knob. Defaults to the local mlx-service.
-RERANK_BASE_URL = os.environ.get("RERANK_BASE_URL", "http://host.docker.internal:8001")
+# so it gets its own URL knob. The wire format follows the mlx-service
+# /rerank shape (see ``src/lib/reranker.py``).
+RERANK_BASE_URL = os.environ.get("RERANK_BASE_URL", "")
 # ``RERANK_ENABLED`` enables the post-RRF rerank pass that takes
 # ``RERANK_CANDIDATES`` from RRF and truncates to the caller's
 # ``limit`` (defaulting to ``RERANK_TOP_N`` when the caller does not
-# specify) via the reranker service.
-RERANK_ENABLED = _env_bool("RERANK_ENABLED", True)
+# specify) via the reranker service. Disabled by default.
+RERANK_ENABLED = _env_bool("RERANK_ENABLED", False)
 RERANK_CANDIDATES = int(os.environ.get("RERANK_CANDIDATES", "20"))
 RERANK_TOP_N = int(os.environ.get("RERANK_TOP_N", "10"))
 
@@ -244,11 +261,12 @@ def main():
     # Shared service clients
     db = Database(SQLITE_PATH)
     llm = LocalLLMClient(
-        embed_base_url=EMBED_BASE_URL,
-        llm_model=LLM_MODEL,
-        llm_base_url=LLM_BASE_URL,
-        embed_model=EMBED_MODEL,
-        embed_api_key=EMBED_API_KEY,
+        embed_base_url=EMBED_OPENAI_BASE_URL,
+        llm_model=INFERENCE_OPENAI_MODEL,
+        llm_base_url=INFERENCE_OPENAI_BASE_URL,
+        embed_model=EMBED_OPENAI_MODEL,
+        embed_api_key=EMBED_OPENAI_API_KEY,
+        llm_api_key=INFERENCE_OPENAI_API_KEY,
     )
     reranker: MlxReranker | None = None
     if RERANK_ENABLED:
@@ -323,7 +341,14 @@ def main():
     register_search_tools(server, db, llm, reranker=reranker)
     register_retrieval_tools(server, db)
     register_intelligence_tools(
-        server, db, llm, LLM_MODE, ANTHROPIC_KEY, CLAUDE_MODEL, reranker=reranker
+        server,
+        db,
+        llm,
+        INFERENCE_MODE,
+        INFERENCE_ANTHROPIC_API_KEY,
+        INFERENCE_ANTHROPIC_MODEL,
+        INFERENCE_ANTHROPIC_BASE_URL,
+        reranker=reranker,
     )
     if MCP_READ_ONLY:
         log.info("MCP read-only mode enabled; action tools are not registered.")
@@ -338,8 +363,8 @@ def main():
 
     log.info(f"MCP server starting on port {MCP_PORT}")
     log.info(f"  SQLite:   {SQLITE_PATH}")
-    log.info(f"  Embedder: {EMBED_BASE_URL} (model={EMBED_MODEL})")
-    if EMBED_API_KEY:
+    log.info(f"  Embedder: {EMBED_OPENAI_BASE_URL} (model={EMBED_OPENAI_MODEL})")
+    if EMBED_OPENAI_API_KEY:
         log.info("  Embedder API key: present (Bearer auth enabled)")
     if RERANK_ENABLED:
         log.info(
@@ -347,11 +372,15 @@ def main():
         )
     else:
         log.info("  Reranker: disabled")
-    log.info(f"  LLM mode: {LLM_MODE}")
-    if LLM_MODE == "local":
-        log.info(f"  LLM:      {LLM_BASE_URL} ({LLM_MODEL})")
-    elif LLM_MODE == "cloud":
-        log.info(f"  Claude model: {CLAUDE_MODEL}")
+    log.info(f"  Inference mode: {INFERENCE_MODE}")
+    if INFERENCE_MODE == "openai":
+        log.info(f"  Inference OpenAI: {INFERENCE_OPENAI_BASE_URL} ({INFERENCE_OPENAI_MODEL})")
+        if INFERENCE_OPENAI_API_KEY:
+            log.info("  Inference OpenAI API key: present (Bearer auth enabled)")
+    elif INFERENCE_MODE == "anthropic":
+        log.info(
+            f"  Inference Anthropic: {INFERENCE_ANTHROPIC_BASE_URL} ({INFERENCE_ANTHROPIC_MODEL})"
+        )
     log.info(f"  Transport: {transport}")
     log.info("  Retrieval: local SQLite index only")
 

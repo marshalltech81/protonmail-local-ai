@@ -98,7 +98,7 @@ MIN_SQLITE_VERSION = (3, 43, 0)
 
 # Vector dimension reserved by the ``*_vec`` schemas. Must match the
 # active embedding model's output dimension or vec0 inserts fail.
-# Qwen3-Embedding-8B (served by mlx-service) is 4096-dim.
+# Qwen3-Embedding-8B is 4096-dim.
 EMBEDDING_DIM = 4096
 
 

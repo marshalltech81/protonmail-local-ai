@@ -2,8 +2,9 @@
 ``/v1/embeddings`` endpoint.
 
 A single client class talks to any provider that speaks the OpenAI
-embeddings wire format: the local mlx-service running on Apple Metal,
-DeepInfra, OpenRouter, LM Studio, vLLM, TEI, etc. The choice of
+embeddings wire format: a remote provider (DeepInfra, OpenRouter,
+etc.) or a host-side server the operator installs themselves
+(LM Studio, vLLM, ``mlx_lm.server``, TEI, etc.). The choice of
 backend is purely a base-URL + model + API key configuration question
 — there is no per-provider code path.
 
@@ -98,19 +99,21 @@ class OpenAIEmbedder:
            "model": "...",
            "usage": {...}}
 
-    For the local mlx-service, ``base_url`` is ``http://host.docker.internal:8001/v1``
-    and ``api_key`` is empty. For DeepInfra, ``base_url`` is
-    ``https://api.deepinfra.com/v1/openai`` and ``api_key`` comes from the
-    ``embed_api_key`` Docker secret. The class itself is provider-agnostic.
+    For an unauthenticated host-side server, ``base_url`` is something
+    like ``http://host.docker.internal:8001/v1`` and ``api_key`` is
+    empty. For DeepInfra, ``base_url`` is
+    ``https://api.deepinfra.com/v1/openai`` and ``api_key`` comes from
+    the ``embed_openai_api_key`` Docker secret. The class itself is
+    provider-agnostic.
     """
 
-    # First-call model warmup may include a HuggingFace download for
-    # the local mlx-service backend. Empirical cold-start times on a
-    # fresh ``~/.cache/huggingface``: Qwen3-Embedding-8B mxfp8 ≈ 4 min.
-    # Cached subsequent loads run in <30 s. Cloud providers respond
-    # in <1 s. The ceiling sits comfortably above the cold-start
-    # observation; operators on slow links can raise it via
-    # ``EMBED_WARMUP_TIMEOUT_SECS``.
+    # First-call model warmup may include a model load on a host-side
+    # server (and a HuggingFace download on first run). Empirical
+    # cold-start observations: Qwen3-Embedding-8B mxfp8 served via
+    # ``mlx_lm.server`` ≈ 4 min from a cold HF cache, <30 s warm. Remote
+    # providers usually respond in <1 s. The ceiling sits comfortably
+    # above the cold-start case; operators on slow links can raise it
+    # via ``EMBED_WARMUP_TIMEOUT_SECS``.
     DEFAULT_WARMUP_TIMEOUT_SECS = 600.0
 
     def __init__(
@@ -130,9 +133,9 @@ class OpenAIEmbedder:
 
     def wait_for_ready(self, timeout: int = 120) -> None:
         """Block until the embedder accepts a real ``/v1/embeddings``
-        request — covers the local-uvicorn-startup window plus first-call
-        HuggingFace download for mlx-service, and a single fast probe
-        for cloud providers.
+        request — covers a host-side server's startup window plus
+        first-call model load, and a single fast probe for remote
+        providers.
 
         Two independent deadlines:
 

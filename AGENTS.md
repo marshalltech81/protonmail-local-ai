@@ -2,39 +2,40 @@
 
 ## Purpose
 
-This repository provides a fully local, privacy-first AI search and intelligence layer for ProtonMail.
+This repository provides a privacy-first AI search and intelligence layer for ProtonMail.
 
-The default stack consists of four containers plus two host processes:
+The stack consists of four containers:
 
 - ProtonBridge (container)
 - mbsync (container)
 - indexer (container)
 - MCP server (container)
-- mlx-service (host process — embedder + reranker on Apple Metal,
-  port 8001)
-- mlx-lm-server (host process — LLM serving on Apple Metal via
-  upstream `mlx_lm.server`, port 8002, OpenAI-compatible
-  `/v1/chat/completions`)
 
-Both host processes run as LaunchAgents bound to `127.0.0.1` and are
-reached from containers via OrbStack's `host.docker.internal`. They
-are required because MLX needs Metal access, which Docker on macOS
-cannot provide.
+Inference and embedding are operator-supplied — the project itself
+ships no model-serving components. The indexer and mcp-server speak
+the OpenAI-compatible `/v1/embeddings` shape and (for OpenAI-mode
+inference) the `/v1/chat/completions` shape, plus an Anthropic-compatible
+Messages API for `INFERENCE_MODE=anthropic`. Whether the operator
+points these at a remote provider or a host-side server they install
+themselves (LM Studio, vLLM, mlx_lm.server, TEI, etc.) is a deployment
+choice, not a project concern.
 
 Core behavior:
 
-- email stays local by default
+- email storage, sync, and indexing stay local
 - Bridge is the only path to Proton
 - mbsync pulls mail into Maildir
 - indexer parses and stores thread-level data in SQLite
 - MCP exposes search, retrieval, intelligence, and action tools over SSE and/or
   Streamable HTTP depending on `MCP_TRANSPORT`
+- whether retrieved email content leaves the host depends on which
+  embedder + inference endpoint the operator wires up
 
 ## Priorities
 
 When making changes, follow these priorities in order:
 
-1. Preserve privacy and local-first behavior.
+1. Preserve privacy guarantees and the local-only deployment option.
 2. Do not weaken secret handling.
 3. Do not broaden network exposure.
 4. Preserve the current architecture unless a change is explicitly required.
@@ -59,7 +60,7 @@ High-level data flow:
 
 1. ProtonBridge connects to ProtonMail.
 2. mbsync pulls from Bridge into Maildir.
-3. indexer parses Maildir messages, builds conversation threads, generates embeddings via an OpenAI-compatible `/v1/embeddings` endpoint (default: host-side mlx-service), and writes SQLite.
+3. indexer parses Maildir messages, builds conversation threads, generates embeddings via an OpenAI-compatible `/v1/embeddings` endpoint (operator-supplied), and writes SQLite.
 4. MCP server reads from SQLite and exposes tools over SSE and/or Streamable HTTP.
 5. Only the MCP server is exposed to the host on `localhost:3000` by default.
 
@@ -70,21 +71,21 @@ Important architecture facts:
 - indexing is thread-level, not message-level
 - MCP defaults to SSE transport; `MCP_TRANSPORT=streamable-http` enables
   Streamable HTTP, and `MCP_TRANSPORT=dual` serves both `/sse` and `/mcp`
-- LLM inference for `LLM_MODE=local` is served by `mlx-lm-server`
-  (upstream `mlx_lm.server` wrapped in a LaunchAgent), bound to
-  `127.0.0.1:8002` and reached from containers via
-  `host.docker.internal:8002`. Embeddings go through the
-  OpenAI-compatible `/v1/embeddings` endpoint at `EMBED_BASE_URL`
-  (default: `mlx-service` LaunchAgent on `127.0.0.1:8001/v1`).
-  Reranking goes through `RERANK_BASE_URL` against the same
-  `mlx-service` `/rerank` endpoint by default. Both LaunchAgents run
-  on the host because MLX needs Metal access, which Docker on macOS
-  cannot provide. The embedder is swappable to any OpenAI-compatible
-  provider (DeepInfra, OpenRouter, LM Studio, vLLM, TEI) by changing
-  `EMBED_BASE_URL` + `EMBED_MODEL` (+ `embed_api_key` Docker secret);
-  the reranker stays on mlx-service's custom `/rerank` shape (no
-  OpenAI rerank standard exists). See `mlx-service/README.md` and
-  `mlx-lm-server/README.md` for the LaunchAgent install.
+- inference is selected by `INFERENCE_MODE`. `anthropic` (default) calls
+  an Anthropic-compatible Messages API at `INFERENCE_ANTHROPIC_BASE_URL`.
+  `openai` calls an OpenAI-compatible `/v1/chat/completions` endpoint at
+  `INFERENCE_OPENAI_BASE_URL` — point this at any compliant provider or
+  at a host-side server you install yourself (LM Studio, vLLM,
+  `mlx_lm.server`, etc.); containers reach a host-side server via
+  OrbStack's `host.docker.internal`.
+- Embeddings go through the OpenAI-compatible `/v1/embeddings` endpoint
+  at `EMBED_OPENAI_BASE_URL` — also operator-supplied, no built-in
+  default. Indexer + mcp-server must point at the same provider + model
+  so query vectors are comparable to indexed vectors.
+- Reranking is opt-in (`RERANK_ENABLED=false` by default). When enabled,
+  `RERANK_BASE_URL` points at an mlx-shaped `/rerank` service the
+  operator stands up; there is no OpenAI rerank standard so the wire
+  shape is independent of `EMBED_OPENAI_BASE_URL`.
 
 ## Non-Negotiable Constraints
 
@@ -100,18 +101,12 @@ Do not make any of the following changes unless the repository owner explicitly 
 ### Network and exposure constraints
 
 - Do not expose any container port other than `mcp-server:3000` to the host.
-- The host MLX LaunchAgents (`mlx-service` on `:8001`,
-  `mlx-lm-server` on `:8002`) bind to `127.0.0.1` and are exempt from
-  macOS' loopback firewall, so no LAN exposure exists by default. Do
-  not change either bind to `0.0.0.0` or a LAN IP. Do not configure
-  containers to use the host's LAN IP — `host.docker.internal` is
-  required so the wiring survives changing networks.
-- After `uv sync` rebuilds either host venv (the operator-side LM
-  serving in `mlx-lm-server/.venv` or the FastAPI service in
-  `mlx-service/.venv`), `launchctl kickstart -k` the matching agent
-  so it picks up the rebuilt binary path. Confirm the service is up:
-  `launchctl print "gui/$(id -u)/com.local.mlx-lm-server"` and
-  `lsof -iTCP:8002 -sTCP:LISTEN`.
+- When the operator points `EMBED_OPENAI_BASE_URL`,
+  `INFERENCE_OPENAI_BASE_URL`, or `RERANK_BASE_URL` at a host-side
+  server, that server should bind to `127.0.0.1` only. Containers reach
+  it via `host.docker.internal`. Do not configure containers to use
+  the host's LAN IP — `host.docker.internal` is required so the
+  wiring survives changing networks.
 - Do not add `network_mode: host`.
 - Do not give `mcp-server` direct IMAP access to Bridge.
 - Do not give `indexer` direct IMAP access to Bridge.
@@ -228,9 +223,12 @@ Secrets are a hard boundary.
 
 - `BRIDGE_USER` comes from Bridge CLI `info`, not the Proton account password
 - `BRIDGE_PASS` belongs in `.secrets/bridge_pass.txt`, not `.env`
-- `LLM_MODE=local` uses the host-side `mlx-lm-server` (or any
-  OpenAI-compatible endpoint at `LLM_BASE_URL`)
-- `LLM_MODE=cloud` uses Claude API
+- `INFERENCE_MODE=openai` uses any OpenAI-compatible chat-completions
+  endpoint at `INFERENCE_OPENAI_BASE_URL` (operator-supplied: a remote
+  provider or a host-side server such as LM Studio / vLLM /
+  `mlx_lm.server`)
+- `INFERENCE_MODE=anthropic` (default) uses an Anthropic-compatible
+  Messages API at `INFERENCE_ANTHROPIC_BASE_URL`
 
 ### Commit hygiene
 
@@ -259,7 +257,7 @@ When working in this repo:
 - install only the minimum necessary packages, libraries, and dependencies for the current implementation, whether in Docker images, Python projects, system packages, or tooling
 - pin all new dependencies to exact versions, except apt packages — see Dockerfile Conventions
 - avoid speculative refactors
-- preserve local-first defaults
+- preserve operator-controlled provider choice; do not silently force a particular embedder or inference endpoint
 
 ## Commit Message Style
 
@@ -449,15 +447,15 @@ Purpose:
 - parses Maildir messages
 - threads messages into conversations
 - embeds content through an OpenAI-compatible `/v1/embeddings` endpoint
-  (default: host-side mlx-service)
+  (operator-supplied — remote provider or host-side server)
 - writes SQLite, FTS5, and vector data
 
 Notes:
 
 - preserve thread-level indexing
 - review schema implications before changing embedding or storage assumptions
-- indexer and mcp-server must point at the same `EMBED_BASE_URL` +
-  `EMBED_MODEL` so query vectors are comparable to indexed vectors —
+- indexer and mcp-server must point at the same `EMBED_OPENAI_BASE_URL` +
+  `EMBED_OPENAI_MODEL` so query vectors are comparable to indexed vectors —
   swapping the embedder requires a full reindex if the new model
   produces vectors of a different shape or distribution
 
