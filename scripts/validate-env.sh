@@ -73,6 +73,23 @@ reject_deprecated_env() {
     }
 }
 
+# API keys are wired as Docker secrets (see ``secrets:`` in
+# docker-compose.yml). Putting them in ``.env`` would surface them in
+# ``docker inspect`` and is therefore disallowed — both for old names
+# that have been renamed and for the current names themselves.
+reject_secret_in_env() {
+    local key_name="$1"
+    local secret_path="$2"
+    local value
+
+    value="$(get_env_value "$key_name")"
+    [[ -z "$value" ]] || {
+        printf 'ERROR: %s must be stored in %s (Docker secret), not .env. Move the value and remove it from .env before starting.\n' \
+            "$key_name" "$secret_path" >&2
+        exit 1
+    }
+}
+
 require_integer() {
     local name="$1"
     local value="$2"
@@ -142,21 +159,36 @@ require_file "$RERANK_KEY_FILE" "Rerank API key secret file"
 # disables a layer entirely. There is no inter-mode fallback — choosing
 # a mode without its required vars is a startup error here, not a silent
 # reroute to a different provider.
+#
+# API keys move via Docker secrets (``.secrets/*_api_key.txt``), not
+# ``.env``. The reject helpers below split into two flavors: renamed
+# non-secret vars get the standard "renamed → use new name in .env"
+# message; renamed secret vars get the "moved to Docker secret file"
+# message so the operator does not paste a key into .env where it would
+# surface in ``docker inspect``.
 reject_deprecated_env "LLM_BASE_URL" "INFERENCE_BASE_URL"
 reject_deprecated_env "LLM_MODEL" "INFERENCE_MODEL"
 reject_deprecated_env "LLM_MODE" "INFERENCE_MODE"
 reject_deprecated_env "CLAUDE_MODEL" "INFERENCE_MODEL"
-reject_deprecated_env "ANTHROPIC_API_KEY" "INFERENCE_API_KEY"
+reject_secret_in_env "ANTHROPIC_API_KEY" "$INFERENCE_KEY_FILE"
 reject_deprecated_env "INFERENCE_OPENAI_BASE_URL" "INFERENCE_BASE_URL"
 reject_deprecated_env "INFERENCE_OPENAI_MODEL" "INFERENCE_MODEL"
-reject_deprecated_env "INFERENCE_OPENAI_API_KEY" "INFERENCE_API_KEY"
+reject_secret_in_env "INFERENCE_OPENAI_API_KEY" "$INFERENCE_KEY_FILE"
 reject_deprecated_env "INFERENCE_ANTHROPIC_BASE_URL" "INFERENCE_BASE_URL"
 reject_deprecated_env "INFERENCE_ANTHROPIC_MODEL" "INFERENCE_MODEL"
-reject_deprecated_env "INFERENCE_ANTHROPIC_API_KEY" "INFERENCE_API_KEY"
+reject_secret_in_env "INFERENCE_ANTHROPIC_API_KEY" "$INFERENCE_KEY_FILE"
 reject_deprecated_env "EMBED_OPENAI_BASE_URL" "EMBED_BASE_URL"
 reject_deprecated_env "EMBED_OPENAI_MODEL" "EMBED_MODEL"
-reject_deprecated_env "EMBED_OPENAI_API_KEY" "EMBED_API_KEY"
+reject_secret_in_env "EMBED_OPENAI_API_KEY" "$EMBED_KEY_FILE"
 reject_deprecated_env "RERANK_ENABLED" "RERANK_MODE"
+# Current *_API_KEY names must never appear in .env either — they are
+# wired as Docker secrets in docker-compose.yml. An operator who pastes
+# them into .env would (a) leak the value into ``docker inspect``
+# output and (b) silently mask the secret-file value, since the
+# container ignores the env when ``_FILE`` indirection is used.
+reject_secret_in_env "INFERENCE_API_KEY" "$INFERENCE_KEY_FILE"
+reject_secret_in_env "EMBED_API_KEY" "$EMBED_KEY_FILE"
+reject_secret_in_env "RERANK_API_KEY" "$RERANK_KEY_FILE"
 # Earlier-era names that predate the *_MODE shape entirely. Carrying
 # any of these in .env would silently get the *_MODE default applied;
 # rejecting them keeps the migration message unambiguous.
