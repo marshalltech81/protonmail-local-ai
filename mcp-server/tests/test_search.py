@@ -191,6 +191,34 @@ class TestErrorPath:
         assert leaked_key not in text
         assert "[REDACTED]" in text
 
+    def test_provider_status_error_is_reduced_to_type_and_status(
+        self, fake_server, fake_llm, seeded_db
+    ):
+        # Provider SDK status errors (openai/anthropic/cohere) carry a
+        # ``status_code`` attribute and stringify with the response
+        # body, which can echo the user's query back. The outer except
+        # must reduce these to ``type + status`` only — never the body
+        # — to match the stricter handling in intelligence/rerank/the
+        # indexer.
+        sensitive_query = "draft about Q3 board comp negotiation"
+
+        class FakeAPIStatusError(Exception):
+            status_code = 400
+
+            def __str__(self) -> str:
+                return f"upstream 400: request body included {sensitive_query!r}"
+
+        def boom(**_kwargs):
+            raise FakeAPIStatusError()
+
+        seeded_db.hybrid_search = boom  # type: ignore[assignment]
+        handler = _handler(fake_server, fake_llm, seeded_db)
+        out = asyncio.run(handler(query=sensitive_query, mode="hybrid"))
+        text = _text(out)
+        assert sensitive_query not in text
+        assert "FakeAPIStatusError" in text
+        assert "status=400" in text
+
 
 class TestFromNameResolution:
     """The ``from_name`` parameter resolves a name through find_contact

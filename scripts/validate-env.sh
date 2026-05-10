@@ -271,6 +271,19 @@ if [[ "$INFERENCE_MODE" != "none" ]]; then
             echo "ERROR: INFERENCE_BASE_URL must start with http:// or https://." >&2
             exit 1
         }
+        # The Anthropic SDK appends '/v1/messages' to the base URL itself.
+        # Operators carrying over the pre-collapse
+        # INFERENCE_ANTHROPIC_BASE_URL=https://api.anthropic.com/v1 would
+        # produce '.../v1/v1/messages' and 404 every intelligence call.
+        # OpenAI-compatible base URLs do end in '/v1' (the SDK appends
+        # 'chat/completions' to that), so this guard only fires for
+        # INFERENCE_MODE=anthropic.
+        if [[ "$INFERENCE_MODE" == "anthropic" && "${INFERENCE_BASE_URL%/}" == */v1 ]]; then
+            echo "ERROR: INFERENCE_BASE_URL must not end with '/v1' when INFERENCE_MODE=anthropic." >&2
+            echo "       The Anthropic SDK appends '/v1/messages' itself. Drop the trailing '/v1'" >&2
+            echo "       (e.g. 'https://api.anthropic.com'), or leave the var empty for the SDK default." >&2
+            exit 1
+        fi
     fi
 fi
 

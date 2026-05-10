@@ -155,6 +155,9 @@ If the provider authenticates, write the key to
 ```bash
 # Anthropic-compatible via the official anthropic SDK (default).
 # Leave INFERENCE_BASE_URL empty to hit api.anthropic.com.
+# Note: the Anthropic SDK appends '/v1/messages' itself, so the
+# value must NOT end with '/v1'. If you migrated from the old
+# INFERENCE_ANTHROPIC_BASE_URL, drop the trailing '/v1'.
 INFERENCE_MODE=anthropic
 INFERENCE_BASE_URL=
 INFERENCE_MODEL=claude-sonnet-4-6

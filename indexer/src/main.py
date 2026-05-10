@@ -113,13 +113,17 @@ def _read_embed_api_key() -> str:
     server bound to loopback) and is not an error. The Docker secret
     path follows the existing ``/run/secrets/<name>`` convention;
     ``EMBED_API_KEY`` env is the fallback for non-Docker deployments.
+
+    Fail-closed posture: when the Docker secret file *exists* but cannot
+    be read (perms regression, mount issue), this is a deployment
+    misconfiguration — propagate the error so the indexer fails to
+    start rather than silently sending an empty bearer token (or worse,
+    a stale env value the operator thought the secret had superseded).
+    The env fallback only kicks in when the secret file is absent.
     """
     secret_path = Path("/run/secrets/embed_api_key")
     if secret_path.exists():
-        try:
-            return secret_path.read_text(encoding="utf-8").strip()
-        except OSError as e:
-            log.warning("could not read /run/secrets/embed_api_key: %s", e)
+        return secret_path.read_text(encoding="utf-8").strip()
     return os.environ.get("EMBED_API_KEY", "").strip()
 
 

@@ -8,7 +8,7 @@ import logging
 
 from mcp.types import TextContent
 
-from ..lib.security import safe_exception_text
+from ..lib.security import safe_exception_text, safe_provider_exception_text
 from ..lib.validation import clamp_int
 
 log = logging.getLogger("mcp.tools.search")
@@ -274,6 +274,16 @@ def register_search_tools(server, db, embed_client, *, reranker=None, secret_val
             return [TextContent(type="text", text="\n".join(output))]
 
         except Exception as e:
-            safe_error = safe_exception_text(e, secrets)
+            # Provider-SDK status errors (embed call, reranker call) can
+            # echo request/response body fragments — for search that
+            # would leak the user's query string into logs and the MCP
+            # response. ``safe_provider_exception_text`` reduces SDK
+            # status errors to ``type + status`` only and falls through
+            # to the standard secret-redacting formatter for non-provider
+            # exceptions (DB errors, validation errors), so DB diagnostics
+            # keep their detail. The inner ``find_contact`` except above
+            # stays on ``safe_exception_text`` because that path is pure
+            # local DB work.
+            safe_error = safe_provider_exception_text(e, secrets)
             log.error("search_emails error: %s", safe_error)
             return [TextContent(type="text", text=f"Search error: {safe_error}")]

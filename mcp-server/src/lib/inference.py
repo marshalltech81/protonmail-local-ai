@@ -122,6 +122,24 @@ class _AnthropicBackend:
         self.base_url = base_url.rstrip("/") if base_url else ""
         self.model = model
         self.max_tokens = max_tokens
+        # The Anthropic SDK appends ``/v1/messages`` to ``base_url``
+        # itself. An operator carrying over the pre-collapse
+        # ``INFERENCE_ANTHROPIC_BASE_URL=https://api.anthropic.com/v1``
+        # would produce a request to ``.../v1/v1/messages`` — every
+        # intelligence tool 404s with an opaque SDK error. Reject the
+        # ``/v1`` suffix at construction so the operator gets a clear
+        # migration message instead of a runtime mystery. Stripping
+        # silently would hide the misconfiguration; rejecting forces
+        # the operator to confirm they meant the SDK base, not a
+        # versioned path.
+        if self.base_url.endswith("/v1"):
+            raise ValueError(
+                "INFERENCE_BASE_URL must not end with '/v1' when "
+                "INFERENCE_MODE=anthropic — the Anthropic SDK appends "
+                "'/v1/messages' itself. Drop the trailing '/v1' "
+                "(e.g. use 'https://api.anthropic.com', or leave the "
+                "var empty to use the SDK default)."
+            )
         # Pass ``base_url`` only when explicitly set so the SDK's real
         # default URL is used when the operator left the env var empty
         # (the documented contract for INFERENCE_MODE=anthropic).

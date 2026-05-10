@@ -106,6 +106,32 @@ class TestFactory:
                 api_key="k",
             )
 
+    def test_anthropic_rejects_base_url_ending_in_v1(self):
+        # Operators carrying over the pre-collapse
+        # INFERENCE_ANTHROPIC_BASE_URL=https://api.anthropic.com/v1 must
+        # see a clear error rather than a runtime 404 on
+        # '.../v1/v1/messages'. The Anthropic SDK appends '/v1/messages'
+        # itself, so the base URL must not already include '/v1'.
+        with pytest.raises(ValueError, match=r"must not end with '/v1'"):
+            InferenceClient.create(
+                mode="anthropic",
+                base_url="https://api.anthropic.com/v1",
+                model="claude-x",
+                api_key="sk-ant-test",  # pragma: allowlist secret
+            )
+
+    def test_anthropic_rejects_base_url_ending_in_v1_with_trailing_slash(self):
+        # The trailing slash is stripped before the suffix check so a
+        # value like 'https://api.anthropic.com/v1/' is rejected the
+        # same way as the no-slash form.
+        with pytest.raises(ValueError, match=r"must not end with '/v1'"):
+            InferenceClient.create(
+                mode="anthropic",
+                base_url="https://api.anthropic.com/v1/",
+                model="claude-x",
+                api_key="sk-ant-test",  # pragma: allowlist secret
+            )
+
 
 class TestComplete:
     def test_openai_backend_returns_message_content(self):
