@@ -10,7 +10,7 @@ import asyncio
 from types import SimpleNamespace
 
 import pytest
-from src.lib.embed import EmbedClient
+from src.lib.embed import EmbedClient, embed_query
 
 
 def _embedding_response(vector: list[float]) -> SimpleNamespace:
@@ -68,3 +68,66 @@ class TestEmbed:
         c.client.embeddings.create = fake_create  # type: ignore[assignment]
         with pytest.raises(Boom):
             asyncio.run(c.embed("query"))
+
+
+class _StubEmbed:
+    """Lightweight stand-in matching the surface ``embed_query`` reads.
+
+    Both the real ``EmbedClient`` and ``FakeEmbedClient`` in tests
+    expose ``.embed(text) -> list[float]`` plus ``.base_url`` /
+    ``.model`` attributes. ``embed_query`` reads the latter two to
+    name the misconfigured knobs in its error message.
+    """
+
+    def __init__(self, vector: list[float], base_url: str = "http://x/v1", model: str = "m"):
+        self._vector = vector
+        self.base_url = base_url
+        self.model = model
+
+    async def embed(self, _text: str) -> list[float]:
+        return list(self._vector)
+
+
+class TestEmbedQueryDimValidation:
+    """``embed_query`` is the boundary check that fixes the silent
+    wrong-dim degradation. Before this, a misconfigured ``EMBED_MODEL``
+    that returned (say) 3072-dim vectors against a 4096-dim index
+    raised inside sqlite-vec and got swallowed by the
+    ``except (sqlite3.Error, ValueError)`` in ``_chunk_vector_search``
+    — so semantic / hybrid search silently returned no results
+    instead of telling the operator the embedder was misconfigured.
+    """
+
+    def test_returns_vector_unchanged_when_dim_matches(self):
+        stub = _StubEmbed([0.1, 0.2, 0.3, 0.4])
+        out = asyncio.run(embed_query(stub, "query", expected_dim=4))
+        assert out == [0.1, 0.2, 0.3, 0.4]
+
+    def test_skips_check_when_expected_dim_is_none(self):
+        # Fresh-install / pre-indexer state: schema doesn't declare a
+        # vec table yet, so ``Database.get_embedding_dim()`` returns
+        # None and the helper has nothing to compare against. Pass
+        # through rather than fail closed — keyword search still works
+        # and semantic / hybrid will surface the missing-table error
+        # via the DB layer.
+        stub = _StubEmbed([0.1, 0.2, 0.3])
+        out = asyncio.run(embed_query(stub, "query", expected_dim=None))
+        assert out == [0.1, 0.2, 0.3]
+
+    def test_raises_on_dim_mismatch_with_actionable_message(self):
+        # The error message must name the knobs the operator can
+        # actually change — ``EMBED_BASE_URL`` and ``EMBED_MODEL`` —
+        # plus the observed-vs-expected sizes so the operator can
+        # confirm which side is wrong.
+        stub = _StubEmbed(
+            [0.1, 0.2, 0.3],
+            base_url="http://wrong-provider/v1",
+            model="other-embed-model",
+        )
+        with pytest.raises(ValueError) as excinfo:
+            asyncio.run(embed_query(stub, "query", expected_dim=4))
+        msg = str(excinfo.value)
+        assert "3" in msg
+        assert "4" in msg
+        assert "EMBED_BASE_URL" in msg or "http://wrong-provider/v1" in msg
+        assert "EMBED_MODEL" in msg or "other-embed-model" in msg

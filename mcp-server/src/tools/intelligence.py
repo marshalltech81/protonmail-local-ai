@@ -10,6 +10,7 @@ import re
 
 from mcp.types import TextContent
 
+from ..lib.embed import embed_query
 from ..lib.security import safe_provider_exception_text
 from ..lib.sqlite import ThreadResult
 from ..lib.validation import clamp_int
@@ -439,6 +440,7 @@ def register_intelligence_tools(
     *,
     reranker=None,
     secret_values=None,
+    expected_embed_dim: int | None = None,
 ):
     """Register intelligence tools.
 
@@ -457,6 +459,12 @@ def register_intelligence_tools(
     echoed back to the caller or written to logs. Populated by
     ``main.py`` from the same env/secret reads used to construct the
     clients above.
+
+    ``expected_embed_dim`` is the dimension declared by the indexer's
+    ``message_chunks_vec`` table. Every embed call is validated against
+    it so a misconfigured ``EMBED_MODEL`` surfaces as an actionable
+    error rather than degrading silently when the wrong-dim vector
+    reaches sqlite-vec MATCH.
     """
     secret_values = list(secret_values or ())
 
@@ -548,7 +556,7 @@ def register_intelligence_tools(
             # per-message chunks to each surfaced thread, so the LLM
             # context below is the precise passages that drove ranking
             # rather than the truncated accumulated thread body.
-            embedding = await embed_client.embed(question)
+            embedding = await embed_query(embed_client, question, expected_embed_dim)
             results = await asyncio.to_thread(
                 db.hybrid_search,
                 query_text=question,
@@ -655,7 +663,7 @@ def register_intelligence_tools(
             # path returns at most one thread so there's no ambiguity
             # at the summarize step.
             if not thread:
-                embedding = await embed_client.embed(thread_id)
+                embedding = await embed_query(embed_client, thread_id, expected_embed_dim)
                 resolved = await asyncio.to_thread(
                     db.hybrid_search,
                     query_text=thread_id,
@@ -766,7 +774,7 @@ def register_intelligence_tools(
         limit = clamp_int(limit, default=20, minimum=1, maximum=_MAX_EXTRACT_LIMIT)
 
         try:
-            embedding = await embed_client.embed(query)
+            embedding = await embed_query(embed_client, query, expected_embed_dim)
             # ``with_evidence`` attaches the chunk(s) that ranked each
             # thread, so the per-thread extraction prompt below sees the
             # exact passages relevant to ``query`` rather than the whole

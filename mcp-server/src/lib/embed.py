@@ -75,3 +75,36 @@ class EmbedClient:
             input=text,
         )
         return list(resp.data[0].embedding)
+
+
+async def embed_query(client, text: str, expected_dim: int | None) -> list[float]:
+    """Embed ``text`` and validate the returned vector matches ``expected_dim``.
+
+    The sqlite-vec ``MATCH`` operator raises an ``OperationalError`` when a
+    query vector's dimension doesn't match the indexed vectors, and the
+    DB read helpers catch ``(sqlite3.Error, ValueError)`` so they can
+    distinguish a missing vec table from a real error. Without this
+    boundary check, a misconfigured ``EMBED_MODEL`` whose output dim
+    differs from what the indexer wrote silently degrades semantic /
+    hybrid search to keyword-only — the operator sees "no results"
+    instead of a clear "your embedder is wrong" signal.
+
+    ``expected_dim`` is read from ``Database.get_embedding_dim()`` at
+    startup. ``None`` means the vec table doesn't exist yet (fresh
+    install pre-indexer-run), in which case there's nothing to compare
+    against and we pass the vector through; the DB layer will surface
+    the missing-table case naturally.
+
+    Raises ``ValueError`` on mismatch with a message naming the
+    operator-controllable knobs (``EMBED_BASE_URL`` / ``EMBED_MODEL``)
+    so the fix path is obvious from the log line.
+    """
+    vector = await client.embed(text)
+    if expected_dim is not None and len(vector) != expected_dim:
+        raise ValueError(
+            f"Embedding dimension mismatch: provider returned {len(vector)}, "
+            f"index expects {expected_dim}. Check that EMBED_BASE_URL="
+            f"{client.base_url!r} and EMBED_MODEL={client.model!r} match "
+            "the embedder the indexer used."
+        )
+    return vector

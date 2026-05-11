@@ -359,9 +359,12 @@ networks:
 secrets:
   bridge_pass:
     file: ./.secrets/bridge_pass.txt
-  # Inference API key — required when INFERENCE_MODE is ``openai`` or
-  # ``anthropic``. Leave the file empty when INFERENCE_MODE=none. Never
-  # put this value in .env (it appears in docker inspect output).
+  # Inference API key — required when INFERENCE_MODE=anthropic. For
+  # INFERENCE_MODE=openai it is required only when the endpoint
+  # authenticates (remote provider); an unauthenticated host-side
+  # OpenAI-compatible server (LM Studio, vLLM, mlx_lm.server) accepts
+  # an empty file. Leave the file empty when INFERENCE_MODE=none.
+  # Never put this value in .env (it appears in docker inspect output).
   inference_api_key:
     file: ./.secrets/inference_api_key.txt
   # Embed API key — required only when EMBED_BASE_URL points at a

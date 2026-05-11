@@ -8,6 +8,7 @@ import logging
 
 from mcp.types import TextContent
 
+from ..lib.embed import embed_query
 from ..lib.security import safe_exception_text, safe_provider_exception_text
 from ..lib.validation import clamp_int
 
@@ -23,7 +24,15 @@ _MAX_SEARCH_LIMIT = 50
 _VALID_SEARCH_MODES = frozenset({"hybrid", "semantic", "keyword"})
 
 
-def register_search_tools(server, db, embed_client, *, reranker=None, secret_values=None):
+def register_search_tools(
+    server,
+    db,
+    embed_client,
+    *,
+    reranker=None,
+    secret_values=None,
+    expected_embed_dim: int | None = None,
+):
     """Register search tools.
 
     ``embed_client`` may be ``None`` when ``EMBED_MODE=none`` — in that
@@ -39,6 +48,13 @@ def register_search_tools(server, db, embed_client, *, reranker=None, secret_val
     auth headers and request/response body fragments; passing the
     configured keys here means a stringified exception that happens to
     quote the bearer token gets redacted before it leaves the process.
+
+    ``expected_embed_dim`` is the dimension declared by the indexer's
+    ``message_chunks_vec`` table (read at startup via
+    ``Database.get_embedding_dim()``). When set, every embed call is
+    validated against it so a misconfigured ``EMBED_MODEL`` surfaces
+    as an actionable error instead of silently degrading to keyword
+    search. ``None`` skips the check (fresh install pre-indexer-run).
     """
     secrets = list(secret_values or ())
 
@@ -219,7 +235,7 @@ def register_search_tools(server, db, embed_client, *, reranker=None, secret_val
                             ),
                         )
                     ]
-                embedding = await embed_client.embed(query)
+                embedding = await embed_query(embed_client, query, expected_embed_dim)
                 results = await asyncio.to_thread(
                     db.semantic_search,
                     query_embedding=embedding,
@@ -241,7 +257,7 @@ def register_search_tools(server, db, embed_client, *, reranker=None, secret_val
                             ),
                         )
                     ]
-                embedding = await embed_client.embed(query)
+                embedding = await embed_query(embed_client, query, expected_embed_dim)
                 results = await asyncio.to_thread(
                     db.hybrid_search,
                     query_text=query,

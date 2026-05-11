@@ -24,6 +24,7 @@ import pytest
 from src.main import (
     _INFERENCE_MODES,
     _env_bool,
+    _float_env,
     _normalize_mode,
     _normalize_transport,
     _read_secret,
@@ -232,6 +233,40 @@ class TestMcpTransport:
         # The stubbed uvicorn raises SystemExit-equivalent so serve()
         # never actually starts a listener — just enough to capture.
         await _run_dual_transport_async(server_stub)
+
+
+class TestFloatEnv:
+    """``_float_env`` rejects non-finite values.
+
+    ``float("nan")`` and ``float("inf")`` parse without raising, and
+    ``nan < minimum`` is always False — so without an explicit
+    ``math.isfinite`` check, a typo'd timeout like ``EMBED_TIMEOUT_SECS=inf``
+    or ``=nan`` reaches the SDK client and breaks per-call deadlines in
+    surprising ways. Reject non-finite values at parse time.
+    """
+
+    def test_returns_default_when_unset(self, monkeypatch):
+        monkeypatch.delenv("FAKE_FLOAT_VAR", raising=False)
+        assert _float_env("FAKE_FLOAT_VAR", default=12.5) == 12.5
+
+    def test_valid_finite_value_parses(self, monkeypatch):
+        monkeypatch.setenv("FAKE_FLOAT_VAR", "30.0")
+        assert _float_env("FAKE_FLOAT_VAR", default=12.5, minimum=1.0) == 30.0
+
+    def test_nan_is_rejected(self, monkeypatch):
+        monkeypatch.setenv("FAKE_FLOAT_VAR", "nan")
+        with pytest.raises(ValueError, match="FAKE_FLOAT_VAR"):
+            _float_env("FAKE_FLOAT_VAR", default=12.5, minimum=1.0)
+
+    def test_positive_infinity_is_rejected(self, monkeypatch):
+        monkeypatch.setenv("FAKE_FLOAT_VAR", "inf")
+        with pytest.raises(ValueError, match="FAKE_FLOAT_VAR"):
+            _float_env("FAKE_FLOAT_VAR", default=12.5, minimum=1.0)
+
+    def test_negative_infinity_is_rejected(self, monkeypatch):
+        monkeypatch.setenv("FAKE_FLOAT_VAR", "-inf")
+        with pytest.raises(ValueError, match="FAKE_FLOAT_VAR"):
+            _float_env("FAKE_FLOAT_VAR", default=12.5, minimum=1.0)
 
 
 class TestNormalizeMode:

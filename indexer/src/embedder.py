@@ -19,6 +19,7 @@ stay backend-agnostic and tests can substitute a duck-typed fake.
 """
 
 import logging
+import math
 import os
 import time
 from typing import Protocol
@@ -48,10 +49,17 @@ def _float_env(name: str, default: float) -> float:
     if not raw:
         return default
     try:
-        return float(raw)
+        value = float(raw)
     except ValueError:
         log.warning("invalid %s=%r; falling back to %.1f", name, raw, default)
         return default
+    # ``float("nan")`` / ``float("inf")`` parse cleanly but would
+    # reach the SDK as a per-call deadline and break in surprising
+    # ways. Same warn-fall-back policy as a malformed string.
+    if not math.isfinite(value):
+        log.warning("invalid %s=%r; falling back to %.1f", name, raw, default)
+        return default
+    return value
 
 
 def scrub_embed_error(exc: BaseException) -> str:

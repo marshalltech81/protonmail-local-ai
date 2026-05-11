@@ -13,7 +13,7 @@ import httpx
 import pytest
 from openai import APIConnectionError, APIStatusError, APITimeoutError
 from src.chunker import l2_normalize
-from src.embedder import OpenAIEmbedder, _is_transient_embed_error
+from src.embedder import OpenAIEmbedder, _float_env, _is_transient_embed_error
 
 
 def _embed_response(vectors: list[list[float]], reverse_order: bool = False) -> SimpleNamespace:
@@ -55,6 +55,43 @@ def _api_status_error(status_code: int) -> APIStatusError:
         response=httpx.Response(status_code, request=httpx.Request("POST", "http://x")),
         body=None,
     )
+
+
+class TestFloatEnv:
+    """``_float_env`` falls back to the default on non-finite values.
+
+    The indexer's float parser uses a fall-back-with-warning policy
+    rather than raising (a typo in a tunable timeout must not crash
+    the indexer), but ``float("nan")`` and ``float("inf")`` parse
+    cleanly and would otherwise reach the SDK and break per-call
+    deadlines. Treat them as malformed input and warn-fall-back.
+    """
+
+    def test_returns_default_when_unset(self, monkeypatch):
+        monkeypatch.delenv("FAKE_FLOAT_VAR", raising=False)
+        assert _float_env("FAKE_FLOAT_VAR", default=30.0) == 30.0
+
+    def test_valid_finite_value_parses(self, monkeypatch):
+        monkeypatch.setenv("FAKE_FLOAT_VAR", "45.0")
+        assert _float_env("FAKE_FLOAT_VAR", default=30.0) == 45.0
+
+    def test_malformed_string_falls_back(self, monkeypatch, caplog):
+        monkeypatch.setenv("FAKE_FLOAT_VAR", "not-a-number")
+        with caplog.at_level("WARNING", logger="indexer.embedder"):
+            assert _float_env("FAKE_FLOAT_VAR", default=30.0) == 30.0
+        assert any("FAKE_FLOAT_VAR" in r.message for r in caplog.records)
+
+    def test_nan_falls_back(self, monkeypatch, caplog):
+        monkeypatch.setenv("FAKE_FLOAT_VAR", "nan")
+        with caplog.at_level("WARNING", logger="indexer.embedder"):
+            assert _float_env("FAKE_FLOAT_VAR", default=30.0) == 30.0
+        assert any("FAKE_FLOAT_VAR" in r.message for r in caplog.records)
+
+    def test_positive_infinity_falls_back(self, monkeypatch, caplog):
+        monkeypatch.setenv("FAKE_FLOAT_VAR", "inf")
+        with caplog.at_level("WARNING", logger="indexer.embedder"):
+            assert _float_env("FAKE_FLOAT_VAR", default=30.0) == 30.0
+        assert any("FAKE_FLOAT_VAR" in r.message for r in caplog.records)
 
 
 class TestOpenAIEmbedder:

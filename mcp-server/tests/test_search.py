@@ -220,6 +220,77 @@ class TestErrorPath:
         assert "status=400" in text
 
 
+class TestWrongDimEmbedSurfaces:
+    """Wrong-dim query vectors used to silently degrade to keyword-only
+    results because sqlite-vec's MATCH error was swallowed by the broad
+    ``except (sqlite3.Error, ValueError)`` in the DB layer. With the
+    ``expected_embed_dim`` validation threaded through
+    ``register_search_tools``, semantic and hybrid modes now surface
+    the misconfiguration with an actionable error naming the embedder
+    knobs the operator can fix.
+    """
+
+    def _register_with_wrong_dim_client(self, fake_server, db):
+        """Wire the search tools with an embed client that returns a
+        vector of the wrong dimension (3 floats against the fixture's
+        4-dim schema). Mimics pointing ``EMBED_MODEL`` at a provider
+        whose output dim doesn't match what the indexer wrote.
+
+        Passes ``expected_embed_dim`` explicitly the same way
+        ``main.py`` does (reading it via ``db.get_embedding_dim()`` at
+        startup). Without that, the helper skips the check and the
+        wrong vector reaches sqlite-vec — which is the pre-fix
+        behavior we're proving has been replaced.
+        """
+        from tests.conftest import FakeEmbedClient
+
+        # FakeEmbedClient exposes ``.base_url`` / ``.model`` so the
+        # error message can name the misconfigured knobs.
+        wrong_dim_client = FakeEmbedClient(embedding=[0.1, 0.2, 0.3])
+        wrong_dim_client.base_url = "http://wrong-embed/v1"
+        wrong_dim_client.model = "wrong-dim-model"
+        register_search_tools(
+            fake_server,
+            db,
+            wrong_dim_client,
+            expected_embed_dim=db.get_embedding_dim(),
+        )
+        return fake_server.tools["search_emails"]
+
+    def test_semantic_search_with_wrong_dim_returns_error_not_empty(self, fake_server, seeded_db):
+        handler = self._register_with_wrong_dim_client(fake_server, seeded_db)
+        out = asyncio.run(handler(query="invoice", mode="semantic"))
+        text = _text(out)
+        # Operator-visible error, not a silent "No results found".
+        assert "Search error" in text
+        # The error must name *something* the operator can change —
+        # either the env var name or the configured value — so they
+        # can find the misconfiguration without reading source.
+        assert "EMBED_MODEL" in text or "wrong-dim-model" in text
+
+    def test_hybrid_search_with_wrong_dim_returns_error_not_keyword_fallback(
+        self, fake_server, seeded_db
+    ):
+        # The pre-fix behavior: hybrid silently fell back to keyword
+        # because the vector lane failed and the RRF still produced
+        # some results. The post-fix behavior surfaces the dim
+        # mismatch so the operator knows the embedder is wrong.
+        handler = self._register_with_wrong_dim_client(fake_server, seeded_db)
+        out = asyncio.run(handler(query="invoice", mode="hybrid"))
+        text = _text(out)
+        assert "Search error" in text
+        assert "EMBED_MODEL" in text or "wrong-dim-model" in text
+
+    def test_keyword_search_works_when_embed_misconfigured(self, fake_server, seeded_db):
+        # Keyword search must NOT be gated on dim validation — it
+        # never embeds. An operator pointing at the wrong embedder
+        # can still use keyword search while they debug.
+        handler = self._register_with_wrong_dim_client(fake_server, seeded_db)
+        out = asyncio.run(handler(query="invoice", mode="keyword"))
+        text = _text(out)
+        assert "Search error" not in text
+
+
 class TestFromNameResolution:
     """The ``from_name`` parameter resolves a name through find_contact
     and applies the resulting canonical address as a strict from_addr

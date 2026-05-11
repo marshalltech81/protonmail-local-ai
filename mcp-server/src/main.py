@@ -7,6 +7,7 @@ opt-in write backend exists.
 
 import contextlib
 import logging
+import math
 import os
 from pathlib import Path
 from typing import Literal
@@ -184,6 +185,12 @@ def _float_env(name: str, default: float, minimum: float = 0.0) -> float:
         value = float(raw)
     except ValueError as exc:
         raise ValueError(f"{name} must be a number, got {raw!r}") from exc
+    # ``float("nan")`` / ``float("inf")`` parse cleanly and ``nan <
+    # minimum`` is always False, so a non-finite value would otherwise
+    # slip past the bounds check and reach the SDK client as a
+    # per-call deadline.
+    if not math.isfinite(value):
+        raise ValueError(f"{name} must be a finite number, got {raw!r}")
     if value < minimum:
         raise ValueError(f"{name} must be >= {minimum}, got {value}")
     return value
@@ -329,12 +336,14 @@ def _run_server(server: FastMCP, transport: _Transport) -> None:
 
 
 def main():
-    # Shared service clients
-    db = Database(SQLITE_PATH)
-
-    # Validate per-mode required vars at startup. A chosen mode with
-    # missing config raises here so the operator sees a precise error
-    # rather than a runtime fallback to a different provider.
+    # Validate per-mode required vars BEFORE constructing service clients
+    # or opening the SQLite database. A missing volume mount or bad DB
+    # path is a much less common operator error than a missing env var,
+    # so let env validation fire first — otherwise a bad SQLITE_PATH
+    # would mask the real "you forgot INFERENCE_API_KEY" failure. A
+    # chosen mode with missing config raises here so the operator sees a
+    # precise error rather than a runtime fallback to a different
+    # provider.
     embed_client: EmbedClient | None = None
     if EMBED_MODE == "openai":
         _require_env("EMBED_MODE", EMBED_MODE, "EMBED_BASE_URL", EMBED_BASE_URL)
@@ -387,6 +396,18 @@ def main():
                 timeout_secs=RERANK_TIMEOUT_SECS,
             )
         )
+
+    # Env validated — now open the SQLite index.
+    db = Database(SQLITE_PATH)
+
+    # Read the declared embedding dim from ``message_chunks_vec`` so the
+    # tool layer can reject wrong-shaped query vectors before they reach
+    # sqlite-vec MATCH (where the broad ``except`` in
+    # ``_chunk_vector_search`` would otherwise swallow them as a silent
+    # "no results"). ``None`` is expected on a fresh install where the
+    # indexer has not yet run its schema migrations; the tool layer
+    # treats that as skip-validation.
+    expected_embed_dim = db.get_embedding_dim()
 
     # FastMCP server — supports @server.tool() decorator and SSE transport.
     # ``host="0.0.0.0"`` is required so the in-container bind is reachable
@@ -457,7 +478,14 @@ def main():
     # inference; the group is skipped when either layer is disabled so a
     # mailbox with retrieval-only or inference-only configuration still
     # serves keyword search and retrieval cleanly.
-    register_search_tools(server, db, embed_client, reranker=reranker, secret_values=secret_values)
+    register_search_tools(
+        server,
+        db,
+        embed_client,
+        reranker=reranker,
+        secret_values=secret_values,
+        expected_embed_dim=expected_embed_dim,
+    )
     register_retrieval_tools(server, db)
     if embed_client is not None and inference_client is not None:
         register_intelligence_tools(
@@ -467,6 +495,7 @@ def main():
             inference_client,
             reranker=reranker,
             secret_values=secret_values,
+            expected_embed_dim=expected_embed_dim,
         )
     else:
         log.info(

@@ -294,8 +294,14 @@ After changing provider:
    `.secrets/embed_api_key.txt` (`chmod 600`). `make init-secrets`
    creates an empty placeholder.
 3. **Indexer and mcp-server must point at the same provider + model**
-   so query vectors are comparable to indexed vectors. Mixing them
-   silently degrades hybrid search.
+   so query vectors are comparable to indexed vectors. A
+   dimension mismatch (e.g. pointing mcp-server at a 3072-dim
+   model against a 4096-dim index) surfaces at query time as a
+   `Search error: Embedding dimension mismatch` naming
+   `EMBED_BASE_URL` and `EMBED_MODEL`. A same-dim model with a
+   different vector distribution still degrades hybrid search
+   silently — there's no way to detect that without a full
+   reindex.
 4. The schema reserves a fixed 4096-dim vector. `EMBED_MODEL`
    must keep producing 4096-dim vectors (Qwen3-Embedding-8B variants)
    or a schema migration is required.
