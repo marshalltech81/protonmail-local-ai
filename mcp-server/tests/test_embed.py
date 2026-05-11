@@ -27,25 +27,35 @@ def _embedding_response(vector: list[float]) -> SimpleNamespace:
 
 
 class TestConstructor:
+    # ``api_key`` is required (non-empty) in production — startup
+    # validation in ``main.py`` rejects an empty value before the
+    # constructor runs. Tests always supply an explicit placeholder so
+    # the SDK's "must be a non-empty string" check doesn't masquerade
+    # as a constructor bug. Operators pointing at an unauthenticated
+    # host-side server supply the same shape of value in
+    # ``.secrets/embed_api_key.txt``.
     def test_strips_trailing_slash_from_base_url(self):
-        c = EmbedClient(base_url="http://x/v1/", model="m")
+        c = EmbedClient(base_url="http://x/v1/", model="m", api_key="placeholder")
         assert c.base_url == "http://x/v1"
 
     def test_stores_model(self):
-        c = EmbedClient(base_url="http://x/v1", model="qwen3-embed")
+        c = EmbedClient(base_url="http://x/v1", model="qwen3-embed", api_key="placeholder")
         assert c.model == "qwen3-embed"
 
-    def test_constructs_against_unauthenticated_server(self):
-        # An empty api_key must not raise — the SDK requires a string,
-        # so the class supplies a placeholder. Compat servers ignore
-        # the resulting Authorization header.
-        c = EmbedClient(base_url="http://x/v1", model="m", api_key="")
-        assert c is not None
+    def test_constructor_passes_api_key_through_unchanged(self):
+        # The constructor MUST NOT rewrite ``api_key`` (no silent
+        # substitution to a literal like ``"unauthenticated"``).
+        # Operators supply the exact bearer string they want sent; a
+        # silent rewrite would surface in a misconfigured remote
+        # provider's request log instead of the operator's value.
+        c = EmbedClient(base_url="http://x/v1", model="m", api_key="placeholder")
+        # The SDK's stored credential is what we passed in.
+        assert c.client.api_key == "placeholder"  # pragma: allowlist secret
 
 
 class TestEmbed:
     def test_returns_embedding_vector(self):
-        c = EmbedClient(base_url="http://x/v1", model="m")
+        c = EmbedClient(base_url="http://x/v1", model="m", api_key="placeholder")
 
         async def fake_create(**kwargs):
             assert kwargs["model"] == "m"
@@ -57,7 +67,7 @@ class TestEmbed:
         assert out == [0.5, 0.6, 0.7, 0.8]
 
     def test_propagates_sdk_exceptions(self):
-        c = EmbedClient(base_url="http://x/v1", model="m")
+        c = EmbedClient(base_url="http://x/v1", model="m", api_key="placeholder")
 
         class Boom(Exception):
             pass

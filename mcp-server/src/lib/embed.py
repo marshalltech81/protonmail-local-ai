@@ -41,10 +41,17 @@ class EmbedClient:
 
         self.base_url = base_url.rstrip("/")
         self.model = model
-        # ``api_key`` must be a non-empty string for the SDK to construct
-        # cleanly; for unauthenticated host-side servers we pass a
-        # placeholder. The Authorization header still goes out, but
-        # compat servers that don't require auth ignore it.
+        # ``api_key`` is required (non-empty) — startup validation in
+        # ``main.py`` rejects an empty value before reaching here. For
+        # unauthenticated host-side servers (LM Studio, vLLM,
+        # ``mlx_lm.server``, TEI) the operator supplies any placeholder
+        # string in the secret file; the SDK sends it as a bearer token
+        # and compat servers ignore it. Keeping the substitution out of
+        # this constructor means the credential we actually send is
+        # exactly what the operator wrote — no silent rewrite to a
+        # literal that could surface in a misconfigured remote
+        # provider's request log.
+        #
         # SDK default retry posture (2 attempts with exponential backoff)
         # is kept on the mcp-server side because the query path is a
         # single user-visible embed call — silently absorbing one
@@ -55,7 +62,7 @@ class EmbedClient:
         # classification across many texts per call.
         self.client = AsyncOpenAI(
             base_url=self.base_url,
-            api_key=api_key or "unauthenticated",
+            api_key=api_key,
             timeout=timeout_secs,
         )
 

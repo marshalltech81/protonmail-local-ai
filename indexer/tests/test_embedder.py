@@ -26,6 +26,14 @@ def _embed_response(vectors: list[list[float]], reverse_order: bool = False) -> 
 
 
 def _make_embedder(**overrides) -> OpenAIEmbedder:
+    # ``api_key`` is required (non-empty) in production — startup
+    # validation in ``main._validate_embed_config`` rejects an empty
+    # value before the embedder is constructed. Tests supply an explicit
+    # placeholder so the SDK's "non-empty string" check doesn't
+    # masquerade as a constructor bug. Operators pointing at an
+    # unauthenticated host-side server supply the same shape of value
+    # in ``.secrets/embed_api_key.txt``.
+    overrides.setdefault("api_key", "placeholder")
     return OpenAIEmbedder(
         overrides.pop("base_url", "http://host.docker.internal:8001/v1"),
         overrides.pop("model", "test-model"),

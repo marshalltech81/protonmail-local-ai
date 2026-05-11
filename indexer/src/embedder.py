@@ -145,12 +145,14 @@ class OpenAIEmbedder:
     """OpenAI-SDK-backed ``/v1/embeddings`` client.
 
     For an unauthenticated host-side server, ``base_url`` is something
-    like ``http://host.docker.internal:8001/v1`` and ``api_key`` is
-    empty (a placeholder is passed to satisfy SDK construction; compat
-    servers ignore the auth header). For DeepInfra, ``base_url`` is
-    ``https://api.deepinfra.com/v1/openai`` and ``api_key`` comes from
-    the ``embed_api_key`` Docker secret. The class itself is
-    provider-agnostic.
+    like ``http://host.docker.internal:8001/v1`` and ``api_key`` is any
+    operator-supplied placeholder string (e.g. ``unauthenticated``);
+    compat servers ignore the auth header. For DeepInfra, ``base_url``
+    is ``https://api.deepinfra.com/v1/openai`` and ``api_key`` comes
+    from the ``embed_api_key`` Docker secret. The class itself is
+    provider-agnostic. ``api_key`` must be non-empty — startup
+    validation in ``main._validate_embed_config`` enforces that
+    contract before the embedder is constructed.
 
     Project-specific behavior preserved over the bare SDK:
 
@@ -184,20 +186,22 @@ class OpenAIEmbedder:
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.batch_size = batch_size
-        # The SDK requires a non-empty ``api_key`` to construct cleanly.
-        # Unauthenticated host-side servers ignore the resulting
-        # Authorization header; the ``"placeholder"`` literal is
-        # deliberately self-descriptive so it cannot be mistaken for a
-        # real credential if it ever surfaces in a provider's request
-        # log (which would happen only if ``EMBED_BASE_URL`` were
-        # misconfigured to a remote provider while ``EMBED_API_KEY``
-        # was empty). ``max_retries=0`` because retry policy is owned
+        # ``api_key`` is required (non-empty) — startup validation in
+        # ``main._validate_embed_config`` rejects an empty value before
+        # this constructor runs. Unauthenticated host-side servers
+        # ignore the resulting Authorization header, so the operator
+        # supplies any placeholder string (e.g. ``unauthenticated``)
+        # in the secret file. Keeping the substitution out of this
+        # constructor means the credential actually sent is exactly
+        # what the operator wrote — no silent rewrite to a literal
+        # that could surface in a misconfigured remote provider's
+        # request log. ``max_retries=0`` because retry policy is owned
         # by the tenacity wrapper below — the SDK's built-in retry
         # would double-up exponential backoff and obscure the
         # 4xx-fast-fail / 5xx-retry classification.
         self.client = OpenAI(
             base_url=self.base_url,
-            api_key=api_key or "placeholder",
+            api_key=api_key,
             timeout=request_timeout,
             max_retries=0,
         )

@@ -180,11 +180,15 @@ class TestComplete:
         assert captured["system"] == "sys"
         assert captured["messages"][0]["role"] == "user"
 
-    def test_anthropic_backend_returns_empty_when_no_text_block(self):
-        # Defensive path: a Messages response with only non-text blocks
-        # (e.g. tool_use only) should not raise — return empty so the
-        # caller's downstream JSON parse fails cleanly with a clear
-        # "No structured data" message rather than a TypeError.
+    def test_anthropic_backend_raises_when_no_text_block(self):
+        # A Messages response with only non-text blocks (e.g. tool_use
+        # only) is an actionable provider error, not a "successful empty
+        # answer." Pre-fix the backend returned ``""``, which surfaced
+        # to the caller as a blank tool response with no signal that
+        # anything went wrong — structured callers got a confusing
+        # JSONDecodeError two layers down, prose callers passed the
+        # empty string straight to the agent. Raise here so all callers
+        # see a sanitized RuntimeError naming the failure mode.
         c = InferenceClient.create(
             mode="anthropic",
             base_url="https://api.anthropic.com",
@@ -198,8 +202,88 @@ class TestComplete:
             )
 
         c._backend.client.messages.create = fake_create  # type: ignore[assignment]
-        out = asyncio.run(c.complete("sys", "user"))
-        assert out == ""
+        with pytest.raises(RuntimeError, match="no text blocks"):
+            asyncio.run(c.complete("sys", "user"))
+
+    def test_anthropic_backend_raises_when_content_empty(self):
+        # A Messages response with ``content=[]`` (provider abandoned the
+        # generation, content-filter trip, etc.) also collapses to an
+        # empty text result. Same RuntimeError surface.
+        c = InferenceClient.create(
+            mode="anthropic",
+            base_url="https://api.anthropic.com",
+            model="claude-x",
+            api_key="sk-ant-test",  # pragma: allowlist secret
+        )
+
+        async def fake_create(**_kwargs):
+            return SimpleNamespace(content=[])
+
+        c._backend.client.messages.create = fake_create  # type: ignore[assignment]
+        with pytest.raises(RuntimeError, match="no text blocks"):
+            asyncio.run(c.complete("sys", "user"))
+
+    def test_openai_backend_raises_when_choices_empty(self):
+        # OpenAI-compatible servers occasionally return empty
+        # ``choices`` (provider error states, content-filter trips).
+        # Pre-fix this raised an opaque ``IndexError`` on
+        # ``resp.choices[0]``; the new contract is a sanitized
+        # RuntimeError naming the failure mode so the operator-facing
+        # log line is actionable.
+        c = InferenceClient.create(
+            mode="openai",
+            base_url="http://x/v1",
+            model="qwen",
+            api_key="sk-test",  # pragma: allowlist secret
+        )
+
+        async def fake_create(**_kwargs):
+            return SimpleNamespace(choices=[])
+
+        c._backend.client.chat.completions.create = fake_create  # type: ignore[assignment]
+        with pytest.raises(RuntimeError, match="no choices"):
+            asyncio.run(c.complete("sys", "user"))
+
+    def test_openai_backend_raises_when_content_none(self):
+        # A ``message.content=None`` case (tool-call-only delta,
+        # length-truncated response) was previously coerced to ``""``
+        # via ``or ""`` and returned as a successful empty answer. Now
+        # it raises so the failure is visible.
+        c = InferenceClient.create(
+            mode="openai",
+            base_url="http://x/v1",
+            model="qwen",
+            api_key="sk-test",  # pragma: allowlist secret
+        )
+
+        async def fake_create(**_kwargs):
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content=None))],
+            )
+
+        c._backend.client.chat.completions.create = fake_create  # type: ignore[assignment]
+        with pytest.raises(RuntimeError, match="empty content"):
+            asyncio.run(c.complete("sys", "user"))
+
+    def test_openai_backend_raises_when_content_empty_string(self):
+        # The ``or ""`` coercion previously swallowed an explicit
+        # empty string too. Reject the same way as None — both are
+        # "no answer" signals from the provider.
+        c = InferenceClient.create(
+            mode="openai",
+            base_url="http://x/v1",
+            model="qwen",
+            api_key="sk-test",  # pragma: allowlist secret
+        )
+
+        async def fake_create(**_kwargs):
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content=""))],
+            )
+
+        c._backend.client.chat.completions.create = fake_create  # type: ignore[assignment]
+        with pytest.raises(RuntimeError, match="empty content"):
+            asyncio.run(c.complete("sys", "user"))
 
     def test_anthropic_backend_concatenates_multiple_text_blocks(self):
         # A future model might return multiple text blocks (or thinking

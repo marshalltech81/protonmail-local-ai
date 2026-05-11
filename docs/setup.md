@@ -38,21 +38,24 @@ all four files to exist before starting. You will overwrite them
 with real values only as needed:
 
 - `bridge_pass.txt` — after the Bridge login step below
-- `inference_api_key.txt` — required (non-empty) when
-  `INFERENCE_MODE=anthropic`. Leave empty when `INFERENCE_MODE=none`
-  or when pointing `INFERENCE_MODE=openai` at an unauthenticated
-  host-side server (LM Studio, vLLM, `mlx_lm.server`); the official
-  SDK requires a non-empty `api_key` to construct, so the inference
-  client substitutes a placeholder string in that case. Set a real
-  key for `INFERENCE_MODE=openai` only when the endpoint actually
-  requires authentication (a remote OpenAI-compatible provider).
-- `embed_api_key.txt` — required (non-empty) only when `EMBED_BASE_URL`
-  points at an authenticated provider (DeepInfra, OpenRouter, etc.).
-  Leave empty when pointing at an unauthenticated host server; the
-  embed client substitutes a placeholder string for the SDK constructor
-  in that case.
-- `rerank_api_key.txt` — required when `RERANK_MODE=cohere`.
-  Leave empty when `RERANK_MODE=none`.
+- `inference_api_key.txt` — required (non-empty) whenever
+  `INFERENCE_MODE` is enabled (`anthropic` or `openai`). For a remote
+  provider, use the provider's real key. When pointing
+  `INFERENCE_MODE=openai` at an unauthenticated host-side server
+  (LM Studio, vLLM, `mlx_lm.server`), write any non-empty placeholder
+  string — `unauthenticated` reads cleanly in logs — so the
+  no-fallback startup contract holds uniformly across all three
+  layers. The compat server ignores the bearer header; the placeholder
+  never leaves the host. Leave the file empty only when
+  `INFERENCE_MODE=none`.
+- `embed_api_key.txt` — required (non-empty); `EMBED_MODE=openai` is
+  always enabled (the indexer cannot run without an embedder). For a
+  remote provider (DeepInfra, OpenRouter, etc.), use the provider's
+  real key. For an unauthenticated host-side server, write any
+  non-empty placeholder string (e.g. `unauthenticated`); the compat
+  server ignores the bearer header.
+- `rerank_api_key.txt` — required (non-empty) when `RERANK_MODE=cohere`.
+  Leave empty only when `RERANK_MODE=none`.
 
 ### 3. Build all Docker images
 
@@ -147,8 +150,10 @@ The schema reserves a fixed 4096-dim vector — pick a model that
 produces 4096-dim vectors or run a schema migration. See "Pointing at
 a different embedder provider" below for examples (DeepInfra,
 OpenRouter, host-side servers like LM Studio / vLLM / `mlx_lm.server`).
-If the provider authenticates, write the key to
-`.secrets/embed_api_key.txt` (`chmod 600`).
+Write the embedder key to `.secrets/embed_api_key.txt` (`chmod 600`).
+The key is required (non-empty) — for an unauthenticated host-side
+server, use any placeholder string (e.g. `unauthenticated`); compat
+servers ignore the bearer header.
 
 **Inference** — choose one mode:
 
@@ -161,15 +166,16 @@ If the provider authenticates, write the key to
 INFERENCE_MODE=anthropic
 INFERENCE_BASE_URL=
 INFERENCE_MODEL=claude-sonnet-4-6
-# write the key to .secrets/inference_api_key.txt
+# write the key to .secrets/inference_api_key.txt (required)
 
 # OpenAI-compatible via the official openai SDK (local or remote).
 INFERENCE_MODE=openai
 INFERENCE_BASE_URL=...   # any /v1 base URL
 INFERENCE_MODEL=...
-# write the key to .secrets/inference_api_key.txt
-# (the SDK accepts an unauth placeholder against host servers that
-# ignore the Authorization header)
+# write the key to .secrets/inference_api_key.txt (required, non-empty)
+# For unauthenticated host servers, use any placeholder string
+# (e.g. `unauthenticated`) — the compat server ignores the bearer
+# header but the key must be non-empty so the startup contract holds.
 
 # Disabled — intelligence tools are not registered.
 INFERENCE_MODE=none
@@ -208,13 +214,16 @@ make up
 
 - `BRIDGE_USER` is still unset or left at the placeholder value
 - `.secrets/bridge_pass.txt` is missing, empty, or not `600`
-- any always-authenticated layer's secret file is missing, empty, or not `600`
-  (`inference_api_key.txt` when `INFERENCE_MODE=anthropic`,
-  `rerank_api_key.txt` when `RERANK_MODE=cohere`)
+- any enabled layer's secret file is missing, empty, or not `600`:
+  `inference_api_key.txt` when `INFERENCE_MODE` is `anthropic` or
+  `openai`; `embed_api_key.txt` always (`EMBED_MODE` has no `none`
+  mode); `rerank_api_key.txt` when `RERANK_MODE=cohere`. For
+  unauthenticated host-side servers, write any non-empty placeholder
+  string (e.g. `unauthenticated`).
 - inference / embed / rerank secret placeholder files are missing or not `600`
   (validation requires the files to exist with `600` permissions even when the
-  matching layer is `none` or pointing at an unauthenticated host server, so
-  the docker-compose `secrets:` references resolve cleanly)
+  matching layer is `none`, so the docker-compose `secrets:` references
+  resolve cleanly)
 - numeric or enum settings such as `SYNC_INTERVAL`, `MCP_PORT`, `MCP_READ_ONLY`, or `INFERENCE_MODE` are invalid
 
 Verify everything is running:
@@ -293,9 +302,11 @@ EMBED_MODEL=qwen/qwen3-embedding-8b
 After changing provider:
 
 1. Set the new vars in `.env`.
-2. If the provider authenticates, write the API key to
-   `.secrets/embed_api_key.txt` (`chmod 600`). `make init-secrets`
-   creates an empty placeholder.
+2. Write the API key to `.secrets/embed_api_key.txt` (`chmod 600`).
+   `make init-secrets` creates an empty placeholder; the key is
+   required (non-empty). For an unauthenticated host-side server, use
+   any placeholder string (e.g. `unauthenticated`); compat servers
+   ignore the bearer header.
 3. **Indexer and mcp-server must point at the same provider + model**
    so query vectors are comparable to indexed vectors. A
    dimension mismatch (e.g. pointing mcp-server at a 3072-dim

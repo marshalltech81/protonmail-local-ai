@@ -470,31 +470,27 @@ require_mode_600 "$INFERENCE_KEY_FILE"
 require_mode_600 "$EMBED_KEY_FILE"
 require_mode_600 "$RERANK_KEY_FILE"
 
-# Each active mode's secret file requirement depends on whether the
-# mode targets an authenticated provider or can also point at an
-# unauthenticated host-side server (LM Studio, vLLM, ``mlx_lm.server``).
+# Every enabled layer requires a non-empty API key — uniform rule
+# across the three operator-supplied layers. Operators pointing at an
+# unauthenticated host-side server (LM Studio, vLLM, ``mlx_lm.server``,
+# TEI) supply any placeholder string (e.g. ``unauthenticated``); the
+# compat server ignores the bearer header, but the no-fallback startup
+# contract requires the value to be non-empty so a missing key
+# surfaces here rather than at first tool call.
 #
-# - ``INFERENCE_MODE=anthropic``: Anthropic-only, always authenticated.
-#   Requires a non-empty key.
-# - ``INFERENCE_MODE=openai``: may target a remote provider OR an
-#   unauthenticated host server. The openai SDK requires a non-empty
-#   ``api_key`` to construct, but ``InferenceClient`` (mcp-server) and
-#   ``OpenAIEmbedder`` (indexer) supply ``"unauthenticated"`` as a
-#   placeholder when the configured key is empty, so the operator can
-#   leave the secret file empty for unauthenticated host servers.
-# - ``EMBED_MODE=openai``: same dual case as ``INFERENCE_MODE=openai``.
-#   ``EmbedClient`` supplies the SDK placeholder when empty.
-# - ``RERANK_MODE=cohere``: Cohere-only, always authenticated.
-#   Requires a non-empty key.
+# - ``INFERENCE_MODE=anthropic|openai``: requires a non-empty
+#   inference key.
+# - ``EMBED_MODE=openai``: always enabled (embed has no ``none`` mode);
+#   requires a non-empty embed key.
+# - ``RERANK_MODE=cohere``: requires a non-empty rerank key.
 #
 # Disabled inference / rerank layers (``*_MODE=none``) can leave the
 # file empty; the file must still exist with mode 600 so the
-# docker-compose ``secrets:`` reference resolves cleanly. Embed has
-# no disabled mode, but its file may be empty for unauthenticated
-# host-side servers (LM Studio, vLLM, etc.).
-if [[ "$INFERENCE_MODE" == "anthropic" ]]; then
+# docker-compose ``secrets:`` reference resolves cleanly.
+if [[ "$INFERENCE_MODE" != "none" ]]; then
     require_nonempty_file "$INFERENCE_KEY_FILE" "Inference API key"
 fi
+require_nonempty_file "$EMBED_KEY_FILE" "Embed API key"
 if [[ "$RERANK_MODE" == "cohere" ]]; then
     require_nonempty_file "$RERANK_KEY_FILE" "Rerank API key"
 fi

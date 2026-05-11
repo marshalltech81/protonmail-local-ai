@@ -733,6 +733,61 @@ class TestDrainQueueRetryAndDeadLetter:
         assert "PermissionError" in err or "Errno 13" in err
 
 
+class TestValidateEmbedConfig:
+    """``_validate_embed_config`` enforces the per-layer startup contract:
+    every operator-supplied env var the embedder needs must be present
+    and non-empty before the indexer constructs the embedder client.
+
+    Pre-tightening, ``EMBED_API_KEY`` could be empty and the indexer
+    would happily start, only failing at the first embed call against
+    a remote provider with a 401. Now empty keys fail closed at startup
+    so a missing secret surfaces in the same place as a missing
+    ``EMBED_BASE_URL`` or ``EMBED_MODEL``.
+    """
+
+    def test_complete_config_passes_silently(self, monkeypatch):
+        monkeypatch.setattr(main, "EMBED_BASE_URL", "http://x/v1")
+        monkeypatch.setattr(main, "EMBED_MODEL", "qwen-embed")
+        monkeypatch.setattr(main, "EMBED_API_KEY", "sk-real")  # pragma: allowlist secret
+        # No raise == pass.
+        main._validate_embed_config()
+
+    def test_missing_base_url_raises(self, monkeypatch):
+        monkeypatch.setattr(main, "EMBED_BASE_URL", "")
+        monkeypatch.setattr(main, "EMBED_MODEL", "qwen-embed")
+        monkeypatch.setattr(main, "EMBED_API_KEY", "sk-real")  # pragma: allowlist secret
+        with pytest.raises(ValueError, match="EMBED_BASE_URL"):
+            main._validate_embed_config()
+
+    def test_missing_model_raises(self, monkeypatch):
+        monkeypatch.setattr(main, "EMBED_BASE_URL", "http://x/v1")
+        monkeypatch.setattr(main, "EMBED_MODEL", "")
+        monkeypatch.setattr(main, "EMBED_API_KEY", "sk-real")  # pragma: allowlist secret
+        with pytest.raises(ValueError, match="EMBED_MODEL"):
+            main._validate_embed_config()
+
+    def test_empty_api_key_raises(self, monkeypatch):
+        # The startup contract: every enabled operator-supplied layer
+        # needs a non-empty key. Operators pointing at an unauthenticated
+        # host-side server supply any placeholder (``unauthenticated``)
+        # rather than leaving the secret file empty.
+        monkeypatch.setattr(main, "EMBED_BASE_URL", "http://x/v1")
+        monkeypatch.setattr(main, "EMBED_MODEL", "qwen-embed")
+        monkeypatch.setattr(main, "EMBED_API_KEY", "")
+        with pytest.raises(ValueError, match="EMBED_API_KEY"):
+            main._validate_embed_config()
+
+    def test_placeholder_api_key_passes(self, monkeypatch):
+        # The contract is "non-empty," not "well-formed." A placeholder
+        # string for an unauthenticated host-side server passes startup
+        # validation; the SDK sends it as a bearer token that compat
+        # servers ignore.
+        monkeypatch.setattr(main, "EMBED_BASE_URL", "http://x/v1")
+        monkeypatch.setattr(main, "EMBED_MODEL", "qwen-embed")
+        monkeypatch.setattr(main, "EMBED_API_KEY", "unauthenticated")
+        main._validate_embed_config()
+
+
 class TestValidateEmbeddingDim:
     def test_matching_dim_passes_silently(self):
         embedder = make_mock_embedder()

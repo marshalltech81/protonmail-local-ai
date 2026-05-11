@@ -96,6 +96,17 @@ class TestReadSecret:
         # the test machine, so the env fallback must fire.
         assert _read_secret("missing_secret", "FAKE_SECRET_ENV") == "from-env-fallback"
 
+    def test_env_fallback_value_is_whitespace_stripped(self, monkeypatch):
+        # Operators pasting a key into ``INFERENCE_API_KEY=" key "`` (or
+        # any shell-quoted form that picks up stray spaces) would
+        # otherwise send whitespace as part of the bearer credential and
+        # fail in a non-obvious way at first call. The secret-file path
+        # already strips; the env fallback must match so both paths are
+        # interchangeable. Indexer's equivalent already strips both
+        # paths — keep mcp-server symmetric.
+        monkeypatch.setenv("FAKE_SECRET_ENV", "  env-key  ")
+        assert _read_secret("missing_secret", "FAKE_SECRET_ENV") == "env-key"
+
     def test_returns_empty_when_neither_source_present(self, monkeypatch):
         monkeypatch.delenv("DEFINITELY_UNSET", raising=False)
         assert _read_secret("missing_secret", "DEFINITELY_UNSET") == ""
@@ -295,6 +306,32 @@ class TestRequireEnv:
         assert "INFERENCE_API_KEY" in msg
         assert "INFERENCE_MODE" in msg
         assert "anthropic" in msg
+
+    def test_inference_openai_mode_requires_api_key(self):
+        # Tightened contract: every enabled inference layer requires a
+        # non-empty key, including ``openai`` mode. Pre-fix an operator
+        # pointing at a remote OpenAI-compatible provider could start
+        # cleanly and only fail at first intelligence call with a 401.
+        # Operators pointing at an unauthenticated host-side server
+        # supply any placeholder string (``unauthenticated``) so the
+        # startup contract holds uniformly.
+        with pytest.raises(ValueError) as excinfo:
+            _require_env("INFERENCE_MODE", "openai", "INFERENCE_API_KEY", "")
+        msg = str(excinfo.value)
+        assert "INFERENCE_API_KEY" in msg
+        assert "openai" in msg
+
+    def test_embed_mode_requires_api_key(self):
+        # ``EMBED_MODE=openai`` is the only valid embed mode (no ``none``
+        # mode exists), and the contract is the same across layers:
+        # non-empty key required. Pre-fix the indexer + mcp-server would
+        # accept an empty embed key and silently send an empty bearer
+        # token on first call.
+        with pytest.raises(ValueError) as excinfo:
+            _require_env("EMBED_MODE", "openai", "EMBED_API_KEY", "")
+        msg = str(excinfo.value)
+        assert "EMBED_API_KEY" in msg
+        assert "openai" in msg
 
 
 class TestHealthEndpoint:

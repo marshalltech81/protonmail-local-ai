@@ -75,7 +75,10 @@ Important architecture facts:
   same env-var shape: `{LAYER}_MODE` selects the SDK/protocol;
   `{LAYER}_BASE_URL` / `{LAYER}_MODEL` / `{LAYER}_API_KEY` configure
   the chosen mode. `mode=none` disables a layer. Missing required
-  vars are a startup error — there is no inter-mode fallback.
+  vars are a startup error — there is no inter-mode fallback. The
+  `{LAYER}_API_KEY` is always required (non-empty) when the matching
+  layer is enabled; operators pointing at an unauthenticated host-side
+  server supply any placeholder string (e.g. `unauthenticated`).
 - inference is selected by `INFERENCE_MODE` (`anthropic|openai|none`).
   `anthropic` (default) uses the official `anthropic` SDK against the
   Messages API; leave `INFERENCE_BASE_URL` empty for the SDK default
@@ -237,15 +240,27 @@ Secrets are a hard boundary.
 - Each operator-supplied layer has one Docker secret:
   `.secrets/inference_api_key.txt`, `.secrets/embed_api_key.txt`,
   `.secrets/rerank_api_key.txt`. Each file must exist with mode 600
-  so the docker-compose `secrets:` reference resolves cleanly; the
-  file may be empty when the matching layer's `*_MODE=none`.
+  so the docker-compose `secrets:` reference resolves cleanly. The
+  file must be **non-empty** when the matching layer's `*_MODE` is
+  enabled (set to anything other than `none`); for unauthenticated
+  host-side servers the operator supplies any placeholder string
+  (e.g. `unauthenticated`) so the no-fallback startup contract holds
+  uniformly. The file may be empty only when the matching layer's
+  `*_MODE=none` (currently only `INFERENCE_MODE` and `RERANK_MODE`
+  have a `none` mode; `EMBED_MODE` is always `openai`).
 - `INFERENCE_MODE=openai` uses the official `openai` SDK against any
   OpenAI-compatible chat-completions endpoint at `INFERENCE_BASE_URL`
   (operator-supplied: a remote provider or a host-side server such
-  as LM Studio / vLLM / `mlx_lm.server`).
+  as LM Studio / vLLM / `mlx_lm.server`). `INFERENCE_API_KEY` is
+  required (non-empty); local unauthenticated servers accept any
+  placeholder string.
 - `INFERENCE_MODE=anthropic` (default) uses the official `anthropic`
   SDK against the Anthropic Messages API; leave `INFERENCE_BASE_URL`
   empty for the SDK default or set it for compatible gateways.
+  `INFERENCE_API_KEY` is required.
+- `EMBED_MODE=openai` is the only valid value. `EMBED_API_KEY` is
+  required (non-empty); local unauthenticated servers accept any
+  placeholder string.
 - `RERANK_MODE=cohere` uses the official `cohere` SDK against the
   Cohere rerank API. `RERANK_API_KEY` is required; `RERANK_BASE_URL`
   is optional (empty falls through to the SDK default).

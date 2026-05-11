@@ -7,10 +7,11 @@ and writes to the SQLite index.
 The embedder is operator-supplied: any OpenAI-compatible provider
 works (remote — DeepInfra, OpenRouter, etc. — or a host-side server
 the operator installs themselves: LM Studio, vLLM, ``mlx_lm.server``,
-TEI). Configure via ``EMBED_BASE_URL`` + ``EMBED_MODEL`` (+ optional
-``EMBED_API_KEY`` Docker secret). ``EMBED_MODE`` is the wire-shape
-selector kept for symmetry with the other layers; only ``openai`` is
-valid today.
+TEI). Configure via ``EMBED_BASE_URL`` + ``EMBED_MODEL`` +
+``EMBED_API_KEY`` Docker secret. The key is required (non-empty);
+operators pointing at an unauthenticated host-side server supply any
+placeholder string. ``EMBED_MODE`` is the wire-shape selector kept
+for symmetry with the other layers; only ``openai`` is valid today.
 
 When ``INDEXER_DELETION_ENABLED=true`` the indexer also runs a reconciler
 that records tombstones for mbsync-flagged (``T``) Maildir files and reaps
@@ -62,12 +63,13 @@ SQLITE_PATH = Path(os.environ.get("SQLITE_PATH", "/data/mail.db"))
 # provider — set ``EMBED_BASE_URL`` to any compliant /v1 base URL and
 # ``EMBED_MODEL`` to a model id served there. The schema reserves a
 # fixed 4096-dim vector — pick a 4096-dim model (Qwen3-Embedding-8B
-# variants) or run a schema migration. Authentication (when needed) is
-# loaded from the ``embed_api_key`` Docker secret or ``EMBED_API_KEY``
-# env. ``EMBED_MODE`` is kept as a config knob for symmetry with
-# ``INFERENCE_MODE`` / ``RERANK_MODE`` but only accepts ``openai``
-# today — embed is the headline retrieval feature and the indexer
-# cannot function without it, so there is no disabled mode.
+# variants) or run a schema migration. The bearer credential is loaded
+# from the ``embed_api_key`` Docker secret or ``EMBED_API_KEY`` env and
+# is required (non-empty); unauthenticated host-side servers accept any
+# placeholder string. ``EMBED_MODE`` is kept as a config knob for
+# symmetry with ``INFERENCE_MODE`` / ``RERANK_MODE`` but only accepts
+# ``openai`` today — embed is the headline retrieval feature and the
+# indexer cannot function without it, so there is no disabled mode.
 _EMBED_MODES = frozenset({"openai"})
 
 
@@ -91,21 +93,39 @@ def _validate_embed_config() -> None:
     without supplying a full embedder config. The container entrypoint
     always reaches ``main()`` first, so the operator-facing failure
     surface is identical.
+
+    ``EMBED_API_KEY`` is required (non-empty) too. Operators pointing
+    at an unauthenticated host-side server (LM Studio, vLLM,
+    ``mlx_lm.server``, TEI) supply any non-empty placeholder string
+    (e.g. ``unauthenticated``) so the no-fallback startup contract
+    holds uniformly across the three operator-supplied layers — a
+    missing key surfaces here, not on the first embed call. Symmetric
+    with the mcp-server side so indexer + mcp-server fail in the same
+    place when the operator forgets a key.
     """
     if not EMBED_BASE_URL:
         raise ValueError("EMBED_BASE_URL must be set when EMBED_MODE='openai'")
     if not EMBED_MODEL:
         raise ValueError("EMBED_MODEL must be set when EMBED_MODE='openai'")
+    if not EMBED_API_KEY:
+        raise ValueError("EMBED_API_KEY must be set when EMBED_MODE='openai'")
 
 
 def _read_embed_api_key() -> str:
     """Read the embedder API key from a Docker secret, then env, then empty.
 
-    Mirrors the secret-then-env pattern used in mcp-server. An empty key
-    is the unauthenticated-host-server case (e.g. a local OpenAI-compat
-    server bound to loopback) and is not an error. The Docker secret
-    path follows the existing ``/run/secrets/<name>`` convention;
+    Mirrors the secret-then-env pattern used in mcp-server. The Docker
+    secret path follows the existing ``/run/secrets/<name>`` convention;
     ``EMBED_API_KEY`` env is the fallback for non-Docker deployments.
+
+    An empty return value is not an error here — the startup contract
+    is enforced by ``_validate_embed_config()``, which fails closed if
+    no key is set. Splitting "read" from "require" keeps the reader
+    purely about source-of-truth precedence (secret > env), and the
+    validator owns the non-empty rule. For unauthenticated host-side
+    servers the operator supplies a placeholder string (e.g.
+    ``unauthenticated``); the SDK sends it as a bearer token that
+    compat servers ignore.
 
     Fail-closed posture: when the Docker secret file *exists* but cannot
     be read (perms regression, mount issue), this is a deployment

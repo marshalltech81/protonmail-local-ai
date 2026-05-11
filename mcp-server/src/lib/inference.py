@@ -76,10 +76,18 @@ class _OpenAIBackend:
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.max_tokens = max_tokens
-        # ``api_key`` must be a non-empty string for the SDK to construct
-        # cleanly; for unauthenticated host-side servers we pass a
-        # placeholder. The Authorization header still goes out, but compat
-        # servers ignore it. Production providers reject it as expected.
+        # ``api_key`` is required (non-empty) — startup validation in
+        # ``main.py`` rejects an empty value before reaching this
+        # constructor. For unauthenticated host-side servers (LM Studio,
+        # vLLM, ``mlx_lm.server``) the operator supplies any placeholder
+        # string in the secret file; the SDK sends it as a bearer token
+        # and compat servers ignore it. Keeping the substitution out of
+        # this constructor means the audit trail of "what did we send as
+        # the credential" is exactly what the operator wrote — no
+        # silent rewrite to a literal that could surface in a remote
+        # provider's request log if ``INFERENCE_BASE_URL`` were
+        # misconfigured.
+        #
         # SDK default retry posture (2 attempts with exponential backoff)
         # is kept on the mcp-server side because the query path is a
         # single user-visible request — silently absorbing one transient
@@ -89,7 +97,7 @@ class _OpenAIBackend:
         # tenacity there.
         self.client = AsyncOpenAI(
             base_url=self.base_url,
-            api_key=api_key or "unauthenticated",
+            api_key=api_key,
             timeout=timeout_secs,
         )
 
@@ -103,7 +111,21 @@ class _OpenAIBackend:
             max_tokens=self.max_tokens,
             stream=False,
         )
-        content = resp.choices[0].message.content or ""
+        # OpenAI-compatible servers occasionally return empty
+        # ``choices`` (provider error states, content-filter trips) or a
+        # ``message.content`` of ``None``/``""`` (tool-call-only deltas,
+        # length-truncated responses). Returning the empty string would
+        # surface to the caller as a silent blank answer — the
+        # intelligence tools then pass that straight through to the
+        # agent, which has no signal that the provider failed. Raise so
+        # the operator-facing log line names the failure mode. The
+        # message contains no prompt or response content, so logging
+        # the exception cannot leak user data.
+        if not resp.choices:
+            raise RuntimeError("Inference provider returned no choices (mode=openai)")
+        content = resp.choices[0].message.content
+        if not content:
+            raise RuntimeError("Inference provider returned empty content (mode=openai)")
         return content
 
 
@@ -178,7 +200,17 @@ class _AnthropicBackend:
             text = getattr(block, "text", None)
             if isinstance(text, str) and getattr(block, "type", None) == "text":
                 parts.append(text)
-        return "".join(parts)
+        result = "".join(parts)
+        # An empty result means the response contained no text blocks
+        # at all (empty ``content``, or only ``tool_use`` / ``thinking``
+        # blocks). Returning "" would let the caller pass a silent blank
+        # answer to the agent; raise so the failure surfaces with a
+        # clear, sanitized error (no prompt/response content) instead.
+        # Structured callers that expected JSON get a RuntimeError here
+        # rather than a JSONDecodeError two layers down.
+        if not result:
+            raise RuntimeError("Inference provider returned no text blocks (mode=anthropic)")
+        return result
 
 
 class InferenceClient:
