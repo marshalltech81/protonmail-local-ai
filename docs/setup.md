@@ -46,11 +46,11 @@ with real values only as needed:
   client substitutes a placeholder string in that case. Set a real
   key for `INFERENCE_MODE=openai` only when the endpoint actually
   requires authentication (a remote OpenAI-compatible provider).
-- `embed_api_key.txt` — required (non-empty) only when `EMBED_MODE=openai`
+- `embed_api_key.txt` — required (non-empty) only when `EMBED_BASE_URL`
   points at an authenticated provider (DeepInfra, OpenRouter, etc.).
-  Leave empty when pointing at an unauthenticated host server or when
-  `EMBED_MODE=none`; the embed client substitutes a placeholder string
-  for the SDK constructor in that case.
+  Leave empty when pointing at an unauthenticated host server; the
+  embed client substitutes a placeholder string for the SDK constructor
+  in that case.
 - `rerank_api_key.txt` — required when `RERANK_MODE=cohere`.
   Leave empty when `RERANK_MODE=none`.
 

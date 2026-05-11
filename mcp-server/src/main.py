@@ -113,7 +113,7 @@ def _env_bool(name: str, default: bool) -> bool:
 
 
 _INFERENCE_MODES = frozenset({"anthropic", "openai", "none"})
-_EMBED_MODES = frozenset({"openai", "none"})
+_EMBED_MODES = frozenset({"openai"})
 _RERANK_MODES = frozenset({"cohere", "none"})
 
 
@@ -159,14 +159,17 @@ SQLITE_PATH = os.environ.get("SQLITE_PATH", "/data/mail.db")
 # Each layer (inference / embed / rerank) is selected by its ``*_MODE``
 # variable. The same shape applies across all three:
 #
-#   {LAYER}_MODE      = anthropic|openai|none / openai|none / cohere|none
+#   {LAYER}_MODE      = anthropic|openai|none / openai / cohere|none
 #   {LAYER}_BASE_URL  = endpoint URL (when the chosen mode needs one)
 #   {LAYER}_MODEL     = model id served at that endpoint
 #   {LAYER}_API_KEY   = bearer credential (Docker secret preferred)
 #
-# ``mode=none`` disables the layer: the client is not constructed and
-# tools that depend on it are either not registered (inference) or
-# refuse the dependent operations (embed / rerank).
+# Embed has no disabled mode because semantic / hybrid search is the
+# headline retrieval feature and the indexer cannot run without an
+# embedder either; ``EMBED_MODE=openai`` is the only valid value and
+# is kept as a config knob purely for symmetry with the other layers.
+# ``INFERENCE_MODE=none`` skips registration of the intelligence tools;
+# ``RERANK_MODE=none`` disables the rerank stage in hybrid search.
 #
 # Validation is strict and fail-closed: a chosen mode without its
 # required vars raises at startup. There is no inter-mode fallback —
@@ -344,16 +347,14 @@ def main():
     # chosen mode with missing config raises here so the operator sees a
     # precise error rather than a runtime fallback to a different
     # provider.
-    embed_client: EmbedClient | None = None
-    if EMBED_MODE == "openai":
-        _require_env("EMBED_MODE", EMBED_MODE, "EMBED_BASE_URL", EMBED_BASE_URL)
-        _require_env("EMBED_MODE", EMBED_MODE, "EMBED_MODEL", EMBED_MODEL)
-        embed_client = EmbedClient(
-            base_url=EMBED_BASE_URL,
-            model=EMBED_MODEL,
-            api_key=EMBED_API_KEY,
-            timeout_secs=EMBED_TIMEOUT_SECS,
-        )
+    _require_env("EMBED_MODE", EMBED_MODE, "EMBED_BASE_URL", EMBED_BASE_URL)
+    _require_env("EMBED_MODE", EMBED_MODE, "EMBED_MODEL", EMBED_MODEL)
+    embed_client = EmbedClient(
+        base_url=EMBED_BASE_URL,
+        model=EMBED_MODEL,
+        api_key=EMBED_API_KEY,
+        timeout_secs=EMBED_TIMEOUT_SECS,
+    )
 
     inference_client: InferenceClient | None = None
     if INFERENCE_MODE in {"openai", "anthropic"}:
@@ -474,10 +475,10 @@ def main():
     # doesn't waste a no-op replace pass on them.
     secret_values = [k for k in (INFERENCE_API_KEY, EMBED_API_KEY, RERANK_API_KEY) if k]
 
-    # Register all tool groups. Intelligence tools require both embed and
-    # inference; the group is skipped when either layer is disabled so a
-    # mailbox with retrieval-only or inference-only configuration still
-    # serves keyword search and retrieval cleanly.
+    # Register all tool groups. Intelligence tools require inference;
+    # the group is skipped when ``INFERENCE_MODE=none`` so a mailbox
+    # without an inference provider still serves keyword / semantic /
+    # hybrid retrieval cleanly.
     register_search_tools(
         server,
         db,
@@ -487,7 +488,7 @@ def main():
         expected_embed_dim=expected_embed_dim,
     )
     register_retrieval_tools(server, db)
-    if embed_client is not None and inference_client is not None:
+    if inference_client is not None:
         register_intelligence_tools(
             server,
             db,
@@ -498,11 +499,7 @@ def main():
             expected_embed_dim=expected_embed_dim,
         )
     else:
-        log.info(
-            "Intelligence tools not registered (EMBED_MODE=%s, INFERENCE_MODE=%s).",
-            EMBED_MODE,
-            INFERENCE_MODE,
-        )
+        log.info("Intelligence tools not registered (INFERENCE_MODE=none).")
     if MCP_READ_ONLY:
         log.info("MCP read-only mode enabled; action tools are not registered.")
     else:

@@ -326,25 +326,13 @@ if [[ "$INFERENCE_MODE" != "none" ]]; then
 fi
 
 # ----- EMBED -----
-# Indexer + mcp-server share this var in the compose stack. The indexer
-# rejects ``EMBED_MODE=none`` at startup (cannot ingest mail without an
-# embedder); mcp-server ``depends_on: indexer.service_healthy``. So
-# ``EMBED_MODE=none`` would block the whole stack at startup. The
-# mcp-server code path for ``none`` is still wired (so a standalone
-# mcp-server run outside docker-compose can serve keyword-only search
-# off an existing DB), but ``make up`` rejects it here to keep the
-# compose contract honest.
+# Embed has no disabled mode: semantic / hybrid search is the headline
+# retrieval feature and the indexer cannot run without an embedder
+# either. ``EMBED_MODE=openai`` is the only valid value and is kept as
+# a config knob for symmetry with the other layers.
 EMBED_MODE="${EMBED_MODE:-openai}"
 [[ "$EMBED_MODE" == "openai" ]] || {
-    if [[ "$EMBED_MODE" == "none" ]]; then
-        printf 'ERROR: EMBED_MODE=none is not supported by the compose stack.\n' >&2
-        printf '       The indexer requires an embedder and mcp-server depends_on it.\n' >&2
-        printf '       Set EMBED_MODE=openai and configure EMBED_BASE_URL / EMBED_MODEL,\n' >&2
-        printf '       or run mcp-server standalone (outside docker-compose) for\n' >&2
-        printf '       keyword-only search over an existing index.\n' >&2
-        exit 1
-    fi
-    echo "ERROR: EMBED_MODE must be 'openai' (or 'none' outside compose)." >&2
+    echo "ERROR: EMBED_MODE must be 'openai' (the only supported embed mode)." >&2
     exit 1
 }
 
@@ -466,9 +454,11 @@ require_mode_600 "$RERANK_KEY_FILE"
 # - ``RERANK_MODE=cohere``: Cohere-only, always authenticated.
 #   Requires a non-empty key.
 #
-# Disabled layers (``*_MODE=none``) can leave the file empty (it must
-# still exist with mode 600 so the docker-compose ``secrets:``
-# reference resolves cleanly).
+# Disabled inference / rerank layers (``*_MODE=none``) can leave the
+# file empty; the file must still exist with mode 600 so the
+# docker-compose ``secrets:`` reference resolves cleanly. Embed has
+# no disabled mode, but its file may be empty for unauthenticated
+# host-side servers (LM Studio, vLLM, etc.).
 if [[ "$INFERENCE_MODE" == "anthropic" ]]; then
     require_nonempty_file "$INFERENCE_KEY_FILE" "Inference API key"
 fi

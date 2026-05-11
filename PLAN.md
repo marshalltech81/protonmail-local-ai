@@ -470,9 +470,9 @@ Concretely:
   needs the URL/model knobs filled in.
 - Validation: validate-env.sh now mode-conditional — `INFERENCE_*`
   required only when `INFERENCE_MODE != none`, `RERANK_*` required
-  only when `RERANK_MODE=cohere`, and `EMBED_*` always required by
-  the indexer (which rejects `EMBED_MODE=none` at startup; the
-  mcp-server side accepts `none` for keyword-only retrieval).
+  only when `RERANK_MODE=cohere`, and `EMBED_*` always required
+  (`EMBED_MODE=openai` is the only valid value; embed has no
+  disabled mode because the indexer cannot run without it).
 - Hardened overlay: warning rewritten — `internal: true` is intended
   to block remote providers, and is compatible with operator-installed
   host-side providers (subject to runtime `host.docker.internal`

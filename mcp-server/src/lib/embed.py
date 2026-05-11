@@ -5,18 +5,10 @@ Calls an OpenAI-compatible ``/v1/embeddings`` endpoint via the official
 indexer uses, so query vectors and indexed vectors come from the same
 provider + model.
 
-``EMBED_MODE`` selects the wire shape:
-
-- ``openai``: this client. Operator-supplied compat servers (LM Studio,
-  vLLM, ``mlx_lm.server``, TEI, DeepInfra, OpenRouter, etc.) target
-  the OpenAI SDK as their reference client by design, so pointing the
-  SDK at them via ``base_url`` is the supported path.
-- ``none``: layer disabled. ``main.py`` does not instantiate
-  ``EmbedClient`` and search tools refuse semantic / hybrid modes.
-
-The ``openai`` SDK is imported inside ``__init__`` so deployments with
-``EMBED_MODE=none`` never pay the import cost — and never depend on
-the SDK installing cleanly.
+``EMBED_MODE=openai`` is the only valid mode. Operator-supplied compat
+servers (LM Studio, vLLM, ``mlx_lm.server``, TEI, DeepInfra, OpenRouter,
+etc.) target the OpenAI SDK as their reference client by design, so
+pointing the SDK at them via ``base_url`` is the supported path.
 """
 
 import logging
@@ -45,7 +37,6 @@ class EmbedClient:
         api_key: str = "",
         timeout_secs: float = DEFAULT_EMBED_TIMEOUT_SECS,
     ) -> None:
-        # Lazy import: only paid when EMBED_MODE!=none.
         from openai import AsyncOpenAI
 
         self.base_url = base_url.rstrip("/")

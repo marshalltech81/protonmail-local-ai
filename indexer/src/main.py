@@ -8,11 +8,9 @@ The embedder is operator-supplied: any OpenAI-compatible provider
 works (remote — DeepInfra, OpenRouter, etc. — or a host-side server
 the operator installs themselves: LM Studio, vLLM, ``mlx_lm.server``,
 TEI). Configure via ``EMBED_BASE_URL`` + ``EMBED_MODEL`` (+ optional
-``EMBED_API_KEY`` Docker secret). ``EMBED_MODE`` selects the wire
-shape; the indexer requires an active embedder so ``EMBED_MODE=none``
-is a startup error here (the mcp-server side accepts ``none`` to
-serve keyword-only search, but the indexer cannot index without
-embeddings).
+``EMBED_API_KEY`` Docker secret). ``EMBED_MODE`` is the wire-shape
+selector kept for symmetry with the other layers; only ``openai`` is
+valid today.
 
 When ``INDEXER_DELETION_ENABLED=true`` the indexer also runs a reconciler
 that records tombstones for mbsync-flagged (``T``) Maildir files and reaps
@@ -66,17 +64,18 @@ SQLITE_PATH = Path(os.environ.get("SQLITE_PATH", "/data/mail.db"))
 # fixed 4096-dim vector — pick a 4096-dim model (Qwen3-Embedding-8B
 # variants) or run a schema migration. Authentication (when needed) is
 # loaded from the ``embed_api_key`` Docker secret or ``EMBED_API_KEY``
-# env. ``EMBED_MODE`` selects the wire shape (``openai`` is the only
-# active value here; ``none`` fails closed because the indexer cannot
-# function without embeddings).
-_EMBED_MODES = frozenset({"openai", "none"})
+# env. ``EMBED_MODE`` is kept as a config knob for symmetry with
+# ``INFERENCE_MODE`` / ``RERANK_MODE`` but only accepts ``openai``
+# today — embed is the headline retrieval feature and the indexer
+# cannot function without it, so there is no disabled mode.
+_EMBED_MODES = frozenset({"openai"})
 
 
 def _normalize_embed_mode(raw: str) -> str:
     mode = raw.strip().lower()
     if mode in _EMBED_MODES:
         return mode
-    raise ValueError("EMBED_MODE must be one of: none, openai")
+    raise ValueError("EMBED_MODE must be 'openai'")
 
 
 EMBED_MODE = _normalize_embed_mode(os.environ.get("EMBED_MODE", "openai"))
@@ -93,12 +92,6 @@ def _validate_embed_config() -> None:
     always reaches ``main()`` first, so the operator-facing failure
     surface is identical.
     """
-    if EMBED_MODE == "none":
-        raise ValueError(
-            "EMBED_MODE=none is not supported by the indexer — the indexer "
-            "cannot ingest mail without an embedder. Set EMBED_MODE=openai "
-            "and configure EMBED_BASE_URL / EMBED_MODEL."
-        )
     if not EMBED_BASE_URL:
         raise ValueError("EMBED_BASE_URL must be set when EMBED_MODE='openai'")
     if not EMBED_MODEL:

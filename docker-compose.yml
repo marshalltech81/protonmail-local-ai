@@ -86,13 +86,16 @@ services:
 
   # ---------------------------------------------------------------------------
   # Inference / embed / rerank are operator-supplied. Each layer has a
-  # ``*_MODE`` env var (anthropic|openai|none, openai|none, cohere|none)
-  # plus matching ``*_BASE_URL`` / ``*_MODEL`` / ``*_API_KEY``. ``none``
-  # disables the layer; missing required vars fail at startup with no
-  # inter-mode fallback. Inference and rerank go through official SDKs
-  # (openai, anthropic, cohere); embed uses the openai SDK pointed at a
-  # custom ``base_url``. See .env.example for examples and AGENTS.md for
-  # the full shape.
+  # ``*_MODE`` env var (anthropic|openai|none, openai, cohere|none) plus
+  # matching ``*_BASE_URL`` / ``*_MODEL`` / ``*_API_KEY``. Embed has no
+  # disabled mode (semantic search is the headline feature and the
+  # indexer cannot run without an embedder); ``INFERENCE_MODE=none``
+  # skips intelligence-tool registration and ``RERANK_MODE=none``
+  # disables the rerank stage. Missing required vars fail at startup
+  # with no inter-mode fallback. Inference and rerank go through
+  # official SDKs (openai, anthropic, cohere); embed uses the openai
+  # SDK pointed at a custom ``base_url``. See .env.example for examples
+  # and AGENTS.md for the full shape.
   # ---------------------------------------------------------------------------
 
   # ---------------------------------------------------------------------------
@@ -148,7 +151,7 @@ services:
       # /v1/embeddings works (DeepInfra, OpenRouter, LM Studio, vLLM,
       # TEI, or a host-side mlx_lm.server). Indexer + mcp-server must
       # point at the same provider + model so vectors are comparable.
-      # ``EMBED_MODE=none`` is rejected by the indexer at startup.
+      # ``EMBED_MODE=openai`` is the only valid value.
       EMBED_MODE: ${EMBED_MODE:-openai}
       EMBED_BASE_URL: ${EMBED_BASE_URL}
       EMBED_MODEL: ${EMBED_MODEL}
@@ -291,9 +294,7 @@ services:
       # OpenAI-compatible embedder for query-time embedding via the
       # openai SDK. Must point at the same provider + model as the
       # indexer; otherwise query and indexed vectors are produced by
-      # different models and hybrid search degrades. ``EMBED_MODE=none``
-      # serves keyword-only retrieval (search tools refuse semantic /
-      # hybrid modes).
+      # different models and hybrid search degrades.
       EMBED_MODE: ${EMBED_MODE:-openai}
       EMBED_BASE_URL: ${EMBED_BASE_URL}
       EMBED_MODEL: ${EMBED_MODEL}

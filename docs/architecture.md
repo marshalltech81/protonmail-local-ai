@@ -135,10 +135,10 @@ without changing any code. The schema reserves a fixed 4096-dim
 vector, so `EMBED_MODEL` must keep producing 4096-dim vectors
 (Qwen3-Embedding-8B variants) or a schema migration is required.
 Indexer and mcp-server must point at the same provider + model so
-query vectors are comparable to indexed vectors. `EMBED_MODE=none`
-disables embeddings on mcp-server (search tools refuse semantic /
-hybrid modes; keyword still works) and is rejected at startup by
-the indexer.
+query vectors are comparable to indexed vectors. `EMBED_MODE=openai`
+is the only valid value — embed has no disabled mode because
+semantic / hybrid search is the headline retrieval feature and the
+indexer cannot ingest mail without an embedder.
 
 For inference, `INFERENCE_MODE=anthropic` (default) uses the
 official `anthropic` SDK against the Messages API; leave

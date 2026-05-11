@@ -89,12 +89,9 @@ Important architecture facts:
   OpenAI-compatible `/v1/embeddings` endpoint at `EMBED_BASE_URL` —
   no built-in default. Indexer + mcp-server must point at the same
   provider + model so query vectors are comparable to indexed
-  vectors. The mcp-server code accepts `EMBED_MODE=none` for
-  keyword-only retrieval (search tools refuse semantic / hybrid
-  modes), but the compose stack rejects it at `validate-env`
-  because the indexer requires an embedder and mcp-server
-  `depends_on: indexer.service_healthy`. Keyword-only mcp-server is
-  therefore a standalone-run option, not a compose configuration.
+  vectors. `EMBED_MODE=openai` is the only valid value; embed has
+  no disabled mode because semantic / hybrid search is the headline
+  retrieval feature and the indexer cannot run without an embedder.
 - reranking is opt-in (`RERANK_MODE=none` by default). `RERANK_MODE=cohere`
   uses the official `cohere` SDK against the Cohere rerank API; set
   `RERANK_MODEL` (e.g. `rerank-v4.0-pro`) and provide
@@ -481,12 +478,9 @@ Notes:
   `EMBED_MODEL` so query vectors are comparable to indexed vectors —
   swapping the embedder requires a full reindex if the new model
   produces vectors of a different shape or distribution
-- `EMBED_MODE=none` is rejected at indexer startup (the indexer cannot
-  ingest mail without an embedder) AND at `validate-env` for the
-  compose stack (since mcp-server `depends_on: indexer.service_healthy`,
-  a failing indexer blocks the whole stack). The mcp-server code still
-  accepts `none` to serve keyword-only retrieval when run standalone
-  outside compose
+- `EMBED_MODE=openai` is the only valid value. Embed has no disabled
+  mode because the indexer cannot ingest mail without an embedder and
+  semantic / hybrid search is the headline retrieval feature
 
 ### `mcp-server/`
 

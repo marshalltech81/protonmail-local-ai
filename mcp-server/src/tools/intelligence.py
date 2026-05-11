@@ -446,9 +446,8 @@ def register_intelligence_tools(
 
     ``embed_client`` and ``inference_client`` must both be present —
     intelligence tools require both retrieval and inference. ``main.py``
-    only calls this registrar when ``EMBED_MODE`` and ``INFERENCE_MODE``
-    are both active; ``mode=none`` on either layer skips this group
-    entirely.
+    only calls this registrar when an inference client is configured;
+    ``INFERENCE_MODE=none`` skips this group entirely.
 
     There is no inter-mode fallback: ``inference_client`` already
     encapsulates the chosen protocol/SDK. A misconfigured mode is

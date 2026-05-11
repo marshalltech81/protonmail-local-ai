@@ -35,13 +35,6 @@ def register_search_tools(
 ):
     """Register search tools.
 
-    ``embed_client`` may be ``None`` when ``EMBED_MODE=none`` — in that
-    case ``search_emails`` accepts only ``mode="keyword"`` and returns
-    a clear error for ``"hybrid"``/``"semantic"`` calls. This is the
-    no-fallback behavior the operator opts into by setting the mode
-    explicitly: a missing embed layer is surfaced, not silently
-    rerouted to FTS-only.
-
     ``secret_values`` is the list of operator-configured API keys
     (embed / rerank) to scrub from any exception text echoed back to
     the caller or written to logs. Provider-SDK exceptions can include
@@ -225,16 +218,6 @@ def register_search_tools(
                     limit=limit,
                 )
             elif mode == "semantic":
-                if embed_client is None:
-                    return [
-                        TextContent(
-                            type="text",
-                            text=(
-                                "Semantic search is unavailable: EMBED_MODE=none. "
-                                "Use mode='keyword' instead, or configure EMBED_MODE."
-                            ),
-                        )
-                    ]
                 embedding = await embed_query(embed_client, query, expected_embed_dim)
                 results = await asyncio.to_thread(
                     db.semantic_search,
@@ -247,16 +230,6 @@ def register_search_tools(
                     limit=limit,
                 )
             else:  # hybrid (default)
-                if embed_client is None:
-                    return [
-                        TextContent(
-                            type="text",
-                            text=(
-                                "Hybrid search is unavailable: EMBED_MODE=none. "
-                                "Use mode='keyword' instead, or configure EMBED_MODE."
-                            ),
-                        )
-                    ]
                 embedding = await embed_query(embed_client, query, expected_embed_dim)
                 results = await asyncio.to_thread(
                     db.hybrid_search,
