@@ -229,6 +229,54 @@ class TestMarkSkipped:
         assert q.claim_next() is None
 
 
+class TestMarkDeadTerminal:
+    """``mark_dead_terminal`` writes a dead row directly for a
+    non-retryable failure that must survive restarts. Distinct from
+    ``mark_skipped`` (drops the row — used when the file is gone) and
+    from ``mark_failed`` (schedules a retry until max_attempts). Used
+    for terminal-but-present failures like oversized files, where
+    deleting the row would let ``initial_index`` re-enqueue the same
+    file on every container start.
+    """
+
+    def test_writes_dead_row_with_stage_and_error(self, db: Database):
+        q = _queue(db)
+        q.enqueue("/m/huge", REASON_ON_CREATED)
+        q.mark_dead_terminal("/m/huge", stage="parse", error="oversized: 60MB > 50MB cap")
+        row = db._conn.execute(
+            "SELECT status, attempts, last_stage, last_error "
+            "FROM indexing_jobs WHERE filepath = '/m/huge'"
+        ).fetchone()
+        assert row["status"] == STATUS_DEAD
+        assert row["attempts"] == 1
+        assert row["last_stage"] == "parse"
+        assert "oversized" in row["last_error"]
+
+    def test_is_dead_returns_true_so_initial_scan_skips_on_restart(self, db: Database):
+        q = _queue(db)
+        q.enqueue("/m/huge", REASON_ON_CREATED)
+        q.mark_dead_terminal("/m/huge", stage="parse", error="oversized")
+        # ``initial_index`` consults ``is_dead`` before re-enqueueing
+        # files surfaced by the Maildir walk; this gate is what
+        # prevents the retry storm the fix targets.
+        assert q.is_dead("/m/huge") is True
+
+    def test_claim_next_skips_dead_terminal_rows(self, db: Database):
+        # Dead rows are visible-but-ignored: the worker must not
+        # re-attempt them, otherwise the terminal designation is
+        # meaningless.
+        q = _queue(db)
+        q.enqueue("/m/huge", REASON_ON_CREATED)
+        q.mark_dead_terminal("/m/huge", stage="parse", error="oversized")
+        assert q.claim_next() is None
+
+    def test_dead_terminal_row_appears_in_stats(self, db: Database):
+        q = _queue(db)
+        q.enqueue("/m/huge", REASON_ON_CREATED)
+        q.mark_dead_terminal("/m/huge", stage="parse", error="oversized")
+        assert q.stats() == {"queued": 0, "dead": 1}
+
+
 class TestReEnqueueResetsState:
     def test_reenqueue_resets_failed_row_to_fresh_attempt(self, db: Database):
         """A newly-observed watchdog event is fresh intent. A previous
@@ -294,6 +342,40 @@ class TestLoadConfigFromEnv:
         )
         assert cfg["max_attempts"] == 10
         assert cfg["base_backoff_seconds"] == 90
+
+    def test_zero_max_attempts_falls_back_to_default(self):
+        # max_attempts <= 0 would dead-letter every row on the first
+        # failure (``new_attempts >= self.max_attempts`` matches at
+        # 1 >= 0). Clamp to the documented default so a typo doesn't
+        # silently neutralize the retry contract.
+        cfg = load_config_from_env({"INDEXER_MAX_ATTEMPTS": "0"})
+        assert cfg["max_attempts"] == DEFAULT_MAX_ATTEMPTS
+
+    def test_negative_max_attempts_falls_back_to_default(self):
+        cfg = load_config_from_env({"INDEXER_MAX_ATTEMPTS": "-1"})
+        assert cfg["max_attempts"] == DEFAULT_MAX_ATTEMPTS
+
+    def test_zero_base_backoff_falls_back_to_default(self):
+        # base_backoff_seconds <= 0 schedules next_attempt_at at "now"
+        # (zero seconds added) or in the past (negative), so claim_next
+        # immediately re-claims the failing row and the retry budget
+        # burns in a tight loop. Clamp to the documented default.
+        cfg = load_config_from_env({"INDEXER_RETRY_BASE_SECONDS": "0"})
+        assert cfg["base_backoff_seconds"] == DEFAULT_BASE_BACKOFF_SECONDS
+
+    def test_negative_base_backoff_falls_back_to_default(self):
+        cfg = load_config_from_env({"INDEXER_RETRY_BASE_SECONDS": "-30"})
+        assert cfg["base_backoff_seconds"] == DEFAULT_BASE_BACKOFF_SECONDS
+
+    def test_malformed_int_falls_back_to_default(self):
+        cfg = load_config_from_env(
+            {
+                "INDEXER_MAX_ATTEMPTS": "five",
+                "INDEXER_RETRY_BASE_SECONDS": "thirty",
+            }
+        )
+        assert cfg["max_attempts"] == DEFAULT_MAX_ATTEMPTS
+        assert cfg["base_backoff_seconds"] == DEFAULT_BASE_BACKOFF_SECONDS
 
 
 class TestBackoffCap:

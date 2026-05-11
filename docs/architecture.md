@@ -361,8 +361,9 @@ The indexer ships an opt-in reconciler
    reaped message's rows from `message_thread_map` / `indexed_files`, and
    either rebuilds the parent thread from the surviving messages on disk
    (re-parsed, re-embedded) or deletes the thread entirely when nothing
-   remains. MLX-service failures during rebuild cause the reaper to back off and
-   retry on the next pass.
+   remains. Embedding-endpoint failures during rebuild (operator-supplied
+   `EMBED_BASE_URL`) cause the reaper to back off and retry on the next
+   pass.
 
 A **mass-delete brake** (`INDEXER_DELETION_MAX_BATCH_PCT`, default 5%) caps
 the fraction of total indexed messages the reaper will touch in a single

@@ -9,8 +9,6 @@ dependencies = [
     "sqlite-vec==0.1.9",
     "aioimaplib==2.0.1",
     "httpx==0.28.1",
-    "python-dotenv==1.2.2",
-    "tenacity==9.1.4",
     # Inference, embed, and rerank SDKs. ``openai`` covers both
     # ``INFERENCE_MODE=openai`` (chat completions) and ``EMBED_MODE=openai``
     # (the ``/v1/embeddings`` wire format every operator-supplied compat

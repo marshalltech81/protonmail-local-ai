@@ -533,12 +533,15 @@ def _phase1_commit_thread(
         # Watchdog's IN_MOVED_TO will re-enqueue under the new name.
         queue.mark_skipped(filepath, reason="file_missing")
         return None
-    except OversizedMessageError:
-        # File exceeds INDEXER_PARSE_MAX_BYTES. Terminal — retrying will
-        # find the same oversized file and burn embed budget. Skip
-        # rather than silently mark_succeeded so operators can see
-        # oversized entries in the indexer log.
-        queue.mark_skipped(filepath, reason="oversized")
+    except OversizedMessageError as e:
+        # File exceeds INDEXER_PARSE_MAX_BYTES. Terminal under current
+        # config — retrying will find the same oversized file and burn
+        # embed budget. Dead-letter so the durable row survives restarts
+        # (the file is still on disk, so deleting the row would let
+        # ``initial_index`` re-enqueue it on every container start). The
+        # ``is_dead`` gate then skips the file thereafter, and operators
+        # see the entry in ``queue.stats()['dead']``.
+        queue.mark_dead_terminal(filepath, stage="parse", error=f"oversized: {e}")
         return None
     except Exception as e:
         queue.mark_failed(filepath, stage="parse", error=repr(e))

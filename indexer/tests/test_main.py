@@ -663,6 +663,48 @@ class TestDrainQueueRetryAndDeadLetter:
         ).fetchone()
         assert row is None
 
+    def test_oversized_file_dead_letters_not_terminal_success(self, tmp_path, monkeypatch):
+        # Models a >50 MB ``.eml``. Previous behavior routed oversized
+        # through ``mark_skipped`` (delete the queue row); because the
+        # file is still present on disk, ``initial_index`` re-enqueued
+        # the same file on every container restart, and ``_index_one_file``
+        # interpreted "row gone + file present" as success — the file
+        # was never actually indexed. The fix routes oversized through
+        # ``mark_dead_terminal``: row stays at status='dead', the
+        # ``is_dead`` gate skips it on restart, and ``_index_one_file``
+        # returns ``(False, "parse", ...)``.
+        monkeypatch.setenv("INDEXER_PARSE_MAX_BYTES", "1024")
+
+        dest = tmp_path / "INBOX" / "cur" / "huge.eml"
+        dest.parent.mkdir(parents=True)
+        # Write a file larger than the 1 KiB cap above.
+        dest.write_bytes(b"X" * 2048)
+
+        db = Database(tmp_path / "mail.db")
+        threader = Threader(db)
+        embedder = make_mock_embedder()
+        embedder.embed.return_value = [0.0] * EMBEDDING_DIM
+
+        ok, stage, err, _ = main._index_one_file(dest, db, embedder, threader)
+
+        assert ok is False
+        assert stage == "parse"
+        assert err is not None
+        assert "oversized" in err
+
+        # Durable dead-letter row prevents re-enqueue on restart.
+        row = db._conn.execute(
+            "SELECT status, last_stage FROM indexing_jobs WHERE filepath = ?", (str(dest),)
+        ).fetchone()
+        assert row is not None
+        assert row["status"] == "dead"
+        assert row["last_stage"] == "parse"
+
+        # ``is_dead`` (initial_index's gate) reports True so the next
+        # container restart skips the file instead of re-enqueueing it.
+        queue = IndexingQueue(db, max_attempts=1, base_backoff_seconds=0)
+        assert queue.is_dead(str(dest)) is True
+
     def test_unreadable_file_routes_to_retry_not_terminal_success(self, tmp_path):
         # Models the mbsync 0600→0644 chmod race: the watchdog enqueues a
         # newly-delivered file before mbsync's post-sync chmod hook makes

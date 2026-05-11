@@ -229,9 +229,12 @@ You should see:
 - `indexer` — "Running initial index scan..."
 - `mcp-server` — "MCP server starting on port 3000"
 
-The MLX LaunchAgents are not in this list — they run on the host,
-not as containers. Verify them separately with
-`lsof -iTCP:8001 -iTCP:8002 -sTCP:LISTEN` if needed.
+Operator-supplied inference / embed / rerank endpoints are not in
+this list — they run wherever you choose (a remote provider, or a
+host-side OpenAI-compatible server such as LM Studio, vLLM,
+`mlx_lm.server`, or TEI). Verify reachability from your host with
+a small `curl` against `$EMBED_BASE_URL`, `$INFERENCE_BASE_URL`, or
+`$RERANK_BASE_URL` if a layer's container is failing to start.
 
 The initial index scan may take several minutes depending on mailbox size.
 

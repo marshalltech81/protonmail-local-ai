@@ -230,6 +230,8 @@ RERANK_CANDIDATES="$(get_env_value RERANK_CANDIDATES)"
 RERANK_TOP_N="$(get_env_value RERANK_TOP_N)"
 RERANK_TIMEOUT_SECS="$(get_env_value RERANK_TIMEOUT_SECS)"
 INDEXER_PARSE_MAX_BYTES="$(get_env_value INDEXER_PARSE_MAX_BYTES)"
+INDEXER_MAX_ATTEMPTS="$(get_env_value INDEXER_MAX_ATTEMPTS)"
+INDEXER_RETRY_BASE_SECONDS="$(get_env_value INDEXER_RETRY_BASE_SECONDS)"
 SYNC_INTERVAL="$(get_env_value SYNC_INTERVAL)"
 MCP_PORT="$(get_env_value MCP_PORT)"
 MCP_TRANSPORT="$(get_env_value MCP_TRANSPORT)"
@@ -356,6 +358,21 @@ fi
 # overrides the indexer/src/parser.py default.
 if [[ -n "$INDEXER_PARSE_MAX_BYTES" ]]; then
     require_integer_min "INDEXER_PARSE_MAX_BYTES" "$INDEXER_PARSE_MAX_BYTES" 0
+fi
+
+# Indexing queue retry knobs. The Python loader (``queue.load_config_from_env``)
+# clamps both to the documented defaults on out-of-range values, but the
+# operator-facing contract is that .env never contains values the indexer
+# would silently override. ``max_attempts <= 0`` dead-letters on first
+# failure; ``base_backoff_seconds <= 0`` schedules immediate retry
+# churn that burns the attempt budget in a tight loop. Reject both
+# here so the operator sees the actual problem instead of a runtime
+# warning buried in indexer logs.
+if [[ -n "$INDEXER_MAX_ATTEMPTS" ]]; then
+    require_integer_min "INDEXER_MAX_ATTEMPTS" "$INDEXER_MAX_ATTEMPTS" 1
+fi
+if [[ -n "$INDEXER_RETRY_BASE_SECONDS" ]]; then
+    require_integer_min "INDEXER_RETRY_BASE_SECONDS" "$INDEXER_RETRY_BASE_SECONDS" 1
 fi
 
 require_integer "SYNC_INTERVAL" "$SYNC_INTERVAL"
