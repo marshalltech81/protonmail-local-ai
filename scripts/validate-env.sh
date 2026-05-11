@@ -165,6 +165,42 @@ fi
 
 require_file "$ENV_FILE" ".env"
 require_file "$BRIDGE_PASS_FILE" "Bridge password secret"
+
+# Detect pre-collapse secret filenames before requiring the new ones,
+# so an operator upgrading from the prior layout sees explicit
+# migration guidance instead of a generic "file not found" followed by
+# ``init-secrets`` creating an empty new file (which would surface as
+# "API key empty" much later, never pointing back at the old file).
+# ``init-secrets`` does not detect this case either — it short-circuits
+# on the presence of the new filename — so the check has to land here
+# before ``require_file`` fires below.
+require_renamed_secret_migrated() {
+    local old_path="$1"
+    local new_path="$2"
+
+    [[ -f "$old_path" ]] || return 0
+    printf 'ERROR: legacy secret file %s exists.\n' "$old_path" >&2
+    printf '       The *_MODE collapse refactor renamed the secret files.\n' >&2
+    if [[ ! -s "$new_path" ]]; then
+        printf '       Move the key value before starting:\n' >&2
+        printf '         mv %s %s\n' "$old_path" "$new_path" >&2
+        printf '         chmod 600 %s\n' "$new_path" >&2
+    else
+        printf '       %s already holds a value; confirm it was migrated,\n' "$new_path" >&2
+        printf '       then remove the legacy file:\n' >&2
+        printf '         rm %s\n' "$old_path" >&2
+    fi
+    exit 1
+}
+require_renamed_secret_migrated \
+    "${ROOT_DIR}/.secrets/inference_anthropic_api_key.txt" "$INFERENCE_KEY_FILE"
+require_renamed_secret_migrated \
+    "${ROOT_DIR}/.secrets/inference_openai_api_key.txt" "$INFERENCE_KEY_FILE"
+require_renamed_secret_migrated \
+    "${ROOT_DIR}/.secrets/embed_openai_api_key.txt" "$EMBED_KEY_FILE"
+require_renamed_secret_migrated \
+    "${ROOT_DIR}/.secrets/anthropic_api_key.txt" "$INFERENCE_KEY_FILE"
+
 require_file "$INFERENCE_KEY_FILE" "Inference API key secret file"
 require_file "$EMBED_KEY_FILE" "Embed API key secret file"
 require_file "$RERANK_KEY_FILE" "Rerank API key secret file"
@@ -290,31 +326,40 @@ if [[ "$INFERENCE_MODE" != "none" ]]; then
 fi
 
 # ----- EMBED -----
-# Indexer + mcp-server share these vars. mcp-server accepts ``none`` for a
-# keyword-only retrieval surface; the indexer rejects ``none`` at startup
-# because it cannot ingest mail without an embedder. Validate the shape
-# here — the indexer / mcp-server containers each enforce their own
-# tighter rule.
+# Indexer + mcp-server share this var in the compose stack. The indexer
+# rejects ``EMBED_MODE=none`` at startup (cannot ingest mail without an
+# embedder); mcp-server ``depends_on: indexer.service_healthy``. So
+# ``EMBED_MODE=none`` would block the whole stack at startup. The
+# mcp-server code path for ``none`` is still wired (so a standalone
+# mcp-server run outside docker-compose can serve keyword-only search
+# off an existing DB), but ``make up`` rejects it here to keep the
+# compose contract honest.
 EMBED_MODE="${EMBED_MODE:-openai}"
-[[ "$EMBED_MODE" =~ ^(openai|none)$ ]] || {
-    echo "ERROR: EMBED_MODE must be one of: openai, none." >&2
+[[ "$EMBED_MODE" == "openai" ]] || {
+    if [[ "$EMBED_MODE" == "none" ]]; then
+        printf 'ERROR: EMBED_MODE=none is not supported by the compose stack.\n' >&2
+        printf '       The indexer requires an embedder and mcp-server depends_on it.\n' >&2
+        printf '       Set EMBED_MODE=openai and configure EMBED_BASE_URL / EMBED_MODEL,\n' >&2
+        printf '       or run mcp-server standalone (outside docker-compose) for\n' >&2
+        printf '       keyword-only search over an existing index.\n' >&2
+        exit 1
+    fi
+    echo "ERROR: EMBED_MODE must be 'openai' (or 'none' outside compose)." >&2
     exit 1
 }
 
-if [[ "$EMBED_MODE" != "none" ]]; then
-    [[ -n "$EMBED_BASE_URL" ]] || {
-        echo "ERROR: EMBED_BASE_URL must be set when EMBED_MODE=$EMBED_MODE." >&2
-        exit 1
-    }
-    [[ "$EMBED_BASE_URL" =~ ^https?:// ]] || {
-        echo "ERROR: EMBED_BASE_URL must start with http:// or https://." >&2
-        exit 1
-    }
-    [[ -n "$EMBED_MODEL" ]] || {
-        echo "ERROR: EMBED_MODEL must be set when EMBED_MODE=$EMBED_MODE." >&2
-        exit 1
-    }
-fi
+[[ -n "$EMBED_BASE_URL" ]] || {
+    echo "ERROR: EMBED_BASE_URL must be set when EMBED_MODE=$EMBED_MODE." >&2
+    exit 1
+}
+[[ "$EMBED_BASE_URL" =~ ^https?:// ]] || {
+    echo "ERROR: EMBED_BASE_URL must start with http:// or https://." >&2
+    exit 1
+}
+[[ -n "$EMBED_MODEL" ]] || {
+    echo "ERROR: EMBED_MODEL must be set when EMBED_MODE=$EMBED_MODE." >&2
+    exit 1
+}
 
 # ----- RERANK -----
 RERANK_MODE="${RERANK_MODE:-none}"

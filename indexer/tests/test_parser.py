@@ -222,6 +222,50 @@ class TestParseEmail:
         assert excinfo.value.size > 100
         assert excinfo.value.path == path
 
+    def test_oversized_caught_when_fstat_returns_undersized(self, tmp_path, monkeypatch):
+        # Defends against the stat-then-read TOCTOU: if ``os.fstat`` returns
+        # a size below the cap (because it failed, or because the file grew
+        # after the syscall), the bounded ``f.read(cap + 1)`` must still
+        # raise ``OversizedMessageError`` rather than slurping an unbounded
+        # file into memory. We simulate by monkey-patching ``os.fstat`` to
+        # report ``None`` (the stat-failure branch) on a file that exceeds
+        # the cap.
+        import os as _os
+
+        import pytest
+        from src import parser as parser_module
+
+        monkeypatch.setenv("INDEXER_PARSE_MAX_BYTES", "100")
+        path = write_eml(
+            tmp_path,
+            """
+            From: a@example.com
+            To: b@example.com
+            Subject: huge-toctou
+            Message-ID: <toctou@example.com>
+            Date: Mon, 01 Jan 2024 12:00:00 +0000
+            Content-Type: text/plain; charset=utf-8
+
+            """
+            + ("Y" * 500),
+            name="toctou.eml",
+        )
+        real_fstat = _os.fstat
+
+        def _fail_fstat(fd):
+            raise OSError("simulated fstat failure")
+
+        monkeypatch.setattr(parser_module.os, "fstat", _fail_fstat)
+        try:
+            with pytest.raises(OversizedMessageError) as excinfo:
+                parse_email(path)
+        finally:
+            monkeypatch.setattr(parser_module.os, "fstat", real_fstat)
+        assert excinfo.value.cap == 100
+        # Read path reports len(raw) (which is cap+1) when stat is unavailable.
+        assert excinfo.value.size == 101
+        assert excinfo.value.path == path
+
     def test_permission_denied_propagates_for_queue_retry(self, tmp_path):
         # Models the mbsync 0600→0644 chmod race: the file exists but
         # is not yet readable to the indexer UID. The error must

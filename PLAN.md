@@ -572,6 +572,14 @@ All 314 mcp-server tests pass at 92.81% coverage. Memory:
 
 ### 2026-05-04 — MLX consolidation Phases A + B + C (Ollama abandoned)
 
+> Historical note: ``LocalLLMClient`` / ``local_llm.py`` referenced
+> throughout this entry reflect state as of 2026-05-04. A later
+> ``*_MODE`` collapse refactor (this PR) replaced them with the
+> official ``openai`` / ``anthropic`` SDK clients under
+> ``mcp-server/src/lib/inference.py`` (``InferenceClient``) and
+> ``mcp-server/src/lib/embed.py`` (``EmbedClient``). ``local_llm.py``
+> no longer exists in the tree.
+
 The local-inference layer is fully consolidated onto MLX. Phase A
 (LLM-client OpenAI-compat refactor), Phase B (operational MLX-LM
 swap), and Phase C (Ollama embed-fallback + scaffolding teardown)

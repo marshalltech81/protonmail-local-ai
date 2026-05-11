@@ -158,32 +158,56 @@ def parse_email(path: Path, maildir_root: Path | None = None) -> Message | None:
     of a quietly shrinking index.
 
     Files larger than ``INDEXER_PARSE_MAX_BYTES`` (default 50 MB) raise
-    ``OversizedMessageError`` before ``read_bytes`` so a malicious or
-    corrupt Maildir entry cannot exhaust container memory. The worker
-    catches the error and routes the row through
-    ``mark_skipped(reason="oversized")`` — terminal, no retry, but
-    visible in operator logs as a skip rather than a silent
-    success-deletion.
+    ``OversizedMessageError`` either at the fstat pre-check or while
+    reading — whichever fires first — so a malicious or corrupt Maildir
+    entry cannot exhaust container memory even if the file grew between
+    fstat and read or fstat itself failed. The worker catches the
+    error and routes the row through ``mark_skipped(reason="oversized")``
+    — terminal, no retry, but visible in operator logs as a skip
+    rather than a silent success-deletion.
     """
-    # ``stat`` doubles as the size-cap pre-check AND the source of the
-    # ``mtime_ns`` we capture below. A single OSError covers both.
-    try:
-        stat = os.stat(path)
-    except OSError:
-        stat = None
-
+    # Open the file once, fstat that descriptor, and bound the read on
+    # the same fd. Opening first means the cap check and the read see
+    # the same inode regardless of any rename / unlink / replace that
+    # happens after we entered the function — closing the
+    # stat-then-read TOCTOU window. The bounded ``f.read(cap + 1)``
+    # below also catches the case where fstat reports a size <= cap but
+    # the file grows after the check, and the case where fstat itself
+    # raised (size unknown but read still bounded).
     cap = _parse_max_bytes()
-    if cap > 0 and stat is not None and stat.st_size > cap:
-        log.warning(
-            "Skipping oversized email %s (%d bytes > %d cap); "
-            "raise INDEXER_PARSE_MAX_BYTES to ingest, or 0 to disable.",
-            path,
-            stat.st_size,
-            cap,
-        )
-        raise OversizedMessageError(path, stat.st_size, cap)
+    with path.open("rb") as f:
+        try:
+            stat = os.fstat(f.fileno())
+        except OSError:
+            stat = None
 
-    raw = path.read_bytes()
+        if cap > 0 and stat is not None and stat.st_size > cap:
+            log.warning(
+                "Skipping oversized email %s (%d bytes > %d cap); "
+                "raise INDEXER_PARSE_MAX_BYTES to ingest, or 0 to disable.",
+                path,
+                stat.st_size,
+                cap,
+            )
+            raise OversizedMessageError(path, stat.st_size, cap)
+
+        if cap > 0:
+            # Read at most cap+1 bytes so a file that grew between
+            # fstat and read (or that fstat could not size) cannot
+            # exceed the memory budget. cap+1 lets us positively
+            # detect the over-cap case.
+            raw = f.read(cap + 1)
+            if len(raw) > cap:
+                actual = stat.st_size if stat is not None else len(raw)
+                log.warning(
+                    "Skipping oversized email %s (>%d cap, detected during read); "
+                    "raise INDEXER_PARSE_MAX_BYTES to ingest, or 0 to disable.",
+                    path,
+                    cap,
+                )
+                raise OversizedMessageError(path, actual, cap)
+        else:
+            raw = f.read()
     msg = email.message_from_bytes(raw)
 
     message_id = _clean_id(msg.get("Message-ID", ""))
