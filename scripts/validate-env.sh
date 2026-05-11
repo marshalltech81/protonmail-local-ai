@@ -256,9 +256,12 @@ BRIDGE_VERSION="$(get_env_value BRIDGE_VERSION)"
 INFERENCE_MODE="$(get_env_value INFERENCE_MODE)"
 INFERENCE_BASE_URL="$(get_env_value INFERENCE_BASE_URL)"
 INFERENCE_MODEL="$(get_env_value INFERENCE_MODEL)"
+INFERENCE_TIMEOUT_SECS="$(get_env_value INFERENCE_TIMEOUT_SECS)"
+INFERENCE_MAX_TOKENS="$(get_env_value INFERENCE_MAX_TOKENS)"
 EMBED_MODE="$(get_env_value EMBED_MODE)"
 EMBED_BASE_URL="$(get_env_value EMBED_BASE_URL)"
 EMBED_MODEL="$(get_env_value EMBED_MODEL)"
+EMBED_TIMEOUT_SECS="$(get_env_value EMBED_TIMEOUT_SECS)"
 EMBED_WARMUP_TIMEOUT_SECS="$(get_env_value EMBED_WARMUP_TIMEOUT_SECS)"
 RERANK_MODE="$(get_env_value RERANK_MODE)"
 RERANK_BASE_URL="$(get_env_value RERANK_BASE_URL)"
@@ -304,6 +307,18 @@ if [[ "$INFERENCE_MODE" != "none" ]]; then
             echo "ERROR: INFERENCE_BASE_URL must be set when INFERENCE_MODE=openai." >&2
             exit 1
         }
+    fi
+    # Optional inference tuning knobs. Validate only when set so the
+    # defaults in mcp-server/src/main.py remain authoritative when the
+    # operator leaves the value blank. ``INFERENCE_TIMEOUT_SECS`` must
+    # be >= 1 to bound a stalled inference call without rejecting
+    # routine sub-second failures. ``INFERENCE_MAX_TOKENS`` must be
+    # >= 1 — zero or negative would request an empty completion.
+    if [[ -n "$INFERENCE_TIMEOUT_SECS" ]]; then
+        require_integer_min "INFERENCE_TIMEOUT_SECS" "$INFERENCE_TIMEOUT_SECS" 1
+    fi
+    if [[ -n "$INFERENCE_MAX_TOKENS" ]]; then
+        require_integer_min "INFERENCE_MAX_TOKENS" "$INFERENCE_MAX_TOKENS" 1
     fi
     if [[ -n "$INFERENCE_BASE_URL" ]]; then
         [[ "$INFERENCE_BASE_URL" =~ ^https?:// ]] || {
@@ -358,6 +373,13 @@ EMBED_MODE="${EMBED_MODE:-openai}"
 # (no value silently overridden by the loader).
 if [[ -n "$EMBED_WARMUP_TIMEOUT_SECS" ]]; then
     require_integer_min "EMBED_WARMUP_TIMEOUT_SECS" "$EMBED_WARMUP_TIMEOUT_SECS" 1
+fi
+
+# Optional per-call embed deadline used by the mcp-server query path.
+# Must be >= 1 for the same reason as ``RERANK_TIMEOUT_SECS`` — bound
+# a stalled call without rejecting routine sub-second failures.
+if [[ -n "$EMBED_TIMEOUT_SECS" ]]; then
+    require_integer_min "EMBED_TIMEOUT_SECS" "$EMBED_TIMEOUT_SECS" 1
 fi
 
 # ----- RERANK -----

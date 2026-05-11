@@ -243,9 +243,12 @@ class OpenAIEmbedder:
             timeout,
             warmup_timeout,
         )
-        connect_deadline = time.time() + float(timeout)
+        # Monotonic clock: wall-clock jumps (NTP correction, container
+        # host suspending) would otherwise let the deadline either fail
+        # early or hang well past the configured timeout.
+        connect_deadline = time.monotonic() + float(timeout)
         last_err: Exception | None = None
-        while time.time() < connect_deadline:
+        while time.monotonic() < connect_deadline:
             try:
                 self.client.with_options(timeout=warmup_timeout).embeddings.create(
                     model=self.model,
