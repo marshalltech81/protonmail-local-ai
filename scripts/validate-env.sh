@@ -259,6 +259,7 @@ INFERENCE_MODEL="$(get_env_value INFERENCE_MODEL)"
 EMBED_MODE="$(get_env_value EMBED_MODE)"
 EMBED_BASE_URL="$(get_env_value EMBED_BASE_URL)"
 EMBED_MODEL="$(get_env_value EMBED_MODEL)"
+EMBED_WARMUP_TIMEOUT_SECS="$(get_env_value EMBED_WARMUP_TIMEOUT_SECS)"
 RERANK_MODE="$(get_env_value RERANK_MODE)"
 RERANK_BASE_URL="$(get_env_value RERANK_BASE_URL)"
 RERANK_MODEL="$(get_env_value RERANK_MODEL)"
@@ -348,6 +349,16 @@ EMBED_MODE="${EMBED_MODE:-openai}"
     echo "ERROR: EMBED_MODEL must be set when EMBED_MODE=$EMBED_MODE." >&2
     exit 1
 }
+
+# Optional warmup deadline. ``EMBED_WARMUP_TIMEOUT_SECS`` bounds one
+# successful first-call response (covering a host-side server's
+# first-time model load). Must be >= 1 — the indexer's _float_env
+# helper already falls back on smaller values, but rejecting them
+# here keeps the .env contract aligned with the in-container check
+# (no value silently overridden by the loader).
+if [[ -n "$EMBED_WARMUP_TIMEOUT_SECS" ]]; then
+    require_integer_min "EMBED_WARMUP_TIMEOUT_SECS" "$EMBED_WARMUP_TIMEOUT_SECS" 1
+fi
 
 # ----- RERANK -----
 RERANK_MODE="${RERANK_MODE:-none}"

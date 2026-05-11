@@ -64,7 +64,19 @@ def _parse_max_bytes() -> int:
             _DEFAULT_PARSE_MAX_BYTES,
         )
         return _DEFAULT_PARSE_MAX_BYTES
-    return max(0, value)
+    # ``0`` is the explicit "disable the cap" sentinel. Negative values
+    # are a typo / misconfiguration — not a second opt-out — so fall
+    # back rather than silently collapsing them to ``0`` (the old
+    # ``max(0, value)`` did, which let ``-1`` quietly disable the OOM
+    # protection on every read).
+    if value < 0:
+        log.warning(
+            "invalid INDEXER_PARSE_MAX_BYTES=%r (negative); falling back to %d",
+            raw,
+            _DEFAULT_PARSE_MAX_BYTES,
+        )
+        return _DEFAULT_PARSE_MAX_BYTES
+    return value
 
 
 h2t = html2text.HTML2Text()
@@ -198,7 +210,15 @@ def parse_email(path: Path, maildir_root: Path | None = None) -> Message | None:
             # detect the over-cap case.
             raw = f.read(cap + 1)
             if len(raw) > cap:
-                actual = stat.st_size if stat is not None else len(raw)
+                # If the file grew between fstat and read, ``stat.st_size``
+                # can be stale and even <= cap, which would make the
+                # dead-letter message misleading. ``len(raw)`` is the
+                # lower bound on the actual file size (we capped the read
+                # at cap+1, so a file >= cap+1 reads exactly cap+1 bytes);
+                # taking the max with ``stat.st_size`` keeps the larger of
+                # the two so the operator-visible size is never an
+                # under-report relative to either signal.
+                actual = max(stat.st_size, len(raw)) if stat is not None else len(raw)
                 log.warning(
                     "Skipping oversized email %s (>%d cap, detected during read); "
                     "raise INDEXER_PARSE_MAX_BYTES to ingest, or 0 to disable.",

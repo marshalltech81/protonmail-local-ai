@@ -37,13 +37,22 @@ from .chunker import l2_normalize
 log = logging.getLogger("indexer.embedder")
 
 
-def _float_env(name: str, default: float) -> float:
+def _float_env(name: str, default: float, minimum: float = 1.0) -> float:
     """Read a float env var with a graceful fallback.
 
     Mirrors ``main._int_env`` and ``reconciler._int`` / ``_pct``: an
     empty / unset / malformed value logs a warning and falls back
     rather than raising at startup. A typo in a tunable knob should
     not crash the indexer.
+
+    ``minimum`` defines the lower bound (default 1.0) — values below
+    it are treated as malformed and fall back. ``EMBED_WARMUP_TIMEOUT_SECS``
+    and similar per-call deadlines must be positive: ``0`` or negative
+    values would reach the OpenAI SDK timeout path and either fail oddly
+    or make startup behavior brittle. Mirrors the
+    ``mcp-server/src/main._float_env`` helper's ``minimum`` parameter,
+    differing only in the warn-fall-back vs raise policy that each
+    service has already settled on.
     """
     raw = os.environ.get(name, "").strip()
     if not raw:
@@ -58,6 +67,15 @@ def _float_env(name: str, default: float) -> float:
     # ways. Same warn-fall-back policy as a malformed string.
     if not math.isfinite(value):
         log.warning("invalid %s=%r; falling back to %.1f", name, raw, default)
+        return default
+    if value < minimum:
+        log.warning(
+            "invalid %s=%r (must be >= %.1f); falling back to %.1f",
+            name,
+            raw,
+            minimum,
+            default,
+        )
         return default
     return value
 

@@ -93,6 +93,23 @@ class TestFloatEnv:
             assert _float_env("FAKE_FLOAT_VAR", default=30.0) == 30.0
         assert any("FAKE_FLOAT_VAR" in r.message for r in caplog.records)
 
+    def test_below_minimum_falls_back(self, monkeypatch, caplog):
+        # ``0`` and negative values parse cleanly but would reach the
+        # OpenAI SDK as a per-call deadline of 0/negative and either
+        # fail oddly or short-circuit warmup. Treat them as malformed
+        # so a misconfigured EMBED_WARMUP_TIMEOUT_SECS=0 falls back to
+        # the documented default rather than breaking startup.
+        for raw in ("0", "0.5", "-1"):
+            monkeypatch.setenv("FAKE_FLOAT_VAR", raw)
+            caplog.clear()
+            with caplog.at_level("WARNING", logger="indexer.embedder"):
+                assert _float_env("FAKE_FLOAT_VAR", default=30.0, minimum=1.0) == 30.0
+            assert any("FAKE_FLOAT_VAR" in r.message for r in caplog.records)
+
+    def test_above_minimum_returns_parsed_value(self, monkeypatch):
+        monkeypatch.setenv("FAKE_FLOAT_VAR", "1.0")
+        assert _float_env("FAKE_FLOAT_VAR", default=30.0, minimum=1.0) == 1.0
+
 
 class TestOpenAIEmbedder:
     def test_base_url_trailing_slash_is_stripped(self):
