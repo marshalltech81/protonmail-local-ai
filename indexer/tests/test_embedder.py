@@ -136,7 +136,10 @@ class TestOpenAIEmbedder:
         # (``OPENAI_BASE_URL`` env → ``https://api.openai.com/v1``).
         # We read the URL back from the SDK so the stored value
         # reflects the wire endpoint rather than the empty string.
-        assert emb.base_url.startswith("https://api.openai.com")
+        # The trailing ``/`` anchors the hostname boundary so the
+        # check can't be satisfied by ``https://api.openai.com.<x>/``
+        # (CodeQL ``py/incomplete-url-substring-sanitization``).
+        assert emb.base_url.startswith("https://api.openai.com/")
 
     def test_embed_returns_vector_on_success(self):
         emb = _make_embedder()

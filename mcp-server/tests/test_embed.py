@@ -64,7 +64,10 @@ class TestConstructor:
         c = EmbedClient(base_url="", model="m", api_key="sk-real")  # pragma: allowlist secret
         # After construction the SDK has resolved its fallback chain
         # (``OPENAI_BASE_URL`` env → ``https://api.openai.com/v1``).
-        assert c.base_url.startswith("https://api.openai.com")
+        # The trailing ``/`` anchors the hostname boundary so the
+        # check can't be satisfied by ``https://api.openai.com.<x>/``
+        # (CodeQL ``py/incomplete-url-substring-sanitization``).
+        assert c.base_url.startswith("https://api.openai.com/")
 
 
 class TestEmbed:
