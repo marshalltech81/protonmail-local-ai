@@ -145,12 +145,13 @@ services:
       HOME: /home/indexer
       MAILDIR_PATH: /maildir
       SQLITE_PATH: /data/mail.db
-      # OpenAI-compatible embedder via the openai SDK with a custom
-      # ``base_url``. No built-in default — operator configures
-      # EMBED_BASE_URL + EMBED_MODEL in .env. Any provider that speaks
-      # /v1/embeddings works (DeepInfra, OpenRouter, LM Studio, vLLM,
-      # TEI, or a host-side mlx_lm.server). Indexer + mcp-server must
-      # point at the same provider + model so vectors are comparable.
+      # OpenAI-compatible embedder via the openai SDK. EMBED_MODEL and
+      # EMBED_API_KEY are required; EMBED_BASE_URL is optional and an
+      # empty value selects the SDK default (``https://api.openai.com/v1``).
+      # Set EMBED_BASE_URL to point at any other provider that speaks
+      # /v1/embeddings (DeepInfra, OpenRouter, LM Studio, vLLM, TEI, or
+      # a host-side mlx_lm.server). Indexer + mcp-server must point at
+      # the same provider + model so vectors are comparable.
       # ``EMBED_MODE=openai`` is the only valid value.
       EMBED_MODE: ${EMBED_MODE:-openai}
       EMBED_BASE_URL: ${EMBED_BASE_URL}
@@ -266,13 +267,15 @@ services:
       - rerank_api_key
     environment:
       SQLITE_PATH: /data/mail.db
-      # INFERENCE_MODE selects the inference client/SDK:
+      # INFERENCE_MODE selects the inference client/SDK. For any enabled
+      # mode INFERENCE_MODEL and INFERENCE_API_KEY are required;
+      # INFERENCE_BASE_URL is optional and an empty value selects the
+      # SDK's documented default.
       # - anthropic (default): Anthropic Messages API via the official
-      #   anthropic SDK. Empty INFERENCE_BASE_URL falls through to the
-      #   SDK default (api.anthropic.com).
+      #   anthropic SDK. Empty INFERENCE_BASE_URL -> api.anthropic.com.
       # - openai: OpenAI-compatible chat completions via the official
-      #   openai SDK with a custom base_url (remote provider or
-      #   host-side server). INFERENCE_BASE_URL required.
+      #   openai SDK. Empty INFERENCE_BASE_URL -> api.openai.com/v1;
+      #   set it for any other provider or a host-side server.
       # - none: intelligence tools are not registered.
       INFERENCE_MODE: ${INFERENCE_MODE:-anthropic}
       INFERENCE_BASE_URL: ${INFERENCE_BASE_URL}
@@ -360,17 +363,18 @@ networks:
 secrets:
   bridge_pass:
     file: ./.secrets/bridge_pass.txt
-  # Inference API key — required when INFERENCE_MODE=anthropic. For
-  # INFERENCE_MODE=openai it is required only when the endpoint
-  # authenticates (remote provider); an unauthenticated host-side
-  # OpenAI-compatible server (LM Studio, vLLM, mlx_lm.server) accepts
-  # an empty file. Leave the file empty when INFERENCE_MODE=none.
+  # Inference API key — required (non-empty) whenever INFERENCE_MODE
+  # != none. For unauthenticated host-side OpenAI-compatible servers
+  # (LM Studio, vLLM, mlx_lm.server) write any placeholder string
+  # (e.g. ``unauthenticated``); the compat server ignores the bearer
+  # header. Leave the file empty only when INFERENCE_MODE=none.
   # Never put this value in .env (it appears in docker inspect output).
   inference_api_key:
     file: ./.secrets/inference_api_key.txt
-  # Embed API key — required only when EMBED_BASE_URL points at a
-  # provider that authenticates (DeepInfra, OpenRouter, etc.). Leave
-  # empty when pointing at an unauthenticated host server.
+  # Embed API key — always required non-empty because EMBED_MODE has
+  # no ``none`` mode (the indexer cannot run without an embedder).
+  # Use any placeholder string (e.g. ``unauthenticated``) when
+  # pointing at an unauthenticated host server.
   embed_api_key:
     file: ./.secrets/embed_api_key.txt
   # Rerank API key — required when RERANK_MODE=cohere. Leave the file
