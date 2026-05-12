@@ -760,7 +760,7 @@ class TestValidateEmbedConfig:
         # their provider, so we trust the SDK fallback. Symmetric with
         # ``INFERENCE_MODE=anthropic``'s empty-URL behavior.
         monkeypatch.setattr(main, "EMBED_BASE_URL", "")
-        monkeypatch.setattr(main, "EMBED_MODEL", "text-embedding-3-large")
+        monkeypatch.setattr(main, "EMBED_MODEL", "Qwen/Qwen3-Embedding-8B")
         monkeypatch.setattr(main, "EMBED_API_KEY", "sk-real")  # pragma: allowlist secret
         main._validate_embed_config()
 

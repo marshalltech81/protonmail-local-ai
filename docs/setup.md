@@ -158,7 +158,7 @@ the host endpoint and supply any non-empty placeholder string (e.g.
 ```bash
 # Edit .env:
 EMBED_BASE_URL=...      # optional; leave empty for OpenAI proper
-EMBED_MODEL=...         # required (e.g. text-embedding-3-large, Qwen3-Embedding-8B)
+EMBED_MODEL=...         # required (e.g. Qwen/Qwen3-Embedding-8B)
 ```
 
 The schema reserves a fixed 4096-dim vector — pick a model that
@@ -308,17 +308,12 @@ OpenAI-compatible `/v1/embeddings` shape, so any compliant provider is
 a single env change away. Examples:
 
 ```bash
-# OpenAI proper — leave EMBED_BASE_URL empty for the SDK default
-# (https://api.openai.com/v1). The required EMBED_API_KEY is the
-# explicit-intent signal that makes empty-URL unambiguous.
-EMBED_BASE_URL=
-EMBED_MODEL=text-embedding-3-large
-# put the OpenAI key in .secrets/embed_api_key.txt — never .env
-
-# Host-side server (LM Studio, vLLM, mlx_lm.server, TEI, etc.)
+# Host-side server (mlx_lm.server, LM Studio, vLLM, TEI, etc.) —
+# privacy-preserving default; mail content never leaves the host.
 EMBED_BASE_URL=http://host.docker.internal:8001/v1
 EMBED_MODEL=mlx-community/Qwen3-Embedding-8B-mxfp8
-# put any placeholder string in .secrets/embed_api_key.txt
+# put any placeholder string (e.g. `unauthenticated`) in
+# .secrets/embed_api_key.txt — compat servers ignore the bearer header
 
 # DeepInfra
 EMBED_BASE_URL=https://api.deepinfra.com/v1/openai
@@ -328,12 +323,24 @@ EMBED_MODEL=Qwen/Qwen3-Embedding-8B
 # OpenRouter
 EMBED_BASE_URL=https://openrouter.ai/api/v1
 EMBED_MODEL=qwen/qwen3-embedding-8b
+# put the API key in .secrets/embed_api_key.txt — never .env
 ```
+
+OpenAI proper is not currently a usable embed provider here: their
+public embedding catalog has no 4096-dim model
+(`text-embedding-3-large` is 3072-dim, `text-embedding-3-small` is
+1536-dim), and the schema reserves a fixed 4096-dim vector. The
+empty-`EMBED_BASE_URL` / SDK-default path remains documented for
+symmetry with `INFERENCE_MODE=openai`, but using OpenAI as the
+embedder would require a schema migration to a different vector
+width — it is not a copy-paste config swap today.
 
 After changing provider:
 
-1. Set the new vars in `.env`. `EMBED_BASE_URL` may be left empty when
-   targeting OpenAI proper — the SDK's documented default kicks in.
+1. Set the new vars in `.env`. `EMBED_BASE_URL` is required for every
+   provider listed above (no compatible OpenAI-proper embed model
+   exists today, so the empty-URL / SDK-default path has no usable
+   recipe to copy).
 2. Write the API key to `.secrets/embed_api_key.txt` (`chmod 600`).
    `make init-secrets` creates an empty placeholder; the key is
    required (non-empty). For an unauthenticated host-side server, use
