@@ -96,6 +96,28 @@ class TestEmbed:
         with pytest.raises(Boom):
             asyncio.run(c.embed("query"))
 
+    def test_raises_actionable_error_on_empty_data(self):
+        # A buggy / not-quite-compatible provider that returns
+        # ``data=[]`` would otherwise trip ``IndexError: list index
+        # out of range`` from a bare ``resp.data[0]`` access. Mirror
+        # the indexer's batch-cardinality check: raise ``RuntimeError``
+        # naming the operator-controllable knobs (base URL + model),
+        # never the query text — the indexer's shape-validation path
+        # explicitly omits payload bytes from its error message and
+        # the query string is user input that must not land in logs.
+        c = EmbedClient(base_url="http://wrong-provider/v1", model="m", api_key="placeholder")
+
+        async def fake_create(**_kwargs):
+            return SimpleNamespace(data=[])
+
+        c.client.embeddings.create = fake_create  # type: ignore[assignment]
+        with pytest.raises(RuntimeError) as excinfo:
+            asyncio.run(c.embed("secret-query-text"))
+        msg = str(excinfo.value)
+        assert "http://wrong-provider/v1" in msg
+        assert "m" in msg
+        assert "secret-query-text" not in msg
+
 
 class _StubEmbed:
     """Lightweight stand-in matching the surface ``embed_query`` reads.

@@ -96,6 +96,21 @@ class EmbedClient:
             model=self.model,
             input=text,
         )
+        # Hard-validate response shape before unwrapping. A buggy or
+        # not-quite-compatible provider that returns ``data=[]`` would
+        # otherwise trip ``IndexError: list index out of range`` on
+        # ``resp.data[0]`` — actionable nowhere. Mirror the indexer's
+        # batch-cardinality check (``embedder._embed_one_batch``) and
+        # surface the operator-controllable knobs (base URL + model)
+        # so the fix path is obvious from the log line. The query
+        # text is deliberately omitted: it is user input that must
+        # not land in logs or tracebacks (mailbox content can flow
+        # through query strings).
+        if len(resp.data) != 1:
+            raise RuntimeError(
+                f"embedder returned {len(resp.data)} vectors for 1 input "
+                f"({self.base_url}, model={self.model!r})"
+            )
         return list(resp.data[0].embedding)
 
 

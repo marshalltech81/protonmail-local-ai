@@ -1215,14 +1215,6 @@ def main():
     log.info("Starting indexer...")
     log.info("  Maildir: %s", MAILDIR_PATH)
     log.info("  SQLite:  %s", SQLITE_PATH)
-    log.info(
-        "  Embedder: %s (model=%s, batch=%d)",
-        EMBED_BASE_URL,
-        EMBED_MODEL,
-        EMBED_BATCH_SIZE,
-    )
-    if EMBED_API_KEY:
-        log.info("  Embedder API key: present (Bearer auth enabled)")
 
     db = Database(SQLITE_PATH)
     embedder = OpenAIEmbedder(
@@ -1231,6 +1223,21 @@ def main():
         api_key=EMBED_API_KEY,
         batch_size=EMBED_BATCH_SIZE,
     )
+    # Log the resolved wire endpoint after construction. ``EMBED_BASE_URL=""``
+    # intentionally means "use the SDK default" (OpenAI proper); printing
+    # the raw env value would hide that the indexer is actually pointing
+    # at api.openai.com when the operator forgot to wire an
+    # unauthenticated host-side server. ``OpenAIEmbedder.base_url`` reads
+    # the URL back from the SDK after fallback resolution, matching the
+    # mcp-server inference / rerank log lines.
+    log.info(
+        "  Embedder: %s (model=%s, batch=%d)",
+        embedder.base_url,
+        EMBED_MODEL,
+        EMBED_BATCH_SIZE,
+    )
+    if EMBED_API_KEY:
+        log.info("  Embedder API key: present (Bearer auth enabled)")
     threader = Threader(db)
     touch_health_file()
 

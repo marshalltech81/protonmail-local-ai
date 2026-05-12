@@ -523,7 +523,15 @@ def main():
     log.info(f"  SQLite:   {SQLITE_PATH}")
     log.info(f"  Embed mode:     {EMBED_MODE}")
     if embed_client is not None:
-        log.info(f"  Embed:          {EMBED_BASE_URL} (model={EMBED_MODEL})")
+        # Surface the resolved wire endpoint, not the raw env var.
+        # ``EMBED_BASE_URL=""`` intentionally means "use the SDK
+        # default" (OpenAI proper) — printing the empty string hides
+        # that an unauthenticated host-side server isn't actually
+        # being used and the request is going to api.openai.com.
+        # ``EmbedClient.base_url`` reads the URL back from the SDK
+        # after fallback resolution, matching the inference / rerank
+        # log lines below.
+        log.info(f"  Embed:          {embed_client.base_url} (model={EMBED_MODEL})")
     log.info(f"  Inference mode: {INFERENCE_MODE}")
     if inference_client is not None:
         # Anthropic mode may use the SDK default URL when INFERENCE_BASE_URL
