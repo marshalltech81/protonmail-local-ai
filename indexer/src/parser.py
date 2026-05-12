@@ -19,6 +19,66 @@ import html2text
 
 log = logging.getLogger("indexer.parser")
 
+
+class OversizedMessageError(Exception):
+    """Raised when an ``.eml`` exceeds ``INDEXER_PARSE_MAX_BYTES``.
+
+    Distinct from the parser's other ``None``-return paths (no
+    Message-ID, etc.) so the indexer worker can route oversized files
+    through ``mark_skipped(reason="oversized")`` rather than
+    ``mark_succeeded`` — the file was never indexed, and the queue
+    log line should reflect that for operator visibility.
+    """
+
+    def __init__(self, path: Path, size: int, cap: int) -> None:
+        super().__init__(
+            f"oversized email {path} ({size} bytes > {cap} cap); "
+            "raise INDEXER_PARSE_MAX_BYTES to ingest, or 0 to disable."
+        )
+        self.path = path
+        self.size = size
+        self.cap = cap
+
+
+# Hard ceiling on the size of a single ``.eml`` we will read into
+# memory. Bridge inbound usually caps at ~25 MB, but a malicious /
+# corrupt Maildir file with no such bound would otherwise let a
+# single ``read_bytes`` call exhaust the indexer container's memory
+# (default ``mem_limit: 6g``). 50 MB is comfortably above any
+# legitimate message and well below the container ceiling. ``0``
+# disables the cap; operators on environments with larger inbound
+# limits can raise it via ``INDEXER_PARSE_MAX_BYTES``.
+_DEFAULT_PARSE_MAX_BYTES = 50_000_000
+
+
+def _parse_max_bytes() -> int:
+    raw = os.environ.get("INDEXER_PARSE_MAX_BYTES", "").strip()
+    if not raw:
+        return _DEFAULT_PARSE_MAX_BYTES
+    try:
+        value = int(raw)
+    except ValueError:
+        log.warning(
+            "invalid INDEXER_PARSE_MAX_BYTES=%r; falling back to %d",
+            raw,
+            _DEFAULT_PARSE_MAX_BYTES,
+        )
+        return _DEFAULT_PARSE_MAX_BYTES
+    # ``0`` is the explicit "disable the cap" sentinel. Negative values
+    # are a typo / misconfiguration — not a second opt-out — so fall
+    # back rather than silently collapsing them to ``0`` (the old
+    # ``max(0, value)`` did, which let ``-1`` quietly disable the OOM
+    # protection on every read).
+    if value < 0:
+        log.warning(
+            "invalid INDEXER_PARSE_MAX_BYTES=%r (negative); falling back to %d",
+            raw,
+            _DEFAULT_PARSE_MAX_BYTES,
+        )
+        return _DEFAULT_PARSE_MAX_BYTES
+    return value
+
+
 h2t = html2text.HTML2Text()
 h2t.ignore_links = True
 h2t.ignore_images = True
@@ -108,8 +168,66 @@ def parse_email(path: Path, maildir_root: Path | None = None) -> Message | None:
     exception escape routes the row through the queue's retry +
     dead-letter cascade so operators see persistent parser bugs instead
     of a quietly shrinking index.
+
+    Files larger than ``INDEXER_PARSE_MAX_BYTES`` (default 50 MB) raise
+    ``OversizedMessageError`` either at the fstat pre-check or while
+    reading — whichever fires first — so a malicious or corrupt Maildir
+    entry cannot exhaust container memory even if the file grew between
+    fstat and read or fstat itself failed. The worker catches the
+    error and routes the row through ``mark_skipped(reason="oversized")``
+    — terminal, no retry, but visible in operator logs as a skip
+    rather than a silent success-deletion.
     """
-    raw = path.read_bytes()
+    # Open the file once, fstat that descriptor, and bound the read on
+    # the same fd. Opening first means the cap check and the read see
+    # the same inode regardless of any rename / unlink / replace that
+    # happens after we entered the function — closing the
+    # stat-then-read TOCTOU window. The bounded ``f.read(cap + 1)``
+    # below also catches the case where fstat reports a size <= cap but
+    # the file grows after the check, and the case where fstat itself
+    # raised (size unknown but read still bounded).
+    cap = _parse_max_bytes()
+    with path.open("rb") as f:
+        try:
+            stat = os.fstat(f.fileno())
+        except OSError:
+            stat = None
+
+        if cap > 0 and stat is not None and stat.st_size > cap:
+            log.warning(
+                "Skipping oversized email %s (%d bytes > %d cap); "
+                "raise INDEXER_PARSE_MAX_BYTES to ingest, or 0 to disable.",
+                path,
+                stat.st_size,
+                cap,
+            )
+            raise OversizedMessageError(path, stat.st_size, cap)
+
+        if cap > 0:
+            # Read at most cap+1 bytes so a file that grew between
+            # fstat and read (or that fstat could not size) cannot
+            # exceed the memory budget. cap+1 lets us positively
+            # detect the over-cap case.
+            raw = f.read(cap + 1)
+            if len(raw) > cap:
+                # If the file grew between fstat and read, ``stat.st_size``
+                # can be stale and even <= cap, which would make the
+                # dead-letter message misleading. ``len(raw)`` is the
+                # lower bound on the actual file size (we capped the read
+                # at cap+1, so a file >= cap+1 reads exactly cap+1 bytes);
+                # taking the max with ``stat.st_size`` keeps the larger of
+                # the two so the operator-visible size is never an
+                # under-report relative to either signal.
+                actual = max(stat.st_size, len(raw)) if stat is not None else len(raw)
+                log.warning(
+                    "Skipping oversized email %s (>%d cap, detected during read); "
+                    "raise INDEXER_PARSE_MAX_BYTES to ingest, or 0 to disable.",
+                    path,
+                    cap,
+                )
+                raise OversizedMessageError(path, actual, cap)
+        else:
+            raw = f.read()
     msg = email.message_from_bytes(raw)
 
     message_id = _clean_id(msg.get("Message-ID", ""))
@@ -134,15 +252,14 @@ def parse_email(path: Path, maildir_root: Path | None = None) -> Message | None:
     # bytes we actually hashed; ``content_hash`` is computed over the
     # raw file — not the decoded body — so flag-only renames keep the
     # same hash while any real content mutation shows up as a mismatch.
-    # A ``stat`` failure is treated as "identity unknown" rather than a
-    # parse failure: the file was just read successfully, so the row
-    # still belongs in the index. Future passes can backfill.
+    # ``mtime_ns`` reuses the ``stat`` captured above for the size cap
+    # check. A ``stat`` failure is treated as "identity unknown"
+    # rather than a parse failure: the file was just read
+    # successfully, so the row still belongs in the index. Future
+    # passes can backfill.
     size = len(raw)
     content_hash = hashlib.sha256(raw).hexdigest()
-    try:
-        mtime_ns = os.stat(path).st_mtime_ns
-    except OSError:
-        mtime_ns = None
+    mtime_ns = stat.st_mtime_ns if stat is not None else None
 
     return Message(
         message_id=message_id,

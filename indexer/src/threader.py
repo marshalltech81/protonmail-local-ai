@@ -115,10 +115,12 @@ class Thread:
 
 class Threader:
     """
-    Assigns messages to threads using a two-pass strategy:
+    Assigns messages to threads using header lookups followed by a
+    guarded subject fallback:
     1. Check In-Reply-To header
-    2. Check References headers
-    3. Fall back to subject-based matching (normalized subject)
+    2. Check References headers (most recent first)
+    3. Fall back to normalized-subject matching within the same folder,
+       gated by participant overlap and a 60-day proximity window
     4. Create a new thread if no match found
     """
 

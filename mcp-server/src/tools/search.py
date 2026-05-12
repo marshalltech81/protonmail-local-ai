@@ -8,6 +8,8 @@ import logging
 
 from mcp.types import TextContent
 
+from ..lib.embed import embed_query
+from ..lib.security import safe_exception_text, safe_provider_exception_text
 from ..lib.validation import clamp_int
 
 log = logging.getLogger("mcp.tools.search")
@@ -22,7 +24,33 @@ _MAX_SEARCH_LIMIT = 50
 _VALID_SEARCH_MODES = frozenset({"hybrid", "semantic", "keyword"})
 
 
-def register_search_tools(server, db, llm, *, reranker=None):
+def register_search_tools(
+    server,
+    db,
+    embed_client,
+    *,
+    reranker=None,
+    secret_values=None,
+    expected_embed_dim: int | None = None,
+):
+    """Register search tools.
+
+    ``secret_values`` is the list of operator-configured API keys
+    (embed / rerank) to scrub from any exception text echoed back to
+    the caller or written to logs. Provider-SDK exceptions can include
+    auth headers and request/response body fragments; passing the
+    configured keys here means a stringified exception that happens to
+    quote the bearer token gets redacted before it leaves the process.
+
+    ``expected_embed_dim`` is the dimension declared by the indexer's
+    ``message_chunks_vec`` table (read at startup via
+    ``Database.get_embedding_dim()``). When set, every embed call is
+    validated against it so a misconfigured ``EMBED_MODEL`` surfaces
+    as an actionable error instead of silently degrading to keyword
+    search. ``None`` skips the check (fresh install pre-indexer-run).
+    """
+    secrets = list(secret_values or ())
+
     @server.tool()
     async def search_emails(
         query: str,
@@ -152,8 +180,9 @@ def register_search_tools(server, db, llm, *, reranker=None):
             try:
                 contacts = await asyncio.to_thread(db.find_contact, from_name, 1, senders_only=True)
             except Exception as e:
-                log.error(f"search_emails: find_contact({from_name!r}) failed: {e}")
-                return [TextContent(type="text", text=f"Search error: {e}")]
+                safe_error = safe_exception_text(e, secrets)
+                log.error("search_emails: find_contact(%r) failed: %s", from_name, safe_error)
+                return [TextContent(type="text", text=f"Search error: {safe_error}")]
             if not contacts:
                 return [
                     TextContent(
@@ -189,7 +218,7 @@ def register_search_tools(server, db, llm, *, reranker=None):
                     limit=limit,
                 )
             elif mode == "semantic":
-                embedding = await llm.embed(query)
+                embedding = await embed_query(embed_client, query, expected_embed_dim)
                 results = await asyncio.to_thread(
                     db.semantic_search,
                     query_embedding=embedding,
@@ -201,7 +230,7 @@ def register_search_tools(server, db, llm, *, reranker=None):
                     limit=limit,
                 )
             else:  # hybrid (default)
-                embedding = await llm.embed(query)
+                embedding = await embed_query(embed_client, query, expected_embed_dim)
                 results = await asyncio.to_thread(
                     db.hybrid_search,
                     query_text=query,
@@ -234,5 +263,16 @@ def register_search_tools(server, db, llm, *, reranker=None):
             return [TextContent(type="text", text="\n".join(output))]
 
         except Exception as e:
-            log.error(f"search_emails error: {e}")
-            return [TextContent(type="text", text=f"Search error: {e}")]
+            # Provider-SDK status errors (embed call, reranker call) can
+            # echo request/response body fragments — for search that
+            # would leak the user's query string into logs and the MCP
+            # response. ``safe_provider_exception_text`` reduces SDK
+            # status errors to ``type + status`` only and falls through
+            # to the standard secret-redacting formatter for non-provider
+            # exceptions (DB errors, validation errors), so DB diagnostics
+            # keep their detail. The inner ``find_contact`` except above
+            # stays on ``safe_exception_text`` because that path is pure
+            # local DB work.
+            safe_error = safe_provider_exception_text(e, secrets)
+            log.error("search_emails error: %s", safe_error)
+            return [TextContent(type="text", text=f"Search error: {safe_error}")]

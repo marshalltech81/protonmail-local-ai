@@ -73,13 +73,56 @@ def load_config_from_env(env: dict[str, str] | os._Environ) -> dict[str, int]:
 
     Exposed as a helper so ``main.py`` and tests share the same parsing
     rather than each re-implementing int coercion with the same default.
+
+    Malformed or out-of-range values fall back to the documented default
+    with a warning rather than raising at startup — matches the lenient
+    parser shape used by ``reconciler.load_config_from_env`` and
+    ``main._int_env`` so a typo in any one knob doesn't crash the
+    indexer. Both knobs are clamped to a minimum of 1:
+
+    - ``max_attempts <= 0`` would dead-letter every row on the first
+      failure (the >= check in ``mark_failed`` matches immediately),
+      neutralizing the retry contract.
+    - ``base_backoff_seconds <= 0`` schedules ``next_attempt_at`` in the
+      past (or at "now"), causing immediate retry churn that consumes
+      the attempt budget in a tight loop until dead-letter.
     """
     return {
-        "max_attempts": int(env.get("INDEXER_MAX_ATTEMPTS", DEFAULT_MAX_ATTEMPTS)),
-        "base_backoff_seconds": int(
-            env.get("INDEXER_RETRY_BASE_SECONDS", DEFAULT_BASE_BACKOFF_SECONDS)
+        "max_attempts": _int_env(env, "INDEXER_MAX_ATTEMPTS", DEFAULT_MAX_ATTEMPTS, minimum=1),
+        "base_backoff_seconds": _int_env(
+            env,
+            "INDEXER_RETRY_BASE_SECONDS",
+            DEFAULT_BASE_BACKOFF_SECONDS,
+            minimum=1,
         ),
     }
+
+
+def _int_env(
+    env: dict[str, str] | os._Environ,
+    name: str,
+    default: int,
+    *,
+    minimum: int | None = None,
+) -> int:
+    raw = env.get(name)
+    if raw is None or not str(raw).strip():
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        log.warning("invalid %s=%r; falling back to %d", name, raw, default)
+        return default
+    if minimum is not None and value < minimum:
+        log.warning(
+            "invalid %s=%r (must be >= %d); falling back to %d",
+            name,
+            value,
+            minimum,
+            default,
+        )
+        return default
+    return value
 
 
 class IndexingQueue:
@@ -151,7 +194,7 @@ class IndexingQueue:
         self.db.queue_delete(filepath)
 
     def mark_skipped(self, filepath: str, *, reason: str) -> None:
-        """Drop a queue row that cannot be retried.
+        """Drop a queue row that cannot be retried AND whose path is gone.
 
         Distinct from ``mark_succeeded`` (the file was NOT indexed) and
         from ``mark_failed`` (no retry, no dead-letter, no attempts
@@ -163,11 +206,44 @@ class IndexingQueue:
         event. Burning retry budget on the original path is wasted
         work and clutters the dead-letter set with non-bug entries.
 
+        For terminal failures where the file IS still present on disk
+        (e.g. oversized), use ``mark_dead_terminal`` instead so the
+        initial scan's ``is_dead`` gate prevents re-enqueue on every
+        container restart.
+
         Logs at INFO because this is normal Maildir lifecycle
         behavior, not an indexer fault.
         """
         self.db.queue_delete(filepath)
         log.info("skipped: %s reason=%s", filepath, reason)
+
+    def mark_dead_terminal(self, filepath: str, *, stage: str, error: str) -> None:
+        """Move a row directly to ``dead`` for a non-retryable failure.
+
+        Distinct from ``mark_failed`` (which schedules a retry until
+        ``max_attempts``) and ``mark_skipped`` (which deletes the row).
+        Used when the file is still present on disk and the failure is
+        terminal under current config — e.g. oversized files. Deleting
+        the row would let ``initial_index`` re-enqueue the same file on
+        every container restart (the standard walk has no other way to
+        know the file is unindexable); the ``is_dead`` gate skips
+        dead-lettered rows so a persistent oversized file is recorded
+        once and ignored thereafter. The row is also visible in
+        ``queue.stats()['dead']`` for operator observability.
+        """
+        self.db.queue_mark_dead(
+            filepath=filepath,
+            attempts=1,
+            last_stage=stage,
+            last_error=error,
+            now_iso=_now_iso(),
+        )
+        log.warning(
+            "terminal: %s stage=%s error=%s",
+            filepath,
+            stage,
+            _truncate_error(error),
+        )
 
     def mark_failed(self, filepath: str, *, stage: str, error: str) -> None:
         """Record a failed attempt and schedule the next retry or dead-letter.

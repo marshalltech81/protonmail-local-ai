@@ -34,18 +34,14 @@ help:
 
 # Create placeholder secret files required by Docker Compose.
 # Run this once during initial setup before make first-run or make up.
-# bridge_pass.txt — overwrite with real Bridge password after make first-run.
-# inference_openai_api_key.txt — overwrite when INFERENCE_OPENAI_BASE_URL
-#                         points at an authenticated provider (or leave
-#                         empty if pointing at an unauthenticated host
-#                         server like a local mlx_lm.server install).
-# inference_anthropic_api_key.txt — overwrite with your Anthropic-compatible
-#                         provider key when INFERENCE_MODE=anthropic.
-# embed_openai_api_key.txt — overwrite with your provider key when
-#                         EMBED_OPENAI_BASE_URL points at an authenticated
-#                         provider (DeepInfra, OpenRouter, etc.); leave
-#                         empty when pointing at an unauthenticated host
-#                         embedder.
+# Each layer (inference / embed / rerank) has one secret file. Each
+# file must exist with mode 600 so the docker-compose ``secrets:``
+# reference resolves cleanly. The file must be NON-EMPTY when its
+# matching layer is enabled (EMBED_MODE is always enabled;
+# INFERENCE_MODE != none; RERANK_MODE == cohere). For unauthenticated
+# host-side servers (LM Studio, vLLM, mlx_lm.server) write any
+# placeholder string (e.g. ``unauthenticated``). Leave the file empty
+# only when the matching layer's *_MODE=none.
 init-secrets:
 	@mkdir -p .secrets
 	@chmod 700 .secrets
@@ -56,26 +52,26 @@ init-secrets:
 	else \
 		echo "  .secrets/bridge_pass.txt already exists, skipping"; \
 	fi
-	@if [ ! -f .secrets/inference_openai_api_key.txt ]; then \
-		printf '' > .secrets/inference_openai_api_key.txt; \
-		chmod 600 .secrets/inference_openai_api_key.txt; \
-		echo "  created .secrets/inference_openai_api_key.txt (empty — fill in only for authenticated OpenAI-compatible inference)"; \
+	@if [ ! -f .secrets/inference_api_key.txt ]; then \
+		printf '' > .secrets/inference_api_key.txt; \
+		chmod 600 .secrets/inference_api_key.txt; \
+		echo "  created .secrets/inference_api_key.txt (empty — must be non-empty when INFERENCE_MODE != none; use any placeholder for unauthenticated host servers)"; \
 	else \
-		echo "  .secrets/inference_openai_api_key.txt already exists, skipping"; \
+		echo "  .secrets/inference_api_key.txt already exists, skipping"; \
 	fi
-	@if [ ! -f .secrets/inference_anthropic_api_key.txt ]; then \
-		printf '' > .secrets/inference_anthropic_api_key.txt; \
-		chmod 600 .secrets/inference_anthropic_api_key.txt; \
-		echo "  created .secrets/inference_anthropic_api_key.txt (empty — fill in if INFERENCE_MODE=anthropic)"; \
+	@if [ ! -f .secrets/embed_api_key.txt ]; then \
+		printf '' > .secrets/embed_api_key.txt; \
+		chmod 600 .secrets/embed_api_key.txt; \
+		echo "  created .secrets/embed_api_key.txt (empty — must be non-empty before make up; use any placeholder for unauthenticated host servers)"; \
 	else \
-		echo "  .secrets/inference_anthropic_api_key.txt already exists, skipping"; \
+		echo "  .secrets/embed_api_key.txt already exists, skipping"; \
 	fi
-	@if [ ! -f .secrets/embed_openai_api_key.txt ]; then \
-		printf '' > .secrets/embed_openai_api_key.txt; \
-		chmod 600 .secrets/embed_openai_api_key.txt; \
-		echo "  created .secrets/embed_openai_api_key.txt (empty — fill in only for cloud embedder)"; \
+	@if [ ! -f .secrets/rerank_api_key.txt ]; then \
+		printf '' > .secrets/rerank_api_key.txt; \
+		chmod 600 .secrets/rerank_api_key.txt; \
+		echo "  created .secrets/rerank_api_key.txt (empty — fill in for RERANK_MODE=cohere)"; \
 	else \
-		echo "  .secrets/embed_openai_api_key.txt already exists, skipping"; \
+		echo "  .secrets/rerank_api_key.txt already exists, skipping"; \
 	fi
 
 # Build all images from source

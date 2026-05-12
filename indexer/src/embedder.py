@@ -8,17 +8,28 @@ etc.) or a host-side server the operator installs themselves
 backend is purely a base-URL + model + API key configuration question
 — there is no per-provider code path.
 
+Calls go through the official ``openai`` SDK with a custom ``base_url``;
+operator-supplied compat servers target the SDK as their reference
+client by design, so pointing the SDK at them via ``base_url=`` is the
+supported path.
+
 ``OpenAIEmbedder`` implements the ``EmbeddingBackend`` Protocol so
 callers in ``main.py``, ``reconciler.py``, and ``attachment_indexing.py``
 stay backend-agnostic and tests can substitute a duck-typed fake.
 """
 
 import logging
+import math
 import os
 import time
 from typing import Protocol
 
-import httpx
+from openai import (
+    APIConnectionError,
+    APIStatusError,
+    APITimeoutError,
+    OpenAI,
+)
 from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
 
 from .chunker import l2_normalize
@@ -26,47 +37,94 @@ from .chunker import l2_normalize
 log = logging.getLogger("indexer.embedder")
 
 
+def _float_env(name: str, default: float, minimum: float = 1.0) -> float:
+    """Read a float env var with a graceful fallback.
+
+    Mirrors ``main._int_env`` and ``reconciler._int`` / ``_pct``: an
+    empty / unset / malformed value logs a warning and falls back
+    rather than raising at startup. A typo in a tunable knob should
+    not crash the indexer.
+
+    ``minimum`` defines the lower bound (default 1.0) — values below
+    it are treated as malformed and fall back. ``EMBED_WARMUP_TIMEOUT_SECS``
+    and similar per-call deadlines must be positive: ``0`` or negative
+    values would reach the OpenAI SDK timeout path and either fail oddly
+    or make startup behavior brittle. Mirrors the
+    ``mcp-server/src/main._float_env`` helper's ``minimum`` parameter,
+    differing only in the warn-fall-back vs raise policy that each
+    service has already settled on.
+    """
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        log.warning("invalid %s=%r; falling back to %.1f", name, raw, default)
+        return default
+    # ``float("nan")`` / ``float("inf")`` parse cleanly but would
+    # reach the SDK as a per-call deadline and break in surprising
+    # ways. Same warn-fall-back policy as a malformed string.
+    if not math.isfinite(value):
+        log.warning("invalid %s=%r; falling back to %.1f", name, raw, default)
+        return default
+    if value < minimum:
+        log.warning(
+            "invalid %s=%r (must be >= %.1f); falling back to %.1f",
+            name,
+            raw,
+            minimum,
+            default,
+        )
+        return default
+    return value
+
+
+def scrub_embed_error(exc: BaseException) -> str:
+    """Render an embedder exception into a log/DB-safe string.
+
+    The OpenAI SDK's ``APIStatusError`` carries the provider's response
+    body, which can echo input fragments back on 4xx — for the indexer
+    that means email body text from the failing batch can flow into
+    ``indexing_jobs.last_error`` and any operator log sink. The repo
+    is public and the ``last_error`` row + truncated log line both
+    travel further than callers usually expect, so trim
+    ``APIStatusError`` down to type + status_code only.
+
+    Connection / timeout / our own ``RuntimeError`` (index-integrity
+    check) carry no email content, so their full ``repr`` is safe to
+    keep.
+    """
+    if isinstance(exc, APIStatusError):
+        return f"{type(exc).__name__}: status={exc.status_code}"
+    return repr(exc)
+
+
 def _is_transient_embed_error(exc: BaseException) -> bool:
     """Decide whether tenacity should retry ``exc``.
 
-    Retry transport-level failures that a fresh attempt could plausibly
-    fix:
+    Retry transport-level failures and 5xx that a fresh attempt could
+    plausibly fix:
 
-    * Most subclasses of ``httpx.TransportError`` — ``TimeoutException``
-      (``ConnectTimeout`` / ``ReadTimeout`` / ``WriteTimeout`` /
-      ``PoolTimeout``), ``NetworkError`` (``ConnectError`` / ``ReadError``
-      / ``WriteError`` / ``CloseError``), ``RemoteProtocolError``,
-      and ``ProxyError``. The earlier explicit allowlist
-      (``ConnectError``, ``ReadTimeout``, ``RemoteProtocolError``)
-      missed ``ConnectTimeout`` / ``WriteTimeout`` / ``PoolTimeout``
-      and made the call fail immediately on common transient
-      provider hiccups.
-    * 5xx ``HTTPStatusError`` — the provider failed to serve a
+    * ``openai.APIConnectionError`` — TCP / DNS / TLS failures the SDK
+      surfaces uniformly.
+    * ``openai.APITimeoutError`` — read / write / pool timeouts.
+    * 5xx ``openai.APIStatusError`` — provider failed to serve a
       well-formed request and might recover.
 
     Do NOT retry — deterministic config errors that retrying only
     delays:
 
-    * ``httpx.UnsupportedProtocol`` — raised when ``base_url`` lacks
-      a scheme (e.g. ``host.docker.internal:8001/v1`` instead of
-      ``http://host.docker.internal:8001/v1``). A typo, not a
-      transient outage. Retrying buys nothing but startup-timeout
-      latency before the operator sees the actionable error.
-    * ``httpx.LocalProtocolError`` — raised when the client itself
-      builds a malformed request (HTTP/2 framing bug, illegal header
-      value). Almost always a code or config issue, not a network
-      issue.
-    * 4xx ``HTTPStatusError`` (auth, model id, quota, request shape).
+    * 4xx ``openai.APIStatusError`` (auth, model id, quota, request
+      shape).
     * Our own ``RuntimeError`` from index-integrity checks — the
       provider returned a malformed batch and a retry would produce
       the same shape.
     """
-    if isinstance(exc, (httpx.UnsupportedProtocol, httpx.LocalProtocolError)):
-        return False
-    if isinstance(exc, httpx.TransportError):
+    if isinstance(exc, APIStatusError):
+        return exc.status_code >= 500
+    if isinstance(exc, (APIConnectionError, APITimeoutError)):
         return True
-    if isinstance(exc, httpx.HTTPStatusError):
-        return exc.response.status_code >= 500
     return False
 
 
@@ -74,8 +132,8 @@ class EmbeddingBackend(Protocol):
     """Structural contract the embedder satisfies.
 
     Defined as a ``Protocol`` (not an inheritance base) so test fakes
-    can stay duck-typed without depending on httpx or any concrete
-    backend.
+    can stay duck-typed without depending on the OpenAI SDK or any
+    concrete backend.
     """
 
     def wait_for_ready(self, timeout: int = 120) -> None: ...
@@ -84,27 +142,34 @@ class EmbeddingBackend(Protocol):
 
 
 class OpenAIEmbedder:
-    """OpenAI-compatible ``/v1/embeddings`` HTTP client.
-
-    Wire format:
-
-        POST {base_url}/embeddings
-        Authorization: Bearer {api_key}    # omitted if api_key is empty
-        Content-Type: application/json
-
-        {"model": "...", "input": "text" | ["t1", "t2", ...]}
-
-        → {"object": "list",
-           "data": [{"object": "embedding", "embedding": [...], "index": 0}, ...],
-           "model": "...",
-           "usage": {...}}
+    """OpenAI-SDK-backed ``/v1/embeddings`` client.
 
     For an unauthenticated host-side server, ``base_url`` is something
-    like ``http://host.docker.internal:8001/v1`` and ``api_key`` is
-    empty. For DeepInfra, ``base_url`` is
-    ``https://api.deepinfra.com/v1/openai`` and ``api_key`` comes from
-    the ``embed_openai_api_key`` Docker secret. The class itself is
+    like ``http://host.docker.internal:8001/v1`` and ``api_key`` is any
+    operator-supplied placeholder string (e.g. ``unauthenticated``);
+    compat servers ignore the auth header. For DeepInfra, ``base_url``
+    is ``https://api.deepinfra.com/v1/openai``. For OpenAI proper,
+    ``base_url`` may be left empty so the SDK's documented fallback
+    fires (``OPENAI_BASE_URL`` env → ``https://api.openai.com/v1``);
+    ``api_key`` (always required, non-empty) is the explicit-intent
+    signal that makes empty-base_url unambiguous. The class itself is
     provider-agnostic.
+
+    ``api_key`` must be non-empty — startup validation in
+    ``main._validate_embed_config`` enforces that contract before the
+    embedder is constructed. ``self.base_url`` is read back from the
+    SDK after construction so it always reflects the wire endpoint,
+    not the (possibly empty) value the operator typed.
+
+    Project-specific behavior preserved over the bare SDK:
+
+    - Custom retry classification (4xx config errors fail fast; 5xx
+      and connection errors retry with exponential backoff).
+    - Defensive index-integrity check on the batch response so a
+      provider that ever returns reordered / duplicate indices fails
+      loudly instead of silently misaligning vectors with chunks.
+    - L2 normalization at the boundary so storage invariants hold
+      regardless of provider normalization defaults.
     """
 
     # First-call model warmup may include a model load on a host-side
@@ -121,15 +186,56 @@ class OpenAIEmbedder:
         base_url: str,
         model: str,
         *,
-        api_key: str = "",
+        api_key: str,
         batch_size: int = 64,
         request_timeout: float = 120.0,
     ):
-        self.base_url = base_url.rstrip("/")
         self.model = model
         self.batch_size = batch_size
-        headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
-        self.client = httpx.Client(timeout=request_timeout, headers=headers)
+        # ``api_key`` is required (non-empty) — startup validation in
+        # ``main._validate_embed_config`` rejects an empty value before
+        # this constructor runs. The key is the explicit-intent signal:
+        # an operator with a real ``sk-...`` in
+        # ``.secrets/embed_api_key.txt`` has unambiguously chosen their
+        # provider, so an empty ``base_url`` is interpreted as "I want
+        # the SDK default (OpenAI proper)" rather than "I forgot to
+        # configure." For unauthenticated host-side servers the
+        # operator supplies any placeholder string; compat servers
+        # ignore the bearer header. Keeping the substitution out of
+        # this constructor means the credential actually sent is
+        # exactly what the operator wrote — no silent rewrite to a
+        # literal that could surface in a misconfigured remote
+        # provider's request log.
+        #
+        # ``base_url`` may be empty: omit the kwarg so the SDK's
+        # documented fallback chain fires (``OPENAI_BASE_URL`` env →
+        # ``https://api.openai.com/v1`` literal). The required
+        # ``EMBED_API_KEY`` upstream guards against accidental
+        # ship-to-OpenAI from a forgotten env var — a typo can't
+        # produce a real bearer credential.
+        #
+        # ``max_retries=0`` because retry policy is owned by the
+        # tenacity wrapper below — the SDK's built-in retry would
+        # double-up exponential backoff and obscure the 4xx-fast-fail
+        # / 5xx-retry classification.
+        if base_url:
+            self.client = OpenAI(
+                base_url=base_url.rstrip("/"),
+                api_key=api_key,
+                timeout=request_timeout,
+                max_retries=0,
+            )
+        else:
+            self.client = OpenAI(
+                api_key=api_key,
+                timeout=request_timeout,
+                max_retries=0,
+            )
+        # After the SDK resolves its fallback chain, read the URL back
+        # so logs and error messages name the actual wire endpoint
+        # (e.g. the SDK default) rather than the empty string the
+        # operator typed.
+        self.base_url = str(self.client.base_url).rstrip("/")
 
     def wait_for_ready(self, timeout: int = 120) -> None:
         """Block until the embedder accepts a real ``/v1/embeddings``
@@ -146,7 +252,7 @@ class OpenAIEmbedder:
           not 10 minutes.
         - ``EMBED_WARMUP_TIMEOUT_SECS`` (default 600 s) bounds **one
           successful response** — once TCP connects the request can
-          take this long before httpx times out, absorbing a
+          take this long before the SDK times out, absorbing a
           multi-minute first-time HF model download.
 
         Total wall-clock can exceed ``timeout`` only when a connection
@@ -155,21 +261,15 @@ class OpenAIEmbedder:
         deadline has by then passed.
 
         Retry classification delegates to ``_is_transient_embed_error``
-        — the same predicate ``_embed_one_batch`` uses — so startup and
-        runtime share one definition of "transient". 4xx auth / model /
-        quota errors fail fast (deterministic config), as does any
-        non-httpx exception. 5xx and most of the
-        ``httpx.TransportError`` family (connect / read / write / pool
-        timeouts, network errors, ``RemoteProtocolError``) retry until
-        the connect deadline; deterministic config errors
-        (``UnsupportedProtocol``, ``LocalProtocolError``) bypass retry
-        because no fresh attempt would change the outcome.
+        — the same predicate ``_embed_one_batch`` uses — so startup
+        and runtime share one definition of "transient". 4xx auth /
+        model / quota errors fail fast (deterministic config), as does
+        any non-SDK exception. 5xx and the SDK's connection / timeout
+        families retry until the connect deadline.
         """
-        warmup_timeout = float(
-            os.environ.get(
-                "EMBED_WARMUP_TIMEOUT_SECS",
-                self.DEFAULT_WARMUP_TIMEOUT_SECS,
-            )
+        warmup_timeout = _float_env(
+            "EMBED_WARMUP_TIMEOUT_SECS",
+            self.DEFAULT_WARMUP_TIMEOUT_SECS,
         )
         log.info(
             "Waiting for embedder at %s (model=%s, connect_timeout=%ds, warmup_timeout=%.0fs)...",
@@ -178,23 +278,24 @@ class OpenAIEmbedder:
             timeout,
             warmup_timeout,
         )
-        connect_deadline = time.time() + float(timeout)
+        # Monotonic clock: wall-clock jumps (NTP correction, container
+        # host suspending) would otherwise let the deadline either fail
+        # early or hang well past the configured timeout.
+        connect_deadline = time.monotonic() + float(timeout)
         last_err: Exception | None = None
-        while time.time() < connect_deadline:
+        while time.monotonic() < connect_deadline:
             try:
-                r = self.client.post(
-                    f"{self.base_url}/embeddings",
-                    json={"model": self.model, "input": "warmup"},
-                    timeout=warmup_timeout,
+                self.client.with_options(timeout=warmup_timeout).embeddings.create(
+                    model=self.model,
+                    input="warmup",
                 )
-                r.raise_for_status()
                 log.info("Embedder ready: %s (%s)", self.base_url, self.model)
                 return
-            except httpx.HTTPError as e:
+            except (APIConnectionError, APITimeoutError, APIStatusError) as e:
                 if not _is_transient_embed_error(e):
                     # 4xx config errors and any other non-transient
-                    # httpx error surface immediately so the operator
-                    # fixes config rather than waiting out the timeout.
+                    # error surface immediately so the operator fixes
+                    # config rather than waiting out the timeout.
                     raise
                 last_err = e
             time.sleep(3)
@@ -232,13 +333,11 @@ class OpenAIEmbedder:
         reraise=True,
     )
     def _embed_one_batch(self, texts: list[str]) -> list[list[float]]:
-        r = self.client.post(
-            f"{self.base_url}/embeddings",
-            json={"model": self.model, "input": texts},
+        resp = self.client.embeddings.create(
+            model=self.model,
+            input=texts,
         )
-        r.raise_for_status()
-        body = r.json()
-        data = list(body["data"])
+        data = list(resp.data)
         # Hard-validate the index integrity before zipping vectors
         # back onto chunks. A provider that returns duplicate or
         # missing indices would silently attach the wrong vector to
@@ -250,14 +349,14 @@ class OpenAIEmbedder:
                 f"embedder returned {len(data)} vectors for {len(texts)} inputs "
                 f"({self.base_url}, model={self.model!r})"
             )
-        seen_indices = sorted(d["index"] for d in data)
+        seen_indices = sorted(d.index for d in data)
         if seen_indices != list(range(len(texts))):
             raise RuntimeError(
                 f"embedder returned non-contiguous or duplicate indices "
                 f"{seen_indices} for {len(texts)} inputs "
                 f"({self.base_url}, model={self.model!r})"
             )
-        data.sort(key=lambda d: d["index"])
+        data.sort(key=lambda d: d.index)
         # Normalize raw provider output here so chunk vectors land
         # unit-normed regardless of provider. The DB write boundary
         # in ``database.py`` also normalizes at ``upsert_thread`` /
@@ -271,4 +370,4 @@ class OpenAIEmbedder:
         # holds end-to-end. ``l2_normalize`` short-circuits
         # already-unit-norm inputs, so this is a no-op against
         # Qwen3-Embedding-8B.
-        return [l2_normalize(d["embedding"]) for d in data]
+        return [l2_normalize(list(d.embedding)) for d in data]

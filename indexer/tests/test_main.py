@@ -93,8 +93,8 @@ def _write_eml_with_text_attachment(path: Path, message_id: str) -> None:
     )
 
 
-class TestReadEmbedOpenAIApiKey:
-    """Coverage for ``main._read_embed_openai_api_key``.
+class TestReadEmbedApiKey:
+    """Coverage for ``main._read_embed_api_key``.
 
     The Docker secret path takes precedence over the env var; when the
     secret file is unreadable the function falls back to env rather
@@ -102,26 +102,30 @@ class TestReadEmbedOpenAIApiKey:
     """
 
     def test_returns_secret_file_contents_stripped(self, tmp_path, monkeypatch):
-        secret = tmp_path / "embed_openai_api_key"
+        secret = tmp_path / "embed_api_key"
         secret.write_text("  sk-abc123\n", encoding="utf-8")  # pragma: allowlist secret
         monkeypatch.setattr(main, "Path", lambda _p: secret)
-        monkeypatch.delenv("EMBED_OPENAI_API_KEY", raising=False)
-        assert main._read_embed_openai_api_key() == "sk-abc123"  # pragma: allowlist secret
+        monkeypatch.delenv("EMBED_API_KEY", raising=False)
+        assert main._read_embed_api_key() == "sk-abc123"  # pragma: allowlist secret
 
     def test_falls_back_to_env_when_secret_missing(self, tmp_path, monkeypatch):
         monkeypatch.setattr(main, "Path", lambda _p: tmp_path / "does-not-exist")
-        monkeypatch.setenv("EMBED_OPENAI_API_KEY", "  env-key  ")
-        assert main._read_embed_openai_api_key() == "env-key"
+        monkeypatch.setenv("EMBED_API_KEY", "  env-key  ")
+        assert main._read_embed_api_key() == "env-key"
 
     def test_returns_empty_when_neither_source_set(self, tmp_path, monkeypatch):
         monkeypatch.setattr(main, "Path", lambda _p: tmp_path / "does-not-exist")
-        monkeypatch.delenv("EMBED_OPENAI_API_KEY", raising=False)
-        assert main._read_embed_openai_api_key() == ""
+        monkeypatch.delenv("EMBED_API_KEY", raising=False)
+        assert main._read_embed_api_key() == ""
 
-    def test_falls_back_to_env_on_oserror_reading_secret(self, monkeypatch, caplog):
-        # If the secret file exists but can't be read (perms regression
-        # in a future deploy), don't crash — log and fall through to env
-        # so the operator can recover by setting EMBED_OPENAI_API_KEY.
+    def test_unreadable_secret_file_fails_closed(self, monkeypatch):
+        # An unreadable mounted Docker secret is a deployment
+        # misconfiguration, not a fall-through case: silently dropping
+        # to the env fallback would either send an empty bearer token
+        # to a remote embedder or use a stale env value the operator
+        # thought the secret had superseded. The indexer must refuse
+        # to start, surfacing the OSError so the operator fixes the
+        # mount/perms before any embed call goes out.
 
         class _UnreadableSecretPath:
             def exists(self) -> bool:
@@ -131,10 +135,9 @@ class TestReadEmbedOpenAIApiKey:
                 raise PermissionError("simulated perms regression")
 
         monkeypatch.setattr(main, "Path", lambda _p: _UnreadableSecretPath())
-        monkeypatch.setenv("EMBED_OPENAI_API_KEY", "fallback-key")
-        with caplog.at_level("WARNING"):
-            assert main._read_embed_openai_api_key() == "fallback-key"
-        assert "could not read" in caplog.text
+        monkeypatch.setenv("EMBED_API_KEY", "fallback-key")
+        with pytest.raises(PermissionError, match="simulated perms regression"):
+            main._read_embed_api_key()
 
 
 class TestOnMovedIndexesDestination:
@@ -660,6 +663,48 @@ class TestDrainQueueRetryAndDeadLetter:
         ).fetchone()
         assert row is None
 
+    def test_oversized_file_dead_letters_not_terminal_success(self, tmp_path, monkeypatch):
+        # Models a >50 MB ``.eml``. Previous behavior routed oversized
+        # through ``mark_skipped`` (delete the queue row); because the
+        # file is still present on disk, ``initial_index`` re-enqueued
+        # the same file on every container restart, and ``_index_one_file``
+        # interpreted "row gone + file present" as success — the file
+        # was never actually indexed. The fix routes oversized through
+        # ``mark_dead_terminal``: row stays at status='dead', the
+        # ``is_dead`` gate skips it on restart, and ``_index_one_file``
+        # returns ``(False, "parse", ...)``.
+        monkeypatch.setenv("INDEXER_PARSE_MAX_BYTES", "1024")
+
+        dest = tmp_path / "INBOX" / "cur" / "huge.eml"
+        dest.parent.mkdir(parents=True)
+        # Write a file larger than the 1 KiB cap above.
+        dest.write_bytes(b"X" * 2048)
+
+        db = Database(tmp_path / "mail.db")
+        threader = Threader(db)
+        embedder = make_mock_embedder()
+        embedder.embed.return_value = [0.0] * EMBEDDING_DIM
+
+        ok, stage, err, _ = main._index_one_file(dest, db, embedder, threader)
+
+        assert ok is False
+        assert stage == "parse"
+        assert err is not None
+        assert "oversized" in err
+
+        # Durable dead-letter row prevents re-enqueue on restart.
+        row = db._conn.execute(
+            "SELECT status, last_stage FROM indexing_jobs WHERE filepath = ?", (str(dest),)
+        ).fetchone()
+        assert row is not None
+        assert row["status"] == "dead"
+        assert row["last_stage"] == "parse"
+
+        # ``is_dead`` (initial_index's gate) reports True so the next
+        # container restart skips the file instead of re-enqueueing it.
+        queue = IndexingQueue(db, max_attempts=1, base_backoff_seconds=0)
+        assert queue.is_dead(str(dest)) is True
+
     def test_unreadable_file_routes_to_retry_not_terminal_success(self, tmp_path):
         # Models the mbsync 0600→0644 chmod race: the watchdog enqueues a
         # newly-delivered file before mbsync's post-sync chmod hook makes
@@ -686,6 +731,87 @@ class TestDrainQueueRetryAndDeadLetter:
         assert stage == "parse"
         assert err is not None
         assert "PermissionError" in err or "Errno 13" in err
+
+
+class TestValidateEmbedConfig:
+    """``_validate_embed_config`` enforces the per-layer startup contract:
+    every operator-supplied env var the embedder needs must be present
+    and non-empty before the indexer constructs the embedder client.
+
+    Pre-tightening, ``EMBED_API_KEY`` could be empty and the indexer
+    would happily start, only failing at the first embed call against
+    a remote provider with a 401. Now empty keys fail closed at startup
+    so a missing secret surfaces in the same place as a missing
+    ``EMBED_BASE_URL`` or ``EMBED_MODEL``.
+    """
+
+    def test_complete_config_passes_silently(self, monkeypatch):
+        monkeypatch.setattr(main, "EMBED_BASE_URL", "http://x/v1")
+        monkeypatch.setattr(main, "EMBED_MODEL", "qwen-embed")
+        monkeypatch.setattr(main, "EMBED_API_KEY", "sk-real")  # pragma: allowlist secret
+        # No raise == pass.
+        main._validate_embed_config()
+
+    def test_empty_base_url_passes(self, monkeypatch):
+        # Empty ``EMBED_BASE_URL`` is intentional: it means "use the
+        # SDK default" (OpenAI proper). The required non-empty
+        # ``EMBED_API_KEY`` is the explicit-intent signal — an
+        # operator with a real ``sk-...`` has unambiguously chosen
+        # their provider, so we trust the SDK fallback. Symmetric with
+        # ``INFERENCE_MODE=anthropic``'s empty-URL behavior.
+        monkeypatch.setattr(main, "EMBED_BASE_URL", "")
+        monkeypatch.setattr(main, "EMBED_MODEL", "Qwen/Qwen3-Embedding-8B")
+        monkeypatch.setattr(main, "EMBED_API_KEY", "sk-real")  # pragma: allowlist secret
+        main._validate_embed_config()
+
+    def test_missing_model_raises(self, monkeypatch):
+        # ``EMBED_MODEL`` stays required: no SDK has a default model,
+        # so an empty value always fails at request time. Catching it
+        # at startup gives an actionable error.
+        monkeypatch.setattr(main, "EMBED_BASE_URL", "http://x/v1")
+        monkeypatch.setattr(main, "EMBED_MODEL", "")
+        monkeypatch.setattr(main, "EMBED_API_KEY", "sk-real")  # pragma: allowlist secret
+        with pytest.raises(ValueError, match="EMBED_MODEL"):
+            main._validate_embed_config()
+
+    def test_empty_api_key_raises(self, monkeypatch):
+        # The startup contract: every enabled operator-supplied layer
+        # needs a non-empty key. The key is the explicit-intent signal
+        # that lets us trust an empty ``EMBED_BASE_URL`` as "use the
+        # SDK default" rather than "I forgot to configure." Operators
+        # pointing at an unauthenticated host-side server supply any
+        # placeholder (``unauthenticated``) rather than leaving the
+        # secret file empty.
+        monkeypatch.setattr(main, "EMBED_BASE_URL", "http://x/v1")
+        monkeypatch.setattr(main, "EMBED_MODEL", "qwen-embed")
+        monkeypatch.setattr(main, "EMBED_API_KEY", "")
+        with pytest.raises(ValueError, match="EMBED_API_KEY"):
+            main._validate_embed_config()
+
+    def test_placeholder_api_key_passes(self, monkeypatch):
+        # The contract is "non-empty," not "well-formed." A placeholder
+        # string for an unauthenticated host-side server passes startup
+        # validation; the SDK sends it as a bearer token that compat
+        # servers ignore.
+        monkeypatch.setattr(main, "EMBED_BASE_URL", "http://x/v1")
+        monkeypatch.setattr(main, "EMBED_MODEL", "qwen-embed")
+        monkeypatch.setattr(main, "EMBED_API_KEY", "unauthenticated")
+        main._validate_embed_config()
+
+    def test_base_url_with_userinfo_raises(self, monkeypatch):
+        # URLs that embed a ``user:pass@host`` userinfo authority flow
+        # into the startup log naming the resolved wire endpoint,
+        # leaking embedded credentials. Reject at startup; secrets
+        # belong in ``.secrets/embed_api_key.txt``.
+        monkeypatch.setattr(
+            main,
+            "EMBED_BASE_URL",
+            "https://user:token@gateway.example/v1",  # pragma: allowlist secret
+        )
+        monkeypatch.setattr(main, "EMBED_MODEL", "qwen-embed")
+        monkeypatch.setattr(main, "EMBED_API_KEY", "sk-real")  # pragma: allowlist secret
+        with pytest.raises(ValueError, match="EMBED_BASE_URL.*credentials"):
+            main._validate_embed_config()
 
 
 class TestValidateEmbeddingDim:

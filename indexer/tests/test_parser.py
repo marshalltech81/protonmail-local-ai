@@ -10,6 +10,7 @@ from datetime import datetime
 from pathlib import Path
 
 from src.parser import (
+    OversizedMessageError,
     _clean_id,
     _decode_header,
     _parse_addrs,
@@ -190,6 +191,165 @@ class TestParseEmail:
 
         with pytest.raises(FileNotFoundError):
             parse_email(tmp_path / "ghost.eml")
+
+    def test_oversized_file_raises_oversized_message_error(self, tmp_path, monkeypatch):
+        # Files past INDEXER_PARSE_MAX_BYTES must raise so the worker
+        # routes them through ``mark_skipped(reason="oversized")``
+        # instead of the previous silent ``return None`` /
+        # ``mark_succeeded`` path that hid oversized entries from
+        # operator-visible logs.
+        import pytest
+
+        # Force a small cap so we don't have to write a 50 MB fixture.
+        monkeypatch.setenv("INDEXER_PARSE_MAX_BYTES", "100")
+        path = write_eml(
+            tmp_path,
+            """
+            From: a@example.com
+            To: b@example.com
+            Subject: huge
+            Message-ID: <huge@example.com>
+            Date: Mon, 01 Jan 2024 12:00:00 +0000
+            Content-Type: text/plain; charset=utf-8
+
+            """
+            + ("X" * 500),
+            name="huge.eml",
+        )
+        with pytest.raises(OversizedMessageError) as excinfo:
+            parse_email(path)
+        assert excinfo.value.cap == 100
+        assert excinfo.value.size > 100
+        assert excinfo.value.path == path
+
+    def test_oversized_caught_when_fstat_returns_undersized(self, tmp_path, monkeypatch):
+        # Defends against the stat-then-read TOCTOU: if ``os.fstat`` returns
+        # a size below the cap (because it failed, or because the file grew
+        # after the syscall), the bounded ``f.read(cap + 1)`` must still
+        # raise ``OversizedMessageError`` rather than slurping an unbounded
+        # file into memory. We simulate by monkey-patching ``os.fstat`` to
+        # report ``None`` (the stat-failure branch) on a file that exceeds
+        # the cap.
+        import os as _os
+
+        import pytest
+        from src import parser as parser_module
+
+        monkeypatch.setenv("INDEXER_PARSE_MAX_BYTES", "100")
+        path = write_eml(
+            tmp_path,
+            """
+            From: a@example.com
+            To: b@example.com
+            Subject: huge-toctou
+            Message-ID: <toctou@example.com>
+            Date: Mon, 01 Jan 2024 12:00:00 +0000
+            Content-Type: text/plain; charset=utf-8
+
+            """
+            + ("Y" * 500),
+            name="toctou.eml",
+        )
+        real_fstat = _os.fstat
+
+        def _fail_fstat(fd):
+            raise OSError("simulated fstat failure")
+
+        monkeypatch.setattr(parser_module.os, "fstat", _fail_fstat)
+        try:
+            with pytest.raises(OversizedMessageError) as excinfo:
+                parse_email(path)
+        finally:
+            monkeypatch.setattr(parser_module.os, "fstat", real_fstat)
+        assert excinfo.value.cap == 100
+        # Read path reports len(raw) (which is cap+1) when stat is unavailable.
+        assert excinfo.value.size == 101
+        assert excinfo.value.path == path
+
+    def test_negative_parse_max_bytes_falls_back_to_default(self, tmp_path, monkeypatch, caplog):
+        # Regression: ``INDEXER_PARSE_MAX_BYTES=-1`` used to silently
+        # disable the cap (the old ``max(0, value)`` collapsed it to 0,
+        # the disable sentinel). A typo should fall back to the default
+        # rather than disabling OOM protection, so the call must apply
+        # the 50 MB default and a small fixture parses without raising.
+        import logging
+
+        from src import parser as parser_module
+
+        monkeypatch.setenv("INDEXER_PARSE_MAX_BYTES", "-1")
+        path = write_eml(
+            tmp_path,
+            """
+            From: a@example.com
+            To: b@example.com
+            Subject: negative-cap-fallback
+            Message-ID: <neg@example.com>
+            Date: Mon, 01 Jan 2024 12:00:00 +0000
+            Content-Type: text/plain; charset=utf-8
+
+            Body.
+            """,
+            name="neg.eml",
+        )
+        with caplog.at_level(logging.WARNING, logger="indexer.parser"):
+            assert parser_module._parse_max_bytes() == parser_module._DEFAULT_PARSE_MAX_BYTES
+            msg = parse_email(path)
+        assert msg is not None
+        assert msg.message_id == "neg@example.com"
+        assert any("INDEXER_PARSE_MAX_BYTES" in r.message for r in caplog.records)
+
+    def test_oversized_size_reports_post_growth_max(self, tmp_path, monkeypatch):
+        # Regression for the stat-then-read race: if the file grows
+        # between ``fstat`` and the bounded read, ``stat.st_size``
+        # underreports vs. ``len(raw)``. The dead-letter ``OversizedMessageError.size``
+        # must reflect the larger of the two so operators don't see a
+        # misleadingly small size when the read-side detection fires.
+        import os as _os
+
+        import pytest
+        from src import parser as parser_module
+
+        monkeypatch.setenv("INDEXER_PARSE_MAX_BYTES", "100")
+        path = write_eml(
+            tmp_path,
+            """
+            From: a@example.com
+            To: b@example.com
+            Subject: stat-stale
+            Message-ID: <stale@example.com>
+            Date: Mon, 01 Jan 2024 12:00:00 +0000
+            Content-Type: text/plain; charset=utf-8
+
+            """
+            + ("Z" * 500),
+            name="stale.eml",
+        )
+        real_fstat = _os.fstat
+
+        def _undersized_fstat(fd):
+            stat = real_fstat(fd)
+            return _os.stat_result(
+                (
+                    stat.st_mode,
+                    stat.st_ino,
+                    stat.st_dev,
+                    stat.st_nlink,
+                    stat.st_uid,
+                    stat.st_gid,
+                    50,
+                    stat.st_atime,
+                    stat.st_mtime,
+                    stat.st_ctime,
+                )
+            )
+
+        monkeypatch.setattr(parser_module.os, "fstat", _undersized_fstat)
+        with pytest.raises(OversizedMessageError) as excinfo:
+            parse_email(path)
+        # ``stat.st_size`` says 50, but ``len(raw) == cap + 1 == 101``;
+        # the reported size is the max so the dead-letter doesn't lie.
+        assert excinfo.value.size == 101
+        assert excinfo.value.cap == 100
 
     def test_permission_denied_propagates_for_queue_retry(self, tmp_path):
         # Models the mbsync 0600→0644 chmod race: the file exists but

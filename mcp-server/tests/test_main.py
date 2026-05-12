@@ -20,11 +20,16 @@ here:
 import asyncio
 import logging
 
+import pytest
 from src.main import (
+    _INFERENCE_MODES,
     _env_bool,
-    _normalize_inference_mode,
+    _float_env,
+    _normalize_mode,
     _normalize_transport,
     _read_secret,
+    _reject_url_userinfo,
+    _require_env,
     _run_server,
 )
 
@@ -49,12 +54,8 @@ class TestEnvBool:
         # A malformed safety flag should fail startup rather than silently
         # flipping the deployment posture.
         monkeypatch.setenv("FAKE_BOOL_FLAG", "maybe")
-        try:
+        with pytest.raises(ValueError, match="FAKE_BOOL_FLAG"):
             _env_bool("FAKE_BOOL_FLAG", default=True)
-        except ValueError as exc:
-            assert "FAKE_BOOL_FLAG" in str(exc)
-        else:
-            raise AssertionError("expected ValueError")
 
     def test_whitespace_around_value_is_tolerated(self, monkeypatch):
         monkeypatch.setenv("FAKE_BOOL_FLAG", "  true  ")
@@ -96,6 +97,17 @@ class TestReadSecret:
         # the test machine, so the env fallback must fire.
         assert _read_secret("missing_secret", "FAKE_SECRET_ENV") == "from-env-fallback"
 
+    def test_env_fallback_value_is_whitespace_stripped(self, monkeypatch):
+        # Operators pasting a key into ``INFERENCE_API_KEY=" key "`` (or
+        # any shell-quoted form that picks up stray spaces) would
+        # otherwise send whitespace as part of the bearer credential and
+        # fail in a non-obvious way at first call. The secret-file path
+        # already strips; the env fallback must match so both paths are
+        # interchangeable. Indexer's equivalent already strips both
+        # paths — keep mcp-server symmetric.
+        monkeypatch.setenv("FAKE_SECRET_ENV", "  env-key  ")
+        assert _read_secret("missing_secret", "FAKE_SECRET_ENV") == "env-key"
+
     def test_returns_empty_when_neither_source_present(self, monkeypatch):
         monkeypatch.delenv("DEFINITELY_UNSET", raising=False)
         assert _read_secret("missing_secret", "DEFINITELY_UNSET") == ""
@@ -108,12 +120,8 @@ class TestMcpTransport:
         assert _normalize_transport("DUAL") == "dual"
 
     def test_unknown_transport_fails_closed(self):
-        try:
+        with pytest.raises(ValueError, match="MCP_TRANSPORT"):
             _normalize_transport("websocket")
-        except ValueError as exc:
-            assert "MCP_TRANSPORT" in str(exc)
-        else:
-            raise AssertionError("expected ValueError")
 
     def test_sse_and_streamable_delegate_to_fastmcp_run(self):
         class FakeServer:
@@ -239,18 +247,127 @@ class TestMcpTransport:
         await _run_dual_transport_async(server_stub)
 
 
-class TestInferenceMode:
+class TestFloatEnv:
+    """``_float_env`` rejects non-finite values.
+
+    ``float("nan")`` and ``float("inf")`` parse without raising, and
+    ``nan < minimum`` is always False — so without an explicit
+    ``math.isfinite`` check, a typo'd timeout like ``EMBED_TIMEOUT_SECS=inf``
+    or ``=nan`` reaches the SDK client and breaks per-call deadlines in
+    surprising ways. Reject non-finite values at parse time.
+    """
+
+    def test_returns_default_when_unset(self, monkeypatch):
+        monkeypatch.delenv("FAKE_FLOAT_VAR", raising=False)
+        assert _float_env("FAKE_FLOAT_VAR", default=12.5) == 12.5
+
+    def test_valid_finite_value_parses(self, monkeypatch):
+        monkeypatch.setenv("FAKE_FLOAT_VAR", "30.0")
+        assert _float_env("FAKE_FLOAT_VAR", default=12.5, minimum=1.0) == 30.0
+
+    def test_nan_is_rejected(self, monkeypatch):
+        monkeypatch.setenv("FAKE_FLOAT_VAR", "nan")
+        with pytest.raises(ValueError, match="FAKE_FLOAT_VAR"):
+            _float_env("FAKE_FLOAT_VAR", default=12.5, minimum=1.0)
+
+    def test_positive_infinity_is_rejected(self, monkeypatch):
+        monkeypatch.setenv("FAKE_FLOAT_VAR", "inf")
+        with pytest.raises(ValueError, match="FAKE_FLOAT_VAR"):
+            _float_env("FAKE_FLOAT_VAR", default=12.5, minimum=1.0)
+
+    def test_negative_infinity_is_rejected(self, monkeypatch):
+        monkeypatch.setenv("FAKE_FLOAT_VAR", "-inf")
+        with pytest.raises(ValueError, match="FAKE_FLOAT_VAR"):
+            _float_env("FAKE_FLOAT_VAR", default=12.5, minimum=1.0)
+
+
+class TestNormalizeMode:
     def test_supported_modes_are_normalized(self):
-        assert _normalize_inference_mode("openai") == "openai"
-        assert _normalize_inference_mode(" ANTHROPIC ") == "anthropic"
+        assert _normalize_mode("INFERENCE_MODE", "openai", _INFERENCE_MODES) == "openai"
+        assert _normalize_mode("INFERENCE_MODE", " ANTHROPIC ", _INFERENCE_MODES) == "anthropic"
+        assert _normalize_mode("INFERENCE_MODE", "none", _INFERENCE_MODES) == "none"
 
     def test_unknown_mode_fails_closed(self):
-        try:
-            _normalize_inference_mode("local")
-        except ValueError as exc:
-            assert "INFERENCE_MODE" in str(exc)
-        else:
-            raise AssertionError("expected ValueError")
+        with pytest.raises(ValueError, match="INFERENCE_MODE"):
+            _normalize_mode("INFERENCE_MODE", "local", _INFERENCE_MODES)
+
+
+class TestRejectUrlUserinfo:
+    """``_reject_url_userinfo`` blocks base URLs that embed a
+    ``user:pass@host`` userinfo authority at config load. Resolved base
+    URLs flow into the startup log naming the wire endpoint, so
+    embedded credentials would leak to container logs / journald.
+    Mirrors the same guard in ``scripts/validate-env.sh``.
+    """
+
+    def test_empty_value_passes_through(self):
+        # Empty ``*_BASE_URL`` is contract-supported (use SDK default).
+        assert _reject_url_userinfo("INFERENCE_BASE_URL", "") == ""
+
+    def test_clean_url_passes_through(self):
+        assert (
+            _reject_url_userinfo("EMBED_BASE_URL", "https://api.example.com/v1")
+            == "https://api.example.com/v1"
+        )
+
+    def test_host_with_port_no_userinfo_passes(self):
+        # ``host.docker.internal:8001`` has a colon in netloc but no '@'.
+        url = "http://host.docker.internal:8001/v1"
+        assert _reject_url_userinfo("EMBED_BASE_URL", url) == url
+
+    def test_userinfo_in_url_raises(self):
+        with pytest.raises(ValueError, match="INFERENCE_BASE_URL.*credentials"):
+            _reject_url_userinfo(
+                "INFERENCE_BASE_URL",
+                "https://user:token@gateway.example/v1",  # pragma: allowlist secret
+            )
+
+    def test_userinfo_username_only_raises(self):
+        with pytest.raises(ValueError, match="RERANK_BASE_URL.*credentials"):
+            _reject_url_userinfo("RERANK_BASE_URL", "https://user@gateway.example/v1")
+
+
+class TestRequireEnv:
+    def test_passes_through_present_value(self):
+        assert _require_env("INFERENCE_MODE", "openai", "INFERENCE_BASE_URL", "https://x") == (
+            "https://x"
+        )
+
+    def test_empty_value_raises_with_actionable_message(self):
+        # The no-fallback rule: a chosen mode without its required vars
+        # must surface here, not silently route to a different provider.
+        with pytest.raises(ValueError) as excinfo:
+            _require_env("INFERENCE_MODE", "anthropic", "INFERENCE_API_KEY", "")
+        msg = str(excinfo.value)
+        assert "INFERENCE_API_KEY" in msg
+        assert "INFERENCE_MODE" in msg
+        assert "anthropic" in msg
+
+    def test_inference_openai_mode_requires_api_key(self):
+        # Tightened contract: every enabled inference layer requires a
+        # non-empty key, including ``openai`` mode. Pre-fix an operator
+        # pointing at a remote OpenAI-compatible provider could start
+        # cleanly and only fail at first intelligence call with a 401.
+        # Operators pointing at an unauthenticated host-side server
+        # supply any placeholder string (``unauthenticated``) so the
+        # startup contract holds uniformly.
+        with pytest.raises(ValueError) as excinfo:
+            _require_env("INFERENCE_MODE", "openai", "INFERENCE_API_KEY", "")
+        msg = str(excinfo.value)
+        assert "INFERENCE_API_KEY" in msg
+        assert "openai" in msg
+
+    def test_embed_mode_requires_api_key(self):
+        # ``EMBED_MODE=openai`` is the only valid embed mode (no ``none``
+        # mode exists), and the contract is the same across layers:
+        # non-empty key required. Pre-fix the indexer + mcp-server would
+        # accept an empty embed key and silently send an empty bearer
+        # token on first call.
+        with pytest.raises(ValueError) as excinfo:
+            _require_env("EMBED_MODE", "openai", "EMBED_API_KEY", "")
+        msg = str(excinfo.value)
+        assert "EMBED_API_KEY" in msg
+        assert "openai" in msg
 
 
 class TestHealthEndpoint:

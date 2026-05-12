@@ -24,8 +24,8 @@ host-side server you install yourself.
 | ProtonBridge | Decrypts ProtonMail, exposes local IMAP/SMTP |
 | mbsync | Real-time incremental sync to local Maildir |
 | Indexer | Parses threads, generates embeddings, builds SQLite index |
-| Embedder (operator-supplied) | OpenAI-compatible `/v1/embeddings`. Point `EMBED_OPENAI_BASE_URL` at any compliant provider — remote (DeepInfra, OpenRouter) or a host-side server you install yourself (LM Studio, vLLM, TEI, `mlx_lm.server`) |
-| Inference (operator-supplied) | Anthropic-compatible Messages API by default (`INFERENCE_MODE=anthropic`); switch to `INFERENCE_MODE=openai` for any OpenAI-compatible chat-completions endpoint at `INFERENCE_OPENAI_BASE_URL` |
+| Embedder (operator-supplied) | OpenAI-compatible `/v1/embeddings`. Point `EMBED_BASE_URL` at any compliant provider — remote (DeepInfra, OpenRouter) or a host-side server you install yourself (LM Studio, vLLM, TEI, `mlx_lm.server`) |
+| Inference (operator-supplied) | Anthropic-compatible Messages API by default (`INFERENCE_MODE=anthropic`); switch to `INFERENCE_MODE=openai` for any OpenAI-compatible chat-completions endpoint at `INFERENCE_BASE_URL` |
 | SQLite (FTS5 + sqlite-vec) | Hybrid keyword + vector search index |
 | MCP Server | Exposes tools to Claude Desktop via HTTP/SSE |
 
@@ -80,21 +80,23 @@ chmod 600 .secrets/bridge_pass.txt
 
 Edit `.env` to point at the providers you want to use:
 
-- `EMBED_OPENAI_BASE_URL` + `EMBED_OPENAI_MODEL` — OpenAI-compatible
+- `EMBED_BASE_URL` + `EMBED_MODEL` — OpenAI-compatible
   embedder. Remote (DeepInfra, OpenRouter) or a host-side server you
   install yourself (LM Studio, vLLM, TEI, `mlx_lm.server`). Containers
   reach a host-side server via OrbStack's `host.docker.internal`.
   The schema reserves a fixed 4096-dim vector — pick a model that
   produces 4096-dim vectors (Qwen3-Embedding-8B variants) or run a
   schema migration.
-- `INFERENCE_MODE` — `anthropic` (default) calls an Anthropic-compatible
-  Messages API at `INFERENCE_ANTHROPIC_BASE_URL`. `openai` calls an
-  OpenAI-compatible chat-completions endpoint at
-  `INFERENCE_OPENAI_BASE_URL`.
-- API keys go in `.secrets/inference_anthropic_api_key.txt`,
-  `.secrets/inference_openai_api_key.txt`, and
-  `.secrets/embed_openai_api_key.txt` (`chmod 600`). Leave any unused
-  ones empty.
+- `INFERENCE_MODE` — `anthropic` (default) uses the official
+  `anthropic` SDK against the Messages API; `openai` uses the
+  official `openai` SDK against any OpenAI-compatible chat-completions
+  endpoint at `INFERENCE_BASE_URL`; `none` skips the intelligence
+  tools.
+- `RERANK_MODE` — `cohere` enables Cohere rerank via the official
+  `cohere` SDK; `none` (default) returns RRF order directly.
+- API keys go in `.secrets/inference_api_key.txt`,
+  `.secrets/embed_api_key.txt`, and `.secrets/rerank_api_key.txt`
+  (`chmod 600`). Leave any unused ones empty.
 
 See [`docs/setup.md`](docs/setup.md) for end-to-end examples.
 
@@ -155,7 +157,7 @@ deliberate about all three layers.
 | Data | Where it lives |
 |---|---|
 | Your emails (Maildir) | Local Docker volume — never leaves your machine |
-| Embeddings | Wherever `EMBED_OPENAI_BASE_URL` points. A host-side server (LM Studio, vLLM, `mlx_lm.server`, TEI, etc.) keeps email body chunks on your machine; a remote provider (DeepInfra, OpenRouter, etc.) ships chunks to that provider at index time and search-query strings at retrieval time. |
+| Embeddings | Wherever `EMBED_BASE_URL` points. A host-side server (LM Studio, vLLM, `mlx_lm.server`, TEI, etc.) keeps email body chunks on your machine; a remote provider (DeepInfra, OpenRouter, etc.) ships chunks to that provider at index time and search-query strings at retrieval time. |
 | Search index (SQLite FTS5 + sqlite-vec) | Local Docker volume |
 | Bridge ↔ Proton traffic | The only mandatory path off your machine for mail data |
 
@@ -170,8 +172,8 @@ The MCP server's intelligence tools (`ask_mailbox`, `summarize_thread`,
 
 | Mode | What happens to retrieved email content |
 |---|---|
-| `anthropic` (default) | Sent to the Anthropic-compatible Messages API at `INFERENCE_ANTHROPIC_BASE_URL`. Requires `.secrets/inference_anthropic_api_key.txt`. |
-| `openai` | Sent to the OpenAI-compatible chat-completions endpoint at `INFERENCE_OPENAI_BASE_URL`. If that endpoint is a host-side server you install yourself (LM Studio, vLLM, `mlx_lm.server`), retrieved chunks stay on your machine; if it's a remote provider, they ship to that provider. |
+| `anthropic` (default) | Sent to the Anthropic-compatible Messages API at `INFERENCE_BASE_URL`. Requires `.secrets/inference_api_key.txt`. |
+| `openai` | Sent to the OpenAI-compatible chat-completions endpoint at `INFERENCE_BASE_URL`. If that endpoint is a host-side server you install yourself (LM Studio, vLLM, `mlx_lm.server`), retrieved chunks stay on your machine; if it's a remote provider, they ship to that provider. |
 
 This setting only governs what the MCP server does *internally* during a tool
 call. It does not govern what your MCP *client* does with the result.

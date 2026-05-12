@@ -5,10 +5,20 @@ generates embeddings via an OpenAI-compatible /v1/embeddings endpoint,
 and writes to the SQLite index.
 
 The embedder is operator-supplied: any OpenAI-compatible provider
-works (remote — DeepInfra, OpenRouter, etc. — or a host-side server
-the operator installs themselves: LM Studio, vLLM, ``mlx_lm.server``,
-TEI). Configure via ``EMBED_OPENAI_BASE_URL`` + ``EMBED_OPENAI_MODEL``
-(+ optional ``EMBED_OPENAI_API_KEY`` Docker secret).
+works (OpenAI proper, remote alternatives like DeepInfra / OpenRouter,
+or a host-side server the operator installs themselves: LM Studio,
+vLLM, ``mlx_lm.server``, TEI). Configure via ``EMBED_MODEL`` +
+``EMBED_API_KEY`` Docker secret (both required, non-empty);
+``EMBED_BASE_URL`` is optional — leave it empty to use the openai
+SDK's documented default (OpenAI proper), or set it to point at any
+other endpoint. The required ``EMBED_API_KEY`` is the explicit-intent
+signal that makes an empty ``EMBED_BASE_URL`` unambiguous: an
+operator with a real ``sk-...`` has unambiguously chosen their
+provider. Operators pointing at an unauthenticated host-side server
+set ``EMBED_BASE_URL`` to the host endpoint and supply any
+placeholder string for the key. ``EMBED_MODE`` is the wire-shape
+selector kept for symmetry with the other layers; only ``openai`` is
+valid today.
 
 When ``INDEXER_DELETION_ENABLED=true`` the indexer also runs a reconciler
 that records tombstones for mbsync-flagged (``T``) Maildir files and reaps
@@ -19,6 +29,7 @@ import logging
 import os
 import sqlite3
 import time
+import urllib.parse
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -32,8 +43,8 @@ from .attachment_indexing import (
 )
 from .chunker import MessageChunk, chunk_message, mean_vector
 from .database import EMBEDDING_DIM, Database
-from .embedder import EmbeddingBackend, OpenAIEmbedder
-from .parser import Message, parse_email
+from .embedder import EmbeddingBackend, OpenAIEmbedder, scrub_embed_error
+from .parser import Message, OversizedMessageError, parse_email
 from .queue import (
     REASON_INITIAL_SCAN,
     REASON_ON_CREATED,
@@ -57,41 +68,104 @@ MAILDIR_PATH = Path(os.environ.get("MAILDIR_PATH", "/maildir"))
 SQLITE_PATH = Path(os.environ.get("SQLITE_PATH", "/data/mail.db"))
 
 # OpenAI-compatible embedder configuration. The operator supplies the
-# provider — set ``EMBED_OPENAI_BASE_URL`` to any compliant /v1 base
-# URL and ``EMBED_OPENAI_MODEL`` to a model id served there. The schema
-# reserves a fixed 4096-dim vector — pick a 4096-dim model
-# (Qwen3-Embedding-8B variants) or run a schema migration. Authentication
-# (when needed) is loaded from the ``embed_openai_api_key`` Docker secret
-# or ``EMBED_OPENAI_API_KEY`` env. The local-dev default below points at
-# the conventional host-side port (``host.docker.internal:8001/v1``);
-# in containerized deployments docker-compose passes the env through
-# unconditionally so an unset .env value becomes empty and validate-env
-# refuses to start.
-EMBED_OPENAI_BASE_URL = os.environ.get(
-    "EMBED_OPENAI_BASE_URL", "http://host.docker.internal:8001/v1"
-)
-EMBED_OPENAI_MODEL = os.environ.get("EMBED_OPENAI_MODEL", "mlx-community/Qwen3-Embedding-8B-mxfp8")
+# provider. Set ``EMBED_MODEL`` to a model id served at the chosen
+# endpoint; the schema reserves a fixed 4096-dim vector so pick a
+# 4096-dim model (Qwen3-Embedding-8B variants) or run a schema
+# migration. Set ``EMBED_BASE_URL`` to point at any compliant /v1 base
+# URL, or leave it empty to use the openai SDK's documented default
+# (OpenAI proper at ``https://api.openai.com/v1``). The bearer
+# credential is loaded from the ``embed_api_key`` Docker secret or
+# ``EMBED_API_KEY`` env and is required (non-empty); the key is the
+# explicit-intent signal that makes empty-URL unambiguous, and
+# unauthenticated host-side servers accept any placeholder string.
+# ``EMBED_MODE`` is kept as a config knob for symmetry with
+# ``INFERENCE_MODE`` / ``RERANK_MODE`` but only accepts ``openai``
+# today — embed is the headline retrieval feature and the indexer
+# cannot function without it, so there is no disabled mode.
+_EMBED_MODES = frozenset({"openai"})
 
 
-def _read_embed_openai_api_key() -> str:
+def _normalize_embed_mode(raw: str) -> str:
+    mode = raw.strip().lower()
+    if mode in _EMBED_MODES:
+        return mode
+    raise ValueError("EMBED_MODE must be 'openai'")
+
+
+EMBED_MODE = _normalize_embed_mode(os.environ.get("EMBED_MODE", "openai"))
+EMBED_BASE_URL = os.environ.get("EMBED_BASE_URL", "")
+EMBED_MODEL = os.environ.get("EMBED_MODEL", "")
+
+
+def _validate_embed_config() -> None:
+    """Raise at startup when the embedder is misconfigured.
+
+    Validation runs in ``main()`` rather than at module load so test
+    files can ``from src import main`` to import helper functions
+    without supplying a full embedder config. The container entrypoint
+    always reaches ``main()`` first, so the operator-facing failure
+    surface is identical.
+
+    ``EMBED_API_KEY`` is required (non-empty); ``EMBED_MODEL`` is too.
+    ``EMBED_BASE_URL`` may be empty: that is interpreted as "use the
+    SDK default" (OpenAI proper via the openai SDK), and the required
+    ``EMBED_API_KEY`` is the explicit-intent signal that makes the
+    interpretation unambiguous — an operator with a real ``sk-...``
+    has unambiguously chosen their provider. Symmetric with how
+    ``INFERENCE_MODE=anthropic`` and ``INFERENCE_MODE=openai`` treat
+    empty ``INFERENCE_BASE_URL``. Operators pointing at an
+    unauthenticated host-side server (LM Studio, vLLM,
+    ``mlx_lm.server``, TEI) supply any placeholder string for
+    ``EMBED_API_KEY``; the compat server ignores the bearer header.
+    """
+    if not EMBED_MODEL:
+        raise ValueError("EMBED_MODEL must be set when EMBED_MODE='openai'")
+    if not EMBED_API_KEY:
+        raise ValueError("EMBED_API_KEY must be set when EMBED_MODE='openai'")
+    # Reject URLs that embed a ``user:pass@host`` userinfo authority.
+    # The resolved base URL flows into the startup log line naming the
+    # wire endpoint, so embedded credentials would leak to container
+    # logs / journald. The credential model puts every secret in a
+    # Docker-secrets file (``.secrets/embed_api_key.txt``). Mirrors the
+    # same guard in ``scripts/validate-env.sh`` so a deployment that
+    # skipped that script still fails closed instead of leaking.
+    if EMBED_BASE_URL and "@" in urllib.parse.urlsplit(EMBED_BASE_URL).netloc:
+        raise ValueError(
+            "EMBED_BASE_URL must not embed credentials (user:pass@host). Put "
+            "the API key in .secrets/embed_api_key.txt instead."
+        )
+
+
+def _read_embed_api_key() -> str:
     """Read the embedder API key from a Docker secret, then env, then empty.
 
-    Mirrors the secret-then-env pattern used in mcp-server. An empty key
-    is the unauthenticated-host-server case (e.g. a local OpenAI-compat
-    server bound to loopback) and is not an error. The Docker secret
-    path follows the existing ``/run/secrets/<name>`` convention;
-    ``EMBED_OPENAI_API_KEY`` env is the fallback for non-Docker deployments.
+    Mirrors the secret-then-env pattern used in mcp-server. The Docker
+    secret path follows the existing ``/run/secrets/<name>`` convention;
+    ``EMBED_API_KEY`` env is the fallback for non-Docker deployments.
+
+    An empty return value is not an error here — the startup contract
+    is enforced by ``_validate_embed_config()``, which fails closed if
+    no key is set. Splitting "read" from "require" keeps the reader
+    purely about source-of-truth precedence (secret > env), and the
+    validator owns the non-empty rule. For unauthenticated host-side
+    servers the operator supplies a placeholder string (e.g.
+    ``unauthenticated``); the SDK sends it as a bearer token that
+    compat servers ignore.
+
+    Fail-closed posture: when the Docker secret file *exists* but cannot
+    be read (perms regression, mount issue), this is a deployment
+    misconfiguration — propagate the error so the indexer fails to
+    start rather than silently sending an empty bearer token (or worse,
+    a stale env value the operator thought the secret had superseded).
+    The env fallback only kicks in when the secret file is absent.
     """
-    secret_path = Path("/run/secrets/embed_openai_api_key")
+    secret_path = Path("/run/secrets/embed_api_key")
     if secret_path.exists():
-        try:
-            return secret_path.read_text(encoding="utf-8").strip()
-        except OSError as e:
-            log.warning("could not read /run/secrets/embed_openai_api_key: %s", e)
-    return os.environ.get("EMBED_OPENAI_API_KEY", "").strip()
+        return secret_path.read_text(encoding="utf-8").strip()
+    return os.environ.get("EMBED_API_KEY", "").strip()
 
 
-EMBED_OPENAI_API_KEY = _read_embed_openai_api_key()
+EMBED_API_KEY = _read_embed_api_key()
 # /tmp default is safe: container tmpfs, non-root user, overridable via env.
 INDEXER_HEALTH_FILE = Path(os.environ.get("INDEXER_HEALTH_FILE", "/tmp/indexer-health"))  # nosec B108
 
@@ -134,7 +208,7 @@ CHUNK_OVERLAP_TOKENS = _int_env("INDEXER_CHUNK_OVERLAP_TOKENS", 150, minimum=0)
 
 # How many messages the initial-scan drainer accumulates before issuing
 # a single batched embed call. Larger batches amortize the embed
-# round-trip across more messages — meaningful when EMBED_OPENAI_BASE_URL
+# round-trip across more messages — meaningful when EMBED_BASE_URL
 # points at a remote provider (~150 ms RTT each), marginal against a
 # host-side server on loopback.
 INITIAL_INDEX_BATCH_SIZE = _int_env("INITIAL_INDEX_BATCH_SIZE", 50)
@@ -279,7 +353,7 @@ class MaildirHandler(FileSystemEventHandler):
                 try:
                     self.reconciler.handle_moved(src_path, dest_path)
                 except Exception as e:
-                    log.error(f"reconciler on_moved failed: {e}")
+                    log.error("reconciler on_moved failed: %s", e)
             else:
                 # Default deployment has no reconciler; still move the
                 # indexed_files / message_thread_map filepath forward so
@@ -287,7 +361,7 @@ class MaildirHandler(FileSystemEventHandler):
                 try:
                     self.db.update_filepath(src_path, dest_path)
                 except Exception as e:
-                    log.error(f"update_filepath failed on rename: {e}")
+                    log.error("update_filepath failed on rename: %s", e)
             return
 
         # Case 2: new delivery — enqueue for the worker.
@@ -492,6 +566,16 @@ def _phase1_commit_thread(
         # mbsync flag-rename race: file moved between enqueue and parse.
         # Watchdog's IN_MOVED_TO will re-enqueue under the new name.
         queue.mark_skipped(filepath, reason="file_missing")
+        return None
+    except OversizedMessageError as e:
+        # File exceeds INDEXER_PARSE_MAX_BYTES. Terminal under current
+        # config — retrying will find the same oversized file and burn
+        # embed budget. Dead-letter so the durable row survives restarts
+        # (the file is still on disk, so deleting the row would let
+        # ``initial_index`` re-enqueue it on every container start). The
+        # ``is_dead`` gate then skips the file thereafter, and operators
+        # see the entry in ``queue.stats()['dead']``.
+        queue.mark_dead_terminal(filepath, stage="parse", error=f"oversized: {e}")
         return None
     except Exception as e:
         queue.mark_failed(filepath, stage="parse", error=repr(e))
@@ -853,14 +937,22 @@ def _drain_queue_batched(
         try:
             vectors = embedder.embed_batch(all_texts) if all_texts else []
         except Exception as e:
+            # Scrub the error before persistence: ``APIStatusError`` can
+            # echo input fragments (email body text) on 4xx, and
+            # ``last_error`` rides into ``indexing_jobs.last_error`` +
+            # operator log sinks. ``scrub_embed_error`` keeps full repr
+            # for safe error shapes (connection / timeout / our own
+            # integrity-check ``RuntimeError``) and trims SDK status
+            # errors to type + status_code.
+            err_repr = scrub_embed_error(e)
             log.error(
-                "batched embed failed for %d texts (batch=%d msgs): %r",
+                "batched embed failed for %d texts (batch=%d msgs): %s",
                 len(all_texts),
                 len(survivors),
-                e,
+                err_repr,
             )
             for entry in survivors:
-                queue.mark_failed(entry.row["filepath"], stage="embed", error=repr(e))
+                queue.mark_failed(entry.row["filepath"], stage="embed", error=err_repr)
             continue
         embed_ms = (time.perf_counter() - t_embed_start) * 1000
         # Attribute embed time evenly across the batch for telemetry.
@@ -1091,7 +1183,7 @@ def initial_index(
     final_line = format_summary(timing_aggregator.summary())
     if final_line:
         log.info(final_line)
-    log.info(f"Initial index complete: {processed} job(s) processed.")
+    log.info("Initial index complete: %d job(s) processed.", processed)
 
 
 def _validate_embedding_dim(embedder: EmbeddingBackend) -> None:
@@ -1128,23 +1220,33 @@ def _log_reconciler_config(cfg: ReconcilerConfig) -> None:
 
 
 def main():
+    _validate_embed_config()
     log.info("Starting indexer...")
-    log.info(f"  Maildir: {MAILDIR_PATH}")
-    log.info(f"  SQLite:  {SQLITE_PATH}")
-    log.info(
-        f"  Embedder: {EMBED_OPENAI_BASE_URL} "
-        f"(model={EMBED_OPENAI_MODEL}, batch={EMBED_BATCH_SIZE})"
-    )
-    if EMBED_OPENAI_API_KEY:
-        log.info("  Embedder API key: present (Bearer auth enabled)")
+    log.info("  Maildir: %s", MAILDIR_PATH)
+    log.info("  SQLite:  %s", SQLITE_PATH)
 
     db = Database(SQLITE_PATH)
     embedder = OpenAIEmbedder(
-        base_url=EMBED_OPENAI_BASE_URL,
-        model=EMBED_OPENAI_MODEL,
-        api_key=EMBED_OPENAI_API_KEY,
+        base_url=EMBED_BASE_URL,
+        model=EMBED_MODEL,
+        api_key=EMBED_API_KEY,
         batch_size=EMBED_BATCH_SIZE,
     )
+    # Log the resolved wire endpoint after construction. ``EMBED_BASE_URL=""``
+    # intentionally means "use the SDK default" (OpenAI proper); printing
+    # the raw env value would hide that the indexer is actually pointing
+    # at api.openai.com when the operator forgot to wire an
+    # unauthenticated host-side server. ``OpenAIEmbedder.base_url`` reads
+    # the URL back from the SDK after fallback resolution, matching the
+    # mcp-server inference / rerank log lines.
+    log.info(
+        "  Embedder: %s (model=%s, batch=%d)",
+        embedder.base_url,
+        EMBED_MODEL,
+        EMBED_BATCH_SIZE,
+    )
+    if EMBED_API_KEY:
+        log.info("  Embedder API key: present (Bearer auth enabled)")
     threader = Threader(db)
     touch_health_file()
 
@@ -1196,7 +1298,7 @@ def main():
     try:
         sweep_paths(db)
     except Exception as e:
-        log.error(f"startup rename sweep failed: {e}")
+        log.error("startup rename sweep failed: %s", e)
 
     # Startup reconciliation sweep — detect tombstones and path renames that
     # landed while the indexer was offline. Safe to run every startup: it only
@@ -1206,7 +1308,7 @@ def main():
             reconciler.sweep()
             reconciler.reap()
         except Exception as e:
-            log.error(f"startup reconciliation failed: {e}")
+            log.error("startup reconciliation failed: %s", e)
 
     # Watch for new emails
     handler = MaildirHandler(db, queue, reconciler=reconciler)
@@ -1258,7 +1360,7 @@ def main():
                         )
                     drained_since_log = 0
             except Exception as e:
-                log.error(f"queue drain failed: {e}")
+                log.error("queue drain failed: %s", e)
 
             now = time.monotonic()
             if reconciler is not None:
@@ -1267,7 +1369,7 @@ def main():
                         reconciler.sweep()
                         reconciler.reap()
                     except Exception as e:
-                        log.error(f"periodic reconciliation failed: {e}")
+                        log.error("periodic reconciliation failed: %s", e)
                     last_reconcile = now
 
             # Recovery sweep: re-enqueue messages on chunkless
@@ -1281,13 +1383,16 @@ def main():
                 try:
                     _recover_zero_vector_threads(db, queue)
                 except Exception as e:
-                    log.error(f"periodic recovery sweep failed: {e}")
+                    log.error("periodic recovery sweep failed: %s", e)
                 last_recovery_sweep = now
 
             # WAL checkpoint: keep the WAL file size bounded over a
-            # long-running container. The single shared connection
-            # otherwise pins a read snapshot that prevents WAL
-            # truncation at SQLite's automatic checkpoint thresholds.
+            # long-running container. The indexer holds a single
+            # writer connection for the life of the process; that
+            # connection's read snapshot prevents SQLite's automatic
+            # checkpoint thresholds from truncating the WAL, so an
+            # explicit periodic ``wal_checkpoint(TRUNCATE)`` is what
+            # reclaims space on the writer side.
             if now - last_wal_checkpoint >= WAL_CHECKPOINT_INTERVAL_SECS:
                 try:
                     busy, _log_pages, ckpt_pages = db.wal_checkpoint_truncate()
@@ -1300,7 +1405,7 @@ def main():
                     elif ckpt_pages:
                         log.debug("wal_checkpoint truncated %d page(s)", ckpt_pages)
                 except Exception as e:
-                    log.error(f"wal checkpoint failed: {e}")
+                    log.error("wal checkpoint failed: %s", e)
                 last_wal_checkpoint = now
 
             time.sleep(1)

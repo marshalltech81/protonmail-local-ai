@@ -24,24 +24,12 @@ from src.tools.intelligence import register_intelligence_tools
 from tests.conftest import FakeLocalLLM
 
 
-def _handlers(
-    fake_server,
-    db,
-    llm,
-    *,
-    inference_mode="openai",
-    api_key="",
-    model="claude-x",
-    base_url="https://api.anthropic.com/v1",
-):
+def _handlers(fake_server, db, llm):
     register_intelligence_tools(
         fake_server,
         db,
-        llm,
-        inference_mode,
-        api_key,
-        model,
-        base_url,
+        llm.embed_client,
+        llm.inference_client,
     )
     return fake_server.tools
 
@@ -105,6 +93,30 @@ class TestAskMailbox:
         handler = _handlers(fake_server, seeded_db, fake_llm)["ask_mailbox"]
         out = asyncio.run(handler(question="anything"))
         assert "Error" in _text(out)
+
+    def test_secret_values_are_scrubbed_from_exception_text(self, fake_server, seeded_db, fake_llm):
+        # Pin the main.py wiring of secret_values into the intelligence
+        # registrar — a provider SDK exception that quotes the operator's
+        # API key (e.g. an auth-header echo in the error body) must not
+        # leak to the caller via the user-visible Error: response.
+        leaked_key = "sk-leakedXYZ789"  # pragma: allowlist secret
+
+        def boom(**_kwargs):
+            raise RuntimeError(f"upstream auth: Bearer {leaked_key}")
+
+        seeded_db.hybrid_search = boom  # type: ignore[assignment]
+        register_intelligence_tools(
+            fake_server,
+            seeded_db,
+            fake_llm.embed_client,
+            fake_llm.inference_client,
+            secret_values=[leaked_key],
+        )
+        handler = fake_server.tools["ask_mailbox"]
+        out = asyncio.run(handler(question="anything"))
+        text = _text(out)
+        assert leaked_key not in text
+        assert "[REDACTED]" in text
 
 
 class TestSummarizeThread:
@@ -287,32 +299,12 @@ class TestExtractFromEmails:
         assert "Error" in _text(out)
 
 
-class TestLLMRouting:
-    def test_openai_mode_routes_to_openai_compatible_complete(
-        self, fake_server, seeded_db, fake_llm
-    ):
-        handler = _handlers(fake_server, seeded_db, fake_llm, inference_mode="openai")[
-            "ask_mailbox"
-        ]
-        asyncio.run(handler(question="invoice"))
-        # ``INFERENCE_MODE=openai`` uses the OpenAI-compatible chat
-        # completions client regardless of where the operator points
-        # ``INFERENCE_OPENAI_BASE_URL``.
-        assert fake_llm.complete_calls
-
-    def test_anthropic_mode_without_api_key_falls_back_to_openai_client(
-        self, fake_server, seeded_db, fake_llm
-    ):
-        # anthropic + empty key must not call an Anthropic-compatible
-        # endpoint; instead it falls through to llm.complete. Startup
-        # validation catches the missing key in production, but this
-        # protects direct unit-level use of the registration helper too.
-        handler = _handlers(
-            fake_server,
-            seeded_db,
-            fake_llm,
-            inference_mode="anthropic",
-            api_key="",
-        )["ask_mailbox"]
+class TestInferenceDispatch:
+    def test_inference_client_is_invoked_for_ask_mailbox(self, fake_server, seeded_db, fake_llm):
+        # Intelligence tools delegate to the inference client without
+        # branching by mode — the client itself encapsulates the
+        # protocol/SDK choice. Validation that a misconfigured mode
+        # surfaces at startup (no fallback) lives in test_main.py.
+        handler = _handlers(fake_server, seeded_db, fake_llm)["ask_mailbox"]
         asyncio.run(handler(question="invoice"))
         assert fake_llm.complete_calls

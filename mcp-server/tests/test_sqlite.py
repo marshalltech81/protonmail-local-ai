@@ -69,6 +69,40 @@ class TestFailFastOnMissingIndex:
             Database(str(tmp_path / "data" / "mail.db"))
 
 
+class TestGetEmbeddingDim:
+    """The DB is the source of truth for the embedding dimension.
+
+    mcp-server must reject query vectors that don't match what the
+    indexer wrote — otherwise wrong-dim vectors slip into the
+    sqlite-vec MATCH path and the existing OperationalError swallow
+    in ``_chunk_vector_search`` / ``_vector_search`` silently
+    degrades search to keyword-only. Reading the dim from
+    ``message_chunks_vec``'s CREATE statement keeps both sides in
+    sync without a new env var.
+    """
+
+    def test_returns_declared_dim_for_chunk_vec_table(self, seeded_db: Database):
+        # The shared test fixture declares ``message_chunks_vec`` with
+        # ``FLOAT[4]`` so toy embeddings work; production schema uses
+        # ``FLOAT[4096]``. Either way the integer comes back unchanged.
+        assert seeded_db.get_embedding_dim() == 4
+
+    def test_returns_none_when_vec_table_missing(self, tmp_path):
+        import sqlite3
+
+        db_path = tmp_path / "no-vec.db"
+        # Build a DB that has the file but no ``message_chunks_vec`` —
+        # represents a fresh-install / pre-indexer state where
+        # mcp-server starts but the indexer has not yet run its
+        # schema migrations.
+        sqlite3.connect(str(db_path)).close()
+        db = Database(str(db_path))
+        try:
+            assert db.get_embedding_dim() is None
+        finally:
+            db.close()
+
+
 class TestReciprocalRankFusion:
     def test_single_list_preserves_ranking(self, seeded_db: Database, make_result):
         bm25 = [make_result("t1"), make_result("t2"), make_result("t3")]

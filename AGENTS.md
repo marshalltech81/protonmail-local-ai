@@ -71,21 +71,52 @@ Important architecture facts:
 - indexing is thread-level, not message-level
 - MCP defaults to SSE transport; `MCP_TRANSPORT=streamable-http` enables
   Streamable HTTP, and `MCP_TRANSPORT=dual` serves both `/sse` and `/mcp`
-- inference is selected by `INFERENCE_MODE`. `anthropic` (default) calls
-  an Anthropic-compatible Messages API at `INFERENCE_ANTHROPIC_BASE_URL`.
-  `openai` calls an OpenAI-compatible `/v1/chat/completions` endpoint at
-  `INFERENCE_OPENAI_BASE_URL` — point this at any compliant provider or
-  at a host-side server you install yourself (LM Studio, vLLM,
-  `mlx_lm.server`, etc.); containers reach a host-side server via
-  OrbStack's `host.docker.internal`.
-- Embeddings go through the OpenAI-compatible `/v1/embeddings` endpoint
-  at `EMBED_OPENAI_BASE_URL` — also operator-supplied, no built-in
-  default. Indexer + mcp-server must point at the same provider + model
-  so query vectors are comparable to indexed vectors.
-- Reranking is opt-in (`RERANK_ENABLED=false` by default). When enabled,
-  `RERANK_BASE_URL` points at an mlx-shaped `/rerank` service the
-  operator stands up; there is no OpenAI rerank standard so the wire
-  shape is independent of `EMBED_OPENAI_BASE_URL`.
+- each operator-supplied layer (inference / embed / rerank) follows the
+  same env-var shape: `{LAYER}_MODE` selects the SDK/protocol;
+  `{LAYER}_BASE_URL` / `{LAYER}_MODEL` / `{LAYER}_API_KEY` configure
+  the chosen mode. `mode=none` disables a layer. Missing required
+  vars are a startup error — there is no inter-mode fallback.
+- **The required-vars contract is uniform and intentional:** for any
+  enabled layer, `{LAYER}_API_KEY` and `{LAYER}_MODEL` must be
+  non-empty; `{LAYER}_BASE_URL` may be empty. An empty base URL
+  means "use the SDK's documented default" — Anthropic Messages API
+  for `INFERENCE_MODE=anthropic`, OpenAI proper
+  (`https://api.openai.com/v1`) for `INFERENCE_MODE=openai`, OpenAI
+  proper for `EMBED_MODE=openai`, Cohere API for `RERANK_MODE=cohere`.
+  **The required `{LAYER}_API_KEY` is the explicit-intent signal**: an
+  operator with a real `sk-...` in `.secrets/<layer>_api_key.txt` has
+  unambiguously chosen their provider, so an empty base URL is
+  interpreted as "I want the SDK default" rather than "I forgot to
+  configure." A typo or forgotten env var can't ship inbox content to
+  a remote provider because it can't produce a real bearer credential.
+  Operators pointing at an unauthenticated host-side server (LM
+  Studio, vLLM, `mlx_lm.server`, TEI) set `{LAYER}_BASE_URL` to the
+  host endpoint and supply any non-empty placeholder string (e.g.
+  `unauthenticated`) for `{LAYER}_API_KEY`; the compat server ignores
+  the bearer header.
+- inference is selected by `INFERENCE_MODE` (`anthropic|openai|none`).
+  `anthropic` (default) uses the official `anthropic` SDK against the
+  Messages API; leave `INFERENCE_BASE_URL` empty for the SDK default
+  (`https://api.anthropic.com`). `openai` uses the official `openai`
+  SDK against any OpenAI-compatible chat-completions endpoint: leave
+  `INFERENCE_BASE_URL` empty for OpenAI proper, or set it to a host
+  endpoint (LM Studio, vLLM, `mlx_lm.server` — containers reach a
+  host-side server via OrbStack's `host.docker.internal`) or to an
+  alternative provider (DeepInfra, OpenRouter, etc.). `none` skips
+  registration of the intelligence tools.
+- embeddings go through the official `openai` SDK against any
+  OpenAI-compatible `/v1/embeddings` endpoint: leave `EMBED_BASE_URL`
+  empty for OpenAI proper or set it to a host endpoint or alternative
+  provider. Indexer + mcp-server must point at the same provider +
+  model so query vectors are comparable to indexed vectors.
+  `EMBED_MODE=openai` is the only valid value; embed has no disabled
+  mode because semantic / hybrid search is the headline retrieval
+  feature and the indexer cannot run without an embedder.
+- reranking is opt-in (`RERANK_MODE=none` by default). `RERANK_MODE=cohere`
+  uses the official `cohere` SDK against the Cohere rerank API; set
+  `RERANK_MODEL` (e.g. `rerank-v4.0-pro`) and provide
+  `RERANK_API_KEY`. Leave `RERANK_BASE_URL` empty for the SDK
+  default; set it only for proxies / gateways / region overrides.
 
 ## Non-Negotiable Constraints
 
@@ -101,12 +132,12 @@ Do not make any of the following changes unless the repository owner explicitly 
 ### Network and exposure constraints
 
 - Do not expose any container port other than `mcp-server:3000` to the host.
-- When the operator points `EMBED_OPENAI_BASE_URL`,
-  `INFERENCE_OPENAI_BASE_URL`, or `RERANK_BASE_URL` at a host-side
-  server, that server should bind to `127.0.0.1` only. Containers reach
-  it via `host.docker.internal`. Do not configure containers to use
-  the host's LAN IP — `host.docker.internal` is required so the
-  wiring survives changing networks.
+- When the operator points `EMBED_BASE_URL`, `INFERENCE_BASE_URL`,
+  or `RERANK_BASE_URL` at a host-side server, that server should
+  bind to `127.0.0.1` only. Containers reach it via
+  `host.docker.internal`. Do not configure containers to use the
+  host's LAN IP — `host.docker.internal` is required so the wiring
+  survives changing networks.
 - Do not add `network_mode: host`.
 - Do not give `mcp-server` direct IMAP access to Bridge.
 - Do not give `indexer` direct IMAP access to Bridge.
@@ -223,12 +254,36 @@ Secrets are a hard boundary.
 
 - `BRIDGE_USER` comes from Bridge CLI `info`, not the Proton account password
 - `BRIDGE_PASS` belongs in `.secrets/bridge_pass.txt`, not `.env`
-- `INFERENCE_MODE=openai` uses any OpenAI-compatible chat-completions
-  endpoint at `INFERENCE_OPENAI_BASE_URL` (operator-supplied: a remote
-  provider or a host-side server such as LM Studio / vLLM /
-  `mlx_lm.server`)
-- `INFERENCE_MODE=anthropic` (default) uses an Anthropic-compatible
-  Messages API at `INFERENCE_ANTHROPIC_BASE_URL`
+- Each operator-supplied layer has one Docker secret:
+  `.secrets/inference_api_key.txt`, `.secrets/embed_api_key.txt`,
+  `.secrets/rerank_api_key.txt`. Each file must exist with mode 600
+  so the docker-compose `secrets:` reference resolves cleanly. The
+  file must be **non-empty** when the matching layer's `*_MODE` is
+  enabled (set to anything other than `none`); for unauthenticated
+  host-side servers the operator supplies any placeholder string
+  (e.g. `unauthenticated`) so the no-fallback startup contract holds
+  uniformly. The file may be empty only when the matching layer's
+  `*_MODE=none` (currently only `INFERENCE_MODE` and `RERANK_MODE`
+  have a `none` mode; `EMBED_MODE` is always `openai`).
+- `INFERENCE_MODE=openai` uses the official `openai` SDK against any
+  OpenAI-compatible chat-completions endpoint. `INFERENCE_API_KEY` is
+  required (non-empty); `INFERENCE_BASE_URL` is optional — leave it
+  empty for OpenAI proper, or set it to a host-side server (LM Studio
+  / vLLM / `mlx_lm.server`) or alternative provider (DeepInfra,
+  OpenRouter, etc.). Local unauthenticated servers accept any
+  placeholder string for `INFERENCE_API_KEY`.
+- `INFERENCE_MODE=anthropic` (default) uses the official `anthropic`
+  SDK against the Anthropic Messages API. `INFERENCE_API_KEY` is
+  required (non-empty); leave `INFERENCE_BASE_URL` empty for the SDK
+  default or set it for compatible gateways.
+- `EMBED_MODE=openai` is the only valid value. `EMBED_API_KEY` is
+  required (non-empty); `EMBED_BASE_URL` is optional — leave it empty
+  for OpenAI proper, or set it to a host-side server or alternative
+  provider. Local unauthenticated servers accept any placeholder
+  string for `EMBED_API_KEY`.
+- `RERANK_MODE=cohere` uses the official `cohere` SDK against the
+  Cohere rerank API. `RERANK_API_KEY` is required; `RERANK_BASE_URL`
+  is optional (empty falls through to the SDK default).
 
 ### Commit hygiene
 
@@ -454,10 +509,13 @@ Notes:
 
 - preserve thread-level indexing
 - review schema implications before changing embedding or storage assumptions
-- indexer and mcp-server must point at the same `EMBED_OPENAI_BASE_URL` +
-  `EMBED_OPENAI_MODEL` so query vectors are comparable to indexed vectors —
+- indexer and mcp-server must point at the same `EMBED_BASE_URL` +
+  `EMBED_MODEL` so query vectors are comparable to indexed vectors —
   swapping the embedder requires a full reindex if the new model
   produces vectors of a different shape or distribution
+- `EMBED_MODE=openai` is the only valid value. Embed has no disabled
+  mode because the indexer cannot ingest mail without an embedder and
+  semantic / hybrid search is the headline retrieval feature
 
 ### `mcp-server/`
 

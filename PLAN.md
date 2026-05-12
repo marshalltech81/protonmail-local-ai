@@ -21,7 +21,7 @@ The project no longer ships its own model-serving components. The
 indexer + mcp-server now consume an operator-supplied OpenAI-compatible
 embedder and choose between an Anthropic-compatible Messages API
 (default daily-driver) or any OpenAI-compatible chat-completions
-endpoint for inference. The reranker is opt-in (`RERANK_ENABLED=false`
+endpoint for inference. The reranker is opt-in (`RERANK_MODE=none`
 by default).
 
 What remains: the previously paused pre-MLX priorities resume from
@@ -62,11 +62,12 @@ The stack now runs:
 - **mcp-server** — Docker, hybrid search + intelligence tools. The
   LLM-synthesis step is dispatched by `INFERENCE_MODE`: `anthropic`
   (default daily-driver) → Anthropic-compatible Messages API at
-  `INFERENCE_ANTHROPIC_BASE_URL` (default model `claude-sonnet-4-6`);
-  `openai` → `LocalLLMClient.complete()` against any OpenAI-compatible
-  `/v1/chat/completions` endpoint at `INFERENCE_OPENAI_BASE_URL`. The
+  `INFERENCE_BASE_URL` (default model `claude-sonnet-4-6`);
+  `openai` → `InferenceClient.complete()` (official `openai` SDK via
+  `AsyncOpenAI.chat.completions.create`) against any OpenAI-compatible
+  `/v1/chat/completions` endpoint at `INFERENCE_BASE_URL`. The
   optional cross-encoder rerank stage runs against `RERANK_BASE_URL`
-  when `RERANK_ENABLED=true`; the default is off. The Tier-2–11
+  when `RERANK_MODE=cohere`; the default is off. The Tier-2–11
   manual-eval pass on 2026-05-04 was run with `INFERENCE_MODE=anthropic`;
   that remains the standing quality baseline.
 
@@ -95,7 +96,7 @@ Independent of the consolidation work above. These are tuning /
 validation tasks that should happen regardless of the LLM-engine swap.
 
 1. **Rerank-side quality experiment.** Once retrieval is stable,
-   compare `RERANK_ENABLED=true` vs `false` on the manual eval
+   compare `RERANK_MODE=cohere` vs `false` on the manual eval
    set to measure what the rerank stage actually buys you.
 2. **Indexer healthcheck threshold.** Currently flagged
    "unhealthy" during sustained MLX-pace indexing because
@@ -230,6 +231,44 @@ Definition of done:
 - add attachment download support once the read-only action path is defined
 - verify action tools respect read-only guardrails
 
+### RAG quality — inline-reply quote stripping
+
+`indexer/src/quoting.py:_HARD_CUT_PATTERNS` treats `On … wrote:` as a
+hard cut and `break`s out of the loop, so any inline reply text that
+appears AFTER the cut line is silently dropped from the embedding
+input. Two failure shapes:
+
+- **Pure inline reply** (no top-posted prefix): the very first line
+  is `On … wrote:`, the loop breaks immediately, `kept` is empty, and
+  the empty-fallback at quoting.py:76-83 returns the original
+  body_text unchanged — so the embedder sees the questions and
+  answers tangled together with quoted questions appearing twice.
+- **Top-posted reply with inline annotations on the quoted history**:
+  everything after the cut line — including the user's inline answers
+  between `>` blocks — is dropped. The thread vector keeps only the
+  top-posted prefix.
+
+Both shapes regress retrieval quality compared to the file's stated
+philosophy ("conservative stripper that occasionally leaves quoted
+text in is better than aggressive one that eats real body content").
+For the inline case the current implementation does the opposite of
+that.
+
+Three options, ordered by complexity:
+
+1. Drop `On … wrote:` from `_HARD_CUT_PATTERNS`. Conservative — the
+   `>`-line filter still removes most quoted history. Slight RAG-noise
+   increase on top-posts.
+2. Two-pass: stop *cutting* at the marker but keep filtering `>` lines
+   after it. Preserves inline answers without bringing back the full
+   quoted history. Fits the file's "no ML, simple line rules" stance.
+3. Defer to a real reply-parser library (`mailparser-reply`, `talon`).
+   Higher dependency cost, broader inbox-shape coverage.
+
+Option 2 is the natural fit. Surfaced during the indexer line-by-line
+review on 2026-05-08; not blocking any active priority but a real
+RAG-quality regression on inbox-shape replies.
+
 ### Attachment indexing — remaining work
 Most of this section is implemented: filenames/MIME indexed in
 `attachments_fts`, per-format extraction (PDF / DOCX / XLSX / HTML / TXT /
@@ -267,7 +306,6 @@ persisted, unsupported types log at debug. What's still open:
 ### Bridge build and operations
 - consolidate `BRIDGE_VERSION` to a single source of truth (`.env.example`) and remove the duplicate hardcoded defaults from `docker-compose.yml` and `bridge/Dockerfile` so version bumps only require one change
 - parameterize the Go toolchain version as an `ARG` in `bridge/Dockerfile` alongside `BRIDGE_VERSION` for consistency
-- pin all apt packages in `bridge/Dockerfile` to exact versions in both the builder stage (`git`, `make`, `gcc`, `pkg-config`, `libsecret-1-dev`, `libfido2-dev`, `libcbor-dev`) and the runtime stage (`bash`, `pass`, `gnupg2`, `libfido2-1`, `libsecret-1-0`) so a Debian package update cannot silently change the build or runtime environment between identical `BRIDGE_VERSION` builds
 - add OCI image labels (`org.opencontainers.image.source`, `org.opencontainers.image.version`, `org.opencontainers.image.revision`) to `bridge/Dockerfile` so every built image carries build provenance that can be traced back to the exact Bridge release and Dockerfile revision
 - verify the Proton release tag signature before building: import Proton's published signing key into the builder stage, hardcode the expected fingerprint, and run `git verify-tag ${BRIDGE_VERSION}` after cloning so a tampered or substituted tag fails the build
 - add a pre-flight check to `make first-run` that detects an existing `bridge-data` volume and warns the operator before proceeding, since a populated volume means Bridge is already logged in and the interactive CLI will not behave as expected
@@ -308,22 +346,6 @@ persisted, unsupported types log at debug. What's still open:
 - extract Bridge container work into standalone repo after stabilization
 - improve operational observability and health reporting
 - decide whether `mcp-server` should eventually use live IMAP retrieval only as fallback once richer thread context is available locally
-- swap the raw-httpx OpenAI clients (`indexer/src/embedder.OpenAIEmbedder`,
-  `mcp-server/src/lib/local_llm.LocalLLMClient`) for the official `openai`
-  Python SDK (`OpenAI` / `AsyncOpenAI`). Triggers that justify the swap (do
-  NOT do it pre-emptively): (a) routing chat through a rate-limited cloud
-  provider where missing `Retry-After` and `x-ratelimit-reset-*`
-  honoring causes real backoff misbehavior; (b) adding token-by-token
-  streaming to the intelligence tools (requires MCP `mcp/progress`
-  plumbing too — SDK alone isn't enough); (c) enabling local-LLM
-  function-calling so Qwen3-32B can self-route between mcp-server
-  sub-tools (architecture change, not just transport). Preserve the
-  split-client pattern (one `(Async)OpenAI` instance per upstream:
-  embed / chat) — the auth-header leak Codex caught in PR #95 lives in
-  business logic, not the transport, and would re-emerge with a single
-  shared client. Cost: ~150 LOC across the two client classes plus a
-  test rewrite (current tests use `httpx.MockTransport`; SDK testing is
-  `respx`-style). Not worth it without one of the three triggers above.
 
 ### Search and intelligence expansion
 - add attachment-aware retrieval with provenance so results can cite message ID, attachment filename, and page/time range where applicable
@@ -432,7 +454,7 @@ project no longer ships its own model-serving components. Operators
 now supply their own OpenAI-compatible embedder and choose between an
 Anthropic-compatible Messages API (default daily-driver) or any
 OpenAI-compatible chat-completions endpoint for inference. The
-reranker becomes opt-in (`RERANK_ENABLED=false`).
+reranker becomes opt-in (`RERANK_MODE=none`).
 
 Concretely:
 
@@ -440,16 +462,17 @@ Concretely:
   jobs, sync targets, bandit scans, and the dual-mac-runner test
   workflow that existed only because the `mlx` Linux wheel doesn't
   import.
-- Defaults: `INFERENCE_MODE=anthropic`, `RERANK_ENABLED=false`,
-  `EMBED_OPENAI_BASE_URL` / `EMBED_OPENAI_MODEL` /
-  `INFERENCE_OPENAI_BASE_URL` / `RERANK_BASE_URL` ship empty so
+- Defaults: `INFERENCE_MODE=anthropic`, `RERANK_MODE=none`,
+  `EMBED_BASE_URL` / `EMBED_MODEL` /
+  `INFERENCE_BASE_URL` / `RERANK_BASE_URL` ship empty so
   validate-env.sh fails closed unless the operator wires up a
   provider. Anthropic mode is fully default-configured; openai mode
   needs the URL/model knobs filled in.
-- Validation: validate-env.sh now mode-conditional — `INFERENCE_OPENAI_*`
-  required only when `INFERENCE_MODE=openai`, `RERANK_BASE_URL`
-  required only when `RERANK_ENABLED=true`, and `EMBED_OPENAI_*`
-  always required (the indexer can't run without an embedder).
+- Validation: validate-env.sh now mode-conditional — `INFERENCE_*`
+  required only when `INFERENCE_MODE != none`, `RERANK_*` required
+  only when `RERANK_MODE=cohere`, and `EMBED_*` always required
+  (`EMBED_MODE=openai` is the only valid value; embed has no
+  disabled mode because the indexer cannot run without it).
 - Hardened overlay: warning rewritten — `internal: true` is intended
   to block remote providers, and is compatible with operator-installed
   host-side providers (subject to runtime `host.docker.internal`
@@ -468,8 +491,8 @@ the storage contract:
 
 - **PR #95** — OpenAIEmbedder client (mlx-service, indexer,
   mcp-server) speaks the OpenAI `/v1/embeddings` wire format directly.
-  Provider swap is now `EMBED_OPENAI_BASE_URL` + `EMBED_OPENAI_MODEL` + an
-  optional `embed_openai_api_key` Docker secret with no per-provider
+  Provider swap is now `EMBED_BASE_URL` + `EMBED_MODEL` + an
+  optional `embed_api_key` Docker secret with no per-provider
   code path.
 - **PR #96** — cross-message embed batching for initial_index ("C1").
   Phase 1 commits thread membership per message; Phase 2b issues one
@@ -549,6 +572,14 @@ All 314 mcp-server tests pass at 92.81% coverage. Memory:
 
 ### 2026-05-04 — MLX consolidation Phases A + B + C (Ollama abandoned)
 
+> Historical note: ``LocalLLMClient`` / ``local_llm.py`` referenced
+> throughout this entry reflect state as of 2026-05-04. A later
+> ``*_MODE`` collapse refactor (this PR) replaced them with the
+> official ``openai`` / ``anthropic`` SDK clients under
+> ``mcp-server/src/lib/inference.py`` (``InferenceClient``) and
+> ``mcp-server/src/lib/embed.py`` (``EmbedClient``). ``local_llm.py``
+> no longer exists in the tree.
+
 The local-inference layer is fully consolidated onto MLX. Phase A
 (LLM-client OpenAI-compat refactor), Phase B (operational MLX-LM
 swap), and Phase C (Ollama embed-fallback + scaffolding teardown)
@@ -563,8 +594,8 @@ all shipped together.
   default to give Qwen3's thinking-mode answers headroom when
   callers don't override per-request. ``.env.example`` and
   ``docker-compose.yml`` defaults flipped to point at MLX-LM
-  (``INFERENCE_OPENAI_BASE_URL=http://host.docker.internal:8002/v1``,
-  ``INFERENCE_OPENAI_MODEL=mlx-community/Qwen3-32B-4bit``). End-to-end smoke
+  (``INFERENCE_BASE_URL=http://host.docker.internal:8002/v1``,
+  ``INFERENCE_MODEL=mlx-community/Qwen3-32B-4bit``). End-to-end smoke
   test confirmed: ``LocalLLMClient.complete()`` against the live
   server returns a correct grounded answer in production shape.
 - **Ollama teardown.** ``com.local.ollama-host`` LaunchAgent
@@ -589,8 +620,8 @@ preparatory work for Phase B's operational MLX-LM swap.
   ``LocalLLMClient`` (file ``mcp-server/src/lib/ollama.py`` →
   ``local_llm.py``). ``complete()`` now POSTs the OpenAI-compatible
   ``/v1/chat/completions`` shape and unwraps
-  ``choices[0].message.content``; new ``INFERENCE_OPENAI_BASE_URL`` and
-  ``INFERENCE_OPENAI_MODEL`` env vars replace ``OLLAMA_LLM_MODEL``. The same
+  ``choices[0].message.content``; new ``INFERENCE_BASE_URL`` and
+  ``INFERENCE_MODEL`` env vars replace ``OLLAMA_LLM_MODEL``. The same
   client targets both Ollama (``:11434/v1``) and ``mlx_lm.server``
   with no per-backend branching, so the engine swap in Phase B
   becomes an env-var change.

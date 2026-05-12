@@ -1059,6 +1059,35 @@ class Database:
         """
         self._fetchone("SELECT 1")
 
+    def get_embedding_dim(self) -> int | None:
+        """Return the embedding dimension declared by ``message_chunks_vec``.
+
+        The indexer writes vec0 virtual tables with a dim baked into
+        the CREATE statement (``embedding FLOAT[N]``). Reading that
+        value lets mcp-server validate query vectors before they reach
+        sqlite-vec — otherwise a misconfigured ``EMBED_MODEL`` whose
+        output dim doesn't match the index produces an
+        ``OperationalError`` that the broad ``except`` in
+        ``_chunk_vector_search`` swallows, silently degrading search
+        to keyword-only.
+
+        Returns ``None`` when ``message_chunks_vec`` doesn't exist
+        yet — a fresh install where mcp-server starts before the
+        indexer has run its schema migrations. Callers treat ``None``
+        as "skip validation"; semantic / hybrid queries then fail at
+        the DB layer with the missing-table message, which is the
+        right operator-visible signal for that state.
+        """
+        row = self._fetchone(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='message_chunks_vec'"
+        )
+        if row is None:
+            return None
+        match = re.search(r"FLOAT\s*\[\s*(\d+)\s*\]", row["sql"], re.IGNORECASE)
+        if match is None:
+            return None
+        return int(match.group(1))
+
     def get_stats(self) -> dict:
         stats = {}
         with closing(self._connect()) as conn:

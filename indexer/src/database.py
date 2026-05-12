@@ -1846,12 +1846,18 @@ class Database:
         mbsync renames a Maildir file whenever flags change (e.g. S → SR when
         the message is replied to). Keep the stored path in sync so later
         reconciliation sweeps can still find the file.
+
+        Goes through ``_begin_if_needed`` / ``_commit_if_started`` /
+        ``_rollback_if_started`` like every other write helper so a
+        future caller wrapping this in ``with db.transaction():`` does
+        not crash on a nested ``BEGIN``.
         """
         if old_path == new_path:
             return
         cur = self._conn.cursor()
+        started = False
         try:
-            cur.execute("BEGIN IMMEDIATE")
+            started = self._begin_if_needed(cur)
             cur.execute(
                 "UPDATE message_thread_map SET filepath = ? WHERE filepath = ?",
                 (new_path, old_path),
@@ -1881,9 +1887,9 @@ class Database:
                 "UPDATE pending_deletions SET filepath = ? WHERE filepath = ?",
                 (new_path, old_path),
             )
-            self._conn.commit()
+            self._commit_if_started(started)
         except Exception:
-            self._conn.rollback()
+            self._rollback_if_started(started)
             raise
 
     @_synchronized

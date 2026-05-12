@@ -41,7 +41,7 @@ indexer container
   - Watches maildir-volume via inotify
   - Parses .eml files: MIME, HTML→text, attachments
   - Groups messages into threads via In-Reply-To / References headers
-  - Calls EMBED_OPENAI_BASE_URL for vector embeddings
+  - Calls EMBED_BASE_URL for vector embeddings
   - Writes to SQLite (FTS5 keyword index + sqlite-vec vector index)
         │                              │
         │  embed API                   │  writes
@@ -49,17 +49,17 @@ indexer container
 embedder (operator-supplied)  sqlite-volume
   - OpenAI-compatible            - threads table (FTS5)
     /v1/embeddings at            - threads_vec table (sqlite-vec)
-    EMBED_OPENAI_BASE_URL        - message_thread_map
+    EMBED_BASE_URL        - message_thread_map
   - 4096-dim vectors required    - indexed_files
     by current schema            - pending_deletions (reconciler)
 
 inference (operator-supplied)
   - INFERENCE_MODE=anthropic →
     Messages API at
-    INFERENCE_ANTHROPIC_BASE_URL
+    INFERENCE_BASE_URL
   - INFERENCE_MODE=openai →
     /v1/chat/completions at
-    INFERENCE_OPENAI_BASE_URL
+    INFERENCE_BASE_URL
         │
         │  reads sqlite-volume (connection opened read-only)
         ▼
@@ -68,7 +68,7 @@ mcp-server container
   - Serves GET /health for the container healthcheck (200 when the
     read-only SQLite connection answers, 503 otherwise)
   - Hybrid search: BM25 + vector → RRF merge (optional rerank stage
-    when RERANK_ENABLED=true and RERANK_BASE_URL is configured)
+    when RERANK_MODE=cohere)
   - Q&A: retrieves threads → prompts the configured inference provider
   - Retrieval: serves indexed mailbox data from SQLite
   - Email excerpts sent to the LLM are wrapped in <untrusted_email>
@@ -92,9 +92,9 @@ Claude Desktop (host machine)
 | `mbsync` | Bridge IMAP | `maildir-volume` | nothing |
 | `indexer` | `maildir-volume`, embedder | `sqlite-volume` | nothing |
 | `mcp-server` | `sqlite-volume`, embedder, inference provider, optional reranker | nothing | HTTP 3000 (localhost only) |
-| Embedder (operator-supplied) | indexer + mcp-server requests | depends on provider | OpenAI-compatible `/v1/embeddings` at `EMBED_OPENAI_BASE_URL`. A host-side server reachable via `host.docker.internal`, or a remote provider. |
+| Embedder (operator-supplied) | indexer + mcp-server requests | depends on provider | OpenAI-compatible `/v1/embeddings` at `EMBED_BASE_URL`. A host-side server reachable via `host.docker.internal`, or a remote provider. |
 | Inference (operator-supplied) | mcp-server intelligence-tool requests | depends on provider | Anthropic Messages API or OpenAI `/v1/chat/completions` selected by `INFERENCE_MODE`. |
-| Reranker (operator-supplied, optional) | mcp-server hybrid-search requests | depends on provider | mlx-shaped `/rerank` at `RERANK_BASE_URL` when `RERANK_ENABLED=true`. |
+| Reranker (operator-supplied, optional) | mcp-server hybrid-search requests | Cohere | Cohere rerank API via the official `cohere` SDK when `RERANK_MODE=cohere`. `RERANK_BASE_URL` optional (empty = SDK default). |
 
 ## Docker Volumes
 
@@ -127,25 +127,30 @@ No container is reachable from outside the machine.
 ### Operator-supplied providers
 
 The embedder surface is OpenAI-compatible (`/v1/embeddings`). The
-indexer's `OpenAIEmbedder` client and mcp-server's
-`LocalLLMClient.embed()` both speak this dialect, so an operator can
-point `EMBED_OPENAI_BASE_URL` at any compliant provider — DeepInfra,
-OpenRouter, LM Studio, vLLM, TEI, `mlx_lm.server` — without changing
-any code. The schema reserves a fixed 4096-dim vector, so
-`EMBED_OPENAI_MODEL` must keep producing 4096-dim vectors
+indexer's `OpenAIEmbedder` client and mcp-server's `EmbedClient` both
+use the official `openai` SDK with a custom `base_url`, so an
+operator can point `EMBED_BASE_URL` at any compliant provider —
+DeepInfra, OpenRouter, LM Studio, vLLM, TEI, `mlx_lm.server` —
+without changing any code. The schema reserves a fixed 4096-dim
+vector, so `EMBED_MODEL` must keep producing 4096-dim vectors
 (Qwen3-Embedding-8B variants) or a schema migration is required.
 Indexer and mcp-server must point at the same provider + model so
-query vectors are comparable to indexed vectors.
+query vectors are comparable to indexed vectors. `EMBED_MODE=openai`
+is the only valid value — embed has no disabled mode because
+semantic / hybrid search is the headline retrieval feature and the
+indexer cannot ingest mail without an embedder.
 
-For inference, `INFERENCE_MODE=anthropic` (default) calls an
-Anthropic-compatible Messages API at `INFERENCE_ANTHROPIC_BASE_URL`;
-`INFERENCE_MODE=openai` calls an OpenAI-compatible
-`/v1/chat/completions` endpoint at `INFERENCE_OPENAI_BASE_URL`.
+For inference, `INFERENCE_MODE=anthropic` (default) uses the
+official `anthropic` SDK against the Messages API; leave
+`INFERENCE_BASE_URL` empty for the SDK default.
+`INFERENCE_MODE=openai` uses the official `openai` SDK against any
+OpenAI-compatible chat-completions endpoint at `INFERENCE_BASE_URL`.
+`INFERENCE_MODE=none` skips registration of the intelligence tools.
 
-The reranker uses a custom `/rerank` shape — there is no OpenAI
-rerank standard — so `RERANK_BASE_URL` is independent of
-`EMBED_OPENAI_BASE_URL`. Reranking is opt-in (`RERANK_ENABLED=false`
-by default).
+Reranking is opt-in via `RERANK_MODE`. `RERANK_MODE=cohere` uses
+the official `cohere` SDK against the Cohere rerank API; leave
+`RERANK_BASE_URL` empty for the SDK default. `RERANK_MODE=none`
+(default) returns RRF order directly.
 
 When operator-installed servers run on the host, they should bind to
 `127.0.0.1` only. Containers reach them via OrbStack's
@@ -160,7 +165,7 @@ The hybrid search pipeline:
 ```
 User query
     │
-    ├─ Embed query text → OpenAI /v1/embeddings at EMBED_OPENAI_BASE_URL → 4096-dim vector
+    ├─ Embed query text → OpenAI /v1/embeddings at EMBED_BASE_URL → 4096-dim vector
     │
     ├─ BM25 search   → SQLite FTS5 over thread bodies      → ranked list A
     │
@@ -173,13 +178,12 @@ User query
     │
     ├─ optional: post-fusion filter (folder / sender / date / attachments)
     │
-    ├─ optional rerank stage (RERANK_ENABLED=true, default false):
+    ├─ optional rerank stage (RERANK_MODE=cohere, default none):
     │   take RRF top RERANK_CANDIDATES (default 20), score each candidate
-    │   against the query via the cross-encoder served at
-    │   RERANK_BASE_URL (mlx-shaped /rerank), reorder, truncate to the
-    │   caller's `limit` (defaulting to RERANK_TOP_N when the caller
-    │   doesn't specify — so callers like extract_from_emails(limit=20)
-    │   get 20, not 10)
+    │   against the query via the Cohere rerank API (official cohere SDK),
+    │   reorder, truncate to the caller's `limit` (defaulting to
+    │   RERANK_TOP_N when the caller doesn't specify — so callers like
+    │   extract_from_emails(limit=20) get 20, not 10)
     │
     └─ top-k threads (with evidence chunks if requested)
 ```
@@ -357,8 +361,9 @@ The indexer ships an opt-in reconciler
    reaped message's rows from `message_thread_map` / `indexed_files`, and
    either rebuilds the parent thread from the surviving messages on disk
    (re-parsed, re-embedded) or deletes the thread entirely when nothing
-   remains. MLX-service failures during rebuild cause the reaper to back off and
-   retry on the next pass.
+   remains. Embedding-endpoint failures during rebuild (operator-supplied
+   `EMBED_BASE_URL`) cause the reaper to back off and retry on the next
+   pass.
 
 A **mass-delete brake** (`INDEXER_DELETION_MAX_BATCH_PCT`, default 5%) caps
 the fraction of total indexed messages the reaper will touch in a single
@@ -628,12 +633,12 @@ walkthrough; the table below is the per-operation reference.
 
 | Operation | Local only | Leaves machine |
 |---|---|---|
-| Embedding — `EMBED_OPENAI_BASE_URL` points at a host-side server | ✅ | Never |
-| Embedding — `EMBED_OPENAI_BASE_URL` points at a remote provider | Retrieval queries + indexed content | Email body chunks → provider |
+| Embedding — `EMBED_BASE_URL` points at a host-side server | ✅ | Never |
+| Embedding — `EMBED_BASE_URL` points at a remote provider | Retrieval queries + indexed content | Email body chunks → provider |
 | Reranking — `RERANK_BASE_URL` points at a host-side server | ✅ | Never |
 | Reranking — `RERANK_BASE_URL` points at a remote provider | Retrieval queries | Retrieved chunks → provider |
-| Q&A — `INFERENCE_MODE=openai`, host-side `INFERENCE_OPENAI_BASE_URL` | Retrieval local | Never |
-| Q&A — `INFERENCE_MODE=openai`, remote `INFERENCE_OPENAI_BASE_URL` | Retrieval local | Retrieved chunks → OpenAI-compatible provider |
+| Q&A — `INFERENCE_MODE=openai`, host-side `INFERENCE_BASE_URL` | Retrieval local | Never |
+| Q&A — `INFERENCE_MODE=openai`, remote `INFERENCE_BASE_URL` | Retrieval local | Retrieved chunks → OpenAI-compatible provider |
 | Q&A — `INFERENCE_MODE=anthropic` (default) | Retrieval local | Retrieved chunks → Anthropic-compatible provider |
 
 > **Note on remote providers.** Pointing any of these at a remote
@@ -672,10 +677,10 @@ localhost-bound port.
 Set `INFERENCE_MODE` in `.env`:
 
 - `anthropic` (default) — Anthropic-compatible Messages API via
-  `INFERENCE_ANTHROPIC_BASE_URL`. Retrieved email chunks are sent to
+  `INFERENCE_BASE_URL`. Retrieved email chunks are sent to
   that provider.
 - `openai` — OpenAI-compatible chat completions via
-  `INFERENCE_OPENAI_BASE_URL`. Point this at a remote provider or at
+  `INFERENCE_BASE_URL`. Point this at a remote provider or at
   a host-side server you install yourself; only the latter keeps
   retrieved chunks on your machine.
 
