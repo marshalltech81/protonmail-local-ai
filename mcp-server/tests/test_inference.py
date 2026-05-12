@@ -205,6 +205,30 @@ class TestFactory:
         )
         assert captured["kwargs"]["base_url"] == "http://host.docker.internal:8001/v1"
 
+    def test_client_re_exposes_backend_base_url(self, monkeypatch):
+        # ``main.py`` logs ``inference_client.base_url`` at startup so
+        # operators see the resolved wire endpoint (the SDK default
+        # literal, not the empty string they typed). The class must
+        # re-expose ``backend.base_url`` — without this attribute the
+        # startup log would have to print "(SDK default)" again, which
+        # is too vague in a privacy-sensitive deployment.
+        class FakeAsyncAnthropic:
+            def __init__(self, **kwargs):
+                self.base_url = "https://api.anthropic.com"
+
+        import anthropic
+
+        monkeypatch.setattr(anthropic, "AsyncAnthropic", FakeAsyncAnthropic)
+
+        c = InferenceClient.create(
+            mode="anthropic",
+            base_url="",
+            model="claude-x",
+            api_key="sk-ant-test",  # pragma: allowlist secret
+        )
+        assert c.base_url == "https://api.anthropic.com"
+        assert c.base_url == c._backend.base_url
+
 
 class TestComplete:
     def test_openai_backend_returns_message_content(self):

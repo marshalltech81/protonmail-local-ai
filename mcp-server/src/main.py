@@ -534,12 +534,13 @@ def main():
         log.info(f"  Embed:          {embed_client.base_url} (model={EMBED_MODEL})")
     log.info(f"  Inference mode: {INFERENCE_MODE}")
     if inference_client is not None:
-        # Anthropic mode may use the SDK default URL when INFERENCE_BASE_URL
-        # is empty; surface what was actually wired so the log doesn't
-        # imply a configured value when none was set.
-        log.info(
-            f"  Inference:      {INFERENCE_BASE_URL or '(SDK default)'} (model={INFERENCE_MODEL})"
-        )
+        # Surface the resolved wire endpoint, not "(SDK default)". In a
+        # privacy-sensitive deployment retrieved email excerpts go to
+        # whatever URL the SDK resolves to, so the operator-facing log
+        # must name it explicitly. ``InferenceClient.base_url`` reads
+        # the URL back from the SDK after fallback resolution — same
+        # pattern as ``EmbedClient.base_url`` above.
+        log.info(f"  Inference:      {inference_client.base_url} (model={INFERENCE_MODEL})")
     log.info(f"  Rerank mode:    {RERANK_MODE}")
     if reranker is not None:
         log.info(

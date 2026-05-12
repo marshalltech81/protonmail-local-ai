@@ -56,7 +56,17 @@ class _Backend(Protocol):
     Defined as a ``Protocol`` (not an inheritance base) so future
     backends and test fakes can stay duck-typed without depending on
     any specific SDK.
+
+    ``base_url`` is the wire endpoint after the SDK resolved its
+    fallback chain (so the empty-string operator input becomes the
+    SDK default literal, not ``""``). ``InferenceClient`` re-exposes
+    it so ``main.py`` can log the resolved URL alongside the embed
+    and rerank lines — important in a privacy-sensitive deployment
+    where the operator needs the startup log to name exactly where
+    retrieved email excerpts are being sent.
     """
+
+    base_url: str
 
     async def complete(self, system: str, user: str) -> str: ...
 
@@ -255,6 +265,13 @@ class InferenceClient:
     def __init__(self, backend: _Backend, mode: str) -> None:
         self._backend = backend
         self.mode = mode
+        # Re-expose the backend's resolved wire endpoint so the startup
+        # log line in ``main.py`` can name the exact URL retrieved email
+        # excerpts are sent to. Mirrors ``EmbedClient.base_url`` — the
+        # empty-string operator input is replaced with the SDK's
+        # resolved default ("https://api.anthropic.com" /
+        # "https://api.openai.com/v1") rather than logged as "SDK default."
+        self.base_url = backend.base_url
 
     @classmethod
     def create(

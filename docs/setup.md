@@ -625,7 +625,7 @@ docker inspect mbsync --format='{{json .State.Health}}'
 
 The indexer or mcp-server reports a connection error against
 `EMBED_BASE_URL` / `INFERENCE_BASE_URL` /
-`INFERENCE_BASE_URL`. The project does not run those
+`RERANK_BASE_URL`. The project does not run those
 servers, so the diagnostic depends on where you pointed it:
 
 - Host-side server: confirm it is listening on the configured port
