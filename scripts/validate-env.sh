@@ -299,15 +299,13 @@ if [[ "$INFERENCE_MODE" != "none" ]]; then
         echo "ERROR: INFERENCE_MODEL must be set when INFERENCE_MODE=$INFERENCE_MODE." >&2
         exit 1
     }
-    if [[ "$INFERENCE_MODE" == "openai" ]]; then
-        # OpenAI-compatible mode requires an explicit endpoint; anthropic
-        # mode falls through to the SDK default when INFERENCE_BASE_URL
-        # is empty, so URL validation only fires when a value was set.
-        [[ -n "$INFERENCE_BASE_URL" ]] || {
-            echo "ERROR: INFERENCE_BASE_URL must be set when INFERENCE_MODE=openai." >&2
-            exit 1
-        }
-    fi
+    # ``INFERENCE_BASE_URL`` may be empty for any enabled mode. Empty
+    # means "use the SDK default" — Anthropic Messages API for
+    # ``anthropic`` mode (``api.anthropic.com``) and OpenAI proper for
+    # ``openai`` mode (``api.openai.com/v1``). The required
+    # ``INFERENCE_API_KEY`` (checked below) is the explicit-intent
+    # signal that makes empty-URL unambiguous — a typo can't produce a
+    # real bearer credential.
     # Optional inference tuning knobs. Validate only when set so the
     # defaults in mcp-server/src/main.py remain authoritative when the
     # operator leaves the value blank. ``INFERENCE_TIMEOUT_SECS`` must
@@ -352,14 +350,18 @@ EMBED_MODE="${EMBED_MODE:-openai}"
     exit 1
 }
 
-[[ -n "$EMBED_BASE_URL" ]] || {
-    echo "ERROR: EMBED_BASE_URL must be set when EMBED_MODE=$EMBED_MODE." >&2
-    exit 1
-}
-[[ "$EMBED_BASE_URL" =~ ^https?:// ]] || {
-    echo "ERROR: EMBED_BASE_URL must start with http:// or https://." >&2
-    exit 1
-}
+# ``EMBED_BASE_URL`` may be empty: an empty value means "use the SDK
+# default" (OpenAI proper, via the openai SDK's documented fallback).
+# Symmetric with the inference layer. The required ``EMBED_API_KEY``
+# (checked below) is the explicit-intent signal that makes empty-URL
+# unambiguous. ``EMBED_MODEL`` is always required because no SDK has a
+# default model — empty model always fails at request time.
+if [[ -n "$EMBED_BASE_URL" ]]; then
+    [[ "$EMBED_BASE_URL" =~ ^https?:// ]] || {
+        echo "ERROR: EMBED_BASE_URL must start with http:// or https://." >&2
+        exit 1
+    }
+fi
 [[ -n "$EMBED_MODEL" ]] || {
     echo "ERROR: EMBED_MODEL must be set when EMBED_MODE=$EMBED_MODE." >&2
     exit 1

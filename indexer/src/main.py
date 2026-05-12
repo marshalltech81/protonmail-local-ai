@@ -5,13 +5,20 @@ generates embeddings via an OpenAI-compatible /v1/embeddings endpoint,
 and writes to the SQLite index.
 
 The embedder is operator-supplied: any OpenAI-compatible provider
-works (remote — DeepInfra, OpenRouter, etc. — or a host-side server
-the operator installs themselves: LM Studio, vLLM, ``mlx_lm.server``,
-TEI). Configure via ``EMBED_BASE_URL`` + ``EMBED_MODEL`` +
-``EMBED_API_KEY`` Docker secret. The key is required (non-empty);
-operators pointing at an unauthenticated host-side server supply any
-placeholder string. ``EMBED_MODE`` is the wire-shape selector kept
-for symmetry with the other layers; only ``openai`` is valid today.
+works (OpenAI proper, remote alternatives like DeepInfra / OpenRouter,
+or a host-side server the operator installs themselves: LM Studio,
+vLLM, ``mlx_lm.server``, TEI). Configure via ``EMBED_MODEL`` +
+``EMBED_API_KEY`` Docker secret (both required, non-empty);
+``EMBED_BASE_URL`` is optional — leave it empty to use the openai
+SDK's documented default (OpenAI proper), or set it to point at any
+other endpoint. The required ``EMBED_API_KEY`` is the explicit-intent
+signal that makes an empty ``EMBED_BASE_URL`` unambiguous: an
+operator with a real ``sk-...`` has unambiguously chosen their
+provider. Operators pointing at an unauthenticated host-side server
+set ``EMBED_BASE_URL`` to the host endpoint and supply any
+placeholder string for the key. ``EMBED_MODE`` is the wire-shape
+selector kept for symmetry with the other layers; only ``openai`` is
+valid today.
 
 When ``INDEXER_DELETION_ENABLED=true`` the indexer also runs a reconciler
 that records tombstones for mbsync-flagged (``T``) Maildir files and reaps
@@ -60,16 +67,20 @@ MAILDIR_PATH = Path(os.environ.get("MAILDIR_PATH", "/maildir"))
 SQLITE_PATH = Path(os.environ.get("SQLITE_PATH", "/data/mail.db"))
 
 # OpenAI-compatible embedder configuration. The operator supplies the
-# provider — set ``EMBED_BASE_URL`` to any compliant /v1 base URL and
-# ``EMBED_MODEL`` to a model id served there. The schema reserves a
-# fixed 4096-dim vector — pick a 4096-dim model (Qwen3-Embedding-8B
-# variants) or run a schema migration. The bearer credential is loaded
-# from the ``embed_api_key`` Docker secret or ``EMBED_API_KEY`` env and
-# is required (non-empty); unauthenticated host-side servers accept any
-# placeholder string. ``EMBED_MODE`` is kept as a config knob for
-# symmetry with ``INFERENCE_MODE`` / ``RERANK_MODE`` but only accepts
-# ``openai`` today — embed is the headline retrieval feature and the
-# indexer cannot function without it, so there is no disabled mode.
+# provider. Set ``EMBED_MODEL`` to a model id served at the chosen
+# endpoint; the schema reserves a fixed 4096-dim vector so pick a
+# 4096-dim model (Qwen3-Embedding-8B variants) or run a schema
+# migration. Set ``EMBED_BASE_URL`` to point at any compliant /v1 base
+# URL, or leave it empty to use the openai SDK's documented default
+# (OpenAI proper at ``https://api.openai.com/v1``). The bearer
+# credential is loaded from the ``embed_api_key`` Docker secret or
+# ``EMBED_API_KEY`` env and is required (non-empty); the key is the
+# explicit-intent signal that makes empty-URL unambiguous, and
+# unauthenticated host-side servers accept any placeholder string.
+# ``EMBED_MODE`` is kept as a config knob for symmetry with
+# ``INFERENCE_MODE`` / ``RERANK_MODE`` but only accepts ``openai``
+# today — embed is the headline retrieval feature and the indexer
+# cannot function without it, so there is no disabled mode.
 _EMBED_MODES = frozenset({"openai"})
 
 
@@ -94,17 +105,18 @@ def _validate_embed_config() -> None:
     always reaches ``main()`` first, so the operator-facing failure
     surface is identical.
 
-    ``EMBED_API_KEY`` is required (non-empty) too. Operators pointing
-    at an unauthenticated host-side server (LM Studio, vLLM,
-    ``mlx_lm.server``, TEI) supply any non-empty placeholder string
-    (e.g. ``unauthenticated``) so the no-fallback startup contract
-    holds uniformly across the three operator-supplied layers — a
-    missing key surfaces here, not on the first embed call. Symmetric
-    with the mcp-server side so indexer + mcp-server fail in the same
-    place when the operator forgets a key.
+    ``EMBED_API_KEY`` is required (non-empty); ``EMBED_MODEL`` is too.
+    ``EMBED_BASE_URL`` may be empty: that is interpreted as "use the
+    SDK default" (OpenAI proper via the openai SDK), and the required
+    ``EMBED_API_KEY`` is the explicit-intent signal that makes the
+    interpretation unambiguous — an operator with a real ``sk-...``
+    has unambiguously chosen their provider. Symmetric with how
+    ``INFERENCE_MODE=anthropic`` and ``INFERENCE_MODE=openai`` treat
+    empty ``INFERENCE_BASE_URL``. Operators pointing at an
+    unauthenticated host-side server (LM Studio, vLLM,
+    ``mlx_lm.server``, TEI) supply any placeholder string for
+    ``EMBED_API_KEY``; the compat server ignores the bearer header.
     """
-    if not EMBED_BASE_URL:
-        raise ValueError("EMBED_BASE_URL must be set when EMBED_MODE='openai'")
     if not EMBED_MODEL:
         raise ValueError("EMBED_MODEL must be set when EMBED_MODE='openai'")
     if not EMBED_API_KEY:

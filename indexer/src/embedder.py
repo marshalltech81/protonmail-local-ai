@@ -148,11 +148,18 @@ class OpenAIEmbedder:
     like ``http://host.docker.internal:8001/v1`` and ``api_key`` is any
     operator-supplied placeholder string (e.g. ``unauthenticated``);
     compat servers ignore the auth header. For DeepInfra, ``base_url``
-    is ``https://api.deepinfra.com/v1/openai`` and ``api_key`` comes
-    from the ``embed_api_key`` Docker secret. The class itself is
-    provider-agnostic. ``api_key`` must be non-empty — startup
-    validation in ``main._validate_embed_config`` enforces that
-    contract before the embedder is constructed.
+    is ``https://api.deepinfra.com/v1/openai``. For OpenAI proper,
+    ``base_url`` may be left empty so the SDK's documented fallback
+    fires (``OPENAI_BASE_URL`` env → ``https://api.openai.com/v1``);
+    ``api_key`` (always required, non-empty) is the explicit-intent
+    signal that makes empty-base_url unambiguous. The class itself is
+    provider-agnostic.
+
+    ``api_key`` must be non-empty — startup validation in
+    ``main._validate_embed_config`` enforces that contract before the
+    embedder is constructed. ``self.base_url`` is read back from the
+    SDK after construction so it always reflects the wire endpoint,
+    not the (possibly empty) value the operator typed.
 
     Project-specific behavior preserved over the bare SDK:
 
@@ -179,32 +186,56 @@ class OpenAIEmbedder:
         base_url: str,
         model: str,
         *,
-        api_key: str = "",
+        api_key: str,
         batch_size: int = 64,
         request_timeout: float = 120.0,
     ):
-        self.base_url = base_url.rstrip("/")
         self.model = model
         self.batch_size = batch_size
         # ``api_key`` is required (non-empty) — startup validation in
         # ``main._validate_embed_config`` rejects an empty value before
-        # this constructor runs. Unauthenticated host-side servers
-        # ignore the resulting Authorization header, so the operator
-        # supplies any placeholder string (e.g. ``unauthenticated``)
-        # in the secret file. Keeping the substitution out of this
-        # constructor means the credential actually sent is exactly
-        # what the operator wrote — no silent rewrite to a literal
-        # that could surface in a misconfigured remote provider's
-        # request log. ``max_retries=0`` because retry policy is owned
-        # by the tenacity wrapper below — the SDK's built-in retry
-        # would double-up exponential backoff and obscure the
-        # 4xx-fast-fail / 5xx-retry classification.
-        self.client = OpenAI(
-            base_url=self.base_url,
-            api_key=api_key,
-            timeout=request_timeout,
-            max_retries=0,
-        )
+        # this constructor runs. The key is the explicit-intent signal:
+        # an operator with a real ``sk-...`` in
+        # ``.secrets/embed_api_key.txt`` has unambiguously chosen their
+        # provider, so an empty ``base_url`` is interpreted as "I want
+        # the SDK default (OpenAI proper)" rather than "I forgot to
+        # configure." For unauthenticated host-side servers the
+        # operator supplies any placeholder string; compat servers
+        # ignore the bearer header. Keeping the substitution out of
+        # this constructor means the credential actually sent is
+        # exactly what the operator wrote — no silent rewrite to a
+        # literal that could surface in a misconfigured remote
+        # provider's request log.
+        #
+        # ``base_url`` may be empty: omit the kwarg so the SDK's
+        # documented fallback chain fires (``OPENAI_BASE_URL`` env →
+        # ``https://api.openai.com/v1`` literal). The required
+        # ``EMBED_API_KEY`` upstream guards against accidental
+        # ship-to-OpenAI from a forgotten env var — a typo can't
+        # produce a real bearer credential.
+        #
+        # ``max_retries=0`` because retry policy is owned by the
+        # tenacity wrapper below — the SDK's built-in retry would
+        # double-up exponential backoff and obscure the 4xx-fast-fail
+        # / 5xx-retry classification.
+        if base_url:
+            self.client = OpenAI(
+                base_url=base_url.rstrip("/"),
+                api_key=api_key,
+                timeout=request_timeout,
+                max_retries=0,
+            )
+        else:
+            self.client = OpenAI(
+                api_key=api_key,
+                timeout=request_timeout,
+                max_retries=0,
+            )
+        # After the SDK resolves its fallback chain, read the URL back
+        # so logs and error messages name the actual wire endpoint
+        # (e.g. the SDK default) rather than the empty string the
+        # operator typed.
+        self.base_url = str(self.client.base_url).rstrip("/")
 
     def wait_for_ready(self, timeout: int = 120) -> None:
         """Block until the embedder accepts a real ``/v1/embeddings``

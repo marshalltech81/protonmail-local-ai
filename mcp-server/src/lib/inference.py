@@ -73,20 +73,33 @@ class _OpenAIBackend:
     ) -> None:
         from openai import AsyncOpenAI
 
-        self.base_url = base_url.rstrip("/")
         self.model = model
         self.max_tokens = max_tokens
         # ``api_key`` is required (non-empty) — startup validation in
         # ``main.py`` rejects an empty value before reaching this
-        # constructor. For unauthenticated host-side servers (LM Studio,
-        # vLLM, ``mlx_lm.server``) the operator supplies any placeholder
-        # string in the secret file; the SDK sends it as a bearer token
-        # and compat servers ignore it. Keeping the substitution out of
-        # this constructor means the audit trail of "what did we send as
-        # the credential" is exactly what the operator wrote — no
-        # silent rewrite to a literal that could surface in a remote
-        # provider's request log if ``INFERENCE_BASE_URL`` were
-        # misconfigured.
+        # constructor. The key is the explicit-intent signal: an
+        # operator with a real ``sk-...`` in
+        # ``.secrets/inference_api_key.txt`` has unambiguously chosen
+        # their provider, so we trust them to also have set
+        # ``base_url`` to the right place (or to have left it empty
+        # because they want the SDK default, which is OpenAI proper).
+        # For unauthenticated host-side servers (LM Studio, vLLM,
+        # ``mlx_lm.server``) the operator supplies any placeholder
+        # string; compat servers ignore the bearer header. Keeping the
+        # substitution out of this constructor means the audit trail
+        # of "what did we send as the credential" is exactly what the
+        # operator wrote — no silent rewrite to a literal that could
+        # surface in a misconfigured remote provider's request log.
+        #
+        # ``base_url`` may be empty: an empty value omits the kwarg so
+        # the SDK's documented fallback chain fires
+        # (``OPENAI_BASE_URL`` env → ``https://api.openai.com/v1``
+        # literal). Symmetric with the ``_AnthropicBackend`` empty-URL
+        # path and with ``EmbedClient``. Passing an empty string through
+        # would defeat the fallback because the SDK only treats
+        # ``None`` as "missing." The required ``INFERENCE_API_KEY``
+        # upstream is what guards against an accidental ship-to-OpenAI
+        # from a forgotten env var.
         #
         # SDK default retry posture (2 attempts with exponential backoff)
         # is kept on the mcp-server side because the query path is a
@@ -95,11 +108,22 @@ class _OpenAIBackend:
         # The indexer is structurally different (batch embed loops, custom
         # 4xx-fast / 5xx-retry classification) and owns retries via
         # tenacity there.
-        self.client = AsyncOpenAI(
-            base_url=self.base_url,
-            api_key=api_key,
-            timeout=timeout_secs,
-        )
+        if base_url:
+            self.client = AsyncOpenAI(
+                base_url=base_url.rstrip("/"),
+                api_key=api_key,
+                timeout=timeout_secs,
+            )
+        else:
+            self.client = AsyncOpenAI(
+                api_key=api_key,
+                timeout=timeout_secs,
+            )
+        # After the SDK resolves its fallback chain, read the URL back
+        # so ``self.base_url`` always reflects the wire endpoint —
+        # useful for log lines that name what the backend is actually
+        # talking to.
+        self.base_url = str(self.client.base_url).rstrip("/")
 
     async def complete(self, system: str, user: str) -> str:
         resp = await self.client.chat.completions.create(

@@ -34,23 +34,35 @@ class EmbedClient:
         *,
         base_url: str,
         model: str,
-        api_key: str = "",
+        api_key: str,
         timeout_secs: float = DEFAULT_EMBED_TIMEOUT_SECS,
     ) -> None:
         from openai import AsyncOpenAI
 
-        self.base_url = base_url.rstrip("/")
         self.model = model
         # ``api_key`` is required (non-empty) — startup validation in
-        # ``main.py`` rejects an empty value before reaching here. For
-        # unauthenticated host-side servers (LM Studio, vLLM,
+        # ``main.py`` rejects an empty value before reaching here. The
+        # key is the explicit-intent signal: an operator with a real
+        # ``sk-...`` in ``.secrets/embed_api_key.txt`` has unambiguously
+        # chosen their provider, so we trust them to also have set
+        # ``base_url`` to the right place (or to have left it empty
+        # because they want the SDK default, which is OpenAI proper).
+        # For unauthenticated host-side servers (LM Studio, vLLM,
         # ``mlx_lm.server``, TEI) the operator supplies any placeholder
-        # string in the secret file; the SDK sends it as a bearer token
-        # and compat servers ignore it. Keeping the substitution out of
-        # this constructor means the credential we actually send is
-        # exactly what the operator wrote — no silent rewrite to a
-        # literal that could surface in a misconfigured remote
-        # provider's request log.
+        # string in the secret file; compat servers ignore the bearer
+        # header. Keeping the substitution out of this constructor
+        # means the credential actually sent is exactly what the
+        # operator wrote — no silent rewrite that could surface in a
+        # misconfigured remote provider's request log.
+        #
+        # ``base_url`` may be empty: an empty value omits the kwarg so
+        # the SDK's documented fallback chain fires
+        # (``OPENAI_BASE_URL`` env → ``https://api.openai.com/v1``
+        # literal). Passing the empty string through would defeat the
+        # fallback because the SDK only treats ``None`` as "missing."
+        # The required ``EMBED_API_KEY`` upstream is what guards
+        # against an accidental ship-to-OpenAI from a forgotten env
+        # var — a typo can't produce a real bearer credential.
         #
         # SDK default retry posture (2 attempts with exponential backoff)
         # is kept on the mcp-server side because the query path is a
@@ -60,11 +72,23 @@ class EmbedClient:
         # tenacity (``indexer/src/embedder.py``) because its batched
         # embed loop benefits from explicit 4xx-fast / 5xx-retry
         # classification across many texts per call.
-        self.client = AsyncOpenAI(
-            base_url=self.base_url,
-            api_key=api_key,
-            timeout=timeout_secs,
-        )
+        if base_url:
+            self.client = AsyncOpenAI(
+                base_url=base_url.rstrip("/"),
+                api_key=api_key,
+                timeout=timeout_secs,
+            )
+        else:
+            self.client = AsyncOpenAI(
+                api_key=api_key,
+                timeout=timeout_secs,
+            )
+        # After the SDK resolves its fallback chain, read the URL back
+        # so ``self.base_url`` always reflects the wire endpoint.
+        # ``embed_query`` surfaces this in the dim-mismatch error so
+        # operators see the actual URL (e.g. the SDK default), not the
+        # empty string they typed.
+        self.base_url = str(self.client.base_url).rstrip("/")
 
     async def embed(self, text: str) -> list[float]:
         """Embed a query string for vector search."""

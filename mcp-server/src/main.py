@@ -166,9 +166,9 @@ SQLITE_PATH = os.environ.get("SQLITE_PATH", "/data/mail.db")
 # variable. The same shape applies across all three:
 #
 #   {LAYER}_MODE      = anthropic|openai|none / openai / cohere|none
-#   {LAYER}_BASE_URL  = endpoint URL (when the chosen mode needs one)
-#   {LAYER}_MODEL     = model id served at that endpoint
-#   {LAYER}_API_KEY   = bearer credential (Docker secret preferred)
+#   {LAYER}_BASE_URL  = endpoint URL — OPTIONAL (empty = SDK default)
+#   {LAYER}_MODEL     = model id (required, no SDK default exists)
+#   {LAYER}_API_KEY   = bearer credential (required, non-empty)
 #
 # Embed has no disabled mode because semantic / hybrid search is the
 # headline retrieval feature and the indexer cannot run without an
@@ -180,7 +180,14 @@ SQLITE_PATH = os.environ.get("SQLITE_PATH", "/data/mail.db")
 # Validation is strict and fail-closed: a chosen mode without its
 # required vars raises at startup. There is no inter-mode fallback —
 # choosing ``anthropic`` and forgetting the API key surfaces here, not
-# silently as a reroute to the OpenAI-shaped client.
+# silently as a reroute to the OpenAI-shaped client. ``*_BASE_URL`` is
+# the one var that may be empty: empty means "use the SDK's documented
+# default" (OpenAI proper for openai/embed modes, Anthropic API for
+# anthropic mode, Cohere API for cohere mode). The required
+# ``*_API_KEY`` is the explicit-intent signal — an operator with a
+# real ``sk-...`` has unambiguously chosen their provider, so we
+# trust an empty base URL as "I want the SDK default" rather than
+# "I forgot to configure."
 def _float_env(name: str, default: float, minimum: float = 0.0) -> float:
     """Read a positive float from the environment with a fallback.
 
@@ -353,7 +360,15 @@ def main():
     # chosen mode with missing config raises here so the operator sees a
     # precise error rather than a runtime fallback to a different
     # provider.
-    _require_env("EMBED_MODE", EMBED_MODE, "EMBED_BASE_URL", EMBED_BASE_URL)
+    # Every enabled layer requires its API key (non-empty) at startup —
+    # this is the explicit-intent signal. An operator with a real
+    # ``sk-...`` has unambiguously chosen their provider, so an empty
+    # ``*_BASE_URL`` is interpreted as "I want the SDK default" rather
+    # than "I forgot to configure"; the required ``*_API_KEY`` is what
+    # guards against an accidental ship-to-OpenAI/Anthropic from a
+    # forgotten env var (a typo can't produce a real bearer credential).
+    # ``*_MODEL`` is always required because no SDK has a default model
+    # — empty ``model`` always fails at request time.
     _require_env("EMBED_MODE", EMBED_MODE, "EMBED_MODEL", EMBED_MODEL)
     _require_env("EMBED_MODE", EMBED_MODE, "EMBED_API_KEY", EMBED_API_KEY)
     embed_client = EmbedClient(
@@ -366,19 +381,6 @@ def main():
     inference_client: InferenceClient | None = None
     if INFERENCE_MODE in {"openai", "anthropic"}:
         _require_env("INFERENCE_MODE", INFERENCE_MODE, "INFERENCE_MODEL", INFERENCE_MODEL)
-        # Every enabled layer requires its API key (non-empty) at startup
-        # — there is no inter-mode fallback. OpenAI mode additionally
-        # requires INFERENCE_BASE_URL because the operator picks the
-        # endpoint (remote provider or host-side server). Anthropic mode
-        # passes an empty base_url through to the SDK so its real default
-        # applies — we never substitute a hardcoded constant the SDK
-        # might later drift from. Operators pointing at an unauthenticated
-        # host-side server (LM Studio, vLLM, mlx_lm.server) supply any
-        # non-empty placeholder string in the secret file; making that
-        # explicit at startup catches a missing key before the first tool
-        # call rather than after.
-        if INFERENCE_MODE == "openai":
-            _require_env("INFERENCE_MODE", INFERENCE_MODE, "INFERENCE_BASE_URL", INFERENCE_BASE_URL)
         _require_env("INFERENCE_MODE", INFERENCE_MODE, "INFERENCE_API_KEY", INFERENCE_API_KEY)
         inference_client = InferenceClient.create(
             mode=INFERENCE_MODE,

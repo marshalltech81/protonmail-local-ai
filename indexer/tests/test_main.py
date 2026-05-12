@@ -752,14 +752,22 @@ class TestValidateEmbedConfig:
         # No raise == pass.
         main._validate_embed_config()
 
-    def test_missing_base_url_raises(self, monkeypatch):
+    def test_empty_base_url_passes(self, monkeypatch):
+        # Empty ``EMBED_BASE_URL`` is intentional: it means "use the
+        # SDK default" (OpenAI proper). The required non-empty
+        # ``EMBED_API_KEY`` is the explicit-intent signal — an
+        # operator with a real ``sk-...`` has unambiguously chosen
+        # their provider, so we trust the SDK fallback. Symmetric with
+        # ``INFERENCE_MODE=anthropic``'s empty-URL behavior.
         monkeypatch.setattr(main, "EMBED_BASE_URL", "")
-        monkeypatch.setattr(main, "EMBED_MODEL", "qwen-embed")
+        monkeypatch.setattr(main, "EMBED_MODEL", "text-embedding-3-large")
         monkeypatch.setattr(main, "EMBED_API_KEY", "sk-real")  # pragma: allowlist secret
-        with pytest.raises(ValueError, match="EMBED_BASE_URL"):
-            main._validate_embed_config()
+        main._validate_embed_config()
 
     def test_missing_model_raises(self, monkeypatch):
+        # ``EMBED_MODEL`` stays required: no SDK has a default model,
+        # so an empty value always fails at request time. Catching it
+        # at startup gives an actionable error.
         monkeypatch.setattr(main, "EMBED_BASE_URL", "http://x/v1")
         monkeypatch.setattr(main, "EMBED_MODEL", "")
         monkeypatch.setattr(main, "EMBED_API_KEY", "sk-real")  # pragma: allowlist secret
@@ -768,9 +776,12 @@ class TestValidateEmbedConfig:
 
     def test_empty_api_key_raises(self, monkeypatch):
         # The startup contract: every enabled operator-supplied layer
-        # needs a non-empty key. Operators pointing at an unauthenticated
-        # host-side server supply any placeholder (``unauthenticated``)
-        # rather than leaving the secret file empty.
+        # needs a non-empty key. The key is the explicit-intent signal
+        # that lets us trust an empty ``EMBED_BASE_URL`` as "use the
+        # SDK default" rather than "I forgot to configure." Operators
+        # pointing at an unauthenticated host-side server supply any
+        # placeholder (``unauthenticated``) rather than leaving the
+        # secret file empty.
         monkeypatch.setattr(main, "EMBED_BASE_URL", "http://x/v1")
         monkeypatch.setattr(main, "EMBED_MODEL", "qwen-embed")
         monkeypatch.setattr(main, "EMBED_API_KEY", "")

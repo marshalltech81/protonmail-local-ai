@@ -52,6 +52,20 @@ class TestConstructor:
         # The SDK's stored credential is what we passed in.
         assert c.client.api_key == "placeholder"  # pragma: allowlist secret
 
+    def test_empty_base_url_falls_back_to_sdk_default(self):
+        # ``EMBED_BASE_URL=""`` means "use the SDK default" (OpenAI
+        # proper). The required non-empty ``EMBED_API_KEY`` upstream
+        # is the explicit-intent signal that makes empty-URL
+        # unambiguous: an operator with a real ``sk-...`` has
+        # unambiguously chosen their provider, so we trust the
+        # documented SDK fallback. Symmetric with the indexer's
+        # ``OpenAIEmbedder``, the inference ``_OpenAIBackend``, and
+        # the existing ``_AnthropicBackend`` empty-URL path.
+        c = EmbedClient(base_url="", model="m", api_key="sk-real")  # pragma: allowlist secret
+        # After construction the SDK has resolved its fallback chain
+        # (``OPENAI_BASE_URL`` env → ``https://api.openai.com/v1``).
+        assert c.base_url.startswith("https://api.openai.com")
+
 
 class TestEmbed:
     def test_returns_embedding_vector(self):

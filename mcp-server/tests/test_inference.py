@@ -132,6 +132,70 @@ class TestFactory:
                 api_key="sk-ant-test",  # pragma: allowlist secret
             )
 
+    def test_openai_with_empty_base_url_falls_back_to_sdk_default(self, monkeypatch):
+        # ``INFERENCE_BASE_URL=""`` for ``INFERENCE_MODE=openai`` means
+        # "use the SDK default" (OpenAI proper). The required non-empty
+        # ``INFERENCE_API_KEY`` upstream is the explicit-intent signal:
+        # an operator with a real ``sk-...`` has unambiguously chosen
+        # their provider, so we trust the documented SDK fallback.
+        # Symmetric with ``_AnthropicBackend``'s empty-URL path and
+        # with ``EmbedClient`` / ``OpenAIEmbedder``.
+        #
+        # Intercept ``AsyncOpenAI`` to confirm ``base_url`` is NOT
+        # passed as a kwarg when empty — passing an empty string would
+        # defeat the SDK's fallback because the SDK only treats
+        # ``None`` as "missing."
+        captured: dict = {}
+
+        class FakeAsyncOpenAI:
+            def __init__(self, **kwargs):
+                captured["kwargs"] = kwargs
+                # Mimic the SDK's resolved base_url so the constructor
+                # can read it back into ``self.base_url``.
+                self.base_url = "https://api.openai.com/v1/"
+
+        import openai
+
+        monkeypatch.setattr(openai, "AsyncOpenAI", FakeAsyncOpenAI)
+
+        c = InferenceClient.create(
+            mode="openai",
+            base_url="",
+            model="gpt-4",
+            api_key="sk-real",  # pragma: allowlist secret
+        )
+        # ``base_url`` kwarg is genuinely absent — the SDK fallback
+        # chain fires when the kwarg is missing, not when it is
+        # passed as empty string.
+        assert "base_url" not in captured["kwargs"]
+        assert captured["kwargs"]["api_key"] == "sk-real"  # pragma: allowlist secret
+        # After construction, ``self.base_url`` reflects the SDK's
+        # resolved endpoint, not the empty string the operator typed.
+        assert c._backend.base_url == "https://api.openai.com/v1"
+
+    def test_openai_with_explicit_base_url_passes_kwarg(self, monkeypatch):
+        # Counterpart: when the operator DOES set INFERENCE_BASE_URL
+        # (host-side server, alternative provider, gateway), that
+        # exact value must reach AsyncOpenAI.
+        captured: dict = {}
+
+        class FakeAsyncOpenAI:
+            def __init__(self, **kwargs):
+                captured["kwargs"] = kwargs
+                self.base_url = kwargs.get("base_url", "") + "/"
+
+        import openai
+
+        monkeypatch.setattr(openai, "AsyncOpenAI", FakeAsyncOpenAI)
+
+        InferenceClient.create(
+            mode="openai",
+            base_url="http://host.docker.internal:8001/v1",
+            model="qwen",
+            api_key="sk-test",  # pragma: allowlist secret
+        )
+        assert captured["kwargs"]["base_url"] == "http://host.docker.internal:8001/v1"
+
 
 class TestComplete:
     def test_openai_backend_returns_message_content(self):

@@ -75,26 +75,43 @@ Important architecture facts:
   same env-var shape: `{LAYER}_MODE` selects the SDK/protocol;
   `{LAYER}_BASE_URL` / `{LAYER}_MODEL` / `{LAYER}_API_KEY` configure
   the chosen mode. `mode=none` disables a layer. Missing required
-  vars are a startup error — there is no inter-mode fallback. The
-  `{LAYER}_API_KEY` is always required (non-empty) when the matching
-  layer is enabled; operators pointing at an unauthenticated host-side
-  server supply any placeholder string (e.g. `unauthenticated`).
+  vars are a startup error — there is no inter-mode fallback.
+- **The required-vars contract is uniform and intentional:** for any
+  enabled layer, `{LAYER}_API_KEY` and `{LAYER}_MODEL` must be
+  non-empty; `{LAYER}_BASE_URL` may be empty. An empty base URL
+  means "use the SDK's documented default" — Anthropic Messages API
+  for `INFERENCE_MODE=anthropic`, OpenAI proper
+  (`https://api.openai.com/v1`) for `INFERENCE_MODE=openai`, OpenAI
+  proper for `EMBED_MODE=openai`, Cohere API for `RERANK_MODE=cohere`.
+  **The required `{LAYER}_API_KEY` is the explicit-intent signal**: an
+  operator with a real `sk-...` in `.secrets/<layer>_api_key.txt` has
+  unambiguously chosen their provider, so an empty base URL is
+  interpreted as "I want the SDK default" rather than "I forgot to
+  configure." A typo or forgotten env var can't ship inbox content to
+  a remote provider because it can't produce a real bearer credential.
+  Operators pointing at an unauthenticated host-side server (LM
+  Studio, vLLM, `mlx_lm.server`, TEI) set `{LAYER}_BASE_URL` to the
+  host endpoint and supply any non-empty placeholder string (e.g.
+  `unauthenticated`) for `{LAYER}_API_KEY`; the compat server ignores
+  the bearer header.
 - inference is selected by `INFERENCE_MODE` (`anthropic|openai|none`).
   `anthropic` (default) uses the official `anthropic` SDK against the
   Messages API; leave `INFERENCE_BASE_URL` empty for the SDK default
   (`https://api.anthropic.com`). `openai` uses the official `openai`
-  SDK against any OpenAI-compatible chat-completions endpoint
-  (remote provider or a host-side server such as LM Studio, vLLM,
-  `mlx_lm.server`); containers reach a host-side server via
-  OrbStack's `host.docker.internal`. `none` skips registration of the
-  intelligence tools.
+  SDK against any OpenAI-compatible chat-completions endpoint: leave
+  `INFERENCE_BASE_URL` empty for OpenAI proper, or set it to a host
+  endpoint (LM Studio, vLLM, `mlx_lm.server` — containers reach a
+  host-side server via OrbStack's `host.docker.internal`) or to an
+  alternative provider (DeepInfra, OpenRouter, etc.). `none` skips
+  registration of the intelligence tools.
 - embeddings go through the official `openai` SDK against any
-  OpenAI-compatible `/v1/embeddings` endpoint at `EMBED_BASE_URL` —
-  no built-in default. Indexer + mcp-server must point at the same
-  provider + model so query vectors are comparable to indexed
-  vectors. `EMBED_MODE=openai` is the only valid value; embed has
-  no disabled mode because semantic / hybrid search is the headline
-  retrieval feature and the indexer cannot run without an embedder.
+  OpenAI-compatible `/v1/embeddings` endpoint: leave `EMBED_BASE_URL`
+  empty for OpenAI proper or set it to a host endpoint or alternative
+  provider. Indexer + mcp-server must point at the same provider +
+  model so query vectors are comparable to indexed vectors.
+  `EMBED_MODE=openai` is the only valid value; embed has no disabled
+  mode because semantic / hybrid search is the headline retrieval
+  feature and the indexer cannot run without an embedder.
 - reranking is opt-in (`RERANK_MODE=none` by default). `RERANK_MODE=cohere`
   uses the official `cohere` SDK against the Cohere rerank API; set
   `RERANK_MODEL` (e.g. `rerank-v4.0-pro`) and provide
@@ -249,18 +266,21 @@ Secrets are a hard boundary.
   `*_MODE=none` (currently only `INFERENCE_MODE` and `RERANK_MODE`
   have a `none` mode; `EMBED_MODE` is always `openai`).
 - `INFERENCE_MODE=openai` uses the official `openai` SDK against any
-  OpenAI-compatible chat-completions endpoint at `INFERENCE_BASE_URL`
-  (operator-supplied: a remote provider or a host-side server such
-  as LM Studio / vLLM / `mlx_lm.server`). `INFERENCE_API_KEY` is
-  required (non-empty); local unauthenticated servers accept any
-  placeholder string.
+  OpenAI-compatible chat-completions endpoint. `INFERENCE_API_KEY` is
+  required (non-empty); `INFERENCE_BASE_URL` is optional — leave it
+  empty for OpenAI proper, or set it to a host-side server (LM Studio
+  / vLLM / `mlx_lm.server`) or alternative provider (DeepInfra,
+  OpenRouter, etc.). Local unauthenticated servers accept any
+  placeholder string for `INFERENCE_API_KEY`.
 - `INFERENCE_MODE=anthropic` (default) uses the official `anthropic`
-  SDK against the Anthropic Messages API; leave `INFERENCE_BASE_URL`
-  empty for the SDK default or set it for compatible gateways.
-  `INFERENCE_API_KEY` is required.
+  SDK against the Anthropic Messages API. `INFERENCE_API_KEY` is
+  required (non-empty); leave `INFERENCE_BASE_URL` empty for the SDK
+  default or set it for compatible gateways.
 - `EMBED_MODE=openai` is the only valid value. `EMBED_API_KEY` is
-  required (non-empty); local unauthenticated servers accept any
-  placeholder string.
+  required (non-empty); `EMBED_BASE_URL` is optional — leave it empty
+  for OpenAI proper, or set it to a host-side server or alternative
+  provider. Local unauthenticated servers accept any placeholder
+  string for `EMBED_API_KEY`.
 - `RERANK_MODE=cohere` uses the official `cohere` SDK against the
   Cohere rerank API. `RERANK_API_KEY` is required; `RERANK_BASE_URL`
   is optional (empty falls through to the SDK default).

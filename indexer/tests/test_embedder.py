@@ -124,6 +124,20 @@ class TestOpenAIEmbedder:
         emb = _make_embedder(base_url="http://x:8001/v1/")
         assert emb.base_url == "http://x:8001/v1"
 
+    def test_empty_base_url_falls_back_to_sdk_default(self):
+        # ``EMBED_BASE_URL=""`` is intentional: it means "use the SDK
+        # default" (OpenAI proper). The required non-empty
+        # ``EMBED_API_KEY`` is the explicit-intent signal that makes
+        # the interpretation unambiguous. Symmetric with the
+        # mcp-server ``EmbedClient`` and ``_OpenAIBackend`` behavior,
+        # and with ``INFERENCE_MODE=anthropic``'s empty-URL fallback.
+        emb = _make_embedder(base_url="")
+        # After construction the SDK has resolved its fallback chain
+        # (``OPENAI_BASE_URL`` env → ``https://api.openai.com/v1``).
+        # We read the URL back from the SDK so the stored value
+        # reflects the wire endpoint rather than the empty string.
+        assert emb.base_url.startswith("https://api.openai.com")
+
     def test_embed_returns_vector_on_success(self):
         emb = _make_embedder()
         captured: dict = {}
