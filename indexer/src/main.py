@@ -29,6 +29,7 @@ import logging
 import os
 import sqlite3
 import time
+import urllib.parse
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -121,6 +122,18 @@ def _validate_embed_config() -> None:
         raise ValueError("EMBED_MODEL must be set when EMBED_MODE='openai'")
     if not EMBED_API_KEY:
         raise ValueError("EMBED_API_KEY must be set when EMBED_MODE='openai'")
+    # Reject URLs that embed a ``user:pass@host`` userinfo authority.
+    # The resolved base URL flows into the startup log line naming the
+    # wire endpoint, so embedded credentials would leak to container
+    # logs / journald. The credential model puts every secret in a
+    # Docker-secrets file (``.secrets/embed_api_key.txt``). Mirrors the
+    # same guard in ``scripts/validate-env.sh`` so a deployment that
+    # skipped that script still fails closed instead of leaking.
+    if EMBED_BASE_URL and "@" in urllib.parse.urlsplit(EMBED_BASE_URL).netloc:
+        raise ValueError(
+            "EMBED_BASE_URL must not embed credentials (user:pass@host). Put "
+            "the API key in .secrets/embed_api_key.txt instead."
+        )
 
 
 def _read_embed_api_key() -> str:
@@ -182,10 +195,6 @@ def _int_env(name: str, default: int, minimum: int = 1) -> int:
 # server on loopback. The provider's own per-request input cap is the
 # upper bound (DeepInfra accepts 100; OpenAI accepts 2048).
 EMBED_BATCH_SIZE = _int_env("EMBED_BATCH_SIZE", 64)
-
-
-# Acquire the OpenAI client at module load so a misconfigured base URL
-# fails closed before any indexing thread starts.
 
 
 # Chunker token budgets — see ``chunker.chunk_message`` for semantics.

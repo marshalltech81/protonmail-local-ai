@@ -64,24 +64,29 @@ class EmbedClient:
         # against an accidental ship-to-OpenAI from a forgotten env
         # var — a typo can't produce a real bearer credential.
         #
-        # SDK default retry posture (2 attempts with exponential backoff)
-        # is kept on the mcp-server side because the query path is a
-        # single user-visible embed call — silently absorbing one
-        # transient 5xx prevents a tool-call error the calling agent
-        # may not retry. The indexer side runs custom retry logic via
-        # tenacity (``indexer/src/embedder.py``) because its batched
-        # embed loop benefits from explicit 4xx-fast / 5xx-retry
-        # classification across many texts per call.
+        # ``max_retries=0`` disables SDK-internal retries so
+        # ``timeout_secs`` is the honest wall-clock ceiling for one
+        # ``embed()`` call. Default SDK posture (2 attempts +
+        # exponential backoff) would silently turn ``EMBED_TIMEOUT_SECS``
+        # into a 2-3× longer worst-case — hostile to operators tuning
+        # the ceiling. On a transient 5xx the query tool surfaces a
+        # clean error and the agent (or user) can re-invoke. Parity
+        # with ``OpenAIEmbedder`` in the indexer, which also pins
+        # ``max_retries=0`` (it owns retries above via tenacity;
+        # mcp-server has no higher retry layer and deliberately doesn't
+        # add one).
         if base_url:
             self.client = AsyncOpenAI(
                 base_url=base_url.rstrip("/"),
                 api_key=api_key,
                 timeout=timeout_secs,
+                max_retries=0,
             )
         else:
             self.client = AsyncOpenAI(
                 api_key=api_key,
                 timeout=timeout_secs,
+                max_retries=0,
             )
         # After the SDK resolves its fallback chain, read the URL back
         # so ``self.base_url`` always reflects the wire endpoint.

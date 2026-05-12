@@ -155,20 +155,27 @@ the host endpoint and supply any non-empty placeholder string (e.g.
 
 **Embedder** — required, indexer cannot run without it.
 
+The SQLite schema reserves a fixed 4096-dim vector, so `EMBED_MODEL`
+must produce 4096-dim vectors. The recommended path is a host-side
+server running a 4096-dim model (Qwen3-Embedding-8B family), reached
+from the containers via `host.docker.internal`:
+
 ```bash
-# Edit .env:
-EMBED_BASE_URL=...      # optional; leave empty for OpenAI proper
-EMBED_MODEL=...         # required (e.g. Qwen/Qwen3-Embedding-8B)
+# Edit .env — host-side server (mlx_lm.server, LM Studio, vLLM, TEI):
+EMBED_BASE_URL=http://host.docker.internal:8001/v1
+EMBED_MODEL=mlx-community/Qwen3-Embedding-8B-mxfp8
+# write any placeholder string to .secrets/embed_api_key.txt (chmod 600);
+# unauthenticated compat servers ignore the bearer header but the
+# secret must be non-empty so the startup contract holds.
 ```
 
-The schema reserves a fixed 4096-dim vector — pick a model that
-produces 4096-dim vectors or run a schema migration. See "Pointing at
-a different embedder provider" below for examples (OpenAI proper,
-DeepInfra, OpenRouter, host-side servers like LM Studio / vLLM /
-`mlx_lm.server`). Write the embedder key to
-`.secrets/embed_api_key.txt` (`chmod 600`). The key is required
-(non-empty); for an unauthenticated host-side server, use any
-placeholder string (e.g. `unauthenticated`).
+Alternative providers that also serve a 4096-dim Qwen3-Embedding-8B
+(DeepInfra, OpenRouter) are listed under "Pointing at a different
+embedder provider" below. Leaving `EMBED_BASE_URL` empty is
+contract-supported (it falls back to OpenAI proper via the SDK default),
+but OpenAI's public embedding catalog has no 4096-dim model today
+(`text-embedding-3-large` is 3072-dim, `-3-small` is 1536-dim), so the
+empty-URL path is not a usable recipe without a schema migration.
 
 **Inference** — choose one mode:
 

@@ -28,6 +28,7 @@ from src.main import (
     _normalize_mode,
     _normalize_transport,
     _read_secret,
+    _reject_url_userinfo,
     _require_env,
     _run_server,
 )
@@ -289,6 +290,41 @@ class TestNormalizeMode:
     def test_unknown_mode_fails_closed(self):
         with pytest.raises(ValueError, match="INFERENCE_MODE"):
             _normalize_mode("INFERENCE_MODE", "local", _INFERENCE_MODES)
+
+
+class TestRejectUrlUserinfo:
+    """``_reject_url_userinfo`` blocks base URLs that embed a
+    ``user:pass@host`` userinfo authority at config load. Resolved base
+    URLs flow into the startup log naming the wire endpoint, so
+    embedded credentials would leak to container logs / journald.
+    Mirrors the same guard in ``scripts/validate-env.sh``.
+    """
+
+    def test_empty_value_passes_through(self):
+        # Empty ``*_BASE_URL`` is contract-supported (use SDK default).
+        assert _reject_url_userinfo("INFERENCE_BASE_URL", "") == ""
+
+    def test_clean_url_passes_through(self):
+        assert (
+            _reject_url_userinfo("EMBED_BASE_URL", "https://api.example.com/v1")
+            == "https://api.example.com/v1"
+        )
+
+    def test_host_with_port_no_userinfo_passes(self):
+        # ``host.docker.internal:8001`` has a colon in netloc but no '@'.
+        url = "http://host.docker.internal:8001/v1"
+        assert _reject_url_userinfo("EMBED_BASE_URL", url) == url
+
+    def test_userinfo_in_url_raises(self):
+        with pytest.raises(ValueError, match="INFERENCE_BASE_URL.*credentials"):
+            _reject_url_userinfo(
+                "INFERENCE_BASE_URL",
+                "https://user:token@gateway.example/v1",  # pragma: allowlist secret
+            )
+
+    def test_userinfo_username_only_raises(self):
+        with pytest.raises(ValueError, match="RERANK_BASE_URL.*credentials"):
+            _reject_url_userinfo("RERANK_BASE_URL", "https://user@gateway.example/v1")
 
 
 class TestRequireEnv:

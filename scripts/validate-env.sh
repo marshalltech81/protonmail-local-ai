@@ -116,6 +116,27 @@ require_integer_min() {
     }
 }
 
+# Reject URLs that embed a ``user:pass@host`` userinfo authority.
+# ``*_BASE_URL`` values flow into startup log lines naming the resolved
+# wire endpoint, so embedded credentials would leak to container logs
+# / journald. The project's credential model puts every secret in a
+# Docker-secrets file (``.secrets/<layer>_api_key.txt``); a URL with
+# userinfo means the operator is trying to authenticate out-of-band,
+# which both bypasses the contract and exposes the credential.
+reject_url_userinfo() {
+    local name="$1"
+    local value="$2"
+
+    # Use an explicit ``if`` rather than ``[[ ]] && { ... }`` so the
+    # not-matched path returns 0. Under ``set -e`` a function whose
+    # last command is ``[[ no-match ]] && {...}`` propagates the test
+    # failure (exit 1) and the caller aborts on every clean URL.
+    if [[ "$value" =~ ^https?://[^/]*@ ]]; then
+        printf 'ERROR: %s must not embed credentials (user:pass@host). Put the API key in the matching .secrets/<layer>_api_key.txt file instead.\n' "$name" >&2
+        exit 1
+    fi
+}
+
 # Read a single KEY=VALUE from .env without shell-sourcing.
 # Shell-sourcing would evaluate command substitutions in values, so a
 # malformed or hostile .env line could execute arbitrary commands from the
@@ -323,6 +344,7 @@ if [[ "$INFERENCE_MODE" != "none" ]]; then
             echo "ERROR: INFERENCE_BASE_URL must start with http:// or https://." >&2
             exit 1
         }
+        reject_url_userinfo "INFERENCE_BASE_URL" "$INFERENCE_BASE_URL"
         # The Anthropic SDK appends '/v1/messages' to the base URL itself.
         # Operators carrying over the pre-collapse
         # INFERENCE_ANTHROPIC_BASE_URL=https://api.anthropic.com/v1 would
@@ -361,6 +383,7 @@ if [[ -n "$EMBED_BASE_URL" ]]; then
         echo "ERROR: EMBED_BASE_URL must start with http:// or https://." >&2
         exit 1
     }
+    reject_url_userinfo "EMBED_BASE_URL" "$EMBED_BASE_URL"
 fi
 [[ -n "$EMBED_MODEL" ]] || {
     echo "ERROR: EMBED_MODEL must be set when EMBED_MODE=$EMBED_MODE." >&2
@@ -401,6 +424,7 @@ if [[ "$RERANK_MODE" != "none" ]]; then
             echo "ERROR: RERANK_BASE_URL must start with http:// or https://." >&2
             exit 1
         }
+        reject_url_userinfo "RERANK_BASE_URL" "$RERANK_BASE_URL"
     fi
 fi
 

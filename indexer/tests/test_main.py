@@ -798,6 +798,21 @@ class TestValidateEmbedConfig:
         monkeypatch.setattr(main, "EMBED_API_KEY", "unauthenticated")
         main._validate_embed_config()
 
+    def test_base_url_with_userinfo_raises(self, monkeypatch):
+        # URLs that embed a ``user:pass@host`` userinfo authority flow
+        # into the startup log naming the resolved wire endpoint,
+        # leaking embedded credentials. Reject at startup; secrets
+        # belong in ``.secrets/embed_api_key.txt``.
+        monkeypatch.setattr(
+            main,
+            "EMBED_BASE_URL",
+            "https://user:token@gateway.example/v1",  # pragma: allowlist secret
+        )
+        monkeypatch.setattr(main, "EMBED_MODEL", "qwen-embed")
+        monkeypatch.setattr(main, "EMBED_API_KEY", "sk-real")  # pragma: allowlist secret
+        with pytest.raises(ValueError, match="EMBED_BASE_URL.*credentials"):
+            main._validate_embed_config()
+
 
 class TestValidateEmbeddingDim:
     def test_matching_dim_passes_silently(self):

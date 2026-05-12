@@ -9,6 +9,7 @@ import contextlib
 import logging
 import math
 import os
+import urllib.parse
 from pathlib import Path
 from typing import Literal
 
@@ -225,10 +226,34 @@ def _int_env(name: str, default: int, minimum: int = 1) -> int:
     return value
 
 
+def _reject_url_userinfo(name: str, value: str) -> str:
+    """Reject URLs that embed a ``user:pass@host`` userinfo authority.
+
+    Resolved base URLs flow into startup log lines naming the wire
+    endpoint, so embedded credentials would leak to container logs /
+    journald. The credential model puts every secret in a Docker-secrets
+    file (``.secrets/<layer>_api_key.txt``); a URL with userinfo means
+    the operator is trying to authenticate out-of-band and exposing the
+    credential. Mirrors the same guard in ``scripts/validate-env.sh`` so
+    a deployment that skipped that script (CI, tests, manual ``docker
+    compose up``) still fails closed instead of leaking.
+    """
+    if not value:
+        return value
+    if "@" in urllib.parse.urlsplit(value).netloc:
+        raise ValueError(
+            f"{name} must not embed credentials (user:pass@host). Put the "
+            "API key in the matching .secrets/<layer>_api_key.txt file instead."
+        )
+    return value
+
+
 INFERENCE_MODE = _normalize_mode(
     "INFERENCE_MODE", os.environ.get("INFERENCE_MODE", "anthropic"), _INFERENCE_MODES
 )
-INFERENCE_BASE_URL = os.environ.get("INFERENCE_BASE_URL", "")
+INFERENCE_BASE_URL = _reject_url_userinfo(
+    "INFERENCE_BASE_URL", os.environ.get("INFERENCE_BASE_URL", "")
+)
 INFERENCE_MODEL = os.environ.get("INFERENCE_MODEL", "")
 INFERENCE_API_KEY = _read_secret("inference_api_key", "INFERENCE_API_KEY")
 INFERENCE_TIMEOUT_SECS = _float_env(
@@ -237,13 +262,13 @@ INFERENCE_TIMEOUT_SECS = _float_env(
 INFERENCE_MAX_TOKENS = _int_env("INFERENCE_MAX_TOKENS", DEFAULT_MAX_TOKENS, minimum=1)
 
 EMBED_MODE = _normalize_mode("EMBED_MODE", os.environ.get("EMBED_MODE", "openai"), _EMBED_MODES)
-EMBED_BASE_URL = os.environ.get("EMBED_BASE_URL", "")
+EMBED_BASE_URL = _reject_url_userinfo("EMBED_BASE_URL", os.environ.get("EMBED_BASE_URL", ""))
 EMBED_MODEL = os.environ.get("EMBED_MODEL", "")
 EMBED_API_KEY = _read_secret("embed_api_key", "EMBED_API_KEY")
 EMBED_TIMEOUT_SECS = _float_env("EMBED_TIMEOUT_SECS", DEFAULT_EMBED_TIMEOUT_SECS, minimum=1.0)
 
 RERANK_MODE = _normalize_mode("RERANK_MODE", os.environ.get("RERANK_MODE", "none"), _RERANK_MODES)
-RERANK_BASE_URL = os.environ.get("RERANK_BASE_URL", "")
+RERANK_BASE_URL = _reject_url_userinfo("RERANK_BASE_URL", os.environ.get("RERANK_BASE_URL", ""))
 RERANK_MODEL = os.environ.get("RERANK_MODEL", "")
 RERANK_API_KEY = _read_secret("rerank_api_key", "RERANK_API_KEY")
 RERANK_CANDIDATES = _int_env("RERANK_CANDIDATES", 20, minimum=1)
