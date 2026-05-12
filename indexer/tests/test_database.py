@@ -1126,6 +1126,59 @@ class TestUpsertThreadUpdate:
         ).fetchone()
         assert "Second message" in row["snippet"]
 
+    def test_per_message_body_cap_matches_across_insert_and_update_paths(self, db, threader):
+        # Both the fresh-insert path (``Thread.text_for_embedding``) and
+        # the accumulation path (``Database._compute_body``) must apply
+        # the SAME per-message char cap. The previous shape used 500 chars
+        # on insert and 2000 chars on update — meaning a thread that
+        # arrived as a single 3000-char message had only the first 500
+        # chars indexed for FTS forever, while an identical thread that
+        # arrived as a sequence of replies got 2000 chars per message.
+        # The asymmetry was permanent and tied to arrival ordering.
+        from src.threader import PER_MESSAGE_BODY_CAP_CHARS
+
+        long_body = "X" * (PER_MESSAGE_BODY_CAP_CHARS + 1000)
+
+        # Distinct subjects keep the two seed messages from subject-merging
+        # into a single thread via the threader's subject-fallback path.
+        fresh_msg = make_message(
+            message_id="cap_fresh@example.com",
+            subject="cap fresh subject",
+            body_text=long_body,
+        )
+        t_fresh = threader.assign_thread(fresh_msg)
+        db.upsert_thread(t_fresh, FAKE_EMBEDDING)
+        fresh_row = db._conn.execute(
+            "SELECT body_text FROM threads WHERE thread_id = 'cap_fresh@example.com'"
+        ).fetchone()
+
+        seed_msg = make_message(
+            message_id="cap_seed@example.com",
+            subject="cap seed subject",
+            body_text="short seed",
+        )
+        t_seed = threader.assign_thread(seed_msg)
+        db.upsert_thread(t_seed, FAKE_EMBEDDING)
+        update_msg = make_message(
+            message_id="cap_update@example.com",
+            subject="Re: cap seed subject",
+            in_reply_to="cap_seed@example.com",
+            body_text=long_body,
+            filepath="/maildir/INBOX/cur/cap_update",
+            date=datetime(2024, 6, 1, tzinfo=UTC),
+        )
+        t_update = threader.assign_thread(update_msg)
+        db.upsert_thread(t_update, FAKE_EMBEDDING)
+        update_row = db._conn.execute(
+            "SELECT body_text FROM threads WHERE thread_id = 'cap_seed@example.com'"
+        ).fetchone()
+
+        # Each path keeps exactly ``PER_MESSAGE_BODY_CAP_CHARS`` of the
+        # long body. The cap fires once per message even though the two
+        # paths assemble the surrounding metadata differently.
+        assert fresh_row["body_text"].count("X") == PER_MESSAGE_BODY_CAP_CHARS
+        assert update_row["body_text"].count("X") == PER_MESSAGE_BODY_CAP_CHARS
+
     def test_accumulated_body_capped_at_token_budget(self, db, threader):
         # The accumulated thread body must respect the same token-based
         # cap (``THREAD_BODY_TEXT_MAX_TOKENS``) on update that the
@@ -2260,6 +2313,28 @@ class TestThreadChunkAggregation:
 
     def test_get_chunk_embeddings_for_messages_empty_input_returns_empty(self, db):
         assert db.get_chunk_embeddings_for_messages([]) == []
+
+    def test_thread_has_chunks_returns_true_only_when_rows_exist(self, db):
+        # ``thread_has_chunks`` exists so the batched indexer's hot
+        # subject-fallback gate can check "any chunks committed?"
+        # without unpacking every chunk vector via
+        # ``get_thread_chunk_embeddings``. The contract: True when at
+        # least one ``message_chunks`` row references the thread,
+        # False otherwise (no rows, or thread does not exist at all).
+        assert db.thread_has_chunks("never-existed") is False
+
+        _seed_thread_for_message(db, "th@x", "t_has")
+        # Thread row exists but no chunks yet — gate must say False.
+        assert db.thread_has_chunks("t_has") is False
+
+        chunk = _make_chunk("zhas".ljust(64, "0"), 0, "some body")
+        db.replace_message_chunks(
+            message_id="th@x",
+            thread_id="t_has",
+            chunks=[chunk],
+            embeddings_by_chunk_id={chunk.chunk_id: _one_hot(0)},
+        )
+        assert db.thread_has_chunks("t_has") is True
 
 
 class TestAtomicIndexTransaction:

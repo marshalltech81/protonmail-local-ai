@@ -738,20 +738,31 @@ def _phase2a_collect_chunks(
         # behavior. The fallback text rides through Phase 2b inside the
         # same batched embed call as everyone else's chunks.
         #
-        # The check is on COMMITTED chunks only
-        # (``get_thread_chunk_embeddings``), not on pending in-batch
-        # chunks. An earlier batch sibling that queued chunks for the
-        # same thread but whose Phase 2c then fails would otherwise
-        # leave this chunkless successor committing cleanly with a
-        # zero thread vector — see the docstring rationale above.
-        # Reserving an extra fallback slot when an earlier sibling
-        # also produced chunks is harmless: Phase 2c's three-case
-        # priority chain prefers ``mean(committed chunks)`` over the
-        # fallback embedding, so the fallback only takes effect when
-        # nothing else committed.
+        # The check is on COMMITTED chunks only (``thread_has_chunks``),
+        # not on pending in-batch chunks. An earlier batch sibling that
+        # queued chunks for the same thread but whose Phase 2c then
+        # fails would otherwise leave this chunkless successor
+        # committing cleanly with a zero thread vector — see the
+        # docstring rationale above. Reserving an extra fallback slot
+        # when an earlier sibling also produced chunks is harmless:
+        # Phase 2c's three-case priority chain prefers
+        # ``mean(committed chunks)`` over the fallback embedding, so
+        # the fallback only takes effect when nothing else committed.
+        #
+        # ``thread_has_chunks`` is a single-row existence check —
+        # avoids the per-message blob-unpack churn that
+        # ``get_thread_chunk_embeddings`` would impose on chatty
+        # threads where this gate fires for every chunkless arrival.
         has_new_chunks = bool(new_body) or any(plan_new for plan_new in attach_new_chunks)
-        if not has_new_chunks and not db.get_thread_chunk_embeddings(state.thread.thread_id):
-            fallback_text = state.thread.subject.strip() if state.thread.subject else ""
+        if not has_new_chunks and not db.thread_has_chunks(state.thread.thread_id):
+            # Use the message's ORIGINAL-case subject (with any ``Re:`` /
+            # ``Fwd:`` intact) as the fallback embed text rather than
+            # ``state.thread.subject``, which is the threader's
+            # normalized (lowercased, prefix-stripped) grouping key. The
+            # un-normalized form gives the embedder a richer semantic
+            # anchor — this is the ONLY vector a chunkless thread ever
+            # gets, so maximizing its signal matters.
+            fallback_text = (state.msg.subject or "").strip()
             if not fallback_text:
                 fallback_text = "(empty thread)"
             state.subject_fallback_offset = len(all_texts)
@@ -1186,6 +1197,41 @@ def initial_index(
     log.info("Initial index complete: %d job(s) processed.", processed)
 
 
+def _warn_if_non_qwen3_model() -> None:
+    """Warn when ``EMBED_MODEL`` is not a recognised Qwen3-Embedding variant.
+
+    The chunker's ``estimate_tokens`` / ``truncate_to_tokens`` /
+    ``chunk_message`` paths are sized against the bundled
+    ``Qwen/Qwen3-Embedding-8B`` BPE tokenizer (see ``chunker._TOKENIZER_PATH``)
+    so chunk budgets line up with the model's real context window.
+    Other models (OpenAI ``text-embedding-3-large``, Cohere
+    ``embed-v4``, sentence-transformers variants) have different BPE
+    tokenizers; chunks remain retrievable, but the per-chunk token
+    budget can be off by ~30-50% in either direction, leaving context
+    unused or risking truncation at embed time.
+
+    This is a soft warning — the dimension probe in
+    ``_validate_embedding_dim`` already enforces 4096-dim output, so
+    a wholly-incompatible model still fails closed at startup. The
+    warning surfaces the more subtle case: a 4096-dim non-Qwen3
+    model whose chunk-size budgets silently drift.
+    """
+    model_lower = EMBED_MODEL.lower()
+    if "qwen3-embedding" in model_lower:
+        return
+    log.warning(
+        "EMBED_MODEL=%r is not a recognised Qwen3-Embedding variant. "
+        "The chunker's token budgets (INDEXER_CHUNK_TARGET_TOKENS, "
+        "INDEXER_CHUNK_MAX_TOKENS) are calibrated against the bundled "
+        "Qwen3-Embedding-8B BPE tokenizer and may misalign with the "
+        "configured model's tokenizer. Chunks remain retrievable but "
+        "may be sized 30-50%% off the model's real context window. Tune "
+        "INDEXER_CHUNK_*_TOKENS to your model's tokenizer if recall "
+        "matters.",
+        EMBED_MODEL,
+    )
+
+
 def _validate_embedding_dim(embedder: EmbeddingBackend) -> None:
     """Probe the running embedder once at startup and verify its output
     dimension matches the schema-reserved ``EMBEDDING_DIM``.
@@ -1282,6 +1328,11 @@ def main():
 
     # Verify the running model matches the schema's reserved vector dim.
     _validate_embedding_dim(embedder)
+
+    # Surface a soft warning when the configured model isn't a known
+    # Qwen3-Embedding variant — the chunker's bundled BPE tokenizer
+    # only matches that family.
+    _warn_if_non_qwen3_model()
 
     # Index existing emails
     initial_index(db, embedder, threader, queue)

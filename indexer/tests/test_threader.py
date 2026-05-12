@@ -30,14 +30,23 @@ class TestTextForEmbedding:
         thread = make_thread(messages=[msg])
         assert "This is the body content." in thread.text_for_embedding()
 
-    def test_per_message_body_truncated_at_500_chars(self):
-        long_body = "x" * 1000
+    def test_per_message_body_truncated_at_shared_char_cap(self):
+        # ``Thread.text_for_embedding`` caps each message's body
+        # contribution at ``PER_MESSAGE_BODY_CAP_CHARS`` so one outlier
+        # message cannot dominate the thread's FTS body before the
+        # thread-wide token cap fires. ``Database._compute_body`` (the
+        # update path) shares this constant — see
+        # ``test_per_message_body_cap_matches_across_insert_and_update_paths``
+        # in test_database.py — so the two paths agree on what each
+        # message contributes regardless of arrival ordering.
+        from src.threader import PER_MESSAGE_BODY_CAP_CHARS
+
+        long_body = "x" * (PER_MESSAGE_BODY_CAP_CHARS + 1000)
         msg = make_message(body_text=long_body)
         thread = make_thread(messages=[msg])
         text = thread.text_for_embedding()
-        # The long body should appear but be capped at 500 chars
-        assert "x" * 500 in text
-        assert "x" * 501 not in text
+        assert "x" * PER_MESSAGE_BODY_CAP_CHARS in text
+        assert "x" * (PER_MESSAGE_BODY_CAP_CHARS + 1) not in text
 
     def test_thread_output_capped_at_shared_max_tokens(self):
         """Both the fresh-insert embedding text and the accumulated body
@@ -371,6 +380,45 @@ class TestAssignThread:
 
         assert t2.date_first == datetime(2024, 1, 1, tzinfo=UTC)
         assert t2.date_last == datetime(2024, 6, 1, tzinfo=UTC)
+
+
+# ---------------------------------------------------------------------------
+# _normalize_subject
+# ---------------------------------------------------------------------------
+
+
+class TestNormalizeSubject:
+    def test_strips_english_prefixes(self):
+        assert _normalize_subject("Re: Hello") == "hello"
+        assert _normalize_subject("Fwd: Hello") == "hello"
+        assert _normalize_subject("FW: Hello") == "hello"
+
+    def test_strips_german_prefixes(self):
+        assert _normalize_subject("Aw: Hallo") == "hallo"
+        assert _normalize_subject("Ant: Hallo") == "hallo"
+
+    def test_strips_swedish_and_french_prefixes(self):
+        assert _normalize_subject("Sv: Hej") == "hej"
+        assert _normalize_subject("Tr: Bonjour") == "bonjour"
+
+    def test_strips_chinese_reply_prefixes(self):
+        assert _normalize_subject("回复: 你好") == "你好"
+        assert _normalize_subject("答复: 你好") == "你好"
+
+    def test_strips_nested_mixed_prefixes(self):
+        assert _normalize_subject("Re: Fwd: Sv: Hello") == "hello"
+
+    def test_preserves_subjects_without_prefix_punctuation(self):
+        # ``R&D meeting`` must not be mangled: the regex requires
+        # whitespace/colon/bracket after the prefix candidate. Without
+        # that gate, single-letter or short prefixes would silently strip
+        # the start of unrelated subjects.
+        assert _normalize_subject("R&D meeting") == "r&d meeting"
+        assert _normalize_subject("Trend report") == "trend report"
+        assert _normalize_subject("Aware of the issue") == "aware of the issue"
+
+    def test_collapses_whitespace(self):
+        assert _normalize_subject("Re:    Project   Update") == "project update"
 
 
 # ---------------------------------------------------------------------------

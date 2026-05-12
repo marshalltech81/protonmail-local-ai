@@ -435,6 +435,85 @@ class TestReap:
         assert db.get_thread(thread_id) is not None
         assert db.has_pending_deletion(str(trashed))
 
+    def test_skips_reap_when_survivor_oversized(
+        self, db, threader, embedder, reconciler, maildir, monkeypatch
+    ):
+        # ``parse_email`` raises ``OversizedMessageError`` when the file
+        # exceeds ``INDEXER_PARSE_MAX_BYTES``. That exception is not an
+        # ``OSError`` subclass, so the reap path must catch it
+        # explicitly — otherwise a single oversized survivor crashes
+        # the whole ``reap()`` call and stalls every other thread's
+        # tombstones behind it.
+        from src.parser import OversizedMessageError
+
+        orig_path = maildir / "1700000000.M1.host:2,S"
+        _write_eml(orig_path, "ov1@example.com")
+        thread_id = _index(orig_path, db, threader)
+
+        reply_path = maildir / "1700000001.M2.host:2,S"
+        _write_eml(
+            reply_path,
+            "ov2@example.com",
+            in_reply_to="ov1@example.com",
+            subject="Re: Test message",
+            date=datetime(2024, 2, 1, tzinfo=UTC),
+        )
+        _index(reply_path, db, threader)
+
+        trashed = maildir / "1700000000.M1.host:2,ST"
+        orig_path.rename(trashed)
+        reconciler.sweep()
+
+        def _raise_oversized(path, maildir_root=None):
+            raise OversizedMessageError(path, size=99, cap=10)
+
+        monkeypatch.setattr("src.reconciler.parse_email", _raise_oversized)
+
+        result = reconciler.reap()
+
+        assert result["threads_rebuilt"] == 0
+        assert db.get_thread(thread_id) is not None
+        assert db.has_pending_deletion(str(trashed))
+
+    def test_skips_reap_on_content_pathology_in_survivor(
+        self, db, threader, embedder, reconciler, maildir, monkeypatch
+    ):
+        # ``parse_email`` deliberately propagates content-pathology
+        # exceptions (malformed MIME the email module cannot decompose,
+        # html2text blowups, etc.) so the indexer worker can route them
+        # through the queue's retry + dead-letter cascade. The reaper has
+        # no equivalent — and the previous narrow ``OSError`` catch let
+        # those exceptions crash ``reap()`` entirely, stalling every
+        # other thread's tombstones. The reaper must log + skip the pass.
+        orig_path = maildir / "1700000000.M1.host:2,S"
+        _write_eml(orig_path, "cp1@example.com")
+        thread_id = _index(orig_path, db, threader)
+
+        reply_path = maildir / "1700000001.M2.host:2,S"
+        _write_eml(
+            reply_path,
+            "cp2@example.com",
+            in_reply_to="cp1@example.com",
+            subject="Re: Test message",
+            date=datetime(2024, 2, 1, tzinfo=UTC),
+        )
+        _index(reply_path, db, threader)
+
+        trashed = maildir / "1700000000.M1.host:2,ST"
+        orig_path.rename(trashed)
+        reconciler.sweep()
+
+        def _raise_value_error(path, maildir_root=None):
+            raise ValueError("malformed MIME boundary")
+
+        monkeypatch.setattr("src.reconciler.parse_email", _raise_value_error)
+
+        result = reconciler.reap()
+
+        assert result["threads_rebuilt"] == 0
+        assert db.get_thread(thread_id) is not None
+        assert db.has_pending_deletion(str(trashed))
+
     def test_unlinks_files_when_unlink_on_reap_enabled(self, db, threader, embedder, maildir):
         cfg = _default_config(unlink_on_reap=True)
         rec = Reconciler(db, embedder, threader, cfg)

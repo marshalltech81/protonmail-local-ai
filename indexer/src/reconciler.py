@@ -35,7 +35,7 @@ from .chunker import mean_vector
 from .database import Database
 from .embedder import EmbeddingBackend
 from .maildir import is_trashed, resolve_current_path
-from .parser import parse_email
+from .parser import OversizedMessageError, parse_email
 from .threader import Thread, Threader
 
 log = logging.getLogger("indexer.reconciler")
@@ -247,14 +247,35 @@ class Reconciler:
         for row in survivor_rows:
             try:
                 msg = parse_email(Path(row["filepath"]), maildir_root=self.maildir_root)
-            except OSError as e:
-                # Transient read failure (mbsync chmod race, perms regression,
-                # rename mid-sweep). Skip the pass; a later sweep will retry.
+            except (OSError, OversizedMessageError) as e:
+                # Foreseeable parse failures the parser is documented to
+                # raise: ``OSError`` covers the mbsync chmod / rename /
+                # perms races; ``OversizedMessageError`` fires when the
+                # survivor exceeds ``INDEXER_PARSE_MAX_BYTES``. Skip the
+                # pass; a later sweep retries (the underlying condition
+                # is typically transient or operator-actionable).
                 log.warning(
                     "reaper: could not read survivor %s in thread %s (%s); skipping this reap pass",
                     row["filepath"],
                     thread_id,
                     e,
+                )
+                return False, False
+            except Exception as e:
+                # Content-pathology errors (malformed MIME the email
+                # module cannot decompose, html2text blowups, etc.) the
+                # parser deliberately propagates instead of swallowing.
+                # The indexer's main worker routes those through the
+                # queue's retry + dead-letter cascade; the reaper has
+                # no equivalent, so skipping the pass with a loud log
+                # is the closest equivalent — better than crashing
+                # ``reap()`` and stalling every other thread's
+                # tombstones behind a single corrupt survivor.
+                log.error(
+                    "reaper: parse_email raised on survivor %s in thread %s; skipping this reap pass",
+                    row["filepath"],
+                    thread_id,
+                    exc_info=e,
                 )
                 return False, False
             if msg is None:

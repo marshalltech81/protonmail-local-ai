@@ -19,7 +19,12 @@ from pathlib import Path
 import sqlite_vec
 
 from .chunker import l2_normalize, truncate_to_tokens
-from .threader import THREAD_BODY_TEXT_MAX_TOKENS, Thread, canonical_addr
+from .threader import (
+    PER_MESSAGE_BODY_CAP_CHARS,
+    THREAD_BODY_TEXT_MAX_TOKENS,
+    Thread,
+    canonical_addr,
+)
 
 log = logging.getLogger("indexer.database")
 
@@ -627,8 +632,13 @@ class Database:
             existing_message_ids = set(json.loads(existing["message_ids"]))
             new_messages = [m for m in thread.messages if m.message_id not in existing_message_ids]
             if new_messages:
+                # Per-message char cap shared with ``Thread.text_for_embedding``
+                # so a thread that arrived as one message gets the same FTS
+                # body coverage as a thread that arrived as a sequence of
+                # replies.
                 new_content = "\n".join(
-                    f"From: {m.from_addr}\nDate: {m.date.isoformat()}\n{m.body_text[:2000]}"
+                    f"From: {m.from_addr}\nDate: {m.date.isoformat()}\n"
+                    f"{m.body_text[:PER_MESSAGE_BODY_CAP_CHARS]}"
                     for m in new_messages
                 )
                 return truncate_to_tokens(
@@ -1419,6 +1429,23 @@ class Database:
             stuck_thread_ids,
         ).fetchall()
         return [r["filepath"] for r in rows]
+
+    @_synchronized
+    def thread_has_chunks(self, thread_id: str) -> bool:
+        """Return True iff at least one chunk row exists for ``thread_id``.
+
+        Cheap existence check for the subject-fallback gate in the
+        batched indexer's Phase 2a. ``get_thread_chunk_embeddings`` is
+        the wrong tool for that check — it loads, blob-unpacks, and
+        copies every chunk vector for the thread just so the caller
+        can take ``bool(list)``. On chatty threads with hundreds of
+        chunks that's wasted I/O on a hot per-message path.
+        """
+        row = self._conn.execute(
+            "SELECT 1 FROM message_chunks WHERE thread_id = ? LIMIT 1",
+            (thread_id,),
+        ).fetchone()
+        return row is not None
 
     @_synchronized
     def get_thread_chunk_embeddings(self, thread_id: str) -> list[list[float]]:

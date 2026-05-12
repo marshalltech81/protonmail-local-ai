@@ -832,6 +832,33 @@ class TestValidateEmbeddingDim:
         assert str(EMBEDDING_DIM) in str(exc_info.value)
 
 
+class TestWarnIfNonQwen3Model:
+    def test_silent_for_qwen3_embedding_model(self, monkeypatch, caplog):
+        monkeypatch.setattr(main, "EMBED_MODEL", "Qwen/Qwen3-Embedding-8B")
+        with caplog.at_level("WARNING", logger="indexer"):
+            main._warn_if_non_qwen3_model()
+        assert not any("not a recognised Qwen3-Embedding" in r.message for r in caplog.records)
+
+    def test_silent_for_lowercase_qwen3_variant(self, monkeypatch, caplog):
+        monkeypatch.setattr(main, "EMBED_MODEL", "qwen3-embedding-0.6b")
+        with caplog.at_level("WARNING", logger="indexer"):
+            main._warn_if_non_qwen3_model()
+        assert not any("not a recognised Qwen3-Embedding" in r.message for r in caplog.records)
+
+    def test_warns_for_openai_text_embedding(self, monkeypatch, caplog):
+        # Non-Qwen3 4096-dim-compatible model — dim probe alone won't
+        # surface the tokenizer mismatch, so the warning is the only
+        # operator-visible signal.
+        monkeypatch.setattr(main, "EMBED_MODEL", "text-embedding-3-large")
+        with caplog.at_level("WARNING", logger="indexer"):
+            main._warn_if_non_qwen3_model()
+        assert any(
+            "not a recognised Qwen3-Embedding" in r.message
+            and "text-embedding-3-large" in r.message
+            for r in caplog.records
+        )
+
+
 class TestIndexOneFileChunking:
     """End-to-end of the schema-v9 chunker integration through the
     real ``_index_one_file`` path — chunker is invoked for each new
@@ -1205,6 +1232,53 @@ class TestBatchedInitialIndex:
             "thread vector should equal the L2-normalized embedder "
             "return value for the subject fallback, not be derived "
             "from chunks (none exist)"
+        )
+
+    def test_subject_fallback_embeds_original_case_subject(self, tmp_path, monkeypatch):
+        # The subject-fallback path is the ONLY vector a chunkless
+        # thread ever gets, so it should use the message's
+        # ORIGINAL-case subject (with ``Re:`` / ``Fwd:`` intact) — not
+        # the threader's normalized grouping key, which has been
+        # lowercased and had reply prefixes stripped. Stripping
+        # semantic context from the embed input degrades retrieval for
+        # blank-body messages whose subject is the only signal we have.
+        maildir = tmp_path / "maildir"
+        inbox = maildir / "INBOX" / "cur"
+        inbox.mkdir(parents=True)
+
+        # Blank body so chunk_message emits nothing and the fallback
+        # path is the only embed contribution.
+        original_subject = "Re: Quarterly Review (Q1 follow-up)"
+        eml = inbox / "blank.eml"
+        eml.write_text(
+            "From: alice@example.com\r\n"
+            "To: bob@example.com\r\n"
+            f"Subject: {original_subject}\r\n"
+            "Message-ID: <case@example.com>\r\n"
+            "Date: Mon, 01 Jan 2024 12:00:00 +0000\r\n"
+            "Content-Type: text/plain; charset=utf-8\r\n"
+            "\r\n",
+            encoding="utf-8",
+        )
+
+        db = Database(tmp_path / "mail.db")
+        threader = Threader(db)
+        embedder = make_mock_embedder(vector=[0.25] * EMBEDDING_DIM)
+        queue = _make_queue(db)
+        self._run(db, embedder, threader, queue, monkeypatch, maildir)
+
+        embedded_texts = [call.args[0] for call in embedder.embed.call_args_list]
+        assert original_subject in embedded_texts, (
+            f"subject fallback must embed the original-case subject, "
+            f"not the normalized grouping key; embedded: {embedded_texts!r}"
+        )
+        # The normalized grouping key would have ``re:`` stripped and
+        # everything lowercased — that is exactly what we MUST NOT
+        # have embedded.
+        normalized = "quarterly review (q1 follow-up)"
+        assert normalized not in embedded_texts, (
+            "the fallback must not embed the normalized grouping key "
+            "(lowercased + Re:-stripped) — that loses semantic context"
         )
 
     def test_phase2_failure_preserves_existing_thread_vector(self, tmp_path, monkeypatch):
