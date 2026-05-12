@@ -86,10 +86,13 @@ class RerankerBackend(Protocol):
 class CohereReranker:
     """Cohere ``rerank`` client using the official SDK.
 
-    The base URL is forwarded only when the operator explicitly sets
-    ``RERANK_BASE_URL`` (proxies, gateways, EU region overrides). An
-    empty value means "use the SDK default" — the cleanest path for
-    the standard public endpoint.
+    Same shape as the other three SDK-using clients (``EmbedClient``,
+    ``OpenAIEmbedder``, ``_OpenAIBackend``): ``api_key`` and ``model``
+    are required upstream; ``base_url`` is optional. An empty
+    ``RERANK_BASE_URL`` means "use the SDK default"
+    (``https://api.cohere.com``) — the required ``RERANK_API_KEY`` is
+    the explicit-intent signal. Set ``RERANK_BASE_URL`` only for
+    proxies, gateways, or EU region overrides.
     """
 
     def __init__(self, config: RerankConfig):
@@ -114,6 +117,15 @@ class CohereReranker:
                 api_key=config.api_key,
                 timeout=config.timeout_secs,
             )
+        # Note: ``EmbedClient`` / ``_OpenAIBackend`` / ``OpenAIEmbedder``
+        # read back ``self.client.base_url`` after construction so the
+        # field reflects the SDK's resolved URL. The Cohere SDK only
+        # exposes the resolved URL via ``_client_wrapper.get_base_url()``
+        # (private API across SDK versions), so this client doesn't
+        # mirror that field. The startup log line in ``main.py`` already
+        # handles the empty-config case explicitly
+        # (``RERANK_BASE_URL or '(SDK default)'``), so the diagnostic
+        # surface is covered without reaching into SDK internals.
 
     def rerank(
         self,

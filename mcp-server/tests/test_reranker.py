@@ -119,6 +119,33 @@ class TestRerank:
         r.client.rerank = fake_rerank  # type: ignore[assignment]
         assert r.rerank("q", ["a", "b"]) == []
 
+    def test_empty_base_url_omits_kwarg_so_sdk_default_applies(self):
+        # ``RERANK_BASE_URL=""`` means "use the SDK default"
+        # (``https://api.cohere.com``). The required non-empty
+        # ``RERANK_API_KEY`` upstream is the explicit-intent signal —
+        # an operator with a real Cohere key has unambiguously chosen
+        # their provider, so we trust the documented SDK fallback.
+        # Symmetric with how ``EmbedClient``, ``OpenAIEmbedder``, and
+        # ``_OpenAIBackend`` treat empty base URLs.
+        #
+        # The base_url kwarg must be GENUINELY ABSENT from the SDK
+        # constructor call — passing an empty string would defeat the
+        # SDK's fallback chain because the SDK only treats ``None``
+        # as "missing."
+        with patch("cohere.ClientV2") as mock_client:
+            CohereReranker(
+                RerankConfig(
+                    base_url="",
+                    model="rerank-v4.0-pro",
+                    api_key="ck-test",  # pragma: allowlist secret
+                    candidates=20,
+                    top_n=5,
+                    timeout_secs=42.5,
+                )
+            )
+            mock_client.assert_called_once()
+            assert "base_url" not in mock_client.call_args.kwargs
+
     def test_timeout_is_passed_to_sdk_client(self):
         # A stalled Cohere request must not be allowed to pin the
         # hybrid_search worker thread on the SDK's 300s default —

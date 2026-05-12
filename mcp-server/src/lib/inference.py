@@ -165,7 +165,6 @@ class _AnthropicBackend:
     ) -> None:
         from anthropic import AsyncAnthropic
 
-        self.base_url = base_url.rstrip("/") if base_url else ""
         self.model = model
         self.max_tokens = max_tokens
         # The Anthropic SDK appends ``/v1/messages`` to ``base_url``
@@ -178,7 +177,8 @@ class _AnthropicBackend:
         # silently would hide the misconfiguration; rejecting forces
         # the operator to confirm they meant the SDK base, not a
         # versioned path.
-        if self.base_url.endswith("/v1"):
+        stripped = base_url.rstrip("/") if base_url else ""
+        if stripped.endswith("/v1"):
             raise ValueError(
                 "INFERENCE_BASE_URL must not end with '/v1' when "
                 "INFERENCE_MODE=anthropic — the Anthropic SDK appends "
@@ -192,9 +192,9 @@ class _AnthropicBackend:
         # Passing an empty string would override the SDK default with a
         # malformed URL. SDK default retries (2 attempts, exponential
         # backoff) are kept — see ``_OpenAIBackend`` for the rationale.
-        if self.base_url:
+        if stripped:
             self.client = AsyncAnthropic(
-                base_url=self.base_url,
+                base_url=stripped,
                 api_key=api_key,
                 timeout=timeout_secs,
             )
@@ -203,6 +203,12 @@ class _AnthropicBackend:
                 api_key=api_key,
                 timeout=timeout_secs,
             )
+        # After the SDK resolves its fallback chain, read the URL back
+        # so ``self.base_url`` always reflects the wire endpoint — the
+        # same pattern used by ``_OpenAIBackend``, ``EmbedClient``,
+        # and ``OpenAIEmbedder``. Useful for diagnostic log lines that
+        # name what the backend is actually talking to.
+        self.base_url = str(self.client.base_url).rstrip("/")
 
     async def complete(self, system: str, user: str) -> str:
         resp = await self.client.messages.create(

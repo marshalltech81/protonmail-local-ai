@@ -57,6 +57,9 @@ class TestFactory:
         class FakeAsyncAnthropic:
             def __init__(self, **kwargs):
                 captured["kwargs"] = kwargs
+                # Mimic the SDK's resolved base_url so the constructor
+                # can read it back into ``self.base_url``.
+                self.base_url = "https://api.anthropic.com"
 
         import anthropic
 
@@ -74,6 +77,10 @@ class TestFactory:
         # and ``timeout`` still flow through.
         assert "base_url" not in captured["kwargs"]
         assert captured["kwargs"]["api_key"] == "sk-ant-test"  # pragma: allowlist secret
+        # After construction, ``self.base_url`` reflects the SDK's
+        # resolved endpoint — same pattern as ``_OpenAIBackend``,
+        # ``EmbedClient``, and ``OpenAIEmbedder``.
+        assert c._backend.base_url == "https://api.anthropic.com"
 
     def test_anthropic_with_explicit_base_url_passes_kwarg(self, monkeypatch):
         # Counterpart to the empty-base_url test: when the operator DOES
@@ -84,6 +91,8 @@ class TestFactory:
         class FakeAsyncAnthropic:
             def __init__(self, **kwargs):
                 captured["kwargs"] = kwargs
+                # Mimic the SDK storing the operator-supplied base_url.
+                self.base_url = kwargs.get("base_url", "")
 
         import anthropic
 
