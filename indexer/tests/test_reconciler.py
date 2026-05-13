@@ -435,6 +435,61 @@ class TestReap:
         assert db.get_thread(thread_id) is not None
         assert db.has_pending_deletion(str(trashed))
 
+    def test_blocked_threads_count_surfaces_in_reap_return(
+        self, db, threader, embedder, reconciler, maildir, monkeypatch
+    ):
+        # Deterministic parse failures on a survivor will retry forever
+        # under the broadened ``except Exception`` catch. Without a
+        # visibility surface, the only operator signal was a stuck
+        # tombstone count + scattered WARN/ERROR log lines per pass.
+        # ``reap()`` now reports ``blocked_threads`` so a stale
+        # deletion-cleanup state is visible to ``get_index_status``
+        # consumers instead of buried in logs.
+        orig_path = maildir / "1700000000.M1.host:2,S"
+        _write_eml(orig_path, "bk1@example.com")
+        thread_id = _index(orig_path, db, threader)
+
+        reply_path = maildir / "1700000001.M2.host:2,S"
+        _write_eml(
+            reply_path,
+            "bk2@example.com",
+            in_reply_to="bk1@example.com",
+            subject="Re: Test message",
+            date=datetime(2024, 2, 1, tzinfo=UTC),
+        )
+        _index(reply_path, db, threader)
+
+        trashed = maildir / "1700000000.M1.host:2,ST"
+        orig_path.rename(trashed)
+        reconciler.sweep()
+
+        # Force a deterministic content-pathology failure on every
+        # ``parse_email`` call so the reaper hits the broad
+        # ``except Exception`` branch.
+        def _raise_value_error(path, maildir_root=None):
+            raise ValueError("malformed MIME boundary")
+
+        monkeypatch.setattr("src.reconciler.parse_email", _raise_value_error)
+
+        result_1 = reconciler.reap()
+        assert result_1["threads_rebuilt"] == 0
+        assert result_1["blocked_threads"] == 1
+        assert reconciler._blocked_thread_attempts[thread_id] == 1
+
+        # Counter must INCREMENT on each subsequent stuck pass so an
+        # operator can see whether the failure is fresh or chronic.
+        result_2 = reconciler.reap()
+        assert result_2["blocked_threads"] == 1  # still one stuck thread
+        assert reconciler._blocked_thread_attempts[thread_id] == 2
+
+        # And a successful reap (failure resolved) must CLEAR the
+        # counter so a one-time blip doesn't permanently linger.
+        monkeypatch.undo()
+        result_3 = reconciler.reap()
+        assert result_3["threads_rebuilt"] == 1
+        assert result_3["blocked_threads"] == 0
+        assert thread_id not in reconciler._blocked_thread_attempts
+
     def test_skips_reap_when_survivor_oversized(
         self, db, threader, embedder, reconciler, maildir, monkeypatch
     ):
