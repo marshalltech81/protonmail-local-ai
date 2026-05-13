@@ -343,6 +343,15 @@ PER_THREAD_CHAR_BUDGET = 2000
 _MAX_ASK_THREADS = 10
 _MAX_EXTRACT_LIMIT = 50
 
+# Tail size for ``summarize_thread``'s recent-chunks fetch. The stored
+# ``body_text`` is capped at ``THREAD_BODY_TEXT_MAX_TOKENS`` (4000) and
+# front-preserved, so long threads lose their newest replies from the
+# body view. Pulling six recent chunks (~9000 tokens with the default
+# chunker) gives the LLM enough recent context to summarize the tail of
+# an active thread without exceeding ``PER_THREAD_CHAR_BUDGET`` after
+# ``_thread_context`` truncates per chunk.
+_SUMMARIZE_RECENT_CHUNKS = 6
+
 # Shared defense-in-depth framing for every intelligence prompt. Email
 # content is attacker-controlled input: anyone can send the user an email
 # asking the model to exfiltrate data, reveal the system prompt, or follow
@@ -414,10 +423,25 @@ def _thread_context(thread: ThreadResult, limit: int = PER_THREAD_CHAR_BUDGET) -
         # ``limit`` so multi-thread prompts (e.g. ``ask_mailbox`` with
         # ``max_threads=5``) stay within the LLM context window even
         # when each thread carries multiple chunks.
+        #
+        # When a chunk derives from an attachment (PDF / OCR'd image /
+        # extract), surface filename + MIME in the header so the LLM
+        # can cite "the quote.pdf says X" rather than emitting opaque
+        # passage references that the user can't trace back to the
+        # source attachment. Body chunks keep the shorter header
+        # shape to save tokens.
         parts: list[str] = []
         used = 0
         for chunk in thread.evidence_chunks:
-            header = f"[chunk {chunk.chunk_index} chars {chunk.char_start}-{chunk.char_end}]"
+            if chunk.attachment_id is not None:
+                fname = chunk.attachment_filename or "attachment"
+                mime = chunk.attachment_mime or "unknown"
+                header = (
+                    f"[chunk {chunk.chunk_index} — attachment {fname} ({mime}), "
+                    f"chars {chunk.char_start}-{chunk.char_end}]"
+                )
+            else:
+                header = f"[chunk {chunk.chunk_index} chars {chunk.char_start}-{chunk.char_end}]"
             text = chunk.text
             remaining = limit - used - len(header) - 2  # \n separators
             if remaining <= 0:
@@ -690,6 +714,20 @@ def register_intelligence_tools(
                 thread = await asyncio.to_thread(db.get_thread, best.thread_id)
                 if not thread:
                     return [TextContent(type="text", text=f"Thread not found: {thread_id}")]
+
+            # Attach the tail of the chunk store. The stored ``body_text``
+            # is front-preserved (Codex P1): once a thread crosses
+            # ``THREAD_BODY_TEXT_MAX_TOKENS`` (4000) any later reply is
+            # appended and immediately truncated off the tail. Reading
+            # the most-recent chunks lets the summary / timeline see the
+            # latest activity; if the thread has no chunks (empty body,
+            # extraction failure) ``_thread_context`` falls back to
+            # ``body_text`` as before.
+            recent_chunks = await asyncio.to_thread(
+                db.get_recent_chunks_for_thread, thread.thread_id, _SUMMARIZE_RECENT_CHUNKS
+            )
+            if recent_chunks:
+                thread.evidence_chunks = recent_chunks
 
             style_instructions = {
                 "brief": "Summarize in 2-3 sentences.",

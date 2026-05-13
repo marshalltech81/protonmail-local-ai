@@ -115,6 +115,8 @@ def _insert_chunk(
     text: str,
     embedding: list[float],
     chunk_index: int = 0,
+    chunked_at: str = "2024-01-01T00:00:00+00:00",
+    attachment_id: str | None = None,
 ) -> None:
     """Insert one ``message_chunks`` + matching FTS + vec row.
 
@@ -135,8 +137,8 @@ def _insert_chunk(
         INSERT INTO message_chunks
             (chunk_id, message_id, thread_id, chunk_index, text,
              char_start, char_end, token_est,
-             chunked_at, fts_rowid)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             chunked_at, fts_rowid, attachment_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             chunk_id,
@@ -147,8 +149,9 @@ def _insert_chunk(
             0,
             len(text),
             max(1, len(text) // 4),
-            "2024-01-01T00:00:00+00:00",
+            chunked_at,
             fts_rowid,
+            attachment_id,
         ),
     )
     conn.commit()

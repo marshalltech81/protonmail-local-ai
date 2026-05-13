@@ -269,6 +269,55 @@ Option 2 is the natural fit. Surfaced during the indexer line-by-line
 review on 2026-05-08; not blocking any active priority but a real
 RAG-quality regression on inbox-shape replies.
 
+### RAG quality — retrieval review followups (resolved 2026-05-13)
+
+Codex follow-up review on `fix/indexer-rag-review-followups` flagged
+four retrieval-quality gaps. All four addressed in this branch:
+
+- **F1 (P1) — Evidence ranking ignored lane provenance.** `ask_mailbox`
+  promises attachment content surfaces when the carrier thread is found
+  by *any* lane, including attachment filename FTS, but
+  `get_evidence_chunks_for_threads` ranked chunks purely by dense
+  similarity and `ChunkResult` carried no attachment provenance. Fixed
+  by extending `ChunkResult` with `attachment_id` / `attachment_filename`
+  / `attachment_mime`, JOINing `attachments` on `(attachment_id,
+  message_id)`, and floating attachment chunks to the front of the
+  per-thread evidence slice whenever the thread won via attachment-FTS
+  (`Database._attachment_won_thread_ids`). `_thread_context` renders
+  filename + MIME in the chunk header so the LLM can cite the source
+  attachment.
+- **F2 (P1) — `summarize_thread` fed stale `body_text`.** `_compute_body`
+  appends new replies to the existing body then truncates from the
+  front, so a thread that crosses `THREAD_BODY_TEXT_MAX_TOKENS` (4000)
+  silently drops its newest replies from the body view. `get_thread`
+  returns no evidence chunks, so `_thread_context` fell back to the
+  stale body. Added `Database.get_recent_chunks_for_thread`
+  (`chunked_at DESC, chunk_index DESC` selection, chronological output)
+  and `summarize_thread` now attaches the tail of the chunk store
+  before rendering. `body_text` shape is unchanged — front-preservation
+  still serves the threads-lane FTS coverage and `threads_vec` seeding.
+- **F3 (P2) — Retrieval eval lied about hybrid coverage.** The hybrid
+  test seeded a 768-dim placeholder against a 4096-dim schema; the
+  vector lane caught `OperationalError`, returned empty, and the
+  "hybrid" test became keyword-only while claiming to validate the
+  default RAG path. Now requires a real embedder: a session-scoped
+  `eval_embedder` fixture reads `EMBED_MODEL` / `EMBED_API_KEY` /
+  `EMBED_BASE_URL`, constructs an `EmbedClient`, and skips the hybrid
+  tests with a clear message when those are unset. Keyword-only eval
+  still runs without an embedder.
+- **F4 (P2) — `semantic_search` ignored the chunk-vec lane.** An MCP
+  caller picking `mode="semantic"` got `threads_vec`-only retrieval —
+  silently worse than `hybrid` for long-thread and attachment queries.
+  `semantic_search` now fuses `threads_vec` + `message_chunks_vec` via
+  RRF, mirroring the dense half of `hybrid_search`.
+
+Tests: `TestEvidenceAttachmentProvenance` (3), `TestThreadContextWithChunks`
+(3 new attachment-header cases), `TestGetRecentChunksForThread` (4),
+`TestSummarizeThread::test_recent_chunks_supersede_stale_body_text`
++ `::test_chunkless_thread_still_uses_body_text`, and
+`TestSemanticSearch::test_chunk_vec_lane_lifts_thread_with_weak_thread_vec`.
+Full mcp-server suite (385 tests) passes, coverage 93.5%.
+
 ### RAG quality — thread vector weighting across body and attachment chunks
 
 Surfaced by Codex review on 2026-05-12, deliberately **not addressed**

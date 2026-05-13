@@ -219,6 +219,35 @@ class TestSummarizeThread:
         out = asyncio.run(handler(thread_id="t-alpha"))
         assert "Error" in _text(out)
 
+    def test_recent_chunks_supersede_stale_body_text(self, fake_server, chunked_db, fake_llm):
+        """Codex P1: when ``body_text`` is stale (front-preserved truncate
+        drops newer replies), the summarize prompt must instead carry the
+        chunk tail. ``chunked_db.t-alpha`` has a chunk whose text is NOT
+        present in its ``body_text`` — that chunk must reach the LLM
+        prompt as evidence rather than the older body."""
+        handler = _handlers(fake_server, chunked_db, fake_llm)["summarize_thread"]
+        asyncio.run(handler(thread_id="t-alpha"))
+        assert fake_llm.complete_calls
+        _system, user = fake_llm.complete_calls[0]
+        # The chunk text "invoice number 12345" lives only in
+        # message_chunks, not in t-alpha's body_text — so its presence
+        # in the prompt is proof the recent-chunks path ran.
+        assert "invoice number 12345" in user
+        # And the chunk-rendered header form (not the body_text fallback).
+        assert "[chunk " in user
+
+    def test_chunkless_thread_still_uses_body_text(self, fake_server, chunked_db, fake_llm):
+        """Regression guard: a thread with NO chunks (t-gamma) must
+        continue to fall back to body_text so the summarize path works
+        for empty-body or extraction-failure threads."""
+        handler = _handlers(fake_server, chunked_db, fake_llm)["summarize_thread"]
+        asyncio.run(handler(thread_id="t-gamma"))
+        assert fake_llm.complete_calls
+        _system, user = fake_llm.complete_calls[0]
+        # The thread's body_text reaches the prompt because there are
+        # no chunks to override it.
+        assert "notes from the planning meeting" in user
+
 
 class TestExtractFromEmails:
     def test_returns_no_match_message_when_search_is_empty(self, fake_server, seeded_db, fake_llm):

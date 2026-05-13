@@ -36,12 +36,14 @@ across the loaded query set so two runs (e.g. before/after raising
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
+from src.lib.embed import EmbedClient, embed_query
 from src.lib.sqlite import Database
 
 # Module-level marker so ``pytest -m eval`` runs only this directory and
@@ -118,6 +120,41 @@ def eval_queries() -> list[EvalQuery]:
     return queries
 
 
+@pytest.fixture(scope="session")
+def eval_embedder(eval_db: Database):
+    """Return a callable that embeds a query string for the hybrid lane.
+
+    Codex P2: the prior placeholder ``[0.0] * 768`` lied about hybrid
+    coverage on two counts — the dim was wrong (schema is 4096) so
+    ``_vector_search`` swallowed an OperationalError and returned an
+    empty lane, and an all-zeros query against unit-normalised vectors
+    is semantically meaningless anyway. Skip the hybrid path entirely
+    unless the operator wired up a real embedder, so a green run
+    actually means hybrid retrieval is working — not "keyword-only
+    silently passing as hybrid."
+    """
+    base_url = os.environ.get("EMBED_BASE_URL", "")
+    model = os.environ.get("EMBED_MODEL")
+    api_key = os.environ.get("EMBED_API_KEY")
+    if not model or not api_key:
+        pytest.skip(
+            "Hybrid eval requires a real embedder. Set EMBED_MODEL and "
+            "EMBED_API_KEY (and EMBED_BASE_URL if not OpenAI proper) to "
+            "exercise the chunk-vec + thread-vec lanes; otherwise only "
+            "the keyword-eval cases run."
+        )
+    client = EmbedClient(base_url=base_url, model=model, api_key=api_key)
+    expected_dim = eval_db.get_embedding_dim()
+
+    def _embed(text: str) -> list[float]:
+        # Each call gets its own event loop so the eval suite stays sync
+        # at the test layer; ``asyncio.run`` avoids the 3.14 deprecation
+        # warning on ``get_event_loop()`` with no running loop.
+        return asyncio.run(embed_query(client, text, expected_dim))
+
+    return _embed
+
+
 def _rank_of_first_match(results: list, expected_ids: set[str]) -> int | None:
     """Return the 1-indexed rank of the first expected id, or ``None``."""
     for rank, r in enumerate(results, start=1):
@@ -160,21 +197,19 @@ def test_keyword_search_finds_expected_thread(eval_db: Database, eval_query: Eva
     )
 
 
-def test_hybrid_search_finds_expected_thread(eval_db: Database, eval_query: EvalQuery) -> None:
+def test_hybrid_search_finds_expected_thread(
+    eval_db: Database, eval_embedder, eval_query: EvalQuery
+) -> None:
     """Hybrid (BM25 + vector via RRF) is the default search mode the LLM
     sees through ``search_emails`` / ``ask_mailbox``. If it loses the
     expected thread, downstream answers will be wrong even if the LLM
     is perfect — this is the most important assertion in the file."""
     if not eval_query.expected_thread_ids:
         pytest.skip(f"{eval_query.id}: no expected_thread_ids — skip.")
-    # Hybrid needs an embedding; we synthesize a deterministic placeholder
-    # so this test is purely a retrieval check on the indexed vectors and
-    # does not require a live embedder. Real "ask_mailbox quality" is a
-    # separate eval (not in this PR) that exercises the LLM end-to-end.
-    placeholder = [0.0] * 768
+    embedding = eval_embedder(eval_query.search_query)
     results = eval_db.hybrid_search(
         query_text=eval_query.search_query,
-        query_embedding=placeholder,
+        query_embedding=embedding,
         limit=10,
     )
     rank = _rank_of_first_match(results, set(eval_query.expected_thread_ids))
@@ -184,7 +219,7 @@ def test_hybrid_search_finds_expected_thread(eval_db: Database, eval_query: Eval
     )
 
 
-def test_eval_summary(eval_db: Database, eval_queries: list[EvalQuery]) -> None:
+def test_eval_summary(eval_db: Database, eval_embedder, eval_queries: list[EvalQuery]) -> None:
     """Aggregate Recall@10 and MRR across the loaded query set.
 
     Always passes — this is a reporting test, not an assertion, so the
@@ -196,10 +231,10 @@ def test_eval_summary(eval_db: Database, eval_queries: list[EvalQuery]) -> None:
     for q in eval_queries:
         if not q.expected_thread_ids:
             continue
-        placeholder = [0.0] * 768
+        embedding = eval_embedder(q.search_query)
         results = eval_db.hybrid_search(
             query_text=q.search_query,
-            query_embedding=placeholder,
+            query_embedding=embedding,
             limit=10,
         )
         rank = _rank_of_first_match(results, set(q.expected_thread_ids))

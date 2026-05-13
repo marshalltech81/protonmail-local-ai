@@ -32,7 +32,14 @@ def _result(
     )
 
 
-def _chunk(text: str, index: int = 0, char_start: int = 0) -> ChunkResult:
+def _chunk(
+    text: str,
+    index: int = 0,
+    char_start: int = 0,
+    attachment_id: str | None = None,
+    attachment_filename: str | None = None,
+    attachment_mime: str | None = None,
+) -> ChunkResult:
     return ChunkResult(
         chunk_id=f"c{index}",
         message_id="m1",
@@ -41,6 +48,9 @@ def _chunk(text: str, index: int = 0, char_start: int = 0) -> ChunkResult:
         text=text,
         char_start=char_start,
         char_end=char_start + len(text),
+        attachment_id=attachment_id,
+        attachment_filename=attachment_filename,
+        attachment_mime=attachment_mime,
     )
 
 
@@ -100,6 +110,53 @@ class TestThreadContextWithChunks:
     def test_no_evidence_chunks_falls_back_to_body_text(self):
         r = _result(body_text="legacy thread body")
         assert _thread_context(r) == "legacy thread body"
+
+    def test_attachment_chunk_header_names_filename_and_mime(self):
+        """Codex P1: when evidence comes from an attachment, the header
+        must surface filename + MIME so the LLM can cite the source
+        attachment rather than emitting opaque passage references."""
+        r = _result(
+            evidence_chunks=[
+                _chunk(
+                    "solar installation total USD 18450",
+                    index=2,
+                    char_start=100,
+                    attachment_id="att-1",
+                    attachment_filename="proposal-quote.pdf",
+                    attachment_mime="application/pdf",
+                )
+            ],
+        )
+        out = _thread_context(r)
+        assert "attachment proposal-quote.pdf" in out
+        assert "application/pdf" in out
+        assert "solar installation total USD 18450" in out
+
+    def test_body_chunk_header_omits_attachment_decoration(self):
+        """Token-budget guardrail: non-attachment chunks keep the short
+        ``[chunk N chars X-Y]`` header so multi-thread prompts don't bloat."""
+        r = _result(evidence_chunks=[_chunk("body passage", index=0)])
+        out = _thread_context(r)
+        assert "attachment" not in out
+        assert "[chunk 0 chars 0-12]" in out
+
+    def test_attachment_header_tolerates_missing_filename_or_mime(self):
+        """Defensive fallback: if the JOIN against ``attachments`` misses
+        (orphan chunk, DB mid-reap), render generic placeholders rather
+        than crashing with ``None``-formatted text."""
+        r = _result(
+            evidence_chunks=[
+                _chunk(
+                    "orphan attachment text",
+                    attachment_id="att-x",
+                    attachment_filename=None,
+                    attachment_mime=None,
+                )
+            ],
+        )
+        out = _thread_context(r)
+        assert "attachment attachment" in out  # generic placeholder
+        assert "(unknown)" in out
 
 
 def _candidate(thread_id: str, subject: str) -> ThreadResult:
