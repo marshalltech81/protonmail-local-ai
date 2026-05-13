@@ -269,6 +269,53 @@ Option 2 is the natural fit. Surfaced during the indexer line-by-line
 review on 2026-05-08; not blocking any active priority but a real
 RAG-quality regression on inbox-shape replies.
 
+### RAG quality — thread vector weighting across body and attachment chunks
+
+Surfaced by Codex review on 2026-05-12, deliberately **not addressed**
+on `fix/indexer-rag-review-followups` pending real eval data.
+
+`indexer/src/main.py:_phase2c_commit_vectors` computes the thread
+vector as `mean_vector(chunk_embs)` where `chunk_embs` comes from
+`Database.get_thread_chunk_embeddings(thread_id)`. That query reads
+every chunk for the thread with no `attachment_id` filter, so body
+chunks and attachment chunks contribute equally to the mean. A
+30-page PDF (~50 chunks) on a 5-message email thread (~5 chunks)
+drives roughly 91% of the thread vector — the actual email
+conversation becomes a ~9% signal in the coarse retrieval lane.
+
+The chunk-precision lane is unaffected (per-chunk vectors are
+unchanged), so "find the right passage" still works. The drift hits
+the "find the right thread" lane: a query asking about the email
+discussion can be deprioritised against threads whose attachment
+content dominates their vector.
+
+Three options if/when an eval shows this matters:
+
+1. **Keep mean-of-all-chunks** (current). Document as a known
+   tradeoff. Defensible if most user queries are
+   attachment-content-driven (operator asks "what does the attached
+   PDF say?" far more than "what did Bob say in the email?").
+2. **Weight body chunks vs attachment chunks** (e.g.
+   `body_weight=1.0`, `attachment_weight=0.3`). Requires a tunable
+   constant pair and a per-chunk source flag in
+   `get_thread_chunk_embeddings` so the mean can be weighted.
+3. **Cap per-source contribution** — every "source" (message body or
+   specific `attachment_id`) contributes equally to the mean
+   regardless of chunk count. Removes the long-PDF amplification
+   without introducing a tuning constant.
+
+Not actioned because choosing between these blindly is just
+guessing at a tradeoff the user's actual queries answer. The
+action-ready signal is a retrieval eval that distinguishes "asked
+about the PDF" vs "asked about the email" queries on a populated
+real mailbox; until then, this finding stays parked.
+
+When the eval lands, expect to also touch
+`indexer/src/database.py:get_thread_chunk_embeddings` (add an
+`attachment_id IS NULL` filter or weighted variant) and
+`indexer/src/reconciler.py:_reap_thread` (the survivor-chunks-mean
+path mirrors the same logic).
+
 ### Attachment indexing — remaining work
 Most of this section is implemented: filenames/MIME indexed in
 `attachments_fts`, per-format extraction (PDF / DOCX / XLSX / HTML / TXT /
