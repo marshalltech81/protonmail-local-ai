@@ -1431,6 +1431,35 @@ class Database:
         return [r["filepath"] for r in rows]
 
     @_synchronized
+    def get_thread_display_subject(self, thread_id: str) -> str | None:
+        """Return ``threads.display_subject`` for ``thread_id``, or ``None``.
+
+        ``display_subject`` is the oldest message's original-case
+        subject (with any ``Re:`` / ``Fwd:`` prefixes intact),
+        maintained by ``upsert_thread``'s merge so the value is stable
+        across the lifetime of the thread except when a genuinely
+        older message arrives out of order. ``None`` when the thread
+        does not exist OR is a legacy v12 row that has not been
+        refreshed since v13 added the column.
+
+        Used by the chunkless-thread subject-fallback path in the
+        indexer's Phase 2a and the reconciler's reap rebuild so both
+        paths embed the SAME stable subject text for the same thread.
+        Without this shared source, the indexer's fallback used the
+        newly-arrived message's subject (overwriting prior fallbacks
+        on every chunkless reply, producing order-dependent thread
+        vectors) and the reaper used the threader's normalized
+        grouping key (silent vector drift between the two paths).
+        """
+        row = self._conn.execute(
+            "SELECT display_subject FROM threads WHERE thread_id = ?",
+            (thread_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return row["display_subject"]
+
+    @_synchronized
     def thread_has_chunks(self, thread_id: str) -> bool:
         """Return True iff at least one chunk row exists for ``thread_id``.
 

@@ -755,14 +755,26 @@ def _phase2a_collect_chunks(
         # threads where this gate fires for every chunkless arrival.
         has_new_chunks = bool(new_body) or any(plan_new for plan_new in attach_new_chunks)
         if not has_new_chunks and not db.thread_has_chunks(state.thread.thread_id):
-            # Use the message's ORIGINAL-case subject (with any ``Re:`` /
-            # ``Fwd:`` intact) as the fallback embed text rather than
-            # ``state.thread.subject``, which is the threader's
-            # normalized (lowercased, prefix-stripped) grouping key. The
-            # un-normalized form gives the embedder a richer semantic
-            # anchor — this is the ONLY vector a chunkless thread ever
-            # gets, so maximizing its signal matters.
-            fallback_text = (state.msg.subject or "").strip()
+            # Source the fallback text from the thread's stored
+            # ``display_subject`` rather than from ``state.msg.subject``.
+            # ``display_subject`` is the OLDEST message's original-case
+            # subject, maintained by ``upsert_thread``'s merge across
+            # every arrival. Reading from there keeps the fallback
+            # vector STABLE across successive chunkless arrivals: using
+            # ``state.msg.subject`` made each new chunkless message
+            # overwrite the prior thread vector with its own subject
+            # embedding (msg1's "Quarterly Review" → msg2's "Re: Quarterly
+            # Review" → msg3's "Fwd: ..."), producing arrival-order-
+            # dependent thread vectors on a chunkless thread.
+            #
+            # Phase 1 already committed this message's row via
+            # ``upsert_thread``, so the display_subject reflecting the
+            # oldest-seen message is in the DB before this read. Falls
+            # through to the message's own subject for legacy v12 rows
+            # where display_subject is NULL (an indexer pass will
+            # refresh those over time).
+            stored_display = db.get_thread_display_subject(state.thread.thread_id)
+            fallback_text = (stored_display or state.msg.subject or "").strip()
             if not fallback_text:
                 fallback_text = "(empty thread)"
             state.subject_fallback_offset = len(all_texts)

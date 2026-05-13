@@ -528,6 +528,76 @@ class TestReap:
         rec.reap()
         assert trashed.exists() is False
 
+    def test_reap_chunkless_fallback_uses_display_subject_not_normalized(
+        self, db, threader, embedder, reconciler, maildir
+    ):
+        # When a reap leaves only survivors whose bodies are all
+        # chunk-less (blank body, only-quoted body that strips to empty),
+        # the rebuilt thread vector falls back to embedding the subject.
+        # That fallback MUST mirror the indexer's main path, which
+        # embeds the thread's stored ``display_subject`` (oldest
+        # message's original-case subject). Embedding
+        # ``rebuilt_thread.subject`` instead would use the threader's
+        # normalized grouping key (lowercased, ``Re:``/``Fwd:`` stripped)
+        # — silent vector drift between the main and reap paths.
+        original_subject = "Quarterly Review Schedule"
+
+        orig_path = maildir / "1700000000.M1.host:2,S"
+        _write_eml(orig_path, "ds1@example.com", subject=original_subject, body="")
+        thread_id = _index(orig_path, db, threader)
+
+        reply_path = maildir / "1700000001.M2.host:2,S"
+        _write_eml(
+            reply_path,
+            "ds2@example.com",
+            subject=f"Re: {original_subject}",
+            body="",
+            in_reply_to="ds1@example.com",
+            date=datetime(2024, 2, 1, tzinfo=UTC),
+        )
+        _index(reply_path, db, threader)
+
+        # Reaping the original leaves the reply as the sole survivor —
+        # blank body, no chunks, so the reap path takes the fallback
+        # branch in ``_reap_thread``.
+        trashed = maildir / "1700000000.M1.host:2,ST"
+        orig_path.rename(trashed)
+        reconciler.sweep()
+
+        # Reset call history so we can isolate what gets embedded
+        # during the reap fallback alone.
+        embedder.calls = 0
+        # FakeEmbedder records call count but not args; intercept embed
+        # to capture the actual text the reaper sent.
+        embedded: list[str] = []
+        original_embed = embedder.embed
+
+        def _capture(text: str) -> list[float]:
+            embedded.append(text)
+            return original_embed(text)
+
+        embedder.embed = _capture
+
+        result = reconciler.reap()
+        assert result["threads_rebuilt"] == 1
+        assert db.get_thread(thread_id) is not None
+
+        # The reaper must have embedded the ORIGINAL-case subject from
+        # the thread's ``display_subject`` (or, falling back, the oldest
+        # survivor's subject). The normalized grouping key
+        # ``"quarterly review schedule"`` (lowercased + prefix-stripped)
+        # would be the regression — it must NOT appear.
+        assert any(original_subject in text for text in embedded), (
+            f"reap fallback must embed display_subject (or oldest "
+            f"survivor's original-case subject); embedded: {embedded!r}"
+        )
+        normalized = original_subject.lower()
+        assert all(text != normalized for text in embedded), (
+            f"reap fallback must not embed the normalized grouping key "
+            f"({normalized!r}) — that drifts from the main indexer's "
+            f"fallback choice; embedded: {embedded!r}"
+        )
+
     def test_reap_drops_chunks_for_reaped_messages_and_keeps_survivor_chunks(
         self, db, threader, embedder, reconciler, maildir
     ):

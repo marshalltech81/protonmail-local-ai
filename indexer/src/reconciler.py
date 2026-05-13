@@ -319,7 +319,23 @@ class Reconciler:
             if survivor_chunks:
                 embedding = mean_vector(survivor_chunks)
             else:
-                fallback = rebuilt_thread.subject.strip() or "(empty thread)"
+                # Mirror the indexer's main subject-fallback path:
+                # prefer the thread's stored ``display_subject``
+                # (oldest message's original-case subject) so a
+                # post-reap rebuild produces the same vector shape the
+                # main indexer would have. ``rebuilt_thread.subject``
+                # is the threader's normalized grouping key
+                # (lowercased, ``Re:``/``Fwd:`` stripped) — using it
+                # here drifted silently from the main path's choice.
+                # Falls back to the oldest survivor's original-case
+                # subject, then a sentinel, so legacy threads with NULL
+                # ``display_subject`` still get a usable embedding.
+                stored_display = self.db.get_thread_display_subject(thread_id)
+                fallback = (stored_display or "").strip()
+                if not fallback and survivors:
+                    fallback = (survivors[0].subject or "").strip()
+                if not fallback:
+                    fallback = "(empty thread)"
                 embedding = self.embedder.embed(fallback)
         except Exception as e:
             # Embedding service unavailable or embedding failed — leave state untouched
