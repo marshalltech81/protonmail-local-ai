@@ -134,6 +134,100 @@ class TestFilterForwarding:
         assert captured["has_attachments"] is True
 
 
+class TestRerankerEvidence:
+    """``search_emails`` must request evidence chunks from
+    ``hybrid_search`` whenever a reranker is configured, so the
+    cross-encoder scores against the actual passage text that lifted
+    the thread into ranking — not ``Subject + snippet`` (the 200-char
+    body preview from the latest message). Without this, the
+    optional reranker can demote the genuinely-relevant thread
+    because the only signal it sees is metadata-shaped, which it
+    wasn't trained against.
+    """
+
+    class _CaptureReranker:
+        """Reranker stub that records the documents it scored.
+
+        Conforms to ``RerankerBackend`` structurally (duck-typed); no
+        inheritance so test layers stay free of reranker.py imports.
+        """
+
+        candidates = 10
+        top_n = 5
+
+        def __init__(self) -> None:
+            self.seen_docs: list[list[str]] = []
+
+        def rerank(self, query, documents, top_n=None):
+            self.seen_docs.append(list(documents))
+            return [(i, float(len(documents) - i)) for i in range(len(documents))]
+
+    def test_hybrid_with_reranker_sets_with_evidence_true(self, fake_server, fake_llm, chunked_db):
+        captured: dict = {}
+        original = chunked_db.hybrid_search
+
+        def spy(**kwargs):
+            captured.update(kwargs)
+            return original(**kwargs)
+
+        chunked_db.hybrid_search = spy  # type: ignore[assignment]
+        reranker = self._CaptureReranker()
+        register_search_tools(fake_server, chunked_db, fake_llm, reranker=reranker)
+        handler = fake_server.tools["search_emails"]
+
+        asyncio.run(handler(query="invoice", mode="hybrid"))
+
+        assert captured.get("with_evidence") is True, (
+            "search_emails with a reranker configured must request "
+            "evidence chunks so the cross-encoder scores against the "
+            "passage text, not the 200-char snippet"
+        )
+
+    def test_hybrid_without_reranker_keeps_with_evidence_false(
+        self, fake_server, fake_llm, seeded_db
+    ):
+        captured: dict = {}
+        original = seeded_db.hybrid_search
+
+        def spy(**kwargs):
+            captured.update(kwargs)
+            return original(**kwargs)
+
+        seeded_db.hybrid_search = spy  # type: ignore[assignment]
+        handler = _handler(fake_server, fake_llm, seeded_db)
+
+        asyncio.run(handler(query="invoice", mode="hybrid"))
+
+        # No reranker → we skip the chunk-attach cost. The flag must
+        # be explicitly False so a future caller wrapping this in a
+        # batch pipeline doesn't inherit a True from a stale default.
+        assert captured.get("with_evidence") is False
+
+    def test_reranker_sees_chunk_text_not_just_snippet(self, fake_server, fake_llm, chunked_db):
+        # End-to-end: with the fix, the reranker's ``documents``
+        # argument carries chunk text. ``alpha-c1`` (in the chunked_db
+        # fixture) has text "invoice number 12345 due march 31"; the
+        # number ``12345`` appears in NEITHER the subject ("invoice
+        # for march") NOR the snippet ("please find the invoice
+        # attached"), so finding it in the reranker's documents proves
+        # the chunk was attached and forwarded.
+        reranker = self._CaptureReranker()
+        register_search_tools(fake_server, chunked_db, fake_llm, reranker=reranker)
+        handler = fake_server.tools["search_emails"]
+
+        asyncio.run(handler(query="invoice", mode="hybrid"))
+
+        assert reranker.seen_docs, "reranker.rerank was never invoked"
+        joined = "\n".join(reranker.seen_docs[0])
+        assert "12345" in joined, (
+            f"Reranker must score against chunk text — ``12345`` "
+            f"appears in chunk ``alpha-c1`` but NEVER in subject or "
+            f"snippet, so finding it in the rerank documents is the "
+            f"sentinel for evidence-chunk wiring. Got documents:\n"
+            f"{reranker.seen_docs[0]!r}"
+        )
+
+
 class TestResultFormatting:
     def test_empty_results_returns_no_results_message(self, fake_server, fake_llm, seeded_db):
         handler = _handler(fake_server, fake_llm, seeded_db)

@@ -297,7 +297,17 @@ class Database:
         # coarse vector score. Threads with no chunks (empty bodies)
         # simply don't appear in this lane and rely on the other two
         # for ranking.
-        chunk_hits = self._chunk_vector_search(query_embedding, fetch_limit * 3)
+        #
+        # ``_CHUNK_LANE_OVERSAMPLE`` (=10) matches the FTS chunk and
+        # attachment lanes that already use this factor. The shared
+        # constant exists precisely to address the "long thread with
+        # many similar chunks monopolises the top-K and contributes
+        # only one credit to RRF" failure mode — leaving the vec lane
+        # at the prior ``* 3`` would re-create that asymmetry between
+        # the keyword and dense chunk paths.
+        chunk_hits = self._chunk_vector_search(
+            query_embedding, fetch_limit * _CHUNK_LANE_OVERSAMPLE
+        )
         fused = self._reciprocal_rank_fusion(bm25_results, vec_results, chunk_hits)
         filtered = self._apply_filters(
             fused, folders, from_addr, date_from, date_to, has_attachments
@@ -319,15 +329,20 @@ class Database:
         candidates = filtered[:candidates_n]
 
         if with_evidence and candidates:
-            # Reuse the chunk lane already fetched: group its hits by
-            # parent thread, take the best per thread for the surfaced
-            # results. Avoids a second sqlite-vec round-trip when
-            # ``chunk_hits`` already covers the surfaced threads.
-            wanted = {r.thread_id for r in candidates}
-            grouped: dict[str, list[ChunkResult]] = {tid: [] for tid in wanted}
-            for chunk in chunk_hits:
-                if chunk.thread_id in wanted and len(grouped[chunk.thread_id]) < 3:
-                    grouped[chunk.thread_id].append(chunk)
+            # Fetch evidence chunks per surfaced thread, not from the
+            # global chunk-vec pool. A thread can win the candidates
+            # slice via BM25, thread-vector, or any of the keyword
+            # filter lanes (sender, date, attachment filename FTS) —
+            # and its specific chunks may not rank anywhere in the
+            # global chunk-vec top-K. The prior pool-reuse shape left
+            # those threads with empty ``evidence_chunks``, silently
+            # breaking ``ask_mailbox``'s "reads attachment content"
+            # promise whenever the carrier email won by metadata but
+            # the attachment chunks didn't enter the chunk-vec pool.
+            wanted = [r.thread_id for r in candidates]
+            grouped = self.get_evidence_chunks_for_threads(
+                wanted, query_embedding, per_thread_limit=3
+            )
             for result in candidates:
                 result.evidence_chunks = grouped.get(result.thread_id, [])
 
@@ -833,30 +848,76 @@ class Database:
         thread_ids: list[str],
         embedding: list[float],
         per_thread_limit: int = 3,
-        candidate_pool: int = 200,
     ) -> dict[str, list[ChunkResult]]:
         """Return up to ``per_thread_limit`` best-matching chunks per thread.
 
-        Pulls a single vector-search candidate pool of size
-        ``candidate_pool`` and groups the results by thread, keeping
-        only the top chunks for the requested ``thread_ids``. One sqlite-
-        vec round-trip serves N threads at once; per-thread queries
-        would scale linearly.
+        Scans the chunks belonging to ``thread_ids`` directly (rather
+        than filtering a global vector-search pool by thread_id),
+        sorts each thread's chunks by similarity to ``embedding``, and
+        returns the top ``per_thread_limit`` per thread.
 
-        Used by intelligence tools after ``hybrid_search`` to attach
-        precise passage citations to the threads it returned.
+        This shape matters for the ``hybrid_search(with_evidence=True)``
+        path. The prior pool-reuse implementation depended on the
+        thread's chunks happening to rank in the global chunk-vector
+        top-K — meaning a thread won via BM25, thread-vector,
+        sender/date filter, or attachment filename FTS could end up
+        with empty ``evidence_chunks`` whenever its specific chunks
+        didn't make the global pool. ``ask_mailbox``'s docstring
+        promises that "this is the ONLY mailbox tool that reads
+        attachment content"; the pool-reuse shape silently broke that
+        promise for any non-chunk-vec retrieval lane.
+
+        Implementation reads only chunks belonging to the surfaced
+        ``thread_ids`` and computes ``vec_distance_l2`` against each.
+        For typical surfaced sets (5-50 threads × 1-100 chunks each)
+        this is a small sequential scan and beats N per-thread KNN
+        queries on round-trip overhead.
         """
         if not thread_ids:
             return {}
-        chunks = self._chunk_vector_search(embedding, candidate_pool)
-        wanted = set(thread_ids)
+        try:
+            serialized = sqlite_vec.serialize_float32(embedding)
+            placeholders = ",".join(["?"] * len(thread_ids))
+            # Composed SQL — the ``IN (?, ...)`` is built from a
+            # placeholder count, not from thread_id values, and every
+            # bound parameter goes through the driver. nosec B608.
+            sql = (
+                "SELECT c.chunk_id, c.message_id, c.thread_id, c.chunk_index, "
+                "c.text, c.char_start, c.char_end, "
+                "vec_distance_l2(v.embedding, ?) AS score "
+                "FROM message_chunks c "
+                "JOIN message_chunks_vec v ON c.chunk_id = v.chunk_id "
+                f"WHERE c.thread_id IN ({placeholders}) "  # nosec B608
+                "ORDER BY score ASC"
+            )
+            rows = self._fetchall(sql, [serialized, *thread_ids])
+        except (sqlite3.Error, ValueError) as e:
+            # Same catch surface as ``_chunk_vector_search`` — missing
+            # vec extension, corrupt vec row, malformed serialised
+            # embedding. Degrade to empty evidence rather than failing
+            # the whole hybrid_search call; coarse retrieval still
+            # works and the LLM falls back to ``body_text``.
+            log.warning("Per-thread evidence chunk fetch failed: %s", e)
+            return {tid: [] for tid in thread_ids}
+
         grouped: dict[str, list[ChunkResult]] = {tid: [] for tid in thread_ids}
-        for chunk in chunks:
-            if chunk.thread_id not in wanted:
+        for r in rows:
+            tid = r["thread_id"]
+            bucket = grouped[tid]
+            if len(bucket) >= per_thread_limit:
                 continue
-            bucket = grouped[chunk.thread_id]
-            if len(bucket) < per_thread_limit:
-                bucket.append(chunk)
+            bucket.append(
+                ChunkResult(
+                    chunk_id=r["chunk_id"],
+                    message_id=r["message_id"],
+                    thread_id=tid,
+                    chunk_index=int(r["chunk_index"]),
+                    text=r["text"],
+                    char_start=int(r["char_start"]),
+                    char_end=int(r["char_end"]),
+                    score=float(r["score"]),
+                )
+            )
         return grouped
 
     def _vector_search(self, embedding: list[float], limit: int) -> list[ThreadResult]:

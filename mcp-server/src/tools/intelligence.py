@@ -485,14 +485,18 @@ def register_intelligence_tools(
 
         This is the ONLY mailbox tool that reads attachment content.
         The local index extracts text from every PDF (digital and
-        OCR'd) and runs OCR on every image, then makes those
-        passages available to ``ask_mailbox`` as evidence chunks.
-        ``search_emails`` and ``get_thread`` see only message
-        bodies; their snippets and indexed text exclude attachment
-        extracts. Reaching for an external tool (Google Drive, web
-        search, etc.) to read a PDF that arrived as an email
-        attachment is the wrong shape — that PDF's text is already
-        in the local index, and ``ask_mailbox`` will surface it.
+        OCR'd) and runs OCR on every image. Once a thread is
+        surfaced by retrieval — via BM25, dense thread vector, dense
+        chunk vector, sender / date / attachment filename filter, or
+        any combination thereof — the most-relevant passages of that
+        thread's body AND its attachment text are fetched per-thread
+        and handed to the LLM as evidence chunks. ``search_emails``
+        and ``get_thread`` see only message bodies; their snippets
+        and indexed text exclude attachment extracts. Reaching for an
+        external tool (Google Drive, web search, etc.) to read a PDF
+        that arrived as an email attachment is the wrong shape —
+        that PDF's text is already in the local index, and
+        ``ask_mailbox`` will surface it.
 
         Use this whenever the question needs:
           - attachment content (PDFs, scans, OCR'd images, statements,

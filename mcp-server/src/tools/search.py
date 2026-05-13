@@ -231,6 +231,18 @@ def register_search_tools(
                 )
             else:  # hybrid (default)
                 embedding = await embed_query(embed_client, query, expected_embed_dim)
+                # When a reranker is configured, ask for evidence
+                # chunks so the cross-encoder scores against the actual
+                # passage that lifted the thread into ranking — not
+                # ``Subject + snippet`` (the snippet is the latest
+                # message's first 200 chars, almost certainly the wrong
+                # passage for the reranker to score against). Without
+                # ``with_evidence=True`` the reranker can demote the
+                # genuinely-relevant thread because it never sees the
+                # passage that made the dense or chunk lane retrieve
+                # it. The flag is gated on reranker presence so we
+                # don't pay the chunk-attach cost on the rerank-less
+                # default path.
                 results = await asyncio.to_thread(
                     db.hybrid_search,
                     query_text=query,
@@ -241,6 +253,7 @@ def register_search_tools(
                     date_to=date_to,
                     has_attachments=has_attachments,
                     limit=limit,
+                    with_evidence=reranker is not None,
                     reranker=reranker,
                 )
 

@@ -527,6 +527,64 @@ class TestHybridSearch:
         )
         assert all(r.folder == "INBOX" for r in results)
 
+    def test_hybrid_chunk_vec_lane_uses_shared_oversample_constant(
+        self, seeded_db: Database, monkeypatch
+    ):
+        """Regression for the dense-chunk pool-starvation failure mode.
+
+        A long thread with many semantically-similar chunks can fill
+        the top-K of the chunk-vector lane and contribute only one
+        unique thread to RRF (the best-rank-only dedupe in
+        ``_reciprocal_rank_fusion`` strips its siblings). Sibling
+        threads whose only signal is also a chunk-vector match never
+        enter the fused result list. The keyword chunk and attachment
+        lanes already use ``_CHUNK_LANE_OVERSAMPLE`` (=10) to address
+        exactly this; the dense chunk lane in ``hybrid_search`` used
+        ``fetch_limit * 3`` until this regression was flagged.
+
+        Asserting the wiring directly (the chunk-vec lane is called
+        with ``fetch_limit * _CHUNK_LANE_OVERSAMPLE``) keeps the test
+        deterministic. The RRF-score behaviour at high oversample
+        already has coverage in ``TestRRFChunkLifting`` — the gap
+        flagged here was the call-site constant, not the dedupe.
+        """
+        from src.lib import sqlite as sqlite_module
+
+        captured_limits: list[int] = []
+        original = sqlite_module.Database._chunk_vector_search
+
+        def _spy(self, query_embedding, limit):
+            captured_limits.append(limit)
+            return original(self, query_embedding, limit)
+
+        monkeypatch.setattr(sqlite_module.Database, "_chunk_vector_search", _spy)
+
+        seeded_db.hybrid_search(
+            query_text="anything",
+            query_embedding=[1.0, 0.0, 0.0, 0.0],
+            limit=5,
+        )
+
+        assert captured_limits, "_chunk_vector_search was never invoked"
+        # Default ``hybrid_search`` math: no filters / no rerank →
+        # oversample = _UNFILTERED_OVERSAMPLE (2) → fetch_limit = 10 →
+        # the chunk-vec lane MUST be invoked with
+        # fetch_limit * _CHUNK_LANE_OVERSAMPLE (= 100), not the prior
+        # ``fetch_limit * 3`` (= 30). A regression dropping the
+        # constant back to ``3`` would fail this assertion immediately.
+        expected = (
+            5  # limit
+            * sqlite_module._UNFILTERED_OVERSAMPLE
+            * sqlite_module._CHUNK_LANE_OVERSAMPLE
+        )
+        assert captured_limits[0] == expected, (
+            f"chunk-vec lane invoked with limit={captured_limits[0]}, "
+            f"expected {expected} "
+            f"(fetch_limit * _CHUNK_LANE_OVERSAMPLE). A smaller value "
+            f"reintroduces the pool-starvation failure for long "
+            f"threads with many similar chunks."
+        )
+
 
 class _IndexScoringReranker:
     """Test stub: scores each candidate by its position in the input
@@ -1149,6 +1207,115 @@ class TestEvidenceChunksHelper:
 
     def test_empty_thread_ids_returns_empty_dict(self, chunked_db: Database):
         assert chunked_db.get_evidence_chunks_for_threads([], [1.0, 0.0, 0.0, 0.0]) == {}
+
+    def test_returns_thread_chunks_even_when_global_top_k_excludes_them(self, tmp_path):
+        """Regression for the ``with_evidence=True`` pool-starvation gap.
+
+        Codex flagged that ``ask_mailbox`` could surface a carrier
+        email via BM25 / metadata / thread-vector / attachment FTS
+        and then hand the LLM ``body_text`` instead of the attachment
+        passages — because the prior pool-reuse logic populated
+        ``evidence_chunks`` only from the global chunk-vec top-K, and
+        the carrier's specific chunks could rank deep enough to fall
+        out of that pool entirely.
+
+        Setup pins exactly that failure shape: thread ``t-carrier``
+        carries a chunk whose embedding is FAR from the query, plus a
+        cloud of distractor threads whose chunks dominate any global
+        top-K. The helper must still surface ``t-carrier``'s own
+        chunk when asked for that thread specifically — because real
+        production callers (hybrid_search after a non-chunk-lane win)
+        rely on per-thread retrieval, not pool filtering.
+        """
+        from tests.conftest import _build_schema, _insert_chunk, _insert_thread
+
+        db_path = tmp_path / "carrier.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.enable_load_extension(True)
+        import sqlite_vec
+
+        sqlite_vec.load(conn)
+        conn.enable_load_extension(False)
+        _build_schema(conn)
+
+        # Carrier thread: chunk embedding orthogonal to query. A pool-
+        # reuse implementation pulling top-K by similarity would never
+        # see this chunk.
+        _insert_thread(
+            conn,
+            thread_id="t-carrier",
+            subject="please find attached",
+            participants=["alice@example.com"],
+            senders=["alice@example.com"],
+            body_text="please find attached",
+            snippet="please find attached",
+            embedding=[1.0, 0.0, 0.0, 0.0],
+        )
+        _insert_chunk(
+            conn,
+            chunk_id="carrier-chunk",
+            message_id="t-carrier",
+            thread_id="t-carrier",
+            text="attached PDF: invoice number 99999 due june 30",
+            # Deliberately ORTHOGONAL to the query so a global top-K
+            # by similarity would never include this chunk.
+            embedding=[0.0, 0.0, 0.0, 1.0],
+        )
+
+        # 50 distractor threads each with a chunk closer to the query
+        # than the carrier's. Together they monopolise the global
+        # top-K — any pool-reuse logic with a reasonable candidate
+        # pool size would miss the carrier's chunk entirely.
+        for i in range(50):
+            tid = f"t-d-{i:02d}"
+            _insert_thread(
+                conn,
+                thread_id=tid,
+                subject=f"distractor {i}",
+                participants=["bob@example.com"],
+                senders=["bob@example.com"],
+                body_text=f"distractor body {i}",
+                snippet="d",
+                embedding=[0.9, 0.4, 0.0, 0.0],
+            )
+            _insert_chunk(
+                conn,
+                chunk_id=f"d-{i:02d}-chunk",
+                message_id=tid,
+                thread_id=tid,
+                text=f"distractor chunk content {i}",
+                # Close to query — these dominate any global top-K.
+                embedding=[1.0, 0.0, 0.0, 0.0],
+            )
+
+        conn.close()
+
+        db = Database(str(db_path))
+        try:
+            # Ask for evidence on the carrier specifically — what
+            # ``hybrid_search(with_evidence=True)`` does after the
+            # carrier wins via thread-vec / BM25 / metadata.
+            evidence = db.get_evidence_chunks_for_threads(
+                thread_ids=["t-carrier"],
+                embedding=[1.0, 0.0, 0.0, 0.0],
+            )
+        finally:
+            db.close()
+
+        # The carrier's chunk MUST come back even though it's deep
+        # inside the global similarity ordering — the helper scans
+        # only chunks belonging to the requested thread_ids, so
+        # global pool starvation can't strip it.
+        assert "t-carrier" in evidence
+        chunk_texts = [c.text for c in evidence["t-carrier"]]
+        assert any("99999" in t for t in chunk_texts), (
+            f"carrier's chunk (with sentinel ``99999``) must be "
+            f"retrievable even when a global chunk-vec top-K would "
+            f"never include it; got: {chunk_texts!r}"
+        )
+        # And the helper must NOT leak distractor chunks into the
+        # carrier's bucket.
+        assert all(c.thread_id == "t-carrier" for c in evidence["t-carrier"])
 
 
 class TestHybridSearchChunkLane:
