@@ -832,33 +832,6 @@ class TestValidateEmbeddingDim:
         assert str(EMBEDDING_DIM) in str(exc_info.value)
 
 
-class TestWarnIfNonQwen3Model:
-    def test_silent_for_qwen3_embedding_model(self, monkeypatch, caplog):
-        monkeypatch.setattr(main, "EMBED_MODEL", "Qwen/Qwen3-Embedding-8B")
-        with caplog.at_level("WARNING", logger="indexer"):
-            main._warn_if_non_qwen3_model()
-        assert not any("not a recognised Qwen3-Embedding" in r.message for r in caplog.records)
-
-    def test_silent_for_lowercase_qwen3_variant(self, monkeypatch, caplog):
-        monkeypatch.setattr(main, "EMBED_MODEL", "qwen3-embedding-0.6b")
-        with caplog.at_level("WARNING", logger="indexer"):
-            main._warn_if_non_qwen3_model()
-        assert not any("not a recognised Qwen3-Embedding" in r.message for r in caplog.records)
-
-    def test_warns_for_openai_text_embedding(self, monkeypatch, caplog):
-        # Non-Qwen3 4096-dim-compatible model — dim probe alone won't
-        # surface the tokenizer mismatch, so the warning is the only
-        # operator-visible signal.
-        monkeypatch.setattr(main, "EMBED_MODEL", "text-embedding-3-large")
-        with caplog.at_level("WARNING", logger="indexer"):
-            main._warn_if_non_qwen3_model()
-        assert any(
-            "not a recognised Qwen3-Embedding" in r.message
-            and "text-embedding-3-large" in r.message
-            for r in caplog.records
-        )
-
-
 class TestIndexOneFileChunking:
     """End-to-end of the schema-v9 chunker integration through the
     real ``_index_one_file`` path — chunker is invoked for each new

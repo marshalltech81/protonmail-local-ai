@@ -1197,41 +1197,6 @@ def initial_index(
     log.info("Initial index complete: %d job(s) processed.", processed)
 
 
-def _warn_if_non_qwen3_model() -> None:
-    """Warn when ``EMBED_MODEL`` is not a recognised Qwen3-Embedding variant.
-
-    The chunker's ``estimate_tokens`` / ``truncate_to_tokens`` /
-    ``chunk_message`` paths are sized against the bundled
-    ``Qwen/Qwen3-Embedding-8B`` BPE tokenizer (see ``chunker._TOKENIZER_PATH``)
-    so chunk budgets line up with the model's real context window.
-    Other models (OpenAI ``text-embedding-3-large``, Cohere
-    ``embed-v4``, sentence-transformers variants) have different BPE
-    tokenizers; chunks remain retrievable, but the per-chunk token
-    budget can be off by ~30-50% in either direction, leaving context
-    unused or risking truncation at embed time.
-
-    This is a soft warning — the dimension probe in
-    ``_validate_embedding_dim`` already enforces 4096-dim output, so
-    a wholly-incompatible model still fails closed at startup. The
-    warning surfaces the more subtle case: a 4096-dim non-Qwen3
-    model whose chunk-size budgets silently drift.
-    """
-    model_lower = EMBED_MODEL.lower()
-    if "qwen3-embedding" in model_lower:
-        return
-    log.warning(
-        "EMBED_MODEL=%r is not a recognised Qwen3-Embedding variant. "
-        "The chunker's token budgets (INDEXER_CHUNK_TARGET_TOKENS, "
-        "INDEXER_CHUNK_MAX_TOKENS) are calibrated against the bundled "
-        "Qwen3-Embedding-8B BPE tokenizer and may misalign with the "
-        "configured model's tokenizer. Chunks remain retrievable but "
-        "may be sized 30-50%% off the model's real context window. Tune "
-        "INDEXER_CHUNK_*_TOKENS to your model's tokenizer if recall "
-        "matters.",
-        EMBED_MODEL,
-    )
-
-
 def _validate_embedding_dim(embedder: EmbeddingBackend) -> None:
     """Probe the running embedder once at startup and verify its output
     dimension matches the schema-reserved ``EMBEDDING_DIM``.
@@ -1328,11 +1293,6 @@ def main():
 
     # Verify the running model matches the schema's reserved vector dim.
     _validate_embedding_dim(embedder)
-
-    # Surface a soft warning when the configured model isn't a known
-    # Qwen3-Embedding variant — the chunker's bundled BPE tokenizer
-    # only matches that family.
-    _warn_if_non_qwen3_model()
 
     # Index existing emails
     initial_index(db, embedder, threader, queue)
