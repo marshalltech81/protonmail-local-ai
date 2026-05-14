@@ -911,11 +911,25 @@ class Database:
         """
         try:
             serialized = sqlite_vec.serialize_float32(embedding)
-            # LEFT JOIN ``attachments`` on the (attachment_id, message_id)
-            # pair so attachment chunks carry filename + MIME through to
-            # the LLM context. Body chunks have ``c.attachment_id IS NULL``
-            # and the JOIN yields ``NULL`` for filename/MIME — handled in
-            # the dataclass construction below.
+            # LEFT JOIN ``attachments`` so each attachment chunk carries
+            # filename + MIME through to the LLM context. Body chunks
+            # have ``c.attachment_id IS NULL`` and the JOIN yields
+            # ``NULL`` for filename/MIME — handled in the dataclass
+            # construction below.
+            #
+            # The JOIN anchors on the SINGLE representative occurrence
+            # row per ``(attachment_id, message_id)`` pair (the one
+            # with the lowest ``attachment_occurrence_id``). The
+            # indexer permits the same content hash to be attached
+            # under multiple filenames in one message (a user attaching
+            # the same PDF twice with different display names); each
+            # occurrence is its own row in ``attachments`` but only
+            # ONE chunk set is stored per content hash, so a naive
+            # ``ON (attachment_id, message_id)`` JOIN multiplies the
+            # chunk by the occurrence count and emits non-deterministic
+            # filename attribution. Picking the lowest occurrence id
+            # gives a stable, deterministic choice and eliminates the
+            # multiplication.
             rows = self._fetchall(
                 """
                 SELECT
@@ -927,8 +941,12 @@ class Database:
                 FROM message_chunks_vec v
                 JOIN message_chunks c ON c.chunk_id = v.chunk_id
                 LEFT JOIN attachments a
-                    ON a.attachment_id = c.attachment_id
-                   AND a.message_id = c.message_id
+                    ON a.attachment_occurrence_id = (
+                        SELECT MIN(a2.attachment_occurrence_id)
+                        FROM attachments a2
+                        WHERE a2.attachment_id = c.attachment_id
+                          AND a2.message_id = c.message_id
+                    )
                 WHERE v.embedding MATCH ?
                   AND k = ?
                 ORDER BY v.distance
@@ -992,13 +1010,18 @@ class Database:
             # placeholder count, not from thread_id values, and every
             # bound parameter goes through the driver. nosec B608.
             #
-            # LEFT JOIN ``attachments`` on (attachment_id, message_id) so
-            # attachment provenance (filename + MIME) reaches the LLM
-            # context. The pair is unique because the same payload
-            # (same ``attachment_id`` content hash) can occur on
-            # multiple messages — restricting to the chunk's own
-            # ``message_id`` avoids row-multiplication for body chunks
-            # ``c.attachment_id IS NULL`` matches no attachment row.
+            # LEFT JOIN ``attachments`` on the SINGLE representative
+            # occurrence row per ``(attachment_id, message_id)`` (the
+            # one with the lowest ``attachment_occurrence_id``). The
+            # indexer allows the same content hash to be attached
+            # under multiple display filenames in one message but
+            # stores ONLY ONE chunk set per content hash, so a naive
+            # ``ON (attachment_id, message_id)`` JOIN multiplies the
+            # chunk row by the occurrence count. See
+            # ``_chunk_vector_search`` for the full rationale; both
+            # call sites apply the same fix. Body chunks have
+            # ``c.attachment_id IS NULL`` so the subquery returns
+            # NULL and the LEFT JOIN yields NULL filename/MIME.
             sql = (
                 "SELECT c.chunk_id, c.message_id, c.thread_id, c.chunk_index, "
                 "c.text, c.char_start, c.char_end, c.attachment_id, "
@@ -1008,8 +1031,12 @@ class Database:
                 "FROM message_chunks c "
                 "JOIN message_chunks_vec v ON c.chunk_id = v.chunk_id "
                 "LEFT JOIN attachments a "
-                "  ON a.attachment_id = c.attachment_id "
-                " AND a.message_id = c.message_id "
+                "  ON a.attachment_occurrence_id = ( "
+                "       SELECT MIN(a2.attachment_occurrence_id) "
+                "       FROM attachments a2 "
+                "       WHERE a2.attachment_id = c.attachment_id "
+                "         AND a2.message_id = c.message_id "
+                "  ) "
                 f"WHERE c.thread_id IN ({placeholders}) "  # nosec B608
                 "ORDER BY score ASC"
             )
@@ -1067,17 +1094,29 @@ class Database:
         selected tail) order so the LLM prompt reads naturally as a
         timeline. Caller can render them via ``_thread_context``.
 
-        Ordering caveats:
-        - ``chunked_at`` is the chunker's wall-clock at insert. In
-          steady-state operation chunks for newer messages have later
-          ``chunked_at``, so the tail captures the latest activity. A
-          full re-index resets the column; in that degenerate case all
-          chunks share a timestamp and ``chunk_index DESC`` falls back
-          to last-chunk-first, which is still bounded behavior — never
-          silently empty.
-        - Selection uses ``ORDER BY chunked_at DESC, chunk_index DESC``
-          to pick the latest ``limit`` chunks, then the result is
-          reversed in Python for ascending display order.
+        Ordering: ``COALESCE(c.message_date, c.chunked_at) DESC,
+        c.chunk_index DESC``. ``message_date`` is the message's
+        ``Date:`` header captured at chunk-write (schema v18+); it is
+        the authoritative "when did this message arrive" signal and
+        sorts correctly across reindex, reap-rebuild, dead-letter
+        retry, and recovery-sweep paths. ``chunked_at`` (the chunker's
+        wall-clock at insert) is the fallback for legacy v17- chunk
+        rows that pre-date the column — those rows have
+        ``message_date IS NULL`` and degrade to the prior heuristic
+        until they are re-indexed. ``chunk_index DESC`` tiebreaks
+        when a thread is freshly indexed in one batch (all chunks
+        share the same ``message_date`` / ``chunked_at``) so the
+        last chunk emitted by the chunker comes first in selection.
+        Selection picks the latest ``limit`` chunks, then the result
+        is reversed in Python for ascending display order.
+
+        Attachment provenance join: anchor on the single representative
+        ``attachments`` row per ``(attachment_id, message_id)`` (the
+        one with the lowest ``attachment_occurrence_id``). The indexer
+        permits the same content hash to occur under multiple display
+        filenames in one message but stores ONLY ONE chunk set per
+        content hash, so a naive ``ON (attachment_id, message_id)``
+        JOIN multiplies the chunk row by the occurrence count.
         """
         if limit <= 0:
             return []
@@ -1091,10 +1130,15 @@ class Database:
                        0.0 AS score
                 FROM message_chunks c
                 LEFT JOIN attachments a
-                    ON a.attachment_id = c.attachment_id
-                   AND a.message_id = c.message_id
+                    ON a.attachment_occurrence_id = (
+                        SELECT MIN(a2.attachment_occurrence_id)
+                        FROM attachments a2
+                        WHERE a2.attachment_id = c.attachment_id
+                          AND a2.message_id = c.message_id
+                    )
                 WHERE c.thread_id = ?
-                ORDER BY c.chunked_at DESC, c.chunk_index DESC
+                ORDER BY COALESCE(c.message_date, c.chunked_at) DESC,
+                         c.chunk_index DESC
                 LIMIT ?
                 """,
                 (thread_id, limit),

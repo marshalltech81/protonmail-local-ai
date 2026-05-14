@@ -1607,6 +1607,272 @@ class TestGetRecentChunksForThread:
     def test_unknown_thread_returns_empty(self, chunked_db: Database):
         assert chunked_db.get_recent_chunks_for_thread("never-existed") == []
 
+    def test_message_date_overrides_chunked_at_for_ordering(self, tmp_path):
+        """Codex P1 regression: ``chunked_at`` is index-time, not
+        message-time. After a reap-rebuild / dead-letter retry / full
+        reindex, an OLD message's chunks can have a NEWER
+        ``chunked_at`` than chunks for a recent reply — so the prior
+        ordering surfaced stale content as "latest activity."
+
+        With v18+ ``message_date`` populated, the query orders by
+        ``COALESCE(message_date, chunked_at) DESC``. A scenario where
+        the two columns disagree (old message reindexed later than a
+        newer message arrived) must rank by message date, not insert
+        time.
+        """
+        from tests.conftest import _build_schema, _insert_chunk, _insert_thread
+
+        db_path = tmp_path / "msg_date_ordering.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.enable_load_extension(True)
+        import sqlite_vec
+
+        sqlite_vec.load(conn)
+        conn.enable_load_extension(False)
+        _build_schema(conn)
+
+        _insert_thread(
+            conn,
+            thread_id="t-rebuild",
+            subject="long thread that was reindexed out of order",
+            participants=["alice@example.com"],
+            senders=["alice@example.com"],
+            body_text="thread body",
+            snippet="...",
+            embedding=[1.0, 0.0, 0.0, 0.0],
+        )
+        # Old message (2024-01) was REINDEXED today (e.g. reap-rebuild
+        # rewrote its chunks) — so chunked_at=NOW but message_date=
+        # 2024-01.
+        _insert_chunk(
+            conn,
+            chunk_id="c-old-reindexed",
+            message_id="m-old",
+            thread_id="t-rebuild",
+            text="content from january",
+            embedding=[1.0, 0.0, 0.0, 0.0],
+            chunk_index=0,
+            chunked_at="2026-05-13T00:00:00+00:00",
+            message_date="2024-01-01T00:00:00+00:00",
+        )
+        # Recent reply (2024-12) was indexed in steady state — both
+        # columns match.
+        _insert_chunk(
+            conn,
+            chunk_id="c-newer-reply",
+            message_id="m-newer",
+            thread_id="t-rebuild",
+            text="content from december",
+            embedding=[1.0, 0.0, 0.0, 0.0],
+            chunk_index=0,
+            chunked_at="2024-12-01T00:00:00+00:00",
+            message_date="2024-12-01T00:00:00+00:00",
+        )
+        conn.close()
+
+        db = Database(str(db_path))
+        try:
+            chunks = db.get_recent_chunks_for_thread("t-rebuild", limit=2)
+        finally:
+            db.close()
+
+        # Both chunks selected; ordering must reflect MESSAGE date, not
+        # insert date. Oldest-first in display order (the function
+        # reverses the SELECT). The pre-fix behavior would have picked
+        # c-old-reindexed as "newer" because its chunked_at is today.
+        assert [c.chunk_id for c in chunks] == [
+            "c-old-reindexed",
+            "c-newer-reply",
+        ], (
+            "ordering must be by message_date (oldest-first in display), "
+            "not chunked_at — see Codex P1 finding on summarize_thread"
+        )
+
+    def test_legacy_null_message_date_falls_back_to_chunked_at(self, tmp_path):
+        """v17 legacy chunks have ``message_date IS NULL``; the
+        downstream ``COALESCE(message_date, chunked_at)`` must keep
+        the old ``chunked_at`` ordering for those rows so an unmigrated
+        install still gets a stable timeline (even if not strictly
+        correct after rebuilds).
+        """
+        from tests.conftest import _build_schema, _insert_chunk, _insert_thread
+
+        db_path = tmp_path / "legacy_null.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.enable_load_extension(True)
+        import sqlite_vec
+
+        sqlite_vec.load(conn)
+        conn.enable_load_extension(False)
+        _build_schema(conn)
+
+        _insert_thread(
+            conn,
+            thread_id="t-legacy",
+            subject="legacy thread",
+            participants=["alice@example.com"],
+            senders=["alice@example.com"],
+            body_text="thread body",
+            snippet="...",
+            embedding=[1.0, 0.0, 0.0, 0.0],
+        )
+        _insert_chunk(
+            conn,
+            chunk_id="c-legacy-old",
+            message_id="m-old",
+            thread_id="t-legacy",
+            text="legacy old",
+            embedding=[1.0, 0.0, 0.0, 0.0],
+            chunked_at="2024-01-01T00:00:00+00:00",
+            message_date=None,
+        )
+        _insert_chunk(
+            conn,
+            chunk_id="c-legacy-new",
+            message_id="m-new",
+            thread_id="t-legacy",
+            text="legacy new",
+            embedding=[1.0, 0.0, 0.0, 0.0],
+            chunked_at="2024-12-01T00:00:00+00:00",
+            message_date=None,
+        )
+        conn.close()
+
+        db = Database(str(db_path))
+        try:
+            chunks = db.get_recent_chunks_for_thread("t-legacy", limit=2)
+        finally:
+            db.close()
+
+        # With both message_date NULL, the COALESCE fallback uses
+        # chunked_at — same ordering as the pre-fix behavior.
+        assert [c.chunk_id for c in chunks] == ["c-legacy-old", "c-legacy-new"]
+
+
+class TestAttachmentProvenanceJoin:
+    """Codex P2: when the same content hash is attached under multiple
+    display filenames in one message, the indexer stores ONE chunk set
+    (deduplicated by content hash) but multiple ``attachments`` rows
+    (one per occurrence). A naive ``ON (attachment_id, message_id)``
+    JOIN multiplies the chunk row by the occurrence count and yields
+    non-deterministic filename attribution. Each chunk-fetch path must
+    anchor on the SINGLE representative ``attachments`` row per pair
+    (the one with the lowest ``attachment_occurrence_id``).
+    """
+
+    def _build_duplicate_attachment_db(self, tmp_path):
+        from tests.conftest import (
+            _build_schema,
+            _insert_attachment,
+            _insert_chunk,
+            _insert_thread,
+        )
+
+        db_path = tmp_path / "dupe_attach.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.enable_load_extension(True)
+        import sqlite_vec
+
+        sqlite_vec.load(conn)
+        conn.enable_load_extension(False)
+        _build_schema(conn)
+
+        _insert_thread(
+            conn,
+            thread_id="t-dupe",
+            subject="duplicate attachment",
+            participants=["alice@example.com"],
+            senders=["alice@example.com"],
+            body_text="body",
+            snippet="...",
+            embedding=[1.0, 0.0, 0.0, 0.0],
+        )
+        # Same content hash, same message_id, TWO occurrences with
+        # different filenames. occurrence_id "occ-a" sorts lower than
+        # "occ-b" so MIN(occurrence_id) → "occ-a" → invoice-a.pdf is
+        # the canonical attribution.
+        _insert_attachment(
+            conn,
+            message_id="m-dupe",
+            thread_id="t-dupe",
+            attachment_id="content-hash-dupe",
+            filename="invoice-a.pdf",
+            occurrence_id="occ-a",
+        )
+        _insert_attachment(
+            conn,
+            message_id="m-dupe",
+            thread_id="t-dupe",
+            attachment_id="content-hash-dupe",
+            filename="invoice-b.pdf",
+            occurrence_id="occ-b",
+        )
+        # One attachment chunk for the deduplicated content.
+        _insert_chunk(
+            conn,
+            chunk_id="c-att-dupe",
+            message_id="m-dupe",
+            thread_id="t-dupe",
+            text="invoice number 12345",
+            embedding=[1.0, 0.0, 0.0, 0.0],
+            attachment_id="content-hash-dupe",
+        )
+        conn.close()
+        return Database(str(db_path))
+
+    def test_recent_chunks_returns_single_row_with_deterministic_filename(self, tmp_path):
+        # ``get_recent_chunks_for_thread`` is the most-visible affected
+        # path (summarize_thread context). Without the MIN-occurrence
+        # subquery, two rows came back from one chunk.
+        db = self._build_duplicate_attachment_db(tmp_path)
+        try:
+            chunks = db.get_recent_chunks_for_thread("t-dupe", limit=10)
+        finally:
+            db.close()
+        assert len(chunks) == 1, (
+            f"chunk row must not multiply by attachment-occurrence count; "
+            f"got {len(chunks)} rows for one chunk"
+        )
+        assert chunks[0].attachment_filename == "invoice-a.pdf", (
+            f"deterministic filename attribution must pick the row with "
+            f"lowest occurrence_id (occ-a → invoice-a.pdf); got "
+            f"{chunks[0].attachment_filename!r}"
+        )
+
+    def test_chunk_vector_search_returns_single_row_per_chunk(self, tmp_path):
+        # ``_chunk_vector_search`` is the dense-retrieval lane for the
+        # chunk fusion path. The same MIN-occurrence anchor applies.
+        db = self._build_duplicate_attachment_db(tmp_path)
+        try:
+            chunks = db._chunk_vector_search([1.0, 0.0, 0.0, 0.0], limit=10)
+        finally:
+            db.close()
+        assert len(chunks) == 1, (
+            f"vector-search chunk row must not multiply by attachment-"
+            f"occurrence count; got {len(chunks)} rows for one chunk"
+        )
+        assert chunks[0].attachment_filename == "invoice-a.pdf"
+
+    def test_evidence_chunks_returns_single_row_per_chunk(self, tmp_path):
+        # ``get_evidence_chunks_for_threads`` is the with_evidence=True
+        # path the chunk fusion uses. Same MIN-occurrence anchor.
+        db = self._build_duplicate_attachment_db(tmp_path)
+        try:
+            evidence = db.get_evidence_chunks_for_threads(
+                ["t-dupe"],
+                [1.0, 0.0, 0.0, 0.0],
+                per_thread_limit=10,
+            )
+        finally:
+            db.close()
+        chunks = evidence.get("t-dupe", [])
+        assert len(chunks) == 1, (
+            f"per-thread evidence chunk row must not multiply by "
+            f"attachment-occurrence count; got {len(chunks)} rows for "
+            f"one chunk"
+        )
+        assert chunks[0].attachment_filename == "invoice-a.pdf"
+
 
 class TestHybridSearchChunkLane:
     def test_chunk_specific_query_lifts_parent_thread(self, chunked_db: Database):

@@ -88,13 +88,26 @@ def _dedupe_by_canonical(addrs: list[str]) -> list[str]:
 #         and blocking the watchdog + reconciler. Including
 #         ``thread_id`` in the index makes it actually covering for the
 #         SELECT (no per-match table seek).
+#   v17 — backfill the unit-norm storage invariant on existing
+#         ``threads_vec`` / ``message_chunks_vec`` rows so cosine
+#         similarity equals dot product across both new and pre-upgrade
+#         vectors. See ``0017_unit_norm_vec_invariant.sql``.
+#   v18 — ``message_chunks.message_date``: nullable column carrying
+#         the source message's ``Date:`` header value at chunk-write
+#         time so timeline-style retrieval
+#         (``get_recent_chunks_for_thread`` / ``summarize_thread``)
+#         can order by message time instead of the chunker's
+#         wall-clock insert time. Legacy v17- rows have NULL
+#         ``message_date`` and the downstream query uses
+#         ``COALESCE(message_date, chunked_at)`` so they degrade to
+#         the old heuristic until they are re-chunked.
 # Bumping this constant requires shipping a forward migration file at
 # ``src/migrations/<NNNN>_<slug>.sql`` covering the new version. Fresh
 # installs continue to apply ``_apply_initial_schema`` directly and stamp
 # the current version; existing installs run the migration runner to
 # catch up. See ``src/migrations/runner.py`` for the file layout and
 # transactional guarantees.
-SCHEMA_VERSION = 17
+SCHEMA_VERSION = 18
 
 # The schema uses FTS5 ``contentless_delete=1``, which SQLite added in 3.43.
 # Validate the runtime version at Database init and fail fast with a clear
@@ -499,6 +512,7 @@ class Database:
                 chunked_at      TEXT NOT NULL,
                 fts_rowid       INTEGER,
                 attachment_id   TEXT,
+                message_date    TEXT,                    -- source message's Date: header at chunk-write; NULL on legacy v17- rows, COALESCE'd to chunked_at by readers
                 FOREIGN KEY (message_id) REFERENCES message_thread_map(message_id)
                     ON DELETE CASCADE,
                 FOREIGN KEY (thread_id) REFERENCES threads(thread_id)
@@ -912,6 +926,7 @@ class Database:
         chunks,
         embeddings_by_chunk_id: dict[str, list[float]],
         attachment_id: str | None = None,
+        message_date: str | None = None,
     ) -> dict[str, int]:
         """Idempotently sync the chunk rows for one slice of a message.
 
@@ -936,6 +951,17 @@ class Database:
           forwarded across N messages produces N distinct chunk
           occurrences (one per parent thread) so any chunk hit can lift
           its parent thread into ranking.
+
+        ``message_date`` is the source message's ``Date:`` header in
+        ISO 8601 form (``msg.date.isoformat()``). Stored on every new
+        chunk row so timeline-style retrieval
+        (``get_recent_chunks_for_thread`` / ``summarize_thread``) can
+        order by message time instead of the chunker's wall-clock
+        insert time. ``None`` is permitted for callers that have no
+        date context (legacy test fixtures, ad-hoc tooling) and
+        produces ``NULL`` rows that downstream readers handle via
+        ``COALESCE(message_date, chunked_at)``. Production indexer
+        paths always pass a real ISO timestamp.
 
         All inserts / deletes across ``message_chunks``,
         ``message_chunks_fts`` and ``message_chunks_vec`` happen inside
@@ -1014,8 +1040,8 @@ class Database:
                     INSERT INTO message_chunks
                         (chunk_id, message_id, thread_id, chunk_index, text,
                          char_start, char_end, token_est,
-                         chunked_at, fts_rowid, attachment_id)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                         chunked_at, fts_rowid, attachment_id, message_date)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         chunk.chunk_id,
@@ -1029,6 +1055,7 @@ class Database:
                         now_iso,
                         fts_rowid,
                         attachment_id,
+                        message_date,
                     ),
                 )
 

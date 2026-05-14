@@ -87,35 +87,42 @@ class TestSchema:
         second.close()
 
     def test_opening_with_stale_version_runs_migration_to_current(self, tmp_path):
-        """An existing volume two versions behind ``SCHEMA_VERSION``
+        """An existing volume several versions behind ``SCHEMA_VERSION``
         triggers the migration runner, which applies every shipped
         migration in order and stamps the current version. The v13
-        schema change (``threads.display_subject``) must be present
-        after the v12→v14 catch-up, demonstrating that the runner
-        applied the v13 migration before advancing to v14."""
+        ``threads.display_subject`` and v18
+        ``message_chunks.message_date`` column-adding migrations both
+        run end-to-end, demonstrating that the runner applies the
+        intermediate migrations before advancing to the current
+        version."""
         db_path = tmp_path / "stale.db"
         database = Database(db_path)
         database.close()
         import sqlite3
 
-        # Drop the v13 column and stamp v12 to simulate an existing
-        # install that pre-dates the v13 + v14 migrations. ``ALTER
-        # TABLE DROP COLUMN`` exists in SQLite >= 3.35; the indexer's
-        # runtime already requires SQLite >= 3.43.
+        # Drop the v13 + v18 columns and stamp v12 to simulate an
+        # existing install that pre-dates every column-adding
+        # migration in the range. ``ALTER TABLE DROP COLUMN`` exists
+        # in SQLite >= 3.35; the indexer's runtime already requires
+        # SQLite >= 3.43.
         conn = sqlite3.connect(str(db_path))
         try:
             conn.execute("ALTER TABLE threads DROP COLUMN display_subject")
+            conn.execute("ALTER TABLE message_chunks DROP COLUMN message_date")
             conn.execute("UPDATE schema_version SET version = ?", (12,))
             conn.commit()
         finally:
             conn.close()
 
-        # Reopening should run the v13 + v14 migrations silently.
+        # Reopening should run every shipped migration silently.
         database = Database(db_path)
         try:
             cur = database._conn.execute("PRAGMA table_info(threads)")
-            columns = {row["name"] for row in cur.fetchall()}
-            assert "display_subject" in columns
+            thread_columns = {row["name"] for row in cur.fetchall()}
+            assert "display_subject" in thread_columns
+            cur = database._conn.execute("PRAGMA table_info(message_chunks)")
+            chunk_columns = {row["name"] for row in cur.fetchall()}
+            assert "message_date" in chunk_columns
             stored = database._conn.execute("SELECT version FROM schema_version").fetchone()[
                 "version"
             ]
@@ -140,10 +147,14 @@ class TestSchema:
         database.close()
         import sqlite3
 
-        # Drop the index and stamp v15 to simulate the pre-v16 state.
+        # Drop the index AND any post-v15 columns, then stamp v15 to
+        # simulate the pre-v16 state. Without the column drop the
+        # v18 column-adding migration fires during the forward replay
+        # and errors with "duplicate column name: message_date".
         conn = sqlite3.connect(str(db_path))
         try:
             conn.execute("DROP INDEX IF EXISTS idx_threads_subject_folder")
+            conn.execute("ALTER TABLE message_chunks DROP COLUMN message_date")
             conn.execute("UPDATE schema_version SET version = ?", (15,))
             conn.commit()
             # Precondition: the index does NOT exist before reopen.
@@ -224,6 +235,9 @@ class TestSchema:
             conn.execute(
                 "CREATE INDEX idx_threads_subject_folder ON threads(subject, folder, date_last)"
             )
+            # Drop post-v15 columns so the forward migration replay
+            # doesn't hit a duplicate-column error on v18.
+            conn.execute("ALTER TABLE message_chunks DROP COLUMN message_date")
             conn.execute("UPDATE schema_version SET version = ?", (15,))
             conn.commit()
             # Precondition: the wrong-shape index is in place.
@@ -316,6 +330,9 @@ class TestSchema:
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             ("c1", "m1", "t1", 0, "body", 0, 4, 1, "2026-01-01"),
         )
+        # Drop post-v13 columns so the forward migration replay
+        # doesn't hit a duplicate-column error on v18.
+        database._conn.execute("ALTER TABLE message_chunks DROP COLUMN message_date")
         database._conn.execute("UPDATE schema_version SET version = ?", (13,))
         database._conn.commit()
         database.close()
@@ -338,6 +355,9 @@ class TestSchema:
         nothing to lose, so no opt-in env required."""
         db_path = tmp_path / "empty.db"
         database = Database(db_path)
+        # Drop post-v13 columns so the forward migration replay
+        # doesn't hit a duplicate-column error on v18.
+        database._conn.execute("ALTER TABLE message_chunks DROP COLUMN message_date")
         database._conn.execute("UPDATE schema_version SET version = ?", (13,))
         database._conn.commit()
         database.close()
@@ -506,6 +526,9 @@ class TestSchema:
                     "INSERT INTO threads_vec (thread_id, embedding) VALUES (?, ?)",
                     (tid, sqlite_vec.serialize_float32(vec)),
                 )
+            # Drop post-v16 columns so the forward migration replay
+            # doesn't hit a duplicate-column error on v18.
+            conn.execute("ALTER TABLE message_chunks DROP COLUMN message_date")
             conn.execute("UPDATE schema_version SET version = ?", (16,))
             conn.commit()
         finally:
@@ -588,6 +611,9 @@ class TestSchema:
                 "INSERT INTO message_chunks_vec (chunk_id, embedding) VALUES (?, ?)",
                 ("c-non-unit", sqlite_vec.serialize_float32(non_unit)),
             )
+            # Drop post-v16 columns so the forward migration replay
+            # doesn't hit a duplicate-column error on v18.
+            conn.execute("ALTER TABLE message_chunks DROP COLUMN message_date")
             conn.execute("UPDATE schema_version SET version = ?", (16,))
             conn.commit()
         finally:
@@ -606,6 +632,69 @@ class TestSchema:
                 "chunk vectors so message_chunks_vec shares the same "
                 "end-to-end unit-norm invariant as threads_vec"
             )
+        finally:
+            database.close()
+
+    def test_v17_to_v18_migration_adds_message_date_column(self, tmp_path):
+        """Migration 0018 adds ``message_chunks.message_date`` so
+        timeline-style retrieval can order by message time instead of
+        the chunker's wall-clock insert time. Legacy v17 rows have no
+        column at all; the migration must add it as nullable so
+        existing chunks survive untouched and downstream readers
+        coalesce to ``chunked_at`` for those rows.
+
+        Pre-migration state simulation: drop the column, stamp v17.
+        Post-migration state: column exists, legacy chunk row's
+        ``message_date`` is NULL (no backfill at the SQL level), and
+        the downstream ``get_recent_chunks_for_thread`` COALESCE
+        fallback handles the NULL transparently — verified by the
+        mcp-server test side."""
+        db_path = tmp_path / "v17_no_message_date.db"
+        database = Database(db_path)
+        _seed_thread_for_message(database, "m-md@x", "t-md")
+        database._conn.execute(
+            "INSERT INTO message_chunks (chunk_id, message_id, thread_id, "
+            "chunk_index, text, char_start, char_end, token_est, chunked_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            ("c-legacy", "m-md@x", "t-md", 0, "body", 0, 4, 1, "2026-01-01"),
+        )
+        database._conn.commit()
+        database.close()
+
+        # Drop the v18 column and stamp v17 to simulate the pre-v18 state.
+        conn = sqlite3.connect(str(db_path))
+        try:
+            conn.execute("ALTER TABLE message_chunks DROP COLUMN message_date")
+            conn.execute("UPDATE schema_version SET version = ?", (17,))
+            conn.commit()
+            # Precondition: column does not exist before reopen.
+            cols = {row[1] for row in conn.execute("PRAGMA table_info(message_chunks)").fetchall()}
+            assert "message_date" not in cols, "precondition: v17 simulation must drop message_date"
+        finally:
+            conn.close()
+
+        # Reopening through ``Database`` runs the v18 migration.
+        database = Database(db_path)
+        try:
+            cols = {
+                row["name"]
+                for row in database._conn.execute("PRAGMA table_info(message_chunks)").fetchall()
+            }
+            assert "message_date" in cols, (
+                "migration 0018 must add message_chunks.message_date so "
+                "timeline retrieval can order by message time"
+            )
+            # Legacy row's message_date is NULL — no SQL-level
+            # backfill, so the downstream COALESCE fallback handles it.
+            row = database._conn.execute(
+                "SELECT message_date FROM message_chunks WHERE chunk_id = ?",
+                ("c-legacy",),
+            ).fetchone()
+            assert row["message_date"] is None
+            stored = database._conn.execute("SELECT version FROM schema_version").fetchone()[
+                "version"
+            ]
+            assert stored == SCHEMA_VERSION
         finally:
             database.close()
 
@@ -2269,6 +2358,47 @@ def _one_hot(slot: int) -> list[float]:
     vec = [0.0] * EMBEDDING_DIM
     vec[slot] = 1.0
     return vec
+
+
+class TestMessageDateOnChunks:
+    """``message_chunks.message_date`` carries the source message's
+    ``Date:`` header on every new chunk row so timeline-style
+    retrieval can order by message time instead of insert time.
+    """
+
+    def test_message_date_kwarg_persists_on_new_chunks(self, db):
+        _seed_thread_for_message(db, "m-md1@x", "t-md1")
+        chunk = _make_chunk("md1".ljust(64, "0"), 0, "body")
+        db.replace_message_chunks(
+            message_id="m-md1@x",
+            thread_id="t-md1",
+            chunks=[chunk],
+            embeddings_by_chunk_id={chunk.chunk_id: _one_hot(0)},
+            message_date="2024-06-01T12:00:00+00:00",
+        )
+        row = db._conn.execute(
+            "SELECT message_date FROM message_chunks WHERE chunk_id = ?",
+            (chunk.chunk_id,),
+        ).fetchone()
+        assert row["message_date"] == "2024-06-01T12:00:00+00:00"
+
+    def test_message_date_defaults_to_null_when_omitted(self, db):
+        # Back-compat: legacy callers and tests that did not pass the
+        # kwarg still produce a valid row; the column is nullable and
+        # downstream readers COALESCE to ``chunked_at``.
+        _seed_thread_for_message(db, "m-md2@x", "t-md2")
+        chunk = _make_chunk("md2".ljust(64, "0"), 0, "body")
+        db.replace_message_chunks(
+            message_id="m-md2@x",
+            thread_id="t-md2",
+            chunks=[chunk],
+            embeddings_by_chunk_id={chunk.chunk_id: _one_hot(0)},
+        )
+        row = db._conn.execute(
+            "SELECT message_date FROM message_chunks WHERE chunk_id = ?",
+            (chunk.chunk_id,),
+        ).fetchone()
+        assert row["message_date"] is None
 
 
 class TestThreadChunkAggregation:

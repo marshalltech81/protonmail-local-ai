@@ -89,11 +89,16 @@ class Reconciler:
         # parser, oversized survivor file). Counter increments each
         # pass the thread fails to reap, resets when the thread
         # successfully reaps. Surfaced through ``reap()``'s return
-        # dict (and on into ``get_index_status`` consumers) so
-        # operators can spot stale deletion cleanup without grepping
-        # logs. In-memory only — resets on indexer restart, which is
-        # the right shape for a counter that signals "something's
-        # blocked right now" rather than long-term retry accounting.
+        # dict and via the per-pass WARN at each call site (plus the
+        # one-shot escalation WARN when the counter crosses
+        # ``_BLOCKED_ESCALATION_THRESHOLD``) — operator-visible only
+        # through the indexer's own logs. NOT plumbed into the
+        # mcp-server's ``get_index_status``: that surface runs in a
+        # separate process and reads SQLite stats, with no IPC back
+        # to this counter. In-memory only — resets on indexer restart,
+        # which is the right shape for a counter that signals
+        # "something's blocked right now" rather than long-term retry
+        # accounting.
         self._blocked_thread_attempts: dict[str, int] = {}
         # Threads for which the one-shot escalation log has already
         # fired. Kept separate from ``_blocked_thread_attempts`` because

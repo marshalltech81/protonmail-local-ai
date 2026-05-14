@@ -821,6 +821,11 @@ def _phase2c_commit_vectors(
             c.chunk_id: vectors[i] for c, i in zip(plan_new, plan_offsets)
         }
 
+    # ISO-8601 representation of the source message's Date: header.
+    # Stamped onto every chunk row (body + attachment) so timeline
+    # retrieval can order by message time instead of insert time —
+    # see ``replace_message_chunks`` and the v18 migration.
+    msg_date_iso = msg.date.isoformat()
     try:
         with db.transaction():
             db.replace_message_chunks(
@@ -828,6 +833,7 @@ def _phase2c_commit_vectors(
                 thread_id=thread.thread_id,
                 chunks=state.body_chunks,
                 embeddings_by_chunk_id=body_embs,
+                message_date=msg_date_iso,
             )
             for plan in state.attach_plans:
                 apply_attachment_writes(
@@ -835,6 +841,7 @@ def _phase2c_commit_vectors(
                     message_id=msg.message_id,
                     thread_id=thread.thread_id,
                     db=db,
+                    message_date=msg_date_iso,
                 )
             # Replace the Phase 1 seed thread vector. Three cases
             # mirror the old ``_seed_thread_embedding`` logic:

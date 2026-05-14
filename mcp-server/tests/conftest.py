@@ -57,6 +57,11 @@ def _build_schema(conn: sqlite3.Connection) -> None:
         -- Per-message chunks. Tests use the same toy 4-dim embedding
         -- space as the thread vec table so synthetic vectors like
         -- ``[1, 0, 0, 0]`` work uniformly across both lanes.
+        --
+        -- ``message_date`` mirrors the indexer's v18 schema so the
+        -- COALESCE(message_date, chunked_at) ordering in
+        -- ``get_recent_chunks_for_thread`` can be exercised with both
+        -- new (date-stamped) and legacy (NULL) rows in tests.
         CREATE TABLE message_chunks (
             chunk_id        TEXT PRIMARY KEY,
             message_id      TEXT NOT NULL,
@@ -68,7 +73,8 @@ def _build_schema(conn: sqlite3.Connection) -> None:
             token_est       INTEGER NOT NULL,
             chunked_at      TEXT NOT NULL,
             fts_rowid       INTEGER,
-            attachment_id   TEXT
+            attachment_id   TEXT,
+            message_date    TEXT
         );
 
         CREATE VIRTUAL TABLE message_chunks_fts USING fts5(
@@ -117,6 +123,7 @@ def _insert_chunk(
     chunk_index: int = 0,
     chunked_at: str = "2024-01-01T00:00:00+00:00",
     attachment_id: str | None = None,
+    message_date: str | None = None,
 ) -> None:
     """Insert one ``message_chunks`` + matching FTS + vec row.
 
@@ -124,6 +131,11 @@ def _insert_chunk(
     enough that the chunk-aware retrieval lane in the MCP reader can
     exercise it end-to-end, without requiring a real indexer pipeline
     in the unit-test stack.
+
+    ``message_date`` mirrors the v18 column on ``message_chunks``;
+    defaults to ``None`` so existing tests that pre-date the column
+    keep their semantics (NULL value, COALESCE'd to ``chunked_at`` by
+    readers).
     """
     cur = conn.cursor()
     cur.execute("INSERT INTO message_chunks_fts (text) VALUES (?)", (text,))
@@ -137,8 +149,8 @@ def _insert_chunk(
         INSERT INTO message_chunks
             (chunk_id, message_id, thread_id, chunk_index, text,
              char_start, char_end, token_est,
-             chunked_at, fts_rowid, attachment_id)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             chunked_at, fts_rowid, attachment_id, message_date)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             chunk_id,
@@ -152,6 +164,7 @@ def _insert_chunk(
             chunked_at,
             fts_rowid,
             attachment_id,
+            message_date,
         ),
     )
     conn.commit()
