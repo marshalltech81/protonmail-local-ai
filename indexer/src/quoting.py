@@ -45,25 +45,45 @@ _HARD_CUT_PATTERNS: tuple[re.Pattern[str], ...] = (
 # Coverage spans the major Western-language Gmail/Apple Mail
 # attribution shapes so the indexer pipeline doesn't drop quoted
 # history cleanly in English while leaking the same noise in other
-# languages. Each verb is anchored at end-of-line so a body that
-# merely mentions the verb in prose is not falsely cut. Two-line
-# wrapped variants (Gmail wraps the attribution when the address
-# pushes it past ~78 chars) are handled by ``_WRAPPED_REPLY_HEADER_PATTERNS``
-# in a pre-pass that joins them onto one line before the loop runs.
+# languages.
+#
+# Anchoring on ``<addr@host>`` (the email address in angle brackets)
+# is the load-bearing safeguard against false-positive stripping of
+# real user prose: a German sentence like ``"Am Montag schrieb der
+# Manager folgendes:"`` is a routine sentence-end colon, and the
+# verbs ``schrieb``/``schreef``/``a écrit``/``escribió``/``ha
+# scritto`` are everyday past-tense forms — without the bracket
+# requirement, an aggressive end-of-line match silently drops the
+# user's own content. Gmail/Apple Mail always include the address;
+# clients that omit it leak the attribution line into the indexed
+# body (minor noise) but no user content is dropped. English
+# ``wrote:`` is rarer in prose so the bracket requirement is mainly
+# defense-in-depth there.
+#
+# Two-line wrapped variants (Gmail wraps the attribution when the
+# address pushes it past ~78 chars) are handled by
+# ``_WRAPPED_REPLY_HEADER_PATTERNS`` in a pre-pass that removes the
+# wrapped span before the loop runs.
+_EMAIL_RE_FRAGMENT = r"<[^<>\s]+@[^<>\s]+>"
 _REPLY_HEADER_PATTERNS: tuple[re.Pattern[str], ...] = (
-    # English: "On <date>, <name> wrote:"
-    re.compile(r"^On\b.*\bwrote:\s*$"),
-    # German: "Am <date> schrieb <name>:"
-    re.compile(r"^Am\b.*\bschrieb\b.*:\s*$"),
-    # French: "Le <date>, <name> a écrit :" (French convention uses a
-    # space before the colon; accept both forms).
-    re.compile(r"^Le\b.*\ba écrit\s*:\s*$"),
-    # Spanish: "El <date>, <name> escribió:"
-    re.compile(r"^El\b.*\bescribió\s*:\s*$"),
-    # Italian: "Il giorno <date> <name> ha scritto:"
-    re.compile(r"^Il\b.*\bha scritto\s*:\s*$"),
-    # Dutch: "Op <date> schreef <name>:"
-    re.compile(r"^Op\b.*\bschreef\b.*:\s*$"),
+    # English: "On <date> ... Alice <alice@example.com> wrote:"
+    re.compile(rf"^On\b.*{_EMAIL_RE_FRAGMENT}.*\bwrote:\s*$"),
+    # German: "Am <date> schrieb Alice <alice@example.com>:" — verb
+    # comes BEFORE the address. Without ``<email>:`` at end-of-line
+    # this matched any German sentence beginning with ``Am`` and
+    # ending with ``schrieb ... :``.
+    re.compile(rf"^Am\b.*\bschrieb\b.*{_EMAIL_RE_FRAGMENT}\s*:\s*$"),
+    # French: "Le <date>, Alice <alice@example.com> a écrit :"
+    # (French convention puts a space before the colon; accept both
+    # forms). Address comes BEFORE the verb.
+    re.compile(rf"^Le\b.*{_EMAIL_RE_FRAGMENT}.*\ba écrit\s*:\s*$"),
+    # Spanish: "El <date>, Alice <alice@example.com> escribió:"
+    re.compile(rf"^El\b.*{_EMAIL_RE_FRAGMENT}.*\bescribió\s*:\s*$"),
+    # Italian: "Il giorno <date> Alice <alice@example.com> ha scritto:"
+    re.compile(rf"^Il\b.*{_EMAIL_RE_FRAGMENT}.*\bha scritto\s*:\s*$"),
+    # Dutch: "Op <date> schreef Alice <alice@example.com>:" — verb
+    # comes BEFORE the address, like German.
+    re.compile(rf"^Op\b.*\bschreef\b.*{_EMAIL_RE_FRAGMENT}\s*:\s*$"),
 )
 
 # Two-line wrapped reply headers. Gmail wraps the attribution when the
@@ -76,26 +96,44 @@ _REPLY_HEADER_PATTERNS: tuple[re.Pattern[str], ...] = (
 # and the continuation must be just the verb plus colon (modulo
 # whitespace) to match.
 #
-# ``\r?`` accommodates CRLF-line-ending bodies (RFC 5322 requires CRLF
-# on the wire; some parsers preserve it through to ``body_text``).
+# ``\r?`` between lines accommodates CRLF-line-ending bodies (RFC 5322
+# requires CRLF on the wire; some parsers preserve it through to
+# ``body_text``). The trailing ``[ \t]*\r?$`` must ALSO consume the
+# optional ``\r`` before ``\n`` — without it, ``$`` cannot anchor on
+# CRLF lines because ``[ \t]*`` does not match ``\r`` and the
+# multiline ``$`` only matches immediately before ``\n``. The
+# single-line patterns above use ``\s*$`` (which includes ``\r``) so
+# this asymmetry was previously silent.
 _WRAPPED_REPLY_HEADER_PATTERNS: tuple[re.Pattern[str], ...] = (
-    re.compile(r"^On\b[^\r\n]*\r?\n[ \t]*wrote:[ \t]*$", re.MULTILINE),
-    re.compile(r"^Am\b[^\r\n]*\r?\n[ \t]*schrieb\b[^\r\n]*:[ \t]*$", re.MULTILINE),
-    re.compile(r"^Le\b[^\r\n]*\r?\n[ \t]*a écrit\s*:[ \t]*$", re.MULTILINE),
-    re.compile(r"^El\b[^\r\n]*\r?\n[ \t]*escribió\b[^\r\n]*:[ \t]*$", re.MULTILINE),
-    re.compile(r"^Il\b[^\r\n]*\r?\n[ \t]*ha scritto\b[^\r\n]*:[ \t]*$", re.MULTILINE),
-    re.compile(r"^Op\b[^\r\n]*\r?\n[ \t]*schreef\b[^\r\n]*:[ \t]*$", re.MULTILINE),
+    re.compile(r"^On\b[^\r\n]*\r?\n[ \t]*wrote:[ \t]*\r?$", re.MULTILINE),
+    re.compile(r"^Am\b[^\r\n]*\r?\n[ \t]*schrieb\b[^\r\n]*:[ \t]*\r?$", re.MULTILINE),
+    re.compile(r"^Le\b[^\r\n]*\r?\n[ \t]*a écrit\s*:[ \t]*\r?$", re.MULTILINE),
+    re.compile(r"^El\b[^\r\n]*\r?\n[ \t]*escribió\b[^\r\n]*:[ \t]*\r?$", re.MULTILINE),
+    re.compile(r"^Il\b[^\r\n]*\r?\n[ \t]*ha scritto\b[^\r\n]*:[ \t]*\r?$", re.MULTILINE),
+    re.compile(r"^Op\b[^\r\n]*\r?\n[ \t]*schreef\b[^\r\n]*:[ \t]*\r?$", re.MULTILINE),
 )
 
 # Outlook-style forward/reply block header. Newer Outlook omits the
 # "-----Original Message-----" dashed delimiter and emits a bare
 # ``From:/Sent:/To:/Subject:`` block at the top of the quoted history.
-# Match a ``From:`` line followed (after at most one blank line) by a
-# ``Sent:`` or ``Date:`` line — a distinctive shape that prose
-# mentioning "From: someone" without a following timestamp line won't
-# trip. The match position becomes a hard cut for the rest of the body.
+#
+# Match the FULL four-line shape: ``From:`` line, then ``Sent:`` or
+# ``Date:`` line (with any number of blank lines between — Outlook
+# double-spacing is common), then ``Subject:`` within a few lines.
+# Requiring ``Subject:`` is the load-bearing safeguard: a body that
+# happens to contain ``From: someone\nDate: 2024-01-01`` as agenda /
+# calendar / "From the desk of" prose has no following ``Subject:``
+# header and is correctly NOT treated as a quoted block. Earlier
+# versions matched on just ``From: + Sent|Date:`` and silently
+# truncated agenda bodies. ``To:``/``Cc:`` lines are tolerated as
+# intermediate filler so the most common four-header shape
+# (From/Sent/To/Subject) still matches.
 _OUTLOOK_BLOCK_PATTERN: re.Pattern[str] = re.compile(
-    r"^From:\s.*\r?\n(?:[ \t]*\r?\n)?(?:Sent|Date):\s",
+    r"^From:\s.*\r?\n"
+    r"(?:[ \t]*\r?\n)*"
+    r"(?:Sent|Date):\s.*\r?\n"
+    r"(?:[^\r\n]*\r?\n){0,4}"
+    r"Subject:\s",
     re.MULTILINE,
 )
 

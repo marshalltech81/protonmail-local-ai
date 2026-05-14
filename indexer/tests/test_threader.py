@@ -417,6 +417,29 @@ class TestNormalizeSubject:
         assert _normalize_subject("Trend report") == "trend report"
         assert _normalize_subject("Aware of the issue") == "aware of the issue"
 
+    def test_does_not_strip_space_separated_two_letter_lookalikes(self):
+        # ``aw|ant|sv|tr`` are language-specific reply prefixes whose
+        # two-letter form collides with English / cross-language
+        # subjects starting with the same letters. Real clients
+        # universally emit the colon shape (``Aw:``, ``Sv:``, ``Tr:``,
+        # ``Ant:``), so the normalizer requires explicit ``:``/``[``
+        # punctuation rather than bare whitespace. Without that
+        # restriction, ``Tr report on Q1`` collapsed to ``report on q1``
+        # and silently merged onto an unrelated thread.
+        assert _normalize_subject("Tr report on Q1") == "tr report on q1"
+        assert _normalize_subject("Sv anything") == "sv anything"
+        assert _normalize_subject("Aw report") == "aw report"
+        assert _normalize_subject("Ant question?") == "ant question?"
+
+    def test_still_strips_two_letter_prefixes_with_colon(self):
+        # The colon-only restriction must NOT affect real reply
+        # detection: every legitimate client emits the colon shape, so
+        # ``Aw:``, ``Sv:``, ``Tr:``, ``Ant:`` continue to strip.
+        assert _normalize_subject("Aw: Hallo") == "hallo"
+        assert _normalize_subject("Sv: Hej") == "hej"
+        assert _normalize_subject("Tr: Bonjour") == "bonjour"
+        assert _normalize_subject("Ant: Hallo") == "hallo"
+
     def test_collapses_whitespace(self):
         assert _normalize_subject("Re:    Project   Update") == "project update"
 

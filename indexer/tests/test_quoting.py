@@ -307,6 +307,121 @@ class TestOutlookBlockCut:
         assert "That was all it said." in result
         assert "Strange." in result
 
+    def test_agenda_style_from_date_block_without_subject_survives(self):
+        # An agenda / event listing with ``From:`` and ``Date:`` lines
+        # but no ``Subject:`` is NOT an Outlook quoted block — it's
+        # legitimate body content. The detector must require all three
+        # headers (From + Sent|Date + Subject) before truncating. Prior
+        # versions matched on just ``From: + Date:`` and silently
+        # dropped agenda text.
+        body = (
+            "Meeting schedule:\n"
+            "From: Alice (host)\n"
+            "Date: 2026-01-01 10:00 UTC\n"
+            "Location: Zoom Room A\n"
+            "Notes: please join 5 min early."
+        )
+        result = strip_for_embedding(body)
+        assert "Meeting schedule:" in result
+        assert "From: Alice (host)" in result
+        assert "Date: 2026-01-01" in result
+        assert "Location: Zoom Room A" in result
+        assert "please join 5 min early" in result
+
+    def test_outlook_block_with_multiple_blank_lines_still_cuts(self):
+        # Outlook double-spacing can produce two or more blank lines
+        # between ``From:`` and ``Sent:``. The detector must tolerate
+        # any number of blanks, not just one.
+        body = (
+            "Looks good.\n"
+            "\n"
+            "From: Alice <alice@example.com>\n"
+            "\n"
+            "\n"
+            "Sent: Monday, January 1, 2024 10:00 AM\n"
+            "To: Bob <bob@example.com>\n"
+            "Subject: Status\n"
+            "\n"
+            "Body of original."
+        )
+        assert strip_for_embedding(body) == "Looks good."
+
+
+class TestReplyHeaderFalsePositives:
+    """Non-English reply-header verbs (``schrieb``, ``schreef``,
+    ``a écrit``, ``escribió``, ``ha scritto``) are everyday past-tense
+    forms that legitimately appear in prose ending with ``:``. The
+    detector must anchor on ``<addr@host>`` in angle brackets so a
+    real German / Dutch / French / Spanish / Italian sentence is not
+    silently dropped.
+    """
+
+    def test_german_prose_ending_in_colon_is_not_cut(self):
+        # ``Am Montag schrieb der Manager folgendes:`` is a normal
+        # German sentence introducing a list / quote. Without the
+        # ``<email>:`` anchor this was falsely classified as a reply
+        # header and the line was dropped from the embed input.
+        body = (
+            "Am Montag schrieb der Manager folgendes:\n"
+            "Wir müssen die Lieferung beschleunigen.\n"
+            "Bitte um schnelle Rückmeldung."
+        )
+        result = strip_for_embedding(body)
+        assert "Am Montag schrieb der Manager folgendes:" in result
+        assert "Wir müssen die Lieferung beschleunigen." in result
+        assert "Bitte um schnelle Rückmeldung." in result
+
+    def test_dutch_prose_ending_in_colon_is_not_cut(self):
+        # Same shape in Dutch: ``Op de markt schreef de manager:`` is
+        # not a reply attribution; it's prose.
+        body = (
+            "Op de markt schreef de manager:\n"
+            "We moeten de levering versnellen.\n"
+            "Graag snelle reactie."
+        )
+        result = strip_for_embedding(body)
+        assert "Op de markt schreef de manager:" in result
+        assert "We moeten de levering versnellen." in result
+        assert "Graag snelle reactie." in result
+
+    def test_french_prose_with_a_ecrit_is_not_cut(self):
+        body = "Le directeur a écrit :\nVeuillez accélérer la livraison."
+        result = strip_for_embedding(body)
+        assert "Le directeur a écrit :" in result
+        assert "Veuillez accélérer la livraison." in result
+
+
+class TestWrappedReplyHeaderCRLF:
+    """The wrapped reply-header pre-pass must work on CRLF-line-ending
+    bodies. Earlier versions used ``[ \\t]*$`` for the trailing anchor
+    which cannot match before ``\\n`` when ``\\r`` is in the way.
+    """
+
+    def test_english_wrapped_on_wrote_with_crlf_is_dropped(self):
+        body = (
+            "Thanks for the heads up.\r\n"
+            "On Mon, Jan 1, 2024 at 10:00 AM Alice <alice@verylongdomain.example.com>\r\n"
+            "wrote:\r\n"
+            "> Please confirm."
+        )
+        result = strip_for_embedding(body)
+        assert "Thanks for the heads up." in result
+        assert "wrote:" not in result
+        assert "verylongdomain" not in result
+        assert "Please confirm" not in result
+
+    def test_german_wrapped_schrieb_with_crlf_is_dropped(self):
+        body = (
+            "Vielen Dank.\r\n"
+            "Am Mo., 1. Jan. 2024 um 10:00 Uhr Alice <alice@verylongdomain.example.com>\r\n"
+            "schrieb:\r\n"
+            "> Bitte um Bestätigung."
+        )
+        result = strip_for_embedding(body)
+        assert "Vielen Dank." in result
+        assert "schrieb:" not in result
+        assert "verylongdomain" not in result
+
 
 class TestEmptyFallback:
     def test_empty_input_returns_empty(self):

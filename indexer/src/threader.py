@@ -16,19 +16,34 @@ from .parser import Message
 # Hoisted to module level so the compiled regex is reused across every
 # incoming message instead of recompiling per call.
 #
-# The conservative set deliberately favours specificity over coverage:
-# every alternate is at least two ASCII characters or a CJK reply
-# marker, and each must be followed by one of ``\s:\[\]`` to avoid
-# stripping real-word prefixes. ``re|fwd|fw`` cover English; ``aw|ant``
-# cover German (``Antwort``); ``sv`` covers Swedish (``Svar``); ``tr``
-# covers French forwards (``Transféré``); ``回复`` / ``答复`` cover
-# Chinese reply markers. Single-letter prefixes (Italian ``R:``,
-# French ``Réf:``) are intentionally excluded — the prevalence is low
-# and the false-strip risk against subjects starting with one letter +
-# punctuation (e.g. ``R: meeting`` vs ``R&D recap``) is high enough
-# that a wrong strip would silently merge unrelated threads.
+# Two prefix classes, distinguished by what punctuation must follow.
+#
+# CLASS 1 — well-known, low false-strip risk: ``re|fwd|fw|回复|答复``.
+# Accept the full punctuation set ``[\s:\[\]]+`` because the prefix
+# is universally recognized and a real subject starting with
+# ``Re report ...`` (missing colon) is functionally always a reply,
+# not English prose. ``回复`` / ``答复`` are CJK so cannot collide
+# with English word starts.
+#
+# CLASS 2 — language-specific two-letter abbreviations, high
+# false-strip risk against English prose: ``aw|ant|sv|tr``. Require
+# explicit ``[:\[\]]+`` punctuation (no bare whitespace) so English /
+# cross-language subjects like ``Tr report on Q1``, ``Sv anything``,
+# ``Ant question?``, or ``Aw report`` are NOT silently treated as
+# reply prefixes and merged onto an unrelated thread. Real
+# ``Aw``/``Ant`` (German), ``Sv`` (Swedish), ``Tr`` (French) clients
+# universally emit the colon shape (``Aw:``, ``Sv:``, ``Tr:``), so
+# this restriction does not affect real reply detection. The colon
+# requirement is what makes the existing reasoning (single-letter
+# prefixes are excluded because of false-strip risk) actually hold
+# for the two-character cases that share surface with English prose.
+#
+# Single-letter prefixes (Italian ``R:``, French ``Réf:``) remain
+# excluded — even with the colon-only restriction, the false-strip
+# surface for one-letter starts (e.g. ``R: meeting`` vs ``R&D recap``)
+# is too narrow to disambiguate.
 _SUBJECT_PREFIX_RE = re.compile(
-    r"^(re|fwd|fw|aw|ant|sv|tr|回复|答复)[\s:\[\]]+",
+    r"^(?:(?:re|fwd|fw|回复|答复)[\s:\[\]]+|(?:aw|ant|sv|tr)[:\[\]]+)",
     re.IGNORECASE,
 )
 _SUBJECT_WHITESPACE_RE = re.compile(r"\s+")

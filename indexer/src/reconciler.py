@@ -46,6 +46,15 @@ log = logging.getLogger("indexer.reconciler")
 # would incorrectly trip the mass-delete brake. See ``reap()``.
 _REAP_ABSOLUTE_FLOOR = 10
 
+# Consecutive blocked passes before a thread crosses from "transient
+# blip" into "stuck state" and earns a one-shot escalation log line.
+# Routine cold-start / single-batch retries clear well within this
+# window; threads still blocked after this many sweeps almost always
+# indicate a misconfigured embedder, persistent parser bug, or stuck
+# survivor file that needs operator attention rather than another
+# silent retry.
+_BLOCKED_ESCALATION_THRESHOLD = 3
+
 
 @dataclass(frozen=True)
 class ReconcilerConfig:
@@ -86,6 +95,14 @@ class Reconciler:
         # the right shape for a counter that signals "something's
         # blocked right now" rather than long-term retry accounting.
         self._blocked_thread_attempts: dict[str, int] = {}
+        # Threads for which the one-shot escalation log has already
+        # fired. Kept separate from ``_blocked_thread_attempts`` because
+        # the per-pass WARN at each call site already fires every
+        # sweep; this latch ensures the higher-severity "this is now
+        # a stuck state" message is emitted exactly once per stuck
+        # episode rather than spamming on every retry. Clears together
+        # with the attempt counter when the thread reaps successfully.
+        self._escalated_threads: set[str] = set()
 
     # -----------------------------------------------------------------
     # Tombstone detection
@@ -252,14 +269,34 @@ class Reconciler:
         }
 
     def _record_blocked(self, thread_id: str) -> int:
-        """Bump the blocked-attempts counter for ``thread_id`` and return it."""
+        """Bump the blocked-attempts counter for ``thread_id`` and return it.
+
+        Crossing ``_BLOCKED_ESCALATION_THRESHOLD`` for the first time
+        emits a one-shot WARN distinct from the per-pass log lines at
+        each call site, so operators can grep for the escalation
+        signal without scanning every routine retry. The latch in
+        ``_escalated_threads`` prevents the message from firing again
+        until the thread reaps successfully.
+        """
         attempts = self._blocked_thread_attempts.get(thread_id, 0) + 1
         self._blocked_thread_attempts[thread_id] = attempts
+        if attempts >= _BLOCKED_ESCALATION_THRESHOLD and thread_id not in self._escalated_threads:
+            log.warning(
+                "reconciler: thread %s has been blocked from reaping for "
+                "%d consecutive passes; this is no longer a transient retry. "
+                "Check embedder availability, parser errors, or stuck "
+                "survivor files. Sweeps will continue, but this message "
+                "will not repeat until the thread reaps cleanly.",
+                thread_id,
+                attempts,
+            )
+            self._escalated_threads.add(thread_id)
         return attempts
 
     def _clear_blocked(self, thread_id: str) -> None:
         """Drop the blocked-attempts entry for a thread that reaped cleanly."""
         self._blocked_thread_attempts.pop(thread_id, None)
+        self._escalated_threads.discard(thread_id)
 
     def _reap_thread(self, thread_id: str, tombs: list) -> tuple[bool, bool]:
         """Reap one thread. Returns (fully_reaped, rebuilt)."""
@@ -338,10 +375,10 @@ class Reconciler:
                 return False, False
             survivors.append(msg)
 
-        if not survivors:
-            self._record_blocked(thread_id)
-            return False, False
-
+        # Note: ``survivors`` is always non-empty here. ``survivor_rows``
+        # was checked non-empty above; every parse-failure path in the
+        # loop body early-returns, so we cannot exit the loop with an
+        # empty list.
         survivors.sort(key=lambda m: m.date)
         existing = self.db.get_thread(thread_id)
         subject = existing.subject if existing else survivors[0].subject
@@ -369,21 +406,27 @@ class Reconciler:
             if survivor_chunks:
                 embedding = mean_vector(survivor_chunks)
             else:
-                # Mirror the indexer's main subject-fallback path:
-                # prefer the thread's stored ``display_subject``
-                # (oldest message's original-case subject) so a
-                # post-reap rebuild produces the same vector shape the
-                # main indexer would have. ``rebuilt_thread.subject``
-                # is the threader's normalized grouping key
-                # (lowercased, ``Re:``/``Fwd:`` stripped) — using it
-                # here drifted silently from the main path's choice.
-                # Falls back to the oldest survivor's original-case
-                # subject, then a sentinel, so legacy threads with NULL
-                # ``display_subject`` still get a usable embedding.
-                stored_display = self.db.get_thread_display_subject(thread_id)
-                fallback = (stored_display or "").strip()
-                if not fallback and survivors:
-                    fallback = (survivors[0].subject or "").strip()
+                # Fallback priority: oldest SURVIVOR's original-case
+                # subject first; only fall back to the thread's stored
+                # ``display_subject`` if every survivor's subject is
+                # empty. ``display_subject`` is maintained as the
+                # oldest message's subject across the lifetime of the
+                # thread INCLUDING reaped messages — so using it as
+                # the primary source means a post-reap rebuild can
+                # embed text from the message we just deleted, which
+                # is the opposite of what an embed-from-survivors
+                # rebuild should do. Survivors' subjects are still
+                # original-case (``Re:``/``Fwd:`` intact) — they
+                # differ from ``rebuilt_thread.subject`` only by case
+                # / prefix-stripping, both of which are noise for
+                # retrieval. Falling back to ``display_subject`` as a
+                # secondary source covers the edge case where every
+                # survivor has an empty subject line; the sentinel
+                # ``(empty thread)`` covers the final NULL case.
+                fallback = (survivors[0].subject or "").strip()
+                if not fallback:
+                    stored_display = self.db.get_thread_display_subject(thread_id)
+                    fallback = (stored_display or "").strip()
                 if not fallback:
                     fallback = "(empty thread)"
                 embedding = self.embedder.embed(fallback)

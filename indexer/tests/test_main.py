@@ -1760,7 +1760,7 @@ class TestBatchedInitialIndex:
         embedder.embed_batch.return_value = [sentinel]
         # Fall back to per-message embed call shape: when Phase 2b
         # asks for N texts, return N copies of the sentinel.
-        embedder.embed_batch.side_effect = lambda texts: [list(sentinel) for _ in texts]
+        embedder.embed_batch.side_effect = lambda texts, **_kw: [list(sentinel) for _ in texts]
         queue = _make_queue(db)
 
         original = db.replace_message_chunks

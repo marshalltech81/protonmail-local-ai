@@ -958,7 +958,11 @@ def _drain_queue_batched(
         # ---- Phase 2b: bulk embed across batch ----
         t_embed_start = time.perf_counter()
         try:
-            vectors = embedder.embed_batch(all_texts) if all_texts else []
+            vectors = (
+                embedder.embed_batch(all_texts, on_batch_complete=touch_health_file)
+                if all_texts
+                else []
+            )
         except Exception as e:
             # Scrub the error before persistence: ``APIStatusError`` can
             # echo input fragments (email body text) on 4xx, and

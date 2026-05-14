@@ -98,13 +98,20 @@ validation tasks that should happen regardless of the LLM-engine swap.
 1. **Rerank-side quality experiment.** Once retrieval is stable,
    compare `RERANK_MODE=cohere` vs `false` on the manual eval
    set to measure what the rerank stage actually buys you.
-2. **Indexer healthcheck threshold.** Currently flagged
+2. **Indexer healthcheck threshold.** Previously flagged
    "unhealthy" during sustained MLX-pace indexing because
    `HEALTH_MAX_AGE_SECONDS` was tuned for the prior fast-embed
    path (~50-200ms per call), not Qwen3-Embedding's ~1-3s per
-   chunk. Functional impact zero; small follow-up to bump the
-   threshold default and/or call `touch_health_file()` more
-   aggressively.
+   chunk. Partially addressed on `fix/indexer-rag-review-followups`
+   by threading `touch_health_file` through
+   `OpenAIEmbedder.embed_batch` as an `on_batch_complete` hook so
+   the heartbeat now refreshes between internal batches inside a
+   single Phase 2b call. The same branch also replaces the
+   hardcoded 3 s probe interval in `wait_for_ready` with a
+   fast-initial (0.5 s × 10) → slow (3 s) backoff so cold-start
+   detection isn't paying ~3 s of latency on every restart. A
+   `HEALTH_MAX_AGE_SECONDS` default bump is still open if
+   operators on very slow embedders see false-unhealthy signals.
 
 The detailed PR-#83 session notes live in the project memory file
 ``project_mlx_rebuild_session.md``.
