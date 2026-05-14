@@ -231,43 +231,59 @@ Definition of done:
 - add attachment download support once the read-only action path is defined
 - verify action tools respect read-only guardrails
 
-### RAG quality — inline-reply quote stripping
+### RAG quality — inline-reply quote stripping (resolved 2026-05-13)
 
-`indexer/src/quoting.py:_HARD_CUT_PATTERNS` treats `On … wrote:` as a
-hard cut and `break`s out of the loop, so any inline reply text that
-appears AFTER the cut line is silently dropped from the embedding
-input. Two failure shapes:
+Previously, `indexer/src/quoting.py:_HARD_CUT_PATTERNS` treated
+`On … wrote:` as a hard cut and `break`ed out of the loop, so any
+inline reply text after the cut line was silently dropped from the
+embedding input. Two failure shapes:
 
-- **Pure inline reply** (no top-posted prefix): the very first line
-  is `On … wrote:`, the loop breaks immediately, `kept` is empty, and
-  the empty-fallback at quoting.py:76-83 returns the original
-  body_text unchanged — so the embedder sees the questions and
-  answers tangled together with quoted questions appearing twice.
-- **Top-posted reply with inline annotations on the quoted history**:
-  everything after the cut line — including the user's inline answers
-  between `>` blocks — is dropped. The thread vector keeps only the
-  top-posted prefix.
+- **Pure inline reply**: the loop broke immediately and the
+  empty-fallback returned the full original body unchanged — the
+  embedder saw questions and answers tangled together.
+- **Top-posted reply with inline annotations**: the user's inline
+  answers between `>` blocks were dropped.
 
-Both shapes regress retrieval quality compared to the file's stated
-philosophy ("conservative stripper that occasionally leaves quoted
-text in is better than aggressive one that eats real body content").
-For the inline case the current implementation does the opposite of
-that.
+Resolved on `fix/indexer-rag-review-followups` via option 2 (two-pass):
+`On … wrote:` moved from `_HARD_CUT_PATTERNS` to a separate
+`_REPLY_HEADER_PATTERNS` tuple, and reply-header lines now `continue`
+past the loop instead of `break`ing. The `>`-line filter still
+removes the quoted history that follows. Signature delimiters
+(`-- `) and forward preambles remain genuine hard cuts. Test coverage
+extended in `test_quoting.py::TestInlineReplies`. Option 3 (real
+reply-parser library) remains deferred — no additional dependency
+felt warranted once the inline-answer regression was fixed.
 
-Three options, ordered by complexity:
+Follow-up on the same branch (2026-05-13) extended coverage so the
+indexer pipeline doesn't drop quoted history cleanly in English while
+leaking the same noise in other languages and other clients:
 
-1. Drop `On … wrote:` from `_HARD_CUT_PATTERNS`. Conservative — the
-   `>`-line filter still removes most quoted history. Slight RAG-noise
-   increase on top-posts.
-2. Two-pass: stop *cutting* at the marker but keep filtering `>` lines
-   after it. Preserves inline answers without bringing back the full
-   quoted history. Fits the file's "no ML, simple line rules" stance.
-3. Defer to a real reply-parser library (`mailparser-reply`, `talon`).
-   Higher dependency cost, broader inbox-shape coverage.
+- **Non-English single-line reply headers.** `_REPLY_HEADER_PATTERNS`
+  now matches German (`Am … schrieb …:`), French (`Le … a écrit :`),
+  Spanish (`El … escribió:`), Italian (`Il … ha scritto:`), and Dutch
+  (`Op … schreef …:`) attribution shapes. Mirrors the threader's
+  multi-language `TestNormalizeSubject` coverage so the pipeline
+  treats reply headers symmetrically across the languages it already
+  handles for subject normalization.
+- **Two-line wrapped reply headers.** Gmail wraps the attribution
+  when the address pushes it past ~78 chars, putting the verb (and
+  colon) on a line of its own. New `_WRAPPED_REPLY_HEADER_PATTERNS`
+  tuple plus a pre-pass `re.sub` joins the wrapped span back into
+  one line before the main loop runs. Covers the same six languages
+  as the single-line set.
+- **Outlook bare-block header.** Newer Outlook omits the
+  `-----Original Message-----` dashed delimiter and emits a bare
+  `From:/Sent:/To:/Subject:` block at the top of the quoted history.
+  New `_OUTLOOK_BLOCK_PATTERN` matches `From:` followed (after at
+  most one blank line) by `Sent:` or `Date:` and truncates the body
+  at the match position — same effect as the dashed delimiter in
+  `_HARD_CUT_PATTERNS`. False-positive guard test (`test_prose_mentioning_from_is_not_falsely_cut`)
+  confirms prose like "The note read: From: Anonymous." survives
+  because no following timestamp line is present.
 
-Option 2 is the natural fit. Surfaced during the indexer line-by-line
-review on 2026-05-08; not blocking any active priority but a real
-RAG-quality regression on inbox-shape replies.
+Test coverage extended in `test_quoting.py::TestNonEnglishReplyHeaders`
+(7 cases), `TestWrappedReplyHeaders` (3 cases), and
+`TestOutlookBlockCut` (4 cases). Full indexer suite (573 tests) passes.
 
 ### RAG quality — retrieval review followups (resolved 2026-05-13)
 
