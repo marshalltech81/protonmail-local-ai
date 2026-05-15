@@ -1748,6 +1748,79 @@ class TestGetRecentChunksForThread:
         # chunked_at — same ordering as the pre-fix behavior.
         assert [c.chunk_id for c in chunks] == ["c-legacy-old", "c-legacy-new"]
 
+    def test_attachment_chunks_excluded(self, tmp_path):
+        """Privacy contract: ``summarize_thread`` is a body summary, so
+        ``get_recent_chunks_for_thread`` must return body chunks only.
+        Attachment-text retrieval is reserved to ``ask_mailbox`` — a
+        thread carrying both kinds of chunk must yield only the body
+        chunk here, or attachment extracts would silently reach a
+        remote inference endpoint via the summary path.
+        """
+        from tests.conftest import (
+            _build_schema,
+            _insert_attachment,
+            _insert_chunk,
+            _insert_thread,
+        )
+
+        db_path = tmp_path / "body_only.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.enable_load_extension(True)
+        import sqlite_vec
+
+        sqlite_vec.load(conn)
+        conn.enable_load_extension(False)
+        _build_schema(conn)
+
+        _insert_thread(
+            conn,
+            thread_id="t-mixed",
+            subject="thread with an attachment",
+            participants=["alice@example.com"],
+            senders=["alice@example.com"],
+            body_text="body",
+            snippet="...",
+            embedding=[1.0, 0.0, 0.0, 0.0],
+        )
+        _insert_attachment(
+            conn,
+            message_id="m-mixed",
+            thread_id="t-mixed",
+            attachment_id="content-hash-mixed",
+            filename="report.pdf",
+            occurrence_id="occ-mixed",
+        )
+        _insert_chunk(
+            conn,
+            chunk_id="c-body",
+            message_id="m-mixed",
+            thread_id="t-mixed",
+            text="body chunk text",
+            embedding=[1.0, 0.0, 0.0, 0.0],
+        )
+        _insert_chunk(
+            conn,
+            chunk_id="c-attach",
+            message_id="m-mixed",
+            thread_id="t-mixed",
+            text="attachment chunk text",
+            embedding=[1.0, 0.0, 0.0, 0.0],
+            attachment_id="content-hash-mixed",
+        )
+        conn.close()
+
+        db = Database(str(db_path))
+        try:
+            chunks = db.get_recent_chunks_for_thread("t-mixed", limit=10)
+        finally:
+            db.close()
+
+        assert [c.chunk_id for c in chunks] == ["c-body"], (
+            "get_recent_chunks_for_thread must exclude attachment chunks; "
+            "attachment-text retrieval is reserved to ask_mailbox"
+        )
+        assert chunks[0].attachment_id is None
+
 
 class TestAttachmentProvenanceJoin:
     """Codex P2: when the same content hash is attached under multiple
@@ -1755,9 +1828,12 @@ class TestAttachmentProvenanceJoin:
     (deduplicated by content hash) but multiple ``attachments`` rows
     (one per occurrence). A naive ``ON (attachment_id, message_id)``
     JOIN multiplies the chunk row by the occurrence count and yields
-    non-deterministic filename attribution. Each chunk-fetch path must
-    anchor on the SINGLE representative ``attachments`` row per pair
-    (the one with the lowest ``attachment_occurrence_id``).
+    non-deterministic filename attribution. Each attachment-joining
+    chunk-fetch path (``_chunk_vector_search`` and
+    ``get_evidence_chunks_for_threads``) must anchor on the SINGLE
+    representative ``attachments`` row per pair (the one with the
+    lowest ``attachment_occurrence_id``). ``get_recent_chunks_for_thread``
+    is body-only and no longer joins ``attachments``.
     """
 
     def _build_duplicate_attachment_db(self, tmp_path):
@@ -1819,25 +1895,6 @@ class TestAttachmentProvenanceJoin:
         )
         conn.close()
         return Database(str(db_path))
-
-    def test_recent_chunks_returns_single_row_with_deterministic_filename(self, tmp_path):
-        # ``get_recent_chunks_for_thread`` is the most-visible affected
-        # path (summarize_thread context). Without the MIN-occurrence
-        # subquery, two rows came back from one chunk.
-        db = self._build_duplicate_attachment_db(tmp_path)
-        try:
-            chunks = db.get_recent_chunks_for_thread("t-dupe", limit=10)
-        finally:
-            db.close()
-        assert len(chunks) == 1, (
-            f"chunk row must not multiply by attachment-occurrence count; "
-            f"got {len(chunks)} rows for one chunk"
-        )
-        assert chunks[0].attachment_filename == "invoice-a.pdf", (
-            f"deterministic filename attribution must pick the row with "
-            f"lowest occurrence_id (occ-a → invoice-a.pdf); got "
-            f"{chunks[0].attachment_filename!r}"
-        )
 
     def test_chunk_vector_search_returns_single_row_per_chunk(self, tmp_path):
         # ``_chunk_vector_search`` is the dense-retrieval lane for the

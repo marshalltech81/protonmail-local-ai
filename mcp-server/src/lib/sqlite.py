@@ -1080,7 +1080,7 @@ class Database:
         thread_id: str,
         limit: int = 6,
     ) -> list[ChunkResult]:
-        """Return the most-recently-indexed chunks for ``thread_id``.
+        """Return the most-recently-indexed BODY chunks for ``thread_id``.
 
         Used by ``summarize_thread`` / timeline-style intelligence tools
         that need "what does the thread say lately" — NOT "what matches
@@ -1089,6 +1089,13 @@ class Database:
         silently drops its newest replies. The chunk store carries every
         message in full, so reading the tail of ``chunked_at`` recovers
         the missing context.
+
+        Attachment chunks (rows with a non-NULL ``attachment_id``) are
+        deliberately excluded via ``c.attachment_id IS NULL``. The tool
+        contract reserves attachment-text retrieval to ``ask_mailbox``
+        alone; ``summarize_thread`` is a body summary, so surfacing
+        attachment extracts here would silently broaden which indexed
+        content can leave the host for a remote inference endpoint.
 
         Returned chunks are in chronological (oldest-first within the
         selected tail) order so the LLM prompt reads naturally as a
@@ -1110,13 +1117,10 @@ class Database:
         Selection picks the latest ``limit`` chunks, then the result
         is reversed in Python for ascending display order.
 
-        Attachment provenance join: anchor on the single representative
-        ``attachments`` row per ``(attachment_id, message_id)`` (the
-        one with the lowest ``attachment_occurrence_id``). The indexer
-        permits the same content hash to occur under multiple display
-        filenames in one message but stores ONLY ONE chunk set per
-        content hash, so a naive ``ON (attachment_id, message_id)``
-        JOIN multiplies the chunk row by the occurrence count.
+        Body-only filter: because attachment chunks are excluded, no
+        ``attachments`` JOIN is needed — ``attachment_filename`` and
+        ``attachment_mime`` are emitted as literal ``NULL`` so the row
+        shape still matches ``_row_to_chunk_result``.
         """
         if limit <= 0:
             return []
@@ -1125,18 +1129,12 @@ class Database:
                 """
                 SELECT c.chunk_id, c.message_id, c.thread_id, c.chunk_index,
                        c.text, c.char_start, c.char_end, c.attachment_id,
-                       a.filename AS attachment_filename,
-                       a.content_type AS attachment_mime,
+                       NULL AS attachment_filename,
+                       NULL AS attachment_mime,
                        0.0 AS score
                 FROM message_chunks c
-                LEFT JOIN attachments a
-                    ON a.attachment_occurrence_id = (
-                        SELECT MIN(a2.attachment_occurrence_id)
-                        FROM attachments a2
-                        WHERE a2.attachment_id = c.attachment_id
-                          AND a2.message_id = c.message_id
-                    )
                 WHERE c.thread_id = ?
+                  AND c.attachment_id IS NULL
                 ORDER BY COALESCE(c.message_date, c.chunked_at) DESC,
                          c.chunk_index DESC
                 LIMIT ?

@@ -722,7 +722,9 @@ def register_intelligence_tools(
             # the most-recent chunks lets the summary / timeline see the
             # latest activity; if the thread has no chunks (empty body,
             # extraction failure) ``_thread_context`` falls back to
-            # ``body_text`` as before.
+            # ``body_text`` as before. ``get_recent_chunks_for_thread``
+            # returns BODY chunks only — attachment-text retrieval stays
+            # reserved to ``ask_mailbox`` per the tool contract.
             recent_chunks = await asyncio.to_thread(
                 db.get_recent_chunks_for_thread, thread.thread_id, _SUMMARIZE_RECENT_CHUNKS
             )

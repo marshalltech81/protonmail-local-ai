@@ -35,10 +35,12 @@ The stack now runs:
 - **mbsync** — Docker, pulls into Maildir, `chmod go+r` after each sync.
 - **indexer** — Docker, parses Maildir, threads, embeds via any
   OpenAI-compatible `/v1/embeddings` provider (operator-supplied),
-  writes SQLite. Schema is at v17 with 4096-dim L2-unit-norm vectors
-  (the v17 backfill normalizes any pre-existing non-unit
+  writes SQLite. Schema is at v18 with 4096-dim L2-unit-norm vectors
+  (the v17 backfill normalized any pre-existing non-unit
   `threads_vec` / `message_chunks_vec` rows in place via
-  `vec_normalize`, gated to skip the zero placeholder). Both the
+  `vec_normalize`, gated to skip the zero placeholder; v18 adds the
+  nullable `message_chunks.message_date` column so the chunk tail
+  orders by message time, not index time). Both the
   initial scan and the steady-state main loop drain the queue through
   the same unified two-phase batched path (`Phase 1` commits thread
   membership per message — seeded by a three-case priority chain:
