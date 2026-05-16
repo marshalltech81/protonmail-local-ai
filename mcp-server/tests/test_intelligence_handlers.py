@@ -219,21 +219,23 @@ class TestSummarizeThread:
         out = asyncio.run(handler(thread_id="t-alpha"))
         assert "Error" in _text(out)
 
-    def test_recent_chunks_supersede_stale_body_text(self, fake_server, chunked_db, fake_llm):
-        """Codex P1: when ``body_text`` is stale (front-preserved truncate
-        drops newer replies), the summarize prompt must instead carry the
-        chunk tail. ``chunked_db.t-alpha`` has a chunk whose text is NOT
-        present in its ``body_text`` — that chunk must reach the LLM
-        prompt as evidence rather than the older body."""
+    def test_recent_chunks_supplement_body_text(self, fake_server, chunked_db, fake_llm):
+        """Codex P1: the recent-chunk tail is *appended* to ``body_text``,
+        not substituted for it. ``body_text`` is front-preserved, so a
+        ``"detailed"`` summary must see BOTH the start of the thread
+        (body) AND its latest activity (chunk tail). ``chunked_db.t-alpha``
+        has a chunk whose text is NOT in its ``body_text`` — both must
+        reach the prompt."""
         handler = _handlers(fake_server, chunked_db, fake_llm)["summarize_thread"]
-        asyncio.run(handler(thread_id="t-alpha"))
+        asyncio.run(handler(thread_id="t-alpha", style="detailed"))
         assert fake_llm.complete_calls
         _system, user = fake_llm.complete_calls[0]
-        # The chunk text "invoice number 12345" lives only in
-        # message_chunks, not in t-alpha's body_text — so its presence
-        # in the prompt is proof the recent-chunks path ran.
+        # Earlier body context is preserved...
+        assert "please find the invoice attached for march" in user
+        # ...and the recent-chunk tail (text only in message_chunks) is
+        # appended under its section header in chunk-rendered form.
         assert "invoice number 12345" in user
-        # And the chunk-rendered header form (not the body_text fallback).
+        assert "--- recent messages ---" in user
         assert "[chunk " in user
 
     def test_chunkless_thread_still_uses_body_text(self, fake_server, chunked_db, fake_llm):

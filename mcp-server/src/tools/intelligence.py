@@ -12,7 +12,7 @@ from mcp.types import TextContent
 
 from ..lib.embed import embed_query
 from ..lib.security import safe_provider_exception_text
-from ..lib.sqlite import ThreadResult
+from ..lib.sqlite import ChunkResult, ThreadResult
 from ..lib.validation import clamp_int
 
 # Number of candidates the summarize_thread fallback pulls from
@@ -346,11 +346,18 @@ _MAX_EXTRACT_LIMIT = 50
 # Tail size for ``summarize_thread``'s recent-chunks fetch. The stored
 # ``body_text`` is capped at ``THREAD_BODY_TEXT_MAX_TOKENS`` (4000) and
 # front-preserved, so long threads lose their newest replies from the
-# body view. Pulling six recent chunks (~9000 tokens with the default
-# chunker) gives the LLM enough recent context to summarize the tail of
-# an active thread without exceeding ``PER_THREAD_CHAR_BUDGET`` after
-# ``_thread_context`` truncates per chunk.
+# body view. Pulling six recent chunks gives the LLM enough recent
+# context to summarize the tail of an active thread.
 _SUMMARIZE_RECENT_CHUNKS = 6
+
+# Per-section char budgets for ``summarize_thread``. Unlike ``ask_mailbox``
+# (up to five threads sharing one prompt, hence the tight 2000-char
+# ``PER_THREAD_CHAR_BUDGET``), summarize works on a SINGLE thread, so it
+# can spend a larger share of the model context on that one thread. The
+# body section keeps the front-preserved accumulated ``body_text``; the
+# tail section adds the recent-chunk tail that the body cap dropped.
+_SUMMARIZE_BODY_CHAR_BUDGET = 8000
+_SUMMARIZE_TAIL_CHAR_BUDGET = 4000
 
 # Shared defense-in-depth framing for every intelligence prompt. Email
 # content is attacker-controlled input: anyone can send the user an email
@@ -454,6 +461,43 @@ def _thread_context(thread: ThreadResult, limit: int = PER_THREAD_CHAR_BUDGET) -
             return "\n\n".join(parts)
     text = thread.body_text or thread.snippet or ""
     return text[:limit]
+
+
+def _summarize_context(thread: ThreadResult, recent_chunks: list[ChunkResult]) -> str:
+    """Build ``summarize_thread``'s prompt body: accumulated ``body_text``
+    *plus* a recent-message tail.
+
+    The indexer's ``body_text`` is front-preserved and capped at
+    ``THREAD_BODY_TEXT_MAX_TOKENS`` — once a thread crosses the cap its
+    newest replies fall off the tail. ``recent_chunks`` (the tail of the
+    chunk store, oldest-first) recovers that lost context.
+
+    Both sections are kept (Codex P1): the recent chunks are *appended*
+    to ``body_text`` rather than replacing it, so a ``"detailed"`` /
+    ``"action-items"`` summary sees the start of the thread AND its
+    latest activity. On a short, un-truncated thread the two overlap —
+    a few wasted tokens, but context is never silently dropped. The
+    recent chunks are BODY-only (``get_recent_chunks_for_thread``
+    excludes attachment rows), so each renders with the short
+    ``[chunk N chars X-Y]`` header.
+    """
+    body = (thread.body_text or thread.snippet or "")[:_SUMMARIZE_BODY_CHAR_BUDGET]
+    parts: list[str] = []
+    used = 0
+    for chunk in recent_chunks:
+        header = f"[chunk {chunk.chunk_index} chars {chunk.char_start}-{chunk.char_end}]"
+        remaining = _SUMMARIZE_TAIL_CHAR_BUDGET - used - len(header) - 2  # \n separators
+        if remaining <= 0:
+            break
+        text = chunk.text[:remaining]
+        parts.append(f"{header}\n{text}")
+        used += len(header) + len(text) + 2
+    if not parts:
+        return body
+    tail = "\n\n".join(parts)
+    if not body:
+        return tail
+    return f"{body}\n\n--- recent messages ---\n{tail}"
 
 
 def register_intelligence_tools(
@@ -715,21 +759,20 @@ def register_intelligence_tools(
                 if not thread:
                     return [TextContent(type="text", text=f"Thread not found: {thread_id}")]
 
-            # Attach the tail of the chunk store. The stored ``body_text``
-            # is front-preserved (Codex P1): once a thread crosses
+            # Fetch the tail of the chunk store. The stored ``body_text``
+            # is front-preserved: once a thread crosses
             # ``THREAD_BODY_TEXT_MAX_TOKENS`` (4000) any later reply is
             # appended and immediately truncated off the tail. Reading
             # the most-recent chunks lets the summary / timeline see the
-            # latest activity; if the thread has no chunks (empty body,
-            # extraction failure) ``_thread_context`` falls back to
-            # ``body_text`` as before. ``get_recent_chunks_for_thread``
-            # returns BODY chunks only — attachment-text retrieval stays
-            # reserved to ``ask_mailbox`` per the tool contract.
+            # latest activity. ``_summarize_context`` *appends* these to
+            # ``body_text`` rather than replacing it (Codex P1) so an
+            # earlier-context summary keeps the start of the thread.
+            # ``get_recent_chunks_for_thread`` returns BODY chunks only —
+            # attachment-text retrieval stays reserved to ``ask_mailbox``
+            # per the tool contract.
             recent_chunks = await asyncio.to_thread(
                 db.get_recent_chunks_for_thread, thread.thread_id, _SUMMARIZE_RECENT_CHUNKS
             )
-            if recent_chunks:
-                thread.evidence_chunks = recent_chunks
 
             style_instructions = {
                 "brief": "Summarize in 2-3 sentences.",
@@ -747,7 +790,7 @@ def register_intelligence_tools(
                 f"Participants: {', '.join(thread.participants)}\n"
                 f"Date range: {thread.date_first.strftime('%Y-%m-%d')} "
                 f"to {thread.date_last.strftime('%Y-%m-%d')}\n"
-                f"Body:\n{_thread_context(thread)}\n"
+                f"Body:\n{_summarize_context(thread, recent_chunks)}\n"
                 f"</untrusted_email>\n\n"
                 f"Task: {instruction}"
             )

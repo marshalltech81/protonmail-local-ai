@@ -2194,7 +2194,7 @@ class TestReplaceMessageChunks:
             embeddings_by_chunk_id=embeds,
         )
 
-        assert result == {"inserted": 2, "deleted": 0, "kept": 0}
+        assert result == {"inserted": 2, "deleted": 0, "kept": 0, "backfilled": 0}
         # Each chunk landed in all three indexes.
         assert (
             db._conn.execute(
@@ -2230,7 +2230,7 @@ class TestReplaceMessageChunks:
             chunks=chunks,
             embeddings_by_chunk_id=embeds,
         )
-        assert first == {"inserted": 1, "deleted": 0, "kept": 0}
+        assert first == {"inserted": 1, "deleted": 0, "kept": 0, "backfilled": 0}
 
         # Replay with no embeddings — would raise if the diff path tried
         # to insert anything.
@@ -2240,7 +2240,7 @@ class TestReplaceMessageChunks:
             chunks=chunks,
             embeddings_by_chunk_id={},
         )
-        assert second == {"inserted": 0, "deleted": 0, "kept": 1}
+        assert second == {"inserted": 0, "deleted": 0, "kept": 1, "backfilled": 0}
 
     def test_diff_write_inserts_new_keeps_existing_drops_gone(self, db):
         _seed_thread_for_message(db, "m3@x", "t3")
@@ -2266,7 +2266,7 @@ class TestReplaceMessageChunks:
             chunks=[keep, new],
             embeddings_by_chunk_id={new.chunk_id: [0.3] * EMBEDDING_DIM},
         )
-        assert result == {"inserted": 1, "deleted": 1, "kept": 1}
+        assert result == {"inserted": 1, "deleted": 1, "kept": 1, "backfilled": 0}
 
         stored = {
             row[0]
@@ -2376,6 +2376,65 @@ class TestMessageDateOnChunks:
             embeddings_by_chunk_id={chunk.chunk_id: _one_hot(0)},
             message_date="2024-06-01T12:00:00+00:00",
         )
+        row = db._conn.execute(
+            "SELECT message_date FROM message_chunks WHERE chunk_id = ?",
+            (chunk.chunk_id,),
+        ).fetchone()
+        assert row["message_date"] == "2024-06-01T12:00:00+00:00"
+
+    def test_message_date_backfills_kept_chunks_on_reprocess(self, db):
+        # Legacy v17- chunk rows carry ``NULL`` ``message_date``. Chunk
+        # IDs are deterministic, so reprocessing an unchanged message
+        # (reap-rebuild / dead-letter retry / recovery sweep) yields the
+        # same IDs — every chunk is "kept", never re-inserted. The
+        # backfill path must still stamp ``message_date`` on those kept
+        # rows so the v18 "gradually pick up" promise actually holds.
+        _seed_thread_for_message(db, "m-md3@x", "t-md3")
+        chunk = _make_chunk("md3".ljust(64, "0"), 0, "body")
+        # First write: legacy-style, no date -> NULL row.
+        db.replace_message_chunks(
+            message_id="m-md3@x",
+            thread_id="t-md3",
+            chunks=[chunk],
+            embeddings_by_chunk_id={chunk.chunk_id: _one_hot(0)},
+        )
+        # Reprocess the identical chunk, now with a real Date: header.
+        result = db.replace_message_chunks(
+            message_id="m-md3@x",
+            thread_id="t-md3",
+            chunks=[chunk],
+            embeddings_by_chunk_id={},
+            message_date="2024-06-02T09:30:00+00:00",
+        )
+        assert result["inserted"] == 0
+        assert result["kept"] == 1
+        assert result["backfilled"] == 1
+        row = db._conn.execute(
+            "SELECT message_date FROM message_chunks WHERE chunk_id = ?",
+            (chunk.chunk_id,),
+        ).fetchone()
+        assert row["message_date"] == "2024-06-02T09:30:00+00:00"
+
+    def test_message_date_backfill_does_not_overwrite_existing(self, db):
+        # A kept row that already carries a date must not be rewritten:
+        # the ``IS NULL`` guard keeps the backfill a pure one-way fill.
+        _seed_thread_for_message(db, "m-md4@x", "t-md4")
+        chunk = _make_chunk("md4".ljust(64, "0"), 0, "body")
+        db.replace_message_chunks(
+            message_id="m-md4@x",
+            thread_id="t-md4",
+            chunks=[chunk],
+            embeddings_by_chunk_id={chunk.chunk_id: _one_hot(0)},
+            message_date="2024-06-01T12:00:00+00:00",
+        )
+        result = db.replace_message_chunks(
+            message_id="m-md4@x",
+            thread_id="t-md4",
+            chunks=[chunk],
+            embeddings_by_chunk_id={},
+            message_date="2099-12-31T23:59:59+00:00",
+        )
+        assert result["backfilled"] == 0
         row = db._conn.execute(
             "SELECT message_date FROM message_chunks WHERE chunk_id = ?",
             (chunk.chunk_id,),

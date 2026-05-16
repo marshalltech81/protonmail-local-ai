@@ -9,7 +9,13 @@ budget fed into LLM prompts.
 from datetime import UTC, datetime
 
 from src.lib.sqlite import ChunkResult, ThreadResult
-from src.tools.intelligence import PER_THREAD_CHAR_BUDGET, _thread_context
+from src.tools.intelligence import (
+    _SUMMARIZE_BODY_CHAR_BUDGET,
+    _SUMMARIZE_TAIL_CHAR_BUDGET,
+    PER_THREAD_CHAR_BUDGET,
+    _summarize_context,
+    _thread_context,
+)
 
 
 def _result(
@@ -157,6 +163,64 @@ class TestThreadContextWithChunks:
         out = _thread_context(r)
         assert "attachment attachment" in out  # generic placeholder
         assert "(unknown)" in out
+
+
+class TestSummarizeContext:
+    """``_summarize_context`` merges accumulated ``body_text`` with the
+    recent-chunk tail for ``summarize_thread`` (Codex P1) — the tail
+    supplements the body, it does not replace it.
+    """
+
+    def test_body_and_tail_both_present(self):
+        r = _result(body_text="start of the thread")
+        out = _summarize_context(r, [_chunk("latest reply text", index=4, char_start=900)])
+        assert "start of the thread" in out
+        assert "latest reply text" in out
+        assert "--- recent messages ---" in out
+        assert "[chunk 4 chars 900-917]" in out
+
+    def test_no_chunks_returns_body_only(self):
+        r = _result(body_text="the whole thread body")
+        out = _summarize_context(r, [])
+        assert out == "the whole thread body"
+
+    def test_empty_body_returns_tail_without_separator(self):
+        # A blank-body thread that somehow has chunks: render the tail
+        # alone, with no dangling "--- recent messages ---" header.
+        r = _result(body_text="", snippet="")
+        out = _summarize_context(r, [_chunk("only the chunk", index=0)])
+        assert "only the chunk" in out
+        assert "--- recent messages ---" not in out
+
+    def test_falls_back_to_snippet_when_body_text_missing(self):
+        r = _result(body_text="", snippet="short preview")
+        out = _summarize_context(r, [])
+        assert out == "short preview"
+
+    def test_body_truncated_to_body_budget(self):
+        r = _result(body_text="x" * (_SUMMARIZE_BODY_CHAR_BUDGET * 2))
+        out = _summarize_context(r, [])
+        assert len(out) == _SUMMARIZE_BODY_CHAR_BUDGET
+
+    def test_tail_bounded_by_tail_budget(self):
+        big = "y" * (_SUMMARIZE_TAIL_CHAR_BUDGET * 2)
+        r = _result(body_text="")
+        out = _summarize_context(r, [_chunk(big, index=0)])
+        # The whole tail section stays within the tail budget.
+        assert len(out) <= _SUMMARIZE_TAIL_CHAR_BUDGET
+
+    def test_multiple_chunks_concatenated_in_tail(self):
+        r = _result(body_text="body")
+        out = _summarize_context(
+            r,
+            [
+                _chunk("oldest tail message", index=2, char_start=0),
+                _chunk("newest tail message", index=3, char_start=300),
+            ],
+        )
+        assert "oldest tail message" in out
+        assert "newest tail message" in out
+        assert "[chunk 2" in out and "[chunk 3" in out
 
 
 def _candidate(thread_id: str, subject: str) -> ThreadResult:

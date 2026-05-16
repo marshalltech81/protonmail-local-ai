@@ -936,7 +936,9 @@ class Database:
         relative to what's already stored — embeddings for existing
         chunk_ids are not touched (the chunk text is unchanged so the
         prior embedding is still valid). Returns ``{"inserted": n,
-        "deleted": m, "kept": k}`` for observability.
+        "deleted": m, "kept": k, "backfilled": b}`` for observability;
+        ``backfilled`` counts kept rows whose ``NULL`` ``message_date``
+        was filled in by this call (see below).
 
         ``attachment_id`` selects which slice of the message's chunks
         this call manages:
@@ -954,7 +956,8 @@ class Database:
 
         ``message_date`` is the source message's ``Date:`` header in
         ISO 8601 form (``msg.date.isoformat()``). Stored on every new
-        chunk row so timeline-style retrieval
+        chunk row — and backfilled onto kept rows that still carry a
+        ``NULL`` ``message_date`` — so timeline-style retrieval
         (``get_recent_chunks_for_thread`` / ``summarize_thread``) can
         order by message time instead of the chunker's wall-clock
         insert time. ``None`` is permitted for callers that have no
@@ -1059,6 +1062,30 @@ class Database:
                     ),
                 )
 
+            # Backfill ``message_date`` onto kept chunk rows. Chunk IDs
+            # are deterministic (``sha256(message_pk || index || text)``),
+            # so reprocessing an unchanged message during a reap-rebuild,
+            # dead-letter retry, or recovery sweep produces identical IDs
+            # — every chunk lands in ``kept``, not ``to_insert``, and the
+            # insert path above never runs for it. Legacy v17- rows
+            # (written before the schema v18 ``message_date`` column)
+            # would therefore stay ``NULL`` forever. The ``IS NULL``
+            # guard keeps this a pure backfill: rows that already carry
+            # a date are untouched.
+            backfilled = 0
+            kept_ids = existing_ids & incoming_ids
+            if message_date is not None and kept_ids:
+                placeholders = ",".join("?" * len(kept_ids))
+                # ``placeholders`` is only ``?`` marks; every chunk_id is
+                # bound as a parameter, so this is not a SQL-injection
+                # vector. nosec B608.
+                cur.execute(
+                    f"UPDATE message_chunks SET message_date = ? "  # nosec B608
+                    f"WHERE message_date IS NULL AND chunk_id IN ({placeholders})",
+                    (message_date, *kept_ids),
+                )
+                backfilled = cur.rowcount
+
             self._commit_if_started(started)
         except Exception:
             self._rollback_if_started(started)
@@ -1068,6 +1095,7 @@ class Database:
             "inserted": len(to_insert),
             "deleted": len(to_delete),
             "kept": len(existing_ids & incoming_ids),
+            "backfilled": backfilled,
         }
 
     @_synchronized

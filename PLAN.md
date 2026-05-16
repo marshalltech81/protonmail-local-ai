@@ -344,10 +344,16 @@ four retrieval-quality gaps. All four addressed in this branch:
   silently drops its newest replies from the body view. `get_thread`
   returns no evidence chunks, so `_thread_context` fell back to the
   stale body. Added `Database.get_recent_chunks_for_thread`
-  (`chunked_at DESC, chunk_index DESC` selection, chronological output)
-  and `summarize_thread` now attaches the tail of the chunk store
-  before rendering. `body_text` shape is unchanged — front-preservation
-  still serves the threads-lane FTS coverage and `threads_vec` seeding.
+  (`COALESCE(message_date, chunked_at) DESC, chunk_index DESC`
+  selection, chronological output) and a `_summarize_context` helper
+  that *merges* the accumulated `body_text` with the recent-chunk tail
+  under a `--- recent messages ---` section — the tail supplements the
+  body rather than replacing it, so `"detailed"` / `"action-items"`
+  summaries keep both the start of the thread and its latest activity
+  (Codex follow-up: an earlier evidence-chunk-priority approach dropped
+  all earlier body context whenever a thread had chunks). `body_text`
+  shape is unchanged — front-preservation still serves the threads-lane
+  FTS coverage and `threads_vec` seeding.
 - **F3 (P2) — Retrieval eval lied about hybrid coverage.** The hybrid
   test seeded a 768-dim placeholder against a 4096-dim schema; the
   vector lane caught `OperationalError`, returned empty, and the
@@ -364,11 +370,12 @@ four retrieval-quality gaps. All four addressed in this branch:
   RRF, mirroring the dense half of `hybrid_search`.
 
 Tests: `TestEvidenceAttachmentProvenance` (3), `TestThreadContextWithChunks`
-(3 new attachment-header cases), `TestGetRecentChunksForThread` (4),
-`TestSummarizeThread::test_recent_chunks_supersede_stale_body_text`
+(3 new attachment-header cases), `TestSummarizeContext` (7),
+`TestGetRecentChunksForThread` (4),
+`TestSummarizeThread::test_recent_chunks_supplement_body_text`
 + `::test_chunkless_thread_still_uses_body_text`, and
 `TestSemanticSearch::test_chunk_vec_lane_lifts_thread_with_weak_thread_vec`.
-Full mcp-server suite (385 tests) passes, coverage 93.5%.
+Full mcp-server suite passes, coverage 93%+.
 
 ### RAG quality — thread vector weighting across body and attachment chunks
 
