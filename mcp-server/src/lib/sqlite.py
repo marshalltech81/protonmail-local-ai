@@ -57,30 +57,48 @@ _FILTERED_OVERSAMPLE = 4
 _CHUNK_LANE_OVERSAMPLE = 10
 
 
-def _matches_sender(result, from_addr_lower: str) -> bool:
-    """True if ``from_addr_lower`` matches one of the thread's senders.
+def _addr_matches(haystack: list[str], query_lower: str) -> bool:
+    """True if ``query_lower`` matches an address string in ``haystack``.
 
-    Senders is the list of ``From`` addresses recorded on the thread.
     Match mode depends on the shape of the query:
 
     * A full address (``bob@example.com``) is compared by canonical
       equality so that case variation in the stored display string
       (``Bob@Example.com``, ``Bob Smith <bob@example.com>``) still matches.
     * A bare name (``bob``) or domain fragment (``@example.com``,
-      ``example.com``) keeps the previous substring behavior against the
-      lowercased display string, since those shapes cannot canonicalize.
+      ``example.com``) keeps substring behavior against the lowercased
+      display string, since those shapes cannot canonicalize.
     """
-    haystack = result.senders
-    canonical_query = canonical_addr(from_addr_lower)
+    canonical_query = canonical_addr(query_lower)
     # A canonicalizable full address requires a non-empty local part.
     # ``canonical_addr`` still returns the input for a bare domain like
     # ``@example.com`` because the ``@`` check passes, but equality against
     # ``bob@example.com`` would then miss. Route the domain-only shape through
-    # the substring fallback so ``from_addr="@example.com"`` still behaves
-    # like a domain filter.
+    # the substring fallback so ``"@example.com"`` still behaves like a
+    # domain filter.
     if canonical_query and not canonical_query.startswith("@"):
         return any(canonical_addr(s) == canonical_query for s in haystack)
-    return any(from_addr_lower in s.lower() for s in haystack)
+    return any(query_lower in s.lower() for s in haystack)
+
+
+def _matches_sender(result, from_addr_lower: str) -> bool:
+    """True if ``from_addr_lower`` matches one of the thread's senders.
+
+    Senders is the list of ``From`` addresses recorded on the thread.
+    See ``_addr_matches`` for the full-address vs. substring match rules.
+    """
+    return _addr_matches(result.senders, from_addr_lower)
+
+
+def _matches_participant(result, participant_lower: str) -> bool:
+    """True if ``participant_lower`` matches anyone on the thread.
+
+    Participants is the broader From + To + Cc set, so this surfaces
+    threads a person was on in *any* role — distinct from
+    ``_matches_sender``, which is From-line only. See ``_addr_matches``
+    for the full-address vs. substring match rules.
+    """
+    return _addr_matches(result.participants, participant_lower)
 
 
 def _sanitize_fts_query(query: str) -> str:
@@ -113,6 +131,18 @@ class ChunkResult:
     so the hybrid-search RRF can lift it into thread ranking, and its
     ``text`` + ``char_start`` / ``char_end`` so intelligence tools can
     cite the exact passage they used.
+
+    ``attachment_id`` / ``attachment_filename`` / ``attachment_mime`` are
+    populated for chunks derived from an attachment's extracted text and
+    left ``None`` for body chunks. ``ask_mailbox``'s "reads attachment
+    content" promise depends on these fields reaching the LLM context —
+    without filename/MIME provenance the model sees opaque text and
+    cannot cite the source attachment.
+
+    ``message_date`` is the source message's ``Date:`` header (schema
+    v18+), carried so ``get_evidence`` can show *when* a cited passage
+    arrived. Left ``None`` for legacy v17- chunk rows that pre-date the
+    column and for query paths that do not SELECT it.
     """
 
     chunk_id: str
@@ -123,6 +153,37 @@ class ChunkResult:
     char_start: int
     char_end: int
     score: float = 0.0
+    attachment_id: str | None = None
+    attachment_filename: str | None = None
+    attachment_mime: str | None = None
+    message_date: str | None = None
+
+
+def _row_to_chunk_result(r) -> ChunkResult:
+    """Build a ``ChunkResult`` from a row that may or may not have JOINed
+    attachment columns.
+
+    Centralizes the ``attachment_*`` extraction so every chunk-producing
+    query path materializes the same shape — without this, callers that
+    only ``SELECT c.*`` (no JOIN) would silently emit ``ChunkResult``
+    instances with ``attachment_filename=None`` even when filename data
+    existed for the chunk.
+    """
+    keys = r.keys()
+    return ChunkResult(
+        chunk_id=r["chunk_id"],
+        message_id=r["message_id"],
+        thread_id=r["thread_id"],
+        chunk_index=int(r["chunk_index"]),
+        text=r["text"],
+        char_start=int(r["char_start"]),
+        char_end=int(r["char_end"]),
+        score=float(r["score"]) if "score" in keys and r["score"] is not None else 0.0,
+        attachment_id=r["attachment_id"] if "attachment_id" in keys else None,
+        attachment_filename=(r["attachment_filename"] if "attachment_filename" in keys else None),
+        attachment_mime=r["attachment_mime"] if "attachment_mime" in keys else None,
+        message_date=r["message_date"] if "message_date" in keys else None,
+    )
 
 
 @dataclass
@@ -147,6 +208,84 @@ class ThreadResult:
     # did. Intelligence tools surface these to the LLM as precise passage
     # citations rather than feeding the whole accumulated body.
     evidence_chunks: list[ChunkResult] = field(default_factory=list)
+    # Retrieval-lane provenance: lane name -> 0-based rank the thread held
+    # in that lane before fusion. Lanes are ``thread_fts`` / ``chunk_fts`` /
+    # ``attachment_fts`` (BM25), ``thread_vec`` / ``chunk_vec`` (dense),
+    # and ``rerank`` (final cross-encoder position when a reranker ran).
+    # Populated additively by the RRF fusion as pure observability — it
+    # never feeds back into scoring or ordering — and surfaced by
+    # ``get_evidence(include_scores=True)``. Empty for retrieval paths
+    # that bypass fusion (e.g. a thread addressed directly by ID).
+    lane_ranks: dict[str, int] = field(default_factory=dict)
+
+
+def _tag_lane_ranks(results: list[ThreadResult], lane: str) -> list[ThreadResult]:
+    """Stamp each result's 0-based position in ``lane`` onto ``lane_ranks``.
+
+    Called on a lane's ranked output *before* it enters RRF fusion so the
+    fusion step can merge every lane a thread appeared in onto the single
+    surviving ``ThreadResult``. Mutates and returns the same list for
+    inline use at the call site. Purely additive — does not touch scores.
+    """
+    for rank, result in enumerate(results):
+        result.lane_ranks[lane] = rank
+    return results
+
+
+@dataclass
+class AttachmentResult:
+    """One attachment occurrence surfaced by ``search_attachments``.
+
+    An *occurrence* is one (message, attachment) pairing — the same
+    content hash (``attachment_id``) can be attached to several messages,
+    and each is its own row in the ``attachments`` table.
+
+    ``extraction_status`` and ``text_snippet`` come from
+    ``attachment_extractions`` (keyed by content hash). ``extraction_status``
+    is ``None`` and ``text_snippet`` empty when the index has no extraction
+    row for the attachment yet — distinct from a failed extraction, which
+    has a non-NULL status.
+    """
+
+    attachment_id: str
+    message_id: str
+    thread_id: str
+    filename: str
+    content_type: str
+    size_bytes: int
+    subject: str
+    folder: str
+    date_last: datetime
+    senders: list[str] = field(default_factory=list)
+    extraction_status: str | None = None
+    text_snippet: str = ""
+    score: float = 0.0
+
+
+def _row_to_attachment_result(r) -> AttachmentResult:
+    """Build an ``AttachmentResult`` from a search-lane row.
+
+    All three attachment lanes SELECT the same fixed column list (the
+    subject pair, ``senders`` JSON, the extraction columns, a ``score``
+    alias), so no per-column key guard is needed. ``display_subject``
+    is preferred over the normalized ``subject`` when the row carries
+    one (legacy rows have it NULL), mirroring ``_row_to_result``.
+    """
+    return AttachmentResult(
+        attachment_id=r["attachment_id"],
+        message_id=r["message_id"],
+        thread_id=r["thread_id"],
+        filename=r["filename"],
+        content_type=r["content_type"],
+        size_bytes=int(r["size_bytes"]),
+        subject=r["display_subject"] or r["subject"],
+        folder=r["folder"],
+        date_last=datetime.fromisoformat(r["date_last"]),
+        senders=json.loads(r["senders"]),
+        extraction_status=r["extraction_status"],
+        text_snippet=r["text_snippet"] or "",
+        score=float(r["score"]),
+    )
 
 
 class Database:
@@ -256,13 +395,16 @@ class Database:
         date_from: str | None = None,
         date_to: str | None = None,
         has_attachments: bool | None = None,
+        participant: str | None = None,
         limit: int = 10,
         with_evidence: bool = False,
         reranker: RerankerBackend | None = None,
     ) -> list[ThreadResult]:
         oversample = (
             _FILTERED_OVERSAMPLE
-            if self._has_post_fusion_filter(folders, from_addr, date_from, date_to, has_attachments)
+            if self._has_post_fusion_filter(
+                folders, from_addr, date_from, date_to, has_attachments, participant
+            )
             else _UNFILTERED_OVERSAMPLE
         )
         # When a reranker is configured the fetch must size for the
@@ -297,10 +439,20 @@ class Database:
         # coarse vector score. Threads with no chunks (empty bodies)
         # simply don't appear in this lane and rely on the other two
         # for ranking.
-        chunk_hits = self._chunk_vector_search(query_embedding, fetch_limit * 3)
+        #
+        # ``_CHUNK_LANE_OVERSAMPLE`` (=10) matches the FTS chunk and
+        # attachment lanes that already use this factor. The shared
+        # constant exists precisely to address the "long thread with
+        # many similar chunks monopolises the top-K and contributes
+        # only one credit to RRF" failure mode — leaving the vec lane
+        # at the prior ``* 3`` would re-create that asymmetry between
+        # the keyword and dense chunk paths.
+        chunk_hits = self._chunk_vector_search(
+            query_embedding, fetch_limit * _CHUNK_LANE_OVERSAMPLE
+        )
         fused = self._reciprocal_rank_fusion(bm25_results, vec_results, chunk_hits)
         filtered = self._apply_filters(
-            fused, folders, from_addr, date_from, date_to, has_attachments
+            fused, folders, from_addr, date_from, date_to, has_attachments, participant
         )
 
         # Decide how many candidates to keep before any rerank. The
@@ -319,15 +471,35 @@ class Database:
         candidates = filtered[:candidates_n]
 
         if with_evidence and candidates:
-            # Reuse the chunk lane already fetched: group its hits by
-            # parent thread, take the best per thread for the surfaced
-            # results. Avoids a second sqlite-vec round-trip when
-            # ``chunk_hits`` already covers the surfaced threads.
-            wanted = {r.thread_id for r in candidates}
-            grouped: dict[str, list[ChunkResult]] = {tid: [] for tid in wanted}
-            for chunk in chunk_hits:
-                if chunk.thread_id in wanted and len(grouped[chunk.thread_id]) < 3:
-                    grouped[chunk.thread_id].append(chunk)
+            # Fetch evidence chunks per surfaced thread, not from the
+            # global chunk-vec pool. A thread can win the candidates
+            # slice via BM25, thread-vector, or any of the keyword
+            # filter lanes (sender, date, attachment filename FTS) —
+            # and its specific chunks may not rank anywhere in the
+            # global chunk-vec top-K. The prior pool-reuse shape left
+            # those threads with empty ``evidence_chunks``, silently
+            # breaking ``ask_mailbox``'s "reads attachment content"
+            # promise whenever the carrier email won by metadata but
+            # the attachment chunks didn't enter the chunk-vec pool.
+            wanted = [r.thread_id for r in candidates]
+            # Recompute attachment-FTS hits standalone so we know which
+            # candidates won via filename match. The keyword lane's RRF
+            # output is opaque to lane provenance, so we re-run the
+            # narrow query here (cheap FTS5 lookup, only when the
+            # caller wants evidence). For these threads, attachment
+            # chunks are floated to the front of the per-thread
+            # evidence slice — fixes the "filename match → wrong
+            # evidence" gap where the LLM saw body text instead of
+            # the attachment the user asked about.
+            attachment_won = self._attachment_won_thread_ids(
+                query_text, wanted, folders, date_from, date_to, has_attachments
+            )
+            grouped = self.get_evidence_chunks_for_threads(
+                wanted,
+                query_embedding,
+                per_thread_limit=3,
+                attachment_won_thread_ids=attachment_won,
+            )
             for result in candidates:
                 result.evidence_chunks = grouped.get(result.thread_id, [])
 
@@ -380,6 +552,9 @@ class Database:
             if 0 <= orig_idx < len(candidates):
                 result = candidates[orig_idx]
                 result.score = score
+                # Record the post-rerank position as the ``rerank`` lane
+                # rank — observability only, surfaced by get_evidence.
+                result.lane_ranks["rerank"] = len(reordered)
                 reordered.append(result)
         return reordered[:limit]
 
@@ -391,6 +566,7 @@ class Database:
         date_from: str | None = None,
         date_to: str | None = None,
         has_attachments: bool | None = None,
+        participant: str | None = None,
         limit: int = 10,
     ) -> list[ThreadResult]:
         # Previously dropped every filter except ``folders`` on the floor, so
@@ -398,7 +574,9 @@ class Database:
         # results. All four filters now flow through, matching hybrid_search.
         oversample = (
             _FILTERED_OVERSAMPLE
-            if self._has_post_fusion_filter(folders, from_addr, date_from, date_to, has_attachments)
+            if self._has_post_fusion_filter(
+                folders, from_addr, date_from, date_to, has_attachments, participant
+            )
             else _UNFILTERED_OVERSAMPLE
         )
         results = self._keyword_search(
@@ -410,7 +588,7 @@ class Database:
             has_attachments=has_attachments,
         )
         filtered = self._apply_filters(
-            results, folders, from_addr, date_from, date_to, has_attachments
+            results, folders, from_addr, date_from, date_to, has_attachments, participant
         )
         return filtered[:limit]
 
@@ -422,18 +600,259 @@ class Database:
         date_from: str | None = None,
         date_to: str | None = None,
         has_attachments: bool | None = None,
+        participant: str | None = None,
         limit: int = 10,
     ) -> list[ThreadResult]:
+        """Vector retrieval over both thread- and chunk-level lanes.
+
+        Fuses ``threads_vec`` (mean-pooled thread vector) with
+        ``message_chunks_vec`` (per-message precision vectors) via RRF,
+        so a long thread with one strong matching chunk can outrank a
+        thread whose coarse mean only weakly aligns with the query.
+        Mirrors the dense half of ``hybrid_search`` — without the
+        chunk lane the mode silently returned the worse retrieval
+        whenever a caller chose ``mode="semantic"``.
+        """
         oversample = (
             _FILTERED_OVERSAMPLE
-            if self._has_post_fusion_filter(folders, from_addr, date_from, date_to, has_attachments)
+            if self._has_post_fusion_filter(
+                folders, from_addr, date_from, date_to, has_attachments, participant
+            )
             else _UNFILTERED_OVERSAMPLE
         )
-        results = self._vector_search(query_embedding, limit * oversample)
+        fetch_limit = limit * oversample
+        vec_results = self._vector_search(query_embedding, fetch_limit)
+        # Same chunk-lane oversample reasoning as ``hybrid_search``:
+        # without enough chunks, a long thread monopolises the top-K
+        # and other threads never enter the lane.
+        chunk_hits = self._chunk_vector_search(
+            query_embedding, fetch_limit * _CHUNK_LANE_OVERSAMPLE
+        )
+        fused = self._reciprocal_rank_fusion(bm25=[], vec=vec_results, chunks=chunk_hits)
         filtered = self._apply_filters(
-            results, folders, from_addr, date_from, date_to, has_attachments
+            fused, folders, from_addr, date_from, date_to, has_attachments, participant
         )
         return filtered[:limit]
+
+    # -------------------------------------------------------------------------
+    # Attachment search
+    # -------------------------------------------------------------------------
+
+    def search_attachments(
+        self,
+        query: str | None = None,
+        content_type: str | None = None,
+        from_addr: str | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
+        extracted_only: bool = False,
+        limit: int = 20,
+    ) -> list[AttachmentResult]:
+        """Search indexed attachments by filename, MIME type, and extracted text.
+
+        Two FTS lanes run when ``query`` is set: ``attachments_fts``
+        (filename + content type) and ``message_chunks_fts`` restricted to
+        attachment-derived chunks (the extracted PDF / OCR / document
+        text). Filename / MIME matches are listed first, then extracted-text
+        matches not already surfaced — a finder ("the quote PDF from
+        Acme") is better served by the obvious filename hit on top. With
+        no ``query`` the index is scanned by the structured filters
+        alone, newest thread activity first.
+
+        Filters: ``content_type`` is an exact MIME match; ``date_from`` /
+        ``date_to`` bound the parent thread's activity (a bare date
+        includes the whole day); ``extracted_only`` keeps only
+        attachments whose text extraction succeeded; ``from_addr`` keeps
+        only attachments on threads the address sent on (matched against
+        the thread's From-line senders, post-query in Python).
+        """
+        extra_clauses, extra_params = self._attachment_filter_clauses(
+            content_type, date_from, date_to, extracted_only
+        )
+        # ``from_addr`` is matched in Python against the parent thread's
+        # senders (the attachments table carries no sender column).
+        # Oversample the SQL fetch when it is set so a deep match still
+        # survives the filter — same reasoning as the thread-search
+        # post-fusion filters.
+        fetch_limit = limit * (_FILTERED_OVERSAMPLE if from_addr else 1)
+
+        fts_query = _sanitize_fts_query(query) if query else ""
+        if fts_query:
+            results = self._attachment_filename_lane(
+                fts_query, extra_clauses, extra_params, fetch_limit
+            )
+            seen = {(r.attachment_id, r.message_id, r.filename) for r in results}
+            for r in self._attachment_text_lane(
+                fts_query, extra_clauses, extra_params, fetch_limit
+            ):
+                key = (r.attachment_id, r.message_id, r.filename)
+                if key not in seen:
+                    seen.add(key)
+                    results.append(r)
+        elif query:
+            # A query that sanitized to nothing (pure punctuation) is an
+            # explicit no-match rather than a silent unfiltered scan.
+            return []
+        else:
+            results = self._attachment_scan(extra_clauses, extra_params, fetch_limit)
+
+        if from_addr:
+            fa = from_addr.lower()
+            results = [r for r in results if _addr_matches(r.senders, fa)]
+        return results[:limit]
+
+    @staticmethod
+    def _attachment_filter_clauses(
+        content_type: str | None,
+        date_from: str | None,
+        date_to: str | None,
+        extracted_only: bool,
+    ) -> tuple[list[str], list]:
+        """Build the SQL WHERE fragment shared by every attachment lane.
+
+        Returns ``(clauses, params)``: literal clause strings (referencing
+        the ``a`` / ``t`` / ``e`` aliases every lane query declares) and
+        their ``?``-bound parameter values. Date bounds are normalized the
+        same way the thread-search lanes normalize them so a bare
+        ``"2024-12-31"`` includes the full day it names.
+        """
+        clauses: list[str] = []
+        params: list = []
+        if content_type:
+            clauses.append("a.content_type = ?")
+            params.append(content_type)
+        date_from_iso = _normalize_date_bound(date_from, end_of_day=False, field_name="date_from")
+        date_to_iso = _normalize_date_bound(date_to, end_of_day=True, field_name="date_to")
+        if date_from_iso is not None:
+            clauses.append("t.date_last >= ?")
+            params.append(date_from_iso)
+        if date_to_iso is not None:
+            clauses.append("t.date_first <= ?")
+            params.append(date_to_iso)
+        if extracted_only:
+            # ``e`` is LEFT JOINed, so this also drops attachments with no
+            # extraction row at all (status reads NULL) — the intent of
+            # "only attachments whose text I could actually read".
+            clauses.append("e.extraction_status = 'success'")
+        return clauses, params
+
+    def _attachment_filename_lane(
+        self,
+        fts_query: str,
+        extra_clauses: list[str],
+        extra_params: list,
+        limit: int,
+    ) -> list[AttachmentResult]:
+        """Attachments whose filename / content type match ``fts_query``."""
+        where = ["attachments_fts MATCH ?", *extra_clauses]
+        params = [fts_query, *extra_params, limit]
+        # WHERE clauses are fixed literals (the MATCH plus the
+        # filter-clause literals); every user value is ``?``-bound.
+        sql = (
+            "SELECT a.attachment_id, a.message_id, a.thread_id, a.filename, "
+            "a.content_type, a.size_bytes, t.subject, t.display_subject, "
+            "t.folder, t.date_last, t.senders, e.extraction_status, "
+            "substr(e.extracted_text, 1, 240) AS text_snippet, "
+            "bm25(attachments_fts) AS score "
+            "FROM attachments_fts "
+            "JOIN attachments a ON attachments_fts.rowid = a.fts_rowid "
+            "JOIN threads t ON a.thread_id = t.thread_id "
+            "LEFT JOIN attachment_extractions e ON e.attachment_id = a.attachment_id "
+            "WHERE " + " AND ".join(where) + " "  # nosec B608
+            "ORDER BY score LIMIT ?"
+        )
+        try:
+            rows = self._fetchall(sql, params)
+        except sqlite3.OperationalError as e:
+            log.warning("Attachment filename search unavailable: %s", e)
+            return []
+        return [_row_to_attachment_result(r) for r in rows]
+
+    def _attachment_text_lane(
+        self,
+        fts_query: str,
+        extra_clauses: list[str],
+        extra_params: list,
+        limit: int,
+    ) -> list[AttachmentResult]:
+        """Attachments whose extracted text matches ``fts_query``.
+
+        Searches ``message_chunks_fts`` restricted to attachment-derived
+        chunks, then resolves each match to its attachment occurrence.
+        One content hash can be attached under several filenames in a
+        single message; the JOIN anchors on the lowest
+        ``attachment_occurrence_id`` for the pair so the row count is
+        deterministic (see ``_chunk_vector_search`` for the full
+        rationale). Many chunks can match one attachment, so the result
+        is deduped by occurrence in Python, keeping the best BM25 row.
+        """
+        where = [
+            "message_chunks_fts MATCH ?",
+            "c.attachment_id IS NOT NULL",
+            *extra_clauses,
+        ]
+        params = [fts_query, *extra_params, limit]
+        sql = (
+            "SELECT a.attachment_id, a.message_id, a.thread_id, a.filename, "
+            "a.content_type, a.size_bytes, t.subject, t.display_subject, "
+            "t.folder, t.date_last, t.senders, e.extraction_status, "
+            "substr(e.extracted_text, 1, 240) AS text_snippet, "
+            "bm25(message_chunks_fts) AS score "
+            "FROM message_chunks_fts "
+            "JOIN message_chunks c ON message_chunks_fts.rowid = c.fts_rowid "
+            "JOIN attachments a ON a.attachment_occurrence_id = ( "
+            "    SELECT MIN(a2.attachment_occurrence_id) FROM attachments a2 "
+            "    WHERE a2.attachment_id = c.attachment_id "
+            "      AND a2.message_id = c.message_id ) "
+            "JOIN threads t ON a.thread_id = t.thread_id "
+            "LEFT JOIN attachment_extractions e ON e.attachment_id = a.attachment_id "
+            "WHERE " + " AND ".join(where) + " "  # nosec B608
+            "ORDER BY score LIMIT ?"
+        )
+        try:
+            rows = self._fetchall(sql, params)
+        except sqlite3.OperationalError as e:
+            log.warning("Attachment text search unavailable: %s", e)
+            return []
+        results: list[AttachmentResult] = []
+        seen: set[tuple[str, str, str]] = set()
+        for r in rows:
+            result = _row_to_attachment_result(r)
+            key = (result.attachment_id, result.message_id, result.filename)
+            if key in seen:
+                continue
+            seen.add(key)
+            results.append(result)
+        return results
+
+    def _attachment_scan(
+        self,
+        extra_clauses: list[str],
+        extra_params: list,
+        limit: int,
+    ) -> list[AttachmentResult]:
+        """List attachments by structured filters only (no text query)."""
+        # ``1=1`` keeps the AND-join valid when no filter clause is set.
+        where = ["1=1", *extra_clauses]
+        params = [*extra_params, limit]
+        sql = (
+            "SELECT a.attachment_id, a.message_id, a.thread_id, a.filename, "
+            "a.content_type, a.size_bytes, t.subject, t.display_subject, "
+            "t.folder, t.date_last, t.senders, e.extraction_status, "
+            "substr(e.extracted_text, 1, 240) AS text_snippet, "
+            "0.0 AS score "
+            "FROM attachments a "
+            "JOIN threads t ON a.thread_id = t.thread_id "
+            "LEFT JOIN attachment_extractions e ON e.attachment_id = a.attachment_id "
+            "WHERE " + " AND ".join(where) + " "  # nosec B608
+            "ORDER BY t.date_last DESC LIMIT ?"
+        )
+        try:
+            rows = self._fetchall(sql, params)
+        except sqlite3.OperationalError as e:
+            log.warning("Attachment scan unavailable: %s", e)
+            return []
+        return [_row_to_attachment_result(r) for r in rows]
 
     @staticmethod
     def _has_post_fusion_filter(
@@ -442,8 +861,16 @@ class Database:
         date_from: str | None = None,
         date_to: str | None = None,
         has_attachments: bool | None = None,
+        participant: str | None = None,
     ) -> bool:
-        return bool(folders or from_addr or date_from or date_to or has_attachments is not None)
+        return bool(
+            folders
+            or from_addr
+            or date_from
+            or date_to
+            or has_attachments is not None
+            or participant
+        )
 
     def _keyword_search(
         self,
@@ -478,6 +905,13 @@ class Database:
             date_to=date_to,
             has_attachments=has_attachments,
         )
+        # Tag each lane's pre-fusion rank so the fusion step can record
+        # lane provenance on the surviving thread row (surfaced by
+        # ``get_evidence(include_scores=True)``). Pure observability —
+        # tagging mutates ``lane_ranks`` only and never affects scoring.
+        _tag_lane_ranks(thread_hits, "thread_fts")
+        _tag_lane_ranks(chunk_hits, "chunk_fts")
+        _tag_lane_ranks(attachment_hits, "attachment_fts")
         return self._reciprocal_rank_fusion_threads(thread_hits, chunk_hits, attachment_hits)[
             :limit
         ]
@@ -664,6 +1098,40 @@ class Database:
         results = [self._row_to_result(r) for r in rows]
         return self._best_per_thread(results)[:limit]
 
+    def _attachment_won_thread_ids(
+        self,
+        query: str,
+        thread_ids: list[str],
+        folders: list[str] | None,
+        date_from: str | None,
+        date_to: str | None,
+        has_attachments: bool | None,
+    ) -> set[str]:
+        """Return the subset of ``thread_ids`` that match the attachment-FTS lane.
+
+        Used by ``hybrid_search(with_evidence=True)`` to mark threads that
+        the attachment filename / MIME index lifted into the result set
+        — so per-thread evidence ranking can privilege attachment chunks
+        for them. Cheap one-shot FTS5 query; falls back to an empty set
+        on any error so the caller's main path is never blocked.
+        """
+        if not thread_ids:
+            return set()
+        try:
+            attachment_hits = self._attachment_keyword_search(
+                query,
+                limit=len(thread_ids) * _CHUNK_LANE_OVERSAMPLE,
+                folders=folders,
+                date_from=date_from,
+                date_to=date_to,
+                has_attachments=has_attachments,
+            )
+        except sqlite3.Error as e:
+            log.warning("Attachment-won lookup failed; skipping bias: %s", e)
+            return set()
+        candidate_set = set(thread_ids)
+        return {r.thread_id for r in attachment_hits if r.thread_id in candidate_set}
+
     @staticmethod
     def _append_thread_filter_sql(
         where_clauses: list[str],
@@ -793,33 +1261,49 @@ class Database:
         """
         try:
             serialized = sqlite_vec.serialize_float32(embedding)
+            # LEFT JOIN ``attachments`` so each attachment chunk carries
+            # filename + MIME through to the LLM context. Body chunks
+            # have ``c.attachment_id IS NULL`` and the JOIN yields
+            # ``NULL`` for filename/MIME — handled in the dataclass
+            # construction below.
+            #
+            # The JOIN anchors on the SINGLE representative occurrence
+            # row per ``(attachment_id, message_id)`` pair (the one
+            # with the lowest ``attachment_occurrence_id``). The
+            # indexer permits the same content hash to be attached
+            # under multiple filenames in one message (a user attaching
+            # the same PDF twice with different display names); each
+            # occurrence is its own row in ``attachments`` but only
+            # ONE chunk set is stored per content hash, so a naive
+            # ``ON (attachment_id, message_id)`` JOIN multiplies the
+            # chunk by the occurrence count and emits non-deterministic
+            # filename attribution. Picking the lowest occurrence id
+            # gives a stable, deterministic choice and eliminates the
+            # multiplication.
             rows = self._fetchall(
                 """
                 SELECT
                     c.chunk_id, c.message_id, c.thread_id, c.chunk_index,
-                    c.text, c.char_start, c.char_end,
+                    c.text, c.char_start, c.char_end, c.attachment_id,
+                    a.filename AS attachment_filename,
+                    a.content_type AS attachment_mime,
                     v.distance AS score
                 FROM message_chunks_vec v
                 JOIN message_chunks c ON c.chunk_id = v.chunk_id
+                LEFT JOIN attachments a
+                    ON a.attachment_occurrence_id = (
+                        SELECT MIN(a2.attachment_occurrence_id)
+                        FROM attachments a2
+                        WHERE a2.attachment_id = c.attachment_id
+                          AND a2.message_id = c.message_id
+                    )
                 WHERE v.embedding MATCH ?
                   AND k = ?
                 ORDER BY v.distance
                 """,
                 (serialized, limit),
             )
-            return [
-                ChunkResult(
-                    chunk_id=r["chunk_id"],
-                    message_id=r["message_id"],
-                    thread_id=r["thread_id"],
-                    chunk_index=int(r["chunk_index"]),
-                    text=r["text"],
-                    char_start=int(r["char_start"]),
-                    char_end=int(r["char_end"]),
-                    score=float(r["score"]),
-                )
-                for r in rows
-            ]
+            return [_row_to_chunk_result(r) for r in rows]
         except (sqlite3.Error, ValueError) as e:
             # ``sqlite3.Error`` covers OperationalError (missing vec
             # table) and DatabaseError (corruption); ``ValueError`` is
@@ -833,31 +1317,226 @@ class Database:
         thread_ids: list[str],
         embedding: list[float],
         per_thread_limit: int = 3,
-        candidate_pool: int = 200,
+        attachment_won_thread_ids: set[str] | None = None,
     ) -> dict[str, list[ChunkResult]]:
         """Return up to ``per_thread_limit`` best-matching chunks per thread.
 
-        Pulls a single vector-search candidate pool of size
-        ``candidate_pool`` and groups the results by thread, keeping
-        only the top chunks for the requested ``thread_ids``. One sqlite-
-        vec round-trip serves N threads at once; per-thread queries
-        would scale linearly.
+        Scans the chunks belonging to ``thread_ids`` directly (rather
+        than filtering a global vector-search pool by thread_id),
+        sorts each thread's chunks by similarity to ``embedding``, and
+        returns the top ``per_thread_limit`` per thread.
 
-        Used by intelligence tools after ``hybrid_search`` to attach
-        precise passage citations to the threads it returned.
+        This shape matters for the ``hybrid_search(with_evidence=True)``
+        path. The prior pool-reuse implementation depended on the
+        thread's chunks happening to rank in the global chunk-vector
+        top-K — meaning a thread won via BM25, thread-vector,
+        sender/date filter, or attachment filename FTS could end up
+        with empty ``evidence_chunks`` whenever its specific chunks
+        didn't make the global pool. ``ask_mailbox``'s docstring
+        promises that "this is the ONLY mailbox tool that reads
+        attachment content"; the pool-reuse shape silently broke that
+        promise for any non-chunk-vec retrieval lane.
+
+        Implementation reads only chunks belonging to the surfaced
+        ``thread_ids`` and computes ``vec_distance_l2`` against each.
+        For typical surfaced sets (5-50 threads × 1-100 chunks each)
+        this is a small sequential scan and beats N per-thread KNN
+        queries on round-trip overhead.
+
+        ``attachment_won_thread_ids``: threads that ``hybrid_search``
+        surfaced via attachment-filename FTS. For those threads,
+        attachment chunks are floated to the front of the per-thread
+        slice so the LLM sees attachment text (the source the user
+        meant) before body text — even when a body chunk has higher
+        dense similarity. Closes the "filename match → wrong evidence"
+        gap in ``ask_mailbox``'s "reads attachment content" promise.
         """
         if not thread_ids:
             return {}
-        chunks = self._chunk_vector_search(embedding, candidate_pool)
-        wanted = set(thread_ids)
-        grouped: dict[str, list[ChunkResult]] = {tid: [] for tid in thread_ids}
-        for chunk in chunks:
-            if chunk.thread_id not in wanted:
-                continue
-            bucket = grouped[chunk.thread_id]
-            if len(bucket) < per_thread_limit:
-                bucket.append(chunk)
+        try:
+            serialized = sqlite_vec.serialize_float32(embedding)
+            placeholders = ",".join(["?"] * len(thread_ids))
+            # Composed SQL — the ``IN (?, ...)`` is built from a
+            # placeholder count, not from thread_id values, and every
+            # bound parameter goes through the driver. nosec B608.
+            #
+            # LEFT JOIN ``attachments`` on the SINGLE representative
+            # occurrence row per ``(attachment_id, message_id)`` (the
+            # one with the lowest ``attachment_occurrence_id``). The
+            # indexer allows the same content hash to be attached
+            # under multiple display filenames in one message but
+            # stores ONLY ONE chunk set per content hash, so a naive
+            # ``ON (attachment_id, message_id)`` JOIN multiplies the
+            # chunk row by the occurrence count. See
+            # ``_chunk_vector_search`` for the full rationale; both
+            # call sites apply the same fix. Body chunks have
+            # ``c.attachment_id IS NULL`` so the subquery returns
+            # NULL and the LEFT JOIN yields NULL filename/MIME.
+            sql = (
+                "SELECT c.chunk_id, c.message_id, c.thread_id, c.chunk_index, "
+                "c.text, c.char_start, c.char_end, c.attachment_id, c.message_date, "
+                "a.filename AS attachment_filename, "
+                "a.content_type AS attachment_mime, "
+                "vec_distance_l2(v.embedding, ?) AS score "
+                "FROM message_chunks c "
+                "JOIN message_chunks_vec v ON c.chunk_id = v.chunk_id "
+                "LEFT JOIN attachments a "
+                "  ON a.attachment_occurrence_id = ( "
+                "       SELECT MIN(a2.attachment_occurrence_id) "
+                "       FROM attachments a2 "
+                "       WHERE a2.attachment_id = c.attachment_id "
+                "         AND a2.message_id = c.message_id "
+                "  ) "
+                f"WHERE c.thread_id IN ({placeholders}) "  # nosec B608
+                "ORDER BY score ASC"
+            )
+            rows = self._fetchall(sql, [serialized, *thread_ids])
+        except (sqlite3.Error, ValueError) as e:
+            # Same catch surface as ``_chunk_vector_search`` — missing
+            # vec extension, corrupt vec row, malformed serialised
+            # embedding. Degrade to empty evidence rather than failing
+            # the whole hybrid_search call; coarse retrieval still
+            # works and the LLM falls back to ``body_text``.
+            log.warning("Per-thread evidence chunk fetch failed: %s", e)
+            return {tid: [] for tid in thread_ids}
+
+        # First pass: gather ALL chunks per thread (still ordered by
+        # vec_distance ASC within each thread) so the attachment-first
+        # reorder below has the full set to work with. The cap to
+        # ``per_thread_limit`` happens after the reorder.
+        all_chunks: dict[str, list[ChunkResult]] = {tid: [] for tid in thread_ids}
+        for r in rows:
+            all_chunks[r["thread_id"]].append(_row_to_chunk_result(r))
+
+        attachment_won = attachment_won_thread_ids or set()
+        grouped: dict[str, list[ChunkResult]] = {}
+        for tid, chunks in all_chunks.items():
+            if tid in attachment_won:
+                # Float attachment chunks to the front, preserving
+                # within-group order (already vec_distance ASC). The
+                # query was won by attachment-filename FTS, so the
+                # user's intent is attachment content; surface that
+                # first even when a body chunk dense-scored higher.
+                attachment_chunks = [c for c in chunks if c.attachment_id is not None]
+                body_chunks = [c for c in chunks if c.attachment_id is None]
+                ordered = attachment_chunks + body_chunks
+            else:
+                ordered = chunks
+            grouped[tid] = ordered[:per_thread_limit]
         return grouped
+
+    def get_recent_chunks_for_thread(
+        self,
+        thread_id: str,
+        limit: int = 6,
+    ) -> list[ChunkResult]:
+        """Return the most-recently-indexed BODY chunks for ``thread_id``.
+
+        Used by ``summarize_thread`` / timeline-style intelligence tools
+        that need "what does the thread say lately" — NOT "what matches
+        a query." The stored ``body_text`` is front-preserving and
+        token-capped, so a long thread that crosses ``THREAD_BODY_TEXT_MAX_TOKENS``
+        silently drops its newest replies. The chunk store carries every
+        message in full, so reading the tail of ``chunked_at`` recovers
+        the missing context.
+
+        Attachment chunks (rows with a non-NULL ``attachment_id``) are
+        deliberately excluded via ``c.attachment_id IS NULL``. The tool
+        contract reserves attachment-text retrieval to ``ask_mailbox``
+        alone; ``summarize_thread`` is a body summary, so surfacing
+        attachment extracts here would silently broaden which indexed
+        content can leave the host for a remote inference endpoint.
+
+        Returned chunks are in chronological (oldest-first within the
+        selected tail) order so the LLM prompt reads naturally as a
+        timeline. Caller can render them via ``_thread_context``.
+
+        Ordering: ``COALESCE(c.message_date, c.chunked_at) DESC,
+        c.chunk_index DESC``. ``message_date`` is the message's
+        ``Date:`` header captured at chunk-write (schema v18+); it is
+        the authoritative "when did this message arrive" signal and
+        sorts correctly across reindex, reap-rebuild, dead-letter
+        retry, and recovery-sweep paths. ``chunked_at`` (the chunker's
+        wall-clock at insert) is the fallback for legacy v17- chunk
+        rows that pre-date the column — those rows have
+        ``message_date IS NULL`` and degrade to the prior heuristic
+        until they are re-indexed. ``chunk_index DESC`` tiebreaks
+        when a thread is freshly indexed in one batch (all chunks
+        share the same ``message_date`` / ``chunked_at``) so the
+        last chunk emitted by the chunker comes first in selection.
+        Selection picks the latest ``limit`` chunks, then the result
+        is reversed in Python for ascending display order.
+
+        Body-only filter: because attachment chunks are excluded, no
+        ``attachments`` JOIN is needed — ``attachment_filename`` and
+        ``attachment_mime`` are emitted as literal ``NULL`` so the row
+        shape still matches ``_row_to_chunk_result``.
+        """
+        if limit <= 0:
+            return []
+        try:
+            rows = self._fetchall(
+                """
+                SELECT c.chunk_id, c.message_id, c.thread_id, c.chunk_index,
+                       c.text, c.char_start, c.char_end, c.attachment_id,
+                       NULL AS attachment_filename,
+                       NULL AS attachment_mime,
+                       0.0 AS score
+                FROM message_chunks c
+                WHERE c.thread_id = ?
+                  AND c.attachment_id IS NULL
+                ORDER BY COALESCE(c.message_date, c.chunked_at) DESC,
+                         c.chunk_index DESC
+                LIMIT ?
+                """,
+                (thread_id, limit),
+            )
+        except sqlite3.Error as e:
+            log.warning("Recent-chunks lookup failed for %s: %s", thread_id, e)
+            return []
+        chunks = [_row_to_chunk_result(r) for r in rows]
+        # Reverse for chronological display: SELECT picked the newest
+        # ``limit`` chunks; we want them oldest-first in the prompt so
+        # the timeline reads naturally.
+        chunks.reverse()
+        return chunks
+
+    def get_message_chunks(self, message_id: str) -> list[ChunkResult]:
+        """Return one message's BODY chunks in document order.
+
+        ``get_message`` stitches these into a best-effort reconstruction
+        of the message body — the local index stores no per-message full
+        body, but the chunk store carries every paragraph-packed slice
+        with its ``char_start`` / ``char_end`` offsets.
+
+        Attachment chunks (non-NULL ``attachment_id``) are excluded:
+        ``get_message`` reconstructs the *message body*, and attachment
+        text retrieval is reserved to ``ask_mailbox`` / ``get_evidence``.
+        Ordered by ``chunk_index`` ASC so the caller can concatenate
+        directly. ``attachment_filename`` / ``attachment_mime`` are
+        emitted as literal NULL so the row shape matches
+        ``_row_to_chunk_result`` without an ``attachments`` JOIN.
+        """
+        try:
+            rows = self._fetchall(
+                """
+                SELECT c.chunk_id, c.message_id, c.thread_id, c.chunk_index,
+                       c.text, c.char_start, c.char_end, c.attachment_id,
+                       NULL AS attachment_filename,
+                       NULL AS attachment_mime,
+                       c.message_date,
+                       0.0 AS score
+                FROM message_chunks c
+                WHERE c.message_id = ?
+                  AND c.attachment_id IS NULL
+                ORDER BY c.chunk_index ASC
+                """,
+                (message_id,),
+            )
+        except sqlite3.Error as e:
+            log.warning("Message-chunks lookup failed for %s: %s", message_id, e)
+            return []
+        return [_row_to_chunk_result(r) for r in rows]
 
     def _vector_search(self, embedding: list[float], limit: int) -> list[ThreadResult]:
         try:
@@ -877,7 +1556,9 @@ class Database:
             """,
                 (serialized, limit),
             )
-            return [self._row_to_result(r) for r in rows]
+            # Tag the dense thread lane so RRF fusion can record it as
+            # ``thread_vec`` provenance on the surviving thread row.
+            return _tag_lane_ranks([self._row_to_result(r) for r in rows], "thread_vec")
         except (sqlite3.Error, ValueError) as e:
             # Same catch surface as ``_chunk_vector_search`` —
             # ``sqlite3.Error`` for table/connection issues, ``ValueError``
@@ -907,14 +1588,23 @@ class Database:
         """
         scores: dict[str, float] = {}
         index: dict[str, ThreadResult] = {}
+        # Side accumulator for lane provenance, keyed by thread_id.
+        # ``index`` is last-write-wins per thread, so a thread's
+        # ``thread_fts`` ranks (carried on the bm25 copy) would be lost
+        # when the vec copy overwrites the entry. Merging into this dict
+        # and stamping the survivor at the end keeps every lane the
+        # thread appeared in. Pure observability — never feeds scoring.
+        lane_ranks: dict[str, dict[str, int]] = {}
 
         for rank, result in enumerate(bm25):
             scores[result.thread_id] = scores.get(result.thread_id, 0) + 1.0 / (k + rank + 1)
             index[result.thread_id] = result
+            lane_ranks.setdefault(result.thread_id, {}).update(result.lane_ranks)
 
         for rank, result in enumerate(vec):
             scores[result.thread_id] = scores.get(result.thread_id, 0) + 1.0 / (k + rank + 1)
             index[result.thread_id] = result
+            lane_ranks.setdefault(result.thread_id, {}).update(result.lane_ranks)
 
         if chunks:
             seen_threads: set[str] = set()
@@ -928,6 +1618,7 @@ class Database:
                     continue
                 seen_threads.add(tid)
                 scores[tid] = scores.get(tid, 0) + 1.0 / (k + rank + 1)
+                lane_ranks.setdefault(tid, {})["chunk_vec"] = rank
                 if tid not in index:
                     # Materialize chunk-only threads via a thread fetch.
                     # Skip silently if the thread row is missing (shouldn't
@@ -945,6 +1636,7 @@ class Database:
                 continue
             r = index[thread_id]
             r.score = score
+            r.lane_ranks = lane_ranks.get(thread_id, {})
             results.append(r)
         return results
 
@@ -957,18 +1649,26 @@ class Database:
 
         Used by keyword search, where thread-body FTS, chunk-text FTS, and
         attachment filename/MIME FTS all already materialize parent threads.
+
+        Each lane's results are expected to carry their pre-fusion rank in
+        ``lane_ranks`` (stamped by ``_tag_lane_ranks`` at the call site);
+        those per-lane ranks are merged onto the surviving thread row so
+        downstream callers can see which keyword sub-lanes matched.
         """
         scores: dict[str, float] = {}
         index: dict[str, ThreadResult] = {}
+        lane_ranks: dict[str, dict[str, int]] = {}
         for lane in lanes:
             for rank, result in enumerate(lane):
                 scores[result.thread_id] = scores.get(result.thread_id, 0.0) + 1.0 / (k + rank + 1)
                 index.setdefault(result.thread_id, result)
+                lane_ranks.setdefault(result.thread_id, {}).update(result.lane_ranks)
 
         results: list[ThreadResult] = []
         for thread_id, score in sorted(scores.items(), key=lambda x: x[1], reverse=True):
             result = index[thread_id]
             result.score = score
+            result.lane_ranks = lane_ranks.get(thread_id, {})
             results.append(result)
         return results
 
@@ -980,6 +1680,7 @@ class Database:
         date_from: str | None = None,
         date_to: str | None = None,
         has_attachments: bool | None = None,
+        participant: str | None = None,
     ) -> list[ThreadResult]:
         date_from_dt = (
             _parse_filter_date(date_from, end_of_day=False, _field_name="date_from")
@@ -997,6 +1698,14 @@ class Database:
             fa = from_addr.lower()
             # Filter by sender (the From-only subset, not all participants).
             filtered = [r for r in filtered if _matches_sender(r, fa)]
+        if participant:
+            # Filter by anyone on the thread — From, To, or Cc. Distinct
+            # from ``from_addr``, which is sender-only. Runs post-fusion
+            # like the sender filter; ``_has_post_fusion_filter`` counts
+            # it so the caller oversampled raw candidates and a deep
+            # match still survives the filter.
+            pa = participant.lower()
+            filtered = [r for r in filtered if _matches_participant(r, pa)]
         # Compare as datetimes rather than as strings: a user-supplied
         # date-only ``date_to="2024-12-31"`` was previously compared against
         # stored ISO timestamps like ``"2024-12-31T10:00:00+00:00"`` and

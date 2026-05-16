@@ -325,6 +325,7 @@ def apply_attachment_writes(
     message_id: str,
     thread_id: str,
     db: Database,
+    message_date: str | None = None,
 ) -> dict[str, int]:
     """Persist a prepared attachment plan. DB writes only.
 
@@ -344,6 +345,11 @@ def apply_attachment_writes(
     * ``message_chunks`` carries per-occurrence chunks of the extracted
       text so any chunk hit lifts the parent thread of the email that
       carried it.
+
+    ``message_date`` is passed through to ``replace_message_chunks``
+    so attachment chunks inherit the parent message's ``Date:``
+    header for timeline-style retrieval ordering. See
+    ``replace_message_chunks`` for the full contract.
     """
     summary = {
         "occurrences_inserted": 0,
@@ -383,6 +389,7 @@ def apply_attachment_writes(
         chunks=plan.chunks,
         embeddings_by_chunk_id=plan.embeddings_by_chunk_id,
         attachment_id=plan.attachment.content_hash,
+        message_date=message_date,
     )
     summary["chunks_inserted"] = write_summary["inserted"]
     summary["chunks_kept"] = write_summary["kept"]
@@ -406,6 +413,7 @@ def process_attachment(
     max_extracted_chars: int | None = None,
     ocr_timeout_seconds: float | None = None,
     max_pdf_pages: int | None = None,
+    message_date: str | None = None,
 ) -> dict[str, int]:
     """Single-call wrapper: prepare + apply for one attachment occurrence.
 
@@ -436,4 +444,5 @@ def process_attachment(
         message_id=message_id,
         thread_id=thread_id,
         db=db,
+        message_date=message_date,
     )

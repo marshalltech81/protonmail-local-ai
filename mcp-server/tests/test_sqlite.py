@@ -508,6 +508,71 @@ class TestSemanticSearch:
     def test_empty_db_returns_empty(self, empty_db: Database):
         assert empty_db.semantic_search([1.0, 0.0, 0.0, 0.0]) == []
 
+    def test_chunk_vec_lane_lifts_thread_with_weak_thread_vec(self, tmp_path):
+        """Codex P2: ``semantic_search`` used to ignore the chunk-vec lane,
+        so an MCP caller picking ``mode="semantic"`` silently lost the
+        precision-evidence layer the rest of the architecture relies
+        on. With chunk-vec fusion, a thread whose mean-pooled coarse
+        vector points away from the query but which carries one
+        strongly-aligned chunk must still surface."""
+        from tests.conftest import _build_schema, _insert_chunk, _insert_thread
+
+        db_path = tmp_path / "semantic-chunks.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.enable_load_extension(True)
+        import sqlite_vec
+
+        sqlite_vec.load(conn)
+        conn.enable_load_extension(False)
+        _build_schema(conn)
+
+        # Target thread: coarse vector orthogonal to the query, so the
+        # thread-vec lane never surfaces it on its own.
+        _insert_thread(
+            conn,
+            thread_id="t-target",
+            subject="long thread",
+            participants=["alice@example.com"],
+            senders=["alice@example.com"],
+            body_text="mixed content thread",
+            snippet="mixed content",
+            embedding=[0.0, 0.0, 0.0, 1.0],
+        )
+        # But one chunk inside the thread IS aligned with the query.
+        _insert_chunk(
+            conn,
+            chunk_id="target-chunk",
+            message_id="t-target",
+            thread_id="t-target",
+            text="the precise passage aligned with the query",
+            embedding=[1.0, 0.0, 0.0, 0.0],
+        )
+        # Decoy thread whose coarse vector is aligned but has no chunks.
+        _insert_thread(
+            conn,
+            thread_id="t-decoy-vec",
+            subject="decoy a",
+            participants=["bob@example.com"],
+            senders=["bob@example.com"],
+            body_text="vec-only decoy",
+            snippet="decoy",
+            embedding=[1.0, 0.0, 0.0, 0.0],
+        )
+        conn.close()
+        db = Database(str(db_path))
+        try:
+            results = db.semantic_search([1.0, 0.0, 0.0, 0.0], limit=5)
+        finally:
+            db.close()
+        ids = [r.thread_id for r in results]
+        # Both threads surface: chunk lane lifts t-target, thread-vec
+        # lane lifts t-decoy-vec. Without chunk-vec fusion only the
+        # decoy would appear.
+        assert "t-target" in ids, (
+            "semantic_search must fuse chunk-vec — without it the chunk "
+            f"lane is silently dropped; got {ids!r}"
+        )
+
 
 class TestHybridSearch:
     def test_combines_keyword_and_vector_matches(self, seeded_db: Database):
@@ -526,6 +591,64 @@ class TestHybridSearch:
             folders=["INBOX"],
         )
         assert all(r.folder == "INBOX" for r in results)
+
+    def test_hybrid_chunk_vec_lane_uses_shared_oversample_constant(
+        self, seeded_db: Database, monkeypatch
+    ):
+        """Regression for the dense-chunk pool-starvation failure mode.
+
+        A long thread with many semantically-similar chunks can fill
+        the top-K of the chunk-vector lane and contribute only one
+        unique thread to RRF (the best-rank-only dedupe in
+        ``_reciprocal_rank_fusion`` strips its siblings). Sibling
+        threads whose only signal is also a chunk-vector match never
+        enter the fused result list. The keyword chunk and attachment
+        lanes already use ``_CHUNK_LANE_OVERSAMPLE`` (=10) to address
+        exactly this; the dense chunk lane in ``hybrid_search`` used
+        ``fetch_limit * 3`` until this regression was flagged.
+
+        Asserting the wiring directly (the chunk-vec lane is called
+        with ``fetch_limit * _CHUNK_LANE_OVERSAMPLE``) keeps the test
+        deterministic. The RRF-score behaviour at high oversample
+        already has coverage in ``TestRRFChunkLifting`` — the gap
+        flagged here was the call-site constant, not the dedupe.
+        """
+        from src.lib import sqlite as sqlite_module
+
+        captured_limits: list[int] = []
+        original = sqlite_module.Database._chunk_vector_search
+
+        def _spy(self, query_embedding, limit):
+            captured_limits.append(limit)
+            return original(self, query_embedding, limit)
+
+        monkeypatch.setattr(sqlite_module.Database, "_chunk_vector_search", _spy)
+
+        seeded_db.hybrid_search(
+            query_text="anything",
+            query_embedding=[1.0, 0.0, 0.0, 0.0],
+            limit=5,
+        )
+
+        assert captured_limits, "_chunk_vector_search was never invoked"
+        # Default ``hybrid_search`` math: no filters / no rerank →
+        # oversample = _UNFILTERED_OVERSAMPLE (2) → fetch_limit = 10 →
+        # the chunk-vec lane MUST be invoked with
+        # fetch_limit * _CHUNK_LANE_OVERSAMPLE (= 100), not the prior
+        # ``fetch_limit * 3`` (= 30). A regression dropping the
+        # constant back to ``3`` would fail this assertion immediately.
+        expected = (
+            5  # limit
+            * sqlite_module._UNFILTERED_OVERSAMPLE
+            * sqlite_module._CHUNK_LANE_OVERSAMPLE
+        )
+        assert captured_limits[0] == expected, (
+            f"chunk-vec lane invoked with limit={captured_limits[0]}, "
+            f"expected {expected} "
+            f"(fetch_limit * _CHUNK_LANE_OVERSAMPLE). A smaller value "
+            f"reintroduces the pool-starvation failure for long "
+            f"threads with many similar chunks."
+        )
 
 
 class _IndexScoringReranker:
@@ -1150,6 +1273,663 @@ class TestEvidenceChunksHelper:
     def test_empty_thread_ids_returns_empty_dict(self, chunked_db: Database):
         assert chunked_db.get_evidence_chunks_for_threads([], [1.0, 0.0, 0.0, 0.0]) == {}
 
+    def test_returns_thread_chunks_even_when_global_top_k_excludes_them(self, tmp_path):
+        """Regression for the ``with_evidence=True`` pool-starvation gap.
+
+        Codex flagged that ``ask_mailbox`` could surface a carrier
+        email via BM25 / metadata / thread-vector / attachment FTS
+        and then hand the LLM ``body_text`` instead of the attachment
+        passages — because the prior pool-reuse logic populated
+        ``evidence_chunks`` only from the global chunk-vec top-K, and
+        the carrier's specific chunks could rank deep enough to fall
+        out of that pool entirely.
+
+        Setup pins exactly that failure shape: thread ``t-carrier``
+        carries a chunk whose embedding is FAR from the query, plus a
+        cloud of distractor threads whose chunks dominate any global
+        top-K. The helper must still surface ``t-carrier``'s own
+        chunk when asked for that thread specifically — because real
+        production callers (hybrid_search after a non-chunk-lane win)
+        rely on per-thread retrieval, not pool filtering.
+        """
+        from tests.conftest import _build_schema, _insert_chunk, _insert_thread
+
+        db_path = tmp_path / "carrier.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.enable_load_extension(True)
+        import sqlite_vec
+
+        sqlite_vec.load(conn)
+        conn.enable_load_extension(False)
+        _build_schema(conn)
+
+        # Carrier thread: chunk embedding orthogonal to query. A pool-
+        # reuse implementation pulling top-K by similarity would never
+        # see this chunk.
+        _insert_thread(
+            conn,
+            thread_id="t-carrier",
+            subject="please find attached",
+            participants=["alice@example.com"],
+            senders=["alice@example.com"],
+            body_text="please find attached",
+            snippet="please find attached",
+            embedding=[1.0, 0.0, 0.0, 0.0],
+        )
+        _insert_chunk(
+            conn,
+            chunk_id="carrier-chunk",
+            message_id="t-carrier",
+            thread_id="t-carrier",
+            text="attached PDF: invoice number 99999 due june 30",
+            # Deliberately ORTHOGONAL to the query so a global top-K
+            # by similarity would never include this chunk.
+            embedding=[0.0, 0.0, 0.0, 1.0],
+        )
+
+        # 50 distractor threads each with a chunk closer to the query
+        # than the carrier's. Together they monopolise the global
+        # top-K — any pool-reuse logic with a reasonable candidate
+        # pool size would miss the carrier's chunk entirely.
+        for i in range(50):
+            tid = f"t-d-{i:02d}"
+            _insert_thread(
+                conn,
+                thread_id=tid,
+                subject=f"distractor {i}",
+                participants=["bob@example.com"],
+                senders=["bob@example.com"],
+                body_text=f"distractor body {i}",
+                snippet="d",
+                embedding=[0.9, 0.4, 0.0, 0.0],
+            )
+            _insert_chunk(
+                conn,
+                chunk_id=f"d-{i:02d}-chunk",
+                message_id=tid,
+                thread_id=tid,
+                text=f"distractor chunk content {i}",
+                # Close to query — these dominate any global top-K.
+                embedding=[1.0, 0.0, 0.0, 0.0],
+            )
+
+        conn.close()
+
+        db = Database(str(db_path))
+        try:
+            # Ask for evidence on the carrier specifically — what
+            # ``hybrid_search(with_evidence=True)`` does after the
+            # carrier wins via thread-vec / BM25 / metadata.
+            evidence = db.get_evidence_chunks_for_threads(
+                thread_ids=["t-carrier"],
+                embedding=[1.0, 0.0, 0.0, 0.0],
+            )
+        finally:
+            db.close()
+
+        # The carrier's chunk MUST come back even though it's deep
+        # inside the global similarity ordering — the helper scans
+        # only chunks belonging to the requested thread_ids, so
+        # global pool starvation can't strip it.
+        assert "t-carrier" in evidence
+        chunk_texts = [c.text for c in evidence["t-carrier"]]
+        assert any("99999" in t for t in chunk_texts), (
+            f"carrier's chunk (with sentinel ``99999``) must be "
+            f"retrievable even when a global chunk-vec top-K would "
+            f"never include it; got: {chunk_texts!r}"
+        )
+        # And the helper must NOT leak distractor chunks into the
+        # carrier's bucket.
+        assert all(c.thread_id == "t-carrier" for c in evidence["t-carrier"])
+
+
+class TestEvidenceAttachmentProvenance:
+    """Codex P1: ``ask_mailbox`` promises attachment content. The evidence
+    helper must surface attachment chunks' filename + MIME and prefer
+    attachment chunks when the thread won via the attachment-FTS lane —
+    otherwise a filename-matched thread can hand the LLM body text
+    instead of the attachment the user asked about.
+    """
+
+    def _build_attachment_carrier_db(self, tmp_path):
+        """Carrier thread with one attachment chunk + one body chunk."""
+        from tests.conftest import (
+            _build_schema,
+            _insert_attachment,
+            _insert_chunk,
+            _insert_thread,
+        )
+
+        db_path = tmp_path / "attachment-evidence.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.enable_load_extension(True)
+        import sqlite_vec
+
+        sqlite_vec.load(conn)
+        conn.enable_load_extension(False)
+        _build_schema(conn)
+
+        _insert_thread(
+            conn,
+            thread_id="t-quote",
+            subject="proposal cover note",
+            participants=["alice@example.com"],
+            senders=["alice@example.com"],
+            body_text="please see attached for our latest proposal",
+            snippet="please see attached",
+            has_attachments=True,
+            embedding=[1.0, 0.0, 0.0, 0.0],
+        )
+        _insert_attachment(
+            conn,
+            message_id="t-quote",
+            thread_id="t-quote",
+            attachment_id="att-quote",
+            filename="proposal-quote.pdf",
+            content_type="application/pdf",
+        )
+        # Body chunk: aligned with the query, so by dense-only ranking
+        # this is the chunk evidence helper would pick first.
+        _insert_chunk(
+            conn,
+            chunk_id="t-quote-body",
+            message_id="t-quote",
+            thread_id="t-quote",
+            text="please see attached for our latest proposal",
+            embedding=[1.0, 0.0, 0.0, 0.0],
+            chunk_index=0,
+        )
+        # Attachment chunk: orthogonal to the query embedding so it ranks
+        # AFTER the body chunk on dense similarity alone. Carries
+        # the actual attachment text the user wants.
+        _insert_chunk(
+            conn,
+            chunk_id="t-quote-att",
+            message_id="t-quote",
+            thread_id="t-quote",
+            text="line item: solar installation total USD 18450",
+            embedding=[0.0, 0.0, 0.0, 1.0],
+            chunk_index=1,
+            attachment_id="att-quote",
+        )
+        conn.close()
+        return Database(str(db_path))
+
+    def test_chunk_result_carries_attachment_provenance(self, tmp_path):
+        db = self._build_attachment_carrier_db(tmp_path)
+        try:
+            evidence = db.get_evidence_chunks_for_threads(
+                thread_ids=["t-quote"],
+                embedding=[0.0, 0.0, 0.0, 1.0],
+                per_thread_limit=5,
+            )
+        finally:
+            db.close()
+        chunks = evidence["t-quote"]
+        att_chunk = next(c for c in chunks if c.attachment_id is not None)
+        assert att_chunk.attachment_filename == "proposal-quote.pdf"
+        assert att_chunk.attachment_mime == "application/pdf"
+        body_chunk = next(c for c in chunks if c.attachment_id is None)
+        assert body_chunk.attachment_filename is None
+        assert body_chunk.attachment_mime is None
+
+    def test_attachment_won_threads_get_attachment_chunks_first(self, tmp_path):
+        """The core P1 fix: when the thread is in ``attachment_won_thread_ids``,
+        attachment chunks float to the front of the per-thread evidence
+        slice even though the body chunk dense-scored higher."""
+        db = self._build_attachment_carrier_db(tmp_path)
+        try:
+            # Query embedding is aligned with the BODY chunk — pure
+            # dense ranking would surface body first.
+            evidence_bias = db.get_evidence_chunks_for_threads(
+                thread_ids=["t-quote"],
+                embedding=[1.0, 0.0, 0.0, 0.0],
+                per_thread_limit=1,
+                attachment_won_thread_ids={"t-quote"},
+            )
+            evidence_no_bias = db.get_evidence_chunks_for_threads(
+                thread_ids=["t-quote"],
+                embedding=[1.0, 0.0, 0.0, 0.0],
+                per_thread_limit=1,
+            )
+        finally:
+            db.close()
+        # With the attachment-won bias, slot-0 is the attachment chunk.
+        assert evidence_bias["t-quote"][0].attachment_id == "att-quote"
+        # Without the bias, slot-0 is the body chunk (regression guard).
+        assert evidence_no_bias["t-quote"][0].attachment_id is None
+
+    def test_hybrid_search_with_evidence_biases_filename_winners(self, tmp_path):
+        """End-to-end: a query whose tokens hit the attachment-FTS lane
+        must produce evidence chunks with the attachment chunk first."""
+        db = self._build_attachment_carrier_db(tmp_path)
+        try:
+            # ``proposal-quote`` matches the attachment filename FTS.
+            results = db.hybrid_search(
+                query_text="proposal-quote",
+                query_embedding=[1.0, 0.0, 0.0, 0.0],
+                limit=5,
+                with_evidence=True,
+            )
+        finally:
+            db.close()
+        assert results
+        top = next(r for r in results if r.thread_id == "t-quote")
+        assert top.evidence_chunks
+        assert top.evidence_chunks[0].attachment_id == "att-quote"
+        assert top.evidence_chunks[0].attachment_filename == "proposal-quote.pdf"
+
+
+class TestGetRecentChunksForThread:
+    """Codex P1: ``body_text`` is front-preserved and token-capped, so once
+    a thread crosses 4000 tokens the newest replies are silently dropped.
+    ``summarize_thread`` must read the chunk tail directly instead.
+    """
+
+    def _build_chunked_db_with_timeline(self, tmp_path):
+        """Thread with three chunks at distinct ``chunked_at`` timestamps."""
+        from tests.conftest import _build_schema, _insert_chunk, _insert_thread
+
+        db_path = tmp_path / "timeline.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.enable_load_extension(True)
+        import sqlite_vec
+
+        sqlite_vec.load(conn)
+        conn.enable_load_extension(False)
+        _build_schema(conn)
+
+        _insert_thread(
+            conn,
+            thread_id="t-tl",
+            subject="long running thread",
+            participants=["alice@example.com"],
+            senders=["alice@example.com"],
+            body_text="oldest content only (later replies were chopped off)",
+            snippet="oldest content",
+            embedding=[1.0, 0.0, 0.0, 0.0],
+        )
+        # Three chunks, oldest → newest by chunked_at.
+        _insert_chunk(
+            conn,
+            chunk_id="c-old",
+            message_id="t-tl",
+            thread_id="t-tl",
+            text="oldest message content",
+            embedding=[1.0, 0.0, 0.0, 0.0],
+            chunk_index=0,
+            chunked_at="2024-01-01T00:00:00+00:00",
+        )
+        _insert_chunk(
+            conn,
+            chunk_id="c-mid",
+            message_id="t-tl",
+            thread_id="t-tl",
+            text="middle message content",
+            embedding=[1.0, 0.0, 0.0, 0.0],
+            chunk_index=0,
+            chunked_at="2024-06-01T00:00:00+00:00",
+        )
+        _insert_chunk(
+            conn,
+            chunk_id="c-new",
+            message_id="t-tl",
+            thread_id="t-tl",
+            text="newest reply content",
+            embedding=[1.0, 0.0, 0.0, 0.0],
+            chunk_index=0,
+            chunked_at="2024-12-01T00:00:00+00:00",
+        )
+        conn.close()
+        return Database(str(db_path))
+
+    def test_returns_latest_chunks_in_chronological_order(self, tmp_path):
+        db = self._build_chunked_db_with_timeline(tmp_path)
+        try:
+            chunks = db.get_recent_chunks_for_thread("t-tl", limit=2)
+        finally:
+            db.close()
+        # Selection picked the two newest by ``chunked_at DESC``;
+        # output reverses so the prompt reads oldest-first.
+        assert [c.chunk_id for c in chunks] == ["c-mid", "c-new"]
+
+    def test_limit_zero_returns_empty(self, tmp_path):
+        db = self._build_chunked_db_with_timeline(tmp_path)
+        try:
+            assert db.get_recent_chunks_for_thread("t-tl", limit=0) == []
+        finally:
+            db.close()
+
+    def test_thread_without_chunks_returns_empty(self, chunked_db: Database):
+        # ``t-gamma`` has no chunks in chunked_db.
+        assert chunked_db.get_recent_chunks_for_thread("t-gamma") == []
+
+    def test_unknown_thread_returns_empty(self, chunked_db: Database):
+        assert chunked_db.get_recent_chunks_for_thread("never-existed") == []
+
+    def test_message_date_overrides_chunked_at_for_ordering(self, tmp_path):
+        """Codex P1 regression: ``chunked_at`` is index-time, not
+        message-time. After a reap-rebuild / dead-letter retry / full
+        reindex, an OLD message's chunks can have a NEWER
+        ``chunked_at`` than chunks for a recent reply — so the prior
+        ordering surfaced stale content as "latest activity."
+
+        With v18+ ``message_date`` populated, the query orders by
+        ``COALESCE(message_date, chunked_at) DESC``. A scenario where
+        the two columns disagree (old message reindexed later than a
+        newer message arrived) must rank by message date, not insert
+        time.
+        """
+        from tests.conftest import _build_schema, _insert_chunk, _insert_thread
+
+        db_path = tmp_path / "msg_date_ordering.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.enable_load_extension(True)
+        import sqlite_vec
+
+        sqlite_vec.load(conn)
+        conn.enable_load_extension(False)
+        _build_schema(conn)
+
+        _insert_thread(
+            conn,
+            thread_id="t-rebuild",
+            subject="long thread that was reindexed out of order",
+            participants=["alice@example.com"],
+            senders=["alice@example.com"],
+            body_text="thread body",
+            snippet="...",
+            embedding=[1.0, 0.0, 0.0, 0.0],
+        )
+        # Old message (2024-01) was REINDEXED today (e.g. reap-rebuild
+        # rewrote its chunks) — so chunked_at=NOW but message_date=
+        # 2024-01.
+        _insert_chunk(
+            conn,
+            chunk_id="c-old-reindexed",
+            message_id="m-old",
+            thread_id="t-rebuild",
+            text="content from january",
+            embedding=[1.0, 0.0, 0.0, 0.0],
+            chunk_index=0,
+            chunked_at="2026-05-13T00:00:00+00:00",
+            message_date="2024-01-01T00:00:00+00:00",
+        )
+        # Recent reply (2024-12) was indexed in steady state — both
+        # columns match.
+        _insert_chunk(
+            conn,
+            chunk_id="c-newer-reply",
+            message_id="m-newer",
+            thread_id="t-rebuild",
+            text="content from december",
+            embedding=[1.0, 0.0, 0.0, 0.0],
+            chunk_index=0,
+            chunked_at="2024-12-01T00:00:00+00:00",
+            message_date="2024-12-01T00:00:00+00:00",
+        )
+        conn.close()
+
+        db = Database(str(db_path))
+        try:
+            chunks = db.get_recent_chunks_for_thread("t-rebuild", limit=2)
+        finally:
+            db.close()
+
+        # Both chunks selected; ordering must reflect MESSAGE date, not
+        # insert date. Oldest-first in display order (the function
+        # reverses the SELECT). The pre-fix behavior would have picked
+        # c-old-reindexed as "newer" because its chunked_at is today.
+        assert [c.chunk_id for c in chunks] == [
+            "c-old-reindexed",
+            "c-newer-reply",
+        ], (
+            "ordering must be by message_date (oldest-first in display), "
+            "not chunked_at — see Codex P1 finding on summarize_thread"
+        )
+
+    def test_legacy_null_message_date_falls_back_to_chunked_at(self, tmp_path):
+        """v17 legacy chunks have ``message_date IS NULL``; the
+        downstream ``COALESCE(message_date, chunked_at)`` must keep
+        the old ``chunked_at`` ordering for those rows so an unmigrated
+        install still gets a stable timeline (even if not strictly
+        correct after rebuilds).
+        """
+        from tests.conftest import _build_schema, _insert_chunk, _insert_thread
+
+        db_path = tmp_path / "legacy_null.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.enable_load_extension(True)
+        import sqlite_vec
+
+        sqlite_vec.load(conn)
+        conn.enable_load_extension(False)
+        _build_schema(conn)
+
+        _insert_thread(
+            conn,
+            thread_id="t-legacy",
+            subject="legacy thread",
+            participants=["alice@example.com"],
+            senders=["alice@example.com"],
+            body_text="thread body",
+            snippet="...",
+            embedding=[1.0, 0.0, 0.0, 0.0],
+        )
+        _insert_chunk(
+            conn,
+            chunk_id="c-legacy-old",
+            message_id="m-old",
+            thread_id="t-legacy",
+            text="legacy old",
+            embedding=[1.0, 0.0, 0.0, 0.0],
+            chunked_at="2024-01-01T00:00:00+00:00",
+            message_date=None,
+        )
+        _insert_chunk(
+            conn,
+            chunk_id="c-legacy-new",
+            message_id="m-new",
+            thread_id="t-legacy",
+            text="legacy new",
+            embedding=[1.0, 0.0, 0.0, 0.0],
+            chunked_at="2024-12-01T00:00:00+00:00",
+            message_date=None,
+        )
+        conn.close()
+
+        db = Database(str(db_path))
+        try:
+            chunks = db.get_recent_chunks_for_thread("t-legacy", limit=2)
+        finally:
+            db.close()
+
+        # With both message_date NULL, the COALESCE fallback uses
+        # chunked_at — same ordering as the pre-fix behavior.
+        assert [c.chunk_id for c in chunks] == ["c-legacy-old", "c-legacy-new"]
+
+    def test_attachment_chunks_excluded(self, tmp_path):
+        """Privacy contract: ``summarize_thread`` is a body summary, so
+        ``get_recent_chunks_for_thread`` must return body chunks only.
+        Attachment-text retrieval is reserved to ``ask_mailbox`` — a
+        thread carrying both kinds of chunk must yield only the body
+        chunk here, or attachment extracts would silently reach a
+        remote inference endpoint via the summary path.
+        """
+        from tests.conftest import (
+            _build_schema,
+            _insert_attachment,
+            _insert_chunk,
+            _insert_thread,
+        )
+
+        db_path = tmp_path / "body_only.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.enable_load_extension(True)
+        import sqlite_vec
+
+        sqlite_vec.load(conn)
+        conn.enable_load_extension(False)
+        _build_schema(conn)
+
+        _insert_thread(
+            conn,
+            thread_id="t-mixed",
+            subject="thread with an attachment",
+            participants=["alice@example.com"],
+            senders=["alice@example.com"],
+            body_text="body",
+            snippet="...",
+            embedding=[1.0, 0.0, 0.0, 0.0],
+        )
+        _insert_attachment(
+            conn,
+            message_id="m-mixed",
+            thread_id="t-mixed",
+            attachment_id="content-hash-mixed",
+            filename="report.pdf",
+            occurrence_id="occ-mixed",
+        )
+        _insert_chunk(
+            conn,
+            chunk_id="c-body",
+            message_id="m-mixed",
+            thread_id="t-mixed",
+            text="body chunk text",
+            embedding=[1.0, 0.0, 0.0, 0.0],
+        )
+        _insert_chunk(
+            conn,
+            chunk_id="c-attach",
+            message_id="m-mixed",
+            thread_id="t-mixed",
+            text="attachment chunk text",
+            embedding=[1.0, 0.0, 0.0, 0.0],
+            attachment_id="content-hash-mixed",
+        )
+        conn.close()
+
+        db = Database(str(db_path))
+        try:
+            chunks = db.get_recent_chunks_for_thread("t-mixed", limit=10)
+        finally:
+            db.close()
+
+        assert [c.chunk_id for c in chunks] == ["c-body"], (
+            "get_recent_chunks_for_thread must exclude attachment chunks; "
+            "attachment-text retrieval is reserved to ask_mailbox"
+        )
+        assert chunks[0].attachment_id is None
+
+
+class TestAttachmentProvenanceJoin:
+    """Codex P2: when the same content hash is attached under multiple
+    display filenames in one message, the indexer stores ONE chunk set
+    (deduplicated by content hash) but multiple ``attachments`` rows
+    (one per occurrence). A naive ``ON (attachment_id, message_id)``
+    JOIN multiplies the chunk row by the occurrence count and yields
+    non-deterministic filename attribution. Each attachment-joining
+    chunk-fetch path (``_chunk_vector_search`` and
+    ``get_evidence_chunks_for_threads``) must anchor on the SINGLE
+    representative ``attachments`` row per pair (the one with the
+    lowest ``attachment_occurrence_id``). ``get_recent_chunks_for_thread``
+    is body-only and no longer joins ``attachments``.
+    """
+
+    def _build_duplicate_attachment_db(self, tmp_path):
+        from tests.conftest import (
+            _build_schema,
+            _insert_attachment,
+            _insert_chunk,
+            _insert_thread,
+        )
+
+        db_path = tmp_path / "dupe_attach.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.enable_load_extension(True)
+        import sqlite_vec
+
+        sqlite_vec.load(conn)
+        conn.enable_load_extension(False)
+        _build_schema(conn)
+
+        _insert_thread(
+            conn,
+            thread_id="t-dupe",
+            subject="duplicate attachment",
+            participants=["alice@example.com"],
+            senders=["alice@example.com"],
+            body_text="body",
+            snippet="...",
+            embedding=[1.0, 0.0, 0.0, 0.0],
+        )
+        # Same content hash, same message_id, TWO occurrences with
+        # different filenames. occurrence_id "occ-a" sorts lower than
+        # "occ-b" so MIN(occurrence_id) → "occ-a" → invoice-a.pdf is
+        # the canonical attribution.
+        _insert_attachment(
+            conn,
+            message_id="m-dupe",
+            thread_id="t-dupe",
+            attachment_id="content-hash-dupe",
+            filename="invoice-a.pdf",
+            occurrence_id="occ-a",
+        )
+        _insert_attachment(
+            conn,
+            message_id="m-dupe",
+            thread_id="t-dupe",
+            attachment_id="content-hash-dupe",
+            filename="invoice-b.pdf",
+            occurrence_id="occ-b",
+        )
+        # One attachment chunk for the deduplicated content.
+        _insert_chunk(
+            conn,
+            chunk_id="c-att-dupe",
+            message_id="m-dupe",
+            thread_id="t-dupe",
+            text="invoice number 12345",
+            embedding=[1.0, 0.0, 0.0, 0.0],
+            attachment_id="content-hash-dupe",
+        )
+        conn.close()
+        return Database(str(db_path))
+
+    def test_chunk_vector_search_returns_single_row_per_chunk(self, tmp_path):
+        # ``_chunk_vector_search`` is the dense-retrieval lane for the
+        # chunk fusion path. The same MIN-occurrence anchor applies.
+        db = self._build_duplicate_attachment_db(tmp_path)
+        try:
+            chunks = db._chunk_vector_search([1.0, 0.0, 0.0, 0.0], limit=10)
+        finally:
+            db.close()
+        assert len(chunks) == 1, (
+            f"vector-search chunk row must not multiply by attachment-"
+            f"occurrence count; got {len(chunks)} rows for one chunk"
+        )
+        assert chunks[0].attachment_filename == "invoice-a.pdf"
+
+    def test_evidence_chunks_returns_single_row_per_chunk(self, tmp_path):
+        # ``get_evidence_chunks_for_threads`` is the with_evidence=True
+        # path the chunk fusion uses. Same MIN-occurrence anchor.
+        db = self._build_duplicate_attachment_db(tmp_path)
+        try:
+            evidence = db.get_evidence_chunks_for_threads(
+                ["t-dupe"],
+                [1.0, 0.0, 0.0, 0.0],
+                per_thread_limit=10,
+            )
+        finally:
+            db.close()
+        chunks = evidence.get("t-dupe", [])
+        assert len(chunks) == 1, (
+            f"per-thread evidence chunk row must not multiply by "
+            f"attachment-occurrence count; got {len(chunks)} rows for "
+            f"one chunk"
+        )
+        assert chunks[0].attachment_filename == "invoice-a.pdf"
+
 
 class TestHybridSearchChunkLane:
     def test_chunk_specific_query_lifts_parent_thread(self, chunked_db: Database):
@@ -1548,5 +2328,375 @@ class TestFindContactSendersOnly:
             assert full[0]["thread_count"] == 3
             # senders_only: alice sent 2 of those 3.
             assert sent[0]["thread_count"] == 2
+        finally:
+            db.close()
+
+
+def _open_built_db_conn(tmp_path, name="lib-test.db"):
+    """Open a writable sqlite3 connection with the MCP schema built.
+
+    The caller inserts fixture rows, closes this connection, then opens
+    a read-only ``Database`` on the returned path. Mirrors the inline
+    DB-build boilerplate the older tests in this file repeat.
+    """
+    import sqlite_vec
+
+    from tests.conftest import _build_schema
+
+    path = tmp_path / name
+    conn = sqlite3.connect(str(path))
+    conn.enable_load_extension(True)
+    sqlite_vec.load(conn)
+    conn.enable_load_extension(False)
+    _build_schema(conn)
+    return conn, path
+
+
+class TestParticipantFilter:
+    """``participant`` filters threads by anyone in From/To/Cc — distinct
+    from ``from_addr``, which is sender-only."""
+
+    @staticmethod
+    def _thread(thread_id, participants, senders=None):
+        from datetime import UTC, datetime
+
+        from src.lib.sqlite import ThreadResult
+
+        return ThreadResult(
+            thread_id=thread_id,
+            subject="s",
+            participants=participants,
+            senders=senders if senders is not None else [],
+            folder="INBOX",
+            date_first=datetime(2024, 1, 1, tzinfo=UTC),
+            date_last=datetime(2024, 1, 2, tzinfo=UTC),
+            message_ids=[thread_id],
+            snippet="",
+            has_attachments=False,
+        )
+
+    def test_apply_filters_matches_participant_any_role(self, seeded_db: Database):
+        a = self._thread("a", ["alice@example.com", "bob@example.com"])
+        b = self._thread("b", ["carol@example.com"])
+        filtered = seeded_db._apply_filters([a, b], participant="bob@example.com")
+        assert [r.thread_id for r in filtered] == ["a"]
+
+    def test_participant_matches_recipient_not_just_sender(self, seeded_db: Database):
+        # bob is a participant but not a sender — from_addr would miss him.
+        t = self._thread(
+            "a", ["alice@example.com", "bob@example.com"], senders=["alice@example.com"]
+        )
+        assert seeded_db._apply_filters([t], participant="bob@example.com")
+        assert seeded_db._apply_filters([t], from_addr="bob@example.com") == []
+
+    def test_participant_domain_fragment(self, seeded_db: Database):
+        t = self._thread("a", ["alice@example.com"])
+        assert seeded_db._apply_filters([t], participant="@example.com")
+        assert seeded_db._apply_filters([t], participant="@other.org") == []
+
+    def test_has_post_fusion_filter_counts_participant(self):
+        assert Database._has_post_fusion_filter(participant="x@example.com") is True
+        assert Database._has_post_fusion_filter() is False
+
+    def test_hybrid_search_applies_participant(self, seeded_db: Database):
+        # carol is a participant only of t-beta in the seeded fixture.
+        results = seeded_db.hybrid_search(
+            query_text="invoice lunch meeting",
+            query_embedding=[0.0, 1.0, 0.0, 0.0],
+            participant="carol@example.com",
+        )
+        assert results
+        assert all("carol@example.com" in r.participants for r in results)
+
+    def test_keyword_search_applies_participant(self, seeded_db: Database):
+        results = seeded_db.keyword_search("invoice lunch meeting", participant="dave@example.com")
+        assert results
+        assert all("dave@example.com" in r.participants for r in results)
+
+    def test_semantic_search_applies_participant(self, seeded_db: Database):
+        results = seeded_db.semantic_search([0.0, 0.0, 1.0, 0.0], participant="dave@example.com")
+        assert results
+        assert all("dave@example.com" in r.participants for r in results)
+
+
+class TestAddrMatchHelpers:
+    def test_addr_matches_full_address_is_canonical(self):
+        from src.lib.sqlite import _addr_matches
+
+        assert _addr_matches(["Bob Smith <bob@example.com>"], "bob@example.com")
+        assert not _addr_matches(["Bob Smith <bob@example.com>"], "alice@example.com")
+
+    def test_addr_matches_domain_fragment_is_substring(self):
+        from src.lib.sqlite import _addr_matches
+
+        assert _addr_matches(["bob@example.com"], "@example.com")
+
+    def test_matches_participant_vs_matches_sender(self):
+        from datetime import UTC, datetime
+
+        from src.lib.sqlite import ThreadResult, _matches_participant, _matches_sender
+
+        r = ThreadResult(
+            thread_id="t",
+            subject="s",
+            participants=["a@example.com", "b@example.com"],
+            senders=["a@example.com"],
+            folder="INBOX",
+            date_first=datetime(2024, 1, 1, tzinfo=UTC),
+            date_last=datetime(2024, 1, 1, tzinfo=UTC),
+            message_ids=["t"],
+            snippet="",
+            has_attachments=False,
+        )
+        # Recipient-only address: participant matches, sender does not.
+        assert _matches_participant(r, "b@example.com")
+        assert not _matches_sender(r, "b@example.com")
+
+
+class TestLaneProvenance:
+    """RRF fusion records which lanes lifted each thread into ranking, as
+    pure observability for get_evidence(include_scores=True). These tests
+    pin that the provenance is captured — TestReciprocalRankFusion and the
+    rerank suite already pin that scoring/ordering are unchanged."""
+
+    def test_hybrid_search_records_lane_ranks(self, chunked_db: Database):
+        results = chunked_db.hybrid_search(
+            query_text="invoice", query_embedding=[1.0, 0.0, 0.0, 0.0], limit=5
+        )
+        top = next(r for r in results if r.thread_id == "t-alpha")
+        assert top.lane_ranks
+        assert all(isinstance(v, int) for v in top.lane_ranks.values())
+
+    def test_keyword_sub_lane_name_recorded(self, chunked_db: Database):
+        results = chunked_db.keyword_search("invoice", limit=5)
+        top = next(r for r in results if r.thread_id == "t-alpha")
+        # t-alpha's subject "invoice for march" matches the thread-FTS lane.
+        assert "thread_fts" in top.lane_ranks
+
+    def test_chunk_vec_lane_recorded(self, chunked_db: Database):
+        results = chunked_db.hybrid_search(
+            query_text="invoice", query_embedding=[1.0, 0.0, 0.0, 0.0], limit=5
+        )
+        top = next(r for r in results if r.thread_id == "t-alpha")
+        # t-alpha carries chunk alpha-c1 aligned to the query embedding.
+        assert "chunk_vec" in top.lane_ranks
+
+    def test_thread_vec_lane_recorded(self, chunked_db: Database):
+        results = chunked_db.semantic_search([1.0, 0.0, 0.0, 0.0], limit=5)
+        top = next(r for r in results if r.thread_id == "t-alpha")
+        assert "thread_vec" in top.lane_ranks
+
+    def test_rerank_lane_recorded(self, seeded_db: Database):
+        class _StubReranker:
+            candidates = 10
+            top_n = 5
+
+            def rerank(self, query, documents, top_n=None):
+                # Identity order, descending score.
+                return [(i, float(len(documents) - i)) for i in range(len(documents))]
+
+        results = seeded_db.hybrid_search(
+            query_text="invoice",
+            query_embedding=[1.0, 0.0, 0.0, 0.0],
+            limit=5,
+            reranker=_StubReranker(),
+        )
+        assert results
+        assert results[0].lane_ranks.get("rerank") == 0
+
+
+class TestMessageDateOnChunks:
+    """``ChunkResult.message_date`` is populated from the v18 column by
+    ``get_evidence_chunks_for_threads`` so get_evidence can show when a
+    cited passage arrived."""
+
+    def test_evidence_chunks_carry_message_date(self, tmp_path):
+        from tests.conftest import _insert_chunk
+
+        conn, path = _open_built_db_conn(tmp_path, "msgdate.db")
+        _insert_chunk(
+            conn,
+            chunk_id="c1",
+            message_id="m1",
+            thread_id="t1",
+            text="hello world",
+            embedding=[1.0, 0.0, 0.0, 0.0],
+            message_date="2024-05-09T08:00:00+00:00",
+        )
+        conn.close()
+        db = Database(str(path))
+        try:
+            grouped = db.get_evidence_chunks_for_threads(["t1"], [1.0, 0.0, 0.0, 0.0])
+            assert grouped["t1"][0].message_date == "2024-05-09T08:00:00+00:00"
+        finally:
+            db.close()
+
+    def test_legacy_null_message_date_is_none(self, chunked_db: Database):
+        # chunked_db chunks are inserted without a message_date (v17- shape).
+        grouped = chunked_db.get_evidence_chunks_for_threads(["t-alpha"], [1.0, 0.0, 0.0, 0.0])
+        assert grouped["t-alpha"]
+        assert grouped["t-alpha"][0].message_date is None
+
+
+class TestGetMessageChunks:
+    """``get_message_chunks`` reconstructs one message's BODY chunks in
+    document order; ``get_message`` stitches them into a body."""
+
+    def test_returns_only_body_chunks_in_document_order(self, tmp_path):
+        from tests.conftest import _insert_chunk
+
+        conn, path = _open_built_db_conn(tmp_path, "msgchunks.db")
+        # Insert out of order; an attachment chunk must be excluded.
+        _insert_chunk(
+            conn,
+            chunk_id="b2",
+            message_id="m1",
+            thread_id="t1",
+            text="second paragraph",
+            embedding=[1.0, 0.0, 0.0, 0.0],
+            chunk_index=1,
+        )
+        _insert_chunk(
+            conn,
+            chunk_id="b1",
+            message_id="m1",
+            thread_id="t1",
+            text="first paragraph",
+            embedding=[1.0, 0.0, 0.0, 0.0],
+            chunk_index=0,
+        )
+        _insert_chunk(
+            conn,
+            chunk_id="att",
+            message_id="m1",
+            thread_id="t1",
+            text="attachment text",
+            embedding=[1.0, 0.0, 0.0, 0.0],
+            chunk_index=2,
+            attachment_id="att-x",
+        )
+        conn.close()
+        db = Database(str(path))
+        try:
+            chunks = db.get_message_chunks("m1")
+            assert [c.chunk_index for c in chunks] == [0, 1]
+            assert [c.text for c in chunks] == ["first paragraph", "second paragraph"]
+            # The attachment chunk is excluded — body reconstruction only.
+            assert all(c.attachment_id is None for c in chunks)
+        finally:
+            db.close()
+
+    def test_unknown_message_returns_empty(self, chunked_db: Database):
+        assert chunked_db.get_message_chunks("no-such-message") == []
+
+    def test_db_error_returns_empty(self, tmp_path):
+        conn, path = _open_built_db_conn(tmp_path, "no-chunks.db")
+        conn.execute("DROP TABLE message_chunks")
+        conn.commit()
+        conn.close()
+        db = Database(str(path))
+        try:
+            assert db.get_message_chunks("anything") == []
+        finally:
+            db.close()
+
+
+class TestSearchAttachments:
+    """``search_attachments`` fuses a filename/MIME FTS lane and an
+    extracted-text FTS lane, with structured filters and a no-query scan."""
+
+    def test_filename_lane_match(self, attachments_db: Database):
+        # "budget" is in the filename annual-budget.xlsx and in no chunk.
+        results = attachments_db.search_attachments(query="budget")
+        assert [a.attachment_id for a in results] == ["att-budget"]
+
+    def test_extracted_text_lane_match(self, attachments_db: Database):
+        # "wage" appears only in the W-2's extracted text, not its filename.
+        results = attachments_db.search_attachments(query="wage")
+        assert [a.attachment_id for a in results] == ["att-w2"]
+
+    def test_filename_and_text_match_deduped(self, attachments_db: Database):
+        # "acme" hits the filename AND the extracted text of att-quote;
+        # the occurrence must be surfaced exactly once.
+        results = attachments_db.search_attachments(query="acme")
+        quote_hits = [a for a in results if a.attachment_id == "att-quote"]
+        assert len(quote_hits) == 1
+
+    def test_content_type_filter(self, attachments_db: Database):
+        results = attachments_db.search_attachments(content_type="application/pdf")
+        assert {a.attachment_id for a in results} == {"att-quote", "att-w2"}
+
+    def test_from_addr_filter(self, attachments_db: Database):
+        results = attachments_db.search_attachments(from_addr="alice@example.com")
+        assert {a.attachment_id for a in results} == {"att-quote"}
+
+    def test_date_from_filter(self, attachments_db: Database):
+        results = attachments_db.search_attachments(date_from="2024-03-01")
+        assert {a.attachment_id for a in results} == {"att-quote"}
+
+    def test_date_to_filter(self, attachments_db: Database):
+        results = attachments_db.search_attachments(date_to="2024-01-31")
+        assert {a.attachment_id for a in results} == {"att-budget"}
+
+    def test_extracted_only_excludes_failed(self, attachments_db: Database):
+        results = attachments_db.search_attachments(extracted_only=True)
+        ids = {a.attachment_id for a in results}
+        assert "att-budget" not in ids
+        assert ids == {"att-quote", "att-w2"}
+
+    def test_no_query_scans_newest_first(self, attachments_db: Database):
+        results = attachments_db.search_attachments()
+        assert [a.attachment_id for a in results] == ["att-quote", "att-w2", "att-budget"]
+
+    def test_extraction_status_and_snippet_surfaced(self, attachments_db: Database):
+        from src.lib.sqlite import AttachmentResult
+
+        results = attachments_db.search_attachments(query="acme")
+        a = next(a for a in results if a.attachment_id == "att-quote")
+        assert isinstance(a, AttachmentResult)
+        assert a.extraction_status == "success"
+        assert "Acme Corporation" in a.text_snippet
+        assert a.senders == ["alice@example.com"]
+
+    def test_failed_extraction_has_status_and_no_snippet(self, attachments_db: Database):
+        results = attachments_db.search_attachments(query="budget")
+        a = results[0]
+        assert a.extraction_status == "failed"
+        assert a.text_snippet == ""
+
+    def test_display_subject_preferred_over_normalized(self, attachments_db: Database):
+        # t-quote carries display_subject "Acme Quotation"; t-tax does not.
+        quote = attachments_db.search_attachments(query="acme")[0]
+        assert quote.subject == "Acme Quotation"
+        tax = attachments_db.search_attachments(query="wage")[0]
+        assert tax.subject == "payroll documents"
+
+    def test_no_match_returns_empty(self, attachments_db: Database):
+        assert attachments_db.search_attachments(query="zzznosuchterm") == []
+
+    def test_punctuation_only_query_returns_empty(self, attachments_db: Database):
+        # A query that sanitizes to nothing is an explicit no-match, not
+        # a silent unfiltered scan.
+        assert attachments_db.search_attachments(query="!!!") == []
+
+    def test_limit_caps_results(self, attachments_db: Database):
+        assert len(attachments_db.search_attachments(limit=1)) == 1
+
+    def test_bad_date_filter_raises_value_error(self, attachments_db: Database):
+        with pytest.raises(ValueError):
+            attachments_db.search_attachments(date_from="not-a-date")
+
+    def test_lanes_degrade_when_attachments_table_missing(self, tmp_path):
+        # Every lane JOINs/scans ``attachments``; dropping it exercises the
+        # OperationalError branch in all three lanes — the search degrades
+        # to an empty result rather than raising.
+        conn, path = _open_built_db_conn(tmp_path, "no-attach.db")
+        conn.execute("DROP TABLE attachments")
+        conn.commit()
+        conn.close()
+        db = Database(str(path))
+        try:
+            assert db.search_attachments(query="acme") == []
+            assert db.search_attachments() == []
         finally:
             db.close()

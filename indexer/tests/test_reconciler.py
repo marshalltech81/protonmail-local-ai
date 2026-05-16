@@ -36,7 +36,7 @@ class FakeEmbedder:
             raise RuntimeError("simulated embedder outage")
         return FAKE_EMBEDDING
 
-    def embed_batch(self, texts: list[str]) -> list[list[float]]:
+    def embed_batch(self, texts: list[str], **_kw) -> list[list[float]]:
         return [self.embed(t) for t in texts]
 
 
@@ -435,6 +435,234 @@ class TestReap:
         assert db.get_thread(thread_id) is not None
         assert db.has_pending_deletion(str(trashed))
 
+    def test_blocked_threads_count_surfaces_in_reap_return(
+        self, db, threader, embedder, reconciler, maildir, monkeypatch
+    ):
+        # Deterministic parse failures on a survivor will retry forever
+        # under the broadened ``except Exception`` catch. Without a
+        # visibility surface, the only operator signal was a stuck
+        # tombstone count + scattered WARN/ERROR log lines per pass.
+        # ``reap()`` now reports ``blocked_threads`` so a stale
+        # deletion-cleanup state is visible to ``get_index_status``
+        # consumers instead of buried in logs.
+        orig_path = maildir / "1700000000.M1.host:2,S"
+        _write_eml(orig_path, "bk1@example.com")
+        thread_id = _index(orig_path, db, threader)
+
+        reply_path = maildir / "1700000001.M2.host:2,S"
+        _write_eml(
+            reply_path,
+            "bk2@example.com",
+            in_reply_to="bk1@example.com",
+            subject="Re: Test message",
+            date=datetime(2024, 2, 1, tzinfo=UTC),
+        )
+        _index(reply_path, db, threader)
+
+        trashed = maildir / "1700000000.M1.host:2,ST"
+        orig_path.rename(trashed)
+        reconciler.sweep()
+
+        # Force a deterministic content-pathology failure on every
+        # ``parse_email`` call so the reaper hits the broad
+        # ``except Exception`` branch.
+        def _raise_value_error(path, maildir_root=None):
+            raise ValueError("malformed MIME boundary")
+
+        monkeypatch.setattr("src.reconciler.parse_email", _raise_value_error)
+
+        result_1 = reconciler.reap()
+        assert result_1["threads_rebuilt"] == 0
+        assert result_1["blocked_threads"] == 1
+        assert reconciler._blocked_thread_attempts[thread_id] == 1
+
+        # Counter must INCREMENT on each subsequent stuck pass so an
+        # operator can see whether the failure is fresh or chronic.
+        result_2 = reconciler.reap()
+        assert result_2["blocked_threads"] == 1  # still one stuck thread
+        assert reconciler._blocked_thread_attempts[thread_id] == 2
+
+        # And a successful reap (failure resolved) must CLEAR the
+        # counter so a one-time blip doesn't permanently linger.
+        monkeypatch.undo()
+        result_3 = reconciler.reap()
+        assert result_3["threads_rebuilt"] == 1
+        assert result_3["blocked_threads"] == 0
+        assert thread_id not in reconciler._blocked_thread_attempts
+
+    def test_escalation_warning_fires_once_at_threshold(
+        self, db, threader, embedder, reconciler, maildir, monkeypatch, caplog
+    ):
+        # A thread blocked for ``_BLOCKED_ESCALATION_THRESHOLD``
+        # consecutive passes earns a one-shot, higher-signal WARN so
+        # operators can distinguish "embedder is cold-starting" from
+        # "embedder is misconfigured and has been failing all day".
+        # The latch ensures the message fires exactly once per stuck
+        # episode rather than every pass.
+        from src.reconciler import _BLOCKED_ESCALATION_THRESHOLD
+
+        orig_path = maildir / "1700000000.M1.host:2,S"
+        _write_eml(orig_path, "esc1@example.com")
+        thread_id = _index(orig_path, db, threader)
+
+        reply_path = maildir / "1700000001.M2.host:2,S"
+        _write_eml(
+            reply_path,
+            "esc2@example.com",
+            in_reply_to="esc1@example.com",
+            subject="Re: Test message",
+            date=datetime(2024, 2, 1, tzinfo=UTC),
+        )
+        _index(reply_path, db, threader)
+
+        trashed = maildir / "1700000000.M1.host:2,ST"
+        orig_path.rename(trashed)
+        reconciler.sweep()
+
+        def _raise_value_error(path, maildir_root=None):
+            raise ValueError("malformed MIME boundary")
+
+        monkeypatch.setattr("src.reconciler.parse_email", _raise_value_error)
+
+        # Below-threshold passes do not emit the escalation line.
+        with caplog.at_level("WARNING", logger="indexer.reconciler"):
+            for _ in range(_BLOCKED_ESCALATION_THRESHOLD - 1):
+                reconciler.reap()
+        assert not any("no longer a transient retry" in r.message for r in caplog.records)
+
+        # The pass that crosses the threshold fires the escalation
+        # exactly once, even though the underlying failure persists.
+        caplog.clear()
+        with caplog.at_level("WARNING", logger="indexer.reconciler"):
+            reconciler.reap()
+            reconciler.reap()
+            reconciler.reap()
+        escalation_lines = [r for r in caplog.records if "no longer a transient retry" in r.message]
+        assert len(escalation_lines) == 1
+        assert thread_id in escalation_lines[0].message
+        assert thread_id in reconciler._escalated_threads
+
+    def test_escalation_latch_resets_after_successful_reap(
+        self, db, threader, embedder, reconciler, maildir, monkeypatch, caplog
+    ):
+        # Once a thread reaps cleanly the escalation latch clears, so
+        # a future stuck episode on the same thread can re-emit the
+        # warning instead of being silently swallowed by a stale set
+        # entry.
+        from src.reconciler import _BLOCKED_ESCALATION_THRESHOLD
+
+        orig_path = maildir / "1700000000.M1.host:2,S"
+        _write_eml(orig_path, "esc1@example.com")
+        thread_id = _index(orig_path, db, threader)
+
+        reply_path = maildir / "1700000001.M2.host:2,S"
+        _write_eml(
+            reply_path,
+            "esc2@example.com",
+            in_reply_to="esc1@example.com",
+            subject="Re: Test message",
+            date=datetime(2024, 2, 1, tzinfo=UTC),
+        )
+        _index(reply_path, db, threader)
+
+        trashed = maildir / "1700000000.M1.host:2,ST"
+        orig_path.rename(trashed)
+        reconciler.sweep()
+
+        def _raise_value_error(path, maildir_root=None):
+            raise ValueError("malformed MIME boundary")
+
+        monkeypatch.setattr("src.reconciler.parse_email", _raise_value_error)
+        for _ in range(_BLOCKED_ESCALATION_THRESHOLD):
+            reconciler.reap()
+        assert thread_id in reconciler._escalated_threads
+
+        # Successful reap clears both the counter and the latch.
+        monkeypatch.undo()
+        result = reconciler.reap()
+        assert result["threads_rebuilt"] == 1
+        assert thread_id not in reconciler._blocked_thread_attempts
+        assert thread_id not in reconciler._escalated_threads
+
+    def test_skips_reap_when_survivor_oversized(
+        self, db, threader, embedder, reconciler, maildir, monkeypatch
+    ):
+        # ``parse_email`` raises ``OversizedMessageError`` when the file
+        # exceeds ``INDEXER_PARSE_MAX_BYTES``. That exception is not an
+        # ``OSError`` subclass, so the reap path must catch it
+        # explicitly — otherwise a single oversized survivor crashes
+        # the whole ``reap()`` call and stalls every other thread's
+        # tombstones behind it.
+        from src.parser import OversizedMessageError
+
+        orig_path = maildir / "1700000000.M1.host:2,S"
+        _write_eml(orig_path, "ov1@example.com")
+        thread_id = _index(orig_path, db, threader)
+
+        reply_path = maildir / "1700000001.M2.host:2,S"
+        _write_eml(
+            reply_path,
+            "ov2@example.com",
+            in_reply_to="ov1@example.com",
+            subject="Re: Test message",
+            date=datetime(2024, 2, 1, tzinfo=UTC),
+        )
+        _index(reply_path, db, threader)
+
+        trashed = maildir / "1700000000.M1.host:2,ST"
+        orig_path.rename(trashed)
+        reconciler.sweep()
+
+        def _raise_oversized(path, maildir_root=None):
+            raise OversizedMessageError(path, size=99, cap=10)
+
+        monkeypatch.setattr("src.reconciler.parse_email", _raise_oversized)
+
+        result = reconciler.reap()
+
+        assert result["threads_rebuilt"] == 0
+        assert db.get_thread(thread_id) is not None
+        assert db.has_pending_deletion(str(trashed))
+
+    def test_skips_reap_on_content_pathology_in_survivor(
+        self, db, threader, embedder, reconciler, maildir, monkeypatch
+    ):
+        # ``parse_email`` deliberately propagates content-pathology
+        # exceptions (malformed MIME the email module cannot decompose,
+        # html2text blowups, etc.) so the indexer worker can route them
+        # through the queue's retry + dead-letter cascade. The reaper has
+        # no equivalent — and the previous narrow ``OSError`` catch let
+        # those exceptions crash ``reap()`` entirely, stalling every
+        # other thread's tombstones. The reaper must log + skip the pass.
+        orig_path = maildir / "1700000000.M1.host:2,S"
+        _write_eml(orig_path, "cp1@example.com")
+        thread_id = _index(orig_path, db, threader)
+
+        reply_path = maildir / "1700000001.M2.host:2,S"
+        _write_eml(
+            reply_path,
+            "cp2@example.com",
+            in_reply_to="cp1@example.com",
+            subject="Re: Test message",
+            date=datetime(2024, 2, 1, tzinfo=UTC),
+        )
+        _index(reply_path, db, threader)
+
+        trashed = maildir / "1700000000.M1.host:2,ST"
+        orig_path.rename(trashed)
+        reconciler.sweep()
+
+        def _raise_value_error(path, maildir_root=None):
+            raise ValueError("malformed MIME boundary")
+
+        monkeypatch.setattr("src.reconciler.parse_email", _raise_value_error)
+
+        result = reconciler.reap()
+
+        assert result["threads_rebuilt"] == 0
+        assert db.get_thread(thread_id) is not None
+        assert db.has_pending_deletion(str(trashed))
+
     def test_unlinks_files_when_unlink_on_reap_enabled(self, db, threader, embedder, maildir):
         cfg = _default_config(unlink_on_reap=True)
         rec = Reconciler(db, embedder, threader, cfg)
@@ -448,6 +676,136 @@ class TestReap:
         assert trashed.exists()
         rec.reap()
         assert trashed.exists() is False
+
+    def test_reap_chunkless_fallback_uses_survivor_subject(
+        self, db, threader, embedder, reconciler, maildir
+    ):
+        # When a reap leaves only survivors whose bodies are all
+        # chunk-less (blank body, only-quoted body that strips to empty),
+        # the rebuilt thread vector falls back to embedding a subject.
+        # That fallback MUST source from the oldest SURVIVING message's
+        # subject — not from ``rebuilt_thread.subject`` (the threader's
+        # normalized grouping key: lowercased, ``Re:``/``Fwd:`` stripped)
+        # and not from ``display_subject`` (which references the
+        # OLDEST-EVER message including reaped ones, embedding text
+        # from content the user just deleted).
+        original_subject = "Quarterly Review Schedule"
+        reply_subject = f"Re: {original_subject}"
+
+        orig_path = maildir / "1700000000.M1.host:2,S"
+        _write_eml(orig_path, "ds1@example.com", subject=original_subject, body="")
+        thread_id = _index(orig_path, db, threader)
+
+        reply_path = maildir / "1700000001.M2.host:2,S"
+        _write_eml(
+            reply_path,
+            "ds2@example.com",
+            subject=reply_subject,
+            body="",
+            in_reply_to="ds1@example.com",
+            date=datetime(2024, 2, 1, tzinfo=UTC),
+        )
+        _index(reply_path, db, threader)
+
+        # Reaping the original leaves the reply as the sole survivor —
+        # blank body, no chunks, so the reap path takes the fallback
+        # branch in ``_reap_thread``.
+        trashed = maildir / "1700000000.M1.host:2,ST"
+        orig_path.rename(trashed)
+        reconciler.sweep()
+
+        embedder.calls = 0
+        # FakeEmbedder records call count but not args; intercept embed
+        # to capture the actual text the reaper sent.
+        embedded: list[str] = []
+        original_embed = embedder.embed
+
+        def _capture(text: str) -> list[float]:
+            embedded.append(text)
+            return original_embed(text)
+
+        embedder.embed = _capture
+
+        result = reconciler.reap()
+        assert result["threads_rebuilt"] == 1
+        assert db.get_thread(thread_id) is not None
+
+        # The reaper must have embedded the SURVIVOR's original-case
+        # subject (``Re: Quarterly Review Schedule``). Embedding from
+        # the deleted message is wrong: that text is no longer part of
+        # the index, and using it as the vector key for the rebuilt
+        # thread is semantically odd. The normalized grouping key
+        # (lowercased, prefix-stripped) would also be the regression.
+        assert reply_subject in embedded, (
+            f"reap fallback must embed the SURVIVOR's original-case "
+            f"subject (Re-prefix intact); embedded: {embedded!r}"
+        )
+        normalized = original_subject.lower()
+        assert all(text != normalized for text in embedded), (
+            f"reap fallback must not embed the normalized grouping key "
+            f"({normalized!r}); embedded: {embedded!r}"
+        )
+
+    def test_reap_chunkless_fallback_prefers_survivor_over_deleted_display_subject(
+        self, db, threader, embedder, reconciler, maildir
+    ):
+        # ``display_subject`` is maintained as the OLDEST-ever message's
+        # subject across the lifetime of a thread, including reaped
+        # messages. After reaping the original, the survivor may have a
+        # substantively different subject — but ``display_subject`` in
+        # the DB still references the deleted message. The fallback
+        # must prefer the survivor's subject so the rebuild's vector
+        # key is text that still exists in the index. Embedding from
+        # the deleted message's subject would tie the post-reap thread
+        # vector to content the user explicitly removed.
+        deleted_subject = "Confidential salary discussion"
+        survivor_subject = "Re: Public Q1 results"
+
+        orig_path = maildir / "1700000000.M1.host:2,S"
+        _write_eml(orig_path, "del1@example.com", subject=deleted_subject, body="")
+        thread_id = _index(orig_path, db, threader)
+
+        reply_path = maildir / "1700000001.M2.host:2,S"
+        _write_eml(
+            reply_path,
+            "del2@example.com",
+            subject=survivor_subject,
+            body="",
+            in_reply_to="del1@example.com",
+            date=datetime(2024, 2, 1, tzinfo=UTC),
+        )
+        _index(reply_path, db, threader)
+
+        # Sanity check: ``display_subject`` was set to the deleted
+        # message's subject — so a fallback that reads display_subject
+        # FIRST would expose the deleted text in the post-reap vector.
+        assert db.get_thread_display_subject(thread_id) == deleted_subject
+
+        trashed = maildir / "1700000000.M1.host:2,ST"
+        orig_path.rename(trashed)
+        reconciler.sweep()
+
+        embedded: list[str] = []
+        original_embed = embedder.embed
+
+        def _capture(text: str) -> list[float]:
+            embedded.append(text)
+            return original_embed(text)
+
+        embedder.embed = _capture
+
+        result = reconciler.reap()
+        assert result["threads_rebuilt"] == 1
+        # The survivor's subject must be what the rebuild embeds.
+        assert survivor_subject in embedded, (
+            f"reap fallback must use survivor's subject, not the "
+            f"deleted message's; embedded: {embedded!r}"
+        )
+        # The deleted subject text must NOT appear as an embed input.
+        assert deleted_subject not in embedded, (
+            f"reap fallback must not embed the deleted message's "
+            f"subject text ({deleted_subject!r}); embedded: {embedded!r}"
+        )
 
     def test_reap_drops_chunks_for_reaped_messages_and_keeps_survivor_chunks(
         self, db, threader, embedder, reconciler, maildir

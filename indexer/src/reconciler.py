@@ -35,7 +35,7 @@ from .chunker import mean_vector
 from .database import Database
 from .embedder import EmbeddingBackend
 from .maildir import is_trashed, resolve_current_path
-from .parser import parse_email
+from .parser import OversizedMessageError, parse_email
 from .threader import Thread, Threader
 
 log = logging.getLogger("indexer.reconciler")
@@ -45,6 +45,15 @@ log = logging.getLogger("indexer.reconciler")
 # 5% default and a 10-message mailbox, a single deletion is 10% and
 # would incorrectly trip the mass-delete brake. See ``reap()``.
 _REAP_ABSOLUTE_FLOOR = 10
+
+# Consecutive blocked passes before a thread crosses from "transient
+# blip" into "stuck state" and earns a one-shot escalation log line.
+# Routine cold-start / single-batch retries clear well within this
+# window; threads still blocked after this many sweeps almost always
+# indicate a misconfigured embedder, persistent parser bug, or stuck
+# survivor file that needs operator attention rather than another
+# silent retry.
+_BLOCKED_ESCALATION_THRESHOLD = 3
 
 
 @dataclass(frozen=True)
@@ -75,6 +84,30 @@ class Reconciler:
         # Passed through to parse_email when re-reading survivors so nested
         # folder paths (``Clients/ABC``) are preserved during thread rebuild.
         self.maildir_root = maildir_root
+        # Threads currently stuck in the reap path because a survivor
+        # cannot be parsed (corrupt MIME header, runtime bug in the
+        # parser, oversized survivor file). Counter increments each
+        # pass the thread fails to reap, resets when the thread
+        # successfully reaps. Surfaced through ``reap()``'s return
+        # dict and via the per-pass WARN at each call site (plus the
+        # one-shot escalation WARN when the counter crosses
+        # ``_BLOCKED_ESCALATION_THRESHOLD``) — operator-visible only
+        # through the indexer's own logs. NOT plumbed into the
+        # mcp-server's ``get_index_status``: that surface runs in a
+        # separate process and reads SQLite stats, with no IPC back
+        # to this counter. In-memory only — resets on indexer restart,
+        # which is the right shape for a counter that signals
+        # "something's blocked right now" rather than long-term retry
+        # accounting.
+        self._blocked_thread_attempts: dict[str, int] = {}
+        # Threads for which the one-shot escalation log has already
+        # fired. Kept separate from ``_blocked_thread_attempts`` because
+        # the per-pass WARN at each call site already fires every
+        # sweep; this latch ensures the higher-severity "this is now
+        # a stuck state" message is emitted exactly once per stuck
+        # episode rather than spamming on every retry. Clears together
+        # with the attempt counter when the thread reaps successfully.
+        self._escalated_threads: set[str] = set()
 
     # -----------------------------------------------------------------
     # Tombstone detection
@@ -221,11 +254,54 @@ class Reconciler:
                 threads_reaped,
                 threads_rebuilt,
             )
+        blocked_count = len(self._blocked_thread_attempts)
+        if blocked_count:
+            log.warning(
+                "reconciler reap: %d thread(s) blocked from reaping "
+                "(corrupt survivor / embed outage / parser regression); "
+                "see prior log lines for affected thread_ids",
+                blocked_count,
+            )
         return {
             "threads_reaped": threads_reaped,
             "threads_rebuilt": threads_rebuilt,
             "aborted": False,
+            # Number of threads that failed to reap on this pass and
+            # remain in a stuck state. Surfaced so a stale deletion
+            # cleanup is visible in operator health checks instead of
+            # buried in per-pass WARN/ERROR log lines.
+            "blocked_threads": blocked_count,
         }
+
+    def _record_blocked(self, thread_id: str) -> int:
+        """Bump the blocked-attempts counter for ``thread_id`` and return it.
+
+        Crossing ``_BLOCKED_ESCALATION_THRESHOLD`` for the first time
+        emits a one-shot WARN distinct from the per-pass log lines at
+        each call site, so operators can grep for the escalation
+        signal without scanning every routine retry. The latch in
+        ``_escalated_threads`` prevents the message from firing again
+        until the thread reaps successfully.
+        """
+        attempts = self._blocked_thread_attempts.get(thread_id, 0) + 1
+        self._blocked_thread_attempts[thread_id] = attempts
+        if attempts >= _BLOCKED_ESCALATION_THRESHOLD and thread_id not in self._escalated_threads:
+            log.warning(
+                "reconciler: thread %s has been blocked from reaping for "
+                "%d consecutive passes; this is no longer a transient retry. "
+                "Check embedder availability, parser errors, or stuck "
+                "survivor files. Sweeps will continue, but this message "
+                "will not repeat until the thread reaps cleanly.",
+                thread_id,
+                attempts,
+            )
+            self._escalated_threads.add(thread_id)
+        return attempts
+
+    def _clear_blocked(self, thread_id: str) -> None:
+        """Drop the blocked-attempts entry for a thread that reaped cleanly."""
+        self._blocked_thread_attempts.pop(thread_id, None)
+        self._escalated_threads.discard(thread_id)
 
     def _reap_thread(self, thread_id: str, tombs: list) -> tuple[bool, bool]:
         """Reap one thread. Returns (fully_reaped, rebuilt)."""
@@ -240,6 +316,7 @@ class Reconciler:
                 for fp in dead_filepaths:
                     self._safe_unlink(fp)
             log.info("reaped thread %s (%d messages)", thread_id, len(tombs))
+            self._clear_blocked(thread_id)
             return True, False
 
         # Thread has survivors — parse them from disk and rebuild.
@@ -247,30 +324,66 @@ class Reconciler:
         for row in survivor_rows:
             try:
                 msg = parse_email(Path(row["filepath"]), maildir_root=self.maildir_root)
-            except OSError as e:
-                # Transient read failure (mbsync chmod race, perms regression,
-                # rename mid-sweep). Skip the pass; a later sweep will retry.
+            except (OSError, OversizedMessageError) as e:
+                # Foreseeable parse failures the parser is documented to
+                # raise: ``OSError`` covers the mbsync chmod / rename /
+                # perms races; ``OversizedMessageError`` fires when the
+                # survivor exceeds ``INDEXER_PARSE_MAX_BYTES``. Skip the
+                # pass; a later sweep retries (the underlying condition
+                # is typically transient or operator-actionable).
+                attempts = self._record_blocked(thread_id)
                 log.warning(
-                    "reaper: could not read survivor %s in thread %s (%s); skipping this reap pass",
+                    "reaper: could not read survivor %s in thread %s "
+                    "(%s); skipping this reap pass (blocked attempts=%d)",
                     row["filepath"],
                     thread_id,
                     e,
+                    attempts,
+                )
+                return False, False
+            except Exception as e:
+                # Content-pathology errors (malformed MIME the email
+                # module cannot decompose, html2text blowups, etc.) the
+                # parser deliberately propagates instead of swallowing.
+                # The indexer's main worker routes those through the
+                # queue's retry + dead-letter cascade; the reaper has
+                # no equivalent, so skipping the pass with a loud log
+                # is the closest equivalent — better than crashing
+                # ``reap()`` and stalling every other thread's
+                # tombstones behind a single corrupt survivor. The
+                # blocked-attempts counter on the Reconciler instance
+                # surfaces these stuck threads to operators via
+                # ``reap()``'s return dict so deterministic failures
+                # (which retry forever under this catch) are not just
+                # buried log lines.
+                attempts = self._record_blocked(thread_id)
+                log.error(
+                    "reaper: parse_email raised on survivor %s in thread %s; "
+                    "skipping this reap pass (blocked attempts=%d)",
+                    row["filepath"],
+                    thread_id,
+                    attempts,
+                    exc_info=e,
                 )
                 return False, False
             if msg is None:
                 # Survivor unparseable; skip it from the rebuild but do not
                 # delete the DB row. A later sweep can pick it up again.
+                attempts = self._record_blocked(thread_id)
                 log.warning(
-                    "reaper: could not re-parse survivor %s in thread %s; skipping this reap pass",
+                    "reaper: could not re-parse survivor %s in thread %s; "
+                    "skipping this reap pass (blocked attempts=%d)",
                     row["filepath"],
                     thread_id,
+                    attempts,
                 )
                 return False, False
             survivors.append(msg)
 
-        if not survivors:
-            return False, False
-
+        # Note: ``survivors`` is always non-empty here. ``survivor_rows``
+        # was checked non-empty above; every parse-failure path in the
+        # loop body early-returns, so we cannot exit the loop with an
+        # empty list.
         survivors.sort(key=lambda m: m.date)
         existing = self.db.get_thread(thread_id)
         subject = existing.subject if existing else survivors[0].subject
@@ -298,15 +411,40 @@ class Reconciler:
             if survivor_chunks:
                 embedding = mean_vector(survivor_chunks)
             else:
-                fallback = rebuilt_thread.subject.strip() or "(empty thread)"
+                # Fallback priority: oldest SURVIVOR's original-case
+                # subject first; only fall back to the thread's stored
+                # ``display_subject`` if every survivor's subject is
+                # empty. ``display_subject`` is maintained as the
+                # oldest message's subject across the lifetime of the
+                # thread INCLUDING reaped messages — so using it as
+                # the primary source means a post-reap rebuild can
+                # embed text from the message we just deleted, which
+                # is the opposite of what an embed-from-survivors
+                # rebuild should do. Survivors' subjects are still
+                # original-case (``Re:``/``Fwd:`` intact) — they
+                # differ from ``rebuilt_thread.subject`` only by case
+                # / prefix-stripping, both of which are noise for
+                # retrieval. Falling back to ``display_subject`` as a
+                # secondary source covers the edge case where every
+                # survivor has an empty subject line; the sentinel
+                # ``(empty thread)`` covers the final NULL case.
+                fallback = (survivors[0].subject or "").strip()
+                if not fallback:
+                    stored_display = self.db.get_thread_display_subject(thread_id)
+                    fallback = (stored_display or "").strip()
+                if not fallback:
+                    fallback = "(empty thread)"
                 embedding = self.embedder.embed(fallback)
         except Exception as e:
             # Embedding service unavailable or embedding failed — leave state untouched
             # and retry on the next sweep rather than committing partial work.
+            attempts = self._record_blocked(thread_id)
             log.warning(
-                "reaper: embedding failed for thread %s (%s); will retry next pass",
+                "reaper: embedding failed for thread %s (%s); will retry next pass "
+                "(blocked attempts=%d)",
                 thread_id,
                 e,
+                attempts,
             )
             return False, False
 
@@ -330,6 +468,7 @@ class Reconciler:
             len(tombs),
             len(survivors),
         )
+        self._clear_blocked(thread_id)
         return False, True
 
     # -----------------------------------------------------------------
