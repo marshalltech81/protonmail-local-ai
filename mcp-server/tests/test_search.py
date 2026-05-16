@@ -487,3 +487,231 @@ class TestFromNameResolution:
         handler = _handler(fake_server, fake_llm, seeded_db)
         out = asyncio.run(handler(query="anything", from_name="alice"))
         assert "Search error" in _text(out)
+
+
+class TestParticipantParam:
+    """``participant`` filters by anyone on the thread (From/To/Cc) and
+    must reach the DB layer for every mode — it is post-fusion, so a
+    dropped forward would silently return unfiltered results."""
+
+    def _spy(self, db, attr):
+        captured: dict = {}
+        original = getattr(db, attr)
+
+        def spy(**kwargs):
+            captured.update(kwargs)
+            return original(**kwargs)
+
+        setattr(db, attr, spy)
+        return captured
+
+    def test_participant_forwarded_to_hybrid(self, fake_server, fake_llm, seeded_db):
+        captured = self._spy(seeded_db, "hybrid_search")
+        handler = _handler(fake_server, fake_llm, seeded_db)
+        asyncio.run(handler(query="invoice", participant="bob@example.com"))
+        assert captured.get("participant") == "bob@example.com"
+
+    def test_participant_forwarded_to_keyword(self, fake_server, fake_llm, seeded_db):
+        captured = self._spy(seeded_db, "keyword_search")
+        handler = _handler(fake_server, fake_llm, seeded_db)
+        asyncio.run(handler(query="invoice", mode="keyword", participant="bob@example.com"))
+        assert captured.get("participant") == "bob@example.com"
+
+    def test_participant_forwarded_to_semantic(self, fake_server, fake_llm, seeded_db):
+        captured = self._spy(seeded_db, "semantic_search")
+        handler = _handler(fake_server, fake_llm, seeded_db)
+        asyncio.run(handler(query="invoice", mode="semantic", participant="bob@example.com"))
+        assert captured.get("participant") == "bob@example.com"
+
+
+class TestGetEvidence:
+    """``get_evidence`` returns the retrieved source passages with full
+    provenance and no LLM synthesis."""
+
+    def _handler(self, fake_server, fake_llm, db):
+        register_search_tools(fake_server, db, fake_llm)
+        return fake_server.tools["get_evidence"]
+
+    def test_tool_is_registered(self, fake_server, fake_llm, seeded_db):
+        register_search_tools(fake_server, seeded_db, fake_llm)
+        assert "get_evidence" in fake_server.tools
+
+    def test_mailbox_wide_returns_evidence_chunks(self, fake_server, fake_llm, chunked_db):
+        handler = self._handler(fake_server, fake_llm, chunked_db)
+        out = asyncio.run(handler(query="invoice"))
+        text = _text(out)
+        assert "Evidence for:" in text
+        # alpha-c1's chunk text carries "12345" — absent from subject and
+        # snippet, so finding it proves the chunk was surfaced.
+        assert "12345" in text
+        assert "t-alpha" in text
+
+    def test_thread_scoped_returns_that_threads_chunks(self, fake_server, fake_llm, chunked_db):
+        handler = self._handler(fake_server, fake_llm, chunked_db)
+        out = asyncio.run(handler(query="invoice", thread_id="t-alpha"))
+        assert "12345" in _text(out)
+
+    def test_thread_scoped_unknown_thread(self, fake_server, fake_llm, chunked_db):
+        handler = self._handler(fake_server, fake_llm, chunked_db)
+        out = asyncio.run(handler(query="invoice", thread_id="no-such-thread"))
+        assert "Thread not found" in _text(out)
+
+    def test_blank_query_returns_guidance(self, fake_server, fake_llm, chunked_db):
+        handler = self._handler(fake_server, fake_llm, chunked_db)
+        out = asyncio.run(handler(query="   "))
+        assert "Provide a query" in _text(out)
+
+    def test_no_evidence_message(self, fake_server, fake_llm, empty_db):
+        handler = self._handler(fake_server, fake_llm, empty_db)
+        out = asyncio.run(handler(query="anything"))
+        assert "No evidence found" in _text(out)
+
+    def test_thread_scoped_no_chunks_reports_no_evidence(self, fake_server, fake_llm, chunked_db):
+        # t-gamma exists but carries no chunks — the scoped path must
+        # report no evidence rather than rendering an empty thread group.
+        handler = self._handler(fake_server, fake_llm, chunked_db)
+        out = asyncio.run(handler(query="anything", thread_id="t-gamma"))
+        assert "No evidence found" in _text(out)
+
+    def test_long_chunk_text_is_truncated(self, fake_server, fake_llm, tmp_path):
+        import sqlite3
+
+        import sqlite_vec
+        from src.lib.sqlite import Database
+
+        from tests.conftest import _build_schema, _insert_chunk, _insert_thread
+
+        path = tmp_path / "long-evidence.db"
+        conn = sqlite3.connect(str(path))
+        conn.enable_load_extension(True)
+        sqlite_vec.load(conn)
+        conn.enable_load_extension(False)
+        _build_schema(conn)
+        _insert_thread(
+            conn,
+            thread_id="t1",
+            subject="long thread",
+            participants=["a@example.com"],
+            senders=["a@example.com"],
+            embedding=[1.0, 0.0, 0.0, 0.0],
+        )
+        _insert_chunk(
+            conn,
+            chunk_id="c1",
+            message_id="t1",
+            thread_id="t1",
+            text="x" * 5000,
+            embedding=[1.0, 0.0, 0.0, 0.0],
+        )
+        conn.close()
+        db = Database(str(path))
+        try:
+            register_search_tools(fake_server, db, fake_llm)
+            handler = fake_server.tools["get_evidence"]
+            out = asyncio.run(handler(query="anything", thread_id="t1"))
+            assert "[truncated]" in _text(out)
+        finally:
+            db.close()
+
+    def test_include_scores_shows_lanes_and_distance(self, fake_server, fake_llm, chunked_db):
+        handler = self._handler(fake_server, fake_llm, chunked_db)
+        out = asyncio.run(handler(query="invoice", include_scores=True))
+        text = _text(out)
+        assert "Lanes:" in text
+        assert "vector distance" in text
+
+    def test_default_omits_scores(self, fake_server, fake_llm, chunked_db):
+        handler = self._handler(fake_server, fake_llm, chunked_db)
+        text = _text(asyncio.run(handler(query="invoice")))
+        assert "Lanes:" not in text
+        assert "vector distance" not in text
+
+    def test_thread_scoped_include_scores_omits_lanes(self, fake_server, fake_llm, chunked_db):
+        # The thread-scoped path bypasses RRF fusion, so there is no lane
+        # provenance — but the per-chunk vector distance is still shown.
+        handler = self._handler(fake_server, fake_llm, chunked_db)
+        out = asyncio.run(handler(query="invoice", thread_id="t-alpha", include_scores=True))
+        text = _text(out)
+        assert "Lanes:" not in text
+        assert "vector distance" in text
+
+    def test_attachment_provenance_rendered(self, fake_server, fake_llm, attachments_db):
+        handler = self._handler(fake_server, fake_llm, attachments_db)
+        out = asyncio.run(handler(query="acme", thread_id="t-quote"))
+        assert 'Source: attachment "acme-quote.pdf"' in _text(out)
+
+    def test_limit_clamped_at_tool_boundary(self, fake_server, fake_llm, chunked_db):
+        captured: dict = {}
+        original = chunked_db.hybrid_search
+
+        def spy(**kwargs):
+            captured.update(kwargs)
+            return original(**kwargs)
+
+        chunked_db.hybrid_search = spy  # type: ignore[assignment]
+        handler = self._handler(fake_server, fake_llm, chunked_db)
+        asyncio.run(handler(query="invoice", limit=9999))
+        assert captured["limit"] == 50
+
+    def test_db_error_returns_evidence_error(self, fake_server, fake_llm, chunked_db):
+        def boom(**_kwargs):
+            raise RuntimeError("simulated index error")
+
+        chunked_db.hybrid_search = boom  # type: ignore[assignment]
+        handler = self._handler(fake_server, fake_llm, chunked_db)
+        out = asyncio.run(handler(query="invoice"))
+        assert "Evidence error" in _text(out)
+
+
+class TestSearchAttachmentsTool:
+    """``search_attachments`` locates attachments by filename, MIME, and
+    extracted text and reports each one's parent thread."""
+
+    def _handler(self, fake_server, fake_llm, db):
+        register_search_tools(fake_server, db, fake_llm)
+        return fake_server.tools["search_attachments"]
+
+    def test_tool_is_registered(self, fake_server, fake_llm, seeded_db):
+        register_search_tools(fake_server, seeded_db, fake_llm)
+        assert "search_attachments" in fake_server.tools
+
+    def test_query_match_renders_attachment(self, fake_server, fake_llm, attachments_db):
+        handler = self._handler(fake_server, fake_llm, attachments_db)
+        text = _text(asyncio.run(handler(query="budget")))
+        assert "annual-budget.xlsx" in text
+        assert "t-budget" in text
+
+    def test_no_query_lists_all_attachments(self, fake_server, fake_llm, attachments_db):
+        handler = self._handler(fake_server, fake_llm, attachments_db)
+        text = _text(asyncio.run(handler()))
+        assert "Found 3 attachment(s)" in text
+        assert "acme-quote.pdf" in text
+
+    def test_no_results_message(self, fake_server, fake_llm, attachments_db):
+        handler = self._handler(fake_server, fake_llm, attachments_db)
+        out = asyncio.run(handler(query="zzznosuchterm"))
+        assert "No attachments found" in _text(out)
+
+    def test_extraction_status_and_snippet_rendered(self, fake_server, fake_llm, attachments_db):
+        handler = self._handler(fake_server, fake_llm, attachments_db)
+        text = _text(asyncio.run(handler(query="acme")))
+        assert "Text extraction: success" in text
+        assert "Acme Corporation" in text
+
+    def test_bad_date_returns_error(self, fake_server, fake_llm, attachments_db):
+        handler = self._handler(fake_server, fake_llm, attachments_db)
+        out = asyncio.run(handler(date_from="not-a-date"))
+        assert "Attachment search error" in _text(out)
+
+    def test_limit_clamped_at_tool_boundary(self, fake_server, fake_llm, attachments_db):
+        captured: dict = {}
+        original = attachments_db.search_attachments
+
+        def spy(**kwargs):
+            captured.update(kwargs)
+            return original(**kwargs)
+
+        attachments_db.search_attachments = spy  # type: ignore[assignment]
+        handler = self._handler(fake_server, fake_llm, attachments_db)
+        asyncio.run(handler(limit=9999))
+        assert captured["limit"] == 50

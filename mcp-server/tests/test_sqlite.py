@@ -2330,3 +2330,373 @@ class TestFindContactSendersOnly:
             assert sent[0]["thread_count"] == 2
         finally:
             db.close()
+
+
+def _open_built_db_conn(tmp_path, name="lib-test.db"):
+    """Open a writable sqlite3 connection with the MCP schema built.
+
+    The caller inserts fixture rows, closes this connection, then opens
+    a read-only ``Database`` on the returned path. Mirrors the inline
+    DB-build boilerplate the older tests in this file repeat.
+    """
+    import sqlite_vec
+
+    from tests.conftest import _build_schema
+
+    path = tmp_path / name
+    conn = sqlite3.connect(str(path))
+    conn.enable_load_extension(True)
+    sqlite_vec.load(conn)
+    conn.enable_load_extension(False)
+    _build_schema(conn)
+    return conn, path
+
+
+class TestParticipantFilter:
+    """``participant`` filters threads by anyone in From/To/Cc — distinct
+    from ``from_addr``, which is sender-only."""
+
+    @staticmethod
+    def _thread(thread_id, participants, senders=None):
+        from datetime import UTC, datetime
+
+        from src.lib.sqlite import ThreadResult
+
+        return ThreadResult(
+            thread_id=thread_id,
+            subject="s",
+            participants=participants,
+            senders=senders if senders is not None else [],
+            folder="INBOX",
+            date_first=datetime(2024, 1, 1, tzinfo=UTC),
+            date_last=datetime(2024, 1, 2, tzinfo=UTC),
+            message_ids=[thread_id],
+            snippet="",
+            has_attachments=False,
+        )
+
+    def test_apply_filters_matches_participant_any_role(self, seeded_db: Database):
+        a = self._thread("a", ["alice@example.com", "bob@example.com"])
+        b = self._thread("b", ["carol@example.com"])
+        filtered = seeded_db._apply_filters([a, b], participant="bob@example.com")
+        assert [r.thread_id for r in filtered] == ["a"]
+
+    def test_participant_matches_recipient_not_just_sender(self, seeded_db: Database):
+        # bob is a participant but not a sender — from_addr would miss him.
+        t = self._thread(
+            "a", ["alice@example.com", "bob@example.com"], senders=["alice@example.com"]
+        )
+        assert seeded_db._apply_filters([t], participant="bob@example.com")
+        assert seeded_db._apply_filters([t], from_addr="bob@example.com") == []
+
+    def test_participant_domain_fragment(self, seeded_db: Database):
+        t = self._thread("a", ["alice@example.com"])
+        assert seeded_db._apply_filters([t], participant="@example.com")
+        assert seeded_db._apply_filters([t], participant="@other.org") == []
+
+    def test_has_post_fusion_filter_counts_participant(self):
+        assert Database._has_post_fusion_filter(participant="x@example.com") is True
+        assert Database._has_post_fusion_filter() is False
+
+    def test_hybrid_search_applies_participant(self, seeded_db: Database):
+        # carol is a participant only of t-beta in the seeded fixture.
+        results = seeded_db.hybrid_search(
+            query_text="invoice lunch meeting",
+            query_embedding=[0.0, 1.0, 0.0, 0.0],
+            participant="carol@example.com",
+        )
+        assert results
+        assert all("carol@example.com" in r.participants for r in results)
+
+    def test_keyword_search_applies_participant(self, seeded_db: Database):
+        results = seeded_db.keyword_search("invoice lunch meeting", participant="dave@example.com")
+        assert results
+        assert all("dave@example.com" in r.participants for r in results)
+
+    def test_semantic_search_applies_participant(self, seeded_db: Database):
+        results = seeded_db.semantic_search([0.0, 0.0, 1.0, 0.0], participant="dave@example.com")
+        assert results
+        assert all("dave@example.com" in r.participants for r in results)
+
+
+class TestAddrMatchHelpers:
+    def test_addr_matches_full_address_is_canonical(self):
+        from src.lib.sqlite import _addr_matches
+
+        assert _addr_matches(["Bob Smith <bob@example.com>"], "bob@example.com")
+        assert not _addr_matches(["Bob Smith <bob@example.com>"], "alice@example.com")
+
+    def test_addr_matches_domain_fragment_is_substring(self):
+        from src.lib.sqlite import _addr_matches
+
+        assert _addr_matches(["bob@example.com"], "@example.com")
+
+    def test_matches_participant_vs_matches_sender(self):
+        from datetime import UTC, datetime
+
+        from src.lib.sqlite import ThreadResult, _matches_participant, _matches_sender
+
+        r = ThreadResult(
+            thread_id="t",
+            subject="s",
+            participants=["a@example.com", "b@example.com"],
+            senders=["a@example.com"],
+            folder="INBOX",
+            date_first=datetime(2024, 1, 1, tzinfo=UTC),
+            date_last=datetime(2024, 1, 1, tzinfo=UTC),
+            message_ids=["t"],
+            snippet="",
+            has_attachments=False,
+        )
+        # Recipient-only address: participant matches, sender does not.
+        assert _matches_participant(r, "b@example.com")
+        assert not _matches_sender(r, "b@example.com")
+
+
+class TestLaneProvenance:
+    """RRF fusion records which lanes lifted each thread into ranking, as
+    pure observability for get_evidence(include_scores=True). These tests
+    pin that the provenance is captured — TestReciprocalRankFusion and the
+    rerank suite already pin that scoring/ordering are unchanged."""
+
+    def test_hybrid_search_records_lane_ranks(self, chunked_db: Database):
+        results = chunked_db.hybrid_search(
+            query_text="invoice", query_embedding=[1.0, 0.0, 0.0, 0.0], limit=5
+        )
+        top = next(r for r in results if r.thread_id == "t-alpha")
+        assert top.lane_ranks
+        assert all(isinstance(v, int) for v in top.lane_ranks.values())
+
+    def test_keyword_sub_lane_name_recorded(self, chunked_db: Database):
+        results = chunked_db.keyword_search("invoice", limit=5)
+        top = next(r for r in results if r.thread_id == "t-alpha")
+        # t-alpha's subject "invoice for march" matches the thread-FTS lane.
+        assert "thread_fts" in top.lane_ranks
+
+    def test_chunk_vec_lane_recorded(self, chunked_db: Database):
+        results = chunked_db.hybrid_search(
+            query_text="invoice", query_embedding=[1.0, 0.0, 0.0, 0.0], limit=5
+        )
+        top = next(r for r in results if r.thread_id == "t-alpha")
+        # t-alpha carries chunk alpha-c1 aligned to the query embedding.
+        assert "chunk_vec" in top.lane_ranks
+
+    def test_thread_vec_lane_recorded(self, chunked_db: Database):
+        results = chunked_db.semantic_search([1.0, 0.0, 0.0, 0.0], limit=5)
+        top = next(r for r in results if r.thread_id == "t-alpha")
+        assert "thread_vec" in top.lane_ranks
+
+    def test_rerank_lane_recorded(self, seeded_db: Database):
+        class _StubReranker:
+            candidates = 10
+            top_n = 5
+
+            def rerank(self, query, documents, top_n=None):
+                # Identity order, descending score.
+                return [(i, float(len(documents) - i)) for i in range(len(documents))]
+
+        results = seeded_db.hybrid_search(
+            query_text="invoice",
+            query_embedding=[1.0, 0.0, 0.0, 0.0],
+            limit=5,
+            reranker=_StubReranker(),
+        )
+        assert results
+        assert results[0].lane_ranks.get("rerank") == 0
+
+
+class TestMessageDateOnChunks:
+    """``ChunkResult.message_date`` is populated from the v18 column by
+    ``get_evidence_chunks_for_threads`` so get_evidence can show when a
+    cited passage arrived."""
+
+    def test_evidence_chunks_carry_message_date(self, tmp_path):
+        from tests.conftest import _insert_chunk
+
+        conn, path = _open_built_db_conn(tmp_path, "msgdate.db")
+        _insert_chunk(
+            conn,
+            chunk_id="c1",
+            message_id="m1",
+            thread_id="t1",
+            text="hello world",
+            embedding=[1.0, 0.0, 0.0, 0.0],
+            message_date="2024-05-09T08:00:00+00:00",
+        )
+        conn.close()
+        db = Database(str(path))
+        try:
+            grouped = db.get_evidence_chunks_for_threads(["t1"], [1.0, 0.0, 0.0, 0.0])
+            assert grouped["t1"][0].message_date == "2024-05-09T08:00:00+00:00"
+        finally:
+            db.close()
+
+    def test_legacy_null_message_date_is_none(self, chunked_db: Database):
+        # chunked_db chunks are inserted without a message_date (v17- shape).
+        grouped = chunked_db.get_evidence_chunks_for_threads(["t-alpha"], [1.0, 0.0, 0.0, 0.0])
+        assert grouped["t-alpha"]
+        assert grouped["t-alpha"][0].message_date is None
+
+
+class TestGetMessageChunks:
+    """``get_message_chunks`` reconstructs one message's BODY chunks in
+    document order; ``get_message`` stitches them into a body."""
+
+    def test_returns_only_body_chunks_in_document_order(self, tmp_path):
+        from tests.conftest import _insert_chunk
+
+        conn, path = _open_built_db_conn(tmp_path, "msgchunks.db")
+        # Insert out of order; an attachment chunk must be excluded.
+        _insert_chunk(
+            conn,
+            chunk_id="b2",
+            message_id="m1",
+            thread_id="t1",
+            text="second paragraph",
+            embedding=[1.0, 0.0, 0.0, 0.0],
+            chunk_index=1,
+        )
+        _insert_chunk(
+            conn,
+            chunk_id="b1",
+            message_id="m1",
+            thread_id="t1",
+            text="first paragraph",
+            embedding=[1.0, 0.0, 0.0, 0.0],
+            chunk_index=0,
+        )
+        _insert_chunk(
+            conn,
+            chunk_id="att",
+            message_id="m1",
+            thread_id="t1",
+            text="attachment text",
+            embedding=[1.0, 0.0, 0.0, 0.0],
+            chunk_index=2,
+            attachment_id="att-x",
+        )
+        conn.close()
+        db = Database(str(path))
+        try:
+            chunks = db.get_message_chunks("m1")
+            assert [c.chunk_index for c in chunks] == [0, 1]
+            assert [c.text for c in chunks] == ["first paragraph", "second paragraph"]
+            # The attachment chunk is excluded — body reconstruction only.
+            assert all(c.attachment_id is None for c in chunks)
+        finally:
+            db.close()
+
+    def test_unknown_message_returns_empty(self, chunked_db: Database):
+        assert chunked_db.get_message_chunks("no-such-message") == []
+
+    def test_db_error_returns_empty(self, tmp_path):
+        conn, path = _open_built_db_conn(tmp_path, "no-chunks.db")
+        conn.execute("DROP TABLE message_chunks")
+        conn.commit()
+        conn.close()
+        db = Database(str(path))
+        try:
+            assert db.get_message_chunks("anything") == []
+        finally:
+            db.close()
+
+
+class TestSearchAttachments:
+    """``search_attachments`` fuses a filename/MIME FTS lane and an
+    extracted-text FTS lane, with structured filters and a no-query scan."""
+
+    def test_filename_lane_match(self, attachments_db: Database):
+        # "budget" is in the filename annual-budget.xlsx and in no chunk.
+        results = attachments_db.search_attachments(query="budget")
+        assert [a.attachment_id for a in results] == ["att-budget"]
+
+    def test_extracted_text_lane_match(self, attachments_db: Database):
+        # "wage" appears only in the W-2's extracted text, not its filename.
+        results = attachments_db.search_attachments(query="wage")
+        assert [a.attachment_id for a in results] == ["att-w2"]
+
+    def test_filename_and_text_match_deduped(self, attachments_db: Database):
+        # "acme" hits the filename AND the extracted text of att-quote;
+        # the occurrence must be surfaced exactly once.
+        results = attachments_db.search_attachments(query="acme")
+        quote_hits = [a for a in results if a.attachment_id == "att-quote"]
+        assert len(quote_hits) == 1
+
+    def test_content_type_filter(self, attachments_db: Database):
+        results = attachments_db.search_attachments(content_type="application/pdf")
+        assert {a.attachment_id for a in results} == {"att-quote", "att-w2"}
+
+    def test_from_addr_filter(self, attachments_db: Database):
+        results = attachments_db.search_attachments(from_addr="alice@example.com")
+        assert {a.attachment_id for a in results} == {"att-quote"}
+
+    def test_date_from_filter(self, attachments_db: Database):
+        results = attachments_db.search_attachments(date_from="2024-03-01")
+        assert {a.attachment_id for a in results} == {"att-quote"}
+
+    def test_date_to_filter(self, attachments_db: Database):
+        results = attachments_db.search_attachments(date_to="2024-01-31")
+        assert {a.attachment_id for a in results} == {"att-budget"}
+
+    def test_extracted_only_excludes_failed(self, attachments_db: Database):
+        results = attachments_db.search_attachments(extracted_only=True)
+        ids = {a.attachment_id for a in results}
+        assert "att-budget" not in ids
+        assert ids == {"att-quote", "att-w2"}
+
+    def test_no_query_scans_newest_first(self, attachments_db: Database):
+        results = attachments_db.search_attachments()
+        assert [a.attachment_id for a in results] == ["att-quote", "att-w2", "att-budget"]
+
+    def test_extraction_status_and_snippet_surfaced(self, attachments_db: Database):
+        from src.lib.sqlite import AttachmentResult
+
+        results = attachments_db.search_attachments(query="acme")
+        a = next(a for a in results if a.attachment_id == "att-quote")
+        assert isinstance(a, AttachmentResult)
+        assert a.extraction_status == "success"
+        assert "Acme Corporation" in a.text_snippet
+        assert a.senders == ["alice@example.com"]
+
+    def test_failed_extraction_has_status_and_no_snippet(self, attachments_db: Database):
+        results = attachments_db.search_attachments(query="budget")
+        a = results[0]
+        assert a.extraction_status == "failed"
+        assert a.text_snippet == ""
+
+    def test_display_subject_preferred_over_normalized(self, attachments_db: Database):
+        # t-quote carries display_subject "Acme Quotation"; t-tax does not.
+        quote = attachments_db.search_attachments(query="acme")[0]
+        assert quote.subject == "Acme Quotation"
+        tax = attachments_db.search_attachments(query="wage")[0]
+        assert tax.subject == "payroll documents"
+
+    def test_no_match_returns_empty(self, attachments_db: Database):
+        assert attachments_db.search_attachments(query="zzznosuchterm") == []
+
+    def test_punctuation_only_query_returns_empty(self, attachments_db: Database):
+        # A query that sanitizes to nothing is an explicit no-match, not
+        # a silent unfiltered scan.
+        assert attachments_db.search_attachments(query="!!!") == []
+
+    def test_limit_caps_results(self, attachments_db: Database):
+        assert len(attachments_db.search_attachments(limit=1)) == 1
+
+    def test_bad_date_filter_raises_value_error(self, attachments_db: Database):
+        with pytest.raises(ValueError):
+            attachments_db.search_attachments(date_from="not-a-date")
+
+    def test_lanes_degrade_when_attachments_table_missing(self, tmp_path):
+        # Every lane JOINs/scans ``attachments``; dropping it exercises the
+        # OperationalError branch in all three lanes — the search degrades
+        # to an empty result rather than raising.
+        conn, path = _open_built_db_conn(tmp_path, "no-attach.db")
+        conn.execute("DROP TABLE attachments")
+        conn.commit()
+        conn.close()
+        db = Database(str(path))
+        try:
+            assert db.search_attachments(query="acme") == []
+            assert db.search_attachments() == []
+        finally:
+            db.close()

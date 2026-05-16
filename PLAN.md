@@ -90,7 +90,9 @@ tool-behavior tightening, Tier 1 safety preservation) are now unpaused.
 ### Out of scope for this objective
 
 - Reintroducing project-shipped model-serving components.
-- Adding new MCP tools or changing the MCP API surface.
+- Adding new MCP tools beyond the owner-directed `get_evidence` /
+  `search_attachments` retrieval pair (added 2026-05-15 — see
+  Near-Term Backlog), or otherwise changing the MCP API surface.
 
 ### MLX-rebuild carryover (still-pending follow-ups from PRs #83/#84/#85)
 
@@ -239,6 +241,31 @@ Definition of done:
 ### MCP feature completion
 - add attachment download support once the read-only action path is defined
 - verify action tools respect read-only guardrails
+
+### MCP retrieval tools — get_evidence + search_attachments (added 2026-05-15)
+
+Owner-directed addition pulling forward Later-Backlog retrieval items
+("attachment-aware retrieval with provenance", "ask my mailbox, show
+receipts"). No schema change — all five pieces sit on the existing
+thread + chunk + attachment tables:
+
+- **`get_evidence`** returns the ranked evidence chunks that back a
+  query — thread / message / attachment provenance, char offsets, and
+  message date — with no LLM synthesis. Thin wrapper over the existing
+  `hybrid_search(with_evidence=True)` machinery; a `thread_id` scopes
+  it to one thread.
+- **`search_attachments`** locates attachments by filename, MIME type,
+  and extracted text (two FTS lanes), with content-type / sender /
+  date / extracted-only filters and a no-query scan.
+- **`get_message`** now reconstructs the message body from the
+  per-message chunk store instead of returning thread context only;
+  it falls back to thread context when no body chunks are indexed.
+- **`search_emails`** gains a `participant` filter (matches anyone in
+  From/To/Cc), distinct from the sender-only `from_addr` / `from_name`.
+- RRF fusion records per-lane provenance (`ThreadResult.lane_ranks`)
+  as pure additive observability for `get_evidence(include_scores=True)`
+  — scoring and ordering are unchanged (verified against the existing
+  fusion/rerank suites).
 
 ### RAG quality — inline-reply quote stripping (resolved 2026-05-13)
 
