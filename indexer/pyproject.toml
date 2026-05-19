@@ -14,7 +14,7 @@ dependencies = [
     # (LM Studio / vLLM / mlx_lm.server / TEI / DeepInfra / OpenRouter)
     # target the SDK as their reference client by design, so pointing
     # the SDK at them via ``base_url`` is the supported path.
-    "openai==2.36.0",
+    "openai==2.37.0",
     # Real BPE tokenizer for chunk-size estimation. Counting chunk tokens
     # with a char-count heuristic undercounts CJK / URL / Base64 / code
     # text by 4-6×, producing chunks that blow past the embed model's
