@@ -16,7 +16,7 @@ dependencies = [
     # OpenRouter — already speaks). The embed client is a thin wrapper
     # around ``AsyncOpenAI`` so the project does not maintain its own
     # HTTP/retry plumbing for a wire format the SDK already handles.
-    "openai==2.36.0",
+    "openai==2.37.0",
     "anthropic==0.100.0",
     "cohere==6.1.0",
 ]
