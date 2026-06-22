@@ -31,7 +31,7 @@ jobs:
     name: Trivy dependency scan
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Install Trivy
         uses: aquasecurity/setup-trivy@v0.2.6
@@ -65,7 +65,7 @@ jobs:
     name: Bandit static analysis
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-python@v6
         with:
@@ -84,7 +84,7 @@ jobs:
     name: Trivy misconfiguration scan
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Install Trivy
         uses: aquasecurity/setup-trivy@v0.2.6
