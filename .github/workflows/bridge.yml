@@ -37,7 +37,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       # The drift check compiles internal/vault, which transitively imports
       # docker-credential-helpers/secretservice and needs libsecret-1-dev via
@@ -64,7 +64,7 @@ jobs:
       id-token: write
       attestations: write
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Seed local config for compose build
         run: |
