@@ -26,6 +26,8 @@ from tests.conftest import make_mock_embedder
 # wrapper installed by ``_run`` still walks the real Maildir.
 _REAL_ITER_MAILDIR_MESSAGES = main._iter_maildir_messages
 
+_UNIT_VECTOR = [1.0] + [0.0] * (EMBEDDING_DIM - 1)
+
 
 class _FakeEvent:
     def __init__(self, src_path: str, dest_path: str, is_directory: bool = False):
@@ -1966,3 +1968,291 @@ class TestPeriodicRecoverySkipsDeadLetter:
         re_enqueued = main._recover_zero_vector_threads(db, queue, resurrect_dead=True)
         assert re_enqueued == 1
         assert queue.has_pending_row(str(inbox / "stuck.eml"))
+
+
+class TestEnqueueUnindexedMessages:
+    """The Maildir walk shared by the startup scan and the periodic
+    rescan. The periodic rescan is the eventual-completeness backstop
+    for files whose watchdog event was missed (restart, event
+    coalescing, a delivery during a window the observer wasn't
+    running), so it must find them — without resetting work the queue
+    already owns."""
+
+    def _setup(self, tmp_path, monkeypatch):
+        maildir = tmp_path / "maildir"
+        inbox = maildir / "INBOX" / "cur"
+        inbox.mkdir(parents=True)
+        monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
+        db = Database(tmp_path / "mail.db")
+        return maildir, inbox, db, _make_queue(db)
+
+    def test_enqueues_file_that_arrived_without_an_event(self, tmp_path, monkeypatch):
+        maildir, inbox, db, queue = self._setup(tmp_path, monkeypatch)
+        missed = inbox / "missed.eml"
+        _write_eml(missed, "missed@example.com")
+
+        enqueued = main._enqueue_unindexed_messages(db, queue, maildir, main.REASON_RESCAN)
+
+        assert enqueued == 1
+        assert queue.has_pending_row(str(missed))
+
+    def test_skips_already_indexed_files(self, tmp_path, monkeypatch):
+        maildir, inbox, db, queue = self._setup(tmp_path, monkeypatch)
+        _write_eml(inbox / "done.eml", "done@example.com")
+        main.initial_index(db, make_mock_embedder(_UNIT_VECTOR), Threader(db), queue)
+        assert db.is_indexed(str(inbox / "done.eml"))
+
+        enqueued = main._enqueue_unindexed_messages(db, queue, maildir, main.REASON_RESCAN)
+
+        assert enqueued == 0
+        assert not queue.has_pending_row(str(inbox / "done.eml"))
+
+    def test_leaves_dead_lettered_files_alone(self, tmp_path, monkeypatch):
+        maildir, inbox, db, queue = self._setup(tmp_path, monkeypatch)
+        dead = inbox / "dead.eml"
+        _write_eml(dead, "dead@example.com")
+        queue.enqueue(str(dead), REASON_INITIAL_SCAN)
+        for _ in range(3):
+            queue.mark_failed(str(dead), stage="parse", error="boom")
+        assert queue.is_dead(str(dead))
+        attempts_before = db.queue_get_attempts(str(dead))
+
+        enqueued = main._enqueue_unindexed_messages(db, queue, maildir, main.REASON_RESCAN)
+
+        assert enqueued == 0
+        assert queue.is_dead(str(dead))
+        assert db.queue_get_attempts(str(dead)) == attempts_before
+
+    def test_does_not_reset_an_active_retry_cascade(self, tmp_path, monkeypatch):
+        """``enqueue`` is INSERT OR REPLACE, so a walk that re-enqueued
+        a queued-but-backing-off row would zero its attempts and let a
+        restart loop (or every periodic rescan) retry it forever
+        without ever reaching the dead-letter state."""
+        maildir, inbox, db, queue = self._setup(tmp_path, monkeypatch)
+        retrying = inbox / "retrying.eml"
+        _write_eml(retrying, "retrying@example.com")
+        queue.enqueue(str(retrying), REASON_INITIAL_SCAN)
+        queue.mark_failed(str(retrying), stage="embed", error="timeout")
+        assert queue.has_pending_row(str(retrying))
+        assert db.queue_get_attempts(str(retrying)) == 1
+
+        enqueued = main._enqueue_unindexed_messages(db, queue, maildir, main.REASON_RESCAN)
+
+        assert enqueued == 0
+        assert db.queue_get_attempts(str(retrying)) == 1
+
+    def test_unindexable_message_reaches_terminal_state_not_rescan_loop(
+        self, tmp_path, monkeypatch
+    ):
+        """A message the parser rejects outright (no Message-ID) can
+        never be indexed. It must land in a visible terminal state that
+        the walk skips — otherwise every periodic rescan re-enqueues and
+        re-parses it forever."""
+        maildir, inbox, db, queue = self._setup(tmp_path, monkeypatch)
+        no_id = inbox / "no-id.eml"
+        no_id.write_text("From: alice@example.com\r\nSubject: x\r\n\r\nbody\r\n", encoding="utf-8")
+        main.initial_index(db, make_mock_embedder(), Threader(db), queue)
+
+        enqueued = main._enqueue_unindexed_messages(db, queue, maildir, main.REASON_RESCAN)
+
+        assert enqueued == 0
+        assert queue.is_dead(str(no_id))
+
+
+class _FakeObserver:
+    def __init__(self, events: list[str]):
+        self._events = events
+
+    def schedule(self, *args, **kwargs):
+        pass
+
+    def start(self):
+        self._events.append("observer_start")
+
+    def stop(self):
+        pass
+
+    def join(self):
+        pass
+
+
+class TestMainStartupAndLoop:
+    """``main()`` wiring: the observer must be live before the initial
+    drain (otherwise mail delivered during a multi-hour initial index is
+    never enqueued), and the main loop must periodically re-walk the
+    Maildir so a missed event cannot cause a permanent omission."""
+
+    def _run_main(self, tmp_path, monkeypatch, *, sweep_due: bool):
+        events: list[str] = []
+        db = Database(tmp_path / "mail.db")
+        monkeypatch.setattr(main, "MAILDIR_PATH", tmp_path / "maildir")
+        monkeypatch.setattr(main, "_validate_embed_config", lambda: None)
+        monkeypatch.setattr(main, "_validate_embedding_dim", lambda e: None)
+        monkeypatch.setattr(main, "Database", lambda path: db)
+        monkeypatch.setattr(main, "OpenAIEmbedder", lambda **kw: make_mock_embedder())
+        monkeypatch.setattr(main, "touch_health_file", lambda: None)
+        monkeypatch.setattr(main, "sweep_paths", lambda db: None)
+        monkeypatch.setattr(main, "Observer", lambda: _FakeObserver(events))
+        monkeypatch.setattr(
+            main,
+            "initial_index",
+            lambda *a, **kw: events.append(f"initial_index:skip_trashed={kw.get('skip_trashed')}"),
+        )
+        monkeypatch.setattr(main, "_drain_queue_batched", lambda *a, **kw: 0)
+        monkeypatch.setattr(main, "_recover_zero_vector_threads", lambda *a, **kw: 0)
+        monkeypatch.setattr(
+            main,
+            "_enqueue_unindexed_messages",
+            lambda db, queue, root, reason, **kw: (
+                events.append(f"walk:{reason}:skip_trashed={kw.get('skip_trashed')}") or 0
+            ),
+        )
+        if sweep_due:
+            monkeypatch.setattr(main, "RECOVERY_SWEEP_INTERVAL_SECS", 0)
+
+        def _stop(_seconds):
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(main.time, "sleep", _stop)
+        main.main()
+        return events
+
+    def test_observer_starts_before_initial_drain(self, tmp_path, monkeypatch):
+        events = self._run_main(tmp_path, monkeypatch, sweep_due=False)
+
+        init = next(e for e in events if e.startswith("initial_index"))
+        assert "observer_start" in events
+        assert events.index("observer_start") < events.index(init)
+
+    def test_main_loop_periodically_rewalks_the_maildir(self, tmp_path, monkeypatch):
+        events = self._run_main(tmp_path, monkeypatch, sweep_due=True)
+
+        assert any(e.startswith(f"walk:{main.REASON_RESCAN}:") for e in events)
+
+    def test_trashed_files_skipped_only_when_deletion_reconciliation_enabled(
+        self, tmp_path, monkeypatch
+    ):
+        """With reconciliation on, a T-flagged file means "deleted
+        upstream" — every Maildir walk must skip it or reaped messages
+        come back. With it off (append-only default), behavior is
+        unchanged."""
+        monkeypatch.setenv("INDEXER_DELETION_ENABLED", "true")
+        events = self._run_main(tmp_path, monkeypatch, sweep_due=True)
+        assert "initial_index:skip_trashed=True" in events
+        assert f"walk:{main.REASON_RESCAN}:skip_trashed=True" in events
+
+        monkeypatch.setenv("INDEXER_DELETION_ENABLED", "false")
+        events = self._run_main(tmp_path / "off", monkeypatch, sweep_due=True)
+        assert "initial_index:skip_trashed=False" in events
+        assert f"walk:{main.REASON_RESCAN}:skip_trashed=False" in events
+
+
+class TestReapedMessagesStayDeleted:
+    """Deletion reconciliation with the default ``unlink_on_reap=False``
+    keeps a reaped message's T-flagged ``.eml`` on disk. That file is no
+    longer indexed or queued, so any enqueue path that treats "on disk
+    but not indexed" as undiscovered mail would resurrect it into
+    search — and the next sweep would start a fresh grace window."""
+
+    def _indexed_then_reaped(self, tmp_path, monkeypatch):
+        from src.reconciler import Reconciler, ReconcilerConfig
+
+        maildir = tmp_path / "maildir"
+        inbox = maildir / "INBOX" / "cur"
+        live = inbox / "1700000000.M1.host:2,S"
+        _write_eml(live, "reaped@example.com")
+        monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
+        db = Database(tmp_path / "mail.db")
+        threader = Threader(db)
+        embedder = make_mock_embedder(_UNIT_VECTOR)
+        queue = _make_queue(db)
+        main.initial_index(db, embedder, threader, queue)
+        assert db.is_indexed(str(live))
+        assert db.queue_get_status(str(live)) is None
+
+        trashed = inbox / "1700000000.M1.host:2,ST"
+        live.rename(trashed)
+        reconciler = Reconciler(
+            db,
+            embedder,
+            threader,
+            ReconcilerConfig(
+                enabled=True,
+                grace_days=0,
+                sweep_interval_secs=60,
+                max_batch_pct=1.0,
+                force=False,
+                unlink_on_reap=False,
+            ),
+            maildir_root=maildir,
+        )
+        reconciler.sweep()
+        reconciler.reap()
+        assert trashed.exists()
+        assert not db.is_indexed(str(trashed))
+        return maildir, inbox, trashed, db, embedder, threader, queue, reconciler
+
+    def test_reap_then_rescan_then_drain_does_not_resurrect(self, tmp_path, monkeypatch):
+        maildir, _, trashed, db, embedder, threader, queue, _ = self._indexed_then_reaped(
+            tmp_path, monkeypatch
+        )
+
+        enqueued = main._enqueue_unindexed_messages(
+            db, queue, maildir, main.REASON_RESCAN, skip_trashed=True
+        )
+        main.drain_queue(queue, db, embedder, threader)
+
+        assert enqueued == 0
+        assert not queue.has_pending_row(str(trashed))
+        assert not db.is_indexed(str(trashed))
+
+    def test_restart_scan_does_not_resurrect(self, tmp_path, monkeypatch):
+        maildir, _, trashed, db, embedder, threader, queue, _ = self._indexed_then_reaped(
+            tmp_path, monkeypatch
+        )
+
+        main.initial_index(db, embedder, threader, queue, skip_trashed=True)
+
+        assert not db.is_indexed(str(trashed))
+
+    def test_flag_rename_of_reaped_file_does_not_resurrect(self, tmp_path, monkeypatch):
+        """mbsync renames a reaped (still T-flagged) file for another
+        flag change. The source is not indexed, so the watchdog's
+        new-delivery branch must not mistake it for fresh mail."""
+        _, inbox, trashed, db, _, _, queue, reconciler = self._indexed_then_reaped(
+            tmp_path, monkeypatch
+        )
+        renamed = inbox / "1700000000.M1.host:2,RST"
+        trashed.rename(renamed)
+        handler = main.MaildirHandler(db, queue, reconciler=reconciler)
+
+        handler.on_moved(_FakeEvent(str(trashed), str(renamed)))
+
+        assert not queue.has_pending_row(str(renamed))
+
+    def test_undeleted_upstream_is_reindexed(self, tmp_path, monkeypatch):
+        """If mbsync clears the T flag after a reap (message restored
+        upstream), the file is live mail again and must come back."""
+        maildir, inbox, trashed, db, _, _, queue, _ = self._indexed_then_reaped(
+            tmp_path, monkeypatch
+        )
+        restored = inbox / "1700000000.M1.host:2,S"
+        trashed.rename(restored)
+
+        enqueued = main._enqueue_unindexed_messages(
+            db, queue, maildir, main.REASON_RESCAN, skip_trashed=True
+        )
+
+        assert enqueued == 1
+        assert queue.has_pending_row(str(restored))
+
+    def test_trashed_files_still_indexed_when_reconciliation_disabled(self, tmp_path, monkeypatch):
+        maildir = tmp_path / "maildir"
+        trashed = maildir / "INBOX" / "cur" / "1700000000.M1.host:2,ST"
+        _write_eml(trashed, "kept@example.com")
+        db = Database(tmp_path / "mail.db")
+        queue = _make_queue(db)
+
+        enqueued = main._enqueue_unindexed_messages(db, queue, maildir, main.REASON_RESCAN)
+
+        assert enqueued == 1

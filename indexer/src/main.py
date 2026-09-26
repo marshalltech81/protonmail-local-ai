@@ -44,12 +44,14 @@ from .attachment_indexing import (
 from .chunker import MessageChunk, chunk_message, mean_vector
 from .database import EMBEDDING_DIM, Database
 from .embedder import EmbeddingBackend, OpenAIEmbedder, scrub_embed_error
+from .maildir import is_trashed
 from .parser import Message, OversizedMessageError, parse_email
 from .queue import (
     REASON_INITIAL_SCAN,
     REASON_ON_CREATED,
     REASON_ON_MOVED,
     REASON_RECOVERY,
+    REASON_RESCAN,
     IndexingQueue,
 )
 from .queue import load_config_from_env as load_queue_config_from_env
@@ -237,7 +239,9 @@ WAL_CHECKPOINT_INTERVAL_SECS = _int_env("INDEXER_WAL_CHECKPOINT_INTERVAL_SECS", 
 # visible terminal state; clearing it requires explicit intervention
 # (or a future operator-rescue tool that calls
 # ``_recover_zero_vector_threads(..., resurrect_dead=True)``).
-# See ``_recover_zero_vector_threads`` for the full policy.
+# See ``_recover_zero_vector_threads`` for the full policy. The same
+# cadence drives the periodic Maildir rescan
+# (``_enqueue_unindexed_messages``).
 RECOVERY_SWEEP_INTERVAL_SECS = _int_env("INDEXER_RECOVERY_SWEEP_INTERVAL_SECS", 1800, minimum=60)
 
 # Phase 1 seed for genuinely new threads (the only branch that uses
@@ -318,12 +322,20 @@ class MaildirHandler(FileSystemEventHandler):
         self.queue = queue
         self.reconciler = reconciler
 
+    def _is_reaped_or_deleted(self, path: str | Path) -> bool:
+        # With deletion reconciliation enabled, a T-flagged file is
+        # deleted upstream. After a reap (``unlink_on_reap=False``) its
+        # .eml stays on disk unindexed; enqueueing it would resurrect
+        # the message into search. Same rule as the Maildir walk's
+        # ``skip_trashed``.
+        return self.reconciler is not None and is_trashed(path)
+
     def on_created(self, event):
         if event.is_directory:
             return
         path = Path(event.src_path)
         # Only enqueue files in cur/ or new/ subdirectories
-        if path.parent.name in ("cur", "new"):
+        if path.parent.name in ("cur", "new") and not self._is_reaped_or_deleted(path):
             self.queue.enqueue(str(path), REASON_ON_CREATED)
 
     def on_moved(self, event):
@@ -364,8 +376,14 @@ class MaildirHandler(FileSystemEventHandler):
                     log.error("update_filepath failed on rename: %s", e)
             return
 
-        # Case 2: new delivery — enqueue for the worker.
-        if dest_path_obj.parent.name in ("cur", "new") and not self.db.is_indexed(dest_path):
+        # Case 2: new delivery — enqueue for the worker. A flag rename
+        # of an already-reaped file also lands here (its source is no
+        # longer indexed) and must not be mistaken for new mail.
+        if (
+            dest_path_obj.parent.name in ("cur", "new")
+            and not self.db.is_indexed(dest_path)
+            and not self._is_reaped_or_deleted(dest_path)
+        ):
             self.queue.enqueue(dest_path, REASON_ON_MOVED)
 
 
@@ -419,8 +437,7 @@ def _index_one_file(
         (str(path),),
     ).fetchone()
     if row is None:
-        # Row deleted: succeeded, terminal-success (no Message-ID), or
-        # mark_skipped (file vanished between enqueue and parse —
+        # Row deleted: succeeded, or mark_skipped (file vanished between enqueue and parse —
         # mbsync flag-rename race). Distinguish via filesystem check:
         # file missing → skip; file present → succeeded.
         if not path.exists():
@@ -582,9 +599,12 @@ def _phase1_commit_thread(
         return None
     parse_ms = (time.perf_counter() - t0) * 1000
     if msg is None:
-        # Parser returned None for a terminal reason (no Message-ID, etc.)
-        # — drop the row so the queue does not retry indefinitely.
-        queue.mark_succeeded(filepath)
+        # Parser returned None for a terminal reason (no Message-ID).
+        # Dead-letter rather than delete the row: the file is never
+        # written to ``indexed_files``, so a deleted row would let every
+        # Maildir walk re-enqueue and re-parse it forever. The dead row
+        # makes the walk skip it and keeps it visible in queue stats.
+        queue.mark_dead_terminal(filepath, stage="parse", error="unindexable: no Message-ID")
         return None
 
     t0 = time.perf_counter()
@@ -1136,13 +1156,76 @@ def _recover_zero_vector_threads(
     return re_enqueued
 
 
+def _enqueue_unindexed_messages(
+    db: Database,
+    queue: IndexingQueue,
+    root: Path,
+    reason: str,
+    *,
+    skip_trashed: bool = False,
+) -> int:
+    """Walk the Maildir and enqueue every message not yet indexed.
+
+    Shared by the startup scan and the periodic rescan. The watchdog is
+    the low-latency path; this walk is the eventual-completeness
+    backstop for any file whose event was missed (a restart, event
+    coalescing, a delivery while the observer was not running).
+
+    Skips files that are already indexed, dead-lettered, or already
+    queued. ``enqueue`` is ``INSERT OR REPLACE``, so re-enqueueing a
+    queued row would reset an in-flight retry cascade to zero attempts
+    — repeated walks could then retry a failing file forever without
+    it ever reaching the dead-letter state. Dead rows are left for the
+    operator: the walk only proves the file exists on disk, not that
+    anything about it changed since the last failure. (Watchdog
+    ``on_created`` / ``on_moved`` events still go through ``enqueue``
+    and DO reset prior state, because those signal a real change.)
+
+    ``skip_trashed`` must be True whenever deletion reconciliation is
+    enabled. A T-flagged file is then deleted upstream: after the
+    reaper removes it from the index (``unlink_on_reap=False`` keeps the
+    .eml on disk) it is unindexed and unqueued, and enqueueing it would
+    resurrect the message into search. With reconciliation disabled the
+    index is append-only and trashed files are indexed like any other.
+
+    Returns the number of files enqueued.
+    """
+    enqueued = 0
+    skipped_dead = 0
+    for filepath in _iter_maildir_messages(root):
+        path_str = str(filepath)
+        if db.is_indexed(path_str):
+            continue
+        if skip_trashed and is_trashed(filepath):
+            continue
+        if queue.is_dead(path_str):
+            skipped_dead += 1
+            continue
+        if queue.has_pending_row(path_str):
+            continue
+        queue.enqueue(path_str, reason)
+        enqueued += 1
+    if enqueued or skipped_dead:
+        log.info(
+            "Maildir walk (%s): enqueued %d message(s), skipped %d dead-lettered.",
+            reason,
+            enqueued,
+            skipped_dead,
+        )
+    return enqueued
+
+
 def initial_index(
     db: Database,
     embedder: EmbeddingBackend,
     threader: Threader,
     queue: IndexingQueue,
+    *,
+    skip_trashed: bool = False,
 ):
     """Enqueue every unindexed Maildir message and drain the queue.
+
+    ``skip_trashed``: see ``_enqueue_unindexed_messages``.
 
     Refreshes the health file after every processed message so that
     long initial indexes (large mailboxes, slow embedding service, OCR
@@ -1159,31 +1242,13 @@ def initial_index(
     Maildir and relying on ``is_indexed`` to filter.
     """
     log.info("Running initial index scan...")
-    enqueued = 0
-    skipped_dead = 0
-    for filepath in _iter_maildir_messages(MAILDIR_PATH):
-        path_str = str(filepath)
-        if db.is_indexed(path_str):
-            continue
-        # Don't resurrect dead-lettered files on routine startup. The
-        # initial scan only proves "this file exists on disk" — not
-        # that anything about its content has changed since the last
-        # attempt failed. Watchdog IN_MOVED_TO / IN_CREATED still go
-        # through ``enqueue`` (which DOES reset prior state via
-        # INSERT OR REPLACE) because those events DO indicate the
-        # file changed. Without this skip, every container restart
-        # re-runs the same 5-attempt × 30s backoff cascade against
-        # the same poison-pill payloads — observed to add up to
-        # ~30 minutes of wasted embedding service load per dead file per restart.
-        if queue.is_dead(path_str):
-            skipped_dead += 1
-            continue
-        queue.enqueue(path_str, REASON_INITIAL_SCAN)
-        enqueued += 1
-    log.info(
-        "Initial index: enqueued %d message(s), skipped %d dead-lettered.",
-        enqueued,
-        skipped_dead,
+    # Dead-lettered files are not resurrected on routine startup:
+    # without that skip, every container restart re-ran the same
+    # 5-attempt × 30s backoff cascade against the same poison-pill
+    # payloads — observed to add up to ~30 minutes of wasted embedding
+    # service load per dead file per restart.
+    _enqueue_unindexed_messages(
+        db, queue, MAILDIR_PATH, REASON_INITIAL_SCAN, skip_trashed=skip_trashed
     )
 
     # Recovery sweep — re-enqueue messages stuck on chunkless zero-vector
@@ -1317,8 +1382,18 @@ def main():
     # Verify the running model matches the schema's reserved vector dim.
     _validate_embedding_dim(embedder)
 
+    # Start watching BEFORE the initial drain. On a large mailbox the
+    # drain runs for hours; mail mbsync delivers in that window would
+    # otherwise never be enqueued. Events that land mid-drain are
+    # picked up by the same drain-to-empty loop.
+    handler = MaildirHandler(db, queue, reconciler=reconciler)
+    observer = Observer()
+    observer.schedule(handler, str(MAILDIR_PATH), recursive=True)
+    observer.start()
+    log.info("Watching Maildir for new emails...")
+
     # Index existing emails
-    initial_index(db, embedder, threader, queue)
+    initial_index(db, embedder, threader, queue, skip_trashed=reconciler is not None)
     touch_health_file()
 
     # Always-on startup rename sweep. mbsync renames files in place for
@@ -1343,13 +1418,6 @@ def main():
             reconciler.reap()
         except Exception as e:
             log.error("startup reconciliation failed: %s", e)
-
-    # Watch for new emails
-    handler = MaildirHandler(db, queue, reconciler=reconciler)
-    observer = Observer()
-    observer.schedule(handler, str(MAILDIR_PATH), recursive=True)
-    observer.start()
-    log.info("Watching Maildir for new emails...")
 
     last_reconcile = time.monotonic()
     last_recovery_sweep = time.monotonic()
@@ -1413,11 +1481,23 @@ def main():
             # Dead-lettered rows are left alone (default policy,
             # uniform with the startup path) — see
             # ``_recover_zero_vector_threads`` for why.
+            # The same cadence re-walks the Maildir so a file whose
+            # watchdog event was missed still gets indexed eventually.
             if now - last_recovery_sweep >= RECOVERY_SWEEP_INTERVAL_SECS:
                 try:
                     _recover_zero_vector_threads(db, queue)
                 except Exception as e:
                     log.error("periodic recovery sweep failed: %s", e)
+                try:
+                    _enqueue_unindexed_messages(
+                        db,
+                        queue,
+                        MAILDIR_PATH,
+                        REASON_RESCAN,
+                        skip_trashed=reconciler is not None,
+                    )
+                except Exception as e:
+                    log.error("periodic Maildir rescan failed: %s", e)
                 last_recovery_sweep = now
 
             # WAL checkpoint: keep the WAL file size bounded over a

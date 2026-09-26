@@ -155,9 +155,8 @@ def parse_email(path: Path, maildir_root: Path | None = None) -> Message | None:
     Transient I/O errors (``PermissionError`` from the mbsync 0600→0644
     chmod race, ``FileNotFoundError`` from a rename mid-event) propagate
     so the worker's queue routes them to the retry/backoff path rather
-    than collapsing them into ``None`` — which the worker treats as
-    "terminal success, no Message-ID" and would silently drop the file
-    from the index.
+    than collapsing them into ``None`` — which the worker treats as a
+    permanent "no Message-ID" outcome and dead-letters without retry.
 
     Content-pathology errors (a malformed MIME structure ``email`` cannot
     decompose, an html2text blowup, anything raised by the body /
@@ -391,8 +390,8 @@ def _decode_header(value: str) -> str:
             # here propagates out of ``parse_email``: the function does
             # not have a blanket ``except Exception`` precisely so
             # unanticipated parser failures route through the durable
-            # queue's retry + dead-letter cascade instead of silently
-            # dropping the file as terminal success.
+            # queue's retry + dead-letter cascade instead of being
+            # dead-lettered as unindexable without any retry.
             encoding = charset or "utf-8"
             try:
                 decoded.append(part.decode(encoding, errors="replace"))

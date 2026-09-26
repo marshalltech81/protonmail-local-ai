@@ -378,7 +378,10 @@ cleanups.
 
 `mbsync` keeps `Expunge None` regardless — the reaper cleans up the local
 index; it does not change mbsync's pull-only, no-destructive-delete posture
-on the Maildir itself.
+on the Maildir itself. Because reaped `.eml` files normally remain on disk,
+the indexer's enqueue paths skip `T`-flagged files while reconciliation is
+enabled so a reaped message is never re-indexed (see *Ingestion
+completeness*).
 
 ## MCP Read-Only Enforcement
 
@@ -566,7 +569,35 @@ changed since the last failure, so re-enqueuing every dead row at
 container restart would just re-run the same retry cascade against
 the same upstream condition. The scan therefore consults
 `queue.is_dead(filepath)` and skips dead-lettered files, leaving
-them dead until something explicitly resets them.
+them dead until something explicitly resets them. It also skips
+files that already have a `queued` row, so a restart cannot reset
+an in-flight retry cascade to zero attempts.
+
+### Ingestion completeness
+
+The watchdog observer starts **before** the initial drain, so mail
+mbsync delivers while a long initial index is running is enqueued
+and picked up by the same drain-to-empty loop. Filesystem events are
+the low-latency path but not the correctness guarantee: every
+`INDEXER_RECOVERY_SWEEP_INTERVAL_SECS` (default 30 min) the main loop
+re-walks the Maildir with the same rules as the startup scan
+(`_enqueue_unindexed_messages`: skip indexed, dead-lettered, and
+already-queued files; enqueue the rest with reason `rescan`). A file
+whose event was missed — restart, event coalescing, a delivery
+while the observer was not running — is therefore indexed
+eventually rather than omitted until the next container restart.
+
+When deletion reconciliation is enabled, every enqueue path — the
+startup scan, the periodic rescan, and the watchdog's
+`on_created` / new-delivery `on_moved` branches — skips `T`-flagged
+files. A reaped message's `.eml` stays on disk under the default
+`INDEXER_UNLINK_ON_REAP=false` and is no longer indexed or queued, so
+treating it as undiscovered mail would resurrect it into search (and
+the next sweep would start a fresh grace window). If mbsync later
+clears the `T` flag because the message was restored upstream, the
+file is live mail again and is re-indexed normally. With
+reconciliation disabled, the index is append-only and `T`-flagged
+files are indexed like any other.
 
 Two stage outcomes short-circuit the retry path entirely:
 
