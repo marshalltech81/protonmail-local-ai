@@ -18,7 +18,7 @@ dependencies = [
     # HTTP/retry plumbing for a wire format the SDK already handles.
     "openai==2.36.0",
     "anthropic==0.104.1",
-    "cohere==6.1.0",
+    "cohere==7.0.0",
 ]
 
 [tool.uv]
