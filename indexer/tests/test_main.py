@@ -22,6 +22,10 @@ from src.threader import Threader
 
 from tests.conftest import make_mock_embedder
 
+# Captured before any test monkeypatches the name, so the sorted
+# wrapper installed by ``_run`` still walks the real Maildir.
+_REAL_ITER_MAILDIR_MESSAGES = main._iter_maildir_messages
+
 
 class _FakeEvent:
     def __init__(self, src_path: str, dest_path: str, is_directory: bool = False):
@@ -1040,6 +1044,19 @@ class TestBatchedInitialIndex:
     def _run(self, db, embedder, threader, queue, monkeypatch, maildir):
         monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
         monkeypatch.setattr(main, "touch_health_file", lambda: None)
+        # Pin the initial-scan arrival order to filename order. Production
+        # iterates in raw ``rglob`` order, which is filesystem-dependent
+        # (creation order on APFS, hash order on ext4). Several tests in
+        # this class assert in-batch threading behavior that only holds
+        # when a root message is enqueued before its reply, so an
+        # unsorted walk makes them pass locally and fail on CI. Sorting
+        # here keeps those tests deterministic without pretending
+        # production guarantees an order it does not.
+        monkeypatch.setattr(
+            main,
+            "_iter_maildir_messages",
+            lambda root: iter(sorted(_REAL_ITER_MAILDIR_MESSAGES(root))),
+        )
         main.initial_index(db, embedder, threader, queue)
 
     def test_in_batch_reply_chain_merges_into_single_thread(self, tmp_path, monkeypatch):
@@ -1275,7 +1292,9 @@ class TestBatchedInitialIndex:
         original_subject = "Quarterly Review"
         reply_subject = "Re: Quarterly Review (please review)"
 
-        eml1 = inbox / "root.eml"
+        # Numeric prefixes put the root ahead of the reply under the
+        # filename-sorted arrival order pinned by ``_run``.
+        eml1 = inbox / "1-root.eml"
         eml1.write_text(
             "From: alice@example.com\r\n"
             "To: bob@example.com\r\n"
@@ -1287,7 +1306,7 @@ class TestBatchedInitialIndex:
             encoding="utf-8",
         )
 
-        eml2 = inbox / "reply.eml"
+        eml2 = inbox / "2-reply.eml"
         eml2.write_text(
             "From: bob@example.com\r\n"
             "To: alice@example.com\r\n"
