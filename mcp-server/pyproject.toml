@@ -5,7 +5,7 @@ requires-python = ">=3.14"
 dependencies = [
     "mcp==1.27.1",
     "uvicorn==0.46.0",
-    "starlette==1.0.0",
+    "starlette==1.1.0",
     "sqlite-vec==0.1.9",
     "aioimaplib==2.0.1",
     "httpx==0.28.1",
