@@ -44,6 +44,7 @@ from .attachment_indexing import (
 from .chunker import MessageChunk, chunk_message, mean_vector
 from .database import EMBEDDING_DIM, Database
 from .embedder import EmbeddingBackend, OpenAIEmbedder, scrub_embed_error
+from .maildir import is_trashed
 from .parser import Message, OversizedMessageError, parse_email
 from .queue import (
     REASON_INITIAL_SCAN,
@@ -321,12 +322,20 @@ class MaildirHandler(FileSystemEventHandler):
         self.queue = queue
         self.reconciler = reconciler
 
+    def _is_reaped_or_deleted(self, path: str | Path) -> bool:
+        # With deletion reconciliation enabled, a T-flagged file is
+        # deleted upstream. After a reap (``unlink_on_reap=False``) its
+        # .eml stays on disk unindexed; enqueueing it would resurrect
+        # the message into search. Same rule as the Maildir walk's
+        # ``skip_trashed``.
+        return self.reconciler is not None and is_trashed(path)
+
     def on_created(self, event):
         if event.is_directory:
             return
         path = Path(event.src_path)
         # Only enqueue files in cur/ or new/ subdirectories
-        if path.parent.name in ("cur", "new"):
+        if path.parent.name in ("cur", "new") and not self._is_reaped_or_deleted(path):
             self.queue.enqueue(str(path), REASON_ON_CREATED)
 
     def on_moved(self, event):
@@ -367,8 +376,14 @@ class MaildirHandler(FileSystemEventHandler):
                     log.error("update_filepath failed on rename: %s", e)
             return
 
-        # Case 2: new delivery — enqueue for the worker.
-        if dest_path_obj.parent.name in ("cur", "new") and not self.db.is_indexed(dest_path):
+        # Case 2: new delivery — enqueue for the worker. A flag rename
+        # of an already-reaped file also lands here (its source is no
+        # longer indexed) and must not be mistaken for new mail.
+        if (
+            dest_path_obj.parent.name in ("cur", "new")
+            and not self.db.is_indexed(dest_path)
+            and not self._is_reaped_or_deleted(dest_path)
+        ):
             self.queue.enqueue(dest_path, REASON_ON_MOVED)
 
 
@@ -1141,7 +1156,14 @@ def _recover_zero_vector_threads(
     return re_enqueued
 
 
-def _enqueue_unindexed_messages(db: Database, queue: IndexingQueue, root: Path, reason: str) -> int:
+def _enqueue_unindexed_messages(
+    db: Database,
+    queue: IndexingQueue,
+    root: Path,
+    reason: str,
+    *,
+    skip_trashed: bool = False,
+) -> int:
     """Walk the Maildir and enqueue every message not yet indexed.
 
     Shared by the startup scan and the periodic rescan. The watchdog is
@@ -1159,6 +1181,13 @@ def _enqueue_unindexed_messages(db: Database, queue: IndexingQueue, root: Path, 
     ``on_created`` / ``on_moved`` events still go through ``enqueue``
     and DO reset prior state, because those signal a real change.)
 
+    ``skip_trashed`` must be True whenever deletion reconciliation is
+    enabled. A T-flagged file is then deleted upstream: after the
+    reaper removes it from the index (``unlink_on_reap=False`` keeps the
+    .eml on disk) it is unindexed and unqueued, and enqueueing it would
+    resurrect the message into search. With reconciliation disabled the
+    index is append-only and trashed files are indexed like any other.
+
     Returns the number of files enqueued.
     """
     enqueued = 0
@@ -1166,6 +1195,8 @@ def _enqueue_unindexed_messages(db: Database, queue: IndexingQueue, root: Path, 
     for filepath in _iter_maildir_messages(root):
         path_str = str(filepath)
         if db.is_indexed(path_str):
+            continue
+        if skip_trashed and is_trashed(filepath):
             continue
         if queue.is_dead(path_str):
             skipped_dead += 1
@@ -1189,8 +1220,12 @@ def initial_index(
     embedder: EmbeddingBackend,
     threader: Threader,
     queue: IndexingQueue,
+    *,
+    skip_trashed: bool = False,
 ):
     """Enqueue every unindexed Maildir message and drain the queue.
+
+    ``skip_trashed``: see ``_enqueue_unindexed_messages``.
 
     Refreshes the health file after every processed message so that
     long initial indexes (large mailboxes, slow embedding service, OCR
@@ -1212,7 +1247,9 @@ def initial_index(
     # 5-attempt × 30s backoff cascade against the same poison-pill
     # payloads — observed to add up to ~30 minutes of wasted embedding
     # service load per dead file per restart.
-    _enqueue_unindexed_messages(db, queue, MAILDIR_PATH, REASON_INITIAL_SCAN)
+    _enqueue_unindexed_messages(
+        db, queue, MAILDIR_PATH, REASON_INITIAL_SCAN, skip_trashed=skip_trashed
+    )
 
     # Recovery sweep — re-enqueue messages stuck on chunkless zero-vector
     # threads from a prior crash mid-batch (queued row that mark_failed /
@@ -1356,7 +1393,7 @@ def main():
     log.info("Watching Maildir for new emails...")
 
     # Index existing emails
-    initial_index(db, embedder, threader, queue)
+    initial_index(db, embedder, threader, queue, skip_trashed=reconciler is not None)
     touch_health_file()
 
     # Always-on startup rename sweep. mbsync renames files in place for
@@ -1452,7 +1489,13 @@ def main():
                 except Exception as e:
                     log.error("periodic recovery sweep failed: %s", e)
                 try:
-                    _enqueue_unindexed_messages(db, queue, MAILDIR_PATH, REASON_RESCAN)
+                    _enqueue_unindexed_messages(
+                        db,
+                        queue,
+                        MAILDIR_PATH,
+                        REASON_RESCAN,
+                        skip_trashed=reconciler is not None,
+                    )
                 except Exception as e:
                     log.error("periodic Maildir rescan failed: %s", e)
                 last_recovery_sweep = now

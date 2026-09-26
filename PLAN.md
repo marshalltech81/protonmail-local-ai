@@ -475,7 +475,14 @@ Message-ID) are now dead-lettered with `unindexable: no Message-ID`
 instead of having their row deleted: they were never marked indexed,
 so the periodic walk would otherwise re-parse them every interval
 forever, and they previously ended in no visible state at all.
-Tests: `TestEnqueueUnindexedMessages`,
+With deletion reconciliation enabled, every enqueue path (startup
+scan, periodic rescan, watchdog new-delivery branches) skips
+`T`-flagged files; otherwise a reaped message — whose `.eml` stays
+on disk under `INDEXER_UNLINK_ON_REAP=false` — was resurrected into
+search by the rescan (also by restarts and by mbsync flag renames,
+both pre-existing). Caught in review; covered by
+`TestReapedMessagesStayDeleted` (reap → rescan → drain, restart,
+flag rename, upstream undelete). Tests: `TestEnqueueUnindexedMessages`,
 `TestMainStartupAndLoop` (first `main()` wiring coverage; the
 ordering test was mutation-checked against the old ordering).
 

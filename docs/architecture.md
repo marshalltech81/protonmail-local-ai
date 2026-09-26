@@ -378,7 +378,10 @@ cleanups.
 
 `mbsync` keeps `Expunge None` regardless — the reaper cleans up the local
 index; it does not change mbsync's pull-only, no-destructive-delete posture
-on the Maildir itself.
+on the Maildir itself. Because reaped `.eml` files normally remain on disk,
+the indexer's enqueue paths skip `T`-flagged files while reconciliation is
+enabled so a reaped message is never re-indexed (see *Ingestion
+completeness*).
 
 ## MCP Read-Only Enforcement
 
@@ -583,6 +586,18 @@ already-queued files; enqueue the rest with reason `rescan`). A file
 whose event was missed — restart, event coalescing, a delivery
 while the observer was not running — is therefore indexed
 eventually rather than omitted until the next container restart.
+
+When deletion reconciliation is enabled, every enqueue path — the
+startup scan, the periodic rescan, and the watchdog's
+`on_created` / new-delivery `on_moved` branches — skips `T`-flagged
+files. A reaped message's `.eml` stays on disk under the default
+`INDEXER_UNLINK_ON_REAP=false` and is no longer indexed or queued, so
+treating it as undiscovered mail would resurrect it into search (and
+the next sweep would start a fresh grace window). If mbsync later
+clears the `T` flag because the message was restored upstream, the
+file is live mail again and is re-indexed normally. With
+reconciliation disabled, the index is append-only and `T`-flagged
+files are indexed like any other.
 
 Two stage outcomes short-circuit the retry path entirely:
 
