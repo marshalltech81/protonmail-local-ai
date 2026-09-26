@@ -22,6 +22,10 @@ from src.threader import Threader
 
 from tests.conftest import make_mock_embedder
 
+# Captured before any test monkeypatches the name, so the sorted
+# wrapper installed by ``_run`` still walks the real Maildir.
+_REAL_ITER_MAILDIR_MESSAGES = main._iter_maildir_messages
+
 
 class _FakeEvent:
     def __init__(self, src_path: str, dest_path: str, is_directory: bool = False):
@@ -1040,6 +1044,19 @@ class TestBatchedInitialIndex:
     def _run(self, db, embedder, threader, queue, monkeypatch, maildir):
         monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
         monkeypatch.setattr(main, "touch_health_file", lambda: None)
+        # Pin the initial-scan arrival order to filename order. Production
+        # iterates in raw ``rglob`` order, which is filesystem-dependent
+        # (creation order on APFS, hash order on ext4). Several tests in
+        # this class assert in-batch threading behavior that only holds
+        # when a root message is enqueued before its reply, so an
+        # unsorted walk makes them pass locally and fail on CI. Sorting
+        # here keeps those tests deterministic without pretending
+        # production guarantees an order it does not.
+        monkeypatch.setattr(
+            main,
+            "_iter_maildir_messages",
+            lambda root: iter(sorted(_REAL_ITER_MAILDIR_MESSAGES(root))),
+        )
         main.initial_index(db, embedder, threader, queue)
 
     def test_in_batch_reply_chain_merges_into_single_thread(self, tmp_path, monkeypatch):
@@ -1205,6 +1222,125 @@ class TestBatchedInitialIndex:
             "thread vector should equal the L2-normalized embedder "
             "return value for the subject fallback, not be derived "
             "from chunks (none exist)"
+        )
+
+    def test_subject_fallback_embeds_original_case_subject(self, tmp_path, monkeypatch):
+        # The subject-fallback path is the ONLY vector a chunkless
+        # thread ever gets, so it should use the message's
+        # ORIGINAL-case subject (with ``Re:`` / ``Fwd:`` intact) — not
+        # the threader's normalized grouping key, which has been
+        # lowercased and had reply prefixes stripped. Stripping
+        # semantic context from the embed input degrades retrieval for
+        # blank-body messages whose subject is the only signal we have.
+        maildir = tmp_path / "maildir"
+        inbox = maildir / "INBOX" / "cur"
+        inbox.mkdir(parents=True)
+
+        # Blank body so chunk_message emits nothing and the fallback
+        # path is the only embed contribution.
+        original_subject = "Re: Quarterly Review (Q1 follow-up)"
+        eml = inbox / "blank.eml"
+        eml.write_text(
+            "From: alice@example.com\r\n"
+            "To: bob@example.com\r\n"
+            f"Subject: {original_subject}\r\n"
+            "Message-ID: <case@example.com>\r\n"
+            "Date: Mon, 01 Jan 2024 12:00:00 +0000\r\n"
+            "Content-Type: text/plain; charset=utf-8\r\n"
+            "\r\n",
+            encoding="utf-8",
+        )
+
+        db = Database(tmp_path / "mail.db")
+        threader = Threader(db)
+        embedder = make_mock_embedder(vector=[0.25] * EMBEDDING_DIM)
+        queue = _make_queue(db)
+        self._run(db, embedder, threader, queue, monkeypatch, maildir)
+
+        embedded_texts = [call.args[0] for call in embedder.embed.call_args_list]
+        assert original_subject in embedded_texts, (
+            f"subject fallback must embed the original-case subject, "
+            f"not the normalized grouping key; embedded: {embedded_texts!r}"
+        )
+        # The normalized grouping key would have ``re:`` stripped and
+        # everything lowercased — that is exactly what we MUST NOT
+        # have embedded.
+        normalized = "quarterly review (q1 follow-up)"
+        assert normalized not in embedded_texts, (
+            "the fallback must not embed the normalized grouping key "
+            "(lowercased + Re:-stripped) — that loses semantic context"
+        )
+
+    def test_subject_fallback_is_stable_across_chunkless_replies(self, tmp_path, monkeypatch):
+        # Regression: every chunkless arrival on a still-chunkless
+        # thread reserves a fallback slot AND Phase 2c unconditionally
+        # overwrites the prior thread vector with the new message's
+        # subject embedding. With ``state.msg.subject`` as the source,
+        # successive replies (``Re: Quarterly Review``, ``Fwd: ...``)
+        # produced ARRIVAL-ORDER-DEPENDENT thread vectors on the same
+        # logical thread — a silent RAG-recall hazard. Sourcing from
+        # ``display_subject`` (the oldest message's original-case
+        # subject, maintained by ``upsert_thread``'s merge) makes the
+        # fallback text stable across the lifetime of the thread.
+        maildir = tmp_path / "maildir"
+        inbox = maildir / "INBOX" / "cur"
+        inbox.mkdir(parents=True)
+
+        # Two blank-body messages in the same thread (reply via
+        # In-Reply-To) with DIFFERENT subjects. Without the fix, msg2's
+        # subject would overwrite msg1's in the thread vector slot.
+        original_subject = "Quarterly Review"
+        reply_subject = "Re: Quarterly Review (please review)"
+
+        # Numeric prefixes put the root ahead of the reply under the
+        # filename-sorted arrival order pinned by ``_run``.
+        eml1 = inbox / "1-root.eml"
+        eml1.write_text(
+            "From: alice@example.com\r\n"
+            "To: bob@example.com\r\n"
+            f"Subject: {original_subject}\r\n"
+            "Message-ID: <root@example.com>\r\n"
+            "Date: Mon, 01 Jan 2024 12:00:00 +0000\r\n"
+            "Content-Type: text/plain; charset=utf-8\r\n"
+            "\r\n",
+            encoding="utf-8",
+        )
+
+        eml2 = inbox / "2-reply.eml"
+        eml2.write_text(
+            "From: bob@example.com\r\n"
+            "To: alice@example.com\r\n"
+            f"Subject: {reply_subject}\r\n"
+            "Message-ID: <reply@example.com>\r\n"
+            "In-Reply-To: <root@example.com>\r\n"
+            "Date: Tue, 02 Jan 2024 12:00:00 +0000\r\n"
+            "Content-Type: text/plain; charset=utf-8\r\n"
+            "\r\n",
+            encoding="utf-8",
+        )
+
+        db = Database(tmp_path / "mail.db")
+        threader = Threader(db)
+        embedder = make_mock_embedder(vector=[0.5] * EMBEDDING_DIM)
+        queue = _make_queue(db)
+        self._run(db, embedder, threader, queue, monkeypatch, maildir)
+
+        # Both messages went through the same initial-scan batch. The
+        # final fallback embedding MUST have been the OLDEST message's
+        # original-case subject — not the reply's "Re: ..." form.
+        embedded_texts = [call.args[0] for call in embedder.embed.call_args_list]
+        assert original_subject in embedded_texts, (
+            f"fallback must embed the OLDEST message's subject across "
+            f"chunkless replies (kept in display_subject); embedded: "
+            f"{embedded_texts!r}"
+        )
+        # If the regression returned, ``reply_subject`` would also
+        # appear in the embed inputs because Phase 2a would have
+        # reserved a second fallback slot for it.
+        assert reply_subject not in embedded_texts, (
+            f"reply's subject must NOT be embedded as a separate "
+            f"fallback — that's what made the thread vector order-"
+            f"dependent; embedded: {embedded_texts!r}"
         )
 
     def test_phase2_failure_preserves_existing_thread_vector(self, tmp_path, monkeypatch):
@@ -1643,7 +1779,7 @@ class TestBatchedInitialIndex:
         embedder.embed_batch.return_value = [sentinel]
         # Fall back to per-message embed call shape: when Phase 2b
         # asks for N texts, return N copies of the sentinel.
-        embedder.embed_batch.side_effect = lambda texts: [list(sentinel) for _ in texts]
+        embedder.embed_batch.side_effect = lambda texts, **_kw: [list(sentinel) for _ in texts]
         queue = _make_queue(db)
 
         original = db.replace_message_chunks

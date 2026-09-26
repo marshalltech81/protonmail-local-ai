@@ -21,6 +21,7 @@ contents of a returned thread, follow up with `get_thread` or
 | `date_from` | string | none | ISO 8601 date lower bound |
 | `date_to` | string | none | ISO 8601 date upper bound |
 | `has_attachments` | bool | none | Filter by attachment presence |
+| `participant` | string | none | Filter to threads where this person appears in **any** role — From, To, or Cc. Distinct from `from_addr`/`from_name`, which are sender-only. Accepts an address, a domain (`@example.com`), or a name fragment |
 | `limit` | int | `10` | Max threads to return |
 
 **When to use which mode:**
@@ -53,6 +54,64 @@ drive an unbounded query against the index.
 
 ---
 
+### `get_evidence`
+Return the exact indexed passages (evidence chunks) that back a
+question — the same chunks `ask_mailbox` feeds its model, but with
+**no LLM synthesis**. Use it to audit or cite an answer, or as the
+fast synthesis-free path when only the source text is needed.
+
+Each chunk carries its parent thread + Message-ID, the source
+(message body, or an attachment with filename + MIME type), the
+message date, and the passage's character offsets. Attachment-derived
+chunks (extracted PDF / OCR / document text) are included — unlike
+`get_thread`, which is body-only.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `query` | string | required | The question or topic to gather evidence for |
+| `thread_id` | string | none | Scope evidence to one thread; omit to search the whole mailbox |
+| `folders` | list | all | Scope to specific folders |
+| `from_addr` | string | none | Filter by sender address or domain |
+| `date_from` | string | none | ISO 8601 date lower bound |
+| `date_to` | string | none | ISO 8601 date upper bound |
+| `has_attachments` | bool | none | Restrict to threads with attachments |
+| `limit` | int | `12` | Max evidence chunks to return; clamped to `[1, 50]` |
+| `include_scores` | bool | `false` | Annotate each thread with the retrieval lanes that matched (`thread_fts` / `chunk_fts` / `attachment_fts` / `thread_vec` / `chunk_vec` / `rerank`) and each chunk with its vector distance |
+
+The mailbox-wide path runs the same hybrid retrieval as `ask_mailbox`
+and flattens the per-thread evidence into a flat `limit`-chunk budget.
+The `thread_id`-scoped path returns that thread's chunks ranked
+against the query; it bypasses RRF fusion, so `include_scores` shows
+per-chunk vector distance but no lane provenance.
+
+### `search_attachments`
+Locate indexed attachments by filename, MIME type, and extracted
+text. Use it for attachment-centric questions ("find the quote PDF
+from Acme", "which emails had W-2 attachments?"). With no `query` it
+lists attachments by the structured filters alone, newest thread
+activity first.
+
+To read the full text inside an attachment, use `ask_mailbox` or
+`get_evidence` — this tool locates attachments and previews their
+extracted text; it does not return the whole document.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `query` | string | none | Match against filename, MIME type, and extracted text; omit to list by filter alone |
+| `content_type` | string | none | Exact MIME-type filter, e.g. `application/pdf` |
+| `from_addr` | string | none | Restrict to attachments on threads sent by this address or domain |
+| `date_from` | string | none | ISO 8601 date lower bound (parent thread activity) |
+| `date_to` | string | none | ISO 8601 date upper bound |
+| `extracted_only` | bool | `false` | Return only attachments whose text extraction succeeded |
+| `limit` | int | `20` | Max attachments to return; clamped to `[1, 50]` |
+
+Two FTS lanes run when `query` is set — the attachment filename/MIME
+index and the extracted-text index — with filename matches listed
+first. Each result reports the parent thread so a follow-up
+`get_thread` / `get_evidence` call can round-trip.
+
+---
+
 ## Group 2 — Retrieval
 
 ### `get_thread`
@@ -64,7 +123,12 @@ Fetch indexed thread context by ID from the local SQLite index.
 | `include_attachments_metadata` | bool | `true` | Show the local attachment-availability note when the indexed thread has attachments |
 
 ### `get_message`
-Fetch local index context for a single message by Message-ID.
+Reconstruct one message's indexed body from the per-message chunk
+store, with its parent-thread context. The index keeps no raw
+per-message body, so this is the indexed text **after quoted-reply
+stripping**; it falls back to thread context when no body chunks are
+indexed for the message. Attachment text is not included — use
+`get_evidence` for that.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|

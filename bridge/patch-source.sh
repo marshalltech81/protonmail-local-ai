@@ -103,17 +103,124 @@ require_count "$CERTS_FILE" "$PATCHED_CERT" "1" "patched TLS SAN line"
 require_count "$SETTINGS_FILE" "$UPSTREAM_AUTOUPDATE" "0" "upstream AutoUpdate default after patch"
 require_count "$SETTINGS_FILE" "$PATCHED_AUTOUPDATE" "1" "patched AutoUpdate default"
 
-# Compile the two patched packages to confirm the patches produce valid Go.
+# Compile the patched packages to confirm the patches produce valid Go.
 # String-count checks above verify content; this verifies the result compiles.
 #
 # Two paths:
-#   1. Inside the Bridge Docker build, `go` is already on PATH (the pinned
-#      golang builder stage), so compile directly.
-#   2. From the host drift check (`scripts/bridge-patch-drift.sh`), `go` is
-#      typically not installed locally. Fall back to running the same compile
-#      inside the exact pinned Go image bridge/Dockerfile uses, so the host
-#      check matches the actual build's Go version. The image reference is
-#      sourced from bridge/Dockerfile to avoid drift between the two pins.
+#   1. A host toolchain, used only when it can actually build these packages
+#      — Go on PATH plus every pkg-config module the container path installs.
+#      Inside the Bridge Docker build that is always true (the pinned golang
+#      builder stage installs them), so the build compiles directly.
+#   2. Otherwise, run the same compile inside the exact pinned Go image
+#      bridge/Dockerfile uses, so the check matches the real build's Go
+#      version. The image reference is sourced from bridge/Dockerfile to
+#      avoid drift between the two pins.
+#
+# The capability probe in (1) is load-bearing, not defensive dressing.
+# ./internal/vault/... transitively imports docker-credential-helpers, which
+# needs libsecret-1 via pkg-config, and Bridge links libfido2/libcbor. A host
+# with Go but without those modules fails `go build` with "Package libsecret-1
+# was not found" even though every require_count guard above passed — which
+# reads as patch drift when nothing has drifted. GitHub's ubuntu runners ship
+# Go but not libsecret-1-dev, and that is exactly how a false drift signal
+# reached the weekly bridge-version-check workflow for Bridge v3.27.0.
+HOST_PKG_CONFIG_MODULES=(libsecret-1 libfido2 libcbor)
+readonly HOST_PKG_CONFIG_MODULES
+
+# Minimum Go the cloned Bridge source demands, read from its own go.mod.
+go_mod_required_version() {
+    local go_mod="${REPO_DIR}/go.mod"
+
+    if [[ ! -f "$go_mod" ]]; then
+        return 1
+    fi
+
+    awk '$1 == "go" { print $2; exit }' "$go_mod"
+}
+
+# True when dotted numeric version $1 is >= $2. Implemented in bash rather
+# than via `sort -V` because BSD/macOS sort does not reliably provide it.
+version_at_least() {
+    local have="$1"
+    local want="$2"
+    local -a have_parts want_parts
+    local index have_part want_part
+
+    IFS='.' read -r -a have_parts <<< "$have"
+    IFS='.' read -r -a want_parts <<< "$want"
+
+    for index in 0 1 2; do
+        # Strip any non-numeric suffix (rc1, beta2) before comparing.
+        have_part="${have_parts[index]:-0}"
+        want_part="${want_parts[index]:-0}"
+        have_part="${have_part%%[^0-9]*}"
+        want_part="${want_part%%[^0-9]*}"
+
+        if (( ${have_part:-0} > ${want_part:-0} )); then
+            return 0
+        fi
+        if (( ${have_part:-0} < ${want_part:-0} )); then
+            return 1
+        fi
+    done
+
+    return 0
+}
+
+host_go_is_usable() {
+    if ! command -v go >/dev/null 2>&1; then
+        return 1
+    fi
+
+    # The host toolchain must be able to build this module ON ITS OWN. With
+    # GOTOOLCHAIN=local an older Go refuses outright:
+    #
+    #   go: go.mod requires go >= 1.26.1 (running go 1.24.13; GOTOOLCHAIN=local)
+    #
+    # GitHub runners currently ship Go 1.24.x while Bridge requires 1.26.1, so
+    # CI takes the container path. Without this gate the host path "worked"
+    # only because Go silently downloaded another toolchain, defeating the
+    # pinned-image contract AGENTS.md requires. Inside the Bridge Docker build
+    # the builder stage's Go satisfies go.mod, so that path still compiles
+    # directly — which it must, since Docker is unavailable there.
+    local required host_version
+    if required="$(go_mod_required_version)" && [[ -n "$required" ]]; then
+        host_version="$(go env GOVERSION 2>/dev/null | sed 's/^go//')"
+        if [[ -z "$host_version" ]] || ! version_at_least "$host_version" "$required"; then
+            printf 'Host Go %s does not satisfy go.mod go >= %s; using the pinned Go image instead.\n' \
+                "${host_version:-unknown}" "$required" >&2
+            return 1
+        fi
+    fi
+
+    if ! command -v pkg-config >/dev/null 2>&1; then
+        printf 'Host has go but no pkg-config; using the pinned Go image instead.\n' >&2
+        return 1
+    fi
+
+    local module
+    for module in "${HOST_PKG_CONFIG_MODULES[@]}"; do
+        if ! pkg-config --exists "$module" >/dev/null 2>&1; then
+            printf 'Host is missing pkg-config module %s; using the pinned Go image instead.\n' \
+                "$module" >&2
+            return 1
+        fi
+    done
+
+    return 0
+}
+
+# Run a `go ...` command against the checkout on the host.
+#
+# GOTOOLCHAIN=local mirrors the builder-stage ENV in bridge/Dockerfile and the
+# --env already passed on the container path. Bridge v3.27.0 was the first
+# release to carry a `toolchain` directive in go.mod; without this pin the host
+# path silently downloads that Go version instead of using the one the build
+# is pinned to, which AGENTS.md explicitly forbids.
+run_go_on_host() {
+    ( cd "$REPO_DIR" && GOTOOLCHAIN=local go "$@" )
+}
+
 resolve_go_image() {
     local go_image="${BRIDGE_GO_IMAGE:-}"
     if [[ -z "$go_image" && -f "$BRIDGE_DOCKERFILE" ]]; then
@@ -160,15 +267,15 @@ run_go_in_pinned_image() {
 }
 
 compile_patched_packages() {
-    if command -v go >/dev/null 2>&1; then
-        ( cd "$REPO_DIR" \
-          && go build ./internal/constants/... ./internal/certs/... ./internal/vault/... )
+    if host_go_is_usable; then
+        run_go_on_host build ./internal/constants/... ./internal/certs/... ./internal/vault/...
         return
     fi
 
     if ! command -v docker >/dev/null 2>&1; then
-        printf 'ERROR: neither go nor docker found on PATH; cannot verify the patched source compiles.\n' >&2
-        printf 'Install Go on the host, or ensure Docker is available so the pinned golang image can run the check.\n' >&2
+        printf 'ERROR: no usable host Go toolchain and no docker on PATH; cannot verify the patched source compiles.\n' >&2
+        printf 'Install Go plus pkg-config, libsecret-1-dev, libfido2-dev and libcbor-dev on the host,\n' >&2
+        printf 'or ensure Docker is available so the pinned golang image can run the check.\n' >&2
         return 1
     fi
 
@@ -209,14 +316,13 @@ func TestPatchedAutoUpdateDefaultIsFalse(t *testing.T) {
 }
 GOEOF
 
-    if command -v go >/dev/null 2>&1; then
-        ( cd "$REPO_DIR" \
-          && go test -count=1 -run TestPatchedAutoUpdateDefaultIsFalse ./internal/vault/ )
+    if host_go_is_usable; then
+        run_go_on_host test -count=1 -run TestPatchedAutoUpdateDefaultIsFalse ./internal/vault/
         return
     fi
 
     if ! command -v docker >/dev/null 2>&1; then
-        printf 'ERROR: neither go nor docker found on PATH; cannot run the AutoUpdate assertion.\n' >&2
+        printf 'ERROR: no usable host Go toolchain and no docker on PATH; cannot run the AutoUpdate assertion.\n' >&2
         return 1
     fi
 

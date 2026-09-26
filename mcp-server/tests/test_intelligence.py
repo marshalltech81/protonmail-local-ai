@@ -9,7 +9,13 @@ budget fed into LLM prompts.
 from datetime import UTC, datetime
 
 from src.lib.sqlite import ChunkResult, ThreadResult
-from src.tools.intelligence import PER_THREAD_CHAR_BUDGET, _thread_context
+from src.tools.intelligence import (
+    _SUMMARIZE_BODY_CHAR_BUDGET,
+    _SUMMARIZE_TAIL_CHAR_BUDGET,
+    PER_THREAD_CHAR_BUDGET,
+    _summarize_context,
+    _thread_context,
+)
 
 
 def _result(
@@ -32,7 +38,14 @@ def _result(
     )
 
 
-def _chunk(text: str, index: int = 0, char_start: int = 0) -> ChunkResult:
+def _chunk(
+    text: str,
+    index: int = 0,
+    char_start: int = 0,
+    attachment_id: str | None = None,
+    attachment_filename: str | None = None,
+    attachment_mime: str | None = None,
+) -> ChunkResult:
     return ChunkResult(
         chunk_id=f"c{index}",
         message_id="m1",
@@ -41,6 +54,9 @@ def _chunk(text: str, index: int = 0, char_start: int = 0) -> ChunkResult:
         text=text,
         char_start=char_start,
         char_end=char_start + len(text),
+        attachment_id=attachment_id,
+        attachment_filename=attachment_filename,
+        attachment_mime=attachment_mime,
     )
 
 
@@ -100,6 +116,111 @@ class TestThreadContextWithChunks:
     def test_no_evidence_chunks_falls_back_to_body_text(self):
         r = _result(body_text="legacy thread body")
         assert _thread_context(r) == "legacy thread body"
+
+    def test_attachment_chunk_header_names_filename_and_mime(self):
+        """Codex P1: when evidence comes from an attachment, the header
+        must surface filename + MIME so the LLM can cite the source
+        attachment rather than emitting opaque passage references."""
+        r = _result(
+            evidence_chunks=[
+                _chunk(
+                    "solar installation total USD 18450",
+                    index=2,
+                    char_start=100,
+                    attachment_id="att-1",
+                    attachment_filename="proposal-quote.pdf",
+                    attachment_mime="application/pdf",
+                )
+            ],
+        )
+        out = _thread_context(r)
+        assert "attachment proposal-quote.pdf" in out
+        assert "application/pdf" in out
+        assert "solar installation total USD 18450" in out
+
+    def test_body_chunk_header_omits_attachment_decoration(self):
+        """Token-budget guardrail: non-attachment chunks keep the short
+        ``[chunk N chars X-Y]`` header so multi-thread prompts don't bloat."""
+        r = _result(evidence_chunks=[_chunk("body passage", index=0)])
+        out = _thread_context(r)
+        assert "attachment" not in out
+        assert "[chunk 0 chars 0-12]" in out
+
+    def test_attachment_header_tolerates_missing_filename_or_mime(self):
+        """Defensive fallback: if the JOIN against ``attachments`` misses
+        (orphan chunk, DB mid-reap), render generic placeholders rather
+        than crashing with ``None``-formatted text."""
+        r = _result(
+            evidence_chunks=[
+                _chunk(
+                    "orphan attachment text",
+                    attachment_id="att-x",
+                    attachment_filename=None,
+                    attachment_mime=None,
+                )
+            ],
+        )
+        out = _thread_context(r)
+        assert "attachment attachment" in out  # generic placeholder
+        assert "(unknown)" in out
+
+
+class TestSummarizeContext:
+    """``_summarize_context`` merges accumulated ``body_text`` with the
+    recent-chunk tail for ``summarize_thread`` (Codex P1) — the tail
+    supplements the body, it does not replace it.
+    """
+
+    def test_body_and_tail_both_present(self):
+        r = _result(body_text="start of the thread")
+        out = _summarize_context(r, [_chunk("latest reply text", index=4, char_start=900)])
+        assert "start of the thread" in out
+        assert "latest reply text" in out
+        assert "--- recent messages ---" in out
+        assert "[chunk 4 chars 900-917]" in out
+
+    def test_no_chunks_returns_body_only(self):
+        r = _result(body_text="the whole thread body")
+        out = _summarize_context(r, [])
+        assert out == "the whole thread body"
+
+    def test_empty_body_returns_tail_without_separator(self):
+        # A blank-body thread that somehow has chunks: render the tail
+        # alone, with no dangling "--- recent messages ---" header.
+        r = _result(body_text="", snippet="")
+        out = _summarize_context(r, [_chunk("only the chunk", index=0)])
+        assert "only the chunk" in out
+        assert "--- recent messages ---" not in out
+
+    def test_falls_back_to_snippet_when_body_text_missing(self):
+        r = _result(body_text="", snippet="short preview")
+        out = _summarize_context(r, [])
+        assert out == "short preview"
+
+    def test_body_truncated_to_body_budget(self):
+        r = _result(body_text="x" * (_SUMMARIZE_BODY_CHAR_BUDGET * 2))
+        out = _summarize_context(r, [])
+        assert len(out) == _SUMMARIZE_BODY_CHAR_BUDGET
+
+    def test_tail_bounded_by_tail_budget(self):
+        big = "y" * (_SUMMARIZE_TAIL_CHAR_BUDGET * 2)
+        r = _result(body_text="")
+        out = _summarize_context(r, [_chunk(big, index=0)])
+        # The whole tail section stays within the tail budget.
+        assert len(out) <= _SUMMARIZE_TAIL_CHAR_BUDGET
+
+    def test_multiple_chunks_concatenated_in_tail(self):
+        r = _result(body_text="body")
+        out = _summarize_context(
+            r,
+            [
+                _chunk("oldest tail message", index=2, char_start=0),
+                _chunk("newest tail message", index=3, char_start=300),
+            ],
+        )
+        assert "oldest tail message" in out
+        assert "newest tail message" in out
+        assert "[chunk 2" in out and "[chunk 3" in out
 
 
 def _candidate(thread_id: str, subject: str) -> ThreadResult:

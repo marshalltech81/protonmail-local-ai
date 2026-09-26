@@ -57,6 +57,11 @@ def _build_schema(conn: sqlite3.Connection) -> None:
         -- Per-message chunks. Tests use the same toy 4-dim embedding
         -- space as the thread vec table so synthetic vectors like
         -- ``[1, 0, 0, 0]`` work uniformly across both lanes.
+        --
+        -- ``message_date`` mirrors the indexer's v18 schema so the
+        -- COALESCE(message_date, chunked_at) ordering in
+        -- ``get_recent_chunks_for_thread`` can be exercised with both
+        -- new (date-stamped) and legacy (NULL) rows in tests.
         CREATE TABLE message_chunks (
             chunk_id        TEXT PRIMARY KEY,
             message_id      TEXT NOT NULL,
@@ -68,7 +73,8 @@ def _build_schema(conn: sqlite3.Connection) -> None:
             token_est       INTEGER NOT NULL,
             chunked_at      TEXT NOT NULL,
             fts_rowid       INTEGER,
-            attachment_id   TEXT
+            attachment_id   TEXT,
+            message_date    TEXT
         );
 
         CREATE VIRTUAL TABLE message_chunks_fts USING fts5(
@@ -102,6 +108,18 @@ def _build_schema(conn: sqlite3.Connection) -> None:
             contentless_delete=1,
             tokenize='porter unicode61'
         );
+
+        -- Per-content-hash extracted-text cache. ``search_attachments``
+        -- LEFT JOINs this for extraction status + a text snippet, so
+        -- the table must exist on every fixture DB even when empty.
+        CREATE TABLE attachment_extractions (
+            attachment_id     TEXT PRIMARY KEY,
+            extraction_status TEXT NOT NULL,
+            extractor         TEXT,
+            extracted_text    TEXT,
+            extraction_error  TEXT,
+            extracted_at      TEXT NOT NULL
+        );
         """
     )
 
@@ -115,6 +133,9 @@ def _insert_chunk(
     text: str,
     embedding: list[float],
     chunk_index: int = 0,
+    chunked_at: str = "2024-01-01T00:00:00+00:00",
+    attachment_id: str | None = None,
+    message_date: str | None = None,
 ) -> None:
     """Insert one ``message_chunks`` + matching FTS + vec row.
 
@@ -122,6 +143,11 @@ def _insert_chunk(
     enough that the chunk-aware retrieval lane in the MCP reader can
     exercise it end-to-end, without requiring a real indexer pipeline
     in the unit-test stack.
+
+    ``message_date`` mirrors the v18 column on ``message_chunks``;
+    defaults to ``None`` so existing tests that pre-date the column
+    keep their semantics (NULL value, COALESCE'd to ``chunked_at`` by
+    readers).
     """
     cur = conn.cursor()
     cur.execute("INSERT INTO message_chunks_fts (text) VALUES (?)", (text,))
@@ -135,8 +161,8 @@ def _insert_chunk(
         INSERT INTO message_chunks
             (chunk_id, message_id, thread_id, chunk_index, text,
              char_start, char_end, token_est,
-             chunked_at, fts_rowid)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             chunked_at, fts_rowid, attachment_id, message_date)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             chunk_id,
@@ -147,8 +173,10 @@ def _insert_chunk(
             0,
             len(text),
             max(1, len(text) // 4),
-            "2024-01-01T00:00:00+00:00",
+            chunked_at,
             fts_rowid,
+            attachment_id,
+            message_date,
         ),
     )
     conn.commit()
@@ -189,6 +217,40 @@ def _insert_attachment(
             size_bytes,
             "2024-01-01T00:00:00+00:00",
             fts_rowid,
+        ),
+    )
+    conn.commit()
+
+
+def _insert_extraction(
+    conn: sqlite3.Connection,
+    *,
+    attachment_id: str,
+    status: str = "success",
+    extracted_text: str | None = None,
+    extractor: str = "pdf",
+    error: str | None = None,
+) -> None:
+    """Insert one ``attachment_extractions`` row (per content hash).
+
+    Mirrors the indexer's extracted-text cache: ``status`` is
+    ``success`` / ``failed`` / ``pending``, ``extracted_text`` carries
+    the parsed text on success and is ``None`` otherwise.
+    """
+    conn.execute(
+        """
+        INSERT INTO attachment_extractions
+            (attachment_id, extraction_status, extractor,
+             extracted_text, extraction_error, extracted_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (
+            attachment_id,
+            status,
+            extractor,
+            extracted_text,
+            error,
+            "2024-01-01T00:00:00+00:00",
         ),
     )
     conn.commit()
@@ -417,6 +479,153 @@ def empty_db(tmp_path: Path):
     sqlite_vec.load(conn)
     conn.enable_load_extension(False)
     _build_schema(conn)
+    conn.close()
+    db = Database(str(db_path))
+    try:
+        yield db
+    finally:
+        db.close()
+
+
+@pytest.fixture
+def attachments_db(tmp_path: Path):
+    """Populated read-only DB exercising the attachment search lanes.
+
+    Three threads, each with one attachment: two PDFs whose text
+    extraction succeeded (each with an attachment-derived chunk so the
+    filename FTS lane AND the extracted-text FTS lane both have
+    something to match), plus a spreadsheet whose extraction failed
+    (so ``extracted_only`` and the status field can be exercised).
+    """
+    db_path = tmp_path / "mcp-attachments.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.enable_load_extension(True)
+    sqlite_vec.load(conn)
+    conn.enable_load_extension(False)
+    _build_schema(conn)
+
+    # Thread 1 — Acme quote PDF, extracted successfully (newest).
+    # Carries a display_subject so the original-cased subject path in
+    # _row_to_attachment_result is exercised alongside the NULL-fallback.
+    _insert_thread(
+        conn,
+        thread_id="t-quote",
+        subject="acme quotation",
+        participants=["alice@example.com", "buyer@example.com"],
+        senders=["alice@example.com"],
+        folder="INBOX",
+        date_first="2024-03-10T09:00:00+00:00",
+        date_last="2024-03-10T09:00:00+00:00",
+        has_attachments=True,
+        body_text="our quote is attached",
+        embedding=[1.0, 0.0, 0.0, 0.0],
+        display_subject="Acme Quotation",
+    )
+    _insert_attachment(
+        conn,
+        message_id="t-quote",
+        thread_id="t-quote",
+        attachment_id="att-quote",
+        filename="acme-quote.pdf",
+        content_type="application/pdf",
+        size_bytes=20480,
+    )
+    _insert_extraction(
+        conn,
+        attachment_id="att-quote",
+        extracted_text="Acme Corporation quotation. Total 5000 USD. Offer valid 30 days.",
+    )
+    _insert_chunk(
+        conn,
+        chunk_id="quote-att-c1",
+        message_id="t-quote",
+        thread_id="t-quote",
+        text="Acme Corporation quotation. Total 5000 USD. Offer valid 30 days.",
+        embedding=[0.0, 0.0, 0.0, 1.0],
+        attachment_id="att-quote",
+    )
+    # A second chunk of the same attachment so the extracted-text lane
+    # can return two rows for one occurrence — exercising its dedup.
+    _insert_chunk(
+        conn,
+        chunk_id="quote-att-c2",
+        message_id="t-quote",
+        thread_id="t-quote",
+        text="Acme Corporation purchase order and payment terms.",
+        embedding=[0.0, 0.0, 0.0, 1.0],
+        chunk_index=1,
+        attachment_id="att-quote",
+    )
+
+    # Thread 2 — W-2 tax PDF, extracted successfully.
+    _insert_thread(
+        conn,
+        thread_id="t-tax",
+        subject="payroll documents",
+        participants=["payroll@example.com", "buyer@example.com"],
+        senders=["payroll@example.com"],
+        folder="INBOX",
+        date_first="2024-02-01T09:00:00+00:00",
+        date_last="2024-02-01T09:00:00+00:00",
+        has_attachments=True,
+        body_text="your year-end forms are attached",
+        embedding=[0.0, 1.0, 0.0, 0.0],
+    )
+    _insert_attachment(
+        conn,
+        message_id="t-tax",
+        thread_id="t-tax",
+        attachment_id="att-w2",
+        filename="w2-statement.pdf",
+        content_type="application/pdf",
+        size_bytes=15360,
+    )
+    _insert_extraction(
+        conn,
+        attachment_id="att-w2",
+        extracted_text="Wage and Tax Statement. Form W-2 for tax year 2024.",
+    )
+    _insert_chunk(
+        conn,
+        chunk_id="tax-att-c1",
+        message_id="t-tax",
+        thread_id="t-tax",
+        text="Wage and Tax Statement. Form W-2 for tax year 2024.",
+        embedding=[0.0, 0.0, 0.0, 1.0],
+        attachment_id="att-w2",
+    )
+
+    # Thread 3 — spreadsheet whose text extraction failed (oldest).
+    _insert_thread(
+        conn,
+        thread_id="t-budget",
+        subject="annual budget",
+        participants=["dave@example.com"],
+        senders=["dave@example.com"],
+        folder="Archive",
+        date_first="2024-01-15T09:00:00+00:00",
+        date_last="2024-01-15T09:00:00+00:00",
+        has_attachments=True,
+        body_text="budget spreadsheet attached",
+        embedding=[0.0, 0.0, 1.0, 0.0],
+    )
+    _insert_attachment(
+        conn,
+        message_id="t-budget",
+        thread_id="t-budget",
+        attachment_id="att-budget",
+        filename="annual-budget.xlsx",
+        content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        size_bytes=8192,
+    )
+    _insert_extraction(
+        conn,
+        attachment_id="att-budget",
+        status="failed",
+        extracted_text=None,
+        error="unsupported spreadsheet encoding",
+    )
+
     conn.close()
     db = Database(str(db_path))
     try:

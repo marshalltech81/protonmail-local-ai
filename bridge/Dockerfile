@@ -6,7 +6,7 @@
 # -----------------------------------------------------------------------------
 # Stage 1: Builder
 # -----------------------------------------------------------------------------
-FROM golang:1.26.3-bookworm@sha256:252599aeb51ad60b83e4d8821802068127c528c707cb7dd7afd93be057c6011c AS builder
+FROM golang:1.26.5-bookworm@sha256:18aedc16aa19b3fd7ded7245fc14b109e054d65d22ed53c355c899582bbb2113 AS builder
 
 # Use bash with pipefail for all RUN steps so pipe failures are not silently ignored.
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
@@ -57,7 +57,7 @@ RUN make build-nogui
 # Stage 2: Runtime
 # Runs as non-root user 'bridge' (UID 1000)
 # -----------------------------------------------------------------------------
-FROM debian:bookworm-slim@sha256:67b30a61dc87758f0caf819646104f29ecbda97d920aaf5edc834128ac8493d3 AS runtime
+FROM debian:bookworm-slim@sha256:0104b334637a5f19aa9c983a91b54c89887c0984081f2068983107a6f6c21eeb AS runtime
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     bash \

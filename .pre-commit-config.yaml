@@ -21,10 +21,15 @@ repos:
       - id: actionlint
 
   - repo: https://github.com/hadolint/hadolint
-    rev: v2.14.0
+    rev: v2.15.1
     hooks:
       - id: hadolint-docker
-        args: ['--ignore', 'DL3008', '--ignore', 'DL3059']
+        # DL3066 (non-numeric USER) is ignored deliberately: every image
+        # creates its service account with an explicit --uid/--gid in the
+        # same Dockerfile, so the name always resolves from the image's own
+        # /etc/passwd. Keep this in sync with the hadolint job in
+        # .github/workflows/lint.yml.
+        args: ['--ignore', 'DL3008', '--ignore', 'DL3059', '--ignore', 'DL3066']
 
   - repo: https://github.com/shellcheck-py/shellcheck-py
     rev: v0.11.0.1
@@ -32,7 +37,7 @@ repos:
       - id: shellcheck
 
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.15.12
+    rev: v0.16.2
     hooks:
       - id: ruff
         args: [--fix]

@@ -91,6 +91,69 @@ class TestGetMessage:
         out = asyncio.run(handler(message_id="never-existed"))
         assert "Message not found" in _text(out)
 
+    def test_reconstructs_body_from_indexed_chunks(self, fake_server, chunked_db):
+        # chunked_db carries body chunk alpha-c1 for message t-alpha;
+        # "12345" is in the chunk text only (not the subject/snippet), so
+        # its presence proves the body was reconstructed from the chunks.
+        handler = _handlers(fake_server, chunked_db)["get_message"]
+        out = asyncio.run(handler(message_id="t-alpha"))
+        text = _text(out)
+        assert "12345" in text
+        assert "reconstructed from 1 indexed chunk" in text
+
+    def test_falls_back_to_thread_context_without_chunks(self, fake_server, seeded_db):
+        # seeded_db has no message chunks — the handler must fall back to
+        # parent-thread context rather than returning an empty body.
+        handler = _handlers(fake_server, seeded_db)["get_message"]
+        out = asyncio.run(handler(message_id="t-alpha"))
+        text = _text(out)
+        assert "No per-message body chunks" in text
+        assert "invoice for march" in text
+
+    def test_fallback_uses_snippet_when_body_text_empty(self, fake_server, tmp_path):
+        # No chunks and no accumulated body_text — the fallback must still
+        # surface the thread's snippet rather than going blank.
+        import sqlite3
+
+        import sqlite_vec
+        from src.lib.sqlite import Database
+
+        from tests.conftest import _build_schema, _insert_thread
+
+        path = tmp_path / "snippet-only.db"
+        conn = sqlite3.connect(str(path))
+        conn.enable_load_extension(True)
+        sqlite_vec.load(conn)
+        conn.enable_load_extension(False)
+        _build_schema(conn)
+        _insert_thread(
+            conn,
+            thread_id="t1",
+            subject="s",
+            participants=["a@example.com"],
+            senders=["a@example.com"],
+            snippet="snippet-only-content",
+            body_text="",
+            embedding=[1.0, 0.0, 0.0, 0.0],
+        )
+        conn.close()
+        db = Database(str(path))
+        try:
+            handler = _handlers(fake_server, db)["get_message"]
+            out = asyncio.run(handler(message_id="t1"))
+            assert "snippet-only-content" in _text(out)
+        finally:
+            db.close()
+
+    def test_db_exception_returns_error_text(self, fake_server, seeded_db):
+        def boom(_message_id):
+            raise RuntimeError("simulated read failure")
+
+        seeded_db.find_thread_by_message_id = boom  # type: ignore[assignment]
+        handler = _handlers(fake_server, seeded_db)["get_message"]
+        out = asyncio.run(handler(message_id="anything"))
+        assert "Error" in _text(out)
+
 
 class TestListThreads:
     def test_returns_threads_in_folder(self, fake_server, seeded_db):

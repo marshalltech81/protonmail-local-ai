@@ -738,20 +738,43 @@ def _phase2a_collect_chunks(
         # behavior. The fallback text rides through Phase 2b inside the
         # same batched embed call as everyone else's chunks.
         #
-        # The check is on COMMITTED chunks only
-        # (``get_thread_chunk_embeddings``), not on pending in-batch
-        # chunks. An earlier batch sibling that queued chunks for the
-        # same thread but whose Phase 2c then fails would otherwise
-        # leave this chunkless successor committing cleanly with a
-        # zero thread vector — see the docstring rationale above.
-        # Reserving an extra fallback slot when an earlier sibling
-        # also produced chunks is harmless: Phase 2c's three-case
-        # priority chain prefers ``mean(committed chunks)`` over the
-        # fallback embedding, so the fallback only takes effect when
-        # nothing else committed.
+        # The check is on COMMITTED chunks only (``thread_has_chunks``),
+        # not on pending in-batch chunks. An earlier batch sibling that
+        # queued chunks for the same thread but whose Phase 2c then
+        # fails would otherwise leave this chunkless successor
+        # committing cleanly with a zero thread vector — see the
+        # docstring rationale above. Reserving an extra fallback slot
+        # when an earlier sibling also produced chunks is harmless:
+        # Phase 2c's three-case priority chain prefers
+        # ``mean(committed chunks)`` over the fallback embedding, so
+        # the fallback only takes effect when nothing else committed.
+        #
+        # ``thread_has_chunks`` is a single-row existence check —
+        # avoids the per-message blob-unpack churn that
+        # ``get_thread_chunk_embeddings`` would impose on chatty
+        # threads where this gate fires for every chunkless arrival.
         has_new_chunks = bool(new_body) or any(plan_new for plan_new in attach_new_chunks)
-        if not has_new_chunks and not db.get_thread_chunk_embeddings(state.thread.thread_id):
-            fallback_text = state.thread.subject.strip() if state.thread.subject else ""
+        if not has_new_chunks and not db.thread_has_chunks(state.thread.thread_id):
+            # Source the fallback text from the thread's stored
+            # ``display_subject`` rather than from ``state.msg.subject``.
+            # ``display_subject`` is the OLDEST message's original-case
+            # subject, maintained by ``upsert_thread``'s merge across
+            # every arrival. Reading from there keeps the fallback
+            # vector STABLE across successive chunkless arrivals: using
+            # ``state.msg.subject`` made each new chunkless message
+            # overwrite the prior thread vector with its own subject
+            # embedding (msg1's "Quarterly Review" → msg2's "Re: Quarterly
+            # Review" → msg3's "Fwd: ..."), producing arrival-order-
+            # dependent thread vectors on a chunkless thread.
+            #
+            # Phase 1 already committed this message's row via
+            # ``upsert_thread``, so the display_subject reflecting the
+            # oldest-seen message is in the DB before this read. Falls
+            # through to the message's own subject for legacy v12 rows
+            # where display_subject is NULL (an indexer pass will
+            # refresh those over time).
+            stored_display = db.get_thread_display_subject(state.thread.thread_id)
+            fallback_text = (stored_display or state.msg.subject or "").strip()
             if not fallback_text:
                 fallback_text = "(empty thread)"
             state.subject_fallback_offset = len(all_texts)
@@ -798,6 +821,11 @@ def _phase2c_commit_vectors(
             c.chunk_id: vectors[i] for c, i in zip(plan_new, plan_offsets)
         }
 
+    # ISO-8601 representation of the source message's Date: header.
+    # Stamped onto every chunk row (body + attachment) so timeline
+    # retrieval can order by message time instead of insert time —
+    # see ``replace_message_chunks`` and the v18 migration.
+    msg_date_iso = msg.date.isoformat()
     try:
         with db.transaction():
             db.replace_message_chunks(
@@ -805,6 +833,7 @@ def _phase2c_commit_vectors(
                 thread_id=thread.thread_id,
                 chunks=state.body_chunks,
                 embeddings_by_chunk_id=body_embs,
+                message_date=msg_date_iso,
             )
             for plan in state.attach_plans:
                 apply_attachment_writes(
@@ -812,6 +841,7 @@ def _phase2c_commit_vectors(
                     message_id=msg.message_id,
                     thread_id=thread.thread_id,
                     db=db,
+                    message_date=msg_date_iso,
                 )
             # Replace the Phase 1 seed thread vector. Three cases
             # mirror the old ``_seed_thread_embedding`` logic:
@@ -935,7 +965,11 @@ def _drain_queue_batched(
         # ---- Phase 2b: bulk embed across batch ----
         t_embed_start = time.perf_counter()
         try:
-            vectors = embedder.embed_batch(all_texts) if all_texts else []
+            vectors = (
+                embedder.embed_batch(all_texts, on_batch_complete=touch_health_file)
+                if all_texts
+                else []
+            )
         except Exception as e:
             # Scrub the error before persistence: ``APIStatusError`` can
             # echo input fragments (email body text) on 4xx, and

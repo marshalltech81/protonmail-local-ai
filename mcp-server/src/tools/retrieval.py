@@ -114,13 +114,21 @@ def register_retrieval_tools(server, db):
         body_format: str = "text",
     ) -> list[TextContent]:
         """
-        Get local index context for a single email message.
+        Get one message's indexed body and its parent-thread context.
 
-        ``message_id`` is the RFC 5322 Message-ID header value
-        (e.g. ``"<CAH2Z4_a...@mail.gmail.com>"``). Obtain it from a
-        thread's message list (via get_thread or search_emails). Do
-        NOT pass a subject line or a phrase — invented IDs return
-        ``Message not found``.
+        Reconstructs the message body from the per-message chunk store
+        (in document order) — the index keeps no raw per-message body,
+        so this is the indexed text after quoted-reply stripping, which
+        is usually what you want for "show me the message from Jane on
+        Tuesday". Attachment text is NOT included here; use
+        get_evidence or ask_mailbox for attachment content. When no
+        body chunks are indexed for the message, falls back to
+        parent-thread context.
+
+        ``message_id`` is the RFC 5322 Message-ID header value. Obtain
+        it from a thread's message list (via get_thread or
+        search_emails). Do NOT pass a subject line or a phrase —
+        invented IDs return ``Message not found``.
 
         Args:
             message_id: The Message-ID header value
@@ -128,7 +136,8 @@ def register_retrieval_tools(server, db):
             body_format: Retained for interface compatibility; ignored in local-only mode
 
         Returns:
-            Local index context for the message and its parent thread.
+            The message's reconstructed indexed body plus parent-thread
+            metadata, or thread context when no body chunks are indexed.
         """
         log.info(
             "tool=get_message %s",
@@ -143,6 +152,12 @@ def register_retrieval_tools(server, db):
             if not thread:
                 return [TextContent(type="text", text=f"Message not found: {message_id}")]
 
+            # The index stores no raw per-message body column, but the
+            # chunk store carries every body slice. Reconstruct the body
+            # in chunk_index order; get_message_chunks excludes
+            # attachment chunks, so this is message body only.
+            chunks = await asyncio.to_thread(db.get_message_chunks, message_id)
+
             lines = [
                 f"Message-ID: {message_id}",
                 f"Thread: {thread.subject}",
@@ -151,22 +166,32 @@ def register_retrieval_tools(server, db):
                 f"→ {thread.date_last.strftime('%Y-%m-%d')}",
                 f"Participants: {', '.join(thread.participants)}",
                 f"Mode: {local_only_note}",
-                "",
-                "The local index does not currently store per-message full bodies. "
-                "Use get_thread for indexed thread context.",
             ]
-            if thread.body_text:
+
+            if chunks:
+                body = "\n\n".join(c.text for c in chunks)
                 lines += [
                     "",
-                    "Indexed thread text:",
+                    f"Message body (reconstructed from {len(chunks)} indexed "
+                    "chunk(s); the indexed body after quoted-reply stripping, "
+                    "not the raw message):",
                     "",
-                    thread.body_text,
+                    body,
                 ]
-            elif thread.snippet:
-                lines.append("")
-                lines.append("Indexed snippet:")
-                lines.append("")
-                lines.append(thread.snippet)
+            else:
+                # No body chunks — a legacy thread, an empty-body
+                # message, or one not chunked yet. Fall back to the
+                # accumulated parent-thread context.
+                lines += [
+                    "",
+                    "No per-message body chunks are indexed for this message. "
+                    "Showing indexed thread context instead; use get_thread "
+                    "for the full thread.",
+                ]
+                if thread.body_text:
+                    lines += ["", "Indexed thread text:", "", thread.body_text]
+                elif thread.snippet:
+                    lines += ["", "Indexed snippet:", "", thread.snippet]
 
             return [TextContent(type="text", text="\n".join(lines))]
 

@@ -23,6 +23,11 @@ _MAX_SEARCH_LIMIT = 50
 
 _VALID_SEARCH_MODES = frozenset({"hybrid", "semantic", "keyword"})
 
+# Per-chunk character cap for ``get_evidence`` output. Indexed chunks are
+# already paragraph-bounded by the indexer; this is a defensive ceiling so
+# one pathologically long attachment chunk can't bloat the tool response.
+_EVIDENCE_CHUNK_CHARS = 1600
+
 
 def register_search_tools(
     server,
@@ -61,6 +66,7 @@ def register_search_tools(
         date_from: str | None = None,
         date_to: str | None = None,
         has_attachments: bool | None = None,
+        participant: str | None = None,
         limit: int = 10,
     ) -> list[TextContent]:
         """
@@ -124,6 +130,13 @@ def register_search_tools(
             date_from: ISO 8601 date lower bound e.g. "2024-01-01"
             date_to: ISO 8601 date upper bound e.g. "2024-12-31"
             has_attachments: True to only show threads with attachments
+            participant: Filter to threads where this person appears in
+                         ANY role — sender, To, or Cc. Use this for
+                         "threads involving Jane" / "anything with
+                         legal@example.com on it". Distinct from
+                         from_addr/from_name, which are sender-only.
+                         Accepts an address, a domain (@example.com),
+                         or a bare name fragment.
             limit: Maximum number of threads to return (default 10)
 
         Returns:
@@ -143,6 +156,7 @@ def register_search_tools(
                     "date_from": date_from,
                     "date_to": date_to,
                     "has_attachments": has_attachments,
+                    "participant": participant,
                     "limit": limit,
                 }.items()
                 if v is not None
@@ -215,6 +229,7 @@ def register_search_tools(
                     date_from=date_from,
                     date_to=date_to,
                     has_attachments=has_attachments,
+                    participant=participant,
                     limit=limit,
                 )
             elif mode == "semantic":
@@ -227,10 +242,23 @@ def register_search_tools(
                     date_from=date_from,
                     date_to=date_to,
                     has_attachments=has_attachments,
+                    participant=participant,
                     limit=limit,
                 )
             else:  # hybrid (default)
                 embedding = await embed_query(embed_client, query, expected_embed_dim)
+                # When a reranker is configured, ask for evidence
+                # chunks so the cross-encoder scores against the actual
+                # passage that lifted the thread into ranking — not
+                # ``Subject + snippet`` (the snippet is the latest
+                # message's first 200 chars, almost certainly the wrong
+                # passage for the reranker to score against). Without
+                # ``with_evidence=True`` the reranker can demote the
+                # genuinely-relevant thread because it never sees the
+                # passage that made the dense or chunk lane retrieve
+                # it. The flag is gated on reranker presence so we
+                # don't pay the chunk-attach cost on the rerank-less
+                # default path.
                 results = await asyncio.to_thread(
                     db.hybrid_search,
                     query_text=query,
@@ -240,7 +268,9 @@ def register_search_tools(
                     date_from=date_from,
                     date_to=date_to,
                     has_attachments=has_attachments,
+                    participant=participant,
                     limit=limit,
+                    with_evidence=reranker is not None,
                     reranker=reranker,
                 )
 
@@ -276,3 +306,279 @@ def register_search_tools(
             safe_error = safe_provider_exception_text(e, secrets)
             log.error("search_emails error: %s", safe_error)
             return [TextContent(type="text", text=f"Search error: {safe_error}")]
+
+    @server.tool()
+    async def get_evidence(
+        query: str,
+        thread_id: str | None = None,
+        folders: list[str] | None = None,
+        from_addr: str | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
+        has_attachments: bool | None = None,
+        limit: int = 12,
+        include_scores: bool = False,
+    ) -> list[TextContent]:
+        """
+        Return the exact indexed passages (evidence chunks) that back a
+        question — no LLM synthesis, just the retrieved source text.
+
+        Use this to AUDIT or CITE an answer: it surfaces the same chunks
+        ask_mailbox feeds its model, so you can show the user precisely
+        which emails and attachments ground a claim. It is also the
+        fast, synthesis-free path when you only need the source
+        passages and not a written answer.
+
+        Each chunk carries its parent thread and Message-ID, the source
+        (message body, or an attachment with filename + MIME type), the
+        message date, and the character offsets of the passage.
+        Attachment chunks — extracted PDF / OCR / document text — are
+        included here, unlike get_thread, which is body-only.
+
+        Pass thread_id to scope evidence to a single thread ("which
+        part of this thread mentions the deadline?"); omit it to gather
+        evidence across the whole mailbox.
+
+        Args:
+            query: The question or topic to gather evidence for.
+            thread_id: Optional opaque thread ID to scope evidence to
+                       one thread. Obtain it from search_emails or
+                       list_threads — never invent it from a subject.
+            folders: Restrict to specific folders, e.g. ["INBOX", "Sent"].
+            from_addr: Restrict to a sender ADDRESS or domain
+                       ("jane@example.com", "@example.com"). For a
+                       person's name, resolve it via find_contact first.
+            date_from: ISO 8601 date lower bound, e.g. "2024-01-01".
+            date_to: ISO 8601 date upper bound, e.g. "2024-12-31".
+            has_attachments: True to restrict to threads with attachments.
+            limit: Maximum evidence chunks to return (default 12,
+                   clamped to [1, 50]).
+            include_scores: When true, annotate each thread with the
+                            retrieval lanes that matched (thread_fts /
+                            chunk_fts / attachment_fts / thread_vec /
+                            chunk_vec / rerank) and each chunk with its
+                            vector distance — useful for debugging
+                            retrieval quality.
+
+        Returns:
+            Ranked evidence chunks grouped by thread, with full
+            provenance (thread, message, source, offsets, date).
+        """
+        log.info(
+            "tool=get_evidence %s",
+            {
+                k: v
+                for k, v in {
+                    "query": query,
+                    "thread_id": thread_id,
+                    "folders": folders,
+                    "from_addr": from_addr,
+                    "date_from": date_from,
+                    "date_to": date_to,
+                    "has_attachments": has_attachments,
+                    "limit": limit,
+                    "include_scores": include_scores,
+                }.items()
+                if v is not None
+            },
+        )
+        if not query or not query.strip():
+            return [TextContent(type="text", text="Provide a query to gather evidence for.")]
+        # Same clamp ceiling as search_emails — ``limit`` here counts
+        # evidence chunks, and an LLM-inflated value would drive a large
+        # per-thread chunk fetch and an oversized response payload.
+        limit = clamp_int(limit, default=12, minimum=1, maximum=_MAX_SEARCH_LIMIT)
+
+        # groups: list of (subject, thread_id, lane_ranks | None,
+        # thread_score | None, chunks). ``lane_ranks`` is None for the
+        # thread-scoped path because that path bypasses RRF fusion.
+        groups: list[tuple[str, str, dict[str, int] | None, float | None, list]] = []
+        try:
+            if thread_id:
+                thread = await asyncio.to_thread(db.get_thread, thread_id)
+                if not thread:
+                    return [TextContent(type="text", text=f"Thread not found: {thread_id}")]
+                embedding = await embed_query(embed_client, query, expected_embed_dim)
+                grouped = await asyncio.to_thread(
+                    db.get_evidence_chunks_for_threads, [thread_id], embedding, limit
+                )
+                chunks = grouped.get(thread_id, [])
+                if chunks:
+                    groups.append((thread.subject, thread_id, None, None, chunks))
+            else:
+                embedding = await embed_query(embed_client, query, expected_embed_dim)
+                results = await asyncio.to_thread(
+                    db.hybrid_search,
+                    query_text=query,
+                    query_embedding=embedding,
+                    folders=folders,
+                    from_addr=from_addr,
+                    date_from=date_from,
+                    date_to=date_to,
+                    has_attachments=has_attachments,
+                    limit=limit,
+                    with_evidence=True,
+                    reranker=reranker,
+                )
+                # Flatten thread-ranked evidence into a flat chunk budget:
+                # ``limit`` counts chunks, threads are already ranked, and
+                # chunks within a thread are ranked by similarity. Once the
+                # budget is spent the slice yields [] and the thread drops.
+                taken = 0
+                for r in results:
+                    chunks = r.evidence_chunks[: limit - taken]
+                    if not chunks:
+                        continue
+                    groups.append((r.subject, r.thread_id, r.lane_ranks, r.score, chunks))
+                    taken += len(chunks)
+        except Exception as e:
+            # Mirror search_emails: provider-SDK status errors (the embed
+            # call) can echo the query back, so reduce them to type +
+            # status and redact any quoted secret.
+            safe_error = safe_provider_exception_text(e, secrets)
+            log.error("get_evidence error: %s", safe_error)
+            return [TextContent(type="text", text=f"Evidence error: {safe_error}")]
+
+        total_chunks = sum(len(chunks) for _, _, _, _, chunks in groups)
+        if total_chunks == 0:
+            return [TextContent(type="text", text=f"No evidence found for: '{query}'")]
+
+        lines = [
+            f"Evidence for: '{query}'",
+            f"{total_chunks} chunk(s) from {len(groups)} thread(s).",
+            "",
+        ]
+        for i, (subject, tid, lane_ranks, score, chunks) in enumerate(groups, 1):
+            lines.append(f"[{i}] {subject}")
+            lines.append(f"    Thread ID: {tid}")
+            if include_scores and lane_ranks:
+                lanes = ", ".join(f"{name}#{rank}" for name, rank in sorted(lane_ranks.items()))
+                score_str = f" | retrieval score {score:.4f}" if score is not None else ""
+                lines.append(f"    Lanes: {lanes}{score_str}")
+            for chunk in chunks:
+                msg_date = (chunk.message_date or "")[:10] or "unknown date"
+                lines.append(
+                    f"    --- chunk {chunk.chunk_index} | msg {chunk.message_id} | {msg_date}"
+                )
+                if chunk.attachment_id is not None:
+                    fname = chunk.attachment_filename or "attachment"
+                    mime = chunk.attachment_mime or "unknown"
+                    lines.append(f'        Source: attachment "{fname}" ({mime})')
+                else:
+                    lines.append("        Source: message body")
+                offsets = f"        Chars {chunk.char_start}-{chunk.char_end}"
+                if include_scores:
+                    offsets += f" | vector distance {chunk.score:.4f}"
+                lines.append(offsets)
+                text = chunk.text
+                if len(text) > _EVIDENCE_CHUNK_CHARS:
+                    text = text[:_EVIDENCE_CHUNK_CHARS] + " ... [truncated]"
+                lines.append(f"        {text}")
+            lines.append("")
+
+        return [TextContent(type="text", text="\n".join(lines).rstrip())]
+
+    @server.tool()
+    async def search_attachments(
+        query: str | None = None,
+        content_type: str | None = None,
+        from_addr: str | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
+        extracted_only: bool = False,
+        limit: int = 20,
+    ) -> list[TextContent]:
+        """
+        Search indexed email attachments by filename, MIME type, and
+        extracted text.
+
+        Use this for attachment-centric questions — "find the quote PDF
+        from Acme", "which emails had W-2 attachments?", "list the
+        spreadsheets from last quarter". It matches attachment filenames
+        and content types AND the text extracted from them (PDF / OCR /
+        document parsing), and reports each attachment's parent thread
+        so you can follow up with get_thread or get_evidence.
+
+        With no query it lists attachments by the structured filters
+        alone (content_type / date / sender), newest thread activity
+        first.
+
+        To read the full text inside an attachment, use ask_mailbox or
+        get_evidence — this tool LOCATES attachments and previews their
+        extracted text; it does not return the whole document.
+
+        Args:
+            query: Text to match against filename, MIME type, and
+                   extracted attachment text. Omit to list by filter
+                   alone.
+            content_type: Exact MIME-type filter, e.g. "application/pdf".
+            from_addr: Restrict to attachments on threads sent by this
+                       address or domain ("jane@example.com",
+                       "@example.com").
+            date_from: ISO 8601 date lower bound (parent thread activity).
+            date_to: ISO 8601 date upper bound.
+            extracted_only: True to return only attachments whose text
+                            extraction succeeded.
+            limit: Maximum attachments to return (default 20, clamped
+                   to [1, 50]).
+
+        Returns:
+            Matching attachments with filename, type, size, parent
+            thread, sender, text-extraction status, and a preview of
+            the extracted text.
+        """
+        log.info(
+            "tool=search_attachments %s",
+            {
+                k: v
+                for k, v in {
+                    "query": query,
+                    "content_type": content_type,
+                    "from_addr": from_addr,
+                    "date_from": date_from,
+                    "date_to": date_to,
+                    "extracted_only": extracted_only,
+                    "limit": limit,
+                }.items()
+                if v is not None
+            },
+        )
+        limit = clamp_int(limit, default=20, minimum=1, maximum=_MAX_SEARCH_LIMIT)
+        try:
+            results = await asyncio.to_thread(
+                db.search_attachments,
+                query=query,
+                content_type=content_type,
+                from_addr=from_addr,
+                date_from=date_from,
+                date_to=date_to,
+                extracted_only=extracted_only,
+                limit=limit,
+            )
+        except Exception as e:
+            # search_attachments is pure local-DB work (FTS + joins); the
+            # only expected failure is a bad date filter (ValueError) or
+            # a DB error. No provider call, so the standard secret-aware
+            # formatter is enough.
+            safe_error = safe_exception_text(e, secrets)
+            log.error("search_attachments error: %s", safe_error)
+            return [TextContent(type="text", text=f"Attachment search error: {safe_error}")]
+
+        if not results:
+            return [TextContent(type="text", text="No attachments found.")]
+
+        lines = [f"Found {len(results)} attachment(s):", ""]
+        for i, a in enumerate(results, 1):
+            size_kb = a.size_bytes / 1024
+            lines.append(f"[{i}] {a.filename}  ({a.content_type}, {size_kb:.1f} KB)")
+            lines.append(f"    Thread: {a.subject}  [{a.folder}]")
+            lines.append(f"    Thread ID: {a.thread_id} | Message-ID: {a.message_id}")
+            lines.append(f"    Date: {a.date_last.strftime('%Y-%m-%d')}")
+            if a.senders:
+                lines.append(f"    From: {', '.join(a.senders[:3])}")
+            lines.append(f"    Text extraction: {a.extraction_status or 'not extracted'}")
+            if a.text_snippet:
+                lines.append(f"    Snippet: {a.text_snippet.strip()}")
+            lines.append("")
+
+        return [TextContent(type="text", text="\n".join(lines).rstrip())]
