@@ -5,7 +5,7 @@ requires-python = ">=3.14"
 dependencies = [
     "mcp==1.27.1",
     "uvicorn==0.48.0",
-    "starlette==1.0.0",
+    "starlette==1.1.0",
     "sqlite-vec==0.1.9",
     "aioimaplib==2.0.1",
     "httpx==0.28.1",
@@ -16,9 +16,9 @@ dependencies = [
     # OpenRouter — already speaks). The embed client is a thin wrapper
     # around ``AsyncOpenAI`` so the project does not maintain its own
     # HTTP/retry plumbing for a wire format the SDK already handles.
-    "openai==2.36.0",
-    "anthropic==0.100.0",
-    "cohere==6.1.0",
+    "openai==2.38.0",
+    "anthropic==0.104.1",
+    "cohere==7.0.0",
 ]
 
 [tool.uv]
