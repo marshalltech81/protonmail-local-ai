@@ -35,7 +35,12 @@ jobs:
   bridge-patch-drift:
     name: Bridge patch drift (make bridge-patch-check)
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # The runner's Go (1.24.x) does not satisfy Bridge's go.mod (>= 1.26.1),
+    # so patch-source.sh compiles inside the pinned golang image instead of on
+    # the host. That path runs two separate containers, each apt-installing the
+    # cgo deps and downloading modules, so it needs more headroom than the
+    # former host compile. Locally the same path takes ~5 minutes.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
 
