@@ -64,6 +64,7 @@ def test_successful_cached_extraction_is_reused(tmp_path, monkeypatch):
     embedder.embed.return_value = [0.1] * EMBEDDING_DIM
 
     summary = process_attachment(
+        message_date="2024-01-01T00:00:00+00:00",
         attachment=attachment,
         message_id="message@example.com",
         thread_id="thread-1",
@@ -111,6 +112,7 @@ def _run_process_with_cached_status(
     embedder = make_mock_embedder()
     embedder.embed.return_value = [0.2] * EMBEDDING_DIM
     summary = process_attachment(
+        message_date="2024-01-01T00:00:00+00:00",
         attachment=attachment,
         message_id="message@example.com",
         thread_id="thread-1",
@@ -200,6 +202,7 @@ def test_recent_failed_cached_extraction_is_honored(tmp_path, monkeypatch):
     embedder.embed.return_value = [0.2] * EMBEDDING_DIM
 
     summary = process_attachment(
+        message_date="2024-01-01T00:00:00+00:00",
         attachment=attachment,
         message_id="message@example.com",
         thread_id="thread-1",
@@ -264,6 +267,7 @@ def test_stale_failed_cached_extraction_is_retried(tmp_path, monkeypatch):
     embedder.embed.return_value = [0.2] * EMBEDDING_DIM
 
     summary = process_attachment(
+        message_date="2024-01-01T00:00:00+00:00",
         attachment=attachment,
         message_id="message@example.com",
         thread_id="thread-1",
@@ -320,6 +324,7 @@ def test_ocr_disabled_unsupported_is_re_run_when_ocr_re_enabled(tmp_path, monkey
     embedder.embed.return_value = [0.2] * EMBEDDING_DIM
 
     summary = process_attachment(
+        message_date="2024-01-01T00:00:00+00:00",
         attachment=attachment,
         message_id="message@example.com",
         thread_id="thread-1",
@@ -372,6 +377,7 @@ def test_ocr_disabled_pdf_cache_is_re_run_when_ocr_re_enabled(tmp_path, monkeypa
     embedder.embed.return_value = [0.2] * EMBEDDING_DIM
 
     summary = process_attachment(
+        message_date="2024-01-01T00:00:00+00:00",
         attachment=attachment,
         message_id="message@example.com",
         thread_id="thread-1",
@@ -463,7 +469,13 @@ class TestPrepareApplyBoundary:
         monkeypatch.setattr(attachment_indexing, "extract_attachment", extractor)
         embedder.reset_mock()
 
-        apply_attachment_writes(plan=plan, message_id="msg@x", thread_id="thread-x", db=db)
+        apply_attachment_writes(
+            message_date="2024-01-01T00:00:00+00:00",
+            plan=plan,
+            message_id="msg@x",
+            thread_id="thread-x",
+            db=db,
+        )
 
         extractor.assert_not_called()
         embedder.embed.assert_not_called()
@@ -513,6 +525,7 @@ class TestMultiOccurrenceDeterminism:
         embedder.embed.return_value = [0.1] * EMBEDDING_DIM
 
         process_attachment(
+            message_date="2024-01-01T00:00:00+00:00",
             db=db,
             embedder=embedder,
             thread_id="thread-x",
@@ -521,6 +534,7 @@ class TestMultiOccurrenceDeterminism:
         embed_calls_first_run = embedder.embed.call_count
 
         process_attachment(
+            message_date="2024-01-01T00:00:00+00:00",
             db=db,
             embedder=embedder,
             thread_id="thread-x",
@@ -556,7 +570,11 @@ class TestNonSuccessPlanPaths:
         embedder.embed.return_value = [0.1] * EMBEDDING_DIM
 
         summary = process_attachment(
-            db=db, embedder=embedder, thread_id="thread-x", **_kwargs(attachment)
+            message_date="2024-01-01T00:00:00+00:00",
+            db=db,
+            embedder=embedder,
+            thread_id="thread-x",
+            **_kwargs(attachment),
         )
 
         assert summary["chunks_inserted"] == 0
@@ -585,6 +603,7 @@ class TestNonSuccessPlanPaths:
         embedder = make_mock_embedder()
 
         summary = process_attachment(
+            message_date="2024-01-01T00:00:00+00:00",
             db=db,
             embedder=embedder,
             thread_id="thread-x",
@@ -611,6 +630,7 @@ class TestExtractedTextCap:
         embedder.embed.return_value = [0.1] * EMBEDDING_DIM
 
         process_attachment(
+            message_date="2024-01-01T00:00:00+00:00",
             db=db,
             embedder=embedder,
             thread_id="thread-x",
@@ -631,6 +651,7 @@ class TestExtractedTextCap:
         embedder.embed.return_value = [0.1] * EMBEDDING_DIM
 
         process_attachment(
+            message_date="2024-01-01T00:00:00+00:00",
             db=db,
             embedder=embedder,
             thread_id="thread-x",

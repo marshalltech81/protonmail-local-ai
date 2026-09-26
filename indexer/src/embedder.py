@@ -112,18 +112,25 @@ def _is_transient_embed_error(exc: BaseException) -> bool:
     * ``openai.APITimeoutError`` — read / write / pool timeouts.
     * 5xx ``openai.APIStatusError`` — provider failed to serve a
       well-formed request and might recover.
+    * 429 (rate limited) and 408 (request timeout) — the provider is
+      throttling or slow, not rejecting the request.
 
     Do NOT retry — deterministic config errors that retrying only
     delays:
 
-    * 4xx ``openai.APIStatusError`` (auth, model id, quota, request
+    * Other 4xx ``openai.APIStatusError`` (auth, model id, request
       shape).
     * Our own ``RuntimeError`` from index-integrity checks — the
       provider returned a malformed batch and a retry would produce
       the same shape.
+
+    The indexer's outage detection (``main._drain_queue_batched``)
+    uses this same predicate to decide whether a failed embedder probe
+    is an outage (defer and back off) or a configuration problem
+    (operator action required).
     """
     if isinstance(exc, APIStatusError):
-        return exc.status_code >= 500
+        return exc.status_code >= 500 or exc.status_code in (408, 429)
     if isinstance(exc, (APIConnectionError, APITimeoutError)):
         return True
     return False

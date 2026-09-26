@@ -139,10 +139,9 @@ class ChunkResult:
     without filename/MIME provenance the model sees opaque text and
     cannot cite the source attachment.
 
-    ``message_date`` is the source message's ``Date:`` header (schema
-    v18+), carried so ``get_evidence`` can show *when* a cited passage
-    arrived. Left ``None`` for legacy v17- chunk rows that pre-date the
-    column and for query paths that do not SELECT it.
+    ``message_date`` is the source message's ``Date:`` header, carried
+    so ``get_evidence`` can show *when* a cited passage arrived. Left
+    ``None`` only for query paths that do not SELECT it.
     """
 
     chunk_id: str
@@ -1451,19 +1450,14 @@ class Database:
         selected tail) order so the LLM prompt reads naturally as a
         timeline. Caller can render them via ``_thread_context``.
 
-        Ordering: ``COALESCE(c.message_date, c.chunked_at) DESC,
-        c.chunk_index DESC``. ``message_date`` is the message's
-        ``Date:`` header captured at chunk-write (schema v18+); it is
-        the authoritative "when did this message arrive" signal and
-        sorts correctly across reindex, reap-rebuild, dead-letter
-        retry, and recovery-sweep paths. ``chunked_at`` (the chunker's
-        wall-clock at insert) is the fallback for legacy v17- chunk
-        rows that pre-date the column — those rows have
-        ``message_date IS NULL`` and degrade to the prior heuristic
-        until they are re-indexed. ``chunk_index DESC`` tiebreaks
-        when a thread is freshly indexed in one batch (all chunks
-        share the same ``message_date`` / ``chunked_at``) so the
-        last chunk emitted by the chunker comes first in selection.
+        Ordering: ``c.message_date DESC, c.chunk_index DESC``.
+        ``message_date`` is the message's ``Date:`` header captured at
+        chunk-write — the authoritative "when did this message arrive"
+        signal, correct across reindex, reap-rebuild, dead-letter
+        retry, and recovery-sweep paths (unlike ``chunked_at``, the
+        chunker's wall-clock at insert). ``chunk_index DESC`` tiebreaks
+        chunks of the same message so the last chunk emitted by the
+        chunker comes first in selection.
         Selection picks the latest ``limit`` chunks, then the result
         is reversed in Python for ascending display order.
 
@@ -1485,7 +1479,7 @@ class Database:
                 FROM message_chunks c
                 WHERE c.thread_id = ?
                   AND c.attachment_id IS NULL
-                ORDER BY COALESCE(c.message_date, c.chunked_at) DESC,
+                ORDER BY c.message_date DESC,
                          c.chunk_index DESC
                 LIMIT ?
                 """,

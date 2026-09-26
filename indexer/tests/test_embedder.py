@@ -313,6 +313,17 @@ class TestRetryPredicate:
         assert _is_transient_embed_error(_api_status_error(401)) is False
         assert _is_transient_embed_error(_api_status_error(400)) is False
 
+    def test_retries_rate_limit_and_request_timeout(self):
+        # 429 and 408 are the two 4xx a later attempt can fix: the
+        # provider is throttling or timed out, not rejecting the
+        # request. Treating them as config errors would stall indexing
+        # as "operator action required" during an ordinary rate limit.
+        assert _is_transient_embed_error(_api_status_error(429)) is True
+        assert _is_transient_embed_error(_api_status_error(408)) is True
+        assert _is_transient_embed_error(_api_status_error(403)) is False
+        assert _is_transient_embed_error(_api_status_error(404)) is False
+        assert _is_transient_embed_error(_api_status_error(422)) is False
+
     def test_retries_connection_error(self):
         # APIConnectionError requires a Request to construct.
         req = httpx.Request("POST", "http://x")

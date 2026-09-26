@@ -43,10 +43,17 @@ from .attachment_indexing import (
 )
 from .chunker import MessageChunk, chunk_message, mean_vector
 from .database import EMBEDDING_DIM, Database
-from .embedder import EmbeddingBackend, OpenAIEmbedder, scrub_embed_error
+from .embedder import (
+    EmbeddingBackend,
+    OpenAIEmbedder,
+    _is_transient_embed_error,
+    scrub_embed_error,
+)
 from .maildir import is_trashed
 from .parser import Message, OversizedMessageError, parse_email
 from .queue import (
+    ERROR_CLASS_OPERATOR,
+    ERROR_CLASS_RETRYABLE,
     REASON_INITIAL_SCAN,
     REASON_ON_CREATED,
     REASON_ON_MOVED,
@@ -237,8 +244,7 @@ WAL_CHECKPOINT_INTERVAL_SECS = _int_env("INDEXER_WAL_CHECKPOINT_INTERVAL_SECS", 
 # threads whose queue row is still 'queued' or has been cleaned up —
 # but does NOT auto-resurrect dead-lettered rows. Dead = operator-
 # visible terminal state; clearing it requires explicit intervention
-# (or a future operator-rescue tool that calls
-# ``_recover_zero_vector_threads(..., resurrect_dead=True)``).
+# (``make requeue-dead``).
 # See ``_recover_zero_vector_threads`` for the full policy. The same
 # cadence drives the periodic Maildir rescan
 # (``_enqueue_unindexed_messages``).
@@ -886,6 +892,121 @@ def _phase2c_commit_vectors(
     return True, None
 
 
+class _EmbedOutageBreaker:
+    """Pauses queue draining while the embedder is unavailable.
+
+    Without it, every due batch during an outage would hit the dead
+    embedder in turn (each call spending tenacity's in-call retries)
+    and churn the whole queue. When a batch fails AND a probe confirms
+    the embedder itself is down, the breaker opens: draining stops
+    until the backoff elapses, then one batch tests the embedder again.
+    The backoff doubles per consecutive outage up to ``cap_seconds``
+    and resets on the first successful embed.
+
+    Pausing also skips Phase 1, so mail arriving during an outage is
+    not keyword-searchable until the embedder returns. That is the
+    price of not hammering a down provider; the queue keeps every job.
+    """
+
+    def __init__(self, base_seconds: float = 30, cap_seconds: float = 600):
+        self.base_seconds = base_seconds
+        self.cap_seconds = cap_seconds
+        self.consecutive_failures = 0
+        self.open_until = 0.0
+
+    def allow(self, now: float) -> bool:
+        return now >= self.open_until
+
+    def record_failure(self, now: float) -> float:
+        """Open the breaker; returns the pause length in seconds."""
+        self.consecutive_failures += 1
+        delay = min(
+            self.base_seconds * (2 ** (self.consecutive_failures - 1)),
+            self.cap_seconds,
+        )
+        self.open_until = now + delay
+        return delay
+
+    def record_success(self) -> None:
+        self.consecutive_failures = 0
+        self.open_until = 0.0
+
+
+# Deferral delay for an outage when no breaker is supplied (compat
+# shims and tests). Production always passes the main-loop breaker.
+_OUTAGE_DEFER_SECONDS = 30.0
+
+_EMBED_PROBE_TEXT = "embedder health probe"
+
+
+def _probe_embedder(embedder: EmbeddingBackend) -> BaseException | None:
+    """Embed a tiny known-good input. Returns the error if the embedder
+    cannot embed anything (outage or misconfiguration), else ``None``."""
+    try:
+        embedder.embed(_EMBED_PROBE_TEXT)
+    except Exception as e:
+        return e
+    return None
+
+
+def _entry_text_offsets(entry: _BatchedMsg) -> list[int]:
+    """Every index into the batch's flat embed-input list that belongs
+    to ``entry`` — body chunks, attachment chunks, subject fallback."""
+    offsets = list(entry.new_body_offsets)
+    for plan_offsets in entry.attach_offsets:
+        offsets.extend(plan_offsets)
+    if entry.subject_fallback_offset is not None:
+        offsets.append(entry.subject_fallback_offset)
+    return offsets
+
+
+def _embed_each_message(
+    survivors: list[_BatchedMsg],
+    all_texts: list[str],
+    embedder: EmbeddingBackend,
+    queue: IndexingQueue,
+) -> tuple[list[list[float]], list[_BatchedMsg]]:
+    """Embed each message's texts on its own after a failed batch embed.
+
+    Called only once a probe has shown the embedder is healthy, so the
+    batch failure came from something in the batch. Messages that embed
+    cleanly continue to Phase 2c; the rest are charged individually:
+
+    * a transient-looking error (the provider 5xx'd on this input) —
+      ``mark_failed``: retries, dead-letters once attempts run out;
+    * any other error (the provider rejected this input) —
+      ``mark_dead_terminal`` as a permanent source failure.
+
+    Returns a vector list aligned to ``all_texts`` (slots of failed
+    messages stay empty and are never read) and the successful entries.
+    """
+    vectors: list[list[float]] = [[] for _ in all_texts]
+    ok: list[_BatchedMsg] = []
+    for entry in survivors:
+        offsets = _entry_text_offsets(entry)
+        filepath = entry.row["filepath"]
+        try:
+            entry_vectors = (
+                embedder.embed_batch(
+                    [all_texts[i] for i in offsets], on_batch_complete=touch_health_file
+                )
+                if offsets
+                else []
+            )
+        except Exception as e:
+            err_repr = scrub_embed_error(e)
+            if _is_transient_embed_error(e):
+                queue.mark_failed(filepath, stage="embed", error=err_repr)
+            else:
+                queue.mark_dead_terminal(filepath, stage="embed", error=err_repr)
+            continue
+        for i, vector in zip(offsets, entry_vectors):
+            vectors[i] = vector
+        ok.append(entry)
+        touch_health_file()
+    return vectors, ok
+
+
 def _drain_queue_batched(
     db: Database,
     embedder: EmbeddingBackend,
@@ -895,6 +1016,7 @@ def _drain_queue_batched(
     batch_size: int,
     timing_aggregator: TimingAggregator,
     max_passes: int | None = None,
+    breaker: _EmbedOutageBreaker | None = None,
 ) -> int:
     """Drain the queue in two-phase batches.
 
@@ -926,10 +1048,13 @@ def _drain_queue_batched(
       others continue.
     * Phase 2a (chunk/extract) error for one message — marked failed,
       Phase 1's commit stays. Vector-less but text-searchable.
-    * Phase 2b (embed) error — entire in-flight batch's queue rows
-      marked failed (queue retry on next pass). Phase 1 commits
-      remain; the next pass re-runs Phase 1 (idempotent upsert) plus
-      Phase 2.
+    * Phase 2b (embed) error — a probe decides whose fault it is.
+      Embedder down or misconfigured: every in-flight row is deferred
+      without spending attempts, ``breaker`` opens, and this call
+      stops draining. Embedder healthy: each message is re-embedded on
+      its own, so one bad input cannot fail its batchmates. Phase 1
+      commits remain either way; a later pass re-runs Phase 1
+      (idempotent upsert) plus Phase 2.
     * Phase 2c (DB write) error for one message — marked failed,
       others succeed.
     """
@@ -937,6 +1062,8 @@ def _drain_queue_batched(
     passes = 0
     while True:
         if max_passes is not None and passes >= max_passes:
+            break
+        if breaker is not None and not breaker.allow(time.monotonic()):
             break
         passes += 1
         # ---- Gather batch + Phase 1 ----
@@ -999,15 +1126,54 @@ def _drain_queue_batched(
             # integrity-check ``RuntimeError``) and trims SDK status
             # errors to type + status_code.
             err_repr = scrub_embed_error(e)
-            log.error(
-                "batched embed failed for %d texts (batch=%d msgs): %s",
-                len(all_texts),
-                len(survivors),
+            probe_error = _probe_embedder(embedder)
+            if probe_error is not None:
+                probe_repr = scrub_embed_error(probe_error)
+                error_class = (
+                    ERROR_CLASS_RETRYABLE
+                    if _is_transient_embed_error(probe_error)
+                    else ERROR_CLASS_OPERATOR
+                )
+                delay = (
+                    breaker.record_failure(time.monotonic())
+                    if breaker is not None
+                    else _OUTAGE_DEFER_SECONDS
+                )
+                for entry in survivors:
+                    queue.defer(
+                        entry.row["filepath"],
+                        stage="embed",
+                        error=probe_repr,
+                        error_class=error_class,
+                        delay_seconds=delay,
+                    )
+                if error_class == ERROR_CLASS_OPERATOR:
+                    log.error(
+                        "embedder rejected a health probe (%s) — check EMBED_BASE_URL, "
+                        "EMBED_MODEL and the embed API key. Deferred %d message(s); "
+                        "indexing paused %ds.",
+                        probe_repr,
+                        len(survivors),
+                        delay,
+                    )
+                else:
+                    log.error(
+                        "embedder unavailable (%s). Deferred %d message(s) without "
+                        "spending retry attempts; indexing paused %ds.",
+                        probe_repr,
+                        len(survivors),
+                        delay,
+                    )
+                break
+            log.warning(
+                "batched embed failed (%s) but the embedder is healthy; "
+                "embedding %d message(s) individually to isolate the bad input.",
                 err_repr,
+                len(survivors),
             )
-            for entry in survivors:
-                queue.mark_failed(entry.row["filepath"], stage="embed", error=err_repr)
-            continue
+            vectors, survivors = _embed_each_message(survivors, all_texts, embedder, queue)
+        if breaker is not None:
+            breaker.record_success()
         embed_ms = (time.perf_counter() - t_embed_start) * 1000
         # Attribute embed time evenly across the batch for telemetry.
         per_msg_embed_ms = embed_ms / max(1, len(survivors))
@@ -1081,16 +1247,8 @@ def _recover_zero_vector_threads(
 
     * **Dead-lettered rows** — left alone. To rescue a dead-lettered
       file, an operator confirms the underlying cause is fixed and
-      either:
-
-      - deletes the dead row directly (``DELETE FROM indexing_jobs
-        WHERE filepath = '...';``), after which the next periodic
-        recovery sweep — or the next ``initial_index`` at restart
-        — sees the file as a no-row zero-vector candidate and
-        re-enqueues it via the ``no queue row`` branch above; or
-      - calls this function with ``resurrect_dead=True`` from a
-        one-off rescue tool, which clears the dead status via
-        ``enqueue``'s ``INSERT OR REPLACE`` in one step.
+      runs ``make requeue-dead`` (``src/requeue_dead.py``), which
+      resets dead rows to ``queued`` with a fresh attempt budget.
 
       Note: simply touching the Maildir file does NOT re-enqueue
       it. The watchdog handles ``on_created`` and ``on_moved``
@@ -1098,8 +1256,8 @@ def _recover_zero_vector_threads(
       consults ``queue.is_dead`` and skips dead-lettered paths
       regardless of file activity.
 
-      The ``resurrect_dead=True`` flag stays on the API for that
-      operator tool; no production call site uses it.
+      ``resurrect_dead=True`` re-enqueues dead rows among this
+      sweep's candidates; no production call site uses it.
 
     Skips files that already have a 'queued' row (active retry
     cascade in flight; clobbering its row would reset the attempts
@@ -1222,10 +1380,15 @@ def initial_index(
     queue: IndexingQueue,
     *,
     skip_trashed: bool = False,
+    breaker: _EmbedOutageBreaker | None = None,
 ):
     """Enqueue every unindexed Maildir message and drain the queue.
 
-    ``skip_trashed``: see ``_enqueue_unindexed_messages``.
+    ``skip_trashed``: see ``_enqueue_unindexed_messages``. ``breaker``
+    is shared with the main loop so an embedder outage that starts
+    during the initial drain carries its backoff into steady state
+    (the drain returns early while the breaker is open; the main loop
+    finishes the queue once the embedder is back).
 
     Refreshes the health file after every processed message so that
     long initial indexes (large mailboxes, slow embedding service, OCR
@@ -1275,6 +1438,7 @@ def initial_index(
         queue,
         batch_size=INITIAL_INDEX_BATCH_SIZE,
         timing_aggregator=timing_aggregator,
+        breaker=breaker,
     )
     # Always emit a final summary at the end of the initial scan, even
     # if the count was not a multiple of ``TIMING_LOG_EVERY`` — the
@@ -1393,7 +1557,15 @@ def main():
     log.info("Watching Maildir for new emails...")
 
     # Index existing emails
-    initial_index(db, embedder, threader, queue, skip_trashed=reconciler is not None)
+    breaker = _EmbedOutageBreaker()
+    initial_index(
+        db,
+        embedder,
+        threader,
+        queue,
+        skip_trashed=reconciler is not None,
+        breaker=breaker,
+    )
     touch_health_file()
 
     # Always-on startup rename sweep. mbsync renames files in place for
@@ -1445,6 +1617,7 @@ def main():
                     batch_size=STEADY_STATE_BATCH_SIZE,
                     timing_aggregator=timing_aggregator,
                     max_passes=1,
+                    breaker=breaker,
                 )
                 drained_since_log += drained
                 if drained_since_log >= TIMING_LOG_EVERY:

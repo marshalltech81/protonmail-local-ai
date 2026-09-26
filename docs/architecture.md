@@ -496,10 +496,26 @@ Failure isolation is preserved across phases:
 - Phase 1 error for one message → that message marked failed, the
   rest of the batch continues.
 - Phase 2a error (chunk/extract) → marked failed, batch continues.
-- Phase 2b (embed) error → all in-flight messages marked failed
-  (queue retries on next pass). Phase 1 commits are idempotent —
-  `upsert_thread` merges existing rows — so the next pass re-runs
-  Phase 1 + Phase 2 cleanly.
+- Phase 2b (embed) error → a one-string health probe decides whose
+  fault it is:
+  - **Probe fails** (embedder down, rate-limited, or rejecting the
+    key/model): every in-flight message is *deferred* — `attempts`
+    unchanged, class `retryable` or `operator_action_required` — and
+    a circuit breaker pauses draining (30 s, doubling to 10 min,
+    reset on the next successful embed). No outage can dead-letter
+    mail. The breaker is shared by the initial drain and the main
+    loop. Pausing also skips Phase 1, so new mail is not
+    keyword-searchable until the embedder returns.
+  - **Probe succeeds**: the embedder is healthy, so something in the
+    batch is bad. Each message is re-embedded on its own; the good
+    ones are indexed in the same pass. A message the provider 5xx's
+    on is `mark_failed` (spends attempts, eventually `dead`); one it
+    rejects outright is dead-lettered immediately as a
+    `permanent_source_failure`. One bad input can therefore never
+    fail its batchmates or stall the queue behind the breaker.
+
+  Phase 1 commits are idempotent — `upsert_thread` merges existing
+  rows — so any later pass re-runs Phase 1 + Phase 2 cleanly.
 - Phase 2c (DB write) error for one message → marked failed, others
   succeed.
 
@@ -544,18 +560,16 @@ without breaking the durable queue's bounded-retry contract:
     against the same poison-pill payload on every container
     restart and contradict `initial_index`'s own `is_dead` skip.
     To rescue a dead-lettered file, an operator confirms the
-    underlying cause is fixed and either deletes the row
-    explicitly (`DELETE FROM indexing_jobs WHERE filepath=...;`,
-    after which the next recovery pass sees the no-row state and
-    re-enqueues) or invokes the opt-in API
-    `_recover_zero_vector_threads(..., resurrect_dead=True)` from
-    a one-off rescue tool.
+    underlying cause is fixed and runs `make requeue-dead`
+    (optionally `CLASS=...`), which resets dead rows to `queued`
+    with a fresh attempt budget.
 
 Healthy chunkless threads (e.g., subject-fallback threads from
 blank-body messages) are not touched — the DB query filters out
 non-zero `threads_vec` rows.
 
-Each job carries `attempts`, `last_stage`, `last_error`, and a
+Each job carries `attempts`, `last_stage`, `last_error`, `last_error_class`
+(`retryable` / `permanent_source_failure` / `operator_action_required`), and a
 `next_attempt_at` scheduled via exponential backoff
 (`base_backoff_seconds × 2^(attempts - 1)`, capped at 6 hours). When
 `attempts` reaches `INDEXER_MAX_ATTEMPTS` (default 5), the row

@@ -1614,8 +1614,7 @@ class TestGetRecentChunksForThread:
         ``chunked_at`` than chunks for a recent reply — so the prior
         ordering surfaced stale content as "latest activity."
 
-        With v18+ ``message_date`` populated, the query orders by
-        ``COALESCE(message_date, chunked_at) DESC``. A scenario where
+        The query orders by ``message_date DESC``. A scenario where
         the two columns disagree (old message reindexed later than a
         newer message arrived) must rank by message date, not insert
         time.
@@ -1687,66 +1686,6 @@ class TestGetRecentChunksForThread:
             "ordering must be by message_date (oldest-first in display), "
             "not chunked_at — see Codex P1 finding on summarize_thread"
         )
-
-    def test_legacy_null_message_date_falls_back_to_chunked_at(self, tmp_path):
-        """v17 legacy chunks have ``message_date IS NULL``; the
-        downstream ``COALESCE(message_date, chunked_at)`` must keep
-        the old ``chunked_at`` ordering for those rows so an unmigrated
-        install still gets a stable timeline (even if not strictly
-        correct after rebuilds).
-        """
-        from tests.conftest import _build_schema, _insert_chunk, _insert_thread
-
-        db_path = tmp_path / "legacy_null.db"
-        conn = sqlite3.connect(str(db_path))
-        conn.enable_load_extension(True)
-        import sqlite_vec
-
-        sqlite_vec.load(conn)
-        conn.enable_load_extension(False)
-        _build_schema(conn)
-
-        _insert_thread(
-            conn,
-            thread_id="t-legacy",
-            subject="legacy thread",
-            participants=["alice@example.com"],
-            senders=["alice@example.com"],
-            body_text="thread body",
-            snippet="...",
-            embedding=[1.0, 0.0, 0.0, 0.0],
-        )
-        _insert_chunk(
-            conn,
-            chunk_id="c-legacy-old",
-            message_id="m-old",
-            thread_id="t-legacy",
-            text="legacy old",
-            embedding=[1.0, 0.0, 0.0, 0.0],
-            chunked_at="2024-01-01T00:00:00+00:00",
-            message_date=None,
-        )
-        _insert_chunk(
-            conn,
-            chunk_id="c-legacy-new",
-            message_id="m-new",
-            thread_id="t-legacy",
-            text="legacy new",
-            embedding=[1.0, 0.0, 0.0, 0.0],
-            chunked_at="2024-12-01T00:00:00+00:00",
-            message_date=None,
-        )
-        conn.close()
-
-        db = Database(str(db_path))
-        try:
-            chunks = db.get_recent_chunks_for_thread("t-legacy", limit=2)
-        finally:
-            db.close()
-
-        # With both message_date NULL, the COALESCE fallback uses
-        # chunked_at — same ordering as the pre-fix behavior.
-        assert [c.chunk_id for c in chunks] == ["c-legacy-old", "c-legacy-new"]
 
     def test_attachment_chunks_excluded(self, tmp_path):
         """Privacy contract: ``summarize_thread`` is a body summary, so
@@ -2506,7 +2445,7 @@ class TestLaneProvenance:
 
 
 class TestMessageDateOnChunks:
-    """``ChunkResult.message_date`` is populated from the v18 column by
+    """``ChunkResult.message_date`` is populated from ``message_chunks`` by
     ``get_evidence_chunks_for_threads`` so get_evidence can show when a
     cited passage arrived."""
 
@@ -2530,12 +2469,6 @@ class TestMessageDateOnChunks:
             assert grouped["t1"][0].message_date == "2024-05-09T08:00:00+00:00"
         finally:
             db.close()
-
-    def test_legacy_null_message_date_is_none(self, chunked_db: Database):
-        # chunked_db chunks are inserted without a message_date (v17- shape).
-        grouped = chunked_db.get_evidence_chunks_for_threads(["t-alpha"], [1.0, 0.0, 0.0, 0.0])
-        assert grouped["t-alpha"]
-        assert grouped["t-alpha"][0].message_date is None
 
 
 class TestGetMessageChunks:

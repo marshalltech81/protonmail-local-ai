@@ -722,10 +722,16 @@ immediately for testing, drop the grace window to `0` and restart.
 ### Tuning indexing retries
 
 Every discovered Maildir file is written to an `indexing_jobs` table
-and drained by a worker loop. Transient failures (embed service
-down, SQLite lock contention) get exponential backoff; a persistent
-parser or schema error transitions the row to `dead` after
-`INDEXER_MAX_ATTEMPTS` attempts and stops being retried.
+and drained by a worker loop. A failure specific to one message
+(parser error, SQLite lock contention, input the embedder rejects)
+gets exponential backoff and transitions the row to `dead` after
+`INDEXER_MAX_ATTEMPTS` attempts. An embedder outage or
+misconfiguration (unreachable, rate-limited, bad key or model) is
+**not** charged to messages: their jobs are deferred without
+spending attempts, and indexing pauses — 30 s, doubling to 10 min —
+until the embedder answers again. The indexer logs which case it
+hit; a rejected key or model logs an explicit "check EMBED_BASE_URL,
+EMBED_MODEL and the embed API key" error.
 
 | Variable | Default | Purpose |
 |---|---|---|
@@ -739,13 +745,25 @@ docker run --rm -v protonmail-local-ai_sqlite-volume:/data:ro \
     debian:bookworm-slim bash -c \
     'apt-get -qq install -y sqlite3 >/dev/null && \
      sqlite3 /data/mail.db \
-       "SELECT status, COUNT(*) FROM indexing_jobs GROUP BY status;"'
+       "SELECT status, last_error_class, COUNT(*) FROM indexing_jobs
+        GROUP BY status, last_error_class;"'
 ```
 
-A `dead` row carries the last `last_stage` / `last_error` so you can
-tell an embed-service outage from a parser bug without digging through logs.
-Re-enqueueing (for example by touching the file so mbsync re-delivers)
-resets the row to `queued` with `attempts = 0`.
+Every failed row records a `last_error_class`:
+
+| Class | Meaning |
+|---|---|
+| `retryable` | May succeed on a later attempt; `dead` means the attempt budget ran out |
+| `permanent_source_failure` | This file can never be indexed under the current config (oversized, no `Message-ID`, input the embedder rejects) — dead-lettered immediately |
+| `operator_action_required` | The embedder rejected a health probe (bad key or model); jobs stay `queued` until you fix the config |
+
+Once the cause of a dead-letter is fixed, requeue with a fresh budget
+while the stack is running:
+
+```bash
+make requeue-dead                    # every dead row
+make requeue-dead CLASS=retryable    # only exhausted retries
+```
 
 ### Claude Desktop doesn't see the tools
 
