@@ -30,7 +30,7 @@ dependencies = [
     "pypdf==6.11.0",               # digital PDF text layer
     "pdf2image==1.17.0",           # render PDF pages → PIL.Image (needs Poppler)
     "pytesseract==0.3.13",         # OCR via Tesseract binary
-    "pillow==12.2.0",              # image loading + EXIF rotation for OCR
+    "pillow==12.3.0",              # image loading + EXIF rotation for OCR
     "python-docx==1.2.0",          # DOCX paragraph + table walk
     "openpyxl==3.1.5",             # XLSX read-only workbook walk
     "defusedxml==0.7.1",           # XML-bomb defense for python-docx + openpyxl
