@@ -566,7 +566,23 @@ changed since the last failure, so re-enqueuing every dead row at
 container restart would just re-run the same retry cascade against
 the same upstream condition. The scan therefore consults
 `queue.is_dead(filepath)` and skips dead-lettered files, leaving
-them dead until something explicitly resets them.
+them dead until something explicitly resets them. It also skips
+files that already have a `queued` row, so a restart cannot reset
+an in-flight retry cascade to zero attempts.
+
+### Ingestion completeness
+
+The watchdog observer starts **before** the initial drain, so mail
+mbsync delivers while a long initial index is running is enqueued
+and picked up by the same drain-to-empty loop. Filesystem events are
+the low-latency path but not the correctness guarantee: every
+`INDEXER_RECOVERY_SWEEP_INTERVAL_SECS` (default 30 min) the main loop
+re-walks the Maildir with the same rules as the startup scan
+(`_enqueue_unindexed_messages`: skip indexed, dead-lettered, and
+already-queued files; enqueue the rest with reason `rescan`). A file
+whose event was missed — restart, event coalescing, a delivery
+while the observer was not running — is therefore indexed
+eventually rather than omitted until the next container restart.
 
 Two stage outcomes short-circuit the retry path entirely:
 

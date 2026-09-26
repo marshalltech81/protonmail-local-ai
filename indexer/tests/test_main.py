@@ -1966,3 +1966,157 @@ class TestPeriodicRecoverySkipsDeadLetter:
         re_enqueued = main._recover_zero_vector_threads(db, queue, resurrect_dead=True)
         assert re_enqueued == 1
         assert queue.has_pending_row(str(inbox / "stuck.eml"))
+
+
+class TestEnqueueUnindexedMessages:
+    """The Maildir walk shared by the startup scan and the periodic
+    rescan. The periodic rescan is the eventual-completeness backstop
+    for files whose watchdog event was missed (restart, event
+    coalescing, a delivery during a window the observer wasn't
+    running), so it must find them — without resetting work the queue
+    already owns."""
+
+    def _setup(self, tmp_path, monkeypatch):
+        maildir = tmp_path / "maildir"
+        inbox = maildir / "INBOX" / "cur"
+        inbox.mkdir(parents=True)
+        monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
+        db = Database(tmp_path / "mail.db")
+        return maildir, inbox, db, _make_queue(db)
+
+    def test_enqueues_file_that_arrived_without_an_event(self, tmp_path, monkeypatch):
+        maildir, inbox, db, queue = self._setup(tmp_path, monkeypatch)
+        missed = inbox / "missed.eml"
+        _write_eml(missed, "missed@example.com")
+
+        enqueued = main._enqueue_unindexed_messages(db, queue, maildir, main.REASON_RESCAN)
+
+        assert enqueued == 1
+        assert queue.has_pending_row(str(missed))
+
+    def test_skips_already_indexed_files(self, tmp_path, monkeypatch):
+        maildir, inbox, db, queue = self._setup(tmp_path, monkeypatch)
+        _write_eml(inbox / "done.eml", "done@example.com")
+        main.initial_index(db, make_mock_embedder(), Threader(db), queue)
+        assert db.is_indexed(str(inbox / "done.eml"))
+
+        enqueued = main._enqueue_unindexed_messages(db, queue, maildir, main.REASON_RESCAN)
+
+        assert enqueued == 0
+        assert not queue.has_pending_row(str(inbox / "done.eml"))
+
+    def test_leaves_dead_lettered_files_alone(self, tmp_path, monkeypatch):
+        maildir, inbox, db, queue = self._setup(tmp_path, monkeypatch)
+        dead = inbox / "dead.eml"
+        _write_eml(dead, "dead@example.com")
+        queue.enqueue(str(dead), REASON_INITIAL_SCAN)
+        for _ in range(3):
+            queue.mark_failed(str(dead), stage="parse", error="boom")
+        assert queue.is_dead(str(dead))
+        attempts_before = db.queue_get_attempts(str(dead))
+
+        enqueued = main._enqueue_unindexed_messages(db, queue, maildir, main.REASON_RESCAN)
+
+        assert enqueued == 0
+        assert queue.is_dead(str(dead))
+        assert db.queue_get_attempts(str(dead)) == attempts_before
+
+    def test_does_not_reset_an_active_retry_cascade(self, tmp_path, monkeypatch):
+        """``enqueue`` is INSERT OR REPLACE, so a walk that re-enqueued
+        a queued-but-backing-off row would zero its attempts and let a
+        restart loop (or every periodic rescan) retry it forever
+        without ever reaching the dead-letter state."""
+        maildir, inbox, db, queue = self._setup(tmp_path, monkeypatch)
+        retrying = inbox / "retrying.eml"
+        _write_eml(retrying, "retrying@example.com")
+        queue.enqueue(str(retrying), REASON_INITIAL_SCAN)
+        queue.mark_failed(str(retrying), stage="embed", error="timeout")
+        assert queue.has_pending_row(str(retrying))
+        assert db.queue_get_attempts(str(retrying)) == 1
+
+        enqueued = main._enqueue_unindexed_messages(db, queue, maildir, main.REASON_RESCAN)
+
+        assert enqueued == 0
+        assert db.queue_get_attempts(str(retrying)) == 1
+
+    def test_unindexable_message_reaches_terminal_state_not_rescan_loop(
+        self, tmp_path, monkeypatch
+    ):
+        """A message the parser rejects outright (no Message-ID) can
+        never be indexed. It must land in a visible terminal state that
+        the walk skips — otherwise every periodic rescan re-enqueues and
+        re-parses it forever."""
+        maildir, inbox, db, queue = self._setup(tmp_path, monkeypatch)
+        no_id = inbox / "no-id.eml"
+        no_id.write_text("From: alice@example.com\r\nSubject: x\r\n\r\nbody\r\n", encoding="utf-8")
+        main.initial_index(db, make_mock_embedder(), Threader(db), queue)
+
+        enqueued = main._enqueue_unindexed_messages(db, queue, maildir, main.REASON_RESCAN)
+
+        assert enqueued == 0
+        assert queue.is_dead(str(no_id))
+
+
+class _FakeObserver:
+    def __init__(self, events: list[str]):
+        self._events = events
+
+    def schedule(self, *args, **kwargs):
+        pass
+
+    def start(self):
+        self._events.append("observer_start")
+
+    def stop(self):
+        pass
+
+    def join(self):
+        pass
+
+
+class TestMainStartupAndLoop:
+    """``main()`` wiring: the observer must be live before the initial
+    drain (otherwise mail delivered during a multi-hour initial index is
+    never enqueued), and the main loop must periodically re-walk the
+    Maildir so a missed event cannot cause a permanent omission."""
+
+    def _run_main(self, tmp_path, monkeypatch, *, sweep_due: bool):
+        events: list[str] = []
+        db = Database(tmp_path / "mail.db")
+        monkeypatch.setattr(main, "MAILDIR_PATH", tmp_path / "maildir")
+        monkeypatch.setattr(main, "_validate_embed_config", lambda: None)
+        monkeypatch.setattr(main, "_validate_embedding_dim", lambda e: None)
+        monkeypatch.setattr(main, "Database", lambda path: db)
+        monkeypatch.setattr(main, "OpenAIEmbedder", lambda **kw: make_mock_embedder())
+        monkeypatch.setattr(main, "touch_health_file", lambda: None)
+        monkeypatch.setattr(main, "sweep_paths", lambda db: None)
+        monkeypatch.setattr(main, "Observer", lambda: _FakeObserver(events))
+        monkeypatch.setattr(main, "initial_index", lambda *a, **kw: events.append("initial_index"))
+        monkeypatch.setattr(main, "_drain_queue_batched", lambda *a, **kw: 0)
+        monkeypatch.setattr(main, "_recover_zero_vector_threads", lambda *a, **kw: 0)
+        monkeypatch.setattr(
+            main,
+            "_enqueue_unindexed_messages",
+            lambda db, queue, root, reason: events.append(f"walk:{reason}") or 0,
+        )
+        if sweep_due:
+            monkeypatch.setattr(main, "RECOVERY_SWEEP_INTERVAL_SECS", 0)
+
+        def _stop(_seconds):
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(main.time, "sleep", _stop)
+        main.main()
+        return events
+
+    def test_observer_starts_before_initial_drain(self, tmp_path, monkeypatch):
+        events = self._run_main(tmp_path, monkeypatch, sweep_due=False)
+
+        assert "observer_start" in events
+        assert "initial_index" in events
+        assert events.index("observer_start") < events.index("initial_index")
+
+    def test_main_loop_periodically_rewalks_the_maildir(self, tmp_path, monkeypatch):
+        events = self._run_main(tmp_path, monkeypatch, sweep_due=True)
+
+        assert f"walk:{main.REASON_RESCAN}" in events

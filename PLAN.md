@@ -82,14 +82,10 @@ Maildir eventually reaches one visible terminal ingestion state, and
 transient infrastructure failures never cause permanent source
 omission.
 
-1. **Watcher-before-drain.** Start the watchdog observer *before* the
-   initial queue drain (mail delivered during a multi-hour initial
-   index is currently invisible until the next restart).
-2. **Periodic Maildir reconciliation.** Watching alone is not enough
-   (restarts, event coalescing, overflow). Add a periodic full-walk
-   reconciliation pass so eventual completeness never depends on
-   having seen an event. Builds on the existing recovery sweep and
-   `indexed_files` content-hash identity columns.
+1. ~~**Watcher-before-drain.**~~ Done 2026-09-26 (see Recently
+   Completed).
+2. ~~**Periodic Maildir reconciliation.**~~ Done 2026-09-26 (see
+   Recently Completed).
 3. **Failure taxonomy.** Classify queue failures explicitly —
    `retryable` (embed endpoint down, timeout, rate limit) vs
    `permanent_source_failure` (malformed MIME, corrupt file) vs
@@ -407,9 +403,6 @@ can be revisited with an explicit owner decision.
 ## Known limitations
 
 - initial sync may take a long time on large mailboxes
-- **mail delivered during the initial index drain is not observed
-  until the next restart** (watchdog starts after the drain) — Phase
-  0 item 1
 - **an embedder outage longer than the retry cascade can
   mass-dead-letter in-flight messages, and dead rows are never
   auto-resurrected** — Phase 0 items 3–6
@@ -464,6 +457,27 @@ do not ship persisted claims without them.
    during its Phase 3 experimental period.
 
 ## Recently Completed
+
+### 2026-09-26 — Ingestion completeness (Phase 0 items 1–2)
+
+The watchdog observer now starts before the initial drain, so mail
+delivered during a long initial index is enqueued instead of
+invisible until the next restart. The Maildir walk was extracted
+into `_enqueue_unindexed_messages` and now also runs periodically
+(on `INDEXER_RECOVERY_SWEEP_INTERVAL_SECS`, reason `rescan`) as the
+eventual-completeness backstop for missed events. The walk skips
+indexed, dead-lettered, **and already-queued** files — the last is a
+behavior change for the startup scan too: a restart no longer resets
+an in-flight retry cascade to zero attempts (previously a crash-
+looping container could retry a failing file forever without it ever
+reaching `dead`). Messages the parser rejects outright (no
+Message-ID) are now dead-lettered with `unindexable: no Message-ID`
+instead of having their row deleted: they were never marked indexed,
+so the periodic walk would otherwise re-parse them every interval
+forever, and they previously ended in no visible state at all.
+Tests: `TestEnqueueUnindexedMessages`,
+`TestMainStartupAndLoop` (first `main()` wiring coverage; the
+ordering test was mutation-checked against the old ordering).
 
 ### 2026-09-26 — Direction adoption + roadmap rewrite
 
