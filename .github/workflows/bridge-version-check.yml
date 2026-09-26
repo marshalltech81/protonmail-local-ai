@@ -97,13 +97,33 @@ jobs:
         if: steps.compare.outputs.needs_bump == 'true'
         run: |
           new="${{ steps.latest.outputs.version }}"
-          # Both pin sites must move together — `.env.example` is what
-          # the Compose stack reads at runtime, `bridge/Dockerfile` ARG
-          # is the build-time default if .env is absent.
+          # All THREE pin sites must move together:
+          #   .env.example        — what an operator copies to .env
+          #   bridge/Dockerfile   — build-time ARG default
+          #   docker-compose.yml  — the ${BRIDGE_VERSION:-...} fallback
+          #
+          # The compose fallback is easy to overlook and silently wins:
+          # compose passes BRIDGE_VERSION as an explicit build arg, so
+          # when no .env is present its stale default overrides the
+          # Dockerfile ARG and the build produces the OLD Bridge even
+          # though both other sites were bumped.
           sed -i "s|^BRIDGE_VERSION=.*|BRIDGE_VERSION=${new}|" .env.example
           sed -i "s|^ARG BRIDGE_VERSION=.*|ARG BRIDGE_VERSION=${new}|" bridge/Dockerfile
+          # Single-quoted pattern so the shell leaves the literal
+          # ${BRIDGE_VERSION:-...} text alone; only ${new} breaks out of the
+          # quotes. A double-quoted form here expands the default-value
+          # syntax itself and silently matches nothing.
+          # shellcheck disable=SC2016 # the un-expanded $ is the point: it is
+          # matched as literal text inside docker-compose.yml, not evaluated.
+          sed -i 's|BRIDGE_VERSION: ${BRIDGE_VERSION:-v[0-9.]*}|BRIDGE_VERSION: ${BRIDGE_VERSION:-'"${new}"'}|' docker-compose.yml
           echo "--- diff ---"
-          git --no-pager diff .env.example bridge/Dockerfile
+          git --no-pager diff .env.example bridge/Dockerfile docker-compose.yml
+          # Fail loudly if any pin site still references a different version.
+          if git --no-pager grep -n -E 'v[0-9]+\.[0-9]+\.[0-9]+' -- .env.example bridge/Dockerfile docker-compose.yml \
+               | grep -E 'BRIDGE_VERSION' | grep -v "${new}"; then
+            echo "ERROR: a BRIDGE_VERSION pin site was not updated to ${new}." >&2
+            exit 1
+          fi
 
       - name: Seed local config for bridge-upgrade-check
         if: steps.compare.outputs.needs_bump == 'true'
@@ -118,6 +138,23 @@ jobs:
           chmod 600 .secrets/bridge_pass.txt
           printf '' > .secrets/anthropic_api_key.txt
           chmod 600 .secrets/anthropic_api_key.txt
+
+      # Mirror the same step in .github/workflows/bridge.yml so both
+      # workflows provision the gate identically. These are the C deps
+      # ./internal/vault/... needs through docker-credential-helpers
+      # (libsecret) plus the libfido2/libcbor Bridge links against.
+      #
+      # Today they go unused here: the runner's Go is older than Bridge's
+      # go.mod requires, so patch-source.sh compiles inside the pinned image
+      # instead. They are installed anyway so the faster host path works the
+      # moment a runner image ships a Go that satisfies go.mod, rather than
+      # failing with "Package libsecret-1 was not found" at that point.
+      - name: Install Bridge build C dependencies
+        if: steps.compare.outputs.needs_bump == 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libsecret-1-dev libfido2-dev libcbor-dev
 
       - name: Run bridge-upgrade-check (informational)
         if: steps.compare.outputs.needs_bump == 'true'
@@ -150,12 +187,24 @@ jobs:
 
             `make bridge-upgrade-check` outcome: **${{ steps.gate.outcome }}**
 
-            If the gate failed, upstream most likely restructured
-            `internal/constants/`, `internal/certs/`, or
-            `internal/vault/` enough to break one of the `require_count`
-            guards in `bridge/patch-source.sh`. Review the workflow logs
-            and update the affected `UPSTREAM_*` / `PATCHED_*` constants
-            so the patch hunk lines up against the new source.
+            If the gate failed, read the logs before assuming patch
+            drift — the two failure modes look alike in the summary but
+            call for opposite responses.
+
+            1. **`Patch drift detected: expected N match(es) ...`** —
+               real drift. Upstream restructured
+               `internal/constants/`, `internal/certs/`, or
+               `internal/vault/` enough to break a `require_count`
+               guard in `bridge/patch-source.sh`. Update the affected
+               `UPSTREAM_*` / `PATCHED_*` constants so the hunk lines
+               up against the new source.
+            2. **`post-patch compilation failed`** — the guards all
+               passed and the patch applied; the build environment is
+               at fault. Check for a missing cgo dependency
+               (`Package libsecret-1 was not found`) or a `toolchain`
+               directive in upstream's `go.mod` pulling a different Go
+               version. These are gate bugs, not upstream changes, and
+               the pin itself may be fine.
 
             Per `AGENTS.md`, run `make bridge-upgrade-check` locally
             before merging.
