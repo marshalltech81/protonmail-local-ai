@@ -6,7 +6,7 @@
 # -----------------------------------------------------------------------------
 # Stage 1: Builder — installs Python dependencies that require compilation
 # -----------------------------------------------------------------------------
-FROM python:3.14-slim-trixie@sha256:1697e8e8d39bf168e177ac6b5fdab6df86d81cfc24dae17dfb96cfc3ef76b4dd AS builder
+FROM python:3.14-slim-trixie@sha256:7a500125bc50693f2214e842a621440a1b1b9cbb2188f74ab045d29ed2ea5856 AS builder
 
 COPY --from=ghcr.io/astral-sh/uv:0.11.6@sha256:b1e699368d24c57cda93c338a57a8c5a119009ba809305cc8e86986d4a006754 /uv /uvx /bin/
 
@@ -27,7 +27,7 @@ COPY src/ ./src/
 # Stage 2: Runtime — no build toolchain
 # Runs as non-root user 'indexer' (UID 1002)
 # -----------------------------------------------------------------------------
-FROM python:3.14-slim-trixie@sha256:1697e8e8d39bf168e177ac6b5fdab6df86d81cfc24dae17dfb96cfc3ef76b4dd
+FROM python:3.14-slim-trixie@sha256:7a500125bc50693f2214e842a621440a1b1b9cbb2188f74ab045d29ed2ea5856
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     inotify-tools \
