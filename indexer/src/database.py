@@ -19,7 +19,12 @@ from pathlib import Path
 import sqlite_vec
 
 from .chunker import l2_normalize, truncate_to_tokens
-from .threader import THREAD_BODY_TEXT_MAX_TOKENS, Thread, canonical_addr
+from .threader import (
+    PER_MESSAGE_BODY_CAP_CHARS,
+    THREAD_BODY_TEXT_MAX_TOKENS,
+    Thread,
+    canonical_addr,
+)
 
 log = logging.getLogger("indexer.database")
 
@@ -83,13 +88,26 @@ def _dedupe_by_canonical(addrs: list[str]) -> list[str]:
 #         and blocking the watchdog + reconciler. Including
 #         ``thread_id`` in the index makes it actually covering for the
 #         SELECT (no per-match table seek).
+#   v17 — backfill the unit-norm storage invariant on existing
+#         ``threads_vec`` / ``message_chunks_vec`` rows so cosine
+#         similarity equals dot product across both new and pre-upgrade
+#         vectors. See ``0017_unit_norm_vec_invariant.sql``.
+#   v18 — ``message_chunks.message_date``: nullable column carrying
+#         the source message's ``Date:`` header value at chunk-write
+#         time so timeline-style retrieval
+#         (``get_recent_chunks_for_thread`` / ``summarize_thread``)
+#         can order by message time instead of the chunker's
+#         wall-clock insert time. Legacy v17- rows have NULL
+#         ``message_date`` and the downstream query uses
+#         ``COALESCE(message_date, chunked_at)`` so they degrade to
+#         the old heuristic until they are re-chunked.
 # Bumping this constant requires shipping a forward migration file at
 # ``src/migrations/<NNNN>_<slug>.sql`` covering the new version. Fresh
 # installs continue to apply ``_apply_initial_schema`` directly and stamp
 # the current version; existing installs run the migration runner to
 # catch up. See ``src/migrations/runner.py`` for the file layout and
 # transactional guarantees.
-SCHEMA_VERSION = 17
+SCHEMA_VERSION = 18
 
 # The schema uses FTS5 ``contentless_delete=1``, which SQLite added in 3.43.
 # Validate the runtime version at Database init and fail fast with a clear
@@ -494,6 +512,7 @@ class Database:
                 chunked_at      TEXT NOT NULL,
                 fts_rowid       INTEGER,
                 attachment_id   TEXT,
+                message_date    TEXT,                    -- source message's Date: header at chunk-write; NULL on legacy v17- rows, COALESCE'd to chunked_at by readers
                 FOREIGN KEY (message_id) REFERENCES message_thread_map(message_id)
                     ON DELETE CASCADE,
                 FOREIGN KEY (thread_id) REFERENCES threads(thread_id)
@@ -627,8 +646,13 @@ class Database:
             existing_message_ids = set(json.loads(existing["message_ids"]))
             new_messages = [m for m in thread.messages if m.message_id not in existing_message_ids]
             if new_messages:
+                # Per-message char cap shared with ``Thread.text_for_embedding``
+                # so a thread that arrived as one message gets the same FTS
+                # body coverage as a thread that arrived as a sequence of
+                # replies.
                 new_content = "\n".join(
-                    f"From: {m.from_addr}\nDate: {m.date.isoformat()}\n{m.body_text[:2000]}"
+                    f"From: {m.from_addr}\nDate: {m.date.isoformat()}\n"
+                    f"{m.body_text[:PER_MESSAGE_BODY_CAP_CHARS]}"
                     for m in new_messages
                 )
                 return truncate_to_tokens(
@@ -902,6 +926,7 @@ class Database:
         chunks,
         embeddings_by_chunk_id: dict[str, list[float]],
         attachment_id: str | None = None,
+        message_date: str | None = None,
     ) -> dict[str, int]:
         """Idempotently sync the chunk rows for one slice of a message.
 
@@ -911,7 +936,9 @@ class Database:
         relative to what's already stored — embeddings for existing
         chunk_ids are not touched (the chunk text is unchanged so the
         prior embedding is still valid). Returns ``{"inserted": n,
-        "deleted": m, "kept": k}`` for observability.
+        "deleted": m, "kept": k, "backfilled": b}`` for observability;
+        ``backfilled`` counts kept rows whose ``NULL`` ``message_date``
+        was filled in by this call (see below).
 
         ``attachment_id`` selects which slice of the message's chunks
         this call manages:
@@ -926,6 +953,18 @@ class Database:
           forwarded across N messages produces N distinct chunk
           occurrences (one per parent thread) so any chunk hit can lift
           its parent thread into ranking.
+
+        ``message_date`` is the source message's ``Date:`` header in
+        ISO 8601 form (``msg.date.isoformat()``). Stored on every new
+        chunk row — and backfilled onto kept rows that still carry a
+        ``NULL`` ``message_date`` — so timeline-style retrieval
+        (``get_recent_chunks_for_thread`` / ``summarize_thread``) can
+        order by message time instead of the chunker's wall-clock
+        insert time. ``None`` is permitted for callers that have no
+        date context (legacy test fixtures, ad-hoc tooling) and
+        produces ``NULL`` rows that downstream readers handle via
+        ``COALESCE(message_date, chunked_at)``. Production indexer
+        paths always pass a real ISO timestamp.
 
         All inserts / deletes across ``message_chunks``,
         ``message_chunks_fts`` and ``message_chunks_vec`` happen inside
@@ -1004,8 +1043,8 @@ class Database:
                     INSERT INTO message_chunks
                         (chunk_id, message_id, thread_id, chunk_index, text,
                          char_start, char_end, token_est,
-                         chunked_at, fts_rowid, attachment_id)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                         chunked_at, fts_rowid, attachment_id, message_date)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         chunk.chunk_id,
@@ -1019,8 +1058,33 @@ class Database:
                         now_iso,
                         fts_rowid,
                         attachment_id,
+                        message_date,
                     ),
                 )
+
+            # Backfill ``message_date`` onto kept chunk rows. Chunk IDs
+            # are deterministic (``sha256(message_pk || index || text)``),
+            # so reprocessing an unchanged message during a reap-rebuild,
+            # dead-letter retry, or recovery sweep produces identical IDs
+            # — every chunk lands in ``kept``, not ``to_insert``, and the
+            # insert path above never runs for it. Legacy v17- rows
+            # (written before the schema v18 ``message_date`` column)
+            # would therefore stay ``NULL`` forever. The ``IS NULL``
+            # guard keeps this a pure backfill: rows that already carry
+            # a date are untouched.
+            backfilled = 0
+            kept_ids = existing_ids & incoming_ids
+            if message_date is not None and kept_ids:
+                placeholders = ",".join("?" * len(kept_ids))
+                # ``placeholders`` is only ``?`` marks; every chunk_id is
+                # bound as a parameter, so this is not a SQL-injection
+                # vector. nosec B608.
+                cur.execute(
+                    f"UPDATE message_chunks SET message_date = ? "  # nosec B608
+                    f"WHERE message_date IS NULL AND chunk_id IN ({placeholders})",
+                    (message_date, *kept_ids),
+                )
+                backfilled = cur.rowcount
 
             self._commit_if_started(started)
         except Exception:
@@ -1031,6 +1095,7 @@ class Database:
             "inserted": len(to_insert),
             "deleted": len(to_delete),
             "kept": len(existing_ids & incoming_ids),
+            "backfilled": backfilled,
         }
 
     @_synchronized
@@ -1419,6 +1484,52 @@ class Database:
             stuck_thread_ids,
         ).fetchall()
         return [r["filepath"] for r in rows]
+
+    @_synchronized
+    def get_thread_display_subject(self, thread_id: str) -> str | None:
+        """Return ``threads.display_subject`` for ``thread_id``, or ``None``.
+
+        ``display_subject`` is the oldest message's original-case
+        subject (with any ``Re:`` / ``Fwd:`` prefixes intact),
+        maintained by ``upsert_thread``'s merge so the value is stable
+        across the lifetime of the thread except when a genuinely
+        older message arrives out of order. ``None`` when the thread
+        does not exist OR is a legacy v12 row that has not been
+        refreshed since v13 added the column.
+
+        Used by the chunkless-thread subject-fallback path in the
+        indexer's Phase 2a and the reconciler's reap rebuild so both
+        paths embed the SAME stable subject text for the same thread.
+        Without this shared source, the indexer's fallback used the
+        newly-arrived message's subject (overwriting prior fallbacks
+        on every chunkless reply, producing order-dependent thread
+        vectors) and the reaper used the threader's normalized
+        grouping key (silent vector drift between the two paths).
+        """
+        row = self._conn.execute(
+            "SELECT display_subject FROM threads WHERE thread_id = ?",
+            (thread_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return row["display_subject"]
+
+    @_synchronized
+    def thread_has_chunks(self, thread_id: str) -> bool:
+        """Return True iff at least one chunk row exists for ``thread_id``.
+
+        Cheap existence check for the subject-fallback gate in the
+        batched indexer's Phase 2a. ``get_thread_chunk_embeddings`` is
+        the wrong tool for that check — it loads, blob-unpacks, and
+        copies every chunk vector for the thread just so the caller
+        can take ``bool(list)``. On chatty threads with hundreds of
+        chunks that's wasted I/O on a hot per-message path.
+        """
+        row = self._conn.execute(
+            "SELECT 1 FROM message_chunks WHERE thread_id = ? LIMIT 1",
+            (thread_id,),
+        ).fetchone()
+        return row is not None
 
     @_synchronized
     def get_thread_chunk_embeddings(self, thread_id: str) -> list[list[float]]:

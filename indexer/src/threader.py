@@ -5,11 +5,48 @@ Indexes at the thread level — the unit Claude reasons about.
 """
 
 import logging
+import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from email.utils import parseaddr
 
 from .parser import Message
+
+# Reply / forward prefixes the subject normalizer strips before grouping.
+# Hoisted to module level so the compiled regex is reused across every
+# incoming message instead of recompiling per call.
+#
+# Two prefix classes, distinguished by what punctuation must follow.
+#
+# CLASS 1 — well-known, low false-strip risk: ``re|fwd|fw|回复|答复``.
+# Accept the full punctuation set ``[\s:\[\]]+`` because the prefix
+# is universally recognized and a real subject starting with
+# ``Re report ...`` (missing colon) is functionally always a reply,
+# not English prose. ``回复`` / ``答复`` are CJK so cannot collide
+# with English word starts.
+#
+# CLASS 2 — language-specific two-letter abbreviations, high
+# false-strip risk against English prose: ``aw|ant|sv|tr``. Require
+# explicit ``[:\[\]]+`` punctuation (no bare whitespace) so English /
+# cross-language subjects like ``Tr report on Q1``, ``Sv anything``,
+# ``Ant question?``, or ``Aw report`` are NOT silently treated as
+# reply prefixes and merged onto an unrelated thread. Real
+# ``Aw``/``Ant`` (German), ``Sv`` (Swedish), ``Tr`` (French) clients
+# universally emit the colon shape (``Aw:``, ``Sv:``, ``Tr:``), so
+# this restriction does not affect real reply detection. The colon
+# requirement is what makes the existing reasoning (single-letter
+# prefixes are excluded because of false-strip risk) actually hold
+# for the two-character cases that share surface with English prose.
+#
+# Single-letter prefixes (Italian ``R:``, French ``Réf:``) remain
+# excluded — even with the colon-only restriction, the false-strip
+# surface for one-letter starts (e.g. ``R: meeting`` vs ``R&D recap``)
+# is too narrow to disambiguate.
+_SUBJECT_PREFIX_RE = re.compile(
+    r"^(?:(?:re|fwd|fw|回复|答复)[\s:\[\]]+|(?:aw|ant|sv|tr)[:\[\]]+)",
+    re.IGNORECASE,
+)
+_SUBJECT_WHITESPACE_RE = re.compile(r"\s+")
 
 
 def canonical_addr(value: str) -> str:
@@ -64,6 +101,19 @@ SUBJECT_FALLBACK_WINDOW = timedelta(days=60)
 # pathological threads.
 THREAD_BODY_TEXT_MAX_TOKENS = 4000
 
+# Per-message char cap applied when packing message bodies into the
+# thread-level body_text. Char-based here (vs token-based for the
+# thread-wide cap above) because this is a crude per-message limiter to
+# stop one outlier from dominating the thread's FTS contribution before
+# the thread-wide token cap fires. The two paths that build body_text
+# (``Thread.text_for_embedding`` on fresh insert,
+# ``Database._compute_body`` on update) must share this constant so a
+# thread's FTS coverage does not depend on whether it arrived as one
+# message or as a sequence of replies — the previous shape kept fresh
+# inserts at 500 and updates at 2000, producing a permanent FTS
+# asymmetry tied to arrival ordering.
+PER_MESSAGE_BODY_CAP_CHARS = 2000
+
 log = logging.getLogger("indexer.threader")
 
 
@@ -97,11 +147,11 @@ class Thread:
             parts.append(f"From: {msg.from_addr}")
             parts.append(f"Date: {msg.date.isoformat()}")
             # Cap per-message body so the joined string stays bounded
-            # before the thread-level truncation below. 500 chars is a
-            # crude but effective limiter — one outlier message cannot
-            # dominate the thread vector before the token-based cap
-            # below claims its real budget.
-            parts.append(msg.body_text[:500])
+            # before the thread-level truncation below. Shared with
+            # ``Database._compute_body`` via ``PER_MESSAGE_BODY_CAP_CHARS``
+            # so fresh-insert and update paths agree on what each
+            # message contributes to the thread's FTS body field.
+            parts.append(msg.body_text[:PER_MESSAGE_BODY_CAP_CHARS])
             parts.append("")
 
         return truncate_to_tokens("\n".join(parts), THREAD_BODY_TEXT_MAX_TOKENS)
@@ -253,17 +303,17 @@ class Threader:
 
 def _normalize_subject(subject: str) -> str:
     """
-    Strip Re:, Fwd:, and whitespace variants from subject for matching.
-    Loops until no more prefixes can be removed so deeply-nested reply
-    chains ('Re: Re: Fwd: Hello') collapse to the bare subject ('hello').
-    """
-    import re
+    Strip reply/forward prefixes and collapse whitespace for matching.
 
-    prefix = re.compile(r"^(re|fwd|fw|aw|ant)[\s:\[\]]+", re.IGNORECASE)
+    Loops until no more prefixes can be removed so deeply-nested reply
+    chains ('Re: Re: Fwd: Hello') collapse to the bare subject
+    ('hello'). The prefix set is the conservative cross-language list
+    described in ``_SUBJECT_PREFIX_RE``.
+    """
     s = subject.lower().strip()
     while True:
-        stripped = prefix.sub("", s).strip()
+        stripped = _SUBJECT_PREFIX_RE.sub("", s).strip()
         if stripped == s:
             break
         s = stripped
-    return re.sub(r"\s+", " ", s).strip()
+    return _SUBJECT_WHITESPACE_RE.sub(" ", s).strip()

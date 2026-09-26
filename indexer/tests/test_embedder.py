@@ -244,6 +244,48 @@ class TestOpenAIEmbedder:
         assert emb.embed_batch([]) == []
         assert called["n"] == 0
 
+    def test_on_batch_complete_fires_once_per_internal_batch(self):
+        # A large cross-message embed splits internally at
+        # ``batch_size``; the callback is the indexer's hook for
+        # refreshing the health-file heartbeat between internal
+        # batches so a slow cloud embedder cannot age the health
+        # file past HEALTH_MAX_AGE_SECONDS during a single call.
+        emb = _make_embedder(batch_size=2)
+
+        def fake_create(**kwargs):
+            n = len(kwargs["input"])
+            return _embed_response([[1.0]] * n)
+
+        _patch_create(emb, fake_create)
+        ticks = {"n": 0}
+
+        def on_tick():
+            ticks["n"] += 1
+
+        emb.embed_batch(["a", "b", "c", "d", "e"], on_batch_complete=on_tick)
+        # 5 inputs / batch_size=2 → 3 internal batches.
+        assert ticks["n"] == 3
+
+    def test_on_batch_complete_not_fired_on_failure(self):
+        # If ``_embed_one_batch`` exhausts its retries the callback
+        # must NOT fire — touching the health file for a failed embed
+        # would mask an actual outage from the watchdog.
+        emb = _make_embedder(batch_size=2)
+
+        def fake_create(**_kwargs):
+            raise _api_status_error(500)
+
+        _patch_create(emb, fake_create)
+        emb._embed_one_batch.retry.wait = lambda *_a, **_kw: 0  # type: ignore[attr-defined]
+        ticks = {"n": 0}
+
+        def on_tick():
+            ticks["n"] += 1
+
+        with pytest.raises(APIStatusError):
+            emb.embed_batch(["a", "b"], on_batch_complete=on_tick)
+        assert ticks["n"] == 0
+
     def test_retries_on_5xx_then_succeeds(self):
         emb = _make_embedder()
         attempts = {"n": 0}
@@ -340,6 +382,60 @@ class TestWaitForReady:
         _patch_warmup(emb, fake_create)
         with pytest.raises(RuntimeError, match="did not become ready"):
             emb.wait_for_ready(timeout=1)
+
+    def test_uses_fast_probe_interval_initially_then_slow(self, monkeypatch):
+        # Fast initial probes catch a remote provider that responds in
+        # <1 s without burning ~3 s of startup latency on every cold
+        # start; once the fast budget is spent we back off to the slow
+        # interval so a multi-minute host warmup doesn't spam logs.
+        #
+        # Patch BOTH ``time.sleep`` and ``time.monotonic``: the deadline
+        # check in ``wait_for_ready`` reads ``time.monotonic`` and
+        # would otherwise depend on real wall-clock time advancing
+        # during the loop, making the test flaky on heavily loaded CI
+        # runners (12+ probes taking >10s real time would trip the
+        # deadline check before the side-effect raise).
+        sleeps: list[float] = []
+        clock = {"t": 1000.0}
+
+        def fake_sleep(s: float) -> None:
+            sleeps.append(s)
+            clock["t"] += s
+
+        monkeypatch.setattr(time, "sleep", fake_sleep)
+        monkeypatch.setattr(time, "monotonic", lambda: clock["t"])
+        emb = _make_embedder()
+        req = httpx.Request("POST", "http://x")
+        # Always fail with a transient error so the loop keeps probing
+        # until the side-effect-raised fatal error stops it. Counter
+        # raises after enough probes to exercise both cadence bands.
+        attempts = {"n": 0}
+
+        def fake_create(**_kwargs):
+            attempts["n"] += 1
+            if attempts["n"] > emb._FAST_PROBE_COUNT + 2:
+                raise APIStatusError(
+                    message="fatal",
+                    response=httpx.Response(400, request=httpx.Request("POST", "http://x")),
+                    body=None,
+                )
+            raise APIConnectionError(request=req)
+
+        _patch_warmup(emb, fake_create)
+        # Timeout chosen well above the simulated 11s of probe sleeps
+        # (10 fast x 0.5s + 2 slow x 3.0s = 11s) so the deadline check
+        # never fires under the patched clock.
+        with pytest.raises(APIStatusError):
+            emb.wait_for_ready(timeout=60)
+        # First FAST_PROBE_COUNT sleeps should use the fast interval;
+        # subsequent sleeps should use the slow interval.
+        assert (
+            sleeps[: emb._FAST_PROBE_COUNT]
+            == [emb._FAST_PROBE_INTERVAL_SECS] * emb._FAST_PROBE_COUNT
+        )
+        assert sleeps[emb._FAST_PROBE_COUNT :] == [emb._SLOW_PROBE_INTERVAL_SECS] * (
+            len(sleeps) - emb._FAST_PROBE_COUNT
+        )
 
 
 class TestL2Normalize:

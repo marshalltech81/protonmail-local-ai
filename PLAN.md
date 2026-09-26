@@ -35,10 +35,12 @@ The stack now runs:
 - **mbsync** — Docker, pulls into Maildir, `chmod go+r` after each sync.
 - **indexer** — Docker, parses Maildir, threads, embeds via any
   OpenAI-compatible `/v1/embeddings` provider (operator-supplied),
-  writes SQLite. Schema is at v17 with 4096-dim L2-unit-norm vectors
-  (the v17 backfill normalizes any pre-existing non-unit
+  writes SQLite. Schema is at v18 with 4096-dim L2-unit-norm vectors
+  (the v17 backfill normalized any pre-existing non-unit
   `threads_vec` / `message_chunks_vec` rows in place via
-  `vec_normalize`, gated to skip the zero placeholder). Both the
+  `vec_normalize`, gated to skip the zero placeholder; v18 adds the
+  nullable `message_chunks.message_date` column so the chunk tail
+  orders by message time, not index time). Both the
   initial scan and the steady-state main loop drain the queue through
   the same unified two-phase batched path (`Phase 1` commits thread
   membership per message — seeded by a three-case priority chain:
@@ -88,7 +90,9 @@ tool-behavior tightening, Tier 1 safety preservation) are now unpaused.
 ### Out of scope for this objective
 
 - Reintroducing project-shipped model-serving components.
-- Adding new MCP tools or changing the MCP API surface.
+- Adding new MCP tools beyond the owner-directed `get_evidence` /
+  `search_attachments` retrieval pair (added 2026-05-15 — see
+  Near-Term Backlog), or otherwise changing the MCP API surface.
 
 ### MLX-rebuild carryover (still-pending follow-ups from PRs #83/#84/#85)
 
@@ -98,13 +102,20 @@ validation tasks that should happen regardless of the LLM-engine swap.
 1. **Rerank-side quality experiment.** Once retrieval is stable,
    compare `RERANK_MODE=cohere` vs `false` on the manual eval
    set to measure what the rerank stage actually buys you.
-2. **Indexer healthcheck threshold.** Currently flagged
+2. **Indexer healthcheck threshold.** Previously flagged
    "unhealthy" during sustained MLX-pace indexing because
    `HEALTH_MAX_AGE_SECONDS` was tuned for the prior fast-embed
    path (~50-200ms per call), not Qwen3-Embedding's ~1-3s per
-   chunk. Functional impact zero; small follow-up to bump the
-   threshold default and/or call `touch_health_file()` more
-   aggressively.
+   chunk. Partially addressed on `fix/indexer-rag-review-followups`
+   by threading `touch_health_file` through
+   `OpenAIEmbedder.embed_batch` as an `on_batch_complete` hook so
+   the heartbeat now refreshes between internal batches inside a
+   single Phase 2b call. The same branch also replaces the
+   hardcoded 3 s probe interval in `wait_for_ready` with a
+   fast-initial (0.5 s × 10) → slow (3 s) backoff so cold-start
+   detection isn't paying ~3 s of latency on every restart. A
+   `HEALTH_MAX_AGE_SECONDS` default bump is still open if
+   operators on very slow embedders see false-unhealthy signals.
 
 The detailed PR-#83 session notes live in the project memory file
 ``project_mlx_rebuild_session.md``.
@@ -231,43 +242,187 @@ Definition of done:
 - add attachment download support once the read-only action path is defined
 - verify action tools respect read-only guardrails
 
-### RAG quality — inline-reply quote stripping
+### MCP retrieval tools — get_evidence + search_attachments (added 2026-05-15)
 
-`indexer/src/quoting.py:_HARD_CUT_PATTERNS` treats `On … wrote:` as a
-hard cut and `break`s out of the loop, so any inline reply text that
-appears AFTER the cut line is silently dropped from the embedding
-input. Two failure shapes:
+Owner-directed addition pulling forward Later-Backlog retrieval items
+("attachment-aware retrieval with provenance", "ask my mailbox, show
+receipts"). No schema change — all five pieces sit on the existing
+thread + chunk + attachment tables:
 
-- **Pure inline reply** (no top-posted prefix): the very first line
-  is `On … wrote:`, the loop breaks immediately, `kept` is empty, and
-  the empty-fallback at quoting.py:76-83 returns the original
-  body_text unchanged — so the embedder sees the questions and
-  answers tangled together with quoted questions appearing twice.
-- **Top-posted reply with inline annotations on the quoted history**:
-  everything after the cut line — including the user's inline answers
-  between `>` blocks — is dropped. The thread vector keeps only the
-  top-posted prefix.
+- **`get_evidence`** returns the ranked evidence chunks that back a
+  query — thread / message / attachment provenance, char offsets, and
+  message date — with no LLM synthesis. Thin wrapper over the existing
+  `hybrid_search(with_evidence=True)` machinery; a `thread_id` scopes
+  it to one thread.
+- **`search_attachments`** locates attachments by filename, MIME type,
+  and extracted text (two FTS lanes), with content-type / sender /
+  date / extracted-only filters and a no-query scan.
+- **`get_message`** now reconstructs the message body from the
+  per-message chunk store instead of returning thread context only;
+  it falls back to thread context when no body chunks are indexed.
+- **`search_emails`** gains a `participant` filter (matches anyone in
+  From/To/Cc), distinct from the sender-only `from_addr` / `from_name`.
+- RRF fusion records per-lane provenance (`ThreadResult.lane_ranks`)
+  as pure additive observability for `get_evidence(include_scores=True)`
+  — scoring and ordering are unchanged (verified against the existing
+  fusion/rerank suites).
 
-Both shapes regress retrieval quality compared to the file's stated
-philosophy ("conservative stripper that occasionally leaves quoted
-text in is better than aggressive one that eats real body content").
-For the inline case the current implementation does the opposite of
-that.
+### RAG quality — inline-reply quote stripping (resolved 2026-05-13)
 
-Three options, ordered by complexity:
+Previously, `indexer/src/quoting.py:_HARD_CUT_PATTERNS` treated
+`On … wrote:` as a hard cut and `break`ed out of the loop, so any
+inline reply text after the cut line was silently dropped from the
+embedding input. Two failure shapes:
 
-1. Drop `On … wrote:` from `_HARD_CUT_PATTERNS`. Conservative — the
-   `>`-line filter still removes most quoted history. Slight RAG-noise
-   increase on top-posts.
-2. Two-pass: stop *cutting* at the marker but keep filtering `>` lines
-   after it. Preserves inline answers without bringing back the full
-   quoted history. Fits the file's "no ML, simple line rules" stance.
-3. Defer to a real reply-parser library (`mailparser-reply`, `talon`).
-   Higher dependency cost, broader inbox-shape coverage.
+- **Pure inline reply**: the loop broke immediately and the
+  empty-fallback returned the full original body unchanged — the
+  embedder saw questions and answers tangled together.
+- **Top-posted reply with inline annotations**: the user's inline
+  answers between `>` blocks were dropped.
 
-Option 2 is the natural fit. Surfaced during the indexer line-by-line
-review on 2026-05-08; not blocking any active priority but a real
-RAG-quality regression on inbox-shape replies.
+Resolved on `fix/indexer-rag-review-followups` via option 2 (two-pass):
+`On … wrote:` moved from `_HARD_CUT_PATTERNS` to a separate
+`_REPLY_HEADER_PATTERNS` tuple, and reply-header lines now `continue`
+past the loop instead of `break`ing. The `>`-line filter still
+removes the quoted history that follows. Signature delimiters
+(`-- `) and forward preambles remain genuine hard cuts. Test coverage
+extended in `test_quoting.py::TestInlineReplies`. Option 3 (real
+reply-parser library) remains deferred — no additional dependency
+felt warranted once the inline-answer regression was fixed.
+
+Follow-up on the same branch (2026-05-13) extended coverage so the
+indexer pipeline doesn't drop quoted history cleanly in English while
+leaking the same noise in other languages and other clients:
+
+- **Non-English single-line reply headers.** `_REPLY_HEADER_PATTERNS`
+  now matches German (`Am … schrieb …:`), French (`Le … a écrit :`),
+  Spanish (`El … escribió:`), Italian (`Il … ha scritto:`), and Dutch
+  (`Op … schreef …:`) attribution shapes. Mirrors the threader's
+  multi-language `TestNormalizeSubject` coverage so the pipeline
+  treats reply headers symmetrically across the languages it already
+  handles for subject normalization.
+- **Two-line wrapped reply headers.** Gmail wraps the attribution
+  when the address pushes it past ~78 chars, putting the verb (and
+  colon) on a line of its own. New `_WRAPPED_REPLY_HEADER_PATTERNS`
+  tuple plus a pre-pass `re.sub` joins the wrapped span back into
+  one line before the main loop runs. Covers the same six languages
+  as the single-line set.
+- **Outlook bare-block header.** Newer Outlook omits the
+  `-----Original Message-----` dashed delimiter and emits a bare
+  `From:/Sent:/To:/Subject:` block at the top of the quoted history.
+  New `_OUTLOOK_BLOCK_PATTERN` matches `From:` followed (after at
+  most one blank line) by `Sent:` or `Date:` and truncates the body
+  at the match position — same effect as the dashed delimiter in
+  `_HARD_CUT_PATTERNS`. False-positive guard test (`test_prose_mentioning_from_is_not_falsely_cut`)
+  confirms prose like "The note read: From: Anonymous." survives
+  because no following timestamp line is present.
+
+Test coverage extended in `test_quoting.py::TestNonEnglishReplyHeaders`
+(7 cases), `TestWrappedReplyHeaders` (3 cases), and
+`TestOutlookBlockCut` (4 cases). Full indexer suite (573 tests) passes.
+
+### RAG quality — retrieval review followups (resolved 2026-05-13)
+
+Codex follow-up review on `fix/indexer-rag-review-followups` flagged
+four retrieval-quality gaps. All four addressed in this branch:
+
+- **F1 (P1) — Evidence ranking ignored lane provenance.** `ask_mailbox`
+  promises attachment content surfaces when the carrier thread is found
+  by *any* lane, including attachment filename FTS, but
+  `get_evidence_chunks_for_threads` ranked chunks purely by dense
+  similarity and `ChunkResult` carried no attachment provenance. Fixed
+  by extending `ChunkResult` with `attachment_id` / `attachment_filename`
+  / `attachment_mime`, JOINing `attachments` on `(attachment_id,
+  message_id)`, and floating attachment chunks to the front of the
+  per-thread evidence slice whenever the thread won via attachment-FTS
+  (`Database._attachment_won_thread_ids`). `_thread_context` renders
+  filename + MIME in the chunk header so the LLM can cite the source
+  attachment.
+- **F2 (P1) — `summarize_thread` fed stale `body_text`.** `_compute_body`
+  appends new replies to the existing body then truncates from the
+  front, so a thread that crosses `THREAD_BODY_TEXT_MAX_TOKENS` (4000)
+  silently drops its newest replies from the body view. `get_thread`
+  returns no evidence chunks, so `_thread_context` fell back to the
+  stale body. Added `Database.get_recent_chunks_for_thread`
+  (`COALESCE(message_date, chunked_at) DESC, chunk_index DESC`
+  selection, chronological output) and a `_summarize_context` helper
+  that *merges* the accumulated `body_text` with the recent-chunk tail
+  under a `--- recent messages ---` section — the tail supplements the
+  body rather than replacing it, so `"detailed"` / `"action-items"`
+  summaries keep both the start of the thread and its latest activity
+  (Codex follow-up: an earlier evidence-chunk-priority approach dropped
+  all earlier body context whenever a thread had chunks). `body_text`
+  shape is unchanged — front-preservation still serves the threads-lane
+  FTS coverage and `threads_vec` seeding.
+- **F3 (P2) — Retrieval eval lied about hybrid coverage.** The hybrid
+  test seeded a 768-dim placeholder against a 4096-dim schema; the
+  vector lane caught `OperationalError`, returned empty, and the
+  "hybrid" test became keyword-only while claiming to validate the
+  default RAG path. Now requires a real embedder: a session-scoped
+  `eval_embedder` fixture reads `EMBED_MODEL` / `EMBED_API_KEY` /
+  `EMBED_BASE_URL`, constructs an `EmbedClient`, and skips the hybrid
+  tests with a clear message when those are unset. Keyword-only eval
+  still runs without an embedder.
+- **F4 (P2) — `semantic_search` ignored the chunk-vec lane.** An MCP
+  caller picking `mode="semantic"` got `threads_vec`-only retrieval —
+  silently worse than `hybrid` for long-thread and attachment queries.
+  `semantic_search` now fuses `threads_vec` + `message_chunks_vec` via
+  RRF, mirroring the dense half of `hybrid_search`.
+
+Tests: `TestEvidenceAttachmentProvenance` (3), `TestThreadContextWithChunks`
+(3 new attachment-header cases), `TestSummarizeContext` (7),
+`TestGetRecentChunksForThread` (4),
+`TestSummarizeThread::test_recent_chunks_supplement_body_text`
++ `::test_chunkless_thread_still_uses_body_text`, and
+`TestSemanticSearch::test_chunk_vec_lane_lifts_thread_with_weak_thread_vec`.
+Full mcp-server suite passes, coverage 93%+.
+
+### RAG quality — thread vector weighting across body and attachment chunks
+
+Surfaced by Codex review on 2026-05-12, deliberately **not addressed**
+on `fix/indexer-rag-review-followups` pending real eval data.
+
+`indexer/src/main.py:_phase2c_commit_vectors` computes the thread
+vector as `mean_vector(chunk_embs)` where `chunk_embs` comes from
+`Database.get_thread_chunk_embeddings(thread_id)`. That query reads
+every chunk for the thread with no `attachment_id` filter, so body
+chunks and attachment chunks contribute equally to the mean. A
+30-page PDF (~50 chunks) on a 5-message email thread (~5 chunks)
+drives roughly 91% of the thread vector — the actual email
+conversation becomes a ~9% signal in the coarse retrieval lane.
+
+The chunk-precision lane is unaffected (per-chunk vectors are
+unchanged), so "find the right passage" still works. The drift hits
+the "find the right thread" lane: a query asking about the email
+discussion can be deprioritised against threads whose attachment
+content dominates their vector.
+
+Three options if/when an eval shows this matters:
+
+1. **Keep mean-of-all-chunks** (current). Document as a known
+   tradeoff. Defensible if most user queries are
+   attachment-content-driven (operator asks "what does the attached
+   PDF say?" far more than "what did Bob say in the email?").
+2. **Weight body chunks vs attachment chunks** (e.g.
+   `body_weight=1.0`, `attachment_weight=0.3`). Requires a tunable
+   constant pair and a per-chunk source flag in
+   `get_thread_chunk_embeddings` so the mean can be weighted.
+3. **Cap per-source contribution** — every "source" (message body or
+   specific `attachment_id`) contributes equally to the mean
+   regardless of chunk count. Removes the long-PDF amplification
+   without introducing a tuning constant.
+
+Not actioned because choosing between these blindly is just
+guessing at a tradeoff the user's actual queries answer. The
+action-ready signal is a retrieval eval that distinguishes "asked
+about the PDF" vs "asked about the email" queries on a populated
+real mailbox; until then, this finding stays parked.
+
+When the eval lands, expect to also touch
+`indexer/src/database.py:get_thread_chunk_embeddings` (add an
+`attachment_id IS NULL` filter or weighted variant) and
+`indexer/src/reconciler.py:_reap_thread` (the survivor-chunks-mean
+path mirrors the same logic).
 
 ### Attachment indexing — remaining work
 Most of this section is implemented: filenames/MIME indexed in

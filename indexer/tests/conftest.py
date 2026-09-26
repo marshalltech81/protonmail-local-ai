@@ -29,7 +29,7 @@ def make_mock_embedder(vector: list[float] | None = None) -> MagicMock:
     m = MagicMock()
     if vector is not None:
         m.embed.return_value = vector
-    m.embed_batch.side_effect = lambda texts: [m.embed(t) for t in texts]
+    m.embed_batch.side_effect = lambda texts, **_kw: [m.embed(t) for t in texts]
     return m
 
 

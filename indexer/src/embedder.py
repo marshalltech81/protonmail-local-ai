@@ -22,6 +22,7 @@ import logging
 import math
 import os
 import time
+from collections.abc import Callable
 from typing import Protocol
 
 from openai import (
@@ -138,7 +139,12 @@ class EmbeddingBackend(Protocol):
 
     def wait_for_ready(self, timeout: int = 120) -> None: ...
     def embed(self, text: str) -> list[float]: ...
-    def embed_batch(self, texts: list[str]) -> list[list[float]]: ...
+    def embed_batch(
+        self,
+        texts: list[str],
+        *,
+        on_batch_complete: Callable[[], None] | None = None,
+    ) -> list[list[float]]: ...
 
 
 class OpenAIEmbedder:
@@ -180,6 +186,15 @@ class OpenAIEmbedder:
     # above the cold-start case; operators on slow links can raise it
     # via ``EMBED_WARMUP_TIMEOUT_SECS``.
     DEFAULT_WARMUP_TIMEOUT_SECS = 600.0
+
+    # Probe cadence for ``wait_for_ready``. Fast initial probes catch
+    # a remote provider that responds in <1 s without burning ~3 s of
+    # startup latency on every cold start; once the fast budget is
+    # spent we back off to the slow interval so a multi-minute host
+    # warmup doesn't generate hundreds of log lines.
+    _FAST_PROBE_INTERVAL_SECS = 0.5
+    _FAST_PROBE_COUNT = 10
+    _SLOW_PROBE_INTERVAL_SECS = 3.0
 
     def __init__(
         self,
@@ -283,6 +298,7 @@ class OpenAIEmbedder:
         # early or hang well past the configured timeout.
         connect_deadline = time.monotonic() + float(timeout)
         last_err: Exception | None = None
+        probe_attempt = 0
         while time.monotonic() < connect_deadline:
             try:
                 self.client.with_options(timeout=warmup_timeout).embeddings.create(
@@ -298,7 +314,16 @@ class OpenAIEmbedder:
                     # config rather than waiting out the timeout.
                     raise
                 last_err = e
-            time.sleep(3)
+            probe_attempt += 1
+            # Fast cadence for the first few probes catches a remote
+            # provider that's already up without burning seconds of
+            # startup latency; back off to the slow cadence so a
+            # multi-minute host warmup doesn't spam logs.
+            if probe_attempt <= self._FAST_PROBE_COUNT:
+                interval = self._FAST_PROBE_INTERVAL_SECS
+            else:
+                interval = self._SLOW_PROBE_INTERVAL_SECS
+            time.sleep(interval)
         raise RuntimeError(
             f"embedder at {self.base_url} did not become ready within {timeout}s "
             f"(last error: {last_err!r})"
@@ -308,7 +333,12 @@ class OpenAIEmbedder:
         """Generate an embedding vector for a single input."""
         return self.embed_batch([text])[0]
 
-    def embed_batch(self, texts: list[str]) -> list[list[float]]:
+    def embed_batch(
+        self,
+        texts: list[str],
+        *,
+        on_batch_complete: Callable[[], None] | None = None,
+    ) -> list[list[float]]:
         """Generate embedding vectors for a list of inputs.
 
         Splits ``texts`` into ``batch_size`` chunks and issues one
@@ -317,6 +347,14 @@ class OpenAIEmbedder:
         sorted by ``index`` defensively so a future provider that
         reorders the array does not silently misalign vectors with
         their source texts.
+
+        ``on_batch_complete``, when supplied, is invoked after each
+        internal batch completes successfully. The indexer wires it to
+        ``touch_health_file`` so a large cross-message embed that takes
+        longer than the per-iteration health threshold still refreshes
+        the heartbeat between internal batches instead of only at the
+        outer call boundaries. A failure inside ``_embed_one_batch``
+        propagates without invoking the callback.
         """
         if not texts:
             return []
@@ -324,6 +362,8 @@ class OpenAIEmbedder:
         for i in range(0, len(texts), self.batch_size):
             chunk = texts[i : i + self.batch_size]
             out.extend(self._embed_one_batch(chunk))
+            if on_batch_complete is not None:
+                on_batch_complete()
         return out
 
     @retry(

@@ -1,0 +1,45 @@
+-- v18: add ``message_chunks.message_date`` so timeline-style retrieval
+-- (``get_recent_chunks_for_thread``, ``summarize_thread``) can order
+-- by the message's actual ``Date:`` header instead of the chunker's
+-- wall-clock insert time.
+--
+-- Prior behavior ordered by ``message_chunks.chunked_at``, which is
+-- index-time, not message-time. After a reap-rebuild, dead-letter
+-- retry, recovery sweep, or full reindex, the chunks for an OLD
+-- message can have a NEWER ``chunked_at`` than chunks for a recently-
+-- arrived message — so ``summarize_thread`` could surface the wrong
+-- tail of the conversation and confidently feed the LLM stale
+-- context as "the latest activity."
+--
+-- The column is nullable so this migration is a pure additive ALTER:
+-- no backfill is attempted. Per-message dates are not currently
+-- persisted anywhere else in SQLite (``threads.date_first`` /
+-- ``date_last`` are aggregates, and ``message_thread_map`` carries
+-- only path metadata), so a SQL-only backfill would have to either
+-- re-parse every ``.eml`` from disk (out of scope for a migration
+-- runner that is intentionally SQL-only) or guess at the date from
+-- thread-level aggregates (which would give every chunk in a thread
+-- the same date and lose within-thread ordering entirely).
+--
+-- The downstream query in ``mcp-server/src/lib/sqlite.py``
+-- ``get_recent_chunks_for_thread`` uses
+-- ``ORDER BY COALESCE(c.message_date, c.chunked_at) DESC`` so legacy
+-- v17- chunks (NULL ``message_date``) keep the old behavior and new
+-- chunks (written by the indexer at and after schema v18) get the
+-- correct ordering. Operators who want the fix to take effect across
+-- their full backlog can trigger a full reindex (``make clean &&
+-- make first-run``); otherwise legacy chunks will gradually pick up
+-- the correct value as messages are re-chunked through the reap /
+-- recovery / dead-letter retry paths.
+--
+-- Idempotent: SQLite's ``ALTER TABLE ... ADD COLUMN`` is the standard
+-- single-statement DDL for adding a nullable column and is naturally
+-- safe to re-run in this migration's wrapping ``BEGIN IMMEDIATE`` /
+-- ``COMMIT`` block. A retry after partial failure either lands the
+-- column (fresh apply) or the column already exists and the statement
+-- errors with a clear "duplicate column name" message that the
+-- migration runner surfaces — at which point the operator can
+-- manually advance ``schema_version`` to 18, since the schema is
+-- already in the target state.
+
+ALTER TABLE message_chunks ADD COLUMN message_date TEXT;

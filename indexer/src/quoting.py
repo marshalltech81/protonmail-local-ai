@@ -34,10 +34,107 @@ _HARD_CUT_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"^-{2,}\s*Forwarded message\s*-{2,}\s*$", re.IGNORECASE),
     # Apple Mail forward preamble.
     re.compile(r"^Begin forwarded message:\s*$", re.IGNORECASE),
-    # Gmail / Apple Mail inline reply header: "On <date>, <name> wrote:"
-    # Matched as a single line. Multi-line wrapped variants are left to a
-    # future iteration rather than risking a false positive here.
-    re.compile(r"^On\b.*\bwrote:\s*$"),
+)
+
+# Reply-header lines like "On Mon, Jan 1, 2024 at 10:00 AM Alice wrote:".
+# Treated as a SKIP-LINE (continue past it) rather than a hard cut —
+# inline replies place the user's new text *between* the quoted
+# blocks that follow this header, so cutting here drops those answers
+# entirely. The ``>``-line filter still removes the quoted history.
+#
+# Coverage spans the major Western-language Gmail/Apple Mail
+# attribution shapes so the indexer pipeline doesn't drop quoted
+# history cleanly in English while leaking the same noise in other
+# languages.
+#
+# Anchoring on ``<addr@host>`` (the email address in angle brackets)
+# is the load-bearing safeguard against false-positive stripping of
+# real user prose: a German sentence like ``"Am Montag schrieb der
+# Manager folgendes:"`` is a routine sentence-end colon, and the
+# verbs ``schrieb``/``schreef``/``a écrit``/``escribió``/``ha
+# scritto`` are everyday past-tense forms — without the bracket
+# requirement, an aggressive end-of-line match silently drops the
+# user's own content. Gmail/Apple Mail always include the address;
+# clients that omit it leak the attribution line into the indexed
+# body (minor noise) but no user content is dropped. English
+# ``wrote:`` is rarer in prose so the bracket requirement is mainly
+# defense-in-depth there.
+#
+# Two-line wrapped variants (Gmail wraps the attribution when the
+# address pushes it past ~78 chars) are handled by
+# ``_WRAPPED_REPLY_HEADER_PATTERNS`` in a pre-pass that removes the
+# wrapped span before the loop runs.
+_EMAIL_RE_FRAGMENT = r"<[^<>\s]+@[^<>\s]+>"
+_REPLY_HEADER_PATTERNS: tuple[re.Pattern[str], ...] = (
+    # English: "On <date> ... Alice <alice@example.com> wrote:"
+    re.compile(rf"^On\b.*{_EMAIL_RE_FRAGMENT}.*\bwrote:\s*$"),
+    # German: "Am <date> schrieb Alice <alice@example.com>:" — verb
+    # comes BEFORE the address. Without ``<email>:`` at end-of-line
+    # this matched any German sentence beginning with ``Am`` and
+    # ending with ``schrieb ... :``.
+    re.compile(rf"^Am\b.*\bschrieb\b.*{_EMAIL_RE_FRAGMENT}\s*:\s*$"),
+    # French: "Le <date>, Alice <alice@example.com> a écrit :"
+    # (French convention puts a space before the colon; accept both
+    # forms). Address comes BEFORE the verb.
+    re.compile(rf"^Le\b.*{_EMAIL_RE_FRAGMENT}.*\ba écrit\s*:\s*$"),
+    # Spanish: "El <date>, Alice <alice@example.com> escribió:"
+    re.compile(rf"^El\b.*{_EMAIL_RE_FRAGMENT}.*\bescribió\s*:\s*$"),
+    # Italian: "Il giorno <date> Alice <alice@example.com> ha scritto:"
+    re.compile(rf"^Il\b.*{_EMAIL_RE_FRAGMENT}.*\bha scritto\s*:\s*$"),
+    # Dutch: "Op <date> schreef Alice <alice@example.com>:" — verb
+    # comes BEFORE the address, like German.
+    re.compile(rf"^Op\b.*\bschreef\b.*{_EMAIL_RE_FRAGMENT}\s*:\s*$"),
+)
+
+# Two-line wrapped reply headers. Gmail wraps the attribution when the
+# address makes it longer than ~78 chars, pushing the verb (and the
+# trailing colon) onto a line of its own. A pre-pass removes the
+# wrapped span entirely so the line loop downstream sees a clean body.
+# Anchoring on both the lead word AND the verb-only continuation keeps
+# false-positive risk low: a body that happens to start a sentence
+# with "On" and has "wrote:" on the next line is vanishingly rare,
+# and the continuation must be just the verb plus colon (modulo
+# whitespace) to match.
+#
+# ``\r?`` between lines accommodates CRLF-line-ending bodies (RFC 5322
+# requires CRLF on the wire; some parsers preserve it through to
+# ``body_text``). The trailing ``[ \t]*\r?$`` must ALSO consume the
+# optional ``\r`` before ``\n`` — without it, ``$`` cannot anchor on
+# CRLF lines because ``[ \t]*`` does not match ``\r`` and the
+# multiline ``$`` only matches immediately before ``\n``. The
+# single-line patterns above use ``\s*$`` (which includes ``\r``) so
+# this asymmetry was previously silent.
+_WRAPPED_REPLY_HEADER_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"^On\b[^\r\n]*\r?\n[ \t]*wrote:[ \t]*\r?$", re.MULTILINE),
+    re.compile(r"^Am\b[^\r\n]*\r?\n[ \t]*schrieb\b[^\r\n]*:[ \t]*\r?$", re.MULTILINE),
+    re.compile(r"^Le\b[^\r\n]*\r?\n[ \t]*a écrit\s*:[ \t]*\r?$", re.MULTILINE),
+    re.compile(r"^El\b[^\r\n]*\r?\n[ \t]*escribió\b[^\r\n]*:[ \t]*\r?$", re.MULTILINE),
+    re.compile(r"^Il\b[^\r\n]*\r?\n[ \t]*ha scritto\b[^\r\n]*:[ \t]*\r?$", re.MULTILINE),
+    re.compile(r"^Op\b[^\r\n]*\r?\n[ \t]*schreef\b[^\r\n]*:[ \t]*\r?$", re.MULTILINE),
+)
+
+# Outlook-style forward/reply block header. Newer Outlook omits the
+# "-----Original Message-----" dashed delimiter and emits a bare
+# ``From:/Sent:/To:/Subject:`` block at the top of the quoted history.
+#
+# Match the FULL four-line shape: ``From:`` line, then ``Sent:`` or
+# ``Date:`` line (with any number of blank lines between — Outlook
+# double-spacing is common), then ``Subject:`` within a few lines.
+# Requiring ``Subject:`` is the load-bearing safeguard: a body that
+# happens to contain ``From: someone\nDate: 2024-01-01`` as agenda /
+# calendar / "From the desk of" prose has no following ``Subject:``
+# header and is correctly NOT treated as a quoted block. Earlier
+# versions matched on just ``From: + Sent|Date:`` and silently
+# truncated agenda bodies. ``To:``/``Cc:`` lines are tolerated as
+# intermediate filler so the most common four-header shape
+# (From/Sent/To/Subject) still matches.
+_OUTLOOK_BLOCK_PATTERN: re.Pattern[str] = re.compile(
+    r"^From:\s.*\r?\n"
+    r"(?:[ \t]*\r?\n)*"
+    r"(?:Sent|Date):\s.*\r?\n"
+    r"(?:[^\r\n]*\r?\n){0,4}"
+    r"Subject:\s",
+    re.MULTILINE,
 )
 
 
@@ -48,11 +145,16 @@ def strip_for_embedding(body_text: str) -> str:
     approximation of the "new content" portion of the message:
 
     - lines beginning with ``>`` (any depth) are dropped;
-    - anything from the first hard-cut marker onward is dropped;
+    - reply-header lines (``On ... wrote:``) are dropped but the loop
+      continues past them so inline answers between quoted blocks
+      survive;
+    - anything from the first hard-cut marker onward (signature
+      delimiter, forward preamble) is dropped;
     - surrounding whitespace is trimmed from the result.
 
     When the stripped result is empty (a reply that is literally just
-    "On ... wrote:" followed by the quoted thread), the original
+    "On ... wrote:" followed by the quoted thread, or a top-posted
+    reply that is entirely below a forward marker), the original
     ``body_text`` is returned so the embedding has *something* to go on
     rather than an empty string, which degrades the nearest-neighbor
     search for the thread as a whole.
@@ -60,13 +162,43 @@ def strip_for_embedding(body_text: str) -> str:
     if not body_text:
         return body_text
 
+    # Preserve the input for the empty-fallback below: the pre-passes
+    # below mutate a working copy, and returning the mutated form on
+    # fallback would defeat the purpose (an Outlook-only quote would
+    # fall back to an empty string, the exact case the fallback exists
+    # to prevent).
+    original = body_text
+
+    # Pre-pass 1 — collapse two-line wrapped reply headers by removing
+    # the span entirely; the line loop downstream would otherwise see
+    # the first half of the wrapped header as junk content because
+    # ``_REPLY_HEADER_PATTERNS`` only matches single-line attributions.
+    for pattern in _WRAPPED_REPLY_HEADER_PATTERNS:
+        body_text = pattern.sub("", body_text)
+
+    # Pre-pass 2 — Outlook ``From:/Sent:/...`` block. Truncate body_text
+    # at the start of the block so the line loop never sees the quoted
+    # history. Mirrors the behavior of the dashed Outlook delimiter in
+    # ``_HARD_CUT_PATTERNS``.
+    outlook_match = _OUTLOOK_BLOCK_PATTERN.search(body_text)
+    if outlook_match is not None:
+        body_text = body_text[: outlook_match.start()]
+
     kept: list[str] = []
     for raw_line in body_text.splitlines():
-        # Hard-cut markers end the loop entirely. Checked before the
-        # ``>`` rule so a quoted marker line still cuts (e.g. a nested
-        # reply that includes its own "On ... wrote:" block).
+        # Hard-cut markers end the loop entirely (signature delimiter,
+        # forward preamble). These mark the structural end of the
+        # new-content portion: anything below is reliably not the
+        # user's reply.
         if _is_hard_cut(raw_line):
             break
+        # Reply-header lines like "On ... wrote:" are skipped but do
+        # NOT cut — the user's inline answers may live between the
+        # quoted blocks that follow. Checked before the ``>`` rule so a
+        # marker line still drops even if a client prefixes it with a
+        # quote character.
+        if _is_reply_header(raw_line):
+            continue
         # Quoted-reply lines. Accept any amount of leading whitespace
         # before the ``>`` — some mail clients indent quoted blocks.
         if _is_quoted_line(raw_line):
@@ -80,12 +212,16 @@ def strip_for_embedding(body_text: str) -> str:
         # string. An empty embedding input collapses the vector toward
         # the model's default response and poisons similarity ranking
         # for the whole thread.
-        return body_text
+        return original
     return stripped
 
 
 def _is_hard_cut(line: str) -> bool:
     return any(pattern.match(line) for pattern in _HARD_CUT_PATTERNS)
+
+
+def _is_reply_header(line: str) -> bool:
+    return any(pattern.match(line) for pattern in _REPLY_HEADER_PATTERNS)
 
 
 def _is_quoted_line(line: str) -> bool:
