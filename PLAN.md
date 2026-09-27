@@ -445,12 +445,14 @@ display name (a `mcp_lower` SQL function, since SQLite's `lower()` is
 ASCII-only), and the response names the mode used. `find_contact` now
 aggregates `message_participants` instead of parsing every thread's
 participant JSON, reporting every display name a contact was written
-with; its `senders_only` mode ranks each message's primary author only,
-the same authors `search_emails`' sender filter sees. `search_emails` /
+with; its `senders_only` mode (used by `search_emails(from_name=...)`)
+keeps aggregating `threads.senders`, the exact set that search's sender
+filter checks, so resolution can never pick an address the filter rejects. `search_emails` /
 `list_threads` descriptions route "all" / "how many" questions to the
 new tool. Review round 1: rejected-input errors are no longer logged
-with the input they quote; `text` terms are NFC-composed and keep
-combining marks, so decomposed spellings match; empty pages state
+with the input they quote; `text` terms keep combining marks, so
+decomposed spellings match (round 2 dropped a query-only NFC step that
+broke exact matches for decomposed Greek and Hangul); empty pages state
 `returned: 0` / `has_more: false`. No schema change.
 
 ### 2026-09-27 — Phase 1 foundation: per-message records

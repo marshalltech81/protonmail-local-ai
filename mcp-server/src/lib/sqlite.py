@@ -347,13 +347,16 @@ def _text_terms(text: str) -> list[str]:
     """Split ``text`` into distinct words the way FTS5's unicode61 sees them.
 
     ``\\w`` stops at combining marks, so a decomposed ``re\\u0301sume\\u0301``
-    would split into ``re`` and ``sume`` while FTS indexes one word.
-    NFC-compose first, then keep any remaining combining marks inside the
-    word; a run with no letter or digit (a lone mark) is not a word.
+    would split into ``re`` and ``sume`` while FTS indexes one word; marks
+    stay inside the word here. The text is not normalized: indexed chunks
+    are stored as written, and unicode61 folds composed and decomposed
+    forms only for Latin, so NFC-composing a decomposed Greek or Hangul
+    query would stop it matching its own source text. A run with no
+    letter or digit (a lone mark) is not a word.
     """
     words: list[str] = []
     current: list[str] = []
-    for ch in unicodedata.normalize("NFC", text) + " ":
+    for ch in text + " ":
         if ch.isalnum() or ch == "_" or unicodedata.category(ch).startswith("M"):
             current.append(ch)
         elif current:
@@ -1965,24 +1968,27 @@ class Database:
         """Resolve a name / address / domain fragment to indexed contacts.
 
         Matches the lowercased query against each indexed
-        ``message_participants`` row's address or display name (every
-        role, or From only when ``senders_only=True``) and aggregates by
-        canonical email, so the same contact across many threads
-        collapses to one row, with ``thread_count`` reflecting how many
-        threads they appeared on and ``names`` every display name they
-        were written with. Same-thread duplicates do not double-count.
+        ``message_participants`` row's address or display name and
+        aggregates by canonical email, so the same contact across many
+        threads collapses to one row, with ``thread_count`` reflecting
+        how many threads they appeared on and ``names`` every display
+        name they were written with. Same-thread duplicates do not
+        double-count.
 
-        ``senders_only`` narrows the aggregation to each message's
-        primary From author (the one ``threads.senders`` records). Use this when the caller's
-        intent is "filter to messages this person SENT" rather than
-        "find this person's address anywhere in the index": the
-        broader participants ranking can promote a frequent
-        recipient/CC-only contact over the actual sender, which then
-        misses real results when the resolved address is plugged into
-        ``search_emails(from_addr=...)``. The default is
-        ``senders_only=False`` because the standalone find_contact
-        tool is also used for general "find this person's email"
-        lookups where recipient-only matches are still useful.
+        ``senders_only`` instead aggregates ``threads.senders`` — each
+        message's primary From author as the thread records it. That is
+        exactly the set ``search_emails(from_addr=...)`` filters on, so a
+        resolved address always matches that filter; ranking over the
+        participant table's From rows could promote a secondary author
+        of a multi-author From, or one standing behind an unparseable
+        primary, and return nothing. Use this when the caller's intent is
+        "filter to messages this person SENT" rather than "find this
+        person's address anywhere in the index": the broader
+        participants ranking can promote a frequent recipient/CC-only
+        contact over the actual sender. The default is
+        ``senders_only=False`` because the standalone find_contact tool
+        is also used for general "find this person's email" lookups
+        where recipient-only matches are still useful.
 
         Exists so callers (the LLM via the MCP tool) can map a
         display-name fragment (``"Jane Smith"``) to a canonical
@@ -1995,45 +2001,48 @@ class Database:
             return []
         needle = query.strip().lower()
 
-        # Two literal SQL strings rather than interpolation, so the role
-        # restriction can never come from caller input. Addresses are
-        # stored canonical (lowercased); names need the Unicode-aware
-        # ``mcp_lower``.
+        # canonical email -> {"names": set[str], "threads": set[str]}
+        by_email: dict[str, dict] = {}
+
+        def add(address: str, name: str | None, thread_id: str) -> None:
+            bucket = by_email.setdefault(address, {"names": set(), "threads": set()})
+            if name and name.strip():
+                bucket["names"].add(name.strip())
+            bucket["threads"].add(thread_id)
+
         if senders_only:
-            # Primary author only: the first ``from`` row of each message
-            # (the writer inserts authors in header order). search_emails
-            # filters on ``threads.senders``, which holds each message's
-            # primary author, so ranking a secondary author of a
-            # multi-author From here could pick an address that filter
-            # never matches.
-            sql = """
-                SELECT DISTINCT p.address, p.name, m.thread_id
-                FROM message_participants p
-                JOIN messages m ON m.message_id = p.message_id
-                WHERE p.role = 'from'
-                  AND p.rowid = (
-                      SELECT MIN(p2.rowid) FROM message_participants p2
-                      WHERE p2.message_id = p.message_id AND p2.role = 'from'
-                  )
-                  AND (instr(p.address, ?) > 0 OR instr(mcp_lower(p.name), ?) > 0)
-            """
+            for row in self._fetchall("SELECT thread_id, senders FROM threads"):
+                try:
+                    entries = json.loads(row["senders"])
+                except json.JSONDecodeError, TypeError:
+                    continue
+                for entry in entries:
+                    if not isinstance(entry, str):
+                        continue
+                    try:
+                        name, addr = parseaddr(entry)
+                    except Exception:
+                        # Sender strings come from indexed mail; an entry
+                        # that blows up parseaddr (nested-comment
+                        # recursion) must cost that entry, not the lookup.
+                        continue
+                    addr = addr.strip().lower()
+                    if "@" in addr and needle in f"{name} {addr}".lower():
+                        add(addr, name, row["thread_id"])
         else:
-            sql = """
+            # Addresses are stored canonical (lowercased); names need the
+            # Unicode-aware ``mcp_lower``.
+            rows = self._fetchall(
+                """
                 SELECT DISTINCT p.address, p.name, m.thread_id
                 FROM message_participants p
                 JOIN messages m ON m.message_id = p.message_id
                 WHERE instr(p.address, ?) > 0 OR instr(mcp_lower(p.name), ?) > 0
-            """
-        rows = self._fetchall(sql, (needle, needle))
-
-        # canonical email -> {"names": set[str], "threads": set[str]}
-        by_email: dict[str, dict] = {}
-        for row in rows:
-            bucket = by_email.setdefault(row["address"], {"names": set(), "threads": set()})
-            name = (row["name"] or "").strip()
-            if name:
-                bucket["names"].add(name)
-            bucket["threads"].add(row["thread_id"])
+                """,
+                (needle, needle),
+            )
+            for row in rows:
+                add(row["address"], row["name"], row["thread_id"])
 
         # Most-active contact first; tiebreak on email so the order is
         # stable across runs (important for both eval reproducibility

@@ -2178,6 +2178,39 @@ class TestFindContactSendersOnly:
         finally:
             db.close()
 
+    def test_senders_only_skips_author_behind_an_unparseable_primary(self, tmp_path):
+        # ``From: invalid, Pat Joint <joint@...>``: the primary author is
+        # ``invalid`` (recorded in threads.senders), which the participant
+        # writer skips, so Joint is the first stored From row. Joint is
+        # still not an address the search sender filter can match, so it
+        # must not outrank the real sender.
+        from tests.conftest import _insert_message
+
+        conn, path = _open_built_db_conn(tmp_path, "unparseable-primary.db")
+        _insert_message(
+            conn,
+            message_id="m1",
+            thread_id="t1",
+            sent_at="2024-01-01T00:00:00+00:00",
+            from_=["Pat Solo <solo@example.com>"],
+        )
+        for n in (2, 3):
+            _insert_message(
+                conn,
+                message_id=f"m{n}",
+                thread_id=f"t{n}",
+                sent_at="2024-01-02T00:00:00+00:00",
+                from_=["invalid", "Pat Joint <joint@example.com>"],
+            )
+        conn.close()
+        db = Database(str(path))
+        try:
+            assert [c["email"] for c in db.find_contact("pat", senders_only=True)] == [
+                "solo@example.com"
+            ]
+        finally:
+            db.close()
+
     def test_senders_only_excludes_recipient_only_contact(self, tmp_path):
         # Build a small DB where one contact is ONLY a recipient,
         # never a sender. With the default search they should still
@@ -2787,6 +2820,13 @@ class TestQueryMessagesUnicodeText:
             ("re\u0301sume\u0301 attached", "r\u00e9sum\u00e9"),
             ("re\u0301sume\u0301 attached", "re\u0301sume\u0301"),
             ("a nai\u0308ve plan", "nai\u0308ve"),
+            # Scripts unicode61 does not fold: the query must reach FTS in
+            # the indexed form, not NFC-composed.
+            (
+                "\u03ba\u03bf\u0301\u03c3\u03bc\u03bf\u03c2",
+                "\u03ba\u03bf\u0301\u03c3\u03bc\u03bf\u03c2",
+            ),
+            ("\u1112\u1161\u11ab\u1100\u1173\u11af", "\u1112\u1161\u11ab\u1100\u1173\u11af"),
         ],
     )
     def test_composed_and_decomposed_forms_match(self, tmp_path, body, query):
@@ -2845,3 +2885,32 @@ class TestQueryMessagesPaging:
     def test_malformed_cursor_is_rejected(self, messages_db, cursor):
         with pytest.raises(ValueError, match="cursor"):
             messages_db.query_messages(cursor=cursor)
+
+
+class TestFindContactSendersOnlyHostileEntries:
+    def test_bad_sender_entries_cost_only_themselves(self, tmp_path):
+        """senders_only parses each thread's ``senders`` JSON; a corrupt
+        array, a non-string entry, or a string that makes parseaddr
+        recurse must be skipped, not abort the lookup."""
+        from tests.conftest import _insert_thread
+
+        conn, path = _open_built_db_conn(tmp_path, "hostile-senders.db")
+        _insert_thread(
+            conn,
+            thread_id="t-hostile",
+            subject="hostile",
+            participants=["Bob <bob@example.com>"],
+            senders=["(" * 1200 + ")" * 1200 + " <mallory@example.com>", "Bob <bob@example.com>"],
+        )
+        _insert_thread(conn, thread_id="t-corrupt", subject="c", participants=[])
+        conn.execute("UPDATE threads SET senders = '{not json' WHERE thread_id = 't-corrupt'")
+        _insert_thread(conn, thread_id="t-nonstr", subject="n", participants=[])
+        conn.execute("UPDATE threads SET senders = '[42]' WHERE thread_id = 't-nonstr'")
+        conn.commit()
+        conn.close()
+        db = Database(str(path))
+        try:
+            contacts = db.find_contact("bob", senders_only=True)
+            assert [c["email"] for c in contacts] == ["bob@example.com"]
+        finally:
+            db.close()

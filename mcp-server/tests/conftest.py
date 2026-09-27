@@ -368,6 +368,17 @@ def _insert_message(
         """,
         (thread_id, subject, folder, sent_at, sent_at),
     )
+    # Like the indexer, the thread's ``senders`` JSON records only each
+    # message's primary author (``from_addr``, the first From entry, even
+    # when it has no usable address).
+    if from_:
+        row = cur.execute("SELECT senders FROM threads WHERE thread_id = ?", (thread_id,))
+        senders = json.loads(row.fetchone()[0])
+        if from_[0] not in senders:
+            cur.execute(
+                "UPDATE threads SET senders = ? WHERE thread_id = ?",
+                (json.dumps([*senders, from_[0]]), thread_id),
+            )
     cur.execute(
         "INSERT INTO message_thread_map VALUES (?, ?, ?)",
         (message_id, thread_id, f"/maildir/{folder}/cur/{message_id}"),
