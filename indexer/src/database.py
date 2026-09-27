@@ -1903,7 +1903,10 @@ class Database:
             ),
         )
         cur.execute("DELETE FROM message_participants WHERE message_id = ?", (msg.message_id,))
-        roles = [("from", [msg.from_addr]), ("to", msg.to_addrs), ("cc", msg.cc_addrs)]
+        # ``from_addrs`` holds every author; ``from_addr`` alone for callers
+        # that build a Message by hand.
+        authors = msg.from_addrs or [msg.from_addr]
+        roles = [("from", authors), ("to", msg.to_addrs), ("cc", msg.cc_addrs)]
         for role, values in roles:
             for value in values:
                 address = canonical_addr(value or "")

@@ -2831,6 +2831,69 @@ class TestMessageRecordsEndToEnd:
         row = db._conn.execute("SELECT folder, filepath FROM messages").fetchone()
         assert (row["folder"], row["filepath"]) == ("Archive", str(dest))
 
+    def _ingest_headers(self, tmp_path, monkeypatch, headers: str, message_id: str):
+        maildir = tmp_path / "maildir"
+        path = maildir / "INBOX" / "cur" / f"{message_id}.eml"
+        path.parent.mkdir(parents=True)
+        path.write_bytes(
+            (
+                headers + f"Subject: Header edge case\r\nMessage-ID: <{message_id}>\r\n"
+                "Date: Mon, 01 Jan 2024 12:00:00 +0000\r\n"
+                "Content-Type: text/plain; charset=utf-8\r\n\r\nReadable body.\r\n"
+            ).encode()
+        )
+        monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
+        db = Database(tmp_path / "mail.db")
+        queue = _make_queue(db)
+        main.initial_index(db, make_mock_embedder(_UNIT_VECTOR), Threader(db), queue)
+        participants = {
+            (r["role"], r["address"], r["name"])
+            for r in db._conn.execute("SELECT role, address, name FROM message_participants")
+        }
+        return db, queue, participants
+
+    def test_malformed_encoded_names_do_not_abort_ingestion(self, tmp_path, monkeypatch):
+        """A display name with a broken encoded-word (bad base64) must not
+        dead-letter the message: the address is kept and the raw name
+        text stands in for the undecodable name."""
+        db, queue, participants = self._ingest_headers(
+            tmp_path,
+            monkeypatch,
+            "From: alice@example.com\r\n"
+            "To: =?utf-8?b?x?= <bob@example.com>\r\n"
+            "Cc: =?utf-8?b?y?= <carol@example.com>\r\n",
+            "malformed@example.com",
+        )
+        assert queue.stats() == {"queued": 0, "dead": 0}
+        assert db.get_chunk_ids_for_message("malformed@example.com")
+        assert participants == {
+            ("from", "alice@example.com", None),
+            ("to", "bob@example.com", "=?utf-8?b?x?="),
+            ("cc", "carol@example.com", "=?utf-8?b?y?="),
+        }
+
+    def test_encoded_sender_name_with_comma_keeps_the_sender(self, tmp_path, monkeypatch):
+        _db, _queue, participants = self._ingest_headers(
+            tmp_path,
+            monkeypatch,
+            "From: =?utf-8?q?Doe=2C_Jane?= <jane@example.com>\r\nTo: bob@example.com\r\n",
+            "encoded-from@example.com",
+        )
+        assert ("from", "jane@example.com", "Doe, Jane") in participants
+
+    def test_every_author_of_a_multi_author_from_is_recorded(self, tmp_path, monkeypatch):
+        _db, _queue, participants = self._ingest_headers(
+            tmp_path,
+            monkeypatch,
+            "From: Alice <alice@example.com>, Carol <carol@example.com>\r\n"
+            "Sender: alice@example.com\r\nTo: bob@example.com\r\n",
+            "multi-author@example.com",
+        )
+        assert {p for p in participants if p[0] == "from"} == {
+            ("from", "alice@example.com", "Alice"),
+            ("from", "carol@example.com", "Carol"),
+        }
+
     @pytest.mark.parametrize("with_reconciler", [False, True])
     def test_cross_folder_move_updates_message_folder(self, tmp_path, monkeypatch, with_reconciler):
         """The watcher's rename fast path (indexed source) must keep the

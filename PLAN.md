@@ -440,7 +440,11 @@ not `formataddr` (which raised on non-ASCII addresses, failing the whole
 message, and RFC 2047-encoded Unicode names); raw 8-bit address headers
 are decoded before splitting; and the folder is written inside
 `update_filepath`'s transaction so a failed move rolls back whole and
-stays recoverable by the Maildir walk.
+stays recoverable by the Maildir walk. Round 3: a malformed encoded-word display
+name falls back to its raw text instead of dead-lettering the message,
+and From is parsed structurally into `from_addrs` (every author), so an
+encoded sender name with a comma or a multi-author From no longer loses
+the sender.
 Prerequisite for Phase 1 items 1 (`query_messages`), 3
 (message-first-class retrieval), and 7 (source integrity exposure).
 

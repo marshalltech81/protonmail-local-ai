@@ -5,6 +5,7 @@ Handles MIME, HTML-to-text conversion, and attachment metadata.
 """
 
 import email
+import email.errors
 import email.header
 import email.message
 import email.utils
@@ -131,6 +132,10 @@ class Message:
     filepath: str
     attachments: list[Attachment] = field(default_factory=list)
     has_attachments: bool = False
+    # Every author in From, each a parseable address string. Usually one;
+    # RFC 5322 allows several. ``from_addr`` stays the first author for the
+    # thread-level sender lists.
+    from_addrs: list[str] = field(default_factory=list)
     # File identity captured at parse time. ``size`` / ``mtime_ns``
     # / ``content_hash`` feed ``indexed_files`` so the reconciler can tell a
     # flag-only rename from a genuine content change without re-reading every
@@ -240,7 +245,12 @@ def parse_email(path: Path, maildir_root: Path | None = None) -> Message | None:
     references = [_clean_id(r) for r in msg.get("References", "").split() if r.strip()]
 
     subject = _decode_header(msg.get("Subject", "(no subject)"))
-    from_addr = _decode_header(msg.get("From", ""))
+    # Parse From structurally, like To / Cc: decoding the whole header
+    # first turns an encoded name with a comma ("=?utf-8?q?Doe=2C_Jane?=")
+    # into an unquoted "Doe, Jane <...>" that no longer parses as one
+    # address, and a multi-author From would be read as a single address.
+    from_addrs = _parse_addrs(msg.get("From", ""))
+    from_addr = from_addrs[0] if from_addrs else _decode_header(msg.get("From", ""))
     to_addrs = _parse_addrs(msg.get("To", ""))
     cc_addrs = _parse_addrs(msg.get("Cc", ""))
     date = _parse_date(msg.get("Date", ""))
@@ -268,6 +278,7 @@ def parse_email(path: Path, maildir_root: Path | None = None) -> Message | None:
         references=references,
         subject=subject,
         from_addr=from_addr,
+        from_addrs=from_addrs,
         to_addrs=to_addrs,
         cc_addrs=cc_addrs,
         date=date,
@@ -425,6 +436,19 @@ def _format_address(name: str, addr: str) -> str:
     return f"{name} <{addr}>"
 
 
+def _decode_display_name(name: str) -> str:
+    """Decode an RFC 2047 display name, keeping the raw text if it is broken.
+
+    A malformed encoded-word (bad base64, say) must cost only the pretty
+    name — never the address or the rest of the message, which would
+    otherwise be dead-lettered by a deterministic ``HeaderParseError``.
+    """
+    try:
+        return _decode_header(name)
+    except email.errors.HeaderParseError, UnicodeError:
+        return name
+
+
 def _parse_addrs(value: str | email.header.Header) -> list[str]:
     """Parse an address header into one parseable string per address.
 
@@ -439,7 +463,7 @@ def _parse_addrs(value: str | email.header.Header) -> list[str]:
     text = _decode_header(value) if isinstance(value, email.header.Header) else value
     pairs = email.utils.getaddresses([text])
     return [
-        _format_address(_decode_header(name) if name else "", addr)
+        _format_address(_decode_display_name(name) if name else "", addr)
         for name, addr in pairs
         if addr.strip()
     ]
