@@ -58,10 +58,8 @@ def _build_schema(conn: sqlite3.Connection) -> None:
         -- space as the thread vec table so synthetic vectors like
         -- ``[1, 0, 0, 0]`` work uniformly across both lanes.
         --
-        -- ``message_date`` mirrors the indexer's v18 schema so the
-        -- COALESCE(message_date, chunked_at) ordering in
-        -- ``get_recent_chunks_for_thread`` can be exercised with both
-        -- new (date-stamped) and legacy (NULL) rows in tests.
+        -- ``message_date`` mirrors the indexer schema: NOT NULL, and
+        -- the ordering key for ``get_recent_chunks_for_thread``.
         CREATE TABLE message_chunks (
             chunk_id        TEXT PRIMARY KEY,
             message_id      TEXT NOT NULL,
@@ -74,7 +72,7 @@ def _build_schema(conn: sqlite3.Connection) -> None:
             chunked_at      TEXT NOT NULL,
             fts_rowid       INTEGER,
             attachment_id   TEXT,
-            message_date    TEXT
+            message_date    TEXT NOT NULL
         );
 
         CREATE VIRTUAL TABLE message_chunks_fts USING fts5(
@@ -144,11 +142,11 @@ def _insert_chunk(
     exercise it end-to-end, without requiring a real indexer pipeline
     in the unit-test stack.
 
-    ``message_date`` mirrors the v18 column on ``message_chunks``;
-    defaults to ``None`` so existing tests that pre-date the column
-    keep their semantics (NULL value, COALESCE'd to ``chunked_at`` by
-    readers).
+    ``message_date`` defaults to ``chunked_at``, so tests that only
+    care about insert order get a matching message order.
     """
+    if message_date is None:
+        message_date = chunked_at
     cur = conn.cursor()
     cur.execute("INSERT INTO message_chunks_fts (text) VALUES (?)", (text,))
     fts_rowid = cur.lastrowid

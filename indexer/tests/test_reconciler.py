@@ -854,12 +854,14 @@ class TestReap:
             token_est=5,
         )
         db.replace_message_chunks(
+            message_date="2024-01-01T00:00:00+00:00",
             message_id="co1@example.com",
             thread_id=thread_id,
             chunks=[orig_chunk],
             embeddings_by_chunk_id={orig_chunk.chunk_id: [0.1] * EMBEDDING_DIM},
         )
         db.replace_message_chunks(
+            message_date="2024-01-01T00:00:00+00:00",
             message_id="co2@example.com",
             thread_id=thread_id,
             chunks=[reply_chunk],

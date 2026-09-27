@@ -18,6 +18,11 @@ giving up. The queue makes both cases observable and bounded:
   exponential backoff. When ``attempts`` reaches
   ``max_attempts`` the row transitions to status ``dead`` — stays in
   the table for visibility, stops being claimed.
+- Infrastructure failures (embedder down or misconfigured) are not
+  the message's fault: ``defer`` postpones the row without touching
+  ``attempts``, so no outage can dead-letter mail. Every failure
+  records a ``last_error_class`` (see ``ERROR_CLASSES``), and
+  ``requeue_dead`` is the operator path back out of ``dead``.
 
 Idempotency:
 
@@ -52,6 +57,26 @@ log = logging.getLogger("indexer.queue")
 
 STATUS_QUEUED = "queued"
 STATUS_DEAD = "dead"
+
+# Why a job last failed, persisted in ``indexing_jobs.last_error_class``
+# so a dead row explains itself and ``requeue_dead`` can target a class.
+#
+# * retryable — may succeed on a later attempt; consumes the attempt
+#   budget (``mark_failed``) and dead-letters once it is exhausted.
+# * permanent_source_failure — this source can never be indexed under
+#   the current config (oversized, no Message-ID, input the embedder
+#   rejects); dead-lettered immediately (``mark_dead_terminal``).
+# * operator_action_required — the pipeline itself is misconfigured
+#   (embedder rejects credentials or model). Says nothing about the
+#   message, so it is deferred, never dead-lettered (``defer``).
+#
+# Infrastructure outages are deferred with ``retryable`` and likewise
+# never consume attempts: a transient outage must not turn into a
+# permanent omission from the index.
+ERROR_CLASS_RETRYABLE = "retryable"
+ERROR_CLASS_PERMANENT = "permanent_source_failure"
+ERROR_CLASS_OPERATOR = "operator_action_required"
+ERROR_CLASSES = (ERROR_CLASS_RETRYABLE, ERROR_CLASS_PERMANENT, ERROR_CLASS_OPERATOR)
 
 # Reasons are free-form tags logged for observability; enumerating them
 # here keeps the set reviewable without forcing a CHECK constraint (new
@@ -237,6 +262,7 @@ class IndexingQueue:
             attempts=1,
             last_stage=stage,
             last_error=error,
+            error_class=ERROR_CLASS_PERMANENT,
             now_iso=_now_iso(),
         )
         log.warning(
@@ -268,6 +294,7 @@ class IndexingQueue:
                 attempts=new_attempts,
                 last_stage=stage,
                 last_error=error,
+                error_class=ERROR_CLASS_RETRYABLE,
                 now_iso=_now_iso(),
             )
             log.error(
@@ -288,6 +315,7 @@ class IndexingQueue:
             attempts=new_attempts,
             last_stage=stage,
             last_error=error,
+            error_class=ERROR_CLASS_RETRYABLE,
             now_iso=_now_iso(),
             next_attempt_iso=next_attempt.isoformat(),
         )
@@ -300,6 +328,47 @@ class IndexingQueue:
             backoff_seconds,
             _truncate_error(error),
         )
+
+    def defer(
+        self,
+        filepath: str,
+        *,
+        stage: str,
+        error: str,
+        error_class: str,
+        delay_seconds: float,
+    ) -> None:
+        """Postpone a job for an infrastructure failure without spending
+        its attempt budget.
+
+        Used when the failure says nothing about the message — the
+        embedder is down, rate-limiting, or rejecting credentials. The
+        row stays ``queued`` with ``attempts`` unchanged and becomes due
+        again after ``delay_seconds``, so no outage can dead-letter it.
+        """
+        attempts = self.db.queue_get_attempts(filepath)
+        if attempts is None:
+            log.warning("defer: no queue row for %s; nothing to update", filepath)
+            return
+        next_attempt = datetime.now(UTC) + timedelta(seconds=delay_seconds)
+        self.db.queue_mark_failed(
+            filepath=filepath,
+            attempts=attempts,
+            last_stage=stage,
+            last_error=error,
+            error_class=error_class,
+            now_iso=_now_iso(),
+            next_attempt_iso=next_attempt.isoformat(),
+        )
+
+    def requeue_dead(self, error_class: str | None = None) -> int:
+        """Return dead-lettered jobs to the queue with a fresh budget.
+
+        The operator rescue path once the underlying cause is fixed.
+        ``error_class`` limits the requeue to one failure class; ``None``
+        requeues every dead row. Returns the number of rows requeued.
+        """
+        return self.db.queue_requeue_dead(error_class=error_class, now_iso=_now_iso())
 
     # ----- reads ---------------------------------------------------------
 

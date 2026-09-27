@@ -11,6 +11,9 @@ from src.database import Database
 from src.queue import (
     DEFAULT_BASE_BACKOFF_SECONDS,
     DEFAULT_MAX_ATTEMPTS,
+    ERROR_CLASS_OPERATOR,
+    ERROR_CLASS_PERMANENT,
+    ERROR_CLASS_RETRYABLE,
     REASON_INITIAL_SCAN,
     REASON_ON_CREATED,
     STATUS_DEAD,
@@ -396,3 +399,133 @@ class TestBackoffCap:
         gap = (scheduled - datetime.now(UTC)).total_seconds()
         # Six hours plus a small slack for test execution.
         assert gap <= 6 * 3600 + 5
+
+
+def _row(db: Database, filepath: str):
+    return db._conn.execute(
+        "SELECT status, attempts, last_stage, last_error, last_error_class, next_attempt_at "
+        "FROM indexing_jobs WHERE filepath = ?",
+        (filepath,),
+    ).fetchone()
+
+
+class TestFailureClasses:
+    """Every failure outcome records WHY it failed, so an operator (or
+    ``requeue_dead``) can tell an exhausted retry from a permanently
+    unindexable source from a configuration problem."""
+
+    def test_mark_failed_records_retryable_on_retry_and_on_dead(self, tmp_path):
+        db = Database(tmp_path / "q.db")
+        q = _queue(db, max_attempts=2)
+        q.enqueue("/m/a", REASON_INITIAL_SCAN)
+
+        q.mark_failed("/m/a", stage="parse", error="boom")
+        assert _row(db, "/m/a")["last_error_class"] == ERROR_CLASS_RETRYABLE
+        q.mark_failed("/m/a", stage="parse", error="boom")
+        row = _row(db, "/m/a")
+        assert row["status"] == STATUS_DEAD
+        assert row["last_error_class"] == ERROR_CLASS_RETRYABLE
+
+    def test_mark_dead_terminal_records_permanent_source_failure(self, tmp_path):
+        db = Database(tmp_path / "q.db")
+        q = _queue(db)
+        q.enqueue("/m/a", REASON_INITIAL_SCAN)
+
+        q.mark_dead_terminal("/m/a", stage="parse", error="oversized")
+
+        assert _row(db, "/m/a")["last_error_class"] == ERROR_CLASS_PERMANENT
+
+    def test_enqueue_clears_previous_class(self, tmp_path):
+        db = Database(tmp_path / "q.db")
+        q = _queue(db)
+        q.enqueue("/m/a", REASON_INITIAL_SCAN)
+        q.mark_dead_terminal("/m/a", stage="parse", error="oversized")
+
+        q.enqueue("/m/a", REASON_ON_CREATED)
+
+        assert _row(db, "/m/a")["last_error_class"] is None
+
+
+class TestDefer:
+    """Infrastructure failures (embedder outage, auth misconfiguration)
+    say nothing about the message. They must postpone it without
+    spending its attempt budget, so no outage — however long — can
+    dead-letter mail."""
+
+    def test_defer_keeps_attempts_and_schedules_future_retry(self, tmp_path):
+        db = Database(tmp_path / "q.db")
+        q = _queue(db, max_attempts=2)
+        q.enqueue("/m/a", REASON_INITIAL_SCAN)
+        before = datetime.now(UTC)
+
+        for _ in range(10):
+            q.defer(
+                "/m/a",
+                stage="embed",
+                error="APIConnectionError",
+                error_class=ERROR_CLASS_RETRYABLE,
+                delay_seconds=60,
+            )
+
+        row = _row(db, "/m/a")
+        assert row["status"] == STATUS_QUEUED
+        assert row["attempts"] == 0
+        assert row["last_stage"] == "embed"
+        assert row["last_error_class"] == ERROR_CLASS_RETRYABLE
+        assert datetime.fromisoformat(row["next_attempt_at"]) >= before + timedelta(seconds=60)
+        assert q.claim_next() is None
+
+    def test_defer_records_operator_action_class(self, tmp_path):
+        db = Database(tmp_path / "q.db")
+        q = _queue(db)
+        q.enqueue("/m/a", REASON_INITIAL_SCAN)
+
+        q.defer(
+            "/m/a",
+            stage="embed",
+            error="AuthenticationError: status=401",
+            error_class=ERROR_CLASS_OPERATOR,
+            delay_seconds=30,
+        )
+
+        assert _row(db, "/m/a")["last_error_class"] == ERROR_CLASS_OPERATOR
+
+
+class TestRequeueDead:
+    def _dead(self, db, q, path, *, terminal: bool):
+        q.enqueue(path, REASON_INITIAL_SCAN)
+        if terminal:
+            q.mark_dead_terminal(path, stage="parse", error="oversized")
+        else:
+            for _ in range(q.max_attempts):
+                q.mark_failed(path, stage="embed", error="boom")
+        assert q.is_dead(path)
+
+    def test_requeues_every_dead_row_with_fresh_budget(self, tmp_path):
+        db = Database(tmp_path / "q.db")
+        q = _queue(db)
+        self._dead(db, q, "/m/a", terminal=False)
+        self._dead(db, q, "/m/b", terminal=True)
+        q.enqueue("/m/live", REASON_INITIAL_SCAN)
+        q.mark_failed("/m/live", stage="parse", error="x")
+
+        assert q.requeue_dead() == 2
+
+        for path in ("/m/a", "/m/b"):
+            row = _row(db, path)
+            assert row["status"] == STATUS_QUEUED
+            assert row["attempts"] == 0
+            assert row["last_error_class"] is None
+        assert _row(db, "/m/live")["attempts"] == 1
+        assert q.stats() == {"queued": 3, "dead": 0}
+
+    def test_class_filter_limits_requeue(self, tmp_path):
+        db = Database(tmp_path / "q.db")
+        q = _queue(db)
+        self._dead(db, q, "/m/a", terminal=False)
+        self._dead(db, q, "/m/b", terminal=True)
+
+        assert q.requeue_dead(error_class=ERROR_CLASS_RETRYABLE) == 1
+
+        assert q.has_pending_row("/m/a")
+        assert q.is_dead("/m/b")

@@ -1,4 +1,4 @@
-.PHONY: build build-nocache up down logs first-run update status clean sync sync-indexer sync-mcp test test-indexer test-mcp typecheck typecheck-indexer typecheck-mcp bridge-patch-check bridge-smoke bridge-upgrade-check init-secrets validate-env help
+.PHONY: build build-nocache up down logs first-run update status requeue-dead clean sync sync-indexer sync-mcp test test-indexer test-mcp typecheck typecheck-indexer typecheck-mcp bridge-patch-check bridge-smoke bridge-upgrade-check init-secrets validate-env help
 
 UV_CACHE_DIR ?= /tmp/uv-cache
 export UV_CACHE_DIR
@@ -24,6 +24,7 @@ help:
 	@echo "  bridge-upgrade-check  Run Bridge patch-drift and smoke checks"
 	@echo "  update       Rebuild and restart Bridge with new version"
 	@echo "  status       Show container and index status"
+	@echo "  requeue-dead Requeue dead-lettered indexing jobs (optional CLASS=retryable|permanent_source_failure|operator_action_required)"
 	@echo "  sync         Sync local uv environments for indexer and mcp-server"
 	@echo "  test         Run indexer and mcp-server unit tests locally with uv"
 	@echo "  typecheck    Run mypy over the indexer and mcp-server Python services"
@@ -170,6 +171,11 @@ status:
 		 import json; print(json.dumps(get_index_status(), indent=2))" \
 		2>/dev/null || echo "  MCP server not running or index not ready."
 	@echo ""
+
+# Requeue dead-lettered indexing jobs once their cause is fixed.
+# The running indexer drains them on its next pass.
+requeue-dead:
+	docker exec indexer python -m src.requeue_dead $(if $(CLASS),--class $(CLASS),)
 
 # Run unit tests locally using uv
 test: test-indexer test-mcp

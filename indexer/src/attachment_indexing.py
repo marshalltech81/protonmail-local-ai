@@ -325,7 +325,7 @@ def apply_attachment_writes(
     message_id: str,
     thread_id: str,
     db: Database,
-    message_date: str | None = None,
+    message_date: str,
 ) -> dict[str, int]:
     """Persist a prepared attachment plan. DB writes only.
 
@@ -413,7 +413,7 @@ def process_attachment(
     max_extracted_chars: int | None = None,
     ocr_timeout_seconds: float | None = None,
     max_pdf_pages: int | None = None,
-    message_date: str | None = None,
+    message_date: str,
 ) -> dict[str, int]:
     """Single-call wrapper: prepare + apply for one attachment occurrence.
 

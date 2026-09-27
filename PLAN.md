@@ -56,8 +56,9 @@ The stack runs four containers:
   sync, TOFU cert pinning with explicit rotation flag.
 - **indexer** — Docker, parses Maildir, threads, embeds via any
   OpenAI-compatible `/v1/embeddings` provider (operator-supplied),
-  writes SQLite. Schema v18: 4096-dim L2-unit-norm vectors, nullable
-  `message_chunks.message_date`. Initial scan and steady-state both
+  writes SQLite. Schema v19 (squashed baseline): 4096-dim L2-unit-norm
+  vectors, `NOT NULL` `message_chunks.message_date`,
+  `indexing_jobs.last_error_class`. Initial scan and steady-state both
   drain a durable `indexing_jobs` queue through one two-phase batched
   path (Phase 1 commits thread membership with a three-case
   seed-vector chain; Phase 2b batch-embeds; Phase 2c commits chunks /
@@ -86,24 +87,11 @@ omission.
    Completed).
 2. ~~**Periodic Maildir reconciliation.**~~ Done 2026-09-26 (see
    Recently Completed).
-3. **Failure taxonomy.** Classify queue failures explicitly —
-   `retryable` (embed endpoint down, timeout, rate limit) vs
-   `permanent_source_failure` (malformed MIME, corrupt file) vs
-   `operator_action_required` — persisted as `last_error_class`
-   alongside the existing attempt fields. Formalizes the split the
-   embedder's `_is_transient_embed_error` and the queue's
-   `mark_skipped` already gesture at. Transient infrastructure
-   failures must never dead-letter a message.
-4. **Batch failure isolation.** A Phase 2b embed failure currently
-   marks the whole batch failed with identical backoffs, so one
-   poison message drags up to 49 batchmates into `dead`. Isolate via
-   bisection (or single-message retry) before condemning anything.
-5. **Outage circuit breaker.** On consecutive transport failures,
-   pause draining with backoff instead of burning per-message attempt
-   budgets — an ~8-minute embedder outage must not mass-dead-letter
-   the in-flight queue.
-6. **`requeue-dead` command.** Ship the rescue tool
-   (`architecture.md` currently points at raw SQL in a docstring).
+3. ~~**Failure taxonomy.**~~ Done 2026-09-26 (see Recently
+   Completed).
+4. ~~**Batch failure isolation.**~~ Done 2026-09-26.
+5. ~~**Outage circuit breaker.**~~ Done 2026-09-26.
+6. ~~**`requeue-dead` command.**~~ Done 2026-09-26.
 7. **Robust untrusted-content serialization.** Escape/strip
    `</untrusted_email>` (and equivalent delimiters) from interpolated
    email content — the fence is currently spoofable by a literal
@@ -403,9 +391,6 @@ can be revisited with an explicit owner decision.
 ## Known limitations
 
 - initial sync may take a long time on large mailboxes
-- **an embedder outage longer than the retry cascade can
-  mass-dead-letter in-flight messages, and dead rows are never
-  auto-resurrected** — Phase 0 items 3–6
 - the schema is effectively locked to 4096-dim
   Qwen3-Embedding-8B-shaped models (hardcoded dim, no stored model
   identity, vendored tokenizer) — Phase 2
@@ -457,6 +442,44 @@ do not ship persisted claims without them.
    during its Phase 3 experimental period.
 
 ## Recently Completed
+
+### 2026-09-26 — Failure taxonomy, isolation, outage breaker, requeue-dead (Phase 0 items 3–6)
+
+Phase 0 exit criterion met: transient infrastructure failures can no
+longer cause permanent source omission. Every queue failure now
+records `last_error_class` (`retryable` / `permanent_source_failure` /
+`operator_action_required`; schema v19). When a
+batch embed fails, a one-string health probe separates an outage from
+a bad input: an outage defers every in-flight job without spending
+attempts and opens a circuit breaker (30 s doubling to 10 min, shared
+by the initial drain and the main loop); a healthy probe re-embeds
+each message alone, so good batchmates index in the same pass and
+only the bad input is charged (5xx on that input → retries; outright
+rejection → immediate `permanent_source_failure`). A passing probe
+only describes one tiny request, so every failure during isolation is
+attributed by `classify_embed_failure` (separate from the HTTP retry
+predicate): transport / 408 / 429 and 401 / 403 / 404 defer the
+remaining messages and open the breaker; only 400 / 413 / 422 are
+terminal; 5xx re-probes before charging an attempt (review round 1
+found a mid-isolation 401 or persistent 429 could dead-letter valid
+mail). A rejected multi-input request is re-sent one input per request
+before anything is charged, so a provider request-size limit below
+`EMBED_BATCH_SIZE` can't dead-letter valid mail either (review round 2). 429 and 408 now
+count as transient in `_is_transient_embed_error`, so rate limits
+back off instead of reading as misconfiguration. The same change squashed
+migration history through v19 into `_apply_initial_schema` (no
+deployed database existed): migrations `0013`–`0018` and the v14
+destructive-migration guard (`INDEXER_MIGRATION_V14_FORCE`) were
+deleted, `SCHEMA_BASELINE_VERSION = 19` marks the new floor, and older
+databases fail closed with rebuild instructions. The runner stays for
+future migrations, starting at `0020`. With no pre-v18 rows possible,
+`message_chunks.message_date` became `NOT NULL`, the indexer's NULL
+backfill was removed, and mcp-server's `COALESCE(message_date,
+chunked_at)` legacy fallback was dropped. `make requeue-dead
+[CLASS=...]` (`src/requeue_dead.py`) replaces the raw-SQL rescue.
+Pausing during an outage also pauses Phase 1, so new mail is not
+keyword-searchable until the embedder returns (deliberate: avoids
+hammering a down provider).
 
 ### 2026-09-26 — Ingestion completeness (Phase 0 items 1–2)
 

@@ -15,6 +15,7 @@ import pytest
 from src.attachment_indexing import attachment_occurrence_id
 from src.database import (
     EMBEDDING_DIM,  # noqa: F401  -- via reuse
+    SCHEMA_BASELINE_VERSION,
     SCHEMA_VERSION,
     Database,
 )
@@ -86,386 +87,22 @@ class TestSchema:
         second = Database(db_path)  # second open must not raise
         second.close()
 
-    def test_opening_with_stale_version_runs_migration_to_current(self, tmp_path):
-        """An existing volume several versions behind ``SCHEMA_VERSION``
-        triggers the migration runner, which applies every shipped
-        migration in order and stamps the current version. The v13
-        ``threads.display_subject`` and v18
-        ``message_chunks.message_date`` column-adding migrations both
-        run end-to-end, demonstrating that the runner applies the
-        intermediate migrations before advancing to the current
-        version."""
-        db_path = tmp_path / "stale.db"
-        database = Database(db_path)
-        database.close()
-        import sqlite3
-
-        # Drop the v13 + v18 columns and stamp v12 to simulate an
-        # existing install that pre-dates every column-adding
-        # migration in the range. ``ALTER TABLE DROP COLUMN`` exists
-        # in SQLite >= 3.35; the indexer's runtime already requires
-        # SQLite >= 3.43.
-        conn = sqlite3.connect(str(db_path))
-        try:
-            conn.execute("ALTER TABLE threads DROP COLUMN display_subject")
-            conn.execute("ALTER TABLE message_chunks DROP COLUMN message_date")
-            conn.execute("UPDATE schema_version SET version = ?", (12,))
-            conn.commit()
-        finally:
-            conn.close()
-
-        # Reopening should run every shipped migration silently.
-        database = Database(db_path)
-        try:
-            cur = database._conn.execute("PRAGMA table_info(threads)")
-            thread_columns = {row["name"] for row in cur.fetchall()}
-            assert "display_subject" in thread_columns
-            cur = database._conn.execute("PRAGMA table_info(message_chunks)")
-            chunk_columns = {row["name"] for row in cur.fetchall()}
-            assert "message_date" in chunk_columns
-            stored = database._conn.execute("SELECT version FROM schema_version").fetchone()[
-                "version"
-            ]
-            assert stored == SCHEMA_VERSION
-        finally:
-            database.close()
-
-    def test_v15_to_v16_migration_creates_subject_folder_index(self, tmp_path):
-        """Direct test for migration 0016: a v15-stamped database
-        without ``idx_threads_subject_folder`` must gain the index
-        when reopened. The earlier
-        ``test_opening_with_stale_version_runs_migration_to_current``
-        starts from a current schema and only asserts the column +
-        version after the catch-up — the index already exists in that
-        path because ``_apply_initial_schema`` includes it. A no-op
-        or wrong v16 migration would pass that test silently while
-        leaving existing v15 installs without the index that
-        ``find_threads_by_subject`` depends on for
-        ``_synchronized``-friendly performance."""
-        db_path = tmp_path / "v15.db"
-        database = Database(db_path)
-        database.close()
-        import sqlite3
-
-        # Drop the index AND any post-v15 columns, then stamp v15 to
-        # simulate the pre-v16 state. Without the column drop the
-        # v18 column-adding migration fires during the forward replay
-        # and errors with "duplicate column name: message_date".
-        conn = sqlite3.connect(str(db_path))
-        try:
-            conn.execute("DROP INDEX IF EXISTS idx_threads_subject_folder")
-            conn.execute("ALTER TABLE message_chunks DROP COLUMN message_date")
-            conn.execute("UPDATE schema_version SET version = ?", (15,))
-            conn.commit()
-            # Precondition: the index does NOT exist before reopen.
-            row = conn.execute(
-                "SELECT name FROM sqlite_master "
-                "WHERE type='index' AND name='idx_threads_subject_folder'"
-            ).fetchone()
-            assert row is None, "precondition: v15 simulation must drop the index"
-        finally:
-            conn.close()
-
-        # Reopening through ``Database`` runs the v16 migration.
-        database = Database(db_path)
-        try:
-            row = database._conn.execute(
-                "SELECT name FROM sqlite_master "
-                "WHERE type='index' AND name='idx_threads_subject_folder'"
-            ).fetchone()
-            assert row is not None, (
-                "migration 0016 must create idx_threads_subject_folder; "
-                "without it find_threads_by_subject does a full table scan "
-                "serialized through _synchronized, blocking watchdog + "
-                "reconciler on every initial-scan miss"
-            )
-
-            # The behavioral value of v16 is the COVERING shape — the
-            # exact column order matters. ``PRAGMA index_info`` returns
-            # one row per key column with ``(seqno, cid, name)``, so the
-            # name list in seqno order is the index's column order. A
-            # regression that keeps the index name but drops the
-            # ``thread_id`` covering column (or reorders the prefix
-            # away from the WHERE/ORDER BY shape) would leave the
-            # planner doing a per-match table seek for the projected
-            # thread_id — a real perf regression that "the index
-            # exists" alone would not catch.
-            info = database._conn.execute(
-                "PRAGMA index_info(idx_threads_subject_folder)"
-            ).fetchall()
-            columns_in_order = [r["name"] for r in info]
-            assert columns_in_order == ["subject", "folder", "date_last", "thread_id"], (
-                f"v16 index must have exact covering shape "
-                f"[subject, folder, date_last, thread_id]; got "
-                f"{columns_in_order}. The fourth column makes the "
-                f"index actually covering for find_threads_by_subject's "
-                f"projection — without it SQLite still has to seek the "
-                f"table per match."
-            )
-
-            stored = database._conn.execute("SELECT version FROM schema_version").fetchone()[
-                "version"
-            ]
-            assert stored == SCHEMA_VERSION
-        finally:
-            database.close()
-
-    def test_v16_migration_replaces_wrong_shape_same_name_index(self, tmp_path):
-        """A v15 database with an out-of-band same-name index that has
-        the wrong (three-column, non-covering) shape must be repaired
-        on upgrade, not silently kept. The earlier migration shape
-        used ``CREATE INDEX IF NOT EXISTS`` which accepts whatever
-        same-named index already exists — and would have stamped
-        v16 against a non-covering index, defeating the migration's
-        behavioral contract. The current migration drops first +
-        unconditionally re-creates so the canonical four-column
-        shape is guaranteed regardless of pre-state.
-        """
-        db_path = tmp_path / "v15_wrong_index.db"
-        database = Database(db_path)
-        database.close()
-        import sqlite3
-
-        # Simulate a v15 install with an out-of-band three-column index
-        # under the same name (operator hot-fixed before v16 shipped, or
-        # a different branch's experiment landed an older shape).
-        conn = sqlite3.connect(str(db_path))
-        try:
-            conn.execute("DROP INDEX IF EXISTS idx_threads_subject_folder")
-            conn.execute(
-                "CREATE INDEX idx_threads_subject_folder ON threads(subject, folder, date_last)"
-            )
-            # Drop post-v15 columns so the forward migration replay
-            # doesn't hit a duplicate-column error on v18.
-            conn.execute("ALTER TABLE message_chunks DROP COLUMN message_date")
-            conn.execute("UPDATE schema_version SET version = ?", (15,))
-            conn.commit()
-            # Precondition: the wrong-shape index is in place.
-            wrong_info = conn.execute("PRAGMA index_info(idx_threads_subject_folder)").fetchall()
-            wrong_columns = [r[2] for r in wrong_info]  # PRAGMA returns (seqno, cid, name)
-            assert wrong_columns == ["subject", "folder", "date_last"], (
-                f"precondition: wrong-shape simulation must produce a "
-                f"three-column index, got {wrong_columns}"
-            )
-        finally:
-            conn.close()
-
-        # Reopening through Database runs migration 0016, which
-        # MUST replace the wrong-shape index rather than skip it.
-        database = Database(db_path)
-        try:
-            info = database._conn.execute(
-                "PRAGMA index_info(idx_threads_subject_folder)"
-            ).fetchall()
-            columns = [r["name"] for r in info]
-            assert columns == ["subject", "folder", "date_last", "thread_id"], (
-                f"migration 0016 must REPLACE a wrong-shape same-name "
-                f"index with the canonical four-column covering shape, "
-                f"not keep it. Got {columns}. Without the DROP step, "
-                f"an out-of-band three-column index would survive the "
-                f"migration and the database would be stamped v16 with "
-                f"a non-covering index — operator-invisible perf "
-                f"regression on subject-fallback lookups."
-            )
-            stored = database._conn.execute("SELECT version FROM schema_version").fetchone()[
-                "version"
-            ]
-            assert stored == SCHEMA_VERSION
-        finally:
-            database.close()
-
-    def test_v14_migration_guard_blocks_populated_v13_without_force(self, tmp_path, monkeypatch):
-        """The v14 (768→4096) migration is destructive — it drops the
-        vector tables and clears message_chunks, indexed_files, and
-        the queue. On a populated v13 install that means hours of
-        indexing work get reset, so the guard refuses unless the
-        operator opts in via INDEXER_MIGRATION_V14_FORCE."""
-        db_path = tmp_path / "populated.db"
-        database = Database(db_path)
-        # Seed one message_chunks row to make the DB look "populated"
-        # from the guard's perspective. We also need the foreign-key
-        # ancestors so the FK constraint accepts the row.
-        database._conn.execute(
-            "INSERT INTO threads (thread_id, subject, participants, senders, "
-            "folder, date_first, date_last, message_ids) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            ("t1", "subj", "[]", "[]", "INBOX", "2026-01-01", "2026-01-01", "[]"),
-        )
-        database._conn.execute(
-            "INSERT INTO message_thread_map (message_id, thread_id, filepath) VALUES (?, ?, ?)",
-            ("m1", "t1", "/maildir/cur/m1.eml"),
-        )
-        database._conn.execute(
-            "INSERT INTO message_chunks (chunk_id, message_id, thread_id, "
-            "chunk_index, text, char_start, char_end, token_est, chunked_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            ("c1", "m1", "t1", 0, "body", 0, 4, 1, "2026-01-01"),
-        )
-        database._conn.execute("UPDATE schema_version SET version = ?", (12,))
-        database._conn.commit()
-        database.close()
-
-        monkeypatch.delenv("INDEXER_MIGRATION_V14_FORCE", raising=False)
-        with pytest.raises(RuntimeError, match="Refusing destructive migration v14"):
-            Database(db_path)
-
-    def test_v14_migration_guard_proceeds_with_force_env(self, tmp_path, monkeypatch):
-        """With INDEXER_MIGRATION_V14_FORCE=true the guard logs a
-        warning and lets the migration proceed."""
-        db_path = tmp_path / "populated_force.db"
-        database = Database(db_path)
-        database._conn.execute(
-            "INSERT INTO threads (thread_id, subject, participants, senders, "
-            "folder, date_first, date_last, message_ids) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            ("t1", "subj", "[]", "[]", "INBOX", "2026-01-01", "2026-01-01", "[]"),
-        )
-        database._conn.execute(
-            "INSERT INTO message_thread_map (message_id, thread_id, filepath) VALUES (?, ?, ?)",
-            ("m1", "t1", "/maildir/cur/m1.eml"),
-        )
-        database._conn.execute(
-            "INSERT INTO message_chunks (chunk_id, message_id, thread_id, "
-            "chunk_index, text, char_start, char_end, token_est, chunked_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            ("c1", "m1", "t1", 0, "body", 0, 4, 1, "2026-01-01"),
-        )
-        # Drop post-v13 columns so the forward migration replay
-        # doesn't hit a duplicate-column error on v18.
-        database._conn.execute("ALTER TABLE message_chunks DROP COLUMN message_date")
-        database._conn.execute("UPDATE schema_version SET version = ?", (13,))
-        database._conn.commit()
-        database.close()
-
-        monkeypatch.setenv("INDEXER_MIGRATION_V14_FORCE", "true")
-        # Should reopen cleanly; the migration runs and clears the chunk row.
-        database = Database(db_path)
-        try:
-            n = database._conn.execute("SELECT COUNT(*) FROM message_chunks").fetchone()[0]
-            assert n == 0
-            stored = database._conn.execute("SELECT version FROM schema_version").fetchone()[
-                "version"
-            ]
-            assert stored == SCHEMA_VERSION
-        finally:
-            database.close()
-
-    def test_v14_migration_guard_skipped_for_empty_v13(self, tmp_path, monkeypatch):
-        """Empty v13 databases don't trigger the guard — there's
-        nothing to lose, so no opt-in env required."""
-        db_path = tmp_path / "empty.db"
-        database = Database(db_path)
-        # Drop post-v13 columns so the forward migration replay
-        # doesn't hit a duplicate-column error on v18.
-        database._conn.execute("ALTER TABLE message_chunks DROP COLUMN message_date")
-        database._conn.execute("UPDATE schema_version SET version = ?", (13,))
-        database._conn.commit()
-        database.close()
-
-        monkeypatch.delenv("INDEXER_MIGRATION_V14_FORCE", raising=False)
-        # Should reopen without raising.
-        Database(db_path).close()
-
-    def test_v14_migration_guard_blocks_when_only_indexed_files_populated(
-        self, tmp_path, monkeypatch
-    ):
-        """Codex review of PR #83 caught that the original guard only
-        counted ``message_chunks`` — a v13 install with scan state
-        (indexed_files), queue state (indexing_jobs), or thread
-        vectors (threads_vec) but zero chunk rows would have
-        bypassed the gate and silently lost that state. This test
-        pins the broader coverage: indexed_files alone is enough to
-        trip the guard."""
-        db_path = tmp_path / "scan_state_only.db"
-        database = Database(db_path)
-        database._conn.execute(
-            "INSERT INTO indexed_files (filepath, content_hash, indexed_at) VALUES (?, ?, ?)",
-            ("/maildir/cur/m1.eml", "h1", "2026-01-01"),
-        )
-        database._conn.execute("UPDATE schema_version SET version = ?", (13,))
-        database._conn.commit()
-        database.close()
-
-        monkeypatch.delenv("INDEXER_MIGRATION_V14_FORCE", raising=False)
-        with pytest.raises(RuntimeError, match="indexed_files=1"):
-            Database(db_path)
-
-    def test_v14_migration_guard_blocks_when_only_chunks_vec_populated(self, tmp_path, monkeypatch):
-        """Codex round-2 of PR #85: ``message_chunks_vec`` is a
-        vec0 virtual table the v14 migration drops + recreates, but
-        an earlier revision of the guard tuple omitted it. Normal
-        invariants tie chunk vectors to chunk rows (they're written
-        in one transaction), but a partial-restore / manual-truncate
-        scenario can produce orphan vectors with no parent
-        ``message_chunks`` row. The guard must catch that."""
-        import struct
-
-        db_path = tmp_path / "orphan_vec.db"
-        database = Database(db_path)
-        # vec0 INSERT: chunk_id PK + a serialized FLOAT[N] blob.
-        # ``struct.pack(f'{N}f', *vec)`` matches the canonical
-        # ``sqlite_vec.serialize_float32`` byte layout for FLOAT[N].
-        vec = [0.0] * EMBEDDING_DIM
-        vec_blob = struct.pack(f"{EMBEDDING_DIM}f", *vec)
-        database._conn.execute(
-            "INSERT INTO message_chunks_vec (chunk_id, embedding) VALUES (?, ?)",
-            ("orphan-chunk-id", vec_blob),
-        )
-        database._conn.execute("UPDATE schema_version SET version = ?", (13,))
-        database._conn.commit()
-        database.close()
-
-        monkeypatch.delenv("INDEXER_MIGRATION_V14_FORCE", raising=False)
-        with pytest.raises(RuntimeError, match="message_chunks_vec=1"):
-            Database(db_path)
-
-    def test_v14_migration_guard_blocks_when_only_queue_populated(self, tmp_path, monkeypatch):
-        """Same broader-coverage point: indexing_jobs alone trips
-        the guard. A v13 install with dead-lettered jobs but no
-        successful chunks must not silently lose that diagnostic
-        state on upgrade."""
-        db_path = tmp_path / "queue_only.db"
-        database = Database(db_path)
-        database._conn.execute(
-            "INSERT INTO indexing_jobs (filepath, reason, status, attempts, "
-            "created_at, updated_at, next_attempt_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (
-                "/maildir/cur/m1.eml",
-                "initial_scan",
-                "dead",
-                5,
-                "2026-01-01",
-                "2026-01-01",
-                "2026-01-01",
-            ),
-        )
-        database._conn.execute("UPDATE schema_version SET version = ?", (13,))
-        database._conn.commit()
-        database.close()
-
-        monkeypatch.delenv("INDEXER_MIGRATION_V14_FORCE", raising=False)
-        with pytest.raises(RuntimeError, match="indexing_jobs=1"):
-            Database(db_path)
-
-    def test_opening_with_unreachable_lower_version_raises(self, tmp_path):
-        """If the stored version is older than the oldest forward
-        migration shipped, the runner raises rather than silently
-        skipping unmodelled steps."""
+    def test_opening_pre_baseline_database_fails_with_rebuild_instructions(self, tmp_path):
+        """Migration history before ``SCHEMA_BASELINE_VERSION`` was
+        squashed into ``_apply_initial_schema``, so an older database
+        cannot be upgraded. It must fail closed with the recovery step,
+        not a generic runner error."""
         db_path = tmp_path / "ancient.db"
-        database = Database(db_path)
-        database.close()
+        Database(db_path).close()
         import sqlite3
 
         conn = sqlite3.connect(str(db_path))
         try:
-            # v1 is older than any migration file we ship — we currently
-            # ship v13 only; v2..v12 have no migration files because
-            # ``_apply_initial_schema`` covers them on fresh installs.
-            conn.execute("UPDATE schema_version SET version = ?", (1,))
+            conn.execute("UPDATE schema_version SET version = ?", (SCHEMA_BASELINE_VERSION - 1,))
             conn.commit()
         finally:
             conn.close()
-        with pytest.raises(RuntimeError, match="migration sequence"):
+        with pytest.raises(RuntimeError, match="Wipe the sqlite-volume"):
             Database(db_path)
 
     def test_opening_with_higher_stored_version_raises_downgrade_error(self, tmp_path):
@@ -486,217 +123,6 @@ class TestSchema:
             conn.close()
         with pytest.raises(RuntimeError, match="Downgrade migrations are not supported"):
             Database(db_path)
-
-    def test_v16_to_v17_migration_normalizes_existing_thread_vectors(self, tmp_path):
-        """Direct test for migration 0017: a v16-stamped database with
-        non-unit ``threads_vec`` rows must have those rows normalized
-        to unit-norm on reopen, so an upgraded install does not mix
-        normalized (newly-touched) and non-normalized (untouched)
-        thread vectors. Without the backfill, retrieval ranking after
-        upgrade depends on which threads happened to be re-embedded
-        since the schema bump — exactly the kind of silent corruption
-        Codex flagged in PR #98 review."""
-        import struct
-
-        from src.database import EMBEDDING_DIM
-
-        db_path = tmp_path / "v16_non_unit.db"
-        database = Database(db_path)
-        database.close()
-
-        # Stamp v16 and seed a non-unit thread vector + an already-unit
-        # vector + a zero placeholder. The migration must normalize the
-        # first two and preserve the third unchanged (NaN poisoning a
-        # zero-seed row would corrupt every brand-new thread).
-        conn = sqlite3.connect(str(db_path))
-        try:
-            import sqlite_vec
-
-            conn.enable_load_extension(True)
-            sqlite_vec.load(conn)
-            non_unit = [2.0 / (EMBEDDING_DIM**0.5)] * EMBEDDING_DIM  # norm = 2.0
-            already_unit = [1.0 / (EMBEDDING_DIM**0.5)] * EMBEDDING_DIM  # norm = 1.0
-            zero_seed = [0.0] * EMBEDDING_DIM
-            for tid, vec in (
-                ("t-non-unit", non_unit),
-                ("t-already-unit", already_unit),
-                ("t-zero-seed", zero_seed),
-            ):
-                conn.execute(
-                    "INSERT INTO threads_vec (thread_id, embedding) VALUES (?, ?)",
-                    (tid, sqlite_vec.serialize_float32(vec)),
-                )
-            # Drop post-v16 columns so the forward migration replay
-            # doesn't hit a duplicate-column error on v18.
-            conn.execute("ALTER TABLE message_chunks DROP COLUMN message_date")
-            conn.execute("UPDATE schema_version SET version = ?", (16,))
-            conn.commit()
-        finally:
-            conn.close()
-
-        # Reopen — runs the v17 migration.
-        database = Database(db_path)
-        try:
-
-            def read_norm(thread_id: str) -> float:
-                row = database._conn.execute(
-                    "SELECT embedding FROM threads_vec WHERE thread_id = ?",
-                    (thread_id,),
-                ).fetchone()
-                vec = list(struct.unpack(f"{EMBEDDING_DIM}f", row["embedding"]))
-                return sum(x * x for x in vec) ** 0.5
-
-            assert read_norm("t-non-unit") == pytest.approx(1.0, abs=1e-5), (
-                "v17 migration must normalize pre-existing non-unit "
-                "thread vectors so cosine == dot product downstream"
-            )
-            assert read_norm("t-already-unit") == pytest.approx(1.0, abs=1e-5), (
-                "vec_normalize is idempotent on already-unit input — "
-                "running it twice must not drift the row"
-            )
-
-            # Zero placeholder must survive the migration. A NaN here
-            # would corrupt every later cosine query that touches the
-            # row, including phase-2c-not-yet-run brand-new threads.
-            row = database._conn.execute(
-                "SELECT embedding FROM threads_vec WHERE thread_id = ?",
-                ("t-zero-seed",),
-            ).fetchone()
-            zero_vec = list(struct.unpack(f"{EMBEDDING_DIM}f", row["embedding"]))
-            assert all(v == 0.0 for v in zero_vec), (
-                "v17 migration must preserve the all-zero phase-1 seed "
-                "placeholder unchanged — vec_normalize would NaN-poison it"
-            )
-
-            stored = database._conn.execute("SELECT version FROM schema_version").fetchone()[
-                "version"
-            ]
-            assert stored == SCHEMA_VERSION
-        finally:
-            database.close()
-
-    def test_v16_to_v17_migration_normalizes_existing_chunk_vectors(self, tmp_path):
-        """The v17 backfill also covers ``message_chunks_vec``: an
-        operator on an alternate OpenAI-compatible provider (DeepInfra,
-        OpenRouter, vLLM, TEI) may have indexed against a model that
-        does not normalize, leaving non-unit chunk vectors. Production
-        Qwen3-Embedding-8B emits unit-norm output so the typical
-        upgrade path is a no-op, but we verify the predicate fires on
-        non-unit chunk rows too."""
-        import struct
-
-        from src.database import EMBEDDING_DIM
-
-        db_path = tmp_path / "v16_chunks_non_unit.db"
-        database = Database(db_path)
-        # Need a parent message + thread for the chunk row's FK.
-        _seed_thread_for_message(database, "m-cv@x", "t-cv")
-        database._conn.execute(
-            "INSERT INTO message_chunks (chunk_id, message_id, thread_id, "
-            "chunk_index, text, char_start, char_end, token_est, chunked_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            ("c-non-unit", "m-cv@x", "t-cv", 0, "body", 0, 4, 1, "2026-01-01"),
-        )
-        database._conn.commit()
-        database.close()
-
-        conn = sqlite3.connect(str(db_path))
-        try:
-            import sqlite_vec
-
-            conn.enable_load_extension(True)
-            sqlite_vec.load(conn)
-            non_unit = [3.0 / (EMBEDDING_DIM**0.5)] * EMBEDDING_DIM  # norm = 3.0
-            conn.execute(
-                "INSERT INTO message_chunks_vec (chunk_id, embedding) VALUES (?, ?)",
-                ("c-non-unit", sqlite_vec.serialize_float32(non_unit)),
-            )
-            # Drop post-v16 columns so the forward migration replay
-            # doesn't hit a duplicate-column error on v18.
-            conn.execute("ALTER TABLE message_chunks DROP COLUMN message_date")
-            conn.execute("UPDATE schema_version SET version = ?", (16,))
-            conn.commit()
-        finally:
-            conn.close()
-
-        database = Database(db_path)
-        try:
-            row = database._conn.execute(
-                "SELECT embedding FROM message_chunks_vec WHERE chunk_id = ?",
-                ("c-non-unit",),
-            ).fetchone()
-            vec = list(struct.unpack(f"{EMBEDDING_DIM}f", row["embedding"]))
-            norm = sum(x * x for x in vec) ** 0.5
-            assert norm == pytest.approx(1.0, abs=1e-5), (
-                "v17 migration must normalize pre-existing non-unit "
-                "chunk vectors so message_chunks_vec shares the same "
-                "end-to-end unit-norm invariant as threads_vec"
-            )
-        finally:
-            database.close()
-
-    def test_v17_to_v18_migration_adds_message_date_column(self, tmp_path):
-        """Migration 0018 adds ``message_chunks.message_date`` so
-        timeline-style retrieval can order by message time instead of
-        the chunker's wall-clock insert time. Legacy v17 rows have no
-        column at all; the migration must add it as nullable so
-        existing chunks survive untouched and downstream readers
-        coalesce to ``chunked_at`` for those rows.
-
-        Pre-migration state simulation: drop the column, stamp v17.
-        Post-migration state: column exists, legacy chunk row's
-        ``message_date`` is NULL (no backfill at the SQL level), and
-        the downstream ``get_recent_chunks_for_thread`` COALESCE
-        fallback handles the NULL transparently — verified by the
-        mcp-server test side."""
-        db_path = tmp_path / "v17_no_message_date.db"
-        database = Database(db_path)
-        _seed_thread_for_message(database, "m-md@x", "t-md")
-        database._conn.execute(
-            "INSERT INTO message_chunks (chunk_id, message_id, thread_id, "
-            "chunk_index, text, char_start, char_end, token_est, chunked_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            ("c-legacy", "m-md@x", "t-md", 0, "body", 0, 4, 1, "2026-01-01"),
-        )
-        database._conn.commit()
-        database.close()
-
-        # Drop the v18 column and stamp v17 to simulate the pre-v18 state.
-        conn = sqlite3.connect(str(db_path))
-        try:
-            conn.execute("ALTER TABLE message_chunks DROP COLUMN message_date")
-            conn.execute("UPDATE schema_version SET version = ?", (17,))
-            conn.commit()
-            # Precondition: column does not exist before reopen.
-            cols = {row[1] for row in conn.execute("PRAGMA table_info(message_chunks)").fetchall()}
-            assert "message_date" not in cols, "precondition: v17 simulation must drop message_date"
-        finally:
-            conn.close()
-
-        # Reopening through ``Database`` runs the v18 migration.
-        database = Database(db_path)
-        try:
-            cols = {
-                row["name"]
-                for row in database._conn.execute("PRAGMA table_info(message_chunks)").fetchall()
-            }
-            assert "message_date" in cols, (
-                "migration 0018 must add message_chunks.message_date so "
-                "timeline retrieval can order by message time"
-            )
-            # Legacy row's message_date is NULL — no SQL-level
-            # backfill, so the downstream COALESCE fallback handles it.
-            row = database._conn.execute(
-                "SELECT message_date FROM message_chunks WHERE chunk_id = ?",
-                ("c-legacy",),
-            ).fetchone()
-            assert row["message_date"] is None
-            stored = database._conn.execute("SELECT version FROM schema_version").fetchone()[
-                "version"
-            ]
-            assert stored == SCHEMA_VERSION
-        finally:
-            database.close()
 
 
 class TestEmbeddingDimGuard:
@@ -2173,6 +1599,7 @@ class TestReplaceMessageChunks:
         chunk = _make_chunk("parent-required".ljust(64, "0"), 0, "orphan")
         with pytest.raises(sqlite3.IntegrityError, match="FOREIGN KEY"):
             db.replace_message_chunks(
+                message_date="2024-01-01T00:00:00+00:00",
                 message_id="missing@x",
                 thread_id="missing-thread",
                 chunks=[chunk],
@@ -2188,13 +1615,14 @@ class TestReplaceMessageChunks:
         }
 
         result = db.replace_message_chunks(
+            message_date="2024-01-01T00:00:00+00:00",
             message_id="m1@x",
             thread_id="t1",
             chunks=chunks,
             embeddings_by_chunk_id=embeds,
         )
 
-        assert result == {"inserted": 2, "deleted": 0, "kept": 0, "backfilled": 0}
+        assert result == {"inserted": 2, "deleted": 0, "kept": 0}
         # Each chunk landed in all three indexes.
         assert (
             db._conn.execute(
@@ -2225,22 +1653,24 @@ class TestReplaceMessageChunks:
         embeds = {chunks[0].chunk_id: [0.3] * EMBEDDING_DIM}
 
         first = db.replace_message_chunks(
+            message_date="2024-01-01T00:00:00+00:00",
             message_id="m2@x",
             thread_id="t2",
             chunks=chunks,
             embeddings_by_chunk_id=embeds,
         )
-        assert first == {"inserted": 1, "deleted": 0, "kept": 0, "backfilled": 0}
+        assert first == {"inserted": 1, "deleted": 0, "kept": 0}
 
         # Replay with no embeddings — would raise if the diff path tried
         # to insert anything.
         second = db.replace_message_chunks(
+            message_date="2024-01-01T00:00:00+00:00",
             message_id="m2@x",
             thread_id="t2",
             chunks=chunks,
             embeddings_by_chunk_id={},
         )
-        assert second == {"inserted": 0, "deleted": 0, "kept": 1, "backfilled": 0}
+        assert second == {"inserted": 0, "deleted": 0, "kept": 1}
 
     def test_diff_write_inserts_new_keeps_existing_drops_gone(self, db):
         _seed_thread_for_message(db, "m3@x", "t3")
@@ -2250,6 +1680,7 @@ class TestReplaceMessageChunks:
 
         # Round 1: keep + drop.
         db.replace_message_chunks(
+            message_date="2024-01-01T00:00:00+00:00",
             message_id="m3@x",
             thread_id="t3",
             chunks=[keep, drop],
@@ -2261,12 +1692,13 @@ class TestReplaceMessageChunks:
 
         # Round 2: keep + new (drop should be deleted; keep should be kept).
         result = db.replace_message_chunks(
+            message_date="2024-01-01T00:00:00+00:00",
             message_id="m3@x",
             thread_id="t3",
             chunks=[keep, new],
             embeddings_by_chunk_id={new.chunk_id: [0.3] * EMBEDDING_DIM},
         )
-        assert result == {"inserted": 1, "deleted": 1, "kept": 1, "backfilled": 0}
+        assert result == {"inserted": 1, "deleted": 1, "kept": 1}
 
         stored = {
             row[0]
@@ -2285,6 +1717,7 @@ class TestReplaceMessageChunks:
         chunk = _make_chunk("e" * 64, 0, "needs embed")
         with pytest.raises(ValueError, match="missing embedding"):
             db.replace_message_chunks(
+                message_date="2024-01-01T00:00:00+00:00",
                 message_id="m4@x",
                 thread_id="t4",
                 chunks=[chunk],
@@ -2312,6 +1745,7 @@ class TestReplaceMessageChunks:
         scaled = [2.0 / (EMBEDDING_DIM**0.5)] * EMBEDDING_DIM
 
         db.replace_message_chunks(
+            message_date="2024-01-01T00:00:00+00:00",
             message_id="m-norm@x",
             thread_id="t-norm",
             chunks=[chunk],
@@ -2336,6 +1770,7 @@ class TestReplaceMessageChunks:
         chunk = _make_chunk("f" * 64, 0, "bad dim")
         with pytest.raises(ValueError, match="EMBEDDING_DIM|reserves 4096"):
             db.replace_message_chunks(
+                message_date="2024-01-01T00:00:00+00:00",
                 message_id="m5@x",
                 thread_id="t5",
                 chunks=[chunk],
@@ -2382,82 +1817,18 @@ class TestMessageDateOnChunks:
         ).fetchone()
         assert row["message_date"] == "2024-06-01T12:00:00+00:00"
 
-    def test_message_date_backfills_kept_chunks_on_reprocess(self, db):
-        # Legacy v17- chunk rows carry ``NULL`` ``message_date``. Chunk
-        # IDs are deterministic, so reprocessing an unchanged message
-        # (reap-rebuild / dead-letter retry / recovery sweep) yields the
-        # same IDs — every chunk is "kept", never re-inserted. The
-        # backfill path must still stamp ``message_date`` on those kept
-        # rows so the v18 "gradually pick up" promise actually holds.
-        _seed_thread_for_message(db, "m-md3@x", "t-md3")
-        chunk = _make_chunk("md3".ljust(64, "0"), 0, "body")
-        # First write: legacy-style, no date -> NULL row.
-        db.replace_message_chunks(
-            message_id="m-md3@x",
-            thread_id="t-md3",
-            chunks=[chunk],
-            embeddings_by_chunk_id={chunk.chunk_id: _one_hot(0)},
-        )
-        # Reprocess the identical chunk, now with a real Date: header.
-        result = db.replace_message_chunks(
-            message_id="m-md3@x",
-            thread_id="t-md3",
-            chunks=[chunk],
-            embeddings_by_chunk_id={},
-            message_date="2024-06-02T09:30:00+00:00",
-        )
-        assert result["inserted"] == 0
-        assert result["kept"] == 1
-        assert result["backfilled"] == 1
-        row = db._conn.execute(
-            "SELECT message_date FROM message_chunks WHERE chunk_id = ?",
-            (chunk.chunk_id,),
-        ).fetchone()
-        assert row["message_date"] == "2024-06-02T09:30:00+00:00"
-
-    def test_message_date_backfill_does_not_overwrite_existing(self, db):
-        # A kept row that already carries a date must not be rewritten:
-        # the ``IS NULL`` guard keeps the backfill a pure one-way fill.
-        _seed_thread_for_message(db, "m-md4@x", "t-md4")
-        chunk = _make_chunk("md4".ljust(64, "0"), 0, "body")
-        db.replace_message_chunks(
-            message_id="m-md4@x",
-            thread_id="t-md4",
-            chunks=[chunk],
-            embeddings_by_chunk_id={chunk.chunk_id: _one_hot(0)},
-            message_date="2024-06-01T12:00:00+00:00",
-        )
-        result = db.replace_message_chunks(
-            message_id="m-md4@x",
-            thread_id="t-md4",
-            chunks=[chunk],
-            embeddings_by_chunk_id={},
-            message_date="2099-12-31T23:59:59+00:00",
-        )
-        assert result["backfilled"] == 0
-        row = db._conn.execute(
-            "SELECT message_date FROM message_chunks WHERE chunk_id = ?",
-            (chunk.chunk_id,),
-        ).fetchone()
-        assert row["message_date"] == "2024-06-01T12:00:00+00:00"
-
-    def test_message_date_defaults_to_null_when_omitted(self, db):
-        # Back-compat: legacy callers and tests that did not pass the
-        # kwarg still produce a valid row; the column is nullable and
-        # downstream readers COALESCE to ``chunked_at``.
+    def test_schema_rejects_chunk_without_message_date(self, db):
+        """Timeline retrieval orders by ``message_date`` with no
+        fallback, so the column is ``NOT NULL``: a write path that
+        forgot the date must fail loudly, not store a row that sorts
+        wrong."""
         _seed_thread_for_message(db, "m-md2@x", "t-md2")
-        chunk = _make_chunk("md2".ljust(64, "0"), 0, "body")
-        db.replace_message_chunks(
-            message_id="m-md2@x",
-            thread_id="t-md2",
-            chunks=[chunk],
-            embeddings_by_chunk_id={chunk.chunk_id: _one_hot(0)},
-        )
-        row = db._conn.execute(
-            "SELECT message_date FROM message_chunks WHERE chunk_id = ?",
-            (chunk.chunk_id,),
-        ).fetchone()
-        assert row["message_date"] is None
+        with pytest.raises(sqlite3.IntegrityError, match="message_date"):
+            db._conn.execute(
+                "INSERT INTO message_chunks (chunk_id, message_id, thread_id, "
+                "chunk_index, text, char_start, char_end, token_est, chunked_at) "
+                "VALUES ('c-null', 'm-md2@x', 't-md2', 0, 'body', 0, 4, 1, '2026-01-01')"
+            )
 
 
 class TestThreadChunkAggregation:
@@ -2472,6 +1843,7 @@ class TestThreadChunkAggregation:
         for mid, slot in [("m6a@x", 0), ("m6b@x", 1)]:
             chunk = _make_chunk(f"x{mid}".ljust(64, "0"), 0, f"body of {mid}")
             db.replace_message_chunks(
+                message_date="2024-01-01T00:00:00+00:00",
                 message_id=mid,
                 thread_id="t6",
                 chunks=[chunk],
@@ -2490,6 +1862,7 @@ class TestThreadChunkAggregation:
         for mid, slot in [("m7a@x", 2), ("m7b@x", 3)]:
             chunk = _make_chunk(f"y{mid}".ljust(64, "0"), 0, f"body of {mid}")
             db.replace_message_chunks(
+                message_date="2024-01-01T00:00:00+00:00",
                 message_id=mid,
                 thread_id="t7",
                 chunks=[chunk],
@@ -2518,6 +1891,7 @@ class TestThreadChunkAggregation:
 
         chunk = _make_chunk("zhas".ljust(64, "0"), 0, "some body")
         db.replace_message_chunks(
+            message_date="2024-01-01T00:00:00+00:00",
             message_id="th@x",
             thread_id="t_has",
             chunks=[chunk],
@@ -2536,6 +1910,7 @@ class TestAtomicIndexTransaction:
             with db.transaction():
                 db.upsert_thread(thread, FAKE_EMBEDDING)
                 db.replace_message_chunks(
+                    message_date="2024-01-01T00:00:00+00:00",
                     message_id=msg.message_id,
                     thread_id=thread.thread_id,
                     chunks=[chunk],
@@ -2556,6 +1931,7 @@ class TestChunkCascadeOnMessageRemoval:
 
         chunk = _make_chunk("z" * 64, 0, "to be removed")
         db.replace_message_chunks(
+            message_date="2024-01-01T00:00:00+00:00",
             message_id="m8@x",
             thread_id=thread.thread_id,
             chunks=[chunk],
@@ -2580,6 +1956,7 @@ class TestChunkCascadeOnMessageRemoval:
         for mid in ("m9a@x", "m9b@x"):
             chunk = _make_chunk(f"q{mid}".ljust(64, "0"), 0, "doomed")
             db.replace_message_chunks(
+                message_date="2024-01-01T00:00:00+00:00",
                 message_id=mid,
                 thread_id=t.thread_id,
                 chunks=[chunk],
@@ -2797,12 +2174,14 @@ class TestAttachmentChunkSlicing:
         attachment_id = "att-hash" * 8
 
         db.replace_message_chunks(
+            message_date="2024-01-01T00:00:00+00:00",
             message_id="slice1@x",
             thread_id=thread.thread_id,
             chunks=[body_chunk],
             embeddings_by_chunk_id={body_chunk.chunk_id: [0.1] * EMBEDDING_DIM},
         )
         db.replace_message_chunks(
+            message_date="2024-01-01T00:00:00+00:00",
             message_id="slice1@x",
             thread_id=thread.thread_id,
             chunks=[att_chunk],
@@ -2836,12 +2215,14 @@ class TestAttachmentChunkSlicing:
         att_id = "attID" * 13
 
         db.replace_message_chunks(
+            message_date="2024-01-01T00:00:00+00:00",
             message_id="slice2@x",
             thread_id=thread.thread_id,
             chunks=[body],
             embeddings_by_chunk_id={body.chunk_id: [0.1] * EMBEDDING_DIM},
         )
         db.replace_message_chunks(
+            message_date="2024-01-01T00:00:00+00:00",
             message_id="slice2@x",
             thread_id=thread.thread_id,
             chunks=[att],
@@ -2852,6 +2233,7 @@ class TestAttachmentChunkSlicing:
         # Re-write body slice with a different chunk — attachment chunk stays.
         body2 = _make_chunk("body2-new".ljust(64, "0"), 0, "new body")
         db.replace_message_chunks(
+            message_date="2024-01-01T00:00:00+00:00",
             message_id="slice2@x",
             thread_id=thread.thread_id,
             chunks=[body2],

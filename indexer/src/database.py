@@ -7,7 +7,6 @@ Thread-level indexing: one row per thread, updated as new messages arrive.
 import functools
 import json
 import logging
-import os
 import sqlite3
 import struct
 import threading
@@ -57,57 +56,19 @@ def _dedupe_by_canonical(addrs: list[str]) -> list[str]:
     return result
 
 
-# SCHEMA_VERSION jumped from v8 to v12 in one PR; the four logical steps
-# that the bump represents (and that a future reader will see in the
-# ``_apply_initial_schema`` body) are:
-#   v9  — ``message_chunks`` / ``message_chunks_fts`` / ``message_chunks_vec``
-#         tables: the precision-retrieval lane on top of thread-level rows.
-#   v10 — ``attachments`` + ``attachments_fts``: per-message attachment
-#         occurrences so filename / MIME filters work uniformly.
-#   v11 — ``attachment_extractions`` cache: extracted *text* per
-#         ``content_hash`` (never payload bytes) so OCR / PDF parse cost
-#         runs at most once per unique payload.
-#   v12 — FK ``ON DELETE CASCADE`` across chunk + attachment tables so
-#         a thread or message deletion takes its dependent rows with it
-#         without relying on application-side helpers.
-#   v13 — ``threads.display_subject``: retrieval-facing original-cased
-#         subject (with ``Re:``/``Fwd:`` prefixes intact). The existing
-#         ``subject`` column stays as the normalized matching key used
-#         by the threader for grouping. Existing threads receive
-#         ``NULL`` for ``display_subject``; the retrieval layer
-#         coalesces back to ``subject`` so old threads render with the
-#         legacy normalized value until a future indexer pass refreshes
-#         them.
-#   v16 — ``idx_threads_subject_folder`` covering index on
-#         ``threads(subject, folder, date_last, thread_id)``: the
-#         threader's subject-fallback lookup
-#         (``find_threads_by_subject``) is run once per message that
-#         misses on In-Reply-To/References, which on initial scan is
-#         most messages. Without an index SQLite did a full ``threads``
-#         scan per call, serialized through the ``_synchronized`` lock
-#         and blocking the watchdog + reconciler. Including
-#         ``thread_id`` in the index makes it actually covering for the
-#         SELECT (no per-match table seek).
-#   v17 — backfill the unit-norm storage invariant on existing
-#         ``threads_vec`` / ``message_chunks_vec`` rows so cosine
-#         similarity equals dot product across both new and pre-upgrade
-#         vectors. See ``0017_unit_norm_vec_invariant.sql``.
-#   v18 — ``message_chunks.message_date``: nullable column carrying
-#         the source message's ``Date:`` header value at chunk-write
-#         time so timeline-style retrieval
-#         (``get_recent_chunks_for_thread`` / ``summarize_thread``)
-#         can order by message time instead of the chunker's
-#         wall-clock insert time. Legacy v17- rows have NULL
-#         ``message_date`` and the downstream query uses
-#         ``COALESCE(message_date, chunked_at)`` so they degrade to
-#         the old heuristic until they are re-chunked.
-# Bumping this constant requires shipping a forward migration file at
-# ``src/migrations/<NNNN>_<slug>.sql`` covering the new version. Fresh
-# installs continue to apply ``_apply_initial_schema`` directly and stamp
-# the current version; existing installs run the migration runner to
-# catch up. See ``src/migrations/runner.py`` for the file layout and
+# ``_apply_initial_schema`` builds the complete current schema.
+# Migration history up to v19 was squashed into it while no deployed
+# database existed; databases older than ``SCHEMA_BASELINE_VERSION``
+# cannot be upgraded and must be rebuilt from Maildir.
+#
+# Bumping ``SCHEMA_VERSION`` requires shipping a forward migration file
+# at ``src/migrations/<NNNN>_<slug>.sql`` covering the new version.
+# Fresh installs apply ``_apply_initial_schema`` directly and stamp the
+# current version; existing installs run the migration runner to catch
+# up. See ``src/migrations/runner.py`` for the file layout and
 # transactional guarantees.
-SCHEMA_VERSION = 18
+SCHEMA_VERSION = 19
+SCHEMA_BASELINE_VERSION = 19
 
 # The schema uses FTS5 ``contentless_delete=1``, which SQLite added in 3.43.
 # Validate the runtime version at Database init and fail fast with a clear
@@ -312,8 +273,14 @@ class Database:
                 "and let the indexer rebuild from Maildir."
             )
 
+        if stored < SCHEMA_BASELINE_VERSION:
+            raise RuntimeError(
+                f"Schema version v{stored} predates the v{SCHEMA_BASELINE_VERSION} "
+                "baseline and cannot be migrated. Wipe the sqlite-volume and let "
+                "the indexer rebuild the index from Maildir."
+            )
+
         migration_dir = Path(__file__).parent / "migrations"
-        self._guard_destructive_migrations(stored, SCHEMA_VERSION)
         log.info(f"Migrating database at {self.path}: v{stored} -> v{SCHEMA_VERSION}")
         applied = migration_runner.apply_pending(
             self._conn,
@@ -324,96 +291,6 @@ class Database:
         log.info(
             f"Database ready at {self.path} (schema v{SCHEMA_VERSION}, "
             f"applied migrations: {applied})"
-        )
-
-    # Tables the v14 migration drops / recreates / clears. Each entry
-    # contributes to the "populated v13?" decision below — if any of
-    # them carries rows, the operator pays for losing it on upgrade,
-    # not just ``message_chunks``. Both ``threads_vec`` and
-    # ``message_chunks_vec`` are vec0 virtual tables; the same
-    # ``SELECT COUNT(*)`` shape works against vec0 once sqlite-vec is
-    # loaded (which the connection always does — see ``_connect``).
-    _V14_DESTRUCTIVE_TABLES = (
-        "message_chunks",
-        "message_chunks_fts",
-        "indexed_files",
-        "indexing_jobs",
-        "threads_vec",
-        "message_chunks_vec",
-    )
-
-    def _guard_destructive_migrations(self, stored: int, target: int) -> None:
-        """Refuse known-destructive migrations against populated databases
-        unless the operator has explicitly opted in.
-
-        v14 (768→4096-dim Qwen3 embeddings) is destructive — it drops
-        and recreates the vector tables, and clears
-        ``message_chunks`` / ``message_chunks_fts`` / ``indexed_files``
-        / ``indexing_jobs`` so the next scan re-embeds. On a populated
-        v13 install that means hours of indexing work + queue state +
-        scan-tracking get reset; the operator must reindex from
-        Maildir afterward. Worth a confirmation gate so a routine
-        container restart doesn't silently kick off a full backfill.
-
-        The gate counts every table the migration touches, not just
-        ``message_chunks``. A v13 install that has indexed files, a
-        non-empty queue, or thread vectors but zero chunks (e.g.
-        every chunk write failed mid-pipeline; chunk rows manually
-        truncated) would otherwise silently lose its scan / queue /
-        vector state on upgrade.
-
-        Set ``INDEXER_MIGRATION_V14_FORCE=true`` to acknowledge and
-        proceed. Fresh databases (every checked table empty or
-        absent) skip the gate — there's nothing to lose.
-        """
-        if not (stored < 14 <= target):
-            return
-        populated: dict[str, int] = {}
-        for table in self._V14_DESTRUCTIVE_TABLES:
-            # Table names come from the hardcoded ``_V14_DESTRUCTIVE_TABLES``
-            # tuple above — never operator input — so the f-string
-            # interpolation cannot be exploited as SQL injection.
-            # SQLite does not parameterize table names, so string
-            # formatting is the only option here.
-            try:
-                row = self._conn.execute(
-                    f"SELECT COUNT(*) AS n FROM {table}"  # nosec B608
-                ).fetchone()
-            except sqlite3.OperationalError:
-                # Table doesn't exist in this older schema — counts as empty.
-                continue
-            n = row["n"] if row is not None else 0
-            if n > 0:
-                populated[table] = n
-        if not populated:
-            return
-        force = os.environ.get("INDEXER_MIGRATION_V14_FORCE", "").strip().lower() in {
-            "1",
-            "true",
-            "yes",
-            "on",
-        }
-        populated_summary = ", ".join(f"{t}={n}" for t, n in populated.items())
-        if force:
-            log.warning(
-                "INDEXER_MIGRATION_V14_FORCE=true: applying destructive "
-                "v14 migration over populated tables (%s). All chunks, "
-                "vector data, file cache, and queue state will be "
-                "cleared; the next scan will re-embed every message.",
-                populated_summary,
-            )
-            return
-        raise RuntimeError(
-            f"Refusing destructive migration v14 — populated tables: "
-            f"{populated_summary}. v14 resizes the embedding vector "
-            "tables from 768-dim to 4096-dim (Qwen3-Embedding-8B) and "
-            "clears message_chunks / message_chunks_fts / indexed_files "
-            "/ indexing_jobs so the next scan re-embeds. Every existing "
-            "row in those tables will be DROPPED, plus the existing "
-            "threads_vec table itself. To proceed, set "
-            "INDEXER_MIGRATION_V14_FORCE=true and restart. The next scan "
-            "will re-chunk and re-embed every message — expect hours of "
-            "work on a populated mailbox."
         )
 
     def _apply_initial_schema(self, cur: sqlite3.Cursor):
@@ -468,7 +345,7 @@ class Database:
             -- on ``threads_fts.rowid = threads.fts_rowid``. Without this index
             -- SQLite planned ``SCAN threads`` for every FTS hit, which turned
             -- search_emails O(N_fts × N_threads) and blew the 4-min MCP timeout
-            -- on populated mailboxes. See migration 0015 for context.
+            -- on populated mailboxes.
             CREATE INDEX idx_threads_fts_rowid ON threads(fts_rowid);
 
             -- Threader subject-fallback lookup runs once per incoming
@@ -481,7 +358,7 @@ class Database:
             -- thread_id straight from the index without a per-match
             -- table seek. A 50k-message initial scan does not serialize
             -- 50k full table scans through the ``_synchronized`` writer
-            -- lock. See migration 0016.
+            -- lock.
             CREATE INDEX idx_threads_subject_folder
                 ON threads(subject, folder, date_last, thread_id);
 
@@ -512,7 +389,7 @@ class Database:
                 chunked_at      TEXT NOT NULL,
                 fts_rowid       INTEGER,
                 attachment_id   TEXT,
-                message_date    TEXT,                    -- source message's Date: header at chunk-write; NULL on legacy v17- rows, COALESCE'd to chunked_at by readers
+                message_date    TEXT NOT NULL,           -- source message's Date: header; timeline retrieval orders by it
                 FOREIGN KEY (message_id) REFERENCES message_thread_map(message_id)
                     ON DELETE CASCADE,
                 FOREIGN KEY (thread_id) REFERENCES threads(thread_id)
@@ -524,7 +401,7 @@ class Database:
             CREATE INDEX idx_message_chunks_attachment ON message_chunks(attachment_id);
             -- Hybrid-search chunk lane joins ``message_chunks`` back from
             -- ``message_chunks_fts`` on ``fts_rowid``. Critical for query
-            -- latency on populated mailboxes; see migration 0015.
+            -- latency on populated mailboxes.
             CREATE INDEX idx_message_chunks_fts_rowid ON message_chunks(fts_rowid);
 
             CREATE VIRTUAL TABLE message_chunks_fts USING fts5(
@@ -560,7 +437,7 @@ class Database:
             CREATE INDEX idx_attachments_thread ON attachments(thread_id);
             CREATE INDEX idx_attachments_message ON attachments(message_id);
             -- Hybrid-search attachment lane joins ``attachments`` back from
-            -- ``attachments_fts`` on ``fts_rowid``; see migration 0015.
+            -- ``attachments_fts`` on ``fts_rowid``.
             CREATE INDEX idx_attachments_fts_rowid ON attachments(fts_rowid);
 
             CREATE TABLE attachment_extractions (
@@ -620,6 +497,7 @@ class Database:
                 attempts        INTEGER NOT NULL DEFAULT 0,
                 last_error      TEXT,
                 last_stage      TEXT,
+                last_error_class TEXT,
                 created_at      TEXT NOT NULL,
                 updated_at      TEXT NOT NULL,
                 next_attempt_at TEXT NOT NULL
@@ -926,7 +804,7 @@ class Database:
         chunks,
         embeddings_by_chunk_id: dict[str, list[float]],
         attachment_id: str | None = None,
-        message_date: str | None = None,
+        message_date: str,
     ) -> dict[str, int]:
         """Idempotently sync the chunk rows for one slice of a message.
 
@@ -936,9 +814,7 @@ class Database:
         relative to what's already stored — embeddings for existing
         chunk_ids are not touched (the chunk text is unchanged so the
         prior embedding is still valid). Returns ``{"inserted": n,
-        "deleted": m, "kept": k, "backfilled": b}`` for observability;
-        ``backfilled`` counts kept rows whose ``NULL`` ``message_date``
-        was filled in by this call (see below).
+        "deleted": m, "kept": k}`` for observability.
 
         ``attachment_id`` selects which slice of the message's chunks
         this call manages:
@@ -955,16 +831,13 @@ class Database:
           its parent thread into ranking.
 
         ``message_date`` is the source message's ``Date:`` header in
-        ISO 8601 form (``msg.date.isoformat()``). Stored on every new
-        chunk row — and backfilled onto kept rows that still carry a
-        ``NULL`` ``message_date`` — so timeline-style retrieval
+        ISO 8601 form (``msg.date.isoformat()``), stored on every new
+        chunk row so timeline-style retrieval
         (``get_recent_chunks_for_thread`` / ``summarize_thread``) can
         order by message time instead of the chunker's wall-clock
-        insert time. ``None`` is permitted for callers that have no
-        date context (legacy test fixtures, ad-hoc tooling) and
-        produces ``NULL`` rows that downstream readers handle via
-        ``COALESCE(message_date, chunked_at)``. Production indexer
-        paths always pass a real ISO timestamp.
+        insert time. The parser always yields a date (falling back to
+        ingest time for a missing or unparseable header), so the
+        column is ``NOT NULL`` and readers need no fallback.
 
         All inserts / deletes across ``message_chunks``,
         ``message_chunks_fts`` and ``message_chunks_vec`` happen inside
@@ -1062,30 +935,6 @@ class Database:
                     ),
                 )
 
-            # Backfill ``message_date`` onto kept chunk rows. Chunk IDs
-            # are deterministic (``sha256(message_pk || index || text)``),
-            # so reprocessing an unchanged message during a reap-rebuild,
-            # dead-letter retry, or recovery sweep produces identical IDs
-            # — every chunk lands in ``kept``, not ``to_insert``, and the
-            # insert path above never runs for it. Legacy v17- rows
-            # (written before the schema v18 ``message_date`` column)
-            # would therefore stay ``NULL`` forever. The ``IS NULL``
-            # guard keeps this a pure backfill: rows that already carry
-            # a date are untouched.
-            backfilled = 0
-            kept_ids = existing_ids & incoming_ids
-            if message_date is not None and kept_ids:
-                placeholders = ",".join("?" * len(kept_ids))
-                # ``placeholders`` is only ``?`` marks; every chunk_id is
-                # bound as a parameter, so this is not a SQL-injection
-                # vector. nosec B608.
-                cur.execute(
-                    f"UPDATE message_chunks SET message_date = ? "  # nosec B608
-                    f"WHERE message_date IS NULL AND chunk_id IN ({placeholders})",
-                    (message_date, *kept_ids),
-                )
-                backfilled = cur.rowcount
-
             self._commit_if_started(started)
         except Exception:
             self._rollback_if_started(started)
@@ -1095,7 +944,6 @@ class Database:
             "inserted": len(to_insert),
             "deleted": len(to_delete),
             "kept": len(existing_ids & incoming_ids),
-            "backfilled": backfilled,
         }
 
     @_synchronized
@@ -1779,9 +1627,9 @@ class Database:
             """
             INSERT OR REPLACE INTO indexing_jobs
                 (filepath, reason, status, attempts,
-                 last_error, last_stage,
+                 last_error, last_stage, last_error_class,
                  created_at, updated_at, next_attempt_at)
-            VALUES (?, ?, ?, 0, NULL, NULL, ?, ?, ?)
+            VALUES (?, ?, ?, 0, NULL, NULL, NULL, ?, ?, ?)
             """,
             (filepath, reason, status, now_iso, now_iso, now_iso),
         )
@@ -1867,17 +1715,18 @@ class Database:
         attempts: int,
         last_stage: str,
         last_error: str,
+        error_class: str,
         now_iso: str,
         next_attempt_iso: str,
     ) -> None:
         self._conn.execute(
             """
             UPDATE indexing_jobs
-            SET attempts = ?, last_stage = ?, last_error = ?,
+            SET attempts = ?, last_stage = ?, last_error = ?, last_error_class = ?,
                 updated_at = ?, next_attempt_at = ?, status = 'queued'
             WHERE filepath = ?
             """,
-            (attempts, last_stage, last_error, now_iso, next_attempt_iso, filepath),
+            (attempts, last_stage, last_error, error_class, now_iso, next_attempt_iso, filepath),
         )
         self._conn.commit()
 
@@ -1889,18 +1738,35 @@ class Database:
         attempts: int,
         last_stage: str,
         last_error: str,
+        error_class: str,
         now_iso: str,
     ) -> None:
         self._conn.execute(
             """
             UPDATE indexing_jobs
-            SET attempts = ?, last_stage = ?, last_error = ?,
+            SET attempts = ?, last_stage = ?, last_error = ?, last_error_class = ?,
                 updated_at = ?, status = 'dead'
             WHERE filepath = ?
             """,
-            (attempts, last_stage, last_error, now_iso, filepath),
+            (attempts, last_stage, last_error, error_class, now_iso, filepath),
         )
         self._conn.commit()
+
+    @_synchronized
+    def queue_requeue_dead(self, *, error_class: str | None, now_iso: str) -> int:
+        """Reset dead rows (optionally only one ``last_error_class``) to
+        a fresh, immediately-due ``queued`` state. Returns the row count."""
+        cur = self._conn.execute(
+            """
+            UPDATE indexing_jobs
+            SET status = 'queued', attempts = 0, last_error_class = NULL,
+                updated_at = ?, next_attempt_at = ?
+            WHERE status = 'dead' AND (? IS NULL OR last_error_class = ?)
+            """,
+            (now_iso, now_iso, error_class, error_class),
+        )
+        self._conn.commit()
+        return cur.rowcount
 
     @_synchronized
     def queue_stats(self) -> dict[str, int]:

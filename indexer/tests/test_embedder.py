@@ -13,7 +13,16 @@ import httpx
 import pytest
 from openai import APIConnectionError, APIStatusError, APITimeoutError
 from src.chunker import l2_normalize
-from src.embedder import OpenAIEmbedder, _float_env, _is_transient_embed_error
+from src.embedder import (
+    EMBED_FAILURE_CONFIGURATION,
+    EMBED_FAILURE_INFRASTRUCTURE,
+    EMBED_FAILURE_REJECTED_INPUT,
+    EMBED_FAILURE_UNCERTAIN,
+    OpenAIEmbedder,
+    _float_env,
+    _is_transient_embed_error,
+    classify_embed_failure,
+)
 
 
 def _embed_response(vectors: list[list[float]], reverse_order: bool = False) -> SimpleNamespace:
@@ -313,6 +322,17 @@ class TestRetryPredicate:
         assert _is_transient_embed_error(_api_status_error(401)) is False
         assert _is_transient_embed_error(_api_status_error(400)) is False
 
+    def test_retries_rate_limit_and_request_timeout(self):
+        # 429 and 408 are the two 4xx a later attempt can fix: the
+        # provider is throttling or timed out, not rejecting the
+        # request. Treating them as config errors would stall indexing
+        # as "operator action required" during an ordinary rate limit.
+        assert _is_transient_embed_error(_api_status_error(429)) is True
+        assert _is_transient_embed_error(_api_status_error(408)) is True
+        assert _is_transient_embed_error(_api_status_error(403)) is False
+        assert _is_transient_embed_error(_api_status_error(404)) is False
+        assert _is_transient_embed_error(_api_status_error(422)) is False
+
     def test_retries_connection_error(self):
         # APIConnectionError requires a Request to construct.
         req = httpx.Request("POST", "http://x")
@@ -451,3 +471,33 @@ class TestL2Normalize:
         _patch_create(emb, fake_create)
         out = emb.embed_batch(["x"])
         assert out == [l2_normalize([3.0, 4.0])]
+
+
+class TestClassifyEmbedFailure:
+    """Attribution policy for queue accounting — who is at fault —
+    deliberately separate from the retry predicate above, which only
+    asks whether re-sending the same request could succeed."""
+
+    def test_transport_and_throttling_are_infrastructure(self):
+        req = httpx.Request("POST", "http://x")
+        for exc in (
+            APIConnectionError(request=req),
+            APITimeoutError(request=req),
+            _api_status_error(429),
+            _api_status_error(408),
+        ):
+            assert classify_embed_failure(exc) == EMBED_FAILURE_INFRASTRUCTURE
+
+    def test_auth_and_model_errors_are_configuration(self):
+        for code in (401, 403, 404):
+            assert classify_embed_failure(_api_status_error(code)) == EMBED_FAILURE_CONFIGURATION
+
+    def test_request_rejections_are_rejected_input(self):
+        for code in (400, 413, 422):
+            assert classify_embed_failure(_api_status_error(code)) == EMBED_FAILURE_REJECTED_INPUT
+
+    def test_server_errors_and_unknowns_are_uncertain(self):
+        assert classify_embed_failure(_api_status_error(500)) == EMBED_FAILURE_UNCERTAIN
+        assert classify_embed_failure(_api_status_error(503)) == EMBED_FAILURE_UNCERTAIN
+        assert classify_embed_failure(_api_status_error(409)) == EMBED_FAILURE_UNCERTAIN
+        assert classify_embed_failure(RuntimeError("integrity")) == EMBED_FAILURE_UNCERTAIN

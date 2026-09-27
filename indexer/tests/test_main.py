@@ -480,7 +480,10 @@ class TestDrainQueueRetryAndDeadLetter:
     failure retries until it succeeds; persistent failure transitions
     the row to ``dead`` after ``max_attempts``."""
 
-    def test_transient_embed_failure_retries_and_eventually_succeeds(self, tmp_path):
+    def test_one_off_batch_embed_failure_recovers_in_same_pass(self, tmp_path):
+        """A batch embed that fails once while the embedder is healthy
+        (the probe succeeds) is retried per message immediately — the
+        message is indexed in the same pass and spends no attempt."""
         dest = tmp_path / "INBOX" / "new" / "msg.eml"
         _write_eml(dest, "retry@example.com")
 
@@ -489,39 +492,16 @@ class TestDrainQueueRetryAndDeadLetter:
         queue = _make_queue(db)
 
         embedder = make_mock_embedder()
-        # First embed call raises (transient embedding service error); second call succeeds.
         embedder.embed.side_effect = [
-            RuntimeError("embedding service unavailable"),
-            [0.0] * EMBEDDING_DIM,
+            _status_error(503),  # batch embed
+            _UNIT_VECTOR,  # health probe
+            _UNIT_VECTOR,  # per-message re-embed
         ]
-
         queue.enqueue(str(dest), "test")
 
-        # ``max_batch=1`` models the main loop's interleaving behavior:
-        # each pass through drain processes at most one job before
-        # yielding to other concerns (reconciler, health file). With
-        # the tight zero-backoff queue fixture, the two calls run
-        # attempt 1 (fail → re-queued) and attempt 2 (success → row
-        # deleted) on separate passes.
-        attempted_first = main.drain_queue(queue, db, embedder, threader, max_batch=1)
-        assert attempted_first == 1
-        # Phase 1 commits thread membership + indexed_files eagerly so
-        # subsequent batch members can thread against this message; a
-        # Phase 2 (embed) failure leaves the file ``is_indexed`` but
-        # chunkless until the retry succeeds. The queue's retry
-        # cascade is the contract that closes the loop.
-        assert db.is_indexed(str(dest))
-        assert not db.get_chunk_ids_for_message("retry@example.com")
-        row = db._conn.execute(
-            "SELECT attempts, status FROM indexing_jobs WHERE filepath = ?",
-            (str(dest),),
-        ).fetchone()
-        assert row["attempts"] == 1
-        assert row["status"] == "queued"
+        main.drain_queue(queue, db, embedder, threader, max_batch=1)
 
-        attempted_second = main.drain_queue(queue, db, embedder, threader, max_batch=1)
-        assert attempted_second == 1
-        assert db.is_indexed(str(dest))
+        assert db.get_chunk_ids_for_message("retry@example.com")
         assert queue.stats() == {"queued": 0, "dead": 0}
 
     def test_parser_content_pathology_routes_to_queue_retry(self, tmp_path, monkeypatch):
@@ -581,7 +561,11 @@ class TestDrainQueueRetryAndDeadLetter:
         assert row["last_stage"] == "parse"
         assert "simulated html2text runaway" in row["last_error"]
 
-    def test_persistent_embed_failure_transitions_to_dead(self, tmp_path):
+    def test_persistent_embed_failure_is_deferred_never_dead(self, tmp_path):
+        """An embedder that fails every call — including the health
+        probe — is an infrastructure problem, not a property of the
+        message. The row is deferred without spending attempts however
+        many passes run, so no outage can dead-letter mail."""
         dest = tmp_path / "INBOX" / "new" / "msg.eml"
         _write_eml(dest, "giveup@example.com")
 
@@ -590,37 +574,26 @@ class TestDrainQueueRetryAndDeadLetter:
         queue = _make_queue(db)  # max_attempts=3
 
         embedder = make_mock_embedder()
-        embedder.embed.side_effect = RuntimeError("embedding service still down")
-
+        embedder.embed.side_effect = _connection_error()
         queue.enqueue(str(dest), "test")
 
-        # Drain three times — each attempt fails, the third crosses
-        # max_attempts and transitions the row to ``dead``.
-        main.drain_queue(queue, db, embedder, threader)
-        main.drain_queue(queue, db, embedder, threader)
-        main.drain_queue(queue, db, embedder, threader)
+        for _ in range(5):
+            main.drain_queue(queue, db, embedder, threader)
+            _make_due(db)
 
-        # Under the batched pipeline, Phase 1 commits thread membership
-        # + indexed_files before Phase 2 (embed) runs. A persistent
-        # Phase 2 failure leaves the file ``is_indexed=True`` (the
-        # thread row is durable) but chunkless and dead-lettered. The
-        # ``_recover_zero_vector_threads`` sweep picks this up later
-        # if the underlying cause clears; until then, the dead-letter
-        # row is the operator-visible signal.
-        assert db.is_indexed(str(dest)), (
-            "Phase 1 commit lands eagerly even when Phase 2 fails — "
-            "see _drain_queue_batched failure isolation"
-        )
-        assert not db.get_chunk_ids_for_message("giveup@example.com"), (
-            "Phase 2c never ran, so no chunks for this message"
-        )
-        assert queue.stats() == {"queued": 0, "dead": 1}
+        # Phase 1 commits thread membership + indexed_files eagerly, so
+        # the file is keyword-searchable but chunkless until the
+        # embedder returns.
+        assert db.is_indexed(str(dest))
+        assert not db.get_chunk_ids_for_message("giveup@example.com")
+        assert queue.stats() == {"queued": 1, "dead": 0}
         row = db._conn.execute(
-            "SELECT last_stage, last_error FROM indexing_jobs WHERE filepath = ?",
+            "SELECT attempts, last_stage, last_error_class FROM indexing_jobs WHERE filepath = ?",
             (str(dest),),
         ).fetchone()
+        assert row["attempts"] == 0
         assert row["last_stage"] == "embed"
-        assert "embedding service still down" in row["last_error"]
+        assert row["last_error_class"] == "retryable"
 
     def test_missing_file_routes_to_skip_not_retry(self, tmp_path):
         # Models the mbsync flag-rename race: file existed at enqueue
@@ -984,10 +957,13 @@ class TestIndexOneFileChunking:
         _write_eml_with_text_attachment(dest, "attachment-retry@x")
 
         embedder = make_mock_embedder()
-        embedder.embed.side_effect = [
-            [0.1] * EMBEDDING_DIM,  # body chunk
-            RuntimeError("embedding service attachment failure"),
-        ]
+
+        def embed(text):
+            if "attachment text" in text:
+                raise _status_error(500)
+            return [0.1] * EMBEDDING_DIM
+
+        embedder.embed.side_effect = embed
 
         import src.main as main_mod
 
@@ -1004,7 +980,7 @@ class TestIndexOneFileChunking:
         # ``embed`` rather than ``db_write``.
         assert stage == "embed"
         assert err is not None
-        assert "embedding service attachment failure" in err
+        assert "status=500" in err
         # Phase 1 commit is durable (thread membership + indexed_files);
         # Phase 2c never ran, so chunks / attachments / extractions
         # remain unwritten and the queue retry can replay cleanly.
@@ -2096,9 +2072,16 @@ class TestMainStartupAndLoop:
         monkeypatch.setattr(
             main,
             "initial_index",
-            lambda *a, **kw: events.append(f"initial_index:skip_trashed={kw.get('skip_trashed')}"),
+            lambda *a, **kw: (
+                events.append(f"initial_index:skip_trashed={kw.get('skip_trashed')}"),
+                events.append(f"initial_breaker={id(kw.get('breaker'))}"),
+            ),
         )
-        monkeypatch.setattr(main, "_drain_queue_batched", lambda *a, **kw: 0)
+        monkeypatch.setattr(
+            main,
+            "_drain_queue_batched",
+            lambda *a, **kw: events.append(f"drain:breaker={id(kw.get('breaker'))}") or 0,
+        )
         monkeypatch.setattr(main, "_recover_zero_vector_threads", lambda *a, **kw: 0)
         monkeypatch.setattr(
             main,
@@ -2123,6 +2106,14 @@ class TestMainStartupAndLoop:
         init = next(e for e in events if e.startswith("initial_index"))
         assert "observer_start" in events
         assert events.index("observer_start") < events.index(init)
+
+    def test_initial_drain_and_main_loop_share_one_outage_breaker(self, tmp_path, monkeypatch):
+        events = self._run_main(tmp_path, monkeypatch, sweep_due=False)
+
+        initial = next(e for e in events if e.startswith("initial_breaker="))
+        drain = next(e for e in events if e.startswith("drain:breaker="))
+        assert initial.split("=")[1] == drain.split("=")[1]
+        assert initial.split("=")[1] != str(id(None))
 
     def test_main_loop_periodically_rewalks_the_maildir(self, tmp_path, monkeypatch):
         events = self._run_main(tmp_path, monkeypatch, sweep_due=True)
@@ -2256,3 +2247,436 @@ class TestReapedMessagesStayDeleted:
         enqueued = main._enqueue_unindexed_messages(db, queue, maildir, main.REASON_RESCAN)
 
         assert enqueued == 1
+
+
+def _status_error(status_code: int):
+    import httpx
+    from openai import APIStatusError
+
+    return APIStatusError(
+        message=f"{status_code} error",
+        response=httpx.Response(status_code, request=httpx.Request("POST", "http://x")),
+        body=None,
+    )
+
+
+def _connection_error():
+    import httpx
+    from openai import APIConnectionError
+
+    return APIConnectionError(request=httpx.Request("POST", "http://x"))
+
+
+def _make_due(db: Database) -> None:
+    db._conn.execute("UPDATE indexing_jobs SET next_attempt_at = '2000-01-01T00:00:00+00:00'")
+    db._conn.commit()
+
+
+class TestEmbedFailureHandling:
+    """A failed batch embed is either an outage (the embedder can't
+    embed anything) or a bad input (the embedder is healthy but rejects
+    one message). An outage must never spend attempt budgets — no
+    outage may dead-letter mail — and a bad input must never take its
+    batchmates down with it."""
+
+    def _setup(self, tmp_path, monkeypatch, bodies: dict[str, str]):
+        maildir = tmp_path / "maildir"
+        monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
+        paths = {}
+        for name, body in bodies.items():
+            path = maildir / "INBOX" / "cur" / f"{name}.eml"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(
+                f"From: a@example.com\r\nTo: b@example.com\r\nSubject: {name}\r\n"
+                f"Message-ID: <{name}@example.com>\r\n"
+                "Date: Mon, 01 Jan 2024 12:00:00 +0000\r\n"
+                "Content-Type: text/plain; charset=utf-8\r\n\r\n"
+                f"{body}\r\n",
+                encoding="utf-8",
+            )
+            paths[name] = str(path)
+        db = Database(tmp_path / "mail.db")
+        queue = IndexingQueue(db, max_attempts=3, base_backoff_seconds=0)
+        for p in paths.values():
+            queue.enqueue(p, REASON_INITIAL_SCAN)
+        return db, Threader(db), queue, paths
+
+    def _row(self, db, path):
+        return db._conn.execute(
+            "SELECT status, attempts, last_stage, last_error_class FROM indexing_jobs "
+            "WHERE filepath = ?",
+            (path,),
+        ).fetchone()
+
+    def _drain(self, db, embedder, threader, queue, breaker=None):
+        return main._drain_queue_batched(
+            db,
+            embedder,
+            threader,
+            queue,
+            batch_size=10,
+            timing_aggregator=main.TimingAggregator(window=4),
+            max_passes=1,
+            breaker=breaker,
+        )
+
+    def test_outage_defers_batch_without_spending_attempts(self, tmp_path, monkeypatch):
+        db, threader, queue, paths = self._setup(
+            tmp_path, monkeypatch, {"a": "alpha body", "b": "beta body"}
+        )
+        embedder = make_mock_embedder()
+        embedder.embed.side_effect = _connection_error()
+
+        for _ in range(10):
+            self._drain(db, embedder, threader, queue)
+            _make_due(db)
+
+        for p in paths.values():
+            row = self._row(db, p)
+            assert row["status"] == "queued"
+            assert row["attempts"] == 0
+            assert row["last_stage"] == "embed"
+            assert row["last_error_class"] == "retryable"
+        assert queue.stats()["dead"] == 0
+
+    def test_outage_recovers_once_embedder_returns(self, tmp_path, monkeypatch):
+        db, threader, queue, paths = self._setup(tmp_path, monkeypatch, {"a": "alpha body"})
+        embedder = make_mock_embedder()
+        embedder.embed.side_effect = _connection_error()
+        self._drain(db, embedder, threader, queue)
+
+        embedder.embed.side_effect = None
+        embedder.embed.return_value = _UNIT_VECTOR
+        _make_due(db)
+        self._drain(db, embedder, threader, queue)
+
+        assert queue.stats() == {"queued": 0, "dead": 0}
+        assert db.get_chunk_ids_for_message("a@example.com")
+
+    def test_config_error_defers_as_operator_action(self, tmp_path, monkeypatch):
+        db, threader, queue, paths = self._setup(tmp_path, monkeypatch, {"a": "alpha body"})
+        embedder = make_mock_embedder()
+        embedder.embed.side_effect = _status_error(401)
+
+        for _ in range(5):
+            self._drain(db, embedder, threader, queue)
+            _make_due(db)
+
+        row = self._row(db, paths["a"])
+        assert row["status"] == "queued"
+        assert row["attempts"] == 0
+        assert row["last_error_class"] == "operator_action_required"
+
+    def test_rejected_input_is_isolated_and_batchmates_indexed(self, tmp_path, monkeypatch):
+        db, threader, queue, paths = self._setup(
+            tmp_path,
+            monkeypatch,
+            {"good1": "fine text one", "bad": "POISON input", "good2": "fine text two"},
+        )
+        embedder = make_mock_embedder()
+
+        def embed(text):
+            if "POISON" in text:
+                raise _status_error(400)
+            return _UNIT_VECTOR
+
+        embedder.embed.side_effect = embed
+
+        self._drain(db, embedder, threader, queue)
+
+        assert db.get_chunk_ids_for_message("good1@example.com")
+        assert db.get_chunk_ids_for_message("good2@example.com")
+        row = self._row(db, paths["bad"])
+        assert row["status"] == "dead"
+        assert row["last_stage"] == "embed"
+        assert row["last_error_class"] == "permanent_source_failure"
+        assert queue.stats() == {"queued": 0, "dead": 1}
+
+    def test_input_that_crashes_provider_spends_attempts_not_the_queue(self, tmp_path, monkeypatch):
+        """A provider that 500s on one specific input looks like an
+        outage from the batch alone. The probe proves the embedder is
+        healthy, so only that message retries (and eventually dies) —
+        it cannot stall everything else behind the circuit breaker."""
+        db, threader, queue, paths = self._setup(
+            tmp_path, monkeypatch, {"good": "fine text", "bad": "POISON input"}
+        )
+        embedder = make_mock_embedder()
+
+        def embed(text):
+            if "POISON" in text:
+                raise _status_error(500)
+            return _UNIT_VECTOR
+
+        embedder.embed.side_effect = embed
+        breaker = main._EmbedOutageBreaker()
+
+        self._drain(db, embedder, threader, queue, breaker=breaker)
+
+        assert db.get_chunk_ids_for_message("good@example.com")
+        row = self._row(db, paths["bad"])
+        assert row["status"] == "queued"
+        assert row["attempts"] == 1
+        assert row["last_error_class"] == "retryable"
+        assert breaker.allow(main.time.monotonic())
+
+    def test_outage_trips_breaker_and_open_breaker_pauses_draining(self, tmp_path, monkeypatch):
+        db, threader, queue, paths = self._setup(tmp_path, monkeypatch, {"a": "alpha body"})
+        embedder = make_mock_embedder()
+        embedder.embed.side_effect = _connection_error()
+        breaker = main._EmbedOutageBreaker()
+
+        self._drain(db, embedder, threader, queue, breaker=breaker)
+        assert not breaker.allow(main.time.monotonic())
+
+        _make_due(db)
+        calls_before = embedder.embed.call_count
+        processed = self._drain(db, embedder, threader, queue, breaker=breaker)
+
+        assert processed == 0
+        assert embedder.embed.call_count == calls_before
+
+    def _recover_and_drain(self, db, embedder, threader, queue):
+        embedder.embed.side_effect = None
+        embedder.embed.return_value = _UNIT_VECTOR
+        _make_due(db)
+        self._drain(db, embedder, threader, queue)
+
+    def test_auth_failure_during_isolation_defers_instead_of_dead_lettering(
+        self, tmp_path, monkeypatch
+    ):
+        """batch -> 503, probe -> ok, individual retry -> 401. A probe
+        that passed moments earlier does not make a 401 the message's
+        fault: the key was revoked or a gateway rejected auth. Every
+        remaining message is deferred as operator action and the
+        breaker pauses — nothing is dead-lettered."""
+        db, threader, queue, paths = self._setup(
+            tmp_path, monkeypatch, {"a": "alpha body", "b": "beta body"}
+        )
+        embedder = make_mock_embedder()
+        state = {"batch_done": False}
+
+        def embed(text):
+            if text == main._EMBED_PROBE_TEXT:
+                return _UNIT_VECTOR
+            if not state["batch_done"]:
+                state["batch_done"] = True
+                raise _status_error(503)
+            raise _status_error(401)
+
+        embedder.embed.side_effect = embed
+        breaker = main._EmbedOutageBreaker()
+
+        self._drain(db, embedder, threader, queue, breaker=breaker)
+
+        for p in paths.values():
+            row = self._row(db, p)
+            assert row["status"] == "queued"
+            assert row["attempts"] == 0
+            assert row["last_error_class"] == "operator_action_required"
+        assert not breaker.allow(main.time.monotonic())
+
+        self._recover_and_drain(db, embedder, threader, queue)
+        assert queue.stats() == {"queued": 0, "dead": 0}
+        assert db.get_chunk_ids_for_message("a@example.com")
+        assert db.get_chunk_ids_for_message("b@example.com")
+
+    def test_rate_limit_on_real_requests_never_dead_letters(self, tmp_path, monkeypatch):
+        """The tiny probe fits the provider's remaining capacity but the
+        real request is rate-limited (429), pass after pass. That is
+        infrastructure, not the message: attempts stay untouched."""
+        db, threader, queue, paths = self._setup(tmp_path, monkeypatch, {"a": "alpha body"})
+        embedder = make_mock_embedder()
+
+        def embed(text):
+            if text == main._EMBED_PROBE_TEXT:
+                return _UNIT_VECTOR
+            raise _status_error(429)
+
+        embedder.embed.side_effect = embed
+
+        for _ in range(8):
+            self._drain(db, embedder, threader, queue)
+            _make_due(db)
+
+        row = self._row(db, paths["a"])
+        assert row["status"] == "queued"
+        assert row["attempts"] == 0
+        assert row["last_error_class"] == "retryable"
+
+        self._recover_and_drain(db, embedder, threader, queue)
+        assert queue.stats() == {"queued": 0, "dead": 0}
+        assert db.get_chunk_ids_for_message("a@example.com")
+
+    def test_pause_mid_isolation_commits_messages_already_embedded(self, tmp_path, monkeypatch):
+        """Isolation embeds messages in batch order. If the provider
+        starts rate-limiting partway through, messages that already
+        embedded are indexed; only the rest are deferred."""
+        db, threader, queue, paths = self._setup(
+            tmp_path,
+            monkeypatch,
+            {"a1": "first message", "b2": "THROTTLED second", "c3": "third message"},
+        )
+        embedder = make_mock_embedder()
+        state = {"batch_done": False}
+
+        def embed(text):
+            if text == main._EMBED_PROBE_TEXT:
+                return _UNIT_VECTOR
+            if not state["batch_done"]:
+                state["batch_done"] = True
+                raise _status_error(503)
+            if "THROTTLED" in text:
+                state["throttled"] = True
+            if state.get("throttled"):
+                raise _status_error(429)
+            return _UNIT_VECTOR
+
+        embedder.embed.side_effect = embed
+
+        # Rows are claimed in enqueue order: a1, b2, c3.
+        self._drain(db, embedder, threader, queue)
+
+        embedded = [n for n in paths if db.get_chunk_ids_for_message(f"{n}@example.com")]
+        deferred = [n for n in paths if queue.has_pending_row(paths[n])]
+        assert embedded == ["a1"]
+        assert deferred == ["b2", "c3"]
+        for n in deferred:
+            assert self._row(db, paths[n])["attempts"] == 0
+        assert queue.stats()["dead"] == 0
+
+    def test_provider_error_charges_message_only_when_reprobe_passes(self, tmp_path, monkeypatch):
+        """A 5xx during isolation is ambiguous. If a fresh probe fails,
+        the provider went down: defer, no attempt spent."""
+        db, threader, queue, paths = self._setup(tmp_path, monkeypatch, {"a": "alpha body"})
+        embedder = make_mock_embedder()
+        probes = {"n": 0}
+
+        def embed(text):
+            if text == main._EMBED_PROBE_TEXT:
+                probes["n"] += 1
+                if probes["n"] == 1:
+                    return _UNIT_VECTOR
+                raise _connection_error()
+            raise _status_error(500)
+
+        embedder.embed.side_effect = embed
+
+        self._drain(db, embedder, threader, queue)
+
+        row = self._row(db, paths["a"])
+        assert row["attempts"] == 0
+        assert row["status"] == "queued"
+        assert row["last_error_class"] == "retryable"
+
+
+class TestEmbedOutageBreaker:
+    def test_backoff_doubles_to_cap_and_resets_on_success(self):
+        b = main._EmbedOutageBreaker(base_seconds=30, cap_seconds=100)
+        assert b.allow(0.0)
+
+        assert b.record_failure(0.0) == 30
+        assert not b.allow(29.0)
+        assert b.allow(30.0)
+        assert b.record_failure(30.0) == 60
+        assert b.record_failure(90.0) == 100
+        assert b.record_failure(190.0) == 100
+
+        b.record_success()
+        assert b.allow(190.0)
+        assert b.record_failure(190.0) == 30
+
+
+def _mock_transport_embedder(handler):
+    """A real ``OpenAIEmbedder`` whose SDK client talks to an in-process
+    ``httpx.MockTransport``, so tests exercise actual HTTP request
+    boundaries (how many inputs share one request) rather than a
+    per-text mock."""
+    import httpx
+    from openai import OpenAI
+    from src.embedder import OpenAIEmbedder
+
+    embedder = OpenAIEmbedder(base_url="http://embed.test/v1", model="m", api_key="k")
+    embedder.client = OpenAI(
+        base_url="http://embed.test/v1",
+        api_key="k",
+        max_retries=0,
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    return embedder
+
+
+def _embeddings_response(inputs: list[str]):
+    import httpx
+
+    return httpx.Response(
+        200,
+        json={
+            "object": "list",
+            "model": "m",
+            "data": [
+                {"object": "embedding", "index": i, "embedding": _UNIT_VECTOR}
+                for i in range(len(inputs))
+            ],
+            "usage": {"prompt_tokens": 1, "total_tokens": 1},
+        },
+    )
+
+
+class TestRequestLimitIsNotSourceFailure:
+    """A provider rejecting a *request* (413 / 400 / 422) has not shown
+    that any of the message's content is bad when the request carried
+    several inputs — the limit may be the batch, not the source. Only a
+    rejection of a single input is evidence against the message."""
+
+    def _drain_one(self, tmp_path, monkeypatch, handler):
+        import json
+
+        monkeypatch.setattr(main, "MAILDIR_PATH", tmp_path)
+        dest = tmp_path / "INBOX" / "cur" / "msg.eml"
+        _write_eml_with_text_attachment(dest, "limits@example.com")
+        db = Database(tmp_path / "mail.db")
+        queue = _make_queue(db)
+        queue.enqueue(str(dest), REASON_INITIAL_SCAN)
+        sizes: list[int] = []
+
+        def recording(request):
+            inputs = json.loads(request.content)["input"]
+            sizes.append(len(inputs))
+            return handler(inputs)
+
+        main.drain_queue(queue, db, _mock_transport_embedder(recording), Threader(db))
+        return db, queue, str(dest), sizes
+
+    def test_multi_input_request_rejection_retries_one_input_per_request(
+        self, tmp_path, monkeypatch
+    ):
+        import httpx
+
+        def handler(inputs):
+            if len(inputs) > 1:
+                return httpx.Response(413, json={"error": {"message": "payload too large"}})
+            return _embeddings_response(inputs)
+
+        db, queue, path, sizes = self._drain_one(tmp_path, monkeypatch, handler)
+
+        assert sizes[:3] == [2, 1, 2], "batch, probe, then the message's own combined request"
+        assert all(n == 1 for n in sizes[3:])
+        assert db.get_chunk_ids_for_message("limits@example.com")
+        assert queue.stats() == {"queued": 0, "dead": 0}
+
+    def test_input_rejected_on_its_own_is_a_permanent_source_failure(self, tmp_path, monkeypatch):
+        import httpx
+
+        def handler(inputs):
+            if len(inputs) > 1 or any("attachment text" in t for t in inputs):
+                return httpx.Response(400, json={"error": {"message": "bad input"}})
+            return _embeddings_response(inputs)
+
+        db, queue, path, sizes = self._drain_one(tmp_path, monkeypatch, handler)
+
+        row = db._conn.execute(
+            "SELECT status, last_error_class FROM indexing_jobs WHERE filepath = ?", (path,)
+        ).fetchone()
+        assert row["status"] == "dead"
+        assert row["last_error_class"] == "permanent_source_failure"
+        assert not db.get_chunk_ids_for_message("limits@example.com")
