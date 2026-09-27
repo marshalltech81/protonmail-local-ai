@@ -215,7 +215,9 @@ the same posture as "everything stays local."
 When Proton releases a new Bridge version:
 
 ```bash
-# 1. Update BRIDGE_VERSION in .env
+# 1. Update BRIDGE_VERSION and BRIDGE_COMMIT in .env — the build refuses a
+#    tag that doesn't resolve to BRIDGE_COMMIT (see .env.example for the
+#    one-line git ls-remote lookup)
 # 2. Verify the local patch and runtime assumptions still hold
 make bridge-upgrade-check
 # 3. Rebuild and restart

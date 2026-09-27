@@ -715,3 +715,16 @@ class TestSearchAttachmentsTool:
         handler = self._handler(fake_server, fake_llm, attachments_db)
         asyncio.run(handler(limit=9999))
         assert captured["limit"] == 50
+
+
+class TestLoggingPrivacy:
+    def test_search_query_never_reaches_logs(self, fake_server, fake_llm, seeded_db, caplog):
+        import logging
+
+        handler = _handler(fake_server, fake_llm, seeded_db)
+        with caplog.at_level(logging.DEBUG):
+            asyncio.run(handler(query="zq-private-medical-diagnosis", from_addr="dr@example.com"))
+
+        assert "tool=search_emails" in caplog.text
+        assert "zq-private-medical-diagnosis" not in caplog.text
+        assert "dr@example.com" not in caplog.text

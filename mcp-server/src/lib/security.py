@@ -2,8 +2,10 @@
 Security helpers for redaction and safe error formatting.
 """
 
+import logging
 import re
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
+from typing import Any
 
 _COMMON_SECRET_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     # No prefix group: replace the whole match outright.
@@ -57,3 +59,39 @@ def safe_provider_exception_text(
     if isinstance(status, int):
         return f"{type(error).__name__}: status={status}"
     return safe_exception_text(error, secrets)
+
+
+# Tool parameters that never carry mailbox content. Everything else a tool
+# receives — query / question text, addresses, names, folders, message and
+# thread IDs (which embed sender domains), MIME types, extraction schemas —
+# can quote exactly what the user wants private, so it is never logged.
+_LOGGABLE_TOOL_PARAMS = frozenset(
+    {
+        "mode",
+        "limit",
+        "max_threads",
+        "offset",
+        "style",
+        "filter_type",
+        "body_format",
+        "has_attachments",
+        "include_scores",
+        "extracted_only",
+        "include_attachments_metadata",
+        "date_from",
+        "date_to",
+    }
+)
+
+
+def log_tool_call(logger: logging.Logger, tool: str, params: Mapping[str, Any]) -> None:
+    """Log a tool invocation as metadata only.
+
+    Logs the content-free parameters that were supplied and the *names*
+    of the withheld ones, so an operator can see which filters a call
+    used without the log recording what was searched for.
+    """
+    provided = {k: v for k, v in params.items() if v is not None}
+    loggable = {k: v for k, v in provided.items() if k in _LOGGABLE_TOOL_PARAMS}
+    withheld = sorted(k for k in provided if k not in _LOGGABLE_TOOL_PARAMS)
+    logger.info("tool=%s %s withheld=%s", tool, loggable, withheld)

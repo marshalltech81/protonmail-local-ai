@@ -8,6 +8,7 @@ import logging
 
 from mcp.types import TextContent
 
+from ..lib.security import log_tool_call
 from ..lib.validation import clamp_int
 
 log = logging.getLogger("mcp.tools.retrieval")
@@ -55,12 +56,10 @@ def register_retrieval_tools(server, db):
         Returns:
             Indexed thread context, participants, and timeline from the local index.
         """
-        log.info(
-            "tool=get_thread %s",
-            {
-                "thread_id": thread_id,
-                "include_attachments_metadata": include_attachments_metadata,
-            },
+        log_tool_call(
+            log,
+            "get_thread",
+            {"thread_id": thread_id, "include_attachments_metadata": include_attachments_metadata},
         )
         try:
             thread = await asyncio.to_thread(db.get_thread, thread_id)
@@ -139,8 +138,9 @@ def register_retrieval_tools(server, db):
             The message's reconstructed indexed body plus parent-thread
             metadata, or thread context when no body chunks are indexed.
         """
-        log.info(
-            "tool=get_message %s",
+        log_tool_call(
+            log,
+            "get_message",
             {"message_id": message_id, "folder": folder, "body_format": body_format},
         )
         try:
@@ -231,8 +231,9 @@ def register_retrieval_tools(server, db):
         Returns:
             List of threads sorted by most recent activity.
         """
-        log.info(
-            "tool=list_threads %s",
+        log_tool_call(
+            log,
+            "list_threads",
             {"folder": folder, "filter_type": filter_type, "limit": limit, "offset": offset},
         )
         # Clamp both values so a caller-supplied ``limit=100000``,
@@ -301,7 +302,7 @@ def register_retrieval_tools(server, db):
             Ranked contact list with thread counts. Empty result for
             unknown names.
         """
-        log.info("tool=find_contact %s", {"query": query, "limit": limit})
+        log_tool_call(log, "find_contact", {"query": query, "limit": limit})
         # Same clamp ceiling as list_threads — a hallucinated
         # ``limit=10000`` shouldn't drive a giant aggregation/sort.
         limit = clamp_int(limit, default=10, minimum=1, maximum=50)

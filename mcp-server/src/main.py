@@ -447,7 +447,7 @@ def main():
     # ``host="0.0.0.0"`` is required so the in-container bind is reachable
     # through the Docker port-forward; the host-side mapping in
     # ``docker-compose.yml`` keeps the port loopback-only
-    # (``127.0.0.1:${MCP_PORT}:3000``). nosec B104.
+    # (``127.0.0.1:${MCP_PORT}:${MCP_PORT}``). nosec B104.
     #
     # FastMCP only auto-enables DNS-rebinding protection when ``host`` is
     # one of ``127.0.0.1``/``localhost``/``::1``; binding to ``0.0.0.0``

@@ -12,6 +12,12 @@ FROM golang:1.26.5-bookworm@sha256:18aedc16aa19b3fd7ded7245fc14b109e054d65d22ed5
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 ARG BRIDGE_VERSION=v3.27.0
+# Commit the release tag must resolve to. Tags are mutable, and Proton's
+# release tags are lightweight (no tag object, so nothing for
+# `git verify-tag` to check): a re-pointed tag would silently change the
+# source compiled here. The clone step fails unless BRIDGE_VERSION resolves
+# to exactly this commit. Bump it together with BRIDGE_VERSION.
+ARG BRIDGE_COMMIT=04e46eb4fbc1c7ef4425a920bfc352050da0606b
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
@@ -33,8 +39,13 @@ COPY --chmod=755 patch-source.sh /usr/local/bin/patch-source.sh
 
 WORKDIR /build
 
-RUN git clone --depth 1 --branch ${BRIDGE_VERSION} \
-    https://github.com/ProtonMail/proton-bridge.git .
+RUN git clone --depth 1 --branch "${BRIDGE_VERSION}" \
+    https://github.com/ProtonMail/proton-bridge.git . \
+    && actual="$(git rev-parse HEAD)" \
+    && if [[ "${actual}" != "${BRIDGE_COMMIT}" ]]; then \
+        echo "ERROR: ${BRIDGE_VERSION} resolves to ${actual}, not the pinned BRIDGE_COMMIT ${BRIDGE_COMMIT}. Refusing to build unverified source." >&2; \
+        exit 1; \
+    fi
 
 # Download and verify all Go modules against go.sum before building.
 # go mod download pre-populates the module cache; go mod verify then confirms

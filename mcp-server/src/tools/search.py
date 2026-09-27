@@ -9,7 +9,7 @@ import logging
 from mcp.types import TextContent
 
 from ..lib.embed import embed_query
-from ..lib.security import safe_exception_text, safe_provider_exception_text
+from ..lib.security import log_tool_call, safe_exception_text, safe_provider_exception_text
 from ..lib.validation import clamp_int
 
 log = logging.getLogger("mcp.tools.search")
@@ -143,23 +143,20 @@ def register_search_tools(
             List of matching email threads with subject, participants,
             dates, folder, and a short snippet.
         """
-        log.info(
-            "tool=search_emails %s",
+        log_tool_call(
+            log,
+            "search_emails",
             {
-                k: v
-                for k, v in {
-                    "query": query,
-                    "mode": mode,
-                    "folders": folders,
-                    "from_addr": from_addr,
-                    "from_name": from_name,
-                    "date_from": date_from,
-                    "date_to": date_to,
-                    "has_attachments": has_attachments,
-                    "participant": participant,
-                    "limit": limit,
-                }.items()
-                if v is not None
+                "query": query,
+                "mode": mode,
+                "folders": folders,
+                "from_addr": from_addr,
+                "from_name": from_name,
+                "date_from": date_from,
+                "date_to": date_to,
+                "has_attachments": has_attachments,
+                "participant": participant,
+                "limit": limit,
             },
         )
         if mode not in _VALID_SEARCH_MODES:
@@ -195,7 +192,7 @@ def register_search_tools(
                 contacts = await asyncio.to_thread(db.find_contact, from_name, 1, senders_only=True)
             except Exception as e:
                 safe_error = safe_exception_text(e, secrets)
-                log.error("search_emails: find_contact(%r) failed: %s", from_name, safe_error)
+                log.error("search_emails: find_contact lookup failed: %s", safe_error)
                 return [TextContent(type="text", text=f"Search error: {safe_error}")]
             if not contacts:
                 return [
@@ -364,22 +361,19 @@ def register_search_tools(
             Ranked evidence chunks grouped by thread, with full
             provenance (thread, message, source, offsets, date).
         """
-        log.info(
-            "tool=get_evidence %s",
+        log_tool_call(
+            log,
+            "get_evidence",
             {
-                k: v
-                for k, v in {
-                    "query": query,
-                    "thread_id": thread_id,
-                    "folders": folders,
-                    "from_addr": from_addr,
-                    "date_from": date_from,
-                    "date_to": date_to,
-                    "has_attachments": has_attachments,
-                    "limit": limit,
-                    "include_scores": include_scores,
-                }.items()
-                if v is not None
+                "query": query,
+                "thread_id": thread_id,
+                "folders": folders,
+                "from_addr": from_addr,
+                "date_from": date_from,
+                "date_to": date_to,
+                "has_attachments": has_attachments,
+                "limit": limit,
+                "include_scores": include_scores,
             },
         )
         if not query or not query.strip():
@@ -527,20 +521,17 @@ def register_search_tools(
             thread, sender, text-extraction status, and a preview of
             the extracted text.
         """
-        log.info(
-            "tool=search_attachments %s",
+        log_tool_call(
+            log,
+            "search_attachments",
             {
-                k: v
-                for k, v in {
-                    "query": query,
-                    "content_type": content_type,
-                    "from_addr": from_addr,
-                    "date_from": date_from,
-                    "date_to": date_to,
-                    "extracted_only": extracted_only,
-                    "limit": limit,
-                }.items()
-                if v is not None
+                "query": query,
+                "content_type": content_type,
+                "from_addr": from_addr,
+                "date_from": date_from,
+                "date_to": date_to,
+                "extracted_only": extracted_only,
+                "limit": limit,
             },
         )
         limit = clamp_int(limit, default=20, minimum=1, maximum=_MAX_SEARCH_LIMIT)

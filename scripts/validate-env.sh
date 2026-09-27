@@ -308,6 +308,15 @@ MCP_READ_ONLY="$(get_env_value MCP_READ_ONLY)"
     exit 1
 }
 
+# Optional (docker-compose.yml carries the default pin). When set, it must
+# be a full commit SHA: the Bridge build refuses a tag that resolves to
+# anything else, so a typo here would only surface deep inside the build.
+BRIDGE_COMMIT="$(get_env_value BRIDGE_COMMIT)"
+[[ -z "$BRIDGE_COMMIT" || "$BRIDGE_COMMIT" =~ ^[0-9a-f]{40}$ ]] || {
+    echo "ERROR: BRIDGE_COMMIT in .env must be a full 40-character lowercase commit SHA." >&2
+    exit 1
+}
+
 # ----- INFERENCE -----
 INFERENCE_MODE="${INFERENCE_MODE:-anthropic}"
 [[ "$INFERENCE_MODE" =~ ^(openai|anthropic|none)$ ]] || {

@@ -526,6 +526,16 @@ def _iter_maildir_messages(root: Path):
             yield filepath
 
 
+def _stage_error(exc: BaseException) -> str:
+    """Render a pipeline-stage exception for ``indexing_jobs.last_error``.
+
+    Uses ``str()``, never ``repr()``: some exceptions carry their input
+    as an attribute that only ``repr()`` shows — a ``UnicodeDecodeError``
+    embeds the entire byte buffer it was decoding, i.e. email content.
+    """
+    return f"{type(exc).__name__}: {exc}"
+
+
 @dataclass
 class _BatchedMsg:
     """Per-message state carried through the two-phase batched indexer.
@@ -604,7 +614,7 @@ def _phase1_commit_thread(
         queue.mark_dead_terminal(filepath, stage="parse", error=f"oversized: {e}")
         return None
     except Exception as e:
-        queue.mark_failed(filepath, stage="parse", error=repr(e))
+        queue.mark_failed(filepath, stage="parse", error=_stage_error(e))
         return None
     parse_ms = (time.perf_counter() - t0) * 1000
     if msg is None:
@@ -620,7 +630,7 @@ def _phase1_commit_thread(
     try:
         thread = threader.assign_thread(msg)
     except Exception as e:
-        queue.mark_failed(filepath, stage="thread", error=repr(e))
+        queue.mark_failed(filepath, stage="thread", error=_stage_error(e))
         return None
     thread_ms = (time.perf_counter() - t0) * 1000
 
@@ -657,7 +667,7 @@ def _phase1_commit_thread(
         # message's thread when computing its own thread assignment.
         db.upsert_thread(thread, seed_vector)
     except Exception as e:
-        queue.mark_failed(filepath, stage="thread_commit", error=repr(e))
+        queue.mark_failed(filepath, stage="thread_commit", error=_stage_error(e))
         return None
     phase1_ms = (time.perf_counter() - t0) * 1000
 
@@ -813,7 +823,7 @@ def _phase2a_collect_chunks(
         # here marks this message failed but leaves Phase 1's thread
         # commit in place (keyword-searchable but vectorless until
         # retry succeeds or the operator dead-letters this row).
-        return False, repr(e)
+        return False, _stage_error(e)
 
     state.body_chunks = body_chunks
     state.new_body_chunks = new_body
@@ -891,7 +901,7 @@ def _phase2c_commit_vectors(
             elif state.subject_fallback_offset is not None:
                 db.replace_thread_vector(thread.thread_id, vectors[state.subject_fallback_offset])
     except Exception as e:
-        return False, repr(e)
+        return False, _stage_error(e)
     return True, None
 
 
@@ -945,6 +955,9 @@ _EMBED_PROBE_TEXT = "embedder health probe"
 def _probe_embedder(embedder: EmbeddingBackend) -> BaseException | None:
     """Embed a tiny known-good input. Returns the error if the embedder
     cannot embed anything (outage or misconfiguration), else ``None``."""
+    # The failure that prompted this probe may have run a full retry
+    # cycle; refresh the heartbeat so the probe's own cycle starts fresh.
+    touch_health_file()
     try:
         embedder.embed(_EMBED_PROBE_TEXT)
     except Exception as e:
@@ -1077,6 +1090,7 @@ def _embed_each_message(
     vectors: list[list[float]] = [[] for _ in all_texts]
     ok: list[_BatchedMsg] = []
     for index, entry in enumerate(survivors):
+        touch_health_file()
         offsets = _entry_text_offsets(entry)
         filepath = entry.row["filepath"]
         try:

@@ -1,6 +1,7 @@
 """Tests for src.lib.security redaction helpers."""
 
 from src.lib.security import (
+    log_tool_call,
     redact_sensitive_text,
     safe_exception_text,
     safe_provider_exception_text,
@@ -120,3 +121,36 @@ class TestSafeProviderExceptionText:
         out = safe_provider_exception_text(err, secrets=[])
         assert "sk-ant-abc123XYZ" not in out
         assert "[REDACTED]" in out
+
+
+class TestLogToolCall:
+    """Tool-call logs carry metadata, never mailbox content: a query,
+    sender, folder, or ID can quote exactly what the user wants private
+    ("lawsuit against...", a salary negotiation, a medical sender)."""
+
+    def test_logs_only_content_free_params_and_names_the_rest(self, caplog):
+        import logging
+
+        logger = logging.getLogger("test-tool-log")
+        with caplog.at_level(logging.DEBUG, logger="test-tool-log"):
+            log_tool_call(
+                logger,
+                "search_emails",
+                {
+                    "query": "settlement with opposing counsel",
+                    "from_addr": "lawyer@example.com",
+                    "folders": ["Legal"],
+                    "mode": "hybrid",
+                    "limit": 10,
+                    "date_from": None,
+                },
+            )
+
+        text = caplog.text
+        assert "tool=search_emails" in text
+        assert "'mode': 'hybrid'" in text
+        assert "'limit': 10" in text
+        assert "withheld=['folders', 'from_addr', 'query']" in text
+        for secret in ("settlement", "lawyer@example.com", "Legal"):
+            assert secret not in text
+        assert "date_from" not in text
