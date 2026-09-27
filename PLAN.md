@@ -56,9 +56,10 @@ The stack runs four containers:
   sync, TOFU cert pinning with explicit rotation flag.
 - **indexer** — Docker, parses Maildir, threads, embeds via any
   OpenAI-compatible `/v1/embeddings` provider (operator-supplied),
-  writes SQLite. Schema v19 (squashed baseline): 4096-dim L2-unit-norm
+  writes SQLite. Schema v20 (squashed baseline): 4096-dim L2-unit-norm
   vectors, `NOT NULL` `message_chunks.message_date`,
-  `indexing_jobs.last_error_class`. Initial scan and steady-state both
+  `indexing_jobs.last_error_class`, per-message `messages` +
+  `message_participants`. Initial scan and steady-state both
   drain a durable `indexing_jobs` queue through one two-phase batched
   path (Phase 1 commits thread membership with a three-case
   seed-vector chain; Phase 2b batch-embeds; Phase 2c commits chunks /
@@ -420,6 +421,17 @@ do not ship persisted claims without them.
    during its Phase 3 experimental period.
 
 ## Recently Completed
+
+### 2026-09-27 — Phase 1 foundation: per-message records
+
+Schema v20 (baseline, folded while no deployed database exists):
+`messages` (one row per indexed message: headers, `sent_at`, folder,
+source `filepath` / `size_bytes` / `content_hash`) and
+`message_participants` (normalized From / To / Cc, indexed by canonical
+address). Written in `upsert_thread`'s transaction; removal cascades
+from `message_thread_map`, so reaps and thread deletes need no new
+code. Prerequisite for Phase 1 items 1 (`query_messages`), 3
+(message-first-class retrieval), and 7 (source integrity exposure).
 
 ### 2026-09-27 — Phase 0 hardening (items 7–11); Phase 0 complete
 

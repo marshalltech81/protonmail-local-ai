@@ -2390,3 +2390,133 @@ class TestWalCheckpoint:
                 assert wal_path.stat().st_size == 0
         finally:
             db.close()
+
+
+class TestMessagesTable:
+    """Per-message records: one ``messages`` row per indexed message plus
+    normalized ``message_participants`` rows, written atomically with the
+    thread. They back exact enumeration (every message from/to X), the
+    authoritative per-message view, and source provenance."""
+
+    def _participants(self, db, message_id):
+        return {
+            (r["role"], r["address"], r["name"])
+            for r in db._conn.execute(
+                "SELECT role, address, name FROM message_participants WHERE message_id = ?",
+                (message_id,),
+            )
+        }
+
+    def test_schema_contract(self, db):
+        cols = {r["name"] for r in db._conn.execute("PRAGMA table_info(messages)")}
+        assert cols == {
+            "message_id",
+            "thread_id",
+            "filepath",
+            "folder",
+            "subject",
+            "sent_at",
+            "in_reply_to",
+            "references_json",
+            "has_attachments",
+            "size_bytes",
+            "content_hash",
+            "indexed_at",
+        }
+        cols = {r["name"] for r in db._conn.execute("PRAGMA table_info(message_participants)")}
+        assert cols == {"message_id", "role", "address", "name"}
+        index_cols = [
+            r["name"]
+            for r in db._conn.execute("PRAGMA index_info(idx_message_participants_address)")
+        ]
+        assert index_cols == ["address", "role"]
+
+    def test_upsert_thread_writes_message_and_participants(self, db):
+        msg = make_message(
+            message_id="m1@example.com",
+            subject="Re: Budget",
+            from_addr='"Alice Example" <Alice@Example.com>',
+            to_addrs=["Bob <bob@example.com>", "carol@example.com"],
+            cc_addrs=["Dan <DAN@example.com>"],
+            filepath="/maildir/INBOX/cur/m1",
+            in_reply_to="m0@example.com",
+            references=["m0@example.com"],
+            has_attachments=True,
+        )
+        msg.size = 1234
+        msg.content_hash = "a" * 64
+        db.upsert_thread(make_thread(messages=[msg], thread_id="t1"), _one_hot(0))
+
+        row = db._conn.execute(
+            "SELECT * FROM messages WHERE message_id = 'm1@example.com'"
+        ).fetchone()
+        assert row["thread_id"] == "t1"
+        assert row["filepath"] == "/maildir/INBOX/cur/m1"
+        assert row["folder"] == "INBOX"
+        assert row["subject"] == "Re: Budget"
+        assert row["sent_at"] == "2024-01-01T12:00:00+00:00"
+        assert row["in_reply_to"] == "m0@example.com"
+        assert json.loads(row["references_json"]) == ["m0@example.com"]
+        assert row["has_attachments"] == 1
+        assert row["size_bytes"] == 1234
+        assert row["content_hash"] == "a" * 64
+        assert row["indexed_at"]
+
+        assert self._participants(db, "m1@example.com") == {
+            ("from", "alice@example.com", "Alice Example"),
+            ("to", "bob@example.com", "Bob"),
+            ("to", "carol@example.com", None),
+            ("cc", "dan@example.com", "Dan"),
+        }
+
+    def test_reindexing_updates_in_place_without_duplicates(self, db):
+        msg = make_message(message_id="m1@example.com", filepath="/maildir/INBOX/cur/m1")
+        db.upsert_thread(make_thread(messages=[msg], thread_id="t1"), _one_hot(0))
+        moved = make_message(
+            message_id="m1@example.com", folder="Archive", filepath="/maildir/Archive/cur/m1"
+        )
+        db.upsert_thread(make_thread(messages=[moved], thread_id="t1"), _one_hot(0))
+
+        rows = db._conn.execute("SELECT folder, filepath FROM messages").fetchall()
+        assert [(r["folder"], r["filepath"]) for r in rows] == [
+            ("Archive", "/maildir/Archive/cur/m1")
+        ]
+        assert self._participants(db, "m1@example.com") == {
+            ("from", "alice@example.com", None),
+            ("to", "bob@example.com", None),
+        }
+
+    def test_malformed_and_duplicate_addresses(self, db):
+        msg = make_message(
+            message_id="m1@example.com",
+            to_addrs=["bob@example.com", "Bobby <BOB@example.com>", "undisclosed-recipients"],
+        )
+        db.upsert_thread(make_thread(messages=[msg], thread_id="t1"), _one_hot(0))
+
+        assert {p for p in self._participants(db, "m1@example.com") if p[0] == "to"} == {
+            ("to", "bob@example.com", None)
+        }
+
+    def test_update_filepath_moves_message_locator(self, db):
+        msg = make_message(message_id="m1@example.com", filepath="/maildir/INBOX/cur/m1:2,S")
+        db.upsert_thread(make_thread(messages=[msg], thread_id="t1"), _one_hot(0))
+
+        db.update_filepath("/maildir/INBOX/cur/m1:2,S", "/maildir/INBOX/cur/m1:2,RS")
+
+        row = db._conn.execute("SELECT filepath FROM messages").fetchone()
+        assert row["filepath"] == "/maildir/INBOX/cur/m1:2,RS"
+
+    def test_removing_message_or_thread_cascades(self, db):
+        m1 = make_message(message_id="m1@example.com", filepath="/m/1")
+        m2 = make_message(message_id="m2@example.com", filepath="/m/2")
+        db.upsert_thread(make_thread(messages=[m1, m2], thread_id="t1"), _one_hot(0))
+
+        db.remove_message("m1@example.com")
+        assert [r["message_id"] for r in db._conn.execute("SELECT message_id FROM messages")] == [
+            "m2@example.com"
+        ]
+        assert not self._participants(db, "m1@example.com")
+
+        db.delete_thread_completely("t1")
+        assert db._conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0] == 0
+        assert db._conn.execute("SELECT COUNT(*) FROM message_participants").fetchone()[0] == 0

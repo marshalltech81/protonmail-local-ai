@@ -2722,3 +2722,67 @@ def test_stage_errors_never_persist_the_decoded_payload(tmp_path, monkeypatch):
     assert "UnicodeDecodeError" in row["last_error"]
     assert "invalid start byte" in row["last_error"]
     assert "PRIVATE-BODY-TEXT" not in row["last_error"]
+
+
+class TestMessageRecordsEndToEnd:
+    def test_indexing_records_message_with_source_hash_and_reap_clears_it(
+        self, tmp_path, monkeypatch
+    ):
+        """Through the real parse -> index path, the ``messages`` row's
+        ``content_hash`` is the SHA-256 of the raw file on disk (the
+        provenance anchor), and a reconciler reap removes the row and its
+        participants via the ``message_thread_map`` cascade."""
+        import hashlib
+
+        from src.reconciler import Reconciler, ReconcilerConfig
+
+        maildir = tmp_path / "maildir"
+        live = maildir / "INBOX" / "cur" / "1700000000.M1.host:2,S"
+        _write_eml(
+            live,
+            "e2e@example.com",
+            from_addr="Alice <Alice@Example.com>",
+            to_addr="bob@example.com",
+        )
+        monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
+        db = Database(tmp_path / "mail.db")
+        embedder = make_mock_embedder(_UNIT_VECTOR)
+        threader = Threader(db)
+        main.initial_index(db, embedder, threader, _make_queue(db))
+
+        row = db._conn.execute(
+            "SELECT filepath, folder, content_hash, size_bytes FROM messages "
+            "WHERE message_id = 'e2e@example.com'"
+        ).fetchone()
+        raw = live.read_bytes()
+        assert row["filepath"] == str(live)
+        assert row["folder"] == "INBOX"
+        assert row["content_hash"] == hashlib.sha256(raw).hexdigest()
+        assert row["size_bytes"] == len(raw)
+        participants = {
+            (r["role"], r["address"])
+            for r in db._conn.execute("SELECT role, address FROM message_participants")
+        }
+        assert participants == {("from", "alice@example.com"), ("to", "bob@example.com")}
+
+        trashed = live.with_name("1700000000.M1.host:2,ST")
+        live.rename(trashed)
+        reconciler = Reconciler(
+            db,
+            embedder,
+            threader,
+            ReconcilerConfig(
+                enabled=True,
+                grace_days=0,
+                sweep_interval_secs=60,
+                max_batch_pct=1.0,
+                force=False,
+                unlink_on_reap=False,
+            ),
+            maildir_root=maildir,
+        )
+        reconciler.sweep()
+        reconciler.reap()
+
+        assert db._conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0] == 0
+        assert db._conn.execute("SELECT COUNT(*) FROM message_participants").fetchone()[0] == 0

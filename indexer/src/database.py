@@ -13,6 +13,7 @@ import threading
 import weakref
 from contextlib import contextmanager, suppress
 from datetime import UTC, datetime
+from email.utils import parseaddr
 from pathlib import Path
 
 import sqlite_vec
@@ -57,7 +58,7 @@ def _dedupe_by_canonical(addrs: list[str]) -> list[str]:
 
 
 # ``_apply_initial_schema`` builds the complete current schema.
-# Migration history up to v19 was squashed into it while no deployed
+# Migration history up to v20 was squashed into it while no deployed
 # database existed; databases older than ``SCHEMA_BASELINE_VERSION``
 # cannot be upgraded and must be rebuilt from Maildir.
 #
@@ -67,8 +68,8 @@ def _dedupe_by_canonical(addrs: list[str]) -> list[str]:
 # current version; existing installs run the migration runner to catch
 # up. See ``src/migrations/runner.py`` for the file layout and
 # transactional guarantees.
-SCHEMA_VERSION = 19
-SCHEMA_BASELINE_VERSION = 19
+SCHEMA_VERSION = 20
+SCHEMA_BASELINE_VERSION = 20
 
 # The schema uses FTS5 ``contentless_delete=1``, which SQLite added in 3.43.
 # Validate the runtime version at Database init and fail fast with a clear
@@ -465,6 +466,46 @@ class Database:
                 FOREIGN KEY (thread_id) REFERENCES threads(thread_id)
             );
 
+            -- One row per indexed message: the authoritative per-message
+            -- record (own headers, send time, folder, source locator and
+            -- content hash) behind exact enumeration and provenance.
+            -- Cascades from ``message_thread_map`` so every existing
+            -- message / thread removal path cleans it up.
+            CREATE TABLE messages (
+                message_id      TEXT PRIMARY KEY,
+                thread_id       TEXT NOT NULL,
+                filepath        TEXT NOT NULL,
+                folder          TEXT NOT NULL,
+                subject         TEXT NOT NULL,
+                sent_at         TEXT NOT NULL,
+                in_reply_to     TEXT,
+                references_json TEXT NOT NULL,
+                has_attachments INTEGER NOT NULL,
+                size_bytes      INTEGER,
+                content_hash    TEXT,
+                indexed_at      TEXT NOT NULL,
+                FOREIGN KEY (message_id) REFERENCES message_thread_map(message_id)
+                    ON DELETE CASCADE
+            );
+            CREATE INDEX idx_messages_thread_sent ON messages(thread_id, sent_at);
+            CREATE INDEX idx_messages_folder_sent ON messages(folder, sent_at);
+            CREATE INDEX idx_messages_sent ON messages(sent_at);
+
+            -- Normalized From / To / Cc. ``address`` is the canonical
+            -- lowercased bare address, so "every message from/to X" is an
+            -- indexed lookup rather than a scan of JSON participant lists.
+            CREATE TABLE message_participants (
+                message_id TEXT NOT NULL,
+                role       TEXT NOT NULL CHECK (role IN ('from', 'to', 'cc')),
+                address    TEXT NOT NULL,
+                name       TEXT,
+                PRIMARY KEY (message_id, role, address),
+                FOREIGN KEY (message_id) REFERENCES messages(message_id)
+                    ON DELETE CASCADE
+            );
+            CREATE INDEX idx_message_participants_address
+                ON message_participants(address, role);
+
             CREATE TABLE indexed_files (
                 filepath     TEXT PRIMARY KEY,
                 indexed_at   TEXT NOT NULL,
@@ -736,6 +777,8 @@ class Database:
                     """,
                     (msg.filepath, msg.size, msg.mtime_ns, msg.content_hash),
                 )
+
+                self._write_message_record(cur, msg, thread.thread_id)
 
             # Update FTS5 index. threads_fts is contentless_delete=1 so DELETE
             # requires a specific rowid — read the existing fts_rowid and then
@@ -1816,6 +1859,63 @@ class Database:
             (thread_id,),
         ).fetchall()
 
+    def _write_message_record(self, cur: sqlite3.Cursor, msg, thread_id: str) -> None:
+        """Upsert ``msg``'s ``messages`` row and replace its participants.
+
+        Runs inside ``upsert_thread``'s transaction, after the
+        ``message_thread_map`` row it references. ``ON CONFLICT DO
+        UPDATE`` (never ``REPLACE``) keeps the row in place, so the
+        participant cascade only fires when the message itself is removed.
+        """
+        cur.execute(
+            """
+            INSERT INTO messages
+                (message_id, thread_id, filepath, folder, subject, sent_at,
+                 in_reply_to, references_json, has_attachments, size_bytes,
+                 content_hash, indexed_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(message_id) DO UPDATE SET
+                thread_id       = excluded.thread_id,
+                filepath        = excluded.filepath,
+                folder          = excluded.folder,
+                subject         = excluded.subject,
+                sent_at         = excluded.sent_at,
+                in_reply_to     = excluded.in_reply_to,
+                references_json = excluded.references_json,
+                has_attachments = excluded.has_attachments,
+                size_bytes      = excluded.size_bytes,
+                content_hash    = excluded.content_hash,
+                indexed_at      = excluded.indexed_at
+            """,
+            (
+                msg.message_id,
+                thread_id,
+                msg.filepath,
+                msg.folder,
+                msg.subject,
+                msg.date.isoformat(),
+                msg.in_reply_to,
+                json.dumps(msg.references),
+                int(bool(msg.has_attachments)),
+                msg.size,
+                msg.content_hash,
+                datetime.now(UTC).isoformat(),
+            ),
+        )
+        cur.execute("DELETE FROM message_participants WHERE message_id = ?", (msg.message_id,))
+        roles = [("from", [msg.from_addr]), ("to", msg.to_addrs), ("cc", msg.cc_addrs)]
+        for role, values in roles:
+            for value in values:
+                address = canonical_addr(value or "")
+                if not address:
+                    continue
+                name = parseaddr(value)[0].strip() or None
+                cur.execute(
+                    "INSERT OR IGNORE INTO message_participants (message_id, role, address, name) "
+                    "VALUES (?, ?, ?, ?)",
+                    (msg.message_id, role, address, name),
+                )
+
     @_synchronized
     def update_filepath(self, old_path: str, new_path: str) -> None:
         """Update message_thread_map + indexed_files after a Maildir rename.
@@ -1837,6 +1937,10 @@ class Database:
             started = self._begin_if_needed(cur)
             cur.execute(
                 "UPDATE message_thread_map SET filepath = ? WHERE filepath = ?",
+                (new_path, old_path),
+            )
+            cur.execute(
+                "UPDATE messages SET filepath = ? WHERE filepath = ?",
                 (new_path, old_path),
             )
             # Carry the file-identity columns forward on rename. mbsync

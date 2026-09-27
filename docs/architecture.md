@@ -276,6 +276,27 @@ unchanged input is therefore zero embed cost. Attachment chunks use a
 composite `message_pk` of `f"{message_id}::{attachment_id}"` so their
 chunk IDs are distinct from body chunks for the same message.
 
+## Per-Message Records
+
+Threads are the retrieval unit; `messages` is the authoritative
+per-message record. Each indexed message gets one row — its own
+subject, `sent_at` (`Date:` header), folder, `in_reply_to` /
+references, attachment flag, and its source: `filepath` (the Maildir
+locator, kept current across flag renames) plus `size_bytes` and
+`content_hash` (SHA-256 of the raw `.eml`). `message_participants`
+normalizes From / To / Cc into one row per (message, role, address),
+with `address` canonical and lowercased and the display name kept as
+written; malformed entries with no recoverable address are skipped.
+An index on `(address, role)` makes "every message from / to X" an
+exact indexed lookup — the basis for exhaustive enumeration, as
+opposed to relevance search.
+
+Both are written inside `upsert_thread`'s transaction, after the
+message's `message_thread_map` row. `messages` references
+`message_thread_map` and `message_participants` references `messages`,
+both `ON DELETE CASCADE`, so every existing removal path — reaper,
+whole-thread delete, rebuild — cleans them up without separate code.
+
 ## Attachment Indexing
 
 Email attachments flow through the same chunker and embedder pipeline
