@@ -467,7 +467,13 @@ or decodes to invalid Unicode (lone surrogate, NUL charset label) keeps
 its raw text. Rounds 5-6 removed a `strict=False` lenient fallback that
 had briefly replaced that recovery: it raised `RecursionError` on deeply
 unmatched comment parentheses and ran in quadratic time on large rejected
-headers; all parsing is strict again.
+headers; all parsing is strict again. Round 7: decoded names containing
+control characters (a CR let `Mallory@...\r` be read as the address)
+keep their raw text; `_format_address` enforces an identity invariant (if
+the serialized string parses to a different address, the name is
+dropped); and blank-element cleanup is a linear, escape-aware scan that
+never touches quoted strings, comments, or domain literals (the regex
+version rewrote `"a, ,b"@x` into a different mailbox).
 Prerequisite for Phase 1 items 1 (`query_messages`), 3
 (message-first-class retrieval), and 7 (source integrity exposure).
 

@@ -860,3 +860,38 @@ class TestNormalizeSubject:
         from src.threader import _normalize_subject
 
         assert _normalize_subject("Hello   world") == "hello world"
+
+
+def test_format_address_never_changes_the_address():
+    """Identity invariant for the (name, address) -> string round trip:
+    whatever a display name contains, the serialized string must parse
+    back to the same address, or the name is dropped."""
+    from src.parser import _format_address
+    from src.threader import canonical_addr
+
+    for name in ("Mallory@example.com\r", "Doe,\r Jane", "x\n<mallory@example.com>", "a\x00b"):
+        assert canonical_addr(_format_address(name, "bob@example.com")) == "bob@example.com"
+    assert _format_address("Doe, Jane", "jane@example.com") == '"Doe, Jane" <jane@example.com>'
+    assert _format_address("José Álvarez", "josé@example.com") == "José Álvarez <josé@example.com>"
+
+
+def test_drop_empty_list_elements_only_touches_top_level_commas():
+    from src.parser import _drop_empty_list_elements
+
+    def drop(text: str) -> str:
+        # Whitespace around separators is insignificant to the address
+        # parser; compare structure, not spacing.
+        return " ".join(_drop_empty_list_elements(text).split())
+
+    # Empty elements are removed at every top-level position.
+    assert drop(", a@x, , b@x,") == "a@x , b@x"
+    assert drop("Team: , a@x, ,b@x, ;") == "Team: a@x ,b@x ;"
+    # Commas inside quoted strings, comments, and domain literals are
+    # address or name content, never separators.
+    assert drop('"a, ,b"@x, c@x,') == '"a, ,b"@x, c@x'
+    assert drop("a@x (p, , q), , b@x") == "a@x (p, , q) , b@x"
+    assert drop("a@[1, ,2], , b@x") == "a@[1, ,2] , b@x"
+    # Escaped quotes do not end a quoted string early.
+    assert drop('"a\\", ,b"@x, , c@x') == '"a\\", ,b"@x , c@x'
+    # Unterminated constructs mask the rest of the text (no rewriting).
+    assert drop('a@x, , "b, ,c') == 'a@x , "b, ,c'

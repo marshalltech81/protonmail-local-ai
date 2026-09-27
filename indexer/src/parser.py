@@ -433,7 +433,14 @@ def _format_address(name: str, addr: str) -> str:
         return addr
     if _ADDR_SPECIALS_RE.search(name):
         name = f'"{email.utils.quote(name)}"'
-    return f"{name} <{addr}>"
+    formatted = f"{name} <{addr}>"
+    # Identity invariant: downstream code re-parses this string, so it
+    # must yield the same address. If any name content would change the
+    # parsed address (or make it unparseable), drop the name — a lost
+    # display name is cosmetic, a changed recipient is not.
+    if email.utils.parseaddr(formatted)[1] != addr:
+        return addr
+    return formatted
 
 
 # One RFC 2047 encoded-word: =?charset?Q|B?text?=. Bounded character
@@ -470,6 +477,11 @@ def _decode_encoded_word(match: re.Match[str]) -> str:
         text.encode("utf-8")
     except Exception:
         return token
+    # A decoded CR / LF / other control character survives into the
+    # serialized "name <addr>" string and breaks re-parsing — it can even
+    # make a name like "Mallory@example.com\r" read as the address.
+    if any(ord(ch) < 32 or ord(ch) == 127 for ch in text):
+        return token
     return text
 
 
@@ -489,20 +501,77 @@ def _decode_display_name(name: str) -> str:
     return _ENCODED_WORD_RE.sub(_decode_encoded_word, name)
 
 
-# Empty address-list elements: a comma followed only by whitespace and
-# another separator, or a separator at either end of the list or group.
-_REPEATED_COMMAS_RE = re.compile(r",(?:\s*,)+")
-_EDGE_COMMAS_RE = re.compile(r"^\s*,|,\s*$|(?<=:)\s*,|,\s*(?=;)")
+def _top_level_mask(text: str) -> list[bool]:
+    """Mark characters outside quoted strings, comments, and domain literals.
+
+    One linear pass honoring backslash escapes. Unterminated constructs
+    simply run to the end of the text (everything after is masked out).
+    """
+    top = [False] * len(text)
+    in_quote = in_literal = False
+    comment_depth = 0
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        if in_quote or in_literal or comment_depth:
+            if ch == "\\":
+                i += 2
+                continue
+            if in_quote and ch == '"':
+                in_quote = False
+            elif in_literal and ch == "]":
+                in_literal = False
+            elif comment_depth and ch == "(":
+                comment_depth += 1
+            elif comment_depth and ch == ")":
+                comment_depth -= 1
+        elif ch == '"':
+            in_quote = True
+        elif ch == "[":
+            in_literal = True
+        elif ch == "(":
+            comment_depth = 1
+        else:
+            top[i] = True
+        i += 1
+    return top
 
 
 def _drop_empty_list_elements(text: str) -> str:
-    """Remove empty elements from an address list (linear regexes).
+    """Remove empty elements from an address list, in linear time.
 
-    Can alter a quoted display name that itself contains ``, ,`` — a
-    cosmetic cost on pathological input, acceptable for recovering every
-    recipient of an otherwise valid header.
+    A top-level comma is dropped when nothing but whitespace separates it
+    from the start of the list or group (``:``), from a previous comma, or
+    from the end of the list or group (``;``). Commas inside quoted
+    strings, comments, and domain literals are part of an address or name
+    and are never touched — rewriting ``"a, ,b"@example.com`` would
+    invent a different mailbox.
     """
-    return _EDGE_COMMAS_RE.sub("", _REPEATED_COMMAS_RE.sub(",", text))
+    top = _top_level_mask(text)
+    n = len(text)
+    # Separator class of the nearest non-space character after each
+    # position: "," / ";" when it is a top-level separator, "" for end of
+    # text, "x" for anything else (address text, quoted or commented).
+    next_sep = [""] * (n + 1)
+    for i in range(n - 1, -1, -1):
+        ch = text[i]
+        if ch.isspace() and top[i]:
+            next_sep[i] = next_sep[i + 1]
+        elif top[i] and ch in ",;":
+            next_sep[i] = ch
+        else:
+            next_sep[i] = "x"
+    out = []
+    prev = ""  # separator class of the last kept non-space char; "" = start
+    for i, ch in enumerate(text):
+        if top[i] and ch == ",":
+            if prev in ("", ",", ":") or next_sep[i + 1] in ("", ",", ";"):
+                continue
+            prev = ","
+        elif not (ch.isspace() and top[i]):
+            prev = ch if (top[i] and ch in ":;") else "x"
+        out.append(ch)
+    return "".join(out)
 
 
 def _parse_addrs(value: str | email.header.Header) -> list[str]:

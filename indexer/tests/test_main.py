@@ -3040,6 +3040,41 @@ class TestMessageRecordsEndToEnd:
             "To: carol@example.com\r\nCc: bob@example.com " + "\r\n ".join(["(" * 60] * 20),
             {("to", "carol@example.com", None)},
         ),
+        # A decoded name must never change WHO the recipient is. A CR/LF
+        # decoded from an encoded-word broke re-parsing: "Mallory@...\r"
+        # was recorded as the address instead of bob, and a comma variant
+        # lost the recipient entirely. Such tokens keep their raw text.
+        (
+            "decoded_cr_and_at_in_name",
+            "To: =?utf-8?q?Mallory=40example.com=0D?= <bob@example.com>",
+            {("to", "bob@example.com", "=?utf-8?q?Mallory=40example.com=0D?=")},
+        ),
+        (
+            "decoded_cr_and_comma_in_name",
+            "To: =?utf-8?q?Doe=2C=0D_Jane?= <jane@example.com>",
+            {("to", "jane@example.com", "=?utf-8?q?Doe=2C=0D_Jane?=")},
+        ),
+        (
+            "decoded_lf_in_name",
+            "To: =?utf-8?q?Bob=0AEvil?= <bob@example.com>",
+            {("to", "bob@example.com", "=?utf-8?q?Bob=0AEvil?=")},
+        ),
+        # Blank-element cleanup must not touch quoted strings or comments:
+        # rewriting "a, ,b"@example.com to "a,b"@... invents a mailbox.
+        (
+            "blank_cleanup_spares_quoted_local_part",
+            'To: "a, ,b"@example.com, carol@example.com,',
+            {("to", '"a, ,b"@example.com', None), ("to", "carol@example.com", None)},
+        ),
+        (
+            "blank_cleanup_with_comment",
+            "To: bob@example.com (x y), , carol@example.com",
+            {("to", "bob@example.com", "x y"), ("to", "carol@example.com", None)},
+        ),
+        # Strict parsing rejects any header whose comment contains a comma
+        # (part of the CVE-2023-27043 hardening), blank elements or not —
+        # identical to base. The message still indexes.
+        ("comment_containing_commas", "To: bob@example.com (x, y), carol@example.com", set()),
         # An address-shaped display name stays a name; the real address is
         # the angle-bracket one.
         (
