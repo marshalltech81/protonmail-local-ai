@@ -517,8 +517,13 @@ Failure isolation is preserved across phases:
       remaining message are deferred without spending attempts and
       the breaker opens; messages already embedded are still
       committed;
-    - 400 / 413 / 422 (the provider refused this request body): the
-      only terminal case, dead-lettered as `permanent_source_failure`;
+    - 400 / 413 / 422 (the provider refused the request): if the
+      request carried several of the message's texts, they are re-sent
+      one per request first — a rejected batch only shows the request
+      was too big, not that the content is bad (the indexer logs a
+      hint to lower `EMBED_BATCH_SIZE`). A rejection of a single text
+      is the only terminal case, dead-lettered as
+      `permanent_source_failure`;
     - 5xx or anything else (uncertain): re-probe. A failing probe
       means the provider went down (pause as above); a passing probe
       points at this input, which spends one attempt (`mark_failed`),

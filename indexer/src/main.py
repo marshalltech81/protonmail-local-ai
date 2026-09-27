@@ -1013,6 +1013,33 @@ def _pause_embedding(
         )
 
 
+def _embed_message_texts(texts: list[str], embedder: EmbeddingBackend) -> list[list[float]]:
+    """Embed one message's texts, telling a request limit from bad content.
+
+    ``embed_batch`` packs up to ``EMBED_BATCH_SIZE`` texts into each HTTP
+    request. A provider or gateway that rejects such a request (413, or
+    a 400 / 422 batch limit) has only shown that the *request* was
+    unacceptable, not that any of the message's content is. So a
+    rejected multi-input request is retried one text per request; only
+    a rejection of a single text propagates as evidence against the
+    source. Every other failure propagates unchanged for the caller to
+    attribute.
+    """
+    try:
+        return embedder.embed_batch(texts, on_batch_complete=touch_health_file)
+    except Exception as e:
+        if len(texts) <= 1 or classify_embed_failure(e) != EMBED_FAILURE_REJECTED_INPUT:
+            raise
+        log.warning(
+            "embed request with %d inputs rejected (%s); retrying one input per "
+            "request. If this recurs, the provider's request limit is below "
+            "EMBED_BATCH_SIZE — lower it.",
+            len(texts),
+            scrub_embed_error(e),
+        )
+    return [embedder.embed_batch([t], on_batch_complete=touch_health_file)[0] for t in texts]
+
+
 def _embed_each_message(
     survivors: list[_BatchedMsg],
     all_texts: list[str],
@@ -1027,9 +1054,12 @@ def _embed_each_message(
     every later request, so each individual failure is attributed with
     ``classify_embed_failure`` before any message is charged:
 
-    * ``rejected_input`` (400 / 413 / 422) — the provider refused this
-      message's content: ``mark_dead_terminal`` as a permanent source
-      failure. The only terminal outcome.
+    * ``rejected_input`` (400 / 413 / 422) on a single text — the
+      provider refused this message's content: ``mark_dead_terminal``
+      as a permanent source failure. The only terminal outcome. (A
+      rejected multi-text request is first split into one text per
+      request by ``_embed_message_texts``, so a request-size limit is
+      never charged to the source.)
     * ``infrastructure`` / ``configuration`` (transport, 408, 429,
       401 / 403 / 404) — not the message's fault: this and every
       remaining message are deferred without spending attempts, the
@@ -1051,11 +1081,7 @@ def _embed_each_message(
         filepath = entry.row["filepath"]
         try:
             entry_vectors = (
-                embedder.embed_batch(
-                    [all_texts[i] for i in offsets], on_batch_complete=touch_health_file
-                )
-                if offsets
-                else []
+                _embed_message_texts([all_texts[i] for i in offsets], embedder) if offsets else []
             )
         except Exception as e:
             failure: BaseException = e

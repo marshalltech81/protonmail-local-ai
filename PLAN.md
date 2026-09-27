@@ -462,7 +462,9 @@ predicate): transport / 408 / 429 and 401 / 403 / 404 defer the
 remaining messages and open the breaker; only 400 / 413 / 422 are
 terminal; 5xx re-probes before charging an attempt (review round 1
 found a mid-isolation 401 or persistent 429 could dead-letter valid
-mail). 429 and 408 now
+mail). A rejected multi-input request is re-sent one input per request
+before anything is charged, so a provider request-size limit below
+`EMBED_BATCH_SIZE` can't dead-letter valid mail either (review round 2). 429 and 408 now
 count as transient in `_is_transient_embed_error`, so rate limits
 back off instead of reading as misconfiguration. The same change squashed
 migration history through v19 into `_apply_initial_schema` (no

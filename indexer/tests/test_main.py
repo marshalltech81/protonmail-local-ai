@@ -2584,3 +2584,99 @@ class TestEmbedOutageBreaker:
         b.record_success()
         assert b.allow(190.0)
         assert b.record_failure(190.0) == 30
+
+
+def _mock_transport_embedder(handler):
+    """A real ``OpenAIEmbedder`` whose SDK client talks to an in-process
+    ``httpx.MockTransport``, so tests exercise actual HTTP request
+    boundaries (how many inputs share one request) rather than a
+    per-text mock."""
+    import httpx
+    from openai import OpenAI
+    from src.embedder import OpenAIEmbedder
+
+    embedder = OpenAIEmbedder(base_url="http://embed.test/v1", model="m", api_key="k")
+    embedder.client = OpenAI(
+        base_url="http://embed.test/v1",
+        api_key="k",
+        max_retries=0,
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    return embedder
+
+
+def _embeddings_response(inputs: list[str]):
+    import httpx
+
+    return httpx.Response(
+        200,
+        json={
+            "object": "list",
+            "model": "m",
+            "data": [
+                {"object": "embedding", "index": i, "embedding": _UNIT_VECTOR}
+                for i in range(len(inputs))
+            ],
+            "usage": {"prompt_tokens": 1, "total_tokens": 1},
+        },
+    )
+
+
+class TestRequestLimitIsNotSourceFailure:
+    """A provider rejecting a *request* (413 / 400 / 422) has not shown
+    that any of the message's content is bad when the request carried
+    several inputs — the limit may be the batch, not the source. Only a
+    rejection of a single input is evidence against the message."""
+
+    def _drain_one(self, tmp_path, monkeypatch, handler):
+        import json
+
+        monkeypatch.setattr(main, "MAILDIR_PATH", tmp_path)
+        dest = tmp_path / "INBOX" / "cur" / "msg.eml"
+        _write_eml_with_text_attachment(dest, "limits@example.com")
+        db = Database(tmp_path / "mail.db")
+        queue = _make_queue(db)
+        queue.enqueue(str(dest), REASON_INITIAL_SCAN)
+        sizes: list[int] = []
+
+        def recording(request):
+            inputs = json.loads(request.content)["input"]
+            sizes.append(len(inputs))
+            return handler(inputs)
+
+        main.drain_queue(queue, db, _mock_transport_embedder(recording), Threader(db))
+        return db, queue, str(dest), sizes
+
+    def test_multi_input_request_rejection_retries_one_input_per_request(
+        self, tmp_path, monkeypatch
+    ):
+        import httpx
+
+        def handler(inputs):
+            if len(inputs) > 1:
+                return httpx.Response(413, json={"error": {"message": "payload too large"}})
+            return _embeddings_response(inputs)
+
+        db, queue, path, sizes = self._drain_one(tmp_path, monkeypatch, handler)
+
+        assert sizes[:3] == [2, 1, 2], "batch, probe, then the message's own combined request"
+        assert all(n == 1 for n in sizes[3:])
+        assert db.get_chunk_ids_for_message("limits@example.com")
+        assert queue.stats() == {"queued": 0, "dead": 0}
+
+    def test_input_rejected_on_its_own_is_a_permanent_source_failure(self, tmp_path, monkeypatch):
+        import httpx
+
+        def handler(inputs):
+            if len(inputs) > 1 or any("attachment text" in t for t in inputs):
+                return httpx.Response(400, json={"error": {"message": "bad input"}})
+            return _embeddings_response(inputs)
+
+        db, queue, path, sizes = self._drain_one(tmp_path, monkeypatch, handler)
+
+        row = db._conn.execute(
+            "SELECT status, last_error_class FROM indexing_jobs WHERE filepath = ?", (path,)
+        ).fetchone()
+        assert row["status"] == "dead"
+        assert row["last_error_class"] == "permanent_source_failure"
+        assert not db.get_chunk_ids_for_message("limits@example.com")
