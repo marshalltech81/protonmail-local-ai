@@ -10,6 +10,7 @@ import json
 import logging
 import re
 import sqlite3
+import unicodedata
 from contextlib import closing
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -340,6 +341,25 @@ def _sql_lower(value):
     """Unicode-aware ``lower`` for SQL. SQLite's built-in folds ASCII only,
     so ``JOSÉ`` would never match ``josé``."""
     return value.lower() if isinstance(value, str) else value
+
+
+def _text_terms(text: str) -> list[str]:
+    """Split ``text`` into distinct words the way FTS5's unicode61 sees them.
+
+    ``\\w`` stops at combining marks, so a decomposed ``re\\u0301sume\\u0301``
+    would split into ``re`` and ``sume`` while FTS indexes one word.
+    NFC-compose first, then keep any remaining combining marks inside the
+    word; a run with no letter or digit (a lone mark) is not a word.
+    """
+    words: list[str] = []
+    current: list[str] = []
+    for ch in unicodedata.normalize("NFC", text) + " ":
+        if ch.isalnum() or ch == "_" or unicodedata.category(ch).startswith("M"):
+            current.append(ch)
+        elif current:
+            words.append("".join(current))
+            current = []
+    return list(dict.fromkeys(w for w in words if any(c.isalnum() for c in w)))
 
 
 def address_match_mode(value: str) -> str:
@@ -1952,8 +1972,8 @@ class Database:
         threads they appeared on and ``names`` every display name they
         were written with. Same-thread duplicates do not double-count.
 
-        ``senders_only`` narrows the aggregation to the From-line
-        addresses recorded on each message. Use this when the caller's
+        ``senders_only`` narrows the aggregation to each message's
+        primary From author (the one ``threads.senders`` records). Use this when the caller's
         intent is "filter to messages this person SENT" rather than
         "find this person's address anywhere in the index": the
         broader participants ranking can promote a frequent
@@ -1980,11 +2000,21 @@ class Database:
         # stored canonical (lowercased); names need the Unicode-aware
         # ``mcp_lower``.
         if senders_only:
+            # Primary author only: the first ``from`` row of each message
+            # (the writer inserts authors in header order). search_emails
+            # filters on ``threads.senders``, which holds each message's
+            # primary author, so ranking a secondary author of a
+            # multi-author From here could pick an address that filter
+            # never matches.
             sql = """
                 SELECT DISTINCT p.address, p.name, m.thread_id
                 FROM message_participants p
                 JOIN messages m ON m.message_id = p.message_id
                 WHERE p.role = 'from'
+                  AND p.rowid = (
+                      SELECT MIN(p2.rowid) FROM message_participants p2
+                      WHERE p2.message_id = p.message_id AND p2.role = 'from'
+                  )
                   AND (instr(p.address, ?) > 0 OR instr(mcp_lower(p.name), ?) > 0)
             """
         else:
@@ -2077,14 +2107,15 @@ class Database:
             where.append("instr(mcp_lower(m.subject), ?) > 0")
             params.append(subject.lower())
         if text:
-            terms = list(dict.fromkeys(re.findall(r"\w+", text)))
+            terms = _text_terms(text)
             if not terms:
                 raise ValueError("text must contain at least one word")
             if len(terms) > _MAX_TEXT_TERMS:
                 raise ValueError(f"text supports at most {_MAX_TEXT_TERMS} words")
             # One subquery per word, so the words may fall in different
             # chunks of the same message. Each is a quoted FTS phrase:
-            # ``\w+`` cannot contain a quote, so no FTS syntax leaks in.
+            # a term holds only word characters and combining marks, never
+            # a quote, so no FTS syntax leaks in.
             for term in terms:
                 where.append(
                     "m.message_id IN (SELECT c.message_id FROM message_chunks_fts f "

@@ -338,7 +338,21 @@ class TestQueryMessages:
         handler = _handlers(fake_server, messages_db)["query_messages"]
         text = _text(asyncio.run(handler(sender="nobody@example.com")))
         assert "total_matches: 0" in text
+        # An empty page still carries the full paging contract.
+        assert "returned: 0" in text
+        assert "has_more: false" in text
+        assert "next_cursor" not in text
         assert "No messages match" in text
+
+    def test_invalid_input_value_is_not_logged(self, fake_server, messages_db, caplog):
+        # log_tool_call withholds a non-ISO date_from; the validation
+        # error quoting it must not put it back in the log.
+        handler = _handlers(fake_server, messages_db)["query_messages"]
+        with caplog.at_level("DEBUG"):
+            text = _text(asyncio.run(handler(date_from="private-sentinel-value")))
+        assert "private-sentinel-value" in text  # the caller still learns why
+        assert "private-sentinel-value" not in caplog.text
+        assert "date_from" in caplog.text
 
     def test_long_recipient_lists_state_what_was_left_out(self, fake_server, tmp_path):
         import sqlite3

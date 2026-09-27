@@ -2144,6 +2144,40 @@ class TestFindContactSendersOnly:
     distinction.
     """
 
+    def test_senders_only_counts_primary_author_only(self, tmp_path):
+        # search_emails(from_name=...) plugs the resolved address into a
+        # filter over each thread's primary From authors, so resolution
+        # must rank on the same authors: a secondary author in a
+        # multi-author From must not outrank a real primary sender.
+        from tests.conftest import _insert_message
+
+        conn, path = _open_built_db_conn(tmp_path, "authors.db")
+        _insert_message(
+            conn,
+            message_id="m1",
+            thread_id="t1",
+            sent_at="2024-01-01T00:00:00+00:00",
+            from_=["Pat Solo <solo@example.com>"],
+        )
+        for n in (2, 3):
+            _insert_message(
+                conn,
+                message_id=f"m{n}",
+                thread_id=f"t{n}",
+                sent_at="2024-01-02T00:00:00+00:00",
+                from_=["Lead <lead@example.com>", "Pat Joint <joint@example.com>"],
+            )
+        conn.close()
+        db = Database(str(path))
+        try:
+            assert [c["email"] for c in db.find_contact("pat", senders_only=True)] == [
+                "solo@example.com"
+            ]
+            # Without senders_only every role counts, secondary authors too.
+            assert db.find_contact("pat")[0]["email"] == "joint@example.com"
+        finally:
+            db.close()
+
     def test_senders_only_excludes_recipient_only_contact(self, tmp_path):
         # Build a small DB where one contact is ONLY a recipient,
         # never a sender. With the default search they should still
@@ -2739,6 +2773,39 @@ class TestQueryMessages:
         assert [(p.name, p.address) for p in m2.from_] == [(None, "bob@example.com")]
         assert [(p.name, p.address) for p in m2.to] == [("Jane Doe", "jane@example.com")]
         assert [(p.name, p.address) for p in m2.cc] == [(None, "carol@other.org")]
+
+
+class TestQueryMessagesUnicodeText:
+    """Composed and decomposed spellings of a word are the same word to
+    FTS (unicode61 folds diacritics); the ``text`` terms must agree, or
+    an exhaustive count silently misses messages."""
+
+    @pytest.mark.parametrize(
+        ("body", "query"),
+        [
+            ("r\u00e9sum\u00e9 attached", "re\u0301sume\u0301"),
+            ("re\u0301sume\u0301 attached", "r\u00e9sum\u00e9"),
+            ("re\u0301sume\u0301 attached", "re\u0301sume\u0301"),
+            ("a nai\u0308ve plan", "nai\u0308ve"),
+        ],
+    )
+    def test_composed_and_decomposed_forms_match(self, tmp_path, body, query):
+        from tests.conftest import _insert_message
+
+        conn, path = _open_built_db_conn(tmp_path, "unicode-text.db")
+        _insert_message(
+            conn, message_id="m1", thread_id="t1", sent_at="2024-01-01T00:00:00+00:00", body=body
+        )
+        conn.close()
+        db = Database(str(path))
+        try:
+            assert db.query_messages(text=query).total_matches == 1
+        finally:
+            db.close()
+
+    def test_bare_combining_mark_is_not_a_term(self, messages_db):
+        with pytest.raises(ValueError, match="text"):
+            messages_db.query_messages(text="\u0301")
 
 
 class TestQueryMessagesPaging:

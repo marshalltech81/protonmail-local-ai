@@ -389,12 +389,20 @@ def register_retrieval_tools(server, db):
 
         try:
             page = await asyncio.to_thread(db.query_messages, **args, limit=limit, cursor=cursor)
+        except ValueError as e:
+            # Validation messages quote the offending input (an invalid
+            # date echoes its text), which log_tool_call deliberately
+            # withheld. Return it to the caller; log only that it failed.
+            log.warning("query_messages rejected invalid input (date_from/date_to/text/cursor)")
+            return [TextContent(type="text", text=f"Error: {e}")]
         except Exception as e:
             log.error(f"query_messages error: {e}")
             return [TextContent(type="text", text=f"Error: {e}")]
 
         lines = [f"Query: {_describe_filters(args)}", f"total_matches: {page.total_matches}"]
         if not page.messages:
+            lines.append("returned: 0")
+            lines.append("has_more: false")
             lines.append("No messages match." if page.offset == 0 else "No further messages.")
             return [TextContent(type="text", text="\n".join(lines))]
 
