@@ -558,3 +558,14 @@ class TestSubjectFallbackCanonicalMatching:
         )
         t2 = threader.assign_thread(followup)
         assert t2.thread_id == "canon_orig@example.com"
+
+
+class TestCanonicalAddrHostileInput:
+    def test_unparseable_input_returns_empty_never_raises(self):
+        """canonical_addr re-parses strings from many attacker-influenced
+        paths (thread participants, the from_addr fallback for unparseable
+        From headers), so a parser blow-up must degrade to "no address"."""
+        from src.threader import canonical_addr
+
+        assert canonical_addr("(" * 1200 + ")" * 1200 + " <bob@example.com>") == ""
+        assert canonical_addr("bob@example.com") == "bob@example.com"

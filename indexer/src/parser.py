@@ -513,6 +513,10 @@ def _decode_display_name(name: str) -> str:
 # header or element over budget costs its recipients, never the message.
 _MAX_ADDRESS_HEADER_CHARS = 256_000
 _MAX_ADDRESS_ELEMENT_CHARS = 128_000
+# Longest address we will emit. Real addresses cap at 254 octets
+# (RFC 5321); 998 is the RFC 5322 line limit, generous for anything
+# deliverable, and it bounds the fixed-point re-parse below.
+_MAX_ADDRESS_CHARS = 998
 
 
 def _protect_encoded_words(text: str) -> tuple[str, Callable[[str], str]]:
@@ -630,13 +634,25 @@ def _parse_addrs(value: str | email.header.Header) -> list[str]:
             continue
         try:
             name, addr = email.utils.parseaddr(element)
+            if not addr.strip():
+                continue
+            addr = restore(addr)
+            # Every emitted string is re-parsed downstream — the identity
+            # check in _format_address, canonical_addr in the threader,
+            # the participant writer, the MCP contact reader. A restored
+            # address must therefore survive re-parsing unchanged: one
+            # that is not a parseaddr fixed point (an unsafe restored
+            # encoded-word, say) is discarded HERE, inside the failure
+            # boundary, not handed to an unguarded reparser later.
+            if len(addr) > _MAX_ADDRESS_CHARS or email.utils.parseaddr(addr)[1] != addr:
+                continue
+            name = _decode_display_name(restore(name)) if name else ""
+            formatted = _format_address(name, addr)
         except Exception:
-            # e.g. RecursionError on deeply nested (balanced) comments.
+            # e.g. RecursionError from parseaddr on deeply nested comments,
+            # whether in the element or re-created by restoring a token.
             continue
-        if not addr.strip():
-            continue
-        name = _decode_display_name(restore(name)) if name else ""
-        addresses.append(_format_address(name, restore(addr)))
+        addresses.append(formatted)
     return addresses
 
 

@@ -3152,6 +3152,25 @@ class TestMessageRecordsEndToEnd:
         senders = json.loads(db._conn.execute("SELECT senders FROM threads").fetchone()[0])
         assert any("李雷" in s for s in senders)
 
+    @pytest.mark.parametrize("header", ["From", "To"])
+    def test_restored_encoded_word_cannot_reenter_a_reparser(self, tmp_path, monkeypatch, header):
+        """An encoded-word whose label nests 2,400 parentheses parses as an
+        opaque placeholder, but restoring it into the address re-created
+        the paren bomb for the identity re-parse (and, via the from_addr
+        fallback, for canonical_addr in the threader). Unsafe restored
+        addresses are discarded; the message must always ingest."""
+        value = "=?x" + "(" * 1200 + ")" * 1200 + "?q?bob@example.com?= (Bob)"
+        other = "To: reader@example.com\r\n" if header == "From" else "From: alice@example.com\r\n"
+        db, queue, participants = self._ingest_headers(
+            tmp_path,
+            monkeypatch,
+            f"{header}: {value}\r\n{other}",
+            "restored-bomb@example.com",
+        )
+        assert queue.stats() == {"queued": 0, "dead": 0}
+        assert db.get_chunk_ids_for_message("restored-bomb@example.com")
+        assert not any("(" in addr for _role, addr, _name in participants)
+
     def test_group_syntax_inside_encoded_words_parses_in_linear_time(self, tmp_path):
         """Group syntax carried inside encoded-words drove the standard
         library's group parser quadratic via the From header (3.1 s at

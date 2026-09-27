@@ -903,3 +903,24 @@ def test_encoded_word_contents_are_never_parsed_as_syntax():
     # Colons, commas, parentheses, and "@" inside encoded-words are data.
     out = _parse_addrs("=?utf-8?q?a:b,c@d?= <bob@example.com>, =?x(((?q?A?= <carol@example.com>")
     assert [canonical_addr(a) for a in out] == ["bob@example.com", "carol@example.com"]
+
+
+def test_parse_addrs_output_is_always_a_parseaddr_fixed_point():
+    """Every emitted string is re-parsed downstream (identity check,
+    canonical_addr, the participant writer). Anything that does not
+    round-trip — including an unsafe restored encoded-word — is
+    discarded rather than handed to an unguarded reparser."""
+    from email.utils import parseaddr
+
+    from src.parser import _parse_addrs
+
+    bomb = "=?x" + "(" * 1200 + ")" * 1200 + "?q?bob@example.com?= (Bob)"
+    assert _parse_addrs(bomb) == []
+    assert _parse_addrs(bomb + ", carol@example.com") == ["carol@example.com"]
+    for header in (
+        '"Doe, Jane" <jane@example.com>, =?utf-8?q?Zo=C3=AB?= <zoe@example.com>',
+        "josé@example.com, Team: a@x.example, b@x.example;",
+    ):
+        for formatted in _parse_addrs(header):
+            addr = parseaddr(formatted)[1]
+            assert addr and parseaddr(addr)[1] == addr

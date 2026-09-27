@@ -2633,3 +2633,29 @@ class TestSearchAttachments:
             assert db.search_attachments() == []
         finally:
             db.close()
+
+
+class TestFindContactHostileParticipants:
+    def test_unparseable_stored_entry_does_not_break_lookup(self, tmp_path):
+        """One indexed message whose participant string blows up parseaddr
+        (nested-comment recursion) must not take down every find_contact
+        call — find_contact full-scans all threads' participants."""
+        from tests.conftest import _insert_thread
+
+        conn, path = _open_built_db_conn(tmp_path, "hostile.db")
+        _insert_thread(
+            conn,
+            thread_id="t-hostile",
+            subject="hostile",
+            participants=[
+                "(" * 1200 + ")" * 1200 + " <mallory@example.com>",
+                "Bob <bob@example.com>",
+            ],
+        )
+        conn.close()
+        db = Database(str(path))
+        try:
+            contacts = db.find_contact("bob")
+            assert [c["email"] for c in contacts] == ["bob@example.com"]
+        finally:
+            db.close()

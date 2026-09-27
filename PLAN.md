@@ -481,7 +481,16 @@ syntax — recursion, quadratic groups, and a fabricated
 level in one linear escape-aware pass (groups flattened, empty elements
 dropped), each element is parsed strictly on its own under size budgets
 and fails safe, and decoding is bounded per encoded-word rather than per
-name. `messages(filepath)` is indexed for the rename path.
+name. `messages(filepath)` is indexed for the rename path. Round 9 closed the
+last reparse hole: a restored encoded-word could re-create a
+nested-paren bomb in the address and blow up the unguarded identity
+re-parse (dead-lettering the message). Restore/decode/format now run
+inside the per-element failure boundary, and every emitted address must
+re-parse to itself (`parseaddr` fixed point, ≤998 chars) or be
+discarded. `canonical_addr` and mcp-server's `find_contact` entry parse
+are also guarded — hostile strings that reach them via the `from_addr`
+fallback or already-indexed participants degrade to "no address" instead
+of aborting threading or breaking every contact lookup.
 Prerequisite for Phase 1 items 1 (`query_messages`), 3
 (message-first-class retrieval), and 7 (source integrity exposure).
 
