@@ -3021,6 +3021,19 @@ class TestMessageRecordsEndToEnd:
             "To: =?utf-8?q?Zo=C3=AB?= =?utf-8?q?_Ng?= <zoe@example.com>",
             {("to", "zoe@example.com", "Zoë Ng")},
         ),
+        # Strict parsing rejects deeply nested unmatched comments; the
+        # lenient fallback recurses past Python's limit on them. That must
+        # cost only the (unparseable) recipients, never the message.
+        (
+            "unmatched_parens_to",
+            "To: bob@example.com " + "\r\n ".join(["(" * 60] * 20),
+            set(),
+        ),
+        (
+            "unmatched_parens_cc",
+            "To: carol@example.com\r\nCc: bob@example.com " + "\r\n ".join(["(" * 60] * 20),
+            {("to", "carol@example.com", None)},
+        ),
         # An address-shaped display name stays a name; the real address is
         # the angle-bracket one.
         (

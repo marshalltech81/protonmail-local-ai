@@ -510,7 +510,16 @@ def _parse_addrs(value: str | email.header.Header) -> list[str]:
         # rejected the header outright. The result feeds search
         # enumeration, not authentication, and From is sender-controlled
         # anyway, so leniency grants no new spoofing capability.
-        pairs = email.utils.getaddresses([text], strict=False)
+        #
+        # The fallback is best-effort: the lenient parser recurses on
+        # nested comments and raises RecursionError on deeply unmatched
+        # "(", among other failures on inputs strict parsing safely
+        # rejects. Any failure keeps the strict result (no recipients)
+        # rather than costing the whole message.
+        try:
+            pairs = email.utils.getaddresses([text], strict=False)
+        except Exception:
+            log.debug("lenient address parse failed; keeping strict result")
     return [
         _format_address(_decode_display_name(name) if name else "", addr)
         for name, addr in pairs

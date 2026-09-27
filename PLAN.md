@@ -464,7 +464,10 @@ header outright. Round 4: display names decode only their RFC 2047
 encoded-word tokens (linear scan, adjacent words joined, names over 998
 chars kept raw), leaving existing Unicode untouched; a token that fails
 or decodes to invalid Unicode (lone surrogate, NUL charset label) keeps
-its raw text.
+its raw text. Round 5: the lenient `getaddresses` fallback is
+best-effort — any failure (e.g. `RecursionError` on deeply unmatched
+comment parentheses) keeps the strict result instead of dead-lettering
+the message.
 Prerequisite for Phase 1 items 1 (`query_messages`), 3
 (message-first-class retrieval), and 7 (source integrity exposure).
 
