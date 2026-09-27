@@ -170,13 +170,17 @@ class Reconciler:
             "missing": missing,
         }
 
-    def handle_moved(self, src_path: str, dest_path: str) -> None:
-        """Live tombstone detection from watchdog ``on_moved`` events."""
+    def handle_moved(self, src_path: str, dest_path: str, *, folder: str | None = None) -> None:
+        """Live tombstone detection from watchdog ``on_moved`` events.
+
+        ``folder`` is forwarded to ``update_filepath`` for a rename that
+        crosses Maildir folders.
+        """
         entry = self._find_entry_for_path(src_path) or self._find_entry_for_path(dest_path)
         if entry is None:
             return
         if entry["filepath"] != dest_path:
-            self.db.update_filepath(entry["filepath"], dest_path)
+            self.db.update_filepath(entry["filepath"], dest_path, folder=folder)
         if is_trashed(dest_path):
             self.db.add_pending_deletion(dest_path, entry["message_id"], entry["thread_id"])
             log.info("tombstoned via on_moved: %s", dest_path)

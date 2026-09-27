@@ -431,10 +431,16 @@ source `filepath` / `size_bytes` / `content_hash`) and
 address). Written in `upsert_thread`'s transaction; removal cascades
 from `message_thread_map`, so reaps and thread deletes need no new
 code. Review round 1 fixed two pre-existing gaps it exposed: the parser
-now re-quotes display names with `formataddr` (a `"Doe, Jane" <addr>`
-recipient previously lost its quotes and failed canonicalization, dropping
-it from participants — thread-level lists included), and the watcher's
-rename fast path updates `messages.folder` on cross-folder moves.
+re-quotes display names when they contain RFC 5322 specials (a
+`"Doe, Jane" <addr>` recipient previously lost its quotes and failed
+canonicalization, dropping it from participants — thread-level lists
+included), and the watcher's rename fast path records the new folder on
+cross-folder moves. Round 2: the quoting uses an encoding-free formatter,
+not `formataddr` (which raised on non-ASCII addresses, failing the whole
+message, and RFC 2047-encoded Unicode names); raw 8-bit address headers
+are decoded before splitting; and the folder is written inside
+`update_filepath`'s transaction so a failed move rolls back whole and
+stays recoverable by the Maildir walk.
 Prerequisite for Phase 1 items 1 (`query_messages`), 3
 (message-first-class retrieval), and 7 (source integrity exposure).
 

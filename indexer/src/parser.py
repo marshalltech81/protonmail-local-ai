@@ -5,11 +5,13 @@ Handles MIME, HTML-to-text conversion, and attachment metadata.
 """
 
 import email
+import email.header
 import email.message
 import email.utils
 import hashlib
 import logging
 import os
+import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -377,7 +379,7 @@ def _clean_id(value: str) -> str:
     return value.strip().strip("<>").strip()
 
 
-def _decode_header(value: str) -> str:
+def _decode_header(value: str | email.header.Header) -> str:
     parts = email.header.decode_header(value)
     decoded = []
     for part, charset in parts:
@@ -402,19 +404,45 @@ def _decode_header(value: str) -> str:
     return " ".join(decoded).strip()
 
 
-def _parse_addrs(value: str) -> list[str]:
-    """Parse an address header, handling display names with commas correctly.
+# RFC 5322 "specials": a display name containing any of these must be
+# quoted to stay one address (the same trigger ``formataddr`` uses).
+_ADDR_SPECIALS_RE = re.compile(r'[][\\()<>@,:;".]')
 
-    Each pair is re-serialized with ``formataddr``, which re-quotes a
-    display name when it needs it. A bare ``f"{name} <{addr}>"`` turns
-    ``"Doe, Jane" <jane@x>`` into ``Doe, Jane <jane@x>``, which parses as
-    two broken addresses, so the recipient vanished from every
-    downstream canonical-address match.
+
+def _format_address(name: str, addr: str) -> str:
+    """Serialize one parsed (name, address) pair so it parses back intact.
+
+    Not ``email.utils.formataddr``: it raises ``UnicodeEncodeError`` on a
+    non-ASCII address (``josé@example.com``, an IDN domain) — aborting the
+    whole message's ingestion — and rewrites non-ASCII display names as
+    RFC 2047 encoded-words. This quotes the name only when it contains a
+    special (``"Doe, Jane"``) and never encodes anything.
+    """
+    if not name:
+        return addr
+    if _ADDR_SPECIALS_RE.search(name):
+        name = f'"{email.utils.quote(name)}"'
+    return f"{name} <{addr}>"
+
+
+def _parse_addrs(value: str | email.header.Header) -> list[str]:
+    """Parse an address header into one parseable string per address.
+
+    Raw 8-bit headers (UTF-8 written directly in the header) arrive as
+    ``email.header.Header`` objects whose ``str()`` mangles the non-ASCII
+    bytes, so they are decoded first. Display names are decoded *after*
+    splitting, so an encoded-word name containing a comma cannot split
+    one address into two.
     """
     if not value:
         return []
-    pairs = email.utils.getaddresses([value])
-    return [email.utils.formataddr((name, addr)) for name, addr in pairs if addr.strip()]
+    text = _decode_header(value) if isinstance(value, email.header.Header) else value
+    pairs = email.utils.getaddresses([text])
+    return [
+        _format_address(_decode_header(name) if name else "", addr)
+        for name, addr in pairs
+        if addr.strip()
+    ]
 
 
 def _parse_date(value: str) -> datetime:

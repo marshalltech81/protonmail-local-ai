@@ -282,8 +282,10 @@ Threads are the retrieval unit; `messages` is the authoritative
 per-message record. Each indexed message gets one row — its own
 subject, `sent_at` (`Date:` header), folder, `in_reply_to` /
 references, attachment flag, and its source: `filepath` (the Maildir
-locator, kept current across flag renames; the watcher also updates
-`folder` when a rename crosses folders) plus `size_bytes` and
+locator, kept current across flag renames; when a rename crosses
+folders the new `folder` is written in the same transaction, so a failed
+update rolls back whole and the Maildir walk re-indexes the file) plus
+`size_bytes` and
 `content_hash` (SHA-256 of the raw `.eml`). `message_participants`
 normalizes From / To / Cc into one row per (message, role, address),
 with `address` canonical and lowercased and the display name kept as

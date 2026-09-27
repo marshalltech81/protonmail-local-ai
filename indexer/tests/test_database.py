@@ -2520,3 +2520,41 @@ class TestMessagesTable:
         db.delete_thread_completely("t1")
         assert db._conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0] == 0
         assert db._conn.execute("SELECT COUNT(*) FROM message_participants").fetchone()[0] == 0
+
+
+class TestUpdateFilepathWithFolder:
+    """A cross-folder rename records the new locator and folder in one
+    transaction — both commit, or neither does."""
+
+    def _seed(self, db):
+        msg = make_message(message_id="m1@example.com", filepath="/md/INBOX/cur/m1")
+        db.upsert_thread(make_thread(messages=[msg], thread_id="t1"), _one_hot(0))
+
+    def _state(self, db):
+        row = db._conn.execute("SELECT folder, filepath FROM messages").fetchone()
+        mapped = db._conn.execute("SELECT filepath FROM message_thread_map").fetchone()
+        return row["folder"], row["filepath"], mapped["filepath"]
+
+    def test_updates_locator_and_folder_together(self, db):
+        self._seed(db)
+        db.update_filepath("/md/INBOX/cur/m1", "/md/Archive/cur/m1", folder="Archive")
+        assert self._state(db) == ("Archive", "/md/Archive/cur/m1", "/md/Archive/cur/m1")
+
+    def test_rolls_back_with_an_enclosing_transaction(self, db):
+        self._seed(db)
+        with pytest.raises(RuntimeError), db.transaction():
+            db.update_filepath("/md/INBOX/cur/m1", "/md/Archive/cur/m1", folder="Archive")
+            raise RuntimeError("caller failed after the rename")
+        assert self._state(db) == ("INBOX", "/md/INBOX/cur/m1", "/md/INBOX/cur/m1")
+
+    def test_folder_failure_rolls_back_the_locator(self, db):
+        self._seed(db)
+        db._conn.execute(
+            "CREATE TRIGGER fail_folder BEFORE UPDATE OF folder ON messages "
+            "BEGIN SELECT RAISE(ABORT, 'injected'); END"
+        )
+        with pytest.raises(sqlite3.IntegrityError, match="injected"):
+            db.update_filepath("/md/INBOX/cur/m1", "/md/Archive/cur/m1", folder="Archive")
+        assert self._state(db) == ("INBOX", "/md/INBOX/cur/m1", "/md/INBOX/cur/m1")
+        assert db.is_indexed("/md/INBOX/cur/m1")
+        assert not db.is_indexed("/md/Archive/cur/m1")

@@ -1917,22 +1917,13 @@ class Database:
                 )
 
     @_synchronized
-    def set_message_folder(self, filepath: str, folder: str) -> None:
-        """Record the folder of the message stored at ``filepath``.
-
-        For renames that cross Maildir folders: the rename fast path only
-        moves the locator, so without this the per-message record would
-        point at the new folder's file while still claiming the old one.
-        """
-        self._conn.execute(
-            "UPDATE messages SET folder = ? WHERE filepath = ? AND folder != ?",
-            (folder, filepath, folder),
-        )
-        self._conn.commit()
-
-    @_synchronized
-    def update_filepath(self, old_path: str, new_path: str) -> None:
+    def update_filepath(self, old_path: str, new_path: str, *, folder: str | None = None) -> None:
         """Update message_thread_map + indexed_files after a Maildir rename.
+
+        ``folder`` is the destination's folder when the rename crosses
+        Maildir folders (``None`` for flag-only renames). It is written in
+        the same transaction as the locator, so the per-message record can
+        never point at one folder's file while claiming another.
 
         mbsync renames a Maildir file whenever flags change (e.g. S → SR when
         the message is replied to). Keep the stored path in sync so later
@@ -1957,6 +1948,11 @@ class Database:
                 "UPDATE messages SET filepath = ? WHERE filepath = ?",
                 (new_path, old_path),
             )
+            if folder is not None:
+                cur.execute(
+                    "UPDATE messages SET folder = ? WHERE filepath = ?",
+                    (folder, new_path),
+                )
             # Carry the file-identity columns forward on rename. mbsync
             # renames files in place for flag changes; the content on
             # disk is unchanged, so reindexing just to recompute ``size``

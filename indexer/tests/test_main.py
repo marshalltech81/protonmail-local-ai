@@ -2760,6 +2760,77 @@ class TestMessageRecordsEndToEnd:
             ("cc", "bob@example.com", "Smith, Bob"),
         }
 
+    def test_non_ascii_addresses_and_names_ingest(self, tmp_path, monkeypatch):
+        """One non-ASCII recipient (local part or domain) must not make
+        the whole message unindexable, and non-ASCII display names are
+        stored readable — not as RFC 2047 encoded-words."""
+        maildir = tmp_path / "maildir"
+        path = maildir / "INBOX" / "cur" / "utf8.eml"
+        path.parent.mkdir(parents=True)
+        path.write_bytes(
+            (
+                "From: José Álvarez <jose@example.com>\r\n"
+                'To: josé@example.com, "Doe, Jane" <jane@example.com>,'
+                " =?utf-8?q?Zo=C3=AB_Ng?= <zoe@example.com>\r\n"
+                "Cc: <user@exämple.com>\r\n"
+                "Subject: Unicode recipients\r\n"
+                "Message-ID: <utf8@example.com>\r\n"
+                "Date: Mon, 01 Jan 2024 12:00:00 +0000\r\n"
+                "Content-Type: text/plain; charset=utf-8\r\n\r\nBody text.\r\n"
+            ).encode()
+        )
+        monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
+        db = Database(tmp_path / "mail.db")
+        queue = _make_queue(db)
+        main.initial_index(db, make_mock_embedder(_UNIT_VECTOR), Threader(db), queue)
+
+        assert queue.stats() == {"queued": 0, "dead": 0}
+        assert db.get_chunk_ids_for_message("utf8@example.com")
+        participants = {
+            (r["role"], r["address"], r["name"])
+            for r in db._conn.execute("SELECT role, address, name FROM message_participants")
+        }
+        assert participants == {
+            ("from", "jose@example.com", "José Álvarez"),
+            ("to", "josé@example.com", None),
+            ("to", "jane@example.com", "Doe, Jane"),
+            ("to", "zoe@example.com", "Zoë Ng"),
+            ("cc", "user@exämple.com", None),
+        }
+
+    def test_failed_cross_folder_move_stays_recoverable(self, tmp_path, monkeypatch):
+        """If recording a cross-folder move fails, nothing is half-written:
+        the locator, file identity, and folder all roll back together, the
+        destination stays unindexed, and the next Maildir walk re-indexes
+        it with the right folder."""
+        maildir = tmp_path / "maildir"
+        src = maildir / "INBOX" / "cur" / "1700000000.M1.host:2,S"
+        _write_eml(src, "atomic@example.com")
+        monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
+        db = Database(tmp_path / "mail.db")
+        queue = _make_queue(db)
+        embedder = make_mock_embedder(_UNIT_VECTOR)
+        main.initial_index(db, embedder, Threader(db), queue)
+
+        dest = maildir / "Archive" / "cur" / "1700000000.M1.host:2,S"
+        dest.parent.mkdir(parents=True)
+        src.rename(dest)
+        db._conn.execute(
+            "CREATE TRIGGER fail_folder BEFORE UPDATE OF folder ON messages "
+            "BEGIN SELECT RAISE(ABORT, 'injected'); END"
+        )
+        main.MaildirHandler(db, queue).on_moved(_FakeEvent(str(src), str(dest)))
+
+        row = db._conn.execute("SELECT folder, filepath FROM messages").fetchone()
+        assert (row["folder"], row["filepath"]) == ("INBOX", str(src))
+        assert not db.is_indexed(str(dest))
+
+        db._conn.execute("DROP TRIGGER fail_folder")
+        assert main._enqueue_unindexed_messages(db, queue, maildir, main.REASON_RESCAN) == 1
+        main.drain_queue(queue, db, embedder, Threader(db))
+        row = db._conn.execute("SELECT folder, filepath FROM messages").fetchone()
+        assert (row["folder"], row["filepath"]) == ("Archive", str(dest))
+
     @pytest.mark.parametrize("with_reconciler", [False, True])
     def test_cross_folder_move_updates_message_folder(self, tmp_path, monkeypatch, with_reconciler):
         """The watcher's rename fast path (indexed source) must keep the
