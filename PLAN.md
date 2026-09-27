@@ -460,7 +460,11 @@ end) then found one more pre-existing loss: Python 3.14's strict
 `getaddresses` rejects a whole header containing an empty list element
 (`a@x, , b@x` or a trailing comma), dropping every recipient; the parser
 now falls back to lenient parsing only when strict parsing rejects the
-header outright.
+header outright. Round 4: display names decode only their RFC 2047
+encoded-word tokens (linear scan, adjacent words joined, names over 998
+chars kept raw), leaving existing Unicode untouched; a token that fails
+or decodes to invalid Unicode (lone surrogate, NUL charset label) keeps
+its raw text.
 Prerequisite for Phase 1 items 1 (`query_messages`), 3
 (message-first-class retrieval), and 7 (source integrity exposure).
 

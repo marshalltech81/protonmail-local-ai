@@ -12,6 +12,7 @@ schema-reserved vector dimension.
 exercise it with stub collaborators rather than booting a live indexer.
 """
 
+import json
 from pathlib import Path
 
 import pytest
@@ -2996,6 +2997,30 @@ class TestMessageRecordsEndToEnd:
             "To: alice@example.org)<bob@example.org>",
             {("to", "alice@example.org", None), ("to", "bob@example.org", None)},
         ),
+        # Name decoding must never cost the message or corrupt text:
+        # a UTF-7 word that decodes to a lone surrogate, a charset label
+        # the codec lookup rejects, and plain Unicode next to an
+        # encoded-word all keep a usable name.
+        (
+            "encoded_to_lone_surrogate",
+            "To: =?utf-7?q?+2AA-?= <bob@example.com>",
+            {("to", "bob@example.com", "=?utf-7?q?+2AA-?=")},
+        ),
+        (
+            "nul_in_charset_label",
+            "To: =?utf-8\x00?q?Bob?= <bob@example.com>",
+            {("to", "bob@example.com", "=?utf-8\x00?q?Bob?=")},
+        ),
+        (
+            "unicode_then_encoded_word",
+            "To: José =?utf-8?q?Garc=C3=ADa?= <jose@example.com>",
+            {("to", "jose@example.com", "José García")},
+        ),
+        (
+            "adjacent_encoded_words",
+            "To: =?utf-8?q?Zo=C3=AB?= =?utf-8?q?_Ng?= <zoe@example.com>",
+            {("to", "zoe@example.com", "Zoë Ng")},
+        ),
         # An address-shaped display name stays a name; the real address is
         # the angle-bracket one.
         (
@@ -3004,6 +3029,49 @@ class TestMessageRecordsEndToEnd:
             {("to", "bob@example.org", "alice@example.org")},
         ),
     ]
+
+    def test_mixed_encoded_and_unicode_sender_stays_findable(self, tmp_path, monkeypatch):
+        """An encoded-word next to already-Unicode text must decode only
+        the encoded part; re-decoding the Unicode turned 李雷 into
+        backslash-u escapes in both the participant row and the thread
+        sender list that ``find_contact`` reads."""
+        db, _queue, participants = self._ingest_headers(
+            tmp_path,
+            monkeypatch,
+            "From: =?utf-8?q?Dr.?= 李雷 <li@example.com>\r\nTo: bob@example.com\r\n",
+            "mixed-from@example.com",
+        )
+        assert ("from", "li@example.com", "Dr. 李雷") in participants
+        row = db._conn.execute("SELECT senders, participants FROM threads").fetchone()
+        names = json.loads(row["senders"]) + json.loads(row["participants"])
+        assert any("李雷" in n for n in names)
+        assert not any("\\u" in n for n in names)
+
+    def test_malformed_encoded_prefixes_parse_in_linear_time(self, tmp_path):
+        """Thousands of unfinished ``=?utf-8?q?`` prefixes in one name must
+        not trigger a quadratic re-scan (the worker is synchronous, so a
+        slow parse stalls every queued message behind it)."""
+        import time
+
+        from src.parser import parse_email
+
+        repeated = "=?utf-8?q?abc "
+        chunks = [repeated * 5 for _ in range(1600)]  # 8,000 prefixes, short folded lines
+        path = tmp_path / "INBOX" / "cur" / "slow.eml"
+        path.parent.mkdir(parents=True)
+        path.write_bytes(
+            (
+                "From: alice@example.com\r\nTo: "
+                + "\r\n ".join(chunks)
+                + "<bob@example.com>\r\nSubject: s\r\nMessage-ID: <slow@example.com>\r\n"
+                "Date: Mon, 01 Jan 2024 12:00:00 +0000\r\n\r\nBody.\r\n"
+            ).encode()
+        )
+        start = time.perf_counter()
+        msg = parse_email(path, maildir_root=tmp_path)
+        elapsed = time.perf_counter() - start
+        assert msg is not None
+        assert elapsed < 0.5, f"parse took {elapsed:.2f}s"
 
     @pytest.mark.parametrize(
         ("headers", "expected_recipients"),

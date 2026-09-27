@@ -436,17 +436,57 @@ def _format_address(name: str, addr: str) -> str:
     return f"{name} <{addr}>"
 
 
-def _decode_display_name(name: str) -> str:
-    """Decode an RFC 2047 display name, keeping the raw text if it is broken.
+# One RFC 2047 encoded-word: =?charset?Q|B?text?=. Bounded character
+# classes (no whitespace, no "?") keep the scan linear.
+_ENCODED_WORD_RE = re.compile(r"=\?([^?\s]+)\?([QqBb])\?([^?\s]*)\?=")
+# RFC 2047 §6.2: whitespace between two adjacent encoded-words is dropped.
+_ADJACENT_ENCODED_WORDS_RE = re.compile(r"\?=\s+=\?")
+# RFC 5322 line limit; longer names are kept raw rather than scanned.
+_MAX_DECODED_NAME_CHARS = 998
 
-    A malformed encoded-word (bad base64, say) must cost only the pretty
-    name — never the address or the rest of the message, which would
-    otherwise be dead-lettered by a deterministic ``HeaderParseError``.
+
+def _decode_encoded_word(match: re.Match[str]) -> str:
+    """Decode one encoded-word, or return it unchanged if that fails.
+
+    Deliberately broad: a display name is cosmetic, so no failure here
+    may cost the address or the message. That covers codec errors, a
+    charset label the codec lookup rejects (``ValueError`` on an embedded
+    NUL), and text that decodes but is not valid Unicode (a UTF-7 word
+    yielding a lone surrogate, which would crash later tokenization).
     """
+    token = match.group(0)
     try:
-        return _decode_header(name)
-    except email.errors.HeaderParseError, UnicodeError:
+        pieces = []
+        for part, charset in email.header.decode_header(token):
+            if not isinstance(part, bytes):
+                pieces.append(part)
+                continue
+            try:
+                pieces.append(part.decode(charset or "utf-8", errors="replace"))
+            except LookupError:
+                # Unknown label ("x-bogus"): same UTF-8 fallback as _decode_header.
+                pieces.append(part.decode("utf-8", errors="replace"))
+        text = "".join(pieces)
+        text.encode("utf-8")
+    except Exception:
+        return token
+    return text
+
+
+def _decode_display_name(name: str) -> str:
+    """Decode the RFC 2047 encoded-words in a display name.
+
+    Only encoded-word tokens are decoded; any other text — including
+    Unicode already decoded from a raw 8-bit header — is left exactly as
+    it is. (Running the whole name through ``decode_header`` re-encoded
+    that Unicode and corrupted it, and rescanned the name at every
+    malformed ``=?`` prefix, which is quadratic.) A token that fails to
+    decode keeps its raw text.
+    """
+    if "=?" not in name or len(name) > _MAX_DECODED_NAME_CHARS:
         return name
+    name = _ADJACENT_ENCODED_WORDS_RE.sub("?==?", name)
+    return _ENCODED_WORD_RE.sub(_decode_encoded_word, name)
 
 
 def _parse_addrs(value: str | email.header.Header) -> list[str]:
