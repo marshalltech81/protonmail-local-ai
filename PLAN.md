@@ -66,7 +66,8 @@ The stack runs four containers:
   attachments / final thread vector per message transactionally).
 - **mcp-server** — Docker, hybrid five-lane search (thread FTS, chunk
   FTS, attachment FTS, thread vec, chunk vec → RRF, optional Cohere
-  rerank) + intelligence tools. `INFERENCE_MODE=anthropic` (default,
+  rerank), exhaustive `query_messages` enumeration, and intelligence
+  tools. `INFERENCE_MODE=anthropic` (default,
   `claude-sonnet-4-6`) or `openai`; SSE / streamable-http / dual
   transports; localhost:3000 only.
 
@@ -104,16 +105,8 @@ omission.
 **Exit criterion:** an unfamiliar LLM can query the corpus without
 guessing about semantics, completeness, or identity.
 
-1. **`query_messages`** — deterministic enumeration primitive
-   (sender/recipient/participant/subject/text/folder/date/attachment
-   predicates) returning `total_matches`, `returned`, `has_more`, and
-   a cursor. Relevance search (`search_emails`) ranks; this
-   enumerates. Requires participant indexing that also fixes
-   `find_contact`'s per-call full-scan.
-   *Progress (PR #175): data layer done — `messages` +
-   `message_participants`, indexed by canonical address. Remaining: the
-   MCP tool itself, cursor pagination, and moving `find_contact` onto
-   the participant index.*
+1. ~~**`query_messages`**~~ — Done 2026-09-27 (see Recently
+   Completed).
 2. **Structured MCP output** (`outputSchema` / `structuredContent`)
    across search / retrieval / evidence / status tools; prose
    retained alongside. The chaining path (search → thread_id →
@@ -432,6 +425,28 @@ do not ship persisted claims without them.
    during its Phase 3 experimental period.
 
 ## Recently Completed
+
+### 2026-09-27 — `query_messages` (Phase 1 item 1)
+
+New MCP tool enumerating every message that matches all given
+predicates — sender / recipient (To or Cc) / participant, subject
+substring, body `text` (every word, FTS with stemming, words may span
+chunks; attachments and stripped quotes excluded), folder, inclusive
+`sent_at` bounds, attachment flag — with an exact `total_matches`,
+`returned` range, `has_more`, and a cursor. Newest first, keyset-paged
+on `(sent_at, message_id)` with a row-value predicate that seeks
+`idx_messages_sent` (the OR expansion sorted every earlier row: 34 ms
+vs 0.06 ms at 200K messages); cursors are bound to a digest of their
+filters and rejected, not silently restarted, when reused elsewhere.
+Count, page, and participants come from one read snapshot. A full
+address matches canonically through the `(address, role)` index;
+anything else is a Unicode case-insensitive substring of address or
+display name (a `mcp_lower` SQL function, since SQLite's `lower()` is
+ASCII-only), and the response names the mode used. `find_contact` now
+aggregates `message_participants` instead of parsing every thread's
+participant JSON, reporting every display name a contact was written
+with. `search_emails` / `list_threads` descriptions route "all" / "how
+many" questions to the new tool. No schema change.
 
 ### 2026-09-27 — Phase 1 foundation: per-message records
 

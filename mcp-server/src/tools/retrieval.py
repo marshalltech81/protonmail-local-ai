@@ -9,9 +9,46 @@ import logging
 from mcp.types import TextContent
 
 from ..lib.security import log_tool_call
+from ..lib.sqlite import Participant, address_match_mode, canonical_addr
 from ..lib.validation import clamp_int
 
 log = logging.getLogger("mcp.tools.retrieval")
+
+# Ceiling on query_messages page size: enumeration pages by cursor, so a
+# large page only bloats one response.
+_MAX_QUERY_LIMIT = 100
+
+# Recipients rendered per role before the rest are summarized as a count.
+_MAX_LISTED_PARTICIPANTS = 10
+
+
+def _format_participants(people: list[Participant]) -> str:
+    shown = [f"{p.name} <{p.address}>" if p.name else p.address for p in people]
+    text = ", ".join(shown[:_MAX_LISTED_PARTICIPANTS])
+    if len(shown) > _MAX_LISTED_PARTICIPANTS:
+        text += f" (+{len(shown) - _MAX_LISTED_PARTICIPANTS} more)"
+    return text
+
+
+def _describe_filters(args: dict) -> str:
+    """State how query_messages interpreted each filter, so the caller
+    knows whether an address matched exactly or as a substring."""
+    parts = []
+    for key, value in args.items():
+        if value is None or (isinstance(value, str) and not value.strip()):
+            continue
+        if key in ("sender", "recipient", "participant"):
+            if address_match_mode(value) == "exact":
+                parts.append(f"{key}={canonical_addr(value)} (exact address)")
+            else:
+                parts.append(f"{key}={value.strip()!r} (substring of address or name)")
+        elif key == "subject":
+            parts.append(f"subject={value.strip()!r} (case-insensitive substring)")
+        elif key == "text":
+            parts.append(f"text={value.strip()!r} (all words, message body)")
+        else:
+            parts.append(f"{key}={value!r}")
+    return ", ".join(parts) or "no filters (every indexed message)"
 
 
 def register_retrieval_tools(server, db):
@@ -219,7 +256,9 @@ def register_retrieval_tools(server, db):
         ``search_emails`` instead, which exposes all of those filters.
         In particular, "5 most recent from <person>" is a
         ``search_emails(from_name=..., limit=5)`` call, not a
-        ``list_threads`` call.
+        ``list_threads`` call. For exhaustive listing or counting of
+        messages by exact criteria ("every message from X", "how many
+        in Archive since March"), use ``query_messages``.
 
         Args:
             folder: Folder name (default: INBOX)
@@ -272,6 +311,113 @@ def register_retrieval_tools(server, db):
         except Exception as e:
             log.error(f"list_threads error: {e}")
             return [TextContent(type="text", text=f"Error: {e}")]
+
+    @server.tool()
+    async def query_messages(
+        sender: str | None = None,
+        recipient: str | None = None,
+        participant: str | None = None,
+        subject: str | None = None,
+        text: str | None = None,
+        folder: str | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
+        has_attachments: bool | None = None,
+        limit: int = 25,
+        cursor: str | None = None,
+    ) -> list[TextContent]:
+        """
+        Enumerate EVERY message matching exact criteria, with an exact
+        total count. Not ranked, not fuzzy: the complete matching set,
+        newest first, one message per row.
+
+        Use this for exhaustive or counting questions — "how many
+        emails did Jane send me in 2024?", "list every message from
+        @example.com", "all messages in Archive with attachments since
+        March". ``search_emails`` ranks by relevance and returns only
+        the top threads, so it cannot answer "all" or "how many";
+        this tool can.
+
+        All given filters must match (AND). Omitted or blank filters
+        are ignored; with none, every indexed message is enumerated.
+
+        Paging: the response states ``total_matches``, how many were
+        returned, and ``has_more``. When ``has_more`` is true, call
+        again with the SAME filters plus ``cursor`` set to the returned
+        ``next_cursor``. Never report a partial page as the complete
+        answer — use ``total_matches`` for counts.
+
+        Args:
+            sender: From address. A full address ("jane@example.com")
+                    matches exactly; anything else ("@example.com",
+                    "Jane") is a case-insensitive substring of the
+                    address or display name. The response states which.
+            recipient: To or Cc, matched like ``sender``.
+            participant: Any role (From, To, or Cc), matched like ``sender``.
+            subject: Case-insensitive substring of the message subject.
+            text: Words that must ALL appear in the message body (word
+                  match with stemming). Searches the message's own
+                  text only — not attachments and not quoted earlier
+                  replies. For attachment content use search_attachments.
+            folder: Exact folder name (see list_folders).
+            date_from: ISO 8601 lower bound on the send date, inclusive.
+            date_to: ISO 8601 upper bound, inclusive; a date-only value
+                     covers the whole day (UTC).
+            has_attachments: True for messages with attachments, False
+                             for messages without.
+            limit: Messages per page (default 25, clamped to [1, 100]).
+            cursor: ``next_cursor`` from the previous page of the same query.
+
+        Returns:
+            The filter interpretation, total_matches, the page's
+            messages (send date, folder, subject, From / To / Cc,
+            Message-ID, Thread ID), and paging state.
+        """
+        args = {
+            "sender": sender,
+            "recipient": recipient,
+            "participant": participant,
+            "subject": subject,
+            "text": text,
+            "folder": folder,
+            "date_from": date_from,
+            "date_to": date_to,
+            "has_attachments": has_attachments,
+        }
+        log_tool_call(log, "query_messages", {**args, "limit": limit, "cursor": cursor})
+        limit = clamp_int(limit, default=25, minimum=1, maximum=_MAX_QUERY_LIMIT)
+
+        try:
+            page = await asyncio.to_thread(db.query_messages, **args, limit=limit, cursor=cursor)
+        except Exception as e:
+            log.error(f"query_messages error: {e}")
+            return [TextContent(type="text", text=f"Error: {e}")]
+
+        lines = [f"Query: {_describe_filters(args)}", f"total_matches: {page.total_matches}"]
+        if not page.messages:
+            lines.append("No messages match." if page.offset == 0 else "No further messages.")
+            return [TextContent(type="text", text="\n".join(lines))]
+
+        first, last = page.offset + 1, page.offset + len(page.messages)
+        lines.append(f"returned: {len(page.messages)} (matches {first}-{last})")
+        lines.append(f"has_more: {'true' if page.has_more else 'false'}")
+        if page.next_cursor:
+            lines.append(f"next_cursor: {page.next_cursor}")
+            lines.append("(Call again with the same filters and this cursor for the next page.)")
+        lines.append("")
+
+        for i, m in enumerate(page.messages, first):
+            flags = " | attachments" if m.has_attachments else ""
+            lines.append(f"{i}. {m.sent_at} | {m.folder}{flags}")
+            lines.append(f"   Subject: {m.subject}")
+            for label, people in (("From", m.from_), ("To", m.to), ("Cc", m.cc)):
+                if people:
+                    lines.append(f"   {label}: {_format_participants(people)}")
+            lines.append(f"   Message-ID: {m.message_id}")
+            lines.append(f"   Thread ID: {m.thread_id}")
+            lines.append("")
+
+        return [TextContent(type="text", text="\n".join(lines))]
 
     @server.tool()
     async def find_contact(

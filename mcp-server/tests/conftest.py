@@ -3,6 +3,7 @@
 import json
 import sqlite3
 from datetime import UTC, datetime
+from email.utils import parseaddr
 from pathlib import Path
 
 import pytest
@@ -41,6 +42,32 @@ def _build_schema(conn: sqlite3.Connection) -> None:
             thread_id  TEXT NOT NULL,
             filepath   TEXT NOT NULL
         );
+
+        -- Per-message records behind query_messages and find_contact.
+        CREATE TABLE messages (
+            message_id      TEXT PRIMARY KEY,
+            thread_id       TEXT NOT NULL,
+            filepath        TEXT NOT NULL,
+            folder          TEXT NOT NULL,
+            subject         TEXT NOT NULL,
+            sent_at         TEXT NOT NULL,
+            in_reply_to     TEXT,
+            references_json TEXT NOT NULL,
+            has_attachments INTEGER NOT NULL,
+            size_bytes      INTEGER,
+            content_hash    TEXT,
+            indexed_at      TEXT NOT NULL
+        );
+
+        CREATE TABLE message_participants (
+            message_id TEXT NOT NULL,
+            role       TEXT NOT NULL CHECK (role IN ('from', 'to', 'cc')),
+            address    TEXT NOT NULL,
+            name       TEXT,
+            PRIMARY KEY (message_id, role, address)
+        );
+        CREATE INDEX idx_message_participants_address
+            ON message_participants(address, role);
 
         CREATE VIRTUAL TABLE threads_fts USING fts5(
             subject, participants, body,
@@ -254,6 +281,136 @@ def _insert_extraction(
     conn.commit()
 
 
+def _split_address(value: str) -> tuple[str, str]:
+    """``parseaddr`` that degrades to no address, as the indexer's writer does
+    for strings that make it recurse."""
+    try:
+        name, address = parseaddr(value)
+    except RecursionError:
+        return "", ""
+    return name, address.lower()
+
+
+def _insert_message_record(
+    cur: sqlite3.Cursor,
+    *,
+    message_id: str,
+    thread_id: str,
+    folder: str,
+    subject: str,
+    sent_at: str,
+    has_attachments: bool,
+    participants: list[tuple[str, str]],
+) -> None:
+    """Insert one ``messages`` row and its ``message_participants``.
+
+    ``participants`` is ``(role, display string)`` pairs; addresses are
+    canonicalized and names split out the way the indexer writes them.
+    """
+    cur.execute(
+        """
+        INSERT INTO messages
+            (message_id, thread_id, filepath, folder, subject, sent_at,
+             in_reply_to, references_json, has_attachments, size_bytes,
+             content_hash, indexed_at)
+        VALUES (?, ?, ?, ?, ?, ?, NULL, '[]', ?, 100, 'hash', ?)
+        """,
+        (
+            message_id,
+            thread_id,
+            f"/maildir/{folder}/cur/{message_id}",
+            folder,
+            subject,
+            sent_at,
+            1 if has_attachments else 0,
+            "2024-01-01T00:00:00+00:00",
+        ),
+    )
+    for role, value in participants:
+        name, address = _split_address(value)
+        if "@" not in address:
+            continue
+        cur.execute(
+            "INSERT OR IGNORE INTO message_participants VALUES (?, ?, ?, ?)",
+            (message_id, role, address, name or None),
+        )
+
+
+def _insert_message(
+    conn: sqlite3.Connection,
+    *,
+    message_id: str,
+    thread_id: str,
+    sent_at: str,
+    subject: str = "subject",
+    folder: str = "INBOX",
+    from_: list[str] | None = None,
+    to: list[str] | None = None,
+    cc: list[str] | None = None,
+    has_attachments: bool = False,
+    body: str | None = None,
+    attachment_text: str | None = None,
+) -> None:
+    """Insert one message with full per-message control.
+
+    For ``query_messages`` tests, which need several messages per thread
+    with distinct senders, dates, and bodies. Creates the parent thread
+    row on first use; ``body`` / ``attachment_text`` become a body chunk
+    and an attachment chunk respectively.
+    """
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT OR IGNORE INTO threads (
+            thread_id, subject, participants, senders, folder,
+            date_first, date_last, message_ids
+        ) VALUES (?, ?, '[]', '[]', ?, ?, ?, '[]')
+        """,
+        (thread_id, subject, folder, sent_at, sent_at),
+    )
+    cur.execute(
+        "INSERT INTO message_thread_map VALUES (?, ?, ?)",
+        (message_id, thread_id, f"/maildir/{folder}/cur/{message_id}"),
+    )
+    participants = (
+        [("from", v) for v in from_ or []]
+        + [("to", v) for v in to or []]
+        + [("cc", v) for v in cc or []]
+    )
+    _insert_message_record(
+        cur,
+        message_id=message_id,
+        thread_id=thread_id,
+        folder=folder,
+        subject=subject,
+        sent_at=sent_at,
+        has_attachments=has_attachments,
+        participants=participants,
+    )
+    conn.commit()
+    if body is not None:
+        _insert_chunk(
+            conn,
+            chunk_id=f"{message_id}-body",
+            message_id=message_id,
+            thread_id=thread_id,
+            text=body,
+            embedding=[1.0, 0.0, 0.0, 0.0],
+            message_date=sent_at,
+        )
+    if attachment_text is not None:
+        _insert_chunk(
+            conn,
+            chunk_id=f"{message_id}-att",
+            message_id=message_id,
+            thread_id=thread_id,
+            text=attachment_text,
+            embedding=[1.0, 0.0, 0.0, 0.0],
+            attachment_id=f"{message_id}-att",
+            message_date=sent_at,
+        )
+
+
 def _insert_thread(
     conn: sqlite3.Connection,
     *,
@@ -304,10 +461,25 @@ def _insert_thread(
             display_subject,
         ),
     )
-    for mid in message_ids or [thread_id]:
+    # Senders become ``from`` participants and everyone else ``to``, on
+    # every message of the thread; the first message is sent at
+    # ``date_first`` and the rest at ``date_last``.
+    sender_keys = {_split_address(s)[1] for s in senders or []}
+    roles = [("from" if _split_address(p)[1] in sender_keys else "to", p) for p in participants]
+    for i, mid in enumerate(message_ids or [thread_id]):
         cur.execute(
             "INSERT INTO message_thread_map VALUES (?, ?, ?)",
             (mid, thread_id, f"/maildir/{folder}/cur/{mid}"),
+        )
+        _insert_message_record(
+            cur,
+            message_id=mid,
+            thread_id=thread_id,
+            folder=folder,
+            subject=display_subject or subject,
+            sent_at=date_first if i == 0 else date_last,
+            has_attachments=has_attachments,
+            participants=roles,
         )
     if embedding is not None:
         cur.execute(
@@ -463,6 +635,93 @@ def chunked_db(tmp_path: Path):
 
     conn.close()
     db = Database(str(db_path))
+    try:
+        yield db
+    finally:
+        db.close()
+
+
+@pytest.fixture
+def messages_db(tmp_path):
+    """Five messages across three threads for ``query_messages``.
+
+    m4 and m5 share a ``sent_at`` so paging must break the tie on
+    message_id; m2 has an attachment chunk whose text must not satisfy
+    ``text``; m3 has two body chunks so ``text`` terms can span them.
+    """
+    path = tmp_path / "mcp-messages.db"
+    conn = sqlite3.connect(str(path))
+    conn.enable_load_extension(True)
+    sqlite_vec.load(conn)
+    conn.enable_load_extension(False)
+    _build_schema(conn)
+    _insert_message(
+        conn,
+        message_id="m1",
+        thread_id="t1",
+        sent_at="2024-01-10T09:00:00+00:00",
+        subject="Budget review",
+        from_=["Jane Doe <jane@example.com>"],
+        to=["bob@example.com"],
+        body="the budget is approved",
+    )
+    _insert_message(
+        conn,
+        message_id="m2",
+        thread_id="t1",
+        sent_at="2024-01-11T10:00:00+00:00",
+        subject="Re: Budget review",
+        from_=["bob@example.com"],
+        to=["Jane Doe <jane@example.com>"],
+        cc=["carol@other.org"],
+        has_attachments=True,
+        body="thanks, budget noted",
+        attachment_text="spreadsheet totals",
+    )
+    _insert_message(
+        conn,
+        message_id="m3",
+        thread_id="t2",
+        sent_at="2024-02-01T08:00:00+00:00",
+        subject="Lunch",
+        folder="Archive",
+        from_=["jane@example.com"],
+        to=["carol@other.org"],
+        body="lunch friday?",
+    )
+    _insert_chunk(
+        conn,
+        chunk_id="m3-body-2",
+        message_id="m3",
+        thread_id="t2",
+        chunk_index=1,
+        text="at the noodle place",
+        embedding=[1.0, 0.0, 0.0, 0.0],
+        message_date="2024-02-01T08:00:00+00:00",
+    )
+    _insert_message(
+        conn,
+        message_id="m4",
+        thread_id="t3",
+        sent_at="2024-03-05T12:00:00+00:00",
+        subject="Contrato",
+        from_=["José Álvarez <jose@other.org>"],
+        to=["jane@example.com"],
+        has_attachments=True,
+        body="adjunto el contrato",
+    )
+    _insert_message(
+        conn,
+        message_id="m5",
+        thread_id="t3",
+        sent_at="2024-03-05T12:00:00+00:00",
+        subject="Re: Contrato",
+        from_=["jane@example.com"],
+        to=["jose@other.org"],
+        body="gracias",
+    )
+    conn.close()
+    db = Database(str(path))
     try:
         yield db
     finally:

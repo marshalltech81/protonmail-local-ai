@@ -161,13 +161,58 @@ from Jane Smith"); pass the chosen result's email to
 | `query` | string | required | Name, address, or domain fragment (case-insensitive) |
 | `limit` | int | `10` | Maximum contacts to return; clamped to `[1, 50]` |
 
-The aggregator iterates `threads.participants`, parses each entry
-with `parseaddr`, deduplicates by canonical email (so the same
-contact across many threads collapses to one row), and ranks
-results by `thread_count` descending with email as the tiebreaker.
-Display names are reported when the index has them. Same-thread
-duplicates (occasionally emitted by Bridge after a thread merge)
-do not double-count.
+The aggregator matches the query against each `message_participants`
+row's canonical address or display name (Unicode case-insensitive),
+groups by canonical email (so the same contact across many threads
+collapses to one row), and ranks results by `thread_count` descending
+with email as the tiebreaker. Every display name the contact was
+written with is reported. Same-thread duplicates do not double-count.
+
+### `query_messages`
+Enumerate **every** message matching exact criteria, with an exact
+total. Unlike `search_emails`, which ranks threads by relevance and
+returns the top `limit`, this returns the complete matching set of
+individual messages, newest send date first (Message-ID breaks ties),
+and pages through it with a cursor. Use it for "all" and "how many"
+questions.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `sender` | string | none | From address (see address matching below) |
+| `recipient` | string | none | To or Cc address |
+| `participant` | string | none | Any role: From, To, or Cc |
+| `subject` | string | none | Case-insensitive substring of the message's own subject |
+| `text` | string | none | Every word must appear in the message's indexed body (FTS word match with stemming; words may be in different chunks). Attachment text and stripped quoted replies are not searched; at most 16 words |
+| `folder` | string | none | Exact folder name |
+| `date_from` | string | none | Inclusive ISO 8601 lower bound on the send date |
+| `date_to` | string | none | Inclusive upper bound; a date-only value covers the whole UTC day |
+| `has_attachments` | bool | none | The message's own attachment flag, either way |
+| `limit` | int | `25` | Messages per page; clamped to `[1, 100]` |
+| `cursor` | string | none | `next_cursor` from the previous page of the same query |
+
+All given filters must match; blank filters are ignored, and with
+none every indexed message is enumerated.
+
+**Address matching.** A value that is a full address
+(`jane@example.com`, `Jane <jane@example.com>`) matches by canonical
+equality through the `message_participants(address, role)` index.
+Anything else (`@example.com`, `Jane`) is a case-insensitive substring
+of the address or display name. The response names the mode used for
+each filter.
+
+**Response contract.** The response states the filter interpretation,
+`total_matches` (over the whole set), `returned` with the match range,
+and `has_more`; when more remain it includes `next_cursor`. Each
+message carries its send date, folder, attachment flag, subject,
+From / To / Cc (at most 10 per role, with a count of the rest),
+Message-ID, and Thread ID. The count, the page, and its participants
+are read in one snapshot.
+
+**Paging.** Keyset pagination on `(sent_at, message_id)`: messages
+indexed while a caller pages never shift or duplicate later pages. A
+cursor is bound to the filters it was issued for; a cursor from
+another query, or a malformed one, is rejected with an error rather
+than silently restarting.
 
 ---
 
