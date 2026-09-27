@@ -44,9 +44,12 @@ from .attachment_indexing import (
 from .chunker import MessageChunk, chunk_message, mean_vector
 from .database import EMBEDDING_DIM, Database
 from .embedder import (
+    EMBED_FAILURE_CONFIGURATION,
+    EMBED_FAILURE_REJECTED_INPUT,
+    EMBED_FAILURE_UNCERTAIN,
     EmbeddingBackend,
     OpenAIEmbedder,
-    _is_transient_embed_error,
+    classify_embed_failure,
     scrub_embed_error,
 )
 from .maildir import is_trashed
@@ -850,7 +853,7 @@ def _phase2c_commit_vectors(
     # ISO-8601 representation of the source message's Date: header.
     # Stamped onto every chunk row (body + attachment) so timeline
     # retrieval can order by message time instead of insert time —
-    # see ``replace_message_chunks`` and the v18 migration.
+    # see ``replace_message_chunks``.
     msg_date_iso = msg.date.isoformat()
     try:
         with db.transaction():
@@ -960,29 +963,90 @@ def _entry_text_offsets(entry: _BatchedMsg) -> list[int]:
     return offsets
 
 
+def _pause_embedding(
+    entries: list[_BatchedMsg],
+    queue: IndexingQueue,
+    breaker: _EmbedOutageBreaker | None,
+    exc: BaseException,
+) -> None:
+    """The embedder itself is failing: defer ``entries`` without
+    spending attempts and open the breaker so draining stops.
+
+    A configuration error (or a probe the provider refuses outright)
+    records ``operator_action_required``; anything else is an outage
+    and records ``retryable``.
+    """
+    kind = classify_embed_failure(exc)
+    error_class = (
+        ERROR_CLASS_OPERATOR
+        if kind in (EMBED_FAILURE_CONFIGURATION, EMBED_FAILURE_REJECTED_INPUT)
+        else ERROR_CLASS_RETRYABLE
+    )
+    err_repr = scrub_embed_error(exc)
+    delay = (
+        breaker.record_failure(time.monotonic()) if breaker is not None else _OUTAGE_DEFER_SECONDS
+    )
+    for entry in entries:
+        queue.defer(
+            entry.row["filepath"],
+            stage="embed",
+            error=err_repr,
+            error_class=error_class,
+            delay_seconds=delay,
+        )
+    if error_class == ERROR_CLASS_OPERATOR:
+        log.error(
+            "embedder rejected credentials or model (%s) — check EMBED_BASE_URL, "
+            "EMBED_MODEL and the embed API key. Deferred %d message(s); "
+            "indexing paused %ds.",
+            err_repr,
+            len(entries),
+            delay,
+        )
+    else:
+        log.error(
+            "embedder unavailable (%s). Deferred %d message(s) without "
+            "spending retry attempts; indexing paused %ds.",
+            err_repr,
+            len(entries),
+            delay,
+        )
+
+
 def _embed_each_message(
     survivors: list[_BatchedMsg],
     all_texts: list[str],
     embedder: EmbeddingBackend,
     queue: IndexingQueue,
-) -> tuple[list[list[float]], list[_BatchedMsg]]:
+    breaker: _EmbedOutageBreaker | None,
+) -> tuple[list[list[float]], list[_BatchedMsg], bool]:
     """Embed each message's texts on its own after a failed batch embed.
 
-    Called only once a probe has shown the embedder is healthy, so the
-    batch failure came from something in the batch. Messages that embed
-    cleanly continue to Phase 2c; the rest are charged individually:
+    Called once a probe has shown the embedder can embed *something*.
+    That probe describes one tiny request, not the provider's state for
+    every later request, so each individual failure is attributed with
+    ``classify_embed_failure`` before any message is charged:
 
-    * a transient-looking error (the provider 5xx'd on this input) —
-      ``mark_failed``: retries, dead-letters once attempts run out;
-    * any other error (the provider rejected this input) —
-      ``mark_dead_terminal`` as a permanent source failure.
+    * ``rejected_input`` (400 / 413 / 422) — the provider refused this
+      message's content: ``mark_dead_terminal`` as a permanent source
+      failure. The only terminal outcome.
+    * ``infrastructure`` / ``configuration`` (transport, 408, 429,
+      401 / 403 / 404) — not the message's fault: this and every
+      remaining message are deferred without spending attempts, the
+      breaker opens, and isolation stops.
+    * ``uncertain`` (5xx, integrity errors) — probe again. A failing
+      probe means the provider went down: pause as above. A passing
+      probe points at this input: ``mark_failed`` spends one attempt,
+      so a genuinely poison input still dead-letters eventually without
+      stalling the queue behind the breaker.
 
     Returns a vector list aligned to ``all_texts`` (slots of failed
-    messages stay empty and are never read) and the successful entries.
+    messages stay empty and are never read), the entries that embedded
+    cleanly, and whether embedding was paused.
     """
     vectors: list[list[float]] = [[] for _ in all_texts]
     ok: list[_BatchedMsg] = []
-    for entry in survivors:
+    for index, entry in enumerate(survivors):
         offsets = _entry_text_offsets(entry)
         filepath = entry.row["filepath"]
         try:
@@ -994,17 +1058,24 @@ def _embed_each_message(
                 else []
             )
         except Exception as e:
-            err_repr = scrub_embed_error(e)
-            if _is_transient_embed_error(e):
-                queue.mark_failed(filepath, stage="embed", error=err_repr)
-            else:
-                queue.mark_dead_terminal(filepath, stage="embed", error=err_repr)
-            continue
+            failure: BaseException = e
+            kind = classify_embed_failure(e)
+            if kind == EMBED_FAILURE_UNCERTAIN:
+                probe_error = _probe_embedder(embedder)
+                if probe_error is None:
+                    queue.mark_failed(filepath, stage="embed", error=scrub_embed_error(e))
+                    continue
+                failure = probe_error
+            elif kind == EMBED_FAILURE_REJECTED_INPUT:
+                queue.mark_dead_terminal(filepath, stage="embed", error=scrub_embed_error(e))
+                continue
+            _pause_embedding(survivors[index:], queue, breaker, failure)
+            return vectors, ok, True
         for i, vector in zip(offsets, entry_vectors):
             vectors[i] = vector
         ok.append(entry)
         touch_health_file()
-    return vectors, ok
+    return vectors, ok, False
 
 
 def _drain_queue_batched(
@@ -1052,9 +1123,10 @@ def _drain_queue_batched(
       Embedder down or misconfigured: every in-flight row is deferred
       without spending attempts, ``breaker`` opens, and this call
       stops draining. Embedder healthy: each message is re-embedded on
-      its own, so one bad input cannot fail its batchmates. Phase 1
-      commits remain either way; a later pass re-runs Phase 1
-      (idempotent upsert) plus Phase 2.
+      its own, so one bad input cannot fail its batchmates; each
+      individual failure is attributed before anyone is charged (see
+      ``_embed_each_message``). Phase 1 commits remain either way; a
+      later pass re-runs Phase 1 (idempotent upsert) plus Phase 2.
     * Phase 2c (DB write) error for one message — marked failed,
       others succeed.
     """
@@ -1111,6 +1183,7 @@ def _drain_queue_batched(
 
         # ---- Phase 2b: bulk embed across batch ----
         t_embed_start = time.perf_counter()
+        paused = False
         try:
             vectors = (
                 embedder.embed_batch(all_texts, on_batch_complete=touch_health_file)
@@ -1128,42 +1201,7 @@ def _drain_queue_batched(
             err_repr = scrub_embed_error(e)
             probe_error = _probe_embedder(embedder)
             if probe_error is not None:
-                probe_repr = scrub_embed_error(probe_error)
-                error_class = (
-                    ERROR_CLASS_RETRYABLE
-                    if _is_transient_embed_error(probe_error)
-                    else ERROR_CLASS_OPERATOR
-                )
-                delay = (
-                    breaker.record_failure(time.monotonic())
-                    if breaker is not None
-                    else _OUTAGE_DEFER_SECONDS
-                )
-                for entry in survivors:
-                    queue.defer(
-                        entry.row["filepath"],
-                        stage="embed",
-                        error=probe_repr,
-                        error_class=error_class,
-                        delay_seconds=delay,
-                    )
-                if error_class == ERROR_CLASS_OPERATOR:
-                    log.error(
-                        "embedder rejected a health probe (%s) — check EMBED_BASE_URL, "
-                        "EMBED_MODEL and the embed API key. Deferred %d message(s); "
-                        "indexing paused %ds.",
-                        probe_repr,
-                        len(survivors),
-                        delay,
-                    )
-                else:
-                    log.error(
-                        "embedder unavailable (%s). Deferred %d message(s) without "
-                        "spending retry attempts; indexing paused %ds.",
-                        probe_repr,
-                        len(survivors),
-                        delay,
-                    )
+                _pause_embedding(survivors, queue, breaker, probe_error)
                 break
             log.warning(
                 "batched embed failed (%s) but the embedder is healthy; "
@@ -1171,8 +1209,10 @@ def _drain_queue_batched(
                 err_repr,
                 len(survivors),
             )
-            vectors, survivors = _embed_each_message(survivors, all_texts, embedder, queue)
-        if breaker is not None:
+            vectors, survivors, paused = _embed_each_message(
+                survivors, all_texts, embedder, queue, breaker
+            )
+        if breaker is not None and not paused:
             breaker.record_success()
         embed_ms = (time.perf_counter() - t_embed_start) * 1000
         # Attribute embed time evenly across the batch for telemetry.
@@ -1205,6 +1245,11 @@ def _drain_queue_batched(
             else:
                 queue.mark_failed(entry.row["filepath"], stage="db_write", error=err or "")
             touch_health_file()
+
+        if paused:
+            # Messages embedded before the pause were committed above;
+            # the rest are deferred and the breaker is open.
+            break
 
         if processed and processed % TIMING_LOG_EVERY < batch_size:
             line = format_summary(timing_aggregator.summary())

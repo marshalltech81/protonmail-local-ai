@@ -56,8 +56,9 @@ The stack runs four containers:
   sync, TOFU cert pinning with explicit rotation flag.
 - **indexer** — Docker, parses Maildir, threads, embeds via any
   OpenAI-compatible `/v1/embeddings` provider (operator-supplied),
-  writes SQLite. Schema v18: 4096-dim L2-unit-norm vectors, nullable
-  `message_chunks.message_date`. Initial scan and steady-state both
+  writes SQLite. Schema v19 (squashed baseline): 4096-dim L2-unit-norm
+  vectors, `NOT NULL` `message_chunks.message_date`,
+  `indexing_jobs.last_error_class`. Initial scan and steady-state both
   drain a durable `indexing_jobs` queue through one two-phase batched
   path (Phase 1 commits thread membership with a three-case
   seed-vector chain; Phase 2b batch-embeds; Phase 2c commits chunks /
@@ -454,7 +455,14 @@ attempts and opens a circuit breaker (30 s doubling to 10 min, shared
 by the initial drain and the main loop); a healthy probe re-embeds
 each message alone, so good batchmates index in the same pass and
 only the bad input is charged (5xx on that input → retries; outright
-rejection → immediate `permanent_source_failure`). 429 and 408 now
+rejection → immediate `permanent_source_failure`). A passing probe
+only describes one tiny request, so every failure during isolation is
+attributed by `classify_embed_failure` (separate from the HTTP retry
+predicate): transport / 408 / 429 and 401 / 403 / 404 defer the
+remaining messages and open the breaker; only 400 / 413 / 422 are
+terminal; 5xx re-probes before charging an attempt (review round 1
+found a mid-isolation 401 or persistent 429 could dead-letter valid
+mail). 429 and 408 now
 count as transient in `_is_transient_embed_error`, so rate limits
 back off instead of reading as misconfiguration. The same change squashed
 migration history through v19 into `_apply_initial_schema` (no

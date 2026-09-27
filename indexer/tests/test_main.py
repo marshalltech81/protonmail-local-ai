@@ -2435,6 +2435,139 @@ class TestEmbedFailureHandling:
         assert processed == 0
         assert embedder.embed.call_count == calls_before
 
+    def _recover_and_drain(self, db, embedder, threader, queue):
+        embedder.embed.side_effect = None
+        embedder.embed.return_value = _UNIT_VECTOR
+        _make_due(db)
+        self._drain(db, embedder, threader, queue)
+
+    def test_auth_failure_during_isolation_defers_instead_of_dead_lettering(
+        self, tmp_path, monkeypatch
+    ):
+        """batch -> 503, probe -> ok, individual retry -> 401. A probe
+        that passed moments earlier does not make a 401 the message's
+        fault: the key was revoked or a gateway rejected auth. Every
+        remaining message is deferred as operator action and the
+        breaker pauses — nothing is dead-lettered."""
+        db, threader, queue, paths = self._setup(
+            tmp_path, monkeypatch, {"a": "alpha body", "b": "beta body"}
+        )
+        embedder = make_mock_embedder()
+        state = {"batch_done": False}
+
+        def embed(text):
+            if text == main._EMBED_PROBE_TEXT:
+                return _UNIT_VECTOR
+            if not state["batch_done"]:
+                state["batch_done"] = True
+                raise _status_error(503)
+            raise _status_error(401)
+
+        embedder.embed.side_effect = embed
+        breaker = main._EmbedOutageBreaker()
+
+        self._drain(db, embedder, threader, queue, breaker=breaker)
+
+        for p in paths.values():
+            row = self._row(db, p)
+            assert row["status"] == "queued"
+            assert row["attempts"] == 0
+            assert row["last_error_class"] == "operator_action_required"
+        assert not breaker.allow(main.time.monotonic())
+
+        self._recover_and_drain(db, embedder, threader, queue)
+        assert queue.stats() == {"queued": 0, "dead": 0}
+        assert db.get_chunk_ids_for_message("a@example.com")
+        assert db.get_chunk_ids_for_message("b@example.com")
+
+    def test_rate_limit_on_real_requests_never_dead_letters(self, tmp_path, monkeypatch):
+        """The tiny probe fits the provider's remaining capacity but the
+        real request is rate-limited (429), pass after pass. That is
+        infrastructure, not the message: attempts stay untouched."""
+        db, threader, queue, paths = self._setup(tmp_path, monkeypatch, {"a": "alpha body"})
+        embedder = make_mock_embedder()
+
+        def embed(text):
+            if text == main._EMBED_PROBE_TEXT:
+                return _UNIT_VECTOR
+            raise _status_error(429)
+
+        embedder.embed.side_effect = embed
+
+        for _ in range(8):
+            self._drain(db, embedder, threader, queue)
+            _make_due(db)
+
+        row = self._row(db, paths["a"])
+        assert row["status"] == "queued"
+        assert row["attempts"] == 0
+        assert row["last_error_class"] == "retryable"
+
+        self._recover_and_drain(db, embedder, threader, queue)
+        assert queue.stats() == {"queued": 0, "dead": 0}
+        assert db.get_chunk_ids_for_message("a@example.com")
+
+    def test_pause_mid_isolation_commits_messages_already_embedded(self, tmp_path, monkeypatch):
+        """Isolation embeds messages in batch order. If the provider
+        starts rate-limiting partway through, messages that already
+        embedded are indexed; only the rest are deferred."""
+        db, threader, queue, paths = self._setup(
+            tmp_path,
+            monkeypatch,
+            {"a1": "first message", "b2": "THROTTLED second", "c3": "third message"},
+        )
+        embedder = make_mock_embedder()
+        state = {"batch_done": False}
+
+        def embed(text):
+            if text == main._EMBED_PROBE_TEXT:
+                return _UNIT_VECTOR
+            if not state["batch_done"]:
+                state["batch_done"] = True
+                raise _status_error(503)
+            if "THROTTLED" in text:
+                state["throttled"] = True
+            if state.get("throttled"):
+                raise _status_error(429)
+            return _UNIT_VECTOR
+
+        embedder.embed.side_effect = embed
+
+        # Rows are claimed in enqueue order: a1, b2, c3.
+        self._drain(db, embedder, threader, queue)
+
+        embedded = [n for n in paths if db.get_chunk_ids_for_message(f"{n}@example.com")]
+        deferred = [n for n in paths if queue.has_pending_row(paths[n])]
+        assert embedded == ["a1"]
+        assert deferred == ["b2", "c3"]
+        for n in deferred:
+            assert self._row(db, paths[n])["attempts"] == 0
+        assert queue.stats()["dead"] == 0
+
+    def test_provider_error_charges_message_only_when_reprobe_passes(self, tmp_path, monkeypatch):
+        """A 5xx during isolation is ambiguous. If a fresh probe fails,
+        the provider went down: defer, no attempt spent."""
+        db, threader, queue, paths = self._setup(tmp_path, monkeypatch, {"a": "alpha body"})
+        embedder = make_mock_embedder()
+        probes = {"n": 0}
+
+        def embed(text):
+            if text == main._EMBED_PROBE_TEXT:
+                probes["n"] += 1
+                if probes["n"] == 1:
+                    return _UNIT_VECTOR
+                raise _connection_error()
+            raise _status_error(500)
+
+        embedder.embed.side_effect = embed
+
+        self._drain(db, embedder, threader, queue)
+
+        row = self._row(db, paths["a"])
+        assert row["attempts"] == 0
+        assert row["status"] == "queued"
+        assert row["last_error_class"] == "retryable"
+
 
 class TestEmbedOutageBreaker:
     def test_backoff_doubles_to_cap_and_resets_on_success(self):

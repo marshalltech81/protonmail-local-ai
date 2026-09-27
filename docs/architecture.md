@@ -506,13 +506,24 @@ Failure isolation is preserved across phases:
     mail. The breaker is shared by the initial drain and the main
     loop. Pausing also skips Phase 1, so new mail is not
     keyword-searchable until the embedder returns.
-  - **Probe succeeds**: the embedder is healthy, so something in the
-    batch is bad. Each message is re-embedded on its own; the good
-    ones are indexed in the same pass. A message the provider 5xx's
-    on is `mark_failed` (spends attempts, eventually `dead`); one it
-    rejects outright is dead-lettered immediately as a
-    `permanent_source_failure`. One bad input can therefore never
-    fail its batchmates or stall the queue behind the breaker.
+  - **Probe succeeds**: something in the batch may be bad, so each
+    message is re-embedded on its own and good ones are indexed in the
+    same pass. A passing probe only describes one tiny request, so
+    each individual failure is attributed (`classify_embed_failure`,
+    deliberately separate from the HTTP client's retry predicate)
+    before any message is charged:
+    - transport error, 408, 429 (infrastructure) or 401 / 403 / 404
+      (configuration): not the message's fault — it and every
+      remaining message are deferred without spending attempts and
+      the breaker opens; messages already embedded are still
+      committed;
+    - 400 / 413 / 422 (the provider refused this request body): the
+      only terminal case, dead-lettered as `permanent_source_failure`;
+    - 5xx or anything else (uncertain): re-probe. A failing probe
+      means the provider went down (pause as above); a passing probe
+      points at this input, which spends one attempt (`mark_failed`),
+      so a genuinely poison input still dead-letters eventually
+      without stalling the queue behind the breaker.
 
   Phase 1 commits are idempotent — `upsert_thread` merges existing
   rows — so any later pass re-runs Phase 1 + Phase 2 cleanly.

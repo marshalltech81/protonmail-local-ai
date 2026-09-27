@@ -136,6 +136,42 @@ def _is_transient_embed_error(exc: BaseException) -> bool:
     return False
 
 
+EMBED_FAILURE_INFRASTRUCTURE = "infrastructure"
+EMBED_FAILURE_CONFIGURATION = "configuration"
+EMBED_FAILURE_REJECTED_INPUT = "rejected_input"
+EMBED_FAILURE_UNCERTAIN = "uncertain"
+
+
+def classify_embed_failure(exc: BaseException) -> str:
+    """Attribute an embed failure for queue accounting: whose fault is it?
+
+    Deliberately separate from ``_is_transient_embed_error``, which only
+    answers "could re-sending this exact request succeed?". A 429 is
+    retryable AND not the message's fault; a 401 is not retryable AND
+    still not the message's fault. Only a request rejection is evidence
+    against the source itself.
+
+    * ``infrastructure`` — connection / timeout / 408 / 429: the
+      provider is unreachable, slow, or throttling.
+    * ``configuration`` — 401 / 403 / 404: credentials or model id.
+    * ``rejected_input`` — 400 / 413 / 422: the provider refused this
+      particular request body.
+    * ``uncertain`` — 5xx, our integrity ``RuntimeError``, anything
+      else: could be the input or the provider; callers must gather
+      more evidence (a fresh probe) before charging the message.
+    """
+    if isinstance(exc, (APIConnectionError, APITimeoutError)):
+        return EMBED_FAILURE_INFRASTRUCTURE
+    if isinstance(exc, APIStatusError):
+        if exc.status_code in (408, 429):
+            return EMBED_FAILURE_INFRASTRUCTURE
+        if exc.status_code in (401, 403, 404):
+            return EMBED_FAILURE_CONFIGURATION
+        if exc.status_code in (400, 413, 422):
+            return EMBED_FAILURE_REJECTED_INPUT
+    return EMBED_FAILURE_UNCERTAIN
+
+
 class EmbeddingBackend(Protocol):
     """Structural contract the embedder satisfies.
 
