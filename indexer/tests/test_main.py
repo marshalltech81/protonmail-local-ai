@@ -2989,13 +2989,19 @@ class TestMessageRecordsEndToEnd:
         ("raw_utf8_local_part", "To: josé@example.com", {("to", "josé@example.com", None)}),
         ("raw_utf8_domain", "To: <user@exämple.com>", {("to", "user@exämple.com", None)}),
         ("no_recipients", "", set()),
-        # Strict parsing rejects this CVE-2023-27043-style ambiguous input;
-        # the lenient fallback records BOTH candidates rather than silently
-        # choosing one, so neither address is hidden from enumeration.
+        # Strict parsing rejects this CVE-2023-27043-style ambiguous input,
+        # and no lenient parser second-guesses it: nothing is recorded, as
+        # on base. The message itself still indexes.
+        ("crafted_ambiguous", "To: alice@example.org)<bob@example.org>", set()),
         (
-            "crafted_ambiguous",
-            "To: alice@example.org)<bob@example.org>",
-            {("to", "alice@example.org", None), ("to", "bob@example.org", None)},
+            "blank_elements_in_group",
+            "To: Team: ann@example.com, , ben@example.com,;",
+            {("to", "ann@example.com", None), ("to", "ben@example.com", None)},
+        ),
+        (
+            "leading_comma",
+            "To: , bob@example.com",
+            {("to", "bob@example.com", None)},
         ),
         # Name decoding must never cost the message or corrupt text:
         # a UTF-7 word that decodes to a lone surrogate, a charset label
@@ -3059,6 +3065,33 @@ class TestMessageRecordsEndToEnd:
         names = json.loads(row["senders"]) + json.loads(row["participants"])
         assert any("李雷" in n for n in names)
         assert not any("\\u" in n for n in names)
+
+    def test_rejected_huge_group_header_parses_in_linear_time(self, tmp_path):
+        """A header strict parsing rejects must not fall through to work that
+        grows quadratically with its size: a 600 KB ``)Group: ...;`` header
+        took ~2 s through a lenient re-parse (the worker is synchronous)."""
+        import time
+
+        from src.parser import parse_email
+
+        group = (
+            ")Group: " + ",\r\n ".join(", ".join(["a@example.com"] * 40) for _ in range(1000)) + ";"
+        )
+        path = tmp_path / "INBOX" / "cur" / "group.eml"
+        path.parent.mkdir(parents=True)
+        path.write_bytes(
+            (
+                "From: alice@example.com\r\nTo: "
+                + group
+                + "\r\nSubject: s\r\nMessage-ID: <group@example.com>\r\n"
+                "Date: Mon, 01 Jan 2024 12:00:00 +0000\r\n\r\nBody.\r\n"
+            ).encode()
+        )
+        start = time.perf_counter()
+        msg = parse_email(path, maildir_root=tmp_path)
+        elapsed = time.perf_counter() - start
+        assert msg is not None
+        assert elapsed < 0.5, f"parse took {elapsed:.2f}s"
 
     def test_malformed_encoded_prefixes_parse_in_linear_time(self, tmp_path):
         """Thousands of unfinished ``=?utf-8?q?`` prefixes in one name must

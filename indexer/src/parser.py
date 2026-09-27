@@ -489,6 +489,22 @@ def _decode_display_name(name: str) -> str:
     return _ENCODED_WORD_RE.sub(_decode_encoded_word, name)
 
 
+# Empty address-list elements: a comma followed only by whitespace and
+# another separator, or a separator at either end of the list or group.
+_REPEATED_COMMAS_RE = re.compile(r",(?:\s*,)+")
+_EDGE_COMMAS_RE = re.compile(r"^\s*,|,\s*$|(?<=:)\s*,|,\s*(?=;)")
+
+
+def _drop_empty_list_elements(text: str) -> str:
+    """Remove empty elements from an address list (linear regexes).
+
+    Can alter a quoted display name that itself contains ``, ,`` — a
+    cosmetic cost on pathological input, acceptable for recovering every
+    recipient of an otherwise valid header.
+    """
+    return _EDGE_COMMAS_RE.sub("", _REPEATED_COMMAS_RE.sub(",", text))
+
+
 def _parse_addrs(value: str | email.header.Header) -> list[str]:
     """Parse an address header into one parseable string per address.
 
@@ -502,24 +518,16 @@ def _parse_addrs(value: str | email.header.Header) -> list[str]:
         return []
     text = _decode_header(value) if isinstance(value, email.header.Header) else value
     pairs = email.utils.getaddresses([text])
-    if pairs == [("", "")]:
+    if pairs == [("", "")] and text.strip():
         # Strict parsing (the default since the CVE-2023-27043 fix) rejects
-        # the WHOLE header when any list element is empty — a trailing or
-        # doubled comma, which some clients emit — silently dropping every
-        # recipient. Fall back to lenient parsing only when strict parsing
-        # rejected the header outright. The result feeds search
-        # enumeration, not authentication, and From is sender-controlled
-        # anyway, so leniency grants no new spoofing capability.
-        #
-        # The fallback is best-effort: the lenient parser recurses on
-        # nested comments and raises RecursionError on deeply unmatched
-        # "(", among other failures on inputs strict parsing safely
-        # rejects. Any failure keeps the strict result (no recipients)
-        # rather than costing the whole message.
-        try:
-            pairs = email.utils.getaddresses([text], strict=False)
-        except Exception:
-            log.debug("lenient address parse failed; keeping strict result")
+        # the WHOLE header when any list element is empty — a doubled,
+        # leading, or trailing comma, which some clients emit — silently
+        # dropping every recipient. Remove only those empty elements and
+        # strict-parse once more. No lenient parser is used: it recurses
+        # past Python's limit on nested comments and runs in quadratic
+        # time on large rejected headers, and strict parsing is what makes
+        # crafted ambiguous input safe.
+        pairs = email.utils.getaddresses([_drop_empty_list_elements(text)])
     return [
         _format_address(_decode_display_name(name) if name else "", addr)
         for name, addr in pairs

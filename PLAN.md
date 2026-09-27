@@ -459,15 +459,15 @@ the sender. A 27-case table-driven address corpus (parse -> index, end to
 end) then found one more pre-existing loss: Python 3.14's strict
 `getaddresses` rejects a whole header containing an empty list element
 (`a@x, , b@x` or a trailing comma), dropping every recipient; the parser
-now falls back to lenient parsing only when strict parsing rejects the
-header outright. Round 4: display names decode only their RFC 2047
+now recovers such headers by removing the empty elements and
+strict-parsing again. Round 4: display names decode only their RFC 2047
 encoded-word tokens (linear scan, adjacent words joined, names over 998
 chars kept raw), leaving existing Unicode untouched; a token that fails
 or decodes to invalid Unicode (lone surrogate, NUL charset label) keeps
-its raw text. Round 5: the lenient `getaddresses` fallback is
-best-effort — any failure (e.g. `RecursionError` on deeply unmatched
-comment parentheses) keeps the strict result instead of dead-lettering
-the message.
+its raw text. Rounds 5-6 removed a `strict=False` lenient fallback that
+had briefly replaced that recovery: it raised `RecursionError` on deeply
+unmatched comment parentheses and ran in quadratic time on large rejected
+headers; all parsing is strict again.
 Prerequisite for Phase 1 items 1 (`query_messages`), 3
 (message-first-class retrieval), and 7 (source integrity exposure).
 
