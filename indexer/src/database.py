@@ -1917,6 +1917,20 @@ class Database:
                 )
 
     @_synchronized
+    def set_message_folder(self, filepath: str, folder: str) -> None:
+        """Record the folder of the message stored at ``filepath``.
+
+        For renames that cross Maildir folders: the rename fast path only
+        moves the locator, so without this the per-message record would
+        point at the new folder's file while still claiming the old one.
+        """
+        self._conn.execute(
+            "UPDATE messages SET folder = ? WHERE filepath = ? AND folder != ?",
+            (folder, filepath, folder),
+        )
+        self._conn.commit()
+
+    @_synchronized
     def update_filepath(self, old_path: str, new_path: str) -> None:
         """Update message_thread_map + indexed_files after a Maildir rename.
 

@@ -403,11 +403,18 @@ def _decode_header(value: str) -> str:
 
 
 def _parse_addrs(value: str) -> list[str]:
-    """Parse an address header, handling display names with commas correctly."""
+    """Parse an address header, handling display names with commas correctly.
+
+    Each pair is re-serialized with ``formataddr``, which re-quotes a
+    display name when it needs it. A bare ``f"{name} <{addr}>"`` turns
+    ``"Doe, Jane" <jane@x>`` into ``Doe, Jane <jane@x>``, which parses as
+    two broken addresses, so the recipient vanished from every
+    downstream canonical-address match.
+    """
     if not value:
         return []
     pairs = email.utils.getaddresses([value])
-    return [f"{name} <{addr}>" if name else addr for name, addr in pairs if addr.strip()]
+    return [email.utils.formataddr((name, addr)) for name, addr in pairs if addr.strip()]
 
 
 def _parse_date(value: str) -> datetime:

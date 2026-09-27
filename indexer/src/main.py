@@ -53,7 +53,7 @@ from .embedder import (
     scrub_embed_error,
 )
 from .maildir import is_trashed
-from .parser import Message, OversizedMessageError, parse_email
+from .parser import Message, OversizedMessageError, _derive_folder, parse_email
 from .queue import (
     ERROR_CLASS_OPERATOR,
     ERROR_CLASS_RETRYABLE,
@@ -383,6 +383,15 @@ class MaildirHandler(FileSystemEventHandler):
                     self.db.update_filepath(src_path, dest_path)
                 except Exception as e:
                     log.error("update_filepath failed on rename: %s", e)
+            # Flag renames stay in one folder; a move across folders must
+            # also update the per-message folder, since neither branch
+            # above re-parses the file.
+            dest_folder = _derive_folder(dest_path_obj, MAILDIR_PATH)
+            if dest_folder != _derive_folder(Path(src_path), MAILDIR_PATH):
+                try:
+                    self.db.set_message_folder(dest_path, dest_folder)
+                except Exception as e:
+                    log.error("set_message_folder failed on cross-folder move: %s", e)
             return
 
         # Case 2: new delivery — enqueue for the worker. A flag rename

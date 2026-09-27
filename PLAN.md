@@ -430,7 +430,12 @@ source `filepath` / `size_bytes` / `content_hash`) and
 `message_participants` (normalized From / To / Cc, indexed by canonical
 address). Written in `upsert_thread`'s transaction; removal cascades
 from `message_thread_map`, so reaps and thread deletes need no new
-code. Prerequisite for Phase 1 items 1 (`query_messages`), 3
+code. Review round 1 fixed two pre-existing gaps it exposed: the parser
+now re-quotes display names with `formataddr` (a `"Doe, Jane" <addr>`
+recipient previously lost its quotes and failed canonicalization, dropping
+it from participants — thread-level lists included), and the watcher's
+rename fast path updates `messages.folder` on cross-folder moves.
+Prerequisite for Phase 1 items 1 (`query_messages`), 3
 (message-first-class retrieval), and 7 (source integrity exposure).
 
 ### 2026-09-27 — Phase 0 hardening (items 7–11); Phase 0 complete

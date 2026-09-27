@@ -2725,6 +2725,104 @@ def test_stage_errors_never_persist_the_decoded_payload(tmp_path, monkeypatch):
 
 
 class TestMessageRecordsEndToEnd:
+    """Per-message records through the real parser, watcher, and reconciler."""
+
+    def test_quoted_display_names_with_commas_survive_parsing(self, tmp_path, monkeypatch):
+        """``"Last, First" <addr>`` is a common display-name format. The
+        parser must hand the writer a string that still parses as one
+        address, or the recipient silently disappears from
+        ``message_participants`` (and from thread participant lists)."""
+        maildir = tmp_path / "maildir"
+        path = maildir / "INBOX" / "cur" / "quoted.eml"
+        path.parent.mkdir(parents=True)
+        path.write_text(
+            'From: "Roe, Alex" <alex@example.com>\r\n'
+            'To: "Doe, Jane" <jane@example.com>, Plain Name <plain@example.com>\r\n'
+            'Cc: "Smith, Bob" <bob@example.com>\r\n'
+            "Subject: Quoted names\r\n"
+            "Message-ID: <quoted@example.com>\r\n"
+            "Date: Mon, 01 Jan 2024 12:00:00 +0000\r\n"
+            "Content-Type: text/plain; charset=utf-8\r\n\r\nBody.\r\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
+        db = Database(tmp_path / "mail.db")
+        main.initial_index(db, make_mock_embedder(_UNIT_VECTOR), Threader(db), _make_queue(db))
+
+        participants = {
+            (r["role"], r["address"], r["name"])
+            for r in db._conn.execute("SELECT role, address, name FROM message_participants")
+        }
+        assert participants == {
+            ("from", "alex@example.com", "Roe, Alex"),
+            ("to", "jane@example.com", "Doe, Jane"),
+            ("to", "plain@example.com", "Plain Name"),
+            ("cc", "bob@example.com", "Smith, Bob"),
+        }
+
+    @pytest.mark.parametrize("with_reconciler", [False, True])
+    def test_cross_folder_move_updates_message_folder(self, tmp_path, monkeypatch, with_reconciler):
+        """The watcher's rename fast path (indexed source) must keep the
+        per-message folder in step when a move crosses folders — otherwise
+        the record points at Archive but still claims INBOX, and folder
+        predicates mis-enumerate it forever."""
+        maildir = tmp_path / "maildir"
+        src = maildir / "INBOX" / "cur" / "1700000000.M1.host:2,S"
+        _write_eml(src, "moved@example.com")
+        monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
+        db = Database(tmp_path / "mail.db")
+        queue = _make_queue(db)
+        main.initial_index(db, make_mock_embedder(_UNIT_VECTOR), Threader(db), queue)
+
+        dest = maildir / "Archive" / "cur" / "1700000000.M1.host:2,S"
+        dest.parent.mkdir(parents=True)
+        src.rename(dest)
+        reconciler = None
+        if with_reconciler:
+            from src.reconciler import Reconciler, ReconcilerConfig
+
+            reconciler = Reconciler(
+                db,
+                make_mock_embedder(_UNIT_VECTOR),
+                Threader(db),
+                ReconcilerConfig(
+                    enabled=True,
+                    grace_days=7,
+                    sweep_interval_secs=60,
+                    max_batch_pct=1.0,
+                    force=False,
+                    unlink_on_reap=False,
+                ),
+                maildir_root=maildir,
+            )
+        main.MaildirHandler(db, queue, reconciler=reconciler).on_moved(
+            _FakeEvent(str(src), str(dest))
+        )
+
+        row = db._conn.execute(
+            "SELECT folder, filepath FROM messages WHERE message_id = 'moved@example.com'"
+        ).fetchone()
+        assert row["filepath"] == str(dest)
+        assert row["folder"] == "Archive"
+
+    def test_flag_rename_within_folder_keeps_folder(self, tmp_path, monkeypatch):
+        maildir = tmp_path / "maildir"
+        src = maildir / "Clients" / "Acme" / "cur" / "1700000000.M1.host:2,S"
+        _write_eml(src, "flag@example.com")
+        monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
+        db = Database(tmp_path / "mail.db")
+        queue = _make_queue(db)
+        main.initial_index(db, make_mock_embedder(_UNIT_VECTOR), Threader(db), queue)
+        folder_before = db._conn.execute("SELECT folder FROM messages").fetchone()["folder"]
+
+        dest = src.with_name("1700000000.M1.host:2,RS")
+        src.rename(dest)
+        main.MaildirHandler(db, queue).on_moved(_FakeEvent(str(src), str(dest)))
+
+        row = db._conn.execute("SELECT folder, filepath FROM messages").fetchone()
+        assert row["filepath"] == str(dest)
+        assert row["folder"] == folder_before
+
     def test_indexing_records_message_with_source_hash_and_reap_clears_it(
         self, tmp_path, monkeypatch
     ):
