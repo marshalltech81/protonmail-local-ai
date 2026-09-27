@@ -53,7 +53,7 @@ from .embedder import (
     scrub_embed_error,
 )
 from .maildir import is_trashed
-from .parser import Message, OversizedMessageError, parse_email
+from .parser import Message, OversizedMessageError, _derive_folder, parse_email
 from .queue import (
     ERROR_CLASS_OPERATOR,
     ERROR_CLASS_RETRYABLE,
@@ -369,10 +369,18 @@ class MaildirHandler(FileSystemEventHandler):
         dest_path = str(dest_path_obj)
 
         if self.db.is_indexed(src_path):
-            # Case 1: rename of an existing indexed message.
+            # Case 1: rename of an existing indexed message. Flag renames
+            # stay in one folder; a move across folders also carries the
+            # new folder, recorded atomically with the locator. If that
+            # write fails it rolls back whole: the destination stays
+            # unindexed and the periodic Maildir walk re-indexes it.
+            dest_folder = _derive_folder(dest_path_obj, MAILDIR_PATH)
+            folder_change = (
+                dest_folder if dest_folder != _derive_folder(Path(src_path), MAILDIR_PATH) else None
+            )
             if self.reconciler is not None:
                 try:
-                    self.reconciler.handle_moved(src_path, dest_path)
+                    self.reconciler.handle_moved(src_path, dest_path, folder=folder_change)
                 except Exception as e:
                     log.error("reconciler on_moved failed: %s", e)
             else:
@@ -380,7 +388,7 @@ class MaildirHandler(FileSystemEventHandler):
                 # indexed_files / message_thread_map filepath forward so
                 # future lookups find the current on-disk name.
                 try:
-                    self.db.update_filepath(src_path, dest_path)
+                    self.db.update_filepath(src_path, dest_path, folder=folder_change)
                 except Exception as e:
                     log.error("update_filepath failed on rename: %s", e)
             return

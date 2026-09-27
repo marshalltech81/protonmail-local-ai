@@ -12,6 +12,7 @@ schema-reserved vector dimension.
 exercise it with stub collaborators rather than booting a live indexer.
 """
 
+import json
 from pathlib import Path
 
 import pytest
@@ -2722,3 +2723,670 @@ def test_stage_errors_never_persist_the_decoded_payload(tmp_path, monkeypatch):
     assert "UnicodeDecodeError" in row["last_error"]
     assert "invalid start byte" in row["last_error"]
     assert "PRIVATE-BODY-TEXT" not in row["last_error"]
+
+
+class TestMessageRecordsEndToEnd:
+    """Per-message records through the real parser, watcher, and reconciler."""
+
+    def test_quoted_display_names_with_commas_survive_parsing(self, tmp_path, monkeypatch):
+        """``"Last, First" <addr>`` is a common display-name format. The
+        parser must hand the writer a string that still parses as one
+        address, or the recipient silently disappears from
+        ``message_participants`` (and from thread participant lists)."""
+        maildir = tmp_path / "maildir"
+        path = maildir / "INBOX" / "cur" / "quoted.eml"
+        path.parent.mkdir(parents=True)
+        path.write_text(
+            'From: "Roe, Alex" <alex@example.com>\r\n'
+            'To: "Doe, Jane" <jane@example.com>, Plain Name <plain@example.com>\r\n'
+            'Cc: "Smith, Bob" <bob@example.com>\r\n'
+            "Subject: Quoted names\r\n"
+            "Message-ID: <quoted@example.com>\r\n"
+            "Date: Mon, 01 Jan 2024 12:00:00 +0000\r\n"
+            "Content-Type: text/plain; charset=utf-8\r\n\r\nBody.\r\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
+        db = Database(tmp_path / "mail.db")
+        main.initial_index(db, make_mock_embedder(_UNIT_VECTOR), Threader(db), _make_queue(db))
+
+        participants = {
+            (r["role"], r["address"], r["name"])
+            for r in db._conn.execute("SELECT role, address, name FROM message_participants")
+        }
+        assert participants == {
+            ("from", "alex@example.com", "Roe, Alex"),
+            ("to", "jane@example.com", "Doe, Jane"),
+            ("to", "plain@example.com", "Plain Name"),
+            ("cc", "bob@example.com", "Smith, Bob"),
+        }
+
+    def test_non_ascii_addresses_and_names_ingest(self, tmp_path, monkeypatch):
+        """One non-ASCII recipient (local part or domain) must not make
+        the whole message unindexable, and non-ASCII display names are
+        stored readable — not as RFC 2047 encoded-words."""
+        maildir = tmp_path / "maildir"
+        path = maildir / "INBOX" / "cur" / "utf8.eml"
+        path.parent.mkdir(parents=True)
+        path.write_bytes(
+            (
+                "From: José Álvarez <jose@example.com>\r\n"
+                'To: josé@example.com, "Doe, Jane" <jane@example.com>,'
+                " =?utf-8?q?Zo=C3=AB_Ng?= <zoe@example.com>\r\n"
+                "Cc: <user@exämple.com>\r\n"
+                "Subject: Unicode recipients\r\n"
+                "Message-ID: <utf8@example.com>\r\n"
+                "Date: Mon, 01 Jan 2024 12:00:00 +0000\r\n"
+                "Content-Type: text/plain; charset=utf-8\r\n\r\nBody text.\r\n"
+            ).encode()
+        )
+        monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
+        db = Database(tmp_path / "mail.db")
+        queue = _make_queue(db)
+        main.initial_index(db, make_mock_embedder(_UNIT_VECTOR), Threader(db), queue)
+
+        assert queue.stats() == {"queued": 0, "dead": 0}
+        assert db.get_chunk_ids_for_message("utf8@example.com")
+        participants = {
+            (r["role"], r["address"], r["name"])
+            for r in db._conn.execute("SELECT role, address, name FROM message_participants")
+        }
+        assert participants == {
+            ("from", "jose@example.com", "José Álvarez"),
+            ("to", "josé@example.com", None),
+            ("to", "jane@example.com", "Doe, Jane"),
+            ("to", "zoe@example.com", "Zoë Ng"),
+            ("cc", "user@exämple.com", None),
+        }
+
+    def test_failed_cross_folder_move_stays_recoverable(self, tmp_path, monkeypatch):
+        """If recording a cross-folder move fails, nothing is half-written:
+        the locator, file identity, and folder all roll back together, the
+        destination stays unindexed, and the next Maildir walk re-indexes
+        it with the right folder."""
+        maildir = tmp_path / "maildir"
+        src = maildir / "INBOX" / "cur" / "1700000000.M1.host:2,S"
+        _write_eml(src, "atomic@example.com")
+        monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
+        db = Database(tmp_path / "mail.db")
+        queue = _make_queue(db)
+        embedder = make_mock_embedder(_UNIT_VECTOR)
+        main.initial_index(db, embedder, Threader(db), queue)
+
+        dest = maildir / "Archive" / "cur" / "1700000000.M1.host:2,S"
+        dest.parent.mkdir(parents=True)
+        src.rename(dest)
+        db._conn.execute(
+            "CREATE TRIGGER fail_folder BEFORE UPDATE OF folder ON messages "
+            "BEGIN SELECT RAISE(ABORT, 'injected'); END"
+        )
+        main.MaildirHandler(db, queue).on_moved(_FakeEvent(str(src), str(dest)))
+
+        row = db._conn.execute("SELECT folder, filepath FROM messages").fetchone()
+        assert (row["folder"], row["filepath"]) == ("INBOX", str(src))
+        assert not db.is_indexed(str(dest))
+
+        db._conn.execute("DROP TRIGGER fail_folder")
+        assert main._enqueue_unindexed_messages(db, queue, maildir, main.REASON_RESCAN) == 1
+        main.drain_queue(queue, db, embedder, Threader(db))
+        row = db._conn.execute("SELECT folder, filepath FROM messages").fetchone()
+        assert (row["folder"], row["filepath"]) == ("Archive", str(dest))
+
+    def _ingest_headers(self, tmp_path, monkeypatch, headers: str, message_id: str):
+        maildir = tmp_path / "maildir"
+        path = maildir / "INBOX" / "cur" / f"{message_id}.eml"
+        path.parent.mkdir(parents=True)
+        path.write_bytes(
+            (
+                headers + f"Subject: Header edge case\r\nMessage-ID: <{message_id}>\r\n"
+                "Date: Mon, 01 Jan 2024 12:00:00 +0000\r\n"
+                "Content-Type: text/plain; charset=utf-8\r\n\r\nReadable body.\r\n"
+            ).encode()
+        )
+        monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
+        db = Database(tmp_path / "mail.db")
+        queue = _make_queue(db)
+        main.initial_index(db, make_mock_embedder(_UNIT_VECTOR), Threader(db), queue)
+        participants = {
+            (r["role"], r["address"], r["name"])
+            for r in db._conn.execute("SELECT role, address, name FROM message_participants")
+        }
+        return db, queue, participants
+
+    def test_malformed_encoded_names_do_not_abort_ingestion(self, tmp_path, monkeypatch):
+        """A display name with a broken encoded-word (bad base64) must not
+        dead-letter the message: the address is kept and the raw name
+        text stands in for the undecodable name."""
+        db, queue, participants = self._ingest_headers(
+            tmp_path,
+            monkeypatch,
+            "From: alice@example.com\r\n"
+            "To: =?utf-8?b?x?= <bob@example.com>\r\n"
+            "Cc: =?utf-8?b?y?= <carol@example.com>\r\n",
+            "malformed@example.com",
+        )
+        assert queue.stats() == {"queued": 0, "dead": 0}
+        assert db.get_chunk_ids_for_message("malformed@example.com")
+        assert participants == {
+            ("from", "alice@example.com", None),
+            ("to", "bob@example.com", "=?utf-8?b?x?="),
+            ("cc", "carol@example.com", "=?utf-8?b?y?="),
+        }
+
+    def test_encoded_sender_name_with_comma_keeps_the_sender(self, tmp_path, monkeypatch):
+        _db, _queue, participants = self._ingest_headers(
+            tmp_path,
+            monkeypatch,
+            "From: =?utf-8?q?Doe=2C_Jane?= <jane@example.com>\r\nTo: bob@example.com\r\n",
+            "encoded-from@example.com",
+        )
+        assert ("from", "jane@example.com", "Doe, Jane") in participants
+
+    def test_every_author_of_a_multi_author_from_is_recorded(self, tmp_path, monkeypatch):
+        _db, _queue, participants = self._ingest_headers(
+            tmp_path,
+            monkeypatch,
+            "From: Alice <alice@example.com>, Carol <carol@example.com>\r\n"
+            "Sender: alice@example.com\r\nTo: bob@example.com\r\n",
+            "multi-author@example.com",
+        )
+        assert {p for p in participants if p[0] == "from"} == {
+            ("from", "alice@example.com", "Alice"),
+            ("from", "carol@example.com", "Carol"),
+        }
+
+    # Real-world address-header shapes. Each case is ingested end to end
+    # (parse -> index) and must (a) never cost the message its place in
+    # the index and (b) record exactly these participants. The From line
+    # is the same in every case unless the case overrides it.
+    _ADDRESS_CASES = [
+        ("bare", "To: bob@example.com", {("to", "bob@example.com", None)}),
+        ("angle_only", "To: <bob@example.com>", {("to", "bob@example.com", None)}),
+        ("named", "To: Bob Smith <bob@example.com>", {("to", "bob@example.com", "Bob Smith")}),
+        (
+            "quoted_comma",
+            'To: "Doe, Jane" <jane@example.com>',
+            {("to", "jane@example.com", "Doe, Jane")},
+        ),
+        (
+            "escaped_quotes",
+            'To: "Jane \\"JJ\\" Doe" <jj@example.com>',
+            {("to", "jj@example.com", 'Jane "JJ" Doe')},
+        ),
+        (
+            "unquoted_period",
+            "To: Dr. Who <who@example.com>",
+            {("to", "who@example.com", "Dr. Who")},
+        ),
+        (
+            "comment_name",
+            "To: bob@example.com (Bob Smith)",
+            {("to", "bob@example.com", "Bob Smith")},
+        ),
+        ("empty_quoted_name", 'To: "" <bob@example.com>', {("to", "bob@example.com", None)}),
+        (
+            "case_and_plus_tag",
+            "To: Bob+Tag@Mail.Example.COM",
+            {("to", "bob+tag@mail.example.com", None)},
+        ),
+        (
+            "folded_multi",
+            "To: Bob <bob@example.com>,\r\n Carol <carol@example.com>",
+            {("to", "bob@example.com", "Bob"), ("to", "carol@example.com", "Carol")},
+        ),
+        (
+            "blank_elements",
+            "To: bob@example.com, , carol@example.com,",
+            {("to", "bob@example.com", None), ("to", "carol@example.com", None)},
+        ),
+        ("empty_group", "To: undisclosed-recipients:;", set()),
+        (
+            "group_with_members",
+            "To: Team: ann@example.com, Ben <ben@example.com>;",
+            {("to", "ann@example.com", None), ("to", "ben@example.com", "Ben")},
+        ),
+        ("garbage_entry", "To: not an address", set()),
+        (
+            "same_person_to_and_cc",
+            "To: bob@example.com\r\nCc: Bob <BOB@example.com>",
+            {("to", "bob@example.com", None), ("cc", "bob@example.com", "Bob")},
+        ),
+        (
+            "encoded_q",
+            "To: =?utf-8?q?Zo=C3=AB_Ng?= <zoe@example.com>",
+            {("to", "zoe@example.com", "Zoë Ng")},
+        ),
+        (
+            "encoded_b",
+            "To: =?utf-8?b?Sm9zw6kgw4FsdmFyZXo=?= <jose@example.com>",
+            {("to", "jose@example.com", "José Álvarez")},
+        ),
+        (
+            "encoded_comma",
+            "To: =?utf-8?q?Doe=2C_Jane?= <jane@example.com>",
+            {("to", "jane@example.com", "Doe, Jane")},
+        ),
+        (
+            "encoded_malformed",
+            "To: =?utf-8?b?x?= <bob@example.com>",
+            {("to", "bob@example.com", "=?utf-8?b?x?=")},
+        ),
+        (
+            "encoded_unknown_charset",
+            "To: =?x-bogus?q?Bob?= <bob@example.com>",
+            {("to", "bob@example.com", "Bob")},
+        ),
+        (
+            "raw_utf8_name",
+            "To: José Álvarez <jose@example.com>",
+            {("to", "jose@example.com", "José Álvarez")},
+        ),
+        (
+            "raw_utf8_quoted_comma",
+            'To: "Álvarez, José" <jose@example.com>',
+            {("to", "jose@example.com", "Álvarez, José")},
+        ),
+        ("raw_utf8_local_part", "To: josé@example.com", {("to", "josé@example.com", None)}),
+        ("raw_utf8_domain", "To: <user@exämple.com>", {("to", "user@exämple.com", None)}),
+        ("no_recipients", "", set()),
+        # Strict parsing rejects this CVE-2023-27043-style ambiguous input,
+        # and no lenient parser second-guesses it: nothing is recorded, as
+        # on base. The message itself still indexes.
+        ("crafted_ambiguous", "To: alice@example.org)<bob@example.org>", set()),
+        (
+            "blank_elements_in_group",
+            "To: Team: ann@example.com, , ben@example.com,;",
+            {("to", "ann@example.com", None), ("to", "ben@example.com", None)},
+        ),
+        (
+            "leading_comma",
+            "To: , bob@example.com",
+            {("to", "bob@example.com", None)},
+        ),
+        # Name decoding must never cost the message or corrupt text:
+        # a UTF-7 word that decodes to a lone surrogate, a charset label
+        # the codec lookup rejects, and plain Unicode next to an
+        # encoded-word all keep a usable name.
+        (
+            "encoded_to_lone_surrogate",
+            "To: =?utf-7?q?+2AA-?= <bob@example.com>",
+            {("to", "bob@example.com", "=?utf-7?q?+2AA-?=")},
+        ),
+        (
+            "nul_in_charset_label",
+            "To: =?utf-8\x00?q?Bob?= <bob@example.com>",
+            {("to", "bob@example.com", "=?utf-8\x00?q?Bob?=")},
+        ),
+        (
+            "unicode_then_encoded_word",
+            "To: José =?utf-8?q?Garc=C3=ADa?= <jose@example.com>",
+            {("to", "jose@example.com", "José García")},
+        ),
+        (
+            "adjacent_encoded_words",
+            "To: =?utf-8?q?Zo=C3=AB?= =?utf-8?q?_Ng?= <zoe@example.com>",
+            {("to", "zoe@example.com", "Zoë Ng")},
+        ),
+        # Strict parsing rejects deeply nested unmatched comments; the
+        # lenient fallback recurses past Python's limit on them. That must
+        # cost only the (unparseable) recipients, never the message.
+        (
+            "unmatched_parens_to",
+            "To: bob@example.com " + "\r\n ".join(["(" * 60] * 20),
+            set(),
+        ),
+        (
+            "unmatched_parens_cc",
+            "To: carol@example.com\r\nCc: bob@example.com " + "\r\n ".join(["(" * 60] * 20),
+            {("to", "carol@example.com", None)},
+        ),
+        # A decoded name must never change WHO the recipient is. A CR/LF
+        # decoded from an encoded-word broke re-parsing: "Mallory@...\r"
+        # was recorded as the address instead of bob, and a comma variant
+        # lost the recipient entirely. Such tokens keep their raw text.
+        (
+            "decoded_cr_and_at_in_name",
+            "To: =?utf-8?q?Mallory=40example.com=0D?= <bob@example.com>",
+            {("to", "bob@example.com", "=?utf-8?q?Mallory=40example.com=0D?=")},
+        ),
+        (
+            "decoded_cr_and_comma_in_name",
+            "To: =?utf-8?q?Doe=2C=0D_Jane?= <jane@example.com>",
+            {("to", "jane@example.com", "=?utf-8?q?Doe=2C=0D_Jane?=")},
+        ),
+        (
+            "decoded_lf_in_name",
+            "To: =?utf-8?q?Bob=0AEvil?= <bob@example.com>",
+            {("to", "bob@example.com", "=?utf-8?q?Bob=0AEvil?=")},
+        ),
+        # Blank-element cleanup must not touch quoted strings or comments:
+        # rewriting "a, ,b"@example.com to "a,b"@... invents a mailbox.
+        (
+            "blank_cleanup_spares_quoted_local_part",
+            'To: "a, ,b"@example.com, carol@example.com,',
+            {("to", '"a, ,b"@example.com', None), ("to", "carol@example.com", None)},
+        ),
+        (
+            "blank_cleanup_with_comment",
+            "To: bob@example.com (x y), , carol@example.com",
+            {("to", "bob@example.com", "x y"), ("to", "carol@example.com", None)},
+        ),
+        # A comment containing commas is valid RFC 5322. The list is split
+        # at top-level commas only, so the comment stays part of its element.
+        (
+            "comment_containing_commas",
+            "To: bob@example.com (x, y), carol@example.com",
+            {("to", "bob@example.com", "x, y"), ("to", "carol@example.com", None)},
+        ),
+        # An address-shaped display name stays a name; the real address is
+        # the angle-bracket one.
+        (
+            "address_shaped_name",
+            'To: "alice@example.org" <bob@example.org>',
+            {("to", "bob@example.org", "alice@example.org")},
+        ),
+    ]
+
+    def test_mixed_encoded_and_unicode_sender_stays_findable(self, tmp_path, monkeypatch):
+        """An encoded-word next to already-Unicode text must decode only
+        the encoded part; re-decoding the Unicode turned 李雷 into
+        backslash-u escapes in both the participant row and the thread
+        sender list that ``find_contact`` reads."""
+        db, _queue, participants = self._ingest_headers(
+            tmp_path,
+            monkeypatch,
+            "From: =?utf-8?q?Dr.?= 李雷 <li@example.com>\r\nTo: bob@example.com\r\n",
+            "mixed-from@example.com",
+        )
+        assert ("from", "li@example.com", "Dr. 李雷") in participants
+        row = db._conn.execute("SELECT senders, participants FROM threads").fetchone()
+        names = json.loads(row["senders"]) + json.loads(row["participants"])
+        assert any("李雷" in n for n in names)
+        assert not any("\\u" in n for n in names)
+
+    def test_parentheses_in_encoded_word_labels_do_not_dead_letter(self, tmp_path, monkeypatch):
+        """Encoded-word contents are opaque: 1,200 nested parentheses in
+        charset labels used to reach the recursive comment parser via
+        the From header and dead-letter the message."""
+        from_value = "\r\n ".join(
+            ["=?x" + "(" * 60 + "?q?A?="] * 20 + ["=?x" + ")" * 60 + "?q?B?="] * 20
+        )
+        db, queue, participants = self._ingest_headers(
+            tmp_path,
+            monkeypatch,
+            f"From: {from_value} <bob@example.com>\r\nTo: reader@example.com\r\n",
+            "nested-labels@example.com",
+        )
+        assert queue.stats() == {"queued": 0, "dead": 0}
+        assert db.get_chunk_ids_for_message("nested-labels@example.com")
+        assert {p[1] for p in participants if p[0] == "from"} == {"bob@example.com"}
+
+    def test_encoded_word_parentheses_cannot_alter_the_sender_address(self, tmp_path, monkeypatch):
+        """In ``bob@example.com (=?utf-8?q?A)_(B?=)`` the encoded-word's own
+        parentheses were parsed as comment delimiters, fabricating the
+        sender ``bob@example.com_``."""
+        db, _queue, participants = self._ingest_headers(
+            tmp_path,
+            monkeypatch,
+            "From: bob@example.com (=?utf-8?q?A)_(B?=)\r\nTo: reader@example.com\r\n",
+            "encoded-comment@example.com",
+        )
+        assert {p[1] for p in participants if p[0] == "from"} == {"bob@example.com"}
+        senders = json.loads(db._conn.execute("SELECT senders FROM threads").fetchone()[0])
+        assert not any("example.com_" in s for s in senders)
+
+    def test_long_folded_encoded_name_is_decoded(self, tmp_path, monkeypatch):
+        """A valid name longer than 998 characters in total — but made of
+        short encoded-words on short lines — must still decode, or
+        name lookup (find_contact) stops finding the sender."""
+        import email.header
+
+        folded = email.header.Header("李雷" * 120, "utf-8", maxlinelen=70).encode(linesep="\r\n")
+        db, _queue, participants = self._ingest_headers(
+            tmp_path,
+            monkeypatch,
+            f"From: {folded} <bob@example.com>\r\nTo: reader@example.com\r\n",
+            "long-name@example.com",
+        )
+        assert ("from", "bob@example.com", "李雷" * 120) in participants
+        senders = json.loads(db._conn.execute("SELECT senders FROM threads").fetchone()[0])
+        assert any("李雷" in s for s in senders)
+
+    @pytest.mark.parametrize("header", ["From", "To"])
+    def test_restored_encoded_word_cannot_reenter_a_reparser(self, tmp_path, monkeypatch, header):
+        """An encoded-word whose label nests 2,400 parentheses parses as an
+        opaque placeholder, but restoring it into the address re-created
+        the paren bomb for the identity re-parse (and, via the from_addr
+        fallback, for canonical_addr in the threader). Unsafe restored
+        addresses are discarded; the message must always ingest."""
+        value = "=?x" + "(" * 1200 + ")" * 1200 + "?q?bob@example.com?= (Bob)"
+        other = "To: reader@example.com\r\n" if header == "From" else "From: alice@example.com\r\n"
+        db, queue, participants = self._ingest_headers(
+            tmp_path,
+            monkeypatch,
+            f"{header}: {value}\r\n{other}",
+            "restored-bomb@example.com",
+        )
+        assert queue.stats() == {"queued": 0, "dead": 0}
+        assert db.get_chunk_ids_for_message("restored-bomb@example.com")
+        assert not any("(" in addr for _role, addr, _name in participants)
+
+    def test_group_syntax_inside_encoded_words_parses_in_linear_time(self, tmp_path):
+        """Group syntax carried inside encoded-words drove the standard
+        library's group parser quadratic via the From header (3.1 s at
+        200 KB)."""
+        import time
+
+        from src.parser import parse_email
+
+        value = "\r\n ".join(
+            ["=?x:?q?Bob?="] + ["=?" + ",".join(["a@x"] * 10) + "?q?A?="] * 4000 + ["=?;?q?B?="]
+        )
+        path = tmp_path / "INBOX" / "cur" / "group-ew.eml"
+        path.parent.mkdir(parents=True)
+        path.write_bytes(
+            (
+                f"From: {value} <bob@example.com>\r\nTo: reader@example.com\r\n"
+                "Subject: s\r\nMessage-ID: <group-ew@example.com>\r\n"
+                "Date: Mon, 01 Jan 2024 12:00:00 +0000\r\n\r\nBody.\r\n"
+            ).encode()
+        )
+        start = time.perf_counter()
+        msg = parse_email(path, maildir_root=tmp_path)
+        elapsed = time.perf_counter() - start
+        assert msg is not None
+        assert elapsed < 0.5, f"parse took {elapsed:.2f}s"
+
+    def test_rejected_huge_group_header_parses_in_linear_time(self, tmp_path):
+        """A header strict parsing rejects must not fall through to work that
+        grows quadratically with its size: a 600 KB ``)Group: ...;`` header
+        took ~2 s through a lenient re-parse (the worker is synchronous)."""
+        import time
+
+        from src.parser import parse_email
+
+        group = (
+            ")Group: " + ",\r\n ".join(", ".join(["a@example.com"] * 40) for _ in range(1000)) + ";"
+        )
+        path = tmp_path / "INBOX" / "cur" / "group.eml"
+        path.parent.mkdir(parents=True)
+        path.write_bytes(
+            (
+                "From: alice@example.com\r\nTo: "
+                + group
+                + "\r\nSubject: s\r\nMessage-ID: <group@example.com>\r\n"
+                "Date: Mon, 01 Jan 2024 12:00:00 +0000\r\n\r\nBody.\r\n"
+            ).encode()
+        )
+        start = time.perf_counter()
+        msg = parse_email(path, maildir_root=tmp_path)
+        elapsed = time.perf_counter() - start
+        assert msg is not None
+        assert elapsed < 0.5, f"parse took {elapsed:.2f}s"
+
+    def test_malformed_encoded_prefixes_parse_in_linear_time(self, tmp_path):
+        """Thousands of unfinished ``=?utf-8?q?`` prefixes in one name must
+        not trigger a quadratic re-scan (the worker is synchronous, so a
+        slow parse stalls every queued message behind it)."""
+        import time
+
+        from src.parser import parse_email
+
+        repeated = "=?utf-8?q?abc "
+        chunks = [repeated * 5 for _ in range(1600)]  # 8,000 prefixes, short folded lines
+        path = tmp_path / "INBOX" / "cur" / "slow.eml"
+        path.parent.mkdir(parents=True)
+        path.write_bytes(
+            (
+                "From: alice@example.com\r\nTo: "
+                + "\r\n ".join(chunks)
+                + "<bob@example.com>\r\nSubject: s\r\nMessage-ID: <slow@example.com>\r\n"
+                "Date: Mon, 01 Jan 2024 12:00:00 +0000\r\n\r\nBody.\r\n"
+            ).encode()
+        )
+        start = time.perf_counter()
+        msg = parse_email(path, maildir_root=tmp_path)
+        elapsed = time.perf_counter() - start
+        assert msg is not None
+        assert elapsed < 0.5, f"parse took {elapsed:.2f}s"
+
+    @pytest.mark.parametrize(
+        ("headers", "expected_recipients"),
+        [pytest.param(h, e, id=i) for i, h, e in _ADDRESS_CASES],
+    )
+    def test_address_header_corpus(self, tmp_path, monkeypatch, headers, expected_recipients):
+        message_id = "corpus@example.com"
+        db, queue, participants = self._ingest_headers(
+            tmp_path,
+            monkeypatch,
+            "From: Sender <sender@example.com>\r\n" + (headers + "\r\n" if headers else ""),
+            message_id,
+        )
+        assert queue.stats() == {"queued": 0, "dead": 0}, "message must never be dead-lettered"
+        assert db.get_chunk_ids_for_message(message_id), "body must be indexed"
+        assert participants == {("from", "sender@example.com", "Sender")} | expected_recipients
+
+    @pytest.mark.parametrize("with_reconciler", [False, True])
+    def test_cross_folder_move_updates_message_folder(self, tmp_path, monkeypatch, with_reconciler):
+        """The watcher's rename fast path (indexed source) must keep the
+        per-message folder in step when a move crosses folders — otherwise
+        the record points at Archive but still claims INBOX, and folder
+        predicates mis-enumerate it forever."""
+        maildir = tmp_path / "maildir"
+        src = maildir / "INBOX" / "cur" / "1700000000.M1.host:2,S"
+        _write_eml(src, "moved@example.com")
+        monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
+        db = Database(tmp_path / "mail.db")
+        queue = _make_queue(db)
+        main.initial_index(db, make_mock_embedder(_UNIT_VECTOR), Threader(db), queue)
+
+        dest = maildir / "Archive" / "cur" / "1700000000.M1.host:2,S"
+        dest.parent.mkdir(parents=True)
+        src.rename(dest)
+        reconciler = None
+        if with_reconciler:
+            from src.reconciler import Reconciler, ReconcilerConfig
+
+            reconciler = Reconciler(
+                db,
+                make_mock_embedder(_UNIT_VECTOR),
+                Threader(db),
+                ReconcilerConfig(
+                    enabled=True,
+                    grace_days=7,
+                    sweep_interval_secs=60,
+                    max_batch_pct=1.0,
+                    force=False,
+                    unlink_on_reap=False,
+                ),
+                maildir_root=maildir,
+            )
+        main.MaildirHandler(db, queue, reconciler=reconciler).on_moved(
+            _FakeEvent(str(src), str(dest))
+        )
+
+        row = db._conn.execute(
+            "SELECT folder, filepath FROM messages WHERE message_id = 'moved@example.com'"
+        ).fetchone()
+        assert row["filepath"] == str(dest)
+        assert row["folder"] == "Archive"
+
+    def test_flag_rename_within_folder_keeps_folder(self, tmp_path, monkeypatch):
+        maildir = tmp_path / "maildir"
+        src = maildir / "Clients" / "Acme" / "cur" / "1700000000.M1.host:2,S"
+        _write_eml(src, "flag@example.com")
+        monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
+        db = Database(tmp_path / "mail.db")
+        queue = _make_queue(db)
+        main.initial_index(db, make_mock_embedder(_UNIT_VECTOR), Threader(db), queue)
+        folder_before = db._conn.execute("SELECT folder FROM messages").fetchone()["folder"]
+
+        dest = src.with_name("1700000000.M1.host:2,RS")
+        src.rename(dest)
+        main.MaildirHandler(db, queue).on_moved(_FakeEvent(str(src), str(dest)))
+
+        row = db._conn.execute("SELECT folder, filepath FROM messages").fetchone()
+        assert row["filepath"] == str(dest)
+        assert row["folder"] == folder_before
+
+    def test_indexing_records_message_with_source_hash_and_reap_clears_it(
+        self, tmp_path, monkeypatch
+    ):
+        """Through the real parse -> index path, the ``messages`` row's
+        ``content_hash`` is the SHA-256 of the raw file on disk (the
+        provenance anchor), and a reconciler reap removes the row and its
+        participants via the ``message_thread_map`` cascade."""
+        import hashlib
+
+        from src.reconciler import Reconciler, ReconcilerConfig
+
+        maildir = tmp_path / "maildir"
+        live = maildir / "INBOX" / "cur" / "1700000000.M1.host:2,S"
+        _write_eml(
+            live,
+            "e2e@example.com",
+            from_addr="Alice <Alice@Example.com>",
+            to_addr="bob@example.com",
+        )
+        monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
+        db = Database(tmp_path / "mail.db")
+        embedder = make_mock_embedder(_UNIT_VECTOR)
+        threader = Threader(db)
+        main.initial_index(db, embedder, threader, _make_queue(db))
+
+        row = db._conn.execute(
+            "SELECT filepath, folder, content_hash, size_bytes FROM messages "
+            "WHERE message_id = 'e2e@example.com'"
+        ).fetchone()
+        raw = live.read_bytes()
+        assert row["filepath"] == str(live)
+        assert row["folder"] == "INBOX"
+        assert row["content_hash"] == hashlib.sha256(raw).hexdigest()
+        assert row["size_bytes"] == len(raw)
+        participants = {
+            (r["role"], r["address"])
+            for r in db._conn.execute("SELECT role, address FROM message_participants")
+        }
+        assert participants == {("from", "alice@example.com"), ("to", "bob@example.com")}
+
+        trashed = live.with_name("1700000000.M1.host:2,ST")
+        live.rename(trashed)
+        reconciler = Reconciler(
+            db,
+            embedder,
+            threader,
+            ReconcilerConfig(
+                enabled=True,
+                grace_days=0,
+                sweep_interval_secs=60,
+                max_batch_pct=1.0,
+                force=False,
+                unlink_on_reap=False,
+            ),
+            maildir_root=maildir,
+        )
+        reconciler.sweep()
+        reconciler.reap()
+
+        assert db._conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0] == 0
+        assert db._conn.execute("SELECT COUNT(*) FROM message_participants").fetchone()[0] == 0

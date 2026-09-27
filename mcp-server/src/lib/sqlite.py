@@ -1871,7 +1871,13 @@ class Database:
             for entry in entries:
                 if not isinstance(entry, str):
                     continue
-                name, addr = parseaddr(entry)
+                try:
+                    name, addr = parseaddr(entry)
+                except Exception:
+                    # Participant strings come from indexed mail; an entry
+                    # that blows up parseaddr (nested-comment recursion)
+                    # must cost that entry, not every find_contact call.
+                    continue
                 addr = addr.strip().lower()
                 if "@" not in addr:
                     continue

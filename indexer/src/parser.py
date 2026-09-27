@@ -5,11 +5,16 @@ Handles MIME, HTML-to-text conversion, and attachment metadata.
 """
 
 import email
+import email.errors
+import email.header
 import email.message
 import email.utils
 import hashlib
 import logging
 import os
+import re
+import secrets
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -129,6 +134,10 @@ class Message:
     filepath: str
     attachments: list[Attachment] = field(default_factory=list)
     has_attachments: bool = False
+    # Every author in From, each a parseable address string. Usually one;
+    # RFC 5322 allows several. ``from_addr`` stays the first author for the
+    # thread-level sender lists.
+    from_addrs: list[str] = field(default_factory=list)
     # File identity captured at parse time. ``size`` / ``mtime_ns``
     # / ``content_hash`` feed ``indexed_files`` so the reconciler can tell a
     # flag-only rename from a genuine content change without re-reading every
@@ -238,7 +247,12 @@ def parse_email(path: Path, maildir_root: Path | None = None) -> Message | None:
     references = [_clean_id(r) for r in msg.get("References", "").split() if r.strip()]
 
     subject = _decode_header(msg.get("Subject", "(no subject)"))
-    from_addr = _decode_header(msg.get("From", ""))
+    # Parse From structurally, like To / Cc: decoding the whole header
+    # first turns an encoded name with a comma ("=?utf-8?q?Doe=2C_Jane?=")
+    # into an unquoted "Doe, Jane <...>" that no longer parses as one
+    # address, and a multi-author From would be read as a single address.
+    from_addrs = _parse_addrs(msg.get("From", ""))
+    from_addr = from_addrs[0] if from_addrs else _decode_header(msg.get("From", ""))
     to_addrs = _parse_addrs(msg.get("To", ""))
     cc_addrs = _parse_addrs(msg.get("Cc", ""))
     date = _parse_date(msg.get("Date", ""))
@@ -266,6 +280,7 @@ def parse_email(path: Path, maildir_root: Path | None = None) -> Message | None:
         references=references,
         subject=subject,
         from_addr=from_addr,
+        from_addrs=from_addrs,
         to_addrs=to_addrs,
         cc_addrs=cc_addrs,
         date=date,
@@ -377,7 +392,7 @@ def _clean_id(value: str) -> str:
     return value.strip().strip("<>").strip()
 
 
-def _decode_header(value: str) -> str:
+def _decode_header(value: str | email.header.Header) -> str:
     parts = email.header.decode_header(value)
     decoded = []
     for part, charset in parts:
@@ -402,12 +417,243 @@ def _decode_header(value: str) -> str:
     return " ".join(decoded).strip()
 
 
-def _parse_addrs(value: str) -> list[str]:
-    """Parse an address header, handling display names with commas correctly."""
+# RFC 5322 "specials": a display name containing any of these must be
+# quoted to stay one address (the same trigger ``formataddr`` uses).
+_ADDR_SPECIALS_RE = re.compile(r'[][\\()<>@,:;".]')
+
+
+def _format_address(name: str, addr: str) -> str:
+    """Serialize one parsed (name, address) pair so it parses back intact.
+
+    Not ``email.utils.formataddr``: it raises ``UnicodeEncodeError`` on a
+    non-ASCII address (``josé@example.com``, an IDN domain) — aborting the
+    whole message's ingestion — and rewrites non-ASCII display names as
+    RFC 2047 encoded-words. This quotes the name only when it contains a
+    special (``"Doe, Jane"``) and never encodes anything.
+    """
+    if not name:
+        return addr
+    if _ADDR_SPECIALS_RE.search(name):
+        name = f'"{email.utils.quote(name)}"'
+    formatted = f"{name} <{addr}>"
+    # Identity invariant: downstream code re-parses this string, so it
+    # must yield the same address. If any name content would change the
+    # parsed address (or make it unparseable), drop the name — a lost
+    # display name is cosmetic, a changed recipient is not.
+    if email.utils.parseaddr(formatted)[1] != addr:
+        return addr
+    return formatted
+
+
+# One RFC 2047 encoded-word: =?charset?Q|B?text?=. Bounded character
+# classes (no whitespace, no "?") keep the scan linear.
+_ENCODED_WORD_RE = re.compile(r"=\?([^?\s]+)\?([QqBb])\?([^?\s]*)\?=")
+# RFC 2047 §6.2: whitespace between two adjacent encoded-words is dropped.
+_ADJACENT_ENCODED_WORDS_RE = re.compile(r"\?=\s+=\?")
+# RFC 5322 line limit, applied per encoded-word: a valid long name folds
+# into many short encoded-words, so bounding the whole name would leave
+# legitimate long names undecoded.
+_MAX_ENCODED_WORD_CHARS = 998
+
+
+def _decode_encoded_word(match: re.Match[str]) -> str:
+    """Decode one encoded-word, or return it unchanged if that fails.
+
+    Deliberately broad: a display name is cosmetic, so no failure here
+    may cost the address or the message. That covers codec errors, a
+    charset label the codec lookup rejects (``ValueError`` on an embedded
+    NUL), and text that decodes but is not valid Unicode (a UTF-7 word
+    yielding a lone surrogate, which would crash later tokenization).
+    """
+    token = match.group(0)
+    if len(token) > _MAX_ENCODED_WORD_CHARS:
+        return token
+    try:
+        pieces = []
+        for part, charset in email.header.decode_header(token):
+            if not isinstance(part, bytes):
+                pieces.append(part)
+                continue
+            try:
+                pieces.append(part.decode(charset or "utf-8", errors="replace"))
+            except LookupError:
+                # Unknown label ("x-bogus"): same UTF-8 fallback as _decode_header.
+                pieces.append(part.decode("utf-8", errors="replace"))
+        text = "".join(pieces)
+        text.encode("utf-8")
+    except Exception:
+        return token
+    # A decoded CR / LF / other control character survives into the
+    # serialized "name <addr>" string and breaks re-parsing — it can even
+    # make a name like "Mallory@example.com\r" read as the address.
+    if any(ord(ch) < 32 or ord(ch) == 127 for ch in text):
+        return token
+    return text
+
+
+def _decode_display_name(name: str) -> str:
+    """Decode the RFC 2047 encoded-words in a display name.
+
+    Only encoded-word tokens are decoded; any other text — including
+    Unicode already decoded from a raw 8-bit header — is left exactly as
+    it is. (Running the whole name through ``decode_header`` re-encoded
+    that Unicode and corrupted it, and rescanned the name at every
+    malformed ``=?`` prefix, which is quadratic.) A token that fails to
+    decode keeps its raw text. The scan is linear, and each encoded-word
+    is bounded individually by ``_decode_encoded_word``.
+    """
+    if "=?" not in name:
+        return name
+    name = _ADJACENT_ENCODED_WORDS_RE.sub("?==?", name)
+    return _ENCODED_WORD_RE.sub(_decode_encoded_word, name)
+
+
+# Structural-parsing budget. The split below is linear, and each element
+# is parsed on its own, so these only bound pathological headers; a
+# header or element over budget costs its recipients, never the message.
+_MAX_ADDRESS_HEADER_CHARS = 256_000
+_MAX_ADDRESS_ELEMENT_CHARS = 128_000
+# Longest address we will emit. Real addresses cap at 254 octets
+# (RFC 5321); 998 is the RFC 5322 line limit, generous for anything
+# deliverable, and it bounds the fixed-point re-parse below.
+_MAX_ADDRESS_CHARS = 998
+
+
+def _protect_encoded_words(text: str) -> tuple[str, Callable[[str], str]]:
+    """Replace each encoded-word with an opaque placeholder atom.
+
+    Encoded-word contents are data, not syntax. Left in place, parentheses,
+    colons, commas, or ``@`` inside a charset label or encoded text are
+    parsed as address structure — recursing on nested "comments", driving
+    the standard library's group parser quadratic, or fabricating an
+    address (``bob@example.com (=?utf-8?q?A)_(B?=)`` read as
+    ``bob@example.com_``). Returns the protected text and a function that
+    restores the original tokens in any parsed fragment.
+    """
+    tokens: list[str] = []
+    nonce = secrets.token_hex(6)
+
+    def protect(match: re.Match[str]) -> str:
+        tokens.append(match.group(0))
+        return f"ew{nonce}n{len(tokens) - 1}x"
+
+    protected = _ENCODED_WORD_RE.sub(protect, text)
+    if not tokens:
+        return protected, lambda fragment: fragment
+    placeholder_re = re.compile(rf"ew{nonce}n(\d+)x")
+
+    def restore(fragment: str) -> str:
+        return placeholder_re.sub(lambda m: tokens[int(m.group(1))], fragment)
+
+    return protected, restore
+
+
+def _split_address_list(text: str) -> list[str]:
+    """Split an address-list header into its elements, in one linear pass.
+
+    Separators are recognized only at top level — never inside quoted
+    strings, comments, angle brackets, or ``[domain literals]``, and
+    backslash escapes are honored. Group syntax is flattened: the group
+    name before a top-level ``:`` is dropped and ``;`` ends an element.
+    Empty elements (doubled, leading, or trailing commas) simply vanish.
+    Parsing each element separately keeps the standard library's
+    quadratic group parser out of the path entirely.
+    """
+    elements: list[str] = []
+    buf: list[str] = []
+    in_quote = in_literal = in_angle = False
+    comment_depth = 0
+    i = 0
+    n = len(text)
+    while i < n:
+        ch = text[i]
+        if in_quote or comment_depth or in_literal:
+            if ch == "\\" and i + 1 < n:
+                buf.append(text[i : i + 2])
+                i += 2
+                continue
+            if in_quote and ch == '"':
+                in_quote = False
+            elif comment_depth and ch == "(":
+                comment_depth += 1
+            elif comment_depth and ch == ")":
+                comment_depth -= 1
+            elif in_literal and ch == "]":
+                in_literal = False
+            buf.append(ch)
+        elif ch == '"':
+            in_quote = True
+            buf.append(ch)
+        elif ch == "(":
+            comment_depth = 1
+            buf.append(ch)
+        elif ch == "[":
+            in_literal = True
+            buf.append(ch)
+        elif in_angle:
+            if ch == ">":
+                in_angle = False
+            buf.append(ch)
+        elif ch == "<":
+            in_angle = True
+            buf.append(ch)
+        elif ch in ",;":
+            elements.append("".join(buf))
+            buf = []
+        elif ch == ":":
+            buf = []  # group display name
+        else:
+            buf.append(ch)
+        i += 1
+    elements.append("".join(buf))
+    return [element.strip() for element in elements if element.strip()]
+
+
+def _parse_addrs(value: str | email.header.Header) -> list[str]:
+    """Parse an address header into one parseable string per address.
+
+    Raw 8-bit headers (UTF-8 written directly in the header) arrive as
+    ``email.header.Header`` objects whose ``str()`` mangles the non-ASCII
+    bytes, so they are decoded first. Encoded-words are then made opaque,
+    the list is split at top level, and each element is parsed strictly
+    on its own; display names are decoded only after the address is
+    fixed, so name content can never become address syntax. Every step
+    fails safe: an element that cannot be parsed costs only that
+    recipient, never the message.
+    """
     if not value:
         return []
-    pairs = email.utils.getaddresses([value])
-    return [f"{name} <{addr}>" if name else addr for name, addr in pairs if addr.strip()]
+    text = _decode_header(value) if isinstance(value, email.header.Header) else value
+    if len(text) > _MAX_ADDRESS_HEADER_CHARS:
+        log.debug("address header over %d chars; recipients not parsed", _MAX_ADDRESS_HEADER_CHARS)
+        return []
+    protected, restore = _protect_encoded_words(text)
+    addresses = []
+    for element in _split_address_list(protected):
+        if len(element) > _MAX_ADDRESS_ELEMENT_CHARS:
+            continue
+        try:
+            name, addr = email.utils.parseaddr(element)
+            if not addr.strip():
+                continue
+            addr = restore(addr)
+            # Every emitted string is re-parsed downstream — the identity
+            # check in _format_address, canonical_addr in the threader,
+            # the participant writer, the MCP contact reader. A restored
+            # address must therefore survive re-parsing unchanged: one
+            # that is not a parseaddr fixed point (an unsafe restored
+            # encoded-word, say) is discarded HERE, inside the failure
+            # boundary, not handed to an unguarded reparser later.
+            if len(addr) > _MAX_ADDRESS_CHARS or email.utils.parseaddr(addr)[1] != addr:
+                continue
+            name = _decode_display_name(restore(name)) if name else ""
+            formatted = _format_address(name, addr)
+        except Exception:
+            # e.g. RecursionError from parseaddr on deeply nested comments,
+            # whether in the element or re-created by restoring a token.
+            continue
+        addresses.append(formatted)
+    return addresses
 
 
 def _parse_date(value: str) -> datetime:

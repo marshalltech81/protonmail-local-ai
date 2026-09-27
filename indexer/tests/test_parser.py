@@ -860,3 +860,67 @@ class TestNormalizeSubject:
         from src.threader import _normalize_subject
 
         assert _normalize_subject("Hello   world") == "hello world"
+
+
+def test_format_address_never_changes_the_address():
+    """Identity invariant for the (name, address) -> string round trip:
+    whatever a display name contains, the serialized string must parse
+    back to the same address, or the name is dropped."""
+    from src.parser import _format_address
+    from src.threader import canonical_addr
+
+    for name in ("Mallory@example.com\r", "Doe,\r Jane", "x\n<mallory@example.com>", "a\x00b"):
+        assert canonical_addr(_format_address(name, "bob@example.com")) == "bob@example.com"
+    assert _format_address("Doe, Jane", "jane@example.com") == '"Doe, Jane" <jane@example.com>'
+    assert _format_address("José Álvarez", "josé@example.com") == "José Álvarez <josé@example.com>"
+
+
+def test_split_address_list_only_splits_at_top_level():
+    from src.parser import _split_address_list as split
+
+    # Empty elements vanish wherever they appear.
+    assert split(", a@x, , b@x,") == ["a@x", "b@x"]
+    # Group names are dropped; members become elements; ";" ends a group.
+    assert split("Team: , a@x, ,b@x, ; c@x") == ["a@x", "b@x", "c@x"]
+    assert split("undisclosed-recipients:;") == []
+    # Commas and colons inside quoted strings, comments, angle brackets,
+    # and domain literals are content, never separators.
+    assert split('"a, ,b"@x, c@x,') == ['"a, ,b"@x', "c@x"]
+    assert split('"Doe, Jane" <j@x>, "Re: x" <r@x>') == ['"Doe, Jane" <j@x>', '"Re: x" <r@x>']
+    assert split("a@x (p, q: r), b@x") == ["a@x (p, q: r)", "b@x"]
+    assert split("<@hostA,@hostB:joe@x>, b@x") == ["<@hostA,@hostB:joe@x>", "b@x"]
+    assert split("a@[1, ,2], b@x") == ["a@[1, ,2]", "b@x"]
+    # Escaped quotes do not end a quoted string early.
+    assert split('"a\\", ,b"@x, c@x') == ['"a\\", ,b"@x', "c@x"]
+    # Unterminated constructs run to the end (no separator inside them).
+    assert split('a@x, "b, ,c') == ["a@x", '"b, ,c']
+
+
+def test_encoded_word_contents_are_never_parsed_as_syntax():
+    from src.parser import _parse_addrs
+    from src.threader import canonical_addr
+
+    # Colons, commas, parentheses, and "@" inside encoded-words are data.
+    out = _parse_addrs("=?utf-8?q?a:b,c@d?= <bob@example.com>, =?x(((?q?A?= <carol@example.com>")
+    assert [canonical_addr(a) for a in out] == ["bob@example.com", "carol@example.com"]
+
+
+def test_parse_addrs_output_is_always_a_parseaddr_fixed_point():
+    """Every emitted string is re-parsed downstream (identity check,
+    canonical_addr, the participant writer). Anything that does not
+    round-trip — including an unsafe restored encoded-word — is
+    discarded rather than handed to an unguarded reparser."""
+    from email.utils import parseaddr
+
+    from src.parser import _parse_addrs
+
+    bomb = "=?x" + "(" * 1200 + ")" * 1200 + "?q?bob@example.com?= (Bob)"
+    assert _parse_addrs(bomb) == []
+    assert _parse_addrs(bomb + ", carol@example.com") == ["carol@example.com"]
+    for header in (
+        '"Doe, Jane" <jane@example.com>, =?utf-8?q?Zo=C3=AB?= <zoe@example.com>',
+        "josé@example.com, Team: a@x.example, b@x.example;",
+    ):
+        for formatted in _parse_addrs(header):
+            addr = parseaddr(formatted)[1]
+            assert addr and parseaddr(addr)[1] == addr

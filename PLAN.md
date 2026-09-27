@@ -56,9 +56,10 @@ The stack runs four containers:
   sync, TOFU cert pinning with explicit rotation flag.
 - **indexer** — Docker, parses Maildir, threads, embeds via any
   OpenAI-compatible `/v1/embeddings` provider (operator-supplied),
-  writes SQLite. Schema v19 (squashed baseline): 4096-dim L2-unit-norm
+  writes SQLite. Schema v20 (squashed baseline): 4096-dim L2-unit-norm
   vectors, `NOT NULL` `message_chunks.message_date`,
-  `indexing_jobs.last_error_class`. Initial scan and steady-state both
+  `indexing_jobs.last_error_class`, per-message `messages` +
+  `message_participants`. Initial scan and steady-state both
   drain a durable `indexing_jobs` queue through one two-phase batched
   path (Phase 1 commits thread membership with a three-case
   seed-vector chain; Phase 2b batch-embeds; Phase 2c commits chunks /
@@ -109,6 +110,10 @@ guessing about semantics, completeness, or identity.
    a cursor. Relevance search (`search_emails`) ranks; this
    enumerates. Requires participant indexing that also fixes
    `find_contact`'s per-call full-scan.
+   *Progress (PR #175): data layer done — `messages` +
+   `message_participants`, indexed by canonical address. Remaining: the
+   MCP tool itself, cursor pagination, and moving `find_contact` onto
+   the participant index.*
 2. **Structured MCP output** (`outputSchema` / `structuredContent`)
    across search / retrieval / evidence / status tools; prose
    retained alongside. The chaining path (search → thread_id →
@@ -120,6 +125,9 @@ guessing about semantics, completeness, or identity.
    returns chronological `messages[]` as the authoritative reading
    representation; the accumulated thread text remains a retrieval
    artifact.
+   *Progress (PR #175): per-message headers are now stored (`messages`
+   + `message_participants`). Remaining: `get_message` /
+   `get_thread` reading from them.*
 4. **Honest `get_mailbox_status`** — sync recency, queue
    pending/failed/dead, newest message, and a `current` flag that is
    truthful (only possible after Phase 0 items 1–2).
@@ -136,6 +144,10 @@ guessing about semantics, completeness, or identity.
    already captures content hash and identity; this is exposure, not
    new capture. Evidence resolves answer → evidence → chunk →
    source_id → immutable raw object.
+   *Progress (PR #175): each message's source locator, size, and
+   SHA-256 are now stored per message and kept current across
+   renames. Remaining: exposing them in retrieval / evidence
+   responses.*
 8. **Doc-drift sweep**: architecture.md search section describes
    three retrieval lanes (code has five) and a pre-chunks-era table
    list; README overclaims ("Agentic", "Real-time", "any compliant
@@ -420,6 +432,67 @@ do not ship persisted claims without them.
    during its Phase 3 experimental period.
 
 ## Recently Completed
+
+### 2026-09-27 — Phase 1 foundation: per-message records
+
+Schema v20 (baseline, folded while no deployed database exists):
+`messages` (one row per indexed message: headers, `sent_at`, folder,
+source `filepath` / `size_bytes` / `content_hash`) and
+`message_participants` (normalized From / To / Cc, indexed by canonical
+address). Written in `upsert_thread`'s transaction; removal cascades
+from `message_thread_map`, so reaps and thread deletes need no new
+code. Review round 1 fixed two pre-existing gaps it exposed: the parser
+re-quotes display names when they contain RFC 5322 specials (a
+`"Doe, Jane" <addr>` recipient previously lost its quotes and failed
+canonicalization, dropping it from participants — thread-level lists
+included), and the watcher's rename fast path records the new folder on
+cross-folder moves. Round 2: the quoting uses an encoding-free formatter,
+not `formataddr` (which raised on non-ASCII addresses, failing the whole
+message, and RFC 2047-encoded Unicode names); raw 8-bit address headers
+are decoded before splitting; and the folder is written inside
+`update_filepath`'s transaction so a failed move rolls back whole and
+stays recoverable by the Maildir walk. Round 3: a malformed encoded-word display
+name falls back to its raw text instead of dead-lettering the message,
+and From is parsed structurally into `from_addrs` (every author), so an
+encoded sender name with a comma or a multi-author From no longer loses
+the sender. A 27-case table-driven address corpus (parse -> index, end to
+end) then found one more pre-existing loss: Python 3.14's strict
+`getaddresses` rejects a whole header containing an empty list element
+(`a@x, , b@x` or a trailing comma), dropping every recipient; the parser
+now recovers such headers by removing the empty elements and
+strict-parsing again. Round 4: display names decode only their RFC 2047
+encoded-word tokens (linear scan, adjacent words joined, names over 998
+chars kept raw), leaving existing Unicode untouched; a token that fails
+or decodes to invalid Unicode (lone surrogate, NUL charset label) keeps
+its raw text. Rounds 5-6 removed a `strict=False` lenient fallback that
+had briefly replaced that recovery: it raised `RecursionError` on deeply
+unmatched comment parentheses and ran in quadratic time on large rejected
+headers; all parsing is strict again. Round 7: decoded names containing
+control characters (a CR let `Mallory@...\r` be read as the address)
+keep their raw text; `_format_address` enforces an identity invariant (if
+the serialized string parses to a different address, the name is
+dropped); and blank-element cleanup is a linear, escape-aware scan that
+never touches quoted strings, comments, or domain literals (the regex
+version rewrote `"a, ,b"@x` into a different mailbox). Round 8 replaced the
+patchwork with one design: encoded-words are swapped for opaque
+placeholders before structural parsing (their contents can never become
+syntax — recursion, quadratic groups, and a fabricated
+`bob@example.com_` sender all traced to that), the list is split at top
+level in one linear escape-aware pass (groups flattened, empty elements
+dropped), each element is parsed strictly on its own under size budgets
+and fails safe, and decoding is bounded per encoded-word rather than per
+name. `messages(filepath)` is indexed for the rename path. Round 9 closed the
+last reparse hole: a restored encoded-word could re-create a
+nested-paren bomb in the address and blow up the unguarded identity
+re-parse (dead-lettering the message). Restore/decode/format now run
+inside the per-element failure boundary, and every emitted address must
+re-parse to itself (`parseaddr` fixed point, ≤998 chars) or be
+discarded. `canonical_addr` and mcp-server's `find_contact` entry parse
+are also guarded — hostile strings that reach them via the `from_addr`
+fallback or already-indexed participants degrade to "no address" instead
+of aborting threading or breaking every contact lookup.
+Prerequisite for Phase 1 items 1 (`query_messages`), 3
+(message-first-class retrieval), and 7 (source integrity exposure).
 
 ### 2026-09-27 — Phase 0 hardening (items 7–11); Phase 0 complete
 

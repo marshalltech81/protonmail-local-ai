@@ -69,7 +69,14 @@ def canonical_addr(value: str) -> str:
     """
     if not value:
         return ""
-    _, addr = parseaddr(value)
+    try:
+        _, addr = parseaddr(value)
+    except Exception:
+        # parseaddr recurses on nested comments; hostile input (which
+        # reaches here via thread participants and the from_addr
+        # fallback for unparseable From headers) must degrade to
+        # "no address", never abort threading.
+        return ""
     addr = addr.strip().lower()
     if "@" not in addr:
         return ""

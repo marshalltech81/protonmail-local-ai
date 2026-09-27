@@ -176,8 +176,8 @@ Do not make any of the following changes unless the repository owner explicitly 
   next startup retries from the failing migration onward. Downgrades
   (stored version > code) and gaps (no migration file for an intermediate
   version) both fail closed at startup with actionable error messages.
-  History through v19 is squashed into `_apply_initial_schema`
-  (`SCHEMA_BASELINE_VERSION`); the first new migration is `0020`, and a
+  History through v20 is squashed into `_apply_initial_schema`
+  (`SCHEMA_BASELINE_VERSION`); the first new migration is `0021`, and a
   database older than the baseline fails closed with rebuild
   instructions.
 - Do not change embedding dimensions or model assumptions without verifying schema and context-window implications.
