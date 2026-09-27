@@ -462,6 +462,15 @@ def _parse_addrs(value: str | email.header.Header) -> list[str]:
         return []
     text = _decode_header(value) if isinstance(value, email.header.Header) else value
     pairs = email.utils.getaddresses([text])
+    if pairs == [("", "")]:
+        # Strict parsing (the default since the CVE-2023-27043 fix) rejects
+        # the WHOLE header when any list element is empty — a trailing or
+        # doubled comma, which some clients emit — silently dropping every
+        # recipient. Fall back to lenient parsing only when strict parsing
+        # rejected the header outright. The result feeds search
+        # enumeration, not authentication, and From is sender-controlled
+        # anyway, so leniency grants no new spoofing capability.
+        pairs = email.utils.getaddresses([text], strict=False)
     return [
         _format_address(_decode_display_name(name) if name else "", addr)
         for name, addr in pairs

@@ -2894,6 +2894,133 @@ class TestMessageRecordsEndToEnd:
             ("from", "carol@example.com", "Carol"),
         }
 
+    # Real-world address-header shapes. Each case is ingested end to end
+    # (parse -> index) and must (a) never cost the message its place in
+    # the index and (b) record exactly these participants. The From line
+    # is the same in every case unless the case overrides it.
+    _ADDRESS_CASES = [
+        ("bare", "To: bob@example.com", {("to", "bob@example.com", None)}),
+        ("angle_only", "To: <bob@example.com>", {("to", "bob@example.com", None)}),
+        ("named", "To: Bob Smith <bob@example.com>", {("to", "bob@example.com", "Bob Smith")}),
+        (
+            "quoted_comma",
+            'To: "Doe, Jane" <jane@example.com>',
+            {("to", "jane@example.com", "Doe, Jane")},
+        ),
+        (
+            "escaped_quotes",
+            'To: "Jane \\"JJ\\" Doe" <jj@example.com>',
+            {("to", "jj@example.com", 'Jane "JJ" Doe')},
+        ),
+        (
+            "unquoted_period",
+            "To: Dr. Who <who@example.com>",
+            {("to", "who@example.com", "Dr. Who")},
+        ),
+        (
+            "comment_name",
+            "To: bob@example.com (Bob Smith)",
+            {("to", "bob@example.com", "Bob Smith")},
+        ),
+        ("empty_quoted_name", 'To: "" <bob@example.com>', {("to", "bob@example.com", None)}),
+        (
+            "case_and_plus_tag",
+            "To: Bob+Tag@Mail.Example.COM",
+            {("to", "bob+tag@mail.example.com", None)},
+        ),
+        (
+            "folded_multi",
+            "To: Bob <bob@example.com>,\r\n Carol <carol@example.com>",
+            {("to", "bob@example.com", "Bob"), ("to", "carol@example.com", "Carol")},
+        ),
+        (
+            "blank_elements",
+            "To: bob@example.com, , carol@example.com,",
+            {("to", "bob@example.com", None), ("to", "carol@example.com", None)},
+        ),
+        ("empty_group", "To: undisclosed-recipients:;", set()),
+        (
+            "group_with_members",
+            "To: Team: ann@example.com, Ben <ben@example.com>;",
+            {("to", "ann@example.com", None), ("to", "ben@example.com", "Ben")},
+        ),
+        ("garbage_entry", "To: not an address", set()),
+        (
+            "same_person_to_and_cc",
+            "To: bob@example.com\r\nCc: Bob <BOB@example.com>",
+            {("to", "bob@example.com", None), ("cc", "bob@example.com", "Bob")},
+        ),
+        (
+            "encoded_q",
+            "To: =?utf-8?q?Zo=C3=AB_Ng?= <zoe@example.com>",
+            {("to", "zoe@example.com", "Zoë Ng")},
+        ),
+        (
+            "encoded_b",
+            "To: =?utf-8?b?Sm9zw6kgw4FsdmFyZXo=?= <jose@example.com>",
+            {("to", "jose@example.com", "José Álvarez")},
+        ),
+        (
+            "encoded_comma",
+            "To: =?utf-8?q?Doe=2C_Jane?= <jane@example.com>",
+            {("to", "jane@example.com", "Doe, Jane")},
+        ),
+        (
+            "encoded_malformed",
+            "To: =?utf-8?b?x?= <bob@example.com>",
+            {("to", "bob@example.com", "=?utf-8?b?x?=")},
+        ),
+        (
+            "encoded_unknown_charset",
+            "To: =?x-bogus?q?Bob?= <bob@example.com>",
+            {("to", "bob@example.com", "Bob")},
+        ),
+        (
+            "raw_utf8_name",
+            "To: José Álvarez <jose@example.com>",
+            {("to", "jose@example.com", "José Álvarez")},
+        ),
+        (
+            "raw_utf8_quoted_comma",
+            'To: "Álvarez, José" <jose@example.com>',
+            {("to", "jose@example.com", "Álvarez, José")},
+        ),
+        ("raw_utf8_local_part", "To: josé@example.com", {("to", "josé@example.com", None)}),
+        ("raw_utf8_domain", "To: <user@exämple.com>", {("to", "user@exämple.com", None)}),
+        ("no_recipients", "", set()),
+        # Strict parsing rejects this CVE-2023-27043-style ambiguous input;
+        # the lenient fallback records BOTH candidates rather than silently
+        # choosing one, so neither address is hidden from enumeration.
+        (
+            "crafted_ambiguous",
+            "To: alice@example.org)<bob@example.org>",
+            {("to", "alice@example.org", None), ("to", "bob@example.org", None)},
+        ),
+        # An address-shaped display name stays a name; the real address is
+        # the angle-bracket one.
+        (
+            "address_shaped_name",
+            'To: "alice@example.org" <bob@example.org>',
+            {("to", "bob@example.org", "alice@example.org")},
+        ),
+    ]
+
+    @pytest.mark.parametrize(
+        ("headers", "expected_recipients"),
+        [pytest.param(h, e, id=i) for i, h, e in _ADDRESS_CASES],
+    )
+    def test_address_header_corpus(self, tmp_path, monkeypatch, headers, expected_recipients):
+        message_id = "corpus@example.com"
+        db, queue, participants = self._ingest_headers(
+            tmp_path,
+            monkeypatch,
+            "From: Sender <sender@example.com>\r\n" + (headers + "\r\n" if headers else ""),
+            message_id,
+        )
+        assert queue.stats() == {"queued": 0, "dead": 0}, "message must never be dead-lettered"
+        assert db.get_chunk_ids_for_message(message_id), "body must be indexed"
+        assert participants == {("from", "sender@example.com", "Sender")} | expected_recipients
+
     @pytest.mark.parametrize("with_reconciler", [False, True])
     def test_cross_folder_move_updates_message_folder(self, tmp_path, monkeypatch, with_reconciler):
         """The watcher's rename fast path (indexed source) must keep the

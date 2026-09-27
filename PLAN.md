@@ -444,7 +444,12 @@ stays recoverable by the Maildir walk. Round 3: a malformed encoded-word display
 name falls back to its raw text instead of dead-lettering the message,
 and From is parsed structurally into `from_addrs` (every author), so an
 encoded sender name with a comma or a multi-author From no longer loses
-the sender.
+the sender. A 27-case table-driven address corpus (parse -> index, end to
+end) then found one more pre-existing loss: Python 3.14's strict
+`getaddresses` rejects a whole header containing an empty list element
+(`a@x, , b@x` or a trailing comma), dropping every recipient; the parser
+now falls back to lenient parsing only when strict parsing rejects the
+header outright.
 Prerequisite for Phase 1 items 1 (`query_messages`), 3
 (message-first-class retrieval), and 7 (source integrity exposure).
 
