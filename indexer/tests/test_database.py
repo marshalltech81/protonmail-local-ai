@@ -2558,3 +2558,16 @@ class TestUpdateFilepathWithFolder:
         assert self._state(db) == ("INBOX", "/md/INBOX/cur/m1", "/md/INBOX/cur/m1")
         assert db.is_indexed("/md/INBOX/cur/m1")
         assert not db.is_indexed("/md/Archive/cur/m1")
+
+
+def test_rename_lookups_use_the_filepath_index(db):
+    """Every flag rename updates ``messages`` by filepath; without an index
+    that is a full-table scan under the shared write lock."""
+    for sql in (
+        "UPDATE messages SET filepath = ? WHERE filepath = ?",
+        "UPDATE messages SET folder = ? WHERE filepath = ?",
+    ):
+        plan = " ".join(
+            r["detail"] for r in db._conn.execute("EXPLAIN QUERY PLAN " + sql, ("a", "b"))
+        )
+        assert "idx_messages_filepath" in plan, plan

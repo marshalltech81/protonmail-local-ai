@@ -3071,10 +3071,13 @@ class TestMessageRecordsEndToEnd:
             "To: bob@example.com (x y), , carol@example.com",
             {("to", "bob@example.com", "x y"), ("to", "carol@example.com", None)},
         ),
-        # Strict parsing rejects any header whose comment contains a comma
-        # (part of the CVE-2023-27043 hardening), blank elements or not —
-        # identical to base. The message still indexes.
-        ("comment_containing_commas", "To: bob@example.com (x, y), carol@example.com", set()),
+        # A comment containing commas is valid RFC 5322. The list is split
+        # at top-level commas only, so the comment stays part of its element.
+        (
+            "comment_containing_commas",
+            "To: bob@example.com (x, y), carol@example.com",
+            {("to", "bob@example.com", "x, y"), ("to", "carol@example.com", None)},
+        ),
         # An address-shaped display name stays a name; the real address is
         # the angle-bracket one.
         (
@@ -3100,6 +3103,80 @@ class TestMessageRecordsEndToEnd:
         names = json.loads(row["senders"]) + json.loads(row["participants"])
         assert any("李雷" in n for n in names)
         assert not any("\\u" in n for n in names)
+
+    def test_parentheses_in_encoded_word_labels_do_not_dead_letter(self, tmp_path, monkeypatch):
+        """Encoded-word contents are opaque: 1,200 nested parentheses in
+        charset labels used to reach the recursive comment parser via
+        the From header and dead-letter the message."""
+        from_value = "\r\n ".join(
+            ["=?x" + "(" * 60 + "?q?A?="] * 20 + ["=?x" + ")" * 60 + "?q?B?="] * 20
+        )
+        db, queue, participants = self._ingest_headers(
+            tmp_path,
+            monkeypatch,
+            f"From: {from_value} <bob@example.com>\r\nTo: reader@example.com\r\n",
+            "nested-labels@example.com",
+        )
+        assert queue.stats() == {"queued": 0, "dead": 0}
+        assert db.get_chunk_ids_for_message("nested-labels@example.com")
+        assert {p[1] for p in participants if p[0] == "from"} == {"bob@example.com"}
+
+    def test_encoded_word_parentheses_cannot_alter_the_sender_address(self, tmp_path, monkeypatch):
+        """In ``bob@example.com (=?utf-8?q?A)_(B?=)`` the encoded-word's own
+        parentheses were parsed as comment delimiters, fabricating the
+        sender ``bob@example.com_``."""
+        db, _queue, participants = self._ingest_headers(
+            tmp_path,
+            monkeypatch,
+            "From: bob@example.com (=?utf-8?q?A)_(B?=)\r\nTo: reader@example.com\r\n",
+            "encoded-comment@example.com",
+        )
+        assert {p[1] for p in participants if p[0] == "from"} == {"bob@example.com"}
+        senders = json.loads(db._conn.execute("SELECT senders FROM threads").fetchone()[0])
+        assert not any("example.com_" in s for s in senders)
+
+    def test_long_folded_encoded_name_is_decoded(self, tmp_path, monkeypatch):
+        """A valid name longer than 998 characters in total — but made of
+        short encoded-words on short lines — must still decode, or
+        name lookup (find_contact) stops finding the sender."""
+        import email.header
+
+        folded = email.header.Header("李雷" * 120, "utf-8", maxlinelen=70).encode(linesep="\r\n")
+        db, _queue, participants = self._ingest_headers(
+            tmp_path,
+            monkeypatch,
+            f"From: {folded} <bob@example.com>\r\nTo: reader@example.com\r\n",
+            "long-name@example.com",
+        )
+        assert ("from", "bob@example.com", "李雷" * 120) in participants
+        senders = json.loads(db._conn.execute("SELECT senders FROM threads").fetchone()[0])
+        assert any("李雷" in s for s in senders)
+
+    def test_group_syntax_inside_encoded_words_parses_in_linear_time(self, tmp_path):
+        """Group syntax carried inside encoded-words drove the standard
+        library's group parser quadratic via the From header (3.1 s at
+        200 KB)."""
+        import time
+
+        from src.parser import parse_email
+
+        value = "\r\n ".join(
+            ["=?x:?q?Bob?="] + ["=?" + ",".join(["a@x"] * 10) + "?q?A?="] * 4000 + ["=?;?q?B?="]
+        )
+        path = tmp_path / "INBOX" / "cur" / "group-ew.eml"
+        path.parent.mkdir(parents=True)
+        path.write_bytes(
+            (
+                f"From: {value} <bob@example.com>\r\nTo: reader@example.com\r\n"
+                "Subject: s\r\nMessage-ID: <group-ew@example.com>\r\n"
+                "Date: Mon, 01 Jan 2024 12:00:00 +0000\r\n\r\nBody.\r\n"
+            ).encode()
+        )
+        start = time.perf_counter()
+        msg = parse_email(path, maildir_root=tmp_path)
+        elapsed = time.perf_counter() - start
+        assert msg is not None
+        assert elapsed < 0.5, f"parse took {elapsed:.2f}s"
 
     def test_rejected_huge_group_header_parses_in_linear_time(self, tmp_path):
         """A header strict parsing rejects must not fall through to work that

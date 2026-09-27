@@ -490,6 +490,8 @@ class Database:
             CREATE INDEX idx_messages_thread_sent ON messages(thread_id, sent_at);
             CREATE INDEX idx_messages_folder_sent ON messages(folder, sent_at);
             CREATE INDEX idx_messages_sent ON messages(sent_at);
+            -- Flag renames and cross-folder moves update by filepath.
+            CREATE INDEX idx_messages_filepath ON messages(filepath);
 
             -- Normalized From / To / Cc. ``address`` is the canonical
             -- lowercased bare address, so "every message from/to X" is an

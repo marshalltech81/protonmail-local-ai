@@ -13,6 +13,8 @@ import hashlib
 import logging
 import os
 import re
+import secrets
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -448,8 +450,10 @@ def _format_address(name: str, addr: str) -> str:
 _ENCODED_WORD_RE = re.compile(r"=\?([^?\s]+)\?([QqBb])\?([^?\s]*)\?=")
 # RFC 2047 §6.2: whitespace between two adjacent encoded-words is dropped.
 _ADJACENT_ENCODED_WORDS_RE = re.compile(r"\?=\s+=\?")
-# RFC 5322 line limit; longer names are kept raw rather than scanned.
-_MAX_DECODED_NAME_CHARS = 998
+# RFC 5322 line limit, applied per encoded-word: a valid long name folds
+# into many short encoded-words, so bounding the whole name would leave
+# legitimate long names undecoded.
+_MAX_ENCODED_WORD_CHARS = 998
 
 
 def _decode_encoded_word(match: re.Match[str]) -> str:
@@ -462,6 +466,8 @@ def _decode_encoded_word(match: re.Match[str]) -> str:
     yielding a lone surrogate, which would crash later tokenization).
     """
     token = match.group(0)
+    if len(token) > _MAX_ENCODED_WORD_CHARS:
+        return token
     try:
         pieces = []
         for part, charset in email.header.decode_header(token):
@@ -493,85 +499,110 @@ def _decode_display_name(name: str) -> str:
     it is. (Running the whole name through ``decode_header`` re-encoded
     that Unicode and corrupted it, and rescanned the name at every
     malformed ``=?`` prefix, which is quadratic.) A token that fails to
-    decode keeps its raw text.
+    decode keeps its raw text. The scan is linear, and each encoded-word
+    is bounded individually by ``_decode_encoded_word``.
     """
-    if "=?" not in name or len(name) > _MAX_DECODED_NAME_CHARS:
+    if "=?" not in name:
         return name
     name = _ADJACENT_ENCODED_WORDS_RE.sub("?==?", name)
     return _ENCODED_WORD_RE.sub(_decode_encoded_word, name)
 
 
-def _top_level_mask(text: str) -> list[bool]:
-    """Mark characters outside quoted strings, comments, and domain literals.
+# Structural-parsing budget. The split below is linear, and each element
+# is parsed on its own, so these only bound pathological headers; a
+# header or element over budget costs its recipients, never the message.
+_MAX_ADDRESS_HEADER_CHARS = 256_000
+_MAX_ADDRESS_ELEMENT_CHARS = 128_000
 
-    One linear pass honoring backslash escapes. Unterminated constructs
-    simply run to the end of the text (everything after is masked out).
+
+def _protect_encoded_words(text: str) -> tuple[str, Callable[[str], str]]:
+    """Replace each encoded-word with an opaque placeholder atom.
+
+    Encoded-word contents are data, not syntax. Left in place, parentheses,
+    colons, commas, or ``@`` inside a charset label or encoded text are
+    parsed as address structure — recursing on nested "comments", driving
+    the standard library's group parser quadratic, or fabricating an
+    address (``bob@example.com (=?utf-8?q?A)_(B?=)`` read as
+    ``bob@example.com_``). Returns the protected text and a function that
+    restores the original tokens in any parsed fragment.
     """
-    top = [False] * len(text)
-    in_quote = in_literal = False
+    tokens: list[str] = []
+    nonce = secrets.token_hex(6)
+
+    def protect(match: re.Match[str]) -> str:
+        tokens.append(match.group(0))
+        return f"ew{nonce}n{len(tokens) - 1}x"
+
+    protected = _ENCODED_WORD_RE.sub(protect, text)
+    if not tokens:
+        return protected, lambda fragment: fragment
+    placeholder_re = re.compile(rf"ew{nonce}n(\d+)x")
+
+    def restore(fragment: str) -> str:
+        return placeholder_re.sub(lambda m: tokens[int(m.group(1))], fragment)
+
+    return protected, restore
+
+
+def _split_address_list(text: str) -> list[str]:
+    """Split an address-list header into its elements, in one linear pass.
+
+    Separators are recognized only at top level — never inside quoted
+    strings, comments, angle brackets, or ``[domain literals]``, and
+    backslash escapes are honored. Group syntax is flattened: the group
+    name before a top-level ``:`` is dropped and ``;`` ends an element.
+    Empty elements (doubled, leading, or trailing commas) simply vanish.
+    Parsing each element separately keeps the standard library's
+    quadratic group parser out of the path entirely.
+    """
+    elements: list[str] = []
+    buf: list[str] = []
+    in_quote = in_literal = in_angle = False
     comment_depth = 0
     i = 0
-    while i < len(text):
+    n = len(text)
+    while i < n:
         ch = text[i]
-        if in_quote or in_literal or comment_depth:
-            if ch == "\\":
+        if in_quote or comment_depth or in_literal:
+            if ch == "\\" and i + 1 < n:
+                buf.append(text[i : i + 2])
                 i += 2
                 continue
             if in_quote and ch == '"':
                 in_quote = False
-            elif in_literal and ch == "]":
-                in_literal = False
             elif comment_depth and ch == "(":
                 comment_depth += 1
             elif comment_depth and ch == ")":
                 comment_depth -= 1
+            elif in_literal and ch == "]":
+                in_literal = False
+            buf.append(ch)
         elif ch == '"':
             in_quote = True
-        elif ch == "[":
-            in_literal = True
+            buf.append(ch)
         elif ch == "(":
             comment_depth = 1
+            buf.append(ch)
+        elif ch == "[":
+            in_literal = True
+            buf.append(ch)
+        elif in_angle:
+            if ch == ">":
+                in_angle = False
+            buf.append(ch)
+        elif ch == "<":
+            in_angle = True
+            buf.append(ch)
+        elif ch in ",;":
+            elements.append("".join(buf))
+            buf = []
+        elif ch == ":":
+            buf = []  # group display name
         else:
-            top[i] = True
+            buf.append(ch)
         i += 1
-    return top
-
-
-def _drop_empty_list_elements(text: str) -> str:
-    """Remove empty elements from an address list, in linear time.
-
-    A top-level comma is dropped when nothing but whitespace separates it
-    from the start of the list or group (``:``), from a previous comma, or
-    from the end of the list or group (``;``). Commas inside quoted
-    strings, comments, and domain literals are part of an address or name
-    and are never touched — rewriting ``"a, ,b"@example.com`` would
-    invent a different mailbox.
-    """
-    top = _top_level_mask(text)
-    n = len(text)
-    # Separator class of the nearest non-space character after each
-    # position: "," / ";" when it is a top-level separator, "" for end of
-    # text, "x" for anything else (address text, quoted or commented).
-    next_sep = [""] * (n + 1)
-    for i in range(n - 1, -1, -1):
-        ch = text[i]
-        if ch.isspace() and top[i]:
-            next_sep[i] = next_sep[i + 1]
-        elif top[i] and ch in ",;":
-            next_sep[i] = ch
-        else:
-            next_sep[i] = "x"
-    out = []
-    prev = ""  # separator class of the last kept non-space char; "" = start
-    for i, ch in enumerate(text):
-        if top[i] and ch == ",":
-            if prev in ("", ",", ":") or next_sep[i + 1] in ("", ",", ";"):
-                continue
-            prev = ","
-        elif not (ch.isspace() and top[i]):
-            prev = ch if (top[i] and ch in ":;") else "x"
-        out.append(ch)
-    return "".join(out)
+    elements.append("".join(buf))
+    return [element.strip() for element in elements if element.strip()]
 
 
 def _parse_addrs(value: str | email.header.Header) -> list[str]:
@@ -579,29 +610,34 @@ def _parse_addrs(value: str | email.header.Header) -> list[str]:
 
     Raw 8-bit headers (UTF-8 written directly in the header) arrive as
     ``email.header.Header`` objects whose ``str()`` mangles the non-ASCII
-    bytes, so they are decoded first. Display names are decoded *after*
-    splitting, so an encoded-word name containing a comma cannot split
-    one address into two.
+    bytes, so they are decoded first. Encoded-words are then made opaque,
+    the list is split at top level, and each element is parsed strictly
+    on its own; display names are decoded only after the address is
+    fixed, so name content can never become address syntax. Every step
+    fails safe: an element that cannot be parsed costs only that
+    recipient, never the message.
     """
     if not value:
         return []
     text = _decode_header(value) if isinstance(value, email.header.Header) else value
-    pairs = email.utils.getaddresses([text])
-    if pairs == [("", "")] and text.strip():
-        # Strict parsing (the default since the CVE-2023-27043 fix) rejects
-        # the WHOLE header when any list element is empty — a doubled,
-        # leading, or trailing comma, which some clients emit — silently
-        # dropping every recipient. Remove only those empty elements and
-        # strict-parse once more. No lenient parser is used: it recurses
-        # past Python's limit on nested comments and runs in quadratic
-        # time on large rejected headers, and strict parsing is what makes
-        # crafted ambiguous input safe.
-        pairs = email.utils.getaddresses([_drop_empty_list_elements(text)])
-    return [
-        _format_address(_decode_display_name(name) if name else "", addr)
-        for name, addr in pairs
-        if addr.strip()
-    ]
+    if len(text) > _MAX_ADDRESS_HEADER_CHARS:
+        log.debug("address header over %d chars; recipients not parsed", _MAX_ADDRESS_HEADER_CHARS)
+        return []
+    protected, restore = _protect_encoded_words(text)
+    addresses = []
+    for element in _split_address_list(protected):
+        if len(element) > _MAX_ADDRESS_ELEMENT_CHARS:
+            continue
+        try:
+            name, addr = email.utils.parseaddr(element)
+        except Exception:
+            # e.g. RecursionError on deeply nested (balanced) comments.
+            continue
+        if not addr.strip():
+            continue
+        name = _decode_display_name(restore(name)) if name else ""
+        addresses.append(_format_address(name, restore(addr)))
+    return addresses
 
 
 def _parse_date(value: str) -> datetime:

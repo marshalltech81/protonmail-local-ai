@@ -473,7 +473,15 @@ keep their raw text; `_format_address` enforces an identity invariant (if
 the serialized string parses to a different address, the name is
 dropped); and blank-element cleanup is a linear, escape-aware scan that
 never touches quoted strings, comments, or domain literals (the regex
-version rewrote `"a, ,b"@x` into a different mailbox).
+version rewrote `"a, ,b"@x` into a different mailbox). Round 8 replaced the
+patchwork with one design: encoded-words are swapped for opaque
+placeholders before structural parsing (their contents can never become
+syntax — recursion, quadratic groups, and a fabricated
+`bob@example.com_` sender all traced to that), the list is split at top
+level in one linear escape-aware pass (groups flattened, empty elements
+dropped), each element is parsed strictly on its own under size budgets
+and fails safe, and decoding is bounded per encoded-word rather than per
+name. `messages(filepath)` is indexed for the rename path.
 Prerequisite for Phase 1 items 1 (`query_messages`), 3
 (message-first-class retrieval), and 7 (source integrity exposure).
 

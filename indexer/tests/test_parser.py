@@ -875,23 +875,31 @@ def test_format_address_never_changes_the_address():
     assert _format_address("José Álvarez", "josé@example.com") == "José Álvarez <josé@example.com>"
 
 
-def test_drop_empty_list_elements_only_touches_top_level_commas():
-    from src.parser import _drop_empty_list_elements
+def test_split_address_list_only_splits_at_top_level():
+    from src.parser import _split_address_list as split
 
-    def drop(text: str) -> str:
-        # Whitespace around separators is insignificant to the address
-        # parser; compare structure, not spacing.
-        return " ".join(_drop_empty_list_elements(text).split())
-
-    # Empty elements are removed at every top-level position.
-    assert drop(", a@x, , b@x,") == "a@x , b@x"
-    assert drop("Team: , a@x, ,b@x, ;") == "Team: a@x ,b@x ;"
-    # Commas inside quoted strings, comments, and domain literals are
-    # address or name content, never separators.
-    assert drop('"a, ,b"@x, c@x,') == '"a, ,b"@x, c@x'
-    assert drop("a@x (p, , q), , b@x") == "a@x (p, , q) , b@x"
-    assert drop("a@[1, ,2], , b@x") == "a@[1, ,2] , b@x"
+    # Empty elements vanish wherever they appear.
+    assert split(", a@x, , b@x,") == ["a@x", "b@x"]
+    # Group names are dropped; members become elements; ";" ends a group.
+    assert split("Team: , a@x, ,b@x, ; c@x") == ["a@x", "b@x", "c@x"]
+    assert split("undisclosed-recipients:;") == []
+    # Commas and colons inside quoted strings, comments, angle brackets,
+    # and domain literals are content, never separators.
+    assert split('"a, ,b"@x, c@x,') == ['"a, ,b"@x', "c@x"]
+    assert split('"Doe, Jane" <j@x>, "Re: x" <r@x>') == ['"Doe, Jane" <j@x>', '"Re: x" <r@x>']
+    assert split("a@x (p, q: r), b@x") == ["a@x (p, q: r)", "b@x"]
+    assert split("<@hostA,@hostB:joe@x>, b@x") == ["<@hostA,@hostB:joe@x>", "b@x"]
+    assert split("a@[1, ,2], b@x") == ["a@[1, ,2]", "b@x"]
     # Escaped quotes do not end a quoted string early.
-    assert drop('"a\\", ,b"@x, , c@x') == '"a\\", ,b"@x , c@x'
-    # Unterminated constructs mask the rest of the text (no rewriting).
-    assert drop('a@x, , "b, ,c') == 'a@x , "b, ,c'
+    assert split('"a\\", ,b"@x, c@x') == ['"a\\", ,b"@x', "c@x"]
+    # Unterminated constructs run to the end (no separator inside them).
+    assert split('a@x, "b, ,c') == ["a@x", '"b, ,c']
+
+
+def test_encoded_word_contents_are_never_parsed_as_syntax():
+    from src.parser import _parse_addrs
+    from src.threader import canonical_addr
+
+    # Colons, commas, parentheses, and "@" inside encoded-words are data.
+    out = _parse_addrs("=?utf-8?q?a:b,c@d?= <bob@example.com>, =?x(((?q?A?= <carol@example.com>")
+    assert [canonical_addr(a) for a in out] == ["bob@example.com", "carol@example.com"]
