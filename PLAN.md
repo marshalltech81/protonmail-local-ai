@@ -110,6 +110,10 @@ guessing about semantics, completeness, or identity.
    a cursor. Relevance search (`search_emails`) ranks; this
    enumerates. Requires participant indexing that also fixes
    `find_contact`'s per-call full-scan.
+   *Progress (PR #175): data layer done — `messages` +
+   `message_participants`, indexed by canonical address. Remaining: the
+   MCP tool itself, cursor pagination, and moving `find_contact` onto
+   the participant index.*
 2. **Structured MCP output** (`outputSchema` / `structuredContent`)
    across search / retrieval / evidence / status tools; prose
    retained alongside. The chaining path (search → thread_id →
@@ -121,6 +125,9 @@ guessing about semantics, completeness, or identity.
    returns chronological `messages[]` as the authoritative reading
    representation; the accumulated thread text remains a retrieval
    artifact.
+   *Progress (PR #175): per-message headers are now stored (`messages`
+   + `message_participants`). Remaining: `get_message` /
+   `get_thread` reading from them.*
 4. **Honest `get_mailbox_status`** — sync recency, queue
    pending/failed/dead, newest message, and a `current` flag that is
    truthful (only possible after Phase 0 items 1–2).
@@ -137,6 +144,10 @@ guessing about semantics, completeness, or identity.
    already captures content hash and identity; this is exposure, not
    new capture. Evidence resolves answer → evidence → chunk →
    source_id → immutable raw object.
+   *Progress (PR #175): each message's source locator, size, and
+   SHA-256 are now stored per message and kept current across
+   renames. Remaining: exposing them in retrieval / evidence
+   responses.*
 8. **Doc-drift sweep**: architecture.md search section describes
    three retrieval lanes (code has five) and a pre-chunks-era table
    list; README overclaims ("Agentic", "Real-time", "any compliant
