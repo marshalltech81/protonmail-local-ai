@@ -34,6 +34,35 @@ resolve_bridge_version() {
 BRIDGE_VERSION="$(resolve_bridge_version "${1:-}")"
 readonly BRIDGE_VERSION
 
+# The commit BRIDGE_VERSION must resolve to — same pin the image build
+# enforces, resolved from the same sources in the same order. It must be
+# checked here too: patch-source.sh compiles upstream packages and runs
+# `go test`, possibly directly on the host, so a re-pointed tag would
+# otherwise reach code execution before the Docker build ever rejects it.
+resolve_bridge_commit() {
+    local candidate="${BRIDGE_COMMIT:-}"
+    local env_file
+
+    if [[ -z "$candidate" ]]; then
+        for env_file in "$ROOT_DIR/.env" "$ROOT_DIR/.env.example"; do
+            if [[ -f "$env_file" ]]; then
+                candidate="$(grep -E '^BRIDGE_COMMIT=' "$env_file" | head -n 1 | cut -d= -f2- || true)"
+                candidate="${candidate%$'\r'}"
+                [[ -n "$candidate" ]] && break
+            fi
+        done
+    fi
+
+    if [[ ! "$candidate" =~ ^[0-9a-f]{40}$ ]]; then
+        printf 'Could not determine a full BRIDGE_COMMIT SHA from the environment, .env, or .env.example.\n' >&2
+        exit 1
+    fi
+    printf '%s\n' "$candidate"
+}
+
+BRIDGE_COMMIT="$(resolve_bridge_commit)"
+readonly BRIDGE_COMMIT
+
 # Clone into a throwaway directory so the drift check always evaluates pristine
 # upstream source instead of whatever may already exist in the repo workspace.
 TMP_DIR="$(mktemp -d)"
@@ -67,6 +96,13 @@ printf 'Checking Proton Bridge patch points for %s...\n' "$BRIDGE_VERSION"
 GIT_TERMINAL_PROMPT=0 "$TIMEOUT_CMD" 60s git clone --depth 1 --branch "$BRIDGE_VERSION" \
     https://github.com/ProtonMail/proton-bridge.git "$CLONE_DIR"
 
-printf 'Fetched upstream Bridge commit %s.\n' "$(git -C "$CLONE_DIR" rev-parse --short HEAD)"
+FETCHED_COMMIT="$(git -C "$CLONE_DIR" rev-parse HEAD)"
+readonly FETCHED_COMMIT
+if [[ "$FETCHED_COMMIT" != "$BRIDGE_COMMIT" ]]; then
+    printf 'ERROR: %s resolves to %s, not the pinned BRIDGE_COMMIT %s. Refusing to run the patch helper on unverified source.\n' \
+        "$BRIDGE_VERSION" "$FETCHED_COMMIT" "$BRIDGE_COMMIT" >&2
+    exit 1
+fi
+printf 'Fetched upstream Bridge commit %s (matches BRIDGE_COMMIT).\n' "$FETCHED_COMMIT"
 "$ROOT_DIR/bridge/patch-source.sh" "$CLONE_DIR"
 printf 'Patch drift check passed for %s.\n' "$BRIDGE_VERSION"

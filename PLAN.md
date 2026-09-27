@@ -432,7 +432,10 @@ do not ship persisted claims without them.
   real closing tag with the injected text inside it.
 - **Logging privacy (8).** All ten mcp-server tool handlers log through
   `log_tool_call`: content-free parameters plus the *names* of withheld
-  ones (query, addresses, folders, IDs, schema never reach logs). The
+  ones (query, addresses, folders, IDs, schema never reach logs); an
+  allowlisted field's value is logged only if it passes that field's
+  check (enum member, integer, boolean, ISO date), since LLM-supplied
+  arguments arrive unvalidated (review round 1). The
   find_contact error no longer echoes `from_name`. Indexer stage errors
   persist `Type: message` via `_stage_error`, never `repr()` — a
   `UnicodeDecodeError` repr embeds the decoded email bytes.
@@ -444,6 +447,10 @@ do not ship persisted claims without them.
   and the clone step fails unless `BRIDGE_VERSION` resolves to it. The
   weekly bump workflow resolves and moves the commit with the version
   across all three pin sites; `validate-env.sh` checks its format.
+  `bridge-patch-drift.sh` verifies the same pin right after its clone —
+  it runs before the image build in `make bridge-upgrade-check`, and its
+  patch helper compiles and `go test`s upstream code on the host
+  (review round 1).
 - **Carryovers (11).** Extraction unwraps ```json-fenced model output
   instead of silently skipping the thread. Indexer health threshold
   90 s → 600 s, and the heartbeat is refreshed before each health probe

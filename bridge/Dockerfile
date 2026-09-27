@@ -42,7 +42,7 @@ WORKDIR /build
 RUN git clone --depth 1 --branch "${BRIDGE_VERSION}" \
     https://github.com/ProtonMail/proton-bridge.git . \
     && actual="$(git rev-parse HEAD)" \
-    && if [[ "${actual}" != "${BRIDGE_COMMIT}" ]]; then \
+    && if [ "${actual}" != "${BRIDGE_COMMIT}" ]; then \
         echo "ERROR: ${BRIDGE_VERSION} resolves to ${actual}, not the pinned BRIDGE_COMMIT ${BRIDGE_COMMIT}. Refusing to build unverified source." >&2; \
         exit 1; \
     fi
