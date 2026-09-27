@@ -11,6 +11,7 @@ services:
       context: ./bridge
       args:
         BRIDGE_VERSION: ${BRIDGE_VERSION:-v3.27.0}
+        BRIDGE_COMMIT: ${BRIDGE_COMMIT:-04e46eb4fbc1c7ef4425a920bfc352050da0606b}
     image: protonmail-local-ai/bridge
     container_name: protonmail-bridge
     restart: unless-stopped
@@ -328,7 +329,10 @@ services:
       # without blocking WAL reads.
       - sqlite-volume:/data
     ports:
-      - "127.0.0.1:${MCP_PORT:-3000}:3000"
+      # Same port on both sides: the server binds MCP_PORT inside the
+      # container (and its healthcheck probes MCP_PORT), so mapping the
+      # host port to a fixed container port would point at nothing.
+      - "127.0.0.1:${MCP_PORT:-3000}:${MCP_PORT:-3000}"
     networks:
       - app-net
     # Healthcheck is defined in mcp-server/Dockerfile and inherited here.

@@ -135,7 +135,7 @@ first-run: init-secrets
 		run --rm --no-deps protonmail-bridge
 
 # Update Bridge to a new version
-# 1. Bump BRIDGE_VERSION in .env
+# 1. Bump BRIDGE_VERSION and BRIDGE_COMMIT in .env (see .env.example)
 # 2. Run: make update
 update: bridge-upgrade-check
 	docker compose build protonmail-bridge

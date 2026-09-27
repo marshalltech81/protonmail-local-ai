@@ -1,6 +1,7 @@
 """Tests for src.lib.security redaction helpers."""
 
 from src.lib.security import (
+    log_tool_call,
     redact_sensitive_text,
     safe_exception_text,
     safe_provider_exception_text,
@@ -120,3 +121,108 @@ class TestSafeProviderExceptionText:
         out = safe_provider_exception_text(err, secrets=[])
         assert "sk-ant-abc123XYZ" not in out
         assert "[REDACTED]" in out
+
+
+class TestLogToolCall:
+    """Tool-call logs carry metadata, never mailbox content: a query,
+    sender, folder, or ID can quote exactly what the user wants private
+    ("lawsuit against...", a salary negotiation, a medical sender)."""
+
+    def test_logs_only_content_free_params_and_names_the_rest(self, caplog):
+        import logging
+
+        logger = logging.getLogger("test-tool-log")
+        with caplog.at_level(logging.DEBUG, logger="test-tool-log"):
+            log_tool_call(
+                logger,
+                "search_emails",
+                {
+                    "query": "settlement with opposing counsel",
+                    "from_addr": "lawyer@example.com",
+                    "folders": ["Legal"],
+                    "mode": "hybrid",
+                    "limit": 10,
+                    "date_from": None,
+                },
+            )
+
+        text = caplog.text
+        assert "tool=search_emails" in text
+        assert "'mode': 'hybrid'" in text
+        assert "'limit': 10" in text
+        assert "withheld=['folders', 'from_addr', 'query']" in text
+        for secret in ("settlement", "lawyer@example.com", "Legal"):
+            assert secret not in text
+        assert "date_from" not in text
+
+    def test_allowlisted_names_still_withhold_unvalidated_values(self, caplog):
+        """A parameter *name* being allowlisted does not make its *value*
+        safe: tool arguments come from an LLM before any validation, so a
+        free-string field like ``body_format`` or ``date_from`` can carry
+        arbitrary text. Only values that pass the field's own check are
+        logged; anything else is withheld by name."""
+        import logging
+
+        logger = logging.getLogger("test-tool-log-values")
+        private_text = "Confidential acquisition: Example Corp"
+        with caplog.at_level(logging.INFO, logger="test-tool-log-values"):
+            log_tool_call(
+                logger,
+                "probe",
+                {
+                    "body_format": private_text,
+                    "mode": private_text,
+                    "style": private_text,
+                    "filter_type": private_text,
+                    "date_from": private_text,
+                    "date_to": "2024-13-45",
+                    "limit": private_text,
+                    "has_attachments": private_text,
+                },
+            )
+        assert private_text not in caplog.text
+        assert "2024-13-45" not in caplog.text
+        for name in (
+            "body_format",
+            "date_from",
+            "date_to",
+            "filter_type",
+            "has_attachments",
+            "limit",
+            "mode",
+            "style",
+        ):
+            assert f"'{name}'" in caplog.text  # listed as withheld
+
+    def test_valid_metadata_values_are_logged(self, caplog):
+        import logging
+
+        logger = logging.getLogger("test-tool-log-valid")
+        with caplog.at_level(logging.INFO, logger="test-tool-log-valid"):
+            log_tool_call(
+                logger,
+                "probe",
+                {
+                    "mode": "keyword",
+                    "style": "action-items",
+                    "body_format": "text",
+                    "filter_type": "all",
+                    "date_from": "2024-01-31",
+                    "date_to": "2024-02-01T12:00:00+00:00",
+                    "limit": 5,
+                    "include_scores": True,
+                },
+            )
+        text = caplog.text
+        for fragment in (
+            "'mode': 'keyword'",
+            "'style': 'action-items'",
+            "'body_format': 'text'",
+            "'filter_type': 'all'",
+            "'date_from': '2024-01-31'",
+            "'date_to': '2024-02-01T12:00:00+00:00'",
+            "'limit': 5",
+            "'include_scores': True",
+            "withheld=[]",
+        ):
+            assert fragment in text

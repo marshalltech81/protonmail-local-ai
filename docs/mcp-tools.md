@@ -194,7 +194,11 @@ commands. The intelligence tools mitigate this two ways:
    `<untrusted_email>…</untrusted_email>` tags in the user message. The
    user's task (question, summarization instruction, extraction schema)
    is placed outside those tags so the model has a clear lexical
-   boundary between trusted task and untrusted evidence.
+   boundary between trusted task and untrusted evidence. Every field
+   inside a block (subject, participants, body) is attacker-controlled,
+   so any delimiter-shaped text in it (`</untrusted_email>` in any case
+   or spacing) is escaped to `&lt;/untrusted_email>` — email content
+   cannot close the untrusted region early and smuggle text outside it.
 
 These are defense-in-depth measures — they do not guarantee immunity.
 Operators running `INFERENCE_MODE=anthropic` should still treat retrieved email

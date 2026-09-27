@@ -92,33 +92,11 @@ omission.
 4. ~~**Batch failure isolation.**~~ Done 2026-09-26.
 5. ~~**Outage circuit breaker.**~~ Done 2026-09-26.
 6. ~~**`requeue-dead` command.**~~ Done 2026-09-26.
-7. **Robust untrusted-content serialization.** Escape/strip
-   `</untrusted_email>` (and equivalent delimiters) from interpolated
-   email content — the fence is currently spoofable by a literal
-   closing tag. Add targeted injection fixtures now; the full
-   adversarial suite lands with the synthetic mailbox in Phase 3.
-   Framing: this is robust serialization of untrusted evidence, not a
-   "prompt injection solution" — the stronger property is
-   architectural (read-only MCP, email is data, no consequential
-   tools reachable from untrusted content).
-8. **Logging privacy.** Stop logging query/question text at INFO in
-   search and intelligence handlers; extend to subjects, addresses,
-   filenames, prompts, and evidence text. Operational logs default to
-   metadata shape (`tool= duration_ms= result_count= mode=`) unless
-   debugging is explicitly enabled. Also stop persisting raw
-   `repr(e)` into `indexing_jobs.last_error` for parse-stage errors
-   (inconsistent with the embed-error scrubbing).
-9. **Fix `MCP_PORT` wiring.** The server binds `MCP_PORT` in-container
-   but compose maps host `${MCP_PORT}` to hardcoded container 3000 —
-   a non-default value makes the service host-unreachable while
-   healthchecks stay green. Propagate or remove the knob.
-10. **Pin Bridge source by commit SHA** (or `git verify-tag` with a
-    hardcoded fingerprint). The mutable release tag is the one
-    unpinned supply-chain input.
-11. Small carryover: `HEALTH_MAX_AGE_SECONDS` default bump for slow
-    embedders; `extract_from_emails` must strip markdown code fences
-    before `json.loads` (fenced output currently skips the thread
-    silently).
+7. ~~**Robust untrusted-content serialization.**~~ Done 2026-09-27.
+8. ~~**Logging privacy.**~~ Done 2026-09-27.
+9. ~~**Fix `MCP_PORT` wiring.**~~ Done 2026-09-27.
+10. ~~**Pin Bridge source by commit SHA.**~~ Done 2026-09-27.
+11. ~~Small carryover (health threshold, fenced JSON).~~ Done 2026-09-27.
 
 ### Phase 1 — Truthful MCP contract
 
@@ -442,6 +420,42 @@ do not ship persisted claims without them.
    during its Phase 3 experimental period.
 
 ## Recently Completed
+
+### 2026-09-27 — Phase 0 hardening (items 7–11); Phase 0 complete
+
+- **Untrusted-content serialization (7).** One helper,
+  `_untrusted_email_block`, builds every `<untrusted_email>` block and
+  escapes any delimiter-shaped text in the content (case- and
+  spacing-insensitive), so a hostile subject, participant, or body can
+  no longer close the fence early. Injection fixtures push a hostile
+  thread through all three intelligence tools and assert exactly one
+  real closing tag with the injected text inside it.
+- **Logging privacy (8).** All ten mcp-server tool handlers log through
+  `log_tool_call`: content-free parameters plus the *names* of withheld
+  ones (query, addresses, folders, IDs, schema never reach logs); an
+  allowlisted field's value is logged only if it passes that field's
+  check (enum member, integer, boolean, ISO date), since LLM-supplied
+  arguments arrive unvalidated (review round 1). The
+  find_contact error no longer echoes `from_name`. Indexer stage errors
+  persist `Type: message` via `_stage_error`, never `repr()` — a
+  `UnicodeDecodeError` repr embeds the decoded email bytes.
+- **`MCP_PORT` (9).** Compose maps `${MCP_PORT}` to `${MCP_PORT}`; a
+  non-default port previously pointed at a container port nothing
+  listened on.
+- **Bridge commit pin (10).** Proton's release tags are lightweight, so
+  there is no tag signature to verify; `BRIDGE_COMMIT` pins the commit
+  and the clone step fails unless `BRIDGE_VERSION` resolves to it. The
+  weekly bump workflow resolves and moves the commit with the version
+  across all three pin sites; `validate-env.sh` checks its format.
+  `bridge-patch-drift.sh` verifies the same pin right after its clone —
+  it runs before the image build in `make bridge-upgrade-check`, and its
+  patch helper compiles and `go test`s upstream code on the host
+  (review round 1).
+- **Carryovers (11).** Extraction unwraps ```json-fenced model output
+  instead of silently skipping the thread. Indexer health threshold
+  90 s → 600 s, and the heartbeat is refreshed before each health probe
+  and each isolated message, bounding the silent window to one embed
+  request's retry cycle (~6.5 min).
 
 ### 2026-09-26 — Failure taxonomy, isolation, outage breaker, requeue-dead (Phase 0 items 3–6)
 

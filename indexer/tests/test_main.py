@@ -2680,3 +2680,45 @@ class TestRequestLimitIsNotSourceFailure:
         assert row["status"] == "dead"
         assert row["last_error_class"] == "permanent_source_failure"
         assert not db.get_chunk_ids_for_message("limits@example.com")
+
+
+def test_probe_refreshes_heartbeat_before_its_own_retry_cycle(monkeypatch):
+    """The failure that triggers a probe may have spent a full retry
+    cycle without a heartbeat; the probe must not stack a second silent
+    cycle on top, or a hung embedder trips the container healthcheck."""
+    touches: list[bool] = []
+    embedder = make_mock_embedder(_UNIT_VECTOR)
+
+    def touch():
+        touches.append(embedder.embed.called)
+
+    monkeypatch.setattr(main, "touch_health_file", touch)
+
+    assert main._probe_embedder(embedder) is None
+    assert touches == [False], "heartbeat must be refreshed before the probe request"
+
+
+def test_stage_errors_never_persist_the_decoded_payload(tmp_path, monkeypatch):
+    """``repr()`` of a UnicodeDecodeError embeds the entire byte buffer
+    it was decoding — email content — which would land in
+    ``indexing_jobs.last_error`` and operator logs. The persisted error
+    keeps the type and reason, not the payload."""
+    dest = tmp_path / "INBOX" / "cur" / "msg.eml"
+    _write_eml(dest, "decode@example.com")
+    db = Database(tmp_path / "mail.db")
+    queue = _make_queue(db)
+    queue.enqueue(str(dest), REASON_INITIAL_SCAN)
+
+    def boom(*_a, **_kw):
+        raise UnicodeDecodeError("utf-8", b"PRIVATE-BODY-TEXT\xff", 17, 18, "invalid start byte")
+
+    monkeypatch.setattr(main, "parse_email", boom)
+    main.drain_queue(queue, db, make_mock_embedder(_UNIT_VECTOR), Threader(db), max_batch=1)
+
+    row = db._conn.execute(
+        "SELECT last_stage, last_error FROM indexing_jobs WHERE filepath = ?", (str(dest),)
+    ).fetchone()
+    assert row["last_stage"] == "parse"
+    assert "UnicodeDecodeError" in row["last_error"]
+    assert "invalid start byte" in row["last_error"]
+    assert "PRIVATE-BODY-TEXT" not in row["last_error"]

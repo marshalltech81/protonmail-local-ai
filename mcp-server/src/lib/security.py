@@ -2,8 +2,11 @@
 Security helpers for redaction and safe error formatting.
 """
 
+import logging
 import re
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable, Mapping
+from datetime import datetime
+from typing import Any
 
 _COMMON_SECRET_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     # No prefix group: replace the whole match outright.
@@ -57,3 +60,68 @@ def safe_provider_exception_text(
     if isinstance(status, int):
         return f"{type(error).__name__}: status={status}"
     return safe_exception_text(error, secrets)
+
+
+def _one_of(*allowed: str) -> Callable[[Any], bool]:
+    return lambda v: isinstance(v, str) and v in allowed
+
+
+def _is_int(v: Any) -> bool:
+    return isinstance(v, int) and not isinstance(v, bool)
+
+
+def _is_bool(v: Any) -> bool:
+    return isinstance(v, bool)
+
+
+def _is_iso_date(v: Any) -> bool:
+    if not isinstance(v, str) or len(v) > 40:
+        return False
+    try:
+        datetime.fromisoformat(v)
+    except ValueError:
+        return False
+    return True
+
+
+# Tool parameters whose values can be logged — but only when the value
+# passes that field's own check. Arguments arrive from an LLM before any
+# validation, so a name alone proves nothing: ``body_format`` or
+# ``date_from`` can carry arbitrary text. Enum sets mirror what each tool
+# accepts (search modes: ``tools/search._VALID_SEARCH_MODES``; summary
+# styles: ``summarize_thread``). Everything else a tool receives — query
+# / question text, addresses, names, folders, message and thread IDs
+# (which embed sender domains), MIME types, extraction schemas — can
+# quote exactly what the user wants private and is never logged.
+_LOGGABLE_TOOL_PARAMS: dict[str, Callable[[Any], bool]] = {
+    "mode": _one_of("hybrid", "semantic", "keyword"),
+    "style": _one_of("brief", "detailed", "action-items", "timeline"),
+    "body_format": _one_of("text", "html"),
+    "filter_type": _one_of("all", "unread", "flagged"),
+    "limit": _is_int,
+    "max_threads": _is_int,
+    "offset": _is_int,
+    "has_attachments": _is_bool,
+    "include_scores": _is_bool,
+    "extracted_only": _is_bool,
+    "include_attachments_metadata": _is_bool,
+    "date_from": _is_iso_date,
+    "date_to": _is_iso_date,
+}
+
+
+def log_tool_call(logger: logging.Logger, tool: str, params: Mapping[str, Any]) -> None:
+    """Log a tool invocation as metadata only.
+
+    Logs supplied parameters whose values pass their field's validator,
+    and the *names* of everything else, so an operator can see which
+    filters a call used without the log recording what was searched for.
+    """
+    provided = {k: v for k, v in params.items() if v is not None}
+    loggable = {
+        k: v
+        for k, v in provided.items()
+        if k in _LOGGABLE_TOOL_PARAMS and _LOGGABLE_TOOL_PARAMS[k](v)
+    }
+    withheld = sorted(k for k in provided if k not in loggable)
+    logger.info("tool=%s %s withheld=%s", tool, loggable, withheld)

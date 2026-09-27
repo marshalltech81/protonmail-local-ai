@@ -381,8 +381,18 @@ mean a schema rollback plus a full reindex from Maildir.
 
 ## Updating Bridge
 
-When you bump `BRIDGE_VERSION` in `.env`, validate the upstream patch points and
-the rebuilt image before restarting the service:
+When you bump `BRIDGE_VERSION` in `.env`, also set `BRIDGE_COMMIT` to the commit
+that release tag points at. Proton's release tags are lightweight (unsigned), so
+the build pins the exact commit and refuses a tag that resolves to anything
+else — a re-pointed upstream tag cannot change what gets compiled:
+
+```bash
+git ls-remote https://github.com/ProtonMail/proton-bridge.git 'refs/tags/v3.28.0*'
+# use the ^{} line when present (annotated tag); otherwise the only line
+```
+
+Then validate the upstream patch points and the rebuilt image before restarting
+the service:
 
 ```bash
 make bridge-upgrade-check
