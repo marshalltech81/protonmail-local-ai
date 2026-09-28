@@ -2647,3 +2647,39 @@ class TestUpdateFilepathMovesQueueRow:
         assert db.queue_get_status("/m/cur/b:2,RS") == "dead"
         assert queue.requeue_dead() == 1
         assert db.queue_get_status("/m/cur/b:2,RS") == "queued"
+
+
+class TestInterruptedInitialSchema:
+    def test_restart_after_a_failure_mid_schema_initializes_cleanly(self, tmp_path, monkeypatch):
+        """Regression (#207): the initial DDL committed statement by
+        statement and the version stamp separately, so a failure part-way
+        (disk full, a virtual-table error, a kill) left half the tables
+        with no version row, and every later start failed with "table
+        threads already exists" until the volume was wiped."""
+        from src.database import SCHEMA_VERSION
+
+        real_apply = Database._apply_initial_schema
+
+        def failing_apply(self, cur):
+            def deny_one_index(action, arg1, *_):
+                if action == sqlite3.SQLITE_CREATE_INDEX and arg1 == "idx_threads_fts_rowid":
+                    return sqlite3.SQLITE_DENY
+                return sqlite3.SQLITE_OK
+
+            self._conn.set_authorizer(deny_one_index)
+            try:
+                real_apply(self, cur)
+            finally:
+                self._conn.set_authorizer(None)
+
+        monkeypatch.setattr(Database, "_apply_initial_schema", failing_apply)
+        with pytest.raises(sqlite3.DatabaseError):
+            Database(tmp_path / "mail.db")
+        monkeypatch.setattr(Database, "_apply_initial_schema", real_apply)
+
+        db = Database(tmp_path / "mail.db")
+
+        assert db._conn.execute("SELECT version FROM schema_version").fetchone()[0] == (
+            SCHEMA_VERSION
+        )
+        assert db.count_total_messages() == 0

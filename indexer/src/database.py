@@ -256,8 +256,6 @@ class Database:
         row = cur.execute("SELECT version FROM schema_version").fetchone()
         if row is None:
             self._apply_initial_schema(cur)
-            cur.execute("INSERT INTO schema_version VALUES (?)", (SCHEMA_VERSION,))
-            self._conn.commit()
             log.info(f"Database initialized at {self.path} (schema v{SCHEMA_VERSION})")
             return
 
@@ -325,7 +323,24 @@ class Database:
         dead-letter queue for the parse → embed → upsert pipeline), and
         ``ingestion_state`` (last sync + indexer liveness for status).
         """
+        # One transaction for every table and the version stamp, so an
+        # interruption part-way leaves an empty database that the next
+        # start initializes again, never half a schema with no version
+        # row. ``executescript`` commits anything pending and adds no
+        # transaction of its own, so the script opens one with BEGIN and
+        # leaves it open for the stamp.
+        try:
+            self._run_initial_schema_script(cur)
+            cur.execute("INSERT INTO schema_version VALUES (?)", (SCHEMA_VERSION,))
+            self._conn.commit()
+        except BaseException:
+            if self._conn.in_transaction:
+                self._conn.rollback()
+            raise
+
+    def _run_initial_schema_script(self, cur: sqlite3.Cursor) -> None:
         cur.executescript(f"""
+            BEGIN IMMEDIATE;
             -- Thread-level coarse retrieval
             CREATE TABLE threads (
                 thread_id       TEXT PRIMARY KEY,
@@ -559,7 +574,6 @@ class Database:
                 indexer_seen_at    TEXT NOT NULL
             );
         """)
-        self._conn.commit()
 
     # -------------------------------------------------------------------------
     # Write operations
