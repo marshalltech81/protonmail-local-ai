@@ -20,7 +20,7 @@ dependencies = [
     # is the upstream HuggingFace tokenizer for ``Qwen/Qwen3-Embedding-8B``
     # (the schema-default embedding model). If the embed model is
     # changed, the bundled tokenizer file must be updated to match.
-    "tokenizers==0.23.1",
+    "tokenizers==0.23.2",
     # Attachment text extraction. Each library is required
     # by exactly one extractor module under src/extractors/; lazy import
     # there means a missing one downgrades to ``unsupported`` rather
