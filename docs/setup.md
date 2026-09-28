@@ -398,17 +398,30 @@ make update
 ```
 
 `make update` runs `make bridge-upgrade-check` first and stops if it fails.
-If the check fails, do not work around it:
+If the check fails, do not work around it. A commit mismatch is usually a
+pin mistake to correct (see below). For patch drift or a smoke failure, stay
+on the working release — and because `.env` already holds the candidate
+`BRIDGE_VERSION` and `BRIDGE_COMMIT` by then, that means putting both back:
+
+1. Restore the previous `BRIDGE_VERSION` and `BRIDGE_COMMIT` in `.env`.
+2. If the failure came from the smoke step (it runs after the patch check
+   passes), it has already rebuilt the local `protonmail-local-ai/bridge`
+   image from the candidate. The running container is unaffected, but the
+   next `make up` or container recreation would use the rejected image, so
+   rebuild the known-good one: `docker compose build protonmail-bridge`.
+   Do not restart Bridge until that build finishes.
+
+By failure:
 
 - **Patch drift** (`make bridge-patch-check`): the upstream source no longer
   matches what `bridge/patch-source.sh` expects — usually Proton moved or
-  reworded the code around a patch point. Stay on the current
-  `BRIDGE_VERSION` and wait for a repo update that re-targets the patches;
+  reworded the code around a patch point. Stay on the previous release
+  and wait for a repo update that re-targets the patches;
   do not hand-edit the upstream source or skip the check.
 - **Smoke failure** (`make bridge-smoke`): the patched image built but does
   not start as expected (for example, the `autoUpdate="false"` vault marker
-  is missing from its log). Treat it the same way — stay on the current
-  version.
+  is missing from its log). Treat it the same way — stay on the previous
+  release.
 - **Commit mismatch**: `BRIDGE_VERSION` does not resolve to
   `BRIDGE_COMMIT`. Usually this is local config: `BRIDGE_VERSION` was
   bumped without `BRIDGE_COMMIT` (an unset `BRIDGE_COMMIT` falls back to

@@ -12,7 +12,7 @@ host-side server you install yourself.
 - **Semantic search** — find emails by meaning, not just keywords
 - **Hybrid search** — keyword (FTS5) and vector lanes merged with reciprocal rank fusion
 - **Thread-aware** — retrieves whole conversations, with per-message chunks for precise passages
-- **Exact enumeration** — list every message matching sender, recipient, folder, or date filters, with a total count
+- **Exact enumeration** — list every indexed message matching sender, recipient, folder, or date filters, with a total count (complete for the mailbox once indexing is current — see `get_mailbox_status`)
 - **Q&A / RAG** — ask natural language questions, get answers grounded in your email
 - **Structured extraction** — pull invoices, dates, action items into structured data
 - **MCP interface** — works directly inside Claude Desktop
