@@ -254,7 +254,7 @@ make up
   (validation requires the files to exist with `600` permissions even when the
   matching layer is `none`, so the docker-compose `secrets:` references
   resolve cleanly)
-- numeric or enum settings such as `SYNC_INTERVAL`, `MCP_PORT`, `MCP_READ_ONLY`, or `INFERENCE_MODE` are invalid
+- numeric or enum settings such as `SYNC_INTERVAL`, `MCP_PORT`, `MCP_TRANSPORT`, or `INFERENCE_MODE` are invalid
 
 Verify everything is running:
 
@@ -277,11 +277,9 @@ a small `curl` against `$EMBED_BASE_URL`, `$INFERENCE_BASE_URL`, or
 
 The initial index scan may take several minutes depending on mailbox size.
 
-The default MCP deployment is read-only:
+The MCP server is read-only:
 - search, retrieval, and intelligence tools use the local SQLite index
-- mail-changing action tools are not registered until a safe write path is explicitly enabled
-- the latent live Bridge transport now fails closed unless a future write path
-  is configured with explicit cert-pinned TLS
+- there are no mail-changing tools, and mcp-server has no connection to Bridge
 
 On first run, Bridge must download and decrypt your full mailbox from Proton's
 servers before mbsync can pull anything. This can take a long time for large

@@ -1,8 +1,8 @@
 """
 MCP Server entry point.
 Exposes local mailbox search, retrieval, intelligence, and system tools over
-MCP transports. Mail-changing action tools are disabled by default until a safe
-opt-in write backend exists.
+MCP transports. The server is read-only: it has no mail-changing tools and no
+connection to Bridge.
 """
 
 import contextlib
@@ -99,18 +99,6 @@ class _SilenceClientDisconnect(logging.Filter):
 _disconnect_filter = _SilenceClientDisconnect()
 for _logger_name in ("mcp.server.streamable_http", "mcp.server.lowlevel.server"):
     logging.getLogger(_logger_name).addFilter(_disconnect_filter)
-
-
-def _env_bool(name: str, default: bool) -> bool:
-    raw = os.environ.get(name)
-    if raw is None:
-        return default
-    normalized = raw.strip().lower()
-    if normalized in {"1", "true", "yes", "on"}:
-        return True
-    if normalized in {"0", "false", "no", "off"}:
-        return False
-    raise ValueError(f"{name} must be a boolean value")
 
 
 _INFERENCE_MODES = frozenset({"anthropic", "openai", "none"})
@@ -276,7 +264,6 @@ RERANK_TOP_N = _int_env("RERANK_TOP_N", 10, minimum=1)
 RERANK_TIMEOUT_SECS = _float_env("RERANK_TIMEOUT_SECS", DEFAULT_RERANK_TIMEOUT_SECS, minimum=1.0)
 
 MCP_PORT = int(os.environ.get("MCP_PORT", "3000"))
-MCP_READ_ONLY = _env_bool("MCP_READ_ONLY", True)
 MCP_TRANSPORT = os.environ.get("MCP_TRANSPORT", "sse")
 
 
@@ -533,14 +520,7 @@ def main():
         )
     else:
         log.info("Intelligence tools not registered (INFERENCE_MODE=none).")
-    if MCP_READ_ONLY:
-        log.info("MCP read-only mode enabled; action tools are not registered.")
-    else:
-        log.warning(
-            "MCP_READ_ONLY=false, but mail-changing tools are still not registered because "
-            "the default deployment has no safe write backend for mcp-server."
-        )
-    register_system_tools(server, db, bridge_enabled=False)
+    register_system_tools(server, db)
 
     transport = _normalize_transport(MCP_TRANSPORT)
 

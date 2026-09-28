@@ -6,9 +6,6 @@ groups, which is hard to exercise in unit tests without spinning up the
 SSE transport. The two pieces that DO have unit-testable behavior live
 here:
 
-- ``_env_bool`` — parses ``MCP_READ_ONLY`` and similar; a wrong-value
-  bug here would silently flip the deployment from read-only to
-  read-write.
 - ``_read_secret`` — prefers Docker secret files over env vars; a
   silent fallthrough to env would mean an attacker with ``docker
   inspect`` access could read the Anthropic key.
@@ -23,7 +20,6 @@ import logging
 import pytest
 from src.main import (
     _INFERENCE_MODES,
-    _env_bool,
     _float_env,
     _normalize_mode,
     _normalize_transport,
@@ -32,34 +28,6 @@ from src.main import (
     _require_env,
     _run_server,
 )
-
-
-class TestEnvBool:
-    def test_returns_default_when_missing(self, monkeypatch):
-        monkeypatch.delenv("FAKE_BOOL_FLAG", raising=False)
-        assert _env_bool("FAKE_BOOL_FLAG", default=True) is True
-        assert _env_bool("FAKE_BOOL_FLAG", default=False) is False
-
-    def test_truthy_strings_parse_as_true(self, monkeypatch):
-        for raw in ("1", "true", "True", "TRUE", "yes", "YES", "on", "ON"):
-            monkeypatch.setenv("FAKE_BOOL_FLAG", raw)
-            assert _env_bool("FAKE_BOOL_FLAG", default=False) is True, raw
-
-    def test_falsy_strings_parse_as_false(self, monkeypatch):
-        for raw in ("0", "false", "False", "no", "NO", "off"):
-            monkeypatch.setenv("FAKE_BOOL_FLAG", raw)
-            assert _env_bool("FAKE_BOOL_FLAG", default=True) is False, raw
-
-    def test_unrecognized_value_raises(self, monkeypatch):
-        # A malformed safety flag should fail startup rather than silently
-        # flipping the deployment posture.
-        monkeypatch.setenv("FAKE_BOOL_FLAG", "maybe")
-        with pytest.raises(ValueError, match="FAKE_BOOL_FLAG"):
-            _env_bool("FAKE_BOOL_FLAG", default=True)
-
-    def test_whitespace_around_value_is_tolerated(self, monkeypatch):
-        monkeypatch.setenv("FAKE_BOOL_FLAG", "  true  ")
-        assert _env_bool("FAKE_BOOL_FLAG", default=False) is True
 
 
 class TestReadSecret:

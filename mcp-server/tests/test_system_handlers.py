@@ -15,8 +15,8 @@ import asyncio
 from src.tools.system import register_system_tools
 
 
-def _handlers(fake_server, db, *, bridge_enabled=False):
-    register_system_tools(fake_server, db, bridge_enabled=bridge_enabled)
+def _handlers(fake_server, db):
+    register_system_tools(fake_server, db)
     return fake_server.tools
 
 
@@ -55,49 +55,11 @@ class TestGetIndexStatus:
 
 class TestGetSyncStatus:
     def test_local_mode_returns_local_only_message(self, fake_server, seeded_db):
-        handler = _handlers(fake_server, seeded_db, bridge_enabled=False)["get_sync_status"]
+        handler = _handlers(fake_server, seeded_db)["get_sync_status"]
         out = asyncio.run(handler())
         text = _text(out)
         assert "Sync Status" in text
         assert "local index only" in text
-        # Bridge reachability check must not run in default deployment —
-        # mcp-server is documented to never speak directly to Bridge.
+        # mcp-server never speaks directly to Bridge, so no reachability
+        # probe result may appear.
         assert "Bridge IMAP" not in text
-
-    def test_bridge_enabled_path_runs_reachability_probe(self, fake_server, seeded_db, monkeypatch):
-        # Force socket.create_connection to fail so the test does not
-        # depend on whether anything is listening on port 1143 locally.
-        import socket as _socket
-
-        def fake_create_connection(*_args, **_kwargs):
-            raise OSError("test: connection refused")
-
-        monkeypatch.setattr(_socket, "create_connection", fake_create_connection)
-
-        handler = _handlers(fake_server, seeded_db, bridge_enabled=True)["get_sync_status"]
-        out = asyncio.run(handler())
-        text = _text(out)
-        assert "Bridge IMAP" in text
-        assert "unreachable" in text
-        assert "Troubleshooting" in text
-
-    def test_bridge_enabled_with_reachable_bridge_reports_ok(
-        self, fake_server, seeded_db, monkeypatch
-    ):
-        import socket as _socket
-
-        class FakeSock:
-            def close(self):
-                return None
-
-        def fake_create_connection(*_args, **_kwargs):
-            return FakeSock()
-
-        monkeypatch.setattr(_socket, "create_connection", fake_create_connection)
-
-        handler = _handlers(fake_server, seeded_db, bridge_enabled=True)["get_sync_status"]
-        out = asyncio.run(handler())
-        text = _text(out)
-        assert "reachable" in text
-        # Troubleshooting hint must be omitted when the probe succeeds.
-        assert "Troubleshooting" not in text

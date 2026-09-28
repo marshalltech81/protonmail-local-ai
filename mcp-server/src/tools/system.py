@@ -1,6 +1,6 @@
 """
-System tools — Group 5.
-Index status, sync health, and folder information.
+System tools — Group 4.
+Index status and sync mode.
 Claude should call get_index_status before making claims about email content.
 """
 
@@ -12,7 +12,7 @@ from mcp.types import TextContent
 log = logging.getLogger("mcp.tools.system")
 
 
-def register_system_tools(server, db, bridge_enabled: bool = False):
+def register_system_tools(server, db):
     @server.tool()
     async def get_index_status() -> list[TextContent]:
         """
@@ -48,43 +48,21 @@ def register_system_tools(server, db, bridge_enabled: bool = False):
     @server.tool()
     async def get_sync_status() -> list[TextContent]:
         """
-        Check whether ProtonBridge and mbsync are operating correctly.
+        Report how this server sees mail sync.
+
+        mcp-server serves the local SQLite index only and never talks to
+        ProtonBridge; mbsync owns Bridge access and Maildir refresh.
 
         Returns:
-            Connection status for Bridge IMAP and sync daemon health.
+            The sync mode and which service is responsible for syncing.
         """
         log.info("tool=get_sync_status")
-        if not bridge_enabled:
-            lines = [
-                "=== Sync Status ===",
-                "Mode: local index only",
-                "Bridge reachability is not checked by mcp-server in the default deployment.",
-                "mbsync remains responsible for talking to Bridge and refreshing Maildir.",
-            ]
-            return [TextContent(type="text", text="\n".join(lines))]
-
-        import socket
-        from contextlib import closing
-
-        bridge_host = "protonmail-bridge"
-        bridge_port = 1143
-        bridge_ok = False
-
-        try:
-            with closing(socket.create_connection((bridge_host, bridge_port), timeout=3)):
-                bridge_ok = True
-        except OSError as e:
-            log.debug("Bridge reachability check failed: %s", e)
-
         lines = [
             "=== Sync Status ===",
-            f"Bridge IMAP ({bridge_host}:{bridge_port}): "
-            f"{'✓ reachable' if bridge_ok else '✗ unreachable'}",
+            "Mode: local index only",
+            "Bridge reachability is not checked by mcp-server.",
+            "mbsync remains responsible for talking to Bridge and refreshing Maildir.",
         ]
-
-        if not bridge_ok:
-            lines.append("\nTroubleshooting: run 'make logs' to check Bridge container.")
-
         return [TextContent(type="text", text="\n".join(lines))]
 
 

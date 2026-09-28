@@ -26,7 +26,7 @@ Core behavior:
 - Bridge is the only path to Proton
 - mbsync pulls mail into Maildir
 - indexer parses and stores thread-level data in SQLite
-- MCP exposes search, retrieval, intelligence, and action tools over SSE and/or
+- MCP exposes read-only search, retrieval, intelligence, and status tools over SSE and/or
   Streamable HTTP depending on `MCP_TRANSPORT`
 - whether retrieved email content leaves the host depends on which
   embedder + inference endpoint the operator wires up
@@ -527,13 +527,13 @@ Purpose:
 
 - exposes mailbox tools over SSE and/or Streamable HTTP
 - reads SQLite for retrieval/search
-- performs mail actions when enabled
 
 Notes:
 
 - keep FastMCP-based implementation unless there is a strong reason to change it
-- preserve read-only posture as the default design direction
-- do not broaden direct access to Bridge
+- keep the server read-only: do not add mail-changing tools (send, move,
+  flag, draft) without explicit owner approval
+- do not give it any access to Bridge
 - keep `MCP_TRANSPORT=sse` as the default unless the owner asks to change the
   default client posture; use `dual` only when a client needs both SSE and
   Streamable HTTP on the same localhost-bound port.

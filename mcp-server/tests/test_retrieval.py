@@ -63,8 +63,8 @@ class TestGetThread:
         assert "INBOX" in text
         assert "alice@example.com" in text
         assert "please find the invoice attached" in text
-        # Local-only mode banner must always appear so the LLM does not
-        # claim live Bridge retrieval happened.
+        # Local-only banner must always appear so the LLM does not claim
+        # live Bridge retrieval happened.
         assert "local SQLite index only" in text
 
     def test_unknown_thread_returns_not_found_sentinel(self, fake_server, seeded_db):

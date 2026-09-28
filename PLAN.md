@@ -120,10 +120,8 @@ guessing about semantics, completeness, or identity.
 5. **Bearer-token auth on the MCP endpoint** (promoted from the old
    "evaluate" backlog item). Localhost topology alone is not a trust
    boundary against other local processes.
-6. **Delete the dead action/IMAP surface.** `actions.py` / `imap.py`
-   (~540 lines) are never registered under any configuration; remove
-   them and re-home mcp-tools.md Group 4 as a clearly-labeled design
-   appendix (see Resolved Decisions).
+6. ~~**Delete the dead action/IMAP surface.**~~ Done 2026-09-28 (see
+   Recently Completed).
 7. **Source integrity exposure.** Formalize
    `source_id / sha256 / source_type / original locator / ingested_at
    / size` in retrieval and evidence responses — `indexed_files`
@@ -312,11 +310,11 @@ can be revisited with an explicit owner decision.
   `mark_read`, `flag_message`, `create_draft`, `reply_to_thread`).
   Read-only is part of the trust model, not a temporary deficiency:
   "it can understand your history, but it cannot send or delete
-  anything." The never-registered code is deleted in Phase 1.
+  anything." The never-registered code was deleted 2026-09-28.
 - **Live-IMAP retrieval fallback for mcp-server.** A stale index
   answers "the index is not current" — it never silently switches
-  data sources. This also removes the last consumer argument for
-  `imap.py`.
+  data sources. (This was the last consumer argument for the deleted
+  `imap.py`.)
 - **Per-session inference-mode toggle.** Complexity with no pull;
   per-deployment is enough.
 - **Guarded live Bridge integration CI.** Requires a dedicated paid
@@ -423,8 +421,8 @@ do not ship persisted claims without them.
 
 1. **Read-only policy surface (resolved 2026-09-26):** the MCP server
    is fully read-only — no action tools, no SMTP path, no draft/move/
-   flag operations. The unregistered action/IMAP code is deleted in
-   Phase 1 rather than maintained as hypothetical capability.
+   flag operations. The unregistered action/IMAP code was deleted
+   (2026-09-28) rather than maintained as hypothetical capability.
 2. **Live Bridge integration lane (resolved 2026-09-26):** not doing
    (see Not doing).
 
@@ -436,6 +434,21 @@ do not ship persisted claims without them.
    during its Phase 3 experimental period.
 
 ## Recently Completed
+
+### 2026-09-28 — Dead action/IMAP surface deleted (Phase 1 item 6)
+
+Removed the never-registered mail-changing tools (`tools/actions.py`),
+the live Bridge IMAP/SMTP client (`lib/imap.py`), their tests and
+`FakeIMAP` fixture, and the `aioimaplib` dependency. `MCP_READ_ONLY`
+is gone from `main.py`, compose, `.env.example`, and
+`validate-env.sh`: it only chose a log line, and a flag that suggests
+the server can be made writable contradicts the read-only decision.
+`get_sync_status` lost its never-enabled Bridge reachability probe
+(`bridge_enabled`); mcp-server is not on `bridge-net`, so the probe
+could never have worked. mcp-tools.md moves the action tools to a
+design-only appendix and renumbers System to Group 4; README, setup,
+architecture, and AGENTS.md now describe the server as read-only
+rather than "read-only by default".
 
 ### 2026-09-28 — Message-first-class retrieval (Phase 1 item 3)
 
