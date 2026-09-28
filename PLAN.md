@@ -452,6 +452,24 @@ do not ship persisted claims without them.
 
 ## Recently Completed
 
+### 2026-09-28 — Bounded indexer work on hostile input (#202, #211, #216, #218, #221)
+
+Five Codex findings where one crafted message could stall the single
+indexing worker or silently blank later bodies. The chunker's sentence
+regex is linear on long punctuation runs; Subject and raw-From
+encoded-words decode in one linear pass (plain text next to an
+encoded-word no longer gains doubled spaces); each HTML body and
+attachment gets a fresh `HTML2Text`, since a shared one carried an
+unclosed `<style>` into later documents; XLSX extraction stops at
+20M visited cells, padding included; PDF OCR lowers its DPI so the
+largest page fits 10M pixels (failing closed when page sizes are
+unreadable), and `INDEXER_OCR_TIMEOUT_SECONDS` also bounds the Poppler
+render. Remaining gap: pdf2image does not pass that timeout to its
+`pdfinfo` page-count call. Separately, a job that hangs or kills the
+worker is re-claimed without spending an attempt, so it never reaches
+`dead`; that fix is a queue-semantics change of its own. No schema
+change; `make baseline` unchanged.
+
 ### 2026-09-28 — Retrieval regression baseline (Phase 1.5)
 
 A 20-thread, 37-message synthetic mailbox
