@@ -35,7 +35,7 @@ class StageTimings:
     function returned early) report ``0.0`` rather than ``None`` so the
     aggregator math stays branch-free. Callers that want to distinguish
     "ran but was fast" from "did not run" should also look at the
-    ``stage`` returned from ``_index_one_file``.
+    failing stage recorded on the queue row (``last_stage``).
 
     ``chunk_ms`` covers the body chunker plus attachment extraction
     (PDF parse, OCR, etc.). It only fires for messages with body text

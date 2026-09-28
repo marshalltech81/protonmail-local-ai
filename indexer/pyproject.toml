@@ -5,9 +5,7 @@ requires-python = ">=3.14"
 dependencies = [
     "html2text==2025.4.15",
     "sqlite-vec==0.1.9",
-    "httpx==0.28.1",
     "watchdog==6.0.0",
-    "python-dotenv==1.2.2",
     "tenacity==9.1.4",
     # Official OpenAI SDK for the operator-supplied OpenAI-compatible
     # ``/v1/embeddings`` endpoint. Operator-supplied compat servers
@@ -23,7 +21,7 @@ dependencies = [
     # (the schema-default embedding model). If the embed model is
     # changed, the bundled tokenizer file must be updated to match.
     "tokenizers==0.23.1",
-    # Attachment text extraction (schema v10). Each library is required
+    # Attachment text extraction. Each library is required
     # by exactly one extractor module under src/extractors/; lazy import
     # there means a missing one downgrades to ``unsupported`` rather
     # than crashing the indexer.
@@ -38,6 +36,9 @@ dependencies = [
 
 [dependency-groups]
 dev = [
+    # httpx is only imported by tests (transport stubs for the openai
+    # SDK); the runtime gets it transitively via openai.
+    "httpx==0.28.1",
     "mypy==2.3.0",
     "pytest==9.1.1",
     "pytest-cov==7.1.0",

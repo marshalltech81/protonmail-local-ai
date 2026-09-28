@@ -7,7 +7,6 @@ dependencies = [
     "uvicorn==0.48.0",
     "starlette==1.3.1",
     "sqlite-vec==0.1.9",
-    "httpx==0.28.1",
     # Inference, embed, and rerank SDKs. ``openai`` covers both
     # ``INFERENCE_MODE=openai`` (chat completions) and ``EMBED_MODE=openai``
     # (the ``/v1/embeddings`` wire format every operator-supplied compat

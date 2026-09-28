@@ -159,8 +159,6 @@ jobs:
           mkdir -p .secrets
           printf 'placeholder-bridge-pass' > .secrets/bridge_pass.txt
           chmod 600 .secrets/bridge_pass.txt
-          printf '' > .secrets/anthropic_api_key.txt
-          chmod 600 .secrets/anthropic_api_key.txt
 
       # Mirror the same step in .github/workflows/bridge.yml so both
       # workflows provision the gate identically. These are the C deps

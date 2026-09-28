@@ -77,8 +77,6 @@ jobs:
           mkdir -p .secrets
           printf 'placeholder-bridge-pass' > .secrets/bridge_pass.txt
           chmod 600 .secrets/bridge_pass.txt
-          printf '' > .secrets/anthropic_api_key.txt
-          chmod 600 .secrets/anthropic_api_key.txt
 
       - name: Build and smoke test Bridge
         run: make bridge-smoke

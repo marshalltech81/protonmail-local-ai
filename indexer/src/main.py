@@ -314,7 +314,7 @@ class MaildirHandler(FileSystemEventHandler):
     """Watches Maildir for new email files and enqueues them for indexing.
 
     The callback path only enqueues — the actual parse / embed / upsert
-    pipeline runs in the main loop via ``drain_queue``. Enqueue is a
+    pipeline runs in the main loop via ``_drain_queue_batched``. Enqueue is a
     single SQLite write, so the watchdog's internal thread no longer
     blocks on a slow embed round-trip and a Watchdog event storm
     cannot overflow whatever buffer ``watchdog`` uses internally while
@@ -1489,7 +1489,7 @@ def initial_index(
     healthcheck and cause the container to be reported unhealthy
     mid-scan. (A single message that itself takes longer than
     ``HEALTH_MAX_AGE_SECONDS`` will still trip the healthcheck — that
-    case would need a heartbeat hook inside ``_index_one_file``.)
+    case would need a heartbeat hook inside the batched drain path.)
 
     Routing the initial scan through the queue — rather than indexing
     files inline — means a crash or embedding service outage mid-scan leaves the

@@ -257,8 +257,8 @@ reject_deprecated_env "RERANK_ENABLED" "RERANK_MODE"
 # Current *_API_KEY names must never appear in .env either — they are
 # wired as Docker secrets in docker-compose.yml. An operator who pastes
 # them into .env would (a) leak the value into ``docker inspect``
-# output and (b) silently mask the secret-file value, since the
-# container ignores the env when ``_FILE`` indirection is used.
+# output and (b) silently mask the secret-file value, since both
+# services read the secret file first and only fall back to the env var.
 reject_secret_in_env "INFERENCE_API_KEY" "$INFERENCE_KEY_FILE"
 reject_secret_in_env "EMBED_API_KEY" "$EMBED_KEY_FILE"
 reject_secret_in_env "RERANK_API_KEY" "$RERANK_KEY_FILE"

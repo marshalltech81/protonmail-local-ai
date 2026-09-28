@@ -27,10 +27,7 @@ import-time issue in an SDK the operator isn't using.
 
 from __future__ import annotations
 
-import logging
 from typing import Protocol
-
-log = logging.getLogger("mcp.inference")
 
 # Steady-state ceiling for one completion. Qwen3 in thinking mode can
 # run ~1-2 minutes for a long answer; Anthropic Messages calls usually

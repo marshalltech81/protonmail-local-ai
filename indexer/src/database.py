@@ -1222,26 +1222,6 @@ class Database:
         return result
 
     @_synchronized
-    def get_thread_vector(self, thread_id: str) -> list[float] | None:
-        """Return the stored ``threads_vec`` embedding for ``thread_id``.
-
-        Returns ``None`` when the thread has no row in ``threads_vec``
-        (a brand-new thread, or one whose row was deleted out of band).
-        Used by the batched indexer's Phase 1 seed logic to preserve a
-        pre-existing thread vector — including subject-fallback vectors
-        for chunkless threads — across a Phase 2 failure.
-        """
-        row = self._conn.execute(
-            "SELECT embedding FROM threads_vec WHERE thread_id = ?",
-            (thread_id,),
-        ).fetchone()
-        if row is None:
-            return None
-        blob = row["embedding"]
-        count = len(blob) // 4
-        return list(struct.unpack(f"{count}f", blob))
-
-    @_synchronized
     def get_phase1_seed_state(self, thread_id: str) -> tuple[list[list[float]], list[float] | None]:
         """Combined fetch for the batched indexer's Phase 1 seed selection.
 
@@ -1252,8 +1232,8 @@ class Database:
 
         Folds three reads into one method body (PK existence check + chunk
         embeddings JOIN + ``threads_vec`` lookup) under a single lock
-        acquisition. The previous shape called ``get_thread_chunk_embeddings``
-        and ``get_thread_vector`` after the existence check, each
+        acquisition. The previous shape ran the chunk-embeddings fetch and the
+        ``threads_vec`` lookup as separate calls after the existence check, each
         re-entering the ``_synchronized`` RLock and adding Python frames
         per Phase 1 message — measurable on a 50-message batch. The
         ``LEFT JOIN`` from ``threads`` collapses the PK check and the
@@ -1542,7 +1522,7 @@ class Database:
 
         Depends on ``threads.fts_rowid`` tracking the FTS rowid; without it
         the DELETE would no-op silently and stale tokens would linger in the
-        index (see v3 migration notes).
+        index (see the pre-squash migration notes in git history).
         """
         existing = cur.execute(
             "SELECT fts_rowid FROM threads WHERE thread_id = ?", (thread_id,)
@@ -1833,13 +1813,6 @@ class Database:
         return self._conn.execute(
             "SELECT message_id, thread_id, filepath FROM message_thread_map"
         ).fetchall()
-
-    @_synchronized
-    def get_message_map_entry(self, message_id: str) -> sqlite3.Row | None:
-        return self._conn.execute(
-            "SELECT message_id, thread_id, filepath FROM message_thread_map WHERE message_id = ?",
-            (message_id,),
-        ).fetchone()
 
     @_synchronized
     def find_message_entry_by_filepath(self, filepath: str) -> sqlite3.Row | None:
