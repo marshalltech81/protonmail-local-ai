@@ -68,7 +68,7 @@ def _dedupe_by_canonical(addrs: list[str]) -> list[str]:
 # current version; existing installs run the migration runner to catch
 # up. See ``src/migrations/runner.py`` for the file layout and
 # transactional guarantees.
-SCHEMA_VERSION = 20
+SCHEMA_VERSION = 21
 SCHEMA_BASELINE_VERSION = 20
 
 # The schema uses FTS5 ``contentless_delete=1``, which SQLite added in 3.43.
@@ -321,8 +321,9 @@ class Database:
         Plus the cross-cutting tables: ``message_thread_map`` (message
         → thread index), ``indexed_files`` (file identity for rename
         detection), ``pending_deletions`` (tombstones for the opt-in
-        deletion reconciler), and ``indexing_jobs`` (durable retry +
-        dead-letter queue for the parse → embed → upsert pipeline).
+        deletion reconciler), ``indexing_jobs`` (durable retry +
+        dead-letter queue for the parse → embed → upsert pipeline), and
+        ``ingestion_state`` (last sync + indexer liveness for status).
         """
         cur.executescript(f"""
             -- Thread-level coarse retrieval
@@ -547,6 +548,16 @@ class Database:
             );
             CREATE INDEX idx_indexing_jobs_status_next
                 ON indexing_jobs(status, next_attempt_at);
+
+            -- One row: mbsync's last successful sync as the indexer last
+            -- read it from the Maildir stamp, and when the indexer last
+            -- reported. mcp-server's ``get_mailbox_status`` reads it.
+            CREATE TABLE ingestion_state (
+                id                 INTEGER PRIMARY KEY CHECK (id = 1),
+                sync_completed_at  TEXT,
+                sync_interval_secs INTEGER,
+                indexer_seen_at    TEXT NOT NULL
+            );
         """)
         self._conn.commit()
 
@@ -1792,6 +1803,29 @@ class Database:
         )
         self._conn.commit()
         return cur.rowcount
+
+    @_synchronized
+    def record_ingestion_state(
+        self,
+        *,
+        sync_completed_at: str | None,
+        sync_interval_secs: int | None,
+        seen_at: str,
+    ) -> None:
+        """Replace the single ``ingestion_state`` row."""
+        self._conn.execute(
+            """
+            INSERT INTO ingestion_state
+                (id, sync_completed_at, sync_interval_secs, indexer_seen_at)
+            VALUES (1, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                sync_completed_at = excluded.sync_completed_at,
+                sync_interval_secs = excluded.sync_interval_secs,
+                indexer_seen_at = excluded.indexer_seen_at
+            """,
+            (sync_completed_at, sync_interval_secs, seen_at),
+        )
+        self._conn.commit()
 
     @_synchronized
     def queue_stats(self) -> dict[str, int]:

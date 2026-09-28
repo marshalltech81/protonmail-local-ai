@@ -13,6 +13,7 @@ exercise it with stub collaborators rather than booting a live indexer.
 """
 
 import json
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -1880,6 +1881,91 @@ class TestSteadyStateBatchedDrain:
         assert queue.stats() == {"queued": 3, "dead": 0}
 
 
+class TestIngestionStateRecorder:
+    """The recorder copies mbsync's last-sync stamp and the indexer's own
+    liveness into ``ingestion_state`` for ``get_mailbox_status``, at most
+    once per interval."""
+
+    def _state(self, db):
+        return db._conn.execute(
+            "SELECT sync_completed_at, sync_interval_secs, indexer_seen_at FROM ingestion_state"
+        ).fetchone()
+
+    def test_records_the_stamp_and_liveness(self, tmp_path, db):
+        (tmp_path / main.SYNC_STAMP_NAME).write_text(
+            '{"completed_at": "2026-09-28T12:00:00Z", "sync_interval_secs": 60}'
+        )
+        main._IngestionStateRecorder(db, tmp_path).maybe_record(now=100.0)
+
+        row = self._state(db)
+        assert row["sync_completed_at"] == "2026-09-28T12:00:00+00:00"
+        assert row["sync_interval_secs"] == 60
+        assert row["indexer_seen_at"]
+
+    def test_writes_at_most_once_per_interval(self, tmp_path, db):
+        recorder = main._IngestionStateRecorder(db, tmp_path, interval_secs=30)
+        recorder.maybe_record(now=100.0)
+        (tmp_path / main.SYNC_STAMP_NAME).write_text(
+            '{"completed_at": "2026-09-28T12:00:00Z", "sync_interval_secs": 60}'
+        )
+        recorder.maybe_record(now=129.0)
+        assert self._state(db)["sync_completed_at"] is None
+
+        recorder.maybe_record(now=130.0)
+        assert self._state(db)["sync_completed_at"] == "2026-09-28T12:00:00+00:00"
+
+    def test_malformed_stamp_records_no_sync(self, tmp_path, db, caplog):
+        (tmp_path / main.SYNC_STAMP_NAME).write_text("garbage")
+        main._IngestionStateRecorder(db, tmp_path).maybe_record(now=100.0)
+
+        assert self._state(db)["sync_completed_at"] is None
+        assert "sync stamp" in caplog.text
+
+    def test_write_failure_is_logged_and_retried_next_call(self, tmp_path, db, caplog):
+        recorder = main._IngestionStateRecorder(db, tmp_path, interval_secs=30)
+        original = db.record_ingestion_state
+
+        def boom(**kw):
+            raise sqlite3.OperationalError("database is locked")
+
+        db.record_ingestion_state = boom  # type: ignore[method-assign]
+        recorder.maybe_record(now=100.0)
+        assert "ingestion state" in caplog.text
+
+        db.record_ingestion_state = original  # type: ignore[method-assign]
+        recorder.maybe_record(now=101.0)
+        assert self._state(db) is not None
+
+    def test_batched_drain_records_once_per_pass(self, tmp_path, monkeypatch, db):
+        from unittest.mock import MagicMock
+
+        from src.timings import TimingAggregator
+
+        inbox = tmp_path / "maildir" / "INBOX" / "cur"
+        inbox.mkdir(parents=True)
+        monkeypatch.setattr(main, "MAILDIR_PATH", tmp_path / "maildir")
+        monkeypatch.setattr(main, "touch_health_file", lambda: None)
+        queue = _make_queue(db)
+        for i in range(3):
+            _write_eml(inbox / f"m{i}.eml", f"m{i}@example.com")
+            queue.enqueue(str(inbox / f"m{i}.eml"), REASON_INITIAL_SCAN)
+        embedder = make_mock_embedder()
+        embedder.embed.return_value = [0.1] * EMBEDDING_DIM
+        recorder = MagicMock()
+
+        main._drain_queue_batched(
+            db,
+            embedder,
+            Threader(db),
+            queue,
+            batch_size=1,
+            timing_aggregator=TimingAggregator(window=10),
+            max_passes=2,
+            ingestion_state=recorder,
+        )
+        assert recorder.maybe_record.call_count == 2
+
+
 class TestPeriodicRecoverySkipsDeadLetter:
     """``_recover_zero_vector_threads(resurrect_dead=False)`` must
     preserve the durable queue's bounded-retry contract.
@@ -2062,6 +2148,7 @@ class TestMainStartupAndLoop:
     def _run_main(self, tmp_path, monkeypatch, *, sweep_due: bool):
         events: list[str] = []
         db = Database(tmp_path / "mail.db")
+        self._db = db
         monkeypatch.setattr(main, "MAILDIR_PATH", tmp_path / "maildir")
         monkeypatch.setattr(main, "_validate_embed_config", lambda: None)
         monkeypatch.setattr(main, "_validate_embedding_dim", lambda e: None)
@@ -2076,12 +2163,19 @@ class TestMainStartupAndLoop:
             lambda *a, **kw: (
                 events.append(f"initial_index:skip_trashed={kw.get('skip_trashed')}"),
                 events.append(f"initial_breaker={id(kw.get('breaker'))}"),
+                events.append(f"initial_state={id(kw.get('ingestion_state'))}"),
             ),
         )
         monkeypatch.setattr(
             main,
             "_drain_queue_batched",
-            lambda *a, **kw: events.append(f"drain:breaker={id(kw.get('breaker'))}") or 0,
+            lambda *a, **kw: (
+                (
+                    events.append(f"drain:breaker={id(kw.get('breaker'))}"),
+                    events.append(f"drain:state={id(kw.get('ingestion_state'))}"),
+                )
+                and 0
+            ),
         )
         monkeypatch.setattr(main, "_recover_zero_vector_threads", lambda *a, **kw: 0)
         monkeypatch.setattr(
@@ -2115,6 +2209,22 @@ class TestMainStartupAndLoop:
         drain = next(e for e in events if e.startswith("drain:breaker="))
         assert initial.split("=")[1] == drain.split("=")[1]
         assert initial.split("=")[1] != str(id(None))
+
+    def test_initial_drain_and_main_loop_report_ingestion_state(self, tmp_path, monkeypatch):
+        """``get_mailbox_status`` needs the indexer's liveness during the
+        initial drain as well as in steady state, so both share one
+        recorder."""
+        events = self._run_main(tmp_path, monkeypatch, sweep_due=False)
+
+        initial = next(e for e in events if e.startswith("initial_state="))
+        drain = next(e for e in events if e.startswith("drain:state="))
+        assert initial.split("=")[1] == drain.split("=")[1] != str(id(None))
+
+    def test_main_loop_records_ingestion_state(self, tmp_path, monkeypatch):
+        self._run_main(tmp_path, monkeypatch, sweep_due=False)
+
+        row = self._db._conn.execute("SELECT indexer_seen_at FROM ingestion_state").fetchone()
+        assert row is not None
 
     def test_main_loop_periodically_rewalks_the_maildir(self, tmp_path, monkeypatch):
         events = self._run_main(tmp_path, monkeypatch, sweep_due=True)

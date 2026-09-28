@@ -5,12 +5,51 @@ Maildir files use the form ``<uniq>:2,<flags>`` where ``<flags>`` is a string
 of single-letter flags (D=Draft, F=Flagged, P=Passed, R=Replied, S=Seen,
 T=Trashed). mbsync signals a remote deletion under ``Expunge None`` by adding
 the ``T`` flag to the local file — which on disk is a rename, not a delete.
+
+mbsync also writes a last-sync stamp at the Maildir root after every
+successful sync; see ``read_sync_stamp``.
 """
 
+import json
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 
 FLAG_SEPARATOR = ":2,"
 TRASHED_FLAG = "T"
+
+# Written by mbsync/entrypoint.sh (``write_sync_stamp``) at the Maildir
+# root, outside any ``cur``/``new`` folder, so no Maildir walk or watchdog
+# handler treats it as a message.
+SYNC_STAMP_NAME = ".mbsync-last-sync.json"
+
+
+@dataclass(frozen=True)
+class SyncStamp:
+    completed_at: str  # ISO 8601, UTC
+    sync_interval_secs: int
+
+
+def read_sync_stamp(root: Path) -> SyncStamp | None:
+    """Return mbsync's last successful sync, or ``None`` before the first.
+
+    Raises ``ValueError`` when the stamp exists but cannot be read as a
+    timezone-aware completion time plus a positive integer interval.
+    """
+    try:
+        raw = (root / SYNC_STAMP_NAME).read_text()
+    except FileNotFoundError:
+        return None
+    data = json.loads(raw)  # JSONDecodeError is a ValueError
+    if not isinstance(data, dict):
+        raise ValueError("sync stamp is not a JSON object")
+    completed = datetime.fromisoformat(str(data.get("completed_at")))
+    if completed.tzinfo is None:
+        raise ValueError("sync stamp completion time has no timezone")
+    interval = data.get("sync_interval_secs")
+    if type(interval) is not int or interval < 1:
+        raise ValueError("sync stamp interval is not a positive integer")
+    return SyncStamp(completed.astimezone(UTC).isoformat(), interval)
 
 
 def parse_flags(path: Path | str) -> set[str]:

@@ -40,8 +40,7 @@ STRUCTURED_TOOLS = {
     "list_folders": "folders",
     "find_contact": "contacts",
     "query_messages": "total_matches",
-    "get_index_status": "total_threads",
-    "get_sync_status": "mode",
+    "get_mailbox_status": "current",
 }
 
 
@@ -181,10 +180,11 @@ def test_folders_contacts_and_status(messages_db):
     assert {f["name"] for f in folders} == {"INBOX", "Archive"}
     contacts = _call(server, "find_contact", query="jane")["contacts"]
     assert contacts[0]["email"] == "jane@example.com"
-    status = _call(server, "get_index_status")
+    status = _call(server, "get_mailbox_status")
     assert status["total_threads"] == 3
     assert status["total_messages"] == 5
-    assert _call(server, "get_sync_status")["mode"] == "local_index_only"
+    assert status["current"] is False
+    assert status["queue"] == {"pending": 0, "retrying": 0, "dead": 0}
 
 
 @pytest.mark.parametrize(

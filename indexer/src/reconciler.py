@@ -93,7 +93,7 @@ class Reconciler:
         # one-shot escalation WARN when the counter crosses
         # ``_BLOCKED_ESCALATION_THRESHOLD``) — operator-visible only
         # through the indexer's own logs. NOT plumbed into the
-        # mcp-server's ``get_index_status``: that surface runs in a
+        # mcp-server's ``get_mailbox_status``: that surface runs in a
         # separate process and reads SQLite stats, with no IPC back
         # to this counter. In-memory only — resets on indexer restart,
         # which is the right shape for a counter that signals

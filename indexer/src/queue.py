@@ -401,7 +401,7 @@ class IndexingQueue:
 
     def stats(self) -> dict[str, int]:
         """Return ``{'queued': n, 'dead': n}`` — surfaced through the
-        indexer health file / MCP ``get_index_status`` so operators can
+        indexer health file / MCP ``get_mailbox_status`` so operators can
         see when work is backing up or files are giving up."""
         return self.db.queue_stats()
 

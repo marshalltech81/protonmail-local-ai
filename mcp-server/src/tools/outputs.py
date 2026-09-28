@@ -315,16 +315,32 @@ class ListFoldersOutput(_Output):
 # --- system tools -------------------------------------------------------
 
 
-class IndexStatusOutput(_Output):
+class QueueCounts(_Output):
+    pending: int = Field(description="Messages found in the Maildir, not yet indexed.")
+    retrying: int = Field(description="Messages that failed to index and will be retried.")
+    dead: int = Field(
+        description="Messages that failed permanently: not searchable until an "
+        "operator requeues them."
+    )
+
+
+class MailboxStatusOutput(_Output):
+    current: bool = Field(
+        description="True only when mail synced from Proton recently, the indexer is "
+        "running, and no message is waiting to be indexed. Mail that reached Proton "
+        "after last_sync_at is not searchable either way."
+    )
+    not_current_reasons: list[str] = Field(description="Why current is false; empty when true.")
+    last_sync_at: datetime | None = Field(
+        description="When mbsync last completed a successful sync from Proton."
+    )
+    sync_interval_secs: int | None = Field(description="How often mbsync syncs.")
+    indexer_last_seen_at: datetime | None = Field(
+        description="When the indexer last reported that it was running."
+    )
+    queue: QueueCounts
     total_threads: int
     total_messages: int
     oldest_message: str | None
     newest_message: str | None
     checked_at: datetime
-
-
-class SyncStatusOutput(_Output):
-    mode: Literal["local_index_only"]
-    synced_by: Literal["mbsync"] = Field(
-        description="mcp-server never contacts Bridge; mbsync refreshes the Maildir."
-    )

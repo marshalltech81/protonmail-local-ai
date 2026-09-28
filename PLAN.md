@@ -56,7 +56,8 @@ The stack runs four containers:
   sync, TOFU cert pinning with explicit rotation flag.
 - **indexer** — Docker, parses Maildir, threads, embeds via any
   OpenAI-compatible `/v1/embeddings` provider (operator-supplied),
-  writes SQLite. Schema v20 (squashed baseline): 4096-dim L2-unit-norm
+  writes SQLite. Schema v21 (v20 squashed baseline plus
+  `ingestion_state`): 4096-dim L2-unit-norm
   vectors, `NOT NULL` `message_chunks.message_date`,
   `indexing_jobs.last_error_class`, per-message `messages` +
   `message_participants`. Initial scan and steady-state both
@@ -111,9 +112,8 @@ guessing about semantics, completeness, or identity.
    Completed).
 3. ~~**Message-first-class.**~~ Done 2026-09-28 (see Recently
    Completed). Received date deferred (see Deferred).
-4. **Honest `get_mailbox_status`** — sync recency, queue
-   pending/failed/dead, newest message, and a `current` flag that is
-   truthful (only possible after Phase 0 items 1–2).
+4. ~~**Honest `get_mailbox_status`**~~ Done 2026-09-28 (see Recently
+   Completed).
 5. **Bearer-token auth on the MCP endpoint** (promoted from the old
    "evaluate" backlog item). Localhost topology alone is not a trust
    boundary against other local processes.
@@ -432,6 +432,26 @@ do not ship persisted claims without them.
    during its Phase 3 experimental period.
 
 ## Recently Completed
+
+### 2026-09-28 — Honest `get_mailbox_status` (Phase 1 item 4)
+
+`get_mailbox_status` replaces `get_index_status` and `get_sync_status`
+(and `make status` uses its helper). It returns `current` with one
+reason per failed condition: mbsync completed a sync within three
+intervals (5-minute floor), the indexer reported within 10 minutes,
+and nothing is pending or retrying. Dead messages are reported but do
+not block `current`. It also returns the last sync time, indexer
+liveness, queue counts (pending / retrying / dead), and the existing
+counts and date range, all from one read snapshot. mcp-server still
+reads only SQLite: after each successful sync mbsync writes
+`.mbsync-last-sync.json` at the Maildir root (after the permissions
+fix-up, so that sync's deliveries are already queued), and the indexer
+copies it with its own timestamp into the one-row `ingestion_state`
+table at most every 30 s, from the main loop and from each drain pass,
+so it keeps reporting through the initial index. Schema v21, first
+post-squash migration `0021_ingestion_state.sql`. mbsync now rejects a
+non-integer `SYNC_INTERVAL` at startup. Known gap: a missed filesystem
+event is invisible to `current` until the periodic rescan enqueues it.
 
 ### 2026-09-28 — Structured MCP output (Phase 1 item 2)
 

@@ -28,7 +28,7 @@ arguments.
    ```
 
 2. Find real `thread_id` values via `make status` or by calling
-   `get_index_status` / `search_emails` against your running MCP server.
+   `get_mailbox_status` / `search_emails` against your running MCP server.
 
 3. Edit `queries.json` — each entry needs `expected_thread_ids` from
    your actual index. Keep the file in `.gitignore` if your queries or

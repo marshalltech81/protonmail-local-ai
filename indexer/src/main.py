@@ -31,6 +31,7 @@ import sqlite3
 import time
 import urllib.parse
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 
 from watchdog.events import FileSystemEventHandler
@@ -52,7 +53,7 @@ from .embedder import (
     classify_embed_failure,
     scrub_embed_error,
 )
-from .maildir import is_trashed
+from .maildir import SYNC_STAMP_NAME, is_trashed, read_sync_stamp
 from .parser import Message, OversizedMessageError, _derive_folder, parse_email
 from .queue import (
     ERROR_CLASS_OPERATOR,
@@ -308,6 +309,41 @@ INDEXER_ATTACHMENT_MAX_EXTRACTED_CHARS = _int_env(
 
 def touch_health_file() -> None:
     INDEXER_HEALTH_FILE.touch(exist_ok=True)
+
+
+class _IngestionStateRecorder:
+    """Copies mbsync's last-sync stamp and the indexer's liveness into
+    ``ingestion_state`` for mcp-server's ``get_mailbox_status``.
+
+    Writes at most once per ``interval_secs`` so a one-second idle loop
+    does not commit every tick. The interval bounds how stale the
+    reported state can be; mcp-server's staleness thresholds are minutes.
+    """
+
+    def __init__(self, db: Database, maildir_root: Path, interval_secs: float = 30):
+        self.db = db
+        self.maildir_root = maildir_root
+        self.interval_secs = interval_secs
+        self._last_write: float | None = None
+
+    def maybe_record(self, now: float) -> None:
+        if self._last_write is not None and now - self._last_write < self.interval_secs:
+            return
+        try:
+            stamp = read_sync_stamp(self.maildir_root)
+        except (OSError, ValueError) as e:
+            log.warning("unreadable mbsync sync stamp %s: %s", SYNC_STAMP_NAME, e)
+            stamp = None
+        try:
+            self.db.record_ingestion_state(
+                sync_completed_at=stamp.completed_at if stamp else None,
+                sync_interval_secs=stamp.sync_interval_secs if stamp else None,
+                seen_at=datetime.now(UTC).isoformat(),
+            )
+        except sqlite3.Error as e:
+            log.error("recording ingestion state failed: %s", e)
+            return
+        self._last_write = now
 
 
 class MaildirHandler(FileSystemEventHandler):
@@ -1136,6 +1172,7 @@ def _drain_queue_batched(
     timing_aggregator: TimingAggregator,
     max_passes: int | None = None,
     breaker: _EmbedOutageBreaker | None = None,
+    ingestion_state: _IngestionStateRecorder | None = None,
 ) -> int:
     """Drain the queue in two-phase batches.
 
@@ -1186,6 +1223,8 @@ def _drain_queue_batched(
         if breaker is not None and not breaker.allow(time.monotonic()):
             break
         passes += 1
+        if ingestion_state is not None:
+            ingestion_state.maybe_record(time.monotonic())
         # ---- Gather batch + Phase 1 ----
         # Snapshot up to batch_size distinct queued rows in one query
         # so the gather loop cannot re-claim the same row repeatedly
@@ -1474,6 +1513,7 @@ def initial_index(
     *,
     skip_trashed: bool = False,
     breaker: _EmbedOutageBreaker | None = None,
+    ingestion_state: _IngestionStateRecorder | None = None,
 ):
     """Enqueue every unindexed Maildir message and drain the queue.
 
@@ -1481,7 +1521,8 @@ def initial_index(
     is shared with the main loop so an embedder outage that starts
     during the initial drain carries its backoff into steady state
     (the drain returns early while the breaker is open; the main loop
-    finishes the queue once the embedder is back).
+    finishes the queue once the embedder is back). ``ingestion_state``
+    keeps reporting liveness through a multi-hour initial drain.
 
     Refreshes the health file after every processed message so that
     long initial indexes (large mailboxes, slow embedding service, OCR
@@ -1532,6 +1573,7 @@ def initial_index(
         batch_size=INITIAL_INDEX_BATCH_SIZE,
         timing_aggregator=timing_aggregator,
         breaker=breaker,
+        ingestion_state=ingestion_state,
     )
     # Always emit a final summary at the end of the initial scan, even
     # if the count was not a multiple of ``TIMING_LOG_EVERY`` — the
@@ -1651,6 +1693,7 @@ def main():
 
     # Index existing emails
     breaker = _EmbedOutageBreaker()
+    ingestion_state = _IngestionStateRecorder(db, MAILDIR_PATH)
     initial_index(
         db,
         embedder,
@@ -1658,6 +1701,7 @@ def main():
         queue,
         skip_trashed=reconciler is not None,
         breaker=breaker,
+        ingestion_state=ingestion_state,
     )
     touch_health_file()
 
@@ -1692,6 +1736,7 @@ def main():
     try:
         while True:
             touch_health_file()
+            ingestion_state.maybe_record(time.monotonic())
             # Drain any queued indexing jobs before yielding to the
             # reconciler so newly-arrived mail is visible in search
             # quickly. Steady state goes through the same batched path
@@ -1711,6 +1756,7 @@ def main():
                     timing_aggregator=timing_aggregator,
                     max_passes=1,
                     breaker=breaker,
+                    ingestion_state=ingestion_state,
                 )
                 drained_since_log += drained
                 if drained_since_log >= TIMING_LOG_EVERY:

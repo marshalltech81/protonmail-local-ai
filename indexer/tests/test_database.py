@@ -77,6 +77,28 @@ class TestSchema:
         }
         assert cols == {"filepath", "message_id", "thread_id", "marked_at"}
 
+    def test_v20_database_migrates_to_add_ingestion_state(self, tmp_path):
+        """Migration 0021 adds ``ingestion_state`` to a v20 database."""
+        db_path = tmp_path / "v20.db"
+        Database(db_path).close()
+        conn = sqlite3.connect(str(db_path))
+        try:
+            conn.execute("DROP TABLE ingestion_state")
+            conn.execute("UPDATE schema_version SET version = 20")
+            conn.commit()
+        finally:
+            conn.close()
+
+        database = Database(db_path)
+        try:
+            version = database._conn.execute("SELECT version FROM schema_version").fetchone()
+            assert version["version"] == SCHEMA_VERSION == 21
+            database.record_ingestion_state(
+                sync_completed_at=None, sync_interval_secs=None, seen_at="2026-09-28T12:00:00+00:00"
+            )
+        finally:
+            database.close()
+
     def test_reopening_initialized_database_does_not_error(self, tmp_path):
         """A fresh database created on first open is reopened cleanly on
         the second call: ``_migrate`` finds the matching SCHEMA_VERSION
@@ -123,6 +145,27 @@ class TestSchema:
             conn.close()
         with pytest.raises(RuntimeError, match="Downgrade migrations are not supported"):
             Database(db_path)
+
+
+class TestIngestionState:
+    def test_no_row_until_the_indexer_records_one(self, db):
+        assert db._conn.execute("SELECT COUNT(*) FROM ingestion_state").fetchone()[0] == 0
+
+    def test_record_keeps_a_single_row_with_the_latest_values(self, db):
+        db.record_ingestion_state(
+            sync_completed_at="2026-09-28T12:00:00+00:00",
+            sync_interval_secs=60,
+            seen_at="2026-09-28T12:00:05+00:00",
+        )
+        db.record_ingestion_state(
+            sync_completed_at=None,
+            sync_interval_secs=None,
+            seen_at="2026-09-28T12:00:35+00:00",
+        )
+        rows = db._conn.execute(
+            "SELECT sync_completed_at, sync_interval_secs, indexer_seen_at FROM ingestion_state"
+        ).fetchall()
+        assert [tuple(r) for r in rows] == [(None, None, "2026-09-28T12:00:35+00:00")]
 
 
 class TestEmbeddingDimGuard:
