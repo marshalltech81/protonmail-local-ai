@@ -338,6 +338,34 @@ class TestPackingAndSplitting:
         for c in chunks:
             assert c.token_est <= 500
 
+    def test_long_punctuation_run_scans_in_linear_time(self):
+        """Regression (#221): a punctuation run not followed by
+        whitespace made the sentence regex retry the lookahead from
+        every position in the run — quadratic, so a 128 KB body
+        stalled the single indexing worker. 64K dots took ~20 s
+        before the fix."""
+        import time
+
+        from src.chunker import _SENTENCE_END_RE
+
+        text = "." * 64_000 + "x"
+        started = time.monotonic()
+        matches = list(_SENTENCE_END_RE.finditer(text))
+        assert time.monotonic() - started < 1.0
+        assert matches == []
+
+    def test_sentence_boundaries_unchanged_by_linear_regex(self):
+        """The #221 rewrite must find exactly the boundaries the old
+        pattern did: whole punctuation runs followed by whitespace or
+        end of text."""
+        from src.chunker import _SENTENCE_END_RE
+
+        text = "One. Two!! Three?! v1.2 ok... end...x Last."
+        ends = [m.group() for m in _SENTENCE_END_RE.finditer(text)]
+        spans = [m.span() for m in _SENTENCE_END_RE.finditer(text)]
+        assert ends == [".", "!!", "?!", "...", "."]
+        assert spans == [(3, 4), (8, 10), (16, 18), (26, 29), (42, 43)]
+
 
 class TestOffsetRoundTrip:
     def test_offsets_round_trip_through_normalized_body(self):
