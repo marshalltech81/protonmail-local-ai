@@ -76,3 +76,40 @@ jobs:
           path: mcp-server/coverage.xml
           if-no-files-found: error
           retention-days: 14
+
+  retrieval-baseline:
+    # Step 1 indexes the synthetic mailbox with the real indexer and a
+    # hashed embedder; step 2 checks the golden questions and the rank
+    # snapshot through mcp-server's read path. See `make baseline`.
+    name: retrieval baseline
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version-file: ".python-version"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.2.0
+        with:
+          version: "0.11.6"
+          enable-cache: true
+          cache-dependency-glob: |
+            indexer/uv.lock
+            mcp-server/uv.lock
+
+      - name: Sync environments
+        run: |
+          (cd indexer && uv sync --locked --dev)
+          (cd mcp-server && uv sync --locked --dev)
+
+      - name: Build baseline index
+        working-directory: indexer
+        run: uv run python -m tests.baseline.build "$RUNNER_TEMP/baseline" ../mcp-server/tests/baseline/golden.json
+
+      - name: Check golden questions and rank snapshot
+        working-directory: mcp-server
+        env:
+          BASELINE_DIR: ${{ runner.temp }}/baseline
+        run: uv run pytest -q --no-cov tests/baseline

@@ -566,6 +566,7 @@ Notes:
 - threader changes should verify threading, subject fallback, references, and participant handling
 - database changes should verify schema creation, migration, and upsert/query behavior
 - MCP search changes should verify hybrid/RRF behavior where applicable
+- indexing, chunking, embedding-storage, or retrieval changes should pass `make baseline`; if ranking changes on purpose, regenerate the snapshot with `make baseline UPDATE=1` and explain the snapshot diff in the PR
 - before opening PRs that touch TLS, auth, logging, subprocess execution, or credential handling, run `bandit -r src/` and resolve any findings rated medium or higher (a CI job in `.github/workflows/security.yml` enforces this at medium+ severity for both services)
 
 Run tests with:
@@ -573,6 +574,7 @@ Run tests with:
 ```bash
 cd indexer    && uv run pytest
 cd mcp-server && uv run pytest
+make baseline
 make typecheck
 ```
 

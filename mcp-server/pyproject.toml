@@ -46,6 +46,7 @@ python_functions = ["test_*"]
 addopts = "-v --tb=short --cov=src --cov-branch --cov-report=term-missing --cov-fail-under=90 --ignore=tests/eval"
 markers = [
     "eval: opt-in retrieval-quality eval against a real mailbox (skipped by default; run with `pytest -m eval --override-ini='addopts='`)",
+    "baseline: retrieval regression baseline over the synthetic mailbox (skipped unless BASELINE_DIR is set; run with `make baseline`)",
 ]
 
 [tool.mypy]

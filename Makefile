@@ -1,4 +1,4 @@
-.PHONY: build build-nocache up down logs first-run update status requeue-dead clean sync sync-indexer sync-mcp test test-indexer test-mcp typecheck typecheck-indexer typecheck-mcp bridge-patch-check bridge-smoke bridge-upgrade-check init-secrets validate-env help
+.PHONY: build build-nocache up down logs first-run update status requeue-dead clean sync sync-indexer sync-mcp test test-indexer test-mcp baseline typecheck typecheck-indexer typecheck-mcp bridge-patch-check bridge-smoke bridge-upgrade-check init-secrets validate-env help
 
 UV_CACHE_DIR ?= /tmp/uv-cache
 export UV_CACHE_DIR
@@ -30,6 +30,7 @@ help:
 	@echo "  typecheck    Run mypy over the indexer and mcp-server Python services"
 	@echo "  test-indexer Run indexer unit tests only"
 	@echo "  test-mcp     Run mcp-server unit tests only"
+	@echo "  baseline     Run the retrieval regression baseline (UPDATE=1 rewrites the rank snapshot)"
 	@echo "  clean        Remove all containers and volumes (destructive)"
 	@echo ""
 
@@ -185,6 +186,16 @@ test-indexer: sync-indexer
 
 test-mcp: sync-mcp
 	cd mcp-server && uv run pytest -q
+
+# Retrieval regression baseline. Step 1 indexes the synthetic mailbox with
+# the real indexer and a hashed embedder; step 2 checks the golden
+# questions and the rank snapshot in mcp-server. UPDATE=1 rewrites
+# mcp-server/tests/baseline/snapshot.json after an intended ranking change.
+baseline: sync-indexer sync-mcp
+	@dir=$$(mktemp -d) && \
+	( cd indexer && uv run python -m tests.baseline.build "$$dir/out" ../mcp-server/tests/baseline/golden.json ) && \
+	( cd mcp-server && BASELINE_DIR="$$dir/out" uv run pytest -q --no-cov tests/baseline $(if $(UPDATE),--update-baseline) ); \
+	status=$$?; rm -rf "$$dir"; exit $$status
 
 typecheck: typecheck-indexer typecheck-mcp
 

@@ -125,14 +125,10 @@ guessing about semantics, completeness, or identity.
 
 ### Phase 1.5 — Minimal regression baseline
 
-Before the Phase 2 refactor, not after:
-
-- deterministic synthetic mailbox (also satisfies the no-real-PII
-  fixture constraint)
-- 20–30 golden retrieval/evidence questions with expected-thread /
-  Recall@K assertions, including a few attachment and evidence cases
-
-Phase 2 must demonstrate behavior preservation against this baseline.
+Done 2026-09-28 (see Recently Completed): `make baseline`, CI job
+`retrieval baseline`. Phase 2 must demonstrate behavior preservation
+against it: refactor PRs (items 1–3) show no snapshot diff; item 4
+shows a reviewed snapshot diff with golden checks still passing.
 
 ### Phase 2 — Swappable embedding / vector generations
 
@@ -418,6 +414,35 @@ do not ship persisted claims without them.
    during its Phase 3 experimental period.
 
 ## Recently Completed
+
+### 2026-09-28 — Retrieval regression baseline (Phase 1.5)
+
+A 20-thread, 37-message synthetic mailbox
+(`indexer/tests/baseline/corpus.py`, reserved `.example` domains, text
+and HTML attachments, a forward, cross-folder replies, distractor
+threads) is indexed by the real `initial_index` with a deterministic
+hashed embedder (words + character trigrams → 4096 dims), then queried
+through mcp-server's real `hybrid_search` (no reranker) and
+`query_messages`. Two layers:
+
+- **Golden checks** (`mcp-server/tests/baseline/golden.json`): 29
+  search questions with a per-question max rank, evidence-substring
+  checks for attachment and multi-message cases, and four
+  vector-only questions (misspellings / re-split compounds that porter
+  stemming does not map back, asserted to be found with no `*_fts`
+  lane) plus an MRR floor; 7 enumeration questions with exact message
+  sets.
+- **Rank snapshot** (`snapshot.json`): top-10 order per question, exact
+  score ties ordered by thread ID; any change fails until regenerated
+  with `make baseline UPDATE=1`.
+
+Verified both layers bite: disabling the vector lanes fails the
+vector-only questions, MRR and the snapshot; changing RRF `k` fails only
+the snapshot. The two services cannot share a process (both are a
+top-level `src` package), so the indexer step also writes the query
+vectors and mcp-server never re-implements the embedder. The hashed
+embedder measures plumbing, not semantic quality — that stays with
+Phase 3's evals. No schema change, no new dependencies.
 
 ### 2026-09-28 — Source integrity exposure (Phase 1 item 7)
 
