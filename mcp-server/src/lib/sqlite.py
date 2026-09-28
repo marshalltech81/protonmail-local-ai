@@ -2092,7 +2092,8 @@ class Database:
 
     def get_mailbox_status(self) -> dict:
         """Index counts, queue depth, and the indexer's ``ingestion_state``
-        row (``None`` until the indexer first reports), read in one
+        row (``None`` until the indexer first reports, or before it has
+        migrated to schema v21), read in one
         snapshot so the counts and the queue agree.
 
         Queue rows are ``pending`` (not yet failed), ``retrying``
@@ -2122,9 +2123,19 @@ class Database:
                 """
             ).fetchone()
             stats["queue"] = {"pending": queue[0], "retrying": queue[1], "dead": queue[2]}
-            state = conn.execute(
-                "SELECT sync_completed_at, sync_interval_secs, indexer_seen_at FROM ingestion_state"
+            # mcp-server can start on a new build before the indexer has
+            # run migration 0021; report "not yet" rather than failing.
+            has_state_table = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='ingestion_state'"
             ).fetchone()
+            state = (
+                conn.execute(
+                    "SELECT sync_completed_at, sync_interval_secs, indexer_seen_at "
+                    "FROM ingestion_state"
+                ).fetchone()
+                if has_state_table
+                else None
+            )
             stats["ingestion"] = dict(state) if state is not None else None
             conn.execute("COMMIT")
         return stats

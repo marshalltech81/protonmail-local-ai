@@ -464,6 +464,9 @@ class); two test `type: ignore`s replaced with `monkeypatch`; dead
 messages were described as not searchable, but one that fails after
 Phase 1 keeps its keyword-searchable thread text (now "incompletely
 indexed").
+Review round 2 (Claude): mcp-server restarted on this build before the
+indexer ran migration 0021 failed the whole status tool on the missing
+table; it now reports "the indexer has not reported" instead.
 
 ### 2026-09-28 — Structured MCP output (Phase 1 item 2)
 
