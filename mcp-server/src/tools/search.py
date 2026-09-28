@@ -105,8 +105,9 @@ def register_search_tools(
         images) is not in the result. To read messages inside a thread,
         call get_thread or summarize_thread with the result's
         ``Thread ID``. To read attachment content, use
-        ``search_attachments`` (keyword search over extracted text) or
-        ``ask_mailbox`` (synthesized answers) — neither this tool nor
+        ``search_attachments`` (keyword search over extracted text),
+        ``ask_mailbox`` (synthesized answers), or
+        ``extract_from_emails`` (structured fields) — neither this tool nor
         get_thread surfaces attachment chunks. Never invent a
         thread_id from the subject —
         IDs are opaque values returned only from this tool,

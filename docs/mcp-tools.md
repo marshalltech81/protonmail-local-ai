@@ -296,7 +296,10 @@ Summarize a thread in different styles.
 | `style` | string | `brief` | `brief`, `detailed`, `action-items`, `timeline` |
 
 ### `extract_from_emails`
-Extract structured data from emails matching a query.
+Extract structured data from emails matching a query. Attachment text
+(digital and OCR'd PDFs, images) that ranks for the query is included in
+each thread's context, so fields that appear only in an attachment can be
+extracted.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
