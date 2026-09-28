@@ -11,6 +11,7 @@ import re
 from mcp.types import TextContent
 
 from ..lib.embed import embed_query
+from ..lib.inference import InferenceTruncatedError
 from ..lib.security import log_tool_call, safe_provider_exception_text
 from ..lib.sqlite import ChunkResult, ThreadResult
 from ..lib.validation import clamp_int
@@ -411,6 +412,12 @@ def _untrusted_email_block(content: str, *, index: int | None = None) -> str:
 _CODE_FENCE_RE = re.compile(r"^```[A-Za-z]*\s*\n(.*?)\n?```$", re.DOTALL)
 
 
+# Appended to a prose answer the model stopped writing at max_tokens.
+_TRUNCATED_NOTICE = (
+    "\n\n[Answer cut off at the INFERENCE_MAX_TOKENS limit; raise it for a complete answer.]"
+)
+
+
 def _strip_code_fence(text: str) -> str:
     """Unwrap a model response fenced as a markdown code block.
 
@@ -579,6 +586,16 @@ def register_intelligence_tools(
     async def llm_complete(system: str, user: str) -> str:
         return await inference_client.complete(system, user)
 
+    async def llm_complete_prose(system: str, user: str) -> str:
+        """``llm_complete`` for prose answers: a reply cut off at
+        ``max_tokens`` is still worth showing, but never as if complete."""
+        try:
+            return await llm_complete(system, user)
+        except InferenceTruncatedError as e:
+            if not e.partial.strip():
+                raise
+            return e.partial + _TRUNCATED_NOTICE
+
     @server.tool()
     async def ask_mailbox(
         question: str,
@@ -712,7 +729,7 @@ def register_intelligence_tools(
                 f"User's question: {question}"
             )
 
-            answer = await llm_complete(ASK_SYSTEM, user_prompt)
+            answer = await llm_complete_prose(ASK_SYSTEM, user_prompt)
 
             sources = "\n".join(
                 f"  - {r.subject} ({r.date_last.strftime('%Y-%m-%d')})" for r in results
@@ -836,7 +853,7 @@ def register_intelligence_tools(
                 f"Task: {instruction}"
             )
 
-            summary = await llm_complete(SUMMARIZE_SYSTEM, user_prompt)
+            summary = await llm_complete_prose(SUMMARIZE_SYSTEM, user_prompt)
 
             return [
                 TextContent(type="text", text=f"Summary ({style}) — {thread.subject}:\n\n{summary}")
@@ -925,6 +942,11 @@ def register_intelligence_tools(
 
             schema_str = json.dumps(schema, indent=2)
             extracted_records = []
+            # Threads whose answer says nothing about their data: cut off
+            # at max_tokens, or not JSON. Counted apart from a valid
+            # ``null`` so a failure is never reported as "no data".
+            truncated = 0
+            unparseable = 0
 
             for thread in results:
                 user_prompt = (
@@ -941,12 +963,17 @@ def register_intelligence_tools(
                     "or null if no relevant data found."
                 )
 
-                result_str = await llm_complete(EXTRACT_SYSTEM, user_prompt)
+                try:
+                    result_str = await llm_complete(EXTRACT_SYSTEM, user_prompt)
+                except InferenceTruncatedError:
+                    truncated += 1
+                    continue
 
                 try:
                     record = json.loads(_strip_code_fence(result_str))
                 except json.JSONDecodeError:
-                    continue  # LLM returned null or invalid JSON — skip
+                    unparseable += 1
+                    continue
                 # Accept both a single object and a JSON array of objects.
                 # The prompt asks for an object, but models occasionally
                 # return an array when the schema implies multiple items
@@ -961,6 +988,24 @@ def register_intelligence_tools(
                     item["_source_thread"] = thread.subject
                     item["_date"] = thread.date_last.strftime("%Y-%m-%d")
                     extracted_records.append(item)
+
+            failed = truncated + unparseable
+            if failed:
+                reasons = []
+                if truncated:
+                    reasons.append(f"{truncated} cut off at the INFERENCE_MAX_TOKENS limit")
+                if unparseable:
+                    reasons.append(f"{unparseable} returned output that was not valid JSON")
+                notice = (
+                    f"Incomplete: {failed} of {len(results)} threads could not be extracted "
+                    f"({'; '.join(reasons)}), so any matching data in them is missing."
+                )
+                if not extracted_records:
+                    return [TextContent(type="text", text=f"No records extracted. {notice}")]
+                return [
+                    TextContent(type="text", text=json.dumps(extracted_records, indent=2)),
+                    TextContent(type="text", text=notice),
+                ]
 
             if not extracted_records:
                 return [

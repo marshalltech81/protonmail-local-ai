@@ -18,7 +18,9 @@ seeded DB and the FakeLocalLLM stub. Coverage targets:
 """
 
 import asyncio
+import json
 
+from src.lib.inference import InferenceTruncatedError
 from src.tools.intelligence import register_intelligence_tools
 
 from tests.conftest import FakeLocalLLM
@@ -37,6 +39,10 @@ def _handlers(fake_server, db, llm):
 def _text(result) -> str:
     assert len(result) == 1
     return result[0].text
+
+
+def _all_text(result) -> str:
+    return "\n".join(item.text for item in result)
 
 
 class TestAskMailbox:
@@ -251,6 +257,31 @@ class TestSummarizeThread:
         assert "notes from the planning meeting" in user
 
 
+class TestTruncatedProse:
+    """#222: a prose answer cut off at max_tokens ended mid-way with no
+    marker; it now says so."""
+
+    def test_ask_mailbox_marks_a_truncated_answer(self, fake_server, seeded_db):
+        llm = FakeLocalLLM(complete_responses=[InferenceTruncatedError(partial="The budget was")])
+        handler = _handlers(fake_server, seeded_db, llm)["ask_mailbox"]
+        text = _text(asyncio.run(handler(question="What was the budget?")))
+        assert text.startswith("The budget was")
+        assert "cut off" in text
+
+    def test_summarize_thread_marks_a_truncated_summary(self, fake_server, seeded_db):
+        llm = FakeLocalLLM(complete_responses=[InferenceTruncatedError(partial="- first point")])
+        handler = _handlers(fake_server, seeded_db, llm)["summarize_thread"]
+        text = _text(asyncio.run(handler(thread_id="t-alpha")))
+        assert "- first point" in text
+        assert "cut off" in text
+
+    def test_truncated_with_no_text_is_an_error(self, fake_server, seeded_db):
+        llm = FakeLocalLLM(complete_responses=[InferenceTruncatedError(partial="")])
+        handler = _handlers(fake_server, seeded_db, llm)["ask_mailbox"]
+        text = _text(asyncio.run(handler(question="What was the budget?")))
+        assert text.startswith("Error:")
+
+
 class TestExtractFromEmails:
     def test_returns_no_match_message_when_search_is_empty(self, fake_server, seeded_db, fake_llm):
         # See the equivalent ask_mailbox test — fixed-embedding fakes
@@ -273,13 +304,40 @@ class TestExtractFromEmails:
         asyncio.run(handler(query="invoice", schema={"vendor": "string"}, limit=10_000))
         assert seen["limit"] == 50  # _MAX_EXTRACT_LIMIT
 
-    def test_returns_no_records_when_llm_only_returns_invalid_json(self, fake_server, seeded_db):
+    def test_invalid_json_is_reported_as_failure_not_as_no_data(self, fake_server, seeded_db):
+        """#222: output that is not JSON says nothing about whether the
+        thread holds matching data, so it must not become a claim that
+        none was found."""
         llm = FakeLocalLLM(complete_responses=["not json", "still not json", "nope"])
         handler = _handlers(fake_server, seeded_db, llm)["extract_from_emails"]
         out = asyncio.run(handler(query="invoice OR lunch OR meeting", schema={"vendor": "string"}))
-        # Every per-thread JSON parse fails → the loop logs nothing and
-        # falls into the no-records-found message.
-        assert "No structured data" in _text(out)
+        text = _all_text(out)
+        assert "No structured data matching" not in text
+        assert "could not be extracted" in text
+        assert "not valid JSON" in text
+
+    def test_truncated_output_is_reported_alongside_the_records(self, fake_server, seeded_db):
+        llm = FakeLocalLLM(
+            complete_responses=[
+                '{"vendor": "Acme"}',
+                InferenceTruncatedError(partial='{"vendor": '),
+                "null",
+            ]
+        )
+        handler = _handlers(fake_server, seeded_db, llm)["extract_from_emails"]
+        out = asyncio.run(handler(query="invoice OR lunch OR meeting", schema={"vendor": "string"}))
+
+        records = json.loads(out[0].text)
+        assert [r["vendor"] for r in records] == ["Acme"]
+        notice = _all_text(out[1:])
+        assert "1 of" in notice
+        assert "INFERENCE_MAX_TOKENS" in notice
+
+    def test_valid_null_for_every_thread_still_means_no_data(self, fake_server, seeded_db):
+        llm = FakeLocalLLM(complete_responses=["null"] * 3)
+        handler = _handlers(fake_server, seeded_db, llm)["extract_from_emails"]
+        out = asyncio.run(handler(query="invoice OR lunch OR meeting", schema={"vendor": "string"}))
+        assert "No structured data matching the schema found" in _text(out)
 
     def test_accepts_object_response_and_annotates_with_source(self, fake_server, seeded_db):
         llm = FakeLocalLLM(complete_responses=['{"vendor": "Acme"}'] * 3)

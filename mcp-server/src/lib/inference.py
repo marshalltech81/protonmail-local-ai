@@ -47,6 +47,23 @@ DEFAULT_COMPLETE_TIMEOUT_SECS = 300.0
 DEFAULT_MAX_TOKENS = 1024
 
 
+class InferenceTruncatedError(RuntimeError):
+    """The model stopped at ``max_tokens`` before finishing its answer.
+
+    ``partial`` holds whatever text it produced. Callers decide what a
+    cut-off answer is worth: prose can be shown with a notice, while a
+    cut-off JSON record is a failed extraction, never an empty one. The
+    message itself carries no response content, so it is safe to log.
+    """
+
+    def __init__(self, partial: str) -> None:
+        super().__init__(
+            "Inference output hit the max_tokens limit before finishing "
+            "(raise INFERENCE_MAX_TOKENS)"
+        )
+        self.partial = partial
+
+
 class _Backend(Protocol):
     """Structural contract every inference backend satisfies.
 
@@ -162,6 +179,8 @@ class _OpenAIBackend:
         if not resp.choices:
             raise RuntimeError("Inference provider returned no choices (mode=openai)")
         content = resp.choices[0].message.content
+        if getattr(resp.choices[0], "finish_reason", None) == "length":
+            raise InferenceTruncatedError(content or "")
         if not content:
             raise RuntimeError("Inference provider returned empty content (mode=openai)")
         return content
@@ -248,6 +267,8 @@ class _AnthropicBackend:
             if isinstance(text, str) and getattr(block, "type", None) == "text":
                 parts.append(text)
         result = "".join(parts)
+        if getattr(resp, "stop_reason", None) == "max_tokens":
+            raise InferenceTruncatedError(result)
         # An empty result means the response contained no text blocks
         # at all (empty ``content``, or only ``tool_use`` / ``thinking``
         # blocks). Returning "" would let the caller pass a silent blank
