@@ -30,6 +30,7 @@ import os
 import sqlite3
 import time
 import urllib.parse
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -64,6 +65,7 @@ from .parser import Message, OversizedMessageError, _derive_folder, parse_email
 from .queue import (
     ERROR_CLASS_OPERATOR,
     ERROR_CLASS_RETRYABLE,
+    INTERRUPTED_STAGE,
     REASON_INITIAL_SCAN,
     REASON_ON_CREATED,
     REASON_ON_MOVED,
@@ -74,6 +76,7 @@ from .queue import (
 from .queue import load_config_from_env as load_queue_config_from_env
 from .quoting import strip_for_embedding
 from .reconciler import Reconciler, ReconcilerConfig, load_config_from_env, sweep_paths
+from .stall_guard import StallGuard
 from .threader import Thread, Threader
 from .timings import StageTimings, TimingAggregator, format_summary
 
@@ -300,6 +303,14 @@ INDEXER_OCR_MAX_PAGES = _int_env("INDEXER_OCR_MAX_PAGES", 20, minimum=1)
 # that pins the worker for tens of minutes per PDF. Set to 0 to
 # disable the timeout.
 INDEXER_OCR_TIMEOUT_SECONDS = _int_env("INDEXER_OCR_TIMEOUT_SECONDS", 60, minimum=0)
+# Longest one unit of work — a message's parse, or one attachment's
+# extraction — may run before the stall guard exits the process for
+# Compose to restart (``stall_guard``). Each attachment restarts the
+# clock, so a message with many slow attachments is fine; one scanned
+# PDF legitimately takes up to ``INDEXER_OCR_MAX_PAGES`` x
+# ``INDEXER_OCR_TIMEOUT_SECONDS`` plus its render (~21 min at the
+# defaults). Set to 0 to disable.
+INDEXER_MESSAGE_TIMEOUT_SECONDS = _int_env("INDEXER_MESSAGE_TIMEOUT_SECONDS", 3600, minimum=0)
 # Page cap for the digital pypdf path. The OCR cap above doesn't bound
 # this — a 5 MB text-only PDF can carry thousands of pages, and even
 # at ~ms per page the indexer queue stalls. Set to 0 to disable.
@@ -778,6 +789,8 @@ def _phase2a_collect_chunks(
     state: _BatchedMsg,
     db: Database,
     all_texts: list[str],
+    *,
+    progress: Callable[[], None] = lambda: None,
 ) -> tuple[bool, str | None]:
     """Phase 2a: chunk the body and attachments WITHOUT embedding.
 
@@ -829,6 +842,10 @@ def _phase2a_collect_chunks(
                 else None
             )
             for occurrence_index, attachment in enumerate(msg.attachments):
+                # Each attachment's extraction is separately bounded
+                # (byte caps, OCR page cap and timeouts), so it is the
+                # unit the stall guard's limit applies to.
+                progress()
                 # ``embedder=None`` defers the embed step — the plan
                 # comes back with empty embeddings_by_chunk_id and
                 # Phase 2c populates it from the batched embed result.
@@ -1119,7 +1136,24 @@ def _pause_embedding(
         )
 
 
-def _embed_message_texts(texts: list[str], embedder: EmbeddingBackend) -> list[list[float]]:
+def _embed_progress(queue: IndexingQueue) -> Callable[[], None]:
+    """Callback for each completed embed request: refresh the heartbeat
+    and restart the stall guard's clock. A lone survivor stays charged,
+    and watched, through the bulk embed; each request is separately
+    bounded, so it is the unit the guard's limit applies to."""
+
+    def progress() -> None:
+        touch_health_file()
+        queue.note_progress()
+
+    return progress
+
+
+def _embed_message_texts(
+    texts: list[str],
+    embedder: EmbeddingBackend,
+    on_progress: Callable[[], None] | None = None,
+) -> list[list[float]]:
     """Embed one message's texts, telling a request limit from bad content.
 
     ``embed_batch`` packs up to ``EMBED_BATCH_SIZE`` texts into each HTTP
@@ -1131,8 +1165,10 @@ def _embed_message_texts(texts: list[str], embedder: EmbeddingBackend) -> list[l
     source. Every other failure propagates unchanged for the caller to
     attribute.
     """
+    if on_progress is None:
+        on_progress = touch_health_file
     try:
-        return embedder.embed_batch(texts, on_batch_complete=touch_health_file)
+        return embedder.embed_batch(texts, on_batch_complete=on_progress)
     except Exception as e:
         if len(texts) <= 1 or classify_embed_failure(e) != EMBED_FAILURE_REJECTED_INPUT:
             raise
@@ -1143,7 +1179,7 @@ def _embed_message_texts(texts: list[str], embedder: EmbeddingBackend) -> list[l
             len(texts),
             scrub_embed_error(e),
         )
-    return [embedder.embed_batch([t], on_batch_complete=touch_health_file)[0] for t in texts]
+    return [embedder.embed_batch([t], on_batch_complete=on_progress)[0] for t in texts]
 
 
 def _embed_each_message(
@@ -1188,7 +1224,11 @@ def _embed_each_message(
         filepath = entry.row["filepath"]
         try:
             entry_vectors = (
-                _embed_message_texts([all_texts[i] for i in offsets], embedder) if offsets else []
+                _embed_message_texts(
+                    [all_texts[i] for i in offsets], embedder, _embed_progress(queue)
+                )
+                if offsets
+                else []
             )
         except Exception as e:
             failure: BaseException = e
@@ -1278,9 +1318,26 @@ def _drain_queue_batched(
         rows = queue.claim_batch(batch_size)
         if not rows:
             break
+        # A row still marked ``interrupted`` was mid-step when the
+        # indexer died. An out-of-memory kill can come from the whole
+        # batch's footprint rather than that message, and a restart
+        # replays the same batch in the same order, so the row runs
+        # alone first: only a message that fails on its own keeps
+        # accumulating charges toward ``dead``.
+        interrupted = [row for row in rows if row["last_stage"] == INTERRUPTED_STAGE]
+        if interrupted and len(rows) > 1:
+            rows = interrupted[:1]
         batch: list[_BatchedMsg] = []
         for row in rows:
+            # Parse and extraction are the steps hostile input can crash
+            # or hang, so each runs with its message charged one attempt
+            # (see ``IndexingQueue.begin_attempt``). The refund is not in
+            # a ``finally``: an exception escaping the step takes the
+            # process down, and the charge must survive that.
+            if not queue.begin_attempt(row["filepath"]):
+                continue
             entry = _phase1_commit_thread(row, db, threader, queue)
+            queue.end_attempt(row["filepath"])
             processed += 1
             if entry is not None:
                 batch.append(entry)
@@ -1298,7 +1355,10 @@ def _drain_queue_batched(
         all_texts: list[str] = []
         survivors: list[_BatchedMsg] = []
         for entry in batch:
-            ok, err = _phase2a_collect_chunks(entry, db, all_texts)
+            if not queue.begin_attempt(entry.row["filepath"]):
+                continue
+            ok, err = _phase2a_collect_chunks(entry, db, all_texts, progress=queue.note_progress)
+            queue.end_attempt(entry.row["filepath"])
             if ok:
                 survivors.append(entry)
             else:
@@ -1307,6 +1367,18 @@ def _drain_queue_batched(
 
         if not survivors:
             continue
+
+        # The bulk embed and the vector commits hold the whole batch's
+        # vectors, so a kill there cannot be pinned on one message.
+        # Several survivors are marked ``interrupted`` without a charge,
+        # which replays each alone after a restart; a lone survivor —
+        # already running alone — stays charged until its outcome is
+        # recorded, so one that dies even alone still reaches ``dead``.
+        if len(survivors) == 1:
+            if not queue.begin_attempt(survivors[0].row["filepath"]):
+                continue
+        else:
+            queue.mark_interrupted([entry.row["filepath"] for entry in survivors])
 
         # Refresh the heartbeat just before the bulk embed so a slow
         # cloud-embedder round-trip (potentially tens of seconds for a
@@ -1319,7 +1391,7 @@ def _drain_queue_batched(
         paused = False
         try:
             vectors = (
-                embedder.embed_batch(all_texts, on_batch_complete=touch_health_file)
+                embedder.embed_batch(all_texts, on_batch_complete=_embed_progress(queue))
                 if all_texts
                 else []
             )
@@ -1708,6 +1780,11 @@ def main():
         queue_cfg["max_attempts"],
         queue_cfg["base_backoff_seconds"],
     )
+    if INDEXER_MESSAGE_TIMEOUT_SECONDS:
+        StallGuard(queue, limit_seconds=INDEXER_MESSAGE_TIMEOUT_SECONDS).start()
+        log.info("Stall guard: exits after %ds on one message", INDEXER_MESSAGE_TIMEOUT_SECONDS)
+    else:
+        log.info("Stall guard: disabled (INDEXER_MESSAGE_TIMEOUT_SECONDS=0)")
     queue_depth = queue.stats()
     if queue_depth["queued"] or queue_depth["dead"]:
         log.info(

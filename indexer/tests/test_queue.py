@@ -529,3 +529,210 @@ class TestRequeueDead:
 
         assert q.has_pending_row("/m/a")
         assert q.is_dead("/m/b")
+
+
+class TestInFlightAttempts:
+    """#235: a message that kills or hangs the worker never reached
+    ``mark_failed``, so it was re-claimed forever at ``attempts=0``. The
+    message actually running carries one attempt while it runs, refunded
+    when its step returns; a process that dies mid-step leaves it charged.
+    A new ``IndexingQueue`` over the same database stands in for the
+    restarted indexer."""
+
+    def test_step_that_returns_leaves_attempts_unchanged(self, tmp_path):
+        db = Database(tmp_path / "q.db")
+        q = _queue(db)
+        q.enqueue("/m/a", REASON_INITIAL_SCAN)
+
+        assert q.begin_attempt("/m/a")
+        assert _row(db, "/m/a")["attempts"] == 1
+        q.end_attempt("/m/a")
+
+        assert _row(db, "/m/a")["attempts"] == 0
+        assert q.in_flight() is None
+
+    def test_worker_death_mid_step_counts_one_attempt(self, tmp_path):
+        db = Database(tmp_path / "q.db")
+        _queue(db).enqueue("/m/a", REASON_INITIAL_SCAN)
+        _queue(db).begin_attempt("/m/a")  # process dies here
+
+        row = _row(db, "/m/a")
+        assert row["attempts"] == 1
+        assert row["status"] == STATUS_QUEUED
+
+    def test_repeated_worker_death_dead_letters_the_message(self, tmp_path):
+        db = Database(tmp_path / "q.db")
+        _queue(db, max_attempts=3).enqueue("/m/a", REASON_INITIAL_SCAN)
+        for _ in range(3):
+            assert _queue(db, max_attempts=3).begin_attempt("/m/a")
+
+        restarted = _queue(db, max_attempts=3)
+        assert not restarted.begin_attempt("/m/a")
+
+        row = _row(db, "/m/a")
+        assert row["status"] == STATUS_DEAD
+        assert row["attempts"] == 3
+        assert row["last_stage"] == "interrupted"
+        assert row["last_error_class"] == ERROR_CLASS_RETRYABLE
+        assert "stopped while processing" in row["last_error"]
+        assert restarted.in_flight() is None
+
+    def test_only_the_running_message_is_charged(self, tmp_path):
+        """Charging the whole claimed batch would let an ordinary restart
+        dead-letter healthy batchmates."""
+        db = Database(tmp_path / "q.db")
+        q = _queue(db)
+        for path in ("/m/a", "/m/b", "/m/c"):
+            q.enqueue(path, REASON_INITIAL_SCAN)
+        q.claim_batch(3)
+
+        q.begin_attempt("/m/b")  # process dies here
+
+        assert [_row(db, p)["attempts"] for p in ("/m/a", "/m/b", "/m/c")] == [0, 1, 0]
+
+    def test_mark_failed_during_a_step_counts_one_attempt(self, tmp_path):
+        db = Database(tmp_path / "q.db")
+        q = _queue(db)
+        q.enqueue("/m/a", REASON_INITIAL_SCAN)
+
+        q.begin_attempt("/m/a")
+        q.mark_failed("/m/a", stage="parse", error="boom")
+        q.end_attempt("/m/a")
+
+        assert _row(db, "/m/a")["attempts"] == 1
+        assert q.in_flight() is None
+
+    def test_defer_during_a_step_spends_no_attempt(self, tmp_path):
+        db = Database(tmp_path / "q.db")
+        q = _queue(db)
+        q.enqueue("/m/a", REASON_INITIAL_SCAN)
+
+        q.begin_attempt("/m/a")
+        q.defer(
+            "/m/a",
+            stage="embed",
+            error="APIConnectionError",
+            error_class=ERROR_CLASS_RETRYABLE,
+            delay_seconds=60,
+        )
+
+        assert _row(db, "/m/a")["attempts"] == 0
+
+    def test_terminal_outcomes_during_a_step_clear_the_charge(self, tmp_path):
+        db = Database(tmp_path / "q.db")
+        q = _queue(db)
+        for path in ("/m/ok", "/m/gone", "/m/huge"):
+            q.enqueue(path, REASON_INITIAL_SCAN)
+
+        q.begin_attempt("/m/ok")
+        q.mark_succeeded("/m/ok")
+        q.begin_attempt("/m/gone")
+        q.mark_skipped("/m/gone", reason="moved")
+        q.begin_attempt("/m/huge")
+        q.mark_dead_terminal("/m/huge", stage="parse", error="oversized")
+
+        assert _row(db, "/m/huge")["attempts"] == 1
+        assert q.in_flight() is None
+
+    def test_in_flight_reports_the_running_message_and_its_start(self, tmp_path):
+        import time
+
+        db = Database(tmp_path / "q.db")
+        q = _queue(db)
+        q.enqueue("/m/a", REASON_INITIAL_SCAN)
+        before = time.monotonic()
+
+        q.begin_attempt("/m/a")
+
+        in_flight = q.in_flight()
+        assert in_flight is not None
+        assert in_flight[0] == "/m/a"
+        assert before <= in_flight[1] <= time.monotonic()
+
+    def test_running_step_marks_the_row_interrupted_until_it_returns(self, tmp_path):
+        """The marker is what a restarted indexer reads to know a row's
+        step never returned (review round 1)."""
+        db = Database(tmp_path / "q.db")
+        q = _queue(db)
+        q.enqueue("/m/a", REASON_INITIAL_SCAN)
+
+        q.begin_attempt("/m/a")
+        assert _row(db, "/m/a")["last_stage"] == "interrupted"
+        q.end_attempt("/m/a")
+
+        row = _row(db, "/m/a")
+        assert row["last_stage"] is None
+        assert row["last_error"] is None
+
+    def test_refund_does_not_touch_a_row_reenqueued_mid_step(self, tmp_path):
+        """Review round 1: the watchdog thread can re-enqueue the running
+        path (fresh intent, attempts reset). The refund must not act on
+        the reset row's state."""
+        db = Database(tmp_path / "q.db")
+        q = _queue(db)
+        q.enqueue("/m/a", REASON_INITIAL_SCAN)
+        q.mark_failed("/m/a", stage="parse", error="x")
+
+        q.begin_attempt("/m/a")
+        q.enqueue("/m/a", REASON_ON_CREATED)  # watchdog thread
+        q.end_attempt("/m/a")
+
+        assert _row(db, "/m/a")["attempts"] == 0
+
+    def test_reenqueued_row_is_not_dead_lettered_by_stale_interruptions(self, tmp_path):
+        db = Database(tmp_path / "q.db")
+        _queue(db, max_attempts=3).enqueue("/m/a", REASON_INITIAL_SCAN)
+        for _ in range(3):
+            _queue(db, max_attempts=3).begin_attempt("/m/a")
+        _queue(db, max_attempts=3).enqueue("/m/a", REASON_ON_CREATED)  # new delivery
+
+        assert _queue(db, max_attempts=3).begin_attempt("/m/a")
+        row = _row(db, "/m/a")
+        assert row["status"] == STATUS_QUEUED
+        assert row["attempts"] == 1
+
+    def test_exhausted_row_without_interruptions_still_runs(self, tmp_path):
+        """Lowering INDEXER_MAX_ATTEMPTS leaves ordinary retry rows above
+        the limit; only interruptions may dead-letter at begin."""
+        db = Database(tmp_path / "q.db")
+        q = _queue(db, max_attempts=5)
+        q.enqueue("/m/a", REASON_INITIAL_SCAN)
+        for _ in range(3):
+            q.mark_failed("/m/a", stage="parse", error="x")
+
+        assert _queue(db, max_attempts=2).begin_attempt("/m/a")
+        assert _row(db, "/m/a")["status"] == STATUS_QUEUED
+
+    def test_progress_restarts_the_in_flight_clock(self, tmp_path):
+        db = Database(tmp_path / "q.db")
+        q = _queue(db)
+        q.enqueue("/m/a", REASON_INITIAL_SCAN)
+        q.begin_attempt("/m/a")
+        q._in_flight = ("/m/a", 0.0)
+
+        q.note_progress()
+
+        in_flight = q.in_flight()
+        assert in_flight is not None
+        assert in_flight[0] == "/m/a"
+        assert in_flight[1] > 0.0
+
+    def test_progress_with_nothing_in_flight_is_a_no_op(self, tmp_path):
+        q = _queue(Database(tmp_path / "q.db"))
+        q.note_progress()
+        assert q.in_flight() is None
+
+    def test_marking_a_batch_interrupted_spends_no_attempts(self, tmp_path):
+        """Review round 2: before the bulk embed a multi-message batch is
+        marked so a kill there replays each message alone — without
+        charging any of them."""
+        db = Database(tmp_path / "q.db")
+        q = _queue(db)
+        for path in ("/m/a", "/m/b"):
+            q.enqueue(path, REASON_INITIAL_SCAN)
+        q.mark_failed("/m/b", stage="parse", error="x")
+
+        q.mark_interrupted(["/m/a", "/m/b"])
+
+        assert [_row(db, p)["attempts"] for p in ("/m/a", "/m/b")] == [0, 1]
+        assert all(_row(db, p)["last_stage"] == "interrupted" for p in ("/m/a", "/m/b"))

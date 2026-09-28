@@ -1723,6 +1723,75 @@ class Database:
         return int(row["attempts"]) if row else None
 
     @_synchronized
+    def queue_charge_attempt(
+        self,
+        *,
+        filepath: str,
+        max_attempts: int,
+        marker_stage: str,
+        marker_error: str,
+        error_class: str,
+        now_iso: str,
+    ) -> bool:
+        """Charge one attempt and mark the row as mid-step; return False
+        (and dead-letter it) when interruptions already exhausted it.
+
+        Conditional updates under the connection lock, so a concurrent
+        ``queue_enqueue`` from the watchdog thread is either fully before
+        (the reset row is charged from zero) or fully after (it resets
+        the charge) — never interleaved with a stale read.
+        """
+        exhausted = self._conn.execute(
+            """
+            UPDATE indexing_jobs
+            SET status = 'dead', last_error_class = ?, updated_at = ?
+            WHERE filepath = ? AND status = 'queued'
+              AND last_stage = ? AND attempts >= ?
+            """,
+            (error_class, now_iso, filepath, marker_stage, max_attempts),
+        ).rowcount
+        if not exhausted:
+            self._conn.execute(
+                """
+                UPDATE indexing_jobs
+                SET attempts = attempts + 1, last_stage = ?, last_error = ?
+                WHERE filepath = ? AND status = 'queued'
+                """,
+                (marker_stage, marker_error, filepath),
+            )
+        self._conn.commit()
+        return not exhausted
+
+    @_synchronized
+    def queue_mark_interrupted(
+        self, *, filepaths: list[str], marker_stage: str, marker_error: str
+    ) -> None:
+        """Mark queued rows as mid-step without charging an attempt."""
+        self._conn.executemany(
+            """
+            UPDATE indexing_jobs SET last_stage = ?, last_error = ?
+            WHERE filepath = ? AND status = 'queued'
+            """,
+            [(marker_stage, marker_error, filepath) for filepath in filepaths],
+        )
+        self._conn.commit()
+
+    @_synchronized
+    def queue_refund_attempt(self, *, filepath: str, marker_stage: str) -> None:
+        """Undo ``queue_charge_attempt`` if its mark is still on the row.
+        A row re-enqueued meanwhile no longer carries the mark and is
+        left alone."""
+        self._conn.execute(
+            """
+            UPDATE indexing_jobs
+            SET attempts = attempts - 1, last_stage = NULL, last_error = NULL
+            WHERE filepath = ? AND last_stage = ? AND attempts > 0
+            """,
+            (filepath, marker_stage),
+        )
+        self._conn.commit()
+
+    @_synchronized
     def queue_get_status(self, filepath: str) -> str | None:
         """Return ``"queued"`` / ``"dead"`` / ``None`` for ``filepath``.
 

@@ -387,9 +387,9 @@ class TestInitialIndexHeartbeat:
         # touch must fire.
         original_phase2a = main_mod._phase2a_collect_chunks
 
-        def slow_phase2a(state, db_arg, all_texts):
+        def slow_phase2a(state, db_arg, all_texts, **kwargs):
             marker_touches.append("phase2a:enter")
-            result = original_phase2a(state, db_arg, all_texts)
+            result = original_phase2a(state, db_arg, all_texts, **kwargs)
             marker_touches.append("phase2a:exit")
             return result
 
@@ -990,6 +990,254 @@ class TestIndexOneFileChunking:
         assert not db.get_chunk_ids_for_message("attachment-retry@x")
         assert db._conn.execute("SELECT COUNT(*) FROM attachments").fetchone()[0] == 0
         assert db._conn.execute("SELECT COUNT(*) FROM attachment_extractions").fetchone()[0] == 0
+
+
+class _WorkerKilled(BaseException):
+    """Stands in for the process dying mid-step (OOM kill, a re-raised
+    ``MemoryError``, the stall guard's ``os._exit``): nothing in the
+    pipeline catches it, so no outcome is recorded."""
+
+
+class TestInterruptedMessagesDeadLetter:
+    """#235: a message that kills the worker was re-claimed at
+    ``attempts=0`` after every restart, forever. Now each death charges
+    that message — and only that message — one attempt."""
+
+    def _run_until_quiet(self, tmp_path, poison: Path, healthy: Path, max_restarts: int = 6):
+        db = Database(tmp_path / "mail.db")
+        embedder = make_mock_embedder()
+        embedder.embed.return_value = _UNIT_VECTOR
+        _make_queue(db).enqueue(str(poison), REASON_INITIAL_SCAN)
+        _make_queue(db).enqueue(str(healthy), REASON_INITIAL_SCAN)
+        deaths = 0
+        healthy_charges: list[int | None] = []
+        for _ in range(max_restarts):
+            queue = _make_queue(db)  # a restarted indexer, max_attempts=3
+            try:
+                main.drain_queue(queue, db, embedder, Threader(db))
+            except _WorkerKilled:
+                deaths += 1
+                healthy_charges.append(db.queue_get_attempts(str(healthy)))
+                continue
+            break
+        return db, queue, deaths, healthy_charges
+
+    def test_message_that_kills_the_parser_reaches_dead(self, tmp_path, monkeypatch):
+        poison = tmp_path / "INBOX" / "new" / "poison.eml"
+        healthy = tmp_path / "INBOX" / "new" / "healthy.eml"
+        _write_eml(poison, "poison@example.com")
+        _write_eml(healthy, "healthy@example.com")
+
+        from src import parser
+
+        real_parse = parser.parse_email
+
+        def parse(path, *args, **kwargs):
+            if Path(path).name == "poison.eml":
+                raise _WorkerKilled
+            return real_parse(path, *args, **kwargs)
+
+        monkeypatch.setattr(main, "parse_email", parse)
+
+        db, queue, deaths, healthy_charges = self._run_until_quiet(tmp_path, poison, healthy)
+
+        assert deaths == 3
+        assert queue.is_dead(str(poison))
+        assert (
+            db._conn.execute(
+                "SELECT last_stage FROM indexing_jobs WHERE filepath = ?", (str(poison),)
+            ).fetchone()["last_stage"]
+            == "interrupted"
+        )
+        assert all(charge in (None, 0) for charge in healthy_charges)
+        assert db.get_chunk_ids_for_message("healthy@example.com")
+
+    def test_crash_from_batch_memory_retries_the_row_alone(self, tmp_path, monkeypatch):
+        """Review round 1: an out-of-memory kill at row N can come from
+        the whole batch's footprint, and a restart replays the same batch
+        in the same order. The interrupted row runs alone next, so a
+        message that is fine on its own is indexed, not dead-lettered."""
+        first = tmp_path / "INBOX" / "new" / "first.eml"
+        second = tmp_path / "INBOX" / "new" / "second.eml"
+        _write_eml(first, "first@example.com")
+        _write_eml(second, "second@example.com")
+
+        real_phase1 = main._phase1_commit_thread
+        seen: list[str] = []
+
+        def phase1(row, db, threader, queue):
+            seen.append(row["filepath"])
+            # "Out of memory" only when another message is in the batch.
+            if row["filepath"].endswith("second.eml") and len(seen) > 1:
+                raise _WorkerKilled
+            return real_phase1(row, db, threader, queue)
+
+        monkeypatch.setattr(main, "_phase1_commit_thread", phase1)
+
+        db = Database(tmp_path / "mail.db")
+        embedder = make_mock_embedder()
+        embedder.embed.return_value = _UNIT_VECTOR
+        _make_queue(db).enqueue(str(first), REASON_INITIAL_SCAN)
+        _make_queue(db).enqueue(str(second), REASON_INITIAL_SCAN)
+        deaths = 0
+        for _ in range(6):
+            seen.clear()
+            try:
+                main.drain_queue(_make_queue(db), db, embedder, Threader(db))
+            except _WorkerKilled:
+                deaths += 1
+                continue
+            if db.queue_stats()["queued"] == 0:
+                break
+
+        assert deaths == 1
+        assert db.queue_stats() == {"queued": 0, "dead": 0}
+        assert db.get_chunk_ids_for_message("first@example.com")
+        assert db.get_chunk_ids_for_message("second@example.com")
+
+    def test_message_that_kills_extraction_reaches_dead(self, tmp_path, monkeypatch):
+        poison = tmp_path / "INBOX" / "new" / "poison.eml"
+        healthy = tmp_path / "INBOX" / "new" / "healthy.eml"
+        _write_eml(poison, "poison@example.com")
+        _write_eml(healthy, "healthy@example.com")
+
+        real_collect = main._phase2a_collect_chunks
+
+        def collect(entry, db, all_texts, **kwargs):
+            if entry.row["filepath"].endswith("poison.eml"):
+                raise _WorkerKilled
+            return real_collect(entry, db, all_texts, **kwargs)
+
+        monkeypatch.setattr(main, "_phase2a_collect_chunks", collect)
+
+        db, queue, deaths, healthy_charges = self._run_until_quiet(tmp_path, poison, healthy)
+
+        assert deaths == 3
+        assert queue.is_dead(str(poison))
+        assert all(charge in (None, 0) for charge in healthy_charges)
+        assert db.get_chunk_ids_for_message("healthy@example.com")
+
+
+class TestInterruptedEmbedPhase:
+    """Review round 2: a kill during the bulk embed or the vector commit
+    (Phase 2b / 2c) happened after every per-message charge was refunded,
+    so the restart rebuilt the same batch and could crash forever."""
+
+    def _drain_with_restarts(self, tmp_path, embed_batch, max_restarts: int = 8):
+        a = tmp_path / "INBOX" / "new" / "a.eml"
+        b = tmp_path / "INBOX" / "new" / "b.eml"
+        _write_eml(a, "a@example.com")
+        _write_eml(b, "b@example.com")
+        db = Database(tmp_path / "mail.db")
+        embedder = make_mock_embedder()
+        embedder.embed.return_value = _UNIT_VECTOR
+        embedder.embed_batch.side_effect = embed_batch
+        _make_queue(db).enqueue(str(a), REASON_INITIAL_SCAN)
+        _make_queue(db).enqueue(str(b), REASON_INITIAL_SCAN)
+        deaths = 0
+        for _ in range(max_restarts):
+            try:
+                main.drain_queue(_make_queue(db), db, embedder, Threader(db))
+            except _WorkerKilled:
+                deaths += 1
+                continue
+            if db.queue_stats()["queued"] == 0:
+                break
+        return db, deaths
+
+    def test_batch_wide_embed_kill_replays_messages_alone(self, tmp_path):
+        """Out of memory only while embedding both messages together."""
+
+        def embed_batch(texts, **_kw):
+            if sum("Body of" in t for t in texts) > 1:
+                raise _WorkerKilled
+            return [_UNIT_VECTOR for _ in texts]
+
+        db, deaths = self._drain_with_restarts(tmp_path, embed_batch)
+
+        assert deaths == 1
+        assert db.queue_stats() == {"queued": 0, "dead": 0}
+        assert db.get_chunk_ids_for_message("a@example.com")
+        assert db.get_chunk_ids_for_message("b@example.com")
+
+    def test_message_that_kills_the_embed_alone_reaches_dead(self, tmp_path):
+        def embed_batch(texts, **_kw):
+            if any("Body of a@" in t for t in texts):
+                raise _WorkerKilled
+            return [_UNIT_VECTOR for _ in texts]
+
+        db, deaths = self._drain_with_restarts(tmp_path, embed_batch)
+
+        assert deaths == 4  # once in the batch, then 3 times alone
+        assert db.queue_stats() == {"queued": 0, "dead": 1}
+        assert _make_queue(db).is_dead(str(tmp_path / "INBOX" / "new" / "a.eml"))
+        assert db.get_chunk_ids_for_message("b@example.com")
+
+
+class TestStallGuardProgress:
+    """Review round 2: the limit bounded a whole message, so several
+    legitimately slow scanned PDFs in one message exceeded it on every
+    restart. Each attachment now counts as progress."""
+
+    def _drain_one_counting_progress(self, tmp_path, monkeypatch, embed_batch):
+        dest = tmp_path / "INBOX" / "new" / "big.eml"
+        _write_eml(dest, "big@example.com")
+        db = Database(tmp_path / "mail.db")
+        queue = _make_queue(db)
+        queue.enqueue(str(dest), REASON_INITIAL_SCAN)
+        progress: list[int] = []
+        real_note = queue.note_progress
+        monkeypatch.setattr(queue, "note_progress", lambda: (progress.append(1), real_note()))
+        embedder = make_mock_embedder()
+        embedder.embed.return_value = _UNIT_VECTOR
+        embedder.embed_batch.side_effect = embed_batch
+        main.drain_queue(queue, db, embedder, Threader(db))
+        assert db.get_chunk_ids_for_message("big@example.com")
+        return progress
+
+    def test_each_embed_sub_batch_counts_as_progress(self, tmp_path, monkeypatch):
+        """Review round 3: a lone survivor stays charged, and so watched,
+        through the bulk embed. A large message's many individually
+        bounded embed requests must each restart the clock, or a healthy
+        message on a slow embedder is killed after the limit."""
+
+        def embed_batch(texts, on_batch_complete=None, **_kw):
+            for _ in range(3):
+                on_batch_complete()
+            return [_UNIT_VECTOR for _ in texts]
+
+        progress = self._drain_one_counting_progress(tmp_path, monkeypatch, embed_batch)
+        assert len(progress) == 3
+
+    def test_isolated_re_embed_counts_as_progress(self, tmp_path, monkeypatch):
+        calls = {"n": 0}
+
+        def embed_batch(texts, on_batch_complete=None, **_kw):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise _status_error(503)  # batch embed fails; probe passes
+            for _ in range(2):
+                on_batch_complete()
+            return [_UNIT_VECTOR for _ in texts]
+
+        progress = self._drain_one_counting_progress(tmp_path, monkeypatch, embed_batch)
+        assert len(progress) >= 2
+
+    def test_phase2a_reports_progress_per_attachment(self, tmp_path):
+        dest = tmp_path / "INBOX" / "new" / "att.eml"
+        _write_eml_with_text_attachment(dest, "att@example.com")
+        db = Database(tmp_path / "mail.db")
+        queue = _make_queue(db)
+        queue.enqueue(str(dest), REASON_INITIAL_SCAN)
+        row = queue.claim_batch(1)[0]
+        entry = main._phase1_commit_thread(row, db, Threader(db), queue)
+        assert entry is not None and entry.msg.attachments
+
+        calls: list[int] = []
+        ok, _ = main._phase2a_collect_chunks(entry, db, [], progress=lambda: calls.append(1))
+
+        assert ok
+        assert len(calls) == len(entry.msg.attachments)
 
 
 class TestBatchedInitialIndex:
@@ -2256,12 +2504,37 @@ class TestMainStartupAndLoop:
         if sweep_due:
             monkeypatch.setattr(main, "RECOVERY_SWEEP_INTERVAL_SECS", 0)
 
+        class _FakeStallGuard:
+            def __init__(self, queue, *, limit_seconds):
+                self.limit_seconds = limit_seconds
+
+            def start(self):
+                events.append(f"stall_guard:{self.limit_seconds}")
+
+        # A real guard thread would hit the patched ``time.sleep`` below.
+        monkeypatch.setattr(main, "StallGuard", _FakeStallGuard)
+
         def _stop(_seconds):
             raise KeyboardInterrupt
 
         monkeypatch.setattr(main.time, "sleep", _stop)
         main.main()
         return events
+
+    def test_stall_guard_starts_before_initial_drain(self, tmp_path, monkeypatch):
+        """#235: the guard must be watching during the initial drain,
+        which is where a hostile message first stalls the worker."""
+        monkeypatch.setattr(main, "INDEXER_MESSAGE_TIMEOUT_SECONDS", 1234)
+        events = self._run_main(tmp_path, monkeypatch, sweep_due=False)
+
+        init = next(e for e in events if e.startswith("initial_index"))
+        assert events.index("stall_guard:1234") < events.index(init)
+
+    def test_stall_guard_disabled_at_zero(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(main, "INDEXER_MESSAGE_TIMEOUT_SECONDS", 0)
+        events = self._run_main(tmp_path, monkeypatch, sweep_due=False)
+
+        assert not any(e.startswith("stall_guard:") for e in events)
 
     def test_observer_starts_before_initial_drain(self, tmp_path, monkeypatch):
         events = self._run_main(tmp_path, monkeypatch, sweep_due=False)

@@ -452,6 +452,41 @@ do not ship persisted claims without them.
 
 ## Recently Completed
 
+### 2026-09-28 — Interrupted messages dead-letter (#235)
+
+A message that crashed or hung the single worker never reached
+`mark_failed`, so it was re-claimed at the same attempt count after
+every restart, forever (and a hang never restarted at all: Compose does
+not restart unhealthy containers). The one message whose parse or
+chunk/extraction step is running now carries one attempt while it runs
+(`begin_attempt`), refunded when the step returns or its outcome is
+recorded; a process that dies mid-step leaves only that message
+charged, never its batchmates, and exhausted rows are dead-lettered
+with `last_stage = 'interrupted'`. A stall guard thread exits the
+indexer when one step runs past `INDEXER_MESSAGE_TIMEOUT_SECONDS`
+(default 3600, `0` disables) so the restart policy recovers it. The
+refund is deliberately not in a `finally`: `MemoryError` /
+`RecursionError` re-raised by the extractors must keep the charge. No
+schema change. Review round 1 (Codex): the charge and refund were
+read-then-write, so a concurrent re-enqueue from the watchdog thread
+could be overwritten with a stale count or dead status (now conditional
+SQL under the connection lock); the stall guard could exit on a stale
+in-flight reading after the step had already refunded (it now decides
+and exits holding a lock the refund takes); and an OOM from a whole
+batch's footprint was blamed on the row it landed on, replayed in the
+same order after each restart until a valid message was dead-lettered
+(a row left marked `interrupted` now runs alone first). Review round 2
+(Codex): a kill during the bulk embed or vector commit came after every
+charge was refunded, so the same batch could crash forever (several
+survivors are now marked `interrupted` without a charge before the
+embed; a lone survivor stays charged through it); and the 3600 s limit
+bounded a whole message, below three legitimately slow scanned PDFs
+(each attachment now restarts the guard's clock). Review round 3
+(Codex): a lone survivor is watched through the bulk embed, where a
+large message's many embed requests only refreshed the heartbeat, so a
+healthy message on a slow embedder could be killed; each completed
+embed request now also restarts the guard's clock.
+
 ### 2026-09-28 — Bounded indexer work on hostile input (#202, #211, #216, #218, #221)
 
 Five Codex findings where one crafted message could stall the single
