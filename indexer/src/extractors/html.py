@@ -11,11 +11,6 @@ from __future__ import annotations
 
 import html2text
 
-_h2t = html2text.HTML2Text()
-_h2t.ignore_links = True
-_h2t.ignore_images = True
-_h2t.body_width = 0
-
 
 def extract(
     payload: bytes,
@@ -30,4 +25,11 @@ def extract(
         source = payload.decode("utf-8")
     except UnicodeDecodeError:
         source = payload.decode("utf-8", errors="replace")
-    return _h2t.handle(source), "html"
+    # A fresh converter per document: ``HTML2Text`` keeps parser state
+    # between calls, so a shared one let an unclosed ``<style>`` blank
+    # the next attachment.
+    h2t = html2text.HTML2Text()
+    h2t.ignore_links = True
+    h2t.ignore_images = True
+    h2t.body_width = 0
+    return h2t.handle(source), "html"

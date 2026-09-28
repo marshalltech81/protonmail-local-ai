@@ -56,8 +56,11 @@ _PARAGRAPH_RE = re.compile(r"[^\n]+(?:\n(?![ \t]*\n)[^\n]*)*")
 # Sentence-boundary-ish split used only when a single paragraph exceeds
 # ``max_tokens``. Conservative: matches runs ending in ``.``/``!``/``?``
 # followed by whitespace or end-of-string. This is a fallback, not a
-# general-purpose sentence splitter.
-_SENTENCE_END_RE = re.compile(r"[.!?]+(?=\s|$)")
+# general-purpose sentence splitter. The lookbehind anchors each match at
+# the start of a punctuation run, so a run not followed by whitespace is
+# scanned once rather than retried from every position inside it
+# (quadratic on a long run such as ``"." * 128000 + "x"``).
+_SENTENCE_END_RE = re.compile(r"(?<![.!?])[.!?]+(?=\s|$)")
 
 
 # Tolerance for "vector is already unit-norm". A model that already

@@ -84,10 +84,18 @@ def _parse_max_bytes() -> int:
     return value
 
 
-h2t = html2text.HTML2Text()
-h2t.ignore_links = True
-h2t.ignore_images = True
-h2t.body_width = 0
+def _html_to_text(html: str) -> str:
+    """Render HTML to text with a fresh converter.
+
+    ``HTML2Text`` keeps parser state between ``handle`` calls, so a
+    shared instance let one message's unclosed ``<style>`` blank every
+    later HTML body until some document closed it.
+    """
+    h2t = html2text.HTML2Text()
+    h2t.ignore_links = True
+    h2t.ignore_images = True
+    h2t.body_width = 0
+    return h2t.handle(html)
 
 
 def _decoded_payload(part: Any) -> bytes:
@@ -362,13 +370,13 @@ def _extract_body_and_attachments(
             elif ct == "text/html" and not html_text:
                 payload = _decoded_payload(part)
                 charset = part.get_content_charset() or "utf-8"
-                html_text = h2t.handle(_safe_decode(payload, charset))
+                html_text = _html_to_text(_safe_decode(payload, charset))
     else:
         ct = msg.get_content_type()
         payload = _decoded_payload(msg)
         charset = msg.get_content_charset() or "utf-8"
         if ct == "text/html":
-            html_text = h2t.handle(_safe_decode(payload, charset))
+            html_text = _html_to_text(_safe_decode(payload, charset))
         else:
             plain_text = _safe_decode(payload, charset)
 
@@ -393,7 +401,24 @@ def _clean_id(value: str) -> str:
 
 
 def _decode_header(value: str | email.header.Header) -> str:
-    parts = email.header.decode_header(value)
+    """Decode a header value's RFC 2047 encoded-words.
+
+    A ``Header`` (raw 8-bit header) already holds decoded chunks. A
+    string is scanned for encoded-words in one linear pass and each one
+    is decoded on its own: ``decode_header`` on the whole string rescans
+    the rest of the header at every malformed ``=?`` prefix, which is
+    quadratic in a hostile Subject.
+    """
+    if isinstance(value, email.header.Header):
+        return _decode_header_parts(email.header.decode_header(value)).strip()
+    if "=?" not in value:
+        return value.strip()
+    return _decode_encoded_word_runs(
+        value, lambda m: _decode_header_parts(email.header.decode_header(m.group(0)))
+    ).strip()
+
+
+def _decode_header_parts(parts: list[tuple[bytes | str, str | None]]) -> str:
     decoded = []
     for part, charset in parts:
         if isinstance(part, bytes):
@@ -414,7 +439,7 @@ def _decode_header(value: str | email.header.Header) -> str:
                 decoded.append(part.decode("utf-8", errors="replace"))
         else:
             decoded.append(part)
-    return " ".join(decoded).strip()
+    return " ".join(decoded)
 
 
 # RFC 5322 "specials": a display name containing any of these must be
@@ -449,7 +474,11 @@ def _format_address(name: str, addr: str) -> str:
 # classes (no whitespace, no "?") keep the scan linear.
 _ENCODED_WORD_RE = re.compile(r"=\?([^?\s]+)\?([QqBb])\?([^?\s]*)\?=")
 # RFC 2047 §6.2: whitespace between two adjacent encoded-words is dropped.
-_ADJACENT_ENCODED_WORDS_RE = re.compile(r"\?=\s+=\?")
+# Matching whole runs of valid words keeps whitespace next to anything
+# that only looks like one (a malformed ``=?...?=`` stays raw text).
+_ENCODED_WORD_RUN_RE = re.compile(
+    _ENCODED_WORD_RE.pattern + r"(?:\s+" + _ENCODED_WORD_RE.pattern + r")*"
+)
 # RFC 5322 line limit, applied per encoded-word: a valid long name folds
 # into many short encoded-words, so bounding the whole name would leave
 # legitimate long names undecoded.
@@ -504,8 +533,20 @@ def _decode_display_name(name: str) -> str:
     """
     if "=?" not in name:
         return name
-    name = _ADJACENT_ENCODED_WORDS_RE.sub("?==?", name)
-    return _ENCODED_WORD_RE.sub(_decode_encoded_word, name)
+    return _decode_encoded_word_runs(name, _decode_encoded_word)
+
+
+def _decode_encoded_word_runs(text: str, decode_word: Callable[[re.Match[str]], str]) -> str:
+    """Decode each encoded-word in ``text``, joining adjacent words.
+
+    One linear pass: each run of whitespace-separated valid encoded-words
+    is decoded word by word and joined without the whitespace; all other
+    text, including malformed look-alikes, is left as it is.
+    """
+    return _ENCODED_WORD_RUN_RE.sub(
+        lambda run: "".join(decode_word(m) for m in _ENCODED_WORD_RE.finditer(run.group(0))),
+        text,
+    )
 
 
 # Structural-parsing budget. The split below is linear, and each element

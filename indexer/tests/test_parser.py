@@ -516,6 +516,30 @@ class TestBodyExtraction:
         assert "<html>" not in msg.body_text
         assert "<b>" not in msg.body_text
 
+    def test_unclosed_style_does_not_blank_the_next_html_body(self, tmp_path):
+        """Regression (#216): one shared HTML2Text instance kept its
+        parser state across messages, so an unclosed ``<style>`` left it
+        in CDATA mode and the next HTML-only body came out empty —
+        indexed as successful, never retried."""
+        template = """
+            From: alice@example.com
+            To: bob@example.com
+            Subject: HTML email
+            Message-ID: <{mid}@example.com>
+            Date: Mon, 01 Jan 2024 12:00:00 +0000
+            Content-Type: text/html; charset=utf-8
+
+            {body}
+        """
+        bad = write_eml(tmp_path, template.format(mid="bad", body="<style>unfinished"), "bad.eml")
+        good = write_eml(
+            tmp_path, template.format(mid="good", body="<p>Next message body</p>"), "good.eml"
+        )
+        assert parse_email(bad) is not None
+        msg = parse_email(good)
+        assert msg is not None
+        assert "Next message body" in msg.body_text
+
     def test_multipart_prefers_plain_text_over_html(self, tmp_path):
         content = (
             "From: alice@example.com\r\n"
@@ -794,6 +818,63 @@ class TestDecodeHeader:
         msg = parse_email(path)
         assert msg is not None
         assert "Weird" in msg.subject
+
+    def test_mixed_plain_and_encoded_text(self):
+        assert _decode_header("Re: =?utf-8?q?H=C3=A9llo?= world") == "Re: Héllo world"
+
+    def test_adjacent_encoded_words_join_without_whitespace(self):
+        """RFC 2047 §6.2: whitespace between adjacent encoded-words is
+        not part of the text."""
+        assert _decode_header("=?utf-8?q?H=C3=A9?= =?utf-8?q?llo?=") == "Héllo"
+
+    def test_whitespace_kept_next_to_a_malformed_encoded_word(self):
+        """Review round 1: whitespace is dropped only between two valid
+        encoded-words. Collapsing it before validating both sides fused
+        ``ok`` onto the raw malformed fragment."""
+        from src.parser import _decode_display_name
+
+        value = "=?utf-8?q?ok?= =?utf-8?x?bad?="
+        assert _decode_header(value) == "ok =?utf-8?x?bad?="
+        assert _decode_display_name(value) == "ok =?utf-8?x?bad?="
+
+    def test_malformed_encoded_word_prefixes_decode_in_linear_time(self):
+        """Regression (#218): ``email.header.decode_header`` rescans the
+        rest of the header at every malformed ``=?`` prefix, so a 48 KB
+        Subject of them took ~0.4 s and a multi-MB one stalled the
+        indexing worker. The prefixes are kept as raw text."""
+        import time
+
+        value = "=?utf-8?q?x " * 16_000
+        started = time.monotonic()
+        result = _decode_header(value)
+        assert time.monotonic() - started < 1.0
+        assert result == value.strip()
+
+    def test_malformed_subject_does_not_stall_parse(self, tmp_path):
+        """End-to-end #218: Subject and the raw-From fallback both go
+        through ``_decode_header``."""
+        import time
+
+        junk = "=?utf-8?q?x " * 16_000
+        content = (
+            f"From: {junk}\r\n"
+            "To: bob@example.com\r\n"
+            f"Subject: {junk}\r\n"
+            "Message-ID: <slow_subject@example.com>\r\n"
+            "Date: Mon, 01 Jan 2024 12:00:00 +0000\r\n"
+            "Content-Type: text/plain; charset=utf-8\r\n"
+            "\r\n"
+            "Body.\r\n"
+        )
+        folder = tmp_path / "INBOX" / "cur"
+        folder.mkdir(parents=True)
+        path = folder / "slow.eml"
+        path.write_bytes(content.encode("utf-8"))
+        started = time.monotonic()
+        msg = parse_email(path)
+        assert time.monotonic() - started < 2.0
+        assert msg is not None
+        assert msg.subject.startswith("=?utf-8?q?x")
 
 
 # ---------------------------------------------------------------------------
