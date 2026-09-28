@@ -183,6 +183,10 @@ services:
       # indexer/src/main.py:_recover_zero_vector_threads for the
       # full policy and rescue paths.
       INDEXER_RECOVERY_SWEEP_INTERVAL_SECS: ${INDEXER_RECOVERY_SWEEP_INTERVAL_SECS:-1800}
+      # Queue retry policy: max attempts before dead-letter, and the
+      # base backoff doubled per attempt (capped at 6h in queue.py).
+      INDEXER_MAX_ATTEMPTS: ${INDEXER_MAX_ATTEMPTS:-5}
+      INDEXER_RETRY_BASE_SECONDS: ${INDEXER_RETRY_BASE_SECONDS:-30}
       # Warmup POST timeout for the first embed call after container
       # start. Default 600s absorbs cold-start latency on host-side
       # providers; lower it on warm caches or fast remote endpoints
