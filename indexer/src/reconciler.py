@@ -309,9 +309,16 @@ class Reconciler:
 
     def _reap_thread(self, thread_id: str, tombs: list) -> tuple[bool, bool]:
         """Reap one thread. Returns (fully_reaped, rebuilt)."""
-        dead_filepaths = {t["filepath"] for t in tombs}
+        # Survivors are chosen by message ID, which removal also uses:
+        # the watcher can rename a tombstoned file (a flag change) after
+        # ``tombs`` was read, and a stale snapshot path would let the
+        # deleted message be rebuilt into the thread as a survivor.
+        dead_ids = {t["message_id"] for t in tombs}
         all_rows = self.db.get_thread_messages(thread_id)
-        survivor_rows = [r for r in all_rows if r["filepath"] not in dead_filepaths]
+        survivor_rows = [r for r in all_rows if r["message_id"] not in dead_ids]
+        dead_filepaths = {t["filepath"] for t in tombs} | {
+            r["filepath"] for r in all_rows if r["message_id"] in dead_ids
+        }
 
         if not survivor_rows:
             # Whole thread gone. Drop everything, then optionally unlink files.

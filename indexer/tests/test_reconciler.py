@@ -438,6 +438,50 @@ class TestReap:
         assert "SYNTHETIC_PRIVATE_SUBJECT" not in caplog.text
         assert "status=400" in caplog.text
 
+    def test_flag_rename_during_reap_does_not_revive_the_deleted_message(
+        self, db, threader, embedder, reconciler, maildir, monkeypatch
+    ):
+        """Regression (#213): the watcher renamed a tombstoned file
+        (``:2,ST`` -> ``:2,RST``) after ``reap`` snapshotted tombstones
+        but before it picked survivors. Survivors were chosen by the
+        snapshot's stale path, so the deleted message was rebuilt into
+        the thread, then its records were removed by message ID — leaving
+        its text in the thread with nothing left to clean it up."""
+        orig_path = maildir / "1700000000.M1.host:2,S"
+        _write_eml(orig_path, "gone@example.com", body="DELETED_BODY_MARKER")
+        thread_id = _index(orig_path, db, threader)
+        reply_path = maildir / "1700000001.M2.host:2,S"
+        _write_eml(
+            reply_path,
+            "kept@example.com",
+            in_reply_to="gone@example.com",
+            subject="Re: Test message",
+            date=datetime(2024, 2, 1, tzinfo=UTC),
+        )
+        _index(reply_path, db, threader)
+        trashed = maildir / "1700000000.M1.host:2,ST"
+        orig_path.rename(trashed)
+        reconciler.sweep()
+
+        renamed = maildir / "1700000000.M1.host:2,RST"
+        real_get = db.get_thread_messages
+
+        def rename_then_read(tid):
+            if trashed.exists():
+                trashed.rename(renamed)
+                reconciler.handle_moved(str(trashed), str(renamed))
+            return real_get(tid)
+
+        monkeypatch.setattr(db, "get_thread_messages", rename_then_read)
+        assert reconciler.reap()["threads_rebuilt"] == 1
+
+        row = db._conn.execute(
+            "SELECT message_ids, body_text FROM threads WHERE thread_id = ?", (thread_id,)
+        ).fetchone()
+        assert "gone@example.com" not in row["message_ids"]
+        assert "DELETED_BODY_MARKER" not in row["body_text"]
+        assert [r["message_id"] for r in real_get(thread_id)] == ["kept@example.com"]
+
     def test_skips_reap_when_survivor_unreadable(self, db, threader, embedder, reconciler, maildir):
         # If a survivor's file is transiently unreadable when the
         # reconciler reparses it (mbsync chmod race, perms regression),
