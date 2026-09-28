@@ -38,6 +38,15 @@ log = logging.getLogger("indexer.extractor.pdf")
 _MIN_DIGITAL_CHARS = 40
 _OCR_DISABLED_EXTRACTOR = "pdf-ocr-disabled"
 
+# OCR render resolution, and the most pixels any one page may rasterize
+# to. A US-letter page at 200 dpi is ~3.7M pixels; the budget leaves room
+# for A3 / legal while stopping a tiny PDF that declares a huge page from
+# asking Poppler for gigabytes of raster (written to the tmpfs, which
+# counts against the container's memory limit, before Pillow's own
+# size check can run).
+_OCR_DPI = 200
+_MAX_OCR_PAGE_PIXELS = 10_000_000
+
 
 def extract(
     payload: bytes,
@@ -154,6 +163,8 @@ def _extract_ocr(
     import pytesseract
     from pdf2image import convert_from_bytes
 
+    dpi = _ocr_dpi(payload, max_ocr_pages)
+
     tesseract_kwargs: dict[str, float] = {}
     if ocr_timeout_seconds is not None and ocr_timeout_seconds > 0:
         # Apply the timeout per page rather than to the whole document
@@ -166,12 +177,17 @@ def _extract_ocr(
     # exception path — so a leaked PPM cannot survive the OCR call.
     with tempfile.TemporaryDirectory(dir="/tmp") as tmpdir:  # nosec B108 — tmpfs
         convert_kwargs: dict[str, object] = {
-            "dpi": 200,
+            "dpi": dpi,
             "first_page": 1,
             "output_folder": tmpdir,
         }
         if max_ocr_pages > 0:
             convert_kwargs["last_page"] = max_ocr_pages
+        if ocr_timeout_seconds is not None and ocr_timeout_seconds > 0:
+            # The same budget bounds the whole Poppler render, so a hung
+            # render cannot block the worker. (pdf2image does not pass
+            # it to its page-count ``pdfinfo`` call.)
+            convert_kwargs["timeout"] = ocr_timeout_seconds
         images = convert_from_bytes(payload, **convert_kwargs)  # type: ignore[arg-type]
 
         pages: list[str] = []
@@ -180,3 +196,30 @@ def _extract_ocr(
             if text and text.strip():
                 pages.append(text.strip())
         return "\n\n".join(pages)
+
+
+def _ocr_dpi(payload: bytes, max_ocr_pages: int) -> int:
+    """Return the render DPI that keeps every OCR'd page within budget.
+
+    Reads each page's MediaBox (scaled by UserUnit), which is what
+    ``pdftoppm`` rasterizes, over the pages the OCR pass will render.
+    One DPI applies to the whole document, so an oversized page lowers
+    it for every page. A parse failure propagates: without page sizes
+    the raster size is unknown, so the fallback fails closed.
+    """
+    reader = pypdf.PdfReader(io.BytesIO(payload))
+    largest_sq_inches = 0.0
+    for index, page in enumerate(reader.pages):
+        if max_ocr_pages > 0 and index >= max_ocr_pages:
+            break
+        box = page.mediabox
+        unit = float(page.user_unit)
+        width = abs(float(box.width)) * unit / 72
+        height = abs(float(box.height)) * unit / 72
+        largest_sq_inches = max(largest_sq_inches, width * height)
+    if largest_sq_inches * _OCR_DPI * _OCR_DPI <= _MAX_OCR_PAGE_PIXELS:
+        return _OCR_DPI
+    dpi = int((_MAX_OCR_PAGE_PIXELS / largest_sq_inches) ** 0.5)
+    if dpi < 1:
+        raise ValueError("PDF page too large to render for OCR")
+    return dpi

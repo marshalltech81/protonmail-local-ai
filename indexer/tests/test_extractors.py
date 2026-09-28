@@ -517,6 +517,7 @@ class TestPdfDigitalExtractor:
             return [Image.new("RGB", (4, 4), color="white")]
 
         monkeypatch.setattr("pdf2image.convert_from_bytes", fake_convert)
+        monkeypatch.setattr(pdf, "_ocr_dpi", lambda payload, max_ocr_pages: 200)
         monkeypatch.setattr(
             "pytesseract.image_to_string",
             lambda image, **_: "ocr text",
@@ -562,6 +563,7 @@ class TestPdfDigitalExtractor:
             raise OSError(28, "No space left on device")
 
         monkeypatch.setattr("pdf2image.convert_from_bytes", fake_convert)
+        monkeypatch.setattr(pdf, "_ocr_dpi", lambda payload, max_ocr_pages: 200)
         real_temp_dir = _tempfile_mod.TemporaryDirectory
         monkeypatch.setattr(
             pdf.tempfile,
@@ -576,6 +578,98 @@ class TestPdfDigitalExtractor:
         assert not os.path.exists(captured["output_folder"]), (
             "TemporaryDirectory must be removed even when convert raises"
         )
+
+    @staticmethod
+    def _blank_pdf(width: float, height: float) -> bytes:
+        import io as _io
+
+        from pypdf import PdfWriter
+
+        writer = PdfWriter()
+        writer.add_blank_page(width=width, height=height)
+        buf = _io.BytesIO()
+        writer.write(buf)
+        return buf.getvalue()
+
+    def _capture_render(self, monkeypatch, tmp_path) -> dict:
+        import tempfile as _tempfile_mod
+
+        from PIL import Image
+        from src.extractors import pdf
+
+        captured: dict = {}
+
+        def fake_convert(payload, **kwargs):
+            captured.update(kwargs)
+            return [Image.new("RGB", (4, 4), color="white")]
+
+        monkeypatch.setattr("pdf2image.convert_from_bytes", fake_convert)
+        monkeypatch.setattr("pytesseract.image_to_string", lambda image, **_: "ocr text")
+        real_temp_dir = _tempfile_mod.TemporaryDirectory
+        monkeypatch.setattr(
+            pdf.tempfile,
+            "TemporaryDirectory",
+            lambda **kwargs: real_temp_dir(dir=str(tmp_path)),
+        )
+        return captured
+
+    def test_ocr_renders_ordinary_pages_at_full_dpi(self, monkeypatch, tmp_path):
+        from src.extractors import pdf
+
+        captured = self._capture_render(monkeypatch, tmp_path)
+        pdf._extract_ocr(self._blank_pdf(612, 792), max_ocr_pages=5)
+        assert captured["dpi"] == 200
+
+    def test_ocr_lowers_dpi_for_oversized_pages(self, monkeypatch, tmp_path):
+        """Regression (#211): a 435-byte PDF with a 200-inch square page
+        asked Poppler for a 40,000 x 40,000 raster (~4.8 GB) at 200 dpi,
+        written to the tmpfs before Pillow's size check ran. The DPI is
+        lowered so the largest page fits the pixel budget."""
+        from src.extractors import pdf
+
+        captured = self._capture_render(monkeypatch, tmp_path)
+        pdf._extract_ocr(self._blank_pdf(14_400, 14_400), max_ocr_pages=5)
+        side = 14_400 / 72 * captured["dpi"]
+        assert 1 <= captured["dpi"] < 200
+        assert side * side <= pdf._MAX_OCR_PAGE_PIXELS
+
+    def test_page_too_large_even_at_one_dpi_fails_before_rendering(self, monkeypatch, tmp_path):
+        """UserUnit scales a page up to 75,000x, past any usable DPI."""
+        import io as _io
+
+        from pypdf import PdfWriter
+        from pypdf.generic import FloatObject, NameObject
+        from src.extractors import pdf
+
+        writer = PdfWriter()
+        page = writer.add_blank_page(width=14_400, height=14_400)
+        page[NameObject("/UserUnit")] = FloatObject(75_000)
+        buf = _io.BytesIO()
+        writer.write(buf)
+
+        captured = self._capture_render(monkeypatch, tmp_path)
+        with pytest.raises(ValueError, match="too large"):
+            pdf._extract_ocr(buf.getvalue(), max_ocr_pages=5)
+        assert captured == {}
+
+    def test_ocr_render_has_a_deadline(self, monkeypatch, tmp_path):
+        """Regression (#211): the OCR timeout reached only Tesseract, so a
+        hung Poppler render blocked the worker forever."""
+        from src.extractors import pdf
+
+        captured = self._capture_render(monkeypatch, tmp_path)
+        pdf._extract_ocr(self._blank_pdf(612, 792), max_ocr_pages=5, ocr_timeout_seconds=45)
+        assert captured["timeout"] == 45
+
+    def test_unreadable_page_sizes_fail_before_rendering(self, monkeypatch, tmp_path):
+        """If the page sizes cannot be read the raster size is unknown, so
+        the OCR fallback fails closed rather than rendering blind."""
+        from src.extractors import pdf
+
+        captured = self._capture_render(monkeypatch, tmp_path)
+        with pytest.raises(Exception):  # noqa: B017 — any pypdf parse error
+            pdf._extract_ocr(b"%PDF-1.7 not a real pdf", max_ocr_pages=5)
+        assert captured == {}
 
 
 class TestImageExtractor:
