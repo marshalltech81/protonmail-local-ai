@@ -173,13 +173,15 @@ answers real knowledge questions, and identify why failures occur.
 
 1. **Agent-level evals** on the synthetic mailbox: tool-selection
    accuracy, argument accuracy, retrieval recall, citation accuracy,
-   pagination completeness, unnecessary-call counts. Extends the
-   existing `eval-queries.md` / `scripts/eval_run.py` approach.
+   pagination completeness, unnecessary-call counts. Automates what
+   the manual `eval-queries.md` walk scores by hand (the old
+   `scripts/eval_run.py` batch runner was removed with Open WebUI).
 2. **Latency instrumentation before performance redesign.** Stage
    timers through the query path (query_embedding / per-lane FTS+KNN /
    fusion / rerank / evidence_fetch / inference / total). `ask_mailbox`
-   already exceeds 60s client timeouts on a populated mailbox — but
-   measure before touching KNN architecture; if inference dominates,
+   exceeded 60s client timeouts on a populated mailbox before the v15
+   index fix and has not been re-measured since — measure before
+   touching KNN architecture; if inference dominates,
    vector work won't fix the user problem. Then set request-level
    deadlines. (Project history endorses this: the 400s search hang
    was three wrong theories until the query plan was measured.)
