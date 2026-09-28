@@ -18,9 +18,10 @@ The search, retrieval, and system tools (Groups 1, 2, and 4) publish an
 Structured output keeps the prose bounds: `get_thread` and
 `query_messages` list at most 10 recipients per role, 10 References, and
 10 thread participants or senders, each with a full count (`to_count`,
-`references_count`, `participant_count`, ...), and `get_thread` cuts
-header values and bodies the same way its prose does. `get_message`
-returns full headers and the full body.
+`references_count`, `participant_count`, ...), and both cut every
+header value past 500 characters with a marker, in prose and structured
+output alike; `get_thread` also cuts bodies. `get_message` returns full
+headers and the full body.
 
 A failure (unknown thread or message, invalid argument, provider or
 database error) is an MCP error result (`isError: true`) whose text
@@ -254,8 +255,11 @@ each filter.
 and `has_more`; when more remain it includes `next_cursor`. Each
 message carries its send date, folder, attachment flag, subject,
 From / To / Cc (at most 10 per role, with a count of the rest),
-Message-ID, and Thread ID. The count, the page, and its participants
-are read in one snapshot.
+Message-ID, and Thread ID; the structured output adds In-Reply-To and
+up to 10 References. Header values are sender-controlled, so any past
+500 characters is cut with a marker — `get_message` returns full
+headers. The count, the page, and its participants are read in one
+snapshot.
 
 **Paging.** Keyset pagination on `(sent_at, message_id)`: messages
 indexed while a caller pages never shift or duplicate later pages. A

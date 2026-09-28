@@ -286,9 +286,6 @@ input by definition.
   (`protonmail-bridge` first — it holds live Proton credentials)
 - loud one-shot startup warning when `INFERENCE_MODE` sends retrieved
   excerpts to a remote provider
-- `query_messages`: bound sender-controlled values per row the way
-  `get_thread` does (PR #177 round 2) — a message's subject and
-  participant display names render in full on pages of up to 100
 - `get_message`: returns a message's full body and headers with no
   bound, so one huge message (a pasted log, 12,000 References) is one
   huge response; decide on body continuation (offset paging) or a
@@ -447,7 +444,12 @@ FastMCP had wrapped every `list[TextContent]` return as
 the intelligence tools still do. A contract test drives every tool
 through a real `FastMCP` and validates each result against its
 published schema. `pydantic` is now a declared dependency (same pinned
-version `mcp` already resolved). No schema change.
+version `mcp` already resolved). No schema change. Review round 1: the
+structured `query_messages` rows newly exposed In-Reply-To and
+References with no length cut (a 2 MB response at `limit=1`); every
+header value in its prose and structured output is now cut at 500
+characters, as in `get_thread`, which also closes the backlog item for
+its unbounded subjects and display names.
 
 ### 2026-09-28 — Dead action/IMAP surface deleted (Phase 1 item 6)
 

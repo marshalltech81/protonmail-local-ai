@@ -235,8 +235,47 @@ def test_sender_controlled_headers_stay_bounded(tmp_path):
         assert m["references_count"] == 12000
         assert len(m["to"]) == 10
         assert m["to_count"] == 30
-    assert len(json.dumps(thread)) < 5000
-    assert thread["messages"][0]["subject"].endswith("[99,500 more characters]")
+    for out in (thread, listed):
+        assert len(json.dumps(out)) < 5000
+    for m in (thread["messages"][0], listed["messages"][0]):
+        assert m["subject"].endswith("[99,500 more characters]")
     assert full["message"]["references"] == refs
     assert len(full["message"]["to"]) == 30
     assert full["message"]["subject"] == "S" * 100_000
+
+
+def test_query_messages_cuts_each_long_header_value(tmp_path):
+    """Review round 1: query_messages bounded list lengths but not the
+    values in them, so one message with a huge In-Reply-To, Reference,
+    subject, or display name made a multi-megabyte page at limit=1. Both
+    the prose and the structured side cut every value at 500 characters;
+    get_message returns them in full."""
+    huge = "x" * 100_000
+    with _open_fixture_db(tmp_path) as (conn, db):
+        _insert_message(
+            conn,
+            message_id="a",
+            thread_id="t",
+            sent_at="2024-01-01T00:00:00+00:00",
+            subject=huge,
+            from_=[f"{huge} <jane@example.com>"],
+            to=[f"{huge} <bob@example.com>"],
+            in_reply_to=huge,
+            references=[huge],
+            body="hello",
+        )
+        conn.close()
+        server = _server(db)
+        result = asyncio.run(server.call_tool("query_messages", {"limit": 1}))
+        full = _call(server, "get_message", message_id="a")
+
+    assert isinstance(result, CallToolResult)
+    assert len(result.content[0].text) < 3000
+    assert len(json.dumps(result.structuredContent)) < 5000
+    m = result.structuredContent["messages"][0]
+    for value in (m["subject"], m["in_reply_to"], m["references"][0], m["from"][0]["name"]):
+        assert value.endswith("[99,500 more characters]")
+    assert m["from"][0]["address"] == "jane@example.com"
+    assert full["message"]["in_reply_to"] == huge
+    assert full["message"]["references"] == [huge]
+    assert full["message"]["from"][0]["name"] == huge
