@@ -20,7 +20,7 @@ dependencies = [
     # Output models for structured tool results (``src/tools/outputs.py``).
     # Pinned to the version ``mcp`` already resolves; declared because the
     # tool code imports it directly.
-    "pydantic==2.12.5",
+    "pydantic==2.13.5",
 ]
 
 [tool.uv]
