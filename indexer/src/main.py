@@ -1849,6 +1849,22 @@ def main():
     observer.start()
     log.info("Watching Maildir for new emails...")
 
+    # Always-on startup rename sweep. mbsync renames files in place for
+    # any flag change (e.g. seen ``S`` → seen+replied ``SR``) and when
+    # promoting from ``new/`` to ``cur/``. Events that land while the
+    # indexer is offline would otherwise leave stale filepaths in
+    # ``indexed_files``, which makes later lookups on the renamed file
+    # miss. sweep_paths() only updates filepath rows; it does not
+    # tombstone missing files, so running it unconditionally preserves
+    # the opt-in posture of deletion reconciliation. It runs before the
+    # initial walk so a renamed file's new path is already recorded as
+    # indexed: otherwise the walk reprocesses every file renamed while
+    # the indexer was down as new mail.
+    try:
+        sweep_paths(db)
+    except Exception as e:
+        log.error("startup rename sweep failed: %s", e)
+
     # Index existing emails
     breaker = _EmbedOutageBreaker()
     initial_index(
@@ -1861,19 +1877,6 @@ def main():
         ingestion_state=ingestion_state,
     )
     touch_health_file()
-
-    # Always-on startup rename sweep. mbsync renames files in place for
-    # any flag change (e.g. seen ``S`` → seen+replied ``SR``) and when
-    # promoting from ``new/`` to ``cur/``. Events that land while the
-    # indexer is offline would otherwise leave stale filepaths in
-    # ``indexed_files``, which makes later lookups on the renamed file
-    # miss. sweep_paths() only updates filepath rows; it does not
-    # tombstone missing files, so running it unconditionally preserves
-    # the opt-in posture of deletion reconciliation.
-    try:
-        sweep_paths(db)
-    except Exception as e:
-        log.error("startup rename sweep failed: %s", e)
 
     # Startup reconciliation sweep — detect tombstones and path renames that
     # landed while the indexer was offline. Safe to run every startup: it only

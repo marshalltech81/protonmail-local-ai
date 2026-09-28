@@ -2611,7 +2611,7 @@ class TestMainStartupAndLoop:
         monkeypatch.setattr(main, "Database", lambda path: db)
         monkeypatch.setattr(main, "OpenAIEmbedder", lambda **kw: make_mock_embedder())
         monkeypatch.setattr(main, "touch_health_file", lambda: None)
-        monkeypatch.setattr(main, "sweep_paths", lambda db: None)
+        monkeypatch.setattr(main, "sweep_paths", lambda db: events.append("sweep_paths"))
         monkeypatch.setattr(main, "Observer", lambda: _FakeObserver(events))
         monkeypatch.setattr(
             main,
@@ -2675,6 +2675,15 @@ class TestMainStartupAndLoop:
         events = self._run_main(tmp_path, monkeypatch, sweep_due=False)
 
         assert not any(e.startswith("stall_guard:") for e in events)
+
+    def test_rename_sweep_runs_before_initial_index(self, tmp_path, monkeypatch):
+        """#204 follow-up: files renamed while the indexer was down must
+        have their stored paths healed before the startup walk, or the
+        walk sees each renamed path as unindexed mail and reprocesses it."""
+        events = self._run_main(tmp_path, monkeypatch, sweep_due=False)
+
+        init = next(e for e in events if e.startswith("initial_index"))
+        assert events.index("sweep_paths") < events.index(init)
 
     def test_observer_starts_before_initial_drain(self, tmp_path, monkeypatch):
         events = self._run_main(tmp_path, monkeypatch, sweep_due=False)
