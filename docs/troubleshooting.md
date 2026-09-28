@@ -1,0 +1,458 @@
+# Troubleshooting
+
+Diagnostics and recovery steps for a running stack. For first-time
+installation and configuration, see [`setup.md`](setup.md).
+
+## Bridge won't start — "Failed to launch exit status 1"
+
+This can happen if the image is outdated. Check:
+
+```bash
+docker compose logs protonmail-bridge
+```
+
+If the image is outdated, rebuild:
+
+```bash
+make bridge-upgrade-check
+make update
+```
+
+## Bridge won't start — keychain / GPG errors
+
+```bash
+docker compose logs protonmail-bridge
+```
+
+If the GPG/pass store is corrupt, wipe the bridge data volume and re-run first-run:
+
+```bash
+docker compose down
+docker volume rm protonmail-local-ai_bridge-data
+make first-run
+```
+
+## Bridge starts but shows "No Proton account found" every time
+
+The account detection looks for `vault.enc` in the bridge-data volume.
+If it keeps dropping to the interactive CLI, the volume may not be persisting correctly:
+
+```bash
+docker volume inspect protonmail-local-ai_bridge-data
+```
+
+Ensure `make first-run` uses `docker compose run` (not `docker run`) so the named
+volume is mounted.
+
+If the volume persists but this started after a Bridge upgrade, check the vault
+path. `bridge/entrypoint.sh` looks for
+`/data/config/protonmail/bridge-v3/vault.enc`, and the `bridge-v3` segment is
+tied to Bridge's major version. A Bridge major version that stores its vault
+elsewhere fails this check on every restart:
+
+```bash
+docker run --rm -v protonmail-local-ai_bridge-data:/data:ro debian:bookworm-slim \
+    find /data/config/protonmail -name vault.enc
+```
+
+## Startup warnings: "Failed to add test credentials to keychain" / "no vault key found"
+
+These are harmless. Bridge cannot use the desktop keychain (no dbus session in a
+container) and falls back to its own encrypted vault. The "no vault key found" warning
+only appears once — on the very first run before the vault is created.
+
+## Reading Bridge logs directly from the volume
+
+Bridge writes structured logs to a timestamped file inside the `bridge-data` volume.
+Since Bridge no longer streams logs to Docker stdout, read them directly:
+
+```bash
+docker run --rm \
+    -v protonmail-local-ai_bridge-data:/data:ro \
+    debian:bookworm-slim \
+    bash -c 'find /data/local/protonmail/bridge-v3/logs -name "*.log" | sort | tail -1 | xargs tail -n 100'
+```
+
+To follow the log in real time, replace `tail -n 100` with `tail -f`.
+
+## Bridge is up but IMAP is unresponsive / mbsync can't connect
+
+Bridge may still be in the middle of its initial Gluon sync — pulling every
+message body from Proton's API into its local database before it can serve IMAP.
+This is not the same as mbsync syncing to Maildir. It happens inside the Bridge
+container and can take hours on a large mailbox.
+
+Run these three diagnostics to understand what state Bridge is in:
+
+**1. Check recent Bridge logs**
+
+```bash
+docker run --rm \
+    -v protonmail-local-ai_bridge-data:/data:ro \
+    debian:bookworm-slim \
+    bash -c 'find /data/local/protonmail/bridge-v3/logs -name "*.log" | sort | tail -1 | xargs tail -n 30'
+```
+
+If you see rapid-fire lines like:
+
+```
+200 OK: GET https://mail-api.proton.me/mail/v4/messages/<id>
+200 OK: GET https://mail-api.proton.me/mail/v4/messages/<id>
+```
+
+Bridge is still downloading messages. Do not attempt cert extraction yet —
+IMAP will be unresponsive during heavy Gluon sync, and `mbsync` now fails
+closed instead of syncing without a pinned Bridge cert. If Bridge stays in
+this state, the `mbsync` container now exits after a bounded wait and Docker
+restarts it so the failure is visible instead of hanging forever.
+
+**2. Check that Bridge is authenticated**
+
+```bash
+docker exec protonmail-bridge \
+    find /data/config/protonmail/bridge-v3 -type f | sort
+```
+
+If `vault.enc` is missing, Bridge is not authenticated and will not serve IMAP
+at all. Re-run `make first-run` to log in again.
+
+**3. Check the bridge binary is actually running**
+
+```bash
+docker exec protonmail-bridge ps aux
+```
+
+A container can be "Up" while the process inside has crashed. If `bridge` does
+not appear in `ps aux`, the process exited — check the logs for the error and
+restart the container.
+
+**How to know Gluon sync is finished**
+
+Watch for the log pattern to shift from message fetching to event polling:
+
+```
+# Still syncing — rapid fire, sub-second interval:
+200 OK: GET .../mail/v4/messages/<id>
+200 OK: GET .../mail/v4/messages/<id>
+
+# Sync complete — sparse, several seconds apart:
+200 OK: GET .../mail/v4/events/<id>
+200 OK: POST .../data/v1/metrics
+```
+
+Once you see event polling instead of message fetching, IMAP is fully
+responsive. mbsync extracts the Bridge TLS cert itself on its next
+start; then check it with "Verifying mbsync is working" below.
+
+**Confirm IMAP port is actually accepting connections**
+
+Run this from outside the container to verify port 1143 is ready:
+
+```bash
+docker run --rm \
+    --network protonmail-local-ai_bridge-net \
+    debian:bookworm-slim \
+    bash -c "apt-get install -y netcat-openbsd -qq 2>/dev/null && \
+             echo | nc -w 5 protonmail-bridge 1143"
+```
+
+If IMAP is ready you will see the Bridge greeting banner, e.g.:
+
+```
+* OK [CAPABILITY IMAP4rev1 ...] ProtonMail Bridge ready.
+```
+
+If the command hangs or exits silently, Bridge is still syncing or the
+process has crashed — check the logs and process steps above.
+
+## Verifying mbsync is working
+
+Run these checks in order of depth.
+
+**1. Is mbsync running and looping?**
+
+```bash
+docker compose logs mbsync --tail 20
+```
+
+Look for `>>> Syncing...` lines repeating at your `SYNC_INTERVAL`. If startup
+fails, `mbsync` now logs a specific cause such as:
+
+- missing `BRIDGE_USER`
+- missing or empty `/run/secrets/bridge_pass`
+- cert extraction timeout
+- `openssl s_client` handshake errors
+- Bridge TLS cert fingerprint does not match the pinned value (see the
+  "Bridge cert pin mismatch" section below)
+
+Repeated sync failures now count toward an exit threshold so the container
+restarts instead of looping forever in a broken state.
+
+**2. Did any mail land in the Maildir volume?**
+
+```bash
+docker run --rm \
+    -v protonmail-local-ai_maildir-volume:/maildir:ro \
+    debian:bookworm-slim \
+    find /maildir -name "*.eml" -o -name "*:2,*" | wc -l
+```
+
+A non-zero count means mbsync is writing files. Zero means it connected but
+downloaded nothing — either the mailbox is empty or `Patterns` is filtering
+everything out.
+
+**3. Check the folder structure was created**
+
+```bash
+docker run --rm \
+    -v protonmail-local-ai_maildir-volume:/maildir:ro \
+    debian:bookworm-slim \
+    find /maildir -maxdepth 2 -type d
+```
+
+You should see `INBOX`, `Sent`, `Drafts`, etc. If only `/maildir` appears with
+nothing under it, the sync ran but Bridge returned no folders.
+
+**4. Force a sync now and watch verbose output**
+
+```bash
+docker exec mbsync mbsync -c /tmp/mbsync/mbsyncrc -a -V 2>&1 | head -50
+```
+
+`-V` prints each folder being synced and message counts. This is the most
+informative test — it will clearly show auth failures, cert errors, or folder
+mismatches.
+
+## mbsync fails to connect
+
+Bridge takes 10–15 seconds to fully start. mbsync waits automatically, but it
+now gives up after a bounded wait and lets Docker restart it rather than
+appearing healthy forever. If it keeps failing:
+
+```bash
+docker compose logs mbsync
+docker compose logs protonmail-bridge
+```
+
+If you want Docker's view of the current state:
+
+```bash
+docker inspect mbsync --format='{{json .State.Health}}'
+```
+
+## Embedder or inference endpoint unreachable from containers
+
+The indexer or mcp-server reports a connection error against
+`EMBED_BASE_URL` / `INFERENCE_BASE_URL` /
+`RERANK_BASE_URL`. The project does not run those
+servers, so the diagnostic depends on where you pointed it:
+
+- Host-side server: confirm it is listening on the configured port
+  (`lsof -iTCP:<port> -sTCP:LISTEN`) and bound to `127.0.0.1`.
+  Containers reach `127.0.0.1` on the host as
+  `host.docker.internal:<port>` via OrbStack.
+- Remote provider: verify outbound networking from a container:
+
+  ```bash
+  docker run --rm curlimages/curl:latest -fsS https://example.com
+  ```
+
+  If the hardened compose overlay is active (`internal: true` on
+  `app-net`), all remote provider calls are blocked by design.
+
+## Inference / embedder cold start
+
+The first call after a fresh install often triggers a model load on
+host-side servers (or a per-provider warmup on remote endpoints).
+`EMBED_WARMUP_TIMEOUT_SECS` (default 600) bounds how long the indexer
+waits before failing the first warmup POST. Watch the relevant
+provider's log for download / load progress.
+
+## sqlite-vec fails with "wrong ELF class: ELFCLASS32" (ARM64 / Apple Silicon)
+
+You are running an older pinned version. `sqlite-vec` versions prior to 0.1.9 ship
+an armv7 (32-bit) wheel which is incompatible with aarch64 containers. Ensure
+both `indexer/pyproject.toml` and `mcp-server/pyproject.toml` pin
+`sqlite-vec==0.1.9` or later, regenerate the lockfiles, then rebuild:
+
+```bash
+docker compose build indexer mcp-server
+```
+
+## Index is empty after startup
+
+The initial sync may still be running. Check:
+
+```bash
+docker compose logs indexer
+docker compose logs mbsync
+```
+
+mbsync must connect to Bridge and complete at least one sync before the indexer
+has emails to process.
+
+## Enabling deletion reconciliation
+
+By default the local index is append-only: messages you delete on ProtonMail
+are still kept locally. To propagate deletions, set
+`INDEXER_DELETION_ENABLED=true` in `.env` and restart the indexer. See the
+`Indexer — deletion reconciliation` block in `.env.example` for all knobs
+(grace window, sweep interval, mass-delete brake, unlink-on-reap).
+
+Defaults — 7-day grace window, 5% mass-delete brake, no file unlink — are
+the safe starting point. Quick checks after enabling:
+
+```bash
+docker compose logs indexer | grep reconciler
+```
+
+You should see one line per sweep/reap. If the reaper ever logs
+`reaper aborted: ... exceed mass-delete threshold`, investigate why mbsync
+marked a large batch as deleted (Bridge vault rebuild, folder rename,
+account re-auth) before setting `INDEXER_DELETION_FORCE=true`.
+
+Tombstones and reaper actions can be inspected directly:
+
+```bash
+docker run --rm -v protonmail-local-ai_sqlite-volume:/data:ro \
+    debian:bookworm-slim bash -c \
+    'apt-get -qq install -y sqlite3 >/dev/null && \
+     sqlite3 /data/mail.db "SELECT COUNT(*) FROM pending_deletions;"'
+```
+
+The reaper sweeps `pending_deletions` on startup and once per
+`INDEXER_DELETION_SWEEP_INTERVAL_SECS`. If you want a deletion to land
+immediately for testing, drop the grace window to `0` and restart.
+
+## Tuning indexing retries
+
+Every discovered Maildir file is written to an `indexing_jobs` table
+and drained by a worker loop. A failure specific to one message
+(parser error, SQLite lock contention, input the embedder rejects)
+gets exponential backoff and transitions the row to `dead` after
+`INDEXER_MAX_ATTEMPTS` attempts. An embedder outage or
+misconfiguration (unreachable, rate-limited, bad key or model) is
+**not** charged to messages: their jobs are deferred without
+spending attempts, and indexing pauses — 30 s, doubling to 10 min —
+until the embedder answers again. The indexer logs which case it
+hit; a rejected key or model logs an explicit "check EMBED_BASE_URL,
+EMBED_MODEL and the embed API key" error.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `INDEXER_MAX_ATTEMPTS` | `5` | Max retries before a row becomes `dead`. |
+| `INDEXER_RETRY_BASE_SECONDS` | `30` | Base backoff. Each attempt multiplies by `2^(attempts-1)`, capped at 6 h. |
+
+`make status` (or the `get_mailbox_status` MCP tool) reports pending,
+retrying, and dead counts and whether the index is current. For the
+error class breakdown, inspect the table directly:
+
+```bash
+docker run --rm -v protonmail-local-ai_sqlite-volume:/data:ro \
+    debian:bookworm-slim bash -c \
+    'apt-get -qq install -y sqlite3 >/dev/null && \
+     sqlite3 /data/mail.db \
+       "SELECT status, last_error_class, COUNT(*) FROM indexing_jobs
+        GROUP BY status, last_error_class;"'
+```
+
+Every failed row records a `last_error_class`:
+
+| Class | Meaning |
+|---|---|
+| `retryable` | May succeed on a later attempt; `dead` means the attempt budget ran out |
+| `permanent_source_failure` | This file can never be indexed under the current config (oversized, no `Message-ID`, input the embedder rejects) — dead-lettered immediately |
+| `operator_action_required` | The embedder rejected a health probe (bad key or model); jobs stay `queued` until you fix the config |
+
+Once the cause of a dead-letter is fixed, requeue with a fresh budget
+while the stack is running:
+
+```bash
+make requeue-dead                    # every dead row
+make requeue-dead CLASS=retryable    # only exhausted retries
+```
+
+## Claude Desktop doesn't see the tools
+
+1. Verify the MCP server is running: `docker compose ps`
+2. Check the server is responding: `curl -N http://localhost:3000/sse`
+3. Verify the Claude Desktop config JSON is valid (no trailing commas)
+4. Restart Claude Desktop
+
+## Bridge credentials expired / need to re-authenticate
+
+```bash
+make down
+docker volume rm protonmail-local-ai_bridge-data
+make first-run   # log in again
+```
+
+After login, copy the new `Username` into `.env` and write the new `Password`
+into `.secrets/bridge_pass.txt`:
+
+```bash
+printf '%s' 'new-bridge-generated-pass' > .secrets/bridge_pass.txt
+chmod 600 .secrets/bridge_pass.txt
+make up
+```
+
+Your email index is in a separate volume (`sqlite-volume`) and is not affected.
+
+## mbsync refuses to sync — Bridge cert pin mismatch
+
+On first boot `mbsync` extracts Bridge's TLS cert, computes its SHA-256
+fingerprint, and saves it to a persistent state volume (`mbsync-state`).
+On every subsequent boot the freshly extracted cert is compared to the
+pinned fingerprint. A mismatch is treated as a security event and
+`mbsync` refuses to sync. Log output looks like:
+
+```
+>>> ERROR: Bridge cert fingerprint does not match pinned value — refusing to sync.
+>>>   pinned:  sha256:<old>
+>>>   current: sha256:<new>
+```
+
+Legitimate cert rotations happen when Bridge is upgraded or `vault.enc`
+is regenerated. To accept the new cert, start `mbsync` once with
+`BRIDGE_CERT_PIN_ROTATE=true`:
+
+```bash
+BRIDGE_CERT_PIN_ROTATE=true docker compose up -d mbsync
+```
+
+The container writes the new fingerprint to the pin file on startup and
+syncing resumes. Set `BRIDGE_CERT_PIN_ROTATE` back to `false` (or remove
+it from `.env`) before the next restart so the new pin is enforced going
+forward. Leaving it permanently true disables pin enforcement.
+
+`make clean` removes the `mbsync-state` volume along with everything
+else, so the next boot after `make clean` is treated as a first boot
+and trust-on-first-use re-pins whatever cert Bridge presents.
+
+`make clean` also truncates `.secrets/bridge_pass.txt` because it
+authenticates against Bridge state that the volume wipe just deleted
+(`vault.enc`). After `make clean` you must re-run `make first-run`
+and paste the new Bridge password into `.secrets/bridge_pass.txt`.
+Inference / embed / rerank provider keys
+(`.secrets/inference_api_key.txt`, `.secrets/embed_api_key.txt`,
+`.secrets/rerank_api_key.txt`) are intentionally preserved because
+they authenticate against external services that survive container
+rebuilds.
+
+## mbsync fails — TLS hostname mismatch after rebuilding Bridge image
+
+The TLS cert Bridge generates is cached inside `vault.enc` in the `bridge-data`
+volume. Rebuilding the image does not regenerate the cert — the old one
+(issued for `127.0.0.1` only) is reused. To force a fresh cert with the correct
+SANs, delete `vault.enc` from the volume without wiping the GPG/pass store:
+
+```bash
+make down
+docker run --rm -v protonmail-local-ai_bridge-data:/data debian:bookworm-slim \
+    rm -f /data/config/protonmail/bridge-v3/vault.enc
+make first-run   # re-login; Bridge generates a new cert with protonmail-bridge SAN
+make up
+```
+
+Deleting `vault.enc` is a full re-authentication path, not a lightweight cert
+refresh. Plan on logging into Bridge again.

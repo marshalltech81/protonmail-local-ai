@@ -50,6 +50,7 @@ Before making non-trivial changes, read:
 - `PLAN.md` for current implementation priorities and active work
 - `docs/architecture.md` for system design and data flow
 - `docs/setup.md` before changing Bridge, first-run flow, TLS, or credentials
+- `docs/troubleshooting.md` before changing Bridge, mbsync, TLS, or recovery behavior
 - `docs/mcp-tools.md` before changing MCP tool behavior
 
 If a change touches container boundaries, TLS, Bridge auth, mbsync behavior, indexing strategy, or schema design, read the relevant docs first.
@@ -628,7 +629,7 @@ bridge/        ProtonBridge container
 mbsync/        Mail sync container
 indexer/       Parser, threader, embeddings, SQLite writer
 mcp-server/    MCP server and tool layer
-docs/          Architecture, setup, and tool documentation
+docs/          Architecture, setup, troubleshooting, and tool documentation
 ```
 
 ## Bottom Line

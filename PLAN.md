@@ -129,13 +129,7 @@ guessing about semantics, completeness, or identity.
    SHA-256 are now stored per message and kept current across
    renames. Remaining: exposing them in retrieval / evidence
    responses.*
-8. **Doc-drift sweep**: architecture.md search section describes
-   three retrieval lanes (code has five) and a pre-chunks-era table
-   list; README overclaims ("Agentic", "Real-time", "any compliant
-   provider"); extract setup.md's troubleshooting half into
-   `docs/troubleshooting.md`; fold in the surviving Bridge doc nits
-   (Gluon-cache backup caveat, upgrade-check failure guidance,
-   bridge-v4 vault-path warning).
+8. ~~**Doc-drift sweep.**~~ Done 2026-09-28 (see Recently Completed).
 
 ### Phase 1.5 — Minimal regression baseline
 
@@ -432,6 +426,22 @@ do not ship persisted claims without them.
    during its Phase 3 experimental period.
 
 ## Recently Completed
+
+### 2026-09-28 — Doc-drift sweep (Phase 1 item 8)
+
+`architecture.md`'s search section now describes the five retrieval
+lanes the code runs, in two RRF stages: three FTS5 lanes
+(`thread_fts`, `chunk_fts`, `attachment_fts`) fuse into the keyword
+list, which then fuses with `thread_vec` and `chunk_vec`. Its data-flow
+table list covers the chunk, message, attachment, queue, and ingestion
+tables. README drops "Agentic" and "Real-time" and states the 4096-dim
+embedder requirement instead of "any compliant provider". The
+Troubleshooting half of `setup.md` moved to `docs/troubleshooting.md`.
+Bridge doc nits: the `bridge-data` volume row now separates auth
+material (`config` + `gnupg` + `pass`, backed up together) from the
+Gluon cache (optional but hours to rebuild); `setup.md` says what to do
+when `make bridge-upgrade-check` fails and what to expect after an
+upgrade (Gluon re-sync, the `bridge-v3` vault path, cert pin rotation).
 
 ### 2026-09-28 — Honest `get_mailbox_status` (Phase 1 item 4)
 

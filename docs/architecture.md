@@ -50,11 +50,15 @@ indexer container
         │  embed API                   │  writes
         ▼                              ▼
 embedder (operator-supplied)  sqlite-volume
-  - OpenAI-compatible            - threads table (FTS5)
-    /v1/embeddings at            - threads_vec table (sqlite-vec)
-    EMBED_BASE_URL        - message_thread_map
-  - 4096-dim vectors required    - indexed_files
-    by current schema            - pending_deletions (reconciler)
+  - OpenAI-compatible            - threads + threads_fts + threads_vec
+    /v1/embeddings at            - message_chunks + _fts + _vec
+    EMBED_BASE_URL               - messages, message_participants,
+  - 4096-dim vectors required      message_thread_map
+    by current schema            - attachments + attachments_fts,
+                                   attachment_extractions
+                                 - indexed_files, indexing_jobs,
+                                   ingestion_state
+                                 - pending_deletions (reconciler)
 
 inference (operator-supplied)
   - INFERENCE_MODE=anthropic →
@@ -70,8 +74,8 @@ mcp-server container
   - Exposes MCP tools via HTTP/SSE on port 3000
   - Serves GET /health for the container healthcheck (200 when the
     read-only SQLite connection answers, 503 otherwise)
-  - Hybrid search: BM25 + vector → RRF merge (optional rerank stage
-    when RERANK_MODE=cohere)
+  - Hybrid search: three FTS5 lanes + two vector lanes → RRF merge
+    (optional rerank stage when RERANK_MODE=cohere)
   - Q&A: retrieves threads → prompts the configured inference provider
   - Retrieval: serves indexed mailbox data from SQLite
   - Email excerpts sent to the LLM are wrapped in <untrusted_email>
@@ -102,7 +106,7 @@ Claude Desktop (host machine)
 
 | Volume | Contents | Back up? |
 |---|---|---|
-| `bridge-data` | Bridge credentials, GPG key, config | Yes — losing this requires re-login |
+| `bridge-data` | Bridge credentials and TLS cert (`vault.enc` under `/data/config`), GPG key (`/data/gnupg`), pass store (`/data/pass`), Gluon IMAP cache and logs (`/data/local`), cache (`/data/cache`) | Yes — back up `/data/config`, `/data/gnupg`, and `/data/pass` together: `vault.enc` cannot be decrypted without the GPG key, so a backup missing `gnupg/` is silently useless. `/data/local` and `/data/cache` can be omitted — Bridge rebuilds them from Proton — but rebuilding the Gluon cache re-downloads the whole mailbox, which can take hours. Losing the whole volume means re-login plus that full re-download. |
 | `maildir-volume` | Raw email in Maildir format | Optional — mbsync can re-sync |
 | `sqlite-volume` | SQLite index (FTS5 + vectors) | Optional — indexer can rebuild |
 
@@ -133,7 +137,8 @@ indexer's `OpenAIEmbedder` client and mcp-server's `EmbedClient` both
 use the official `openai` SDK with a custom `base_url`, so an
 operator can point `EMBED_BASE_URL` at any compliant provider —
 DeepInfra, OpenRouter, LM Studio, vLLM, TEI, `mlx_lm.server` —
-without changing any code. The schema reserves a fixed 4096-dim
+without changing any code, provided the model returns 4096-dim
+vectors. The schema reserves a fixed 4096-dim
 vector, so `EMBED_MODEL` must keep producing 4096-dim vectors
 (Qwen3-Embedding-8B variants) or a schema migration is required.
 Indexer and mcp-server must point at the same provider + model so
@@ -169,35 +174,50 @@ User query
     │
     ├─ Embed query text → OpenAI /v1/embeddings at EMBED_BASE_URL → 4096-dim vector
     │
-    ├─ BM25 search   → SQLite FTS5 over thread bodies      → ranked list A
+    ├─ Keyword list — three FTS5 lanes, fused with RRF into one ranked list:
+    │    thread_fts     → BM25 over accumulated thread bodies
+    │    chunk_fts      → BM25 over body and attachment-text chunks
+    │                     (lifted to parent thread_id)
+    │    attachment_fts → BM25 over attachment filenames / MIME types
     │
-    ├─ Vector search → sqlite-vec over thread vectors      → ranked list B
+    ├─ thread_vec → sqlite-vec over thread vectors
     │
-    ├─ Vector search → sqlite-vec over per-message chunks  → ranked list C
-    │                  (chunks "lifted" to parent thread_id)
+    ├─ chunk_vec  → sqlite-vec over body and attachment-text chunks
+    │               (lifted to parent thread_id)
     │
-    ├─ Reciprocal Rank Fusion (k=60) → merged candidate list
+    ├─ Reciprocal Rank Fusion (k=60) of keyword list + thread_vec + chunk_vec
     │
-    ├─ optional: post-fusion filter (folder / sender / date / attachments)
+    ├─ optional: post-fusion filter (folder / sender / participant / date /
+    │   attachments)
     │
     ├─ optional rerank stage (RERANK_MODE=cohere, default none):
-    │   take RRF top RERANK_CANDIDATES (default 20), score each candidate
-    │   against the query via the Cohere rerank API (official cohere SDK),
-    │   reorder, truncate to the caller's `limit` (defaulting to
-    │   RERANK_TOP_N when the caller doesn't specify — so callers like
-    │   extract_from_emails(limit=20) get 20, not 10)
+    │   take the fused top max(limit, RERANK_CANDIDATES (default 20)), score each
+    │   candidate against the query via the Cohere rerank API (official
+    │   cohere SDK), reorder, and truncate to the caller's `limit`
     │
     └─ top-k threads (with evidence chunks if requested)
 ```
 
-RRF merges the three ranked lists without needing to normalise scores.
-Each thread's RRF score = sum over lanes of `1/(k + rank_in_lane + 1)`.
-The chunk lane credits each thread by the rank of its **best** chunk
-only — without that dedup, a thread with many similar sibling chunks
-would dominate by accumulated score rather than by relevance.
+Retrieval runs five lanes in two RRF stages. The three FTS5 lanes are
+fused first into a single keyword list — the same list `mode=keyword`
+returns — and that list then enters the outer fusion alongside the two
+vector lanes. RRF merges ranked lists without needing to normalise
+scores: each thread's score is the sum over lists of
+`1/(k + rank_in_list + 1)`. The chunk lanes credit each thread by the
+rank of its **best** chunk only — without that dedup, a thread with
+many similar sibling chunks would dominate by accumulated score rather
+than by relevance. `get_evidence(include_scores=True)` reports which
+lanes (`thread_fts` / `chunk_fts` / `attachment_fts` / `thread_vec` /
+`chunk_vec` / `rerank`) each returned thread matched.
 
-Every thread is chunked at index time, so the chunk lane is always
-populated alongside the BM25 and thread-vector lanes.
+Folder, date, and attachment-flag filters are pushed into the FTS
+lanes' SQL so deep-ranked matches are not truncated before they could
+qualify; sqlite-vec has no equivalent pushdown, so the vector lanes
+run unfiltered and the post-fusion filter applies every filter
+uniformly.
+
+Every thread is chunked at index time, so the chunk lanes are always
+populated alongside the thread-level lanes.
 
 The rerank stage is best-effort: a transient rerank-service failure
 returns an empty result set from the reranker, and `hybrid_search`
@@ -674,7 +694,7 @@ Two stage outcomes short-circuit the retry path entirely:
 Two environment variables shape the queue: `INDEXER_MAX_ATTEMPTS` and
 `INDEXER_RETRY_BASE_SECONDS`. Neither is required — the defaults are
 suitable for typical mailboxes, and both are documented in
-`docs/setup.md` for operators who need to tune retry aggressiveness
+`docs/troubleshooting.md` for operators who need to tune retry aggressiveness
 against an unreliable embed service or a flaky mailbox.
 
 Observability: `queue.stats()` returns `{queued, dead}` counts and is
