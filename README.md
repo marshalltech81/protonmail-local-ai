@@ -3,18 +3,18 @@
 A privacy-first AI search and intelligence layer for ProtonMail. Ask
 questions about your inbox in plain English. Email storage, sync, and
 indexing always stay on your machine; whether the LLM and embedder
-calls are local or remote is your choice — point them at any
-OpenAI-compatible / Anthropic-compatible provider, including a
+calls are local or remote is your choice — point them at an
+OpenAI-compatible or Anthropic-compatible provider, including a
 host-side server you install yourself.
 
 ## What It Does
 
 - **Semantic search** — find emails by meaning, not just keywords
-- **Hybrid search** — BM25 keyword + vector similarity merged for best results
-- **Thread-aware** — indexes at the conversation level, not individual messages
+- **Hybrid search** — keyword (FTS5) and vector lanes merged with reciprocal rank fusion
+- **Thread-aware** — retrieves whole conversations, with per-message chunks for precise passages
+- **Exact enumeration** — list every indexed message matching sender, recipient, folder, or date filters, with a total count (complete for the synced folders once indexing is current and no messages are dead-lettered — both reported by `get_mailbox_status`)
 - **Q&A / RAG** — ask natural language questions, get answers grounded in your email
 - **Structured extraction** — pull invoices, dates, action items into structured data
-- **Agentic** — multi-step reasoning across your entire mailbox
 - **MCP interface** — works directly inside Claude Desktop
 
 ## Stack
@@ -22,9 +22,9 @@ host-side server you install yourself.
 | Component | Role |
 |---|---|
 | ProtonBridge | Decrypts ProtonMail, exposes local IMAP/SMTP |
-| mbsync | Real-time incremental sync to local Maildir |
+| mbsync | Incremental pull-only sync to local Maildir, every `SYNC_INTERVAL` seconds |
 | Indexer | Parses threads, generates embeddings, builds SQLite index |
-| Embedder (operator-supplied) | OpenAI-compatible `/v1/embeddings`. Point `EMBED_BASE_URL` at any compliant provider — remote (DeepInfra, OpenRouter) or a host-side server you install yourself (LM Studio, vLLM, TEI, `mlx_lm.server`) |
+| Embedder (operator-supplied) | OpenAI-compatible `/v1/embeddings` returning 4096-dim vectors (the schema's fixed width — e.g. Qwen3-Embedding-8B). Point `EMBED_BASE_URL` at a remote provider (DeepInfra, OpenRouter) or a host-side server you install yourself (LM Studio, vLLM, TEI, `mlx_lm.server`) |
 | Inference (operator-supplied) | Anthropic-compatible Messages API by default (`INFERENCE_MODE=anthropic`); switch to `INFERENCE_MODE=openai` for any OpenAI-compatible chat-completions endpoint at `INFERENCE_BASE_URL` |
 | SQLite (FTS5 + sqlite-vec) | Hybrid keyword + vector search index |
 | MCP Server | Exposes tools to Claude Desktop via HTTP/SSE |
@@ -110,6 +110,8 @@ make logs  # verify everything is running
 `make up` now runs a security preflight first: it validates `.env`, checks that
 the Bridge password secret exists and is non-empty, and enforces `600`
 permissions on secret files before Docker Compose starts the stack.
+If a service doesn't come up, see
+[`docs/troubleshooting.md`](docs/troubleshooting.md).
 
 The MCP server is read-only:
 - search, retrieval, and intelligence tools are available
