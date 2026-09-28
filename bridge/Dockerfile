@@ -68,7 +68,7 @@ RUN make build-nogui
 # Stage 2: Runtime
 # Runs as non-root user 'bridge' (UID 1000)
 # -----------------------------------------------------------------------------
-FROM debian:bookworm-slim@sha256:0104b334637a5f19aa9c983a91b54c89887c0984081f2068983107a6f6c21eeb AS runtime
+FROM debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251 AS runtime
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     bash \
