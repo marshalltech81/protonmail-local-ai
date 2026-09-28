@@ -36,9 +36,9 @@ dependencies = [
 
 [dependency-groups]
 dev = [
-    # httpx is only imported by tests (transport stubs for the openai
+    # httpx2 is only imported by tests (transport stubs for the openai
     # SDK); the runtime gets it transitively via openai.
-    "httpx==0.28.1",
+    "httpx2==2.13.1",
     "mypy==2.3.1",
     "pytest==9.1.1",
     "pytest-cov==7.1.0",
