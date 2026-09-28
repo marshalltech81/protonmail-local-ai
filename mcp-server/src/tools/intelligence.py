@@ -592,9 +592,9 @@ def register_intelligence_tools(
         Synthesize an answer from email threads — including the
         text content of their PDF and image attachments.
 
-        This is the only tool that synthesizes over attachment
-        content (``search_attachments`` and ``get_evidence`` return
-        the raw extracted text).
+        This and ``extract_from_emails`` are the tools that synthesize
+        over attachment content (``search_attachments`` and
+        ``get_evidence`` return the raw extracted text).
         The local index extracts text from every PDF (digital and
         OCR'd) and runs OCR on every image. Once a thread is
         surfaced by retrieval — via BM25, dense thread vector, dense
@@ -863,9 +863,12 @@ def register_intelligence_tools(
         threads — invoice numbers and amounts, tracking numbers,
         flight confirmations, RSVPs, dates of all dentist appointments.
         Returns one record per thread that matches, fitted to the
-        schema you pass in. For prose answers across threads use
-        ask_mailbox; for one specific thread use summarize_thread or
-        get_thread.
+        schema you pass in. Attachment text (digital and OCR'd PDFs,
+        images) that ranks for the query is part of each thread's
+        context, so fields that live only in an attached invoice or
+        statement can be extracted. For prose answers across threads
+        use ask_mailbox; for one specific thread use summarize_thread
+        or get_thread.
 
         Args:
             query: What to search for e.g. "invoices", "meeting confirmations"

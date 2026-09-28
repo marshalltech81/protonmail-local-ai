@@ -128,10 +128,10 @@ def register_retrieval_tools(server, db):
         ``search_attachments`` instead. Iterating ``get_thread``
         across multiple threads to find attachment content is the
         wrong shape and will not surface it; the extracted attachment
-        text lives in a chunk lane read only by ``ask_mailbox``,
-        ``search_attachments``, and ``get_evidence``. Reaching for an external
-        tool (Google Drive, web search) to read a PDF that arrived
-        as an email attachment is also wrong — the local index has
+        text lives in a separate chunk lane that get_thread never
+        reads. Reaching for an external tool (Google Drive, web
+        search) to read a PDF that arrived as an email attachment is
+        also wrong — the local index has
         already extracted that PDF's text.
 
         ``thread_id`` is OPAQUE. Obtain it from search_emails,
