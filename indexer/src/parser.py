@@ -84,10 +84,18 @@ def _parse_max_bytes() -> int:
     return value
 
 
-h2t = html2text.HTML2Text()
-h2t.ignore_links = True
-h2t.ignore_images = True
-h2t.body_width = 0
+def _html_to_text(html: str) -> str:
+    """Render HTML to text with a fresh converter.
+
+    ``HTML2Text`` keeps parser state between ``handle`` calls, so a
+    shared instance let one message's unclosed ``<style>`` blank every
+    later HTML body until some document closed it.
+    """
+    h2t = html2text.HTML2Text()
+    h2t.ignore_links = True
+    h2t.ignore_images = True
+    h2t.body_width = 0
+    return h2t.handle(html)
 
 
 def _decoded_payload(part: Any) -> bytes:
@@ -362,13 +370,13 @@ def _extract_body_and_attachments(
             elif ct == "text/html" and not html_text:
                 payload = _decoded_payload(part)
                 charset = part.get_content_charset() or "utf-8"
-                html_text = h2t.handle(_safe_decode(payload, charset))
+                html_text = _html_to_text(_safe_decode(payload, charset))
     else:
         ct = msg.get_content_type()
         payload = _decoded_payload(msg)
         charset = msg.get_content_charset() or "utf-8"
         if ct == "text/html":
-            html_text = h2t.handle(_safe_decode(payload, charset))
+            html_text = _html_to_text(_safe_decode(payload, charset))
         else:
             plain_text = _safe_decode(payload, charset)
 

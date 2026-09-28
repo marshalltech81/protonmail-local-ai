@@ -516,6 +516,30 @@ class TestBodyExtraction:
         assert "<html>" not in msg.body_text
         assert "<b>" not in msg.body_text
 
+    def test_unclosed_style_does_not_blank_the_next_html_body(self, tmp_path):
+        """Regression (#216): one shared HTML2Text instance kept its
+        parser state across messages, so an unclosed ``<style>`` left it
+        in CDATA mode and the next HTML-only body came out empty —
+        indexed as successful, never retried."""
+        template = """
+            From: alice@example.com
+            To: bob@example.com
+            Subject: HTML email
+            Message-ID: <{mid}@example.com>
+            Date: Mon, 01 Jan 2024 12:00:00 +0000
+            Content-Type: text/html; charset=utf-8
+
+            {body}
+        """
+        bad = write_eml(tmp_path, template.format(mid="bad", body="<style>unfinished"), "bad.eml")
+        good = write_eml(
+            tmp_path, template.format(mid="good", body="<p>Next message body</p>"), "good.eml"
+        )
+        assert parse_email(bad) is not None
+        msg = parse_email(good)
+        assert msg is not None
+        assert "Next message body" in msg.body_text
+
     def test_multipart_prefers_plain_text_over_html(self, tmp_path):
         content = (
             "From: alice@example.com\r\n"

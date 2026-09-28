@@ -240,6 +240,15 @@ class TestHtmlExtractorFallback:
         assert name == "html"
         assert "text" in text
 
+    def test_unclosed_style_does_not_blank_the_next_document(self):
+        """Regression (#216): a shared converter carried an unclosed
+        ``<style>`` into the next attachment, which came out empty."""
+        from src.extractors.html import extract as html_extract
+
+        html_extract(b"<style>unfinished")
+        text, _ = html_extract(b"<p>Next document text</p>")
+        assert "Next document text" in text
+
 
 class TestDocxExtractor:
     def test_extracts_paragraphs_and_tables(self):
