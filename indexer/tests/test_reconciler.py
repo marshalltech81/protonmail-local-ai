@@ -399,6 +399,45 @@ class TestReap:
         assert result["threads_rebuilt"] == 1
         assert db.has_pending_deletion(str(trashed)) is False
 
+    def test_embed_failure_log_omits_provider_response_body(
+        self, db, threader, embedder, reconciler, maildir, caplog
+    ):
+        """Regression (#206): a provider status error can echo the input
+        (here, the survivor's subject) in its body. The reaper logged the
+        raw exception, bypassing ``scrub_embed_error``."""
+        import httpx2
+        from openai import BadRequestError
+
+        orig_path = maildir / "1700000000.M1.host:2,S"
+        _write_eml(orig_path, "e1@example.com")
+        _index(orig_path, db, threader)
+        reply_path = maildir / "1700000001.M2.host:2,S"
+        _write_eml(
+            reply_path,
+            "e2@example.com",
+            in_reply_to="e1@example.com",
+            subject="Re: SYNTHETIC_PRIVATE_SUBJECT",
+            date=datetime(2024, 2, 1, tzinfo=UTC),
+        )
+        _index(reply_path, db, threader)
+        orig_path.rename(maildir / "1700000000.M1.host:2,ST")
+        reconciler.sweep()
+
+        def echoing_embed(text):
+            raise BadRequestError(
+                message=f"invalid input: {text}",
+                response=httpx2.Response(400, request=httpx2.Request("POST", "http://x")),
+                body={"error": f"invalid input: {text}"},
+            )
+
+        embedder.embed = echoing_embed
+        with caplog.at_level("WARNING"):
+            assert reconciler.reap()["threads_rebuilt"] == 0
+
+        assert "reaper: embedding failed" in caplog.text
+        assert "SYNTHETIC_PRIVATE_SUBJECT" not in caplog.text
+        assert "status=400" in caplog.text
+
     def test_skips_reap_when_survivor_unreadable(self, db, threader, embedder, reconciler, maildir):
         # If a survivor's file is transiently unreadable when the
         # reconciler reparses it (mbsync chmod race, perms regression),

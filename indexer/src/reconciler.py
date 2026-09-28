@@ -33,7 +33,7 @@ from pathlib import Path
 
 from .chunker import mean_vector
 from .database import Database
-from .embedder import EmbeddingBackend
+from .embedder import EmbeddingBackend, scrub_embed_error
 from .maildir import is_trashed, resolve_current_path
 from .parser import OversizedMessageError, parse_email
 from .threader import Thread, Threader
@@ -447,7 +447,8 @@ class Reconciler:
                 "reaper: embedding failed for thread %s (%s); will retry next pass "
                 "(blocked attempts=%d)",
                 thread_id,
-                e,
+                # A provider status error can echo the input (a subject).
+                scrub_embed_error(e),
                 attempts,
             )
             return False, False
