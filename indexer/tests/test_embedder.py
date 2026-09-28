@@ -9,7 +9,7 @@ deterministic without hitting a live provider.
 import time
 from types import SimpleNamespace
 
-import httpx
+import httpx2
 import pytest
 from openai import APIConnectionError, APIStatusError, APITimeoutError
 from src.chunker import l2_normalize
@@ -65,11 +65,11 @@ def _patch_warmup(embedder: OpenAIEmbedder, fn) -> None:
 
 
 def _api_status_error(status_code: int) -> APIStatusError:
-    """Build an APIStatusError with a real httpx response object so the
+    """Build an APIStatusError with a real httpx2 response object so the
     SDK exception's ``status_code`` attribute resolves correctly."""
     return APIStatusError(
         message=f"{status_code} error",
-        response=httpx.Response(status_code, request=httpx.Request("POST", "http://x")),
+        response=httpx2.Response(status_code, request=httpx2.Request("POST", "http://x")),
         body=None,
     )
 
@@ -335,12 +335,12 @@ class TestRetryPredicate:
 
     def test_retries_connection_error(self):
         # APIConnectionError requires a Request to construct.
-        req = httpx.Request("POST", "http://x")
+        req = httpx2.Request("POST", "http://x")
         exc = APIConnectionError(request=req)
         assert _is_transient_embed_error(exc) is True
 
     def test_retries_timeout_error(self):
-        req = httpx.Request("POST", "http://x")
+        req = httpx2.Request("POST", "http://x")
         exc = APITimeoutError(request=req)
         assert _is_transient_embed_error(exc) is True
 
@@ -366,7 +366,7 @@ class TestWaitForReady:
         monkeypatch.setattr(time, "sleep", lambda _s: None)
         emb = _make_embedder()
         attempts = {"n": 0}
-        req = httpx.Request("POST", "http://x")
+        req = httpx2.Request("POST", "http://x")
 
         def fake_create(**_kwargs):
             attempts["n"] += 1
@@ -394,7 +394,7 @@ class TestWaitForReady:
     def test_times_out_when_never_responds(self, monkeypatch):
         monkeypatch.setattr(time, "sleep", lambda _s: None)
         emb = _make_embedder()
-        req = httpx.Request("POST", "http://x")
+        req = httpx2.Request("POST", "http://x")
 
         def fake_create(**_kwargs):
             raise APIConnectionError(request=req)
@@ -425,7 +425,7 @@ class TestWaitForReady:
         monkeypatch.setattr(time, "sleep", fake_sleep)
         monkeypatch.setattr(time, "monotonic", lambda: clock["t"])
         emb = _make_embedder()
-        req = httpx.Request("POST", "http://x")
+        req = httpx2.Request("POST", "http://x")
         # Always fail with a transient error so the loop keeps probing
         # until the side-effect-raised fatal error stops it. Counter
         # raises after enough probes to exercise both cadence bands.
@@ -436,7 +436,7 @@ class TestWaitForReady:
             if attempts["n"] > emb._FAST_PROBE_COUNT + 2:
                 raise APIStatusError(
                     message="fatal",
-                    response=httpx.Response(400, request=httpx.Request("POST", "http://x")),
+                    response=httpx2.Response(400, request=httpx2.Request("POST", "http://x")),
                     body=None,
                 )
             raise APIConnectionError(request=req)
@@ -479,7 +479,7 @@ class TestClassifyEmbedFailure:
     asks whether re-sending the same request could succeed."""
 
     def test_transport_and_throttling_are_infrastructure(self):
-        req = httpx.Request("POST", "http://x")
+        req = httpx2.Request("POST", "http://x")
         for exc in (
             APIConnectionError(request=req),
             APITimeoutError(request=req),

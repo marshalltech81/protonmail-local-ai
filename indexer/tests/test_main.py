@@ -2431,21 +2431,21 @@ class TestReapedMessagesStayDeleted:
 
 
 def _status_error(status_code: int):
-    import httpx
+    import httpx2
     from openai import APIStatusError
 
     return APIStatusError(
         message=f"{status_code} error",
-        response=httpx.Response(status_code, request=httpx.Request("POST", "http://x")),
+        response=httpx2.Response(status_code, request=httpx2.Request("POST", "http://x")),
         body=None,
     )
 
 
 def _connection_error():
-    import httpx
+    import httpx2
     from openai import APIConnectionError
 
-    return APIConnectionError(request=httpx.Request("POST", "http://x"))
+    return APIConnectionError(request=httpx2.Request("POST", "http://x"))
 
 
 def _make_due(db: Database) -> None:
@@ -2769,10 +2769,10 @@ class TestEmbedOutageBreaker:
 
 def _mock_transport_embedder(handler):
     """A real ``OpenAIEmbedder`` whose SDK client talks to an in-process
-    ``httpx.MockTransport``, so tests exercise actual HTTP request
+    ``httpx2.MockTransport``, so tests exercise actual HTTP request
     boundaries (how many inputs share one request) rather than a
     per-text mock."""
-    import httpx
+    import httpx2
     from openai import OpenAI
     from src.embedder import OpenAIEmbedder
 
@@ -2781,15 +2781,15 @@ def _mock_transport_embedder(handler):
         base_url="http://embed.test/v1",
         api_key="k",
         max_retries=0,
-        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+        http_client=httpx2.Client(transport=httpx2.MockTransport(handler)),
     )
     return embedder
 
 
 def _embeddings_response(inputs: list[str]):
-    import httpx
+    import httpx2
 
-    return httpx.Response(
+    return httpx2.Response(
         200,
         json={
             "object": "list",
@@ -2831,11 +2831,11 @@ class TestRequestLimitIsNotSourceFailure:
     def test_multi_input_request_rejection_retries_one_input_per_request(
         self, tmp_path, monkeypatch
     ):
-        import httpx
+        import httpx2
 
         def handler(inputs):
             if len(inputs) > 1:
-                return httpx.Response(413, json={"error": {"message": "payload too large"}})
+                return httpx2.Response(413, json={"error": {"message": "payload too large"}})
             return _embeddings_response(inputs)
 
         db, queue, path, sizes = self._drain_one(tmp_path, monkeypatch, handler)
@@ -2846,11 +2846,11 @@ class TestRequestLimitIsNotSourceFailure:
         assert queue.stats() == {"queued": 0, "dead": 0}
 
     def test_input_rejected_on_its_own_is_a_permanent_source_failure(self, tmp_path, monkeypatch):
-        import httpx
+        import httpx2
 
         def handler(inputs):
             if len(inputs) > 1 or any("attachment text" in t for t in inputs):
-                return httpx.Response(400, json={"error": {"message": "bad input"}})
+                return httpx2.Response(400, json={"error": {"message": "bad input"}})
             return _embeddings_response(inputs)
 
         db, queue, path, sizes = self._drain_one(tmp_path, monkeypatch, handler)
