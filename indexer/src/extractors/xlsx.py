@@ -8,8 +8,11 @@ last-computed value (``data_only=True``) — for a forwarded-as-PDF /
 forwarded-as-XLSX flow the user expects to see the same numbers.
 
 Massive spreadsheets are bounded by the dispatcher's
-``INDEXER_ATTACHMENT_MAX_BYTES`` cap, so this extractor itself does
-not need a row limit.
+``INDEXER_ATTACHMENT_MAX_BYTES`` cap, but byte size does not bound the
+work: read-only ``iter_rows`` pads every row to the sheet's full width,
+empty cells included, so a few KB of sparse cells can declare a
+16,384 x 1,048,576 grid. ``_MAX_EXPANDED_CELLS`` bounds the cells
+visited across the whole workbook.
 """
 
 from __future__ import annotations
@@ -17,6 +20,11 @@ from __future__ import annotations
 import io
 
 import openpyxl
+
+# Cells visited, empty padding included, across every sheet. Far above
+# any workbook that fits the attachment byte cap with real data; a few
+# tenths of a second at worst.
+_MAX_EXPANDED_CELLS = 20_000_000
 
 
 def extract(
@@ -35,9 +43,14 @@ def extract(
     )
 
     parts: list[str] = []
+    expanded_cells = 0
     for sheet in workbook.worksheets:
         sheet_lines = [f"[Sheet: {sheet.title}]"]
         for row in sheet.iter_rows(values_only=True):
+            expanded_cells += max(len(row), 1)
+            if expanded_cells > _MAX_EXPANDED_CELLS:
+                workbook.close()
+                raise ValueError(f"workbook exceeds the {_MAX_EXPANDED_CELLS}-cell budget")
             cells = [str(cell).strip() for cell in row if cell is not None and str(cell).strip()]
             if cells:
                 sheet_lines.append("\t".join(cells))

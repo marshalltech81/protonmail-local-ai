@@ -299,6 +299,36 @@ class TestXlsxExtractor:
         assert "Item\tPrice" in text
         assert "Widget\t25" in text
 
+    def test_sparse_sheet_at_worksheet_bounds_fails_promptly(self):
+        """Regression (#202): read-only ``iter_rows`` pads every row out
+        to the sheet's full width, so a 5 KB workbook with cells at A1
+        and XFD1048576 asked for ~17 billion cell visits and stalled the
+        indexing worker. A cell budget turns it into a ``failed``
+        attachment instead."""
+        import io
+        import time
+
+        import openpyxl
+        from src.extractors import STATUS_FAILED, extract
+
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws["A1"] = "first"
+        ws["XFD1048576"] = "last"
+        buf = io.BytesIO()
+        wb.save(buf)
+        wb.close()
+
+        started = time.monotonic()
+        result = extract(
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            filename="sparse.xlsx",
+            payload=buf.getvalue(),
+        )
+        assert time.monotonic() - started < 5.0
+        assert result.status == STATUS_FAILED
+        assert "cell budget" in (result.error or "")
+
 
 class TestPdfDigitalExtractor:
     def test_extracts_text_from_minimal_digital_pdf(self):
