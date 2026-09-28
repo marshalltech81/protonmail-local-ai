@@ -187,6 +187,27 @@ class TestAssignThread:
         assert t2.thread_id == "orig@example.com"
         assert reply in t2.messages
 
+    def test_already_threaded_message_keeps_its_thread(self, db, threader):
+        """#204: reprocessing a message must not re-resolve its thread
+        from headers — its chunks stay under the thread it has."""
+        reply = make_message(
+            message_id="reply@example.com",
+            subject="Budget reply",
+            in_reply_to="parent@example.com",
+            filepath="/maildir/INBOX/cur/reply",
+        )
+        db.upsert_thread(threader.assign_thread(reply), [0.0] * EMBEDDING_DIM)
+        parent = make_message(
+            message_id="parent@example.com",
+            subject="Quarterly plan",
+            filepath="/maildir/INBOX/cur/parent",
+        )
+        db.upsert_thread(threader.assign_thread(parent), [0.0] * EMBEDDING_DIM)
+
+        again = threader.assign_thread(reply)
+
+        assert again.thread_id == "reply@example.com"
+
     def test_joins_existing_thread_via_references(self, db, threader):
         original = make_message(message_id="root@example.com")
         t1 = threader.assign_thread(original)

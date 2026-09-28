@@ -174,6 +174,7 @@ class Threader:
     """
     Assigns messages to threads using header lookups followed by a
     guarded subject fallback:
+    0. Keep the thread an already-indexed message has
     1. Check In-Reply-To header
     2. Check References headers (most recent first)
     3. Fall back to normalized-subject matching within the same folder,
@@ -229,6 +230,15 @@ class Threader:
         return thread
 
     def _find_thread_id(self, message: Message) -> str | None:
+        # A message already threaded keeps its thread. Reprocessing (a
+        # rename seen while the indexer was down, a retry) must not
+        # re-resolve it from headers: a reply indexed before its parent
+        # would move to the parent's thread in the map while its chunks
+        # and the old thread row still claimed it.
+        existing = self.db.find_thread_by_message_id(message.message_id)
+        if existing:
+            return existing
+
         # Check In-Reply-To
         if message.in_reply_to:
             thread_id = self.db.find_thread_by_message_id(message.in_reply_to)

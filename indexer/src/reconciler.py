@@ -123,9 +123,10 @@ class Reconciler:
         renamed = 0
         missing = 0
 
+        listings: dict[Path, dict[str, Path]] = {}
         for row in self.db.iter_message_map():
             stored = Path(row["filepath"])
-            current = resolve_current_path(stored)
+            current = resolve_current_path(stored, listings)
 
             if current is None:
                 # File fully gone — under Expunge None this is unexpected, but
@@ -514,9 +515,10 @@ def sweep_paths(db: Database) -> dict:
     renamed = 0
     unreachable = 0
 
+    listings: dict[Path, dict[str, Path]] = {}
     for row in db.iter_message_map():
         stored = Path(row["filepath"])
-        current = resolve_current_path(stored)
+        current = resolve_current_path(stored, listings)
 
         if current is None:
             # File is no longer at any of the expected Maildir paths. A

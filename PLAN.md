@@ -452,6 +452,22 @@ do not ship persisted claims without them.
 
 ## Recently Completed
 
+### 2026-09-28 — Thread reprocessing (#204)
+
+Reprocessing an already-indexed message no longer re-resolves its
+thread from headers (#204): a reply indexed before its parent, when
+reprocessed, moved to the parent's thread in the map while its chunks
+and the old thread row still claimed it. The startup rename sweep now
+runs before the initial walk, so files mbsync renamed while the indexer
+was down are no longer reprocessed as new mail at all. Databases
+already split by #204 keep the inconsistency until the Phase 2 reindex.
+The Message-ID conflict fix (#217) moved to its own PR after review
+showed takeover needs a real design. No schema change; `make baseline`
+unchanged. Review round 3 (Codex): moving the sweep onto the startup
+path exposed that it rescanned a folder for every stale path (quadratic
+in files renamed while the indexer was down); each sweep now lists a
+directory at most once.
+
 ### 2026-09-28 — Ingestion completeness fixes (#203, #206, #207, #212, #213)
 
 Five Codex findings where valid mail could silently lose indexing, or

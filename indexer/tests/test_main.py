@@ -1336,6 +1336,50 @@ class TestStallGuardProgress:
         assert len(calls) == len(entry.msg.attachments)
 
 
+class TestReprocessKeepsThreadMembership:
+    def test_reprocessed_reply_keeps_its_thread_and_chunks_consistent(self, tmp_path):
+        """Regression (#204): reply B indexed before its parent A gets its
+        own thread. When B was reprocessed later (renamed while the
+        indexer was down, so its new path looked unindexed), threading
+        re-resolved it into A's thread: the map moved but B's chunks kept
+        thread B, and both thread rows listed B."""
+        db = Database(tmp_path / "mail.db")
+        threader = Threader(db)
+        queue = _make_queue(db)
+        embedder = make_mock_embedder()
+        embedder.embed.return_value = _UNIT_VECTOR
+
+        reply = tmp_path / "INBOX" / "cur" / "b:2,S"
+        _write_eml(reply, "b@example.com", subject="Budget reply", in_reply_to="a@example.com")
+        queue.enqueue(str(reply), REASON_INITIAL_SCAN)
+        main.drain_queue(queue, db, embedder, threader)
+        parent = tmp_path / "INBOX" / "cur" / "a:2,S"
+        _write_eml(parent, "a@example.com", subject="Quarterly plan")
+        queue.enqueue(str(parent), REASON_INITIAL_SCAN)
+        main.drain_queue(queue, db, embedder, threader)
+        thread_b = db.find_thread_by_message_id("b@example.com")
+
+        renamed = reply.with_name("b:2,RS")
+        reply.rename(renamed)
+        queue.enqueue(str(renamed), REASON_INITIAL_SCAN)  # the startup walk
+        main.drain_queue(queue, db, embedder, threader)
+
+        assert db.find_thread_by_message_id("b@example.com") == thread_b
+        chunk_threads = {
+            r["thread_id"]
+            for r in db._conn.execute(
+                "SELECT thread_id FROM message_chunks WHERE message_id = ?", ("b@example.com",)
+            )
+        }
+        assert chunk_threads == {thread_b}
+        listing_b = [
+            r["thread_id"]
+            for r in db._conn.execute("SELECT thread_id, message_ids FROM threads")
+            if "b@example.com" in json.loads(r["message_ids"])
+        ]
+        assert listing_b == [thread_b]
+
+
 class TestBatchedInitialIndex:
     """C1 invariants for the cross-message batched initial indexer.
 
@@ -2567,7 +2611,7 @@ class TestMainStartupAndLoop:
         monkeypatch.setattr(main, "Database", lambda path: db)
         monkeypatch.setattr(main, "OpenAIEmbedder", lambda **kw: make_mock_embedder())
         monkeypatch.setattr(main, "touch_health_file", lambda: None)
-        monkeypatch.setattr(main, "sweep_paths", lambda db: None)
+        monkeypatch.setattr(main, "sweep_paths", lambda db: events.append("sweep_paths"))
         monkeypatch.setattr(main, "Observer", lambda: _FakeObserver(events))
         monkeypatch.setattr(
             main,
@@ -2631,6 +2675,15 @@ class TestMainStartupAndLoop:
         events = self._run_main(tmp_path, monkeypatch, sweep_due=False)
 
         assert not any(e.startswith("stall_guard:") for e in events)
+
+    def test_rename_sweep_runs_before_initial_index(self, tmp_path, monkeypatch):
+        """#204 follow-up: files renamed while the indexer was down must
+        have their stored paths healed before the startup walk, or the
+        walk sees each renamed path as unindexed mail and reprocesses it."""
+        events = self._run_main(tmp_path, monkeypatch, sweep_due=False)
+
+        init = next(e for e in events if e.startswith("initial_index"))
+        assert events.index("sweep_paths") < events.index(init)
 
     def test_observer_starts_before_initial_drain(self, tmp_path, monkeypatch):
         events = self._run_main(tmp_path, monkeypatch, sweep_due=False)

@@ -96,7 +96,9 @@ def get_uniq(path: Path | str) -> str:
     return name
 
 
-def resolve_current_path(stored_path: Path) -> Path | None:
+def resolve_current_path(
+    stored_path: Path, listings: dict[Path, dict[str, Path]] | None = None
+) -> Path | None:
     """Find the current on-disk path for a message previously indexed at
     ``stored_path``. Returns ``None`` if the file is no longer present under
     its original uniq in the same Maildir folder.
@@ -112,6 +114,11 @@ def resolve_current_path(stored_path: Path) -> Path | None:
 
     Maildir semantics guarantee the uniq is stable across flag-induced renames
     and ``new``/``cur`` moves within the same folder.
+
+    ``listings`` is a per-sweep cache of each scanned directory's
+    uniq -> file map. A sweep resolving many stale paths in one folder
+    passes the same dict, so the folder is listed once rather than once
+    per path (quadratic in the number of renamed files).
     """
     if stored_path.exists():
         return stored_path
@@ -122,6 +129,14 @@ def resolve_current_path(stored_path: Path) -> Path | None:
     def _scan(directory: Path) -> Path | None:
         if not directory.exists():
             return None
+        if listings is not None:
+            if directory not in listings:
+                listing: dict[str, Path] = {}
+                for child in directory.iterdir():
+                    if child.is_file():
+                        listing.setdefault(get_uniq(child), child)
+                listings[directory] = listing
+            return listings[directory].get(uniq)
         for child in directory.iterdir():
             if not child.is_file():
                 continue
