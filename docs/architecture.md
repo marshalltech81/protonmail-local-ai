@@ -231,8 +231,14 @@ outage degrades quality without failing the whole query.
 Emails are indexed at the **thread level** as the coarse unit of
 discovery, with **per-message chunks** as the precise unit of retrieval.
 
-1. Messages are grouped using `In-Reply-To` and `References` headers
-2. Failing that, subject normalisation within the same folder
+1. Messages are grouped using `In-Reply-To` and `References` headers;
+   a message already indexed keeps its thread when it is reprocessed
+2. Failing that, subject normalisation within the same folder, only
+   when the message's sender and one of its other recipients are both
+   already in the thread and it falls within 60 days of the thread's
+   last message. One shared address is not enough: the mailbox owner
+   is a recipient of nearly every message and the sender of every
+   outgoing one, so two vendors' "Invoice" mails would otherwise merge
 3. Each message's body is sliced into paragraph-packed chunks
    (`indexer/src/chunker.py`); each chunk is FTS-indexed and gets its
    own vector embedding stored in `message_chunks_vec`

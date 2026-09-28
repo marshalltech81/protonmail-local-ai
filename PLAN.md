@@ -452,6 +452,22 @@ do not ship persisted claims without them.
 
 ## Recently Completed
 
+### 2026-09-28 — Subject fallback needs a shared correspondent pair (#205)
+
+The headerless subject fallback accepted any one shared address, and
+the mailbox owner is a recipient of nearly every message, so two
+vendors' "Invoice" mails merged into one thread. It now requires the
+incoming sender and one of its other recipients to both be thread
+participants. That also stops the owner's same-subject notes to
+different people from merging. Monthly mail between the same pair
+(invoices from one vendor) still chains while each falls within 60 days
+of the last; not in #205's scope. `make baseline` unchanged: the
+synthetic corpus has no shared-recipient-only case. Threads already
+merged split only on reindex. No schema change. Review round 1
+(Codex): a multi-author From counted only its first author, in the
+check and in thread participants, so a co-author's follow-up split off;
+every author now counts.
+
 ### 2026-09-28 — Thread reprocessing (#204)
 
 Reprocessing an already-indexed message no longer re-resolves its

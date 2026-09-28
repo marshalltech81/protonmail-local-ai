@@ -178,7 +178,7 @@ class Threader:
     1. Check In-Reply-To header
     2. Check References headers (most recent first)
     3. Fall back to normalized-subject matching within the same folder,
-       gated by participant overlap and a 60-day proximity window
+       gated by a shared correspondent pair and a 60-day proximity window
     4. Create a new thread if no match found
     """
 
@@ -252,9 +252,10 @@ class Threader:
                 return thread_id
 
         # Fall back to normalized subject matching within the same folder.
-        # Only accept the fallback when the candidate thread shares at least
-        # one participant with the incoming message and the message's date
-        # falls within SUBJECT_FALLBACK_WINDOW of the thread's last activity.
+        # Only accept the fallback when the incoming sender and one of its
+        # recipients are both already thread participants and the
+        # message's date falls within SUBJECT_FALLBACK_WINDOW of the
+        # thread's last activity.
         # Without these guards, any two "Re: Hello" / "Invoice" / "Follow
         # up" messages in the same folder would merge into one thread.
         #
@@ -272,8 +273,15 @@ class Threader:
         return None
 
     def _subject_fallback_accepts(self, message: Message, candidate_id: str) -> bool:
-        """Gate the subject-only thread merge with participant overlap +
-        date proximity checks. Returns True if the fallback is safe.
+        """Gate the subject-only thread merge with a correspondent check +
+        date proximity. Returns True if the fallback is safe.
+
+        An incoming author and at least one of its other recipients must
+        both already be thread participants — the same pair of people
+        corresponding. Any single shared address is not enough: the
+        mailbox owner is a recipient of nearly every message (two
+        vendors' "Invoice" mails would merge) and the sender of every
+        outgoing one (a "Meeting" note to X and another to Y would).
 
         Both sides are compared by canonical address so display-name
         variants (``Bob Smith <bob@x>`` vs ``bob@x``) do not cause
@@ -283,14 +291,16 @@ class Threader:
         if thread is None:
             return False
 
-        incoming_canonical = {
-            canonical_addr(addr)
-            for addr in [message.from_addr, *message.to_addrs, *message.cc_addrs]
-        }
-        incoming_canonical.discard("")
         thread_canonical = {canonical_addr(addr) for addr in thread.participants}
         thread_canonical.discard("")
-        if not incoming_canonical.intersection(thread_canonical):
+        authors = {canonical_addr(addr) for addr in _authors(message)}
+        authors.discard("")
+        if not authors.intersection(thread_canonical):
+            return False
+        recipients = {canonical_addr(addr) for addr in [*message.to_addrs, *message.cc_addrs]}
+        recipients.discard("")
+        recipients -= authors
+        if not recipients.intersection(thread_canonical):
             return False
 
         delta = abs(message.date - thread.date_last)
@@ -306,7 +316,7 @@ class Threader:
         seen_canonical: set[str] = set()
         result: list[str] = []
         for msg in messages:
-            for addr in [msg.from_addr, *msg.to_addrs, *msg.cc_addrs]:
+            for addr in [*_authors(msg), *msg.to_addrs, *msg.cc_addrs]:
                 stripped = addr.strip()
                 if not stripped:
                     continue
@@ -316,6 +326,12 @@ class Threader:
                 seen_canonical.add(key)
                 result.append(stripped)
         return result
+
+
+def _authors(msg: Message) -> list[str]:
+    """Every From author (a From header may list several), falling back
+    to ``from_addr`` when the parser found no structured address."""
+    return msg.from_addrs or [msg.from_addr]
 
 
 def _normalize_subject(subject: str) -> str:
