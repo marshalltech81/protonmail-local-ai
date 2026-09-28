@@ -291,6 +291,17 @@ input by definition.
   (`protonmail-bridge` first — it holds live Proton credentials)
 - loud one-shot startup warning when `INFERENCE_MODE` sends retrieved
   excerpts to a remote provider
+- `query_messages`: bound sender-controlled values per row the way
+  `get_thread` does (PR #177 round 2) — a message's subject and
+  participant display names render in full on pages of up to 100
+- `get_message`: returns a message's full body and headers with no
+  bound, so one huge message (a pasted log, 12,000 References) is one
+  huge response; decide on body continuation (offset paging) or a
+  documented cap — fits alongside Phase 1 item 2's structured output
+- mcp-server: remove the dead `Database.get_thread_message_ids` (no
+  callers outside its tests)
+- AGENTS.md commit-hygiene secret check: `grep '^\+'` fails under
+  ugrep (a common `grep` alias); use the portable `grep '^[+]'`
 
 ## Not doing (decided 2026-09-26)
 
