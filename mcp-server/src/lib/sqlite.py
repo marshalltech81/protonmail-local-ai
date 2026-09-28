@@ -354,6 +354,110 @@ def _attach_participants(conn: sqlite3.Connection, records: list[MessageRecord])
         )
 
 
+def _message_records(
+    conn: sqlite3.Connection, where_sql: str, params: tuple, *, limit: int = -1, offset: int = 0
+) -> list[MessageRecord]:
+    """Messages matching ``where_sql``, oldest first (``message_id`` breaks
+    ties), with participants. ``sent_at`` is stored as UTC ISO 8601, so
+    string order is chronological order. ``limit=-1`` means no limit."""
+    rows = conn.execute(
+        f"SELECT {_MESSAGE_COLUMNS} FROM messages m WHERE {where_sql} "  # nosec B608
+        "ORDER BY m.sent_at ASC, m.message_id ASC LIMIT ? OFFSET ?",
+        (*params, limit, offset),
+    ).fetchall()
+    records = [_row_to_message_record(r) for r in rows]
+    _attach_participants(conn, records)
+    return records
+
+
+@dataclass
+class MessageBody:
+    """A message's indexed body, rebuilt from its body chunks."""
+
+    text: str
+    # Characters of the indexed body past ``text`` that were not read.
+    omitted_chars: int = 0
+
+
+def _rebuild_body(chunks: list[sqlite3.Row], total_chars: int, limit: int | None) -> MessageBody:
+    """Stitch a message's body chunks (in ``chunk_index`` order) back
+    together, stopping at body offset ``limit``.
+
+    Each chunk is an exact slice of the normalized body
+    (``body[char_start:char_end] == text``) and adjacent chunks overlap by
+    design, so a chunk contributes only what lies past the offset already
+    emitted. Text repeated at a distinct offset is kept. Chunks that do
+    not touch are joined by a paragraph break.
+    """
+    parts: list[str] = []
+    end = 0
+    for c in chunks:
+        start, text = c["char_start"], c["text"]
+        if limit is not None:
+            if start >= limit:
+                break
+            text = text[: limit - start]
+        if start + len(text) <= end:
+            continue
+        if parts and start > end:
+            parts.append("\n\n")
+        parts.append(text[max(0, end - start) :])
+        end = start + len(text)
+    return MessageBody(text="".join(parts), omitted_chars=max(0, total_chars - end))
+
+
+def _message_bodies(
+    conn: sqlite3.Connection, message_ids: list[str], limit: int | None
+) -> dict[str, MessageBody]:
+    """Bodies for ``message_ids`` (absent when a message has no body
+    chunks), each cut at body offset ``limit``. Chunks starting past the
+    limit are never read, so a huge message loads only what is shown."""
+    if not message_ids:
+        return {}
+    placeholders = ",".join(["?"] * len(message_ids))
+    scope = f"message_id IN ({placeholders}) AND attachment_id IS NULL"
+    totals = dict(
+        conn.execute(
+            f"SELECT message_id, MAX(char_end) FROM message_chunks WHERE {scope} "  # nosec B608
+            "GROUP BY message_id",
+            message_ids,
+        ).fetchall()
+    )
+    cutoff = "" if limit is None else " AND char_start < ?"
+    rows = conn.execute(
+        f"SELECT message_id, text, char_start FROM message_chunks WHERE {scope}{cutoff} "  # nosec B608
+        "ORDER BY message_id, chunk_index",
+        [*message_ids] + ([] if limit is None else [limit]),
+    ).fetchall()
+    grouped: dict[str, list[sqlite3.Row]] = {}
+    for r in rows:
+        grouped.setdefault(r["message_id"], []).append(r)
+    return {mid: _rebuild_body(chunks, totals[mid], limit) for mid, chunks in grouped.items()}
+
+
+@dataclass
+class ThreadPage:
+    """One page of a thread's messages, read from one snapshot."""
+
+    thread: ThreadResult
+    total_messages: int
+    offset: int
+    messages: list[MessageRecord]
+    # By message_id; a message with no indexed body is absent.
+    bodies: dict[str, MessageBody]
+    # Whether any message of the whole thread has an indexed body.
+    has_bodies: bool
+
+
+@dataclass
+class MessageView:
+    """One message, its thread, and its full body, read from one snapshot."""
+
+    record: MessageRecord
+    thread: ThreadResult
+    body: MessageBody | None
+
+
 @dataclass
 class MessagePage:
     """One page of an exhaustive enumeration.
@@ -1685,43 +1789,6 @@ class Database:
         chunks.reverse()
         return chunks
 
-    def get_message_chunks(self, message_id: str) -> list[ChunkResult]:
-        """Return one message's BODY chunks in document order.
-
-        ``get_message`` stitches these into a best-effort reconstruction
-        of the message body — the local index stores no per-message full
-        body, but the chunk store carries every paragraph-packed slice
-        with its ``char_start`` / ``char_end`` offsets.
-
-        Attachment chunks (non-NULL ``attachment_id``) are excluded:
-        ``get_message`` reconstructs the *message body*, and attachment
-        text retrieval is reserved to ``ask_mailbox`` / ``get_evidence``.
-        Ordered by ``chunk_index`` ASC so the caller can concatenate
-        directly. ``attachment_filename`` / ``attachment_mime`` are
-        emitted as literal NULL so the row shape matches
-        ``_row_to_chunk_result`` without an ``attachments`` JOIN.
-        """
-        try:
-            rows = self._fetchall(
-                """
-                SELECT c.chunk_id, c.message_id, c.thread_id, c.chunk_index,
-                       c.text, c.char_start, c.char_end, c.attachment_id,
-                       NULL AS attachment_filename,
-                       NULL AS attachment_mime,
-                       c.message_date,
-                       0.0 AS score
-                FROM message_chunks c
-                WHERE c.message_id = ?
-                  AND c.attachment_id IS NULL
-                ORDER BY c.chunk_index ASC
-                """,
-                (message_id,),
-            )
-        except sqlite3.Error as e:
-            log.warning("Message-chunks lookup failed for %s: %s", message_id, e)
-            return []
-        return [_row_to_chunk_result(r) for r in rows]
-
     def _vector_search(self, embedding: list[float], limit: int) -> list[ThreadResult]:
         try:
             serialized = sqlite_vec.serialize_float32(embedding)
@@ -1916,59 +1983,59 @@ class Database:
         row = self._fetchone("SELECT message_ids FROM threads WHERE thread_id = ?", (thread_id,))
         return json.loads(row["message_ids"]) if row else []
 
-    def get_message_record(self, message_id: str) -> MessageRecord | None:
-        """One message's own headers and participants, or ``None``."""
-        records = self._message_records("m.message_id = ?", (message_id,))
-        return records[0] if records else None
+    def get_thread_page(
+        self, thread_id: str, *, offset: int, limit: int, body_char_limit: int
+    ) -> ThreadPage | None:
+        """One page of a thread's messages, oldest first, each with its
+        own headers and its body cut at ``body_char_limit``.
 
-    def get_thread_messages(self, thread_id: str) -> list[MessageRecord]:
-        """A thread's messages, oldest first (``message_id`` breaks ties).
-
-        ``sent_at`` is stored as UTC ISO 8601, so string order is
-        chronological order.
+        Every read shares one snapshot, so an indexer commit landing
+        mid-call cannot mix two database states. Only the page's messages
+        and the chunks inside the limit are read.
         """
-        return self._message_records("m.thread_id = ?", (thread_id,))
-
-    def _message_records(self, where_sql: str, params: tuple) -> list[MessageRecord]:
         with closing(self._connect()) as conn:
-            # One read snapshot for the rows and their participants.
             conn.execute("BEGIN")
-            rows = conn.execute(
-                f"SELECT {_MESSAGE_COLUMNS} FROM messages m WHERE {where_sql} "  # nosec B608
-                "ORDER BY m.sent_at ASC, m.message_id ASC",
-                params,
-            ).fetchall()
-            records = [_row_to_message_record(r) for r in rows]
-            _attach_participants(conn, records)
-            conn.rollback()
-        return records
-
-    def get_thread_body_chunks(self, thread_id: str) -> dict[str, list[ChunkResult]]:
-        """A thread's BODY chunks grouped by message, each in document order.
-
-        The multi-message counterpart of ``get_message_chunks``:
-        attachment chunks are excluded, and one query serves the whole
-        thread.
-        """
-        rows = self._fetchall(
-            """
-            SELECT c.chunk_id, c.message_id, c.thread_id, c.chunk_index,
-                   c.text, c.char_start, c.char_end, c.attachment_id,
-                   NULL AS attachment_filename,
-                   NULL AS attachment_mime,
-                   c.message_date,
-                   0.0 AS score
-            FROM message_chunks c
-            WHERE c.thread_id = ?
-              AND c.attachment_id IS NULL
-            ORDER BY c.message_id, c.chunk_index ASC
-            """,
-            (thread_id,),
+            row = conn.execute("SELECT * FROM threads WHERE thread_id = ?", (thread_id,)).fetchone()
+            if row is None:
+                return None
+            total = conn.execute(
+                "SELECT COUNT(*) FROM messages WHERE thread_id = ?", (thread_id,)
+            ).fetchone()[0]
+            messages = _message_records(
+                conn, "m.thread_id = ?", (thread_id,), limit=limit, offset=offset
+            )
+            bodies = _message_bodies(conn, [m.message_id for m in messages], body_char_limit)
+            has_bodies = bool(bodies) or bool(
+                conn.execute(
+                    "SELECT EXISTS (SELECT 1 FROM message_chunks "
+                    "WHERE thread_id = ? AND attachment_id IS NULL)",
+                    (thread_id,),
+                ).fetchone()[0]
+            )
+        return ThreadPage(
+            thread=self._row_to_result(row),
+            total_messages=total,
+            offset=offset,
+            messages=messages,
+            bodies=bodies,
+            has_bodies=has_bodies,
         )
-        grouped: dict[str, list[ChunkResult]] = {}
-        for r in rows:
-            grouped.setdefault(r["message_id"], []).append(_row_to_chunk_result(r))
-        return grouped
+
+    def get_message_view(self, message_id: str) -> MessageView | None:
+        """One message's headers, its thread, and its full body, from one
+        read snapshot."""
+        with closing(self._connect()) as conn:
+            conn.execute("BEGIN")
+            records = _message_records(conn, "m.message_id = ?", (message_id,))
+            if not records:
+                return None
+            row = conn.execute(
+                "SELECT * FROM threads WHERE thread_id = ?", (records[0].thread_id,)
+            ).fetchone()
+            if row is None:
+                return None
+            body = _message_bodies(conn, [message_id], None).get(message_id)
+        return MessageView(record=records[0], thread=self._row_to_result(row), body=body)
 
     def list_threads(
         self,

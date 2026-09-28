@@ -21,6 +21,13 @@ _MAX_QUERY_LIMIT = 100
 # Recipients rendered per role before the rest are summarized as a count.
 _MAX_LISTED_PARTICIPANTS = 10
 
+# get_thread pages by message and cuts each body, so neither a long thread
+# nor a long message makes an unbounded response; get_message returns a
+# message's full body.
+_DEFAULT_THREAD_PAGE = 10
+_MAX_THREAD_PAGE = 50
+_THREAD_BODY_CHAR_LIMIT = 4000
+
 
 def _format_participants(
     people: list[Participant], limit: int | None = _MAX_LISTED_PARTICIPANTS
@@ -77,10 +84,17 @@ def register_retrieval_tools(server, db):
     async def get_thread(
         thread_id: str,
         include_attachments_metadata: bool = True,
+        offset: int = 0,
+        limit: int = _DEFAULT_THREAD_PAGE,
     ) -> list[TextContent]:
         """
         Get one thread's messages by thread ID, oldest first — each
         message's own headers and body; no attachment content.
+
+        Pages by message: the response states the thread's message
+        count and, when more remain, the ``offset`` for the next call.
+        Each body is cut at 4,000 characters, with a marker saying how
+        much was left out; ``get_message`` returns a full body.
 
         DO NOT use this to read attachment content (PDFs, OCR'd
         images, scans). It returns the message bodies only; the
@@ -105,9 +119,11 @@ def register_retrieval_tools(server, db):
         Args:
             thread_id: The opaque thread ID returned by search_emails
             include_attachments_metadata: Include the local attachment availability note
+            offset: Messages to skip, oldest first (default 0)
+            limit: Messages per page (default 10, clamped to [1, 50])
 
         Returns:
-            Thread metadata, then every message oldest first: its own
+            Thread metadata, then the page's messages oldest first: its own
             Message-ID, subject, From / To / Cc, send date (UTC),
             folder, reply headers, attachment flag, and indexed body
             (the text after quoted-reply stripping). When no message
@@ -116,15 +132,31 @@ def register_retrieval_tools(server, db):
         log_tool_call(
             log,
             "get_thread",
-            {"thread_id": thread_id, "include_attachments_metadata": include_attachments_metadata},
+            {
+                "thread_id": thread_id,
+                "include_attachments_metadata": include_attachments_metadata,
+                "offset": offset,
+                "limit": limit,
+            },
         )
+        limit = clamp_int(limit, default=_DEFAULT_THREAD_PAGE, minimum=1, maximum=_MAX_THREAD_PAGE)
+        offset = clamp_int(offset, default=0, minimum=0, maximum=1_000_000)
         try:
-            thread = await asyncio.to_thread(db.get_thread, thread_id)
-            if not thread:
+            page = await asyncio.to_thread(
+                db.get_thread_page,
+                thread_id,
+                offset=offset,
+                limit=limit,
+                body_char_limit=_THREAD_BODY_CHAR_LIMIT,
+            )
+            if not page:
                 return [TextContent(type="text", text=f"Thread not found: {thread_id}")]
-            messages = await asyncio.to_thread(db.get_thread_messages, thread_id)
-            bodies = await asyncio.to_thread(db.get_thread_body_chunks, thread_id)
+            thread, messages, total = page.thread, page.messages, page.total_messages
 
+            if messages:
+                count = f"{total} (showing {offset + 1}-{offset + len(messages)}, oldest first)"
+            else:
+                count = str(total)
             lines = [
                 f"Thread: {thread.subject}",
                 f"Thread ID: {thread.thread_id}",
@@ -132,25 +164,41 @@ def register_retrieval_tools(server, db):
                 f"Participants: {', '.join(thread.participants)}",
                 f"Date range: {thread.date_first.strftime('%Y-%m-%d')} "
                 f"→ {thread.date_last.strftime('%Y-%m-%d')}",
-                f"Messages: {len(messages)}",
+                f"Messages: {count}",
                 f"Mode: {local_only_note}",
                 "",
-                "Messages, oldest first (bodies are the indexed text after "
-                "quoted-reply stripping; attachment text is not included):",
             ]
-            for i, m in enumerate(messages, 1):
-                lines += ["", f"[{i}/{len(messages)}] Message-ID: {m.message_id}"]
+            if messages:
+                lines.append(
+                    "Messages, oldest first (bodies are the indexed text after "
+                    "quoted-reply stripping; attachment text is not included):"
+                )
+            elif total:
+                lines.append(f"No messages at offset {offset}; the thread has {total}.")
+            for i, m in enumerate(messages, offset + 1):
+                lines += ["", f"[{i}/{total}] Message-ID: {m.message_id}"]
                 lines += _header_lines(m, _MAX_LISTED_PARTICIPANTS)
                 lines.append("")
-                if m.message_id in bodies:
-                    lines.append("\n\n".join(c.text for c in bodies[m.message_id]))
-                else:
+                body = page.bodies.get(m.message_id)
+                if body is None:
                     lines.append("(No body text is indexed for this message.)")
+                    continue
+                lines.append(body.text)
+                if body.omitted_chars:
+                    lines.append(
+                        f"[{body.omitted_chars:,} more characters not shown; "
+                        f'get_message("{m.message_id}") returns the full body]'
+                    )
+            if offset + len(messages) < total:
+                lines += [
+                    "",
+                    f"More messages: call get_thread with offset={offset + len(messages)}.",
+                ]
 
             # No message body indexed yet (e.g. chunking still pending):
             # fall back to the accumulated thread text, a retrieval
             # artifact that also carries quoted replies.
-            if not bodies:
+            if not page.has_bodies:
                 if thread.body_text:
                     lines += ["", "Indexed thread text:", "", thread.body_text]
                 elif thread.snippet:
@@ -182,8 +230,9 @@ def register_retrieval_tools(server, db):
         Headers come from the message itself: subject, every From /
         To / Cc entry, send date (UTC), folder, In-Reply-To,
         References, and the attachment flag. Reconstructs the message
-        body from the per-message chunk store (in document order) — the index keeps no raw per-message body,
-        so this is the indexed text after quoted-reply stripping, which
+        body from the per-message chunk store (in document order) — the
+        index keeps no raw per-message body, so this is the indexed text
+        after quoted-reply stripping, which
         is usually what you want for "show me the message from Jane on
         Tuesday". Attachment text is NOT included here; use
         get_evidence or ask_mailbox for attachment content. When no
@@ -211,37 +260,26 @@ def register_retrieval_tools(server, db):
             {"message_id": message_id, "folder": folder, "body_format": body_format},
         )
         try:
-            record = await asyncio.to_thread(db.get_message_record, message_id)
-            if not record:
+            view = await asyncio.to_thread(db.get_message_view, message_id)
+            if not view:
                 return [TextContent(type="text", text=f"Message not found: {message_id}")]
-
-            thread = await asyncio.to_thread(db.get_thread, record.thread_id)
-            if not thread:
-                return [TextContent(type="text", text=f"Message not found: {message_id}")]
-
-            # The index stores no raw per-message body column, but the
-            # chunk store carries every body slice. Reconstruct the body
-            # in chunk_index order; get_message_chunks excludes
-            # attachment chunks, so this is message body only.
-            chunks = await asyncio.to_thread(db.get_message_chunks, message_id)
+            thread = view.thread
 
             lines = [
                 f"Message-ID: {message_id}",
-                *_header_lines(record, participant_limit=None),
+                *_header_lines(view.record, participant_limit=None),
                 f"Thread: {thread.subject}",
                 f"Thread ID: {thread.thread_id}",
                 f"Mode: {local_only_note}",
             ]
 
-            if chunks:
-                body = "\n\n".join(c.text for c in chunks)
+            if view.body:
                 lines += [
                     "",
-                    f"Message body (reconstructed from {len(chunks)} indexed "
-                    "chunk(s); the indexed body after quoted-reply stripping, "
-                    "not the raw message):",
+                    "Message body (the indexed body after quoted-reply "
+                    "stripping, not the raw message):",
                     "",
-                    body,
+                    view.body.text,
                 ]
             else:
                 # No body chunks — a legacy thread, an empty-body

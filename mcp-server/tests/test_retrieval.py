@@ -24,7 +24,7 @@ import sqlite_vec
 from src.lib.sqlite import Database
 from src.tools.retrieval import register_retrieval_tools
 
-from tests.conftest import _build_schema
+from tests.conftest import _build_schema, _insert_message
 
 
 @contextmanager
@@ -89,10 +89,10 @@ class TestGetThread:
         assert "Attachments are present" not in _text(out)
 
     def test_db_exception_returns_error_text(self, fake_server, seeded_db):
-        def boom(_thread_id):
+        def boom(*_args, **_kwargs):
             raise RuntimeError("simulated read failure")
 
-        seeded_db.get_thread = boom  # type: ignore[assignment]
+        seeded_db.get_thread_page = boom  # type: ignore[assignment]
         handler = _handlers(fake_server, seeded_db)["get_thread"]
         out = asyncio.run(handler(thread_id="anything"))
         assert "Error" in _text(out)
@@ -100,7 +100,7 @@ class TestGetThread:
     def test_messages_render_oldest_first_with_own_headers(self, fake_server, messages_db):
         handler = _handlers(fake_server, messages_db)["get_thread"]
         text = _text(asyncio.run(handler(thread_id="t1")))
-        assert "Messages: 2" in text
+        assert "Messages: 2 (showing 1-2, oldest first)" in text
         first, second = text.index("[1/2] Message-ID: m1"), text.index("[2/2] Message-ID: m2")
         assert first < second
         m1, m2 = text[first:second], text[second:]
@@ -127,8 +127,6 @@ class TestGetThread:
         assert "Indexed thread text" not in text
 
     def test_message_without_body_chunks_says_so(self, fake_server, tmp_path):
-        from tests.conftest import _insert_message
-
         with _open_fixture_db(tmp_path) as (conn, db):
             _insert_message(
                 conn, message_id="a", thread_id="t", sent_at="2024-01-01T00:00:00+00:00", body="hi"
@@ -147,9 +145,60 @@ class TestGetThread:
         assert "Indexed thread text" in text
         assert "please find the invoice attached for march" in text
 
-    def test_long_recipient_lists_are_summarized(self, fake_server, tmp_path):
-        from tests.conftest import _insert_message
+    def test_pages_through_messages(self, fake_server, messages_db):
+        handler = _handlers(fake_server, messages_db)["get_thread"]
+        first = _text(asyncio.run(handler(thread_id="t1", limit=1)))
+        assert "Messages: 2 (showing 1-1, oldest first)" in first
+        assert "Message-ID: m1" in first and "Message-ID: m2" not in first
+        assert "call get_thread with offset=1" in first
+        second = _text(asyncio.run(handler(thread_id="t1", offset=1, limit=1)))
+        assert "Messages: 2 (showing 2-2, oldest first)" in second
+        assert "[2/2] Message-ID: m2" in second
+        assert "call get_thread with offset" not in second
 
+    def test_offset_past_the_end_is_explicit(self, fake_server, messages_db):
+        handler = _handlers(fake_server, messages_db)["get_thread"]
+        text = _text(asyncio.run(handler(thread_id="t1", offset=5)))
+        assert "No messages at offset 5; the thread has 2." in text
+
+    def test_limit_is_clamped(self, fake_server, messages_db):
+        handler = _handlers(fake_server, messages_db)["get_thread"]
+        calls = []
+        real = messages_db.get_thread_page
+
+        def spy(thread_id, **kwargs):
+            calls.append(kwargs)
+            return real(thread_id, **kwargs)
+
+        messages_db.get_thread_page = spy  # type: ignore[assignment]
+        asyncio.run(handler(thread_id="t1", limit=100000, offset=-3))
+        assert calls[0]["limit"] == 50
+        assert calls[0]["offset"] == 0
+
+    def test_long_bodies_are_cut_with_an_explicit_marker(self, fake_server, tmp_path):
+        with _open_fixture_db(tmp_path) as (conn, db):
+            _insert_message(
+                conn,
+                message_id="a",
+                thread_id="t",
+                sent_at="2024-01-01T00:00:00+00:00",
+                body="x" * 4000 + "TAIL" + "y" * 996,
+            )
+            conn.close()
+            text = _text(asyncio.run(_handlers(fake_server, db)["get_thread"](thread_id="t")))
+        assert "TAIL" not in text
+        assert '[1,000 more characters not shown; get_message("a") returns the full body]' in text
+
+    def test_overlapping_chunks_render_once(self, fake_server, overlap_db):
+        from tests.conftest import OVERLAP_BODY
+
+        handler = _handlers(fake_server, overlap_db)["get_thread"]
+        text = _text(asyncio.run(handler(thread_id="t-ov")))
+        assert OVERLAP_BODY in text
+        assert text.count("Paragraph P3 ") == 1
+        assert text.count("Same line again.") == 2
+
+    def test_long_recipient_lists_are_summarized(self, fake_server, tmp_path):
         with _open_fixture_db(tmp_path) as (conn, db):
             _insert_message(
                 conn,
@@ -198,11 +247,18 @@ class TestGetMessage:
         assert "References:" not in text
         assert "Attachments: no" in text
 
+    def test_overlapping_chunks_render_once(self, fake_server, overlap_db):
+        from tests.conftest import OVERLAP_BODY
+
+        handler = _handlers(fake_server, overlap_db)["get_message"]
+        text = _text(asyncio.run(handler(message_id="ov1")))
+        assert OVERLAP_BODY in text
+        assert text.count("Paragraph P5 ") == 1
+        assert text.count("Same line again.") == 2
+
     def test_lists_every_recipient(self, fake_server, tmp_path):
         # get_message is the authoritative single-message view: no
         # "+N more" summarizing.
-        from tests.conftest import _insert_message
-
         with _open_fixture_db(tmp_path) as (conn, db):
             _insert_message(
                 conn,
@@ -229,7 +285,7 @@ class TestGetMessage:
         out = asyncio.run(handler(message_id="t-alpha"))
         text = _text(out)
         assert "12345" in text
-        assert "reconstructed from 1 indexed chunk" in text
+        assert "Message body (the indexed body after quoted-reply stripping" in text
 
     def test_falls_back_to_thread_context_without_chunks(self, fake_server, seeded_db):
         # seeded_db has no message chunks — the handler must fall back to
@@ -279,7 +335,7 @@ class TestGetMessage:
         def boom(_message_id):
             raise RuntimeError("simulated read failure")
 
-        seeded_db.get_message_record = boom  # type: ignore[assignment]
+        seeded_db.get_message_view = boom  # type: ignore[assignment]
         handler = _handlers(fake_server, seeded_db)["get_message"]
         out = asyncio.run(handler(message_id="anything"))
         assert "Error" in _text(out)

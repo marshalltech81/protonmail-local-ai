@@ -161,6 +161,7 @@ def _insert_chunk(
     chunked_at: str = "2024-01-01T00:00:00+00:00",
     attachment_id: str | None = None,
     message_date: str | None = None,
+    char_start: int = 0,
 ) -> None:
     """Insert one ``message_chunks`` + matching FTS + vec row.
 
@@ -170,7 +171,9 @@ def _insert_chunk(
     in the unit-test stack.
 
     ``message_date`` defaults to ``chunked_at``, so tests that only
-    care about insert order get a matching message order.
+    care about insert order get a matching message order. ``char_start``
+    is the chunk's offset in its message body; a message's later chunks
+    must set it, since bodies are reconstructed by offset.
     """
     if message_date is None:
         message_date = chunked_at
@@ -195,8 +198,8 @@ def _insert_chunk(
             thread_id,
             chunk_index,
             text,
-            0,
-            len(text),
+            char_start,
+            char_start + len(text),
             max(1, len(text) // 4),
             chunked_at,
             fts_rowid,
@@ -717,6 +720,7 @@ def messages_db(tmp_path):
         message_id="m3",
         thread_id="t2",
         chunk_index=1,
+        char_start=len("lunch friday?\n\n"),
         text="at the noodle place",
         embedding=[1.0, 0.0, 0.0, 0.0],
         message_date="2024-02-01T08:00:00+00:00",
@@ -742,6 +746,50 @@ def messages_db(tmp_path):
         to=["jose@other.org"],
         body="gracias",
     )
+    conn.close()
+    db = Database(str(path))
+    try:
+        yield db
+    finally:
+        db.close()
+
+
+# Real indexer chunker output (``chunk_message(target_tokens=40,
+# max_tokens=60, overlap_tokens=20)``) for OVERLAP_BODY: adjacent chunks
+# repeat trailing paragraphs, and "Same line again." legitimately occurs
+# at two distinct offsets.
+_OVERLAP_PARAGRAPHS = [
+    f"Paragraph P{i} says the synthetic sentence number {i} twice over for padding purposes."
+    for i in range(1, 9)
+]
+_OVERLAP_PARAGRAPHS.insert(5, "Same line again.")
+_OVERLAP_PARAGRAPHS.insert(2, "Same line again.")
+OVERLAP_BODY = "\n\n".join(_OVERLAP_PARAGRAPHS)
+OVERLAP_SPANS = [(0, 268), (168, 436), (354, 622), (540, 706)]
+
+
+@pytest.fixture
+def overlap_db(tmp_path: Path):
+    """One message ("ov1", thread "t-ov") whose body is stored as the
+    overlapping chunks above."""
+    path = tmp_path / "mcp-overlap.db"
+    conn = sqlite3.connect(str(path))
+    conn.enable_load_extension(True)
+    sqlite_vec.load(conn)
+    conn.enable_load_extension(False)
+    _build_schema(conn)
+    _insert_message(conn, message_id="ov1", thread_id="t-ov", sent_at="2024-01-01T00:00:00+00:00")
+    for i, (start, end) in enumerate(OVERLAP_SPANS):
+        _insert_chunk(
+            conn,
+            chunk_id=f"ov1-c{i}",
+            message_id="ov1",
+            thread_id="t-ov",
+            text=OVERLAP_BODY[start:end],
+            embedding=[1.0, 0.0, 0.0, 0.0],
+            chunk_index=i,
+            char_start=start,
+        )
     conn.close()
     db = Database(str(path))
     try:

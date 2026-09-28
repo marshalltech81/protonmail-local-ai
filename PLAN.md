@@ -438,6 +438,14 @@ reconstructed from its own body chunks in one grouped query; the
 accumulated `body_text`, which repeats quoted replies, is shown only
 when no message body is indexed yet. Received date is not captured by
 the parser or schema; deferred (see Deferred). No schema change.
+Review round 1: `get_thread` is bounded (message pages of 10, max 50,
+with a next-`offset` line; bodies cut at 4,000 characters with an
+omitted-count marker, and chunks past the cut are never read — the
+first version loaded every chunk of every message, where the old
+`body_text` was capped at 4,000 tokens); bodies are rebuilt by
+`char_start` offset so the chunker's deliberate overlap is not shown
+twice (also a pre-existing `get_message` bug); and both tools read
+thread, messages, participants, and bodies in one read transaction.
 
 ### 2026-09-27 — `query_messages` (Phase 1 item 1)
 

@@ -123,16 +123,25 @@ stripping. Attachment text is not included. When no message body is
 indexed yet, the accumulated thread text (a retrieval artifact that
 also carries quoted replies) is shown instead.
 
+Responses are bounded: messages are paged (the response states the
+thread's message count and the `offset` for the next page), and each
+body is cut at 4,000 characters with a marker stating how many were
+left out — `get_message` returns the full body. The page is read from
+one database snapshot.
+
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `thread_id` | string | required | Thread ID from search results |
 | `include_attachments_metadata` | bool | `true` | Show the local attachment-availability note when the indexed thread has attachments |
+| `offset` | int | `0` | Messages to skip, oldest first |
+| `limit` | int | `10` | Messages per page; clamped to `[1, 50]` |
 
 ### `get_message`
 Return one message's own headers — subject, every From / To / Cc
 entry, send date (UTC), folder, In-Reply-To, References, attachment
-flag — with its thread ID and subject, and its indexed body
-reconstructed from the per-message chunk store. The index keeps no raw
+flag — with its thread ID and subject, and its full indexed body
+reconstructed from the per-message chunk store (overlap between
+adjacent chunks is removed by character offset). The index keeps no raw
 per-message body, so this is the indexed text **after quoted-reply
 stripping**; it falls back to thread context when no body chunks are
 indexed for the message. Attachment text is not included — use
