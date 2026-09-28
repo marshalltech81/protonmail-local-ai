@@ -450,10 +450,13 @@ keeps aggregating `threads.senders`, the exact set that search's sender
 filter checks, so resolution can never pick an address the filter rejects. `search_emails` /
 `list_threads` descriptions route "all" / "how many" questions to the
 new tool. Review round 1: rejected-input errors are no longer logged
-with the input they quote; `text` terms keep combining marks, so
-decomposed spellings match (round 2 dropped a query-only NFC step that
-broke exact matches for decomposed Greek and Hangul); empty pages state
-`returned: 0` / `has_more: false`. No schema change.
+with the input they quote; empty pages state `returned: 0` /
+`has_more: false`. `text` is split into words by FTS5's own unicode61
+tokenizer (a throwaway in-memory table read through `fts5vocab`), so
+query words always match the index's boundaries: three rounds of
+hand-rolled splitting each drifted (combining marks, NFC-composing
+Greek and Hangul, underscores, private-use characters), and every drift
+silently changed exhaustive counts. No schema change.
 
 ### 2026-09-27 — Phase 1 foundation: per-message records
 

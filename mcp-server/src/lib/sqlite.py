@@ -10,7 +10,6 @@ import json
 import logging
 import re
 import sqlite3
-import unicodedata
 from contextlib import closing
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -344,25 +343,25 @@ def _sql_lower(value):
 
 
 def _text_terms(text: str) -> list[str]:
-    """Split ``text`` into distinct words the way FTS5's unicode61 sees them.
+    """Split ``text`` into distinct words exactly as the chunk index does.
 
-    ``\\w`` stops at combining marks, so a decomposed ``re\\u0301sume\\u0301``
-    would split into ``re`` and ``sume`` while FTS indexes one word; marks
-    stay inside the word here. The text is not normalized: indexed chunks
-    are stored as written, and unicode61 folds composed and decomposed
-    forms only for Latin, so NFC-composing a decomposed Greek or Hangul
-    query would stop it matching its own source text. A run with no
-    letter or digit (a lone mark) is not a word.
+    ``message_chunks_fts`` tokenizes with ``porter unicode61``. Hand-rolled
+    splitting kept drifting from unicode61 — combining marks, underscores
+    (separators to FTS), private-use characters (word characters to FTS)
+    — and every drift silently changed an exhaustive count. So the words
+    come from unicode61 itself: a throwaway in-memory FTS5 table and its
+    ``fts5vocab`` instance view, in text order. Porter is left out so each
+    word stays unstemmed; the index's tokenizer stems it once at MATCH
+    time. unicode61's case and diacritic folding is idempotent, so a word
+    quoted as a phrase re-tokenizes to itself. The text is not normalized
+    (indexed chunks are stored as written).
     """
-    words: list[str] = []
-    current: list[str] = []
-    for ch in text + " ":
-        if ch.isalnum() or ch == "_" or unicodedata.category(ch).startswith("M"):
-            current.append(ch)
-        elif current:
-            words.append("".join(current))
-            current = []
-    return list(dict.fromkeys(w for w in words if any(c.isalnum() for c in w)))
+    with closing(sqlite3.connect(":memory:")) as conn:
+        conn.execute("CREATE VIRTUAL TABLE t USING fts5(x, tokenize='unicode61')")
+        conn.execute("CREATE VIRTUAL TABLE v USING fts5vocab(t, 'instance')")
+        conn.execute("INSERT INTO t(x) VALUES (?)", (text,))
+        rows = conn.execute("SELECT term FROM v ORDER BY offset").fetchall()
+    return list(dict.fromkeys(row[0] for row in rows))
 
 
 def address_match_mode(value: str) -> str:
@@ -2122,16 +2121,16 @@ class Database:
             if len(terms) > _MAX_TEXT_TERMS:
                 raise ValueError(f"text supports at most {_MAX_TEXT_TERMS} words")
             # One subquery per word, so the words may fall in different
-            # chunks of the same message. Each is a quoted FTS phrase:
-            # a term holds only word characters and combining marks, never
-            # a quote, so no FTS syntax leaks in.
+            # chunks of the same message. Each is a quoted FTS phrase;
+            # unicode61 never keeps a quote inside a token, but doubling
+            # any (FTS5 string escaping) keeps FTS syntax out regardless.
             for term in terms:
                 where.append(
                     "m.message_id IN (SELECT c.message_id FROM message_chunks_fts f "
                     "JOIN message_chunks c ON c.fts_rowid = f.rowid "
                     "WHERE message_chunks_fts MATCH ? AND c.attachment_id IS NULL)"
                 )
-                params.append(f'"{term}"')
+                params.append('"' + term.replace('"', '""') + '"')
         if folder:
             where.append("m.folder = ?")
             params.append(folder)

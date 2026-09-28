@@ -2770,6 +2770,54 @@ class TestQueryMessages:
         with pytest.raises(ValueError, match="text"):
             messages_db.query_messages(text="!!! ???")
 
+    def test_text_underscore_separates_words_as_fts_does(self, tmp_path):
+        # FTS treats "_" as a separator, so "budget_approved" is the two
+        # words budget and approved, each required, in any order.
+        from tests.conftest import _insert_message
+
+        conn, path = _open_built_db_conn(tmp_path, "underscore.db")
+        for n, body in enumerate(["budget is approved", "approved budget", "budget only"], 1):
+            _insert_message(
+                conn,
+                message_id=f"m{n}",
+                thread_id=f"t{n}",
+                sent_at=f"2024-01-0{n}T00:00:00+00:00",
+                body=body,
+            )
+        conn.close()
+        db = Database(str(path))
+        try:
+            assert _ids(db.query_messages(text="budget_approved")) == ["m2", "m1"]
+        finally:
+            db.close()
+
+    def test_text_private_use_character_stays_inside_the_word(self, tmp_path):
+        # FTS treats private-use characters (category Co) as word
+        # characters: "alphabeta" is one word, not alpha + beta.
+        from tests.conftest import _insert_message
+
+        conn, path = _open_built_db_conn(tmp_path, "private-use.db")
+        _insert_message(
+            conn,
+            message_id="m1",
+            thread_id="t1",
+            sent_at="2024-01-01T00:00:00+00:00",
+            body="alphabeta",
+        )
+        _insert_message(
+            conn,
+            message_id="m2",
+            thread_id="t2",
+            sent_at="2024-01-02T00:00:00+00:00",
+            body="alpha beta",
+        )
+        conn.close()
+        db = Database(str(path))
+        try:
+            assert _ids(db.query_messages(text="alphabeta")) == ["m1"]
+        finally:
+            db.close()
+
     def test_folder_is_exact(self, messages_db):
         assert _ids(messages_db.query_messages(folder="Archive")) == ["m3"]
 
