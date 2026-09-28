@@ -2614,3 +2614,72 @@ def test_rename_lookups_use_the_filepath_index(db):
             r["detail"] for r in db._conn.execute("EXPLAIN QUERY PLAN " + sql, ("a", "b"))
         )
         assert "idx_messages_filepath" in plan, plan
+
+
+class TestUpdateFilepathMovesQueueRow:
+    """#203: a flag rename must carry the file's queue row, with its
+    retry or dead state, to the new path."""
+
+    def test_queued_row_keeps_its_retry_state(self, tmp_path):
+        from src.queue import REASON_INITIAL_SCAN, IndexingQueue
+
+        db = Database(tmp_path / "mail.db")
+        queue = IndexingQueue(db, max_attempts=5, base_backoff_seconds=0)
+        queue.enqueue("/m/cur/b:2,S", REASON_INITIAL_SCAN)
+        queue.mark_failed("/m/cur/b:2,S", stage="embed", error="x")
+
+        db.update_filepath("/m/cur/b:2,S", "/m/cur/b:2,RS")
+
+        assert db.queue_get_attempts("/m/cur/b:2,S") is None
+        assert db.queue_get_attempts("/m/cur/b:2,RS") == 1
+        assert db.queue_get_status("/m/cur/b:2,RS") == "queued"
+
+    def test_dead_row_moves_so_requeue_targets_the_live_path(self, tmp_path):
+        from src.queue import REASON_INITIAL_SCAN, IndexingQueue
+
+        db = Database(tmp_path / "mail.db")
+        queue = IndexingQueue(db, max_attempts=1, base_backoff_seconds=0)
+        queue.enqueue("/m/cur/b:2,S", REASON_INITIAL_SCAN)
+        queue.mark_failed("/m/cur/b:2,S", stage="embed", error="x")
+
+        db.update_filepath("/m/cur/b:2,S", "/m/cur/b:2,RS")
+
+        assert db.queue_get_status("/m/cur/b:2,RS") == "dead"
+        assert queue.requeue_dead() == 1
+        assert db.queue_get_status("/m/cur/b:2,RS") == "queued"
+
+
+class TestInterruptedInitialSchema:
+    def test_restart_after_a_failure_mid_schema_initializes_cleanly(self, tmp_path, monkeypatch):
+        """Regression (#207): the initial DDL committed statement by
+        statement and the version stamp separately, so a failure part-way
+        (disk full, a virtual-table error, a kill) left half the tables
+        with no version row, and every later start failed with "table
+        threads already exists" until the volume was wiped."""
+        from src.database import SCHEMA_VERSION
+
+        real_apply = Database._apply_initial_schema
+
+        def failing_apply(self, cur):
+            def deny_one_index(action, arg1, *_):
+                if action == sqlite3.SQLITE_CREATE_INDEX and arg1 == "idx_threads_fts_rowid":
+                    return sqlite3.SQLITE_DENY
+                return sqlite3.SQLITE_OK
+
+            self._conn.set_authorizer(deny_one_index)
+            try:
+                real_apply(self, cur)
+            finally:
+                self._conn.set_authorizer(None)
+
+        monkeypatch.setattr(Database, "_apply_initial_schema", failing_apply)
+        with pytest.raises(sqlite3.DatabaseError):
+            Database(tmp_path / "mail.db")
+        monkeypatch.setattr(Database, "_apply_initial_schema", real_apply)
+
+        db = Database(tmp_path / "mail.db")
+
+        assert db._conn.execute("SELECT version FROM schema_version").fetchone()[0] == (
+            SCHEMA_VERSION
+        )
+        assert db.count_total_messages() == 0

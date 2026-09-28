@@ -256,8 +256,6 @@ class Database:
         row = cur.execute("SELECT version FROM schema_version").fetchone()
         if row is None:
             self._apply_initial_schema(cur)
-            cur.execute("INSERT INTO schema_version VALUES (?)", (SCHEMA_VERSION,))
-            self._conn.commit()
             log.info(f"Database initialized at {self.path} (schema v{SCHEMA_VERSION})")
             return
 
@@ -325,7 +323,24 @@ class Database:
         dead-letter queue for the parse → embed → upsert pipeline), and
         ``ingestion_state`` (last sync + indexer liveness for status).
         """
+        # One transaction for every table and the version stamp, so an
+        # interruption part-way leaves an empty database that the next
+        # start initializes again, never half a schema with no version
+        # row. ``executescript`` commits anything pending and adds no
+        # transaction of its own, so the script opens one with BEGIN and
+        # leaves it open for the stamp.
+        try:
+            self._run_initial_schema_script(cur)
+            cur.execute("INSERT INTO schema_version VALUES (?)", (SCHEMA_VERSION,))
+            self._conn.commit()
+        except BaseException:
+            if self._conn.in_transaction:
+                self._conn.rollback()
+            raise
+
+    def _run_initial_schema_script(self, cur: sqlite3.Cursor) -> None:
         cur.executescript(f"""
+            BEGIN IMMEDIATE;
             -- Thread-level coarse retrieval
             CREATE TABLE threads (
                 thread_id       TEXT PRIMARY KEY,
@@ -559,7 +574,6 @@ class Database:
                 indexer_seen_at    TEXT NOT NULL
             );
         """)
-        self._conn.commit()
 
     # -------------------------------------------------------------------------
     # Write operations
@@ -1999,7 +2013,7 @@ class Database:
 
     @_synchronized
     def update_filepath(self, old_path: str, new_path: str, *, folder: str | None = None) -> None:
-        """Update message_thread_map + indexed_files after a Maildir rename.
+        """Update message_thread_map, indexed_files and the queue row after a Maildir rename.
 
         ``folder`` is the destination's folder when the rename crosses
         Maildir folders (``None`` for flag-only renames). It is written in
@@ -2057,6 +2071,15 @@ class Database:
             )
             cur.execute(
                 "UPDATE pending_deletions SET filepath = ? WHERE filepath = ?",
+                (new_path, old_path),
+            )
+            # The file's queue row moves too, retry or dead state intact:
+            # a rename of a file whose Phase 1 committed (so the path is
+            # indexed and ``on_moved`` does not re-enqueue it) but whose
+            # Phase 2 is still pending would otherwise leave the job on a
+            # path that no longer exists, to be dropped as missing.
+            cur.execute(
+                "UPDATE OR REPLACE indexing_jobs SET filepath = ? WHERE filepath = ?",
                 (new_path, old_path),
             )
             self._commit_if_started(started)

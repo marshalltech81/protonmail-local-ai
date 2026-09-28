@@ -725,9 +725,13 @@ Two stage outcomes short-circuit the retry path entirely:
   the renamed file enters the queue under its new name via a fresh
   `IN_MOVED_TO` event. The worker calls `mark_skipped` instead of
   `mark_failed`: row deleted, no retry, no dead-letter.
-- `PermissionError` at parse keeps the existing retry path because
-  the file genuinely exists; the mbsync chmod race resolves on a
-  later sync cycle.
+- `PermissionError` at parse is deferred (60 s) without spending an
+  attempt. mbsync `chmod go+r`s new files only after its whole sync
+  finishes, so during a long sync a delivered file stays unreadable to
+  the indexer's UID for longer than the retry budget; charging that
+  expected handoff dead-lettered valid mail. A job still unreadable a
+  day after it was enqueued takes the normal retry path, so a real
+  permissions fault still ends in a visible `dead` row.
 
 Three environment variables shape the queue: `INDEXER_MAX_ATTEMPTS`,
 `INDEXER_RETRY_BASE_SECONDS`, and `INDEXER_MESSAGE_TIMEOUT_SECONDS`.
@@ -781,7 +785,11 @@ stays invisible to `current` until the rescan queues it.
 remains an O(1) primary-key lookup — and the new columns are written
 alongside. On a flag-only mbsync rename (`msg:2,S` → `msg:2,SR`)
 `update_filepath` carries the captured identity forward rather than
-clearing it, because the file contents on disk are unchanged.
+clearing it, because the file contents on disk are unchanged. It moves
+the file's `indexing_jobs` row in the same transaction, retry or dead
+state intact: a file whose Phase 1 committed but whose Phase 2 is still
+pending is already indexed, so the rename is not re-enqueued, and a job
+left on the old path would be dropped as missing.
 
 The columns exist to let future reconciler passes distinguish a
 flag-only rename from a genuine content change, and to spot a "file

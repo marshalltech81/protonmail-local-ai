@@ -182,6 +182,45 @@ class TestOnMovedIndexesDestination:
         main.drain_queue(queue, db, embedder, threader)
         assert db.is_indexed(str(dest))
 
+    def test_pending_retry_survives_a_flag_rename(self, tmp_path):
+        """Regression (#203): Phase 1 committed reply B (so its path is
+        indexed), the embedder was down so B's job was deferred, then
+        mbsync renamed B for a flag change. The rename moved the indexed
+        path but not the job, whose old path then hit FileNotFoundError
+        and was dropped — B's chunks were never written, with no pending
+        or dead job left to say so."""
+        db = Database(tmp_path / "mail.db")
+        threader = Threader(db)
+        queue = _make_queue(db)
+        embedder = make_mock_embedder()
+        embedder.embed.return_value = _UNIT_VECTOR
+
+        root = tmp_path / "INBOX" / "cur" / "a:2,S"
+        _write_eml(root, "a@example.com", subject="Plan")
+        queue.enqueue(str(root), REASON_INITIAL_SCAN)
+        main.drain_queue(queue, db, embedder, threader)
+
+        reply = tmp_path / "INBOX" / "cur" / "b:2,S"
+        _write_eml(reply, "b@example.com", subject="Re: Plan", in_reply_to="a@example.com")
+        queue.enqueue(str(reply), REASON_INITIAL_SCAN)
+        embedder.embed.side_effect = _connection_error()  # outage: deferred
+        main.drain_queue(queue, db, embedder, threader)
+        assert db.is_indexed(str(reply))
+        assert not db.get_chunk_ids_for_message("b@example.com")
+
+        renamed = reply.with_name("b:2,RS")
+        reply.rename(renamed)
+        main.MaildirHandler(db, queue).on_moved(
+            _FakeEvent(src_path=str(reply), dest_path=str(renamed))
+        )
+
+        embedder.embed.side_effect = None
+        _make_due(db)
+        main.drain_queue(queue, db, embedder, threader)
+
+        assert db.get_chunk_ids_for_message("b@example.com")
+        assert queue.stats() == {"queued": 0, "dead": 0}
+
     def test_directory_moves_are_ignored(self, tmp_path):
         db = Database(tmp_path / "db" / "mail.db")
         handler = main.MaildirHandler(db, _make_queue(db))
@@ -506,6 +545,63 @@ class TestDrainQueueRetryAndDeadLetter:
 
         assert db.get_chunk_ids_for_message("retry@example.com")
         assert queue.stats() == {"queued": 0, "dead": 0}
+
+    def test_unreadable_file_during_sync_is_deferred_not_dead_lettered(self, tmp_path, monkeypatch):
+        """Regression (#212): mbsync relaxes new files' permissions only
+        after the whole sync finishes, so during a long sync the indexer
+        can read a 0600 file for longer than its retry budget. Charging
+        those PermissionErrors dead-lettered valid mail; they are now
+        deferred without spending attempts, and the file indexes once
+        readable."""
+        dest = tmp_path / "INBOX" / "new" / "fresh.eml"
+        _write_eml(dest, "fresh@example.com")
+        db = Database(tmp_path / "mail.db")
+        threader = Threader(db)
+        queue = _make_queue(db)  # max_attempts=3
+        embedder = make_mock_embedder()
+        embedder.embed.return_value = _UNIT_VECTOR
+        real_parse = main.parse_email
+
+        def unreadable(path, **kwargs):
+            raise PermissionError(13, "Permission denied", str(path))
+
+        monkeypatch.setattr(main, "parse_email", unreadable)
+        queue.enqueue(str(dest), "test")
+        for _ in range(6):
+            main.drain_queue(queue, db, embedder, threader)
+            row = db._conn.execute(
+                "SELECT status, attempts, last_stage, next_attempt_at FROM indexing_jobs"
+            ).fetchone()
+            assert row["status"] == "queued"
+            assert row["attempts"] == 0
+            assert row["last_stage"] == "parse"
+            _make_due(db)
+
+        monkeypatch.setattr(main, "parse_email", real_parse)
+        main.drain_queue(queue, db, embedder, threader)
+
+        assert db.get_chunk_ids_for_message("fresh@example.com")
+        assert queue.stats() == {"queued": 0, "dead": 0}
+
+    def test_file_unreadable_for_a_day_takes_the_normal_retry_path(self, tmp_path, monkeypatch):
+        """A permissions fault that outlasts any sync still ends in a
+        visible terminal state rather than deferring forever."""
+        dest = tmp_path / "INBOX" / "new" / "stuck.eml"
+        _write_eml(dest, "stuck@example.com")
+        db = Database(tmp_path / "mail.db")
+        queue = _make_queue(db)
+        monkeypatch.setattr(
+            main,
+            "parse_email",
+            lambda path, **kw: (_ for _ in ()).throw(PermissionError(13, "denied")),
+        )
+        queue.enqueue(str(dest), "test")
+        db._conn.execute("UPDATE indexing_jobs SET created_at = '2000-01-01T00:00:00+00:00'")
+        db._conn.commit()
+
+        main.drain_queue(queue, db, make_mock_embedder(), Threader(db))
+
+        assert queue.is_dead(str(dest))
 
     def test_parser_content_pathology_routes_to_queue_retry(self, tmp_path, monkeypatch):
         # Behavior contract: an exception raised mid-parse (malformed
