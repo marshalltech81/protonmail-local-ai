@@ -781,7 +781,11 @@ stays invisible to `current` until the rescan queues it.
 remains an O(1) primary-key lookup — and the new columns are written
 alongside. On a flag-only mbsync rename (`msg:2,S` → `msg:2,SR`)
 `update_filepath` carries the captured identity forward rather than
-clearing it, because the file contents on disk are unchanged.
+clearing it, because the file contents on disk are unchanged. It moves
+the file's `indexing_jobs` row in the same transaction, retry or dead
+state intact: a file whose Phase 1 committed but whose Phase 2 is still
+pending is already indexed, so the rename is not re-enqueued, and a job
+left on the old path would be dropped as missing.
 
 The columns exist to let future reconciler passes distinguish a
 flag-only rename from a genuine content change, and to spot a "file

@@ -2614,3 +2614,36 @@ def test_rename_lookups_use_the_filepath_index(db):
             r["detail"] for r in db._conn.execute("EXPLAIN QUERY PLAN " + sql, ("a", "b"))
         )
         assert "idx_messages_filepath" in plan, plan
+
+
+class TestUpdateFilepathMovesQueueRow:
+    """#203: a flag rename must carry the file's queue row, with its
+    retry or dead state, to the new path."""
+
+    def test_queued_row_keeps_its_retry_state(self, tmp_path):
+        from src.queue import REASON_INITIAL_SCAN, IndexingQueue
+
+        db = Database(tmp_path / "mail.db")
+        queue = IndexingQueue(db, max_attempts=5, base_backoff_seconds=0)
+        queue.enqueue("/m/cur/b:2,S", REASON_INITIAL_SCAN)
+        queue.mark_failed("/m/cur/b:2,S", stage="embed", error="x")
+
+        db.update_filepath("/m/cur/b:2,S", "/m/cur/b:2,RS")
+
+        assert db.queue_get_attempts("/m/cur/b:2,S") is None
+        assert db.queue_get_attempts("/m/cur/b:2,RS") == 1
+        assert db.queue_get_status("/m/cur/b:2,RS") == "queued"
+
+    def test_dead_row_moves_so_requeue_targets_the_live_path(self, tmp_path):
+        from src.queue import REASON_INITIAL_SCAN, IndexingQueue
+
+        db = Database(tmp_path / "mail.db")
+        queue = IndexingQueue(db, max_attempts=1, base_backoff_seconds=0)
+        queue.enqueue("/m/cur/b:2,S", REASON_INITIAL_SCAN)
+        queue.mark_failed("/m/cur/b:2,S", stage="embed", error="x")
+
+        db.update_filepath("/m/cur/b:2,S", "/m/cur/b:2,RS")
+
+        assert db.queue_get_status("/m/cur/b:2,RS") == "dead"
+        assert queue.requeue_dead() == 1
+        assert db.queue_get_status("/m/cur/b:2,RS") == "queued"

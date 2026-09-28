@@ -182,6 +182,45 @@ class TestOnMovedIndexesDestination:
         main.drain_queue(queue, db, embedder, threader)
         assert db.is_indexed(str(dest))
 
+    def test_pending_retry_survives_a_flag_rename(self, tmp_path):
+        """Regression (#203): Phase 1 committed reply B (so its path is
+        indexed), the embedder was down so B's job was deferred, then
+        mbsync renamed B for a flag change. The rename moved the indexed
+        path but not the job, whose old path then hit FileNotFoundError
+        and was dropped — B's chunks were never written, with no pending
+        or dead job left to say so."""
+        db = Database(tmp_path / "mail.db")
+        threader = Threader(db)
+        queue = _make_queue(db)
+        embedder = make_mock_embedder()
+        embedder.embed.return_value = _UNIT_VECTOR
+
+        root = tmp_path / "INBOX" / "cur" / "a:2,S"
+        _write_eml(root, "a@example.com", subject="Plan")
+        queue.enqueue(str(root), REASON_INITIAL_SCAN)
+        main.drain_queue(queue, db, embedder, threader)
+
+        reply = tmp_path / "INBOX" / "cur" / "b:2,S"
+        _write_eml(reply, "b@example.com", subject="Re: Plan", in_reply_to="a@example.com")
+        queue.enqueue(str(reply), REASON_INITIAL_SCAN)
+        embedder.embed.side_effect = _connection_error()  # outage: deferred
+        main.drain_queue(queue, db, embedder, threader)
+        assert db.is_indexed(str(reply))
+        assert not db.get_chunk_ids_for_message("b@example.com")
+
+        renamed = reply.with_name("b:2,RS")
+        reply.rename(renamed)
+        main.MaildirHandler(db, queue).on_moved(
+            _FakeEvent(src_path=str(reply), dest_path=str(renamed))
+        )
+
+        embedder.embed.side_effect = None
+        _make_due(db)
+        main.drain_queue(queue, db, embedder, threader)
+
+        assert db.get_chunk_ids_for_message("b@example.com")
+        assert queue.stats() == {"queued": 0, "dead": 0}
+
     def test_directory_moves_are_ignored(self, tmp_path):
         db = Database(tmp_path / "db" / "mail.db")
         handler = main.MaildirHandler(db, _make_queue(db))

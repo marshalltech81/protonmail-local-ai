@@ -1999,7 +1999,7 @@ class Database:
 
     @_synchronized
     def update_filepath(self, old_path: str, new_path: str, *, folder: str | None = None) -> None:
-        """Update message_thread_map + indexed_files after a Maildir rename.
+        """Update message_thread_map, indexed_files and the queue row after a Maildir rename.
 
         ``folder`` is the destination's folder when the rename crosses
         Maildir folders (``None`` for flag-only renames). It is written in
@@ -2057,6 +2057,15 @@ class Database:
             )
             cur.execute(
                 "UPDATE pending_deletions SET filepath = ? WHERE filepath = ?",
+                (new_path, old_path),
+            )
+            # The file's queue row moves too, retry or dead state intact:
+            # a rename of a file whose Phase 1 committed (so the path is
+            # indexed and ``on_moved`` does not re-enqueue it) but whose
+            # Phase 2 is still pending would otherwise leave the job on a
+            # path that no longer exists, to be dropped as missing.
+            cur.execute(
+                "UPDATE OR REPLACE indexing_jobs SET filepath = ? WHERE filepath = ?",
                 (new_path, old_path),
             )
             self._commit_if_started(started)
