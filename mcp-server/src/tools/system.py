@@ -6,15 +6,19 @@ Claude should call get_index_status before making claims about email content.
 
 import logging
 from datetime import UTC, datetime
+from typing import Annotated
 
-from mcp.types import TextContent
+from mcp.server.fastmcp.exceptions import ToolError
+from mcp.types import CallToolResult
+
+from .outputs import IndexStatusOutput, SyncStatusOutput, tool_result
 
 log = logging.getLogger("mcp.tools.system")
 
 
 def register_system_tools(server, db):
     @server.tool()
-    async def get_index_status() -> list[TextContent]:
+    async def get_index_status() -> Annotated[CallToolResult, IndexStatusOutput]:
         """
         Get the current status of the local email index.
         Call this before answering questions about email content to verify
@@ -29,6 +33,7 @@ def register_system_tools(server, db):
 
             oldest = stats.get("oldest_message", "unknown")
             newest = stats.get("newest_message", "unknown")
+            checked_at = datetime.now(UTC)
 
             lines = [
                 "=== Index Status ===",
@@ -36,17 +41,23 @@ def register_system_tools(server, db):
                 f"Total messages: {stats.get('total_messages', 0):,}",
                 f"Oldest message: {oldest}",
                 f"Newest message: {newest}",
-                f"Checked at:     {datetime.now(UTC).isoformat()}",
+                f"Checked at:     {checked_at.isoformat()}",
             ]
-
-            return [TextContent(type="text", text="\n".join(lines))]
+            output = IndexStatusOutput(
+                total_threads=stats.get("total_threads", 0),
+                total_messages=stats.get("total_messages", 0),
+                oldest_message=stats.get("oldest_message"),
+                newest_message=stats.get("newest_message"),
+                checked_at=checked_at,
+            )
+            return tool_result("\n".join(lines), output)
 
         except Exception as e:
             log.error(f"get_index_status error: {e}")
-            return [TextContent(type="text", text=f"Index status error: {e}")]
+            raise ToolError(f"Index status error: {e}") from e
 
     @server.tool()
-    async def get_sync_status() -> list[TextContent]:
+    async def get_sync_status() -> Annotated[CallToolResult, SyncStatusOutput]:
         """
         Report how this server sees mail sync.
 
@@ -63,7 +74,9 @@ def register_system_tools(server, db):
             "Bridge reachability is not checked by mcp-server.",
             "mbsync remains responsible for talking to Bridge and refreshing Maildir.",
         ]
-        return [TextContent(type="text", text="\n".join(lines))]
+        return tool_result(
+            "\n".join(lines), SyncStatusOutput(mode="local_index_only", synced_by="mbsync")
+        )
 
 
 def get_index_status() -> dict:

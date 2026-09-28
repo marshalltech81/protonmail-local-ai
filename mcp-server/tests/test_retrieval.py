@@ -20,7 +20,9 @@ import asyncio
 import sqlite3
 from contextlib import contextmanager
 
+import pytest
 import sqlite_vec
+from mcp.server.fastmcp.exceptions import ToolError
 from src.lib.sqlite import Database
 from src.tools.retrieval import register_retrieval_tools
 
@@ -50,8 +52,17 @@ def _handlers(fake_server, db):
 
 
 def _text(result) -> str:
-    assert len(result) == 1
-    return result[0].text
+    """Extract the prose from a tool's ``CallToolResult``."""
+    assert len(result.content) == 1
+    return result.content[0].text
+
+
+def _error(coro) -> str:
+    """Run a tool call that must fail; return the ``ToolError`` message
+    the client receives as an ``isError`` result."""
+    with pytest.raises(ToolError) as exc:
+        asyncio.run(coro)
+    return str(exc.value)
 
 
 class TestGetThread:
@@ -69,8 +80,7 @@ class TestGetThread:
 
     def test_unknown_thread_returns_not_found_sentinel(self, fake_server, seeded_db):
         handler = _handlers(fake_server, seeded_db)["get_thread"]
-        out = asyncio.run(handler(thread_id="t-does-not-exist"))
-        assert "Thread not found" in _text(out)
+        assert "Thread not found" in _error(handler(thread_id="t-does-not-exist"))
 
     def test_attachment_note_present_when_thread_has_attachments(self, fake_server, seeded_db):
         handler = _handlers(fake_server, seeded_db)["get_thread"]
@@ -94,8 +104,7 @@ class TestGetThread:
 
         seeded_db.get_thread_page = boom  # type: ignore[assignment]
         handler = _handlers(fake_server, seeded_db)["get_thread"]
-        out = asyncio.run(handler(thread_id="anything"))
-        assert "Error" in _text(out)
+        assert "Error" in _error(handler(thread_id="anything"))
 
     def test_messages_render_oldest_first_with_own_headers(self, fake_server, messages_db):
         handler = _handlers(fake_server, messages_db)["get_thread"]
@@ -337,8 +346,7 @@ class TestGetMessage:
 
     def test_unknown_message_returns_not_found_sentinel(self, fake_server, seeded_db):
         handler = _handlers(fake_server, seeded_db)["get_message"]
-        out = asyncio.run(handler(message_id="never-existed"))
-        assert "Message not found" in _text(out)
+        assert "Message not found" in _error(handler(message_id="never-existed"))
 
     def test_reconstructs_body_from_indexed_chunks(self, fake_server, chunked_db):
         # chunked_db carries body chunk alpha-c1 for message t-alpha;
@@ -400,8 +408,7 @@ class TestGetMessage:
 
         seeded_db.get_message_view = boom  # type: ignore[assignment]
         handler = _handlers(fake_server, seeded_db)["get_message"]
-        out = asyncio.run(handler(message_id="anything"))
-        assert "Error" in _text(out)
+        assert "Error" in _error(handler(message_id="anything"))
 
 
 class TestListThreads:
@@ -444,13 +451,11 @@ class TestListThreads:
 
         seeded_db.list_threads = boom  # type: ignore[assignment]
         handler = _handlers(fake_server, seeded_db)["list_threads"]
-        out = asyncio.run(handler(folder="INBOX"))
-        assert "Error" in _text(out)
+        assert "Error" in _error(handler(folder="INBOX"))
 
     def test_unsupported_filter_type_returns_error_text(self, fake_server, seeded_db):
         handler = _handlers(fake_server, seeded_db)["list_threads"]
-        out = asyncio.run(handler(folder="INBOX", filter_type="unread"))
-        text = _text(out)
+        text = _error(handler(folder="INBOX", filter_type="unread"))
         assert "Error" in text
         assert "filter_type" in text
 
@@ -477,8 +482,7 @@ class TestListFolders:
 
         seeded_db.list_folders = boom  # type: ignore[assignment]
         handler = _handlers(fake_server, seeded_db)["list_folders"]
-        out = asyncio.run(handler())
-        assert "Error" in _text(out)
+        assert "Error" in _error(handler())
 
 
 class TestFindContact:
@@ -508,8 +512,7 @@ class TestFindContact:
         # the tool must short-circuit with a guidance message so the LLM
         # gets a clear signal rather than an empty list.
         handler = _handlers(fake_server, seeded_db)["find_contact"]
-        out = asyncio.run(handler(query=""))
-        assert "Provide a name" in _text(out)
+        assert "Provide a name" in _error(handler(query=""))
 
     def test_above_ceiling_limit_is_clamped(self, fake_server, seeded_db):
         # An LLM-supplied ``limit=99999`` should clamp to the documented
@@ -532,8 +535,7 @@ class TestFindContact:
 
         seeded_db.find_contact = boom  # type: ignore[assignment]
         handler = _handlers(fake_server, seeded_db)["find_contact"]
-        out = asyncio.run(handler(query="alice"))
-        assert "Error" in _text(out)
+        assert "Error" in _error(handler(query="alice"))
 
 
 class TestQueryMessages:
@@ -598,7 +600,7 @@ class TestQueryMessages:
         # error quoting it must not put it back in the log.
         handler = _handlers(fake_server, messages_db)["query_messages"]
         with caplog.at_level("DEBUG"):
-            text = _text(asyncio.run(handler(date_from="private-sentinel-value")))
+            text = _error(handler(date_from="private-sentinel-value"))
         assert "private-sentinel-value" in text  # the caller still learns why
         assert "private-sentinel-value" not in caplog.text
         assert "date_from" in caplog.text
@@ -646,8 +648,8 @@ class TestQueryMessages:
 
     def test_invalid_input_returns_the_reason(self, fake_server, messages_db):
         handler = _handlers(fake_server, messages_db)["query_messages"]
-        assert "date_from" in _text(asyncio.run(handler(date_from="last tuesday")))
-        assert "cursor" in _text(asyncio.run(handler(cursor="garbage")))
+        assert "date_from" in _error(handler(date_from="last tuesday"))
+        assert "cursor" in _error(handler(cursor="garbage"))
 
     def test_db_exception_returns_error_text(self, fake_server, messages_db):
         def boom(**_kwargs):
@@ -655,4 +657,4 @@ class TestQueryMessages:
 
         messages_db.query_messages = boom  # type: ignore[assignment]
         handler = _handlers(fake_server, messages_db)["query_messages"]
-        assert "Error" in _text(asyncio.run(handler()))
+        assert "Error" in _error(handler())

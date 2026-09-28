@@ -16,6 +16,7 @@ otherwise-sync test functions, matching the other handler tests.
 import asyncio
 
 import pytest
+from mcp.server.fastmcp.exceptions import ToolError
 from src.tools.search import register_search_tools
 
 
@@ -25,16 +26,23 @@ def _handler(fake_server, fake_llm, db):
 
 
 def _text(result) -> str:
-    """Extract the single TextContent payload from a tool response."""
-    assert len(result) == 1
-    return result[0].text
+    """Extract the prose from a tool's ``CallToolResult``."""
+    assert len(result.content) == 1
+    return result.content[0].text
+
+
+def _error(coro) -> str:
+    """Run a tool call that must fail; return the ``ToolError`` message
+    the client receives as an ``isError`` result."""
+    with pytest.raises(ToolError) as exc:
+        asyncio.run(coro)
+    return str(exc.value)
 
 
 class TestModeValidation:
     def test_invalid_mode_returns_validation_message(self, fake_server, fake_llm, seeded_db):
         handler = _handler(fake_server, fake_llm, seeded_db)
-        out = asyncio.run(handler(query="anything", mode="fuzzy"))
-        assert "Invalid mode" in _text(out)
+        assert "Invalid mode" in _error(handler(query="anything", mode="fuzzy"))
         # A rejected mode must not have issued any embed or DB work.
         assert fake_llm.embed_calls == []
 
@@ -263,8 +271,7 @@ class TestErrorPath:
 
         seeded_db.hybrid_search = boom  # type: ignore[assignment]
         handler = _handler(fake_server, fake_llm, seeded_db)
-        out = asyncio.run(handler(query="anything", mode="hybrid"))
-        assert "Search error" in _text(out)
+        assert "Search error" in _error(handler(query="anything", mode="hybrid"))
 
     def test_secret_values_are_scrubbed_from_exception_text(self, fake_server, fake_llm, seeded_db):
         # A provider SDK exception that quotes the operator's API key
@@ -279,8 +286,7 @@ class TestErrorPath:
         seeded_db.hybrid_search = boom  # type: ignore[assignment]
         register_search_tools(fake_server, seeded_db, fake_llm, secret_values=[leaked_key])
         handler = fake_server.tools["search_emails"]
-        out = asyncio.run(handler(query="anything", mode="hybrid"))
-        text = _text(out)
+        text = _error(handler(query="anything", mode="hybrid"))
         assert leaked_key not in text
         assert "[REDACTED]" in text
 
@@ -306,8 +312,7 @@ class TestErrorPath:
 
         seeded_db.hybrid_search = boom  # type: ignore[assignment]
         handler = _handler(fake_server, fake_llm, seeded_db)
-        out = asyncio.run(handler(query=sensitive_query, mode="hybrid"))
-        text = _text(out)
+        text = _error(handler(query=sensitive_query, mode="hybrid"))
         assert sensitive_query not in text
         assert "FakeAPIStatusError" in text
         assert "status=400" in text
@@ -352,8 +357,7 @@ class TestWrongDimEmbedSurfaces:
 
     def test_semantic_search_with_wrong_dim_returns_error_not_empty(self, fake_server, seeded_db):
         handler = self._register_with_wrong_dim_client(fake_server, seeded_db)
-        out = asyncio.run(handler(query="invoice", mode="semantic"))
-        text = _text(out)
+        text = _error(handler(query="invoice", mode="semantic"))
         # Operator-visible error, not a silent "No results found".
         assert "Search error" in text
         # The error must name *something* the operator can change —
@@ -369,8 +373,7 @@ class TestWrongDimEmbedSurfaces:
         # some results. The post-fix behavior surfaces the dim
         # mismatch so the operator knows the embedder is wrong.
         handler = self._register_with_wrong_dim_client(fake_server, seeded_db)
-        out = asyncio.run(handler(query="invoice", mode="hybrid"))
-        text = _text(out)
+        text = _error(handler(query="invoice", mode="hybrid"))
         assert "Search error" in text
         assert "EMBED_MODEL" in text or "wrong-dim-model" in text
 
@@ -484,8 +487,7 @@ class TestFromNameResolution:
 
         seeded_db.find_contact = boom  # type: ignore[assignment]
         handler = _handler(fake_server, fake_llm, seeded_db)
-        out = asyncio.run(handler(query="anything", from_name="alice"))
-        assert "Search error" in _text(out)
+        assert "Search error" in _error(handler(query="anything", from_name="alice"))
 
 
 class TestParticipantParam:
@@ -552,13 +554,11 @@ class TestGetEvidence:
 
     def test_thread_scoped_unknown_thread(self, fake_server, fake_llm, chunked_db):
         handler = self._handler(fake_server, fake_llm, chunked_db)
-        out = asyncio.run(handler(query="invoice", thread_id="no-such-thread"))
-        assert "Thread not found" in _text(out)
+        assert "Thread not found" in _error(handler(query="invoice", thread_id="no-such-thread"))
 
     def test_blank_query_returns_guidance(self, fake_server, fake_llm, chunked_db):
         handler = self._handler(fake_server, fake_llm, chunked_db)
-        out = asyncio.run(handler(query="   "))
-        assert "Provide a query" in _text(out)
+        assert "Provide a query" in _error(handler(query="   "))
 
     def test_no_evidence_message(self, fake_server, fake_llm, empty_db):
         handler = self._handler(fake_server, fake_llm, empty_db)
@@ -658,8 +658,7 @@ class TestGetEvidence:
 
         chunked_db.hybrid_search = boom  # type: ignore[assignment]
         handler = self._handler(fake_server, fake_llm, chunked_db)
-        out = asyncio.run(handler(query="invoice"))
-        assert "Evidence error" in _text(out)
+        assert "Evidence error" in _error(handler(query="invoice"))
 
 
 class TestSearchAttachmentsTool:
@@ -699,8 +698,7 @@ class TestSearchAttachmentsTool:
 
     def test_bad_date_returns_error(self, fake_server, fake_llm, attachments_db):
         handler = self._handler(fake_server, fake_llm, attachments_db)
-        out = asyncio.run(handler(date_from="not-a-date"))
-        assert "Attachment search error" in _text(out)
+        assert "Attachment search error" in _error(handler(date_from="not-a-date"))
 
     def test_limit_clamped_at_tool_boundary(self, fake_server, fake_llm, attachments_db):
         captured: dict = {}
@@ -738,7 +736,7 @@ def test_get_message_body_format_text_never_reaches_logs(fake_server, fake_llm, 
 
     register_retrieval_tools(fake_server, seeded_db)
     handler = fake_server.tools["get_message"]
-    with caplog.at_level(logging.INFO):
+    with caplog.at_level(logging.INFO), pytest.raises(ToolError, match="Message not found"):
         asyncio.run(
             handler(
                 message_id="m@example.com", body_format="Confidential acquisition: Example Corp"

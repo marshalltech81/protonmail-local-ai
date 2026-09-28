@@ -12,6 +12,8 @@ surfaces and both need coverage.
 
 import asyncio
 
+import pytest
+from mcp.server.fastmcp.exceptions import ToolError
 from src.tools.system import register_system_tools
 
 
@@ -21,8 +23,17 @@ def _handlers(fake_server, db):
 
 
 def _text(result) -> str:
-    assert len(result) == 1
-    return result[0].text
+    """Extract the prose from a tool's ``CallToolResult``."""
+    assert len(result.content) == 1
+    return result.content[0].text
+
+
+def _error(coro) -> str:
+    """Run a tool call that must fail; return the ``ToolError`` message
+    the client receives as an ``isError`` result."""
+    with pytest.raises(ToolError) as exc:
+        asyncio.run(coro)
+    return str(exc.value)
 
 
 class TestGetIndexStatus:
@@ -49,8 +60,7 @@ class TestGetIndexStatus:
 
         seeded_db.get_stats = boom  # type: ignore[assignment]
         handler = _handlers(fake_server, seeded_db)["get_index_status"]
-        out = asyncio.run(handler())
-        assert "Index status error" in _text(out)
+        assert "Index status error" in _error(handler())
 
 
 class TestGetSyncStatus:

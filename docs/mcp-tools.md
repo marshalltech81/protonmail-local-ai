@@ -2,6 +2,34 @@
 
 All tools are available inside Claude Desktop once the stack is running.
 
+## Response format
+
+The search, retrieval, and system tools (Groups 1, 2, and 4) publish an
+`outputSchema` and return two views of the same result:
+
+- `content` — the readable prose described below, unchanged.
+- `structuredContent` — typed JSON matching the tool's `outputSchema`.
+  IDs chain from typed fields: `search_emails` → `results[].thread_id` →
+  `get_thread` → `messages[].message_id` → `get_message`, and
+  `get_evidence` / `search_attachments` carry `attachment_id`. Paging
+  state is typed as well (`get_thread.next_offset`,
+  `query_messages.next_cursor` / `has_more` / `total_matches`).
+
+Structured output keeps the prose bounds: `get_thread` and
+`query_messages` list at most 10 recipients per role, 10 References, and
+10 thread participants or senders, each with a full count (`to_count`,
+`references_count`, `participant_count`, ...), and `get_thread` cuts
+header values and bodies the same way its prose does. `get_message`
+returns full headers and the full body.
+
+A failure (unknown thread or message, invalid argument, provider or
+database error) is an MCP error result (`isError: true`) whose text
+states the reason; it carries no structured content. An empty match is
+not a failure: it is a normal result with an empty list.
+
+The intelligence tools (Group 3) have no typed output model; their
+answer is the prose in `content`.
+
 ## Group 1 — Search
 
 ### `search_emails`

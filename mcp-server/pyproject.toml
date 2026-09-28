@@ -17,6 +17,10 @@ dependencies = [
     "openai==2.38.0",
     "anthropic==0.104.1",
     "cohere==7.0.0",
+    # Output models for structured tool results (``src/tools/outputs.py``).
+    # Pinned to the version ``mcp`` already resolves; declared because the
+    # tool code imports it directly.
+    "pydantic==2.12.5",
 ]
 
 [tool.uv]

@@ -5,12 +5,36 @@ Fetch thread and message context from the local SQLite index.
 
 import asyncio
 import logging
+from typing import Annotated
 
-from mcp.types import TextContent
+from mcp.server.fastmcp.exceptions import ToolError
+from mcp.types import CallToolResult
 
 from ..lib.security import log_tool_call
-from ..lib.sqlite import MessageRecord, Participant, address_match_mode, canonical_addr
+from ..lib.sqlite import (
+    MessageBody,
+    MessageRecord,
+    Participant,
+    address_match_mode,
+    canonical_addr,
+)
 from ..lib.validation import clamp_int
+from .outputs import (
+    Contact,
+    FilterUse,
+    FindContactOutput,
+    Folder,
+    GetMessageOutput,
+    GetThreadOutput,
+    ListFoldersOutput,
+    ListThreadsOutput,
+    QueryMessagesOutput,
+    ThreadMessage,
+    clip,
+    message_headers,
+    thread_summary,
+    tool_result,
+)
 
 log = logging.getLogger("mcp.tools.retrieval")
 
@@ -37,12 +61,6 @@ def _join_limited(items: list[str], limit: int | None) -> str:
     if limit is None or len(items) <= limit:
         return ", ".join(items)
     return ", ".join(items[:limit]) + f" (+{len(items) - limit} more)"
-
-
-def _clip(value: str, limit: int | None) -> str:
-    if limit is None or len(value) <= limit:
-        return value
-    return value[:limit] + f"… [{len(value) - limit:,} more characters]"
 
 
 def _format_participants(
@@ -72,27 +90,63 @@ def _header_lines(m: MessageRecord, *, full: bool) -> list[str]:
     if m.references:
         headers.append(("References", _join_limited(m.references, refs_limit)))
     headers.append(("Attachments", "yes" if m.has_attachments else "no"))
-    return [f"{label}: {_clip(value, chars)}" for label, value in headers]
+    return [f"{label}: {clip(value, chars)}" for label, value in headers]
 
 
-def _describe_filters(args: dict) -> str:
-    """State how query_messages interpreted each filter, so the caller
-    knows whether an address matched exactly or as a substring."""
-    parts = []
+def _thread_message(m: MessageRecord, body: MessageBody | None) -> ThreadMessage:
+    """One get_thread message: bounded headers plus its cut body."""
+    headers = message_headers(
+        m,
+        people=_MAX_LISTED_PARTICIPANTS,
+        refs=_MAX_LISTED_REFERENCES,
+        chars=_THREAD_HEADER_CHAR_LIMIT,
+    )
+    return ThreadMessage(
+        **headers.model_dump(),
+        body=body.text if body else None,
+        body_omitted_chars=body.omitted_chars if body else 0,
+    )
+
+
+def _filter_uses(args: dict) -> list[FilterUse]:
+    """How query_messages applied each given filter, so the caller knows
+    whether an address matched exactly or as a substring."""
+    uses = []
     for key, value in args.items():
         if value is None or (isinstance(value, str) and not value.strip()):
             continue
         if key in ("sender", "recipient", "participant"):
             if address_match_mode(value) == "exact":
-                parts.append(f"{key}={canonical_addr(value)} (exact address)")
+                uses.append(
+                    FilterUse(filter=key, value=canonical_addr(value), match="exact_address")
+                )
             else:
-                parts.append(f"{key}={value.strip()!r} (substring of address or name)")
+                uses.append(FilterUse(filter=key, value=value.strip(), match="substring"))
         elif key == "subject":
-            parts.append(f"subject={value.strip()!r} (case-insensitive substring)")
+            uses.append(FilterUse(filter=key, value=value.strip(), match="substring"))
         elif key == "text":
-            parts.append(f"text={value.strip()!r} (all words, message body)")
+            uses.append(FilterUse(filter=key, value=value.strip(), match="all_words"))
+        elif key in ("date_from", "date_to"):
+            uses.append(FilterUse(filter=key, value=value, match="inclusive_bound"))
         else:
-            parts.append(f"{key}={value!r}")
+            uses.append(FilterUse(filter=key, value=value, match="equals"))
+    return uses
+
+
+def _describe_filters(uses: list[FilterUse]) -> str:
+    """The prose form of ``_filter_uses``."""
+    parts = []
+    for u in uses:
+        if u.match == "exact_address":
+            parts.append(f"{u.filter}={u.value} (exact address)")
+        elif u.match == "substring" and u.filter != "subject":
+            parts.append(f"{u.filter}={u.value!r} (substring of address or name)")
+        elif u.match == "substring":
+            parts.append(f"subject={u.value!r} (case-insensitive substring)")
+        elif u.match == "all_words":
+            parts.append(f"text={u.value!r} (all words, message body)")
+        else:
+            parts.append(f"{u.filter}={u.value!r}")
     return ", ".join(parts) or "no filters (every indexed message)"
 
 
@@ -108,7 +162,7 @@ def register_retrieval_tools(server, db):
         include_attachments_metadata: bool = True,
         offset: int = 0,
         limit: int = _DEFAULT_THREAD_PAGE,
-    ) -> list[TextContent]:
+    ) -> Annotated[CallToolResult, GetThreadOutput]:
         """
         Get one thread's messages by thread ID, oldest first — each
         message's own headers and body; no attachment content.
@@ -174,7 +228,7 @@ def register_retrieval_tools(server, db):
                 body_char_limit=_THREAD_BODY_CHAR_LIMIT,
             )
             if not page:
-                return [TextContent(type="text", text=f"Thread not found: {thread_id}")]
+                raise ToolError(f"Thread not found: {thread_id}")
             thread, messages, total = page.thread, page.messages, page.total_messages
 
             if messages:
@@ -182,11 +236,11 @@ def register_retrieval_tools(server, db):
             else:
                 count = str(total)
             lines = [
-                f"Thread: {_clip(thread.subject, _THREAD_HEADER_CHAR_LIMIT)}",
+                f"Thread: {clip(thread.subject, _THREAD_HEADER_CHAR_LIMIT)}",
                 f"Thread ID: {thread.thread_id}",
                 f"Folder: {thread.folder}",
                 "Participants: "
-                + _clip(
+                + clip(
                     _join_limited(thread.participants, _MAX_LISTED_PARTICIPANTS),
                     _THREAD_HEADER_CHAR_LIMIT,
                 ),
@@ -227,10 +281,13 @@ def register_retrieval_tools(server, db):
             # No message body indexed yet (e.g. chunking still pending):
             # fall back to the accumulated thread text, a retrieval
             # artifact that also carries quoted replies.
+            thread_text = None
             if not page.has_bodies:
                 if thread.body_text:
+                    thread_text = thread.body_text
                     lines += ["", "Indexed thread text:", "", thread.body_text]
                 elif thread.snippet:
+                    thread_text = thread.snippet
                     lines += ["", "Indexed snippet:", "", thread.snippet]
 
             if include_attachments_metadata and thread.has_attachments:
@@ -240,18 +297,29 @@ def register_retrieval_tools(server, db):
                     "to search their extracted text."
                 )
 
-            return [TextContent(type="text", text="\n".join(lines))]
+            next_offset = offset + len(messages)
+            output = GetThreadOutput(
+                thread=thread_summary(thread, chars=_THREAD_HEADER_CHAR_LIMIT),
+                total_messages=total,
+                offset=offset,
+                messages=[_thread_message(m, page.bodies.get(m.message_id)) for m in messages],
+                next_offset=next_offset if next_offset < total else None,
+                indexed_thread_text=thread_text,
+            )
+            return tool_result("\n".join(lines), output)
 
+        except ToolError:
+            raise
         except Exception as e:
             log.error(f"get_thread error: {e}")
-            return [TextContent(type="text", text=f"Error: {e}")]
+            raise ToolError(f"Error: {e}") from e
 
     @server.tool()
     async def get_message(
         message_id: str,
         folder: str = "INBOX",
         body_format: str = "text",
-    ) -> list[TextContent]:
+    ) -> Annotated[CallToolResult, GetMessageOutput]:
         """
         Get one message's own headers and indexed body.
 
@@ -290,8 +358,9 @@ def register_retrieval_tools(server, db):
         try:
             view = await asyncio.to_thread(db.get_message_view, message_id)
             if not view:
-                return [TextContent(type="text", text=f"Message not found: {message_id}")]
+                raise ToolError(f"Message not found: {message_id}")
             thread = view.thread
+            thread_text = None
 
             lines = [
                 f"Message-ID: {message_id}",
@@ -320,15 +389,25 @@ def register_retrieval_tools(server, db):
                     "for the full thread.",
                 ]
                 if thread.body_text:
+                    thread_text = thread.body_text
                     lines += ["", "Indexed thread text:", "", thread.body_text]
                 elif thread.snippet:
+                    thread_text = thread.snippet
                     lines += ["", "Indexed snippet:", "", thread.snippet]
 
-            return [TextContent(type="text", text="\n".join(lines))]
+            output = GetMessageOutput(
+                message=message_headers(view.record),
+                thread_subject=thread.subject,
+                body=view.body.text if view.body else None,
+                indexed_thread_text=thread_text,
+            )
+            return tool_result("\n".join(lines), output)
 
+        except ToolError:
+            raise
         except Exception as e:
             log.error(f"get_message error: {e}")
-            return [TextContent(type="text", text=f"Error: {e}")]
+            raise ToolError(f"Error: {e}") from e
 
     @server.tool()
     async def list_threads(
@@ -336,7 +415,7 @@ def register_retrieval_tools(server, db):
         filter_type: str = "all",
         limit: int = 20,
         offset: int = 0,
-    ) -> list[TextContent]:
+    ) -> Annotated[CallToolResult, ListThreadsOutput]:
         """
         List email threads in a folder from the local index.
 
@@ -385,8 +464,11 @@ def register_retrieval_tools(server, db):
                 offset=offset,
             )
 
+            output = ListThreadsOutput(
+                folder=folder, offset=offset, threads=[thread_summary(t) for t in threads]
+            )
             if not threads:
-                return [TextContent(type="text", text=f"No threads found in {folder}.")]
+                return tool_result(f"No threads found in {folder}.", output)
 
             lines = [f"Threads in {folder} ({len(threads)} shown):\n"]
             for i, t in enumerate(threads, 1 + offset):
@@ -400,11 +482,11 @@ def register_retrieval_tools(server, db):
                     f"   ID: {t.thread_id}\n"
                 )
 
-            return [TextContent(type="text", text="\n".join(lines))]
+            return tool_result("\n".join(lines), output)
 
         except Exception as e:
             log.error(f"list_threads error: {e}")
-            return [TextContent(type="text", text=f"Error: {e}")]
+            raise ToolError(f"Error: {e}") from e
 
     @server.tool()
     async def query_messages(
@@ -419,7 +501,7 @@ def register_retrieval_tools(server, db):
         has_attachments: bool | None = None,
         limit: int = 25,
         cursor: str | None = None,
-    ) -> list[TextContent]:
+    ) -> Annotated[CallToolResult, QueryMessagesOutput]:
         """
         Enumerate EVERY message matching exact criteria, with an exact
         total count. Not ranked, not fuzzy: the complete matching set,
@@ -488,17 +570,30 @@ def register_retrieval_tools(server, db):
             # date echoes its text), which log_tool_call deliberately
             # withheld. Return it to the caller; log only that it failed.
             log.warning("query_messages rejected invalid input (date_from/date_to/text/cursor)")
-            return [TextContent(type="text", text=f"Error: {e}")]
+            raise ToolError(f"Error: {e}") from e
         except Exception as e:
             log.error(f"query_messages error: {e}")
-            return [TextContent(type="text", text=f"Error: {e}")]
+            raise ToolError(f"Error: {e}") from e
 
-        lines = [f"Query: {_describe_filters(args)}", f"total_matches: {page.total_matches}"]
+        uses = _filter_uses(args)
+        output = QueryMessagesOutput(
+            filters=uses,
+            total_matches=page.total_matches,
+            returned=len(page.messages),
+            offset=page.offset,
+            has_more=page.has_more,
+            next_cursor=page.next_cursor,
+            messages=[
+                message_headers(m, people=_MAX_LISTED_PARTICIPANTS, refs=_MAX_LISTED_REFERENCES)
+                for m in page.messages
+            ],
+        )
+        lines = [f"Query: {_describe_filters(uses)}", f"total_matches: {page.total_matches}"]
         if not page.messages:
             lines.append("returned: 0")
             lines.append("has_more: false")
             lines.append("No messages match." if page.offset == 0 else "No further messages.")
-            return [TextContent(type="text", text="\n".join(lines))]
+            return tool_result("\n".join(lines), output)
 
         first, last = page.offset + 1, page.offset + len(page.messages)
         lines.append(f"returned: {len(page.messages)} (matches {first}-{last})")
@@ -519,13 +614,13 @@ def register_retrieval_tools(server, db):
             lines.append(f"   Thread ID: {m.thread_id}")
             lines.append("")
 
-        return [TextContent(type="text", text="\n".join(lines))]
+        return tool_result("\n".join(lines), output)
 
     @server.tool()
     async def find_contact(
         query: str,
         limit: int = 10,
-    ) -> list[TextContent]:
+    ) -> Annotated[CallToolResult, FindContactOutput]:
         """
         Resolve a name / address / domain fragment to indexed contacts.
 
@@ -556,21 +651,22 @@ def register_retrieval_tools(server, db):
         limit = clamp_int(limit, default=10, minimum=1, maximum=50)
 
         if not query or not query.strip():
-            return [
-                TextContent(
-                    type="text",
-                    text="Provide a name, address, or domain fragment to search for.",
-                )
-            ]
+            raise ToolError("Provide a name, address, or domain fragment to search for.")
 
         try:
             contacts = await asyncio.to_thread(db.find_contact, query, limit)
         except Exception as e:
             log.error(f"find_contact error: {e}")
-            return [TextContent(type="text", text=f"Error: {e}")]
+            raise ToolError(f"Error: {e}") from e
 
+        output = FindContactOutput(
+            contacts=[
+                Contact(email=c["email"], names=c["names"], thread_count=c["thread_count"])
+                for c in contacts
+            ]
+        )
         if not contacts:
-            return [TextContent(type="text", text=f"No contacts found matching: '{query}'")]
+            return tool_result(f"No contacts found matching: '{query}'", output)
 
         lines = [f"Contacts matching '{query}' ({len(contacts)} shown):\n"]
         for i, c in enumerate(contacts, 1):
@@ -578,10 +674,10 @@ def register_retrieval_tools(server, db):
             lines.append(
                 f"{i}. {c['email']}\n   Name(s): {names}\n   Threads: {c['thread_count']}\n"
             )
-        return [TextContent(type="text", text="\n".join(lines))]
+        return tool_result("\n".join(lines), output)
 
     @server.tool()
-    async def list_folders() -> list[TextContent]:
+    async def list_folders() -> Annotated[CallToolResult, ListFoldersOutput]:
         """
         List all available email folders and their thread counts.
 
@@ -597,15 +693,18 @@ def register_retrieval_tools(server, db):
         log.info("tool=list_folders")
         try:
             folders = await asyncio.to_thread(db.list_folders)
+            output = ListFoldersOutput(
+                folders=[Folder(name=f["name"], thread_count=f["thread_count"]) for f in folders]
+            )
             if not folders:
-                return [TextContent(type="text", text="No folders found in index.")]
+                return tool_result("No folders found in index.", output)
 
             lines = ["Folders:\n"]
             for f in folders:
                 lines.append(f"  {f['name']}  ({f['thread_count']} threads)")
 
-            return [TextContent(type="text", text="\n".join(lines))]
+            return tool_result("\n".join(lines), output)
 
         except Exception as e:
             log.error(f"list_folders error: {e}")
-            return [TextContent(type="text", text=f"Error: {e}")]
+            raise ToolError(f"Error: {e}") from e

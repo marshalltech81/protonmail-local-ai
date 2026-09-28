@@ -107,11 +107,8 @@ guessing about semantics, completeness, or identity.
 
 1. ~~**`query_messages`**~~ — Done 2026-09-27 (see Recently
    Completed).
-2. **Structured MCP output** (`outputSchema` / `structuredContent`)
-   across search / retrieval / evidence / status tools; prose
-   retained alongside. The chaining path (search → thread_id →
-   get_thread → message_id → get_message → attachment_id) becomes
-   machine-native, never scraped from prose.
+2. ~~**Structured MCP output**~~ Done 2026-09-28 (see Recently
+   Completed).
 3. ~~**Message-first-class.**~~ Done 2026-09-28 (see Recently
    Completed). Received date deferred (see Deferred).
 4. **Honest `get_mailbox_status`** — sync recency, queue
@@ -434,6 +431,23 @@ do not ship persisted claims without them.
    during its Phase 3 experimental period.
 
 ## Recently Completed
+
+### 2026-09-28 — Structured MCP output (Phase 1 item 2)
+
+The eleven search / retrieval / evidence / status tools declare a
+Pydantic output model (`src/tools/outputs.py`) as their `outputSchema`
+and return it as `structuredContent` beside the unchanged prose, so IDs
+(thread → message → attachment) and paging state (`next_offset`,
+`next_cursor`, `total_matches`) are typed fields. Structured output
+keeps the prose's bounds on sender-controlled headers, with full counts
+alongside. Failures are now raised and reach clients as `isError`
+results instead of success results carrying error prose. Previously
+FastMCP had wrapped every `list[TextContent]` return as
+`{"result": [...]}` structured content, a second copy of the prose;
+the intelligence tools still do. A contract test drives every tool
+through a real `FastMCP` and validates each result against its
+published schema. `pydantic` is now a declared dependency (same pinned
+version `mcp` already resolved). No schema change.
 
 ### 2026-09-28 — Dead action/IMAP surface deleted (Phase 1 item 6)
 
