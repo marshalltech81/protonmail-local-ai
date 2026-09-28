@@ -1,0 +1,46 @@
+{
+  "_comment": "Golden questions for the synthetic baseline mailbox (indexer/tests/baseline/corpus.py). Thread refs 'tNN' mean 'tNN.1@baseline.example'; message refs 'tNN.M' mean 'tNN.M@baseline.example'. max_rank is 1-based. vector_only questions must be answerable only by the vector lanes.",
+  "floors": {
+    "mrr": 0.9
+  },
+  "search": [
+    {"id": "roof-estimate", "query": "roof repair estimate", "expect": "t01", "max_rank": 1},
+    {"id": "roof-inspection", "query": "roof inspection attic leaks", "expect": "t02", "max_rank": 1},
+    {"id": "hoa-dues", "query": "HOA budget monthly dues increase", "expect": "t03", "max_rank": 1},
+    {"id": "pool-vote", "query": "board vote pool resurfacing", "expect": "t04", "max_rank": 1},
+    {"id": "pool-bids", "query": "pool resurfacing bids Crestline", "expect": "t05", "max_rank": 1},
+    {"id": "clubhouse-fee", "query": "clubhouse rental fee", "expect": "t04", "max_rank": 1},
+    {"id": "dental-reschedule", "query": "dental cleaning reschedule", "expect": "t06", "max_rank": 1},
+    {"id": "rabies", "query": "rabies booster", "expect": "t07", "max_rank": 1},
+    {"id": "lisbon-departure", "query": "Boston to Lisbon departure seats", "expect": "t08", "max_rank": 1},
+    {"id": "hotel", "query": "hotel river view breakfast", "expect": "t09", "max_rank": 1},
+    {"id": "claim-approved", "query": "insurance claim approved deductible", "expect": "t10", "max_rank": 1},
+    {"id": "tax-forms", "query": "1099 forms accountant extension deadline", "expect": "t11", "max_rank": 1},
+    {"id": "forwarded-brokerage", "query": "brokerage consolidated tax documents", "expect": "t11", "max_rank": 1},
+    {"id": "field-trip", "query": "field trip permission slip", "expect": "t14", "max_rank": 1},
+    {"id": "book-club", "query": "book club Lighthouse Keeper", "expect": "t13", "max_rank": 1},
+    {"id": "offer-zurich", "query": "job offer salary Zürich", "expect": "t17", "max_rank": 1},
+    {"id": "reply-only-fact", "query": "padlock combination shed", "expect": "t18", "max_rank": 1},
+    {"id": "laptop-receipt", "query": "laptop receipt total charged", "expect": "t19", "max_rank": 1},
+    {"id": "fence-survey", "query": "fence property line survey", "expect": "t20", "max_rank": 1},
+    {"id": "attach-budget-total", "query": "total operating budget", "expect": "t03", "max_rank": 1, "evidence": "$183,800"},
+    {"id": "attach-supply-line", "query": "cracked supply line", "expect": "t10", "max_rank": 1, "evidence": "Total $325"},
+    {"id": "attach-chaperones", "query": "chaperone volunteers packed lunch", "expect": "t14", "max_rank": 1, "evidence": "Chaperone volunteers needed: 4"},
+    {"id": "evidence-counteroffer", "query": "relocation allowance", "expect": "t17", "max_rank": 1, "evidence": "CHF 147,500"},
+    {"id": "filter-folder", "query": "pool resurfacing", "expect": "t05", "max_rank": 1, "filters": {"folders": ["Archive"]}},
+    {"id": "filter-participant", "query": "appointment", "expect": "t06", "max_rank": 1, "filters": {"participant": "frontdesk@brightsmile.example"}},
+    {"id": "vec-passcode", "query": "pass code", "expect": "t12", "max_rank": 3, "vector_only": true},
+    {"id": "vec-hatchback", "query": "hatchbak", "expect": "t15", "max_rank": 3, "vector_only": true},
+    {"id": "vec-compound", "query": "waterdamage", "expect": "t10", "max_rank": 3, "vector_only": true},
+    {"id": "vec-passenger", "query": "pasenger", "expect": "t08", "max_rank": 3, "vector_only": true}
+  ],
+  "enumerate": [
+    {"id": "sender", "args": {"sender": "adjuster@keystoneins.example"}, "expect": ["t10.1", "t10.3"]},
+    {"id": "recipient", "args": {"recipient": "bookclub@readers.example"}, "expect": ["t13.1", "t13.2"]},
+    {"id": "participant-cc", "args": {"participant": "ravi@neighbors.example"}, "expect": ["t18.1", "t18.2", "t20.2"]},
+    {"id": "folder-sent", "args": {"folder": "Sent"}, "expect": ["t01.2", "t02.2", "t05.2", "t06.2", "t10.2", "t11.2", "t15.2", "t17.2", "t18.1", "t20.2"]},
+    {"id": "has-attachments", "args": {"has_attachments": true}, "expect": ["t01.1", "t03.1", "t10.2", "t14.1"]},
+    {"id": "date-range", "args": {"date_from": "2024-05-01", "date_to": "2024-05-31"}, "expect": ["t08.1", "t09.1", "t13.1", "t13.2", "t17.1", "t17.2", "t17.3"]},
+    {"id": "text-stemmed", "args": {"text": "resurfacing"}, "expect": ["t04.1", "t05.1"]}
+  ]
+}

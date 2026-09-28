@@ -12,6 +12,15 @@ import sqlite_vec
 from src.lib.sqlite import Database
 
 
+def pytest_addoption(parser: pytest.Parser) -> None:
+    parser.addoption(
+        "--update-baseline",
+        action="store_true",
+        default=False,
+        help="Rewrite tests/baseline/snapshot.json from the current retrieval results.",
+    )
+
+
 def _build_schema(conn: sqlite3.Connection) -> None:
     """Build the schema the MCP reader depends on.
 
