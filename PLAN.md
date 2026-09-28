@@ -422,18 +422,24 @@ do not ship persisted claims without them.
 3. MCP endpoint auth (Phase 1 item 5, pinned 2026-09-28). The design
    follows the deployment target:
    - local only, deployable outside this repo → static bearer token
-     read from `MCP_AUTH_TOKEN_FILE` / `MCP_AUTH_TOKEN`, ASGI
-     middleware, constant-time compare, `/health` exempt, fail closed
+     stored as a Docker secret (`.secrets/mcp_auth_token.txt`, mode
+     600) and read via `_read_secret`; the env-var fallback stays a
+     non-container local-dev convenience only, never the Compose
+     path. Constant-time compare, fail closed on an empty token
    - own devices over a private network → gate outside the app
      (Tailscale, reverse proxy, Cloudflare Access), static token as
      optional defence in depth
    - hosted clients (claude.ai / ChatGPT connectors) → OAuth 2.1
-     resource server via the MCP SDK's `TokenVerifier` against an
-     external IdP; broadens exposure, so it needs a privacy-posture
-     change in AGENTS.md first
-   Any in-app option also means `sse` / `streamable-http` must stop
-   using `server.run()` and build the ASGI app like `dual` does, so
-   middleware can wrap it.
+     resource server validating tokens from an external IdP
+   Both non-local options send mailbox content off the host (and
+   Cloudflare adds a third-party transit hop), so either needs an
+   owner decision and a privacy-posture update in AGENTS.md first.
+   Any in-app option plugs into the MCP SDK's `TokenVerifier` /
+   `AuthSettings` hooks: `sse_app()` and `streamable_http_app()` add
+   the bearer-auth middleware themselves (so `server.run()` and
+   `dual` both get it), and `custom_route` endpoints such as
+   `/health` stay unauthenticated. `AuthSettings` requires an
+   `issuer_url` even when only a verifier is used.
 
 ## Recently Completed
 
