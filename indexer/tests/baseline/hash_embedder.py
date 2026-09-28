@@ -22,10 +22,20 @@ from src.database import EMBEDDING_DIM
 _WORD = re.compile(r"\w+")
 _WORD_WEIGHT = 1.0
 _TRIGRAM_WEIGHT = 0.5
+_CHAR_WEIGHT = 0.2
 
 
 def _features(text: str):
-    for word in _WORD.findall(text.lower()):
+    lowered = text.lower()
+    # A faint presence feature per distinct character keeps any two
+    # texts from being exactly orthogonal. Without it, every document
+    # sharing no word or trigram with a query sits at distance sqrt(2),
+    # and the order of those ties comes down to platform float rounding
+    # (observed: macOS and Linux CI disagreeing at rank 10).
+    for char in sorted(set(lowered)):
+        if char.isalnum():
+            yield "c:" + char, _CHAR_WEIGHT
+    for word in _WORD.findall(lowered):
         yield "w:" + word, _WORD_WEIGHT
         padded = f"#{word}#"
         for i in range(len(padded) - 2):
