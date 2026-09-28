@@ -23,6 +23,7 @@ from .outputs import (
     SearchAttachmentsOutput,
     SearchEmailsOutput,
     clip,
+    source,
     thread_summary,
     tool_result,
 )
@@ -477,6 +478,7 @@ def register_search_tools(
                             text=c.text[:_EVIDENCE_CHUNK_CHARS],
                             text_truncated=len(c.text) > _EVIDENCE_CHUNK_CHARS,
                             vector_distance=c.score if include_scores else None,
+                            source_file=source(c.source_file),
                         )
                         for c in chunks
                     ],
@@ -621,6 +623,7 @@ def register_search_tools(
                     sender_count=len(a.senders),
                     extraction_status=a.extraction_status,
                     text_snippet=a.text_snippet,
+                    source_file=source(a.source_file),
                 )
                 for a in results
             ]

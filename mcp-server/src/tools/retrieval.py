@@ -365,6 +365,9 @@ def register_retrieval_tools(server, db):
                 f"Thread ID: {thread.thread_id}",
                 f"Mode: {local_only_note}",
             ]
+            if f := view.record.source_file:
+                size = "unknown size" if f.size_bytes is None else f"{f.size_bytes:,} bytes"
+                lines.append(f"Source file: {f.locator} ({size}, sha256 {f.sha256 or 'unknown'})")
 
             if view.body:
                 lines += [

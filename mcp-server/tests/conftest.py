@@ -1,5 +1,6 @@
 """Shared fixtures for mcp-server tests."""
 
+import hashlib
 import json
 import sqlite3
 from datetime import UTC, datetime
@@ -342,6 +343,11 @@ def _split_address(value: str) -> tuple[str, str]:
     return name, address.lower()
 
 
+def source_sha256(message_id: str) -> str:
+    """The raw-file SHA-256 the fixtures record for ``message_id``."""
+    return hashlib.sha256(message_id.encode()).hexdigest()
+
+
 def _insert_message_record(
     cur: sqlite3.Cursor,
     *,
@@ -366,7 +372,7 @@ def _insert_message_record(
             (message_id, thread_id, filepath, folder, subject, sent_at,
              in_reply_to, references_json, has_attachments, size_bytes,
              content_hash, indexed_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 100, 'hash', ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 100, ?, ?)
         """,
         (
             message_id,
@@ -378,6 +384,7 @@ def _insert_message_record(
             in_reply_to,
             json.dumps(references or []),
             1 if has_attachments else 0,
+            source_sha256(message_id),
             "2024-01-01T00:00:00+00:00",
         ),
     )

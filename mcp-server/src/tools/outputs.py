@@ -24,7 +24,7 @@ from typing import Literal
 from mcp.types import CallToolResult, TextContent
 from pydantic import BaseModel, ConfigDict, Field
 
-from ..lib.sqlite import MessageRecord, ThreadResult
+from ..lib.sqlite import MessageRecord, SourceFile, ThreadResult
 from ..lib.sqlite import Participant as ParticipantRecord
 
 # Entries listed per bounded list (thread participants, senders, one
@@ -55,6 +55,40 @@ def clip(value: str, limit: int | None) -> str:
     if limit is None or len(value) <= limit:
         return value
     return value[:limit] + f"… [{len(value) - limit:,} more characters]"
+
+
+class Source(_Output):
+    """The raw file an answer can be checked against."""
+
+    source_type: Literal["maildir_message"] = Field(
+        description="What locator points at; an RFC 5322 message file in the Maildir."
+    )
+    locator: str = Field(
+        description="Path of the raw message file in the Maildir volume, as the "
+        "indexer sees it (/maildir/...). Kept current when mbsync renames the file."
+    )
+    sha256: str | None = Field(
+        description="SHA-256 of the file's bytes when it was indexed; the file's "
+        "content identity. Null when it was not recorded."
+    )
+    size_bytes: int | None = Field(description="File size in bytes; null when not recorded.")
+    indexed_at: datetime = Field(description="When the indexer last wrote this message.")
+
+
+def source(f: SourceFile | None) -> Source | None:
+    """``f`` as a ``Source``, or ``None`` when no source file is recorded."""
+    if f is None:
+        return None
+    return Source(
+        source_type="maildir_message",
+        locator=f.locator,
+        sha256=f.sha256,
+        size_bytes=f.size_bytes,
+        indexed_at=datetime.fromisoformat(f.indexed_at),
+    )
+
+
+_SOURCE_FILE_DESCRIPTION = "The raw message file this came from; null when none is recorded."
 
 
 class Participant(_Output):
@@ -110,6 +144,7 @@ class MessageHeaders(_Output):
     to_count: int
     cc: list[Participant]
     cc_count: int
+    source_file: Source | None = Field(description=_SOURCE_FILE_DESCRIPTION)
 
 
 class ListedMessage(MessageHeaders):
@@ -149,6 +184,7 @@ def message_headers(m: MessageRecord, *, full: bool = False) -> MessageHeaders:
         to_count=len(m.to),
         cc=listed(m.cc, people),
         cc_count=len(m.cc),
+        source_file=source(m.source_file),
     )
 
 
@@ -187,6 +223,10 @@ class EvidenceChunk(_Output):
     text: str
     text_truncated: bool = Field(description="True when text was cut for length.")
     vector_distance: float | None = Field(description="Only with include_scores.")
+    source_file: Source | None = Field(
+        description="The raw file of message_id (for an attachment chunk, the message "
+        "carrying the attachment); null when none is recorded."
+    )
 
 
 class EvidenceThread(_Output):
@@ -223,6 +263,10 @@ class AttachmentHit(_Output):
     sender_count: int
     extraction_status: str | None = Field(description="Null when no extraction has run.")
     text_snippet: str
+    source_file: Source | None = Field(
+        description="The raw file of the message carrying the attachment; null when "
+        "none is recorded."
+    )
 
 
 class SearchAttachmentsOutput(_Output):
