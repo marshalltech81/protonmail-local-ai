@@ -175,7 +175,8 @@ User query
     ├─ Embed query text → OpenAI /v1/embeddings at EMBED_BASE_URL → 4096-dim vector
     │
     ├─ Keyword list — three FTS5 lanes, fused with RRF into one ranked list:
-    │    thread_fts     → BM25 over accumulated thread bodies
+    │    thread_fts     → BM25 over thread subject, participants, and
+    │                     accumulated body
     │    chunk_fts      → BM25 over body and attachment-text chunks
     │                     (lifted to parent thread_id)
     │    attachment_fts → BM25 over attachment filenames / MIME types
@@ -216,8 +217,9 @@ qualify; sqlite-vec has no equivalent pushdown, so the vector lanes
 run unfiltered and the post-fusion filter applies every filter
 uniformly.
 
-Every thread is chunked at index time, so the chunk lanes are always
-populated alongside the thread-level lanes.
+Threads with no chunk rows — empty bodies, or chunks whose embedding
+has not landed yet — never appear in the chunk lanes and rank on the
+thread-level lanes alone.
 
 The rerank stage is best-effort: a transient rerank-service failure
 returns an empty result set from the reranker, and `hybrid_search`

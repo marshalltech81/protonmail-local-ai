@@ -409,9 +409,14 @@ If the check fails, do not work around it:
   not start as expected (for example, the `autoUpdate="false"` vault marker
   is missing from its log). Treat it the same way — stay on the current
   version.
-- **Commit mismatch**: the tag no longer resolves to `BRIDGE_COMMIT`.
-  Re-run the `git ls-remote` lookup above; if the tag was re-pointed
-  upstream, find out why before trusting the new commit.
+- **Commit mismatch**: `BRIDGE_VERSION` does not resolve to
+  `BRIDGE_COMMIT`. Usually this is local config: `BRIDGE_VERSION` was
+  bumped without `BRIDGE_COMMIT` (an unset `BRIDGE_COMMIT` falls back to
+  the previous release's commit), or the annotated tag object's SHA was
+  copied instead of the `^{}` line. Re-run the `git ls-remote` lookup
+  above and set `BRIDGE_COMMIT` to the commit it shows. Only if `.env`
+  already matches that lookup and the error persists has the tag moved
+  upstream — find out why before trusting the new commit.
 
 Things to expect after an upgrade:
 
