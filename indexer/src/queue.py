@@ -11,7 +11,7 @@ giving up. The queue makes both cases observable and bounded:
   reconciler-driven reindex) is ``enqueue``d instead of processed
   inline. Enqueue is fast — a single SQLite write — so the watchdog
   callback thread no longer blocks on an embedding service round-trip.
-- A worker loop in the main thread calls ``claim_next`` and runs the
+- A worker loop in the main thread claims batches (``claim_batch``) and runs the
   existing parse → thread → embed → upsert pipeline against the
   returned path. Success deletes the row (``mark_succeeded``); failure
   records the error, increments ``attempts``, and schedules an
@@ -26,7 +26,7 @@ giving up. The queue makes both cases observable and bounded:
 
 Idempotency:
 
-- Re-enqueuing a path that is already ``queued`` / ``failed`` / ``dead``
+- Re-enqueuing a path that is already ``queued`` or ``dead``
   resets attempts to 0 and schedules it immediately. A newly-arrived
   watchdog event represents fresh intent to index the file; prior
   dead-letter status should not permanently block that.
@@ -36,7 +36,7 @@ Idempotency:
 
 Single-worker invariant:
 
-- ``claim_next`` does not transition the row to ``in_progress``; the
+- Claiming does not transition the row to ``in_progress``; the
   worker holds "currently processing X" state in memory. If the worker
   crashes mid-process, the row stays ``queued`` and the next restart
   picks it up — its ``attempts`` counter is unchanged, which is the

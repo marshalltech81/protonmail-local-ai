@@ -1522,7 +1522,7 @@ class Database:
 
         Depends on ``threads.fts_rowid`` tracking the FTS rowid; without it
         the DELETE would no-op silently and stale tokens would linger in the
-        index (see v3 migration notes).
+        index (see the pre-squash migration notes in git history).
         """
         existing = cur.execute(
             "SELECT fts_rowid FROM threads WHERE thread_id = ?", (thread_id,)

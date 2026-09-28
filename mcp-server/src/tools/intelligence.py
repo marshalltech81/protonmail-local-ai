@@ -592,7 +592,9 @@ def register_intelligence_tools(
         Synthesize an answer from email threads — including the
         text content of their PDF and image attachments.
 
-        This is the ONLY mailbox tool that reads attachment content.
+        This is the only tool that synthesizes over attachment
+        content (``search_attachments`` and ``get_evidence`` return
+        the raw extracted text).
         The local index extracts text from every PDF (digital and
         OCR'd) and runs OCR on every image. Once a thread is
         surfaced by retrieval — via BM25, dense thread vector, dense
@@ -807,8 +809,7 @@ def register_intelligence_tools(
             # ``body_text`` rather than replacing it (Codex P1) so an
             # earlier-context summary keeps the start of the thread.
             # ``get_recent_chunks_for_thread`` returns BODY chunks only —
-            # attachment-text retrieval stays reserved to ``ask_mailbox``
-            # per the tool contract.
+            # ``summarize_thread`` never reads attachment text.
             recent_chunks = await asyncio.to_thread(
                 db.get_recent_chunks_for_thread, thread.thread_id, _SUMMARIZE_RECENT_CHUNKS
             )

@@ -616,9 +616,8 @@ class Database:
         # No-op kept for API compatibility — per-access connections
         # are opened and closed inside each read helper, so there is
         # no persistent resource to release.
-        # Existing test fixtures and main-shutdown code that call
-        # ``db.close()`` continue to work; the flag is preserved so
-        # any caller inspecting it sees the historical semantics.
+        # Existing test fixtures that call ``db.close()`` continue
+        # to work.
         self._closed = True
 
     @property

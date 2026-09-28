@@ -7,7 +7,7 @@
 # Docker volumes if mounted locally
 data/
 maildir/
-# ``indexer/src/data/`` is bundled source data (e.g. the nomic-embed-text
+# ``indexer/src/data/`` is bundled source data (e.g. the qwen3-embedding
 # tokenizer.json) — exempt it from the broad ``data/`` ignore above so
 # the data files ship in the indexer image build context.
 !indexer/src/data/

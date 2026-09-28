@@ -430,7 +430,8 @@ def main():
     # treats that as skip-validation.
     expected_embed_dim = db.get_embedding_dim()
 
-    # FastMCP server — supports @server.tool() decorator and SSE transport.
+    # FastMCP server — provides the @server.tool() decorator and the
+    # SSE / Streamable HTTP apps mounted below per MCP_TRANSPORT.
     # ``host="0.0.0.0"`` is required so the in-container bind is reachable
     # through the Docker port-forward; the host-side mapping in
     # ``docker-compose.yml`` keeps the port loopback-only

@@ -104,9 +104,11 @@ def register_search_tools(
         snippet is BODY content only — attachment text (PDFs, OCR'd
         images) is not in the result. To read messages inside a thread,
         call get_thread or summarize_thread with the result's
-        ``Thread ID``. To read attachment content, the only path is
-        ``ask_mailbox`` — neither this tool nor get_thread surface
-        attachment chunks. Never invent a thread_id from the subject —
+        ``Thread ID``. To read attachment content, use
+        ``search_attachments`` (keyword search over extracted text) or
+        ``ask_mailbox`` (synthesized answers) — neither this tool nor
+        get_thread surfaces attachment chunks. Never invent a
+        thread_id from the subject —
         IDs are opaque values returned only from this tool,
         list_threads, or get_message.
 

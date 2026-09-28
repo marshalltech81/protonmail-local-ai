@@ -124,11 +124,12 @@ def register_retrieval_tools(server, db):
         attachment chunks are not in the result. For any question
         that requires the text of an attached PDF or image — "what
         does the quote PDF say?", "compare the attached statement
-        against the email body" — call ``ask_mailbox`` instead.
-        Iterating ``get_thread`` across multiple threads to find
-        attachment content is the wrong shape and will not surface
-        it; the extracted attachment text lives in the chunk lane
-        that only ``ask_mailbox`` consumes. Reaching for an external
+        against the email body" — call ``ask_mailbox`` or
+        ``search_attachments`` instead. Iterating ``get_thread``
+        across multiple threads to find attachment content is the
+        wrong shape and will not surface it; the extracted attachment
+        text lives in a chunk lane read only by ``ask_mailbox``,
+        ``search_attachments``, and ``get_evidence``. Reaching for an external
         tool (Google Drive, web search) to read a PDF that arrived
         as an email attachment is also wrong — the local index has
         already extracted that PDF's text.
@@ -235,9 +236,8 @@ def register_retrieval_tools(server, db):
             if include_attachments_metadata and thread.has_attachments:
                 lines.append("")
                 lines.append(
-                    "Attachments are present in this thread, but local-only retrieval "
-                    "currently exposes attachment metadata through search/index flags "
-                    "rather than live per-message attachment listings."
+                    "Attachments are present in this thread; use search_attachments "
+                    "to search their extracted text."
                 )
 
             return [TextContent(type="text", text="\n".join(lines))]
