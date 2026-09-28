@@ -114,9 +114,10 @@ guessing about semantics, completeness, or identity.
    Completed). Received date deferred (see Deferred).
 4. ~~**Honest `get_mailbox_status`**~~ Done 2026-09-28 (see Recently
    Completed).
-5. **Bearer-token auth on the MCP endpoint** (promoted from the old
-   "evaluate" backlog item). Localhost topology alone is not a trust
-   boundary against other local processes.
+5. **MCP endpoint auth — pinned 2026-09-28** pending the deployment
+   decision (see Open decisions). Localhost topology alone is not a
+   trust boundary against other local processes, but the right design
+   depends on where the server runs.
 6. ~~**Delete the dead action/IMAP surface.**~~ Done 2026-09-28 (see
    Recently Completed).
 7. ~~**Source integrity exposure.**~~ Done 2026-09-28 (see Recently
@@ -416,6 +417,21 @@ do not ship persisted claims without them.
    archive as the shipped default).
 2. Whether `brief_issue` debuts as an MCP tool or a host-side script
    during its Phase 3 experimental period.
+3. MCP endpoint auth (Phase 1 item 5, pinned 2026-09-28). The design
+   follows the deployment target:
+   - local only, deployable outside this repo → static bearer token
+     read from `MCP_AUTH_TOKEN_FILE` / `MCP_AUTH_TOKEN`, ASGI
+     middleware, constant-time compare, `/health` exempt, fail closed
+   - own devices over a private network → gate outside the app
+     (Tailscale, reverse proxy, Cloudflare Access), static token as
+     optional defence in depth
+   - hosted clients (claude.ai / ChatGPT connectors) → OAuth 2.1
+     resource server via the MCP SDK's `TokenVerifier` against an
+     external IdP; broadens exposure, so it needs a privacy-posture
+     change in AGENTS.md first
+   Any in-app option also means `sse` / `streamable-http` must stop
+   using `server.run()` and build the ASGI app like `dual` does, so
+   middleware can wrap it.
 
 ## Recently Completed
 
