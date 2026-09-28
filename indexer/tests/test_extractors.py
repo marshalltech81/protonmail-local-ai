@@ -652,6 +652,31 @@ class TestPdfDigitalExtractor:
             pdf._extract_ocr(buf.getvalue(), max_ocr_pages=5)
         assert captured == {}
 
+    def test_ocr_budget_counts_rounded_pixel_sides(self, monkeypatch, tmp_path):
+        """Review round 1: Poppler rounds each side up to a whole pixel, so
+        a sliver page (0.14 in wide, 200,000 in tall via UserUnit) has a
+        small area but rasterizes to 6 x 40M pixels at 200 dpi. The
+        budget must hold for the rounded sides."""
+        import io as _io
+        import math
+
+        from pypdf import PdfWriter
+        from pypdf.generic import FloatObject, NameObject
+        from src.extractors import pdf
+
+        writer = PdfWriter()
+        page = writer.add_blank_page(width=0.01, height=14_400)
+        page[NameObject("/UserUnit")] = FloatObject(1_000)
+        buf = _io.BytesIO()
+        writer.write(buf)
+
+        captured = self._capture_render(monkeypatch, tmp_path)
+        pdf._extract_ocr(buf.getvalue(), max_ocr_pages=5)
+        dpi = captured["dpi"]
+        width_px = math.ceil(0.01 * 1_000 / 72 * dpi)
+        height_px = math.ceil(14_400 * 1_000 / 72 * dpi)
+        assert width_px * height_px <= pdf._MAX_OCR_PAGE_PIXELS
+
     def test_ocr_render_has_a_deadline(self, monkeypatch, tmp_path):
         """Regression (#211): the OCR timeout reached only Tesseract, so a
         hung Poppler render blocked the worker forever."""

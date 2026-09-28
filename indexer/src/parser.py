@@ -413,9 +413,8 @@ def _decode_header(value: str | email.header.Header) -> str:
         return _decode_header_parts(email.header.decode_header(value)).strip()
     if "=?" not in value:
         return value.strip()
-    value = _ADJACENT_ENCODED_WORDS_RE.sub("?==?", value)
-    return _ENCODED_WORD_RE.sub(
-        lambda m: _decode_header_parts(email.header.decode_header(m.group(0))), value
+    return _decode_encoded_word_runs(
+        value, lambda m: _decode_header_parts(email.header.decode_header(m.group(0)))
     ).strip()
 
 
@@ -475,7 +474,11 @@ def _format_address(name: str, addr: str) -> str:
 # classes (no whitespace, no "?") keep the scan linear.
 _ENCODED_WORD_RE = re.compile(r"=\?([^?\s]+)\?([QqBb])\?([^?\s]*)\?=")
 # RFC 2047 §6.2: whitespace between two adjacent encoded-words is dropped.
-_ADJACENT_ENCODED_WORDS_RE = re.compile(r"\?=\s+=\?")
+# Matching whole runs of valid words keeps whitespace next to anything
+# that only looks like one (a malformed ``=?...?=`` stays raw text).
+_ENCODED_WORD_RUN_RE = re.compile(
+    _ENCODED_WORD_RE.pattern + r"(?:\s+" + _ENCODED_WORD_RE.pattern + r")*"
+)
 # RFC 5322 line limit, applied per encoded-word: a valid long name folds
 # into many short encoded-words, so bounding the whole name would leave
 # legitimate long names undecoded.
@@ -530,8 +533,20 @@ def _decode_display_name(name: str) -> str:
     """
     if "=?" not in name:
         return name
-    name = _ADJACENT_ENCODED_WORDS_RE.sub("?==?", name)
-    return _ENCODED_WORD_RE.sub(_decode_encoded_word, name)
+    return _decode_encoded_word_runs(name, _decode_encoded_word)
+
+
+def _decode_encoded_word_runs(text: str, decode_word: Callable[[re.Match[str]], str]) -> str:
+    """Decode each encoded-word in ``text``, joining adjacent words.
+
+    One linear pass: each run of whitespace-separated valid encoded-words
+    is decoded word by word and joined without the whitespace; all other
+    text, including malformed look-alikes, is left as it is.
+    """
+    return _ENCODED_WORD_RUN_RE.sub(
+        lambda run: "".join(decode_word(m) for m in _ENCODED_WORD_RE.finditer(run.group(0))),
+        text,
+    )
 
 
 # Structural-parsing budget. The split below is linear, and each element

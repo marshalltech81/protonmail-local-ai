@@ -468,7 +468,12 @@ render. Remaining gap: pdf2image does not pass that timeout to its
 `pdfinfo` page-count call. Separately, a job that hangs or kills the
 worker is re-claimed without spending an attempt, so it never reaches
 `dead`; that fix is a queue-semantics change of its own. No schema
-change; `make baseline` unchanged.
+change; `make baseline` unchanged. Review round 1 (Codex): the pixel
+budget counted page area, not the rounded whole-pixel sides Poppler
+allocates, so a sliver page kept 200 dpi at 1 x 40M pixels; and
+whitespace was dropped next to a malformed encoded-word look-alike
+(`ok =?utf-8?x?bad?=` fused), now only inside runs of valid words
+(display names too).
 
 ### 2026-09-28 — Retrieval regression baseline (Phase 1.5)
 

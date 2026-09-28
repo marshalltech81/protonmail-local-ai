@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import io
 import logging
+import math
 import tempfile
 
 import pypdf
@@ -199,27 +200,36 @@ def _extract_ocr(
 
 
 def _ocr_dpi(payload: bytes, max_ocr_pages: int) -> int:
-    """Return the render DPI that keeps every OCR'd page within budget.
+    """Return the highest DPI, up to ``_OCR_DPI``, at which every OCR'd
+    page fits ``_MAX_OCR_PAGE_PIXELS``.
 
     Reads each page's MediaBox (scaled by UserUnit), which is what
     ``pdftoppm`` rasterizes, over the pages the OCR pass will render.
-    One DPI applies to the whole document, so an oversized page lowers
-    it for every page. A parse failure propagates: without page sizes
-    the raster size is unknown, so the fallback fails closed.
+    Each side is counted as a whole number of pixels, at least one,
+    because that is what gets allocated: a sliver page has a tiny area
+    but can still rasterize to one pixel by hundreds of millions. One DPI
+    applies to the whole document, so an oversized page lowers it for
+    every page. A parse failure propagates: without page sizes the raster
+    size is unknown, so the fallback fails closed.
     """
     reader = pypdf.PdfReader(io.BytesIO(payload))
-    largest_sq_inches = 0.0
+    pages_inches: list[tuple[float, float]] = []
     for index, page in enumerate(reader.pages):
         if max_ocr_pages > 0 and index >= max_ocr_pages:
             break
         box = page.mediabox
         unit = float(page.user_unit)
-        width = abs(float(box.width)) * unit / 72
-        height = abs(float(box.height)) * unit / 72
-        largest_sq_inches = max(largest_sq_inches, width * height)
-    if largest_sq_inches * _OCR_DPI * _OCR_DPI <= _MAX_OCR_PAGE_PIXELS:
-        return _OCR_DPI
-    dpi = int((_MAX_OCR_PAGE_PIXELS / largest_sq_inches) ** 0.5)
-    if dpi < 1:
-        raise ValueError("PDF page too large to render for OCR")
-    return dpi
+        pages_inches.append((abs(float(box.width)) * unit / 72, abs(float(box.height)) * unit / 72))
+
+    def fits(dpi: int) -> bool:
+        return all(
+            max(1, math.ceil(w * dpi)) * max(1, math.ceil(h * dpi)) <= _MAX_OCR_PAGE_PIXELS
+            for w, h in pages_inches
+        )
+
+    # Pixel count only grows with DPI, so the first fit going down is the
+    # highest; at most ``_OCR_DPI`` cheap checks.
+    for dpi in range(_OCR_DPI, 0, -1):
+        if fits(dpi):
+            return dpi
+    raise ValueError("PDF page too large to render for OCR")

@@ -827,6 +827,16 @@ class TestDecodeHeader:
         not part of the text."""
         assert _decode_header("=?utf-8?q?H=C3=A9?= =?utf-8?q?llo?=") == "Héllo"
 
+    def test_whitespace_kept_next_to_a_malformed_encoded_word(self):
+        """Review round 1: whitespace is dropped only between two valid
+        encoded-words. Collapsing it before validating both sides fused
+        ``ok`` onto the raw malformed fragment."""
+        from src.parser import _decode_display_name
+
+        value = "=?utf-8?q?ok?= =?utf-8?x?bad?="
+        assert _decode_header(value) == "ok =?utf-8?x?bad?="
+        assert _decode_display_name(value) == "ok =?utf-8?x?bad?="
+
     def test_malformed_encoded_word_prefixes_decode_in_linear_time(self):
         """Regression (#218): ``email.header.decode_header`` rescans the
         rest of the header at every malformed ``=?`` prefix, so a 48 KB
