@@ -46,27 +46,35 @@ class StallGuard:
 
     def stalled(self) -> str | None:
         """The in-flight message's path if it has run past the limit."""
-        in_flight = self._queue.in_flight()
+        return self._overdue(self._queue.in_flight())
+
+    def check(self) -> bool:
+        """Exit the process if stalled; True when it fired.
+
+        Decides and exits while holding the queue's in-flight lock, so a
+        step returning at that moment cannot refund its charge or charge
+        the next message first.
+        """
+        with self._queue.holding_in_flight() as in_flight:
+            filepath = self._overdue(in_flight)
+            if filepath is None:
+                return False
+            log.error(
+                "stall guard: %s has been processing for over %ds; exiting so the "
+                "container restarts (the attempt stays counted)",
+                filepath,
+                self._limit,
+            )
+            self._exit(1)
+            return True
+
+    def _overdue(self, in_flight: tuple[str, float] | None) -> str | None:
         if in_flight is None:
             return None
         filepath, started = in_flight
         if self._clock() - started > self._limit:
             return filepath
         return None
-
-    def check(self) -> bool:
-        """Exit the process if stalled; True when it fired."""
-        filepath = self.stalled()
-        if filepath is None:
-            return False
-        log.error(
-            "stall guard: %s has been processing for over %ds; exiting so the "
-            "container restarts (the attempt stays counted)",
-            filepath,
-            self._limit,
-        )
-        self._exit(1)
-        return True
 
     def start(self) -> None:
         threading.Thread(target=self._run, name="stall-guard", daemon=True).start()

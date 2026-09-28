@@ -56,7 +56,10 @@ from __future__ import annotations
 import logging
 import os
 import sqlite3
+import threading
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 
 log = logging.getLogger("indexer.queue")
@@ -93,12 +96,12 @@ REASON_INITIAL_SCAN = "initial_scan"
 REASON_RECOVERY = "recovery"
 REASON_RESCAN = "rescan"
 
-# Recorded on a row dead-lettered by ``begin_attempt``: every charged
-# attempt ended with the process gone before the step returned.
-_INTERRUPTED_STAGE = "interrupted"
+# Written by ``begin_attempt`` while a message's step runs and cleared
+# when it returns, so a row still carrying it after a restart was being
+# processed when the indexer stopped.
+INTERRUPTED_STAGE = "interrupted"
 _INTERRUPTED_ERROR = (
-    "indexer stopped while processing this message on every attempt "
-    "(crash, out-of-memory kill, or stall-guard exit)"
+    "indexer stopped while processing this message (crash, out-of-memory kill, or stall-guard exit)"
 )
 
 DEFAULT_MAX_ATTEMPTS = 5
@@ -185,6 +188,8 @@ class IndexingQueue:
         self.max_attempts = max_attempts
         self.base_backoff_seconds = base_backoff_seconds
         self._in_flight: tuple[str, float] | None = None
+        # Guards ``_in_flight`` and its refund against the stall guard's thread.
+        self._lock = threading.Lock()
 
     # ----- writes --------------------------------------------------------
 
@@ -232,33 +237,27 @@ class IndexingQueue:
         """Charge one attempt to ``filepath`` before running one of its
         per-message steps; return False if it must not run.
 
-        The charge is committed before the step starts, so a process
-        that dies mid-step leaves it counted. ``end_attempt`` or any
-        outcome method refunds it. A row whose attempts are already
-        exhausted got there only through such deaths (``mark_failed``
-        dead-letters at the limit itself), so it is dead-lettered here
-        rather than run again.
+        The charge is committed before the step starts, together with
+        ``last_stage = 'interrupted'``, so a process that dies mid-step
+        leaves the row counted and marked. ``end_attempt`` or any outcome
+        method refunds it and clears the mark. A marked row whose
+        attempts are exhausted got there only through such deaths, so it
+        is dead-lettered here rather than run again; an unmarked row over
+        the limit (``INDEXER_MAX_ATTEMPTS`` lowered) still runs, and
+        ``mark_failed`` decides.
         """
-        attempts = self.db.queue_get_attempts(filepath)
-        if attempts is None:
-            return True
-        if attempts >= self.max_attempts:
-            self.db.queue_mark_dead(
-                filepath=filepath,
-                attempts=attempts,
-                last_stage=_INTERRUPTED_STAGE,
-                last_error=_INTERRUPTED_ERROR,
-                error_class=ERROR_CLASS_RETRYABLE,
-                now_iso=_now_iso(),
-            )
-            log.error(
-                "dead-letter: %s after %d attempts interrupted mid-processing",
-                filepath,
-                attempts,
-            )
+        if not self.db.queue_charge_attempt(
+            filepath=filepath,
+            max_attempts=self.max_attempts,
+            marker_stage=INTERRUPTED_STAGE,
+            marker_error=_INTERRUPTED_ERROR,
+            error_class=ERROR_CLASS_RETRYABLE,
+            now_iso=_now_iso(),
+        ):
+            log.error("dead-letter: %s interrupted mid-processing on every attempt", filepath)
             return False
-        self.db.queue_set_attempts(filepath, attempts + 1)
-        self._in_flight = (filepath, time.monotonic())
+        with self._lock:
+            self._in_flight = (filepath, time.monotonic())
         return True
 
     def end_attempt(self, filepath: str) -> None:
@@ -267,19 +266,30 @@ class IndexingQueue:
 
     def in_flight(self) -> tuple[str, float] | None:
         """The message whose step is running and its ``time.monotonic()``
-        start, or ``None``. Read by the stall guard's thread."""
-        return self._in_flight
+        start, or ``None``."""
+        with self._lock:
+            return self._in_flight
+
+    @contextmanager
+    def holding_in_flight(self) -> Iterator[tuple[str, float] | None]:
+        """Yield the in-flight message while blocking its refund.
+
+        The stall guard decides and exits inside this block, so a step
+        that returns at that moment cannot refund its charge (or begin
+        the next message) before the process is gone.
+        """
+        with self._lock:
+            yield self._in_flight
 
     def _settle(self, filepath: str) -> None:
         """Refund an open charge on ``filepath`` before its outcome is
         recorded, so outcome methods keep their own attempt accounting."""
-        in_flight = self._in_flight
-        if in_flight is None or in_flight[0] != filepath:
-            return
-        self._in_flight = None
-        attempts = self.db.queue_get_attempts(filepath)
-        if attempts:
-            self.db.queue_set_attempts(filepath, attempts - 1)
+        with self._lock:
+            in_flight = self._in_flight
+            if in_flight is None or in_flight[0] != filepath:
+                return
+            self.db.queue_refund_attempt(filepath=filepath, marker_stage=INTERRUPTED_STAGE)
+            self._in_flight = None
 
     def mark_succeeded(self, filepath: str) -> None:
         """Remove the job row. Indexing ran through cleanly."""

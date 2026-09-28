@@ -663,12 +663,15 @@ caused it would otherwise be claimed again at the same attempt count
 after every restart, forever. The one message whose parse (Phase 1)
 or chunk / attachment extraction (Phase 2a) step is running is
 therefore charged one attempt while the step runs
-(`IndexingQueue.begin_attempt`), refunded when the step returns or its
-outcome is recorded. A process that dies mid-step leaves only that
-message charged — never its batchmates — so an ordinary restart costs
-at most one attempt, while a message that keeps killing the worker is
-dead-lettered with `last_stage = 'interrupted'` once its attempts are
-exhausted. A hang does not kill the process on its own, and Compose
+(`IndexingQueue.begin_attempt`) and marked `last_stage = 'interrupted'`,
+both refunded when the step returns or its outcome is recorded. A
+process that dies mid-step leaves only that message charged and marked
+— never its batchmates — so an ordinary restart costs at most one
+attempt. An out-of-memory kill can come from the whole batch's
+footprint rather than the message it landed on, and a restart replays
+the same batch, so a claimed batch containing a marked row runs that
+row alone first; only a message that also dies on its own keeps being
+charged, and it is dead-lettered once its attempts are exhausted. A hang does not kill the process on its own, and Compose
 does not restart an unhealthy container, so a stall guard thread
 (`src/stall_guard.py`) exits the indexer when one step has run longer
 than `INDEXER_MESSAGE_TIMEOUT_SECONDS` (default 3600, `0` disables);

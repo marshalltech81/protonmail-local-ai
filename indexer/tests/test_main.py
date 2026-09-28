@@ -1052,6 +1052,49 @@ class TestInterruptedMessagesDeadLetter:
         assert all(charge in (None, 0) for charge in healthy_charges)
         assert db.get_chunk_ids_for_message("healthy@example.com")
 
+    def test_crash_from_batch_memory_retries_the_row_alone(self, tmp_path, monkeypatch):
+        """Review round 1: an out-of-memory kill at row N can come from
+        the whole batch's footprint, and a restart replays the same batch
+        in the same order. The interrupted row runs alone next, so a
+        message that is fine on its own is indexed, not dead-lettered."""
+        first = tmp_path / "INBOX" / "new" / "first.eml"
+        second = tmp_path / "INBOX" / "new" / "second.eml"
+        _write_eml(first, "first@example.com")
+        _write_eml(second, "second@example.com")
+
+        real_phase1 = main._phase1_commit_thread
+        seen: list[str] = []
+
+        def phase1(row, db, threader, queue):
+            seen.append(row["filepath"])
+            # "Out of memory" only when another message is in the batch.
+            if row["filepath"].endswith("second.eml") and len(seen) > 1:
+                raise _WorkerKilled
+            return real_phase1(row, db, threader, queue)
+
+        monkeypatch.setattr(main, "_phase1_commit_thread", phase1)
+
+        db = Database(tmp_path / "mail.db")
+        embedder = make_mock_embedder()
+        embedder.embed.return_value = _UNIT_VECTOR
+        _make_queue(db).enqueue(str(first), REASON_INITIAL_SCAN)
+        _make_queue(db).enqueue(str(second), REASON_INITIAL_SCAN)
+        deaths = 0
+        for _ in range(6):
+            seen.clear()
+            try:
+                main.drain_queue(_make_queue(db), db, embedder, Threader(db))
+            except _WorkerKilled:
+                deaths += 1
+                continue
+            if db.queue_stats()["queued"] == 0:
+                break
+
+        assert deaths == 1
+        assert db.queue_stats() == {"queued": 0, "dead": 0}
+        assert db.get_chunk_ids_for_message("first@example.com")
+        assert db.get_chunk_ids_for_message("second@example.com")
+
     def test_message_that_kills_extraction_reaches_dead(self, tmp_path, monkeypatch):
         poison = tmp_path / "INBOX" / "new" / "poison.eml"
         healthy = tmp_path / "INBOX" / "new" / "healthy.eml"

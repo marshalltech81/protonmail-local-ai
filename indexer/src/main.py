@@ -64,6 +64,7 @@ from .parser import Message, OversizedMessageError, _derive_folder, parse_email
 from .queue import (
     ERROR_CLASS_OPERATOR,
     ERROR_CLASS_RETRYABLE,
+    INTERRUPTED_STAGE,
     REASON_INITIAL_SCAN,
     REASON_ON_CREATED,
     REASON_ON_MOVED,
@@ -1285,6 +1286,15 @@ def _drain_queue_batched(
         rows = queue.claim_batch(batch_size)
         if not rows:
             break
+        # A row still marked ``interrupted`` was mid-step when the
+        # indexer died. An out-of-memory kill can come from the whole
+        # batch's footprint rather than that message, and a restart
+        # replays the same batch in the same order, so the row runs
+        # alone first: only a message that fails on its own keeps
+        # accumulating charges toward ``dead``.
+        interrupted = [row for row in rows if row["last_stage"] == INTERRUPTED_STAGE]
+        if interrupted and len(rows) > 1:
+            rows = interrupted[:1]
         batch: list[_BatchedMsg] = []
         for row in rows:
             # Parse and extraction are the steps hostile input can crash

@@ -467,7 +467,15 @@ indexer when one step runs past `INDEXER_MESSAGE_TIMEOUT_SECONDS`
 (default 3600, `0` disables) so the restart policy recovers it. The
 refund is deliberately not in a `finally`: `MemoryError` /
 `RecursionError` re-raised by the extractors must keep the charge. No
-schema change.
+schema change. Review round 1 (Codex): the charge and refund were
+read-then-write, so a concurrent re-enqueue from the watchdog thread
+could be overwritten with a stale count or dead status (now conditional
+SQL under the connection lock); the stall guard could exit on a stale
+in-flight reading after the step had already refunded (it now decides
+and exits holding a lock the refund takes); and an OOM from a whole
+batch's footprint was blamed on the row it landed on, replayed in the
+same order after each restart until a valid message was dead-lettered
+(a row left marked `interrupted` now runs alone first).
 
 ### 2026-09-28 — Bounded indexer work on hostile input (#202, #211, #216, #218, #221)
 

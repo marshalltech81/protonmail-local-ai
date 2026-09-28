@@ -648,3 +648,57 @@ class TestInFlightAttempts:
         assert in_flight is not None
         assert in_flight[0] == "/m/a"
         assert before <= in_flight[1] <= time.monotonic()
+
+    def test_running_step_marks_the_row_interrupted_until_it_returns(self, tmp_path):
+        """The marker is what a restarted indexer reads to know a row's
+        step never returned (review round 1)."""
+        db = Database(tmp_path / "q.db")
+        q = _queue(db)
+        q.enqueue("/m/a", REASON_INITIAL_SCAN)
+
+        q.begin_attempt("/m/a")
+        assert _row(db, "/m/a")["last_stage"] == "interrupted"
+        q.end_attempt("/m/a")
+
+        row = _row(db, "/m/a")
+        assert row["last_stage"] is None
+        assert row["last_error"] is None
+
+    def test_refund_does_not_touch_a_row_reenqueued_mid_step(self, tmp_path):
+        """Review round 1: the watchdog thread can re-enqueue the running
+        path (fresh intent, attempts reset). The refund must not act on
+        the reset row's state."""
+        db = Database(tmp_path / "q.db")
+        q = _queue(db)
+        q.enqueue("/m/a", REASON_INITIAL_SCAN)
+        q.mark_failed("/m/a", stage="parse", error="x")
+
+        q.begin_attempt("/m/a")
+        q.enqueue("/m/a", REASON_ON_CREATED)  # watchdog thread
+        q.end_attempt("/m/a")
+
+        assert _row(db, "/m/a")["attempts"] == 0
+
+    def test_reenqueued_row_is_not_dead_lettered_by_stale_interruptions(self, tmp_path):
+        db = Database(tmp_path / "q.db")
+        _queue(db, max_attempts=3).enqueue("/m/a", REASON_INITIAL_SCAN)
+        for _ in range(3):
+            _queue(db, max_attempts=3).begin_attempt("/m/a")
+        _queue(db, max_attempts=3).enqueue("/m/a", REASON_ON_CREATED)  # new delivery
+
+        assert _queue(db, max_attempts=3).begin_attempt("/m/a")
+        row = _row(db, "/m/a")
+        assert row["status"] == STATUS_QUEUED
+        assert row["attempts"] == 1
+
+    def test_exhausted_row_without_interruptions_still_runs(self, tmp_path):
+        """Lowering INDEXER_MAX_ATTEMPTS leaves ordinary retry rows above
+        the limit; only interruptions may dead-letter at begin."""
+        db = Database(tmp_path / "q.db")
+        q = _queue(db, max_attempts=5)
+        q.enqueue("/m/a", REASON_INITIAL_SCAN)
+        for _ in range(3):
+            q.mark_failed("/m/a", stage="parse", error="x")
+
+        assert _queue(db, max_attempts=2).begin_attempt("/m/a")
+        assert _row(db, "/m/a")["status"] == STATUS_QUEUED

@@ -73,3 +73,25 @@ def test_thread_exits_a_stalled_worker(tmp_path):
     clock.now += 61
     guard.start()
     assert exited.wait(timeout=5)
+
+
+def test_refund_waits_while_the_guard_is_exiting(tmp_path):
+    """Review round 1: a step that returns just as the guard fires must
+    not refund its charge (or charge the next message) before the exit —
+    the guard decides and exits while holding the in-flight lock."""
+    clock = _Clock()
+    queue = _running_queue(tmp_path, clock)
+    clock.now += 61
+    finished = threading.Event()
+    observed: dict = {}
+
+    def exit_fn(code):
+        refund = threading.Thread(target=lambda: (queue.end_attempt("/m/stuck"), finished.set()))
+        refund.start()
+        observed["refund_blocked"] = not finished.wait(timeout=0.2)
+        observed["attempts"] = queue.db.queue_get_attempts("/m/stuck")
+
+    StallGuard(queue, limit_seconds=60, clock=clock, exit_fn=exit_fn).check()
+
+    assert observed == {"refund_blocked": True, "attempts": 1}
+    assert finished.wait(timeout=5)
