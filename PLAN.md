@@ -452,6 +452,25 @@ do not ship persisted claims without them.
 
 ## Recently Completed
 
+### 2026-09-28 — Ingestion completeness fixes (#203, #206, #207, #212, #213)
+
+Five Codex findings where valid mail could silently lose indexing, or
+the indexer could fail to start. A Maildir rename now moves the file's
+`indexing_jobs` row with it (#203): a reply whose Phase 2 was deferred
+by an embedder outage lost its job on a flag rename and was left
+without chunks and with no pending or dead row. `PermissionError` at
+parse is deferred every 60 s without spending an attempt for a day
+after enqueue (#212): mbsync relaxes permissions only after a whole
+sync, so a long sync dead-lettered valid mail. The deletion reaper
+picks survivors by message ID rather than a tombstone snapshot's path
+(#213), so a flag rename mid-reap can no longer leave a deleted
+message's text in its thread, and it scrubs embedding errors in its log
+(#206). The initial schema and its version stamp are created in one
+transaction (#207), so an interrupted first start no longer blocks every
+later one. Known limit (#203): a rename during that message's own step
+leaves the moved row one extra attempt and one run alone. No schema
+change; `make baseline` unchanged.
+
 ### 2026-09-28 — Interrupted messages dead-letter (#235)
 
 A message that crashed or hung the single worker never reached
