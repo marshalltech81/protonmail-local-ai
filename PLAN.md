@@ -337,6 +337,13 @@ can be revisited with an explicit owner decision.
   relevant if generic-IMAP decoupling is pursued)
 - attachment download support (needs the read-only action-path
   decision it was always gated on)
+- Message-ID conflict resolution: when two files claim one Message-ID
+  with different content, the first indexed wins and the other is a
+  dead row (#217). A spoofed copy indexed first (an offline backlog)
+  would therefore hide the genuine mail until an operator intervenes.
+  Resolving it properly means storing both claimants side by side or
+  ranking them on authenticated provenance (Received / DKIM), which
+  needs a schema change; land it with Phase 4 source provenance
 - per-message received date: the sender controls `Date:`, so a
   trustworthy timeline needs the receiving server's timestamp (top
   `Received:` header; Maildir mtime is sync time, not delivery). Needs
@@ -466,6 +473,13 @@ instead of overwriting its record, participants and chunks (#217);
 legitimate duplicates (archive copies, self-sent mail) and renames
 index as before. Databases already split by #204 keep the inconsistency
 until the Phase 2 reindex. No schema change; `make baseline` unchanged.
+Review round 1 (Codex): a duplicate must now match on sender,
+recipients, subject, body and attachment hashes, not sender and body
+alone (other recipients or attachments could still replace the
+record's participants); and conflicts are dead-lettered at stage
+`conflict`, which each Maildir walk re-checks, so the file takes over
+once the original is gone instead of the Message-ID dropping out of the
+index. Deferred (see Deferred): first arrival wins a conflict.
 
 ### 2026-09-28 — Ingestion completeness fixes (#203, #206, #207, #212, #213)
 

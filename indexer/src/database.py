@@ -1814,6 +1814,13 @@ class Database:
         self._conn.commit()
 
     @_synchronized
+    def queue_get_stage(self, filepath: str) -> str | None:
+        row = self._conn.execute(
+            "SELECT last_stage FROM indexing_jobs WHERE filepath = ?", (filepath,)
+        ).fetchone()
+        return row["last_stage"] if row else None
+
+    @_synchronized
     def queue_get_status(self, filepath: str) -> str | None:
         """Return ``"queued"`` / ``"dead"`` / ``None`` for ``filepath``.
 

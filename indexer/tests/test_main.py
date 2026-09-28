@@ -1383,11 +1383,14 @@ class TestReprocessKeepsThreadMembership:
 class TestConflictingMessageIds:
     """#217: two files carrying one sender-controlled Message-ID."""
 
-    def _index(self, db, queue, path):
+    def _drain(self, db, queue):
         embedder = make_mock_embedder()
         embedder.embed.return_value = _UNIT_VECTOR
-        queue.enqueue(str(path), REASON_INITIAL_SCAN)
         main.drain_queue(queue, db, embedder, Threader(db))
+
+    def _index(self, db, queue, path):
+        queue.enqueue(str(path), REASON_INITIAL_SCAN)
+        self._drain(db, queue)
 
     def _message_row(self, db):
         return db._conn.execute(
@@ -1429,6 +1432,47 @@ class TestConflictingMessageIds:
         assert row["status"] == "dead"
         assert row["last_error_class"] == "permanent_source_failure"
         assert "conflicting Message-ID" in row["last_error"]
+
+    def test_same_sender_and_body_with_other_recipients_is_a_conflict(self, tmp_path):
+        """Review round 1: sender and body alone let a file with other
+        recipients (or attachments) replace the record's participants."""
+        db = Database(tmp_path / "mail.db")
+        queue = _make_queue(db)
+        original = tmp_path / "INBOX" / "cur" / "one:2,S"
+        _write_eml(original, "dup@example.com", to_addr="bob@example.com")
+        self._index(db, queue, original)
+        other = tmp_path / "INBOX" / "cur" / "two:2,S"
+        _write_eml(other, "dup@example.com", to_addr="eve@example.com")
+
+        self._index(db, queue, other)
+
+        assert queue.is_dead(str(other))
+        assert self._message_row(db)["filepath"] == str(original)
+
+    def test_dead_conflict_takes_over_once_the_original_is_gone(self, tmp_path):
+        """Review round 1: walks skip dead rows, so a conflict was never
+        revisited; if the original file then disappeared the Message-ID
+        could drop out of the index while a source file still existed."""
+        db = Database(tmp_path / "mail.db")
+        queue = _make_queue(db)
+        original = tmp_path / "INBOX" / "cur" / "one:2,S"
+        _write_eml(original, "dup@example.com", from_addr="alice@example.com")
+        self._index(db, queue, original)
+        other = tmp_path / "INBOX" / "cur" / "two:2,S"
+        _write_eml(other, "dup@example.com", from_addr="carol@example.com")
+        self._index(db, queue, other)
+        assert queue.is_dead(str(other))
+
+        main._enqueue_unindexed_messages(db, queue, tmp_path, main.REASON_RESCAN)
+        self._drain(db, queue)
+        assert queue.is_dead(str(other))  # original still there: still a conflict
+
+        original.unlink()
+        main._enqueue_unindexed_messages(db, queue, tmp_path, main.REASON_RESCAN)
+        self._drain(db, queue)
+
+        assert queue.stats() == {"queued": 0, "dead": 0}
+        assert self._message_row(db)["filepath"] == str(other)
 
     def test_identical_copy_in_another_folder_indexes_normally(self, tmp_path):
         db = Database(tmp_path / "mail.db")
