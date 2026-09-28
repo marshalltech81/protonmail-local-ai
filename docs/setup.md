@@ -398,10 +398,11 @@ make update
 ```
 
 `make update` runs `make bridge-upgrade-check` first and stops if it fails.
-If the check fails, do not work around it. A commit mismatch is usually a
-pin mistake to correct (see below). For patch drift or a smoke failure, stay
-on the working release — and because `.env` already holds the candidate
-`BRIDGE_VERSION` and `BRIDGE_COMMIT` by then, that means putting both back:
+If the check fails, do not work around it. A commit mismatch is often a
+pin mistake to correct (see below). For patch drift, a smoke failure, or a
+moved upstream tag, stay on the working release — and because `.env`
+already holds the candidate `BRIDGE_VERSION` and `BRIDGE_COMMIT` by then,
+that means putting both back:
 
 1. Restore the previous `BRIDGE_VERSION` and `BRIDGE_COMMIT` in `.env`.
 2. If the failure came from the smoke step (it runs after the patch check
@@ -423,13 +424,19 @@ By failure:
   is missing from its log). Treat it the same way — stay on the previous
   release.
 - **Commit mismatch**: `BRIDGE_VERSION` does not resolve to
-  `BRIDGE_COMMIT`. Usually this is local config: `BRIDGE_VERSION` was
-  bumped without `BRIDGE_COMMIT` (an unset `BRIDGE_COMMIT` falls back to
-  the previous release's commit), or the annotated tag object's SHA was
-  copied instead of the `^{}` line. Re-run the `git ls-remote` lookup
-  above and set `BRIDGE_COMMIT` to the commit it shows. Only if `.env`
-  already matches that lookup and the error persists has the tag moved
-  upstream — find out why before trusting the new commit.
+  `BRIDGE_COMMIT`. What to do depends on whether the pin was already
+  verified for this version:
+  - **Pin just edited** — usually a local mistake: `BRIDGE_VERSION` was
+    bumped without `BRIDGE_COMMIT` (an unset `BRIDGE_COMMIT` falls back to
+    the previous release's commit), or the annotated tag object's SHA was
+    copied instead of the `^{}` line. Correct it from the `git ls-remote`
+    lookup above. Proton's tags are unsigned, so before building, check that
+    the commit is the one the release shipped with — for example, that its
+    date matches the release date on Proton's GitHub releases page.
+  - **Pin previously verified for this version** — the upstream tag has
+    moved. Do not copy the new commit from `git ls-remote`; that is the
+    unverified source the pin exists to block. Stay on the previous
+    release (steps above) until you know why the tag moved.
 
 Things to expect after an upgrade:
 
