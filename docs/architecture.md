@@ -310,7 +310,9 @@ locator, kept current across flag renames; when a rename crosses
 folders the new `folder` is written in the same transaction, so a failed
 update rolls back whole and the Maildir walk re-indexes the file) plus
 `size_bytes` and
-`content_hash` (SHA-256 of the raw `.eml`). `message_participants`
+`content_hash` (SHA-256 of the raw `.eml`). The MCP server returns
+these as `source_file` on every message, evidence chunk, and attachment
+result (see `docs/mcp-tools.md`). `message_participants`
 normalizes From / To / Cc into one row per (message, role, address),
 with `address` canonical and lowercased and the display name kept as
 written; malformed entries with no recoverable address are skipped.

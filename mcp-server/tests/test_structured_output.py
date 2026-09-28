@@ -23,7 +23,13 @@ from src.tools.retrieval import register_retrieval_tools
 from src.tools.search import register_search_tools
 from src.tools.system import register_system_tools
 
-from tests.conftest import FakeEmbedClient, _insert_attachment, _insert_message, _insert_thread
+from tests.conftest import (
+    FakeEmbedClient,
+    _insert_attachment,
+    _insert_message,
+    _insert_thread,
+    source_sha256,
+)
 from tests.test_retrieval import _open_fixture_db
 
 # Tool -> one top-level property its output schema must declare. A bare
@@ -339,3 +345,82 @@ def test_listing_tools_cut_long_participant_values(tmp_path):
     assert hit["senders"][0].endswith("more characters]")
     for out in (found, listed, attachments):
         assert len(json.dumps(out)) < 20_000
+
+
+def _expected_source(message_id: str, folder: str = "INBOX") -> dict:
+    return {
+        "source_type": "maildir_message",
+        "locator": f"/maildir/{folder}/cur/{message_id}",
+        "sha256": source_sha256(message_id),
+        "size_bytes": 100,
+        "indexed_at": "2024-01-01T00:00:00Z",
+    }
+
+
+class TestSourceProvenance:
+    """Every message, evidence chunk, and attachment hit names the raw
+    file it came from: path, SHA-256, size, and when it was indexed."""
+
+    def test_message_rows_carry_their_source(self, messages_db):
+        server = _server(messages_db)
+        thread = _call(server, "get_thread", thread_id="t1")
+        assert [m["source_file"] for m in thread["messages"]] == [
+            _expected_source("m1"),
+            _expected_source("m2"),
+        ]
+        message = _call(server, "get_message", message_id="m3")
+        assert message["message"]["source_file"] == _expected_source("m3", "Archive")
+        page = _call(server, "query_messages", folder="Archive")
+        assert [m["source_file"] for m in page["messages"]] == [_expected_source("m3", "Archive")]
+
+    def test_get_message_prose_names_the_source(self, messages_db):
+        result = asyncio.run(_server(messages_db).call_tool("get_message", {"message_id": "m3"}))
+        assert isinstance(result, CallToolResult)
+        text = result.content[0].text
+        assert "/maildir/Archive/cur/m3" in text
+        assert source_sha256("m3") in text
+
+    @pytest.mark.parametrize("scope", [{"thread_id": "t1"}, {}])
+    def test_evidence_chunks_carry_their_message_source(self, messages_db, scope):
+        evidence = _call(_server(messages_db), "get_evidence", query="budget", **scope)
+        chunks = [c for t in evidence["threads"] for c in t["chunks"]]
+        assert chunks
+        folders = {"m3": "Archive"}
+        for chunk in chunks:
+            mid = chunk["message_id"]
+            assert chunk["source_file"] == _expected_source(mid, folders.get(mid, "INBOX"))
+        # An attachment chunk resolves to the message file that carries it.
+        attachment = next(c for c in chunks if c["source"] == "attachment")
+        assert attachment["source_file"] == _expected_source("m2")
+
+    def test_attachment_hits_carry_their_message_source(self, attachments_db):
+        server = _server(attachments_db)
+        for args in ({"query": "acme"}, {"query": "wage"}, {}):
+            hits = _call(server, "search_attachments", **args)["results"]
+            assert hits
+            for hit in hits:
+                assert hit["source_file"] == _expected_source(hit["message_id"], hit["folder"])
+
+    def test_unrecorded_identity_is_null(self, tmp_path):
+        """A message indexed without file identity reports null hash and
+        size rather than a guess."""
+        with _open_fixture_db(tmp_path) as (conn, db):
+            _insert_message(conn, message_id="m1", thread_id="t1", sent_at="2024-01-01T00:00:00Z")
+            conn.execute("UPDATE messages SET content_hash = NULL, size_bytes = NULL")
+            conn.commit()
+            conn.close()
+            source = _call(_server(db), "get_message", message_id="m1")["message"]["source_file"]
+            assert source["sha256"] is None
+            assert source["size_bytes"] is None
+            assert source["locator"] == "/maildir/INBOX/cur/m1"
+
+    def test_evidence_without_a_message_record_has_null_source(self, tmp_path):
+        with _open_fixture_db(tmp_path) as (conn, db):
+            _insert_message(
+                conn, message_id="m1", thread_id="t1", sent_at="2024-01-01T00:00:00Z", body="hello"
+            )
+            conn.execute("DELETE FROM messages")
+            conn.commit()
+            conn.close()
+            evidence = _call(_server(db), "get_evidence", query="hello", thread_id="t1")
+            assert [c["source_file"] for t in evidence["threads"] for c in t["chunks"]] == [None]

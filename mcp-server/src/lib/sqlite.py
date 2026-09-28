@@ -125,6 +125,40 @@ def _sanitize_fts_query(query: str) -> str:
 
 
 @dataclass
+class SourceFile:
+    """The raw Maildir file a message was indexed from, as the indexer
+    recorded it in ``messages``: path, SHA-256 and size of the file's
+    bytes (``None`` when not captured), and when the record was written."""
+
+    locator: str
+    sha256: str | None
+    size_bytes: int | None
+    indexed_at: str
+
+
+# Selected by every query that reports a message's source file; ``m`` is
+# the ``messages`` row (LEFT JOINed where the row may be missing).
+_SOURCE_COLUMNS = (
+    "m.filepath AS source_locator, m.content_hash AS source_sha256, "
+    "m.size_bytes AS source_size_bytes, m.indexed_at AS source_indexed_at"
+)
+
+
+def _row_to_source(r) -> SourceFile | None:
+    """The ``_SOURCE_COLUMNS`` of ``r``; ``None`` when the row has none or
+    no ``messages`` row joined."""
+    if "source_locator" not in r.keys() or r["source_locator"] is None:
+        return None
+    size = r["source_size_bytes"]
+    return SourceFile(
+        locator=r["source_locator"],
+        sha256=r["source_sha256"],
+        size_bytes=None if size is None else int(size),
+        indexed_at=r["source_indexed_at"],
+    )
+
+
+@dataclass
 class ChunkResult:
     """One per-message chunk hit, used as precise evidence for a thread.
 
@@ -144,6 +178,10 @@ class ChunkResult:
     ``message_date`` is the source message's ``Date:`` header, carried
     so ``get_evidence`` can show *when* a cited passage arrived. Left
     ``None`` only for query paths that do not SELECT it.
+
+    ``source_file`` is the raw file of the chunk's message (for an
+    attachment chunk, the message that carries the attachment); ``None``
+    for query paths that do not SELECT it.
     """
 
     chunk_id: str
@@ -158,6 +196,7 @@ class ChunkResult:
     attachment_filename: str | None = None
     attachment_mime: str | None = None
     message_date: str | None = None
+    source_file: SourceFile | None = None
 
 
 def _row_to_chunk_result(r) -> ChunkResult:
@@ -184,6 +223,7 @@ def _row_to_chunk_result(r) -> ChunkResult:
         attachment_filename=(r["attachment_filename"] if "attachment_filename" in keys else None),
         attachment_mime=r["attachment_mime"] if "attachment_mime" in keys else None,
         message_date=r["message_date"] if "message_date" in keys else None,
+        source_file=_row_to_source(r),
     )
 
 
@@ -261,14 +301,17 @@ class AttachmentResult:
     extraction_status: str | None = None
     text_snippet: str = ""
     score: float = 0.0
+    # Raw file of the message carrying the attachment.
+    source_file: SourceFile | None = None
 
 
 def _row_to_attachment_result(r) -> AttachmentResult:
     """Build an ``AttachmentResult`` from a search-lane row.
 
     All three attachment lanes SELECT the same fixed column list (the
-    subject pair, ``senders`` JSON, the extraction columns, a ``score``
-    alias), so no per-column key guard is needed. ``display_subject``
+    subject pair, ``senders`` JSON, the extraction columns, the
+    source-file columns, a ``score`` alias), so no per-column key guard
+    is needed. ``display_subject``
     is preferred over the normalized ``subject`` when the row carries
     one (legacy rows have it NULL), mirroring ``_row_to_result``.
     """
@@ -286,6 +329,7 @@ def _row_to_attachment_result(r) -> AttachmentResult:
         extraction_status=r["extraction_status"],
         text_snippet=r["text_snippet"] or "",
         score=float(r["score"]),
+        source_file=_row_to_source(r),
     )
 
 
@@ -314,11 +358,12 @@ class MessageRecord:
     from_: list[Participant] = field(default_factory=list)
     to: list[Participant] = field(default_factory=list)
     cc: list[Participant] = field(default_factory=list)
+    source_file: SourceFile | None = None
 
 
 _MESSAGE_COLUMNS = (
     "m.message_id, m.thread_id, m.subject, m.sent_at, m.folder, "
-    "m.has_attachments, m.in_reply_to, m.references_json"
+    "m.has_attachments, m.in_reply_to, m.references_json, " + _SOURCE_COLUMNS
 )
 
 
@@ -332,6 +377,7 @@ def _row_to_message_record(r) -> MessageRecord:
         has_attachments=bool(r["has_attachments"]),
         in_reply_to=r["in_reply_to"],
         references=json.loads(r["references_json"]),
+        source_file=_row_to_source(r),
     )
 
 
@@ -1045,11 +1091,13 @@ class Database:
             "a.content_type, a.size_bytes, t.subject, t.display_subject, "
             "t.folder, t.date_last, t.senders, e.extraction_status, "
             "substr(e.extracted_text, 1, 240) AS text_snippet, "
+            f"{_SOURCE_COLUMNS}, "
             "bm25(attachments_fts) AS score "
             "FROM attachments_fts "
             "JOIN attachments a ON attachments_fts.rowid = a.fts_rowid "
             "JOIN threads t ON a.thread_id = t.thread_id "
             "LEFT JOIN attachment_extractions e ON e.attachment_id = a.attachment_id "
+            "LEFT JOIN messages m ON m.message_id = a.message_id "
             "WHERE " + " AND ".join(where) + " "  # nosec B608
             "ORDER BY score LIMIT ?"
         )
@@ -1089,6 +1137,7 @@ class Database:
             "a.content_type, a.size_bytes, t.subject, t.display_subject, "
             "t.folder, t.date_last, t.senders, e.extraction_status, "
             "substr(e.extracted_text, 1, 240) AS text_snippet, "
+            f"{_SOURCE_COLUMNS}, "
             "bm25(message_chunks_fts) AS score "
             "FROM message_chunks_fts "
             "JOIN message_chunks c ON message_chunks_fts.rowid = c.fts_rowid "
@@ -1098,6 +1147,7 @@ class Database:
             "      AND a2.message_id = c.message_id ) "
             "JOIN threads t ON a.thread_id = t.thread_id "
             "LEFT JOIN attachment_extractions e ON e.attachment_id = a.attachment_id "
+            "LEFT JOIN messages m ON m.message_id = a.message_id "
             "WHERE " + " AND ".join(where) + " "  # nosec B608
             "ORDER BY score LIMIT ?"
         )
@@ -1132,10 +1182,12 @@ class Database:
             "a.content_type, a.size_bytes, t.subject, t.display_subject, "
             "t.folder, t.date_last, t.senders, e.extraction_status, "
             "substr(e.extracted_text, 1, 240) AS text_snippet, "
+            f"{_SOURCE_COLUMNS}, "
             "0.0 AS score "
             "FROM attachments a "
             "JOIN threads t ON a.thread_id = t.thread_id "
             "LEFT JOIN attachment_extractions e ON e.attachment_id = a.attachment_id "
+            "LEFT JOIN messages m ON m.message_id = a.message_id "
             "WHERE " + " AND ".join(where) + " "  # nosec B608
             "ORDER BY t.date_last DESC LIMIT ?"
         )
@@ -1669,9 +1721,11 @@ class Database:
                 "c.text, c.char_start, c.char_end, c.attachment_id, c.message_date, "
                 "a.filename AS attachment_filename, "
                 "a.content_type AS attachment_mime, "
+                f"{_SOURCE_COLUMNS}, "
                 "vec_distance_l2(v.embedding, ?) AS score "
                 "FROM message_chunks c "
                 "JOIN message_chunks_vec v ON c.chunk_id = v.chunk_id "
+                "LEFT JOIN messages m ON m.message_id = c.message_id "
                 "LEFT JOIN attachments a "
                 "  ON a.attachment_occurrence_id = ( "
                 "       SELECT MIN(a2.attachment_occurrence_id) "

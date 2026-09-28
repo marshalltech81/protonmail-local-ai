@@ -15,6 +15,19 @@ The search, retrieval, and system tools (Groups 1, 2, and 4) publish an
   state is typed as well (`get_thread.next_offset`,
   `query_messages.next_cursor` / `has_more` / `total_matches`).
 
+Every message row (`get_thread`, `get_message`, `query_messages`),
+evidence chunk (`get_evidence`), and attachment hit
+(`search_attachments`) carries `source_file`: the raw message file the
+result came from, so an answer can be checked against the original
+bytes. It holds `source_type` (`maildir_message`), `locator` (the
+file's path in the Maildir volume as the indexer sees it, `/maildir/...`,
+kept current across mbsync flag renames), `sha256` and `size_bytes` of
+the raw file when it was indexed (null if not recorded), and
+`indexed_at`. For an attachment chunk or hit it is the file of the
+message that carries the attachment. It is read in the same query as
+the result it belongs to. To verify a cited passage, hash the file:
+`docker compose exec indexer sha256sum <locator>`.
+
 Structured output is bounded because headers are sender-controlled.
 Lists hold at most 10 entries (recipients per role, References, thread
 participants, attachment senders), each with a full count (`to_count`,
@@ -181,7 +194,8 @@ adjacent chunks is removed by character offset). The index keeps no raw
 per-message body, so this is the indexed text **after quoted-reply
 stripping**; it falls back to thread context when no body chunks are
 indexed for the message. Attachment text is not included — use
-`get_evidence` for that.
+`get_evidence` for that. The prose ends its header block with the raw
+source file's path, size, and SHA-256.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|

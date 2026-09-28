@@ -119,16 +119,8 @@ guessing about semantics, completeness, or identity.
    boundary against other local processes.
 6. ~~**Delete the dead action/IMAP surface.**~~ Done 2026-09-28 (see
    Recently Completed).
-7. **Source integrity exposure.** Formalize
-   `source_id / sha256 / source_type / original locator / ingested_at
-   / size` in retrieval and evidence responses — `indexed_files`
-   already captures content hash and identity; this is exposure, not
-   new capture. Evidence resolves answer → evidence → chunk →
-   source_id → immutable raw object.
-   *Progress (PR #175): each message's source locator, size, and
-   SHA-256 are now stored per message and kept current across
-   renames. Remaining: exposing them in retrieval / evidence
-   responses.*
+7. ~~**Source integrity exposure.**~~ Done 2026-09-28 (see Recently
+   Completed).
 8. ~~**Doc-drift sweep.**~~ Done 2026-09-28 (see Recently Completed).
 
 ### Phase 1.5 — Minimal regression baseline
@@ -426,6 +418,23 @@ do not ship persisted claims without them.
    during its Phase 3 experimental period.
 
 ## Recently Completed
+
+### 2026-09-28 — Source integrity exposure (Phase 1 item 7)
+
+Every message row (`get_thread`, `get_message`, `query_messages`),
+evidence chunk (`get_evidence`), and attachment hit
+(`search_attachments`) now carries `source_file`: `source_type`
+(`maildir_message`), `locator` (the raw file's `/maildir/...` path),
+`sha256` and `size_bytes` of the raw file, and `indexed_at`, read from
+`messages` in the same query as the result. An attachment's source is
+the message file that carries it. `get_message`'s prose names the
+source file too. The chain is answer → evidence chunk → `message_id` →
+`source_file` → raw bytes. Two departures from the planned field list:
+no separate `source_id`, since the SHA-256 already is the content
+identity and a second name for it would add nothing; and `indexed_at`
+rather than `ingested_at`, because the indexer rewrites the record
+whenever the thread is re-indexed, so it is not a first-ingest time.
+No schema change.
 
 ### 2026-09-28 — Doc-drift sweep (Phase 1 item 8)
 
