@@ -475,7 +475,13 @@ in-flight reading after the step had already refunded (it now decides
 and exits holding a lock the refund takes); and an OOM from a whole
 batch's footprint was blamed on the row it landed on, replayed in the
 same order after each restart until a valid message was dead-lettered
-(a row left marked `interrupted` now runs alone first).
+(a row left marked `interrupted` now runs alone first). Review round 2
+(Codex): a kill during the bulk embed or vector commit came after every
+charge was refunded, so the same batch could crash forever (several
+survivors are now marked `interrupted` without a charge before the
+embed; a lone survivor stays charged through it); and the 3600 s limit
+bounded a whole message, below three legitimately slow scanned PDFs
+(each attachment now restarts the guard's clock).
 
 ### 2026-09-28 — Bounded indexer work on hostile input (#202, #211, #216, #218, #221)
 

@@ -671,11 +671,24 @@ attempt. An out-of-memory kill can come from the whole batch's
 footprint rather than the message it landed on, and a restart replays
 the same batch, so a claimed batch containing a marked row runs that
 row alone first; only a message that also dies on its own keeps being
-charged, and it is dead-lettered once its attempts are exhausted. A hang does not kill the process on its own, and Compose
-does not restart an unhealthy container, so a stall guard thread
-(`src/stall_guard.py`) exits the indexer when one step has run longer
-than `INDEXER_MESSAGE_TIMEOUT_SECONDS` (default 3600, `0` disables);
-the restart policy brings it back with the attempt counted.
+charged, and it is dead-lettered once its attempts are exhausted.
+
+The bulk embed (Phase 2b) and the vector commits (Phase 2c) hold the
+whole batch's vectors, so a kill there cannot be pinned on one
+message. A batch of several survivors is marked `interrupted` without
+charging anyone, which replays each message alone after a restart; a
+lone survivor is already running alone, so it stays charged through
+both phases until its outcome is recorded.
+
+A hang does not kill the process on its own, and Compose does not
+restart an unhealthy container, so a stall guard thread
+(`src/stall_guard.py`) exits the indexer when one unit of work — a
+message's parse, or one attachment's extraction — has run longer than
+`INDEXER_MESSAGE_TIMEOUT_SECONDS` (default 3600, `0` disables). Each
+attachment restarts the clock, so a message with many legitimately
+slow scanned PDFs (up to ~21 min each at the default OCR limits) is not
+cut off. The restart policy brings the indexer back with the attempt
+counted.
 
 ### Ingestion completeness
 

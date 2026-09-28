@@ -30,6 +30,7 @@ import os
 import sqlite3
 import time
 import urllib.parse
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -302,11 +303,13 @@ INDEXER_OCR_MAX_PAGES = _int_env("INDEXER_OCR_MAX_PAGES", 20, minimum=1)
 # that pins the worker for tens of minutes per PDF. Set to 0 to
 # disable the timeout.
 INDEXER_OCR_TIMEOUT_SECONDS = _int_env("INDEXER_OCR_TIMEOUT_SECONDS", 60, minimum=0)
-# Longest one message's parse or extraction step may run before the
-# stall guard exits the process for Compose to restart (``stall_guard``).
-# Generous because a message with several scanned PDFs legitimately
-# spends ``INDEXER_OCR_MAX_PAGES`` x ``INDEXER_OCR_TIMEOUT_SECONDS`` on
-# each. Set to 0 to disable.
+# Longest one unit of work — a message's parse, or one attachment's
+# extraction — may run before the stall guard exits the process for
+# Compose to restart (``stall_guard``). Each attachment restarts the
+# clock, so a message with many slow attachments is fine; one scanned
+# PDF legitimately takes up to ``INDEXER_OCR_MAX_PAGES`` x
+# ``INDEXER_OCR_TIMEOUT_SECONDS`` plus its render (~21 min at the
+# defaults). Set to 0 to disable.
 INDEXER_MESSAGE_TIMEOUT_SECONDS = _int_env("INDEXER_MESSAGE_TIMEOUT_SECONDS", 3600, minimum=0)
 # Page cap for the digital pypdf path. The OCR cap above doesn't bound
 # this — a 5 MB text-only PDF can carry thousands of pages, and even
@@ -786,6 +789,8 @@ def _phase2a_collect_chunks(
     state: _BatchedMsg,
     db: Database,
     all_texts: list[str],
+    *,
+    progress: Callable[[], None] = lambda: None,
 ) -> tuple[bool, str | None]:
     """Phase 2a: chunk the body and attachments WITHOUT embedding.
 
@@ -837,6 +842,10 @@ def _phase2a_collect_chunks(
                 else None
             )
             for occurrence_index, attachment in enumerate(msg.attachments):
+                # Each attachment's extraction is separately bounded
+                # (byte caps, OCR page cap and timeouts), so it is the
+                # unit the stall guard's limit applies to.
+                progress()
                 # ``embedder=None`` defers the embed step — the plan
                 # comes back with empty embeddings_by_chunk_id and
                 # Phase 2c populates it from the batched embed result.
@@ -1325,7 +1334,7 @@ def _drain_queue_batched(
         for entry in batch:
             if not queue.begin_attempt(entry.row["filepath"]):
                 continue
-            ok, err = _phase2a_collect_chunks(entry, db, all_texts)
+            ok, err = _phase2a_collect_chunks(entry, db, all_texts, progress=queue.note_progress)
             queue.end_attempt(entry.row["filepath"])
             if ok:
                 survivors.append(entry)
@@ -1335,6 +1344,18 @@ def _drain_queue_batched(
 
         if not survivors:
             continue
+
+        # The bulk embed and the vector commits hold the whole batch's
+        # vectors, so a kill there cannot be pinned on one message.
+        # Several survivors are marked ``interrupted`` without a charge,
+        # which replays each alone after a restart; a lone survivor —
+        # already running alone — stays charged until its outcome is
+        # recorded, so one that dies even alone still reaches ``dead``.
+        if len(survivors) == 1:
+            if not queue.begin_attempt(survivors[0].row["filepath"]):
+                continue
+        else:
+            queue.mark_interrupted([entry.row["filepath"] for entry in survivors])
 
         # Refresh the heartbeat just before the bulk embed so a slow
         # cloud-embedder round-trip (potentially tens of seconds for a

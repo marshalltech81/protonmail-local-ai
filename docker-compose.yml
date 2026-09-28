@@ -188,8 +188,8 @@ services:
       INDEXER_MAX_ATTEMPTS: ${INDEXER_MAX_ATTEMPTS:-5}
       INDEXER_RETRY_BASE_SECONDS: ${INDEXER_RETRY_BASE_SECONDS:-30}
       # Stall guard: exit (and let the restart policy bring the indexer
-      # back) when one message's parse or extraction runs this long. 0
-      # disables it.
+      # back) when one message's parse, or one attachment's extraction,
+      # runs this long. 0 disables it.
       INDEXER_MESSAGE_TIMEOUT_SECONDS: ${INDEXER_MESSAGE_TIMEOUT_SECONDS:-3600}
       # Warmup POST timeout for the first embed call after container
       # start. Default 600s absorbs cold-start latency on host-side

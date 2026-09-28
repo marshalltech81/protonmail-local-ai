@@ -1763,6 +1763,20 @@ class Database:
         return not exhausted
 
     @_synchronized
+    def queue_mark_interrupted(
+        self, *, filepaths: list[str], marker_stage: str, marker_error: str
+    ) -> None:
+        """Mark queued rows as mid-step without charging an attempt."""
+        self._conn.executemany(
+            """
+            UPDATE indexing_jobs SET last_stage = ?, last_error = ?
+            WHERE filepath = ? AND status = 'queued'
+            """,
+            [(marker_stage, marker_error, filepath) for filepath in filepaths],
+        )
+        self._conn.commit()
+
+    @_synchronized
     def queue_refund_attempt(self, *, filepath: str, marker_stage: str) -> None:
         """Undo ``queue_charge_attempt`` if its mark is still on the row.
         A row re-enqueued meanwhile no longer carries the mark and is

@@ -702,3 +702,37 @@ class TestInFlightAttempts:
 
         assert _queue(db, max_attempts=2).begin_attempt("/m/a")
         assert _row(db, "/m/a")["status"] == STATUS_QUEUED
+
+    def test_progress_restarts_the_in_flight_clock(self, tmp_path):
+        db = Database(tmp_path / "q.db")
+        q = _queue(db)
+        q.enqueue("/m/a", REASON_INITIAL_SCAN)
+        q.begin_attempt("/m/a")
+        q._in_flight = ("/m/a", 0.0)
+
+        q.note_progress()
+
+        in_flight = q.in_flight()
+        assert in_flight is not None
+        assert in_flight[0] == "/m/a"
+        assert in_flight[1] > 0.0
+
+    def test_progress_with_nothing_in_flight_is_a_no_op(self, tmp_path):
+        q = _queue(Database(tmp_path / "q.db"))
+        q.note_progress()
+        assert q.in_flight() is None
+
+    def test_marking_a_batch_interrupted_spends_no_attempts(self, tmp_path):
+        """Review round 2: before the bulk embed a multi-message batch is
+        marked so a kill there replays each message alone — without
+        charging any of them."""
+        db = Database(tmp_path / "q.db")
+        q = _queue(db)
+        for path in ("/m/a", "/m/b"):
+            q.enqueue(path, REASON_INITIAL_SCAN)
+        q.mark_failed("/m/b", stage="parse", error="x")
+
+        q.mark_interrupted(["/m/a", "/m/b"])
+
+        assert [_row(db, p)["attempts"] for p in ("/m/a", "/m/b")] == [0, 1]
+        assert all(_row(db, p)["last_stage"] == "interrupted" for p in ("/m/a", "/m/b"))

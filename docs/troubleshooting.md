@@ -342,7 +342,7 @@ EMBED_MODEL and the embed API key" error.
 |---|---|---|
 | `INDEXER_MAX_ATTEMPTS` | `5` | Max retries before a row becomes `dead`. |
 | `INDEXER_RETRY_BASE_SECONDS` | `30` | Base backoff. Each attempt multiplies by `2^(attempts-1)`, capped at 6 h. |
-| `INDEXER_MESSAGE_TIMEOUT_SECONDS` | `3600` | Stall guard: the indexer exits (and Compose restarts it) when one message's parse or extraction runs this long. `0` disables. |
+| `INDEXER_MESSAGE_TIMEOUT_SECONDS` | `3600` | Stall guard: the indexer exits (and Compose restarts it) when one message's parse, or one attachment's extraction, runs this long. `0` disables. |
 
 A message that crashes or hangs the indexer is charged one attempt per
 restart, retried on its own (in case the whole batch's memory, not the

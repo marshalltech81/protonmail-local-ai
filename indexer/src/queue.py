@@ -264,6 +264,27 @@ class IndexingQueue:
         """Refund the ``begin_attempt`` charge: the step returned."""
         self._settle(filepath)
 
+    def note_progress(self) -> None:
+        """Restart the in-flight clock: the step finished one bounded unit
+        of work (one attachment), so the stall guard's limit applies per
+        unit rather than to a whole message."""
+        with self._lock:
+            if self._in_flight is not None:
+                self._in_flight = (self._in_flight[0], time.monotonic())
+
+    def mark_interrupted(self, filepaths: list[str]) -> None:
+        """Durably mark several rows as mid-step without charging any.
+
+        For batch-wide work (the bulk embed and vector commit) whose
+        failure cannot be pinned on one message: if the process dies
+        there, every marked row is replayed alone, where a charge is
+        attributable. Each row's outcome method overwrites or deletes
+        the mark.
+        """
+        self.db.queue_mark_interrupted(
+            filepaths=filepaths, marker_stage=INTERRUPTED_STAGE, marker_error=_INTERRUPTED_ERROR
+        )
+
     def in_flight(self) -> tuple[str, float] | None:
         """The message whose step is running and its ``time.monotonic()``
         start, or ``None``."""
