@@ -2,6 +2,38 @@
 
 All tools are available inside Claude Desktop once the stack is running.
 
+## Response format
+
+The search, retrieval, and system tools (Groups 1, 2, and 4) publish an
+`outputSchema` and return two views of the same result:
+
+- `content` — the readable prose described below, unchanged.
+- `structuredContent` — typed JSON matching the tool's `outputSchema`.
+  IDs chain from typed fields: `search_emails` → `results[].thread_id` →
+  `get_thread` → `messages[].message_id` → `get_message`, and
+  `get_evidence` / `search_attachments` carry `attachment_id`. Paging
+  state is typed as well (`get_thread.next_offset`,
+  `query_messages.next_cursor` / `has_more` / `total_matches`).
+
+Structured output is bounded because headers are sender-controlled.
+Lists hold at most 10 entries (recipients per role, References, thread
+participants, attachment senders), each with a full count (`to_count`,
+`references_count`, `participant_count`, `sender_count`, ...). Header
+values past 500 characters (subjects, display names, addresses, reply
+headers, participant and sender strings) are cut with a marker.
+`get_thread` and `query_messages` apply the same cut in their prose, and
+`get_thread` also cuts bodies. IDs are never cut, since a shortened ID
+would not chain; `get_thread` states the thread ID once rather than on
+every message row. `get_message` returns full headers and the full body.
+
+A failure (unknown thread or message, invalid argument, provider or
+database error) is an MCP error result (`isError: true`) whose text
+states the reason; it carries no structured content. An empty match is
+not a failure: it is a normal result with an empty list.
+
+The intelligence tools (Group 3) have no typed output model; their
+answer is the prose in `content`.
+
 ## Group 1 — Search
 
 ### `search_emails`
@@ -226,8 +258,11 @@ each filter.
 and `has_more`; when more remain it includes `next_cursor`. Each
 message carries its send date, folder, attachment flag, subject,
 From / To / Cc (at most 10 per role, with a count of the rest),
-Message-ID, and Thread ID. The count, the page, and its participants
-are read in one snapshot.
+Message-ID, and Thread ID; the structured output adds In-Reply-To and
+up to 10 References. Header values are sender-controlled, so any past
+500 characters is cut with a marker — `get_message` returns full
+headers. The count, the page, and its participants are read in one
+snapshot.
 
 **Paging.** Keyset pagination on `(sent_at, message_id)`: messages
 indexed while a caller pages never shift or duplicate later pages. A

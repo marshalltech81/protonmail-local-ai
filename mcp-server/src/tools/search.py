@@ -5,12 +5,27 @@ Semantic, keyword, and hybrid search over the SQLite index.
 
 import asyncio
 import logging
+from typing import Annotated
 
-from mcp.types import TextContent
+from mcp.server.fastmcp.exceptions import ToolError
+from mcp.types import CallToolResult
 
 from ..lib.embed import embed_query
 from ..lib.security import log_tool_call, safe_exception_text, safe_provider_exception_text
 from ..lib.validation import clamp_int
+from .outputs import (
+    HEADER_CHAR_LIMIT,
+    MAX_LISTED,
+    AttachmentHit,
+    EvidenceChunk,
+    EvidenceOutput,
+    EvidenceThread,
+    SearchAttachmentsOutput,
+    SearchEmailsOutput,
+    clip,
+    thread_summary,
+    tool_result,
+)
 
 log = logging.getLogger("mcp.tools.search")
 
@@ -68,7 +83,7 @@ def register_search_tools(
         has_attachments: bool | None = None,
         participant: str | None = None,
         limit: int = 10,
-    ) -> list[TextContent]:
+    ) -> Annotated[CallToolResult, SearchEmailsOutput]:
         """
         Search the mailbox and return matching THREADS (conversations),
         not individual messages.
@@ -168,12 +183,7 @@ def register_search_tools(
             },
         )
         if mode not in _VALID_SEARCH_MODES:
-            return [
-                TextContent(
-                    type="text",
-                    text=(f"Invalid mode {mode!r}. Use 'hybrid', 'semantic', or 'keyword'."),
-                )
-            ]
+            raise ToolError(f"Invalid mode {mode!r}. Use 'hybrid', 'semantic', or 'keyword'.")
         # Clamp to [1, _MAX_SEARCH_LIMIT] so an out-of-range or
         # non-numeric caller value never drives an unbounded query
         # against the index. clamp_int returns the default (10) when the
@@ -195,24 +205,20 @@ def register_search_tools(
         # When the lookup yields nothing, short-circuit with an
         # honest empty result rather than silently dropping the
         # filter and returning unrelated threads.
+        resolved_from_addr = None
         if from_name and not from_addr:
             try:
                 contacts = await asyncio.to_thread(db.find_contact, from_name, 1, senders_only=True)
             except Exception as e:
                 safe_error = safe_exception_text(e, secrets)
                 log.error("search_emails: find_contact lookup failed: %s", safe_error)
-                return [TextContent(type="text", text=f"Search error: {safe_error}")]
+                raise ToolError(f"Search error: {safe_error}") from e
             if not contacts:
-                return [
-                    TextContent(
-                        type="text",
-                        text=(
-                            f"No results found for: '{query}' "
-                            f"(no contact matched from_name={from_name!r})"
-                        ),
-                    )
-                ]
-            from_addr = contacts[0]["email"]
+                return tool_result(
+                    f"No results found for: '{query}' (no contact matched from_name={from_name!r})",
+                    SearchEmailsOutput(mode=mode, resolved_from_addr=None, results=[]),
+                )
+            from_addr = resolved_from_addr = contacts[0]["email"]
 
         try:
             # All three modes accept the same filter set; keyword and
@@ -279,12 +285,17 @@ def register_search_tools(
                     reranker=reranker,
                 )
 
+            output = SearchEmailsOutput(
+                mode=mode,
+                resolved_from_addr=resolved_from_addr,
+                results=[thread_summary(r) for r in results],
+            )
             if not results:
-                return [TextContent(type="text", text=f"No results found for: '{query}'")]
+                return tool_result(f"No results found for: '{query}'", output)
 
-            output = [f"Found {len(results)} thread(s) for: '{query}'\n"]
+            lines = [f"Found {len(results)} thread(s) for: '{query}'\n"]
             for i, r in enumerate(results, 1):
-                output.append(
+                lines.append(
                     f"{i}. [{r.folder}] {r.subject}\n"
                     f"   Participants: {', '.join(r.participants[:3])}"
                     f"{'...' if len(r.participants) > 3 else ''}\n"
@@ -295,7 +306,7 @@ def register_search_tools(
                     f"   {r.snippet[:120]}...\n"
                 )
 
-            return [TextContent(type="text", text="\n".join(output))]
+            return tool_result("\n".join(lines), output)
 
         except Exception as e:
             # Provider-SDK status errors (embed call, reranker call) can
@@ -310,7 +321,7 @@ def register_search_tools(
             # local DB work.
             safe_error = safe_provider_exception_text(e, secrets)
             log.error("search_emails error: %s", safe_error)
-            return [TextContent(type="text", text=f"Search error: {safe_error}")]
+            raise ToolError(f"Search error: {safe_error}") from e
 
     @server.tool()
     async def get_evidence(
@@ -323,7 +334,7 @@ def register_search_tools(
         has_attachments: bool | None = None,
         limit: int = 12,
         include_scores: bool = False,
-    ) -> list[TextContent]:
+    ) -> Annotated[CallToolResult, EvidenceOutput]:
         """
         Return the exact indexed passages (evidence chunks) that back a
         question — no LLM synthesis, just the retrieved source text.
@@ -385,7 +396,7 @@ def register_search_tools(
             },
         )
         if not query or not query.strip():
-            return [TextContent(type="text", text="Provide a query to gather evidence for.")]
+            raise ToolError("Provide a query to gather evidence for.")
         # Same clamp ceiling as search_emails — ``limit`` here counts
         # evidence chunks, and an LLM-inflated value would drive a large
         # per-thread chunk fetch and an oversized response payload.
@@ -399,7 +410,7 @@ def register_search_tools(
             if thread_id:
                 thread = await asyncio.to_thread(db.get_thread, thread_id)
                 if not thread:
-                    return [TextContent(type="text", text=f"Thread not found: {thread_id}")]
+                    raise ToolError(f"Thread not found: {thread_id}")
                 embedding = await embed_query(embed_client, query, expected_embed_dim)
                 grouped = await asyncio.to_thread(
                     db.get_evidence_chunks_for_threads, [thread_id], embedding, limit
@@ -433,17 +444,48 @@ def register_search_tools(
                         continue
                     groups.append((r.subject, r.thread_id, r.lane_ranks, r.score, chunks))
                     taken += len(chunks)
+        except ToolError:
+            raise
         except Exception as e:
             # Mirror search_emails: provider-SDK status errors (the embed
             # call) can echo the query back, so reduce them to type +
             # status and redact any quoted secret.
             safe_error = safe_provider_exception_text(e, secrets)
             log.error("get_evidence error: %s", safe_error)
-            return [TextContent(type="text", text=f"Evidence error: {safe_error}")]
+            raise ToolError(f"Evidence error: {safe_error}") from e
 
         total_chunks = sum(len(chunks) for _, _, _, _, chunks in groups)
+        output = EvidenceOutput(
+            chunk_count=total_chunks,
+            threads=[
+                EvidenceThread(
+                    thread_id=tid,
+                    subject=subject,
+                    lane_ranks=lane_ranks if include_scores else None,
+                    retrieval_score=score if include_scores else None,
+                    chunks=[
+                        EvidenceChunk(
+                            message_id=c.message_id,
+                            chunk_index=c.chunk_index,
+                            source="body" if c.attachment_id is None else "attachment",
+                            attachment_id=c.attachment_id,
+                            attachment_filename=c.attachment_filename,
+                            attachment_mime=c.attachment_mime,
+                            message_date=c.message_date,
+                            char_start=c.char_start,
+                            char_end=c.char_end,
+                            text=c.text[:_EVIDENCE_CHUNK_CHARS],
+                            text_truncated=len(c.text) > _EVIDENCE_CHUNK_CHARS,
+                            vector_distance=c.score if include_scores else None,
+                        )
+                        for c in chunks
+                    ],
+                )
+                for subject, tid, lane_ranks, score, chunks in groups
+            ],
+        )
         if total_chunks == 0:
-            return [TextContent(type="text", text=f"No evidence found for: '{query}'")]
+            return tool_result(f"No evidence found for: '{query}'", output)
 
         lines = [
             f"Evidence for: '{query}'",
@@ -478,7 +520,7 @@ def register_search_tools(
                 lines.append(f"        {text}")
             lines.append("")
 
-        return [TextContent(type="text", text="\n".join(lines).rstrip())]
+        return tool_result("\n".join(lines).rstrip(), output)
 
     @server.tool()
     async def search_attachments(
@@ -489,7 +531,7 @@ def register_search_tools(
         date_to: str | None = None,
         extracted_only: bool = False,
         limit: int = 20,
-    ) -> list[TextContent]:
+    ) -> Annotated[CallToolResult, SearchAttachmentsOutput]:
         """
         Search indexed email attachments by filename, MIME type, and
         extracted text.
@@ -561,10 +603,30 @@ def register_search_tools(
             # formatter is enough.
             safe_error = safe_exception_text(e, secrets)
             log.error("search_attachments error: %s", safe_error)
-            return [TextContent(type="text", text=f"Attachment search error: {safe_error}")]
+            raise ToolError(f"Attachment search error: {safe_error}") from e
 
+        output = SearchAttachmentsOutput(
+            results=[
+                AttachmentHit(
+                    attachment_id=a.attachment_id,
+                    filename=a.filename,
+                    content_type=a.content_type,
+                    size_bytes=a.size_bytes,
+                    thread_id=a.thread_id,
+                    message_id=a.message_id,
+                    subject=a.subject,
+                    folder=a.folder,
+                    date_last=a.date_last,
+                    senders=[clip(s, HEADER_CHAR_LIMIT) for s in a.senders[:MAX_LISTED]],
+                    sender_count=len(a.senders),
+                    extraction_status=a.extraction_status,
+                    text_snippet=a.text_snippet,
+                )
+                for a in results
+            ]
+        )
         if not results:
-            return [TextContent(type="text", text="No attachments found.")]
+            return tool_result("No attachments found.", output)
 
         lines = [f"Found {len(results)} attachment(s):", ""]
         for i, a in enumerate(results, 1):
@@ -580,4 +642,4 @@ def register_search_tools(
                 lines.append(f"    Snippet: {a.text_snippet.strip()}")
             lines.append("")
 
-        return [TextContent(type="text", text="\n".join(lines).rstrip())]
+        return tool_result("\n".join(lines).rstrip(), output)

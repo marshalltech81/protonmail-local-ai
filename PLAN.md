@@ -107,11 +107,8 @@ guessing about semantics, completeness, or identity.
 
 1. ~~**`query_messages`**~~ — Done 2026-09-27 (see Recently
    Completed).
-2. **Structured MCP output** (`outputSchema` / `structuredContent`)
-   across search / retrieval / evidence / status tools; prose
-   retained alongside. The chaining path (search → thread_id →
-   get_thread → message_id → get_message → attachment_id) becomes
-   machine-native, never scraped from prose.
+2. ~~**Structured MCP output**~~ Done 2026-09-28 (see Recently
+   Completed).
 3. ~~**Message-first-class.**~~ Done 2026-09-28 (see Recently
    Completed). Received date deferred (see Deferred).
 4. **Honest `get_mailbox_status`** — sync recency, queue
@@ -289,15 +286,16 @@ input by definition.
   (`protonmail-bridge` first — it holds live Proton credentials)
 - loud one-shot startup warning when `INFERENCE_MODE` sends retrieved
   excerpts to a remote provider
-- `query_messages`: bound sender-controlled values per row the way
-  `get_thread` does (PR #177 round 2) — a message's subject and
-  participant display names render in full on pages of up to 100
 - `get_message`: returns a message's full body and headers with no
   bound, so one huge message (a pasted log, 12,000 References) is one
   huge response; decide on body continuation (offset paging) or a
   documented cap — fits alongside Phase 1 item 2's structured output
 - mcp-server: remove the dead `Database.get_thread_message_ids` (no
   callers outside its tests)
+- IDs are unbounded: a root Message-ID becomes the thread ID with no
+  length check, and IDs cannot be cut in responses without breaking
+  chaining. Decide on a parse-time length limit (Message-IDs are
+  ≤998 characters per RFC 5322 line length) or a hashed thread ID
 - AGENTS.md commit-hygiene secret check: `grep '^\+'` fails under
   ugrep (a common `grep` alias); use the portable `grep '^[+]'`
 
@@ -434,6 +432,35 @@ do not ship persisted claims without them.
    during its Phase 3 experimental period.
 
 ## Recently Completed
+
+### 2026-09-28 — Structured MCP output (Phase 1 item 2)
+
+The eleven search / retrieval / evidence / status tools declare a
+Pydantic output model (`src/tools/outputs.py`) as their `outputSchema`
+and return it as `structuredContent` beside the unchanged prose, so IDs
+(thread → message → attachment) and paging state (`next_offset`,
+`next_cursor`, `total_matches`) are typed fields. Structured output
+keeps the prose's bounds on sender-controlled headers, with full counts
+alongside. Failures are now raised and reach clients as `isError`
+results instead of success results carrying error prose. Previously
+FastMCP had wrapped every `list[TextContent]` return as
+`{"result": [...]}` structured content, a second copy of the prose;
+the intelligence tools still do. A contract test drives every tool
+through a real `FastMCP` and validates each result against its
+published schema. `pydantic` is now a declared dependency (same pinned
+version `mcp` already resolved). No schema change. Review round 1: the
+structured `query_messages` rows newly exposed In-Reply-To and
+References with no length cut (a 2 MB response at `limit=1`); every
+header value in its prose and structured output is now cut at 500
+characters, as in `get_thread`, which also closes the backlog item for
+its unbounded subjects and display names. Review round 2 (Codex
+security review): `get_thread` repeated the sender-controlled thread ID
+(the root Message-ID) on every message row, and `search_emails` /
+`list_threads` / `search_attachments` listed 10 uncut participants or
+senders where the prose shows 2–3. Message rows now carry `thread_id`
+only where they can span threads (`query_messages`, `get_message`), and
+the shared builders cut by default, with `get_message` the only
+full-value caller.
 
 ### 2026-09-28 — Dead action/IMAP surface deleted (Phase 1 item 6)
 
