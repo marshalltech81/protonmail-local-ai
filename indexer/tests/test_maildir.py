@@ -1,12 +1,18 @@
-"""Tests for src/maildir.py — flag parsing and Maildir uniq resolution."""
+"""Tests for src/maildir.py — flag parsing, Maildir uniq resolution, and
+mbsync's last-sync stamp."""
 
 from pathlib import Path
 
+import pytest
 from src.maildir import (
     FLAG_SEPARATOR,
+    SYNC_STAMP_NAME,
+    SyncStamp,
     get_uniq,
     is_trashed,
     parse_flags,
+    parse_sync_stamp_rename,
+    read_sync_stamp,
     resolve_current_path,
 )
 
@@ -114,3 +120,56 @@ class TestResolveCurrentPath:
         (folder / "cur").mkdir()
         stored = folder / "cur" / "msg.host:2,S"
         assert resolve_current_path(stored) is None
+
+
+class TestReadSyncStamp:
+    def test_missing_stamp_means_no_sync_recorded(self, tmp_path):
+        assert read_sync_stamp(tmp_path) is None
+
+    def test_reads_completion_time_as_utc_and_interval(self, tmp_path):
+        (tmp_path / SYNC_STAMP_NAME).write_text(
+            '{"completed_at": "2026-09-28T12:00:00Z", "sync_interval_secs": 60}\n'
+        )
+        assert read_sync_stamp(tmp_path) == SyncStamp(
+            completed_at="2026-09-28T12:00:00+00:00", sync_interval_secs=60
+        )
+
+    @pytest.mark.parametrize(
+        "content",
+        [
+            "not json",
+            "[]",
+            '{"sync_interval_secs": 60}',
+            '{"completed_at": "yesterday", "sync_interval_secs": 60}',
+            '{"completed_at": "2026-09-28T12:00:00", "sync_interval_secs": 60}',
+            '{"completed_at": "2026-09-28T12:00:00Z", "sync_interval_secs": 0}',
+            '{"completed_at": "2026-09-28T12:00:00Z", "sync_interval_secs": "60"}',
+            '{"completed_at": "2026-09-28T12:00:00Z", "sync_interval_secs": true}',
+        ],
+    )
+    def test_malformed_stamp_raises(self, tmp_path, content):
+        """A stamp that cannot be read must not pass for a sync time:
+        the caller logs it and records no sync."""
+        (tmp_path / SYNC_STAMP_NAME).write_text(content)
+        with pytest.raises(ValueError):
+            read_sync_stamp(tmp_path)
+
+
+class TestParseSyncStampRename:
+    def test_reads_the_sync_from_the_temporary_name(self):
+        assert parse_sync_stamp_rename(
+            "/maildir/.mbsync-last-sync.2026-09-28T12:00:00Z.60.tmp"
+        ) == SyncStamp(completed_at="2026-09-28T12:00:00+00:00", sync_interval_secs=60)
+
+    @pytest.mark.parametrize(
+        "src",
+        [
+            "/maildir/other.tmp",
+            "/maildir/.mbsync-last-sync.json.tmp",
+            "/maildir/.mbsync-last-sync.yesterday.60.tmp",
+            "/maildir/.mbsync-last-sync.2026-09-28T12:00:00.60.tmp",
+            "/maildir/.mbsync-last-sync.2026-09-28T12:00:00Z.0.tmp",
+        ],
+    )
+    def test_anything_else_is_not_a_sync(self, src):
+        assert parse_sync_stamp_rename(src) is None

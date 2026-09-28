@@ -1,7 +1,7 @@
 """
 System tools — Group 4.
-Index status and sync mode.
-Claude should call get_index_status before making claims about email content.
+Mailbox status: how current the local index is, and what it holds.
+Claude should call get_mailbox_status before making claims about email content.
 """
 
 import logging
@@ -11,97 +11,185 @@ from typing import Annotated
 from mcp.server.fastmcp.exceptions import ToolError
 from mcp.types import CallToolResult
 
-from .outputs import IndexStatusOutput, SyncStatusOutput, tool_result
+from .outputs import MailboxStatusOutput, QueueCounts, tool_result
 
 log = logging.getLogger("mcp.tools.system")
+
+# A sync is stale after three missed intervals, but never sooner than
+# five minutes: a sync of a busy mailbox can outlast a short interval.
+SYNC_STALE_INTERVALS = 3
+SYNC_STALE_FLOOR_SECS = 300
+# The indexer reports every 30 s while it runs (``_IngestionStateRecorder``)
+# and its own healthcheck allows 600 s between heartbeats.
+INDEXER_STALE_SECS = 600
+
+
+def _age(seconds: float) -> str:
+    seconds = max(int(seconds), 0)
+    if seconds < 60:
+        return f"{seconds}s"
+    minutes, _ = divmod(seconds, 60)
+    if minutes < 60:
+        return f"{minutes}m"
+    hours, minutes = divmod(minutes, 60)
+    if hours < 24:
+        return f"{hours}h {minutes}m"
+    days, hours = divmod(hours, 24)
+    return f"{days}d {hours}h"
+
+
+def _messages(n: int) -> str:
+    return f"{n:,} message" + ("" if n == 1 else "s")
+
+
+def not_current_reasons(
+    *,
+    last_sync_at: datetime | None,
+    sync_interval_secs: int | None,
+    indexer_last_seen_at: datetime | None,
+    queue: QueueCounts,
+    now: datetime,
+) -> list[str]:
+    """Why the index is not current; empty when it is.
+
+    Current means: mbsync completed a sync recently, the indexer has
+    reported recently (it read that sync's stamp after the sync's mail
+    was already queued), and nothing is waiting in the queue. Dead
+    messages are terminal and reported separately, not waited on.
+    """
+    reasons = []
+    if last_sync_at is None or sync_interval_secs is None:
+        reasons.append("no successful mail sync has been recorded")
+    else:
+        age = (now - last_sync_at).total_seconds()
+        if age > max(SYNC_STALE_INTERVALS * sync_interval_secs, SYNC_STALE_FLOOR_SECS):
+            reasons.append(
+                f"last successful mail sync was {_age(age)} ago "
+                f"(mbsync syncs every {sync_interval_secs}s)"
+            )
+    if indexer_last_seen_at is None:
+        reasons.append("the indexer has not reported")
+    else:
+        age = (now - indexer_last_seen_at).total_seconds()
+        if age > INDEXER_STALE_SECS:
+            reasons.append(f"the indexer last reported {_age(age)} ago")
+    waiting = queue.pending + queue.retrying
+    if waiting:
+        reasons.append(
+            f"{_messages(waiting)} waiting to be indexed "
+            f"({queue.pending:,} pending, {queue.retrying:,} retrying)"
+        )
+    return reasons
+
+
+def _mailbox_status(db) -> MailboxStatusOutput:
+    stats = db.get_mailbox_status()
+    state = stats["ingestion"] or {}
+    last_sync_at = (
+        datetime.fromisoformat(state["sync_completed_at"])
+        if state.get("sync_completed_at")
+        else None
+    )
+    indexer_seen = (
+        datetime.fromisoformat(state["indexer_seen_at"]) if state.get("indexer_seen_at") else None
+    )
+    queue = QueueCounts(**stats["queue"])
+    now = datetime.now(UTC)
+    reasons = not_current_reasons(
+        last_sync_at=last_sync_at,
+        sync_interval_secs=state.get("sync_interval_secs"),
+        indexer_last_seen_at=indexer_seen,
+        queue=queue,
+        now=now,
+    )
+    return MailboxStatusOutput(
+        current=not reasons,
+        not_current_reasons=reasons,
+        last_sync_at=last_sync_at,
+        sync_interval_secs=state.get("sync_interval_secs"),
+        indexer_last_seen_at=indexer_seen,
+        queue=queue,
+        total_threads=stats["total_threads"],
+        total_messages=stats["total_messages"],
+        oldest_message=stats["oldest_message"],
+        newest_message=stats["newest_message"],
+        checked_at=now,
+    )
+
+
+def _when(value: datetime | None, now: datetime) -> str:
+    if value is None:
+        return "never"
+    return f"{value.isoformat()} ({_age((now - value).total_seconds())} ago)"
+
+
+def _render(out: MailboxStatusOutput) -> str:
+    lines = ["=== Mailbox Status ===", f"Current:        {'yes' if out.current else 'no'}"]
+    lines += [f"  - {reason}" for reason in out.not_current_reasons]
+    q = out.queue
+    lines += [
+        f"Last mail sync: {_when(out.last_sync_at, out.checked_at)}",
+        f"Indexer seen:   {_when(out.indexer_last_seen_at, out.checked_at)}",
+        f"Queue:          {q.pending:,} pending, {q.retrying:,} retrying, {q.dead:,} dead",
+    ]
+    if q.dead:
+        lines.append(
+            f"  {_messages(q.dead)} failed permanently and "
+            f"{'is' if q.dead == 1 else 'are'} incompletely indexed: missing from "
+            "search, or found only by keyword, until an operator requeues them "
+            "(make requeue-dead)."
+        )
+    lines += [
+        f"Total threads:  {out.total_threads:,}",
+        f"Total messages: {out.total_messages:,}",
+        f"Oldest message: {out.oldest_message or 'unknown'}",
+        f"Newest message: {out.newest_message or 'unknown'}",
+        f"Checked at:     {out.checked_at.isoformat()}",
+    ]
+    return "\n".join(lines)
 
 
 def register_system_tools(server, db):
     @server.tool()
-    async def get_index_status() -> Annotated[CallToolResult, IndexStatusOutput]:
+    async def get_mailbox_status() -> Annotated[CallToolResult, MailboxStatusOutput]:
         """
-        Get the current status of the local email index.
-        Call this before answering questions about email content to verify
-        the index is current and understand the scope of available data.
+        Report whether the local email index is current, and what it holds.
+        Call this before answering questions about email content.
+
+        This server answers only from the local index, which mbsync fills
+        from Proton every few minutes; it never contacts Proton itself. The
+        index is current when mail synced recently, the indexer is running,
+        and no message is waiting to be indexed. When it is not current, the
+        reasons are listed: say so before relying on the results, since
+        recent mail may be missing. Mail that reached Proton after the last
+        sync is never searchable yet.
 
         Returns:
-            Total threads and messages indexed, date range, and last sync info.
+            current and the reasons it is false, last sync time, indexer
+            liveness, queue counts (pending, retrying, dead), total threads
+            and messages, and the date range.
         """
-        log.info("tool=get_index_status")
+        log.info("tool=get_mailbox_status")
         try:
-            stats = db.get_stats()
-
-            oldest = stats.get("oldest_message", "unknown")
-            newest = stats.get("newest_message", "unknown")
-            checked_at = datetime.now(UTC)
-
-            lines = [
-                "=== Index Status ===",
-                f"Total threads:  {stats.get('total_threads', 0):,}",
-                f"Total messages: {stats.get('total_messages', 0):,}",
-                f"Oldest message: {oldest}",
-                f"Newest message: {newest}",
-                f"Checked at:     {checked_at.isoformat()}",
-            ]
-            output = IndexStatusOutput(
-                total_threads=stats.get("total_threads", 0),
-                total_messages=stats.get("total_messages", 0),
-                oldest_message=stats.get("oldest_message"),
-                newest_message=stats.get("newest_message"),
-                checked_at=checked_at,
-            )
-            return tool_result("\n".join(lines), output)
-
+            output = _mailbox_status(db)
         except Exception as e:
-            log.error(f"get_index_status error: {e}")
-            raise ToolError(f"Index status error: {e}") from e
-
-    @server.tool()
-    async def get_sync_status() -> Annotated[CallToolResult, SyncStatusOutput]:
-        """
-        Report how this server sees mail sync.
-
-        mcp-server serves the local SQLite index only and never talks to
-        ProtonBridge; mbsync owns Bridge access and Maildir refresh.
-
-        Returns:
-            The sync mode and which service is responsible for syncing.
-        """
-        log.info("tool=get_sync_status")
-        lines = [
-            "=== Sync Status ===",
-            "Mode: local index only",
-            "Bridge reachability is not checked by mcp-server.",
-            "mbsync remains responsible for talking to Bridge and refreshing Maildir.",
-        ]
-        return tool_result(
-            "\n".join(lines), SyncStatusOutput(mode="local_index_only", synced_by="mbsync")
-        )
+            log.error(f"get_mailbox_status error: {e}")
+            raise ToolError(f"Mailbox status error: {e}") from e
+        return tool_result(_render(output), output)
 
 
-def get_index_status() -> dict:
+def get_mailbox_status() -> dict:
     """Standalone helper used by the Makefile ``status`` target.
 
     Opens the local SQLite index directly (in read-only URI mode, same as
-    the running MCP server) and returns real stats. Previous behavior
-    unconditionally returned ``{"status": "ok"}`` regardless of index state,
-    so ``make status`` never reflected reality.
+    the running MCP server) and returns the same fields the tool does.
     """
     import os
-    from datetime import UTC, datetime
 
     from ..lib.sqlite import Database
 
     try:
-        db = Database(os.environ.get("SQLITE_PATH", "/data/mail.db"))
-        stats = db.get_stats()
+        output = _mailbox_status(Database(os.environ.get("SQLITE_PATH", "/data/mail.db")))
     except Exception as e:
         return {"status": "error", "error": str(e)}
-    return {
-        "status": "ok",
-        "total_threads": stats.get("total_threads", 0),
-        "total_messages": stats.get("total_messages", 0),
-        "oldest_message": stats.get("oldest_message"),
-        "newest_message": stats.get("newest_message"),
-        "checked_at": datetime.now(UTC).isoformat(),
-    }
+    return {"status": "ok", **output.model_dump(mode="json")}

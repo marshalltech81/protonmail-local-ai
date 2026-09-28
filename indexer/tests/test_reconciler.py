@@ -443,7 +443,7 @@ class TestReap:
         # visibility surface, the only operator signal was a stuck
         # tombstone count + scattered WARN/ERROR log lines per pass.
         # ``reap()`` now reports ``blocked_threads`` so a stale
-        # deletion-cleanup state is visible to ``get_index_status``
+        # deletion-cleanup state is visible to ``get_mailbox_status``
         # consumers instead of buried in logs.
         orig_path = maildir / "1700000000.M1.host:2,S"
         _write_eml(orig_path, "bk1@example.com")

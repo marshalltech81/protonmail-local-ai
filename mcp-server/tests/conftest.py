@@ -145,8 +145,56 @@ def _build_schema(conn: sqlite3.Connection) -> None:
             extraction_error  TEXT,
             extracted_at      TEXT NOT NULL
         );
+        CREATE TABLE indexing_jobs (
+            filepath        TEXT PRIMARY KEY,
+            reason          TEXT NOT NULL,
+            status          TEXT NOT NULL,
+            attempts        INTEGER NOT NULL DEFAULT 0,
+            last_error      TEXT,
+            last_stage      TEXT,
+            last_error_class TEXT,
+            created_at      TEXT NOT NULL,
+            updated_at      TEXT NOT NULL,
+            next_attempt_at TEXT NOT NULL
+        );
+        CREATE TABLE ingestion_state (
+            id                 INTEGER PRIMARY KEY CHECK (id = 1),
+            sync_completed_at  TEXT,
+            sync_interval_secs INTEGER,
+            indexer_seen_at    TEXT NOT NULL
+        );
         """
     )
+
+
+def write_ingestion(
+    db_path: str,
+    *,
+    sync_completed_at: str | None = None,
+    sync_interval_secs: int | None = None,
+    indexer_seen_at: str | None = None,
+    jobs: tuple[tuple[str, int, str | None], ...] = (),
+) -> None:
+    """Write the indexer-owned ``ingestion_state`` row (when
+    ``indexer_seen_at`` is given) and ``indexing_jobs`` rows as
+    ``(status, attempts, last_error_class)`` into a fixture database."""
+    conn = sqlite3.connect(db_path)
+    try:
+        if indexer_seen_at is not None:
+            conn.execute(
+                "INSERT INTO ingestion_state VALUES (1, ?, ?, ?)",
+                (sync_completed_at, sync_interval_secs, indexer_seen_at),
+            )
+        for i, (status, attempts, error_class) in enumerate(jobs):
+            conn.execute(
+                "INSERT INTO indexing_jobs (filepath, reason, status, attempts, "
+                "last_error_class, created_at, updated_at, next_attempt_at) "
+                "VALUES (?, 'x', ?, ?, ?, '', '', '')",
+                (f"/maildir/INBOX/cur/{i}", status, attempts, error_class),
+            )
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def _insert_chunk(

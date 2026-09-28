@@ -13,11 +13,13 @@ exercise it with stub collaborators rather than booting a live indexer.
 """
 
 import json
+import sqlite3
 from pathlib import Path
 
 import pytest
 from src import main
 from src.database import EMBEDDING_DIM, Database
+from src.maildir import SyncStamp
 from src.queue import REASON_INITIAL_SCAN, IndexingQueue
 from src.threader import Threader
 
@@ -1880,6 +1882,157 @@ class TestSteadyStateBatchedDrain:
         assert queue.stats() == {"queued": 3, "dead": 0}
 
 
+STAMP_JSON = '{"completed_at": "2026-09-28T12:00:00Z", "sync_interval_secs": 60}'
+STAMP = SyncStamp(completed_at="2026-09-28T12:00:00+00:00", sync_interval_secs=60)
+
+
+class TestIngestionStateRecorder:
+    """The recorder writes the last acknowledged mbsync sync and the
+    indexer's own liveness into ``ingestion_state`` for
+    ``get_mailbox_status``, at most once per interval. A sync is
+    acknowledged only once every message it delivered is queued."""
+
+    def _state(self, db):
+        return db._conn.execute(
+            "SELECT sync_completed_at, sync_interval_secs, indexer_seen_at FROM ingestion_state"
+        ).fetchone()
+
+    def test_stamp_on_disk_is_not_recorded_until_acknowledged(self, tmp_path, db):
+        """The stamp can be on disk while the watcher is still behind on
+        the deliveries that preceded it."""
+        (tmp_path / main.SYNC_STAMP_NAME).write_text(STAMP_JSON)
+        main._IngestionStateRecorder(db, tmp_path).maybe_record(now=100.0)
+
+        row = self._state(db)
+        assert row["sync_completed_at"] is None
+        assert row["indexer_seen_at"]
+
+    def test_records_the_acknowledged_stamp(self, tmp_path, db):
+        recorder = main._IngestionStateRecorder(db, tmp_path)
+        recorder.acknowledge(STAMP)
+        recorder.maybe_record(now=100.0)
+
+        row = self._state(db)
+        assert row["sync_completed_at"] == STAMP.completed_at
+        assert row["sync_interval_secs"] == 60
+
+    def test_acknowledgement_never_moves_backwards(self, tmp_path, db):
+        recorder = main._IngestionStateRecorder(db, tmp_path)
+        recorder.acknowledge(STAMP)
+        recorder.acknowledge(SyncStamp("2026-09-28T11:00:00+00:00", 60))
+        recorder.acknowledge(None)
+        recorder.maybe_record(now=100.0)
+
+        assert self._state(db)["sync_completed_at"] == STAMP.completed_at
+
+    def test_writes_at_most_once_per_interval(self, tmp_path, db):
+        recorder = main._IngestionStateRecorder(db, tmp_path, interval_secs=30)
+        recorder.maybe_record(now=100.0)
+        recorder.acknowledge(STAMP)
+        recorder.maybe_record(now=129.0)
+        assert self._state(db)["sync_completed_at"] is None
+
+        recorder.maybe_record(now=130.0)
+        assert self._state(db)["sync_completed_at"] == STAMP.completed_at
+
+    def test_read_stamp_logs_a_malformed_stamp(self, tmp_path, db, caplog):
+        (tmp_path / main.SYNC_STAMP_NAME).write_text("garbage")
+
+        assert main._IngestionStateRecorder(db, tmp_path).read_stamp() is None
+        assert "sync stamp" in caplog.text
+
+    def test_write_failure_is_logged_and_retried_next_call(self, tmp_path, db, caplog, monkeypatch):
+        recorder = main._IngestionStateRecorder(db, tmp_path, interval_secs=30)
+
+        def boom(**kw):
+            raise sqlite3.OperationalError("database is locked")
+
+        with monkeypatch.context() as m:
+            m.setattr(db, "record_ingestion_state", boom)
+            recorder.maybe_record(now=100.0)
+        assert "ingestion state" in caplog.text
+
+        recorder.maybe_record(now=101.0)
+        assert self._state(db) is not None
+
+    def test_health_heartbeat_records_liveness(self, tmp_path, db, monkeypatch):
+        """Every health heartbeat — per message, per embed batch — also
+        refreshes liveness, so a long drain pass never reads as a
+        stopped indexer."""
+        monkeypatch.setattr(main, "INDEXER_HEALTH_FILE", tmp_path / "healthy")
+        monkeypatch.setattr(main, "_ingestion_state", main._IngestionStateRecorder(db, tmp_path))
+        main.touch_health_file()
+
+        assert self._state(db)["indexer_seen_at"]
+
+    def test_stamp_rename_acknowledges_the_sync_named_in_the_event(self, tmp_path, db, monkeypatch):
+        """By the time the watcher handles the stamp's rename, every
+        earlier delivery event has been handled (watchdog dispatches in
+        order). The file may already hold a later sync whose deliveries
+        are still behind in the event queue, so the event's own sync —
+        carried in the temporary file's name — is what gets acknowledged."""
+        from watchdog.events import FileMovedEvent
+
+        monkeypatch.setattr(main, "MAILDIR_PATH", tmp_path)
+        recorder = main._IngestionStateRecorder(db, tmp_path)
+        handler = main.MaildirHandler(db, _make_queue(db), ingestion_state=recorder)
+        (tmp_path / main.SYNC_STAMP_NAME).write_text(
+            '{"completed_at": "2026-09-28T12:05:00Z", "sync_interval_secs": 60}'
+        )
+        handler.on_moved(
+            FileMovedEvent(
+                str(tmp_path / ".mbsync-last-sync.2026-09-28T12:00:00Z.60.tmp"),
+                str(tmp_path / main.SYNC_STAMP_NAME),
+            )
+        )
+        recorder.maybe_record(now=100.0)
+
+        assert self._state(db)["sync_completed_at"] == STAMP.completed_at
+
+    def test_unrecognized_rename_onto_the_stamp_is_not_acknowledged(
+        self, tmp_path, db, caplog, monkeypatch
+    ):
+        from watchdog.events import FileMovedEvent
+
+        monkeypatch.setattr(main, "MAILDIR_PATH", tmp_path)
+        recorder = main._IngestionStateRecorder(db, tmp_path)
+        handler = main.MaildirHandler(db, _make_queue(db), ingestion_state=recorder)
+        handler.on_moved(
+            FileMovedEvent(str(tmp_path / "other.tmp"), str(tmp_path / main.SYNC_STAMP_NAME))
+        )
+        recorder.maybe_record(now=100.0)
+
+        assert self._state(db)["sync_completed_at"] is None
+        assert "sync stamp" in caplog.text
+
+    def test_initial_index_acknowledges_the_stamp_read_before_its_walk(
+        self, tmp_path, db, monkeypatch
+    ):
+        """A sync that completes during the walk may have delivered
+        files the walk already passed, so only the stamp read before the
+        walk is acknowledged."""
+        maildir = tmp_path / "maildir"
+        maildir.mkdir()
+        (maildir / main.SYNC_STAMP_NAME).write_text(STAMP_JSON)
+        monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
+        monkeypatch.setattr(main, "touch_health_file", lambda: None)
+
+        def walk(*args, **kwargs):
+            (maildir / main.SYNC_STAMP_NAME).write_text(
+                '{"completed_at": "2026-09-28T12:05:00Z", "sync_interval_secs": 60}'
+            )
+            return 0
+
+        monkeypatch.setattr(main, "_enqueue_unindexed_messages", walk)
+        recorder = main._IngestionStateRecorder(db, maildir)
+        main.initial_index(
+            db, make_mock_embedder(), Threader(db), _make_queue(db), ingestion_state=recorder
+        )
+        recorder.maybe_record(now=100.0)
+
+        assert self._state(db)["sync_completed_at"] == STAMP.completed_at
+
+
 class TestPeriodicRecoverySkipsDeadLetter:
     """``_recover_zero_vector_threads(resurrect_dead=False)`` must
     preserve the durable queue's bounded-retry contract.
@@ -2062,6 +2215,8 @@ class TestMainStartupAndLoop:
     def _run_main(self, tmp_path, monkeypatch, *, sweep_due: bool):
         events: list[str] = []
         db = Database(tmp_path / "mail.db")
+        self._db = db
+        monkeypatch.setattr(main, "_ingestion_state", None)
         monkeypatch.setattr(main, "MAILDIR_PATH", tmp_path / "maildir")
         monkeypatch.setattr(main, "_validate_embed_config", lambda: None)
         monkeypatch.setattr(main, "_validate_embedding_dim", lambda e: None)
@@ -2076,12 +2231,19 @@ class TestMainStartupAndLoop:
             lambda *a, **kw: (
                 events.append(f"initial_index:skip_trashed={kw.get('skip_trashed')}"),
                 events.append(f"initial_breaker={id(kw.get('breaker'))}"),
+                events.append(f"initial_state={id(kw.get('ingestion_state'))}"),
             ),
         )
         monkeypatch.setattr(
             main,
             "_drain_queue_batched",
-            lambda *a, **kw: events.append(f"drain:breaker={id(kw.get('breaker'))}") or 0,
+            lambda *a, **kw: (
+                (
+                    events.append(f"drain:breaker={id(kw.get('breaker'))}"),
+                    events.append(f"drain:state={id(kw.get('ingestion_state'))}"),
+                )
+                and 0
+            ),
         )
         monkeypatch.setattr(main, "_recover_zero_vector_threads", lambda *a, **kw: 0)
         monkeypatch.setattr(
@@ -2115,6 +2277,24 @@ class TestMainStartupAndLoop:
         drain = next(e for e in events if e.startswith("drain:breaker="))
         assert initial.split("=")[1] == drain.split("=")[1]
         assert initial.split("=")[1] != str(id(None))
+
+    def test_heartbeat_and_initial_index_share_one_recorder(self, tmp_path, monkeypatch):
+        """``get_mailbox_status`` needs liveness through the initial
+        drain as well as in steady state."""
+        events = self._run_main(tmp_path, monkeypatch, sweep_due=False)
+
+        initial = next(e for e in events if e.startswith("initial_state="))
+        assert initial == f"initial_state={id(main._ingestion_state)}"
+        assert main._ingestion_state is not None
+
+    def test_periodic_rescan_acknowledges_the_stamp(self, tmp_path, monkeypatch):
+        (tmp_path / "maildir").mkdir()
+        (tmp_path / "maildir" / main.SYNC_STAMP_NAME).write_text(STAMP_JSON)
+        self._run_main(tmp_path, monkeypatch, sweep_due=True)
+
+        main._ingestion_state.maybe_record(now=10**9)
+        row = self._db._conn.execute("SELECT sync_completed_at FROM ingestion_state").fetchone()
+        assert row["sync_completed_at"] == STAMP.completed_at
 
     def test_main_loop_periodically_rewalks_the_maildir(self, tmp_path, monkeypatch):
         events = self._run_main(tmp_path, monkeypatch, sweep_due=True)

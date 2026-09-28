@@ -31,6 +31,7 @@ import sqlite3
 import time
 import urllib.parse
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 
 from watchdog.events import FileSystemEventHandler
@@ -52,7 +53,13 @@ from .embedder import (
     classify_embed_failure,
     scrub_embed_error,
 )
-from .maildir import is_trashed
+from .maildir import (
+    SYNC_STAMP_NAME,
+    SyncStamp,
+    is_trashed,
+    parse_sync_stamp_rename,
+    read_sync_stamp,
+)
 from .parser import Message, OversizedMessageError, _derive_folder, parse_email
 from .queue import (
     ERROR_CLASS_OPERATOR,
@@ -308,6 +315,70 @@ INDEXER_ATTACHMENT_MAX_EXTRACTED_CHARS = _int_env(
 
 def touch_health_file() -> None:
     INDEXER_HEALTH_FILE.touch(exist_ok=True)
+    # Liveness for get_mailbox_status rides on every health heartbeat
+    # (per message, per embed batch), so a long drain pass never reads
+    # as a stopped indexer.
+    if _ingestion_state is not None:
+        _ingestion_state.maybe_record(time.monotonic())
+
+
+class _IngestionStateRecorder:
+    """Writes the last acknowledged mbsync sync and the indexer's
+    liveness into ``ingestion_state`` for mcp-server's
+    ``get_mailbox_status``.
+
+    A sync is acknowledged only once every message it delivered is
+    queued: when the watcher handles the stamp's rename (watchdog
+    dispatches events in order, so the sync's delivery events were
+    handled first), or when a Maildir walk that started after the sync
+    finishes. A stamp merely present on disk proves nothing — the
+    watcher may still be behind on that sync's deliveries.
+
+    Writes at most once per ``interval_secs``; mcp-server's staleness
+    thresholds are minutes.
+    """
+
+    def __init__(self, db: Database, maildir_root: Path, interval_secs: float = 30):
+        self.db = db
+        self.maildir_root = maildir_root
+        self.interval_secs = interval_secs
+        self._acked: SyncStamp | None = None
+        self._last_write: float | None = None
+
+    def read_stamp(self) -> SyncStamp | None:
+        """The stamp on disk now, for acknowledging after a walk."""
+        try:
+            return read_sync_stamp(self.maildir_root)
+        except (OSError, ValueError) as e:
+            log.warning("unreadable mbsync sync stamp %s: %s", SYNC_STAMP_NAME, e)
+            return None
+
+    def acknowledge(self, stamp: SyncStamp | None) -> None:
+        # Called from the watcher thread and the main thread; keep the
+        # newest so a walk that read an older stamp cannot move it back.
+        # Timestamps share one UTC ISO format, so they compare as strings.
+        acked = self._acked
+        if stamp is not None and (acked is None or stamp.completed_at > acked.completed_at):
+            self._acked = stamp
+
+    def maybe_record(self, now: float) -> None:
+        if self._last_write is not None and now - self._last_write < self.interval_secs:
+            return
+        acked = self._acked
+        try:
+            self.db.record_ingestion_state(
+                sync_completed_at=acked.completed_at if acked else None,
+                sync_interval_secs=acked.sync_interval_secs if acked else None,
+                seen_at=datetime.now(UTC).isoformat(),
+            )
+        except sqlite3.Error as e:
+            log.error("recording ingestion state failed: %s", e)
+            return
+        self._last_write = now
+
+
+# Set by ``main``; ``touch_health_file`` reports liveness through it.
+_ingestion_state: _IngestionStateRecorder | None = None
 
 
 class MaildirHandler(FileSystemEventHandler):
@@ -326,10 +397,12 @@ class MaildirHandler(FileSystemEventHandler):
         db: Database,
         queue: IndexingQueue,
         reconciler: Reconciler | None = None,
+        ingestion_state: _IngestionStateRecorder | None = None,
     ):
         self.db = db
         self.queue = queue
         self.reconciler = reconciler
+        self.ingestion_state = ingestion_state
 
     def _is_reaped_or_deleted(self, path: str | Path) -> bool:
         # With deletion reconciliation enabled, a T-flagged file is
@@ -367,6 +440,18 @@ class MaildirHandler(FileSystemEventHandler):
         src_path = str(event.src_path)
         dest_path_obj = Path(event.dest_path)
         dest_path = str(dest_path_obj)
+
+        # mbsync renamed a new last-sync stamp into place. Acknowledge the
+        # sync named by the temporary file, not the stamp's current
+        # content: a later sync may already have replaced it while its
+        # deliveries are still behind this event.
+        if dest_path_obj.name == SYNC_STAMP_NAME and dest_path_obj.parent == MAILDIR_PATH:
+            stamp = parse_sync_stamp_rename(src_path)
+            if stamp is None:
+                log.warning("ignoring unrecognized rename onto the mbsync sync stamp")
+            elif self.ingestion_state is not None:
+                self.ingestion_state.acknowledge(stamp)
+            return
 
         if self.db.is_indexed(src_path):
             # Case 1: rename of an existing indexed message. Flag renames
@@ -1474,6 +1559,7 @@ def initial_index(
     *,
     skip_trashed: bool = False,
     breaker: _EmbedOutageBreaker | None = None,
+    ingestion_state: _IngestionStateRecorder | None = None,
 ):
     """Enqueue every unindexed Maildir message and drain the queue.
 
@@ -1481,7 +1567,9 @@ def initial_index(
     is shared with the main loop so an embedder outage that starts
     during the initial drain carries its backoff into steady state
     (the drain returns early while the breaker is open; the main loop
-    finishes the queue once the embedder is back).
+    finishes the queue once the embedder is back). ``ingestion_state``
+    acknowledges the sync stamp read before the walk once the walk has
+    queued everything that sync delivered.
 
     Refreshes the health file after every processed message so that
     long initial indexes (large mailboxes, slow embedding service, OCR
@@ -1503,9 +1591,12 @@ def initial_index(
     # 5-attempt × 30s backoff cascade against the same poison-pill
     # payloads — observed to add up to ~30 minutes of wasted embedding
     # service load per dead file per restart.
+    stamp = ingestion_state.read_stamp() if ingestion_state is not None else None
     _enqueue_unindexed_messages(
         db, queue, MAILDIR_PATH, REASON_INITIAL_SCAN, skip_trashed=skip_trashed
     )
+    if ingestion_state is not None:
+        ingestion_state.acknowledge(stamp)
 
     # Recovery sweep — re-enqueue messages stuck on chunkless zero-vector
     # threads from a prior crash mid-batch (queued row that mark_failed /
@@ -1643,7 +1734,10 @@ def main():
     # drain runs for hours; mail mbsync delivers in that window would
     # otherwise never be enqueued. Events that land mid-drain are
     # picked up by the same drain-to-empty loop.
-    handler = MaildirHandler(db, queue, reconciler=reconciler)
+    global _ingestion_state
+    ingestion_state = _IngestionStateRecorder(db, MAILDIR_PATH)
+    _ingestion_state = ingestion_state
+    handler = MaildirHandler(db, queue, reconciler=reconciler, ingestion_state=ingestion_state)
     observer = Observer()
     observer.schedule(handler, str(MAILDIR_PATH), recursive=True)
     observer.start()
@@ -1658,6 +1752,7 @@ def main():
         queue,
         skip_trashed=reconciler is not None,
         breaker=breaker,
+        ingestion_state=ingestion_state,
     )
     touch_health_file()
 
@@ -1755,6 +1850,7 @@ def main():
                 except Exception as e:
                     log.error("periodic recovery sweep failed: %s", e)
                 try:
+                    stamp = ingestion_state.read_stamp()
                     _enqueue_unindexed_messages(
                         db,
                         queue,
@@ -1762,6 +1858,7 @@ def main():
                         REASON_RESCAN,
                         skip_trashed=reconciler is not None,
                     )
+                    ingestion_state.acknowledge(stamp)
                 except Exception as e:
                     log.error("periodic Maildir rescan failed: %s", e)
                 last_recovery_sweep = now

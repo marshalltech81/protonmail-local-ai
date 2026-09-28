@@ -746,7 +746,9 @@ EMBED_MODEL and the embed API key" error.
 | `INDEXER_MAX_ATTEMPTS` | `5` | Max retries before a row becomes `dead`. |
 | `INDEXER_RETRY_BASE_SECONDS` | `30` | Base backoff. Each attempt multiplies by `2^(attempts-1)`, capped at 6 h. |
 
-Inspect queued / dead work directly:
+`make status` (or the `get_mailbox_status` MCP tool) reports pending,
+retrying, and dead counts and whether the index is current. For the
+error class breakdown, inspect the table directly:
 
 ```bash
 docker run --rm -v protonmail-local-ai_sqlite-volume:/data:ro \

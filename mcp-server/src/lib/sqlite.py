@@ -2090,16 +2090,54 @@ class Database:
             return None
         return int(match.group(1))
 
-    def get_stats(self) -> dict:
-        stats = {}
+    def get_mailbox_status(self) -> dict:
+        """Index counts, queue depth, and the indexer's ``ingestion_state``
+        row (``None`` until the indexer first reports, or before it has
+        migrated to schema v21), read in one
+        snapshot so the counts and the queue agree.
+
+        Queue rows are ``pending`` (not yet failed), ``retrying``
+        (failed at least once, will retry), or ``dead`` (gave up). A job
+        deferred during an embedder outage keeps ``attempts = 0`` but
+        records its failure class, so the class marks it as retrying; a
+        dead job requeued by ``make requeue-dead`` clears both and is
+        pending again.
+        """
+        stats: dict = {}
         with closing(self._connect()) as conn:
+            conn.execute("BEGIN")
             stats["total_threads"] = conn.execute("SELECT COUNT(*) FROM threads").fetchone()[0]
             stats["total_messages"] = conn.execute(
                 "SELECT COUNT(*) FROM message_thread_map"
             ).fetchone()[0]
             row = conn.execute("SELECT MIN(date_first), MAX(date_last) FROM threads").fetchone()
-        stats["oldest_message"] = row[0]
-        stats["newest_message"] = row[1]
+            stats["oldest_message"] = row[0]
+            stats["newest_message"] = row[1]
+            queue = conn.execute(
+                """
+                SELECT
+                    COALESCE(SUM(status = 'queued' AND NOT (attempts > 0 OR last_error_class IS NOT NULL)), 0),
+                    COALESCE(SUM(status = 'queued' AND (attempts > 0 OR last_error_class IS NOT NULL)), 0),
+                    COALESCE(SUM(status = 'dead'), 0)
+                FROM indexing_jobs
+                """
+            ).fetchone()
+            stats["queue"] = {"pending": queue[0], "retrying": queue[1], "dead": queue[2]}
+            # mcp-server can start on a new build before the indexer has
+            # run migration 0021; report "not yet" rather than failing.
+            has_state_table = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='ingestion_state'"
+            ).fetchone()
+            state = (
+                conn.execute(
+                    "SELECT sync_completed_at, sync_interval_secs, indexer_seen_at "
+                    "FROM ingestion_state"
+                ).fetchone()
+                if has_state_table
+                else None
+            )
+            stats["ingestion"] = dict(state) if state is not None else None
+            conn.execute("COMMIT")
         return stats
 
     def list_folders(self) -> list[dict]:

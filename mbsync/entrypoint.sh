@@ -21,6 +21,11 @@ readonly CERT_EXTRACT_TIMEOUT_SECONDS=20
 readonly MAX_CONSECUTIVE_SYNC_FAILURES=5
 readonly BRIDGE_CERT_PIN_ROTATE="${BRIDGE_CERT_PIN_ROTATE:-false}"
 readonly MAILDIR_PATH="/maildir"
+# Last-sync stamp read by the indexer (indexer/src/maildir.py
+# ``read_sync_stamp``) and reported by mcp-server's get_mailbox_status.
+# It sits at the Maildir root, outside every cur/new folder, so the
+# indexer never treats it as a message.
+readonly SYNC_STAMP_FILE="${MAILDIR_PATH}/.mbsync-last-sync.json"
 
 # Owner-only umask for the runtime tmp dir (config + cert material).
 # mbsync itself ignores umask for Maildir writes — it explicitly passes
@@ -38,6 +43,11 @@ require_prerequisites() {
 
     if [[ ! -s "$BRIDGE_PASS_FILE" ]]; then
         echo ">>> ERROR: ${BRIDGE_PASS_FILE} is missing or empty. Refusing to start without the Bridge password secret." >&2
+        exit 1
+    fi
+
+    if [[ ! "$SYNC_INTERVAL" =~ ^[1-9][0-9]*$ ]]; then
+        echo ">>> ERROR: SYNC_INTERVAL must be a positive integer number of seconds." >&2
         exit 1
     fi
 }
@@ -177,6 +187,23 @@ run_sync() {
     return "$rc"
 }
 
+record_successful_sync() {
+    # Written only after relax_new_maildir_perms, so every message this
+    # sync delivered is already on disk and readable. The temporary name
+    # carries this sync's time and interval: the indexer acknowledges the
+    # sync named by the rename event it sees, which its watcher handles
+    # only after this sync's delivery events. Replaced atomically via
+    # rename; world-readable because the indexer runs as a different UID.
+    local completed_at tmp
+    completed_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    tmp="${MAILDIR_PATH}/.mbsync-last-sync.${completed_at}.${SYNC_INTERVAL}.tmp"
+    printf '{"completed_at": "%s", "sync_interval_secs": %d}\n' \
+        "$completed_at" "$SYNC_INTERVAL" >"$tmp"
+    chmod 644 "$tmp"
+    mv -f "$tmp" "$SYNC_STAMP_FILE"
+    touch "$HEALTH_FILE"
+}
+
 # =============================================================================
 # Generate mbsync config from template
 # envsubst substitutes ${BRIDGE_HOST}, ${BRIDGE_IMAP_PORT}, ${BRIDGE_USER}
@@ -229,7 +256,7 @@ extract_bridge_cert
 consecutive_sync_failures=0
 echo ">>> Running initial sync..."
 if run_sync; then
-    touch "$HEALTH_FILE"
+    record_successful_sync
 else
     consecutive_sync_failures=1
     echo ">>> Initial sync returned a non-zero status (${consecutive_sync_failures}/${MAX_CONSECUTIVE_SYNC_FAILURES})." >&2
@@ -246,7 +273,7 @@ while true; do
     echo ">>> Syncing..."
     if run_sync; then
         consecutive_sync_failures=0
-        touch "$HEALTH_FILE"
+        record_successful_sync
         continue
     fi
 

@@ -1,25 +1,24 @@
 """
-Tests for the registered handlers in src/tools/system.py.
+Tests for the registered ``get_mailbox_status`` handler in
+src/tools/system.py, which the MCP client / LLM calls.
 
-``test_system.py`` already covers the standalone ``get_index_status``
-helper used by the Makefile. This file covers the @server.tool()
-handlers (``get_index_status``, ``get_sync_status``) which the MCP
-client / LLM actually call. The standalone helper and the registered
-handler share a name but have different signatures (one returns a dict,
-the other a list[TextContent]) — they are intentionally different
-surfaces and both need coverage.
+``test_system.py`` covers the ``current`` rules and the standalone
+helper used by the Makefile.
 """
 
 import asyncio
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from mcp.server.fastmcp.exceptions import ToolError
 from src.tools.system import register_system_tools
 
+from tests.conftest import write_ingestion
 
-def _handlers(fake_server, db):
+
+def _handler(fake_server, db):
     register_system_tools(fake_server, db)
-    return fake_server.tools
+    return fake_server.tools["get_mailbox_status"]
 
 
 def _text(result) -> str:
@@ -28,48 +27,60 @@ def _text(result) -> str:
     return result.content[0].text
 
 
-def _error(coro) -> str:
-    """Run a tool call that must fail; return the ``ToolError`` message
-    the client receives as an ``isError`` result."""
-    with pytest.raises(ToolError) as exc:
-        asyncio.run(coro)
-    return str(exc.value)
+def _ago(**kw) -> str:
+    return (datetime.now(UTC) - timedelta(**kw)).isoformat()
 
 
-class TestGetIndexStatus:
-    def test_returns_thread_and_message_counts_for_seeded_db(self, fake_server, seeded_db):
-        handler = _handlers(fake_server, seeded_db)["get_index_status"]
-        out = asyncio.run(handler())
+class TestGetMailboxStatus:
+    def test_current_index(self, fake_server, seeded_db):
+        write_ingestion(
+            seeded_db.path,
+            sync_completed_at=_ago(seconds=30),
+            sync_interval_secs=60,
+            indexer_seen_at=_ago(seconds=5),
+        )
+        out = asyncio.run(_handler(fake_server, seeded_db)())
         text = _text(out)
-        assert "Index Status" in text
+        assert out.structuredContent["current"] is True
+        assert out.structuredContent["not_current_reasons"] == []
+        assert "Current:        yes" in text
         # seeded_db has 3 threads and 3 messages.
         assert "Total threads:  3" in text
         assert "Total messages: 3" in text
         assert "Checked at:" in text
 
-    def test_returns_zeros_for_empty_db(self, fake_server, empty_db):
-        handler = _handlers(fake_server, empty_db)["get_index_status"]
-        out = asyncio.run(handler())
+    def test_not_current_lists_every_reason(self, fake_server, seeded_db):
+        write_ingestion(
+            seeded_db.path,
+            sync_completed_at=_ago(hours=2),
+            sync_interval_secs=60,
+            indexer_seen_at=_ago(seconds=5),
+            jobs=(("queued", 0, None), ("queued", 1, "retryable"), ("dead", 5, "retryable")),
+        )
+        out = asyncio.run(_handler(fake_server, seeded_db)())
         text = _text(out)
-        assert "Total threads:  0" in text
-        assert "Total messages: 0" in text
+        reasons = out.structuredContent["not_current_reasons"]
+        assert out.structuredContent["current"] is False
+        assert len(reasons) == 2
+        assert "Current:        no" in text
+        for reason in reasons:
+            assert f"  - {reason}" in text
+        assert "Queue:          1 pending, 1 retrying, 1 dead" in text
+        assert "1 message failed permanently and is incompletely indexed" in text
 
-    def test_db_exception_returns_error_text(self, fake_server, seeded_db):
+    def test_empty_index_before_any_sync(self, fake_server, empty_db):
+        out = asyncio.run(_handler(fake_server, empty_db)())
+        text = _text(out)
+        assert out.structuredContent["current"] is False
+        assert out.structuredContent["last_sync_at"] is None
+        assert "Last mail sync: never" in text
+        assert "Indexer seen:   never" in text
+        assert "Total threads:  0" in text
+
+    def test_db_exception_raises_tool_error(self, fake_server, seeded_db, monkeypatch):
         def boom():
             raise RuntimeError("simulated stats failure")
 
-        seeded_db.get_stats = boom  # type: ignore[assignment]
-        handler = _handlers(fake_server, seeded_db)["get_index_status"]
-        assert "Index status error" in _error(handler())
-
-
-class TestGetSyncStatus:
-    def test_local_mode_returns_local_only_message(self, fake_server, seeded_db):
-        handler = _handlers(fake_server, seeded_db)["get_sync_status"]
-        out = asyncio.run(handler())
-        text = _text(out)
-        assert "Sync Status" in text
-        assert "local index only" in text
-        # mcp-server never speaks directly to Bridge, so no reachability
-        # probe result may appear.
-        assert "Bridge IMAP" not in text
+        monkeypatch.setattr(seeded_db, "get_mailbox_status", boom)
+        with pytest.raises(ToolError, match="Mailbox status error"):
+            asyncio.run(_handler(fake_server, seeded_db)())

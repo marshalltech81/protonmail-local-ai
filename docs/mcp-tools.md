@@ -360,17 +360,34 @@ inflated values fan out into that many model calls.
 
 ## Group 4 — System
 
-### `get_index_status`
-Returns total threads, messages, date range of indexed email.
+### `get_mailbox_status`
+Reports whether the local index is current and what it holds.
 **Call this first** before answering questions about email content.
 
-The same helper powers ``make status`` on the host: the Makefile target
-invokes the module-level ``get_index_status`` directly against the shared
-SQLite index so the reported counts match what MCP queries see.
+| Field | Meaning |
+|---|---|
+| `current` | `true` only when all three hold: mbsync completed a sync within three sync intervals (never less than 5 minutes), the indexer reported within 10 minutes, and no message is pending or retrying |
+| `not_current_reasons` | One line per failed condition; empty when `current` is `true` |
+| `last_sync_at` / `sync_interval_secs` | mbsync's last successful sync from Bridge, and how often it syncs |
+| `indexer_last_seen_at` | When the indexer last reported (at most every 30 s with its health heartbeat, including during the initial index) |
+| `queue` | `pending` (found, not yet failed), `retrying` (failed at least once, including jobs deferred during an embedder outage; will retry), `dead` (failed permanently and incompletely indexed: missing from search, or found only by keyword, until `make requeue-dead`) |
+| `total_threads`, `total_messages`, `oldest_message`, `newest_message` | What the index holds |
 
-### `get_sync_status`
-Reports that the server answers from the local index only. mcp-server
-never talks to Bridge; mbsync owns Bridge access and Maildir refresh.
+Dead messages do not make the index non-current: nothing more happens
+to them without an operator, so they are reported rather than waited
+on. `current` cannot see mail that reached Proton after the last sync,
+or a delivery whose filesystem event the indexer missed (the periodic
+Maildir rescan picks that up within `INDEXER_RECOVERY_SWEEP_INTERVAL_SECS`).
+
+mcp-server never talks to Bridge. mbsync writes a stamp at the Maildir
+root after each successful sync. The indexer acknowledges a sync only
+once every message it delivered is queued, and records it with its own
+liveness in the `ingestion_state` table that this tool reads (see
+"Index currency" in `docs/architecture.md`).
+
+The same helper powers ``make status`` on the host: the Makefile target
+invokes the module-level ``get_mailbox_status`` directly against the
+shared SQLite index, so it reports what MCP clients see.
 
 ---
 

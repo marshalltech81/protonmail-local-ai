@@ -250,7 +250,7 @@ make bridge-patch-check   # Verify Bridge patch points against upstream source
 make bridge-smoke         # Build and smoke test the Bridge image
 make bridge-upgrade-check # Run both Bridge upgrade guard checks
 make update       # Update Bridge to new version
-make status       # Container and index status
+make status       # Container status and whether the index is current
 make requeue-dead # Requeue dead-lettered indexing jobs once the cause is fixed
 make clean        # Remove everything (destructive)
 ```

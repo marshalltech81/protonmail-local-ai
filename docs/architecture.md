@@ -34,6 +34,8 @@ mbsync container
     mbsync-state volume); refuses to sync on mismatch unless the operator
     sets BRIDGE_CERT_PIN_ROTATE=true for a legitimate rotation
   - Fails closed if cert extraction or repeated sync attempts fail
+  - After each successful sync, writes a last-sync stamp
+    (`.mbsync-last-sync.json`) at the Maildir root
         │
         │  Maildir files (shared volume, read-only for indexer)
         ▼
@@ -43,6 +45,7 @@ indexer container
   - Groups messages into threads via In-Reply-To / References headers
   - Calls EMBED_BASE_URL for vector embeddings
   - Writes to SQLite (FTS5 keyword index + sqlite-vec vector index)
+  - Records mbsync's last sync and its own liveness in `ingestion_state`
         │                              │
         │  embed API                   │  writes
         ▼                              ▼
@@ -680,6 +683,36 @@ run. The main loop's periodic health-file refresh continues
 independent of queue depth, so a stuck queue does not mark the
 container unhealthy (dead jobs are a data issue, not a liveness
 issue).
+
+### Index currency
+
+`get_mailbox_status` answers "is the index current?" from SQLite
+alone, because mcp-server mounts neither Maildir nor Bridge. After
+each successful sync, once the new files have been made readable,
+mbsync writes `.mbsync-last-sync.json` (completion time plus
+`SYNC_INTERVAL`) at the Maildir root. It writes a temporary file named
+after that sync (`.mbsync-last-sync.<time>.<interval>.tmp`) and
+renames it into place. The stamp sits outside every `cur`/`new`
+folder, so no Maildir walk or watchdog handler treats it as mail.
+
+A stamp on disk does not prove the indexer has queued that sync's
+mail: the watcher may still be behind on its delivery events. So the
+indexer **acknowledges** a sync only when every message it delivered
+is queued:
+
+- when the watcher handles the stamp's rename. Watchdog dispatches
+  events in order, so the sync's delivery events were handled first.
+  The sync is read from the temporary file's name, not the stamp's
+  content, which a later sync may already have replaced.
+- when a Maildir walk (startup or the periodic rescan) finishes: the
+  stamp read before the walk is acknowledged.
+
+Acknowledgements only move forward. With every health heartbeat
+(per message and per embed batch, at most every 30 s), the indexer
+upserts the latest acknowledged sync and its own timestamp into the
+one-row `ingestion_state` table (schema v21). A missed stamp event
+reads as a stale sync until the next rescan; a missed delivery event
+stays invisible to `current` until the rescan queues it.
 
 ## File Identity on `indexed_files`
 

@@ -10,6 +10,8 @@ from contextlib import closing
 import pytest
 from src.lib.sqlite import Database
 
+from tests.conftest import write_ingestion
+
 
 class TestReadOnlyConnection:
     def test_write_attempt_raises(self, seeded_db: Database):
@@ -1028,12 +1030,48 @@ class TestDisplaySubjectFallback:
 
 
 class TestStatsAndFolders:
-    def test_get_stats(self, seeded_db: Database):
-        stats = seeded_db.get_stats()
+    def test_get_mailbox_status(self, seeded_db: Database):
+        write_ingestion(
+            seeded_db.path,
+            sync_completed_at="2026-09-28T12:00:00+00:00",
+            sync_interval_secs=60,
+            indexer_seen_at="2026-09-28T12:00:10+00:00",
+            jobs=(
+                ("queued", 0, None),
+                ("queued", 0, None),
+                ("queued", 2, "retryable"),
+                # Deferred during an embedder outage: failed, but no
+                # attempt was spent.
+                ("queued", 0, "operator_action_required"),
+                ("dead", 5, "retryable"),
+            ),
+        )
+        stats = seeded_db.get_mailbox_status()
         assert stats["total_threads"] == 3
         assert stats["total_messages"] == 3
         assert stats["oldest_message"] is not None
         assert stats["newest_message"] is not None
+        assert stats["queue"] == {"pending": 2, "retrying": 2, "dead": 1}
+        assert stats["ingestion"] == {
+            "sync_completed_at": "2026-09-28T12:00:00+00:00",
+            "sync_interval_secs": 60,
+            "indexer_seen_at": "2026-09-28T12:00:10+00:00",
+        }
+
+    def test_get_mailbox_status_before_the_indexer_migrates(self, empty_db: Database):
+        """mcp-server can restart on a new build before the indexer has
+        run migration 0021; the counts must still be reported."""
+        with closing(sqlite3.connect(empty_db.path)) as conn:
+            conn.execute("DROP TABLE ingestion_state")
+            conn.commit()
+        stats = empty_db.get_mailbox_status()
+        assert stats["total_threads"] == 0
+        assert stats["ingestion"] is None
+
+    def test_get_mailbox_status_before_the_indexer_reports(self, empty_db: Database):
+        stats = empty_db.get_mailbox_status()
+        assert stats["queue"] == {"pending": 0, "retrying": 0, "dead": 0}
+        assert stats["ingestion"] is None
 
     def test_list_folders_ranked_by_thread_count(self, seeded_db: Database):
         folders = seeded_db.list_folders()

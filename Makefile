@@ -159,16 +159,16 @@ sync-indexer:
 sync-mcp:
 	cd mcp-server && uv sync --locked --dev
 
-# Show running containers and basic index status
+# Show running containers and mailbox (sync + index) status
 status:
 	@echo ""
 	@echo "=== Containers ==="
 	docker compose ps
 	@echo ""
-	@echo "=== Index ==="
+	@echo "=== Mailbox ==="
 	docker exec mcp-server python -c \
-		"from src.tools.system import get_index_status; \
-		 import json; print(json.dumps(get_index_status(), indent=2))" \
+		"from src.tools.system import get_mailbox_status; \
+		 import json; print(json.dumps(get_mailbox_status(), indent=2))" \
 		2>/dev/null || echo "  MCP server not running or index not ready."
 	@echo ""
 
