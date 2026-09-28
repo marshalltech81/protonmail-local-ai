@@ -481,7 +481,11 @@ charge was refunded, so the same batch could crash forever (several
 survivors are now marked `interrupted` without a charge before the
 embed; a lone survivor stays charged through it); and the 3600 s limit
 bounded a whole message, below three legitimately slow scanned PDFs
-(each attachment now restarts the guard's clock).
+(each attachment now restarts the guard's clock). Review round 3
+(Codex): a lone survivor is watched through the bulk embed, where a
+large message's many embed requests only refreshed the heartbeat, so a
+healthy message on a slow embedder could be killed; each completed
+embed request now also restarts the guard's clock.
 
 ### 2026-09-28 — Bounded indexer work on hostile input (#202, #211, #216, #218, #221)
 

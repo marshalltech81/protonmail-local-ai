@@ -685,7 +685,8 @@ restart an unhealthy container, so a stall guard thread
 (`src/stall_guard.py`) exits the indexer when one unit of work — a
 message's parse, or one attachment's extraction — has run longer than
 `INDEXER_MESSAGE_TIMEOUT_SECONDS` (default 3600, `0` disables). Each
-attachment restarts the clock, so a message with many legitimately
+attachment, and each completed embed request while a lone survivor is
+watched through the bulk embed, restarts the clock, so a message with many legitimately
 slow scanned PDFs (up to ~21 min each at the default OCR limits) is not
 cut off. The restart policy brings the indexer back with the attempt
 counted.

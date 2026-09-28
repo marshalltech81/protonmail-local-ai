@@ -1136,7 +1136,24 @@ def _pause_embedding(
         )
 
 
-def _embed_message_texts(texts: list[str], embedder: EmbeddingBackend) -> list[list[float]]:
+def _embed_progress(queue: IndexingQueue) -> Callable[[], None]:
+    """Callback for each completed embed request: refresh the heartbeat
+    and restart the stall guard's clock. A lone survivor stays charged,
+    and watched, through the bulk embed; each request is separately
+    bounded, so it is the unit the guard's limit applies to."""
+
+    def progress() -> None:
+        touch_health_file()
+        queue.note_progress()
+
+    return progress
+
+
+def _embed_message_texts(
+    texts: list[str],
+    embedder: EmbeddingBackend,
+    on_progress: Callable[[], None] | None = None,
+) -> list[list[float]]:
     """Embed one message's texts, telling a request limit from bad content.
 
     ``embed_batch`` packs up to ``EMBED_BATCH_SIZE`` texts into each HTTP
@@ -1148,8 +1165,10 @@ def _embed_message_texts(texts: list[str], embedder: EmbeddingBackend) -> list[l
     source. Every other failure propagates unchanged for the caller to
     attribute.
     """
+    if on_progress is None:
+        on_progress = touch_health_file
     try:
-        return embedder.embed_batch(texts, on_batch_complete=touch_health_file)
+        return embedder.embed_batch(texts, on_batch_complete=on_progress)
     except Exception as e:
         if len(texts) <= 1 or classify_embed_failure(e) != EMBED_FAILURE_REJECTED_INPUT:
             raise
@@ -1160,7 +1179,7 @@ def _embed_message_texts(texts: list[str], embedder: EmbeddingBackend) -> list[l
             len(texts),
             scrub_embed_error(e),
         )
-    return [embedder.embed_batch([t], on_batch_complete=touch_health_file)[0] for t in texts]
+    return [embedder.embed_batch([t], on_batch_complete=on_progress)[0] for t in texts]
 
 
 def _embed_each_message(
@@ -1205,7 +1224,11 @@ def _embed_each_message(
         filepath = entry.row["filepath"]
         try:
             entry_vectors = (
-                _embed_message_texts([all_texts[i] for i in offsets], embedder) if offsets else []
+                _embed_message_texts(
+                    [all_texts[i] for i in offsets], embedder, _embed_progress(queue)
+                )
+                if offsets
+                else []
             )
         except Exception as e:
             failure: BaseException = e
@@ -1368,7 +1391,7 @@ def _drain_queue_batched(
         paused = False
         try:
             vectors = (
-                embedder.embed_batch(all_texts, on_batch_complete=touch_health_file)
+                embedder.embed_batch(all_texts, on_batch_complete=_embed_progress(queue))
                 if all_texts
                 else []
             )

@@ -1179,6 +1179,50 @@ class TestStallGuardProgress:
     legitimately slow scanned PDFs in one message exceeded it on every
     restart. Each attachment now counts as progress."""
 
+    def _drain_one_counting_progress(self, tmp_path, monkeypatch, embed_batch):
+        dest = tmp_path / "INBOX" / "new" / "big.eml"
+        _write_eml(dest, "big@example.com")
+        db = Database(tmp_path / "mail.db")
+        queue = _make_queue(db)
+        queue.enqueue(str(dest), REASON_INITIAL_SCAN)
+        progress: list[int] = []
+        real_note = queue.note_progress
+        monkeypatch.setattr(queue, "note_progress", lambda: (progress.append(1), real_note()))
+        embedder = make_mock_embedder()
+        embedder.embed.return_value = _UNIT_VECTOR
+        embedder.embed_batch.side_effect = embed_batch
+        main.drain_queue(queue, db, embedder, Threader(db))
+        assert db.get_chunk_ids_for_message("big@example.com")
+        return progress
+
+    def test_each_embed_sub_batch_counts_as_progress(self, tmp_path, monkeypatch):
+        """Review round 3: a lone survivor stays charged, and so watched,
+        through the bulk embed. A large message's many individually
+        bounded embed requests must each restart the clock, or a healthy
+        message on a slow embedder is killed after the limit."""
+
+        def embed_batch(texts, on_batch_complete=None, **_kw):
+            for _ in range(3):
+                on_batch_complete()
+            return [_UNIT_VECTOR for _ in texts]
+
+        progress = self._drain_one_counting_progress(tmp_path, monkeypatch, embed_batch)
+        assert len(progress) == 3
+
+    def test_isolated_re_embed_counts_as_progress(self, tmp_path, monkeypatch):
+        calls = {"n": 0}
+
+        def embed_batch(texts, on_batch_complete=None, **_kw):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise _status_error(503)  # batch embed fails; probe passes
+            for _ in range(2):
+                on_batch_complete()
+            return [_UNIT_VECTOR for _ in texts]
+
+        progress = self._drain_one_counting_progress(tmp_path, monkeypatch, embed_batch)
+        assert len(progress) >= 2
+
     def test_phase2a_reports_progress_per_attachment(self, tmp_path):
         dest = tmp_path / "INBOX" / "new" / "att.eml"
         _write_eml_with_text_attachment(dest, "att@example.com")
