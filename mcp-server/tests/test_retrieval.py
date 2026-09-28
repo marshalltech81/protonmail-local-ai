@@ -17,8 +17,31 @@ read-only Database, so the tests focus on:
 """
 
 import asyncio
+import sqlite3
+from contextlib import contextmanager
 
+import sqlite_vec
+from src.lib.sqlite import Database
 from src.tools.retrieval import register_retrieval_tools
+
+from tests.conftest import _build_schema
+
+
+@contextmanager
+def _open_fixture_db(tmp_path):
+    """An empty schema to insert into through ``conn``; close ``conn``
+    before querying through ``db``."""
+    path = tmp_path / "fixture.db"
+    conn = sqlite3.connect(str(path))
+    conn.enable_load_extension(True)
+    sqlite_vec.load(conn)
+    conn.enable_load_extension(False)
+    _build_schema(conn)
+    db = Database(str(path))
+    try:
+        yield conn, db
+    finally:
+        db.close()
 
 
 def _handlers(fake_server, db):
@@ -74,17 +97,124 @@ class TestGetThread:
         out = asyncio.run(handler(thread_id="anything"))
         assert "Error" in _text(out)
 
+    def test_messages_render_oldest_first_with_own_headers(self, fake_server, messages_db):
+        handler = _handlers(fake_server, messages_db)["get_thread"]
+        text = _text(asyncio.run(handler(thread_id="t1")))
+        assert "Messages: 2" in text
+        first, second = text.index("[1/2] Message-ID: m1"), text.index("[2/2] Message-ID: m2")
+        assert first < second
+        m1, m2 = text[first:second], text[second:]
+        assert "From: Jane Doe <jane@example.com>" in m1
+        assert "Sent: 2024-01-10T09:00:00+00:00" in m1
+        assert "the budget is approved" in m1
+        assert "Subject: Re: Budget review" in m2
+        assert "Cc: carol@other.org" in m2
+        assert "In-Reply-To: m1" in m2
+        assert "Attachments: yes" in m2
+        assert "thanks, budget noted" in m2
+
+    def test_message_bodies_exclude_attachment_text(self, fake_server, messages_db):
+        handler = _handlers(fake_server, messages_db)["get_thread"]
+        assert "spreadsheet totals" not in _text(asyncio.run(handler(thread_id="t1")))
+
+    def test_bodies_replace_accumulated_thread_text(self, fake_server, chunked_db):
+        # With per-message bodies indexed, the accumulated thread text (a
+        # retrieval artifact carrying quoted replies) is not the reading
+        # representation.
+        handler = _handlers(fake_server, chunked_db)["get_thread"]
+        text = _text(asyncio.run(handler(thread_id="t-alpha")))
+        assert "invoice number 12345 due march 31" in text
+        assert "Indexed thread text" not in text
+
+    def test_message_without_body_chunks_says_so(self, fake_server, tmp_path):
+        from tests.conftest import _insert_message
+
+        with _open_fixture_db(tmp_path) as (conn, db):
+            _insert_message(
+                conn, message_id="a", thread_id="t", sent_at="2024-01-01T00:00:00+00:00", body="hi"
+            )
+            _insert_message(
+                conn, message_id="b", thread_id="t", sent_at="2024-01-02T00:00:00+00:00"
+            )
+            conn.close()
+            text = _text(asyncio.run(_handlers(fake_server, db)["get_thread"](thread_id="t")))
+        assert text.count("(No body text is indexed for this message.)") == 1
+
+    def test_falls_back_to_thread_text_when_no_bodies_are_indexed(self, fake_server, seeded_db):
+        handler = _handlers(fake_server, seeded_db)["get_thread"]
+        text = _text(asyncio.run(handler(thread_id="t-alpha")))
+        assert "[1/1] Message-ID: t-alpha" in text
+        assert "Indexed thread text" in text
+        assert "please find the invoice attached for march" in text
+
+    def test_long_recipient_lists_are_summarized(self, fake_server, tmp_path):
+        from tests.conftest import _insert_message
+
+        with _open_fixture_db(tmp_path) as (conn, db):
+            _insert_message(
+                conn,
+                message_id="a",
+                thread_id="t",
+                sent_at="2024-01-01T00:00:00+00:00",
+                to=[f"r{i:02d}@example.com" for i in range(12)],
+            )
+            conn.close()
+            text = _text(asyncio.run(_handlers(fake_server, db)["get_thread"](thread_id="t")))
+        assert "(+2 more)" in text
+        assert "r11@example.com" not in text
+
 
 class TestGetMessage:
     def test_known_message_returns_thread_context(self, fake_server, seeded_db):
-        # seeded_db inserts message_thread_map(message_id=thread_id) so
-        # asking for "t-alpha" round-trips through find_thread_by_message_id.
+        # seeded_db inserts one message per thread with message_id=thread_id.
         handler = _handlers(fake_server, seeded_db)["get_message"]
         out = asyncio.run(handler(message_id="t-alpha"))
         text = _text(out)
         assert "invoice for march" in text
         assert "Message-ID: t-alpha" in text
+        assert "Thread ID: t-alpha" in text
         assert "local SQLite index only" in text
+
+    def test_renders_the_messages_own_headers(self, fake_server, messages_db):
+        handler = _handlers(fake_server, messages_db)["get_message"]
+        text = _text(asyncio.run(handler(message_id="m2")))
+        assert "Subject: Re: Budget review" in text
+        assert "From: bob@example.com" in text
+        assert "To: Jane Doe <jane@example.com>" in text
+        assert "Cc: carol@other.org" in text
+        assert "Sent: 2024-01-11T10:00:00+00:00" in text
+        assert "Folder: INBOX" in text
+        assert "In-Reply-To: m1" in text
+        assert "References: m1" in text
+        assert "Attachments: yes" in text
+        # The thread is named by its root subject, not the message's.
+        assert "Thread: Budget review" in text
+
+    def test_absent_headers_are_omitted(self, fake_server, messages_db):
+        handler = _handlers(fake_server, messages_db)["get_message"]
+        text = _text(asyncio.run(handler(message_id="m1")))
+        assert "Cc:" not in text
+        assert "In-Reply-To:" not in text
+        assert "References:" not in text
+        assert "Attachments: no" in text
+
+    def test_lists_every_recipient(self, fake_server, tmp_path):
+        # get_message is the authoritative single-message view: no
+        # "+N more" summarizing.
+        from tests.conftest import _insert_message
+
+        with _open_fixture_db(tmp_path) as (conn, db):
+            _insert_message(
+                conn,
+                message_id="a",
+                thread_id="t",
+                sent_at="2024-01-01T00:00:00+00:00",
+                to=[f"r{i:02d}@example.com" for i in range(12)],
+            )
+            conn.close()
+            text = _text(asyncio.run(_handlers(fake_server, db)["get_message"](message_id="a")))
+        assert "r11@example.com" in text
+        assert "more)" not in text
 
     def test_unknown_message_returns_not_found_sentinel(self, fake_server, seeded_db):
         handler = _handlers(fake_server, seeded_db)["get_message"]
@@ -149,7 +279,7 @@ class TestGetMessage:
         def boom(_message_id):
             raise RuntimeError("simulated read failure")
 
-        seeded_db.find_thread_by_message_id = boom  # type: ignore[assignment]
+        seeded_db.get_message_record = boom  # type: ignore[assignment]
         handler = _handlers(fake_server, seeded_db)["get_message"]
         out = asyncio.run(handler(message_id="anything"))
         assert "Error" in _text(out)

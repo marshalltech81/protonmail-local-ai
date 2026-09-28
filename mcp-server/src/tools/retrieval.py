@@ -9,7 +9,7 @@ import logging
 from mcp.types import TextContent
 
 from ..lib.security import log_tool_call
-from ..lib.sqlite import Participant, address_match_mode, canonical_addr
+from ..lib.sqlite import MessageRecord, Participant, address_match_mode, canonical_addr
 from ..lib.validation import clamp_int
 
 log = logging.getLogger("mcp.tools.retrieval")
@@ -22,12 +22,28 @@ _MAX_QUERY_LIMIT = 100
 _MAX_LISTED_PARTICIPANTS = 10
 
 
-def _format_participants(people: list[Participant]) -> str:
+def _format_participants(
+    people: list[Participant], limit: int | None = _MAX_LISTED_PARTICIPANTS
+) -> str:
     shown = [f"{p.name} <{p.address}>" if p.name else p.address for p in people]
-    text = ", ".join(shown[:_MAX_LISTED_PARTICIPANTS])
-    if len(shown) > _MAX_LISTED_PARTICIPANTS:
-        text += f" (+{len(shown) - _MAX_LISTED_PARTICIPANTS} more)"
-    return text
+    if limit is None or len(shown) <= limit:
+        return ", ".join(shown)
+    return ", ".join(shown[:limit]) + f" (+{len(shown) - limit} more)"
+
+
+def _header_lines(m: MessageRecord, participant_limit: int | None) -> list[str]:
+    """A message's own headers, one per line; absent ones are omitted."""
+    lines = [f"Subject: {m.subject}"]
+    for label, people in (("From", m.from_), ("To", m.to), ("Cc", m.cc)):
+        if people:
+            lines.append(f"{label}: {_format_participants(people, participant_limit)}")
+    lines += [f"Sent: {m.sent_at}", f"Folder: {m.folder}"]
+    if m.in_reply_to:
+        lines.append(f"In-Reply-To: {m.in_reply_to}")
+    if m.references:
+        lines.append(f"References: {', '.join(m.references)}")
+    lines.append(f"Attachments: {'yes' if m.has_attachments else 'no'}")
+    return lines
 
 
 def _describe_filters(args: dict) -> str:
@@ -63,8 +79,8 @@ def register_retrieval_tools(server, db):
         include_attachments_metadata: bool = True,
     ) -> list[TextContent]:
         """
-        Get one thread's body content by thread ID — body only,
-        no attachment content.
+        Get one thread's messages by thread ID, oldest first — each
+        message's own headers and body; no attachment content.
 
         DO NOT use this to read attachment content (PDFs, OCR'd
         images, scans). It returns the message bodies only; the
@@ -91,7 +107,11 @@ def register_retrieval_tools(server, db):
             include_attachments_metadata: Include the local attachment availability note
 
         Returns:
-            Indexed thread context, participants, and timeline from the local index.
+            Thread metadata, then every message oldest first: its own
+            Message-ID, subject, From / To / Cc, send date (UTC),
+            folder, reply headers, attachment flag, and indexed body
+            (the text after quoted-reply stripping). When no message
+            body is indexed yet, the accumulated thread text instead.
         """
         log_tool_call(
             log,
@@ -102,32 +122,39 @@ def register_retrieval_tools(server, db):
             thread = await asyncio.to_thread(db.get_thread, thread_id)
             if not thread:
                 return [TextContent(type="text", text=f"Thread not found: {thread_id}")]
+            messages = await asyncio.to_thread(db.get_thread_messages, thread_id)
+            bodies = await asyncio.to_thread(db.get_thread_body_chunks, thread_id)
 
             lines = [
                 f"Thread: {thread.subject}",
+                f"Thread ID: {thread.thread_id}",
                 f"Folder: {thread.folder}",
                 f"Participants: {', '.join(thread.participants)}",
                 f"Date range: {thread.date_first.strftime('%Y-%m-%d')} "
                 f"→ {thread.date_last.strftime('%Y-%m-%d')}",
-                f"Messages: {len(thread.message_ids)}",
+                f"Messages: {len(messages)}",
                 f"Mode: {local_only_note}",
                 "",
+                "Messages, oldest first (bodies are the indexed text after "
+                "quoted-reply stripping; attachment text is not included):",
             ]
+            for i, m in enumerate(messages, 1):
+                lines += ["", f"[{i}/{len(messages)}] Message-ID: {m.message_id}"]
+                lines += _header_lines(m, _MAX_LISTED_PARTICIPANTS)
+                lines.append("")
+                if m.message_id in bodies:
+                    lines.append("\n\n".join(c.text for c in bodies[m.message_id]))
+                else:
+                    lines.append("(No body text is indexed for this message.)")
 
-            if thread.body_text:
-                lines.append("Indexed thread text:")
-                lines.append("")
-                lines.append(thread.body_text)
-                lines.append("")
-            elif thread.snippet:
-                lines.append("Indexed snippet:")
-                lines.append("")
-                lines.append(thread.snippet)
-                lines.append("")
-
-            lines.append("Message IDs:")
-            for i, message_id in enumerate(thread.message_ids, 1):
-                lines.append(f"  {i}. {message_id}")
+            # No message body indexed yet (e.g. chunking still pending):
+            # fall back to the accumulated thread text, a retrieval
+            # artifact that also carries quoted replies.
+            if not bodies:
+                if thread.body_text:
+                    lines += ["", "Indexed thread text:", "", thread.body_text]
+                elif thread.snippet:
+                    lines += ["", "Indexed snippet:", "", thread.snippet]
 
             if include_attachments_metadata and thread.has_attachments:
                 lines.append("")
@@ -150,10 +177,12 @@ def register_retrieval_tools(server, db):
         body_format: str = "text",
     ) -> list[TextContent]:
         """
-        Get one message's indexed body and its parent-thread context.
+        Get one message's own headers and indexed body.
 
-        Reconstructs the message body from the per-message chunk store
-        (in document order) — the index keeps no raw per-message body,
+        Headers come from the message itself: subject, every From /
+        To / Cc entry, send date (UTC), folder, In-Reply-To,
+        References, and the attachment flag. Reconstructs the message
+        body from the per-message chunk store (in document order) — the index keeps no raw per-message body,
         so this is the indexed text after quoted-reply stripping, which
         is usually what you want for "show me the message from Jane on
         Tuesday". Attachment text is NOT included here; use
@@ -172,8 +201,9 @@ def register_retrieval_tools(server, db):
             body_format: Retained for interface compatibility; ignored in local-only mode
 
         Returns:
-            The message's reconstructed indexed body plus parent-thread
-            metadata, or thread context when no body chunks are indexed.
+            The message's headers, its thread ID and subject, and its
+            reconstructed indexed body, or thread context when no body
+            chunks are indexed.
         """
         log_tool_call(
             log,
@@ -181,11 +211,11 @@ def register_retrieval_tools(server, db):
             {"message_id": message_id, "folder": folder, "body_format": body_format},
         )
         try:
-            thread_id = await asyncio.to_thread(db.find_thread_by_message_id, message_id)
-            if not thread_id:
+            record = await asyncio.to_thread(db.get_message_record, message_id)
+            if not record:
                 return [TextContent(type="text", text=f"Message not found: {message_id}")]
 
-            thread = await asyncio.to_thread(db.get_thread, thread_id)
+            thread = await asyncio.to_thread(db.get_thread, record.thread_id)
             if not thread:
                 return [TextContent(type="text", text=f"Message not found: {message_id}")]
 
@@ -197,11 +227,9 @@ def register_retrieval_tools(server, db):
 
             lines = [
                 f"Message-ID: {message_id}",
+                *_header_lines(record, participant_limit=None),
                 f"Thread: {thread.subject}",
-                f"Folder: {thread.folder}",
-                f"Thread date range: {thread.date_first.strftime('%Y-%m-%d')} "
-                f"→ {thread.date_last.strftime('%Y-%m-%d')}",
-                f"Participants: {', '.join(thread.participants)}",
+                f"Thread ID: {thread.thread_id}",
                 f"Mode: {local_only_note}",
             ]
 

@@ -300,7 +300,8 @@ class Participant:
 
 @dataclass
 class MessageRecord:
-    """One message as ``query_messages`` enumerates it."""
+    """One message's own headers, from ``messages`` +
+    ``message_participants``."""
 
     message_id: str
     thread_id: str
@@ -308,9 +309,49 @@ class MessageRecord:
     sent_at: str
     folder: str
     has_attachments: bool
+    in_reply_to: str | None = None
+    references: list[str] = field(default_factory=list)
     from_: list[Participant] = field(default_factory=list)
     to: list[Participant] = field(default_factory=list)
     cc: list[Participant] = field(default_factory=list)
+
+
+_MESSAGE_COLUMNS = (
+    "m.message_id, m.thread_id, m.subject, m.sent_at, m.folder, "
+    "m.has_attachments, m.in_reply_to, m.references_json"
+)
+
+
+def _row_to_message_record(r) -> MessageRecord:
+    return MessageRecord(
+        message_id=r["message_id"],
+        thread_id=r["thread_id"],
+        subject=r["subject"],
+        sent_at=r["sent_at"],
+        folder=r["folder"],
+        has_attachments=bool(r["has_attachments"]),
+        in_reply_to=r["in_reply_to"],
+        references=json.loads(r["references_json"]),
+    )
+
+
+def _attach_participants(conn: sqlite3.Connection, records: list[MessageRecord]) -> None:
+    """Fill each record's From / To / Cc from ``message_participants``."""
+    by_id = {rec.message_id: rec for rec in records}
+    if not by_id:
+        return
+    placeholders = ",".join(["?"] * len(by_id))
+    # rowid order is insertion order, i.e. header order.
+    rows = conn.execute(
+        "SELECT message_id, role, address, name FROM message_participants "
+        f"WHERE message_id IN ({placeholders}) ORDER BY rowid",  # nosec B608
+        list(by_id),
+    ).fetchall()
+    for p in rows:
+        role_list = {"from": "from_", "to": "to", "cc": "cc"}[p["role"]]
+        getattr(by_id[p["message_id"]], role_list).append(
+            Participant(name=p["name"], address=p["address"])
+        )
 
 
 @dataclass
@@ -1875,12 +1916,59 @@ class Database:
         row = self._fetchone("SELECT message_ids FROM threads WHERE thread_id = ?", (thread_id,))
         return json.loads(row["message_ids"]) if row else []
 
-    def find_thread_by_message_id(self, message_id: str) -> str | None:
-        row = self._fetchone(
-            "SELECT thread_id FROM message_thread_map WHERE message_id = ?",
-            (message_id,),
+    def get_message_record(self, message_id: str) -> MessageRecord | None:
+        """One message's own headers and participants, or ``None``."""
+        records = self._message_records("m.message_id = ?", (message_id,))
+        return records[0] if records else None
+
+    def get_thread_messages(self, thread_id: str) -> list[MessageRecord]:
+        """A thread's messages, oldest first (``message_id`` breaks ties).
+
+        ``sent_at`` is stored as UTC ISO 8601, so string order is
+        chronological order.
+        """
+        return self._message_records("m.thread_id = ?", (thread_id,))
+
+    def _message_records(self, where_sql: str, params: tuple) -> list[MessageRecord]:
+        with closing(self._connect()) as conn:
+            # One read snapshot for the rows and their participants.
+            conn.execute("BEGIN")
+            rows = conn.execute(
+                f"SELECT {_MESSAGE_COLUMNS} FROM messages m WHERE {where_sql} "  # nosec B608
+                "ORDER BY m.sent_at ASC, m.message_id ASC",
+                params,
+            ).fetchall()
+            records = [_row_to_message_record(r) for r in rows]
+            _attach_participants(conn, records)
+            conn.rollback()
+        return records
+
+    def get_thread_body_chunks(self, thread_id: str) -> dict[str, list[ChunkResult]]:
+        """A thread's BODY chunks grouped by message, each in document order.
+
+        The multi-message counterpart of ``get_message_chunks``:
+        attachment chunks are excluded, and one query serves the whole
+        thread.
+        """
+        rows = self._fetchall(
+            """
+            SELECT c.chunk_id, c.message_id, c.thread_id, c.chunk_index,
+                   c.text, c.char_start, c.char_end, c.attachment_id,
+                   NULL AS attachment_filename,
+                   NULL AS attachment_mime,
+                   c.message_date,
+                   0.0 AS score
+            FROM message_chunks c
+            WHERE c.thread_id = ?
+              AND c.attachment_id IS NULL
+            ORDER BY c.message_id, c.chunk_index ASC
+            """,
+            (thread_id,),
         )
-        return row["thread_id"] if row else None
+        grouped: dict[str, list[ChunkResult]] = {}
+        for r in rows:
+            grouped.setdefault(r["message_id"], []).append(_row_to_chunk_result(r))
+        return grouped
 
     def list_threads(
         self,
@@ -2174,38 +2262,14 @@ class Database:
                 params,
             ).fetchone()[0]
             rows = conn.execute(
-                "SELECT m.message_id, m.thread_id, m.subject, m.sent_at, m.folder, "
-                "m.has_attachments FROM messages m WHERE "
-                + page_where_sql  # nosec B608
+                f"SELECT {_MESSAGE_COLUMNS} FROM messages m WHERE "  # nosec B608
+                + page_where_sql
                 + " ORDER BY m.sent_at DESC, m.message_id DESC LIMIT ?",
                 [*page_params, limit + 1],
             ).fetchall()
             has_more = len(rows) > limit
-            records = [
-                MessageRecord(
-                    message_id=r["message_id"],
-                    thread_id=r["thread_id"],
-                    subject=r["subject"],
-                    sent_at=r["sent_at"],
-                    folder=r["folder"],
-                    has_attachments=bool(r["has_attachments"]),
-                )
-                for r in rows[:limit]
-            ]
-            by_id = {rec.message_id: rec for rec in records}
-            if by_id:
-                placeholders = ",".join(["?"] * len(by_id))
-                # rowid order is insertion order, i.e. header order.
-                participant_rows = conn.execute(
-                    "SELECT message_id, role, address, name FROM message_participants "
-                    f"WHERE message_id IN ({placeholders}) ORDER BY rowid",  # nosec B608
-                    list(by_id),
-                ).fetchall()
-                for p in participant_rows:
-                    role_list = {"from": "from_", "to": "to", "cc": "cc"}[p["role"]]
-                    getattr(by_id[p["message_id"]], role_list).append(
-                        Participant(name=p["name"], address=p["address"])
-                    )
+            records = [_row_to_message_record(r) for r in rows[:limit]]
+            _attach_participants(conn, records)
             conn.rollback()
 
         next_offset = offset + len(records)

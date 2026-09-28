@@ -836,10 +836,6 @@ class TestDirectLookups:
     def test_get_thread_message_ids_missing(self, seeded_db: Database):
         assert seeded_db.get_thread_message_ids("missing") == []
 
-    def test_find_thread_by_message_id(self, seeded_db: Database):
-        assert seeded_db.find_thread_by_message_id("t-alpha") == "t-alpha"
-        assert seeded_db.find_thread_by_message_id("missing") is None
-
     def test_list_threads_respects_folder_and_order(self, seeded_db: Database):
         inbox = seeded_db.list_threads(folder="INBOX")
         assert [r.thread_id for r in inbox] == ["t-beta", "t-alpha"]
@@ -2962,3 +2958,71 @@ class TestFindContactSendersOnlyHostileEntries:
             assert [c["email"] for c in contacts] == ["bob@example.com"]
         finally:
             db.close()
+
+
+class TestMessageRecords:
+    """``get_message_record`` / ``get_thread_messages`` read one message's
+    own headers from ``messages`` + ``message_participants`` — the
+    authoritative per-message representation behind get_message and
+    get_thread."""
+
+    def test_record_carries_its_own_headers(self, messages_db):
+        rec = messages_db.get_message_record("m2")
+        assert rec is not None
+        assert rec.thread_id == "t1"
+        assert rec.subject == "Re: Budget review"
+        assert rec.sent_at == "2024-01-11T10:00:00+00:00"
+        assert rec.folder == "INBOX"
+        assert rec.has_attachments is True
+        assert rec.in_reply_to == "m1"
+        assert rec.references == ["m1"]
+        assert [(p.name, p.address) for p in rec.from_] == [(None, "bob@example.com")]
+        assert [(p.name, p.address) for p in rec.to] == [("Jane Doe", "jane@example.com")]
+        assert [p.address for p in rec.cc] == ["carol@other.org"]
+
+    def test_record_without_reply_headers(self, messages_db):
+        rec = messages_db.get_message_record("m1")
+        assert rec is not None
+        assert rec.in_reply_to is None
+        assert rec.references == []
+
+    def test_unknown_message_is_none(self, messages_db):
+        assert messages_db.get_message_record("nope") is None
+
+    def test_thread_messages_are_chronological(self, messages_db):
+        assert [m.message_id for m in messages_db.get_thread_messages("t1")] == ["m1", "m2"]
+
+    def test_thread_messages_break_sent_at_ties_by_message_id(self, messages_db):
+        # m4 and m5 share a sent_at.
+        assert [m.message_id for m in messages_db.get_thread_messages("t3")] == ["m4", "m5"]
+
+    def test_thread_messages_carry_participants(self, messages_db):
+        msgs = messages_db.get_thread_messages("t1")
+        assert [p.address for p in msgs[0].from_] == ["jane@example.com"]
+        assert [p.address for p in msgs[1].cc] == ["carol@other.org"]
+
+    def test_unknown_thread_has_no_messages(self, messages_db):
+        assert messages_db.get_thread_messages("nope") == []
+
+
+class TestThreadBodyChunks:
+    """``get_thread_body_chunks`` groups a thread's BODY chunks by message,
+    each in document order, so get_thread can render every message's own
+    text without one query per message."""
+
+    def test_groups_body_chunks_by_message(self, messages_db):
+        chunks = messages_db.get_thread_body_chunks("t1")
+        assert {mid: [c.text for c in cs] for mid, cs in chunks.items()} == {
+            "m1": ["the budget is approved"],
+            # m2's attachment chunk is excluded.
+            "m2": ["thanks, budget noted"],
+        }
+
+    def test_chunks_are_in_document_order(self, messages_db):
+        assert [c.text for c in messages_db.get_thread_body_chunks("t2")["m3"]] == [
+            "lunch friday?",
+            "at the noodle place",
+        ]
+
+    def test_unknown_thread_is_empty(self, messages_db):
+        assert messages_db.get_thread_body_chunks("nope") == {}

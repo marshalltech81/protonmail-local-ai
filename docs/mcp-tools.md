@@ -115,7 +115,13 @@ first. Each result reports the parent thread so a follow-up
 ## Group 2 — Retrieval
 
 ### `get_thread`
-Fetch indexed thread context by ID from the local SQLite index.
+Read a thread by ID as its messages, oldest first. Each message shows
+its own headers (Message-ID, subject, From / To / Cc, send date in UTC,
+folder, In-Reply-To, attachment flag; recipient lists past 10 are
+summarized as a count) and its indexed body after quoted-reply
+stripping. Attachment text is not included. When no message body is
+indexed yet, the accumulated thread text (a retrieval artifact that
+also carries quoted replies) is shown instead.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
@@ -123,8 +129,10 @@ Fetch indexed thread context by ID from the local SQLite index.
 | `include_attachments_metadata` | bool | `true` | Show the local attachment-availability note when the indexed thread has attachments |
 
 ### `get_message`
-Reconstruct one message's indexed body from the per-message chunk
-store, with its parent-thread context. The index keeps no raw
+Return one message's own headers — subject, every From / To / Cc
+entry, send date (UTC), folder, In-Reply-To, References, attachment
+flag — with its thread ID and subject, and its indexed body
+reconstructed from the per-message chunk store. The index keeps no raw
 per-message body, so this is the indexed text **after quoted-reply
 stripping**; it falls back to thread context when no body chunks are
 indexed for the message. Attachment text is not included — use

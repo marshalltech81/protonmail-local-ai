@@ -301,6 +301,8 @@ def _insert_message_record(
     sent_at: str,
     has_attachments: bool,
     participants: list[tuple[str, str]],
+    in_reply_to: str | None = None,
+    references: list[str] | None = None,
 ) -> None:
     """Insert one ``messages`` row and its ``message_participants``.
 
@@ -313,7 +315,7 @@ def _insert_message_record(
             (message_id, thread_id, filepath, folder, subject, sent_at,
              in_reply_to, references_json, has_attachments, size_bytes,
              content_hash, indexed_at)
-        VALUES (?, ?, ?, ?, ?, ?, NULL, '[]', ?, 100, 'hash', ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 100, 'hash', ?)
         """,
         (
             message_id,
@@ -322,6 +324,8 @@ def _insert_message_record(
             folder,
             subject,
             sent_at,
+            in_reply_to,
+            json.dumps(references or []),
             1 if has_attachments else 0,
             "2024-01-01T00:00:00+00:00",
         ),
@@ -350,6 +354,8 @@ def _insert_message(
     has_attachments: bool = False,
     body: str | None = None,
     attachment_text: str | None = None,
+    in_reply_to: str | None = None,
+    references: list[str] | None = None,
 ) -> None:
     """Insert one message with full per-message control.
 
@@ -397,6 +403,8 @@ def _insert_message(
         sent_at=sent_at,
         has_attachments=has_attachments,
         participants=participants,
+        in_reply_to=in_reply_to,
+        references=references,
     )
     conn.commit()
     if body is not None:
@@ -657,8 +665,9 @@ def messages_db(tmp_path):
     """Five messages across three threads for ``query_messages``.
 
     m4 and m5 share a ``sent_at`` so paging must break the tie on
-    message_id; m2 has an attachment chunk whose text must not satisfy
-    ``text``; m3 has two body chunks so ``text`` terms can span them.
+    message_id; m2 replies to m1 and has an attachment chunk whose text
+    must not satisfy ``text``; m3 has two body chunks so ``text`` terms
+    can span them.
     """
     path = tmp_path / "mcp-messages.db"
     conn = sqlite3.connect(str(path))
@@ -688,6 +697,8 @@ def messages_db(tmp_path):
         has_attachments=True,
         body="thanks, budget noted",
         attachment_text="spreadsheet totals",
+        in_reply_to="m1",
+        references=["m1"],
     )
     _insert_message(
         conn,
