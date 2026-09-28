@@ -74,7 +74,8 @@ STATUS_DEAD = "dead"
 #   budget (``mark_failed``) and dead-letters once it is exhausted.
 # * permanent_source_failure — this source can never be indexed under
 #   the current config (oversized, no Message-ID, input the embedder
-#   rejects); dead-lettered immediately (``mark_dead_terminal``).
+#   rejects, a Message-ID already indexed from a different message);
+#   dead-lettered immediately (``mark_dead_terminal``).
 # * operator_action_required — the pipeline itself is misconfigured
 #   (embedder rejects credentials or model). Says nothing about the
 #   message, so it is deferred, never dead-lettered (``defer``).

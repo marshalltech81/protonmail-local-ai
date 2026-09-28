@@ -1568,6 +1568,14 @@ class Database:
     # -------------------------------------------------------------------------
 
     @_synchronized
+    def get_message_filepath(self, message_id: str) -> str | None:
+        """The source file currently recorded for ``message_id``."""
+        row = self._conn.execute(
+            "SELECT filepath FROM messages WHERE message_id = ?", (message_id,)
+        ).fetchone()
+        return row["filepath"] if row else None
+
+    @_synchronized
     def find_thread_by_message_id(self, message_id: str) -> str | None:
         row = self._conn.execute(
             "SELECT thread_id FROM message_thread_map WHERE message_id = ?",

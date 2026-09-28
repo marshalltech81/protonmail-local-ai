@@ -1380,6 +1380,87 @@ class TestReprocessKeepsThreadMembership:
         assert listing_b == [thread_b]
 
 
+class TestConflictingMessageIds:
+    """#217: two files carrying one sender-controlled Message-ID."""
+
+    def _index(self, db, queue, path):
+        embedder = make_mock_embedder()
+        embedder.embed.return_value = _UNIT_VECTOR
+        queue.enqueue(str(path), REASON_INITIAL_SCAN)
+        main.drain_queue(queue, db, embedder, Threader(db))
+
+    def _message_row(self, db):
+        return db._conn.execute(
+            "SELECT filepath FROM messages WHERE message_id = 'dup@example.com'"
+        ).fetchone()
+
+    def _chunk_text(self, db):
+        return " ".join(
+            r["text"]
+            for r in db._conn.execute(
+                "SELECT text FROM message_chunks WHERE message_id = 'dup@example.com'"
+            )
+        )
+
+    def test_different_content_does_not_overwrite_the_original(self, tmp_path):
+        db = Database(tmp_path / "mail.db")
+        queue = _make_queue(db)
+        original = tmp_path / "INBOX" / "cur" / "one:2,S"
+        _write_eml(original, "dup@example.com", from_addr="alice@example.com")
+        self._index(db, queue, original)
+        impostor = tmp_path / "INBOX" / "cur" / "two:2,S"
+        impostor.parent.mkdir(parents=True, exist_ok=True)
+        impostor.write_text(
+            original.read_text()
+            .replace("alice@example.com", "mallory@example.com")
+            .replace("Body of dup@example.com.", "Wire the funds today."),
+            encoding="utf-8",
+        )
+
+        self._index(db, queue, impostor)
+
+        assert self._message_row(db)["filepath"] == str(original)
+        assert "Body of dup@example.com" in self._chunk_text(db)
+        assert "Wire the funds" not in self._chunk_text(db)
+        row = db._conn.execute(
+            "SELECT status, last_error_class, last_error FROM indexing_jobs WHERE filepath = ?",
+            (str(impostor),),
+        ).fetchone()
+        assert row["status"] == "dead"
+        assert row["last_error_class"] == "permanent_source_failure"
+        assert "conflicting Message-ID" in row["last_error"]
+
+    def test_identical_copy_in_another_folder_indexes_normally(self, tmp_path):
+        db = Database(tmp_path / "mail.db")
+        queue = _make_queue(db)
+        original = tmp_path / "INBOX" / "cur" / "one:2,S"
+        _write_eml(original, "dup@example.com")
+        self._index(db, queue, original)
+        copy = tmp_path / "Archive" / "cur" / "one:2,S"
+        copy.parent.mkdir(parents=True, exist_ok=True)
+        copy.write_bytes(original.read_bytes())
+
+        self._index(db, queue, copy)
+
+        assert queue.stats() == {"queued": 0, "dead": 0}
+        assert "Body of dup@example.com" in self._chunk_text(db)
+
+    def test_original_file_gone_lets_the_new_file_take_over(self, tmp_path):
+        db = Database(tmp_path / "mail.db")
+        queue = _make_queue(db)
+        original = tmp_path / "INBOX" / "cur" / "one:2,S"
+        _write_eml(original, "dup@example.com", from_addr="alice@example.com")
+        self._index(db, queue, original)
+        original.unlink()
+        replacement = tmp_path / "INBOX" / "cur" / "two:2,S"
+        _write_eml(replacement, "dup@example.com", from_addr="carol@example.com")
+
+        self._index(db, queue, replacement)
+
+        assert queue.stats() == {"queued": 0, "dead": 0}
+        assert self._message_row(db)["filepath"] == str(replacement)
+
+
 class TestBatchedInitialIndex:
     """C1 invariants for the cross-message batched initial indexer.
 
