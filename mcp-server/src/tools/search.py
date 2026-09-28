@@ -80,6 +80,11 @@ def register_search_tools(
         For broad cross-thread synthesis questions (e.g. "what's open?",
         "summarize my recent vendor activity"), reach for ask_mailbox
         instead — it bundles retrieval and synthesis in one call.
+        Results are ranked and capped at ``limit`` threads, so this tool
+        cannot answer "all" or "how many" questions ("every email from
+        Jane in 2024", "how many invoices arrived in March") — use
+        query_messages for those; it enumerates the complete set with an
+        exact count.
 
         Filtering by sender — read this before iterating queries:
             - User said a NAME or ROLE ("Jane Smith", "the accountant",

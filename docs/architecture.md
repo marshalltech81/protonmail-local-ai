@@ -292,7 +292,11 @@ with `address` canonical and lowercased and the display name kept as
 written; malformed entries with no recoverable address are skipped.
 An index on `(address, role)` makes "every message from / to X" an
 exact indexed lookup — the basis for exhaustive enumeration, as
-opposed to relevance search.
+opposed to relevance search. The MCP server's `query_messages`
+enumerates over these tables (count plus keyset pages ordered by
+`(sent_at, message_id)`), and `find_contact` aggregates
+`message_participants` instead of parsing each thread's participant
+JSON.
 
 Both are written inside `upsert_thread`'s transaction, after the
 message's `message_thread_map` row. `messages` references

@@ -285,3 +285,125 @@ class TestFindContact:
         handler = _handlers(fake_server, seeded_db)["find_contact"]
         out = asyncio.run(handler(query="alice"))
         assert "Error" in _text(out)
+
+
+class TestQueryMessages:
+    """The MCP tool wrapping ``Database.query_messages``: the enumeration
+    contract (total, returned, has_more, cursor) must be stated in the
+    text the LLM receives, never left for it to infer."""
+
+    def test_states_counts_and_cursor(self, fake_server, messages_db):
+        handler = _handlers(fake_server, messages_db)["query_messages"]
+        text = _text(asyncio.run(handler(sender="jane@example.com", limit=2)))
+        assert "total_matches: 3" in text
+        assert "returned: 2 (matches 1-2)" in text
+        assert "has_more: true" in text
+        assert "next_cursor: " in text
+        assert "Message-ID: m5" in text
+        assert "Thread ID: t3" in text
+
+    def test_following_the_cursor_returns_the_rest(self, fake_server, messages_db):
+        handler = _handlers(fake_server, messages_db)["query_messages"]
+        first = _text(asyncio.run(handler(sender="jane@example.com", limit=2)))
+        cursor = next(
+            line.split(": ", 1)[1] for line in first.splitlines() if line.startswith("next_cursor:")
+        )
+        text = _text(asyncio.run(handler(sender="jane@example.com", limit=2, cursor=cursor)))
+        assert "returned: 1 (matches 3-3)" in text
+        assert "has_more: false" in text
+        assert "next_cursor" not in text
+        assert "Message-ID: m1" in text
+
+    def test_describes_how_each_address_predicate_matched(self, fake_server, messages_db):
+        handler = _handlers(fake_server, messages_db)["query_messages"]
+        text = _text(asyncio.run(handler(sender="Jane@Example.com", recipient="@other.org")))
+        assert "sender=jane@example.com (exact address)" in text
+        assert "recipient='@other.org' (substring of address or name)" in text
+
+    def test_renders_participants_by_role(self, fake_server, messages_db):
+        handler = _handlers(fake_server, messages_db)["query_messages"]
+        text = _text(asyncio.run(handler(subject="Re: Budget")))
+        assert "From: bob@example.com" in text
+        assert "To: Jane Doe <jane@example.com>" in text
+        assert "Cc: carol@other.org" in text
+        assert "2024-01-11T10:00:00+00:00 | INBOX | attachments" in text
+
+    def test_no_filters_is_labelled(self, fake_server, messages_db):
+        handler = _handlers(fake_server, messages_db)["query_messages"]
+        text = _text(asyncio.run(handler()))
+        assert "no filters" in text
+        assert "total_matches: 5" in text
+
+    def test_zero_matches_is_explicit(self, fake_server, messages_db):
+        handler = _handlers(fake_server, messages_db)["query_messages"]
+        text = _text(asyncio.run(handler(sender="nobody@example.com")))
+        assert "total_matches: 0" in text
+        # An empty page still carries the full paging contract.
+        assert "returned: 0" in text
+        assert "has_more: false" in text
+        assert "next_cursor" not in text
+        assert "No messages match" in text
+
+    def test_invalid_input_value_is_not_logged(self, fake_server, messages_db, caplog):
+        # log_tool_call withholds a non-ISO date_from; the validation
+        # error quoting it must not put it back in the log.
+        handler = _handlers(fake_server, messages_db)["query_messages"]
+        with caplog.at_level("DEBUG"):
+            text = _text(asyncio.run(handler(date_from="private-sentinel-value")))
+        assert "private-sentinel-value" in text  # the caller still learns why
+        assert "private-sentinel-value" not in caplog.text
+        assert "date_from" in caplog.text
+
+    def test_long_recipient_lists_state_what_was_left_out(self, fake_server, tmp_path):
+        import sqlite3
+
+        import sqlite_vec
+        from src.lib.sqlite import Database
+
+        from tests.conftest import _build_schema, _insert_message
+
+        path = tmp_path / "many.db"
+        conn = sqlite3.connect(str(path))
+        conn.enable_load_extension(True)
+        sqlite_vec.load(conn)
+        conn.enable_load_extension(False)
+        _build_schema(conn)
+        _insert_message(
+            conn,
+            message_id="m1",
+            thread_id="t1",
+            sent_at="2024-01-01T00:00:00+00:00",
+            from_=["a@example.com"],
+            to=[f"r{i:02d}@example.com" for i in range(13)],
+        )
+        conn.close()
+        handler = _handlers(fake_server, Database(str(path)))["query_messages"]
+        text = _text(asyncio.run(handler()))
+        assert "r09@example.com (+3 more)" in text
+        assert "r10@example.com" not in text
+
+    def test_above_ceiling_limit_is_clamped(self, fake_server, messages_db):
+        seen: dict = {}
+        original = messages_db.query_messages
+
+        def spy(**kwargs):
+            seen.update(kwargs)
+            return original(**kwargs)
+
+        messages_db.query_messages = spy  # type: ignore[assignment]
+        handler = _handlers(fake_server, messages_db)["query_messages"]
+        asyncio.run(handler(limit=99999))
+        assert seen["limit"] == 100
+
+    def test_invalid_input_returns_the_reason(self, fake_server, messages_db):
+        handler = _handlers(fake_server, messages_db)["query_messages"]
+        assert "date_from" in _text(asyncio.run(handler(date_from="last tuesday")))
+        assert "cursor" in _text(asyncio.run(handler(cursor="garbage")))
+
+    def test_db_exception_returns_error_text(self, fake_server, messages_db):
+        def boom(**_kwargs):
+            raise RuntimeError("simulated read failure")
+
+        messages_db.query_messages = boom  # type: ignore[assignment]
+        handler = _handlers(fake_server, messages_db)["query_messages"]
+        assert "Error" in _text(asyncio.run(handler()))

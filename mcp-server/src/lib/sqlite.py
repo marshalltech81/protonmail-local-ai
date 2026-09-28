@@ -4,6 +4,8 @@ Read-only access to the index built by the indexer service.
 Supports BM25 keyword search, vector similarity search, and hybrid fusion.
 """
 
+import base64
+import hashlib
 import json
 import logging
 import re
@@ -287,6 +289,152 @@ def _row_to_attachment_result(r) -> AttachmentResult:
     )
 
 
+@dataclass
+class Participant:
+    """One From / To / Cc entry of a message: canonical address plus the
+    display name as written (``None`` when the header had none)."""
+
+    name: str | None
+    address: str
+
+
+@dataclass
+class MessageRecord:
+    """One message as ``query_messages`` enumerates it."""
+
+    message_id: str
+    thread_id: str
+    subject: str
+    sent_at: str
+    folder: str
+    has_attachments: bool
+    from_: list[Participant] = field(default_factory=list)
+    to: list[Participant] = field(default_factory=list)
+    cc: list[Participant] = field(default_factory=list)
+
+
+@dataclass
+class MessagePage:
+    """One page of an exhaustive enumeration.
+
+    ``total_matches`` counts every message matching the predicates, not
+    just this page; ``offset`` is how many matches earlier pages returned.
+    ``next_cursor`` is ``None`` exactly when ``has_more`` is false.
+    """
+
+    total_matches: int
+    offset: int
+    messages: list[MessageRecord]
+    has_more: bool
+    next_cursor: str | None
+
+
+# Each ``text`` term is its own FTS subquery; bound the count so one call
+# cannot fan out into hundreds of them.
+_MAX_TEXT_TERMS = 16
+
+_INVALID_CURSOR = "invalid cursor; restart the query without a cursor"
+
+
+def _sql_lower(value):
+    """Unicode-aware ``lower`` for SQL. SQLite's built-in folds ASCII only,
+    so ``JOSÉ`` would never match ``josé``."""
+    return value.lower() if isinstance(value, str) else value
+
+
+def _text_terms(text: str) -> list[str]:
+    """Split ``text`` into distinct words exactly as the chunk index does.
+
+    ``message_chunks_fts`` tokenizes with ``porter unicode61``. Hand-rolled
+    splitting kept drifting from unicode61 — combining marks, underscores
+    (separators to FTS), private-use characters (word characters to FTS)
+    — and every drift silently changed an exhaustive count. So the words
+    come from unicode61 itself: a throwaway in-memory FTS5 table and its
+    ``fts5vocab`` instance view, in text order. Porter is left out so each
+    word stays unstemmed; the index's tokenizer stems it once at MATCH
+    time. unicode61's case and diacritic folding is idempotent, so a word
+    quoted as a phrase re-tokenizes to itself. The text is not normalized
+    (indexed chunks are stored as written).
+    """
+    with closing(sqlite3.connect(":memory:")) as conn:
+        conn.execute("CREATE VIRTUAL TABLE t USING fts5(x, tokenize='unicode61')")
+        conn.execute("CREATE VIRTUAL TABLE v USING fts5vocab(t, 'instance')")
+        conn.execute("INSERT INTO t(x) VALUES (?)", (text,))
+        rows = conn.execute("SELECT term FROM v ORDER BY offset").fetchall()
+    return list(dict.fromkeys(row[0] for row in rows))
+
+
+def address_match_mode(value: str) -> str:
+    """How a sender / recipient / participant predicate matches.
+
+    ``"exact"`` when ``value`` holds a full address (``jane@example.com``,
+    ``Jane <jane@example.com>``): canonical equality, an indexed lookup.
+    ``"substring"`` otherwise (a domain like ``@example.com`` or a name
+    fragment): case-insensitive substring of the address or display name.
+    """
+    try:
+        canonical = canonical_addr(value)
+    except RecursionError:
+        # parseaddr recurses on nested comments; such input has no
+        # usable address, so it can only be a substring.
+        return "substring"
+    return "exact" if canonical and not canonical.startswith("@") else "substring"
+
+
+def _participant_clause(value: str, roles: tuple[str, ...], params: list) -> str:
+    """SQL restricting ``messages m`` to those where ``value`` appears in
+    one of ``roles``; appends the bound values to ``params``."""
+    role_sql = ",".join(["?"] * len(roles))
+    if address_match_mode(value) == "exact":
+        params.extend([canonical_addr(value), *roles])
+        return (
+            "m.message_id IN (SELECT message_id FROM message_participants "  # nosec B608
+            f"WHERE address = ? AND role IN ({role_sql}))"
+        )
+    needle = value.strip().lower()
+    params.extend([*roles, needle, needle])
+    return (
+        "m.message_id IN (SELECT message_id FROM message_participants "  # nosec B608
+        f"WHERE role IN ({role_sql}) "
+        "AND (instr(address, ?) > 0 OR instr(mcp_lower(name), ?) > 0))"
+    )
+
+
+def _encode_cursor(digest: str, last: MessageRecord, offset: int) -> str:
+    payload = json.dumps(
+        {"v": 1, "q": digest, "s": last.sent_at, "m": last.message_id, "o": offset}
+    )
+    return base64.urlsafe_b64encode(payload.encode()).rstrip(b"=").decode()
+
+
+def _decode_cursor(cursor: str, digest: str) -> tuple[str, str, int]:
+    """Return ``(sent_at, message_id, offset)`` of the last row already
+    returned. Raises ``ValueError`` on a malformed cursor or one issued
+    for different predicates (keyset positions only mean something within
+    the same filtered ordering)."""
+    try:
+        raw = base64.urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4))
+        data = json.loads(raw)
+    except ValueError as exc:
+        raise ValueError(_INVALID_CURSOR) from exc
+    if not (
+        isinstance(data, dict)
+        and data.get("v") == 1
+        and isinstance(data.get("q"), str)
+        and isinstance(data.get("s"), str)
+        and isinstance(data.get("m"), str)
+        and isinstance(data.get("o"), int)
+        and data["o"] >= 0
+    ):
+        raise ValueError(_INVALID_CURSOR)
+    if data["q"] != digest:
+        raise ValueError(
+            "cursor was issued for different filters; pass the same filters "
+            "as the call that returned it, or restart without a cursor"
+        )
+    return data["s"], data["m"], data["o"]
+
+
 class Database:
     """Read-only handle to the indexer's SQLite output.
 
@@ -370,6 +518,7 @@ class Database:
         conn.enable_load_extension(True)
         sqlite_vec.load(conn)
         conn.enable_load_extension(False)
+        conn.create_function("mcp_lower", 1, _sql_lower, deterministic=True)
         conn.execute("PRAGMA query_only = ON")
         return conn
 
@@ -1817,25 +1966,28 @@ class Database:
     ) -> list[dict]:
         """Resolve a name / address / domain fragment to indexed contacts.
 
-        Iterates ``threads.participants`` (or ``threads.senders`` when
-        ``senders_only=True``), parses each entry with ``parseaddr``,
-        and matches the lowercased query against either the display
-        name or the email address. Aggregates by canonical email so
-        the same contact across many threads collapses to one row,
-        with ``thread_count`` reflecting how many threads they
-        appeared on. Same-thread duplicates do not double-count.
+        Matches the lowercased query against each indexed
+        ``message_participants`` row's address or display name and
+        aggregates by canonical email, so the same contact across many
+        threads collapses to one row, with ``thread_count`` reflecting
+        how many threads they appeared on and ``names`` every display
+        name they were written with. Same-thread duplicates do not
+        double-count.
 
-        ``senders_only`` narrows the aggregation to the From-line
-        addresses recorded on each thread. Use this when the caller's
-        intent is "filter to messages this person SENT" rather than
-        "find this person's address anywhere in the index": the
-        broader participants ranking can promote a frequent
-        recipient/CC-only contact over the actual sender, which then
-        misses real results when the resolved address is plugged into
-        ``search_emails(from_addr=...)``. The default is
-        ``senders_only=False`` because the standalone find_contact
-        tool is also used for general "find this person's email"
-        lookups where recipient-only matches are still useful.
+        ``senders_only`` instead aggregates ``threads.senders`` — each
+        message's primary From author as the thread records it. That is
+        exactly the set ``search_emails(from_addr=...)`` filters on, so a
+        resolved address always matches that filter; ranking over the
+        participant table's From rows could promote a secondary author
+        of a multi-author From, or one standing behind an unparseable
+        primary, and return nothing. Use this when the caller's intent is
+        "filter to messages this person SENT" rather than "find this
+        person's address anywhere in the index": the broader
+        participants ranking can promote a frequent recipient/CC-only
+        contact over the actual sender. The default is
+        ``senders_only=False`` because the standalone find_contact tool
+        is also used for general "find this person's email" lookups
+        where recipient-only matches are still useful.
 
         Exists so callers (the LLM via the MCP tool) can map a
         display-name fragment (``"Jane Smith"``) to a canonical
@@ -1848,67 +2000,222 @@ class Database:
             return []
         needle = query.strip().lower()
 
-        # ``senders`` is a JSON array of From-only addresses recorded
-        # on each thread; ``participants`` is the broader From + To +
-        # Cc + ... set. Both are stored on the same row so we can
-        # pick at query time without a separate index. Use two
-        # explicit SQL strings rather than f-string interpolation so
-        # there is no path for column to come from caller input —
-        # the choice is bounded to the senders_only flag here.
-        if senders_only:
-            rows = self._fetchall("SELECT senders AS entries FROM threads")
-        else:
-            rows = self._fetchall("SELECT participants AS entries FROM threads")
-
-        # canonical email -> {"names": set[str], "thread_count": int}
+        # canonical email -> {"names": set[str], "threads": set[str]}
         by_email: dict[str, dict] = {}
-        for row in rows:
-            try:
-                entries = json.loads(row["entries"])
-            except json.JSONDecodeError, TypeError:
-                continue
-            seen_in_thread: set[str] = set()
-            for entry in entries:
-                if not isinstance(entry, str):
-                    continue
-                try:
-                    name, addr = parseaddr(entry)
-                except Exception:
-                    # Participant strings come from indexed mail; an entry
-                    # that blows up parseaddr (nested-comment recursion)
-                    # must cost that entry, not every find_contact call.
-                    continue
-                addr = addr.strip().lower()
-                if "@" not in addr:
-                    continue
-                # Match against either the display name or the address so
-                # "smith", "Jane", and "@example.com" all surface the
-                # same contact.
-                haystack = f"{name} {addr}".lower()
-                if needle not in haystack:
-                    continue
-                if addr in seen_in_thread:
-                    continue
-                seen_in_thread.add(addr)
-                bucket = by_email.setdefault(addr, {"names": set(), "thread_count": 0})
-                stripped_name = name.strip()
-                if stripped_name:
-                    bucket["names"].add(stripped_name)
-                bucket["thread_count"] += 1
 
-        results = [
-            {
-                "email": addr,
-                "names": sorted(bucket["names"]),
-                "thread_count": bucket["thread_count"],
-            }
-            for addr, bucket in by_email.items()
-        ]
+        def add(address: str, name: str | None, thread_id: str) -> None:
+            bucket = by_email.setdefault(address, {"names": set(), "threads": set()})
+            if name and name.strip():
+                bucket["names"].add(name.strip())
+            bucket["threads"].add(thread_id)
+
+        if senders_only:
+            for row in self._fetchall("SELECT thread_id, senders FROM threads"):
+                try:
+                    entries = json.loads(row["senders"])
+                except json.JSONDecodeError, TypeError:
+                    continue
+                for entry in entries:
+                    if not isinstance(entry, str):
+                        continue
+                    try:
+                        name, addr = parseaddr(entry)
+                    except Exception:
+                        # Sender strings come from indexed mail; an entry
+                        # that blows up parseaddr (nested-comment
+                        # recursion) must cost that entry, not the lookup.
+                        continue
+                    addr = addr.strip().lower()
+                    if "@" in addr and needle in f"{name} {addr}".lower():
+                        add(addr, name, row["thread_id"])
+        else:
+            # Addresses are stored canonical (lowercased); names need the
+            # Unicode-aware ``mcp_lower``.
+            rows = self._fetchall(
+                """
+                SELECT DISTINCT p.address, p.name, m.thread_id
+                FROM message_participants p
+                JOIN messages m ON m.message_id = p.message_id
+                WHERE instr(p.address, ?) > 0 OR instr(mcp_lower(p.name), ?) > 0
+                """,
+                (needle, needle),
+            )
+            for row in rows:
+                add(row["address"], row["name"], row["thread_id"])
+
         # Most-active contact first; tiebreak on email so the order is
         # stable across runs (important for both eval reproducibility
         # and the unit tests below).
-        results.sort(key=lambda x: (-x["thread_count"], x["email"]))
-        return results[:limit]
+        ranked = sorted(by_email.items(), key=lambda item: (-len(item[1]["threads"]), item[0]))
+        return [
+            {
+                "email": addr,
+                "names": sorted(bucket["names"]),
+                "thread_count": len(bucket["threads"]),
+            }
+            for addr, bucket in ranked[:limit]
+        ]
+
+    def query_messages(
+        self,
+        *,
+        sender: str | None = None,
+        recipient: str | None = None,
+        participant: str | None = None,
+        subject: str | None = None,
+        text: str | None = None,
+        folder: str | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
+        has_attachments: bool | None = None,
+        limit: int = 25,
+        cursor: str | None = None,
+    ) -> MessagePage:
+        """Enumerate every message matching all given predicates.
+
+        Unlike the search methods this does not rank: the result is the
+        exact matching set, newest ``sent_at`` first (``message_id``
+        breaks ties), with ``total_matches`` counted over the whole set
+        and keyset pagination through ``cursor``. Blank predicates are
+        ignored.
+
+        - ``sender`` (From), ``recipient`` (To or Cc), ``participant``
+          (any role): see ``address_match_mode``.
+        - ``subject``: case-insensitive substring of the message's own
+          subject.
+        - ``text``: every word must occur in the message's indexed body
+          (FTS word match with stemming, any chunk; attachment text and
+          stripped quoted replies are not searched).
+        - ``folder``: exact folder name.
+        - ``date_from`` / ``date_to``: inclusive ``sent_at`` bounds;
+          date-only values cover the whole UTC day.
+        - ``has_attachments``: the message's own attachment flag.
+
+        Raises ``ValueError`` for an invalid date, a ``text`` with no
+        words or more than ``_MAX_TEXT_TERMS``, or a malformed / foreign
+        cursor.
+        """
+        sender, recipient, participant, subject, text, folder = (
+            v.strip() if v and v.strip() else None
+            for v in (sender, recipient, participant, subject, text, folder)
+        )
+        date_from_iso = _normalize_date_bound(date_from, end_of_day=False, field_name="date_from")
+        date_to_iso = _normalize_date_bound(date_to, end_of_day=True, field_name="date_to")
+
+        where: list[str] = []
+        params: list = []
+        for value, roles in (
+            (sender, ("from",)),
+            (recipient, ("to", "cc")),
+            (participant, ("from", "to", "cc")),
+        ):
+            if value:
+                where.append(_participant_clause(value, roles, params))
+        if subject:
+            where.append("instr(mcp_lower(m.subject), ?) > 0")
+            params.append(subject.lower())
+        if text:
+            terms = _text_terms(text)
+            if not terms:
+                raise ValueError("text must contain at least one word")
+            if len(terms) > _MAX_TEXT_TERMS:
+                raise ValueError(f"text supports at most {_MAX_TEXT_TERMS} words")
+            # One subquery per word, so the words may fall in different
+            # chunks of the same message. Each is a quoted FTS phrase;
+            # unicode61 never keeps a quote inside a token, but doubling
+            # any (FTS5 string escaping) keeps FTS syntax out regardless.
+            for term in terms:
+                where.append(
+                    "m.message_id IN (SELECT c.message_id FROM message_chunks_fts f "
+                    "JOIN message_chunks c ON c.fts_rowid = f.rowid "
+                    "WHERE message_chunks_fts MATCH ? AND c.attachment_id IS NULL)"
+                )
+                params.append('"' + term.replace('"', '""') + '"')
+        if folder:
+            where.append("m.folder = ?")
+            params.append(folder)
+        if date_from_iso is not None:
+            where.append("m.sent_at >= ?")
+            params.append(date_from_iso)
+        if date_to_iso is not None:
+            where.append("m.sent_at <= ?")
+            params.append(date_to_iso)
+        if has_attachments is not None:
+            where.append("m.has_attachments = ?")
+            params.append(1 if has_attachments else 0)
+
+        # A cursor is only meaningful for the predicates it was issued
+        # under; bind it to a digest of them.
+        digest = hashlib.sha256(
+            json.dumps(
+                [sender, recipient, participant, subject, text, folder]
+                + [date_from_iso, date_to_iso, has_attachments]
+            ).encode()
+        ).hexdigest()[:16]
+        page_where = list(where)
+        page_params = list(params)
+        offset = 0
+        if cursor:
+            last_sent_at, last_id, offset = _decode_cursor(cursor, digest)
+            # Row-value form: SQLite seeks idx_messages_sent to the cursor;
+            # the equivalent OR expansion sorted every earlier row.
+            page_where.append("(m.sent_at, m.message_id) < (?, ?)")
+            page_params += [last_sent_at, last_id]
+
+        where_sql = " AND ".join(where) or "1"
+        page_where_sql = " AND ".join(page_where) or "1"
+        with closing(self._connect()) as conn:
+            # One read transaction: the count, the page, and its
+            # participants come from the same snapshot even while the
+            # indexer commits.
+            conn.execute("BEGIN")
+            total = conn.execute(
+                "SELECT COUNT(*) FROM messages m WHERE " + where_sql,  # nosec B608
+                params,
+            ).fetchone()[0]
+            rows = conn.execute(
+                "SELECT m.message_id, m.thread_id, m.subject, m.sent_at, m.folder, "
+                "m.has_attachments FROM messages m WHERE "
+                + page_where_sql  # nosec B608
+                + " ORDER BY m.sent_at DESC, m.message_id DESC LIMIT ?",
+                [*page_params, limit + 1],
+            ).fetchall()
+            has_more = len(rows) > limit
+            records = [
+                MessageRecord(
+                    message_id=r["message_id"],
+                    thread_id=r["thread_id"],
+                    subject=r["subject"],
+                    sent_at=r["sent_at"],
+                    folder=r["folder"],
+                    has_attachments=bool(r["has_attachments"]),
+                )
+                for r in rows[:limit]
+            ]
+            by_id = {rec.message_id: rec for rec in records}
+            if by_id:
+                placeholders = ",".join(["?"] * len(by_id))
+                # rowid order is insertion order, i.e. header order.
+                participant_rows = conn.execute(
+                    "SELECT message_id, role, address, name FROM message_participants "
+                    f"WHERE message_id IN ({placeholders}) ORDER BY rowid",  # nosec B608
+                    list(by_id),
+                ).fetchall()
+                for p in participant_rows:
+                    role_list = {"from": "from_", "to": "to", "cc": "cc"}[p["role"]]
+                    getattr(by_id[p["message_id"]], role_list).append(
+                        Participant(name=p["name"], address=p["address"])
+                    )
+            conn.rollback()
+
+        next_offset = offset + len(records)
+        return MessagePage(
+            total_matches=total,
+            offset=offset,
+            messages=records,
+            has_more=has_more,
+            next_cursor=_encode_cursor(digest, records[-1], next_offset) if has_more else None,
+        )
 
     # -------------------------------------------------------------------------
     # Helpers

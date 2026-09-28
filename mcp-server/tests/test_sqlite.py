@@ -2083,74 +2083,54 @@ class TestFindContact:
         results = seeded_db.find_contact("@example.com", limit=2)
         assert len(results) == 2
 
-    def test_malformed_participants_json_skipped(self, seeded_db: Database, tmp_path):
-        # A thread with corrupt JSON in ``participants`` should be
-        # skipped rather than crashing the whole aggregation. Drop in
-        # a row by hand to bypass the writer's normal JSON encoding.
-        from tests.conftest import _build_schema
+    def test_reads_participant_index_not_thread_json(self, tmp_path):
+        # find_contact aggregates ``message_participants``: a contact
+        # present only there (the thread's JSON participant list is
+        # empty) is still found, and names from every message collect.
+        from tests.conftest import _insert_message
 
-        path = tmp_path / "bad-json.db"
-        conn = sqlite3.connect(str(path))
-        conn.enable_load_extension(True)
-        import sqlite_vec
-
-        sqlite_vec.load(conn)
-        conn.enable_load_extension(False)
-        _build_schema(conn)
-        conn.execute(
-            """INSERT INTO threads (
-                thread_id, subject, participants, senders, folder,
-                date_first, date_last, message_ids, snippet,
-                has_attachments, body_text, fts_rowid, display_subject
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (
-                "t-broken",
-                "broken",
-                "{not valid json",
-                "[]",
-                "INBOX",
-                "2024-01-01T00:00:00+00:00",
-                "2024-01-01T00:00:00+00:00",
-                "[]",
-                "",
-                0,
-                "",
-                None,
-                None,
-            ),
+        conn, path = _open_built_db_conn(tmp_path, "participants.db")
+        _insert_message(
+            conn,
+            message_id="m1",
+            thread_id="t1",
+            sent_at="2024-01-01T00:00:00+00:00",
+            from_=["Jane Doe <jane@example.com>"],
         )
-        # Add a valid neighbor so we can confirm the loop continued
-        # past the broken row instead of bailing out.
-        conn.execute(
-            """INSERT INTO threads (
-                thread_id, subject, participants, senders, folder,
-                date_first, date_last, message_ids, snippet,
-                has_attachments, body_text, fts_rowid, display_subject
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (
-                "t-good",
-                "ok",
-                '["good@example.com"]',
-                "[]",
-                "INBOX",
-                "2024-01-01T00:00:00+00:00",
-                "2024-01-01T00:00:00+00:00",
-                "[]",
-                "",
-                0,
-                "",
-                None,
-                None,
-            ),
+        _insert_message(
+            conn,
+            message_id="m2",
+            thread_id="t1",
+            sent_at="2024-01-02T00:00:00+00:00",
+            to=["J. Doe <JANE@example.com>"],
         )
-        conn.commit()
         conn.close()
-
         db = Database(str(path))
         try:
-            results = db.find_contact("good")
-            assert len(results) == 1
-            assert results[0]["email"] == "good@example.com"
+            results = db.find_contact("jane")
+            assert results == [
+                {"email": "jane@example.com", "names": ["J. Doe", "Jane Doe"], "thread_count": 1}
+            ]
+        finally:
+            db.close()
+
+    def test_non_ascii_name_matches_case_insensitively(self, tmp_path):
+        # SQLite's own lower() folds ASCII only; the match must fold
+        # "JOSÉ" to "josé" the way Python does.
+        from tests.conftest import _insert_message
+
+        conn, path = _open_built_db_conn(tmp_path, "unicode.db")
+        _insert_message(
+            conn,
+            message_id="m1",
+            thread_id="t1",
+            sent_at="2024-01-01T00:00:00+00:00",
+            from_=["José Álvarez <jose@example.com>"],
+        )
+        conn.close()
+        db = Database(str(path))
+        try:
+            assert [c["email"] for c in db.find_contact("JOSÉ ÁLVAREZ")] == ["jose@example.com"]
         finally:
             db.close()
 
@@ -2163,6 +2143,73 @@ class TestFindContactSendersOnly:
     "filter to messages this person sent". Each test pins the
     distinction.
     """
+
+    def test_senders_only_counts_primary_author_only(self, tmp_path):
+        # search_emails(from_name=...) plugs the resolved address into a
+        # filter over each thread's primary From authors, so resolution
+        # must rank on the same authors: a secondary author in a
+        # multi-author From must not outrank a real primary sender.
+        from tests.conftest import _insert_message
+
+        conn, path = _open_built_db_conn(tmp_path, "authors.db")
+        _insert_message(
+            conn,
+            message_id="m1",
+            thread_id="t1",
+            sent_at="2024-01-01T00:00:00+00:00",
+            from_=["Pat Solo <solo@example.com>"],
+        )
+        for n in (2, 3):
+            _insert_message(
+                conn,
+                message_id=f"m{n}",
+                thread_id=f"t{n}",
+                sent_at="2024-01-02T00:00:00+00:00",
+                from_=["Lead <lead@example.com>", "Pat Joint <joint@example.com>"],
+            )
+        conn.close()
+        db = Database(str(path))
+        try:
+            assert [c["email"] for c in db.find_contact("pat", senders_only=True)] == [
+                "solo@example.com"
+            ]
+            # Without senders_only every role counts, secondary authors too.
+            assert db.find_contact("pat")[0]["email"] == "joint@example.com"
+        finally:
+            db.close()
+
+    def test_senders_only_skips_author_behind_an_unparseable_primary(self, tmp_path):
+        # ``From: invalid, Pat Joint <joint@...>``: the primary author is
+        # ``invalid`` (recorded in threads.senders), which the participant
+        # writer skips, so Joint is the first stored From row. Joint is
+        # still not an address the search sender filter can match, so it
+        # must not outrank the real sender.
+        from tests.conftest import _insert_message
+
+        conn, path = _open_built_db_conn(tmp_path, "unparseable-primary.db")
+        _insert_message(
+            conn,
+            message_id="m1",
+            thread_id="t1",
+            sent_at="2024-01-01T00:00:00+00:00",
+            from_=["Pat Solo <solo@example.com>"],
+        )
+        for n in (2, 3):
+            _insert_message(
+                conn,
+                message_id=f"m{n}",
+                thread_id=f"t{n}",
+                sent_at="2024-01-02T00:00:00+00:00",
+                from_=["invalid", "Pat Joint <joint@example.com>"],
+            )
+        conn.close()
+        db = Database(str(path))
+        try:
+            assert [c["email"] for c in db.find_contact("pat", senders_only=True)] == [
+                "solo@example.com"
+            ]
+        finally:
+            db.close()
 
     def test_senders_only_excludes_recipient_only_contact(self, tmp_path):
         # Build a small DB where one contact is ONLY a recipient,
@@ -2639,7 +2686,7 @@ class TestFindContactHostileParticipants:
     def test_unparseable_stored_entry_does_not_break_lookup(self, tmp_path):
         """One indexed message whose participant string blows up parseaddr
         (nested-comment recursion) must not take down every find_contact
-        call — find_contact full-scans all threads' participants."""
+        call. The writer skips such entries, so the lookup never sees it."""
         from tests.conftest import _insert_thread
 
         conn, path = _open_built_db_conn(tmp_path, "hostile.db")
@@ -2656,6 +2703,262 @@ class TestFindContactHostileParticipants:
         db = Database(str(path))
         try:
             contacts = db.find_contact("bob")
+            assert [c["email"] for c in contacts] == ["bob@example.com"]
+        finally:
+            db.close()
+
+
+def _ids(page) -> list[str]:
+    return [m.message_id for m in page.messages]
+
+
+class TestQueryMessages:
+    """``query_messages`` enumerates: every message matching all given
+    predicates, newest first, with an exact total and a cursor."""
+
+    def test_no_predicates_enumerates_everything_newest_first(self, messages_db):
+        page = messages_db.query_messages()
+        # m4/m5 tie on sent_at; message_id DESC breaks it.
+        assert _ids(page) == ["m5", "m4", "m3", "m2", "m1"]
+        assert page.total_matches == 5
+        assert page.has_more is False
+        assert page.next_cursor is None
+        assert page.offset == 0
+
+    @pytest.mark.parametrize(
+        "value",
+        ["jane@example.com", "JANE@Example.COM", "Jane Doe <jane@example.com>"],
+    )
+    def test_sender_full_address_is_exact(self, messages_db, value):
+        page = messages_db.query_messages(sender=value)
+        assert _ids(page) == ["m5", "m3", "m1"]
+        assert page.total_matches == 3
+
+    def test_sender_domain_is_substring(self, messages_db):
+        assert _ids(messages_db.query_messages(sender="@other.org")) == ["m4"]
+
+    def test_sender_name_fragment_matches_display_name(self, messages_db):
+        # m3 and m5 are from jane@example.com with no display name, so
+        # the name fragment only reaches m1.
+        assert _ids(messages_db.query_messages(sender="doe")) == ["m1"]
+
+    def test_sender_name_match_folds_non_ascii_case(self, messages_db):
+        assert _ids(messages_db.query_messages(sender="ÁLVAREZ")) == ["m4"]
+
+    def test_recipient_covers_to_and_cc(self, messages_db):
+        assert _ids(messages_db.query_messages(recipient="jane@example.com")) == ["m4", "m2"]
+        assert _ids(messages_db.query_messages(recipient="carol@other.org")) == ["m3", "m2"]
+
+    def test_participant_covers_every_role(self, messages_db):
+        page = messages_db.query_messages(participant="jane@example.com")
+        assert page.total_matches == 5
+
+    def test_subject_is_case_insensitive_substring(self, messages_db):
+        assert _ids(messages_db.query_messages(subject="BUDGET")) == ["m2", "m1"]
+
+    def test_text_matches_body_not_attachment(self, messages_db):
+        assert _ids(messages_db.query_messages(text="budget")) == ["m2", "m1"]
+        assert messages_db.query_messages(text="spreadsheet").total_matches == 0
+
+    def test_text_requires_every_term(self, messages_db):
+        assert _ids(messages_db.query_messages(text="budget approved")) == ["m1"]
+
+    def test_text_terms_may_fall_in_different_chunks(self, messages_db):
+        assert _ids(messages_db.query_messages(text="lunch noodle")) == ["m3"]
+
+    def test_text_without_words_is_rejected(self, messages_db):
+        with pytest.raises(ValueError, match="text"):
+            messages_db.query_messages(text="!!! ???")
+
+    def test_text_underscore_separates_words_as_fts_does(self, tmp_path):
+        # FTS treats "_" as a separator, so "budget_approved" is the two
+        # words budget and approved, each required, in any order.
+        from tests.conftest import _insert_message
+
+        conn, path = _open_built_db_conn(tmp_path, "underscore.db")
+        for n, body in enumerate(["budget is approved", "approved budget", "budget only"], 1):
+            _insert_message(
+                conn,
+                message_id=f"m{n}",
+                thread_id=f"t{n}",
+                sent_at=f"2024-01-0{n}T00:00:00+00:00",
+                body=body,
+            )
+        conn.close()
+        db = Database(str(path))
+        try:
+            assert _ids(db.query_messages(text="budget_approved")) == ["m2", "m1"]
+        finally:
+            db.close()
+
+    def test_text_private_use_character_stays_inside_the_word(self, tmp_path):
+        # FTS treats private-use characters (category Co) as word
+        # characters: "alphabeta" is one word, not alpha + beta.
+        from tests.conftest import _insert_message
+
+        conn, path = _open_built_db_conn(tmp_path, "private-use.db")
+        _insert_message(
+            conn,
+            message_id="m1",
+            thread_id="t1",
+            sent_at="2024-01-01T00:00:00+00:00",
+            body="alphabeta",
+        )
+        _insert_message(
+            conn,
+            message_id="m2",
+            thread_id="t2",
+            sent_at="2024-01-02T00:00:00+00:00",
+            body="alpha beta",
+        )
+        conn.close()
+        db = Database(str(path))
+        try:
+            assert _ids(db.query_messages(text="alphabeta")) == ["m1"]
+        finally:
+            db.close()
+
+    def test_folder_is_exact(self, messages_db):
+        assert _ids(messages_db.query_messages(folder="Archive")) == ["m3"]
+
+    def test_date_bounds_are_inclusive_whole_days(self, messages_db):
+        assert _ids(messages_db.query_messages(date_from="2024-02-01")) == ["m5", "m4", "m3"]
+        # m2 at 10:00 on the 11th is inside a date-only upper bound.
+        assert _ids(messages_db.query_messages(date_to="2024-01-11")) == ["m2", "m1"]
+
+    def test_invalid_date_is_rejected(self, messages_db):
+        with pytest.raises(ValueError, match="date_from"):
+            messages_db.query_messages(date_from="last tuesday")
+
+    def test_has_attachments_both_ways(self, messages_db):
+        assert _ids(messages_db.query_messages(has_attachments=True)) == ["m4", "m2"]
+        assert _ids(messages_db.query_messages(has_attachments=False)) == ["m5", "m3", "m1"]
+
+    def test_predicates_combine_with_and(self, messages_db):
+        page = messages_db.query_messages(
+            sender="jane@example.com", folder="INBOX", date_from="2024-03-01"
+        )
+        assert _ids(page) == ["m5"]
+
+    def test_blank_predicates_are_ignored(self, messages_db):
+        page = messages_db.query_messages(sender="", subject="  ", text="")
+        assert page.total_matches == 5
+
+    def test_returns_headers_and_participants_by_role(self, messages_db):
+        (m2,) = messages_db.query_messages(subject="Re: Budget").messages
+        assert m2.thread_id == "t1"
+        assert m2.subject == "Re: Budget review"
+        assert m2.sent_at == "2024-01-11T10:00:00+00:00"
+        assert m2.folder == "INBOX"
+        assert m2.has_attachments is True
+        assert [(p.name, p.address) for p in m2.from_] == [(None, "bob@example.com")]
+        assert [(p.name, p.address) for p in m2.to] == [("Jane Doe", "jane@example.com")]
+        assert [(p.name, p.address) for p in m2.cc] == [(None, "carol@other.org")]
+
+
+class TestQueryMessagesUnicodeText:
+    """Composed and decomposed spellings of a word are the same word to
+    FTS (unicode61 folds diacritics); the ``text`` terms must agree, or
+    an exhaustive count silently misses messages."""
+
+    @pytest.mark.parametrize(
+        ("body", "query"),
+        [
+            ("r\u00e9sum\u00e9 attached", "re\u0301sume\u0301"),
+            ("re\u0301sume\u0301 attached", "r\u00e9sum\u00e9"),
+            ("re\u0301sume\u0301 attached", "re\u0301sume\u0301"),
+            ("a nai\u0308ve plan", "nai\u0308ve"),
+            # Scripts unicode61 does not fold: the query must reach FTS in
+            # the indexed form, not NFC-composed.
+            (
+                "\u03ba\u03bf\u0301\u03c3\u03bc\u03bf\u03c2",
+                "\u03ba\u03bf\u0301\u03c3\u03bc\u03bf\u03c2",
+            ),
+            ("\u1112\u1161\u11ab\u1100\u1173\u11af", "\u1112\u1161\u11ab\u1100\u1173\u11af"),
+        ],
+    )
+    def test_composed_and_decomposed_forms_match(self, tmp_path, body, query):
+        from tests.conftest import _insert_message
+
+        conn, path = _open_built_db_conn(tmp_path, "unicode-text.db")
+        _insert_message(
+            conn, message_id="m1", thread_id="t1", sent_at="2024-01-01T00:00:00+00:00", body=body
+        )
+        conn.close()
+        db = Database(str(path))
+        try:
+            assert db.query_messages(text=query).total_matches == 1
+        finally:
+            db.close()
+
+    def test_bare_combining_mark_is_not_a_term(self, messages_db):
+        with pytest.raises(ValueError, match="text"):
+            messages_db.query_messages(text="\u0301")
+
+
+class TestQueryMessagesPaging:
+    def test_cursor_walks_every_match_exactly_once(self, messages_db):
+        seen: list[str] = []
+        cursor = None
+        offsets = []
+        while True:
+            page = messages_db.query_messages(limit=2, cursor=cursor)
+            assert page.total_matches == 5
+            offsets.append(page.offset)
+            seen += _ids(page)
+            if not page.has_more:
+                assert page.next_cursor is None
+                break
+            cursor = page.next_cursor
+        assert seen == ["m5", "m4", "m3", "m2", "m1"]
+        assert offsets == [0, 2, 4]
+
+    def test_page_boundary_inside_a_sent_at_tie(self, messages_db):
+        first = messages_db.query_messages(limit=1)
+        assert _ids(first) == ["m5"]
+        second = messages_db.query_messages(limit=1, cursor=first.next_cursor)
+        assert _ids(second) == ["m4"]
+
+    def test_exact_final_page_has_no_more(self, messages_db):
+        page = messages_db.query_messages(sender="jane@example.com", limit=3)
+        assert page.has_more is False
+        assert page.next_cursor is None
+
+    def test_cursor_is_bound_to_its_filters(self, messages_db):
+        first = messages_db.query_messages(sender="jane@example.com", limit=1)
+        with pytest.raises(ValueError, match="cursor"):
+            messages_db.query_messages(sender="bob@example.com", cursor=first.next_cursor)
+
+    @pytest.mark.parametrize("cursor", ["not-a-cursor", "e30", "eyJ2IjogOX0"])
+    def test_malformed_cursor_is_rejected(self, messages_db, cursor):
+        with pytest.raises(ValueError, match="cursor"):
+            messages_db.query_messages(cursor=cursor)
+
+
+class TestFindContactSendersOnlyHostileEntries:
+    def test_bad_sender_entries_cost_only_themselves(self, tmp_path):
+        """senders_only parses each thread's ``senders`` JSON; a corrupt
+        array, a non-string entry, or a string that makes parseaddr
+        recurse must be skipped, not abort the lookup."""
+        from tests.conftest import _insert_thread
+
+        conn, path = _open_built_db_conn(tmp_path, "hostile-senders.db")
+        _insert_thread(
+            conn,
+            thread_id="t-hostile",
+            subject="hostile",
+            participants=["Bob <bob@example.com>"],
+            senders=["(" * 1200 + ")" * 1200 + " <mallory@example.com>", "Bob <bob@example.com>"],
+        )
+        _insert_thread(conn, thread_id="t-corrupt", subject="c", participants=[])
+        conn.execute("UPDATE threads SET senders = '{not json' WHERE thread_id = 't-corrupt'")
+        _insert_thread(conn, thread_id="t-nonstr", subject="n", participants=[])
+        conn.execute("UPDATE threads SET senders = '[42]' WHERE thread_id = 't-nonstr'")
+        conn.commit()
+        conn.close()
+        db = Database(str(path))
+        try:
+            contacts = db.find_contact("bob", senders_only=True)
             assert [c["email"] for c in contacts] == ["bob@example.com"]
         finally:
             db.close()
