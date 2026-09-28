@@ -173,9 +173,10 @@ answers real knowledge questions, and identify why failures occur.
 
 1. **Agent-level evals** on the synthetic mailbox: tool-selection
    accuracy, argument accuracy, retrieval recall, citation accuracy,
-   pagination completeness, unnecessary-call counts. Automates what
-   the manual `eval-queries.md` walk scores by hand (the old
-   `scripts/eval_run.py` batch runner was removed with Open WebUI).
+   pagination completeness, unnecessary-call counts. Extends the
+   retrieval-only harness in `mcp-server/tests/eval/` (Recall@10 /
+   MRR, opt-in `pytest -m eval`) to the agent level; the old
+   `scripts/eval_run.py` batch runner was removed with Open WebUI.
 2. **Latency instrumentation before performance redesign.** Stage
    timers through the query path (query_embedding / per-lane FTS+KNN /
    fusion / rerank / evidence_fetch / inference / total). `ask_mailbox`
@@ -434,6 +435,18 @@ do not ship persisted claims without them.
    Both non-local options send mailbox content off the host (and
    Cloudflare adds a third-party transit hop), so either needs an
    owner decision and a privacy-posture update in AGENTS.md first.
+   Either one also has to add the approved external Host (and HTTPS
+   Origin) to the `TransportSecuritySettings` allowlist in
+   `mcp-server/src/main.py`. The allowlist currently accepts only
+   localhost, loopback and `mcp-server`, so proxied requests fail
+   before they reach auth. Add each approved name narrowly and keep
+   DNS-rebinding protection on. The hosted option must also set
+   `AuthSettings.resource_server_url` to the externally visible MCP
+   URL, because the SDK registers the RFC 9728 protected-resource
+   metadata route and the `resource_metadata` challenge parameter
+   only when that URL is set. Without them connectors cannot discover
+   the authorization server. The proxy must expose that well-known
+   route.
    Any in-app option plugs into the MCP SDK's `TokenVerifier` /
    `AuthSettings` hooks: `sse_app()` and `streamable_http_app()` add
    the bearer-auth middleware themselves (so `server.run()` and
