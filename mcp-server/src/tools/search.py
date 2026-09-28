@@ -361,6 +361,8 @@ def register_search_tools(
             thread_id: Optional opaque thread ID to scope evidence to
                        one thread. Obtain it from search_emails or
                        list_threads — never invent it from a subject.
+                       Cannot be combined with folders, from_addr,
+                       date_from, date_to or has_attachments.
             folders: Restrict to specific folders, e.g. ["INBOX", "Sent"].
             from_addr: Restrict to a sender ADDRESS or domain
                        ("jane@example.com", "@example.com"). For a
@@ -398,6 +400,29 @@ def register_search_tools(
         )
         if not query or not query.strip():
             raise ToolError("Provide a query to gather evidence for.")
+        if thread_id:
+            # These filters select threads; thread_id already names one.
+            # Applying them would only keep or drop that whole thread (a
+            # sender filter would not narrow to that sender's passages),
+            # and ignoring them returned evidence that looked filtered.
+            given = [
+                name
+                for name, value in (
+                    ("folders", folders),
+                    ("from_addr", from_addr),
+                    ("date_from", date_from),
+                    ("date_to", date_to),
+                    ("has_attachments", has_attachments),
+                )
+                if value is not None and value != []
+            ]
+            if given:
+                raise ToolError(
+                    f"{', '.join(given)} cannot be combined with thread_id: those "
+                    "filters choose threads, and thread_id already names one. Drop "
+                    "them to read this thread's evidence, or drop thread_id to "
+                    "search the mailbox with them."
+                )
         # Same clamp ceiling as search_emails — ``limit`` here counts
         # evidence chunks, and an LLM-inflated value would drive a large
         # per-thread chunk fetch and an oversized response payload.

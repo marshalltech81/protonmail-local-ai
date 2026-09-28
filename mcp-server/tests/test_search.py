@@ -552,6 +552,28 @@ class TestGetEvidence:
         out = asyncio.run(handler(query="invoice", thread_id="t-alpha"))
         assert "12345" in _text(out)
 
+    @pytest.mark.parametrize(
+        "filters",
+        [
+            {"folders": ["Archive"]},
+            {"from_addr": "bob@example.test"},
+            {"date_from": "2030-01-01"},
+            {"date_to": "2000-01-01"},
+            {"has_attachments": True},
+            {"has_attachments": False},
+        ],
+    )
+    def test_thread_scoped_rejects_retrieval_filters(
+        self, fake_server, fake_llm, chunked_db, filters
+    ):
+        """Regression (#219): with thread_id, the filters were accepted
+        and silently ignored, so the passages returned looked like they
+        satisfied constraints they did not."""
+        handler = self._handler(fake_server, fake_llm, chunked_db)
+        message = _error(handler(query="invoice", thread_id="t-alpha", **filters))
+        assert "cannot be combined with thread_id" in message
+        assert next(iter(filters)) in message
+
     def test_thread_scoped_unknown_thread(self, fake_server, fake_llm, chunked_db):
         handler = self._handler(fake_server, fake_llm, chunked_db)
         assert "Thread not found" in _error(handler(query="invoice", thread_id="no-such-thread"))

@@ -114,7 +114,7 @@ chunks (extracted PDF / OCR / document text) are included — unlike
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `query` | string | required | The question or topic to gather evidence for |
-| `thread_id` | string | none | Scope evidence to one thread; omit to search the whole mailbox |
+| `thread_id` | string | none | Scope evidence to one thread; omit to search the whole mailbox. Rejected in combination with `folders`, `from_addr`, `date_from`, `date_to` or `has_attachments`, which select threads |
 | `folders` | list | all | Scope to specific folders |
 | `from_addr` | string | none | Filter by sender address or domain |
 | `date_from` | string | none | ISO 8601 date lower bound |
