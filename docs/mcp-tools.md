@@ -15,13 +15,16 @@ The search, retrieval, and system tools (Groups 1, 2, and 4) publish an
   state is typed as well (`get_thread.next_offset`,
   `query_messages.next_cursor` / `has_more` / `total_matches`).
 
-Structured output keeps the prose bounds: `get_thread` and
-`query_messages` list at most 10 recipients per role, 10 References, and
-10 thread participants or senders, each with a full count (`to_count`,
-`references_count`, `participant_count`, ...), and both cut every
-header value past 500 characters with a marker, in prose and structured
-output alike; `get_thread` also cuts bodies. `get_message` returns full
-headers and the full body.
+Structured output is bounded because headers are sender-controlled.
+Lists hold at most 10 entries (recipients per role, References, thread
+participants, attachment senders), each with a full count (`to_count`,
+`references_count`, `participant_count`, `sender_count`, ...). Header
+values past 500 characters (subjects, display names, addresses, reply
+headers, participant and sender strings) are cut with a marker.
+`get_thread` and `query_messages` apply the same cut in their prose, and
+`get_thread` also cuts bodies. IDs are never cut, since a shortened ID
+would not chain; `get_thread` states the thread ID once rather than on
+every message row. `get_message` returns full headers and the full body.
 
 A failure (unknown thread or message, invalid argument, provider or
 database error) is an MCP error result (`isError: true`) whose text

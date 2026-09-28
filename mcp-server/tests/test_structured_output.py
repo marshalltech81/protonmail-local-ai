@@ -23,7 +23,7 @@ from src.tools.retrieval import register_retrieval_tools
 from src.tools.search import register_search_tools
 from src.tools.system import register_system_tools
 
-from tests.conftest import FakeEmbedClient, _insert_message
+from tests.conftest import FakeEmbedClient, _insert_attachment, _insert_message, _insert_thread
 from tests.test_retrieval import _open_fixture_db
 
 # Tool -> one top-level property its output schema must declare. A bare
@@ -279,3 +279,63 @@ def test_query_messages_cuts_each_long_header_value(tmp_path):
     assert full["message"]["in_reply_to"] == huge
     assert full["message"]["references"] == [huge]
     assert full["message"]["from"][0]["name"] == huge
+
+
+def test_get_thread_rows_do_not_repeat_the_thread_id(tmp_path):
+    """Security review round 2: a thread ID is the root Message-ID, which
+    the sender controls and which cannot be cut without breaking chaining.
+    get_thread states it once at the top; repeating it in every message
+    row turned one 100K ID into megabytes on a 20-message page."""
+    long_id = "T" * 100_000
+    with _open_fixture_db(tmp_path) as (conn, db):
+        for i in range(20):
+            _insert_message(
+                conn,
+                message_id=f"m{i:02d}",
+                thread_id=long_id,
+                sent_at=f"2024-01-01T00:{i:02d}:00+00:00",
+                body="hello",
+            )
+        conn.close()
+        thread = _call(_server(db), "get_thread", thread_id=long_id, limit=20)
+
+    assert thread["thread"]["thread_id"] == long_id
+    assert len(thread["messages"]) == 20
+    assert all("thread_id" not in m for m in thread["messages"])
+    assert len(json.dumps(thread)) < 150_000
+
+
+def test_listing_tools_cut_long_participant_values(tmp_path):
+    """Security review round 2: search_emails and list_threads list ten
+    participants (search_attachments ten senders) where the prose shows
+    two or three, so each value is cut at 500 characters."""
+    people = [f"{'N' * 100_000}{i} <p{i}@example.com>" for i in range(12)]
+    with _open_fixture_db(tmp_path) as (conn, db):
+        _insert_thread(
+            conn,
+            thread_id="t",
+            subject="quarterly report",
+            participants=people,
+            senders=people,
+            has_attachments=True,
+            body_text="quarterly report attached",
+        )
+        _insert_attachment(
+            conn, message_id="m", thread_id="t", attachment_id="a", filename="report.pdf"
+        )
+        conn.close()
+        server = _server(db)
+        found = _call(server, "search_emails", query="quarterly", mode="keyword")
+        listed = _call(server, "list_threads")
+        attachments = _call(server, "search_attachments", query="report")
+
+    for summary in (found["results"][0], listed["threads"][0]):
+        assert len(summary["participants"]) == 10
+        assert summary["participant_count"] == 12
+        assert summary["participants"][0].endswith("more characters]")
+    hit = attachments["results"][0]
+    assert len(hit["senders"]) == 10
+    assert hit["sender_count"] == 12
+    assert hit["senders"][0].endswith("more characters]")
+    for out in (found, listed, attachments):
+        assert len(json.dumps(out)) < 20_000

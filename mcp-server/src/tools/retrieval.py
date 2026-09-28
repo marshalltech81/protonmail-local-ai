@@ -20,6 +20,7 @@ from ..lib.sqlite import (
 )
 from ..lib.validation import clamp_int
 from .outputs import (
+    HEADER_CHAR_LIMIT,
     Contact,
     FilterUse,
     FindContactOutput,
@@ -31,6 +32,7 @@ from .outputs import (
     QueryMessagesOutput,
     ThreadMessage,
     clip,
+    listed_message,
     message_headers,
     thread_summary,
     tool_result,
@@ -52,10 +54,9 @@ _DEFAULT_THREAD_PAGE = 10
 _MAX_THREAD_PAGE = 50
 _THREAD_BODY_CHAR_LIMIT = 4000
 # Headers are sender-controlled too: get_thread and query_messages list at
-# most this many References and cut every header value at this many
-# characters; get_message returns full headers.
+# most this many References and cut every header value at
+# HEADER_CHAR_LIMIT characters; get_message returns full headers.
 _MAX_LISTED_REFERENCES = 10
-_HEADER_CHAR_LIMIT = 500
 
 
 def _join_limited(items: list[str], limit: int | None) -> str:
@@ -80,7 +81,7 @@ def _header_lines(m: MessageRecord, *, full: bool) -> list[str]:
     """
     people_limit = None if full else _MAX_LISTED_PARTICIPANTS
     refs_limit = None if full else _MAX_LISTED_REFERENCES
-    chars = None if full else _HEADER_CHAR_LIMIT
+    chars = None if full else HEADER_CHAR_LIMIT
     headers = [("Subject", m.subject)]
     for label, people in (("From", m.from_), ("To", m.to), ("Cc", m.cc)):
         if people:
@@ -96,14 +97,8 @@ def _header_lines(m: MessageRecord, *, full: bool) -> list[str]:
 
 def _thread_message(m: MessageRecord, body: MessageBody | None) -> ThreadMessage:
     """One get_thread message: bounded headers plus its cut body."""
-    headers = message_headers(
-        m,
-        people=_MAX_LISTED_PARTICIPANTS,
-        refs=_MAX_LISTED_REFERENCES,
-        chars=_HEADER_CHAR_LIMIT,
-    )
     return ThreadMessage(
-        **headers.model_dump(),
+        **message_headers(m).model_dump(),
         body=body.text if body else None,
         body_omitted_chars=body.omitted_chars if body else 0,
     )
@@ -237,13 +232,13 @@ def register_retrieval_tools(server, db):
             else:
                 count = str(total)
             lines = [
-                f"Thread: {clip(thread.subject, _HEADER_CHAR_LIMIT)}",
+                f"Thread: {clip(thread.subject, HEADER_CHAR_LIMIT)}",
                 f"Thread ID: {thread.thread_id}",
                 f"Folder: {thread.folder}",
                 "Participants: "
                 + clip(
                     _join_limited(thread.participants, _MAX_LISTED_PARTICIPANTS),
-                    _HEADER_CHAR_LIMIT,
+                    HEADER_CHAR_LIMIT,
                 ),
                 f"Date range: {thread.date_first.strftime('%Y-%m-%d')} "
                 f"→ {thread.date_last.strftime('%Y-%m-%d')}",
@@ -300,7 +295,7 @@ def register_retrieval_tools(server, db):
 
             next_offset = offset + len(messages)
             output = GetThreadOutput(
-                thread=thread_summary(thread, chars=_HEADER_CHAR_LIMIT),
+                thread=thread_summary(thread),
                 total_messages=total,
                 offset=offset,
                 messages=[_thread_message(m, page.bodies.get(m.message_id)) for m in messages],
@@ -397,7 +392,7 @@ def register_retrieval_tools(server, db):
                     lines += ["", "Indexed snippet:", "", thread.snippet]
 
             output = GetMessageOutput(
-                message=message_headers(view.record),
+                message=listed_message(view.record, full=True),
                 thread_subject=thread.subject,
                 body=view.body.text if view.body else None,
                 indexed_thread_text=thread_text,
@@ -584,15 +579,7 @@ def register_retrieval_tools(server, db):
             offset=page.offset,
             has_more=page.has_more,
             next_cursor=page.next_cursor,
-            messages=[
-                message_headers(
-                    m,
-                    people=_MAX_LISTED_PARTICIPANTS,
-                    refs=_MAX_LISTED_REFERENCES,
-                    chars=_HEADER_CHAR_LIMIT,
-                )
-                for m in page.messages
-            ],
+            messages=[listed_message(m) for m in page.messages],
         )
         lines = [f"Query: {_describe_filters(uses)}", f"total_matches: {page.total_matches}"]
         if not page.messages:
@@ -612,11 +599,11 @@ def register_retrieval_tools(server, db):
         for i, m in enumerate(page.messages, first):
             flags = " | attachments" if m.has_attachments else ""
             lines.append(f"{i}. {m.sent_at} | {m.folder}{flags}")
-            lines.append(f"   Subject: {clip(m.subject, _HEADER_CHAR_LIMIT)}")
+            lines.append(f"   Subject: {clip(m.subject, HEADER_CHAR_LIMIT)}")
             for label, people in (("From", m.from_), ("To", m.to), ("Cc", m.cc)):
                 if people:
                     lines.append(
-                        f"   {label}: {clip(_format_participants(people), _HEADER_CHAR_LIMIT)}"
+                        f"   {label}: {clip(_format_participants(people), HEADER_CHAR_LIMIT)}"
                     )
             lines.append(f"   Message-ID: {m.message_id}")
             lines.append(f"   Thread ID: {m.thread_id}")

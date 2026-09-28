@@ -292,6 +292,10 @@ input by definition.
   documented cap — fits alongside Phase 1 item 2's structured output
 - mcp-server: remove the dead `Database.get_thread_message_ids` (no
   callers outside its tests)
+- IDs are unbounded: a root Message-ID becomes the thread ID with no
+  length check, and IDs cannot be cut in responses without breaking
+  chaining. Decide on a parse-time length limit (Message-IDs are
+  ≤998 characters per RFC 5322 line length) or a hashed thread ID
 - AGENTS.md commit-hygiene secret check: `grep '^\+'` fails under
   ugrep (a common `grep` alias); use the portable `grep '^[+]'`
 
@@ -449,7 +453,14 @@ structured `query_messages` rows newly exposed In-Reply-To and
 References with no length cut (a 2 MB response at `limit=1`); every
 header value in its prose and structured output is now cut at 500
 characters, as in `get_thread`, which also closes the backlog item for
-its unbounded subjects and display names.
+its unbounded subjects and display names. Review round 2 (Codex
+security review): `get_thread` repeated the sender-controlled thread ID
+(the root Message-ID) on every message row, and `search_emails` /
+`list_threads` / `search_attachments` listed 10 uncut participants or
+senders where the prose shows 2–3. Message rows now carry `thread_id`
+only where they can span threads (`query_messages`, `get_message`), and
+the shared builders cut by default, with `get_message` the only
+full-value caller.
 
 ### 2026-09-28 — Dead action/IMAP surface deleted (Phase 1 item 6)
 

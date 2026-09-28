@@ -14,6 +14,7 @@ from ..lib.embed import embed_query
 from ..lib.security import log_tool_call, safe_exception_text, safe_provider_exception_text
 from ..lib.validation import clamp_int
 from .outputs import (
+    HEADER_CHAR_LIMIT,
     MAX_LISTED,
     AttachmentHit,
     EvidenceChunk,
@@ -21,6 +22,7 @@ from .outputs import (
     EvidenceThread,
     SearchAttachmentsOutput,
     SearchEmailsOutput,
+    clip,
     thread_summary,
     tool_result,
 )
@@ -615,7 +617,7 @@ def register_search_tools(
                     subject=a.subject,
                     folder=a.folder,
                     date_last=a.date_last,
-                    senders=a.senders[:MAX_LISTED],
+                    senders=[clip(s, HEADER_CHAR_LIMIT) for s in a.senders[:MAX_LISTED]],
                     sender_count=len(a.senders),
                     extraction_status=a.extraction_status,
                     text_snippet=a.text_snippet,

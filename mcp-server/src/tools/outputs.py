@@ -12,8 +12,10 @@ Failures are raised as ``ToolError``, so the client receives an
 result always satisfies its schema.
 
 Everything in these models except IDs is sender-controlled, so the
-responses bound lists the way the prose does and report the full count
-alongside (``participant_count``, ``to_count``, ...).
+responses bound lists and cut long values (``MAX_LISTED``,
+``HEADER_CHAR_LIMIT``) and report the full count alongside
+(``participant_count``, ``to_count``, ...). The builders bound by
+default; only get_message asks for full headers.
 """
 
 from datetime import datetime
@@ -28,6 +30,10 @@ from ..lib.sqlite import Participant as ParticipantRecord
 # Entries listed per bounded list (thread participants, senders, one
 # message's recipients per role, References) before the rest are counted.
 MAX_LISTED = 10
+# Characters of one sender-controlled value (subject, name, address,
+# reply header) before it is cut with a marker. IDs are never cut: a
+# shortened ID would not chain to the next call.
+HEADER_CHAR_LIMIT = 500
 
 
 class _Output(BaseModel):
@@ -73,13 +79,13 @@ class ThreadSummary(_Output):
     snippet: str = Field(description="Start of the latest message body; body text only.")
 
 
-def thread_summary(t: ThreadResult, *, chars: int | None = None) -> ThreadSummary:
-    """``t`` as a ``ThreadSummary``; ``chars`` cuts sender-controlled text."""
+def thread_summary(t: ThreadResult) -> ThreadSummary:
+    """``t`` as a ``ThreadSummary``, with sender-controlled text cut."""
     return ThreadSummary(
         thread_id=t.thread_id,
-        subject=clip(t.subject, chars),
+        subject=clip(t.subject, HEADER_CHAR_LIMIT),
         folder=t.folder,
-        participants=[clip(p, chars) for p in t.participants[:MAX_LISTED]],
+        participants=[clip(p, HEADER_CHAR_LIMIT) for p in t.participants[:MAX_LISTED]],
         participant_count=len(t.participants),
         date_first=t.date_first,
         date_last=t.date_last,
@@ -91,7 +97,6 @@ def thread_summary(t: ThreadResult, *, chars: int | None = None) -> ThreadSummar
 
 class MessageHeaders(_Output):
     message_id: str = Field(description="RFC 5322 Message-ID; pass it to get_message.")
-    thread_id: str
     subject: str
     sent_at: str = Field(description="Send date (the sender's Date: header) in UTC, ISO 8601.")
     folder: str
@@ -107,15 +112,18 @@ class MessageHeaders(_Output):
     cc_count: int
 
 
-def message_headers(
-    m: MessageRecord,
-    *,
-    people: int | None = None,
-    refs: int | None = None,
-    chars: int | None = None,
-) -> MessageHeaders:
-    """``m``'s headers, listing at most ``people`` entries per role and
-    ``refs`` References and cutting values at ``chars`` (None: in full)."""
+class ListedMessage(MessageHeaders):
+    """A message's headers where rows may span threads."""
+
+    thread_id: str
+
+
+def message_headers(m: MessageRecord, *, full: bool = False) -> MessageHeaders:
+    """``m``'s headers. Unless ``full``, at most ``MAX_LISTED`` entries per
+    role and References are listed and values are cut at
+    ``HEADER_CHAR_LIMIT``."""
+    people = refs = None if full else MAX_LISTED
+    chars = None if full else HEADER_CHAR_LIMIT
 
     def listed(entries: list[ParticipantRecord], limit: int | None) -> list[Participant]:
         return [
@@ -128,7 +136,6 @@ def message_headers(
 
     return MessageHeaders(
         message_id=m.message_id,
-        thread_id=m.thread_id,
         subject=clip(m.subject, chars),
         sent_at=m.sent_at,
         folder=m.folder,
@@ -143,6 +150,11 @@ def message_headers(
         cc=listed(m.cc, people),
         cc_count=len(m.cc),
     )
+
+
+def listed_message(m: MessageRecord, *, full: bool = False) -> ListedMessage:
+    """``message_headers`` plus the message's thread ID."""
+    return ListedMessage(**message_headers(m, full=full).model_dump(), thread_id=m.thread_id)
 
 
 # --- search tools -------------------------------------------------------
@@ -245,7 +257,7 @@ class GetThreadOutput(_Output):
 
 
 class GetMessageOutput(_Output):
-    message: MessageHeaders
+    message: ListedMessage
     thread_subject: str
     body: str | None = Field(
         description="Full indexed body after quoted-reply stripping; null when none is indexed."
@@ -278,7 +290,7 @@ class QueryMessagesOutput(_Output):
     next_cursor: str | None = Field(
         description="Pass with the same filters for the next page; null when has_more is false."
     )
-    messages: list[MessageHeaders] = Field(description="Newest send date first.")
+    messages: list[ListedMessage] = Field(description="Newest send date first.")
 
 
 class Contact(_Output):
