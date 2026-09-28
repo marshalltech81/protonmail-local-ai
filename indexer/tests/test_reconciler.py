@@ -200,6 +200,33 @@ class TestSweepPaths:
         assert db.find_message_entry_by_filepath(str(replied)) is not None
         assert db.find_message_entry_by_filepath(str(path)) is None
 
+    def test_lists_each_folder_once_however_many_files_were_renamed(
+        self, db, threader, maildir, monkeypatch
+    ):
+        """Review (PR #246): the sweep now runs before the startup walk,
+        and it rescanned the whole folder for every stale path — O(N^2)
+        for N files renamed while the indexer was down. Each directory
+        is now listed at most once per sweep."""
+        count = 6
+        for i in range(count):
+            path = maildir / f"17000000{i:02d}.M{i}.host:2,S"
+            _write_eml(path, f"many{i}@example.com")
+            _index(path, db, threader)
+            path.rename(path.with_name(path.name.replace(":2,S", ":2,RS")))
+        listed: list[Path] = []
+        real_iterdir = Path.iterdir
+
+        def counting_iterdir(self):
+            listed.append(self)
+            return real_iterdir(self)
+
+        monkeypatch.setattr(Path, "iterdir", counting_iterdir)
+
+        result = sweep_paths(db)
+
+        assert result == {"renamed": count, "unreachable": 0}
+        assert len(listed) == len(set(listed)) == 1
+
     def test_does_not_tombstone_missing_files(self, db, threader, maildir):
         """sweep_paths is the always-on variant; a missing file must be
         counted as unreachable but NOT recorded in pending_deletions.

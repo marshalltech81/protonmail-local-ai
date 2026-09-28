@@ -463,7 +463,10 @@ was down are no longer reprocessed as new mail at all. Databases
 already split by #204 keep the inconsistency until the Phase 2 reindex.
 The Message-ID conflict fix (#217) moved to its own PR after review
 showed takeover needs a real design. No schema change; `make baseline`
-unchanged.
+unchanged. Review round 3 (Codex): moving the sweep onto the startup
+path exposed that it rescanned a folder for every stale path (quadratic
+in files renamed while the indexer was down); each sweep now lists a
+directory at most once.
 
 ### 2026-09-28 — Ingestion completeness fixes (#203, #206, #207, #212, #213)
 
