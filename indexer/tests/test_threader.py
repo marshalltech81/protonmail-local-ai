@@ -286,6 +286,50 @@ class TestAssignThread:
         # Must NOT merge — no shared participant.
         assert t2.thread_id == "sub_no_overlap_unrelated@example.com"
 
+    def test_subject_fallback_ignores_a_shared_recipient_alone(self, db, threader):
+        """Regression (#205): the mailbox owner is a recipient of nearly
+        every message, so sharing only them is no evidence of one
+        conversation. Two vendors' "Invoice" mails merged into one
+        thread, mixing their content in retrieval and summaries."""
+        first = make_message(
+            message_id="inv_a@example.com",
+            subject="Invoice",
+            from_addr="billing@vendor-a.example",
+            to_addrs=["owner@example.com"],
+        )
+        db.upsert_thread(threader.assign_thread(first), [0.0] * EMBEDDING_DIM)
+        second = make_message(
+            message_id="inv_b@example.com",
+            subject="Invoice",
+            from_addr="billing@vendor-b.example",
+            to_addrs=["owner@example.com"],
+            filepath="/maildir/INBOX/cur/inv_b",
+            date=datetime(2024, 1, 15, tzinfo=UTC),
+        )
+
+        assert threader.assign_thread(second).thread_id == "inv_b@example.com"
+
+    def test_subject_fallback_ignores_a_shared_sender_alone(self, db, threader):
+        """The same owner writing "Meeting" to two different people is
+        two conversations."""
+        first = make_message(
+            message_id="meet_x@example.com",
+            subject="Meeting",
+            from_addr="owner@example.com",
+            to_addrs=["x@example.com"],
+        )
+        db.upsert_thread(threader.assign_thread(first), [0.0] * EMBEDDING_DIM)
+        second = make_message(
+            message_id="meet_y@example.com",
+            subject="Meeting",
+            from_addr="owner@example.com",
+            to_addrs=["y@example.com"],
+            filepath="/maildir/INBOX/cur/meet_y",
+            date=datetime(2024, 1, 15, tzinfo=UTC),
+        )
+
+        assert threader.assign_thread(second).thread_id == "meet_y@example.com"
+
     def test_subject_fallback_rejected_when_too_distant_in_time(self, db, threader):
         """Subject fallback must also respect a time window — a matching
         subject more than a year later is almost certainly a different
