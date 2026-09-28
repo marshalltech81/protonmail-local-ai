@@ -452,6 +452,21 @@ do not ship persisted claims without them.
 
 ## Recently Completed
 
+### 2026-09-28 — Thread reprocessing and Message-ID conflicts (#204, #217)
+
+Reprocessing an already-indexed message no longer re-resolves its
+thread from headers (#204): a reply indexed before its parent, when
+reprocessed, moved to the parent's thread in the map while its chunks
+and the old thread row still claimed it. The startup rename sweep now
+runs before the initial walk, so files mbsync renamed while the indexer
+was down are no longer reprocessed as new mail at all. A second file
+carrying an indexed message's Message-ID with a different sender or
+body is dead-lettered as `permanent_source_failure` naming the original,
+instead of overwriting its record, participants and chunks (#217);
+legitimate duplicates (archive copies, self-sent mail) and renames
+index as before. Databases already split by #204 keep the inconsistency
+until the Phase 2 reindex. No schema change; `make baseline` unchanged.
+
 ### 2026-09-28 — Ingestion completeness fixes (#203, #206, #207, #212, #213)
 
 Five Codex findings where valid mail could silently lose indexing, or
