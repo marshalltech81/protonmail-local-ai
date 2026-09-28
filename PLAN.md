@@ -452,6 +452,21 @@ do not ship persisted claims without them.
 
 ## Recently Completed
 
+### 2026-09-28 — MCP results no longer overclaim (#219, #220, #222)
+
+Three places where a tool's answer claimed more than it had. Neither
+inference backend checked why generation stopped (#222): output cut off
+at `max_tokens` now raises `InferenceTruncatedError` with the partial
+text, `extract_from_emails` counts truncated and non-JSON threads apart
+from a valid `null` and says how many could not be extracted (instead
+of "No structured data … found"), and `ask_mailbox` / `summarize_thread`
+mark a cut-off answer. `search_attachments`' text lane ranks each
+attachment by its best chunk before its LIMIT (#220), so one long
+document no longer hides other matches (a MATERIALIZED CTE, since
+`bm25()` is not allowed in a grouped query). `get_evidence` rejects
+`thread_id` combined with thread-selecting filters (#219) instead of
+silently ignoring them. No schema change; `make baseline` unchanged.
+
 ### 2026-09-28 — Subject fallback needs a shared correspondent pair (#205)
 
 The headerless subject fallback accepted any one shared address, and
