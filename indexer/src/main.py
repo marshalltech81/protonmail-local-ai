@@ -74,6 +74,7 @@ from .queue import (
 from .queue import load_config_from_env as load_queue_config_from_env
 from .quoting import strip_for_embedding
 from .reconciler import Reconciler, ReconcilerConfig, load_config_from_env, sweep_paths
+from .stall_guard import StallGuard
 from .threader import Thread, Threader
 from .timings import StageTimings, TimingAggregator, format_summary
 
@@ -300,6 +301,12 @@ INDEXER_OCR_MAX_PAGES = _int_env("INDEXER_OCR_MAX_PAGES", 20, minimum=1)
 # that pins the worker for tens of minutes per PDF. Set to 0 to
 # disable the timeout.
 INDEXER_OCR_TIMEOUT_SECONDS = _int_env("INDEXER_OCR_TIMEOUT_SECONDS", 60, minimum=0)
+# Longest one message's parse or extraction step may run before the
+# stall guard exits the process for Compose to restart (``stall_guard``).
+# Generous because a message with several scanned PDFs legitimately
+# spends ``INDEXER_OCR_MAX_PAGES`` x ``INDEXER_OCR_TIMEOUT_SECONDS`` on
+# each. Set to 0 to disable.
+INDEXER_MESSAGE_TIMEOUT_SECONDS = _int_env("INDEXER_MESSAGE_TIMEOUT_SECONDS", 3600, minimum=0)
 # Page cap for the digital pypdf path. The OCR cap above doesn't bound
 # this — a 5 MB text-only PDF can carry thousands of pages, and even
 # at ~ms per page the indexer queue stalls. Set to 0 to disable.
@@ -1280,7 +1287,15 @@ def _drain_queue_batched(
             break
         batch: list[_BatchedMsg] = []
         for row in rows:
+            # Parse and extraction are the steps hostile input can crash
+            # or hang, so each runs with its message charged one attempt
+            # (see ``IndexingQueue.begin_attempt``). The refund is not in
+            # a ``finally``: an exception escaping the step takes the
+            # process down, and the charge must survive that.
+            if not queue.begin_attempt(row["filepath"]):
+                continue
             entry = _phase1_commit_thread(row, db, threader, queue)
+            queue.end_attempt(row["filepath"])
             processed += 1
             if entry is not None:
                 batch.append(entry)
@@ -1298,7 +1313,10 @@ def _drain_queue_batched(
         all_texts: list[str] = []
         survivors: list[_BatchedMsg] = []
         for entry in batch:
+            if not queue.begin_attempt(entry.row["filepath"]):
+                continue
             ok, err = _phase2a_collect_chunks(entry, db, all_texts)
+            queue.end_attempt(entry.row["filepath"])
             if ok:
                 survivors.append(entry)
             else:
@@ -1708,6 +1726,11 @@ def main():
         queue_cfg["max_attempts"],
         queue_cfg["base_backoff_seconds"],
     )
+    if INDEXER_MESSAGE_TIMEOUT_SECONDS:
+        StallGuard(queue, limit_seconds=INDEXER_MESSAGE_TIMEOUT_SECONDS).start()
+        log.info("Stall guard: exits after %ds on one message", INDEXER_MESSAGE_TIMEOUT_SECONDS)
+    else:
+        log.info("Stall guard: disabled (INDEXER_MESSAGE_TIMEOUT_SECONDS=0)")
     queue_depth = queue.stats()
     if queue_depth["queued"] or queue_depth["dead"]:
         log.info(

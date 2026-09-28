@@ -992,6 +992,89 @@ class TestIndexOneFileChunking:
         assert db._conn.execute("SELECT COUNT(*) FROM attachment_extractions").fetchone()[0] == 0
 
 
+class _WorkerKilled(BaseException):
+    """Stands in for the process dying mid-step (OOM kill, a re-raised
+    ``MemoryError``, the stall guard's ``os._exit``): nothing in the
+    pipeline catches it, so no outcome is recorded."""
+
+
+class TestInterruptedMessagesDeadLetter:
+    """#235: a message that kills the worker was re-claimed at
+    ``attempts=0`` after every restart, forever. Now each death charges
+    that message — and only that message — one attempt."""
+
+    def _run_until_quiet(self, tmp_path, poison: Path, healthy: Path, max_restarts: int = 6):
+        db = Database(tmp_path / "mail.db")
+        embedder = make_mock_embedder()
+        embedder.embed.return_value = _UNIT_VECTOR
+        _make_queue(db).enqueue(str(poison), REASON_INITIAL_SCAN)
+        _make_queue(db).enqueue(str(healthy), REASON_INITIAL_SCAN)
+        deaths = 0
+        healthy_charges: list[int | None] = []
+        for _ in range(max_restarts):
+            queue = _make_queue(db)  # a restarted indexer, max_attempts=3
+            try:
+                main.drain_queue(queue, db, embedder, Threader(db))
+            except _WorkerKilled:
+                deaths += 1
+                healthy_charges.append(db.queue_get_attempts(str(healthy)))
+                continue
+            break
+        return db, queue, deaths, healthy_charges
+
+    def test_message_that_kills_the_parser_reaches_dead(self, tmp_path, monkeypatch):
+        poison = tmp_path / "INBOX" / "new" / "poison.eml"
+        healthy = tmp_path / "INBOX" / "new" / "healthy.eml"
+        _write_eml(poison, "poison@example.com")
+        _write_eml(healthy, "healthy@example.com")
+
+        from src import parser
+
+        real_parse = parser.parse_email
+
+        def parse(path, *args, **kwargs):
+            if Path(path).name == "poison.eml":
+                raise _WorkerKilled
+            return real_parse(path, *args, **kwargs)
+
+        monkeypatch.setattr(main, "parse_email", parse)
+
+        db, queue, deaths, healthy_charges = self._run_until_quiet(tmp_path, poison, healthy)
+
+        assert deaths == 3
+        assert queue.is_dead(str(poison))
+        assert (
+            db._conn.execute(
+                "SELECT last_stage FROM indexing_jobs WHERE filepath = ?", (str(poison),)
+            ).fetchone()["last_stage"]
+            == "interrupted"
+        )
+        assert all(charge in (None, 0) for charge in healthy_charges)
+        assert db.get_chunk_ids_for_message("healthy@example.com")
+
+    def test_message_that_kills_extraction_reaches_dead(self, tmp_path, monkeypatch):
+        poison = tmp_path / "INBOX" / "new" / "poison.eml"
+        healthy = tmp_path / "INBOX" / "new" / "healthy.eml"
+        _write_eml(poison, "poison@example.com")
+        _write_eml(healthy, "healthy@example.com")
+
+        real_collect = main._phase2a_collect_chunks
+
+        def collect(entry, db, all_texts):
+            if entry.row["filepath"].endswith("poison.eml"):
+                raise _WorkerKilled
+            return real_collect(entry, db, all_texts)
+
+        monkeypatch.setattr(main, "_phase2a_collect_chunks", collect)
+
+        db, queue, deaths, healthy_charges = self._run_until_quiet(tmp_path, poison, healthy)
+
+        assert deaths == 3
+        assert queue.is_dead(str(poison))
+        assert all(charge in (None, 0) for charge in healthy_charges)
+        assert db.get_chunk_ids_for_message("healthy@example.com")
+
+
 class TestBatchedInitialIndex:
     """C1 invariants for the cross-message batched initial indexer.
 
@@ -2256,12 +2339,37 @@ class TestMainStartupAndLoop:
         if sweep_due:
             monkeypatch.setattr(main, "RECOVERY_SWEEP_INTERVAL_SECS", 0)
 
+        class _FakeStallGuard:
+            def __init__(self, queue, *, limit_seconds):
+                self.limit_seconds = limit_seconds
+
+            def start(self):
+                events.append(f"stall_guard:{self.limit_seconds}")
+
+        # A real guard thread would hit the patched ``time.sleep`` below.
+        monkeypatch.setattr(main, "StallGuard", _FakeStallGuard)
+
         def _stop(_seconds):
             raise KeyboardInterrupt
 
         monkeypatch.setattr(main.time, "sleep", _stop)
         main.main()
         return events
+
+    def test_stall_guard_starts_before_initial_drain(self, tmp_path, monkeypatch):
+        """#235: the guard must be watching during the initial drain,
+        which is where a hostile message first stalls the worker."""
+        monkeypatch.setattr(main, "INDEXER_MESSAGE_TIMEOUT_SECONDS", 1234)
+        events = self._run_main(tmp_path, monkeypatch, sweep_due=False)
+
+        init = next(e for e in events if e.startswith("initial_index"))
+        assert events.index("stall_guard:1234") < events.index(init)
+
+    def test_stall_guard_disabled_at_zero(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(main, "INDEXER_MESSAGE_TIMEOUT_SECONDS", 0)
+        events = self._run_main(tmp_path, monkeypatch, sweep_due=False)
+
+        assert not any(e.startswith("stall_guard:") for e in events)
 
     def test_observer_starts_before_initial_drain(self, tmp_path, monkeypatch):
         events = self._run_main(tmp_path, monkeypatch, sweep_due=False)

@@ -342,6 +342,12 @@ EMBED_MODEL and the embed API key" error.
 |---|---|---|
 | `INDEXER_MAX_ATTEMPTS` | `5` | Max retries before a row becomes `dead`. |
 | `INDEXER_RETRY_BASE_SECONDS` | `30` | Base backoff. Each attempt multiplies by `2^(attempts-1)`, capped at 6 h. |
+| `INDEXER_MESSAGE_TIMEOUT_SECONDS` | `3600` | Stall guard: the indexer exits (and Compose restarts it) when one message's parse or extraction runs this long. `0` disables. |
+
+A message that crashes or hangs the indexer is charged one attempt per
+restart and dead-lettered with `last_stage = 'interrupted'` once
+`INDEXER_MAX_ATTEMPTS` is used up; the logs show a `stall guard:` line
+for a hang. Other messages in the same batch are not charged.
 
 `make status` (or the `get_mailbox_status` MCP tool) reports pending,
 retrying, and dead counts and whether the index is current. For the

@@ -623,7 +623,8 @@ without breaking the durable queue's bounded-retry contract:
     drain claims the row once `next_attempt_at` is due. This is
     also the genuine crash-mid-batch case: a process killed
     between Phase 1 and `mark_failed`/`mark_succeeded` leaves the
-    row at `queued` with the worker's pre-claim attempts count.
+    row at `queued`, charged one attempt only if it was the message
+    being parsed or extracted when the process died (see below).
   - **`dead` row** (deterministic Phase 2 failure exhausted
     `max_attempts`): skipped — left alone as an operator-visible
     terminal state. Auto-resurrecting would burn embedder load
@@ -656,6 +657,22 @@ the same upstream condition. The scan therefore consults
 them dead until something explicitly resets them. It also skips
 files that already have a `queued` row, so a restart cannot reset
 an in-flight retry cascade to zero attempts.
+
+A crash or hang never reaches `mark_failed`, so the message that
+caused it would otherwise be claimed again at the same attempt count
+after every restart, forever. The one message whose parse (Phase 1)
+or chunk / attachment extraction (Phase 2a) step is running is
+therefore charged one attempt while the step runs
+(`IndexingQueue.begin_attempt`), refunded when the step returns or its
+outcome is recorded. A process that dies mid-step leaves only that
+message charged — never its batchmates — so an ordinary restart costs
+at most one attempt, while a message that keeps killing the worker is
+dead-lettered with `last_stage = 'interrupted'` once its attempts are
+exhausted. A hang does not kill the process on its own, and Compose
+does not restart an unhealthy container, so a stall guard thread
+(`src/stall_guard.py`) exits the indexer when one step has run longer
+than `INDEXER_MESSAGE_TIMEOUT_SECONDS` (default 3600, `0` disables);
+the restart policy brings it back with the attempt counted.
 
 ### Ingestion completeness
 
@@ -695,8 +712,9 @@ Two stage outcomes short-circuit the retry path entirely:
   the file genuinely exists; the mbsync chmod race resolves on a
   later sync cycle.
 
-Two environment variables shape the queue: `INDEXER_MAX_ATTEMPTS` and
-`INDEXER_RETRY_BASE_SECONDS`. Neither is required — the defaults are
+Three environment variables shape the queue: `INDEXER_MAX_ATTEMPTS`,
+`INDEXER_RETRY_BASE_SECONDS`, and `INDEXER_MESSAGE_TIMEOUT_SECONDS`.
+None is required — the defaults are
 suitable for typical mailboxes, and both are documented in
 `docs/troubleshooting.md` for operators who need to tune retry aggressiveness
 against an unreliable embed service or a flaky mailbox.

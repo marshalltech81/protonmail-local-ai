@@ -1723,6 +1723,13 @@ class Database:
         return int(row["attempts"]) if row else None
 
     @_synchronized
+    def queue_set_attempts(self, filepath: str, attempts: int) -> None:
+        self._conn.execute(
+            "UPDATE indexing_jobs SET attempts = ? WHERE filepath = ?", (attempts, filepath)
+        )
+        self._conn.commit()
+
+    @_synchronized
     def queue_get_status(self, filepath: str) -> str | None:
         """Return ``"queued"`` / ``"dead"`` / ``None`` for ``filepath``.
 

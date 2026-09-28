@@ -452,6 +452,23 @@ do not ship persisted claims without them.
 
 ## Recently Completed
 
+### 2026-09-28 — Interrupted messages dead-letter (#235)
+
+A message that crashed or hung the single worker never reached
+`mark_failed`, so it was re-claimed at the same attempt count after
+every restart, forever (and a hang never restarted at all: Compose does
+not restart unhealthy containers). The one message whose parse or
+chunk/extraction step is running now carries one attempt while it runs
+(`begin_attempt`), refunded when the step returns or its outcome is
+recorded; a process that dies mid-step leaves only that message
+charged, never its batchmates, and exhausted rows are dead-lettered
+with `last_stage = 'interrupted'`. A stall guard thread exits the
+indexer when one step runs past `INDEXER_MESSAGE_TIMEOUT_SECONDS`
+(default 3600, `0` disables) so the restart policy recovers it. The
+refund is deliberately not in a `finally`: `MemoryError` /
+`RecursionError` re-raised by the extractors must keep the charge. No
+schema change.
+
 ### 2026-09-28 — Bounded indexer work on hostile input (#202, #211, #216, #218, #221)
 
 Five Codex findings where one crafted message could stall the single

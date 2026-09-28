@@ -39,9 +39,14 @@ Single-worker invariant:
 - Claiming does not transition the row to ``in_progress``; the
   worker holds "currently processing X" state in memory. If the worker
   crashes mid-process, the row stays ``queued`` and the next restart
-  picks it up — its ``attempts`` counter is unchanged, which is the
-  correct semantics (a crash is not an attempt that exercised the
-  parse/embed/write pipeline).
+  picks it up.
+- The one message whose parse or extraction step is running carries
+  one attempt while it runs (``begin_attempt``), refunded when the step
+  returns or its outcome is recorded. A process that dies mid-step (OOM
+  kill, a re-raised ``MemoryError``, the stall guard) leaves that
+  message charged and no other: a message that keeps killing the
+  worker reaches ``dead`` instead of looping forever, while an ordinary
+  restart costs at most one attempt to one message.
 - Scaling to multiple workers would require an explicit claim column
   (pid + heartbeat) and row-level locking; that's out of scope.
 """
@@ -51,6 +56,7 @@ from __future__ import annotations
 import logging
 import os
 import sqlite3
+import time
 from datetime import UTC, datetime, timedelta
 
 log = logging.getLogger("indexer.queue")
@@ -86,6 +92,14 @@ REASON_ON_MOVED = "on_moved"
 REASON_INITIAL_SCAN = "initial_scan"
 REASON_RECOVERY = "recovery"
 REASON_RESCAN = "rescan"
+
+# Recorded on a row dead-lettered by ``begin_attempt``: every charged
+# attempt ended with the process gone before the step returned.
+_INTERRUPTED_STAGE = "interrupted"
+_INTERRUPTED_ERROR = (
+    "indexer stopped while processing this message on every attempt "
+    "(crash, out-of-memory kill, or stall-guard exit)"
+)
 
 DEFAULT_MAX_ATTEMPTS = 5
 DEFAULT_BASE_BACKOFF_SECONDS = 30
@@ -170,6 +184,7 @@ class IndexingQueue:
         self.db = db
         self.max_attempts = max_attempts
         self.base_backoff_seconds = base_backoff_seconds
+        self._in_flight: tuple[str, float] | None = None
 
     # ----- writes --------------------------------------------------------
 
@@ -197,9 +212,7 @@ class IndexingQueue:
 
         The row is returned unchanged — the caller holds the
         "currently processing" state in memory. On worker crash the row
-        stays claimable and attempts_count is untouched, which is the
-        correct behavior: a crash does not count as an attempt that
-        exercised the parse/embed/write pipeline.
+        stays claimable; only a charge from ``begin_attempt`` counts it.
         """
         return self.db.queue_claim_next(STATUS_QUEUED, _now_iso())
 
@@ -215,8 +228,62 @@ class IndexingQueue:
         """
         return self.db.queue_fetch_due_batch(STATUS_QUEUED, _now_iso(), limit)
 
+    def begin_attempt(self, filepath: str) -> bool:
+        """Charge one attempt to ``filepath`` before running one of its
+        per-message steps; return False if it must not run.
+
+        The charge is committed before the step starts, so a process
+        that dies mid-step leaves it counted. ``end_attempt`` or any
+        outcome method refunds it. A row whose attempts are already
+        exhausted got there only through such deaths (``mark_failed``
+        dead-letters at the limit itself), so it is dead-lettered here
+        rather than run again.
+        """
+        attempts = self.db.queue_get_attempts(filepath)
+        if attempts is None:
+            return True
+        if attempts >= self.max_attempts:
+            self.db.queue_mark_dead(
+                filepath=filepath,
+                attempts=attempts,
+                last_stage=_INTERRUPTED_STAGE,
+                last_error=_INTERRUPTED_ERROR,
+                error_class=ERROR_CLASS_RETRYABLE,
+                now_iso=_now_iso(),
+            )
+            log.error(
+                "dead-letter: %s after %d attempts interrupted mid-processing",
+                filepath,
+                attempts,
+            )
+            return False
+        self.db.queue_set_attempts(filepath, attempts + 1)
+        self._in_flight = (filepath, time.monotonic())
+        return True
+
+    def end_attempt(self, filepath: str) -> None:
+        """Refund the ``begin_attempt`` charge: the step returned."""
+        self._settle(filepath)
+
+    def in_flight(self) -> tuple[str, float] | None:
+        """The message whose step is running and its ``time.monotonic()``
+        start, or ``None``. Read by the stall guard's thread."""
+        return self._in_flight
+
+    def _settle(self, filepath: str) -> None:
+        """Refund an open charge on ``filepath`` before its outcome is
+        recorded, so outcome methods keep their own attempt accounting."""
+        in_flight = self._in_flight
+        if in_flight is None or in_flight[0] != filepath:
+            return
+        self._in_flight = None
+        attempts = self.db.queue_get_attempts(filepath)
+        if attempts:
+            self.db.queue_set_attempts(filepath, attempts - 1)
+
     def mark_succeeded(self, filepath: str) -> None:
         """Remove the job row. Indexing ran through cleanly."""
+        self._settle(filepath)
         self.db.queue_delete(filepath)
 
     def mark_skipped(self, filepath: str, *, reason: str) -> None:
@@ -240,6 +307,7 @@ class IndexingQueue:
         Logs at INFO because this is normal Maildir lifecycle
         behavior, not an indexer fault.
         """
+        self._settle(filepath)
         self.db.queue_delete(filepath)
         log.info("skipped: %s reason=%s", filepath, reason)
 
@@ -257,6 +325,7 @@ class IndexingQueue:
         once and ignored thereafter. The row is also visible in
         ``queue.stats()['dead']`` for operator observability.
         """
+        self._settle(filepath)
         self.db.queue_mark_dead(
             filepath=filepath,
             attempts=1,
@@ -280,6 +349,7 @@ class IndexingQueue:
         value is stored verbatim so new stages can be introduced without
         migrating existing rows.
         """
+        self._settle(filepath)
         attempts_before = self.db.queue_get_attempts(filepath)
         if attempts_before is None:
             # Worker crashed after claim but before we could record a
@@ -346,6 +416,7 @@ class IndexingQueue:
         row stays ``queued`` with ``attempts`` unchanged and becomes due
         again after ``delay_seconds``, so no outage can dead-letter it.
         """
+        self._settle(filepath)
         attempts = self.db.queue_get_attempts(filepath)
         if attempts is None:
             log.warning("defer: no queue row for %s; nothing to update", filepath)
