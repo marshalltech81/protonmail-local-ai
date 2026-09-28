@@ -795,6 +795,53 @@ class TestDecodeHeader:
         assert msg is not None
         assert "Weird" in msg.subject
 
+    def test_mixed_plain_and_encoded_text(self):
+        assert _decode_header("Re: =?utf-8?q?H=C3=A9llo?= world") == "Re: Héllo world"
+
+    def test_adjacent_encoded_words_join_without_whitespace(self):
+        """RFC 2047 §6.2: whitespace between adjacent encoded-words is
+        not part of the text."""
+        assert _decode_header("=?utf-8?q?H=C3=A9?= =?utf-8?q?llo?=") == "Héllo"
+
+    def test_malformed_encoded_word_prefixes_decode_in_linear_time(self):
+        """Regression (#218): ``email.header.decode_header`` rescans the
+        rest of the header at every malformed ``=?`` prefix, so a 48 KB
+        Subject of them took ~0.4 s and a multi-MB one stalled the
+        indexing worker. The prefixes are kept as raw text."""
+        import time
+
+        value = "=?utf-8?q?x " * 16_000
+        started = time.monotonic()
+        result = _decode_header(value)
+        assert time.monotonic() - started < 1.0
+        assert result == value.strip()
+
+    def test_malformed_subject_does_not_stall_parse(self, tmp_path):
+        """End-to-end #218: Subject and the raw-From fallback both go
+        through ``_decode_header``."""
+        import time
+
+        junk = "=?utf-8?q?x " * 16_000
+        content = (
+            f"From: {junk}\r\n"
+            "To: bob@example.com\r\n"
+            f"Subject: {junk}\r\n"
+            "Message-ID: <slow_subject@example.com>\r\n"
+            "Date: Mon, 01 Jan 2024 12:00:00 +0000\r\n"
+            "Content-Type: text/plain; charset=utf-8\r\n"
+            "\r\n"
+            "Body.\r\n"
+        )
+        folder = tmp_path / "INBOX" / "cur"
+        folder.mkdir(parents=True)
+        path = folder / "slow.eml"
+        path.write_bytes(content.encode("utf-8"))
+        started = time.monotonic()
+        msg = parse_email(path)
+        assert time.monotonic() - started < 2.0
+        assert msg is not None
+        assert msg.subject.startswith("=?utf-8?q?x")
+
 
 # ---------------------------------------------------------------------------
 # _clean_id

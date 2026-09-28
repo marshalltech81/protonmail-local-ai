@@ -393,7 +393,25 @@ def _clean_id(value: str) -> str:
 
 
 def _decode_header(value: str | email.header.Header) -> str:
-    parts = email.header.decode_header(value)
+    """Decode a header value's RFC 2047 encoded-words.
+
+    A ``Header`` (raw 8-bit header) already holds decoded chunks. A
+    string is scanned for encoded-words in one linear pass and each one
+    is decoded on its own: ``decode_header`` on the whole string rescans
+    the rest of the header at every malformed ``=?`` prefix, which is
+    quadratic in a hostile Subject.
+    """
+    if isinstance(value, email.header.Header):
+        return _decode_header_parts(email.header.decode_header(value)).strip()
+    if "=?" not in value:
+        return value.strip()
+    value = _ADJACENT_ENCODED_WORDS_RE.sub("?==?", value)
+    return _ENCODED_WORD_RE.sub(
+        lambda m: _decode_header_parts(email.header.decode_header(m.group(0))), value
+    ).strip()
+
+
+def _decode_header_parts(parts: list[tuple[bytes | str, str | None]]) -> str:
     decoded = []
     for part, charset in parts:
         if isinstance(part, bytes):
@@ -414,7 +432,7 @@ def _decode_header(value: str | email.header.Header) -> str:
                 decoded.append(part.decode("utf-8", errors="replace"))
         else:
             decoded.append(part)
-    return " ".join(decoded).strip()
+    return " ".join(decoded)
 
 
 # RFC 5322 "specials": a display name containing any of these must be
