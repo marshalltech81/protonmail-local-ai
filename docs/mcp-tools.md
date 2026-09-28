@@ -320,15 +320,31 @@ inflated values fan out into that many model calls.
 
 ---
 
-## Group 4 — Actions
+## Group 4 — System
 
-Actions are disabled by default because `MCP_READ_ONLY=true` in the standard deployment.
-The tools below describe the intended interface, but they are not registered unless
-the project explicitly enables a safe write path. The code now fails closed if a
-future write path tries to use live Bridge transport without explicit
-cert-pinned TLS configuration.
+### `get_index_status`
+Returns total threads, messages, date range of indexed email.
+**Call this first** before answering questions about email content.
 
-### `send_email`
+The same helper powers ``make status`` on the host: the Makefile target
+invokes the module-level ``get_index_status`` directly against the shared
+SQLite index so the reported counts match what MCP queries see.
+
+### `get_sync_status`
+Reports that the server answers from the local index only. mcp-server
+never talks to Bridge; mbsync owns Bridge access and Maildir refresh.
+
+---
+
+## Appendix — Mail-changing actions (design only, not implemented)
+
+The MCP server is read-only. None of the tools below exist: there is no
+SMTP path and no draft, move, or flag operation, and no setting enables
+one. The decision is recorded under "Not doing" in `PLAN.md`, and the
+earlier unregistered implementation is in git history. This interface
+sketch is kept only as a starting point if that decision is reopened.
+
+#### `send_email`
 Send a new email via ProtonBridge SMTP.
 
 | Parameter | Type | Default | Description |
@@ -341,7 +357,7 @@ Send a new email via ProtonBridge SMTP.
 | `bcc` | list | none | BCC recipients |
 | `reply_to_message_id` | string | none | Sets threading headers |
 
-### `move_message`
+#### `move_message`
 Move a message from one folder to another.
 
 | Parameter | Type | Default | Description |
@@ -350,7 +366,7 @@ Move a message from one folder to another.
 | `src_folder` | string | required | Source folder name |
 | `dst_folder` | string | required | Destination folder name |
 
-### `mark_read`
+#### `mark_read`
 Mark one or more messages as read or unread.
 
 | Parameter | Type | Default | Description |
@@ -359,7 +375,7 @@ Mark one or more messages as read or unread.
 | `folder` | string | `INBOX` | Folder containing the messages |
 | `read` | bool | `true` | `true` to mark read, `false` to mark unread |
 
-### `flag_message`
+#### `flag_message`
 Flag or unflag a message (starred/important).
 
 | Parameter | Type | Default | Description |
@@ -368,25 +384,10 @@ Flag or unflag a message (starred/important).
 | `folder` | string | `INBOX` | Folder containing the message |
 | `flagged` | bool | `true` | `true` to flag, `false` to unflag |
 
-### `reply_to_thread`
-**Not yet implemented.** Use `send_email` with `reply_to_message_id` set to the
-Message-ID of the last message in the thread as a workaround.
+#### `reply_to_thread`
+Never implemented even in the earlier code; the sketch was `send_email` with
+`reply_to_message_id` set to the Message-ID of the thread's last message.
 
-### `create_draft`
-**Not yet implemented.** Requires IMAP APPEND to the Drafts folder.
-
----
-
-## Group 5 — System
-
-### `get_index_status`
-Returns total threads, messages, date range of indexed email.
-**Call this first** before answering questions about email content.
-
-The same helper powers ``make status`` on the host: the Makefile target
-invokes the module-level ``get_index_status`` directly against the shared
-SQLite index so the reported counts match what MCP queries see.
-
-### `get_sync_status`
-Reports local index mode and, when enabled in a future live-Bridge deployment,
-Bridge connectivity and sync health.
+#### `create_draft`
+Never implemented even in the earlier code; it would need IMAP APPEND to the
+Drafts folder.

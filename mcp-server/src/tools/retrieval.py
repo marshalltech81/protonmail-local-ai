@@ -98,7 +98,7 @@ def _describe_filters(args: dict) -> str:
 
 def register_retrieval_tools(server, db):
     local_only_note = (
-        "Live Bridge retrieval is disabled in the default local-first deployment. "
+        "mcp-server has no live Bridge access. "
         "This response is based on the local SQLite index only."
     )
 

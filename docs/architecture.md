@@ -74,8 +74,7 @@ mcp-server container
   - Email excerpts sent to the LLM are wrapped in <untrusted_email>
     tags and framed as untrusted data — defense against prompt
     injection from attacker-controlled email content
-  - Actions: disabled by default via MCP read-only mode
-  - Any future live write path must be cert-pinned and explicitly enabled
+  - Read-only: no mail-changing tools and no connection to Bridge
         │
         │  HTTP/SSE (localhost:3000)
         ▼

@@ -111,12 +111,10 @@ make logs  # verify everything is running
 the Bridge password secret exists and is non-empty, and enforces `600`
 permissions on secret files before Docker Compose starts the stack.
 
-By default, the MCP server runs in read-only mode:
+The MCP server is read-only:
 - search, retrieval, and intelligence tools are available
-- mail-changing action tools are not registered
+- there are no mail-changing tools (no send, move, flag, or draft)
 - retrieval is served from the local SQLite index rather than direct IMAP access
-- any future live write path must use explicit cert-pinned TLS; insecure
-  fallback behavior is rejected rather than attempted
 
 ### 6. Configure Claude Desktop
 

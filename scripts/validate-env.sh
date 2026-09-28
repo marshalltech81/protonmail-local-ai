@@ -296,7 +296,6 @@ INDEXER_RETRY_BASE_SECONDS="$(get_env_value INDEXER_RETRY_BASE_SECONDS)"
 SYNC_INTERVAL="$(get_env_value SYNC_INTERVAL)"
 MCP_PORT="$(get_env_value MCP_PORT)"
 MCP_TRANSPORT="$(get_env_value MCP_TRANSPORT)"
-MCP_READ_ONLY="$(get_env_value MCP_READ_ONLY)"
 
 [[ -n "$BRIDGE_USER" && "$BRIDGE_USER" != "your@proton.me" ]] || {
     echo "ERROR: BRIDGE_USER in .env must be set to the Bridge username from 'bridge --cli info'." >&2
@@ -491,11 +490,6 @@ require_integer "MCP_PORT" "$MCP_PORT"
 MCP_TRANSPORT="${MCP_TRANSPORT:-sse}"
 [[ "$MCP_TRANSPORT" =~ ^(sse|streamable-http|dual)$ ]] || {
     echo "ERROR: MCP_TRANSPORT must be 'sse', 'streamable-http', or 'dual'." >&2
-    exit 1
-}
-
-[[ "$MCP_READ_ONLY" =~ ^(true|false)$ ]] || {
-    echo "ERROR: MCP_READ_ONLY must be 'true' or 'false'." >&2
     exit 1
 }
 

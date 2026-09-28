@@ -1167,35 +1167,6 @@ class FakeLocalLLM:
         return self._inference
 
 
-class FakeIMAP:
-    """Stub of the IMAP/SMTP client used by action tools.
-
-    Calls are recorded for assertion. ``send_email`` is sync on the real
-    client; ``move_message`` / ``set_flag`` are async. The stub preserves
-    that split so tests catch a caller that awaits the wrong one.
-    """
-
-    def __init__(self, send_ok: bool = True, move_ok: bool = True, flag_ok: bool = True) -> None:
-        self._send_ok = send_ok
-        self._move_ok = move_ok
-        self._flag_ok = flag_ok
-        self.send_calls: list[dict] = []
-        self.move_calls: list[tuple[str, str, str]] = []
-        self.flag_calls: list[tuple[str, str, str, bool]] = []
-
-    def send_email(self, **kwargs) -> bool:
-        self.send_calls.append(kwargs)
-        return self._send_ok
-
-    async def move_message(self, uid: str, src: str, dst: str) -> bool:
-        self.move_calls.append((uid, src, dst))
-        return self._move_ok
-
-    async def set_flag(self, uid: str, folder: str, flag: str, value: bool) -> bool:
-        self.flag_calls.append((uid, folder, flag, value))
-        return self._flag_ok
-
-
 @pytest.fixture
 def fake_server() -> FakeMCPServer:
     return FakeMCPServer()
@@ -1204,8 +1175,3 @@ def fake_server() -> FakeMCPServer:
 @pytest.fixture
 def fake_llm() -> FakeLocalLLM:
     return FakeLocalLLM()
-
-
-@pytest.fixture
-def fake_imap() -> FakeIMAP:
-    return FakeIMAP()

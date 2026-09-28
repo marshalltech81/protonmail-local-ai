@@ -10,8 +10,7 @@ error path) rather than internal SQL.
 
 The project keeps the dep footprint small and does not pull in
 pytest-asyncio. Async handlers are driven through ``asyncio.run`` from
-otherwise-sync test functions, matching ``test_local_llm.py`` and
-``test_imap.py``.
+otherwise-sync test functions, matching the other handler tests.
 """
 
 import asyncio
