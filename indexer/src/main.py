@@ -682,6 +682,17 @@ class _BatchedMsg:
     chunk_ms: float = 0.0
 
 
+# Unreadable-file handoff (see ``_phase1_commit_thread``): retry every
+# minute, for up to a day after the job was enqueued.
+PERMISSION_DEFER_SECS = 60
+PERMISSION_DEFER_WINDOW_SECS = 24 * 60 * 60
+
+
+def _enqueued_within(row: sqlite3.Row, seconds: int) -> bool:
+    created = datetime.fromisoformat(row["created_at"])
+    return (datetime.now(UTC) - created).total_seconds() < seconds
+
+
 def _phase1_commit_thread(
     row: sqlite3.Row,
     db: Database,
@@ -706,6 +717,24 @@ def _phase1_commit_thread(
         # mbsync flag-rename race: file moved between enqueue and parse.
         # Watchdog's IN_MOVED_TO will re-enqueue under the new name.
         queue.mark_skipped(filepath, reason="file_missing")
+        return None
+    except PermissionError as e:
+        # mbsync ``chmod go+r``s new files only after its whole sync
+        # finishes, so during a long sync a delivered file is still 0600
+        # to this UID for longer than the retry budget. That is the
+        # expected handoff, not the message's fault: defer without an
+        # attempt. A fault that outlasts any sync falls through to the
+        # normal retry path so it still ends in a visible dead row.
+        if _enqueued_within(row, PERMISSION_DEFER_WINDOW_SECS):
+            queue.defer(
+                filepath,
+                stage="parse",
+                error=_stage_error(e),
+                error_class=ERROR_CLASS_RETRYABLE,
+                delay_seconds=PERMISSION_DEFER_SECS,
+            )
+        else:
+            queue.mark_failed(filepath, stage="parse", error=_stage_error(e))
         return None
     except OversizedMessageError as e:
         # File exceeds INDEXER_PARSE_MAX_BYTES. Terminal under current

@@ -546,6 +546,63 @@ class TestDrainQueueRetryAndDeadLetter:
         assert db.get_chunk_ids_for_message("retry@example.com")
         assert queue.stats() == {"queued": 0, "dead": 0}
 
+    def test_unreadable_file_during_sync_is_deferred_not_dead_lettered(self, tmp_path, monkeypatch):
+        """Regression (#212): mbsync relaxes new files' permissions only
+        after the whole sync finishes, so during a long sync the indexer
+        can read a 0600 file for longer than its retry budget. Charging
+        those PermissionErrors dead-lettered valid mail; they are now
+        deferred without spending attempts, and the file indexes once
+        readable."""
+        dest = tmp_path / "INBOX" / "new" / "fresh.eml"
+        _write_eml(dest, "fresh@example.com")
+        db = Database(tmp_path / "mail.db")
+        threader = Threader(db)
+        queue = _make_queue(db)  # max_attempts=3
+        embedder = make_mock_embedder()
+        embedder.embed.return_value = _UNIT_VECTOR
+        real_parse = main.parse_email
+
+        def unreadable(path, **kwargs):
+            raise PermissionError(13, "Permission denied", str(path))
+
+        monkeypatch.setattr(main, "parse_email", unreadable)
+        queue.enqueue(str(dest), "test")
+        for _ in range(6):
+            main.drain_queue(queue, db, embedder, threader)
+            row = db._conn.execute(
+                "SELECT status, attempts, last_stage, next_attempt_at FROM indexing_jobs"
+            ).fetchone()
+            assert row["status"] == "queued"
+            assert row["attempts"] == 0
+            assert row["last_stage"] == "parse"
+            _make_due(db)
+
+        monkeypatch.setattr(main, "parse_email", real_parse)
+        main.drain_queue(queue, db, embedder, threader)
+
+        assert db.get_chunk_ids_for_message("fresh@example.com")
+        assert queue.stats() == {"queued": 0, "dead": 0}
+
+    def test_file_unreadable_for_a_day_takes_the_normal_retry_path(self, tmp_path, monkeypatch):
+        """A permissions fault that outlasts any sync still ends in a
+        visible terminal state rather than deferring forever."""
+        dest = tmp_path / "INBOX" / "new" / "stuck.eml"
+        _write_eml(dest, "stuck@example.com")
+        db = Database(tmp_path / "mail.db")
+        queue = _make_queue(db)
+        monkeypatch.setattr(
+            main,
+            "parse_email",
+            lambda path, **kw: (_ for _ in ()).throw(PermissionError(13, "denied")),
+        )
+        queue.enqueue(str(dest), "test")
+        db._conn.execute("UPDATE indexing_jobs SET created_at = '2000-01-01T00:00:00+00:00'")
+        db._conn.commit()
+
+        main.drain_queue(queue, db, make_mock_embedder(), Threader(db))
+
+        assert queue.is_dead(str(dest))
+
     def test_parser_content_pathology_routes_to_queue_retry(self, tmp_path, monkeypatch):
         # Behavior contract: an exception raised mid-parse (malformed
         # MIME the ``email`` module cannot decompose, html2text
