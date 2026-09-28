@@ -836,10 +836,6 @@ class TestDirectLookups:
     def test_get_thread_message_ids_missing(self, seeded_db: Database):
         assert seeded_db.get_thread_message_ids("missing") == []
 
-    def test_find_thread_by_message_id(self, seeded_db: Database):
-        assert seeded_db.find_thread_by_message_id("t-alpha") == "t-alpha"
-        assert seeded_db.find_thread_by_message_id("missing") is None
-
     def test_list_threads_respects_folder_and_order(self, seeded_db: Database):
         inbox = seeded_db.list_threads(folder="INBOX")
         assert [r.thread_id for r in inbox] == ["t-beta", "t-alpha"]
@@ -2518,69 +2514,6 @@ class TestMessageDateOnChunks:
             db.close()
 
 
-class TestGetMessageChunks:
-    """``get_message_chunks`` reconstructs one message's BODY chunks in
-    document order; ``get_message`` stitches them into a body."""
-
-    def test_returns_only_body_chunks_in_document_order(self, tmp_path):
-        from tests.conftest import _insert_chunk
-
-        conn, path = _open_built_db_conn(tmp_path, "msgchunks.db")
-        # Insert out of order; an attachment chunk must be excluded.
-        _insert_chunk(
-            conn,
-            chunk_id="b2",
-            message_id="m1",
-            thread_id="t1",
-            text="second paragraph",
-            embedding=[1.0, 0.0, 0.0, 0.0],
-            chunk_index=1,
-        )
-        _insert_chunk(
-            conn,
-            chunk_id="b1",
-            message_id="m1",
-            thread_id="t1",
-            text="first paragraph",
-            embedding=[1.0, 0.0, 0.0, 0.0],
-            chunk_index=0,
-        )
-        _insert_chunk(
-            conn,
-            chunk_id="att",
-            message_id="m1",
-            thread_id="t1",
-            text="attachment text",
-            embedding=[1.0, 0.0, 0.0, 0.0],
-            chunk_index=2,
-            attachment_id="att-x",
-        )
-        conn.close()
-        db = Database(str(path))
-        try:
-            chunks = db.get_message_chunks("m1")
-            assert [c.chunk_index for c in chunks] == [0, 1]
-            assert [c.text for c in chunks] == ["first paragraph", "second paragraph"]
-            # The attachment chunk is excluded — body reconstruction only.
-            assert all(c.attachment_id is None for c in chunks)
-        finally:
-            db.close()
-
-    def test_unknown_message_returns_empty(self, chunked_db: Database):
-        assert chunked_db.get_message_chunks("no-such-message") == []
-
-    def test_db_error_returns_empty(self, tmp_path):
-        conn, path = _open_built_db_conn(tmp_path, "no-chunks.db")
-        conn.execute("DROP TABLE message_chunks")
-        conn.commit()
-        conn.close()
-        db = Database(str(path))
-        try:
-            assert db.get_message_chunks("anything") == []
-        finally:
-            db.close()
-
-
 class TestSearchAttachments:
     """``search_attachments`` fuses a filename/MIME FTS lane and an
     extracted-text FTS lane, with structured filters and a no-query scan."""
@@ -2962,3 +2895,193 @@ class TestFindContactSendersOnlyHostileEntries:
             assert [c["email"] for c in contacts] == ["bob@example.com"]
         finally:
             db.close()
+
+
+class TestThreadPage:
+    """``get_thread_page`` reads one page of a thread's messages, oldest
+    first, with each message's own headers and its body rebuilt from its
+    body chunks — all from one read snapshot."""
+
+    def test_messages_are_chronological(self, messages_db):
+        page = messages_db.get_thread_page("t1", offset=0, limit=10, body_char_limit=4000)
+        assert [m.message_id for m in page.messages] == ["m1", "m2"]
+        assert page.total_messages == 2
+
+    def test_sent_at_ties_break_by_message_id(self, messages_db):
+        page = messages_db.get_thread_page("t3", offset=0, limit=10, body_char_limit=4000)
+        assert [m.message_id for m in page.messages] == ["m4", "m5"]
+
+    def test_records_carry_their_own_headers(self, messages_db):
+        m2 = messages_db.get_thread_page("t1", offset=0, limit=10, body_char_limit=4000).messages[1]
+        assert m2.subject == "Re: Budget review"
+        assert m2.sent_at == "2024-01-11T10:00:00+00:00"
+        assert m2.has_attachments is True
+        assert m2.in_reply_to == "m1"
+        assert m2.references == ["m1"]
+        assert [(p.name, p.address) for p in m2.from_] == [(None, "bob@example.com")]
+        assert [(p.name, p.address) for p in m2.to] == [("Jane Doe", "jane@example.com")]
+        assert [p.address for p in m2.cc] == ["carol@other.org"]
+
+    def test_pages_by_offset_and_limit(self, messages_db):
+        first = messages_db.get_thread_page("t1", offset=0, limit=1, body_char_limit=4000)
+        second = messages_db.get_thread_page("t1", offset=1, limit=1, body_char_limit=4000)
+        assert [m.message_id for m in first.messages] == ["m1"]
+        assert [m.message_id for m in second.messages] == ["m2"]
+        assert first.total_messages == second.total_messages == 2
+        # Bodies are read only for the page's messages.
+        assert set(first.bodies) == {"m1"}
+
+    def test_bodies_exclude_attachment_text(self, messages_db):
+        page = messages_db.get_thread_page("t1", offset=0, limit=10, body_char_limit=4000)
+        assert page.bodies["m2"].text == "thanks, budget noted"
+
+    def test_overlapping_chunks_rebuild_the_body_exactly(self, overlap_db):
+        from tests.conftest import OVERLAP_BODY
+
+        body = overlap_db.get_thread_page("t-ov", offset=0, limit=10, body_char_limit=4000).bodies[
+            "ov1"
+        ]
+        # Each overlapped paragraph once; the paragraph that really
+        # repeats at two offsets stays twice.
+        assert body.text == OVERLAP_BODY
+        assert body.text.count("Same line again.") == 2
+        assert body.omitted_chars == 0
+
+    def test_body_is_cut_at_the_limit(self, overlap_db):
+        from tests.conftest import OVERLAP_BODY
+
+        body = overlap_db.get_thread_page("t-ov", offset=0, limit=10, body_char_limit=300).bodies[
+            "ov1"
+        ]
+        assert body.text == OVERLAP_BODY[:300]
+        assert body.omitted_chars == len(OVERLAP_BODY) - 300
+
+    def test_separate_chunks_join_at_a_paragraph_break(self, messages_db):
+        page = messages_db.get_thread_page("t2", offset=0, limit=10, body_char_limit=4000)
+        assert page.bodies["m3"].text == "lunch friday?\n\nat the noodle place"
+
+    def test_has_bodies_reflects_the_whole_thread(self, messages_db, seeded_db):
+        page = messages_db.get_thread_page("t1", offset=5, limit=10, body_char_limit=4000)
+        assert page.messages == []
+        assert page.has_bodies is True
+        page = seeded_db.get_thread_page("t-alpha", offset=0, limit=10, body_char_limit=4000)
+        assert page.has_bodies is False
+
+    def test_unknown_thread_is_none(self, messages_db):
+        assert messages_db.get_thread_page("nope", offset=0, limit=10, body_char_limit=4000) is None
+
+    def test_reads_one_snapshot(self, tmp_path):
+        # A reply committed after the thread row is read must not appear
+        # in the page, or the page mixes two database states.
+        db, writer = _snapshot_db(tmp_path)
+        _commit_between_reads(
+            db,
+            writer,
+            """
+            INSERT INTO message_thread_map VALUES ('b', 't', '/maildir/INBOX/cur/b');
+            INSERT INTO messages VALUES ('b', 't', '/maildir/INBOX/cur/b', 'INBOX', 's',
+                '2024-01-02T00:00:00+00:00', 'a', '["a"]', 1, 1, 'h', 'x');
+            UPDATE threads SET date_last = '2024-01-02T00:00:00+00:00' WHERE thread_id = 't';
+            """,
+        )
+        try:
+            page = db.get_thread_page("t", offset=0, limit=10, body_char_limit=4000)
+            assert page is not None
+            assert [m.message_id for m in page.messages] == ["a"]
+            assert page.total_messages == 1
+        finally:
+            db.close()
+            writer.close()
+
+
+class TestMessageView:
+    """``get_message_view`` reads one message's headers, its thread, and
+    its full body from one read snapshot."""
+
+    def test_headers(self, messages_db):
+        view = messages_db.get_message_view("m2")
+        assert view is not None
+        assert view.record.in_reply_to == "m1"
+        assert [p.address for p in view.record.cc] == ["carol@other.org"]
+        assert view.thread.thread_id == "t1"
+
+    def test_message_without_reply_headers(self, messages_db):
+        view = messages_db.get_message_view("m1")
+        assert view is not None
+        assert view.record.in_reply_to is None
+        assert view.record.references == []
+
+    def test_full_body_without_overlap(self, overlap_db):
+        from tests.conftest import OVERLAP_BODY
+
+        view = overlap_db.get_message_view("ov1")
+        assert view is not None and view.body is not None
+        assert view.body.text == OVERLAP_BODY
+
+    def test_body_excludes_attachment_text(self, messages_db):
+        view = messages_db.get_message_view("m2")
+        assert view is not None and view.body is not None
+        assert view.body.text == "thanks, budget noted"
+
+    def test_no_chunks_means_no_body(self, seeded_db):
+        view = seeded_db.get_message_view("t-alpha")
+        assert view is not None
+        assert view.body is None
+
+    def test_unknown_message_is_none(self, messages_db):
+        assert messages_db.get_message_view("nope") is None
+
+    def test_reads_one_snapshot(self, tmp_path):
+        db, writer = _snapshot_db(tmp_path)
+        _commit_between_reads(
+            db, writer, "UPDATE threads SET display_subject = 'changed' WHERE thread_id = 't';"
+        )
+        try:
+            view = db.get_message_view("a")
+            assert view is not None
+            assert view.thread.subject == "s"
+        finally:
+            db.close()
+            writer.close()
+
+
+def _snapshot_db(tmp_path):
+    """A WAL database holding thread "t" with message "a", plus an open
+    writer connection (which keeps the WAL files in place for the
+    read-only reader)."""
+    from tests.conftest import _build_schema, _insert_message
+
+    path = tmp_path / "snapshot.db"
+    writer = sqlite3.connect(str(path))
+    writer.enable_load_extension(True)
+    import sqlite_vec
+
+    sqlite_vec.load(writer)
+    writer.enable_load_extension(False)
+    writer.execute("PRAGMA journal_mode=WAL")
+    _build_schema(writer)
+    _insert_message(
+        writer, message_id="a", thread_id="t", subject="s", sent_at="2024-01-01T00:00:00+00:00"
+    )
+    return Database(str(path)), writer
+
+
+def _commit_between_reads(db, writer, sql: str) -> None:
+    """Have ``writer`` commit ``sql`` just before ``db`` runs its second
+    SELECT, the way an indexer commit can land between two reads."""
+    connect = db._connect
+    selects = []
+
+    def traced_connect():
+        conn = connect()
+
+        def trace(statement: str) -> None:
+            if statement.lstrip().upper().startswith("SELECT"):
+                selects.append(statement)
+                if len(selects) == 2:
+                    writer.executescript(sql)
+
+        conn.set_trace_callback(trace)
+        return conn
+
+    db._connect = traced_connect

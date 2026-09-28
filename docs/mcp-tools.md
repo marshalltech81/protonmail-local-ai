@@ -115,16 +115,37 @@ first. Each result reports the parent thread so a follow-up
 ## Group 2 — Retrieval
 
 ### `get_thread`
-Fetch indexed thread context by ID from the local SQLite index.
+Read a thread by ID as its messages, oldest first. Each message shows
+its own headers (Message-ID, subject, From / To / Cc, send date in UTC,
+folder, In-Reply-To, attachment flag; recipient lists past 10 are
+summarized as a count) and its indexed body after quoted-reply
+stripping. Attachment text is not included. When no message body is
+indexed yet, the accumulated thread text (a retrieval artifact that
+also carries quoted replies) is shown instead.
+
+Responses are bounded: messages are paged (the response states the
+thread's message count and the `offset` for the next page), and each
+body is cut at 4,000 characters with a marker stating how many were
+left out — `get_message` returns the full body. Header content is
+sender-controlled, so it is bounded the same way: at most 10 recipients
+per role, 10 thread participants, and 10 References are listed (with a
+"+N more" count), and any header value past 500 characters is cut with
+a marker — `get_message` returns full headers. The page is read from
+one database snapshot.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `thread_id` | string | required | Thread ID from search results |
 | `include_attachments_metadata` | bool | `true` | Show the local attachment-availability note when the indexed thread has attachments |
+| `offset` | int | `0` | Messages to skip, oldest first |
+| `limit` | int | `10` | Messages per page; clamped to `[1, 50]` |
 
 ### `get_message`
-Reconstruct one message's indexed body from the per-message chunk
-store, with its parent-thread context. The index keeps no raw
+Return one message's own headers — subject, every From / To / Cc
+entry, send date (UTC), folder, In-Reply-To, References, attachment
+flag — with its thread ID and subject, and its full indexed body
+reconstructed from the per-message chunk store (overlap between
+adjacent chunks is removed by character offset). The index keeps no raw
 per-message body, so this is the indexed text **after quoted-reply
 stripping**; it falls back to thread context when no body chunks are
 indexed for the message. Attachment text is not included — use

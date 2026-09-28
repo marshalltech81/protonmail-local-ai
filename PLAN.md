@@ -112,15 +112,8 @@ guessing about semantics, completeness, or identity.
    retained alongside. The chaining path (search → thread_id →
    get_thread → message_id → get_message → attachment_id) becomes
    machine-native, never scraped from prose.
-3. **Message-first-class.** `get_message` returns authoritative
-   headers (from/to/cc, sent/received dates, in-reply-to/references,
-   folder) — the parser already extracts all of it. `get_thread`
-   returns chronological `messages[]` as the authoritative reading
-   representation; the accumulated thread text remains a retrieval
-   artifact.
-   *Progress (PR #175): per-message headers are now stored (`messages`
-   + `message_participants`). Remaining: `get_message` /
-   `get_thread` reading from them.*
+3. ~~**Message-first-class.**~~ Done 2026-09-28 (see Recently
+   Completed). Received date deferred (see Deferred).
 4. **Honest `get_mailbox_status`** — sync recency, queue
    pending/failed/dead, newest message, and a `current` flag that is
    truthful (only possible after Phase 0 items 1–2).
@@ -298,6 +291,17 @@ input by definition.
   (`protonmail-bridge` first — it holds live Proton credentials)
 - loud one-shot startup warning when `INFERENCE_MODE` sends retrieved
   excerpts to a remote provider
+- `query_messages`: bound sender-controlled values per row the way
+  `get_thread` does (PR #177 round 2) — a message's subject and
+  participant display names render in full on pages of up to 100
+- `get_message`: returns a message's full body and headers with no
+  bound, so one huge message (a pasted log, 12,000 References) is one
+  huge response; decide on body continuation (offset paging) or a
+  documented cap — fits alongside Phase 1 item 2's structured output
+- mcp-server: remove the dead `Database.get_thread_message_ids` (no
+  callers outside its tests)
+- AGENTS.md commit-hygiene secret check: `grep '^\+'` fails under
+  ugrep (a common `grep` alias); use the portable `grep '^[+]'`
 
 ## Not doing (decided 2026-09-26)
 
@@ -351,6 +355,13 @@ can be revisited with an explicit owner decision.
   relevant if generic-IMAP decoupling is pursued)
 - attachment download support (needs the read-only action-path
   decision it was always gated on)
+- per-message received date: the sender controls `Date:`, so a
+  trustworthy timeline needs the receiving server's timestamp (top
+  `Received:` header; Maildir mtime is sync time, not delivery). Needs
+  a schema bump plus a re-parse of every `.eml`, so land it with the
+  Phase 2 reindex or when Phase 4/5 temporal reasoning needs it. First
+  verify Bridge-delivered messages keep `Received:` headers (sent mail
+  likely has none)
 
 ## Operational baseline (unchanged)
 
@@ -425,6 +436,31 @@ do not ship persisted claims without them.
    during its Phase 3 experimental period.
 
 ## Recently Completed
+
+### 2026-09-28 — Message-first-class retrieval (Phase 1 item 3)
+
+`get_message` renders the message's own headers from `messages` +
+`message_participants` — subject, every From / To / Cc entry, UTC send
+date, folder, In-Reply-To, References, attachment flag — instead of
+parent-thread participants and date range. `get_thread` renders the
+thread's messages oldest first (`sent_at`, then `message_id`), each
+with its own headers (recipients capped at 10 per role) and its body
+reconstructed from its own body chunks in one grouped query; the
+accumulated `body_text`, which repeats quoted replies, is shown only
+when no message body is indexed yet. Received date is not captured by
+the parser or schema; deferred (see Deferred). No schema change.
+Review round 1: `get_thread` is bounded (message pages of 10, max 50,
+with a next-`offset` line; bodies cut at 4,000 characters with an
+omitted-count marker, and chunks past the cut are never read — the
+first version loaded every chunk of every message, where the old
+`body_text` was capped at 4,000 tokens); bodies are rebuilt by
+`char_start` offset so the chunker's deliberate overlap is not shown
+twice (also a pre-existing `get_message` bug); and both tools read
+thread, messages, participants, and bodies in one read transaction.
+Review round 2: header content bypassed that bound (12,000 folded
+References rendered 550K characters); `get_thread` now lists at most 10
+References and thread participants and cuts every header value at 500
+characters with a marker, leaving full headers to `get_message`.
 
 ### 2026-09-27 — `query_messages` (Phase 1 item 1)
 
