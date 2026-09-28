@@ -11,10 +11,6 @@ etc.) target the OpenAI SDK as their reference client by design, so
 pointing the SDK at them via ``base_url`` is the supported path.
 """
 
-import logging
-
-log = logging.getLogger("mcp.embed")
-
 # Per-call HTTP deadline for embed. A single short string through
 # Qwen3-Embedding-8B runs sub-second steady-state; cold-start (first
 # call after model load) can take a few seconds. 60 s is generous

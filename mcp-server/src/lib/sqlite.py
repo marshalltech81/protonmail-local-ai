@@ -1979,10 +1979,6 @@ class Database:
         row = self._fetchone("SELECT * FROM threads WHERE thread_id = ?", (thread_id,))
         return self._row_to_result(row) if row else None
 
-    def get_thread_message_ids(self, thread_id: str) -> list[str]:
-        row = self._fetchone("SELECT message_ids FROM threads WHERE thread_id = ?", (thread_id,))
-        return json.loads(row["message_ids"]) if row else []
-
     def get_thread_page(
         self, thread_id: str, *, offset: int, limit: int, body_char_limit: int
     ) -> ThreadPage | None:
@@ -2377,15 +2373,6 @@ class Database:
             body_text=row["body_text"] or "",
             score=float(row["score"]) if "score" in row.keys() else 0.0,
         )
-
-    @staticmethod
-    def _validate_iso8601(field_name: str, value: str) -> None:
-        try:
-            _parse_filter_date(value, end_of_day=False, _field_name=field_name)
-        except ValueError as exc:
-            raise ValueError(
-                f"{field_name} must be a valid ISO 8601 date or date/time string"
-            ) from exc
 
 
 def _normalize_date_bound(value: str | None, *, end_of_day: bool, field_name: str) -> str | None:

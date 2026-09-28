@@ -830,12 +830,6 @@ class TestDirectLookups:
     def test_get_thread_missing_returns_none(self, seeded_db: Database):
         assert seeded_db.get_thread("does-not-exist") is None
 
-    def test_get_thread_message_ids(self, seeded_db: Database):
-        assert seeded_db.get_thread_message_ids("t-alpha") == ["t-alpha"]
-
-    def test_get_thread_message_ids_missing(self, seeded_db: Database):
-        assert seeded_db.get_thread_message_ids("missing") == []
-
     def test_list_threads_respects_folder_and_order(self, seeded_db: Database):
         inbox = seeded_db.list_threads(folder="INBOX")
         assert [r.thread_id for r in inbox] == ["t-beta", "t-alpha"]
@@ -1046,18 +1040,6 @@ class TestStatsAndFolders:
         names = [f["name"] for f in folders]
         assert names[0] == "INBOX"
         assert {"name": "Archive", "thread_count": 1} in folders
-
-
-class TestValidateIso8601:
-    def test_accepts_offset_form(self):
-        Database._validate_iso8601("date_from", "2024-03-01T00:00:00+00:00")
-
-    def test_accepts_z_suffix(self):
-        Database._validate_iso8601("date_from", "2024-03-01T00:00:00Z")
-
-    def test_rejects_garbage(self):
-        with pytest.raises(ValueError, match="date_from"):
-            Database._validate_iso8601("date_from", "yesterday")
 
 
 class TestFilterDateUtcNormalization:
