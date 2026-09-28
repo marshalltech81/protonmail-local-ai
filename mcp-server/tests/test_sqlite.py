@@ -2548,6 +2548,45 @@ class TestSearchAttachments:
         results = attachments_db.search_attachments(query="wage")
         assert [a.attachment_id for a in results] == ["att-w2"]
 
+    def test_long_document_does_not_crowd_out_other_matches(self, attachments_db: Database):
+        """Regression (#220): the text lane applied its LIMIT to chunk
+        rows and deduplicated attachments afterwards, so one long
+        document with many strong hits filled every slot and another
+        matching attachment was never returned, even at the maximum
+        limit, with no sign the list was cut."""
+        import sqlite_vec
+
+        from tests.conftest import _insert_chunk
+
+        with closing(sqlite3.connect(attachments_db.path)) as conn:
+            conn.enable_load_extension(True)
+            sqlite_vec.load(conn)
+            for i in range(60):
+                _insert_chunk(
+                    conn,
+                    chunk_id=f"quote-long-{i}",
+                    message_id="t-quote",
+                    thread_id="t-quote",
+                    text="zebraword " * 20,
+                    embedding=[0.0, 0.0, 0.0, 1.0],
+                    chunk_index=10 + i,
+                    attachment_id="att-quote",
+                )
+            _insert_chunk(
+                conn,
+                chunk_id="w2-one-hit",
+                message_id="t-tax",
+                thread_id="t-tax",
+                text="a single zebraword among many other words in this passage",
+                embedding=[0.0, 0.0, 0.0, 1.0],
+                chunk_index=10,
+                attachment_id="att-w2",
+            )
+
+        results = attachments_db.search_attachments(query="zebraword", limit=20)
+
+        assert {a.attachment_id for a in results} == {"att-quote", "att-w2"}
+
     def test_filename_and_text_match_deduped(self, attachments_db: Database):
         # "acme" hits the filename AND the extracted text of att-quote;
         # the occurrence must be surfaced exactly once.
