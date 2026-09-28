@@ -173,11 +173,11 @@ def write_ingestion(
     sync_completed_at: str | None = None,
     sync_interval_secs: int | None = None,
     indexer_seen_at: str | None = None,
-    jobs: tuple[tuple[str, int], ...] = (),
+    jobs: tuple[tuple[str, int, str | None], ...] = (),
 ) -> None:
     """Write the indexer-owned ``ingestion_state`` row (when
     ``indexer_seen_at`` is given) and ``indexing_jobs`` rows as
-    ``(status, attempts)`` pairs into a fixture database."""
+    ``(status, attempts, last_error_class)`` into a fixture database."""
     conn = sqlite3.connect(db_path)
     try:
         if indexer_seen_at is not None:
@@ -185,11 +185,12 @@ def write_ingestion(
                 "INSERT INTO ingestion_state VALUES (1, ?, ?, ?)",
                 (sync_completed_at, sync_interval_secs, indexer_seen_at),
             )
-        for i, (status, attempts) in enumerate(jobs):
+        for i, (status, attempts, error_class) in enumerate(jobs):
             conn.execute(
                 "INSERT INTO indexing_jobs (filepath, reason, status, attempts, "
-                "created_at, updated_at, next_attempt_at) VALUES (?, 'x', ?, ?, '', '', '')",
-                (f"/maildir/INBOX/cur/{i}", status, attempts),
+                "last_error_class, created_at, updated_at, next_attempt_at) "
+                "VALUES (?, 'x', ?, ?, ?, '', '', '')",
+                (f"/maildir/INBOX/cur/{i}", status, attempts, error_class),
             )
         conn.commit()
     finally:

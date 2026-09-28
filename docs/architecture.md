@@ -687,19 +687,32 @@ issue).
 ### Index currency
 
 `get_mailbox_status` answers "is the index current?" from SQLite
-alone, because mcp-server mounts neither Maildir nor Bridge. mbsync
-writes `.mbsync-last-sync.json` (completion time plus
-`SYNC_INTERVAL`) at the Maildir root after each successful sync, once
-the new files have been made readable. The stamp sits outside every
-`cur`/`new` folder, so no Maildir walk or watchdog handler treats it
-as mail. The indexer reads the stamp at most every 30 s, from the
-main loop and from each drain pass (so it keeps reporting through a
-multi-hour initial index), and upserts it with its own timestamp into
-the one-row `ingestion_state` table (schema v21). The watcher enqueues
-a sync's deliveries before mbsync writes that sync's stamp, so once
-the indexer has read the stamp, every message from that sync is
-indexed, queued, or dead. An unreadable stamp is logged and recorded
-as "no sync".
+alone, because mcp-server mounts neither Maildir nor Bridge. After
+each successful sync, once the new files have been made readable,
+mbsync writes `.mbsync-last-sync.json` (completion time plus
+`SYNC_INTERVAL`) at the Maildir root. It writes a temporary file named
+after that sync (`.mbsync-last-sync.<time>.<interval>.tmp`) and
+renames it into place. The stamp sits outside every `cur`/`new`
+folder, so no Maildir walk or watchdog handler treats it as mail.
+
+A stamp on disk does not prove the indexer has queued that sync's
+mail: the watcher may still be behind on its delivery events. So the
+indexer **acknowledges** a sync only when every message it delivered
+is queued:
+
+- when the watcher handles the stamp's rename. Watchdog dispatches
+  events in order, so the sync's delivery events were handled first.
+  The sync is read from the temporary file's name, not the stamp's
+  content, which a later sync may already have replaced.
+- when a Maildir walk (startup or the periodic rescan) finishes: the
+  stamp read before the walk is acknowledged.
+
+Acknowledgements only move forward. With every health heartbeat
+(per message and per embed batch, at most every 30 s), the indexer
+upserts the latest acknowledged sync and its own timestamp into the
+one-row `ingestion_state` table (schema v21). A missed stamp event
+reads as a stale sync until the next rescan; a missed delivery event
+stays invisible to `current` until the rescan queues it.
 
 ## File Identity on `indexed_files`
 

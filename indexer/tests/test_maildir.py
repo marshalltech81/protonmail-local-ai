@@ -11,6 +11,7 @@ from src.maildir import (
     get_uniq,
     is_trashed,
     parse_flags,
+    parse_sync_stamp_rename,
     read_sync_stamp,
     resolve_current_path,
 )
@@ -152,3 +153,23 @@ class TestReadSyncStamp:
         (tmp_path / SYNC_STAMP_NAME).write_text(content)
         with pytest.raises(ValueError):
             read_sync_stamp(tmp_path)
+
+
+class TestParseSyncStampRename:
+    def test_reads_the_sync_from_the_temporary_name(self):
+        assert parse_sync_stamp_rename(
+            "/maildir/.mbsync-last-sync.2026-09-28T12:00:00Z.60.tmp"
+        ) == SyncStamp(completed_at="2026-09-28T12:00:00+00:00", sync_interval_secs=60)
+
+    @pytest.mark.parametrize(
+        "src",
+        [
+            "/maildir/other.tmp",
+            "/maildir/.mbsync-last-sync.json.tmp",
+            "/maildir/.mbsync-last-sync.yesterday.60.tmp",
+            "/maildir/.mbsync-last-sync.2026-09-28T12:00:00.60.tmp",
+            "/maildir/.mbsync-last-sync.2026-09-28T12:00:00Z.0.tmp",
+        ],
+    )
+    def test_anything_else_is_not_a_sync(self, src):
+        assert parse_sync_stamp_rename(src) is None

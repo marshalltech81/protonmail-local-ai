@@ -2095,8 +2095,12 @@ class Database:
         row (``None`` until the indexer first reports), read in one
         snapshot so the counts and the queue agree.
 
-        Queue rows are ``pending`` (never attempted), ``retrying``
-        (failed at least once, will retry), or ``dead`` (gave up).
+        Queue rows are ``pending`` (not yet failed), ``retrying``
+        (failed at least once, will retry), or ``dead`` (gave up). A job
+        deferred during an embedder outage keeps ``attempts = 0`` but
+        records its failure class, so the class marks it as retrying; a
+        dead job requeued by ``make requeue-dead`` clears both and is
+        pending again.
         """
         stats: dict = {}
         with closing(self._connect()) as conn:
@@ -2111,8 +2115,8 @@ class Database:
             queue = conn.execute(
                 """
                 SELECT
-                    COALESCE(SUM(status = 'queued' AND attempts = 0), 0),
-                    COALESCE(SUM(status = 'queued' AND attempts > 0), 0),
+                    COALESCE(SUM(status = 'queued' AND NOT (attempts > 0 OR last_error_class IS NOT NULL)), 0),
+                    COALESCE(SUM(status = 'queued' AND (attempts > 0 OR last_error_class IS NOT NULL)), 0),
                     COALESCE(SUM(status = 'dead'), 0)
                 FROM indexing_jobs
                 """

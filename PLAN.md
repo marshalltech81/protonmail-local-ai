@@ -444,14 +444,26 @@ not block `current`. It also returns the last sync time, indexer
 liveness, queue counts (pending / retrying / dead), and the existing
 counts and date range, all from one read snapshot. mcp-server still
 reads only SQLite: after each successful sync mbsync writes
-`.mbsync-last-sync.json` at the Maildir root (after the permissions
-fix-up, so that sync's deliveries are already queued), and the indexer
-copies it with its own timestamp into the one-row `ingestion_state`
-table at most every 30 s, from the main loop and from each drain pass,
-so it keeps reporting through the initial index. Schema v21, first
+`.mbsync-last-sync.json` at the Maildir root, renamed into place from a
+temporary file named after that sync. The indexer acknowledges a sync
+only once its deliveries are queued (when its watcher handles that
+rename, which comes after the sync's delivery events, or after a
+Maildir walk that started later), and records the latest acknowledged
+sync with its own liveness in the one-row `ingestion_state` table on
+each health heartbeat, at most every 30 s. Schema v21, first
 post-squash migration `0021_ingestion_state.sql`. mbsync now rejects a
 non-integer `SYNC_INTERVAL` at startup. Known gap: a missed filesystem
 event is invisible to `current` until the periodic rescan enqueues it.
+Review round 1 (Codex): the indexer copied whatever stamp was on disk,
+which can run ahead of the watcher's queue (now acknowledged per
+rename event / walk); liveness was refreshed once per drain pass, so a
+long OCR batch could exceed the 10-minute threshold (now on every
+health heartbeat); jobs deferred during an embedder outage keep
+`attempts = 0` and were counted as pending (now retrying, by failure
+class); two test `type: ignore`s replaced with `monkeypatch`; dead
+messages were described as not searchable, but one that fails after
+Phase 1 keeps its keyword-searchable thread text (now "incompletely
+indexed").
 
 ### 2026-09-28 — Structured MCP output (Phase 1 item 2)
 

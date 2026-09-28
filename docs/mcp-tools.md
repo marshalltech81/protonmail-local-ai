@@ -369,8 +369,8 @@ Reports whether the local index is current and what it holds.
 | `current` | `true` only when all three hold: mbsync completed a sync within three sync intervals (never less than 5 minutes), the indexer reported within 10 minutes, and no message is pending or retrying |
 | `not_current_reasons` | One line per failed condition; empty when `current` is `true` |
 | `last_sync_at` / `sync_interval_secs` | mbsync's last successful sync from Bridge, and how often it syncs |
-| `indexer_last_seen_at` | When the indexer last reported (every 30 s while it runs, including during the initial index) |
-| `queue` | `pending` (found, not yet indexed), `retrying` (failed, will retry), `dead` (failed permanently; not searchable until `make requeue-dead`) |
+| `indexer_last_seen_at` | When the indexer last reported (at most every 30 s with its health heartbeat, including during the initial index) |
+| `queue` | `pending` (found, not yet failed), `retrying` (failed at least once, including jobs deferred during an embedder outage; will retry), `dead` (failed permanently and incompletely indexed: missing from search, or found only by keyword, until `make requeue-dead`) |
 | `total_threads`, `total_messages`, `oldest_message`, `newest_message` | What the index holds |
 
 Dead messages do not make the index non-current: nothing more happens
@@ -380,8 +380,10 @@ or a delivery whose filesystem event the indexer missed (the periodic
 Maildir rescan picks that up within `INDEXER_RECOVERY_SWEEP_INTERVAL_SECS`).
 
 mcp-server never talks to Bridge. mbsync writes a stamp at the Maildir
-root after each successful sync; the indexer copies it, with its own
-liveness, into the `ingestion_state` table that this tool reads.
+root after each successful sync. The indexer acknowledges a sync only
+once every message it delivered is queued, and records it with its own
+liveness in the `ingestion_state` table that this tool reads (see
+"Index currency" in `docs/architecture.md`).
 
 The same helper powers ``make status`` on the host: the Makefile target
 invokes the module-level ``get_mailbox_status`` directly against the

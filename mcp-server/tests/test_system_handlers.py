@@ -55,7 +55,7 @@ class TestGetMailboxStatus:
             sync_completed_at=_ago(hours=2),
             sync_interval_secs=60,
             indexer_seen_at=_ago(seconds=5),
-            jobs=(("queued", 0), ("queued", 1), ("dead", 5)),
+            jobs=(("queued", 0, None), ("queued", 1, "retryable"), ("dead", 5, "retryable")),
         )
         out = asyncio.run(_handler(fake_server, seeded_db)())
         text = _text(out)
@@ -66,7 +66,7 @@ class TestGetMailboxStatus:
         for reason in reasons:
             assert f"  - {reason}" in text
         assert "Queue:          1 pending, 1 retrying, 1 dead" in text
-        assert "1 message failed permanently" in text
+        assert "1 message failed permanently and is incompletely indexed" in text
 
     def test_empty_index_before_any_sync(self, fake_server, empty_db):
         out = asyncio.run(_handler(fake_server, empty_db)())

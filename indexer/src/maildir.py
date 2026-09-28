@@ -11,6 +11,7 @@ successful sync; see ``read_sync_stamp``.
 """
 
 import json
+import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -18,16 +19,28 @@ from pathlib import Path
 FLAG_SEPARATOR = ":2,"
 TRASHED_FLAG = "T"
 
-# Written by mbsync/entrypoint.sh (``write_sync_stamp``) at the Maildir
-# root, outside any ``cur``/``new`` folder, so no Maildir walk or watchdog
-# handler treats it as a message.
+# Written by mbsync/entrypoint.sh (``record_successful_sync``) at the
+# Maildir root, outside any ``cur``/``new`` folder, so no Maildir walk or
+# watchdog handler treats it as a message. mbsync writes each stamp to a
+# temporary file named after that sync (``_SYNC_STAMP_TMP_RE``) and
+# renames it into place.
 SYNC_STAMP_NAME = ".mbsync-last-sync.json"
+_SYNC_STAMP_TMP_RE = re.compile(r"^\.mbsync-last-sync\.([0-9T:Z-]+)\.(\d+)\.tmp$")
 
 
 @dataclass(frozen=True)
 class SyncStamp:
     completed_at: str  # ISO 8601, UTC
     sync_interval_secs: int
+
+
+def _sync_stamp(completed_at: object, interval: object) -> SyncStamp:
+    completed = datetime.fromisoformat(str(completed_at))
+    if completed.tzinfo is None:
+        raise ValueError("sync stamp completion time has no timezone")
+    if type(interval) is not int or interval < 1:
+        raise ValueError("sync stamp interval is not a positive integer")
+    return SyncStamp(completed.astimezone(UTC).isoformat(), interval)
 
 
 def read_sync_stamp(root: Path) -> SyncStamp | None:
@@ -43,13 +56,19 @@ def read_sync_stamp(root: Path) -> SyncStamp | None:
     data = json.loads(raw)  # JSONDecodeError is a ValueError
     if not isinstance(data, dict):
         raise ValueError("sync stamp is not a JSON object")
-    completed = datetime.fromisoformat(str(data.get("completed_at")))
-    if completed.tzinfo is None:
-        raise ValueError("sync stamp completion time has no timezone")
-    interval = data.get("sync_interval_secs")
-    if type(interval) is not int or interval < 1:
-        raise ValueError("sync stamp interval is not a positive integer")
-    return SyncStamp(completed.astimezone(UTC).isoformat(), interval)
+    return _sync_stamp(data.get("completed_at"), data.get("sync_interval_secs"))
+
+
+def parse_sync_stamp_rename(src_path: Path | str) -> SyncStamp | None:
+    """The sync named by the temporary file mbsync renamed onto the stamp,
+    or ``None`` when ``src_path`` is not one."""
+    match = _SYNC_STAMP_TMP_RE.match(Path(src_path).name)
+    if match is None:
+        return None
+    try:
+        return _sync_stamp(match.group(1), int(match.group(2)))
+    except ValueError:
+        return None
 
 
 def parse_flags(path: Path | str) -> set[str]:

@@ -135,8 +135,9 @@ def _render(out: MailboxStatusOutput) -> str:
     if q.dead:
         lines.append(
             f"  {_messages(q.dead)} failed permanently and "
-            f"{'is' if q.dead == 1 else 'are'} not searchable until an operator "
-            "requeues them (make requeue-dead)."
+            f"{'is' if q.dead == 1 else 'are'} incompletely indexed: missing from "
+            "search, or found only by keyword, until an operator requeues them "
+            "(make requeue-dead)."
         )
     lines += [
         f"Total threads:  {out.total_threads:,}",

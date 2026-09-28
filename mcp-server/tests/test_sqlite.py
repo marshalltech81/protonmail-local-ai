@@ -1036,14 +1036,22 @@ class TestStatsAndFolders:
             sync_completed_at="2026-09-28T12:00:00+00:00",
             sync_interval_secs=60,
             indexer_seen_at="2026-09-28T12:00:10+00:00",
-            jobs=(("queued", 0), ("queued", 0), ("queued", 2), ("dead", 5)),
+            jobs=(
+                ("queued", 0, None),
+                ("queued", 0, None),
+                ("queued", 2, "retryable"),
+                # Deferred during an embedder outage: failed, but no
+                # attempt was spent.
+                ("queued", 0, "operator_action_required"),
+                ("dead", 5, "retryable"),
+            ),
         )
         stats = seeded_db.get_mailbox_status()
         assert stats["total_threads"] == 3
         assert stats["total_messages"] == 3
         assert stats["oldest_message"] is not None
         assert stats["newest_message"] is not None
-        assert stats["queue"] == {"pending": 2, "retrying": 1, "dead": 1}
+        assert stats["queue"] == {"pending": 2, "retrying": 2, "dead": 1}
         assert stats["ingestion"] == {
             "sync_completed_at": "2026-09-28T12:00:00+00:00",
             "sync_interval_secs": 60,

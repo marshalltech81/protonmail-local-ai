@@ -319,8 +319,8 @@ class QueueCounts(_Output):
     pending: int = Field(description="Messages found in the Maildir, not yet indexed.")
     retrying: int = Field(description="Messages that failed to index and will be retried.")
     dead: int = Field(
-        description="Messages that failed permanently: not searchable until an "
-        "operator requeues them."
+        description="Messages that failed permanently and are incompletely indexed: "
+        "missing from search, or found only by keyword, until an operator requeues them."
     )
 
 

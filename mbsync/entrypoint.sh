@@ -189,12 +189,16 @@ run_sync() {
 
 record_successful_sync() {
     # Written only after relax_new_maildir_perms, so every message this
-    # sync delivered is already readable (and enqueued by the indexer's
-    # watcher) when the stamp appears. Replaced atomically via rename;
-    # world-readable because the indexer runs as a different UID.
-    local tmp="${SYNC_STAMP_FILE}.tmp"
+    # sync delivered is already on disk and readable. The temporary name
+    # carries this sync's time and interval: the indexer acknowledges the
+    # sync named by the rename event it sees, which its watcher handles
+    # only after this sync's delivery events. Replaced atomically via
+    # rename; world-readable because the indexer runs as a different UID.
+    local completed_at tmp
+    completed_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    tmp="${MAILDIR_PATH}/.mbsync-last-sync.${completed_at}.${SYNC_INTERVAL}.tmp"
     printf '{"completed_at": "%s", "sync_interval_secs": %d}\n' \
-        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$SYNC_INTERVAL" >"$tmp"
+        "$completed_at" "$SYNC_INTERVAL" >"$tmp"
     chmod 644 "$tmp"
     mv -f "$tmp" "$SYNC_STAMP_FILE"
     touch "$HEALTH_FILE"
