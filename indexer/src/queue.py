@@ -74,8 +74,7 @@ STATUS_DEAD = "dead"
 #   budget (``mark_failed``) and dead-letters once it is exhausted.
 # * permanent_source_failure — this source can never be indexed under
 #   the current config (oversized, no Message-ID, input the embedder
-#   rejects, a Message-ID already indexed from a different message);
-#   dead-lettered immediately (``mark_dead_terminal``).
+#   rejects); dead-lettered immediately (``mark_dead_terminal``).
 # * operator_action_required — the pipeline itself is misconfigured
 #   (embedder rejects credentials or model). Says nothing about the
 #   message, so it is deferred, never dead-lettered (``defer``).
@@ -96,11 +95,6 @@ REASON_ON_MOVED = "on_moved"
 REASON_INITIAL_SCAN = "initial_scan"
 REASON_RECOVERY = "recovery"
 REASON_RESCAN = "rescan"
-
-# A file dead-lettered because its Message-ID is already indexed from a
-# different message. Unlike other dead rows it is re-checked on every
-# Maildir walk: it stops being a conflict once the original file is gone.
-CONFLICT_STAGE = "conflict"
 
 # Written by ``begin_attempt`` while a message's step runs and cleared
 # when it returns, so a row still carrying it after a restart was being
@@ -494,12 +488,6 @@ class IndexingQueue:
         because those signal real change in the underlying file.
         """
         return self.db.queue_get_status(filepath) == STATUS_DEAD
-
-    def is_dead_conflict(self, filepath: str) -> bool:
-        """True when ``filepath`` is dead as a Message-ID conflict."""
-        return self.db.queue_get_status(filepath) == STATUS_DEAD and (
-            self.db.queue_get_stage(filepath) == CONFLICT_STAGE
-        )
 
     def has_pending_row(self, filepath: str) -> bool:
         """True when ``filepath`` has a row in 'queued' state.

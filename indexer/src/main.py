@@ -63,7 +63,6 @@ from .maildir import (
 )
 from .parser import Message, OversizedMessageError, _derive_folder, parse_email
 from .queue import (
-    CONFLICT_STAGE,
     ERROR_CLASS_OPERATOR,
     ERROR_CLASS_RETRYABLE,
     INTERRUPTED_STAGE,
@@ -78,7 +77,7 @@ from .queue import load_config_from_env as load_queue_config_from_env
 from .quoting import strip_for_embedding
 from .reconciler import Reconciler, ReconcilerConfig, load_config_from_env, sweep_paths
 from .stall_guard import StallGuard
-from .threader import Thread, Threader, canonical_addr
+from .threader import Thread, Threader
 from .timings import StageTimings, TimingAggregator, format_summary
 
 logging.basicConfig(
@@ -694,50 +693,6 @@ def _enqueued_within(row: sqlite3.Row, seconds: int) -> bool:
     return (datetime.now(UTC) - created).total_seconds() < seconds
 
 
-def _conflicting_source(msg: Message, db: Database) -> str | None:
-    """The file already indexed under ``msg``'s Message-ID, if it is a
-    different message.
-
-    A conflict is dead-lettered at stage ``conflict``, which the Maildir
-    walk re-enqueues (``_enqueue_unindexed_messages``): once the original
-    file is gone, the next walk lets this one take over.
-
-    The same message legitimately appears in several files (an archive
-    move leaves the old copy under ``Expunge None``; self-sent mail sits
-    in Sent and INBOX), so a second file is a conflict only when the
-    recorded one still exists and differs in sender or body. The raw
-    file hash is no test: headers added in transit change it for the
-    same message. A recorded file that is gone or unreadable is the
-    rename case, and the new file takes over as before.
-    """
-    recorded = db.get_message_filepath(msg.message_id)
-    if recorded is None or recorded == msg.filepath:
-        return None
-    try:
-        original = parse_email(Path(recorded), maildir_root=MAILDIR_PATH)
-    except Exception:  # noqa: BLE001 — unverifiable: behave as before
-        return None
-    if original is None:
-        return None
-    if _source_identity(original) == _source_identity(msg):
-        return None
-    return recorded
-
-
-def _source_identity(msg: Message) -> tuple:
-    """Everything indexing writes for a message: a legitimate duplicate
-    matches on all of it, so a second file that differs anywhere cannot
-    replace the record's participants or attach its own attachments."""
-    return (
-        canonical_addr(msg.from_addr),
-        sorted(canonical_addr(a) for a in msg.to_addrs),
-        sorted(canonical_addr(a) for a in msg.cc_addrs),
-        " ".join(msg.subject.split()),
-        " ".join(msg.body_text.split()),
-        sorted(a.content_hash for a in msg.attachments),
-    )
-
-
 def _phase1_commit_thread(
     row: sqlite3.Row,
     db: Database,
@@ -802,18 +757,6 @@ def _phase1_commit_thread(
         # Maildir walk re-enqueue and re-parse it forever. The dead row
         # makes the walk skip it and keeps it visible in queue stats.
         queue.mark_dead_terminal(filepath, stage="parse", error="unindexable: no Message-ID")
-        return None
-    conflict = _conflicting_source(msg, db)
-    if conflict is not None:
-        # The Message-ID is sender-controlled. A second file claiming an
-        # indexed message's ID with different content must not overwrite
-        # the original's record, participants and chunks; keep the
-        # original and leave this file visible as dead.
-        queue.mark_dead_terminal(
-            filepath,
-            stage=CONFLICT_STAGE,
-            error=f"conflicting Message-ID: already indexed from {conflict}",
-        )
         return None
 
     t0 = time.perf_counter()
@@ -1671,9 +1614,7 @@ def _enqueue_unindexed_messages(
     — repeated walks could then retry a failing file forever without
     it ever reaching the dead-letter state. Dead rows are left for the
     operator: the walk only proves the file exists on disk, not that
-    anything about it changed since the last failure. The exception is a
-    Message-ID conflict (stage ``conflict``): whether it is still one
-    depends on another file, so each walk re-checks it. (Watchdog
+    anything about it changed since the last failure. (Watchdog
     ``on_created`` / ``on_moved`` events still go through ``enqueue``
     and DO reset prior state, because those signal a real change.)
 
@@ -1694,7 +1635,7 @@ def _enqueue_unindexed_messages(
             continue
         if skip_trashed and is_trashed(filepath):
             continue
-        if queue.is_dead(path_str) and not queue.is_dead_conflict(path_str):
+        if queue.is_dead(path_str):
             skipped_dead += 1
             continue
         if queue.has_pending_row(path_str):
