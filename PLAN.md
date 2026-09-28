@@ -463,7 +463,10 @@ different people from merging. Monthly mail between the same pair
 (invoices from one vendor) still chains while each falls within 60 days
 of the last; not in #205's scope. `make baseline` unchanged: the
 synthetic corpus has no shared-recipient-only case. Threads already
-merged split only on reindex. No schema change.
+merged split only on reindex. No schema change. Review round 1
+(Codex): a multi-author From counted only its first author, in the
+check and in thread participants, so a co-author's follow-up split off;
+every author now counts.
 
 ### 2026-09-28 — Thread reprocessing (#204)
 

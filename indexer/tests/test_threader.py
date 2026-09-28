@@ -309,6 +309,32 @@ class TestAssignThread:
 
         assert threader.assign_thread(second).thread_id == "inv_b@example.com"
 
+    def test_subject_fallback_counts_every_from_author(self, db, threader):
+        """Review round 1: a multi-author From is parsed into
+        ``from_addrs``, but only the first author reached the thread's
+        participants and the fallback check, so a co-author's headerless
+        follow-up was split off."""
+        first = make_message(
+            message_id="coauth@example.com",
+            subject="Draft proposal",
+            from_addr="alice@example.com",
+            to_addrs=["owner@example.com"],
+        )
+        first.from_addrs = ["alice@example.com", "bob@example.com"]
+        thread = threader.assign_thread(first)
+        assert "bob@example.com" in thread.participants
+        db.upsert_thread(thread, [0.0] * EMBEDDING_DIM)
+        followup = make_message(
+            message_id="coauth_follow@example.com",
+            subject="Re: Draft proposal",
+            from_addr="bob@example.com",
+            to_addrs=["owner@example.com"],
+            filepath="/maildir/INBOX/cur/coauth_follow",
+            date=datetime(2024, 1, 2, tzinfo=UTC),
+        )
+
+        assert threader.assign_thread(followup).thread_id == "coauth@example.com"
+
     def test_subject_fallback_ignores_a_shared_sender_alone(self, db, threader):
         """The same owner writing "Meeting" to two different people is
         two conversations."""

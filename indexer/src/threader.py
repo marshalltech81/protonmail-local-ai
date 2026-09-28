@@ -276,7 +276,7 @@ class Threader:
         """Gate the subject-only thread merge with a correspondent check +
         date proximity. Returns True if the fallback is safe.
 
-        The incoming sender and at least one of its other recipients must
+        An incoming author and at least one of its other recipients must
         both already be thread participants — the same pair of people
         corresponding. Any single shared address is not enough: the
         mailbox owner is a recipient of nearly every message (two
@@ -293,12 +293,13 @@ class Threader:
 
         thread_canonical = {canonical_addr(addr) for addr in thread.participants}
         thread_canonical.discard("")
-        sender = canonical_addr(message.from_addr)
-        if not sender or sender not in thread_canonical:
+        authors = {canonical_addr(addr) for addr in _authors(message)}
+        authors.discard("")
+        if not authors.intersection(thread_canonical):
             return False
         recipients = {canonical_addr(addr) for addr in [*message.to_addrs, *message.cc_addrs]}
         recipients.discard("")
-        recipients.discard(sender)
+        recipients -= authors
         if not recipients.intersection(thread_canonical):
             return False
 
@@ -315,7 +316,7 @@ class Threader:
         seen_canonical: set[str] = set()
         result: list[str] = []
         for msg in messages:
-            for addr in [msg.from_addr, *msg.to_addrs, *msg.cc_addrs]:
+            for addr in [*_authors(msg), *msg.to_addrs, *msg.cc_addrs]:
                 stripped = addr.strip()
                 if not stripped:
                     continue
@@ -325,6 +326,12 @@ class Threader:
                 seen_canonical.add(key)
                 result.append(stripped)
         return result
+
+
+def _authors(msg: Message) -> list[str]:
+    """Every From author (a From header may list several), falling back
+    to ``from_addr`` when the parser found no structured address."""
+    return msg.from_addrs or [msg.from_addr]
 
 
 def _normalize_subject(subject: str) -> str:
