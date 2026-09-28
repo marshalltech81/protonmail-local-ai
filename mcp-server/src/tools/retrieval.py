@@ -27,30 +27,52 @@ _MAX_LISTED_PARTICIPANTS = 10
 _DEFAULT_THREAD_PAGE = 10
 _MAX_THREAD_PAGE = 50
 _THREAD_BODY_CHAR_LIMIT = 4000
+# Headers are sender-controlled too: get_thread lists at most this many
+# References and cuts every header value at this many characters.
+_MAX_LISTED_REFERENCES = 10
+_THREAD_HEADER_CHAR_LIMIT = 500
+
+
+def _join_limited(items: list[str], limit: int | None) -> str:
+    if limit is None or len(items) <= limit:
+        return ", ".join(items)
+    return ", ".join(items[:limit]) + f" (+{len(items) - limit} more)"
+
+
+def _clip(value: str, limit: int | None) -> str:
+    if limit is None or len(value) <= limit:
+        return value
+    return value[:limit] + f"… [{len(value) - limit:,} more characters]"
 
 
 def _format_participants(
     people: list[Participant], limit: int | None = _MAX_LISTED_PARTICIPANTS
 ) -> str:
-    shown = [f"{p.name} <{p.address}>" if p.name else p.address for p in people]
-    if limit is None or len(shown) <= limit:
-        return ", ".join(shown)
-    return ", ".join(shown[:limit]) + f" (+{len(shown) - limit} more)"
+    return _join_limited(
+        [f"{p.name} <{p.address}>" if p.name else p.address for p in people], limit
+    )
 
 
-def _header_lines(m: MessageRecord, participant_limit: int | None) -> list[str]:
-    """A message's own headers, one per line; absent ones are omitted."""
-    lines = [f"Subject: {m.subject}"]
+def _header_lines(m: MessageRecord, *, full: bool) -> list[str]:
+    """A message's own headers, one per line; absent ones are omitted.
+
+    Unless ``full``, long lists are summarized and long values cut, so
+    get_thread stays bounded whatever a sender put in the headers.
+    """
+    people_limit = None if full else _MAX_LISTED_PARTICIPANTS
+    refs_limit = None if full else _MAX_LISTED_REFERENCES
+    chars = None if full else _THREAD_HEADER_CHAR_LIMIT
+    headers = [("Subject", m.subject)]
     for label, people in (("From", m.from_), ("To", m.to), ("Cc", m.cc)):
         if people:
-            lines.append(f"{label}: {_format_participants(people, participant_limit)}")
-    lines += [f"Sent: {m.sent_at}", f"Folder: {m.folder}"]
+            headers.append((label, _format_participants(people, people_limit)))
+    headers += [("Sent", m.sent_at), ("Folder", m.folder)]
     if m.in_reply_to:
-        lines.append(f"In-Reply-To: {m.in_reply_to}")
+        headers.append(("In-Reply-To", m.in_reply_to))
     if m.references:
-        lines.append(f"References: {', '.join(m.references)}")
-    lines.append(f"Attachments: {'yes' if m.has_attachments else 'no'}")
-    return lines
+        headers.append(("References", _join_limited(m.references, refs_limit)))
+    headers.append(("Attachments", "yes" if m.has_attachments else "no"))
+    return [f"{label}: {_clip(value, chars)}" for label, value in headers]
 
 
 def _describe_filters(args: dict) -> str:
@@ -94,7 +116,8 @@ def register_retrieval_tools(server, db):
         Pages by message: the response states the thread's message
         count and, when more remain, the ``offset`` for the next call.
         Each body is cut at 4,000 characters, with a marker saying how
-        much was left out; ``get_message`` returns a full body.
+        much was left out; long header values and lists are shortened the
+        same way. ``get_message`` returns a full body and full headers.
 
         DO NOT use this to read attachment content (PDFs, OCR'd
         images, scans). It returns the message bodies only; the
@@ -158,10 +181,14 @@ def register_retrieval_tools(server, db):
             else:
                 count = str(total)
             lines = [
-                f"Thread: {thread.subject}",
+                f"Thread: {_clip(thread.subject, _THREAD_HEADER_CHAR_LIMIT)}",
                 f"Thread ID: {thread.thread_id}",
                 f"Folder: {thread.folder}",
-                f"Participants: {', '.join(thread.participants)}",
+                "Participants: "
+                + _clip(
+                    _join_limited(thread.participants, _MAX_LISTED_PARTICIPANTS),
+                    _THREAD_HEADER_CHAR_LIMIT,
+                ),
                 f"Date range: {thread.date_first.strftime('%Y-%m-%d')} "
                 f"→ {thread.date_last.strftime('%Y-%m-%d')}",
                 f"Messages: {count}",
@@ -171,13 +198,14 @@ def register_retrieval_tools(server, db):
             if messages:
                 lines.append(
                     "Messages, oldest first (bodies are the indexed text after "
-                    "quoted-reply stripping; attachment text is not included):"
+                    "quoted-reply stripping; attachment text is not included; "
+                    "long headers are shortened, get_message returns full headers):"
                 )
             elif total:
                 lines.append(f"No messages at offset {offset}; the thread has {total}.")
             for i, m in enumerate(messages, offset + 1):
                 lines += ["", f"[{i}/{total}] Message-ID: {m.message_id}"]
-                lines += _header_lines(m, _MAX_LISTED_PARTICIPANTS)
+                lines += _header_lines(m, full=False)
                 lines.append("")
                 body = page.bodies.get(m.message_id)
                 if body is None:
@@ -267,7 +295,7 @@ def register_retrieval_tools(server, db):
 
             lines = [
                 f"Message-ID: {message_id}",
-                *_header_lines(view.record, participant_limit=None),
+                *_header_lines(view.record, full=True),
                 f"Thread: {thread.subject}",
                 f"Thread ID: {thread.thread_id}",
                 f"Mode: {local_only_note}",

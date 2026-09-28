@@ -126,7 +126,11 @@ also carries quoted replies) is shown instead.
 Responses are bounded: messages are paged (the response states the
 thread's message count and the `offset` for the next page), and each
 body is cut at 4,000 characters with a marker stating how many were
-left out — `get_message` returns the full body. The page is read from
+left out — `get_message` returns the full body. Header content is
+sender-controlled, so it is bounded the same way: at most 10 recipients
+per role, 10 thread participants, and 10 References are listed (with a
+"+N more" count), and any header value past 500 characters is cut with
+a marker — `get_message` returns full headers. The page is read from
 one database snapshot.
 
 | Parameter | Type | Default | Description |

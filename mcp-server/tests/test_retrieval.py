@@ -24,7 +24,7 @@ import sqlite_vec
 from src.lib.sqlite import Database
 from src.tools.retrieval import register_retrieval_tools
 
-from tests.conftest import _build_schema, _insert_message
+from tests.conftest import _build_schema, _insert_message, _insert_thread
 
 
 @contextmanager
@@ -198,6 +198,54 @@ class TestGetThread:
         assert text.count("Paragraph P3 ") == 1
         assert text.count("Same line again.") == 2
 
+    def test_long_references_are_bounded(self, fake_server, tmp_path):
+        # A sender controls References; 12,000 of them must not bypass
+        # get_thread's paging and body limits.
+        refs = [f"ref{i:05d}@example.com" for i in range(12000)]
+        with _open_fixture_db(tmp_path) as (conn, db):
+            _insert_message(
+                conn,
+                message_id="a",
+                thread_id="t",
+                sent_at="2024-01-01T00:00:00+00:00",
+                references=refs,
+                body="hello",
+            )
+            conn.close()
+            text = _text(asyncio.run(_handlers(fake_server, db)["get_thread"](thread_id="t")))
+        assert len(text) < 3000
+        assert "ref00009@example.com (+11990 more)" in text
+        assert "ref00010@example.com" not in text
+        assert "get_message returns full headers" in text
+
+    def test_long_header_values_are_cut_with_a_marker(self, fake_server, tmp_path):
+        with _open_fixture_db(tmp_path) as (conn, db):
+            _insert_message(
+                conn,
+                message_id="a",
+                thread_id="t",
+                sent_at="2024-01-01T00:00:00+00:00",
+                subject="S" * 100_000,
+                in_reply_to="i" * 100_000,
+                body="hello",
+            )
+            conn.close()
+            text = _text(asyncio.run(_handlers(fake_server, db)["get_thread"](thread_id="t")))
+        # Thread subject, message subject, and In-Reply-To.
+        assert text.count("… [99,500 more characters]") == 3
+        assert len(text) < 5000
+
+    def test_long_thread_participant_lists_are_summarized(self, fake_server, tmp_path):
+        people = [f"p{i:04d}@example.com" for i in range(5000)]
+        with _open_fixture_db(tmp_path) as (conn, db):
+            _insert_thread(conn, thread_id="t", subject="s", participants=people)
+            conn.close()
+            text = _text(asyncio.run(_handlers(fake_server, db)["get_thread"](thread_id="t")))
+        assert "Participants: p0000@example.com" in text
+        assert "p4999@example.com" not in text
+        assert "more)" in text
+        assert len(text) < 5000
+
     def test_long_recipient_lists_are_summarized(self, fake_server, tmp_path):
         with _open_fixture_db(tmp_path) as (conn, db):
             _insert_message(
@@ -255,6 +303,21 @@ class TestGetMessage:
         assert OVERLAP_BODY in text
         assert text.count("Paragraph P5 ") == 1
         assert text.count("Same line again.") == 2
+
+    def test_returns_every_reference(self, fake_server, tmp_path):
+        # get_message is the full-header view get_thread points to.
+        refs = [f"ref{i:03d}@example.com" for i in range(200)]
+        with _open_fixture_db(tmp_path) as (conn, db):
+            _insert_message(
+                conn,
+                message_id="a",
+                thread_id="t",
+                sent_at="2024-01-01T00:00:00+00:00",
+                references=refs,
+            )
+            conn.close()
+            text = _text(asyncio.run(_handlers(fake_server, db)["get_message"](message_id="a")))
+        assert f"References: {', '.join(refs)}" in text
 
     def test_lists_every_recipient(self, fake_server, tmp_path):
         # get_message is the authoritative single-message view: no

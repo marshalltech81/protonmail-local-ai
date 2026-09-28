@@ -446,6 +446,10 @@ first version loaded every chunk of every message, where the old
 `char_start` offset so the chunker's deliberate overlap is not shown
 twice (also a pre-existing `get_message` bug); and both tools read
 thread, messages, participants, and bodies in one read transaction.
+Review round 2: header content bypassed that bound (12,000 folded
+References rendered 550K characters); `get_thread` now lists at most 10
+References and thread participants and cuts every header value at 500
+characters with a marker, leaving full headers to `get_message`.
 
 ### 2026-09-27 — `query_messages` (Phase 1 item 1)
 
