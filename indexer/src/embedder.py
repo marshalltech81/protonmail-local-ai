@@ -81,6 +81,14 @@ def _float_env(name: str, default: float, minimum: float = 1.0) -> float:
     return value
 
 
+class EmbedResponseError(RuntimeError):
+    """A successful embeddings response failed our integrity checks.
+
+    Messages are fixed text plus counts: response fields can echo the
+    submitted email text, so their values are never quoted.
+    """
+
+
 def scrub_embed_error(exc: BaseException) -> str:
     """Render an embedder exception into a log/DB-safe string.
 
@@ -92,13 +100,16 @@ def scrub_embed_error(exc: BaseException) -> str:
     travel further than callers usually expect, so trim
     ``APIStatusError`` down to type + status_code only.
 
-    Connection / timeout / our own ``RuntimeError`` (index-integrity
-    check) carry no email content, so their full ``repr`` is safe to
-    keep.
+    Connection / timeout errors and our own ``EmbedResponseError``
+    carry no email content, so their full ``repr`` is safe to keep.
+    Anything else (SDK response parsing, vector conversion) can quote
+    response values that echo the input, so only its type is kept.
     """
     if isinstance(exc, APIStatusError):
         return f"{type(exc).__name__}: status={exc.status_code}"
-    return repr(exc)
+    if isinstance(exc, (APIConnectionError, EmbedResponseError)):
+        return repr(exc)
+    return type(exc).__name__
 
 
 def _is_transient_embed_error(exc: BaseException) -> bool:
@@ -120,7 +131,7 @@ def _is_transient_embed_error(exc: BaseException) -> bool:
 
     * Other 4xx ``openai.APIStatusError`` (auth, model id, request
       shape).
-    * Our own ``RuntimeError`` from index-integrity checks — the
+    * Our own ``EmbedResponseError`` from index-integrity checks — the
       provider returned a malformed batch and a retry would produce
       the same shape.
 
@@ -156,7 +167,7 @@ def classify_embed_failure(exc: BaseException) -> str:
     * ``configuration`` — 401 / 403 / 404: credentials or model id.
     * ``rejected_input`` — 400 / 413 / 422: the provider refused this
       particular request body.
-    * ``uncertain`` — 5xx, our integrity ``RuntimeError``, anything
+    * ``uncertain`` — 5xx, our integrity ``EmbedResponseError``, anything
       else: could be the input or the provider; callers must gather
       more evidence (a fresh probe) before charging the message.
     """
@@ -427,17 +438,20 @@ class OpenAIEmbedder:
         # the wrong chunk text — a far worse failure mode than a
         # raised exception, since the index commits and stores
         # mis-aligned vectors that survive every later restart.
+        # Error messages never quote response values: they can echo the
+        # submitted email text (#224).
         if len(data) != len(texts):
-            raise RuntimeError(
+            raise EmbedResponseError(
                 f"embedder returned {len(data)} vectors for {len(texts)} inputs "
                 f"({self.base_url}, model={self.model!r})"
             )
-        seen_indices = sorted(d.index for d in data)
-        if seen_indices != list(range(len(texts))):
-            raise RuntimeError(
-                f"embedder returned non-contiguous or duplicate indices "
-                f"{seen_indices} for {len(texts)} inputs "
-                f"({self.base_url}, model={self.model!r})"
+        indices = [d.index for d in data]
+        if not all(isinstance(i, int) and not isinstance(i, bool) for i in indices) or sorted(
+            indices
+        ) != list(range(len(texts))):
+            raise EmbedResponseError(
+                f"embedder returned non-integer, non-contiguous or duplicate indices "
+                f"for {len(texts)} inputs ({self.base_url}, model={self.model!r})"
             )
         data.sort(key=lambda d: d.index)
         # Normalize raw provider output here so chunk vectors land

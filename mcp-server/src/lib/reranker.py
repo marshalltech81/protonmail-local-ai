@@ -149,16 +149,30 @@ class CohereReranker:
                 documents=documents,
                 top_n=effective_top_n,
             )
-            return [(int(item.index), float(item.relevance_score)) for item in resp.results]
+            results: list[tuple[int, float]] = []
+            for item in resp.results:
+                index, score = item.index, item.relevance_score
+                if (
+                    not isinstance(index, int)
+                    or isinstance(index, bool)
+                    or not isinstance(score, (int, float))
+                    or isinstance(score, bool)
+                ):
+                    # Never quote the values: they can echo a passage.
+                    raise TypeError("rerank result has a non-numeric index or score")
+                results.append((index, float(score)))
+            return results
         except Exception as exc:
             # Best-effort: log and signal "no rerank available" so the
             # caller can degrade to RRF order rather than fail the query.
-            # ``safe_provider_exception_text`` trims Cohere SDK status
-            # errors to ``type + status`` so the response body — which
-            # can echo the documents (email-chunk text) we just sent —
-            # never lands in operator logs or downstream callers.
-            # Connection / timeout failures fall through to the standard
-            # secret-redacting formatter and keep diagnostic detail.
-            safe_exc = safe_provider_exception_text(exc, [self.config.api_key])
+            # Every documented failure here can echo the documents
+            # (email-chunk text) we just sent: a status error's response
+            # body, or a malformed 200 field quoted by a parse or
+            # conversion error (#224). Log status errors as ``type +
+            # status`` and everything else as its type alone.
+            if isinstance(getattr(exc, "status_code", None), int):
+                safe_exc = safe_provider_exception_text(exc, [self.config.api_key])
+            else:
+                safe_exc = type(exc).__name__
             log.warning("rerank failed (%s); falling back to RRF order", safe_exc)
             return []

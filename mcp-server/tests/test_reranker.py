@@ -201,3 +201,40 @@ class TestRerank:
 
         r.client.rerank = fake_rerank  # type: ignore[assignment]
         assert r.rerank("q", ["a"]) == []
+
+    def test_malformed_fields_never_reach_logs(self, caplog):
+        # A 200 response whose fields echo a submitted passage must not
+        # put that text in the log via a conversion error (#224).
+        import logging
+
+        r = _make_reranker()
+        marker = "SYNTHETIC_PRIVATE_MAIL"
+        for bad in (
+            SimpleNamespace(index=marker, relevance_score=0.9),
+            SimpleNamespace(index=0, relevance_score=marker),
+        ):
+
+            def fake_rerank(_bad=bad, **_kwargs):
+                return SimpleNamespace(results=[_bad])
+
+            r.client.rerank = fake_rerank  # type: ignore[assignment]
+            with caplog.at_level(logging.DEBUG):
+                assert r.rerank("q", [marker]) == []
+        assert "rerank failed" in caplog.text
+        assert marker not in caplog.text
+
+    def test_unexpected_exception_logs_type_only(self, caplog):
+        # SDK response parsing (pydantic) errors quote the input value;
+        # only status errors and the exception type are safe to log.
+        import logging
+
+        r = _make_reranker()
+
+        def fake_rerank(**_kwargs):
+            raise ValueError("input_value='SYNTHETIC_PRIVATE_MAIL'")
+
+        r.client.rerank = fake_rerank  # type: ignore[assignment]
+        with caplog.at_level(logging.DEBUG):
+            assert r.rerank("q", ["a"]) == []
+        assert "ValueError" in caplog.text
+        assert "SYNTHETIC_PRIVATE_MAIL" not in caplog.text

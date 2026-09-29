@@ -1430,8 +1430,8 @@ def _drain_queue_batched(
             # ``last_error`` rides into ``indexing_jobs.last_error`` +
             # operator log sinks. ``scrub_embed_error`` keeps full repr
             # for safe error shapes (connection / timeout / our own
-            # integrity-check ``RuntimeError``) and trims SDK status
-            # errors to type + status_code.
+            # ``EmbedResponseError``), trims SDK status errors to
+            # type + status_code, and anything else to its type.
             err_repr = scrub_embed_error(e)
             probe_error = _probe_embedder(embedder)
             if probe_error is not None:
