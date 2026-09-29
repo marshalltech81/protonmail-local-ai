@@ -376,8 +376,10 @@ PDFs and images route through Tesseract when `INDEXER_OCR_ENABLED=true`
 (default). The PDF extractor first tries the digital text layer via
 `pypdf`; if the result is below a small minimum-character threshold,
 it falls through to rendering each page via Poppler (`pdf2image`) and
-OCR'ing via `pytesseract`. `INDEXER_OCR_MAX_PAGES` (default 20) caps
-the cost on long scanned documents.
+OCR'ing via `pytesseract`. A multipage TIFF (a scanned invoice or fax)
+is OCR'd page by page; other image formats' extra frames are animation
+and only the first is read. `INDEXER_OCR_MAX_PAGES` (default 20) caps
+the cost on long scanned documents of either kind.
 
 ### Cost bounds
 
@@ -386,7 +388,7 @@ the cost on long scanned documents.
 | `INDEXER_ATTACHMENT_EXTRACTION_ENABLED` | `true` | Master switch — turns the whole pipeline off if needed |
 | `INDEXER_OCR_ENABLED` | `true` | Disables all OCR paths (image + PDF fallback) |
 | `INDEXER_ATTACHMENT_MAX_BYTES` | `10000000` (10 MB) | Skip very large attachments — bounds CPU/memory for huge zips |
-| `INDEXER_OCR_MAX_PAGES` | `20` | Cap pages OCR'd per PDF |
+| `INDEXER_OCR_MAX_PAGES` | `20` | Cap pages OCR'd per PDF or multipage TIFF |
 | `INDEXER_OCR_TIMEOUT_SECONDS` | `60` | Per-page Tesseract timeout — bounds runaway OCR on a crafted high-noise image — and the deadline for rendering a scanned PDF's pages with Poppler. Set `0` to disable both. |
 | `INDEXER_PDF_MAX_DIGITAL_PAGES` | `500` | Cap pages walked by the digital pypdf path — protects against text-only PDFs with thousands of pages. Set `0` to disable. |
 | `INDEXER_ATTACHMENT_MAX_EXTRACTED_CHARS` | `2000000` (~500 pages) | Truncate extracted text before persisting in `attachment_extractions`. Bounds SQLite row size for very long OCR'd PDFs. Set to `0` to disable. |

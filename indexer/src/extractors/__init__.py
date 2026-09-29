@@ -118,7 +118,8 @@ class ExtractionResult:
 #
 # docx 2: reads each cell once, nested tables, and header/footer tables
 # (#226, #228).
-EXTRACTOR_VERSIONS: dict[str, int] = {"docx": 2}
+# image 2: OCRs every page of a multipage TIFF (#231).
+EXTRACTOR_VERSIONS: dict[str, int] = {"docx": 2, "image": 2}
 
 
 def _stamp_extractor(module_name: str, extractor_name: str) -> str:

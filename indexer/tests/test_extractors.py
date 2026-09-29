@@ -971,6 +971,64 @@ class TestImageExtractor:
         assert Image.MAX_IMAGE_PIXELS == before
 
 
+class TestMultipageTiff:
+    """#231: a multipage TIFF was OCR'd from its first frame only and
+    cached as a complete extraction."""
+
+    COLORS = [(255, 255, 255), (0, 0, 0), (255, 0, 0)]
+
+    def _frames(self, fmt: str, count: int) -> bytes:
+        import io
+
+        from PIL import Image
+
+        frames = [Image.new("RGB", (32, 32), c) for c in self.COLORS[:count]]
+        buf = io.BytesIO()
+        frames[0].save(buf, format=fmt, save_all=True, append_images=frames[1:])
+        return buf.getvalue()
+
+    def _ocr_by_color(self, monkeypatch) -> list[str]:
+        from src.extractors import image as image_module
+
+        seen: list[str] = []
+
+        def fake_ocr(img, **_kwargs):
+            marker = f"PAGE_{self.COLORS.index(img.convert('RGB').getpixel((0, 0)))}"
+            seen.append(marker)
+            return marker
+
+        monkeypatch.setattr(image_module.pytesseract, "image_to_string", fake_ocr)
+        return seen
+
+    def test_every_page_is_ocrd_in_order(self, monkeypatch):
+        seen = self._ocr_by_color(monkeypatch)
+        result = extract(
+            content_type="image/tiff", filename="scan.tiff", payload=self._frames("TIFF", 3)
+        )
+        assert seen == ["PAGE_0", "PAGE_1", "PAGE_2"]
+        assert result.status == STATUS_SUCCESS
+        assert result.text is not None
+        assert result.text.split() == ["PAGE_0", "PAGE_1", "PAGE_2"]
+        assert result.extractor == "image-ocr@2"
+
+    def test_pages_are_capped_by_max_ocr_pages(self, monkeypatch):
+        seen = self._ocr_by_color(monkeypatch)
+        extract(
+            content_type="image/tiff",
+            filename="scan.tiff",
+            payload=self._frames("TIFF", 3),
+            max_ocr_pages=2,
+        )
+        assert seen == ["PAGE_0", "PAGE_1"]
+
+    def test_animated_gif_is_still_one_page(self, monkeypatch):
+        # Animation frames are not pages; OCR'ing each would multiply the
+        # work for no new text.
+        seen = self._ocr_by_color(monkeypatch)
+        extract(content_type="image/gif", filename="a.gif", payload=self._frames("GIF", 3))
+        assert seen == ["PAGE_0"]
+
+
 class TestGlobalImagePixelCap:
     """Process-wide PIL cap installed by ``indexer.extractors`` at import.
 

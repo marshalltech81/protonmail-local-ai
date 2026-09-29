@@ -7,8 +7,11 @@ the dispatcher converts it to a ``failed`` extraction row.
 
 Auto-rotates EXIF-oriented JPEGs (smartphone photos default to
 landscape EXIF metadata even when shot portrait, and unrotated input
-hurts OCR accuracy materially). Anything else — language hints,
-preprocessing — is left as a future tuning concern.
+hurts OCR accuracy materially). A multipage TIFF (a scanned invoice or
+fax) is OCR'd page by page, up to ``max_ocr_pages``, like a scanned PDF;
+other formats' extra frames are animation, not pages, and only the
+first is read. Anything else — language hints, preprocessing — is left
+as a future tuning concern.
 
 Decompression-bomb defense: ``INDEXER_ATTACHMENT_MAX_BYTES`` caps the
 payload on disk, but PNG / WebP / TIFF can deflate ~1000× into a
@@ -36,13 +39,14 @@ def extract(
     payload: bytes,
     *,
     ocr_enabled: bool = True,  # noqa: ARG001 — dispatcher already gated on this
-    max_ocr_pages: int = 20,  # noqa: ARG001 — single-page format
+    max_ocr_pages: int = 20,
     ocr_timeout_seconds: float | None = None,
     max_pdf_pages: int | None = None,  # noqa: ARG001 — single-page format
 ) -> tuple[str, str]:
     """OCR an image attachment. Returns (text, "image-ocr").
 
-    ``ocr_timeout_seconds`` (when set) bounds Tesseract per call.
+    ``ocr_timeout_seconds`` (when set) bounds Tesseract per call, so a
+    multipage TIFF costs at most ``max_ocr_pages`` of them.
     Tesseract is single-threaded and a crafted high-noise image can
     keep it busy for minutes; the indexer queue is single-worker, so
     one bad image stalls every subsequent attachment until the OS
@@ -58,11 +62,18 @@ def extract(
         # process.
         warnings.simplefilter("error", Image.DecompressionBombWarning)
         image: Image.Image = Image.open(io.BytesIO(payload))
-        # ``exif_transpose`` reads the EXIF Orientation tag and rotates the
-        # pixels accordingly. No-op for images without EXIF.
-        image = ImageOps.exif_transpose(image)
         tesseract_kwargs: dict[str, float] = {}
         if ocr_timeout_seconds is not None and ocr_timeout_seconds > 0:
             tesseract_kwargs["timeout"] = float(ocr_timeout_seconds)
-        text = pytesseract.image_to_string(image, **tesseract_kwargs)
-    return text, "image-ocr"
+        pages = getattr(image, "n_frames", 1) if image.format == "TIFF" else 1
+        if max_ocr_pages > 0:
+            pages = min(pages, max_ocr_pages)
+        texts: list[str] = []
+        for page in range(pages):
+            image.seek(page)
+            # ``exif_transpose`` reads the EXIF Orientation tag and rotates
+            # the pixels accordingly. No-op for images without EXIF.
+            texts.append(
+                pytesseract.image_to_string(ImageOps.exif_transpose(image), **tesseract_kwargs)
+            )
+    return "\n\n".join(texts), "image-ocr"
