@@ -11,6 +11,7 @@ from datetime import datetime
 from email.message import EmailMessage
 from pathlib import Path
 
+import pytest
 from src.parser import (
     OversizedMessageError,
     _clean_id,
@@ -829,9 +830,10 @@ class TestAttachmentBoundaries:
         assert a.content_hash != b.content_hash
 
     def test_deeply_nested_attached_email_degrades_to_empty_payload(self, tmp_path):
-        """Serializing an attached email recurses once per nesting level.
-        A depth the stdlib parser accepts but cannot re-serialize keeps
-        the message indexable, with the old empty payload."""
+        """A depth the stdlib parser accepts but that is past
+        ``MAX_ATTACHED_MESSAGE_DEPTH`` is never serialized (serializing
+        would recurse past the limit): the message stays indexable, with
+        the old empty payload."""
         attached = 'Content-Type: message/rfc822\r\nContent-Disposition: attachment; filename="x.eml"\r\n\r\n'
         nested = attached * 299 + "Content-Type: text/plain\r\n\r\nleaf\r\n"
         content = (
@@ -851,6 +853,106 @@ class TestAttachmentBoundaries:
         assert msg.body_text == "PARENT_BODY"
         [attachment] = msg.attachments
         assert attachment.payload == b""
+
+    def test_attached_email_nested_past_the_cap_is_not_serialized(self, tmp_path):
+        """Review round 1: serializing copies the subtree once per nesting
+        level, so a large leaf under many wrappers cost depth x size. Past
+        the depth cap the attached email keeps the empty payload."""
+        from src.parser import MAX_ATTACHED_MESSAGE_DEPTH
+
+        def parent(depth: int) -> str:
+            wrapper = "Content-Type: message/rfc822\r\n\r\n"
+            nested = wrapper * (depth - 1) + "Content-Type: text/plain\r\n\r\nleaf\r\n"
+            return (
+                "Message-ID: <deep@example.test>\r\n"
+                "From: sender@example.test\r\n"
+                "Date: Mon, 28 Sep 2026 12:00:00 +0000\r\n"
+                "MIME-Version: 1.0\r\n"
+                'Content-Type: multipart/mixed; boundary="b"\r\n'
+                "\r\n--b\r\nContent-Type: text/plain\r\n\r\nPARENT_BODY\r\n"
+                '--b\r\nContent-Type: message/rfc822\r\nContent-Disposition: attachment; filename="x.eml"\r\n\r\n'
+                f"{nested}\r\n--b--\r\n"
+            )
+
+        folder = tmp_path / "INBOX" / "cur"
+        folder.mkdir(parents=True)
+        for depth, serialized in ((MAX_ATTACHED_MESSAGE_DEPTH, True), (50, False)):
+            path = folder / f"d{depth}.eml"
+            path.write_bytes(parent(depth).encode())
+            msg = parse_email(path)
+            assert msg is not None
+            assert msg.body_text == "PARENT_BODY"
+            [attachment] = msg.attachments
+            assert (b"leaf" in attachment.payload) is serialized, depth
+
+    @pytest.mark.parametrize("encoding", ["base64", "quoted-printable"])
+    def test_transfer_encoded_attached_email_is_hashed_decoded(self, tmp_path, encoding):
+        """Review round 1: a base64 / quoted-printable message/rfc822 part
+        (not allowed by RFC 2046, but sent) was hashed in its transport
+        form, so the same email got a different ID and size per encoding."""
+        import base64
+        import quopri
+
+        inner = (
+            b"Message-ID: <inner@example.test>\r\nFrom: other@example.test\r\n\r\nINNER=body\r\n"
+        )
+        encoded = base64.encodebytes(inner) if encoding == "base64" else quopri.encodestring(inner)
+
+        def parent(cte: str, body: bytes) -> bytes:
+            return (
+                b"Message-ID: <outer@example.test>\r\nFrom: sender@example.test\r\n"
+                b"Date: Mon, 28 Sep 2026 12:00:00 +0000\r\nMIME-Version: 1.0\r\n"
+                b'Content-Type: multipart/mixed; boundary="b"\r\n\r\n'
+                b"--b\r\nContent-Type: text/plain\r\n\r\nPARENT_BODY\r\n"
+                b"--b\r\nContent-Type: message/rfc822\r\n"
+                + f"Content-Transfer-Encoding: {cte}\r\n".encode()
+                + b'Content-Disposition: attachment; filename="x.eml"\r\n\r\n'
+                + body
+                + b"\r\n--b--\r\n"
+            )
+
+        folder = tmp_path / "INBOX" / "cur"
+        folder.mkdir(parents=True)
+        (folder / "plain.eml").write_bytes(parent("7bit", inner))
+        (folder / "encoded.eml").write_bytes(parent(encoding, encoded))
+        plain = parse_email(folder / "plain.eml")
+        coded = parse_email(folder / "encoded.eml")
+        assert plain is not None and coded is not None
+        assert b"INNER=body" in coded.attachments[0].payload
+        assert coded.attachments[0].content_hash == plain.attachments[0].content_hash
+
+    def test_undecodable_base64_attached_email_keeps_an_empty_payload(self, tmp_path):
+        folder = tmp_path / "INBOX" / "cur"
+        folder.mkdir(parents=True)
+        path = folder / "m.eml"
+        path.write_bytes(
+            b"Message-ID: <bad64@example.test>\r\nFrom: sender@example.test\r\n"
+            b"Date: Mon, 28 Sep 2026 12:00:00 +0000\r\nMIME-Version: 1.0\r\n"
+            b'Content-Type: multipart/mixed; boundary="b"\r\n\r\n'
+            b"--b\r\nContent-Type: text/plain\r\n\r\nPARENT_BODY\r\n"
+            b"--b\r\nContent-Type: message/rfc822\r\nContent-Transfer-Encoding: base64\r\n"
+            b'Content-Disposition: attachment; filename="x.eml"\r\n\r\nA\r\n--b--\r\n'
+        )
+        msg = parse_email(path)
+        assert msg is not None
+        assert msg.body_text == "PARENT_BODY"
+        assert msg.attachments[0].payload == b""
+
+    def test_eight_bit_disposition_does_not_abort_parsing(self, tmp_path):
+        """Review round 1: an unencoded 8-bit Content-Disposition comes back
+        from the compat32 parser as a Header, which has no ``lower()``."""
+        folder = tmp_path / "INBOX" / "cur"
+        folder.mkdir(parents=True)
+        path = folder / "m.eml"
+        path.write_bytes(
+            b"Message-ID: <eight@example.test>\r\nFrom: sender@example.test\r\n"
+            b"Date: Mon, 28 Sep 2026 12:00:00 +0000\r\nContent-Type: application/pdf\r\n"
+            b'Content-Disposition: attachment; filename="r\xe9sum\xe9.pdf"\r\n\r\n%PDF\r\n'
+        )
+        msg = parse_email(path)
+        assert msg is not None
+        [attachment] = msg.attachments
+        assert attachment.filename.endswith(".pdf")
 
     def test_single_part_attachment_is_an_attachment(self, tmp_path):
         """#209: a message whose root part is an attachment had its payload

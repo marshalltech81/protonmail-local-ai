@@ -4,6 +4,8 @@ Reads raw .eml files from Maildir and returns structured Message objects.
 Handles MIME, HTML-to-text conversion, and attachment metadata.
 """
 
+import base64
+import binascii
 import email
 import email.errors
 import email.header
@@ -12,6 +14,7 @@ import email.utils
 import hashlib
 import logging
 import os
+import quopri
 import re
 import secrets
 from collections.abc import Callable
@@ -329,7 +332,9 @@ def _is_attachment(part: email.message.Message) -> bool:
     # ``ATTACHMENT``, and similar variants some clients emit,
     # causing real attachments to be decoded as the body or vice
     # versa.
-    cd = part.get("Content-Disposition", "").lower()
+    # ``str()``: an unencoded 8-bit header value comes back as a
+    # ``Header``, which has no ``lower()``.
+    cd = str(part.get("Content-Disposition", "")).lower()
     # Any part carrying a filename is treated as an attachment.
     # Message bodies are normally ``text/plain`` / ``text/html``
     # with no filename; anything that was given a filename is,
@@ -342,24 +347,64 @@ def _is_attachment(part: email.message.Message) -> bool:
     return bool(part.get_filename()) or "attachment" in cd
 
 
+# Nesting levels inside an attached email that are still serialized for
+# its hash. Serializing copies each subtree once per level above it, so
+# a large leaf under many wrappers costs depth x size; a legitimate
+# forward chain (a few forwards, each a few multipart levels) stays well
+# below this.
+MAX_ATTACHED_MESSAGE_DEPTH = 20
+
+
+def _nesting_exceeds(root: email.message.Message, limit: int) -> bool:
+    """Whether ``root``'s part tree is more than ``limit`` levels deep.
+    Iterative, and stops at the first part past the limit."""
+    stack = [(root, 1)]
+    while stack:
+        part, depth = stack.pop()
+        if depth > limit:
+            return True
+        children = part.get_payload() if part.is_multipart() else None
+        if isinstance(children, list):
+            stack.extend((c, depth + 1) for c in children if isinstance(c, email.message.Message))
+    return False
+
+
 def _attachment_payload(part: email.message.Message) -> bytes:
     """The bytes an attachment carries.
 
     An attached email (``message/rfc822``) is parsed into a nested
     message, so it has no decoded payload: serialize the nested message
     instead, or every attached email would hash to ``sha256(b"")`` and
-    share one attachment ID.
+    share one attachment ID. One nested deeper than
+    ``MAX_ATTACHED_MESSAGE_DEPTH`` keeps the empty payload. A base64 or
+    quoted-printable wrapper (not allowed by RFC 2046, but sent) leaves
+    the nested message holding its transport form, so that is decoded
+    and parsed first: the same email hashes the same either way.
     """
     if part.get_content_maintype() == "message" and part.is_multipart():
         nested = part.get_payload()
         if isinstance(nested, list) and nested and isinstance(nested[0], email.message.Message):
-            try:
-                return nested[0].as_bytes()
-            except RecursionError:
-                # Serializing recurses once per nesting level; a hostile
-                # nesting depth degrades to the old empty payload.
+            attached = nested[0]
+            encoding = str(part.get("Content-Transfer-Encoding", "")).strip().lower()
+            if encoding in ("base64", "quoted-printable"):
+                decoded = _decode_transport_form(attached.as_bytes(), encoding)
+                if decoded is None:
+                    return b""
+                attached = decoded
+            if _nesting_exceeds(attached, MAX_ATTACHED_MESSAGE_DEPTH):
                 return b""
+            return attached.as_bytes()
     return _decoded_payload(part)
+
+
+def _decode_transport_form(data: bytes, encoding: str) -> email.message.Message | None:
+    """Parse an attached email held in its transfer encoding, or ``None``
+    when it does not decode or nests too deeply for the parser."""
+    try:
+        decoded = base64.b64decode(data) if encoding == "base64" else quopri.decodestring(data)
+        return email.message_from_bytes(decoded)
+    except binascii.Error, RecursionError:
+        return None
 
 
 def _extract_body_and_attachments(
