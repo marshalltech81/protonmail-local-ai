@@ -5,8 +5,10 @@ Covers: plain text, HTML, multipart, attachments, inline Content-Disposition,
 encoded headers, address parsing, date fallback, and folder derivation.
 """
 
+import hashlib
 import textwrap
 from datetime import datetime
+from email.message import EmailMessage
 from pathlib import Path
 
 from src.parser import (
@@ -770,6 +772,85 @@ class TestMimeHardening:
         assert "Plain body marker." in msg.body_text
         # html2text markdown would include asterisks for <b>; plain path doesn't.
         assert "**" not in msg.body_text
+
+
+def _write_message(tmp_path: Path, message: EmailMessage, name: str = "m.eml") -> Path:
+    folder = tmp_path / "INBOX" / "cur"
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / name
+    path.write_bytes(message.as_bytes())
+    return path
+
+
+def _attached_email(marker: str) -> EmailMessage:
+    inner = EmailMessage()
+    inner["Message-ID"] = f"<{marker}@example.test>"
+    inner["From"] = "other@example.test"
+    inner["Subject"] = "Old instructions"
+    inner.set_content(f"{marker} obsolete instructions")
+    return inner
+
+
+def _html_parent(*attached: EmailMessage) -> EmailMessage:
+    outer = EmailMessage()
+    outer["Message-ID"] = "<outer@example.test>"
+    outer["From"] = "sender@example.test"
+    outer["To"] = "owner@example.test"
+    outer["Date"] = "Mon, 28 Sep 2026 12:00:00 +0000"
+    outer["Subject"] = "New instructions"
+    outer.set_content("<p>OUTER_BODY_MARKER new instructions</p>", subtype="html")
+    for i, inner in enumerate(attached):
+        outer.add_attachment(inner, filename=f"forwarded-{i}.eml")
+    return outer
+
+
+class TestAttachmentBoundaries:
+    def test_attached_email_body_does_not_replace_the_parent_body(self, tmp_path):
+        """#230: the MIME walk descended into an attached message and its
+        text/plain beat the parent's HTML, so the parent was indexed with
+        the attached email's body."""
+        msg = parse_email(_write_message(tmp_path, _html_parent(_attached_email("INNER_MARKER"))))
+        assert msg is not None
+        assert "OUTER_BODY_MARKER" in msg.body_text
+        assert "INNER_MARKER" not in msg.body_text
+        assert msg.message_id == "outer@example.test"
+        assert [a.content_type for a in msg.attachments] == ["message/rfc822"]
+
+    def test_attached_email_is_hashed_by_its_bytes(self, tmp_path):
+        """#230: every attached email had an empty payload, so all of them
+        shared ``sha256(b"")`` as their content hash and attachment ID."""
+        first, second = _attached_email("FIRST_MARKER"), _attached_email("SECOND_MARKER")
+        msg = parse_email(_write_message(tmp_path, _html_parent(first, second)))
+        assert msg is not None
+        a, b = msg.attachments
+        assert b"FIRST_MARKER" in a.payload and b"SECOND_MARKER" in b.payload
+        assert a.size == len(a.payload) > 0
+        assert a.content_hash == hashlib.sha256(a.payload).hexdigest()
+        assert a.content_hash != b.content_hash
+
+    def test_deeply_nested_attached_email_degrades_to_empty_payload(self, tmp_path):
+        """Serializing an attached email recurses once per nesting level.
+        A depth the stdlib parser accepts but cannot re-serialize keeps
+        the message indexable, with the old empty payload."""
+        attached = 'Content-Type: message/rfc822\r\nContent-Disposition: attachment; filename="x.eml"\r\n\r\n'
+        nested = attached * 299 + "Content-Type: text/plain\r\n\r\nleaf\r\n"
+        content = (
+            "Message-ID: <deep@example.test>\r\n"
+            "From: sender@example.test\r\n"
+            "Date: Mon, 28 Sep 2026 12:00:00 +0000\r\n"
+            "MIME-Version: 1.0\r\n"
+            'Content-Type: multipart/mixed; boundary="b"\r\n'
+            "\r\n--b\r\nContent-Type: text/plain\r\n\r\nPARENT_BODY\r\n"
+            f"--b\r\n{attached}{nested}\r\n--b--\r\n"
+        )
+        folder = tmp_path / "INBOX" / "cur"
+        folder.mkdir(parents=True)
+        (folder / "deep.eml").write_bytes(content.encode())
+        msg = parse_email(folder / "deep.eml")
+        assert msg is not None
+        assert msg.body_text == "PARENT_BODY"
+        [attachment] = msg.attachments
+        assert attachment.payload == b""
 
 
 class TestDecodeHeader:

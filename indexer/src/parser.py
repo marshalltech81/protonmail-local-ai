@@ -322,6 +322,46 @@ def _derive_folder(path: Path, maildir_root: Path | None) -> str:
     return folder_dir.name
 
 
+def _is_attachment(part: email.message.Message) -> bool:
+    """True when ``part`` is presented as a file rather than as text."""
+    # Content-Disposition values are case-insensitive per RFC 2183.
+    # The old ``"attachment" in cd`` check missed ``Attachment``,
+    # ``ATTACHMENT``, and similar variants some clients emit,
+    # causing real attachments to be decoded as the body or vice
+    # versa.
+    cd = part.get("Content-Disposition", "").lower()
+    # Any part carrying a filename is treated as an attachment.
+    # Message bodies are normally ``text/plain`` / ``text/html``
+    # with no filename; anything that was given a filename is,
+    # by convention, intended to be presented as a file. Some
+    # clients also omit ``Content-Disposition`` entirely on
+    # attachment parts — the explicit disposition check covers the
+    # filename-less ``Content-Disposition: attachment`` case, while
+    # the filename check covers dispositions that are absent,
+    # non-standard, or ``inline`` with a file.
+    return bool(part.get_filename()) or "attachment" in cd
+
+
+def _attachment_payload(part: email.message.Message) -> bytes:
+    """The bytes an attachment carries.
+
+    An attached email (``message/rfc822``) is parsed into a nested
+    message, so it has no decoded payload: serialize the nested message
+    instead, or every attached email would hash to ``sha256(b"")`` and
+    share one attachment ID.
+    """
+    if part.get_content_maintype() == "message" and part.is_multipart():
+        nested = part.get_payload()
+        if nested:
+            try:
+                return nested[0].as_bytes()
+            except RecursionError:
+                # Serializing recurses once per nesting level; a hostile
+                # nesting depth degrades to the old empty payload.
+                return b""
+    return _decoded_payload(part)
+
+
 def _extract_body_and_attachments(
     msg: email.message.Message,
 ) -> tuple[str, list[Attachment]]:
@@ -329,56 +369,37 @@ def _extract_body_and_attachments(
     html_text = ""
     attachments: list[Attachment] = []
 
-    if msg.is_multipart():
-        for part in msg.walk():
-            ct = part.get_content_type()
-            # Content-Disposition values are case-insensitive per RFC 2183.
-            # The old ``"attachment" in cd`` check missed ``Attachment``,
-            # ``ATTACHMENT``, and similar variants some clients emit,
-            # causing real attachments to be decoded as the body or vice
-            # versa.
-            cd = part.get("Content-Disposition", "").lower()
-            has_filename = bool(part.get_filename())
-
-            # Any part carrying a filename is treated as an attachment.
-            # Message bodies are normally ``text/plain`` / ``text/html``
-            # with no filename; anything that was given a filename is,
-            # by convention, intended to be presented as a file. Some
-            # clients also omit ``Content-Disposition`` entirely on
-            # attachment parts — the explicit disposition check below
-            # covers the filename-less ``Content-Disposition: attachment``
-            # case, while the ``has_filename`` branch covers dispositions
-            # that are absent, non-standard, or ``inline`` with a file.
-            is_attachment = has_filename or "attachment" in cd
-
-            if is_attachment:
-                filename = part.get_filename() or "unnamed"
-                payload = _decoded_payload(part)
-                attachments.append(
-                    Attachment(
-                        filename=filename,
-                        content_type=ct,
-                        size=len(payload),
-                        payload=payload,
-                        content_hash=hashlib.sha256(payload).hexdigest(),
-                    )
+    # Depth-first in document order, like ``msg.walk()``, but an
+    # attachment's subparts are never visited: an attached email's
+    # text is not the parent's body. Iterative, so nesting depth cannot
+    # recurse.
+    stack: list[email.message.Message] = [msg]
+    while stack:
+        part = stack.pop()
+        ct = part.get_content_type()
+        if part is not msg and _is_attachment(part):
+            payload = _attachment_payload(part)
+            attachments.append(
+                Attachment(
+                    filename=part.get_filename() or "unnamed",
+                    content_type=ct,
+                    size=len(payload),
+                    payload=payload,
+                    content_hash=hashlib.sha256(payload).hexdigest(),
                 )
-            elif ct == "text/plain" and not plain_text:
-                payload = _decoded_payload(part)
-                charset = part.get_content_charset() or "utf-8"
-                plain_text = _safe_decode(payload, charset)
-            elif ct == "text/html" and not html_text:
+            )
+        elif part.is_multipart():
+            stack.extend(reversed(part.get_payload()))
+        elif ct == "text/html":
+            if not html_text:
                 payload = _decoded_payload(part)
                 charset = part.get_content_charset() or "utf-8"
                 html_text = _html_to_text(_safe_decode(payload, charset))
-    else:
-        ct = msg.get_content_type()
-        payload = _decoded_payload(msg)
-        charset = msg.get_content_charset() or "utf-8"
-        if ct == "text/html":
-            html_text = _html_to_text(_safe_decode(payload, charset))
-        else:
-            plain_text = _safe_decode(payload, charset)
+        elif ct == "text/plain" or part is msg:
+            if not plain_text:
+                payload = _decoded_payload(part)
+                charset = part.get_content_charset() or "utf-8"
+                plain_text = _safe_decode(payload, charset)
 
     # Prefer ``text/plain`` over ``text/html`` regardless of the order parts
     # appear in the message — otherwise a multipart where the HTML part
