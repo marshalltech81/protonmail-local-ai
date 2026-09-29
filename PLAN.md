@@ -282,8 +282,9 @@ How the first batch was worked, and what to repeat:
 ### Carried over from the first batch
 
 - **#217 Message-ID conflicts** — split out of #246 after two review
-  rounds showed it needs a design. The earlier attempt is on the local
-  branch `fix/indexer-message-id-conflicts`; PR #246's description lists
+  rounds showed it needs a design. The earlier attempt is on the pushed
+  branch `fix/indexer-message-id-conflicts` (head `d479363`, based on a
+  pre-#246 `main`, so rebase before reuse); PR #246's description lists
   every finding it must address:
   - fail closed when the recorded original is unreadable
   - compare full attachment metadata, not only content hashes
