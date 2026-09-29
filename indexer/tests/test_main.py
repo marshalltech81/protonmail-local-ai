@@ -2427,7 +2427,9 @@ class TestRequeueStaleExtractions:
     also repairs mail indexed before the fix (#226, #228)."""
 
     @staticmethod
-    def _write_docx_eml(path: Path, message_id: str) -> None:
+    def _write_docx_eml(
+        path: Path, message_id: str, body: str = "See the attached contract."
+    ) -> None:
         import io
         from email.message import EmailMessage
 
@@ -2447,7 +2449,7 @@ class TestRequeueStaleExtractions:
         msg["Subject"] = "Contract"
         msg["Message-ID"] = f"<{message_id}>"
         msg["Date"] = "Mon, 01 Jan 2024 12:00:00 +0000"
-        msg.set_content("See the attached contract.")
+        msg.set_content(body)
         msg.add_attachment(
             buf.getvalue(),
             maintype="application",
@@ -2468,6 +2470,15 @@ class TestRequeueStaleExtractions:
             timing_aggregator=main.TimingAggregator(window=4),
             max_passes=1,
         )
+
+    @staticmethod
+    def _thread_vector(db, thread_id: str) -> list[float]:
+        import struct
+
+        blob = db._conn.execute(
+            "SELECT embedding FROM threads_vec WHERE thread_id = ?", (thread_id,)
+        ).fetchone()["embedding"]
+        return list(struct.unpack(f"{len(blob) // 4}f", blob))
 
     def _attachment_chunk_text(self, db) -> str:
         rows = db._conn.execute(
@@ -2567,6 +2578,65 @@ class TestRequeueStaleExtractions:
 
         monkeypatch.setattr(main, "INDEXER_ATTACHMENT_EXTRACTION_ENABLED", False)
         assert main._requeue_stale_extractions(db, queue) == 0
+
+    def test_thread_vector_is_replaced_when_the_last_chunks_are_cleared(
+        self, tmp_path, monkeypatch
+    ):
+        """An attachment-only thread whose stale extraction now yields no
+        text loses its last chunks; the thread vector, seeded from those
+        chunks, must be replaced by the subject fallback rather than
+        keep matching the removed text."""
+        maildir = tmp_path / "maildir"
+        monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
+        path = maildir / "INBOX" / "cur" / "contract.eml"
+        self._write_docx_eml(path, "contract@example.com", body="")
+        db = Database(tmp_path / "mail.db")
+        queue = _make_queue(db)
+        queue.enqueue(str(path), REASON_INITIAL_SCAN)
+        from src import attachment_indexing
+        from src.extractors import STATUS_EMPTY, STATUS_SUCCESS, ExtractionResult
+
+        with monkeypatch.context() as m:
+            m.setattr(
+                attachment_indexing,
+                "extract_attachment",
+                lambda **_kw: ExtractionResult(
+                    status=STATUS_SUCCESS, extractor="docx", text="body paragraph", error=None
+                ),
+            )
+            self._drain(db, queue)
+        thread_id = db._conn.execute(
+            "SELECT thread_id FROM message_thread_map WHERE message_id = 'contract@example.com'"
+        ).fetchone()["thread_id"]
+        assert self._thread_vector(db, thread_id) == _UNIT_VECTOR
+
+        fallback_vector = [0.0, 1.0] + [0.0] * (EMBEDDING_DIM - 2)
+        embedder = make_mock_embedder()
+        embedder.embed.side_effect = lambda text: (
+            fallback_vector if text == "Contract" else _UNIT_VECTOR
+        )
+        assert main._requeue_stale_extractions(db, queue) == 1
+        with monkeypatch.context() as m:
+            m.setattr(
+                attachment_indexing,
+                "extract_attachment",
+                lambda **_kw: ExtractionResult(
+                    status=STATUS_EMPTY, extractor="docx@2", text=None, error=None
+                ),
+            )
+            main._drain_queue_batched(
+                db,
+                embedder,
+                Threader(db),
+                queue,
+                batch_size=10,
+                timing_aggregator=main.TimingAggregator(window=4),
+                max_passes=1,
+            )
+
+        assert not db.get_chunk_ids_for_message("contract@example.com", attachment_id=None)
+        assert not db.thread_has_chunks(thread_id)
+        assert self._thread_vector(db, thread_id) == fallback_vector
 
     def test_pending_and_dead_rows_are_left_alone(self, tmp_path, monkeypatch):
         maildir = tmp_path / "maildir"

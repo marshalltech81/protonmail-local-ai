@@ -393,18 +393,20 @@ def apply_attachment_writes(
         )
 
     if not plan.chunks or plan.status != STATUS_SUCCESS:
-        if plan.extraction_to_persist is not None:
-            # A fresh extraction without usable text: drop chunks a
-            # previous (stale) extraction of this attachment left behind,
-            # or they stay searchable under a now-current cache row.
-            db.replace_message_chunks(
-                message_id=message_id,
-                thread_id=thread_id,
-                chunks=[],
-                embeddings_by_chunk_id={},
-                attachment_id=plan.attachment.content_hash,
-                message_date=message_date,
-            )
+        # No usable text now: drop chunks an earlier (since-superseded)
+        # extraction of this attachment left behind, or they stay
+        # searchable for good. This holds for a reused row too: another
+        # message's re-extraction may have stamped it current after this
+        # message indexed the stale text. Costs one indexed SELECT when
+        # there is nothing to delete.
+        db.replace_message_chunks(
+            message_id=message_id,
+            thread_id=thread_id,
+            chunks=[],
+            embeddings_by_chunk_id={},
+            attachment_id=plan.attachment.content_hash,
+            message_date=message_date,
+        )
         return summary
 
     write_summary = db.replace_message_chunks(

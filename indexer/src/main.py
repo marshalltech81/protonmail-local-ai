@@ -843,8 +843,10 @@ def _phase2a_collect_chunks(
     chunk-bearing thread costs one BPE encode and one embed payload
     entry — negligible compared to the bulk-embed savings, and the
     correctness story is straightforward: fallback is reserved iff
-    the message has no new chunks AND the thread has no committed
-    chunks at the moment of the check.
+    the message has no new chunks AND either the thread has no
+    committed chunks at the moment of the check or this message's
+    Phase 2c will delete chunks it committed earlier (which may be the
+    thread's last ones).
     """
     msg = state.msg
     t0 = time.perf_counter()
@@ -858,6 +860,12 @@ def _phase2a_collect_chunks(
         )
         stored_ids = db.get_chunk_ids_for_message(msg.message_id)
         new_body = [c for c in body_chunks if c.chunk_id not in stored_ids]
+        # Whether Phase 2c will delete chunks this message committed
+        # earlier without adding any (a body or a re-extracted
+        # attachment that now yields no text). The thread may then end
+        # up chunkless with a vector still seeded from the deleted
+        # chunks, so the fallback below is reserved for that case too.
+        clears_chunks = bool(stored_ids) and not body_chunks
         new_body_offsets: list[int] = []
         for c in new_body:
             new_body_offsets.append(len(all_texts))
@@ -896,13 +904,15 @@ def _phase2a_collect_chunks(
                     occurrence_index=occurrence_index,
                     max_extracted_chars=cap,
                 )
+                stored_attach_ids = db.get_chunk_ids_for_message(
+                    msg.message_id, attachment_id=attachment.content_hash
+                )
                 if plan.chunks:
-                    stored_attach_ids = db.get_chunk_ids_for_message(
-                        msg.message_id, attachment_id=attachment.content_hash
-                    )
                     plan_new = [c for c in plan.chunks if c.chunk_id not in stored_attach_ids]
                 else:
+                    # ``apply_attachment_writes`` clears this slice.
                     plan_new = []
+                    clears_chunks = clears_chunks or bool(stored_attach_ids)
                 plan_offsets: list[int] = []
                 for c in plan_new:
                     plan_offsets.append(len(all_texts))
@@ -934,7 +944,9 @@ def _phase2a_collect_chunks(
         # ``get_thread_chunk_embeddings`` would impose on chatty
         # threads where this gate fires for every chunkless arrival.
         has_new_chunks = bool(new_body) or any(plan_new for plan_new in attach_new_chunks)
-        if not has_new_chunks and not db.thread_has_chunks(state.thread.thread_id):
+        if not has_new_chunks and (
+            clears_chunks or not db.thread_has_chunks(state.thread.thread_id)
+        ):
             # Source the fallback text from the thread's stored
             # ``display_subject`` rather than from ``state.msg.subject``.
             # ``display_subject`` is the OLDEST message's original-case

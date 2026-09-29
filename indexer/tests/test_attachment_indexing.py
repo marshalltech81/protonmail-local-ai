@@ -184,6 +184,42 @@ def test_stale_row_is_refreshed_by_an_occurrence_of_another_type(tmp_path, monke
     )
 
 
+def test_reused_terminal_row_clears_the_stale_chunks(tmp_path, monkeypatch):
+    """Another message's re-extraction of the same bytes ended ``empty`` and
+    stamped the row current. This message then gets a plain cache hit on
+    it, so it must still drop the chunks its own stale extraction left."""
+    db = _seed_thread_for_cache_test(tmp_path)
+    attachment_id = hashlib.sha256(b"docx bytes").hexdigest()
+    _process_with_cached_extractor(db, "docx@2", STATUS_SUCCESS, "old text", monkeypatch)
+    assert db.get_chunk_ids_for_message("message@example.com", attachment_id=attachment_id)
+
+    db.store_attachment_extraction(
+        attachment_id=attachment_id,
+        extraction_status=STATUS_EMPTY,
+        extractor="docx@2",
+        extracted_text=None,
+        extraction_error=None,
+    )
+    extractor = MagicMock()
+    monkeypatch.setattr(attachment_indexing, "extract_attachment", extractor)
+    process_attachment(
+        message_date="2024-01-01T00:00:00+00:00",
+        attachment=_attachment(b"docx bytes", filename="c.docx", content_type="application/msword"),
+        message_id="message@example.com",
+        thread_id="thread-1",
+        db=db,
+        embedder=make_mock_embedder([0.1] * EMBEDDING_DIM),
+        chunk_target_tokens=350,
+        chunk_max_tokens=500,
+        chunk_overlap_tokens=60,
+        ocr_enabled=True,
+        max_bytes=10_000_000,
+        max_ocr_pages=20,
+    )
+    extractor.assert_not_called()
+    assert not db.get_chunk_ids_for_message("message@example.com", attachment_id=attachment_id)
+
+
 def test_re_extraction_without_text_clears_the_stale_chunks(tmp_path, monkeypatch):
     """A stale row re-extracted to ``empty`` (or ``failed`` / ``too_large``)
     must not leave the old text searchable: the new row is current, so no
