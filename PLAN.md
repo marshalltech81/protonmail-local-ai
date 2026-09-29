@@ -314,9 +314,9 @@ Triaged against `d30e500` by four parallel agents; every issue is real
 and most reproduced with synthetic input. PRs in the order to land
 them (one test-first commit per issue, `Fixes #N` per issue):
 
-**Status 2026-09-29 — next session starts here.** Items 1–5 are merged
-(#251, #252, #255, #253, #254). Next up, in order: item 6 (#233 +
-#225), item 7 (#243), item 8 (#230 + #209), then item 10 (#237 + #210)
+**Status 2026-09-29 — next session starts here.** Items 1–6 are merged
+or in review (#251, #252, #255, #253, #254, #258). Next up, in order:
+item 7 (#243), item 8 (#230 + #209), then item 10 (#237 + #210)
 **before** item 9 (#231 + #234), then 11–12. Items 13–14 wait on owner
 decisions. Also new: **#257**, the known mailbox-content logging gaps
 (extractor filename/exception logs, `safe_provider_exception_text`
@@ -354,7 +354,7 @@ passthrough in the search and intelligence handlers); AGENTS.md's
    sort last, reaching results only when `k` nears the row count, and
    detecting them costs a full vector scan (15–30 s at 20k threads).
    Already-stored rows are repaired by the Phase 2 reindex.
-6. **#233 + #225** MCP robustness: guard `parseaddr` in the mcp-server's
+6. **Done (#258).** **#233 + #225** MCP robustness: guard `parseaddr` in the mcp-server's
    `canonical_addr` (the indexer copy already does); validate reranker
    indices (unique, in range) before mutating any candidate.
 7. **#243** header clipping sweep (subject, participant names,
@@ -599,7 +599,10 @@ cell once and walks nested and header/footer tables (#228, #226, PR
 startup re-queue; five Codex rounds shaped its refresh semantics
 (recorded in item 3). AGENTS.md gained an "Untrusted Mail Content"
 section and a PR review section (#256); remaining logging gaps are
-#257.
+#257. Item 6 (PR #258): the MCP `canonical_addr` degrades an
+unparseable stored sender to "no address" instead of aborting the
+search (#233), and `_apply_rerank` falls back to RRF order on an
+out-of-range or repeated rerank index (#225).
 
 ### 2026-09-28 — Right text reaches the model (#214, #215, #223)
 
