@@ -890,3 +890,40 @@ class TestExtractedTextCap:
         # whitespace stripped by the dispatcher but assert it covers the
         # full payload size (within stripping tolerance).
         assert len(cached["extracted_text"]) >= len(long_payload) - 5
+
+
+def test_batch_results_are_shared_but_do_not_block_a_supported_occurrence(tmp_path, monkeypatch):
+    """#237 + #210 within one batch: a pending result is reused by later
+    occurrences of the same bytes, except an ``unsupported`` one when
+    the occurrence's metadata now selects an extractor."""
+    from src.extractors import extract
+
+    db = _setup_db_for_attachment(tmp_path)
+    calls: list[str] = []
+
+    def counting_extract(**kwargs):
+        calls.append(kwargs["filename"])
+        return extract(**kwargs)
+
+    monkeypatch.setattr(attachment_indexing, "extract_attachment", counting_extract)
+    batch: dict[str, ExtractionResult] = {}
+    payload = b"plain words in a file"
+
+    def prepare(filename, content_type):
+        return prepare_attachment_writes(
+            db=db,
+            embedder=None,
+            batch_extractions=batch,
+            **_kwargs(_attachment(payload, filename=filename, content_type=content_type)),
+        )
+
+    blob = prepare("blob.bin", "application/octet-stream")
+    text = prepare("doc.txt", "text/plain")
+    again = prepare("copy.bin", "application/octet-stream")
+
+    assert calls == ["blob.bin", "doc.txt"]
+    assert blob.status == STATUS_UNSUPPORTED
+    assert text.status == STATUS_SUCCESS and text.chunks
+    assert again.status == STATUS_SUCCESS and again.extraction_reused
+    # Reused but uncommitted: the reusing message still persists the row.
+    assert again.extraction_to_persist is text.extraction_to_persist

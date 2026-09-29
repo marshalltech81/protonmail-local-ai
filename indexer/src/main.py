@@ -54,7 +54,7 @@ from .embedder import (
     classify_embed_failure,
     scrub_embed_error,
 )
-from .extractors import is_stale_extractor
+from .extractors import ExtractionResult, is_stale_extractor
 from .maildir import (
     SYNC_STAMP_NAME,
     SyncStamp,
@@ -822,12 +822,15 @@ def _phase2a_collect_chunks(
     all_texts: list[str],
     *,
     progress: Callable[[], None] = lambda: None,
+    batch_extractions: dict[str, ExtractionResult] | None = None,
 ) -> tuple[bool, str | None]:
     """Phase 2a: chunk the body and attachments WITHOUT embedding.
 
     Appends every new chunk's text to the shared ``all_texts`` list and
     records the offsets on ``state`` so Phase 2c can read its vectors
-    back. Returns ``(True, None)`` on success or ``(False, error)`` on
+    back. ``batch_extractions`` carries the batch's uncommitted
+    extraction results, so identical bytes are extracted once per batch
+    (#237). Returns ``(True, None)`` on success or ``(False, error)`` on
     a chunk/extract failure (rare — usually only attachment OCR errors)
     so the caller can mark the queue row failed without aborting the
     rest of the batch.
@@ -874,6 +877,9 @@ def _phase2a_collect_chunks(
         attach_plans: list[AttachmentWritePlan] = []
         attach_new_chunks: list[list[MessageChunk]] = []
         attach_offsets: list[list[int]] = []
+        # Copies of the same bytes in one message chunk to the same chunk
+        # IDs (the chunk key is message + content hash): embed each once.
+        queued_attach_offsets: dict[str, int] = {}
         if INDEXER_ATTACHMENT_EXTRACTION_ENABLED and msg.attachments:
             cap = (
                 INDEXER_ATTACHMENT_MAX_EXTRACTED_CHARS
@@ -903,6 +909,7 @@ def _phase2a_collect_chunks(
                     max_pdf_pages=INDEXER_PDF_MAX_DIGITAL_PAGES or None,
                     occurrence_index=occurrence_index,
                     max_extracted_chars=cap,
+                    batch_extractions=batch_extractions,
                 )
                 stored_attach_ids = db.get_chunk_ids_for_message(
                     msg.message_id, attachment_id=attachment.content_hash
@@ -915,8 +922,10 @@ def _phase2a_collect_chunks(
                     clears_chunks = clears_chunks or bool(stored_attach_ids)
                 plan_offsets: list[int] = []
                 for c in plan_new:
-                    plan_offsets.append(len(all_texts))
-                    all_texts.append(c.text)
+                    if c.chunk_id not in queued_attach_offsets:
+                        queued_attach_offsets[c.chunk_id] = len(all_texts)
+                        all_texts.append(c.text)
+                    plan_offsets.append(queued_attach_offsets[c.chunk_id])
                 attach_plans.append(plan)
                 attach_new_chunks.append(plan_new)
                 attach_offsets.append(plan_offsets)
@@ -1120,13 +1129,14 @@ def _probe_embedder(embedder: EmbeddingBackend) -> BaseException | None:
 
 def _entry_text_offsets(entry: _BatchedMsg) -> list[int]:
     """Every index into the batch's flat embed-input list that belongs
-    to ``entry`` — body chunks, attachment chunks, subject fallback."""
+    to ``entry`` — body chunks, attachment chunks, subject fallback —
+    each once (copies of one attachment share their chunks' offsets)."""
     offsets = list(entry.new_body_offsets)
     for plan_offsets in entry.attach_offsets:
         offsets.extend(plan_offsets)
     if entry.subject_fallback_offset is not None:
         offsets.append(entry.subject_fallback_offset)
-    return offsets
+    return list(dict.fromkeys(offsets))
 
 
 def _pause_embedding(
@@ -1397,10 +1407,17 @@ def _drain_queue_batched(
         # entry — not just before/after the bulk embed.
         all_texts: list[str] = []
         survivors: list[_BatchedMsg] = []
+        batch_extractions: dict[str, ExtractionResult] = {}
         for entry in batch:
             if not queue.begin_attempt(entry.row["filepath"]):
                 continue
-            ok, err = _phase2a_collect_chunks(entry, db, all_texts, progress=queue.note_progress)
+            ok, err = _phase2a_collect_chunks(
+                entry,
+                db,
+                all_texts,
+                progress=queue.note_progress,
+                batch_extractions=batch_extractions,
+            )
             queue.end_attempt(entry.row["filepath"])
             if ok:
                 survivors.append(entry)

@@ -182,6 +182,7 @@ def _resolve_extracted_text(
     max_extracted_chars: int | None,
     ocr_timeout_seconds: float | None = None,
     max_pdf_pages: int | None = None,
+    batch_extractions: dict[str, ExtractionResult] | None = None,
 ) -> tuple[str | None, str, ExtractionResult | None, bool]:
     """Return ``(text, status, extraction_to_persist, extraction_reused)``.
 
@@ -191,7 +192,22 @@ def _resolve_extracted_text(
     — cache miss, cached non-success, cached row with empty text —
     re-runs the extractor and asks the apply phase to persist the
     fresh result.
+
+    ``batch_extractions`` holds the results extracted earlier in the
+    same batch, by content hash: those are not committed yet, so the
+    cache cannot serve them (#237). A reused one is still returned for
+    persisting, since the message that extracted it may fail to commit.
     """
+    pending = (
+        batch_extractions.get(attachment.content_hash) if batch_extractions is not None else None
+    )
+    if pending is not None and (
+        pending.status != STATUS_UNSUPPORTED
+        or _unsupported_still_holds(pending.error, attachment, ocr_enabled)
+    ):
+        text = pending.text if pending.status == STATUS_SUCCESS else None
+        return text, pending.status, pending, True
+
     cached = db.get_attachment_extraction(attachment.content_hash)
     # A row written by an older version of a since-fixed extractor would
     # otherwise be served forever. Re-run the module that wrote it, from
@@ -223,6 +239,8 @@ def _resolve_extracted_text(
         max_pdf_pages=max_pdf_pages,
         module_override=refresh_module,
     )
+    if batch_extractions is not None:
+        batch_extractions[attachment.content_hash] = result
     text = result.text if result.status == STATUS_SUCCESS else None
     return text, result.status, result, False
 
@@ -243,6 +261,7 @@ def prepare_attachment_writes(
     max_extracted_chars: int | None = None,
     ocr_timeout_seconds: float | None = None,
     max_pdf_pages: int | None = None,
+    batch_extractions: dict[str, ExtractionResult] | None = None,
 ) -> AttachmentWritePlan:
     """Compute everything needed to write one attachment occurrence.
 
@@ -281,6 +300,7 @@ def prepare_attachment_writes(
         max_extracted_chars=max_extracted_chars,
         ocr_timeout_seconds=ocr_timeout_seconds,
         max_pdf_pages=max_pdf_pages,
+        batch_extractions=batch_extractions,
     )
 
     if status != STATUS_SUCCESS or not text:

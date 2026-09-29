@@ -4273,3 +4273,106 @@ class TestMessageRecordsEndToEnd:
 
         assert db._conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0] == 0
         assert db._conn.execute("SELECT COUNT(*) FROM message_participants").fetchone()[0] == 0
+
+
+class TestBatchSharesExtraction:
+    """#237: identical attachment bytes prepared in one batch were
+    extracted once per occurrence, because each occurrence consulted only
+    the committed cache, and copies inside one message queued their
+    identical chunks for embedding once per copy."""
+
+    PAYLOAD = b"SHARED_ATTACHMENT_MARKER quarterly figures"
+
+    def _write(self, path: Path, message_id: str, filenames: list[str]) -> None:
+        from email.message import EmailMessage
+
+        msg = EmailMessage()
+        msg["From"] = "alice@example.com"
+        msg["To"] = "bob@example.com"
+        msg["Subject"] = f"Report {message_id}"
+        msg["Message-ID"] = f"<{message_id}>"
+        msg["Date"] = "Mon, 01 Jan 2024 12:00:00 +0000"
+        msg.set_content(f"Body of {message_id}.")
+        for filename in filenames:
+            msg.add_attachment(self.PAYLOAD, maintype="text", subtype="plain", filename=filename)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(bytes(msg))
+
+    def _drain(self, tmp_path, monkeypatch, messages: dict[str, list[str]], embedder=None):
+        from src import attachment_indexing
+        from src.extractors import extract
+
+        maildir = tmp_path / "maildir"
+        monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
+        db = Database(tmp_path / "mail.db")
+        queue = _make_queue(db)
+        for message_id, filenames in messages.items():
+            path = maildir / "INBOX" / "cur" / f"{message_id}.eml"
+            self._write(path, message_id, filenames)
+            queue.enqueue(str(path), REASON_INITIAL_SCAN)
+        calls: list[str] = []
+
+        def counting_extract(**kwargs):
+            calls.append(kwargs["filename"])
+            return extract(**kwargs)
+
+        monkeypatch.setattr(attachment_indexing, "extract_attachment", counting_extract)
+        embedder = embedder or make_mock_embedder(_UNIT_VECTOR)
+        main._drain_queue_batched(
+            db,
+            embedder,
+            Threader(db),
+            queue,
+            batch_size=10,
+            timing_aggregator=main.TimingAggregator(window=4),
+            max_passes=1,
+        )
+        embedded = [t for call in embedder.embed_batch.call_args_list for t in call.args[0]]
+        return db, calls, embedded
+
+    def _attachment_chunks(self, db) -> list[tuple[str, str]]:
+        rows = db._conn.execute(
+            "SELECT message_id, text FROM message_chunks WHERE attachment_id IS NOT NULL"
+        ).fetchall()
+        return sorted((r["message_id"], r["text"]) for r in rows)
+
+    def test_same_bytes_across_messages_extract_once(self, tmp_path, monkeypatch):
+        messages = {f"m{i}@example.com": [f"report{i}.txt"] for i in range(5)}
+        db, calls, _ = self._drain(tmp_path, monkeypatch, messages)
+        assert len(calls) == 1
+        chunks = self._attachment_chunks(db)
+        assert [mid for mid, _ in chunks] == sorted(messages)
+        assert all("SHARED_ATTACHMENT_MARKER" in text for _, text in chunks)
+        assert db._conn.execute("SELECT COUNT(*) FROM attachments").fetchone()[0] == 5
+        assert db._conn.execute("SELECT COUNT(*) FROM attachment_extractions").fetchone()[0] == 1
+
+    def test_copies_in_one_message_extract_and_embed_once(self, tmp_path, monkeypatch):
+        db, calls, embedded = self._drain(
+            tmp_path, monkeypatch, {"m@example.com": ["scan0.txt", "scan1.txt"]}
+        )
+        assert len(calls) == 1
+        assert sum("SHARED_ATTACHMENT_MARKER" in t for t in embedded) == 1
+        assert len(self._attachment_chunks(db)) == 1
+        assert db._conn.execute("SELECT COUNT(*) FROM attachments").fetchone()[0] == 2
+
+    def test_copies_in_one_message_embed_once_when_isolated(self, tmp_path, monkeypatch):
+        # The bulk embed fails, the probe passes, and each message is
+        # embedded on its own: the shared slot is still embedded once.
+        embedder = make_mock_embedder(_UNIT_VECTOR)
+        delegate = embedder.embed_batch.side_effect
+
+        def fail_first(texts, **kwargs):
+            if embedder.embed_batch.call_count == 1:
+                raise RuntimeError("batch rejected")
+            return delegate(texts, **kwargs)
+
+        embedder.embed_batch.side_effect = fail_first
+        db, _, embedded = self._drain(
+            tmp_path,
+            monkeypatch,
+            {"m@example.com": ["scan0.txt", "scan1.txt"]},
+            embedder=embedder,
+        )
+        isolated = [t for call in embedder.embed_batch.call_args_list[1:] for t in call.args[0]]
+        assert sum("SHARED_ATTACHMENT_MARKER" in t for t in isolated) == 1
+        assert len(self._attachment_chunks(db)) == 1
