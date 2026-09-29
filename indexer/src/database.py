@@ -2144,8 +2144,23 @@ class Database:
 
     @_synchronized
     def clear_pending_deletion(self, filepath: str) -> None:
-        self._conn.execute("DELETE FROM pending_deletions WHERE filepath = ?", (filepath,))
-        self._conn.commit()
+        """Clear a tombstone: mbsync restored the message. A job the
+        drain parked while the file was T-flagged becomes due now rather
+        than after the park delay."""
+        now_iso = datetime.now(UTC).isoformat()
+        cur = self._conn.cursor()
+        try:
+            cur.execute("BEGIN IMMEDIATE")
+            cur.execute("DELETE FROM pending_deletions WHERE filepath = ?", (filepath,))
+            cur.execute(
+                "UPDATE indexing_jobs SET next_attempt_at = ? "
+                "WHERE filepath = ? AND status = 'queued' AND next_attempt_at > ?",
+                (now_iso, filepath, now_iso),
+            )
+            self._conn.commit()
+        except Exception:
+            self._conn.rollback()
+            raise
 
     @_synchronized
     def has_pending_deletion(self, filepath: str) -> bool:

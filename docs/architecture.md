@@ -719,7 +719,7 @@ the watchdog's `on_created` / new-delivery `on_moved` branches — skips
 has been `T`-flagged since it was queued (the reaper owns that message):
 a message still in the index keeps its job parked, which the reap
 deletes or, if mbsync clears the flag first, the rename moves back to the
-live path; a trashed file never indexed has its job dropped. A reaped message's `.eml` stays on disk under the default
+live path and clearing the tombstone makes due at once; a trashed file never indexed has its job dropped. A reaped message's `.eml` stays on disk under the default
 `INDEXER_UNLINK_ON_REAP=false` and is no longer indexed or queued, so
 treating it as undiscovered mail would resurrect it into search (and
 the next sweep would start a fresh grace window). If mbsync later

@@ -4305,9 +4305,10 @@ class TestTrashedFilesWithReconciliation:
         only retry. If mbsync clears the T flag before the reap, nothing
         re-queues a message whose thread already has chunks. The job is
         parked instead, moves with the rename back, and then runs."""
+        from src.reconciler import Reconciler, ReconcilerConfig
+
         maildir = tmp_path / "maildir"
         monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
-        monkeypatch.setattr(main, "TRASHED_DEFER_SECS", 0)
         live = maildir / "INBOX" / "cur" / "1700000000.M1.host:2,S"
         trashed = maildir / "INBOX" / "cur" / "1700000000.M1.host:2,ST"
         _write_eml(live, "parked@example.com")
@@ -4326,18 +4327,33 @@ class TestTrashedFilesWithReconciliation:
                 skip_trashed=True,
             )
 
+        reconciler = Reconciler(
+            db,
+            make_mock_embedder(_UNIT_VECTOR),
+            Threader(db),
+            ReconcilerConfig(
+                enabled=True,
+                grace_days=7,
+                sweep_interval_secs=60,
+                max_batch_pct=1.0,
+                force=False,
+                unlink_on_reap=False,
+            ),
+        )
         queue.enqueue(str(live), REASON_INITIAL_SCAN)
         drain()
         live.rename(trashed)
-        db.update_filepath(str(live), str(trashed))
+        reconciler.handle_moved(str(live), str(trashed))  # tombstones it
         queue.enqueue(str(trashed), REASON_INITIAL_SCAN)  # e.g. a retry still pending
 
         drain()
         job = db._conn.execute("SELECT filepath, attempts FROM indexing_jobs").fetchone()
         assert (job["filepath"], job["attempts"]) == (str(trashed), 0)
 
+        # Restoring clears the tombstone, moves the job, and makes it due
+        # now rather than after the park delay.
         trashed.rename(live)
-        db.update_filepath(str(trashed), str(live))  # moves the job too
+        reconciler.handle_moved(str(trashed), str(live))
         drain()
         assert not queue.has_pending_row(str(live))
         assert db.is_indexed(str(live))
