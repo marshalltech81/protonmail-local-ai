@@ -42,6 +42,7 @@ from .extractors import (
     STATUS_TOO_LARGE,
     STATUS_UNSUPPORTED,
     ExtractionResult,
+    stale_extractor_module,
 )
 from .extractors import (
     extract as extract_attachment,
@@ -183,7 +184,17 @@ def _resolve_extracted_text(
     fresh result.
     """
     cached = db.get_attachment_extraction(attachment.content_hash)
-    if cached is not None and _cache_hit_short_circuits(cached, ocr_enabled):
+    # A row written by an older version of a since-fixed extractor would
+    # otherwise be served forever. Re-run the module that wrote it, from
+    # whichever occurrence of the bytes arrives: the row is shared by
+    # content hash, so an occurrence whose own metadata resolves to
+    # another extractor must still refresh it with the same one.
+    refresh_module = stale_extractor_module(cached["extractor"]) if cached is not None else None
+    if (
+        cached is not None
+        and refresh_module is None
+        and _cache_hit_short_circuits(cached, ocr_enabled)
+    ):
         # Successful hits return the stored text; non-success hits
         # (empty / unsupported / too_large / failed-within-window)
         # return ``None`` text so the caller skips chunking but the
@@ -201,6 +212,7 @@ def _resolve_extracted_text(
         max_extracted_chars=max_extracted_chars,
         ocr_timeout_seconds=ocr_timeout_seconds,
         max_pdf_pages=max_pdf_pages,
+        module_override=refresh_module,
     )
     text = result.text if result.status == STATUS_SUCCESS else None
     return text, result.status, result, False
@@ -381,6 +393,20 @@ def apply_attachment_writes(
         )
 
     if not plan.chunks or plan.status != STATUS_SUCCESS:
+        # No usable text now: drop chunks an earlier (since-superseded)
+        # extraction of this attachment left behind, or they stay
+        # searchable for good. This holds for a reused row too: another
+        # message's re-extraction may have stamped it current after this
+        # message indexed the stale text. Costs one indexed SELECT when
+        # there is nothing to delete.
+        db.replace_message_chunks(
+            message_id=message_id,
+            thread_id=thread_id,
+            chunks=[],
+            embeddings_by_chunk_id={},
+            attachment_id=plan.attachment.content_hash,
+            message_date=message_date,
+        )
         return summary
 
     write_summary = db.replace_message_chunks(

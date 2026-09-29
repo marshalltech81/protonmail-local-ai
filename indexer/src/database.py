@@ -1091,6 +1091,35 @@ class Database:
             raise
 
     @_synchronized
+    def get_extractor_names(self) -> list[str]:
+        """Distinct extractor names recorded in the extraction cache."""
+        rows = self._conn.execute(
+            "SELECT DISTINCT extractor FROM attachment_extractions WHERE extractor IS NOT NULL"
+        ).fetchall()
+        return [r["extractor"] for r in rows]
+
+    @_synchronized
+    def find_filepaths_with_extractors(self, extractors: list[str]) -> list[str]:
+        """Maildir filepaths of messages carrying an attachment whose
+        cached extraction was written by one of ``extractors``, whatever
+        that occurrence's own filename or MIME type."""
+        if not extractors:
+            return []
+        placeholders = ",".join(["?"] * len(extractors))
+        rows = self._conn.execute(
+            f"""
+            SELECT DISTINCT m.filepath
+            FROM attachment_extractions e
+            JOIN attachments a ON a.attachment_id = e.attachment_id
+            JOIN message_thread_map m ON m.message_id = a.message_id
+            WHERE e.extractor IN ({placeholders})
+            ORDER BY m.filepath
+            """,  # nosec B608 — placeholders only, values are bound
+            extractors,
+        ).fetchall()
+        return [r["filepath"] for r in rows]
+
+    @_synchronized
     def get_attachment_extraction(self, attachment_id: str) -> sqlite3.Row | None:
         """Return the cached extraction row for an attachment, or None.
 
