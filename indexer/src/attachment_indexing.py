@@ -42,7 +42,7 @@ from .extractors import (
     STATUS_TOO_LARGE,
     STATUS_UNSUPPORTED,
     ExtractionResult,
-    resolves_extractor,
+    resolved_extractor_module,
     stale_extractor_module,
 )
 from .extractors import (
@@ -85,19 +85,25 @@ def attachment_occurrence_id(
 _FAILED_CACHE_MAX_AGE = timedelta(days=7)
 
 
+# Extractor modules whose result depends on OCR: images, and scanned PDFs
+# through the OCR fallback.
+_OCR_MODULES = frozenset({"image", "pdf"})
+
+
 def _unsupported_still_holds(error: str | None, attachment: Attachment, ocr_enabled: bool) -> bool:
     """Whether an ``unsupported`` result also applies to ``attachment``.
 
-    An "OCR disabled" result holds until OCR is turned on: a scanned PDF
-    resolves to the PDF extractor either way. Any other ``unsupported``
-    result (no extractor for that MIME type / filename) holds only while
-    this occurrence's metadata also selects no extractor: results are
-    shared by content hash, and the same bytes can arrive as ``.bin``
-    first and ``.txt`` later (#210).
+    Results are shared by content hash, but dispatch reads each
+    occurrence's MIME type and filename, so the same bytes can arrive as
+    ``.bin`` first and ``.txt`` later (#210). An "OCR disabled" result
+    holds for an occurrence that also needs OCR until OCR is turned on (a
+    scanned PDF resolves to the PDF extractor either way). Any other
+    holds only while this occurrence selects no extractor.
     """
-    if "OCR disabled" in (error or ""):
+    module = resolved_extractor_module(attachment.content_type, attachment.filename)
+    if "OCR disabled" in (error or "") and module in _OCR_MODULES:
         return not ocr_enabled
-    return not resolves_extractor(attachment.content_type, attachment.filename)
+    return module is None
 
 
 def _cache_hit_short_circuits(cached: dict, attachment: Attachment, ocr_enabled: bool) -> bool:
