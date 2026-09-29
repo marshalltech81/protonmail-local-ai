@@ -31,6 +31,12 @@ from .outputs import (
 
 log = logging.getLogger("mcp.tools.search")
 
+
+def _clip_optional(value: str | None) -> str | None:
+    """``value`` cut at ``HEADER_CHAR_LIMIT``, or ``None`` when absent."""
+    return None if value is None else clip(value, HEADER_CHAR_LIMIT)
+
+
 # Hard ceiling on ``limit``. MCP tool calls can originate from an LLM,
 # which may hallucinate values like ``limit=100000`` — without a clamp
 # that becomes a large FTS + vector + RRF workload and a large result
@@ -297,9 +303,10 @@ def register_search_tools(
 
             lines = [f"Found {len(results)} thread(s) for: '{query}'\n"]
             for i, r in enumerate(results, 1):
+                participants = ", ".join(clip(p, HEADER_CHAR_LIMIT) for p in r.participants[:3])
                 lines.append(
-                    f"{i}. [{r.folder}] {r.subject}\n"
-                    f"   Participants: {', '.join(r.participants[:3])}"
+                    f"{i}. [{r.folder}] {clip(r.subject, HEADER_CHAR_LIMIT)}\n"
+                    f"   Participants: {participants}"
                     f"{'...' if len(r.participants) > 3 else ''}\n"
                     f"   Date: {r.date_last.strftime('%Y-%m-%d')}"
                     f" | Messages: {len(r.message_ids)}"
@@ -453,7 +460,9 @@ def register_search_tools(
                 )
                 chunks = grouped.get(thread_id, [])
                 if chunks:
-                    groups.append((thread.subject, thread_id, None, None, chunks))
+                    groups.append(
+                        (clip(thread.subject, HEADER_CHAR_LIMIT), thread_id, None, None, chunks)
+                    )
             else:
                 embedding = await embed_query(embed_client, query, expected_embed_dim)
                 results = await asyncio.to_thread(
@@ -478,7 +487,8 @@ def register_search_tools(
                     chunks = r.evidence_chunks[: limit - taken]
                     if not chunks:
                         continue
-                    groups.append((r.subject, r.thread_id, r.lane_ranks, r.score, chunks))
+                    subject = clip(r.subject, HEADER_CHAR_LIMIT)
+                    groups.append((subject, r.thread_id, r.lane_ranks, r.score, chunks))
                     taken += len(chunks)
         except ToolError:
             raise
@@ -510,8 +520,8 @@ def register_search_tools(
                             chunk_index=c.chunk_index,
                             source="body" if c.attachment_id is None else "attachment",
                             attachment_id=c.attachment_id,
-                            attachment_filename=c.attachment_filename,
-                            attachment_mime=c.attachment_mime,
+                            attachment_filename=_clip_optional(c.attachment_filename),
+                            attachment_mime=_clip_optional(c.attachment_mime),
                             message_date=c.message_date,
                             char_start=c.char_start,
                             char_end=c.char_end,
@@ -547,8 +557,8 @@ def register_search_tools(
                     f"    --- chunk {chunk.chunk_index} | msg {chunk.message_id} | {msg_date}"
                 )
                 if chunk.attachment_id is not None:
-                    fname = chunk.attachment_filename or "attachment"
-                    mime = chunk.attachment_mime or "unknown"
+                    fname = clip(chunk.attachment_filename or "attachment", HEADER_CHAR_LIMIT)
+                    mime = clip(chunk.attachment_mime or "unknown", HEADER_CHAR_LIMIT)
                     lines.append(f'        Source: attachment "{fname}" ({mime})')
                 else:
                     lines.append("        Source: message body")
@@ -656,12 +666,12 @@ def register_search_tools(
             results=[
                 AttachmentHit(
                     attachment_id=a.attachment_id,
-                    filename=a.filename,
-                    content_type=a.content_type,
+                    filename=clip(a.filename, HEADER_CHAR_LIMIT),
+                    content_type=clip(a.content_type, HEADER_CHAR_LIMIT),
                     size_bytes=a.size_bytes,
                     thread_id=a.thread_id,
                     message_id=a.message_id,
-                    subject=a.subject,
+                    subject=clip(a.subject, HEADER_CHAR_LIMIT),
                     folder=a.folder,
                     date_last=a.date_last,
                     senders=[clip(s, HEADER_CHAR_LIMIT) for s in a.senders[:MAX_LISTED]],
@@ -679,12 +689,15 @@ def register_search_tools(
         lines = [f"Found {len(results)} attachment(s):", ""]
         for i, a in enumerate(results, 1):
             size_kb = a.size_bytes / 1024
-            lines.append(f"[{i}] {a.filename}  ({a.content_type}, {size_kb:.1f} KB)")
-            lines.append(f"    Thread: {a.subject}  [{a.folder}]")
+            fname = clip(a.filename, HEADER_CHAR_LIMIT)
+            mime = clip(a.content_type, HEADER_CHAR_LIMIT)
+            lines.append(f"[{i}] {fname}  ({mime}, {size_kb:.1f} KB)")
+            lines.append(f"    Thread: {clip(a.subject, HEADER_CHAR_LIMIT)}  [{a.folder}]")
             lines.append(f"    Thread ID: {a.thread_id} | Message-ID: {a.message_id}")
             lines.append(f"    Date: {a.date_last.strftime('%Y-%m-%d')}")
             if a.senders:
-                lines.append(f"    From: {', '.join(a.senders[:3])}")
+                senders = ", ".join(clip(s, HEADER_CHAR_LIMIT) for s in a.senders[:3])
+                lines.append(f"    From: {senders}")
             lines.append(f"    Text extraction: {a.extraction_status or 'not extracted'}")
             if a.text_snippet:
                 lines.append(f"    Snippet: {a.text_snippet.strip()}")

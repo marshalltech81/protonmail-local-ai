@@ -471,9 +471,10 @@ def register_retrieval_tools(server, db):
 
             lines = [f"Threads in {folder} ({len(threads)} shown):\n"]
             for i, t in enumerate(threads, 1 + offset):
+                participants = ", ".join(clip(p, HEADER_CHAR_LIMIT) for p in t.participants[:2])
                 lines.append(
-                    f"{i}. {t.subject}\n"
-                    f"   {', '.join(t.participants[:2])}"
+                    f"{i}. {clip(t.subject, HEADER_CHAR_LIMIT)}\n"
+                    f"   {participants}"
                     f"{'...' if len(t.participants) > 2 else ''} | "
                     f"{t.date_last.strftime('%Y-%m-%d')} | "
                     f"{len(t.message_ids)} msg(s)"

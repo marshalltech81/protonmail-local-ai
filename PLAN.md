@@ -304,7 +304,7 @@ How the first batch was worked, and what to repeat:
   settings; land it with Phase 2 item 4 (chunk `kind` tags), which
   rewrites the chunker and changes chunk IDs anyway.
 - **#209 single-part MIME attachment decoded as body**, **#210 stale
-  unsupported-extraction cache entry** — low frequency, about 10 and 5
+  unsupported-extraction cache entry** (#210 done in item 10 below) — low frequency, about 10 and 5
   lines; fix them when next in `parser.py` / `attachment_indexing.py`,
   or together as one small PR.
 
@@ -314,9 +314,9 @@ Triaged against `d30e500` by four parallel agents; every issue is real
 and most reproduced with synthetic input. PRs in the order to land
 them (one test-first commit per issue, `Fixes #N` per issue):
 
-**Status 2026-09-29 — next session starts here.** Items 1–5 are merged
-(#251, #252, #255, #253, #254). Next up, in order: item 6 (#233 +
-#225), item 7 (#243), item 8 (#230 + #209), then item 10 (#237 + #210)
+**Status 2026-09-29 — next session starts here.** Items 1–6 are merged
+or in review (#251, #252, #255, #253, #254, #258). Next up, in order:
+item 7 (#243), item 8 (#230 + #209), then item 10 (#237 + #210)
 **before** item 9 (#231 + #234), then 11–12. Items 13–14 wait on owner
 decisions. Also new: **#257**, the known mailbox-content logging gaps
 (extractor filename/exception logs, `safe_provider_exception_text`
@@ -354,10 +354,10 @@ passthrough in the search and intelligence handlers); AGENTS.md's
    sort last, reaching results only when `k` nears the row count, and
    detecting them costs a full vector scan (15–30 s at 20k threads).
    Already-stored rows are repaired by the Phase 2 reindex.
-6. **#233 + #225** MCP robustness: guard `parseaddr` in the mcp-server's
+6. **Done (#258).** **#233 + #225** MCP robustness: guard `parseaddr` in the mcp-server's
    `canonical_addr` (the indexer copy already does); validate reranker
    indices (unique, in range) before mutating any candidate.
-7. **#243** header clipping sweep (subject, participant names,
+7. **Done (#259).** **#243** header clipping sweep (subject, participant names,
    attachment filename/MIME, reranker `_candidate_text`). Separate from
    the `get_message` / ID-length backlog items below.
 8. **#230 + #209** parser MIME traversal: do not descend into attached
@@ -370,14 +370,14 @@ passthrough in the search and intelligence handlers); AGENTS.md's
    their stale cache rows re-extract. **Land #237 (item 10) first:**
    without a per-batch cache, the startup re-queue re-runs OCR once per
    message carrying the same stale payload in a batch (PR #255 round 2).
-10. **#237 + #210** extraction cache semantics: per-batch cache keyed
+10. **Done (#261).** **#237 + #210** extraction cache semantics: per-batch cache keyed
     by content hash, and re-run an `unsupported` row when an extractor
     now resolves.
 11. **Done (#263).** **#244** reaping leaves `indexing_jobs`, and the rename fix moves
     pending jobs onto the `T`-flagged path, so an embedder outage past
     the grace period resurrects deleted mail. Delete the job in both
     removal paths; skip trashed files at drain time.
-12. **#227 + #240** mbsync: functions called under `if` run without
+12. **Done (#264).** **#227 + #240** mbsync: functions called under `if` run without
     errexit, so a failed `chmod` / fingerprint write still reports
     success. Check each step; write the pin via temp file + `mv`.
 13. **#242** (**owner decision**) no non-interactive way to tell an
@@ -599,7 +599,10 @@ cell once and walks nested and header/footer tables (#228, #226, PR
 startup re-queue; five Codex rounds shaped its refresh semantics
 (recorded in item 3). AGENTS.md gained an "Untrusted Mail Content"
 section and a PR review section (#256); remaining logging gaps are
-#257.
+#257. Item 6 (PR #258): the MCP `canonical_addr` degrades an
+unparseable stored sender to "no address" instead of aborting the
+search (#233), and `_apply_rerank` falls back to RRF order on an
+out-of-range or repeated rerank index (#225).
 
 ### 2026-09-28 — Right text reaches the model (#214, #215, #223)
 

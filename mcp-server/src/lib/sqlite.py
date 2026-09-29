@@ -48,7 +48,13 @@ def canonical_addr(value: str) -> str:
     """
     if not value:
         return ""
-    _, addr = parseaddr(value)
+    try:
+        _, addr = parseaddr(value)
+    except Exception:
+        # parseaddr recurses on nested comments. Stored senders and
+        # participants are indexed mail, so one hostile entry must count
+        # as "no address", not abort a search whose filter is valid.
+        return ""
     addr = addr.strip().lower()
     if "@" not in addr:
         return ""
@@ -77,6 +83,10 @@ _CHUNK_LANE_OVERSAMPLE = 10
 # RERANK_CANDIDATES by filter and chunk oversampling (200 x 4 x 10 = 8000),
 # so both lanes clamp here rather than silently lose the lane.
 _SQLITE_VEC_MAX_K = 4096
+
+# Characters of a candidate's subject sent to the reranker; matches the
+# tools' ``HEADER_CHAR_LIMIT``.
+_RERANK_SUBJECT_CHARS = 500
 
 
 def _addr_matches(haystack: list[str], query_lower: str) -> bool:
@@ -583,12 +593,9 @@ def address_match_mode(value: str) -> str:
     ``"substring"`` otherwise (a domain like ``@example.com`` or a name
     fragment): case-insensitive substring of the address or display name.
     """
-    try:
-        canonical = canonical_addr(value)
-    except RecursionError:
-        # parseaddr recurses on nested comments; such input has no
-        # usable address, so it can only be a substring.
-        return "substring"
+    # Nested-comment input that makes parseaddr recurse canonicalizes to
+    # "", so it can only be a substring.
+    canonical = canonical_addr(value)
     return "exact" if canonical and not canonical.startswith("@") else "substring"
 
 
@@ -874,11 +881,14 @@ class Database:
         callers without ``with_evidence=True`` have to work with). The
         subject is included in both shapes so a query like "invoice
         from acme" can rerank on the subject even when the body is
-        boilerplate.
+        boilerplate. The subject is sender-controlled and unbounded, so it
+        is cut at ``_RERANK_SUBJECT_CHARS``: every candidate is sent to the
+        rerank provider in one request.
         """
+        subject = result.subject[:_RERANK_SUBJECT_CHARS]
         if result.evidence_chunks:
-            return f"Subject: {result.subject}\n\n{result.evidence_chunks[0].text}"
-        return f"Subject: {result.subject}\n\n{result.snippet}"
+            return f"Subject: {subject}\n\n{result.evidence_chunks[0].text}"
+        return f"Subject: {subject}\n\n{result.snippet}"
 
     def _apply_rerank(
         self,
@@ -897,21 +907,27 @@ class Database:
 
         On reranker failure (returns empty list), the candidates fall
         back to RRF order — so a rerank outage degrades quality without
-        failing the whole query.
+        failing the whole query. A ranking with an out-of-range or
+        repeated index is a failure too: applying it would drop or
+        duplicate results. It is checked before any candidate is touched.
         """
         docs = [self._candidate_text(c) for c in candidates]
         scored = reranker.rerank(query, docs, top_n=limit)
         if not scored:
             return candidates[:limit]
+        indices = [orig_idx for orig_idx, _ in scored]
+        if len(set(indices)) != len(indices) or not all(0 <= i < len(candidates) for i in indices):
+            # Fixed text only: the ranking came from the provider.
+            log.warning("rerank returned invalid indices; falling back to RRF order")
+            return candidates[:limit]
         reordered: list[ThreadResult] = []
         for orig_idx, score in scored:
-            if 0 <= orig_idx < len(candidates):
-                result = candidates[orig_idx]
-                result.score = score
-                # Record the post-rerank position as the ``rerank`` lane
-                # rank — observability only, surfaced by get_evidence.
-                result.lane_ranks["rerank"] = len(reordered)
-                reordered.append(result)
+            result = candidates[orig_idx]
+            result.score = score
+            # Record the post-rerank position as the ``rerank`` lane
+            # rank — observability only, surfaced by get_evidence.
+            result.lane_ranks["rerank"] = len(reordered)
+            reordered.append(result)
         return reordered[:limit]
 
     def keyword_search(
