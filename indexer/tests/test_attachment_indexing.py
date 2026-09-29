@@ -86,7 +86,177 @@ def test_successful_cached_extraction_is_reused(tmp_path, monkeypatch):
     )
 
 
+def _process_with_cached_extractor(
+    db,
+    extractor_name,
+    status,
+    text,
+    monkeypatch,
+    *,
+    filename="c.docx",
+    content_type="application/msword",
+):
+    attachment = _attachment(b"docx bytes", filename=filename, content_type=content_type)
+    db.store_attachment_extraction(
+        attachment_id=attachment.content_hash,
+        extraction_status=status,
+        extractor=extractor_name,
+        extracted_text=text,
+        extraction_error=None,
+    )
+    extractor = MagicMock(
+        return_value=ExtractionResult(
+            status=STATUS_SUCCESS, extractor="docx@2", text="fresh text", error=None
+        )
+    )
+    monkeypatch.setattr(attachment_indexing, "extract_attachment", extractor)
+    embedder = make_mock_embedder()
+    embedder.embed.return_value = [0.1] * EMBEDDING_DIM
+    process_attachment(
+        message_date="2024-01-01T00:00:00+00:00",
+        attachment=attachment,
+        message_id="message@example.com",
+        thread_id="thread-1",
+        db=db,
+        embedder=embedder,
+        chunk_target_tokens=350,
+        chunk_max_tokens=500,
+        chunk_overlap_tokens=60,
+        ocr_enabled=True,
+        max_bytes=10_000_000,
+        max_ocr_pages=20,
+    )
+    return extractor, db.get_attachment_extraction(attachment.content_hash)
+
+
+def test_cache_row_from_an_older_extractor_version_is_re_extracted(tmp_path, monkeypatch):
+    """Rows the old DOCX walker wrote (unversioned ``docx``) missed nested
+    and header tables and could be ``empty`` (#226). They must not be
+    served forever: an older version is a cache miss."""
+    for status, text in ((STATUS_SUCCESS, "old text"), (STATUS_EMPTY, None)):
+        db = _seed_thread_for_cache_test(tmp_path / status)
+        extractor, row = _process_with_cached_extractor(db, "docx", status, text, monkeypatch)
+        extractor.assert_called_once()
+        assert row["extractor"] == "docx@2"
+        assert row["extracted_text"] == "fresh text"
+
+
+def test_cache_row_from_the_current_extractor_version_is_reused(tmp_path, monkeypatch):
+    db = _seed_thread_for_cache_test(tmp_path)
+    extractor, _ = _process_with_cached_extractor(
+        db, "docx@2", STATUS_SUCCESS, "cached text", monkeypatch
+    )
+    extractor.assert_not_called()
+
+
+def test_cache_row_from_a_newer_extractor_version_is_reused(tmp_path, monkeypatch):
+    # After a rollback, rows the newer release wrote must not be
+    # downgraded by the older walker.
+    db = _seed_thread_for_cache_test(tmp_path)
+    extractor, row = _process_with_cached_extractor(
+        db, "docx@3", STATUS_SUCCESS, "newer text", monkeypatch
+    )
+    extractor.assert_not_called()
+    assert row["extractor"] == "docx@3"
+
+
+def test_stale_row_is_refreshed_by_an_occurrence_of_another_type(tmp_path, monkeypatch):
+    """The same bytes attached as ``.bin`` resolve to no extractor. They
+    share the DOCX cache row, so they re-run the extractor that produced
+    it: re-running by their own metadata would overwrite the row with
+    ``unsupported``, and skipping would leave their chunks stale."""
+    db = _seed_thread_for_cache_test(tmp_path)
+    extractor, row = _process_with_cached_extractor(
+        db,
+        "docx",
+        STATUS_SUCCESS,
+        "old text",
+        monkeypatch,
+        filename="blob.bin",
+        content_type="application/octet-stream",
+    )
+    extractor.assert_called_once()
+    assert extractor.call_args.kwargs["module_override"] == "docx"
+    assert row["extractor"] == "docx@2"
+    assert row["extracted_text"] == "fresh text"
+    assert db.get_chunk_ids_for_message(
+        "message@example.com", attachment_id=hashlib.sha256(b"docx bytes").hexdigest()
+    )
+
+
+def test_reused_terminal_row_clears_the_stale_chunks(tmp_path, monkeypatch):
+    """Another message's re-extraction of the same bytes ended ``empty`` and
+    stamped the row current. This message then gets a plain cache hit on
+    it, so it must still drop the chunks its own stale extraction left."""
+    db = _seed_thread_for_cache_test(tmp_path)
+    attachment_id = hashlib.sha256(b"docx bytes").hexdigest()
+    _process_with_cached_extractor(db, "docx@2", STATUS_SUCCESS, "old text", monkeypatch)
+    assert db.get_chunk_ids_for_message("message@example.com", attachment_id=attachment_id)
+
+    db.store_attachment_extraction(
+        attachment_id=attachment_id,
+        extraction_status=STATUS_EMPTY,
+        extractor="docx@2",
+        extracted_text=None,
+        extraction_error=None,
+    )
+    extractor = MagicMock()
+    monkeypatch.setattr(attachment_indexing, "extract_attachment", extractor)
+    process_attachment(
+        message_date="2024-01-01T00:00:00+00:00",
+        attachment=_attachment(b"docx bytes", filename="c.docx", content_type="application/msword"),
+        message_id="message@example.com",
+        thread_id="thread-1",
+        db=db,
+        embedder=make_mock_embedder([0.1] * EMBEDDING_DIM),
+        chunk_target_tokens=350,
+        chunk_max_tokens=500,
+        chunk_overlap_tokens=60,
+        ocr_enabled=True,
+        max_bytes=10_000_000,
+        max_ocr_pages=20,
+    )
+    extractor.assert_not_called()
+    assert not db.get_chunk_ids_for_message("message@example.com", attachment_id=attachment_id)
+
+
+def test_re_extraction_without_text_clears_the_stale_chunks(tmp_path, monkeypatch):
+    """A stale row re-extracted to ``empty`` (or ``failed`` / ``too_large``)
+    must not leave the old text searchable: the new row is current, so no
+    later sweep would repair it."""
+    db = _seed_thread_for_cache_test(tmp_path)
+    attachment_id = hashlib.sha256(b"docx bytes").hexdigest()
+    _process_with_cached_extractor(db, "docx@2", STATUS_SUCCESS, "old text", monkeypatch)
+    assert db.get_chunk_ids_for_message("message@example.com", attachment_id=attachment_id)
+
+    with db.transaction():
+        db._conn.execute("UPDATE attachment_extractions SET extractor = 'docx'")
+    extractor = MagicMock(
+        return_value=ExtractionResult(
+            status=STATUS_EMPTY, extractor="docx@2", text=None, error=None
+        )
+    )
+    monkeypatch.setattr(attachment_indexing, "extract_attachment", extractor)
+    process_attachment(
+        message_date="2024-01-01T00:00:00+00:00",
+        attachment=_attachment(b"docx bytes", filename="c.docx", content_type="application/msword"),
+        message_id="message@example.com",
+        thread_id="thread-1",
+        db=db,
+        embedder=make_mock_embedder([0.1] * EMBEDDING_DIM),
+        chunk_target_tokens=350,
+        chunk_max_tokens=500,
+        chunk_overlap_tokens=60,
+        ocr_enabled=True,
+        max_bytes=10_000_000,
+        max_ocr_pages=20,
+    )
+    extractor.assert_called_once()
+    assert not db.get_chunk_ids_for_message("message@example.com", attachment_id=attachment_id)
+
+
 def _seed_thread_for_cache_test(tmp_path):
+    tmp_path.mkdir(parents=True, exist_ok=True)
     db = Database(tmp_path / "mail.db")
     db.upsert_thread(
         make_thread(

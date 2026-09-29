@@ -2421,6 +2421,243 @@ class TestIngestionStateRecorder:
         assert self._state(db)["sync_completed_at"] == STAMP.completed_at
 
 
+class TestRequeueStaleExtractions:
+    """Bumping an extractor's version re-queues the messages whose cached
+    extraction came from an older version, once, so a fixed extractor
+    also repairs mail indexed before the fix (#226, #228)."""
+
+    @staticmethod
+    def _write_docx_eml(
+        path: Path, message_id: str, body: str = "See the attached contract."
+    ) -> None:
+        import io
+        from email.message import EmailMessage
+
+        import docx
+        from docx.shared import Inches
+
+        document = docx.Document()
+        document.add_paragraph("body paragraph")
+        header = document.sections[0].header
+        header.add_table(rows=1, cols=1, width=Inches(2)).cell(0, 0).text = "HEADER_MARK"
+        buf = io.BytesIO()
+        document.save(buf)
+
+        msg = EmailMessage()
+        msg["From"] = "alice@example.com"
+        msg["To"] = "bob@example.com"
+        msg["Subject"] = "Contract"
+        msg["Message-ID"] = f"<{message_id}>"
+        msg["Date"] = "Mon, 01 Jan 2024 12:00:00 +0000"
+        msg.set_content(body)
+        msg.add_attachment(
+            buf.getvalue(),
+            maintype="application",
+            subtype="vnd.openxmlformats-officedocument.wordprocessingml.document",
+            filename="contract.docx",
+        )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(bytes(msg))
+
+    def _drain(self, db, queue):
+        embedder = make_mock_embedder(_UNIT_VECTOR)
+        return main._drain_queue_batched(
+            db,
+            embedder,
+            Threader(db),
+            queue,
+            batch_size=10,
+            timing_aggregator=main.TimingAggregator(window=4),
+            max_passes=1,
+        )
+
+    @staticmethod
+    def _thread_vector(db, thread_id: str) -> list[float]:
+        import struct
+
+        blob = db._conn.execute(
+            "SELECT embedding FROM threads_vec WHERE thread_id = ?", (thread_id,)
+        ).fetchone()["embedding"]
+        return list(struct.unpack(f"{len(blob) // 4}f", blob))
+
+    def _attachment_chunk_text(self, db) -> str:
+        rows = db._conn.execute(
+            "SELECT text FROM message_chunks WHERE attachment_id IS NOT NULL"
+        ).fetchall()
+        return " ".join(r["text"] for r in rows)
+
+    def test_old_version_rows_are_re_extracted_once(self, tmp_path, monkeypatch):
+        maildir = tmp_path / "maildir"
+        monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
+        path = maildir / "INBOX" / "cur" / "contract.eml"
+        self._write_docx_eml(path, "contract@example.com")
+        db = Database(tmp_path / "mail.db")
+        queue = _make_queue(db)
+        queue.enqueue(str(path), REASON_INITIAL_SCAN)
+        # Index with the pre-fix walker's output: unversioned and
+        # missing the header table.
+        from src import attachment_indexing
+        from src.extractors import STATUS_SUCCESS, ExtractionResult
+
+        with monkeypatch.context() as m:
+            m.setattr(
+                attachment_indexing,
+                "extract_attachment",
+                lambda **_kw: ExtractionResult(
+                    status=STATUS_SUCCESS, extractor="docx", text="body paragraph", error=None
+                ),
+            )
+            self._drain(db, queue)
+        assert "HEADER_MARK" not in self._attachment_chunk_text(db)
+
+        assert main._requeue_stale_extractions(db, queue) == 1
+        self._drain(db, queue)
+
+        assert "HEADER_MARK" in self._attachment_chunk_text(db)
+        row = db._conn.execute("SELECT extractor FROM attachment_extractions").fetchone()
+        assert row["extractor"] == "docx@2"
+        assert main._requeue_stale_extractions(db, queue) == 0
+
+    def test_alias_messages_are_requeued_and_rebuilt(self, tmp_path, monkeypatch):
+        """A message carrying the same bytes as ``.bin`` shares the stale
+        cache row and indexed its old text, so it is rebuilt too."""
+        maildir = tmp_path / "maildir"
+        monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
+        docx_path = maildir / "INBOX" / "cur" / "contract.eml"
+        self._write_docx_eml(docx_path, "contract@example.com")
+        blob_path = maildir / "INBOX" / "cur" / "blob.eml"
+        raw = docx_path.read_bytes()
+        raw = raw.replace(b"contract@example.com", b"blob@example.com")
+        raw = raw.replace(
+            b"application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            b"application/octet-stream",
+        ).replace(b"contract.docx", b"blob.bin")
+        blob_path.write_bytes(raw)
+        db = Database(tmp_path / "mail.db")
+        queue = _make_queue(db)
+        queue.enqueue(str(docx_path), REASON_INITIAL_SCAN)
+        queue.enqueue(str(blob_path), REASON_INITIAL_SCAN)
+        from src import attachment_indexing
+        from src.extractors import STATUS_SUCCESS, ExtractionResult
+
+        with monkeypatch.context() as m:
+            m.setattr(
+                attachment_indexing,
+                "extract_attachment",
+                lambda **_kw: ExtractionResult(
+                    status=STATUS_SUCCESS, extractor="docx", text="body paragraph", error=None
+                ),
+            )
+            self._drain(db, queue)
+
+        assert main._requeue_stale_extractions(db, queue) == 2
+        self._drain(db, queue)
+
+        for mid in ("contract@example.com", "blob@example.com"):
+            rows = db._conn.execute(
+                "SELECT text FROM message_chunks WHERE message_id = ? "
+                "AND attachment_id IS NOT NULL",
+                (mid,),
+            ).fetchall()
+            assert "HEADER_MARK" in " ".join(r["text"] for r in rows), mid
+        assert main._requeue_stale_extractions(db, queue) == 0
+
+    def test_nothing_is_requeued_when_extraction_is_disabled(self, tmp_path, monkeypatch):
+        # The drain skips attachments then, so the rows would never be
+        # re-stamped and every restart would re-queue the same messages.
+        maildir = tmp_path / "maildir"
+        monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
+        path = maildir / "INBOX" / "cur" / "contract.eml"
+        self._write_docx_eml(path, "contract@example.com")
+        db = Database(tmp_path / "mail.db")
+        queue = _make_queue(db)
+        queue.enqueue(str(path), REASON_INITIAL_SCAN)
+        self._drain(db, queue)
+        with db.transaction():
+            db._conn.execute("UPDATE attachment_extractions SET extractor = 'docx'")
+
+        monkeypatch.setattr(main, "INDEXER_ATTACHMENT_EXTRACTION_ENABLED", False)
+        assert main._requeue_stale_extractions(db, queue) == 0
+
+    def test_thread_vector_is_replaced_when_the_last_chunks_are_cleared(
+        self, tmp_path, monkeypatch
+    ):
+        """An attachment-only thread whose stale extraction now yields no
+        text loses its last chunks; the thread vector, seeded from those
+        chunks, must be replaced by the subject fallback rather than
+        keep matching the removed text."""
+        maildir = tmp_path / "maildir"
+        monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
+        path = maildir / "INBOX" / "cur" / "contract.eml"
+        self._write_docx_eml(path, "contract@example.com", body="")
+        db = Database(tmp_path / "mail.db")
+        queue = _make_queue(db)
+        queue.enqueue(str(path), REASON_INITIAL_SCAN)
+        from src import attachment_indexing
+        from src.extractors import STATUS_EMPTY, STATUS_SUCCESS, ExtractionResult
+
+        with monkeypatch.context() as m:
+            m.setattr(
+                attachment_indexing,
+                "extract_attachment",
+                lambda **_kw: ExtractionResult(
+                    status=STATUS_SUCCESS, extractor="docx", text="body paragraph", error=None
+                ),
+            )
+            self._drain(db, queue)
+        thread_id = db._conn.execute(
+            "SELECT thread_id FROM message_thread_map WHERE message_id = 'contract@example.com'"
+        ).fetchone()["thread_id"]
+        assert self._thread_vector(db, thread_id) == _UNIT_VECTOR
+
+        fallback_vector = [0.0, 1.0] + [0.0] * (EMBEDDING_DIM - 2)
+        embedder = make_mock_embedder()
+        embedder.embed.side_effect = lambda text: (
+            fallback_vector if text == "Contract" else _UNIT_VECTOR
+        )
+        assert main._requeue_stale_extractions(db, queue) == 1
+        with monkeypatch.context() as m:
+            m.setattr(
+                attachment_indexing,
+                "extract_attachment",
+                lambda **_kw: ExtractionResult(
+                    status=STATUS_EMPTY, extractor="docx@2", text=None, error=None
+                ),
+            )
+            main._drain_queue_batched(
+                db,
+                embedder,
+                Threader(db),
+                queue,
+                batch_size=10,
+                timing_aggregator=main.TimingAggregator(window=4),
+                max_passes=1,
+            )
+
+        assert not db.get_chunk_ids_for_message("contract@example.com", attachment_id=None)
+        assert not db.thread_has_chunks(thread_id)
+        assert self._thread_vector(db, thread_id) == fallback_vector
+
+    def test_pending_and_dead_rows_are_left_alone(self, tmp_path, monkeypatch):
+        maildir = tmp_path / "maildir"
+        monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
+        path = maildir / "INBOX" / "cur" / "contract.eml"
+        self._write_docx_eml(path, "contract@example.com")
+        db = Database(tmp_path / "mail.db")
+        queue = _make_queue(db)
+        queue.enqueue(str(path), REASON_INITIAL_SCAN)
+        self._drain(db, queue)
+        with db.transaction():
+            db._conn.execute("UPDATE attachment_extractions SET extractor = 'docx'")
+
+        queue.enqueue(str(path), REASON_INITIAL_SCAN)
+        assert main._requeue_stale_extractions(db, queue) == 0
+        for _ in range(queue.max_attempts):
+            queue.mark_failed(str(path), stage="embed", error="x")
+        assert queue.is_dead(str(path))
+        assert main._requeue_stale_extractions(db, queue) == 0
+
+
 class TestPeriodicRecoverySkipsDeadLetter:
     """``_recover_zero_vector_threads(resurrect_dead=False)`` must
     preserve the durable queue's bounded-retry contract.
