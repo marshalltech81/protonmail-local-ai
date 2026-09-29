@@ -2041,13 +2041,25 @@ class Database:
                 )
 
     @_synchronized
-    def update_filepath(self, old_path: str, new_path: str, *, folder: str | None = None) -> None:
+    def update_filepath(
+        self,
+        old_path: str,
+        new_path: str,
+        *,
+        folder: str | None = None,
+        clear_tombstone: bool = False,
+    ) -> None:
         """Update message_thread_map, indexed_files and the queue row after a Maildir rename.
 
         ``folder`` is the destination's folder when the rename crosses
         Maildir folders (``None`` for flag-only renames). It is written in
         the same transaction as the locator, so the per-message record can
         never point at one folder's file while claiming another.
+
+        ``clear_tombstone`` drops the file's tombstone in the same
+        transaction, for a rename that restores it (T flag cleared): the
+        reaper runs on another thread, and seeing the restored path with
+        its tombstone still in place it would delete the message.
 
         mbsync renames a Maildir file whenever flags change (e.g. S → SR when
         the message is replied to). Keep the stored path in sync so later
@@ -2098,10 +2110,13 @@ class Database:
                     prior["content_hash"] if prior else None,
                 ),
             )
-            cur.execute(
-                "UPDATE pending_deletions SET filepath = ? WHERE filepath = ?",
-                (new_path, old_path),
-            )
+            if clear_tombstone:
+                cur.execute("DELETE FROM pending_deletions WHERE filepath = ?", (old_path,))
+            else:
+                cur.execute(
+                    "UPDATE pending_deletions SET filepath = ? WHERE filepath = ?",
+                    (new_path, old_path),
+                )
             # The file's queue row moves too, retry or dead state intact:
             # a rename of a file whose Phase 1 committed (so the path is
             # indexed and ``on_moved`` does not re-enqueue it) but whose

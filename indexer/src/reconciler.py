@@ -181,7 +181,15 @@ class Reconciler:
         if entry is None:
             return
         if entry["filepath"] != dest_path:
-            self.db.update_filepath(entry["filepath"], dest_path, folder=folder)
+            # A restore clears the tombstone in the same write as the
+            # rename: the reaper, on the main thread, must never see the
+            # live path with an eligible tombstone still attached.
+            self.db.update_filepath(
+                entry["filepath"],
+                dest_path,
+                folder=folder,
+                clear_tombstone=not is_trashed(dest_path),
+            )
         if is_trashed(dest_path):
             self.db.add_pending_deletion(dest_path, entry["message_id"], entry["thread_id"])
             log.info("tombstoned via on_moved: %s", dest_path)

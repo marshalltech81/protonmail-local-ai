@@ -453,6 +453,40 @@ class TestReap:
         assert db.get_thread(thread_id) is not None
         assert queue.has_pending_row(str(trashed))
 
+    def test_reap_between_restore_steps_keeps_the_message(
+        self, db, threader, embedder, maildir, monkeypatch
+    ):
+        """Review round 5: ``handle_moved`` committed the rename, then
+        cleared the tombstone in a separate step; a reap on the main thread
+        in between still saw the eligible tombstone and deleted the
+        restored message. The rename and the clear are now one write."""
+        from src.queue import REASON_INITIAL_SCAN, IndexingQueue
+
+        rec = Reconciler(db, embedder, threader, _default_config())
+        path = maildir / "1700000000.M1.host:2,S"
+        _write_eml(path, "restoring@example.com")
+        thread_id = _index(path, db, threader)
+        queue = IndexingQueue(db)
+        queue.enqueue(str(path), REASON_INITIAL_SCAN)
+        trashed = maildir / "1700000000.M1.host:2,ST"
+        path.rename(trashed)
+        rec.handle_moved(str(path), str(trashed))
+        trashed.rename(path)
+
+        real_update = db.update_filepath
+
+        def update_then_reap(*args, **kwargs):
+            result = real_update(*args, **kwargs)
+            rec.reap()  # the main thread wins the lock right after the rename
+            return result
+
+        monkeypatch.setattr(db, "update_filepath", update_then_reap)
+        rec.handle_moved(str(trashed), str(path))
+
+        assert db.get_thread(thread_id) is not None
+        assert not db.has_pending_deletion(str(path))
+        assert queue.has_pending_row(str(path))
+
     def test_partial_reap_skips_a_message_restored_after_the_snapshot(
         self, db, threader, reconciler, maildir, monkeypatch
     ):
