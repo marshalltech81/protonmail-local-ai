@@ -309,10 +309,11 @@ content is as private as a credential.
   content-bearing tool-argument values to logs,
   `indexing_jobs.last_error`, or exception messages that reach them.
   The credential redaction rules above do not cover this: the text is
-  arbitrary, not a known secret. Validated non-sensitive tool options
-  (the enums, numbers and booleans allowlisted in
-  `mcp-server/src/lib/security.py` `_LOGGABLE_TOOL_PARAMS`) may be
-  logged; `log_tool_call` withholds everything else.
+  arbitrary, not a known secret. Tool arguments allowlisted in
+  `mcp-server/src/lib/security.py` `_LOGGABLE_TOOL_PARAMS` may be
+  logged when the value passes that field's own check (enums, numbers,
+  booleans and ISO dates today); `log_tool_call` withholds everything
+  else, including an allowlisted field whose value fails its check.
 - At a provider-call boundary, log an SDK status error as its type plus
   status code. Keep the full text only of exceptions that cannot carry
   provider or mail data: connection and timeout errors, and our own
