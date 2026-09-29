@@ -42,6 +42,7 @@ from .extractors import (
     STATUS_TOO_LARGE,
     STATUS_UNSUPPORTED,
     ExtractionResult,
+    is_stale_extractor,
     needs_reextraction,
 )
 from .extractors import (
@@ -190,6 +191,19 @@ def _resolve_extracted_text(
     fresh result.
     """
     cached = db.get_attachment_extraction(attachment.content_hash)
+    if (
+        cached is not None
+        and is_stale_extractor(cached["extractor"])
+        and not needs_reextraction(
+            cached["extractor"], attachment.content_type, attachment.filename
+        )
+    ):
+        # The same bytes under metadata that resolves to another
+        # extractor. Re-running would overwrite the shared row with that
+        # extractor's result, and indexing the stale text would overwrite
+        # the fresh chunks of a DOCX occurrence in the same message, so
+        # neither: this occurrence's chunks are left as they are.
+        return None, cached["extraction_status"], None, True
     if cached is not None and _cache_hit_short_circuits(
         cached,
         ocr_enabled,
@@ -393,6 +407,18 @@ def apply_attachment_writes(
         )
 
     if not plan.chunks or plan.status != STATUS_SUCCESS:
+        if plan.extraction_to_persist is not None:
+            # A fresh extraction without usable text: drop chunks a
+            # previous (stale) extraction of this attachment left behind,
+            # or they stay searchable under a now-current cache row.
+            db.replace_message_chunks(
+                message_id=message_id,
+                thread_id=thread_id,
+                chunks=[],
+                embeddings_by_chunk_id={},
+                attachment_id=plan.attachment.content_hash,
+                message_date=message_date,
+            )
         return summary
 
     write_summary = db.replace_message_chunks(

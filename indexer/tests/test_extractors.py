@@ -379,6 +379,22 @@ class TestDocxExtractor:
         )
         assert result.extractor == "docx@2"
 
+    def test_versions_are_keyed_by_dispatch_module(self, monkeypatch):
+        """The image module records ``image-ocr`` and the PDF module
+        ``pdf-ocr`` / ``pdf-digital``. A version keyed by module must both
+        stamp those names and recognise them as stale."""
+        from src import extractors
+
+        monkeypatch.setattr(extractors, "EXTRACTOR_VERSIONS", {"image": 2, "pdf": 3})
+        assert extractors._stamp_extractor("image", "image-ocr") == "image-ocr@2"
+        assert extractors._stamp_extractor("pdf", "pdf-digital") == "pdf-digital@3"
+        assert extractors._stamp_extractor("text", "text") == "text"
+        assert extractors.is_stale_extractor("image-ocr")
+        assert not extractors.is_stale_extractor("image-ocr@2")
+        assert extractors.needs_reextraction("image-ocr", "image/tiff", "scan.tif")
+        assert extractors.needs_reextraction("pdf-ocr@2", "application/pdf", "a.pdf")
+        assert not extractors.needs_reextraction("pdf-ocr@2", "image/tiff", "scan.tif")
+
 
 class TestXlsxExtractor:
     def test_serializes_each_sheet_with_header_marker(self):

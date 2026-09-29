@@ -350,9 +350,11 @@ them (one test-first commit per issue, `Fixes #N` per issue):
    currently `sha256(b"")`); apply the attachment check to a single-part
    root.
 9. **#231 + #234** multipage TIFF (honour the ignored `max_ocr_pages`),
-   UTF-16 BOM / NUL detection. Bump the image and text extractors in
+   UTF-16 BOM / NUL detection. Bump the `image` and `text` modules in
    `EXTRACTOR_VERSIONS` (from item 3; owner approved 2026-09-29) so
-   their stale cache rows re-extract.
+   their stale cache rows re-extract. **Land #237 (item 10) first:**
+   without a per-batch cache, the startup re-queue re-runs OCR once per
+   message carrying the same stale payload in a batch (PR #255 round 2).
 10. **#237 + #210** extraction cache semantics: per-batch cache keyed
     by content hash, and re-run an `unsupported` row when an extractor
     now resolves.

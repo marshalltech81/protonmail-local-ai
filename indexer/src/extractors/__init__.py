@@ -105,16 +105,31 @@ class ExtractionResult:
     error: str | None
 
 
-# Versioned names for extractors whose output changed for the same bytes.
-# The cache stores the versioned name, and a row stamped with an older
-# version of the same extractor is re-extracted instead of being served
-# forever; ``main._requeue_stale_extractions`` also re-queues the
-# messages that carry it at startup. Bump the version whenever a fix
-# changes what an extractor returns.
+# Version of each extractor module whose output changed for the same
+# bytes, keyed by dispatch module (``_MIME_DISPATCH`` values). The
+# dispatcher stamps the recorded extractor name (``docx@2``; the image
+# module's ``image-ocr@2``) into the cache, and a row stamped with an
+# older version is re-extracted instead of being served forever;
+# ``main._requeue_stale_extractions`` also re-queues the messages that
+# carry it at startup. Bump a module's version whenever a fix changes
+# what it returns. Names a module records are the module name, or the
+# module name plus a ``-suffix`` (``pdf-ocr``), so a name maps back to
+# its module.
 #
-# docx@2: reads each cell once, nested tables, and header/footer tables
+# docx 2: reads each cell once, nested tables, and header/footer tables
 # (#226, #228).
-EXTRACTOR_VERSIONS: dict[str, str] = {"docx": "docx@2"}
+EXTRACTOR_VERSIONS: dict[str, int] = {"docx": 2}
+
+
+def _stamp_extractor(module_name: str, extractor_name: str) -> str:
+    """Append the module's version to the name recorded in the cache."""
+    version = EXTRACTOR_VERSIONS.get(module_name)
+    return f"{extractor_name}@{version}" if version is not None else extractor_name
+
+
+def _extractor_module(name: str) -> str:
+    """``pdf-ocr@3`` -> ``pdf``."""
+    return name.partition("@")[0].partition("-")[0]
 
 
 def _extractor_version(name: str) -> int:
@@ -124,29 +139,29 @@ def _extractor_version(name: str) -> int:
 
 
 def is_stale_extractor(name: str | None) -> bool:
-    """True when ``name`` is an older version of a versioned extractor.
+    """True when ``name`` was recorded by an older version of its module.
 
     Only older: after a rollback, rows a newer release wrote are kept
     rather than downgraded by the older code.
     """
     if not name:
         return False
-    current = EXTRACTOR_VERSIONS.get(name.partition("@")[0])
-    return current is not None and _extractor_version(name) < _extractor_version(current)
+    current = EXTRACTOR_VERSIONS.get(_extractor_module(name))
+    return current is not None and _extractor_version(name) < current
 
 
 def needs_reextraction(cached_extractor: str | None, content_type: str, filename: str) -> bool:
     """True when this occurrence should re-extract a stale cached row.
 
     The cache is shared by every occurrence of the same bytes, whatever
-    their metadata. Only an occurrence that resolves to the stale
-    extractor re-runs it; another (the same file attached as ``.bin``)
+    their metadata. Only an occurrence that resolves to the stale row's
+    module re-runs it; another (the same file attached as ``.bin``)
     would overwrite the shared row with a different result.
     """
     if not cached_extractor or not is_stale_extractor(cached_extractor):
         return False
     module_name, _ = _resolve_extractor(content_type, filename)
-    return module_name == cached_extractor.partition("@")[0]
+    return module_name == _extractor_module(cached_extractor)
 
 
 # Public statuses are exposed as constants so callers can compare without
@@ -279,7 +294,7 @@ def extract(
         if zip_error is not None:
             return ExtractionResult(
                 status=STATUS_FAILED,
-                extractor=EXTRACTOR_VERSIONS.get(module_name, module_name),
+                extractor=_stamp_extractor(module_name, module_name),
                 text=None,
                 error=zip_error,
             )
@@ -315,12 +330,11 @@ def extract(
         )
         return ExtractionResult(
             status=STATUS_FAILED,
-            extractor=EXTRACTOR_VERSIONS.get(module_name, module_name),
+            extractor=_stamp_extractor(module_name, module_name),
             text=None,
             error=f"{type(exc).__name__}: {exc}",
         )
 
-    extractor_name = EXTRACTOR_VERSIONS.get(extractor_name, extractor_name)
     if extractor_name == "pdf-ocr-disabled":
         return ExtractionResult(
             status=STATUS_UNSUPPORTED,
@@ -329,6 +343,7 @@ def extract(
             error="OCR disabled (INDEXER_OCR_ENABLED=false)",
         )
 
+    extractor_name = _stamp_extractor(module_name, extractor_name)
     cleaned = (text or "").strip()
     if not cleaned:
         return ExtractionResult(
