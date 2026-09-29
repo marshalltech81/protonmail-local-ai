@@ -47,6 +47,23 @@ DEFAULT_COMPLETE_TIMEOUT_SECS = 300.0
 DEFAULT_MAX_TOKENS = 1024
 
 
+class InferenceTruncatedError(RuntimeError):
+    """The model stopped at ``max_tokens`` before finishing its answer.
+
+    ``partial`` holds whatever text it produced. Callers decide what a
+    cut-off answer is worth: prose can be shown with a notice, while a
+    cut-off JSON record is a failed extraction, never an empty one. The
+    message itself carries no response content, so it is safe to log.
+    """
+
+    def __init__(self, partial: str) -> None:
+        super().__init__(
+            "Inference output hit the max_tokens limit before finishing "
+            "(raise INFERENCE_MAX_TOKENS)"
+        )
+        self.partial = partial
+
+
 class _Backend(Protocol):
     """Structural contract every inference backend satisfies.
 
@@ -162,6 +179,15 @@ class _OpenAIBackend:
         if not resp.choices:
             raise RuntimeError("Inference provider returned no choices (mode=openai)")
         content = resp.choices[0].message.content
+        finish_reason = getattr(resp.choices[0], "finish_reason", None)
+        if finish_reason == "length":
+            raise InferenceTruncatedError(content or "")
+        if finish_reason == "content_filter":
+            # The provider stopped the answer part-way; its prefix must
+            # not pass as a finished answer.
+            raise RuntimeError(
+                "Inference provider stopped the answer with a content filter (mode=openai)"
+            )
         if not content:
             raise RuntimeError("Inference provider returned empty content (mode=openai)")
         return content
@@ -248,6 +274,11 @@ class _AnthropicBackend:
             if isinstance(text, str) and getattr(block, "type", None) == "text":
                 parts.append(text)
         result = "".join(parts)
+        stop_reason = getattr(resp, "stop_reason", None)
+        if stop_reason in ("max_tokens", "model_context_window_exceeded"):
+            raise InferenceTruncatedError(result)
+        if stop_reason == "refusal":
+            raise RuntimeError("Inference provider refused to answer (mode=anthropic)")
         # An empty result means the response contained no text blocks
         # at all (empty ``content``, or only ``tool_use`` / ``thinking``
         # blocks). Returning "" would let the caller pass a silent blank

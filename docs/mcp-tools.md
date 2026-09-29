@@ -114,7 +114,7 @@ chunks (extracted PDF / OCR / document text) are included — unlike
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `query` | string | required | The question or topic to gather evidence for |
-| `thread_id` | string | none | Scope evidence to one thread; omit to search the whole mailbox |
+| `thread_id` | string | none | Scope evidence to one thread; omit to search the whole mailbox. Rejected in combination with `folders`, `from_addr`, `date_from`, `date_to` or `has_attachments`, which select threads |
 | `folders` | list | all | Scope to specific folders |
 | `from_addr` | string | none | Filter by sender address or domain |
 | `date_from` | string | none | ISO 8601 date lower bound |
@@ -336,6 +336,10 @@ Retrieves relevant threads and synthesizes an answer.
 inflated caller-supplied value cannot expand into an oversized prompt
 that blows past the model's context window.
 
+An answer the model stopped writing at `INFERENCE_MAX_TOKENS` is
+returned with a closing `[Answer cut off …]` notice rather than as if
+complete; `summarize_thread` does the same.
+
 ### `summarize_thread`
 Summarize a thread in different styles.
 
@@ -369,6 +373,16 @@ or a JSON array of such objects (useful when a thread contains
 multiple invoices, receipts, etc.). `limit` is clamped to `[1, 50]`
 at the tool boundary. Each retrieved thread drives one LLM call, so
 inflated values fan out into that many model calls.
+
+A thread whose answer was cut off at `INFERENCE_MAX_TOKENS`, or was not
+a JSON object, array of objects, or `null` / `[]`, is counted as
+failed, never as having no data. An answer the provider stopped with a
+content filter or refusal is an error. When any
+thread fails, the records come back as the first content item and a
+second item says how many of the searched threads could not be
+extracted and why; if none were extracted the response says so rather
+than "No structured data … found", which is reserved for every thread
+answering `null` or `[]`.
 
 ---
 

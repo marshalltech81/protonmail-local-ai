@@ -9,7 +9,12 @@ import asyncio
 from types import SimpleNamespace
 
 import pytest
-from src.lib.inference import InferenceClient, _AnthropicBackend, _OpenAIBackend
+from src.lib.inference import (
+    InferenceClient,
+    InferenceTruncatedError,
+    _AnthropicBackend,
+    _OpenAIBackend,
+)
 
 
 def _openai_response(text: str) -> SimpleNamespace:
@@ -450,3 +455,124 @@ class TestComplete:
         c._backend.client.chat.completions.create = fake_create  # type: ignore[assignment]
         asyncio.run(c.complete("sys", "user"))
         assert captured["max_tokens"] == 4096
+
+
+class TestTruncatedOutput:
+    """#222: a response cut off at max_tokens was returned as if complete,
+    so truncated JSON read as "no data" and prose answers ended mid-way
+    with no marker."""
+
+    def _openai(self):
+        return InferenceClient.create(mode="openai", base_url="http://x/v1", model="m", api_key="k")
+
+    def _anthropic(self):
+        return InferenceClient.create(mode="anthropic", base_url="", model="m", api_key="k")
+
+    def test_openai_length_finish_raises_with_the_partial_text(self, monkeypatch):
+        c = self._openai()
+
+        async def fake_create(**_kwargs):
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(content='{"invoice": "SYNTH-1", "amount":'),
+                        finish_reason="length",
+                    )
+                ]
+            )
+
+        monkeypatch.setattr(c._backend.client.chat.completions, "create", fake_create)
+        with pytest.raises(InferenceTruncatedError) as err:
+            asyncio.run(c.complete("sys", "user"))
+        assert err.value.partial == '{"invoice": "SYNTH-1", "amount":'
+        assert "SYNTH" not in str(err.value)
+
+    def test_openai_length_finish_with_no_content_is_still_truncation(self, monkeypatch):
+        c = self._openai()
+
+        async def fake_create(**_kwargs):
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(message=SimpleNamespace(content=None), finish_reason="length")
+                ]
+            )
+
+        monkeypatch.setattr(c._backend.client.chat.completions, "create", fake_create)
+        with pytest.raises(InferenceTruncatedError) as err:
+            asyncio.run(c.complete("sys", "user"))
+        assert err.value.partial == ""
+
+    def test_anthropic_max_tokens_stop_raises_with_the_partial_text(self, monkeypatch):
+        c = self._anthropic()
+
+        async def fake_create(**_kwargs):
+            return SimpleNamespace(
+                content=[SimpleNamespace(type="text", text="The decision was")],
+                stop_reason="max_tokens",
+            )
+
+        monkeypatch.setattr(c._backend.client.messages, "create", fake_create)
+        with pytest.raises(InferenceTruncatedError) as err:
+            asyncio.run(c.complete("sys", "user"))
+        assert err.value.partial == "The decision was"
+
+    def test_complete_responses_are_returned_unchanged(self, monkeypatch):
+        c = self._anthropic()
+
+        async def fake_create(**_kwargs):
+            return SimpleNamespace(
+                content=[SimpleNamespace(type="text", text="done")], stop_reason="end_turn"
+            )
+
+        monkeypatch.setattr(c._backend.client.messages, "create", fake_create)
+        assert asyncio.run(c.complete("sys", "user")) == "done"
+
+
+class TestFilteredOutput:
+    """Review round 1: a provider that stops an answer with a content
+    filter / refusal returned its prefix as a finished answer."""
+
+    def test_openai_content_filter_is_an_error(self, monkeypatch):
+        c = InferenceClient.create(mode="openai", base_url="http://x/v1", model="m", api_key="k")
+
+        async def fake_create(**_kwargs):
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(content="The safe part"),
+                        finish_reason="content_filter",
+                    )
+                ]
+            )
+
+        monkeypatch.setattr(c._backend.client.chat.completions, "create", fake_create)
+        with pytest.raises(RuntimeError, match="content filter"):
+            asyncio.run(c.complete("sys", "user"))
+
+    def test_anthropic_refusal_is_an_error(self, monkeypatch):
+        c = InferenceClient.create(mode="anthropic", base_url="", model="m", api_key="k")
+
+        async def fake_create(**_kwargs):
+            return SimpleNamespace(
+                content=[SimpleNamespace(type="text", text="I can")], stop_reason="refusal"
+            )
+
+        monkeypatch.setattr(c._backend.client.messages, "create", fake_create)
+        with pytest.raises(RuntimeError, match="refused"):
+            asyncio.run(c.complete("sys", "user"))
+
+    def test_anthropic_context_window_stop_is_truncation(self, monkeypatch):
+        """Review round 2: a context-window stop cuts the answer off just
+        like max_tokens does."""
+        c = InferenceClient.create(mode="anthropic", base_url="", model="m", api_key="k")
+
+        async def fake_create(**_kwargs):
+            return SimpleNamespace(
+                content=[SimpleNamespace(type="text", text="Partly")],
+                stop_reason="model_context_window_exceeded",
+            )
+
+        monkeypatch.setattr(c._backend.client.messages, "create", fake_create)
+        with pytest.raises(InferenceTruncatedError) as err:
+            asyncio.run(c.complete("sys", "user"))
+        assert err.value.partial == "Partly"

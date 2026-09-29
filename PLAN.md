@@ -452,6 +452,31 @@ do not ship persisted claims without them.
 
 ## Recently Completed
 
+### 2026-09-28 — MCP results no longer overclaim (#219, #220, #222)
+
+Three places where a tool's answer claimed more than it had. Neither
+inference backend checked why generation stopped (#222): output cut off
+at `max_tokens` now raises `InferenceTruncatedError` with the partial
+text, `extract_from_emails` counts truncated and non-JSON threads apart
+from a valid `null` and says how many could not be extracted (instead
+of "No structured data … found"), and `ask_mailbox` / `summarize_thread`
+mark a cut-off answer. `search_attachments`' text lane ranks each
+attachment by its best chunk before its LIMIT (#220), so one long
+document no longer hides other matches (a MATERIALIZED CTE, since
+`bm25()` is not allowed in a grouped query). `get_evidence` rejects
+`thread_id` combined with thread-selecting filters (#219) instead of
+silently ignoring them. No schema change; `make baseline` unchanged.
+Review round 1 (Codex): valid JSON of another shape (a string, a
+number, a list of non-objects) now counts as a failed extraction;
+blank optional filters (`from_addr=""`) are absent on the thread-scoped
+path, as on the mailbox-wide one; and an OpenAI `content_filter` or
+Anthropic `refusal` stop is an error rather than a finished answer.
+Review round 2: the attachment text lane applies its filters before
+grouping (a filtered search no longer aggregates every matching chunk
+in the mailbox), and an Anthropic `model_context_window_exceeded` stop
+counts as truncation. Round 3: a mixed array's objects are kept but
+the thread counts as incompletely extracted.
+
 ### 2026-09-28 — Subject fallback needs a shared correspondent pair (#205)
 
 The headerless subject fallback accepted any one shared address, and

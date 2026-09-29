@@ -1162,13 +1162,14 @@ class FakeInferenceClient:
     Returns a canned ``complete()`` response so intelligence tools can
     be exercised without hitting a live LLM backend.
     ``complete_responses`` lets a test queue up successive distinct
-    responses for the per-thread ``extract_from_emails`` loop.
+    responses for the per-thread ``extract_from_emails`` loop; a queued
+    exception is raised instead of returned.
     """
 
     def __init__(
         self,
         response: str = "mock answer",
-        complete_responses: list[str] | None = None,
+        complete_responses: list[str | BaseException] | None = None,
         mode: str = "anthropic",
     ) -> None:
         self._default_response = response
@@ -1179,7 +1180,10 @@ class FakeInferenceClient:
     async def complete(self, system: str, user: str) -> str:
         self.complete_calls.append((system, user))
         if self._queued:
-            return self._queued.pop(0)
+            queued = self._queued.pop(0)
+            if isinstance(queued, BaseException):
+                raise queued
+            return queued
         return self._default_response
 
 
@@ -1201,7 +1205,7 @@ class FakeLocalLLM:
         self,
         embedding: list[float] | None = None,
         response: str = "mock answer",
-        complete_responses: list[str] | None = None,
+        complete_responses: list[str | BaseException] | None = None,
     ) -> None:
         self._embed = FakeEmbedClient(embedding=embedding)
         self._inference = FakeInferenceClient(

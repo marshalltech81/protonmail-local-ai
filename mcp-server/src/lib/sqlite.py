@@ -1123,32 +1123,45 @@ class Database:
         single message; the JOIN anchors on the lowest
         ``attachment_occurrence_id`` for the pair so the row count is
         deterministic (see ``_chunk_vector_search`` for the full
-        rationale). Many chunks can match one attachment, so the result
-        is deduped by occurrence in Python, keeping the best BM25 row.
+        rationale).
+
+        Many chunks can match one attachment, so each attachment is ranked
+        by its best chunk *before* the LIMIT: limiting chunk rows first
+        let one long document fill every slot and hide other matching
+        attachments. ``bm25()`` cannot be used inside a grouped query, so
+        the scored hits are a MATERIALIZED CTE (which SQLite does not
+        flatten into the GROUP BY). The filters apply before the grouping,
+        so a narrowly filtered search does not aggregate every matching
+        chunk in the mailbox.
         """
-        where = [
-            "message_chunks_fts MATCH ?",
-            "c.attachment_id IS NOT NULL",
-            *extra_clauses,
-        ]
+        where = ["c.attachment_id IS NOT NULL", *extra_clauses]
         params = [fts_query, *extra_params, limit]
         sql = (
+            "WITH hits AS MATERIALIZED ( "
+            "    SELECT rowid AS fts_rowid, bm25(message_chunks_fts) AS score "
+            "    FROM message_chunks_fts WHERE message_chunks_fts MATCH ? ), "
+            "best AS ( "
+            "    SELECT a.attachment_occurrence_id, MIN(h.score) AS score "
+            "    FROM hits h JOIN message_chunks c ON c.fts_rowid = h.fts_rowid "
+            "    JOIN attachments a ON a.attachment_occurrence_id = ( "
+            "        SELECT MIN(a2.attachment_occurrence_id) FROM attachments a2 "
+            "        WHERE a2.attachment_id = c.attachment_id "
+            "          AND a2.message_id = c.message_id ) "
+            "    JOIN threads t ON a.thread_id = t.thread_id "
+            "    LEFT JOIN attachment_extractions e ON e.attachment_id = a.attachment_id "
+            "    WHERE " + " AND ".join(where) + " "  # nosec B608
+            "    GROUP BY a.attachment_occurrence_id ) "
             "SELECT a.attachment_id, a.message_id, a.thread_id, a.filename, "
             "a.content_type, a.size_bytes, t.subject, t.display_subject, "
             "t.folder, t.date_last, t.senders, e.extraction_status, "
             "substr(e.extracted_text, 1, 240) AS text_snippet, "
             f"{_SOURCE_COLUMNS}, "
-            "bm25(message_chunks_fts) AS score "
-            "FROM message_chunks_fts "
-            "JOIN message_chunks c ON message_chunks_fts.rowid = c.fts_rowid "
-            "JOIN attachments a ON a.attachment_occurrence_id = ( "
-            "    SELECT MIN(a2.attachment_occurrence_id) FROM attachments a2 "
-            "    WHERE a2.attachment_id = c.attachment_id "
-            "      AND a2.message_id = c.message_id ) "
+            "best.score AS score "
+            "FROM best "
+            "JOIN attachments a ON a.attachment_occurrence_id = best.attachment_occurrence_id "
             "JOIN threads t ON a.thread_id = t.thread_id "
             "LEFT JOIN attachment_extractions e ON e.attachment_id = a.attachment_id "
             "LEFT JOIN messages m ON m.message_id = a.message_id "
-            "WHERE " + " AND ".join(where) + " "  # nosec B608
             "ORDER BY score LIMIT ?"
         )
         try:
