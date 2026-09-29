@@ -534,8 +534,8 @@ def _summarize_context(thread: ThreadResult, recent_chunks: list[ChunkResult]) -
     # The tail budget is spent newest-first — the latest reply is what
     # the tail exists for, and one ordinary chunk can fill the whole
     # budget — then rendered oldest-first. A chunk cut to fit keeps its
-    # end (the newer text), and its header states the chars actually
-    # shown.
+    # beginning, where a reply usually states its answer, and its header
+    # states the chars actually shown.
     parts: list[str] = []
     used = 0
     for chunk in reversed(recent_chunks):
@@ -545,17 +545,10 @@ def _summarize_context(thread: ThreadResult, recent_chunks: list[ChunkResult]) -
             break
         text = chunk.text
         if len(text) > remaining:
-            # The rewritten header's start offset can have more digits
-            # than the original's, so size the cut against the longest
-            # header possible (start printed as wide as the end).
-            widest = f"[chunk {chunk.chunk_index} chars {chunk.char_end}-{chunk.char_end}]"
-            remaining = _SUMMARIZE_TAIL_CHAR_BUDGET - used - len(widest) - 2
-            if remaining <= 0:
-                break
-            text = text[-remaining:]
-            header = (
-                f"[chunk {chunk.chunk_index} chars {chunk.char_end - len(text)}-{chunk.char_end}]"
-            )
+            # A smaller end offset never has more digits, so the header
+            # cannot outgrow the budget computed above.
+            text = text[:remaining]
+            header = f"[chunk {chunk.chunk_index} chars {chunk.char_start}-{chunk.char_start + len(text)}]"
         parts.append(f"{header}\n{text}")
         used += len(header) + len(text) + 2
     if not parts:

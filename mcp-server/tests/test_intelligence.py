@@ -250,15 +250,17 @@ class TestSummarizeContextKeepsNewest:
         )
         assert out.index("earlier reply") < out.index("later reply")
 
-    def test_a_cut_chunk_keeps_its_newest_text_and_true_offsets(self):
+    def test_an_oversized_newest_reply_keeps_its_opening(self):
+        """Review round 1: keeping a cut chunk's end dropped the start of
+        the newest reply, where the answer usually is."""
         r = _result(body_text="")
-        text = "A" * 3000 + "B" * 3000
+        text = "LATEST_DECISION: cancel launch. " + "detail " * 1000
         out = _summarize_context(r, [_chunk(text, index=5, char_start=1000)])
-        assert out.endswith("B" * 100)
+        assert "LATEST_DECISION: cancel launch" in out
         header = out.splitlines()[0]
-        assert header.endswith(f"-{1000 + len(text)}]")
         kept = len(out) - len(header) - 1
-        assert header == f"[chunk 5 chars {1000 + len(text) - kept}-{1000 + len(text)}]"
+        assert header == f"[chunk 5 chars 1000-{1000 + kept}]"
+        assert len(out) <= _SUMMARIZE_TAIL_CHAR_BUDGET
 
 
 def _candidate(thread_id: str, subject: str) -> ThreadResult:

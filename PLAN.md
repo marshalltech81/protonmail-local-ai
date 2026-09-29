@@ -462,7 +462,11 @@ then other attachments, then body (#215); only the thread was
 remembered, so other attachments could fill the three slots. Both vector
 lanes clamp KNN `k` to sqlite-vec's 4096 (#223): a large
 `RERANK_CANDIDATES` with a filter asked for 8000 and silently lost the
-chunk lane. No schema change; `make baseline` unchanged.
+chunk lane. No schema change; `make baseline` unchanged. Review round 1
+(Codex): matched attachments are ranked by BM25, since the index holds
+MIME types and query words are OR'd ("proposal-quote pdf" matched every
+PDF); and a chunk cut to fit the tail keeps its beginning, so an
+oversized newest reply keeps the answer it opens with.
 
 ### 2026-09-28 — MCP results no longer overclaim (#219, #220, #222)
 

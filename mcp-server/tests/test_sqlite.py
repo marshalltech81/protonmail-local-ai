@@ -1501,7 +1501,7 @@ class TestEvidenceAttachmentProvenance:
                 thread_ids=["t-quote"],
                 embedding=[1.0, 0.0, 0.0, 0.0],
                 per_thread_limit=1,
-                matched_attachments={"t-quote": {"att-quote"}},
+                matched_attachments={"t-quote": ["att-quote"]},
             )
             evidence_no_bias = db.get_evidence_chunks_for_threads(
                 thread_ids=["t-quote"],
@@ -1555,7 +1555,7 @@ class TestEvidenceAttachmentProvenance:
                 thread_ids=["t-quote"],
                 embedding=[1.0, 0.0, 0.0, 0.0],
                 per_thread_limit=3,
-                matched_attachments={"t-quote": {"att-quote"}},
+                matched_attachments={"t-quote": ["att-quote"]},
             )
         finally:
             db.close()
@@ -1567,6 +1567,24 @@ class TestEvidenceAttachmentProvenance:
         try:
             results = db.hybrid_search(
                 query_text="proposal-quote",
+                query_embedding=[1.0, 0.0, 0.0, 0.0],
+                limit=5,
+                with_evidence=True,
+            )
+        finally:
+            db.close()
+        quote = next(r for r in results if r.thread_id == "t-quote")
+        assert "18450" in quote.evidence_chunks[0].text
+
+    def test_a_generic_mime_word_does_not_dilute_the_named_file(self, tmp_path):
+        """Review round 1: attachments_fts indexes MIME types and query
+        words are OR'd, so "proposal-quote pdf" also matched every other
+        PDF in the thread; the named file must still lead."""
+        db = self._build_attachment_carrier_db(tmp_path)
+        self._add_competing_attachments(db)
+        try:
+            results = db.hybrid_search(
+                query_text="proposal-quote pdf",
                 query_embedding=[1.0, 0.0, 0.0, 0.0],
                 limit=5,
                 with_evidence=True,

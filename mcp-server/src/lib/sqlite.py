@@ -1459,9 +1459,13 @@ class Database:
         results = [self._row_to_result(r) for r in rows]
         return self._best_per_thread(results)[:limit]
 
-    def _matched_attachments(self, query: str, thread_ids: list[str]) -> dict[str, set[str]]:
+    def _matched_attachments(self, query: str, thread_ids: list[str]) -> dict[str, list[str]]:
         """Map each of ``thread_ids`` to the attachments whose filename or
-        MIME type matches ``query``.
+        MIME type matches ``query``, strongest match first.
+
+        The index holds MIME types too and query words are OR'd, so
+        "proposal-quote pdf" matches every PDF; ranking by BM25 keeps the
+        file the query named ahead of the generic hits.
 
         Used by ``hybrid_search(with_evidence=True)`` so per-thread
         evidence leads with the specific attachment the query named, not
@@ -1476,20 +1480,23 @@ class Database:
             return {}
         placeholders = ",".join(["?"] * len(thread_ids))
         sql = (
-            "SELECT a.thread_id, a.attachment_id "
+            "SELECT a.thread_id, a.attachment_id, bm25(attachments_fts) AS score "
             "FROM attachments_fts "
             "JOIN attachments a ON attachments_fts.rowid = a.fts_rowid "
             "WHERE attachments_fts MATCH ? "
-            f"AND a.thread_id IN ({placeholders})"  # nosec B608
+            f"AND a.thread_id IN ({placeholders}) "  # nosec B608
+            "ORDER BY score"
         )
         try:
             rows = self._fetchall(sql, [fts_query, *thread_ids])
         except sqlite3.Error as e:
             log.warning("Attachment match lookup failed; skipping bias: %s", e)
             return {}
-        matched: dict[str, set[str]] = {}
+        matched: dict[str, list[str]] = {}
         for r in rows:
-            matched.setdefault(r["thread_id"], set()).add(r["attachment_id"])
+            ranked = matched.setdefault(r["thread_id"], [])
+            if r["attachment_id"] not in ranked:
+                ranked.append(r["attachment_id"])
         return matched
 
     @staticmethod
@@ -1677,7 +1684,7 @@ class Database:
         thread_ids: list[str],
         embedding: list[float],
         per_thread_limit: int = 3,
-        matched_attachments: dict[str, set[str]] | None = None,
+        matched_attachments: dict[str, list[str]] | None = None,
     ) -> dict[str, list[ChunkResult]]:
         """Return up to ``per_thread_limit`` best-matching chunks per thread.
 
@@ -1704,8 +1711,9 @@ class Database:
         queries on round-trip overhead.
 
         ``matched_attachments``: per thread, the attachments whose
-        filename / MIME matched the query. Their chunks lead the
-        per-thread slice, then the thread's other attachment chunks,
+        filename / MIME matched the query, strongest first. Their chunks
+        lead the per-thread slice in that order, then the thread's other
+        attachment chunks,
         then body chunks — so the LLM sees the document the user named
         even when a body chunk, or another attachment's chunk, has
         higher dense similarity. Remembering only the thread let the cap
@@ -1775,11 +1783,16 @@ class Database:
         for tid, chunks in all_chunks.items():
             matched = matched_by_thread.get(tid)
             if matched:
-                # Matched attachment, then other attachments, then body;
-                # a stable sort keeps vec_distance order within each.
+                # Matched attachments by match strength, then other
+                # attachments, then body; the stable sort keeps
+                # vec_distance order within each group.
+                rank = {attachment_id: i for i, attachment_id in enumerate(matched)}
+                others = len(matched)
                 ordered = sorted(
                     chunks,
-                    key=lambda c: 0 if c.attachment_id in matched else 1 if c.attachment_id else 2,
+                    key=lambda c: (
+                        rank.get(c.attachment_id, others) if c.attachment_id else others + 1
+                    ),
                 )
             else:
                 ordered = chunks
