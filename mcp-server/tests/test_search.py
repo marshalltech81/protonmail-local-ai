@@ -574,6 +574,15 @@ class TestGetEvidence:
         assert "cannot be combined with thread_id" in message
         assert next(iter(filters)) in message
 
+    def test_thread_scoped_treats_blank_filters_as_absent(self, fake_server, fake_llm, chunked_db):
+        """Review round 1: clients often send unset optionals as blank
+        strings; the mailbox-wide path already ignores them."""
+        handler = self._handler(fake_server, fake_llm, chunked_db)
+        out = asyncio.run(
+            handler(query="invoice", thread_id="t-alpha", from_addr="", date_from=" ", folders=[])
+        )
+        assert "12345" in _text(out)
+
     def test_thread_scoped_unknown_thread(self, fake_server, fake_llm, chunked_db):
         handler = self._handler(fake_server, fake_llm, chunked_db)
         assert "Thread not found" in _error(handler(query="invoice", thread_id="no-such-thread"))

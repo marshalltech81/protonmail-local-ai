@@ -374,13 +374,15 @@ multiple invoices, receipts, etc.). `limit` is clamped to `[1, 50]`
 at the tool boundary. Each retrieved thread drives one LLM call, so
 inflated values fan out into that many model calls.
 
-A thread whose answer was cut off at `INFERENCE_MAX_TOKENS` or was not
-valid JSON is counted as failed, never as having no data. When any
+A thread whose answer was cut off at `INFERENCE_MAX_TOKENS`, or was not
+a JSON object, array of objects, or `null` / `[]`, is counted as
+failed, never as having no data. An answer the provider stopped with a
+content filter or refusal is an error. When any
 thread fails, the records come back as the first content item and a
 second item says how many of the searched threads could not be
 extracted and why; if none were extracted the response says so rather
 than "No structured data … found", which is reserved for every thread
-answering `null`.
+answering `null` or `[]`.
 
 ---
 

@@ -314,7 +314,23 @@ class TestExtractFromEmails:
         text = _all_text(out)
         assert "No structured data matching" not in text
         assert "could not be extracted" in text
-        assert "not valid JSON" in text
+        assert "not a JSON object" in text
+
+    def test_json_of_an_unusable_shape_is_a_failure(self, fake_server, seeded_db):
+        """Review round 1: valid JSON that is neither an object, a list of
+        objects, nor null says nothing about the thread's data."""
+        llm = FakeLocalLLM(complete_responses=['"Acme"', "42", '["a", "b"]'])
+        handler = _handlers(fake_server, seeded_db, llm)["extract_from_emails"]
+        out = asyncio.run(handler(query="invoice OR lunch OR meeting", schema={"vendor": "string"}))
+        text = _all_text(out)
+        assert "No structured data matching" not in text
+        assert "3 of 3 threads could not be extracted" in text
+
+    def test_empty_list_still_means_no_data(self, fake_server, seeded_db):
+        llm = FakeLocalLLM(complete_responses=["[]", "null", "[]"])
+        handler = _handlers(fake_server, seeded_db, llm)["extract_from_emails"]
+        out = asyncio.run(handler(query="invoice OR lunch OR meeting", schema={"vendor": "string"}))
+        assert "No structured data matching the schema found" in _text(out)
 
     def test_truncated_output_is_reported_alongside_the_records(self, fake_server, seeded_db):
         llm = FakeLocalLLM(

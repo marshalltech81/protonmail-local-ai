@@ -414,7 +414,11 @@ def register_search_tools(
                     ("date_to", date_to),
                     ("has_attachments", has_attachments),
                 )
-                if value is not None and value != []
+                # Blank optionals (``""``, ``[]``) are absent, as on the
+                # mailbox-wide path; ``has_attachments=False`` is a filter.
+                if value is not None
+                and value != []
+                and not (isinstance(value, str) and not value.strip())
             ]
             if given:
                 raise ToolError(

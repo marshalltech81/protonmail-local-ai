@@ -526,3 +526,37 @@ class TestTruncatedOutput:
 
         c._backend.client.messages.create = fake_create  # type: ignore[assignment]
         assert asyncio.run(c.complete("sys", "user")) == "done"
+
+
+class TestFilteredOutput:
+    """Review round 1: a provider that stops an answer with a content
+    filter / refusal returned its prefix as a finished answer."""
+
+    def test_openai_content_filter_is_an_error(self):
+        c = InferenceClient.create(mode="openai", base_url="http://x/v1", model="m", api_key="k")
+
+        async def fake_create(**_kwargs):
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(content="The safe part"),
+                        finish_reason="content_filter",
+                    )
+                ]
+            )
+
+        c._backend.client.chat.completions.create = fake_create  # type: ignore[assignment]
+        with pytest.raises(RuntimeError, match="content filter"):
+            asyncio.run(c.complete("sys", "user"))
+
+    def test_anthropic_refusal_is_an_error(self):
+        c = InferenceClient.create(mode="anthropic", base_url="", model="m", api_key="k")
+
+        async def fake_create(**_kwargs):
+            return SimpleNamespace(
+                content=[SimpleNamespace(type="text", text="I can")], stop_reason="refusal"
+            )
+
+        c._backend.client.messages.create = fake_create  # type: ignore[assignment]
+        with pytest.raises(RuntimeError, match="refused"):
+            asyncio.run(c.complete("sys", "user"))

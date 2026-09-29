@@ -466,6 +466,11 @@ document no longer hides other matches (a MATERIALIZED CTE, since
 `bm25()` is not allowed in a grouped query). `get_evidence` rejects
 `thread_id` combined with thread-selecting filters (#219) instead of
 silently ignoring them. No schema change; `make baseline` unchanged.
+Review round 1 (Codex): valid JSON of another shape (a string, a
+number, a list of non-objects) now counts as a failed extraction;
+blank optional filters (`from_addr=""`) are absent on the thread-scoped
+path, as on the mailbox-wide one; and an OpenAI `content_filter` or
+Anthropic `refusal` stop is an error rather than a finished answer.
 
 ### 2026-09-28 — Subject fallback needs a shared correspondent pair (#205)
 

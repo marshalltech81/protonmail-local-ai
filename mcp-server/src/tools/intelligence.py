@@ -943,8 +943,9 @@ def register_intelligence_tools(
             schema_str = json.dumps(schema, indent=2)
             extracted_records = []
             # Threads whose answer says nothing about their data: cut off
-            # at max_tokens, or not JSON. Counted apart from a valid
-            # ``null`` so a failure is never reported as "no data".
+            # at max_tokens, or not a JSON object / array of objects.
+            # Counted apart from a valid ``null`` (or ``[]``) so a failure
+            # is never reported as "no data".
             truncated = 0
             unparseable = 0
 
@@ -981,10 +982,16 @@ def register_intelligence_tools(
                 # array path raised ``TypeError`` on the dict assignment
                 # and aborted the entire tool call instead of skipping
                 # the thread.
+                if record is None or record == []:
+                    continue  # the model's explicit "no relevant data"
                 items = record if isinstance(record, list) else [record]
-                for item in items:
-                    if not isinstance(item, dict):
-                        continue
+                records = [item for item in items if isinstance(item, dict)]
+                if not records:
+                    # Valid JSON of another shape (a string, a number, a
+                    # list of non-objects) is no answer about the data.
+                    unparseable += 1
+                    continue
+                for item in records:
                     item["_source_thread"] = thread.subject
                     item["_date"] = thread.date_last.strftime("%Y-%m-%d")
                     extracted_records.append(item)
@@ -995,7 +1002,10 @@ def register_intelligence_tools(
                 if truncated:
                     reasons.append(f"{truncated} cut off at the INFERENCE_MAX_TOKENS limit")
                 if unparseable:
-                    reasons.append(f"{unparseable} returned output that was not valid JSON")
+                    reasons.append(
+                        f"{unparseable} returned output that was not a JSON object, "
+                        "array of objects, or null"
+                    )
                 notice = (
                     f"Incomplete: {failed} of {len(results)} threads could not be extracted "
                     f"({'; '.join(reasons)}), so any matching data in them is missing."

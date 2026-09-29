@@ -179,8 +179,15 @@ class _OpenAIBackend:
         if not resp.choices:
             raise RuntimeError("Inference provider returned no choices (mode=openai)")
         content = resp.choices[0].message.content
-        if getattr(resp.choices[0], "finish_reason", None) == "length":
+        finish_reason = getattr(resp.choices[0], "finish_reason", None)
+        if finish_reason == "length":
             raise InferenceTruncatedError(content or "")
+        if finish_reason == "content_filter":
+            # The provider stopped the answer part-way; its prefix must
+            # not pass as a finished answer.
+            raise RuntimeError(
+                "Inference provider stopped the answer with a content filter (mode=openai)"
+            )
         if not content:
             raise RuntimeError("Inference provider returned empty content (mode=openai)")
         return content
@@ -267,8 +274,11 @@ class _AnthropicBackend:
             if isinstance(text, str) and getattr(block, "type", None) == "text":
                 parts.append(text)
         result = "".join(parts)
-        if getattr(resp, "stop_reason", None) == "max_tokens":
+        stop_reason = getattr(resp, "stop_reason", None)
+        if stop_reason == "max_tokens":
             raise InferenceTruncatedError(result)
+        if stop_reason == "refusal":
+            raise RuntimeError("Inference provider refused to answer (mode=anthropic)")
         # An empty result means the response contained no text blocks
         # at all (empty ``content``, or only ``tool_use`` / ``thinking``
         # blocks). Returning "" would let the caller pass a silent blank
