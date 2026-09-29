@@ -318,10 +318,12 @@ content is as private as a credential.
   text sent to it. `safe_provider_exception_text` reduces only status
   errors and otherwise keeps the (secret-redacted) message, so it does
   not satisfy this on its own.
-- Known gaps, tracked in #257: the attachment extractors log filenames
-  and raw parser/OCR exceptions, and the search and intelligence tool
-  handlers log non-status provider exceptions through
-  `safe_provider_exception_text`. Do not add to them.
+- Known gaps are tracked in #257, which holds the full list. Examples:
+  the parser logs a malformed `Date` header verbatim, the attachment
+  pipeline and extractors log filenames and raw parser/OCR exceptions,
+  and the search and intelligence tool handlers log non-status provider
+  exceptions through `safe_provider_exception_text`. Do not add to
+  them, and add any new one you find to #257.
 - Messages built from provider responses use fixed text and counts,
   never the returned values.
 - A validation error quoting a tool argument may be returned to the
