@@ -986,10 +986,13 @@ def register_intelligence_tools(
                     continue  # the model's explicit "no relevant data"
                 items = record if isinstance(record, list) else [record]
                 records = [item for item in items if isinstance(item, dict)]
-                if not records:
-                    # Valid JSON of another shape (a string, a number, a
-                    # list of non-objects) is no answer about the data.
+                if len(records) < len(items):
+                    # Valid JSON of another shape (a string, a number, an
+                    # array entry that is not an object) is no answer
+                    # about the data. Objects in a mixed array are kept,
+                    # but the thread still counts as incompletely read.
                     unparseable += 1
+                if not records:
                     continue
                 for item in records:
                     item["_source_thread"] = thread.subject

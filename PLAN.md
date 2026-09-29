@@ -474,7 +474,8 @@ Anthropic `refusal` stop is an error rather than a finished answer.
 Review round 2: the attachment text lane applies its filters before
 grouping (a filtered search no longer aggregates every matching chunk
 in the mailbox), and an Anthropic `model_context_window_exceeded` stop
-counts as truncation.
+counts as truncation. Round 3: a mixed array's objects are kept but
+the thread counts as incompletely extracted.
 
 ### 2026-09-28 — Subject fallback needs a shared correspondent pair (#205)
 

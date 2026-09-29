@@ -326,6 +326,16 @@ class TestExtractFromEmails:
         assert "No structured data matching" not in text
         assert "3 of 3 threads could not be extracted" in text
 
+    def test_mixed_array_keeps_its_records_and_reports_the_rest(self, fake_server, seeded_db):
+        """Review round 2: non-object entries in an array were dropped
+        silently, so the thread looked fully extracted."""
+        llm = FakeLocalLLM(complete_responses=['[{"vendor": "Acme"}, "Beta"]', "null", "null"])
+        handler = _handlers(fake_server, seeded_db, llm)["extract_from_emails"]
+        out = asyncio.run(handler(query="invoice OR lunch OR meeting", schema={"vendor": "string"}))
+
+        assert [r["vendor"] for r in json.loads(out[0].text)] == ["Acme"]
+        assert "1 of 3 threads could not be extracted" in _all_text(out[1:])
+
     def test_empty_list_still_means_no_data(self, fake_server, seeded_db):
         llm = FakeLocalLLM(complete_responses=["[]", "null", "[]"])
         handler = _handlers(fake_server, seeded_db, llm)["extract_from_emails"]
