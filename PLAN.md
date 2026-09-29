@@ -364,7 +364,7 @@ passthrough in the search and intelligence handlers); AGENTS.md's
    parts (and hash rfc822 attachments by their bytes — every one is
    currently `sha256(b"")`); apply the attachment check to a single-part
    root.
-9. **#231 + #234** multipage TIFF (honour the ignored `max_ocr_pages`),
+9. **Done (#262).** **#231 + #234** multipage TIFF (honour the ignored `max_ocr_pages`),
    UTF-16 BOM / NUL detection. Bump the `image` and `text` modules in
    `EXTRACTOR_VERSIONS` (from item 3; owner approved 2026-09-29) so
    their stale cache rows re-extract. **Land #237 (item 10) first:**
