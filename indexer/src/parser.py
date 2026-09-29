@@ -352,7 +352,7 @@ def _attachment_payload(part: email.message.Message) -> bytes:
     """
     if part.get_content_maintype() == "message" and part.is_multipart():
         nested = part.get_payload()
-        if nested:
+        if isinstance(nested, list) and nested and isinstance(nested[0], email.message.Message):
             try:
                 return nested[0].as_bytes()
             except RecursionError:
@@ -390,7 +390,9 @@ def _extract_body_and_attachments(
                 )
             )
         elif part.is_multipart():
-            stack.extend(reversed(part.get_payload()))
+            children = part.get_payload()
+            if isinstance(children, list):
+                stack.extend(c for c in reversed(children) if isinstance(c, email.message.Message))
         elif ct == "text/html":
             if not html_text:
                 payload = _decoded_payload(part)
