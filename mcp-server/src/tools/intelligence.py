@@ -518,7 +518,8 @@ def _summarize_context(thread: ThreadResult, recent_chunks: list[ChunkResult]) -
     The indexer's ``body_text`` is front-preserved and capped at
     ``THREAD_BODY_TEXT_MAX_TOKENS`` — once a thread crosses the cap its
     newest replies fall off the tail. ``recent_chunks`` (the tail of the
-    chunk store, oldest-first) recovers that lost context.
+    chunk store, oldest-first) recovers that lost context; the tail
+    budget keeps the newest of them.
 
     Both sections are kept (Codex P1): the recent chunks are *appended*
     to ``body_text`` rather than replacing it, so a ``"detailed"`` /
@@ -530,16 +531,42 @@ def _summarize_context(thread: ThreadResult, recent_chunks: list[ChunkResult]) -
     ``[chunk N chars X-Y]`` header.
     """
     body = (thread.body_text or thread.snippet or "")[:_SUMMARIZE_BODY_CHAR_BUDGET]
-    parts: list[str] = []
+    # The tail budget is spent on messages newest-first — the latest
+    # reply is what the tail exists for, and one ordinary chunk can fill
+    # the whole budget — and within a message from its first chunk, where
+    # a reply usually states its answer. A chunk cut to fit keeps its
+    # beginning, with a header stating the chars actually shown.
+    # Everything renders oldest-first.
+    by_message: dict[str, list[ChunkResult]] = {}
+    for chunk in recent_chunks:  # oldest-first, so dict order is too
+        by_message.setdefault(chunk.message_id, []).append(chunk)
+    kept_by_message: list[list[str]] = []
     used = 0
-    for chunk in recent_chunks:
-        header = f"[chunk {chunk.chunk_index} chars {chunk.char_start}-{chunk.char_end}]"
-        remaining = _SUMMARIZE_TAIL_CHAR_BUDGET - used - len(header) - 2  # \n separators
-        if remaining <= 0:
+    exhausted = False
+    for chunks in reversed(list(by_message.values())):
+        kept: list[str] = []
+        for chunk in sorted(chunks, key=lambda c: c.chunk_index):
+            header = f"[chunk {chunk.chunk_index} chars {chunk.char_start}-{chunk.char_end}]"
+            remaining = _SUMMARIZE_TAIL_CHAR_BUDGET - used - len(header) - 2  # \n separators
+            if remaining <= 0:
+                exhausted = True
+                break
+            text = chunk.text
+            if len(text) > remaining:
+                # A smaller end offset never has more digits, so the
+                # header cannot outgrow the budget computed above.
+                text = text[:remaining]
+                header = (
+                    f"[chunk {chunk.chunk_index} chars "
+                    f"{chunk.char_start}-{chunk.char_start + len(text)}]"
+                )
+            kept.append(f"{header}\n{text}")
+            used += len(header) + len(text) + 2
+        if kept:
+            kept_by_message.append(kept)
+        if exhausted:
             break
-        text = chunk.text[:remaining]
-        parts.append(f"{header}\n{text}")
-        used += len(header) + len(text) + 2
+    parts = [part for kept in reversed(kept_by_message) for part in kept]
     if not parts:
         return body
     tail = "\n\n".join(parts)

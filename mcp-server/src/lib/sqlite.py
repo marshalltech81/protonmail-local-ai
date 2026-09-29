@@ -58,6 +58,12 @@ _FILTERED_OVERSAMPLE = 4
 # even on dense matches.
 _CHUNK_LANE_OVERSAMPLE = 10
 
+# sqlite-vec's largest accepted KNN ``k``; a larger one is an error, which
+# the vector lanes catch as "lane unavailable". The fetch windows multiply
+# RERANK_CANDIDATES by filter and chunk oversampling (200 x 4 x 10 = 8000),
+# so both lanes clamp here rather than silently lose the lane.
+_SQLITE_VEC_MAX_K = 4096
+
 
 def _addr_matches(haystack: list[str], query_lower: str) -> bool:
     """True if ``query_lower`` matches an address string in ``haystack``.
@@ -829,14 +835,12 @@ class Database:
             # evidence slice — fixes the "filename match → wrong
             # evidence" gap where the LLM saw body text instead of
             # the attachment the user asked about.
-            attachment_won = self._attachment_won_thread_ids(
-                query_text, wanted, folders, date_from, date_to, has_attachments
-            )
+            matched_attachments = self._matched_attachments(query_text, wanted)
             grouped = self.get_evidence_chunks_for_threads(
                 wanted,
                 query_embedding,
                 per_thread_limit=3,
-                attachment_won_thread_ids=attachment_won,
+                matched_attachments=matched_attachments,
             )
             for result in candidates:
                 result.evidence_chunks = grouped.get(result.thread_id, [])
@@ -1455,39 +1459,45 @@ class Database:
         results = [self._row_to_result(r) for r in rows]
         return self._best_per_thread(results)[:limit]
 
-    def _attachment_won_thread_ids(
-        self,
-        query: str,
-        thread_ids: list[str],
-        folders: list[str] | None,
-        date_from: str | None,
-        date_to: str | None,
-        has_attachments: bool | None,
-    ) -> set[str]:
-        """Return the subset of ``thread_ids`` that match the attachment-FTS lane.
+    def _matched_attachments(self, query: str, thread_ids: list[str]) -> dict[str, list[str]]:
+        """Map each of ``thread_ids`` to the attachments whose filename or
+        MIME type matches ``query``, strongest match first.
 
-        Used by ``hybrid_search(with_evidence=True)`` to mark threads that
-        the attachment filename / MIME index lifted into the result set
-        — so per-thread evidence ranking can privilege attachment chunks
-        for them. Cheap one-shot FTS5 query; falls back to an empty set
-        on any error so the caller's main path is never blocked.
+        The index holds MIME types too and query words are OR'd, so
+        "proposal-quote pdf" matches every PDF; ranking by BM25 keeps the
+        file the query named ahead of the generic hits.
+
+        Used by ``hybrid_search(with_evidence=True)`` so per-thread
+        evidence leads with the specific attachment the query named, not
+        just any attachment in a thread that has one. The candidate
+        threads already passed the search's filters, so none are
+        re-applied. Cheap FTS5 query bounded by the candidates; falls
+        back to an empty map on any error so the caller's main path is
+        never blocked.
         """
-        if not thread_ids:
-            return set()
+        fts_query = _sanitize_fts_query(query)
+        if not thread_ids or not fts_query:
+            return {}
+        placeholders = ",".join(["?"] * len(thread_ids))
+        sql = (
+            "SELECT a.thread_id, a.attachment_id, bm25(attachments_fts) AS score "
+            "FROM attachments_fts "
+            "JOIN attachments a ON attachments_fts.rowid = a.fts_rowid "
+            "WHERE attachments_fts MATCH ? "
+            f"AND a.thread_id IN ({placeholders}) "  # nosec B608
+            "ORDER BY score"
+        )
         try:
-            attachment_hits = self._attachment_keyword_search(
-                query,
-                limit=len(thread_ids) * _CHUNK_LANE_OVERSAMPLE,
-                folders=folders,
-                date_from=date_from,
-                date_to=date_to,
-                has_attachments=has_attachments,
-            )
+            rows = self._fetchall(sql, [fts_query, *thread_ids])
         except sqlite3.Error as e:
-            log.warning("Attachment-won lookup failed; skipping bias: %s", e)
-            return set()
-        candidate_set = set(thread_ids)
-        return {r.thread_id for r in attachment_hits if r.thread_id in candidate_set}
+            log.warning("Attachment match lookup failed; skipping bias: %s", e)
+            return {}
+        matched: dict[str, list[str]] = {}
+        for r in rows:
+            ranked = matched.setdefault(r["thread_id"], [])
+            if r["attachment_id"] not in ranked:
+                ranked.append(r["attachment_id"])
+        return matched
 
     @staticmethod
     def _append_thread_filter_sql(
@@ -1658,7 +1668,7 @@ class Database:
                   AND k = ?
                 ORDER BY v.distance
                 """,
-                (serialized, limit),
+                (serialized, min(limit, _SQLITE_VEC_MAX_K)),
             )
             return [_row_to_chunk_result(r) for r in rows]
         except (sqlite3.Error, ValueError) as e:
@@ -1674,7 +1684,7 @@ class Database:
         thread_ids: list[str],
         embedding: list[float],
         per_thread_limit: int = 3,
-        attachment_won_thread_ids: set[str] | None = None,
+        matched_attachments: dict[str, list[str]] | None = None,
     ) -> dict[str, list[ChunkResult]]:
         """Return up to ``per_thread_limit`` best-matching chunks per thread.
 
@@ -1700,13 +1710,14 @@ class Database:
         this is a small sequential scan and beats N per-thread KNN
         queries on round-trip overhead.
 
-        ``attachment_won_thread_ids``: threads that ``hybrid_search``
-        surfaced via attachment-filename FTS. For those threads,
-        attachment chunks are floated to the front of the per-thread
-        slice so the LLM sees attachment text (the source the user
-        meant) before body text — even when a body chunk has higher
-        dense similarity. Closes the "filename match → wrong evidence"
-        gap in ``ask_mailbox``'s "reads attachment content" promise.
+        ``matched_attachments``: per thread, the attachments whose
+        filename / MIME matched the query, strongest first. Their chunks
+        lead the per-thread slice in that order, then the thread's other
+        attachment chunks,
+        then body chunks — so the LLM sees the document the user named
+        even when a body chunk, or another attachment's chunk, has
+        higher dense similarity. Remembering only the thread let the cap
+        keep unrelated attachments and drop the one that matched.
         """
         if not thread_ids:
             return {}
@@ -1767,18 +1778,22 @@ class Database:
         for r in rows:
             all_chunks[r["thread_id"]].append(_row_to_chunk_result(r))
 
-        attachment_won = attachment_won_thread_ids or set()
+        matched_by_thread = matched_attachments or {}
         grouped: dict[str, list[ChunkResult]] = {}
         for tid, chunks in all_chunks.items():
-            if tid in attachment_won:
-                # Float attachment chunks to the front, preserving
-                # within-group order (already vec_distance ASC). The
-                # query was won by attachment-filename FTS, so the
-                # user's intent is attachment content; surface that
-                # first even when a body chunk dense-scored higher.
-                attachment_chunks = [c for c in chunks if c.attachment_id is not None]
-                body_chunks = [c for c in chunks if c.attachment_id is None]
-                ordered = attachment_chunks + body_chunks
+            matched = matched_by_thread.get(tid)
+            if matched:
+                # Matched attachments by match strength, then other
+                # attachments, then body; the stable sort keeps
+                # vec_distance order within each group.
+                rank = {attachment_id: i for i, attachment_id in enumerate(matched)}
+                others = len(matched)
+                ordered = sorted(
+                    chunks,
+                    key=lambda c: (
+                        rank.get(c.attachment_id, others) if c.attachment_id else others + 1
+                    ),
+                )
             else:
                 ordered = chunks
             grouped[tid] = ordered[:per_thread_limit]
@@ -1871,7 +1886,7 @@ class Database:
                   AND k = ?
                 ORDER BY v.distance
             """,
-                (serialized, limit),
+                (serialized, min(limit, _SQLITE_VEC_MAX_K)),
             )
             # Tag the dense thread lane so RRF fusion can record it as
             # ``thread_vec`` provenance on the surviving thread row.
