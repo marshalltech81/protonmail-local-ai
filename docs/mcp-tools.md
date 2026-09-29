@@ -33,9 +33,10 @@ Lists hold at most 10 entries (recipients per role, References, thread
 participants, attachment senders), each with a full count (`to_count`,
 `references_count`, `participant_count`, `sender_count`, ...). Header
 values past 500 characters (subjects, display names, addresses, reply
-headers, participant and sender strings) are cut with a marker.
-`get_thread` and `query_messages` apply the same cut in their prose, and
-`get_thread` also cuts bodies. IDs are never cut, since a shortened ID
+headers, participant and sender strings, attachment filenames and MIME
+types) are cut with a marker. Every tool applies the same cut in its
+prose, the intelligence tools apply it to the headers they send to the
+model, and `get_thread` also cuts bodies. IDs are never cut, since a shortened ID
 would not chain; `get_thread` states the thread ID once rather than on
 every message row. `get_message` returns full headers and the full body.
 
