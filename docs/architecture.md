@@ -715,8 +715,11 @@ eventually rather than omitted until the next container restart.
 When deletion reconciliation is enabled, every enqueue path — the
 startup scan, the periodic rescan, the zero-vector recovery sweep, and
 the watchdog's `on_created` / new-delivery `on_moved` branches — skips
-`T`-flagged files, and the drain drops a claimed job whose file has been
-`T`-flagged since it was queued (the reaper owns that message). A reaped message's `.eml` stays on disk under the default
+`T`-flagged files, and the drain never indexes a claimed job whose file
+has been `T`-flagged since it was queued (the reaper owns that message):
+a message still in the index keeps its job parked, which the reap
+deletes or, if mbsync clears the flag first, the rename moves back to the
+live path; a trashed file never indexed has its job dropped. A reaped message's `.eml` stays on disk under the default
 `INDEXER_UNLINK_ON_REAP=false` and is no longer indexed or queued, so
 treating it as undiscovered mail would resurrect it into search (and
 the next sweep would start a fresh grace window). If mbsync later

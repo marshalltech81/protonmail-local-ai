@@ -687,6 +687,9 @@ class _BatchedMsg:
 # Unreadable-file handoff (see ``_phase1_commit_thread``): retry every
 # minute, for up to a day after the job was enqueued.
 PERMISSION_DEFER_SECS = 60
+# How long a job for a T-flagged, still-indexed file is parked while
+# deletion reconciliation decides its message (see ``_drain_queue_batched``).
+TRASHED_DEFER_SECS = 60 * 60
 PERMISSION_DEFER_WINDOW_SECS = 24 * 60 * 60
 
 
@@ -1331,9 +1334,13 @@ def _drain_queue_batched(
     refresh instead of starving them on a long burst.
 
     ``skip_trashed`` (set whenever deletion reconciliation is enabled;
-    see ``_enqueue_unindexed_messages``) drops a claimed job whose file
-    is T-flagged instead of indexing it: the reconciler owns that
-    message now, and indexing it would undo or outlive its reap.
+    see ``_enqueue_unindexed_messages``) never indexes a claimed job
+    whose file is T-flagged: the reconciler owns that message now, and
+    indexing it would outlive its reap. The job of a message still in
+    the index is parked without spending an attempt: the reap deletes it
+    with the message's rows, or, if mbsync clears the flag first, the
+    rename moves it to the live path where it runs. A trashed file that
+    was never indexed has nothing to keep, so its job is dropped.
 
     Failure isolation:
 
@@ -1379,7 +1386,16 @@ def _drain_queue_batched(
         batch: list[_BatchedMsg] = []
         for row in rows:
             if skip_trashed and is_trashed(row["filepath"]):
-                queue.mark_skipped(row["filepath"], reason="trashed")
+                if db.find_message_entry_by_filepath(row["filepath"]) is None:
+                    queue.mark_skipped(row["filepath"], reason="trashed")
+                else:
+                    queue.defer(
+                        row["filepath"],
+                        stage="trashed",
+                        error="file is T-flagged; parked until reaped or restored",
+                        error_class=ERROR_CLASS_RETRYABLE,
+                        delay_seconds=TRASHED_DEFER_SECS,
+                    )
                 continue
             # Parse and extraction are the steps hostile input can crash
             # or hang, so each runs with its message charged one attempt

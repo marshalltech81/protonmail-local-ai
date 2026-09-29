@@ -4300,6 +4300,48 @@ class TestTrashedFilesWithReconciliation:
         assert not db.is_indexed(str(path))
         assert not queue.has_pending_row(str(path))
 
+    def test_a_tombstoned_message_keeps_its_job_until_restored(self, tmp_path, monkeypatch):
+        """Review round 1: dropping the job of an indexed message lost its
+        only retry. If mbsync clears the T flag before the reap, nothing
+        re-queues a message whose thread already has chunks. The job is
+        parked instead, moves with the rename back, and then runs."""
+        maildir = tmp_path / "maildir"
+        monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
+        monkeypatch.setattr(main, "TRASHED_DEFER_SECS", 0)
+        live = maildir / "INBOX" / "cur" / "1700000000.M1.host:2,S"
+        trashed = maildir / "INBOX" / "cur" / "1700000000.M1.host:2,ST"
+        _write_eml(live, "parked@example.com")
+        db = Database(tmp_path / "mail.db")
+        queue = _make_queue(db)
+
+        def drain():
+            main._drain_queue_batched(
+                db,
+                make_mock_embedder(_UNIT_VECTOR),
+                Threader(db),
+                queue,
+                batch_size=10,
+                timing_aggregator=main.TimingAggregator(window=4),
+                max_passes=1,
+                skip_trashed=True,
+            )
+
+        queue.enqueue(str(live), REASON_INITIAL_SCAN)
+        drain()
+        live.rename(trashed)
+        db.update_filepath(str(live), str(trashed))
+        queue.enqueue(str(trashed), REASON_INITIAL_SCAN)  # e.g. a retry still pending
+
+        drain()
+        job = db._conn.execute("SELECT filepath, attempts FROM indexing_jobs").fetchone()
+        assert (job["filepath"], job["attempts"]) == (str(trashed), 0)
+
+        trashed.rename(live)
+        db.update_filepath(str(trashed), str(live))  # moves the job too
+        drain()
+        assert not queue.has_pending_row(str(live))
+        assert db.is_indexed(str(live))
+
     def test_drain_indexes_a_trashed_file_without_reconciliation(self, tmp_path, monkeypatch):
         # The index is append-only then: trashed mail is indexed as before.
         maildir = tmp_path / "maildir"
