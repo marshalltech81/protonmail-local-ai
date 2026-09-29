@@ -377,7 +377,7 @@ passthrough in the search and intelligence handlers); AGENTS.md's
     pending jobs onto the `T`-flagged path, so an embedder outage past
     the grace period resurrects deleted mail. Delete the job in both
     removal paths; skip trashed files at drain time.
-12. **#227 + #240** mbsync: functions called under `if` run without
+12. **Done (#264).** **#227 + #240** mbsync: functions called under `if` run without
     errexit, so a failed `chmod` / fingerprint write still reports
     success. Check each step; write the pin via temp file + `mv`.
 13. **#242** (**owner decision**) no non-interactive way to tell an
