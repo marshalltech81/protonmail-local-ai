@@ -418,7 +418,8 @@ The indexer ships an opt-in reconciler
    if mbsync un-flags the file on a later pull.
 2. **Reap** — after a configurable grace window
    (`INDEXER_DELETION_GRACE_DAYS`, default 7 days) the reaper removes the
-   reaped message's rows from `message_thread_map` / `indexed_files`, and
+   reaped message's rows from `message_thread_map` / `indexed_files` and
+   any indexing job still queued for its file (in the same transaction), and
    either rebuilds the parent thread from the surviving messages on disk
    (re-parsed, re-embedded) or deletes the thread entirely when nothing
    remains. Embedding-endpoint failures during rebuild (operator-supplied
@@ -712,9 +713,10 @@ while the observer was not running — is therefore indexed
 eventually rather than omitted until the next container restart.
 
 When deletion reconciliation is enabled, every enqueue path — the
-startup scan, the periodic rescan, and the watchdog's
-`on_created` / new-delivery `on_moved` branches — skips `T`-flagged
-files. A reaped message's `.eml` stays on disk under the default
+startup scan, the periodic rescan, the zero-vector recovery sweep, and
+the watchdog's `on_created` / new-delivery `on_moved` branches — skips
+`T`-flagged files, and the drain drops a claimed job whose file has been
+`T`-flagged since it was queued (the reaper owns that message). A reaped message's `.eml` stays on disk under the default
 `INDEXER_UNLINK_ON_REAP=false` and is no longer indexed or queued, so
 treating it as undiscovered mail would resurrect it into search (and
 the next sweep would start a fresh grace window). If mbsync later

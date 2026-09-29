@@ -1304,6 +1304,7 @@ def _drain_queue_batched(
     timing_aggregator: TimingAggregator,
     max_passes: int | None = None,
     breaker: _EmbedOutageBreaker | None = None,
+    skip_trashed: bool = False,
 ) -> int:
     """Drain the queue in two-phase batches.
 
@@ -1328,6 +1329,11 @@ def _drain_queue_batched(
     the main loop pass ``max_passes=1`` so each tick interleaves
     cleanly with the reconciler sweep, WAL checkpoint, and health-file
     refresh instead of starving them on a long burst.
+
+    ``skip_trashed`` (set whenever deletion reconciliation is enabled;
+    see ``_enqueue_unindexed_messages``) drops a claimed job whose file
+    is T-flagged instead of indexing it: the reconciler owns that
+    message now, and indexing it would undo or outlive its reap.
 
     Failure isolation:
 
@@ -1372,6 +1378,9 @@ def _drain_queue_batched(
             rows = interrupted[:1]
         batch: list[_BatchedMsg] = []
         for row in rows:
+            if skip_trashed and is_trashed(row["filepath"]):
+                queue.mark_skipped(row["filepath"], reason="trashed")
+                continue
             # Parse and extraction are the steps hostile input can crash
             # or hang, so each runs with its message charged one attempt
             # (see ``IndexingQueue.begin_attempt``). The refund is not in
@@ -1508,7 +1517,11 @@ def _drain_queue_batched(
 
 
 def _recover_zero_vector_threads(
-    db: Database, queue: IndexingQueue, *, resurrect_dead: bool = False
+    db: Database,
+    queue: IndexingQueue,
+    *,
+    resurrect_dead: bool = False,
+    skip_trashed: bool = False,
 ) -> int:
     """Re-enqueue messages stuck on chunkless zero-vector threads.
 
@@ -1554,7 +1567,8 @@ def _recover_zero_vector_threads(
 
     Skips files that already have a 'queued' row (active retry
     cascade in flight; clobbering its row would reset the attempts
-    counter mid-cascade).
+    counter mid-cascade), and with ``skip_trashed`` (deletion
+    reconciliation enabled) T-flagged files, which the reaper owns.
 
     Returns the number of files re-enqueued for visibility in logs.
     """
@@ -1566,6 +1580,8 @@ def _recover_zero_vector_threads(
     skipped_pending = 0
     skipped_dead = 0
     for filepath in candidates:
+        if skip_trashed and is_trashed(filepath):
+            continue
         if queue.has_pending_row(filepath):
             skipped_pending += 1
             continue
@@ -1757,7 +1773,7 @@ def initial_index(
     # ``_recover_zero_vector_threads`` for the rationale and the
     # ``resurrect_dead=True`` opt-in path. Run BEFORE the drain so
     # recovery rows ride the same batched-index pass as fresh enqueues.
-    _recover_zero_vector_threads(db, queue)
+    _recover_zero_vector_threads(db, queue, skip_trashed=skip_trashed)
     # Messages whose attachments an extractor fix would now read
     # differently; re-queued once per version bump.
     _requeue_stale_extractions(db, queue)
@@ -1775,6 +1791,7 @@ def initial_index(
         batch_size=INITIAL_INDEX_BATCH_SIZE,
         timing_aggregator=timing_aggregator,
         breaker=breaker,
+        skip_trashed=skip_trashed,
     )
     # Always emit a final summary at the end of the initial scan, even
     # if the count was not a multiple of ``TIMING_LOG_EVERY`` — the
@@ -1966,6 +1983,7 @@ def main():
                     timing_aggregator=timing_aggregator,
                     max_passes=1,
                     breaker=breaker,
+                    skip_trashed=reconciler is not None,
                 )
                 drained_since_log += drained
                 if drained_since_log >= TIMING_LOG_EVERY:
@@ -2006,7 +2024,7 @@ def main():
             # watchdog event was missed still gets indexed eventually.
             if now - last_recovery_sweep >= RECOVERY_SWEEP_INTERVAL_SECS:
                 try:
-                    _recover_zero_vector_threads(db, queue)
+                    _recover_zero_vector_threads(db, queue, skip_trashed=reconciler is not None)
                 except Exception as e:
                     log.error("periodic recovery sweep failed: %s", e)
                 try:

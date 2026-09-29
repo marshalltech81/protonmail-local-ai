@@ -350,6 +350,52 @@ class TestReap:
         assert db.count_total_messages() == 0
         assert db.count_pending_deletions() == 0
 
+    def test_full_reap_removes_the_pending_job(self, db, threader, reconciler, maildir):
+        """#244: a job still queued for the message (an embedder outage
+        past the grace window) was left behind, and draining it later
+        re-indexed the reaped message from the kept .eml."""
+        from src.queue import REASON_INITIAL_SCAN, IndexingQueue
+
+        path = maildir / "1700000000.M1.host:2,S"
+        _write_eml(path, "queued@example.com")
+        _index(path, db, threader)
+        queue = IndexingQueue(db)
+        queue.enqueue(str(path), REASON_INITIAL_SCAN)
+        trashed = maildir / "1700000000.M1.host:2,ST"
+        path.rename(trashed)
+        reconciler.sweep()  # moves the job onto the trashed path
+        assert queue.has_pending_row(str(trashed))
+
+        assert reconciler.reap()["threads_reaped"] == 1
+        assert not queue.has_pending_row(str(trashed))
+        assert queue.stats().get("queued", 0) == 0
+
+    def test_partial_reap_removes_only_the_reaped_job(self, db, threader, reconciler, maildir):
+        from src.queue import REASON_INITIAL_SCAN, IndexingQueue
+
+        orig = maildir / "1700000000.M1.host:2,S"
+        _write_eml(orig, "orig@example.com", subject="Budget")
+        _index(orig, db, threader)
+        reply = maildir / "1700000001.M2.host:2,S"
+        _write_eml(
+            reply,
+            "reply@example.com",
+            subject="Re: Budget",
+            in_reply_to="orig@example.com",
+            date=datetime(2024, 2, 1, 12, 0, tzinfo=UTC),
+        )
+        _index(reply, db, threader)
+        queue = IndexingQueue(db)
+        queue.enqueue(str(orig), REASON_INITIAL_SCAN)
+        queue.enqueue(str(reply), REASON_INITIAL_SCAN)
+        trashed = maildir / "1700000000.M1.host:2,ST"
+        orig.rename(trashed)
+        reconciler.sweep()
+
+        assert reconciler.reap()["threads_rebuilt"] == 1
+        assert not queue.has_pending_row(str(trashed))
+        assert queue.has_pending_row(str(reply))
+
     def test_rebuild_when_thread_has_survivors(self, db, threader, embedder, reconciler, maildir):
         # Two messages in one thread; tombstone the original, keep the reply.
         orig_path = maildir / "1700000000.M1.host:2,S"

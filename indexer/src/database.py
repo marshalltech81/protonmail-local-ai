@@ -2225,6 +2225,9 @@ class Database:
             cur.execute("DELETE FROM pending_deletions WHERE thread_id = ?", (thread_id,))
             for fp in filepaths:
                 cur.execute("DELETE FROM indexed_files WHERE filepath = ?", (fp,))
+                # A job still queued for the file (an embedder outage past
+                # the grace window) would re-index it from the kept .eml.
+                cur.execute("DELETE FROM indexing_jobs WHERE filepath = ?", (fp,))
             self._conn.commit()
         except Exception:
             self._conn.rollback()
@@ -2394,4 +2397,7 @@ class Database:
         cur.execute("DELETE FROM message_thread_map WHERE message_id = ?", (message_id,))
         cur.execute("DELETE FROM indexed_files WHERE filepath = ?", (filepath,))
         cur.execute("DELETE FROM pending_deletions WHERE filepath = ?", (filepath,))
+        # A job still queued for the file would re-index it from the kept
+        # .eml (see ``delete_thread_completely``).
+        cur.execute("DELETE FROM indexing_jobs WHERE filepath = ?", (filepath,))
         return filepath
