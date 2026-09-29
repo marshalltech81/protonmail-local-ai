@@ -303,15 +303,25 @@ content is as private as a credential.
 ### Keep mailbox content out of logs and errors
 
 - Never write mailbox content (bodies, subjects, names, addresses,
-  attachment text), provider response fields, or tool arguments to
-  logs, `indexing_jobs.last_error`, or exception messages that reach
-  them. The credential redaction rules above do not cover this: the
-  text is arbitrary, not a known secret.
-- Provider and SDK errors are logged as type plus status code only
-  (`scrub_embed_error`, `safe_provider_exception_text`); any other
-  exception from a provider call is logged as its type alone.
-  Validation and parse errors quote the values they reject, and a
-  provider's response can echo the text sent to it.
+  attachment filenames and text), provider response fields, or
+  content-bearing tool-argument values to logs,
+  `indexing_jobs.last_error`, or exception messages that reach them.
+  The credential redaction rules above do not cover this: the text is
+  arbitrary, not a known secret. Validated non-sensitive tool options
+  (the enums, numbers and booleans allowlisted in
+  `mcp-server/src/lib/security.py` `_LOGGABLE_TOOL_PARAMS`) may be
+  logged; `log_tool_call` withholds everything else.
+- At a provider-call boundary, log an SDK status error as its type plus
+  status code, and any other exception as its type alone, as
+  `scrub_embed_error` and the reranker do. Validation and parse errors
+  quote the values they reject, and a provider's response can echo the
+  text sent to it. `safe_provider_exception_text` reduces only status
+  errors and otherwise keeps the (secret-redacted) message, so it does
+  not satisfy this on its own.
+- Known gaps, tracked in #257: the attachment extractors log filenames
+  and raw parser/OCR exceptions, and the search and intelligence tool
+  handlers log non-status provider exceptions through
+  `safe_provider_exception_text`. Do not add to them.
 - Messages built from provider responses use fixed text and counts,
   never the returned values.
 - A validation error quoting a tool argument may be returned to the
