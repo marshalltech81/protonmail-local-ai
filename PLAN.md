@@ -257,6 +257,84 @@ knowledge-base poisoning (a crafted email minting a `decision` row
 every future brief cites). The mailbox contains adversarial-capable
 input by definition.
 
+## Open review findings (next session starts here)
+
+Codex filed code-review findings as GitHub issues on 2026-09-28. Many
+break the Phase 0 exit criterion (a source must reach one visible
+terminal state) or the Phase 1 truthful-contract criterion, so they
+come before Phase 2 work. The first batch (#202–#223) is done: 18 of 22
+closed in PRs #229, #236, #241, #246, #247, #248, #249 (see Recently
+Completed).
+
+How the first batch was worked, and what to repeat:
+
+1. **Verify before fixing.** Parallel agents, one per code area, checked
+   every claim against current `main`. Every issue was real, but severity
+   and likelihood were often misjudged (#203 and #204 far more likely
+   than stated; #217 overrated; #202 overstated for a single sheet).
+2. **Batch by area.** Small PRs grouped by code area, with one test-first
+   commit per issue and a `Fixes #N` line per issue so a merge closes
+   it. Behaviour-changing or schema-adjacent fixes get their own PR.
+3. **Expect Codex rounds.** Every PR took 1–5 rounds, and later rounds
+   found gaps in the fixes themselves. Record each round in the PR body
+   and PLAN, and resolve threads only once fixed or deferred by the owner.
+
+### Carried over from the first batch
+
+- **#217 Message-ID conflicts** — split out of #246 after two review
+  rounds showed it needs a design. The earlier attempt is on the pushed
+  branch `fix/indexer-message-id-conflicts` (head `d479363`, based on a
+  pre-#246 `main`, so rebase before reuse); PR #246's description lists
+  every finding it must address:
+  - fail closed when the recorded original is unreadable
+  - compare full attachment metadata, not only content hashes
+  - replace rather than merge on takeover: remove the old message and
+    rebuild its thread first
+  - re-check a conflict only when the original disappears, not on every
+    walk
+  - verify source identity before a known Message-ID keeps its thread
+    (the #246 round-4 P3)
+  - owner decision pending: which claimant wins; the first-arrival
+    spoofing risk (the #246 round-1 P3)
+
+  Likely needs a schema change (store both claimants), so land it with
+  the Phase 2 migration and reindex. That reindex also repairs databases
+  already damaged by #204 and #205.
+- **#208 chunk overlap exceeds `max_tokens`** — harmless at default
+  settings; land it with Phase 2 item 4 (chunk `kind` tags), which
+  rewrites the chunker and changes chunk IDs anyway.
+- **#209 single-part MIME attachment decoded as body**, **#210 stale
+  unsupported-extraction cache entry** — low frequency, about 10 and 5
+  lines; fix them when next in `parser.py` / `attachment_indexing.py`,
+  or together as one small PR.
+
+### Second batch (#224–#245) — not yet verified
+
+Filed later on 2026-09-28. Triage first, as above: verdict, realistic
+likelihood and plan fit, then a PR grouping. Grouped by area:
+
+- **Indexer extraction and parsing:** #228 (P1) DOCX merged-cell spans
+  bypass extraction work limits; #239 (P1) reply-attribution regexes are
+  quadratic before chunking; #230 an attached message can replace the
+  parent's indexed body; #231 multipage TIFF indexed from page 1 only;
+  #234 UTF-16 text attachments cached as successful with their text lost;
+  #226 DOCX nested and header/footer tables skipped; #237 identical
+  attachment payloads OCR'd again within a batch.
+- **Indexer queue and data integrity:** #232 non-finite embedding values
+  committed, breaking semantic search; #244 pending retries recreate mail
+  after deletion reconciliation; #224 malformed provider responses leak
+  mailbox content into logs and job errors.
+- **MCP server:** #243 unbounded headers bypass response and context
+  limits (overlaps the `get_message` / ID-length backlog items below);
+  #233 a malformed stored From header crashes sender-filtered search;
+  #225 invalid reranker indices erase or duplicate results; #238 invalid
+  date filters leak withheld tool input into logs.
+- **mbsync and Bridge:** #227 a sync is recorded as successful when
+  permission repair fails; #240 cert pinning succeeds when the
+  fingerprint cannot be saved; #242 retrying an unfinished first-run
+  login starts Bridge without the interactive CLI; #245 existing Bridge
+  vaults keep automatic updates despite the patch.
+
 ## Maintenance backlog (small, ongoing)
 
 - consolidate `BRIDGE_VERSION` to a single source of truth
