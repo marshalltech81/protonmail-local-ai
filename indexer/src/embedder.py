@@ -454,6 +454,14 @@ class OpenAIEmbedder:
                 f"for {len(texts)} inputs ({self.base_url}, model={self.model!r})"
             )
         data.sort(key=lambda d: d.index)
+        vectors = [list(d.embedding) for d in data]
+        # sqlite-vec stores NaN / inf, and such a row breaks semantic
+        # search, so reject the batch rather than commit it (#232).
+        if not all(math.isfinite(x) for vec in vectors for x in vec):
+            raise EmbedResponseError(
+                f"embedder returned non-finite vector values for {len(texts)} inputs "
+                f"({self.base_url}, model={self.model!r})"
+            )
         # Normalize raw provider output here so chunk vectors land
         # unit-normed regardless of provider. The DB write boundary
         # in ``database.py`` also normalizes at ``upsert_thread`` /
@@ -467,4 +475,4 @@ class OpenAIEmbedder:
         # holds end-to-end. ``l2_normalize`` short-circuits
         # already-unit-norm inputs, so this is a no-op against
         # Qwen3-Embedding-8B.
-        return [l2_normalize(list(d.embedding)) for d in data]
+        return [l2_normalize(vec) for vec in vectors]

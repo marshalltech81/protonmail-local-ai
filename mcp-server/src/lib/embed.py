@@ -11,6 +11,8 @@ etc.) target the OpenAI SDK as their reference client by design, so
 pointing the SDK at them via ``base_url`` is the supported path.
 """
 
+import math
+
 # Per-call HTTP deadline for embed. A single short string through
 # Qwen3-Embedding-8B runs sub-second steady-state; cold-start (first
 # call after model load) can take a few seconds. 60 s is generous
@@ -144,5 +146,12 @@ async def embed_query(client, text: str, expected_dim: int | None) -> list[float
             f"index expects {expected_dim}. Check that EMBED_BASE_URL="
             f"{client.base_url!r} and EMBED_MODEL={client.model!r} match "
             "the embedder the indexer used."
+        )
+    # A NaN query vector gets a NULL distance to every stored row, so
+    # semantic search would silently return nothing (#232).
+    if not all(math.isfinite(x) for x in vector):
+        raise ValueError(
+            f"Embedding provider returned non-finite values. Check EMBED_BASE_URL="
+            f"{client.base_url!r} and EMBED_MODEL={client.model!r}."
         )
     return vector

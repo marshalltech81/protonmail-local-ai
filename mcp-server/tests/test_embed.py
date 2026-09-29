@@ -180,3 +180,11 @@ class TestEmbedQueryDimValidation:
         assert "4" in msg
         assert "EMBED_BASE_URL" in msg or "http://wrong-provider/v1" in msg
         assert "EMBED_MODEL" in msg or "other-embed-model" in msg
+
+    @pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+    def test_raises_on_non_finite_values(self, bad):
+        # A NaN query vector gets a NULL distance to every stored row,
+        # so semantic search would silently return nothing (#232).
+        stub = _StubEmbed([0.1, bad, 0.3, 0.4])
+        with pytest.raises(ValueError, match="non-finite"):
+            asyncio.run(embed_query(stub, "query", expected_dim=4))

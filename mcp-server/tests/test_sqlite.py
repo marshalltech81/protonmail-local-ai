@@ -1267,6 +1267,50 @@ class TestChunkVectorSearch:
         assert empty_db._chunk_vector_search([1.0, 0.0, 0.0, 0.0], limit=5) == []
 
 
+class TestNonFiniteStoredVectors:
+    """A NaN vector stored before the indexer rejected them (#232) gets a
+    NULL distance from sqlite-vec. It must be skipped, not crash the
+    thread lane or rank as a perfect match in the chunk lanes."""
+
+    @staticmethod
+    def _poison(db: Database) -> None:
+        import sqlite3
+
+        import sqlite_vec
+
+        nan = sqlite_vec.serialize_float32([float("nan"), 0.0, 0.0, 0.0])
+        conn = sqlite3.connect(db.path)
+        conn.enable_load_extension(True)
+        sqlite_vec.load(conn)
+        conn.execute("UPDATE threads_vec SET embedding = ? WHERE thread_id = 't-alpha'", (nan,))
+        conn.execute(
+            "UPDATE message_chunks_vec SET embedding = ? WHERE chunk_id = 'alpha-c1'", (nan,)
+        )
+        conn.commit()
+        conn.close()
+
+    def test_thread_lane_skips_null_distance(self, chunked_db: Database):
+        self._poison(chunked_db)
+        results = chunked_db.semantic_search([0.0, 1.0, 0.0, 0.0], limit=50)
+        ids = [r.thread_id for r in results]
+        assert "t-beta" in ids
+        assert "t-alpha" not in ids
+
+    def test_chunk_lane_skips_null_distance(self, chunked_db: Database):
+        self._poison(chunked_db)
+        results = chunked_db._chunk_vector_search([0.0, 1.0, 0.0, 0.0], limit=50)
+        assert results
+        assert all(r.chunk_id != "alpha-c1" for r in results)
+
+    def test_evidence_skips_null_distance(self, chunked_db: Database):
+        self._poison(chunked_db)
+        grouped = chunked_db.get_evidence_chunks_for_threads(
+            ["t-alpha", "t-beta"], [0.0, 1.0, 0.0, 0.0]
+        )
+        assert grouped["t-alpha"] == []
+        assert grouped["t-beta"]
+
+
 class TestEvidenceChunksHelper:
     def test_groups_chunks_by_requested_thread_id(self, chunked_db: Database):
         evidence = chunked_db.get_evidence_chunks_for_threads(

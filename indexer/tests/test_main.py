@@ -2995,6 +2995,50 @@ class TestEmbedFailureHandling:
         assert row["last_error_class"] == "permanent_source_failure"
         assert queue.stats() == {"queued": 0, "dead": 1}
 
+    def test_non_finite_vector_is_isolated_and_never_committed(self, tmp_path, monkeypatch):
+        """A 200 response carrying NaN (base64 float32, the SDK's own
+        encoding) must not be stored as a successfully indexed vector,
+        and its batchmates must still be indexed (#232)."""
+        import base64
+        import math
+        import struct
+
+        import httpx2
+
+        db, threader, queue, paths = self._setup(
+            tmp_path,
+            monkeypatch,
+            {"good1": "fine text one", "bad": "POISON input", "good2": "fine text two"},
+        )
+        nan_vec = [float("nan")] + [0.0] * (EMBEDDING_DIM - 1)
+        nan_b64 = base64.b64encode(struct.pack(f"{EMBEDDING_DIM}f", *nan_vec)).decode()
+        unit_b64 = base64.b64encode(struct.pack(f"{EMBEDDING_DIM}f", *_UNIT_VECTOR)).decode()
+
+        def handler(request):
+            inputs = json.loads(request.content)["input"]
+            data = [
+                {
+                    "object": "embedding",
+                    "index": i,
+                    "embedding": nan_b64 if "POISON" in text else unit_b64,
+                }
+                for i, text in enumerate(inputs)
+            ]
+            return httpx2.Response(
+                200,
+                json={"object": "list", "model": "m", "data": data, "usage": {}},
+            )
+
+        self._drain(db, _mock_transport_embedder(handler), threader, queue)
+
+        assert db.get_chunk_ids_for_message("good1@example.com")
+        assert db.get_chunk_ids_for_message("good2@example.com")
+        assert not db.get_chunk_ids_for_message("bad@example.com")
+        assert self._row(db, paths["bad"])["status"] in ("queued", "dead")
+        for row in db._conn.execute("SELECT embedding FROM threads_vec").fetchall():
+            blob = row["embedding"]
+            assert all(math.isfinite(v) for v in struct.unpack(f"{len(blob) // 4}f", blob))
+
     def test_input_that_crashes_provider_spends_attempts_not_the_queue(self, tmp_path, monkeypatch):
         """A provider that 500s on one specific input looks like an
         outage from the batch alone. The probe proves the embedder is
