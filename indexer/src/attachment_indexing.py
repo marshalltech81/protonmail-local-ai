@@ -36,12 +36,14 @@ from .chunker import MessageChunk, chunk_message
 from .database import Database
 from .embedder import EmbeddingBackend
 from .extractors import (
+    SCANNED_PDF_OCR_DISABLED_ERROR,
     STATUS_EMPTY,
     STATUS_FAILED,
     STATUS_SUCCESS,
     STATUS_TOO_LARGE,
     STATUS_UNSUPPORTED,
     ExtractionResult,
+    resolved_extractor_module,
     stale_extractor_module,
 )
 from .extractors import (
@@ -84,7 +86,26 @@ def attachment_occurrence_id(
 _FAILED_CACHE_MAX_AGE = timedelta(days=7)
 
 
-def _cache_hit_short_circuits(cached: dict, ocr_enabled: bool) -> bool:
+def _unsupported_still_holds(error: str | None, attachment: Attachment, ocr_enabled: bool) -> bool:
+    """Whether an ``unsupported`` result also applies to ``attachment``.
+
+    Results are shared by content hash, but dispatch reads each
+    occurrence's MIME type and filename, so the same bytes can arrive as
+    ``.bin`` first and ``.txt`` later (#210). An "OCR disabled" result
+    holds until OCR is turned on for an occurrence that needs OCR: an
+    image, or a PDF when the PDF extractor wrote the result (it found no
+    digital text layer). Any other result holds only while this
+    occurrence selects no extractor.
+    """
+    module = resolved_extractor_module(attachment.content_type, attachment.filename)
+    error = error or ""
+    needs_ocr = module == "image" or (module == "pdf" and error == SCANNED_PDF_OCR_DISABLED_ERROR)
+    if "OCR disabled" in error and needs_ocr:
+        return not ocr_enabled
+    return module is None
+
+
+def _cache_hit_short_circuits(cached: dict, attachment: Attachment, ocr_enabled: bool) -> bool:
     """Return True when ``cached`` should short-circuit re-extraction.
 
     ``STATUS_SUCCESS`` rows with non-empty text are the obvious hit. The
@@ -93,14 +114,13 @@ def _cache_hit_short_circuits(cached: dict, ocr_enabled: bool) -> bool:
 
     * ``STATUS_EMPTY`` — the payload genuinely had no text. Re-running
       will produce the same empty result.
-    * ``STATUS_UNSUPPORTED`` / ``STATUS_TOO_LARGE`` — the dispatch table
-      and size cap are runtime config; if either changed, the operator
-      restarted the indexer and the cache is the wrong place to resolve
-      the version skew (a future schema bump or explicit cache clear
-      handles it). One special case: an image cached as
-      ``unsupported`` because OCR was disabled at the time should be
-      re-run when the operator re-enables it, since the cached row's
-      "OCR disabled" reason is no longer current.
+    * ``STATUS_TOO_LARGE`` — the size cap is runtime config; if it
+      changed, the operator restarted the indexer and the cache is the
+      wrong place to resolve the version skew (a future schema bump or
+      explicit cache clear handles it).
+    * ``STATUS_UNSUPPORTED`` — while ``_unsupported_still_holds`` for
+      this occurrence: re-run once OCR is re-enabled, or when this
+      occurrence's metadata selects an extractor.
     * ``STATUS_FAILED`` — re-run if the cached row is older than
       ``_FAILED_CACHE_MAX_AGE`` (defense against a chronic failure
       burning OCR cycles on every reappearance), otherwise honor the
@@ -114,13 +134,7 @@ def _cache_hit_short_circuits(cached: dict, ocr_enabled: bool) -> bool:
     if status == STATUS_TOO_LARGE:
         return True
     if status == STATUS_UNSUPPORTED:
-        # Re-run an image that was cached as unsupported because OCR was
-        # off at the time, now that OCR is on. Other unsupported reasons
-        # (no extractor for this MIME type) stay cached.
-        error = cached["extraction_error"] or ""
-        if ocr_enabled and "OCR disabled" in error:
-            return False
-        return True
+        return _unsupported_still_holds(cached["extraction_error"], attachment, ocr_enabled)
     if status == STATUS_FAILED:
         cached_at = cached["extracted_at"]
         if not cached_at:
@@ -161,6 +175,10 @@ class AttachmentWritePlan:
     extraction_reused: bool
     chunks: list[MessageChunk] = field(default_factory=list)
     embeddings_by_chunk_id: dict[str, list[float]] = field(default_factory=dict)
+    # Whether a plan without text clears the attachment's stored chunks.
+    # The batched indexer turns it off when another copy of the same bytes
+    # in the message fills that slice.
+    clears_stale_chunks: bool = True
 
 
 def _resolve_extracted_text(
@@ -173,6 +191,7 @@ def _resolve_extracted_text(
     max_extracted_chars: int | None,
     ocr_timeout_seconds: float | None = None,
     max_pdf_pages: int | None = None,
+    batch_extractions: dict[str, ExtractionResult] | None = None,
 ) -> tuple[str | None, str, ExtractionResult | None, bool]:
     """Return ``(text, status, extraction_to_persist, extraction_reused)``.
 
@@ -182,7 +201,22 @@ def _resolve_extracted_text(
     — cache miss, cached non-success, cached row with empty text —
     re-runs the extractor and asks the apply phase to persist the
     fresh result.
+
+    ``batch_extractions`` holds the results extracted earlier in the
+    same batch, by content hash: those are not committed yet, so the
+    cache cannot serve them (#237). A reused one is still returned for
+    persisting, since the message that extracted it may fail to commit.
     """
+    pending = (
+        batch_extractions.get(attachment.content_hash) if batch_extractions is not None else None
+    )
+    if pending is not None and (
+        pending.status != STATUS_UNSUPPORTED
+        or _unsupported_still_holds(pending.error, attachment, ocr_enabled)
+    ):
+        text = pending.text if pending.status == STATUS_SUCCESS else None
+        return text, pending.status, pending, True
+
     cached = db.get_attachment_extraction(attachment.content_hash)
     # A row written by an older version of a since-fixed extractor would
     # otherwise be served forever. Re-run the module that wrote it, from
@@ -193,7 +227,7 @@ def _resolve_extracted_text(
     if (
         cached is not None
         and refresh_module is None
-        and _cache_hit_short_circuits(cached, ocr_enabled)
+        and _cache_hit_short_circuits(cached, attachment, ocr_enabled)
     ):
         # Successful hits return the stored text; non-success hits
         # (empty / unsupported / too_large / failed-within-window)
@@ -214,6 +248,8 @@ def _resolve_extracted_text(
         max_pdf_pages=max_pdf_pages,
         module_override=refresh_module,
     )
+    if batch_extractions is not None:
+        batch_extractions[attachment.content_hash] = result
     text = result.text if result.status == STATUS_SUCCESS else None
     return text, result.status, result, False
 
@@ -234,6 +270,7 @@ def prepare_attachment_writes(
     max_extracted_chars: int | None = None,
     ocr_timeout_seconds: float | None = None,
     max_pdf_pages: int | None = None,
+    batch_extractions: dict[str, ExtractionResult] | None = None,
 ) -> AttachmentWritePlan:
     """Compute everything needed to write one attachment occurrence.
 
@@ -272,6 +309,7 @@ def prepare_attachment_writes(
         max_extracted_chars=max_extracted_chars,
         ocr_timeout_seconds=ocr_timeout_seconds,
         max_pdf_pages=max_pdf_pages,
+        batch_extractions=batch_extractions,
     )
 
     if status != STATUS_SUCCESS or not text:
@@ -399,6 +437,8 @@ def apply_attachment_writes(
         # message's re-extraction may have stamped it current after this
         # message indexed the stale text. Costs one indexed SELECT when
         # there is nothing to delete.
+        if not plan.clears_stale_chunks:
+            return summary
         db.replace_message_chunks(
             message_id=message_id,
             thread_id=thread_id,

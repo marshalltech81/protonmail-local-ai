@@ -304,7 +304,7 @@ How the first batch was worked, and what to repeat:
   settings; land it with Phase 2 item 4 (chunk `kind` tags), which
   rewrites the chunker and changes chunk IDs anyway.
 - **#209 single-part MIME attachment decoded as body**, **#210 stale
-  unsupported-extraction cache entry** — low frequency, about 10 and 5
+  unsupported-extraction cache entry** (#210 done in item 10 below) — low frequency, about 10 and 5
   lines; fix them when next in `parser.py` / `attachment_indexing.py`,
   or together as one small PR.
 
@@ -370,7 +370,7 @@ passthrough in the search and intelligence handlers); AGENTS.md's
    their stale cache rows re-extract. **Land #237 (item 10) first:**
    without a per-batch cache, the startup re-queue re-runs OCR once per
    message carrying the same stale payload in a batch (PR #255 round 2).
-10. **#237 + #210** extraction cache semantics: per-batch cache keyed
+10. **Done (#261).** **#237 + #210** extraction cache semantics: per-batch cache keyed
     by content hash, and re-run an `unsupported` row when an extractor
     now resolves.
 11. **#244** reaping leaves `indexing_jobs`, and the rename fix moves
