@@ -105,6 +105,26 @@ class ExtractionResult:
     error: str | None
 
 
+# Versioned names for extractors whose output changed for the same bytes.
+# The cache stores the versioned name, and a row stamped with an older
+# version of the same extractor is re-extracted instead of being served
+# forever; ``main._requeue_stale_extractions`` also re-queues the
+# messages that carry it at startup. Bump the version whenever a fix
+# changes what an extractor returns.
+#
+# docx@2: reads each cell once, nested tables, and header/footer tables
+# (#226, #228).
+EXTRACTOR_VERSIONS: dict[str, str] = {"docx": "docx@2"}
+
+
+def is_stale_extractor(name: str | None) -> bool:
+    """True when ``name`` is an older version of a versioned extractor."""
+    if not name:
+        return False
+    current = EXTRACTOR_VERSIONS.get(name.partition("@")[0])
+    return current is not None and name != current
+
+
 # Public statuses are exposed as constants so callers can compare without
 # typo-prone string literals scattered across the codebase.
 STATUS_SUCCESS = "success"
@@ -235,7 +255,7 @@ def extract(
         if zip_error is not None:
             return ExtractionResult(
                 status=STATUS_FAILED,
-                extractor=module_name,
+                extractor=EXTRACTOR_VERSIONS.get(module_name, module_name),
                 text=None,
                 error=zip_error,
             )
@@ -271,11 +291,12 @@ def extract(
         )
         return ExtractionResult(
             status=STATUS_FAILED,
-            extractor=module_name,
+            extractor=EXTRACTOR_VERSIONS.get(module_name, module_name),
             text=None,
             error=f"{type(exc).__name__}: {exc}",
         )
 
+    extractor_name = EXTRACTOR_VERSIONS.get(extractor_name, extractor_name)
     if extractor_name == "pdf-ocr-disabled":
         return ExtractionResult(
             status=STATUS_UNSUPPORTED,

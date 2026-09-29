@@ -95,6 +95,7 @@ REASON_ON_MOVED = "on_moved"
 REASON_INITIAL_SCAN = "initial_scan"
 REASON_RECOVERY = "recovery"
 REASON_RESCAN = "rescan"
+REASON_REEXTRACT = "reextract"
 
 # Written by ``begin_attempt`` while a message's step runs and cleared
 # when it returns, so a row still carrying it after a restart was being

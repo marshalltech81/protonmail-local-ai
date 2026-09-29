@@ -86,7 +86,62 @@ def test_successful_cached_extraction_is_reused(tmp_path, monkeypatch):
     )
 
 
+def _process_with_cached_extractor(db, extractor_name, status, text, monkeypatch):
+    attachment = _attachment(b"docx bytes", filename="c.docx", content_type="application/msword")
+    db.store_attachment_extraction(
+        attachment_id=attachment.content_hash,
+        extraction_status=status,
+        extractor=extractor_name,
+        extracted_text=text,
+        extraction_error=None,
+    )
+    extractor = MagicMock(
+        return_value=ExtractionResult(
+            status=STATUS_SUCCESS, extractor="docx@2", text="fresh text", error=None
+        )
+    )
+    monkeypatch.setattr(attachment_indexing, "extract_attachment", extractor)
+    embedder = make_mock_embedder()
+    embedder.embed.return_value = [0.1] * EMBEDDING_DIM
+    process_attachment(
+        message_date="2024-01-01T00:00:00+00:00",
+        attachment=attachment,
+        message_id="message@example.com",
+        thread_id="thread-1",
+        db=db,
+        embedder=embedder,
+        chunk_target_tokens=350,
+        chunk_max_tokens=500,
+        chunk_overlap_tokens=60,
+        ocr_enabled=True,
+        max_bytes=10_000_000,
+        max_ocr_pages=20,
+    )
+    return extractor, db.get_attachment_extraction(attachment.content_hash)
+
+
+def test_cache_row_from_an_older_extractor_version_is_re_extracted(tmp_path, monkeypatch):
+    """Rows the old DOCX walker wrote (unversioned ``docx``) missed nested
+    and header tables and could be ``empty`` (#226). They must not be
+    served forever: an older version is a cache miss."""
+    for status, text in ((STATUS_SUCCESS, "old text"), (STATUS_EMPTY, None)):
+        db = _seed_thread_for_cache_test(tmp_path / status)
+        extractor, row = _process_with_cached_extractor(db, "docx", status, text, monkeypatch)
+        extractor.assert_called_once()
+        assert row["extractor"] == "docx@2"
+        assert row["extracted_text"] == "fresh text"
+
+
+def test_cache_row_from_the_current_extractor_version_is_reused(tmp_path, monkeypatch):
+    db = _seed_thread_for_cache_test(tmp_path)
+    extractor, _ = _process_with_cached_extractor(
+        db, "docx@2", STATUS_SUCCESS, "cached text", monkeypatch
+    )
+    extractor.assert_not_called()
+
+
 def _seed_thread_for_cache_test(tmp_path):
+    tmp_path.mkdir(parents=True, exist_ok=True)
     db = Database(tmp_path / "mail.db")
     db.upsert_thread(
         make_thread(

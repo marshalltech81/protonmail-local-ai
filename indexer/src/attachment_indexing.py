@@ -42,6 +42,7 @@ from .extractors import (
     STATUS_TOO_LARGE,
     STATUS_UNSUPPORTED,
     ExtractionResult,
+    is_stale_extractor,
 )
 from .extractors import (
     extract as extract_attachment,
@@ -105,6 +106,10 @@ def _cache_hit_short_circuits(cached: dict, ocr_enabled: bool) -> bool:
       burning OCR cycles on every reappearance), otherwise honor the
       cache.
     """
+    if is_stale_extractor(cached["extractor"]):
+        # Written by an older version of an extractor that has since
+        # been fixed; its result would be served forever otherwise.
+        return False
     status = cached["extraction_status"]
     if status == STATUS_SUCCESS:
         return bool(cached["extracted_text"])

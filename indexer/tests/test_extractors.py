@@ -364,6 +364,21 @@ class TestDocxExtractor:
         text, _ = docx_extract(self._save(document))
         assert text.index("FIRST") < text.index("SECOND") < text.index("THIRD")
 
+    def test_dispatcher_stamps_the_current_extractor_version(self):
+        # The cache stores this name; bumping the version is what makes
+        # rows written by the old walker re-extract.
+        import docx
+        from src.extractors import extract
+
+        document = docx.Document()
+        document.add_paragraph("versioned")
+        result = extract(
+            content_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            filename="v.docx",
+            payload=self._save(document),
+        )
+        assert result.extractor == "docx@2"
+
 
 class TestXlsxExtractor:
     def test_serializes_each_sheet_with_header_marker(self):

@@ -54,6 +54,7 @@ from .embedder import (
     classify_embed_failure,
     scrub_embed_error,
 )
+from .extractors import is_stale_extractor
 from .maildir import (
     SYNC_STAMP_NAME,
     SyncStamp,
@@ -70,6 +71,7 @@ from .queue import (
     REASON_ON_CREATED,
     REASON_ON_MOVED,
     REASON_RECOVERY,
+    REASON_REEXTRACT,
     REASON_RESCAN,
     IndexingQueue,
 )
@@ -1593,6 +1595,33 @@ def _recover_zero_vector_threads(
     return re_enqueued
 
 
+def _requeue_stale_extractions(db: Database, queue: IndexingQueue) -> int:
+    """Re-queue messages whose cached attachment extraction came from an
+    older version of an extractor (see ``extractors.EXTRACTOR_VERSIONS``).
+
+    Reprocessing re-extracts the attachment (an old version is a cache
+    miss) and replaces its chunks, and the cache row is rewritten with
+    the current version, so each message is re-queued once. Like the
+    zero-vector recovery sweep, files already queued or dead-lettered
+    are left alone. Returns the number of files re-queued.
+    """
+    stale = [name for name in db.get_extractor_names() if is_stale_extractor(name)]
+    re_enqueued = 0
+    for filepath in db.find_filepaths_with_extractors(stale):
+        if queue.has_pending_row(filepath) or queue.is_dead(filepath):
+            continue
+        queue.enqueue(filepath, REASON_REEXTRACT)
+        re_enqueued += 1
+    if re_enqueued:
+        log.info(
+            "re-queued %d message(s) whose attachments were extracted by an older "
+            "extractor version (%s).",
+            re_enqueued,
+            ", ".join(sorted(stale)),
+        )
+    return re_enqueued
+
+
 def _enqueue_unindexed_messages(
     db: Database,
     queue: IndexingQueue,
@@ -1710,6 +1739,9 @@ def initial_index(
     # ``resurrect_dead=True`` opt-in path. Run BEFORE the drain so
     # recovery rows ride the same batched-index pass as fresh enqueues.
     _recover_zero_vector_threads(db, queue)
+    # Messages whose attachments an extractor fix would now read
+    # differently; re-queued once per version bump.
+    _requeue_stale_extractions(db, queue)
 
     timing_aggregator = TimingAggregator(window=200)
     log.info(
