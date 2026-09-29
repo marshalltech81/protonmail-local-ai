@@ -13,7 +13,7 @@ from mcp.types import TextContent
 from ..lib.embed import embed_query
 from ..lib.inference import InferenceTruncatedError
 from ..lib.security import log_tool_call, safe_provider_exception_text
-from ..lib.sqlite import ChunkResult, ThreadResult
+from ..lib.sqlite import ChunkResult, InvalidFilterError, ThreadResult
 from ..lib.validation import clamp_int
 
 # Number of candidates the summarize_thread fallback pulls from
@@ -764,6 +764,11 @@ def register_intelligence_tools(
 
             return [TextContent(type="text", text=f"{answer}\n\nSources searched:\n{sources}")]
 
+        except InvalidFilterError as e:
+            # The message quotes the rejected value, which log_tool_call
+            # withheld. Return it to the caller; log only the field name.
+            log.warning("ask_mailbox rejected invalid %s", e.field_name)
+            return [TextContent(type="text", text=f"Error: {e}")]
         except Exception as e:
             safe_error = safe_provider_exception_text(e, secret_values)
             log.error("ask_mailbox error: %s", safe_error)
@@ -1057,6 +1062,11 @@ def register_intelligence_tools(
 
             return [TextContent(type="text", text=json.dumps(extracted_records, indent=2))]
 
+        except InvalidFilterError as e:
+            # The message quotes the rejected value, which log_tool_call
+            # withheld. Return it to the caller; log only the field name.
+            log.warning("extract_from_emails rejected invalid %s", e.field_name)
+            return [TextContent(type="text", text=f"Error: {e}")]
         except Exception as e:
             safe_error = safe_provider_exception_text(e, secret_values)
             log.error("extract_from_emails error: %s", safe_error)
