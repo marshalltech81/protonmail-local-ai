@@ -314,10 +314,13 @@ content is as private as a credential.
   `mcp-server/src/lib/security.py` `_LOGGABLE_TOOL_PARAMS`) may be
   logged; `log_tool_call` withholds everything else.
 - At a provider-call boundary, log an SDK status error as its type plus
-  status code, and any other exception as its type alone, as
-  `scrub_embed_error` and the reranker do. Validation and parse errors
-  quote the values they reject, and a provider's response can echo the
-  text sent to it. `safe_provider_exception_text` reduces only status
+  status code. Keep the full text only of exceptions that cannot carry
+  provider or mail data: connection and timeout errors, and our own
+  fixed-message errors such as `EmbedResponseError`. Log anything else
+  (response parsing, validation, conversion) as its type alone, since
+  those errors quote the values they reject and a provider's response
+  can echo the text sent to it. `scrub_embed_error` and the reranker
+  follow this. `safe_provider_exception_text` reduces only status
   errors and otherwise keeps the (secret-redacted) message, so it does
   not satisfy this on its own.
 - Known gaps are tracked in #257, which holds the full list. Examples:
@@ -382,17 +385,18 @@ Examples:
 
 ## Pull Requests and Review
 
-- One test-first commit per issue, with a `Fixes #N` line for each
-  issue the PR closes; behaviour-changing or schema-adjacent fixes get
-  their own PR.
+- When a PR first lands, one test-first commit per issue, with a
+  `Fixes #N` line for each issue the PR closes; behaviour-changing or
+  schema-adjacent fixes get their own PR.
 - Every push starts a Codex code and security review. A round is done
   when Codex's summary comment shows both rows completed on the head
   commit; a 👍 reaction means no findings. Replies you post to review
   threads also count as reviews on the head, so do not use "a review
   exists" as the signal.
-- Verify each finding against the code before agreeing, then fix it
-  test-first in one commit per round and add a "Review round N" section
-  to the PR description.
+- Verify each finding against the code before agreeing. Fix a review
+  round's findings test-first in one commit for that round (they answer
+  the same review, even when they touch different issues), and add a
+  "Review round N" section to the PR description.
 - Resolve a thread only once it is fixed or the owner has deferred it;
   merging is blocked while line threads are open.
 - Merge (squash) only on the owner's explicit go-ahead.
