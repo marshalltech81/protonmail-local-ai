@@ -377,6 +377,13 @@ def extract(
     )
 
 
+def resolves_extractor(content_type: str, filename: str) -> bool:
+    """Whether this metadata selects an extractor module. Dispatch reads
+    the MIME type and filename, not the bytes, so the same bytes can be
+    unsupported under one occurrence and extractable under another."""
+    return _resolve_extractor(content_type, filename)[0] is not None
+
+
 def _resolve_extractor(content_type: str, filename: str) -> tuple[str | None, str]:
     """Return (module_name, dispatch_via) for an attachment.
 

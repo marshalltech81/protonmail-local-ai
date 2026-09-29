@@ -42,6 +42,7 @@ from .extractors import (
     STATUS_TOO_LARGE,
     STATUS_UNSUPPORTED,
     ExtractionResult,
+    resolves_extractor,
     stale_extractor_module,
 )
 from .extractors import (
@@ -84,7 +85,22 @@ def attachment_occurrence_id(
 _FAILED_CACHE_MAX_AGE = timedelta(days=7)
 
 
-def _cache_hit_short_circuits(cached: dict, ocr_enabled: bool) -> bool:
+def _unsupported_still_holds(error: str | None, attachment: Attachment, ocr_enabled: bool) -> bool:
+    """Whether an ``unsupported`` result also applies to ``attachment``.
+
+    An "OCR disabled" result holds until OCR is turned on: a scanned PDF
+    resolves to the PDF extractor either way. Any other ``unsupported``
+    result (no extractor for that MIME type / filename) holds only while
+    this occurrence's metadata also selects no extractor: results are
+    shared by content hash, and the same bytes can arrive as ``.bin``
+    first and ``.txt`` later (#210).
+    """
+    if "OCR disabled" in (error or ""):
+        return not ocr_enabled
+    return not resolves_extractor(attachment.content_type, attachment.filename)
+
+
+def _cache_hit_short_circuits(cached: dict, attachment: Attachment, ocr_enabled: bool) -> bool:
     """Return True when ``cached`` should short-circuit re-extraction.
 
     ``STATUS_SUCCESS`` rows with non-empty text are the obvious hit. The
@@ -93,14 +109,13 @@ def _cache_hit_short_circuits(cached: dict, ocr_enabled: bool) -> bool:
 
     * ``STATUS_EMPTY`` — the payload genuinely had no text. Re-running
       will produce the same empty result.
-    * ``STATUS_UNSUPPORTED`` / ``STATUS_TOO_LARGE`` — the dispatch table
-      and size cap are runtime config; if either changed, the operator
-      restarted the indexer and the cache is the wrong place to resolve
-      the version skew (a future schema bump or explicit cache clear
-      handles it). One special case: an image cached as
-      ``unsupported`` because OCR was disabled at the time should be
-      re-run when the operator re-enables it, since the cached row's
-      "OCR disabled" reason is no longer current.
+    * ``STATUS_TOO_LARGE`` — the size cap is runtime config; if it
+      changed, the operator restarted the indexer and the cache is the
+      wrong place to resolve the version skew (a future schema bump or
+      explicit cache clear handles it).
+    * ``STATUS_UNSUPPORTED`` — while ``_unsupported_still_holds`` for
+      this occurrence: re-run once OCR is re-enabled, or when this
+      occurrence's metadata selects an extractor.
     * ``STATUS_FAILED`` — re-run if the cached row is older than
       ``_FAILED_CACHE_MAX_AGE`` (defense against a chronic failure
       burning OCR cycles on every reappearance), otherwise honor the
@@ -114,13 +129,7 @@ def _cache_hit_short_circuits(cached: dict, ocr_enabled: bool) -> bool:
     if status == STATUS_TOO_LARGE:
         return True
     if status == STATUS_UNSUPPORTED:
-        # Re-run an image that was cached as unsupported because OCR was
-        # off at the time, now that OCR is on. Other unsupported reasons
-        # (no extractor for this MIME type) stay cached.
-        error = cached["extraction_error"] or ""
-        if ocr_enabled and "OCR disabled" in error:
-            return False
-        return True
+        return _unsupported_still_holds(cached["extraction_error"], attachment, ocr_enabled)
     if status == STATUS_FAILED:
         cached_at = cached["extracted_at"]
         if not cached_at:
@@ -193,7 +202,7 @@ def _resolve_extracted_text(
     if (
         cached is not None
         and refresh_module is None
-        and _cache_hit_short_circuits(cached, ocr_enabled)
+        and _cache_hit_short_circuits(cached, attachment, ocr_enabled)
     ):
         # Successful hits return the stored text; non-success hits
         # (empty / unsupported / too_large / failed-within-window)
