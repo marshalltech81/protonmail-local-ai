@@ -18,10 +18,12 @@ from src.embedder import (
     EMBED_FAILURE_INFRASTRUCTURE,
     EMBED_FAILURE_REJECTED_INPUT,
     EMBED_FAILURE_UNCERTAIN,
+    EmbedResponseError,
     OpenAIEmbedder,
     _float_env,
     _is_transient_embed_error,
     classify_embed_failure,
+    scrub_embed_error,
 )
 
 
@@ -216,6 +218,26 @@ class TestOpenAIEmbedder:
         _patch_create(emb, fake_create)
         with pytest.raises(RuntimeError, match="non-contiguous"):
             emb.embed_batch(["a", "b"])
+
+    def test_malformed_indices_are_not_quoted_in_the_error(self):
+        # A 200 response whose ``index`` echoes submitted text must not
+        # carry it into logs or ``indexing_jobs.last_error`` (#224).
+        emb = _make_embedder()
+        marker = "SYNTHETIC_PRIVATE_MAIL"
+        for indices in ([marker], [0, 0], [0, 5]):
+
+            def fake_create(_indices=indices, **_kwargs):
+                return SimpleNamespace(
+                    data=[SimpleNamespace(embedding=[1.0], index=i) for i in _indices],
+                )
+
+            _patch_create(emb, fake_create)
+            with pytest.raises(EmbedResponseError) as exc:
+                emb.embed_batch(["x"] * len(indices))
+            scrubbed = scrub_embed_error(exc.value)
+            assert "EmbedResponseError" in scrubbed
+            assert marker not in scrubbed
+            assert "5" not in str(exc.value)
 
     def test_embed_batch_raises_on_count_mismatch(self):
         emb = _make_embedder()
@@ -501,3 +523,18 @@ class TestClassifyEmbedFailure:
         assert classify_embed_failure(_api_status_error(503)) == EMBED_FAILURE_UNCERTAIN
         assert classify_embed_failure(_api_status_error(409)) == EMBED_FAILURE_UNCERTAIN
         assert classify_embed_failure(RuntimeError("integrity")) == EMBED_FAILURE_UNCERTAIN
+
+
+class TestScrubEmbedError:
+    def test_status_error_keeps_type_and_status_only(self):
+        assert scrub_embed_error(_api_status_error(400)) == "APIStatusError: status=400"
+
+    def test_connection_error_keeps_detail(self):
+        exc = APIConnectionError(request=httpx2.Request("POST", "http://x"))
+        assert "Connection error" in scrub_embed_error(exc)
+
+    def test_other_exceptions_keep_type_only(self):
+        # SDK response parsing (pydantic) and vector conversion errors
+        # can quote response values that echo the submitted text.
+        scrubbed = scrub_embed_error(ValueError("input_value='SYNTHETIC_PRIVATE_MAIL'"))
+        assert scrubbed == "ValueError"
