@@ -518,7 +518,8 @@ def _summarize_context(thread: ThreadResult, recent_chunks: list[ChunkResult]) -
     The indexer's ``body_text`` is front-preserved and capped at
     ``THREAD_BODY_TEXT_MAX_TOKENS`` — once a thread crosses the cap its
     newest replies fall off the tail. ``recent_chunks`` (the tail of the
-    chunk store, oldest-first) recovers that lost context.
+    chunk store, oldest-first) recovers that lost context; the tail
+    budget keeps the newest of them.
 
     Both sections are kept (Codex P1): the recent chunks are *appended*
     to ``body_text`` rather than replacing it, so a ``"detailed"`` /
@@ -530,19 +531,36 @@ def _summarize_context(thread: ThreadResult, recent_chunks: list[ChunkResult]) -
     ``[chunk N chars X-Y]`` header.
     """
     body = (thread.body_text or thread.snippet or "")[:_SUMMARIZE_BODY_CHAR_BUDGET]
+    # The tail budget is spent newest-first — the latest reply is what
+    # the tail exists for, and one ordinary chunk can fill the whole
+    # budget — then rendered oldest-first. A chunk cut to fit keeps its
+    # end (the newer text), and its header states the chars actually
+    # shown.
     parts: list[str] = []
     used = 0
-    for chunk in recent_chunks:
+    for chunk in reversed(recent_chunks):
         header = f"[chunk {chunk.chunk_index} chars {chunk.char_start}-{chunk.char_end}]"
         remaining = _SUMMARIZE_TAIL_CHAR_BUDGET - used - len(header) - 2  # \n separators
         if remaining <= 0:
             break
-        text = chunk.text[:remaining]
+        text = chunk.text
+        if len(text) > remaining:
+            # The rewritten header's start offset can have more digits
+            # than the original's, so size the cut against the longest
+            # header possible (start printed as wide as the end).
+            widest = f"[chunk {chunk.chunk_index} chars {chunk.char_end}-{chunk.char_end}]"
+            remaining = _SUMMARIZE_TAIL_CHAR_BUDGET - used - len(widest) - 2
+            if remaining <= 0:
+                break
+            text = text[-remaining:]
+            header = (
+                f"[chunk {chunk.chunk_index} chars {chunk.char_end - len(text)}-{chunk.char_end}]"
+            )
         parts.append(f"{header}\n{text}")
         used += len(header) + len(text) + 2
     if not parts:
         return body
-    tail = "\n\n".join(parts)
+    tail = "\n\n".join(reversed(parts))
     if not body:
         return tail
     return f"{body}\n\n--- recent messages ---\n{tail}"

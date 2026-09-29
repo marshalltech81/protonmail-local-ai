@@ -223,6 +223,44 @@ class TestSummarizeContext:
         assert "[chunk 2" in out and "[chunk 3" in out
 
 
+class TestSummarizeContextKeepsNewest:
+    def test_a_long_older_chunk_does_not_crowd_out_the_newest(self):
+        """Regression (#214): the tail budget was spent oldest-first, and
+        one ordinary chunk (~4,000 chars at default chunk sizes) filled
+        it, so the newest reply — the one the tail exists for — was the
+        first thing dropped."""
+        r = _result(body_text="body")
+        out = _summarize_context(
+            r,
+            [
+                _chunk("x" * (_SUMMARIZE_TAIL_CHAR_BUDGET + 200), index=6, char_start=0),
+                _chunk("LATEST_DECISION: cancel launch", index=11, char_start=9000),
+            ],
+        )
+        assert "LATEST_DECISION: cancel launch" in out
+
+    def test_kept_chunks_render_oldest_first(self):
+        r = _result(body_text="")
+        out = _summarize_context(
+            r,
+            [
+                _chunk("earlier reply", index=2, char_start=0),
+                _chunk("later reply", index=3, char_start=300),
+            ],
+        )
+        assert out.index("earlier reply") < out.index("later reply")
+
+    def test_a_cut_chunk_keeps_its_newest_text_and_true_offsets(self):
+        r = _result(body_text="")
+        text = "A" * 3000 + "B" * 3000
+        out = _summarize_context(r, [_chunk(text, index=5, char_start=1000)])
+        assert out.endswith("B" * 100)
+        header = out.splitlines()[0]
+        assert header.endswith(f"-{1000 + len(text)}]")
+        kept = len(out) - len(header) - 1
+        assert header == f"[chunk 5 chars {1000 + len(text) - kept}-{1000 + len(text)}]"
+
+
 def _candidate(thread_id: str, subject: str) -> ThreadResult:
     return ThreadResult(
         thread_id=thread_id,
