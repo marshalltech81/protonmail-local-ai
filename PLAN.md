@@ -308,32 +308,67 @@ How the first batch was worked, and what to repeat:
   lines; fix them when next in `parser.py` / `attachment_indexing.py`,
   or together as one small PR.
 
-### Second batch (#224–#245) — not yet verified
+### Second batch (#224–#245) — verified 2026-09-28
 
-Filed later on 2026-09-28. Triage first, as above: verdict, realistic
-likelihood and plan fit, then a PR grouping. Grouped by area:
+Triaged against `d30e500` by four parallel agents; every issue is real
+and most reproduced with synthetic input. PRs in the order to land
+them (one test-first commit per issue, `Fixes #N` per issue):
 
-- **Indexer extraction and parsing:** #228 (P1) DOCX merged-cell spans
-  bypass extraction work limits; #239 (P1) reply-attribution regexes are
-  quadratic before chunking; #230 an attached message can replace the
-  parent's indexed body; #231 multipage TIFF indexed from page 1 only;
-  #234 UTF-16 text attachments cached as successful with their text lost;
-  #226 DOCX nested and header/footer tables skipped; #237 identical
-  attachment payloads OCR'd again within a batch.
-- **Indexer queue and data integrity:** #232 non-finite embedding values
-  committed, breaking semantic search; #244 pending retries recreate mail
-  after deletion reconciliation; #224 malformed provider responses leak
-  mailbox content into logs and job errors.
-- **MCP server:** #243 unbounded headers bypass response and context
-  limits (overlaps the `get_message` / ID-length backlog items below);
-  #233 a malformed stored From header crashes sender-filtered search;
-  #225 invalid reranker indices erase or duplicate results; #238 invalid
-  date filters leak withheld tool input into logs.
-- **mbsync and Bridge:** #227 a sync is recorded as successful when
-  permission repair fails; #240 cert pinning succeeds when the
-  fingerprint cannot be saved; #242 retrying an unfinished first-run
-  login starts Bridge without the interactive CLI; #245 existing Bridge
-  vaults keep automatic updates despite the patch.
+1. **#238** invalid date filters leak withheld input into logs — five
+   handlers logged the `ValueError` quoting the value. Fixed with a
+   dedicated `InvalidFilterError` the handlers log by field name only.
+2. **#239** (P1) reply-attribution regexes are quadratic, and wider than
+   filed: all six languages, and `wrote:` mid-line too. A 1 MB line
+   blocks the worker for minutes. Fix: skip lines over ~500 chars in
+   `_is_reply_header`.
+3. **#228 + #226** (#228 P1) DOCX walker rewrite: iterate serialized cells once
+   (no `gridSpan` expansion), skip vMerge continuations, recurse into
+   nested and header/footer tables via `iter_inner_content()`, with a
+   running character budget.
+4. **#224** malformed 200 provider responses leak mailbox text (embedder
+   index errors reach logs and `indexing_jobs.last_error`; reranker
+   `int()`/`float()` errors reach logs). Fixed-text diagnostics only.
+5. **#232** non-finite embeddings: sqlite-vec stores NaN, KNN returns
+   NULL distances that sort first; thread lane raises on `float(None)`,
+   chunk lane scores them as perfect matches. Reject at the embedder,
+   skip NULL distances in MCP, and a startup sweep
+   (`vec_distance_l2(e, e) IS NULL`) to reset poisoned threads so the
+   zero-vector recovery re-enqueues them. Needs `make baseline`.
+6. **#233 + #225** MCP robustness: guard `parseaddr` in the mcp-server's
+   `canonical_addr` (the indexer copy already does); validate reranker
+   indices (unique, in range) before mutating any candidate.
+7. **#243** header clipping sweep (subject, participant names,
+   attachment filename/MIME, reranker `_candidate_text`). Separate from
+   the `get_message` / ID-length backlog items below.
+8. **#230 + #209** parser MIME traversal: do not descend into attached
+   parts (and hash rfc822 attachments by their bytes — every one is
+   currently `sha256(b"")`); apply the attachment check to a single-part
+   root.
+9. **#231 + #234 + cache versioning** multipage TIFF (honour the
+   ignored `max_ocr_pages`), UTF-16 BOM / NUL detection. **Owner
+   decision:** wrong results are cached by content hash and served
+   forever; recommended fix is a version stamp in the existing
+   `extractor` column (`docx@2`) treated as a miss, plus a one-off
+   re-enqueue of affected messages.
+10. **#237 + #210** extraction cache semantics: per-batch cache keyed
+    by content hash, and re-run an `unsupported` row when an extractor
+    now resolves.
+11. **#244** reaping leaves `indexing_jobs`, and the rename fix moves
+    pending jobs onto the `T`-flagged path, so an embedder outage past
+    the grace period resurrects deleted mail. Delete the job in both
+    removal paths; skip trashed files at drain time.
+12. **#227 + #240** mbsync: functions called under `if` run without
+    errexit, so a failed `chmod` / fingerprint write still reports
+    success. Check each step; write the pin via temp file + `mv`.
+13. **#242** (**owner decision**) no non-interactive way to tell an
+    empty vault from a logged-in one. Recommended: `BRIDGE_FORCE_CLI=true`
+    in `docker-compose.first-run.yml`.
+14. **#245** (**owner decision**) impact is lower than filed: with no
+    launcher a downloaded update is staged in `/data` but never
+    executed; the exposure is unpinned fetches and code on disk. Fix is
+    a fourth patch hunk forcing the `updates.go` gate off (three-layer
+    rule applies); AGENTS.md's "silently bypass" wording should be
+    corrected with it.
 
 ## Maintenance backlog (small, ongoing)
 
