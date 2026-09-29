@@ -204,14 +204,23 @@ relax_new_maildir_perms() {
     # created while the service umask is 077 are also not traversable by
     # the indexer. Re-apply directory execute/read and file read bits after
     # each sync so the indexer reads via "other" permission.
-    find "$MAILDIR_PATH" -type d \! -perm -005 -exec chmod go+rx {} +
-    find "$MAILDIR_PATH" -type f \! -perm -044 -exec chmod go+r {} +
+    #
+    # Runs inside ``run_sync``, an ``if`` condition where errexit is off,
+    # so each step's failure is returned explicitly.
+    find "$MAILDIR_PATH" -type d \! -perm -005 -exec chmod go+rx {} + || return 1
+    find "$MAILDIR_PATH" -type f \! -perm -044 -exec chmod go+r {} + || return 1
 }
 
 run_sync() {
+    # Fails when mbsync or the permission repair fails: a sync whose mail
+    # the indexer cannot read must not be recorded as successful. The
+    # repair runs even after a failed mbsync, for what it did deliver.
     local rc=0
     mbsync -c "$CONFIG_FILE" -a 2>&1 || rc=$?
-    relax_new_maildir_perms
+    if ! relax_new_maildir_perms; then
+        echo ">>> ERROR: could not make new Maildir entries readable to the indexer." >&2
+        return 1
+    fi
     return "$rc"
 }
 

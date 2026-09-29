@@ -118,6 +118,69 @@ failed_rotation_fails_closed_and_keeps_the_old_pin() {
     [[ "$(find "$STATE_DIR" -type f | wc -l)" -eq 1 ]]
 }
 
+# --- run_sync (#227) -------------------------------------------------------
+
+# shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
+sync_setup() {
+    MAILDIR_PATH="$WORK/maildir-$1"
+    CONFIG_FILE="$WORK/mbsyncrc"
+    FIND_CALLS="$WORK/find-calls-$1"
+    mkdir -p "$MAILDIR_PATH"
+    : >"$FIND_CALLS"
+    load relax_new_maildir_perms run_sync
+}
+
+mbsync_ok() { return 0; }
+mbsync_fails() { return 1; }
+
+# shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
+sync_succeeds_when_mbsync_and_repair_succeed() {
+    sync_setup ok
+    mbsync() { mbsync_ok; }
+    find() { printf 'find\n' >>"$FIND_CALLS"; }
+    run_sync
+    [[ "$(wc -l <"$FIND_CALLS")" -eq 2 ]]
+}
+
+# shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
+failed_directory_repair_fails_the_sync() {
+    sync_setup dir-fail
+    mbsync() { mbsync_ok; }
+    find() {
+        printf 'find\n' >>"$FIND_CALLS"
+        [[ "$3" != "d" ]]
+    }
+    if run_sync; then
+        echo "sync reported success although the directory repair failed"
+        return 1
+    fi
+}
+
+# shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
+failed_file_repair_fails_the_sync() {
+    sync_setup file-fail
+    mbsync() { mbsync_ok; }
+    find() {
+        printf 'find\n' >>"$FIND_CALLS"
+        [[ "$3" != "f" ]]
+    }
+    if run_sync; then
+        echo "sync reported success although the file repair failed"
+        return 1
+    fi
+}
+
+# shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
+repair_still_runs_after_a_failed_mbsync() {
+    sync_setup mbsync-fail
+    mbsync() { mbsync_fails; }
+    find() { printf 'find\n' >>"$FIND_CALLS"; }
+    if run_sync; then
+        return 1
+    fi
+    [[ "$(wc -l <"$FIND_CALLS")" -eq 2 ]]
+}
+
 check "first boot pins the fingerprint (mode 600)" first_boot_pins_the_fingerprint
 check "first boot fails closed when the pin cannot be saved" \
     first_boot_fails_closed_when_the_pin_cannot_be_saved
@@ -126,6 +189,12 @@ check "a mismatch is refused without rotation" mismatch_is_refused_without_rotat
 check "rotation replaces the pin" rotation_replaces_the_pin
 check "a failed rotation fails closed and keeps the old pin" \
     failed_rotation_fails_closed_and_keeps_the_old_pin
+check "sync succeeds when mbsync and the repair succeed" \
+    sync_succeeds_when_mbsync_and_repair_succeed
+check "a failed directory repair fails the sync" failed_directory_repair_fails_the_sync
+check "a failed file repair fails the sync" failed_file_repair_fails_the_sync
+check "the repair still runs after a failed mbsync" repair_still_runs_after_a_failed_mbsync
+
 if ((FAILURES > 0)); then
     printf '%d test(s) failed\n' "$FAILURES" >&2
     exit 1
