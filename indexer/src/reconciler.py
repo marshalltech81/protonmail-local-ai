@@ -323,7 +323,12 @@ class Reconciler:
 
         if not survivor_rows:
             # Whole thread gone. Drop everything, then optionally unlink files.
-            self.db.delete_thread_completely(thread_id)
+            if not self.db.delete_thread_completely(thread_id):
+                log.info(
+                    "reaper: thread %s changed since its tombstones were read; retrying next pass",
+                    thread_id,
+                )
+                return False, False
             if self.config.unlink_on_reap:
                 for fp in dead_filepaths:
                     self._safe_unlink(fp)
@@ -472,6 +477,13 @@ class Reconciler:
             embedding,
             [tomb["message_id"] for tomb in tombs],
         )
+        if removed_filepaths is None:
+            log.info(
+                "reaper: a message in thread %s was restored since its tombstones "
+                "were read; retrying next pass",
+                thread_id,
+            )
+            return False, False
         if self.config.unlink_on_reap:
             for fp in removed_filepaths:
                 self._safe_unlink(fp)

@@ -30,6 +30,13 @@ FAKE_EMBEDDING = [0.1] * EMBEDDING_DIM
 # ---------------------------------------------------------------------------
 
 
+def _tombstone_thread(db, thread_id: str) -> None:
+    """Tombstone every message in ``thread_id``, as the reconciler does
+    before ``delete_thread_completely``, which refuses otherwise."""
+    for row in db.get_thread_messages(thread_id):
+        db.add_pending_deletion(row["filepath"], row["message_id"], thread_id)
+
+
 class TestSchema:
     def test_database_created_at_given_path(self, tmp_path):
         db_path = tmp_path / "mail.db"
@@ -1293,6 +1300,7 @@ class TestReconciliationSupport:
         db.upsert_thread(thread, FAKE_EMBEDDING)
         db.add_pending_deletion("/d/1", "d1@x", "doomed")
 
+        _tombstone_thread(db, "doomed")
         db.delete_thread_completely("doomed")
 
         assert db.get_thread("doomed") is None
@@ -2006,6 +2014,7 @@ class TestChunkCascadeOnMessageRemoval:
                 embeddings_by_chunk_id={chunk.chunk_id: [0.5] * EMBEDDING_DIM},
             )
 
+        _tombstone_thread(db, t.thread_id)
         db.delete_thread_completely(t.thread_id)
 
         assert db.get_thread_chunk_embeddings(t.thread_id) == []
@@ -2381,6 +2390,7 @@ class TestAttachmentCascadeOnMessageRemoval:
                 ),
             )
 
+        _tombstone_thread(db, t.thread_id)
         db.delete_thread_completely(t.thread_id)
 
         cnt = db._conn.execute(
@@ -2560,6 +2570,7 @@ class TestMessagesTable:
         ]
         assert not self._participants(db, "m1@example.com")
 
+        _tombstone_thread(db, "t1")
         db.delete_thread_completely("t1")
         assert db._conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0] == 0
         assert db._conn.execute("SELECT COUNT(*) FROM message_participants").fetchone()[0] == 0

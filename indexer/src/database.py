@@ -2111,6 +2111,15 @@ class Database:
                 "UPDATE OR REPLACE indexing_jobs SET filepath = ? WHERE filepath = ?",
                 (new_path, old_path),
             )
+            # A job the drain parked because its file was T-flagged is due
+            # at once on any rename: a restore must not wait out the park
+            # delay (there may be no tombstone yet to clear), and a job
+            # still on a trashed path is simply parked again.
+            cur.execute(
+                "UPDATE indexing_jobs SET next_attempt_at = ? "
+                "WHERE filepath = ? AND status = 'queued' AND last_stage = 'trashed'",
+                (datetime.now(UTC).isoformat(), new_path),
+            )
             self._commit_if_started(started)
         except Exception:
             self._rollback_if_started(started)
@@ -2144,23 +2153,8 @@ class Database:
 
     @_synchronized
     def clear_pending_deletion(self, filepath: str) -> None:
-        """Clear a tombstone: mbsync restored the message. A job the
-        drain parked while the file was T-flagged becomes due now rather
-        than after the park delay."""
-        now_iso = datetime.now(UTC).isoformat()
-        cur = self._conn.cursor()
-        try:
-            cur.execute("BEGIN IMMEDIATE")
-            cur.execute("DELETE FROM pending_deletions WHERE filepath = ?", (filepath,))
-            cur.execute(
-                "UPDATE indexing_jobs SET next_attempt_at = ? "
-                "WHERE filepath = ? AND status = 'queued' AND next_attempt_at > ?",
-                (now_iso, filepath, now_iso),
-            )
-            self._conn.commit()
-        except Exception:
-            self._conn.rollback()
-            raise
+        self._conn.execute("DELETE FROM pending_deletions WHERE filepath = ?", (filepath,))
+        self._conn.commit()
 
     @_synchronized
     def has_pending_deletion(self, filepath: str) -> bool:
@@ -2201,13 +2195,20 @@ class Database:
             raise
 
     @_synchronized
-    def delete_thread_completely(self, thread_id: str) -> None:
+    def delete_thread_completely(self, thread_id: str) -> bool:
         """Remove a thread and every derived row. Used when the last message
         in a thread has been reaped.
+
+        Returns False, changing nothing, when a message in the thread is no
+        longer tombstoned: the watcher restored it (or a new message
+        joined the thread) after the reaper read its tombstones.
         """
         cur = self._conn.cursor()
         try:
             cur.execute("BEGIN IMMEDIATE")
+            if self._has_untombstoned_messages(cur, thread_id):
+                self._conn.rollback()
+                return False
             row = cur.execute(
                 "SELECT fts_rowid FROM threads WHERE thread_id = ?", (thread_id,)
             ).fetchone()
@@ -2247,6 +2248,25 @@ class Database:
         except Exception:
             self._conn.rollback()
             raise
+        return True
+
+    @staticmethod
+    def _has_untombstoned_messages(
+        cur: sqlite3.Cursor, thread_id: str, message_ids: list[str] | None = None
+    ) -> bool:
+        """Whether a message of ``thread_id`` (only ``message_ids``, when
+        given) has no tombstone. Read inside the reap transaction, so a
+        restore after the reaper's snapshot is seen."""
+        sql = (
+            "SELECT 1 FROM message_thread_map m WHERE m.thread_id = ? "
+            "AND NOT EXISTS (SELECT 1 FROM pending_deletions p "
+            "WHERE p.message_id = m.message_id)"
+        )
+        params: list[str] = [thread_id]
+        if message_ids is not None:
+            sql += f" AND m.message_id IN ({','.join('?' * len(message_ids))})"  # nosec B608
+            params.extend(message_ids)
+        return cur.execute(sql + " LIMIT 1", params).fetchone() is not None
 
     @_synchronized
     def rebuild_thread(self, thread, embedding: list[float]) -> None:
@@ -2272,7 +2292,7 @@ class Database:
         thread,
         embedding: list[float],
         reaped_message_ids: list[str],
-    ) -> list[str]:
+    ) -> list[str] | None:
         """Atomically rewrite a thread and remove reaped messages.
 
         The reconciler previously called ``rebuild_thread`` and then looped
@@ -2287,12 +2307,17 @@ class Database:
         so either the whole reap lands or none of it does.
 
         Returns the filepaths that were removed, so the caller can perform
-        any on-disk unlink work outside the transaction.
+        any on-disk unlink work outside the transaction, or ``None``,
+        changing nothing, when a reaped message is no longer tombstoned
+        (the watcher restored it after the reaper read its tombstones).
         """
         cur = self._conn.cursor()
         removed_filepaths: list[str] = []
         try:
             cur.execute("BEGIN IMMEDIATE")
+            if self._has_untombstoned_messages(cur, thread.thread_id, reaped_message_ids):
+                self._conn.rollback()
+                return None
             self._rewrite_thread_row(cur, thread, embedding)
             for mid in reaped_message_ids:
                 fp = self._remove_message_row(cur, mid)

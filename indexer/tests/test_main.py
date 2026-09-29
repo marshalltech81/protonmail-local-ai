@@ -4358,6 +4358,45 @@ class TestTrashedFilesWithReconciliation:
         assert not queue.has_pending_row(str(live))
         assert db.is_indexed(str(live))
 
+    def test_a_parked_job_moved_without_a_tombstone_runs_at_once(self, tmp_path, monkeypatch):
+        """Review round 3: at startup ``sweep_paths`` can move a job onto a
+        T path and the drain park it before any tombstone exists, so a
+        restore has no tombstone to clear. Moving a parked job off the
+        path makes it due whatever the tombstone state."""
+        maildir = tmp_path / "maildir"
+        monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
+        live = maildir / "INBOX" / "cur" / "1700000000.M1.host:2,S"
+        trashed = maildir / "INBOX" / "cur" / "1700000000.M1.host:2,ST"
+        _write_eml(live, "startup@example.com")
+        db = Database(tmp_path / "mail.db")
+        queue = _make_queue(db)
+
+        def drain():
+            main._drain_queue_batched(
+                db,
+                make_mock_embedder(_UNIT_VECTOR),
+                Threader(db),
+                queue,
+                batch_size=10,
+                timing_aggregator=main.TimingAggregator(window=4),
+                max_passes=1,
+                skip_trashed=True,
+            )
+
+        queue.enqueue(str(live), REASON_INITIAL_SCAN)
+        drain()
+        live.rename(trashed)
+        db.update_filepath(str(live), str(trashed))
+        queue.enqueue(str(trashed), REASON_INITIAL_SCAN)
+        drain()  # parked
+        assert queue.has_pending_row(str(trashed))
+        assert not db.has_pending_deletion(str(trashed))
+
+        trashed.rename(live)
+        db.update_filepath(str(trashed), str(live))
+        drain()
+        assert not queue.has_pending_row(str(live))
+
     def test_drain_indexes_a_trashed_file_without_reconciliation(self, tmp_path, monkeypatch):
         # The index is append-only then: trashed mail is indexed as before.
         maildir = tmp_path / "maildir"

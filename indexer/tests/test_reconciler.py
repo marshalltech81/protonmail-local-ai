@@ -396,6 +396,65 @@ class TestReap:
         assert not queue.has_pending_row(str(trashed))
         assert queue.has_pending_row(str(reply))
 
+    def _restore_after_snapshot(self, db, monkeypatch, trashed, live):
+        """Review round 3: the watcher restores a message after ``reap()``
+        read its tombstones but before the reap transaction runs."""
+        snapshot = db.list_pending_deletions_older_than(datetime.now(UTC).isoformat())
+        trashed.rename(live)
+        db.update_filepath(str(trashed), str(live))
+        db.clear_pending_deletion(str(live))
+        monkeypatch.setattr(db, "list_pending_deletions_older_than", lambda _cutoff: snapshot)
+
+    def test_full_reap_skips_a_message_restored_after_the_snapshot(
+        self, db, threader, reconciler, maildir, monkeypatch
+    ):
+        from src.queue import REASON_INITIAL_SCAN, IndexingQueue
+
+        path = maildir / "1700000000.M1.host:2,S"
+        _write_eml(path, "restored@example.com")
+        thread_id = _index(path, db, threader)
+        queue = IndexingQueue(db)
+        queue.enqueue(str(path), REASON_INITIAL_SCAN)
+        trashed = maildir / "1700000000.M1.host:2,ST"
+        path.rename(trashed)
+        reconciler.sweep()
+        self._restore_after_snapshot(db, monkeypatch, trashed, path)
+
+        assert reconciler.reap()["threads_reaped"] == 0
+        assert db.get_thread(thread_id) is not None
+        assert queue.has_pending_row(str(path))
+
+    def test_partial_reap_skips_a_message_restored_after_the_snapshot(
+        self, db, threader, reconciler, maildir, monkeypatch
+    ):
+        from src.queue import REASON_INITIAL_SCAN, IndexingQueue
+
+        orig = maildir / "1700000000.M1.host:2,S"
+        _write_eml(orig, "orig@example.com", subject="Budget")
+        thread_id = _index(orig, db, threader)
+        reply = maildir / "1700000001.M2.host:2,S"
+        _write_eml(
+            reply,
+            "reply@example.com",
+            subject="Re: Budget",
+            in_reply_to="orig@example.com",
+            date=datetime(2024, 2, 1, 12, 0, tzinfo=UTC),
+        )
+        _index(reply, db, threader)
+        queue = IndexingQueue(db)
+        queue.enqueue(str(orig), REASON_INITIAL_SCAN)
+        trashed = maildir / "1700000000.M1.host:2,ST"
+        orig.rename(trashed)
+        reconciler.sweep()
+        self._restore_after_snapshot(db, monkeypatch, trashed, orig)
+
+        assert reconciler.reap()["threads_rebuilt"] == 0
+        assert {r["message_id"] for r in db.get_thread_messages(thread_id)} == {
+            "orig@example.com",
+            "reply@example.com",
+        }
+        assert queue.has_pending_row(str(orig))
+
     def test_rebuild_when_thread_has_survivors(self, db, threader, embedder, reconciler, maildir):
         # Two messages in one thread; tombstone the original, keep the reply.
         orig_path = maildir / "1700000000.M1.host:2,S"
