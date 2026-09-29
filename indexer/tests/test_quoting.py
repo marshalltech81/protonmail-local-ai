@@ -5,6 +5,9 @@ Covers quoted-reply stripping, signature cut-offs, forward markers, and
 the empty-result fallback used to keep the embedding input non-empty.
 """
 
+import time
+
+import pytest
 from src.quoting import strip_for_embedding
 
 
@@ -389,6 +392,45 @@ class TestReplyHeaderFalsePositives:
         result = strip_for_embedding(body)
         assert "Le directeur a écrit :" in result
         assert "Veuillez accélérer la livraison." in result
+
+
+class TestReplyHeaderWorkBound:
+    """The single-line reply-header patterns backtrack quadratically on a
+    long line that starts with a lead word and repeats ``<addr>``
+    fragments (#239). A small hostile email could stall the only
+    ingestion worker, so lines too long to be a real attribution are
+    never tested against them.
+    """
+
+    @pytest.mark.parametrize(
+        "line",
+        [
+            "On " + "<a@b> " * 40_000,
+            "On " + "<a@b> wrote: " * 20_000,
+            "Am schrieb " + "<a@b> " * 40_000,
+            "Le " + "<a@b> " * 40_000,
+            "El " + "<a@b> " * 40_000,
+            "Il " + "<a@b> " * 40_000,
+            "Op schreef " + "<a@b> " * 40_000,
+        ],
+        ids=["en", "en-wrote-mid-line", "de", "fr", "es", "it", "nl"],
+    )
+    def test_long_lead_word_line_is_linear(self, line):
+        # Unbounded, each of these takes minutes; bounded, milliseconds.
+        started = time.perf_counter()
+        result = strip_for_embedding(line + "\nNew reply text.")
+        assert time.perf_counter() - started < 1.0
+        assert "New reply text." in result
+
+    def test_long_attribution_line_is_still_cut(self):
+        body = (
+            "Thanks, see below.\n"
+            "On Wednesday, September 28, 2026 at 10:15:32 AM Pacific Daylight "
+            "Time, Firstname Middlename Lastname-Longername "
+            "<firstname.lastname@mail.subdomain.example.co.uk> wrote:\n"
+            "> earlier text"
+        )
+        assert strip_for_embedding(body) == "Thanks, see below."
 
 
 class TestWrappedReplyHeaderCRLF:
