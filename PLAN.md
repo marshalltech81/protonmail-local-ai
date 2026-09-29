@@ -339,7 +339,9 @@ passthrough in the search and intelligence handlers); AGENTS.md's
    cache miss and startup re-queues the affected messages once. Review
    rounds settled the refresh semantics: any occurrence of a stale row
    re-runs the module that wrote it (`extract(module_override=...)`),
-   the sweep re-queues every message carrying the bytes, and a plan
+   the sweep re-queues every message carrying the bytes except
+   dead-lettered ones (those keep their stale chunks until an operator
+   runs `make requeue-dead`), and a plan
    without usable text clears the attachment's chunk slice.
 4. **Done (#253).** **#224** malformed 200 provider responses leak mailbox text (embedder
    index errors reach logs and `indexing_jobs.last_error`; reranker

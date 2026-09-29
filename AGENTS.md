@@ -197,6 +197,8 @@ Do not make any of the following changes unless the repository owner explicitly 
   extraction cache is otherwise served forever, so the fix would never
   reach mail indexed before it; with the bump, stale rows re-extract and
   the startup sweep re-queues the messages carrying them once.
+  Dead-lettered messages are skipped and keep their stale chunks until
+  an operator runs `make requeue-dead`.
 
 ## Bridge-Specific Guardrails
 
@@ -519,9 +521,11 @@ set -Eeuo pipefail
 - Python version is `3.14`
 - do not add `type: ignore` in `src/` unless explicitly approved; fix
   types properly instead
-- tests may use a code-scoped `# type: ignore[<code>]` where they
-  monkeypatch an SDK or library object (for example replacing
-  `client.embeddings.create`)
+- tests may use a code-scoped `# type: ignore[<code>]` for deliberate
+  test doubles (monkeypatching an SDK, library or project object, such
+  as replacing `client.embeddings.create` or a `Database` method) and
+  for negative tests that pass an invalid type or mutate a frozen
+  dataclass on purpose
 - MCP server code should remain async
 - indexer is sync except where the watchdog/event loop requires otherwise
 - local Python dependency management uses `uv`
