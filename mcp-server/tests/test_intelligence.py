@@ -45,10 +45,11 @@ def _chunk(
     attachment_id: str | None = None,
     attachment_filename: str | None = None,
     attachment_mime: str | None = None,
+    message_id: str = "m1",
 ) -> ChunkResult:
     return ChunkResult(
-        chunk_id=f"c{index}",
-        message_id="m1",
+        chunk_id=f"{message_id}-c{index}",
+        message_id=message_id,
         thread_id="t",
         chunk_index=index,
         text=text,
@@ -233,11 +234,27 @@ class TestSummarizeContextKeepsNewest:
         out = _summarize_context(
             r,
             [
-                _chunk("x" * (_SUMMARIZE_TAIL_CHAR_BUDGET + 200), index=6, char_start=0),
-                _chunk("LATEST_DECISION: cancel launch", index=11, char_start=9000),
+                _chunk("x" * (_SUMMARIZE_TAIL_CHAR_BUDGET + 200), index=6, message_id="m1"),
+                _chunk("LATEST_DECISION: cancel launch", index=0, message_id="m2"),
             ],
         )
         assert "LATEST_DECISION: cancel launch" in out
+
+    def test_newest_message_is_read_from_its_first_chunk(self):
+        """Review round 2: walking chunks newest-first took the newest
+        message's last chunk first, so a long final chunk used the budget
+        before the chunk opening the reply (where the answer is)."""
+        r = _result(body_text="")
+        out = _summarize_context(
+            r,
+            [
+                _chunk("older reply", index=0, message_id="m1"),
+                _chunk("LATEST_DECISION: cancel launch", index=0, message_id="m2"),
+                _chunk("z" * (_SUMMARIZE_TAIL_CHAR_BUDGET + 500), index=1, message_id="m2"),
+            ],
+        )
+        assert "LATEST_DECISION: cancel launch" in out
+        assert len(out) <= _SUMMARIZE_TAIL_CHAR_BUDGET
 
     def test_kept_chunks_render_oldest_first(self):
         r = _result(body_text="")

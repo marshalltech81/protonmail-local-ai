@@ -466,7 +466,10 @@ chunk lane. No schema change; `make baseline` unchanged. Review round 1
 (Codex): matched attachments are ranked by BM25, since the index holds
 MIME types and query words are OR'd ("proposal-quote pdf" matched every
 PDF); and a chunk cut to fit the tail keeps its beginning, so an
-oversized newest reply keeps the answer it opens with.
+oversized newest reply keeps the answer it opens with. Round 2: the
+budget goes to messages newest-first but reads each message from its
+first chunk, so a long newest email's last chunk cannot crowd out its
+opening.
 
 ### 2026-09-28 — MCP results no longer overclaim (#219, #220, #222)
 
