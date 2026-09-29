@@ -3223,3 +3223,45 @@ def _commit_between_reads(db, writer, sql: str) -> None:
         return conn
 
     db._connect = traced_connect
+
+
+class TestVectorLaneKLimit:
+    """#223: sqlite-vec rejects k > 4096. A large RERANK_CANDIDATES times
+    the oversampling factors exceeded it, the error was caught, and the
+    lane silently returned nothing — raising the candidate window lost
+    the precision lane."""
+
+    def test_chunk_lane_survives_a_window_past_the_k_limit(self, chunked_db: Database):
+        assert chunked_db._chunk_vector_search([1.0, 0.0, 0.0, 0.0], limit=8000)
+
+    def test_thread_lane_survives_a_window_past_the_k_limit(self, chunked_db: Database):
+        assert chunked_db._vector_search([1.0, 0.0, 0.0, 0.0], limit=8000)
+
+    def test_filtered_rerank_window_keeps_the_chunk_lane(self, chunked_db: Database, monkeypatch):
+        """The issue's case: 200 candidates with a folder filter asked for
+        k = 200 x 4 x 10 = 8000."""
+
+        class _PassThroughReranker:
+            candidates = 200
+            top_n = 5
+
+            def rerank(self, query, documents, top_n=None):
+                return [(i, 1.0 - i / 1000) for i in range(len(documents))][: top_n or 5]
+
+        calls: list[int] = []
+        real = chunked_db._chunk_vector_search
+
+        def spy(embedding, limit):
+            results = real(embedding, limit)
+            calls.append(len(results))
+            return results
+
+        monkeypatch.setattr(chunked_db, "_chunk_vector_search", spy)
+        chunked_db.hybrid_search(
+            query_text="zzzz-no-keyword-hit",
+            query_embedding=[1.0, 0.0, 0.0, 0.0],
+            folders=["INBOX"],
+            limit=5,
+            reranker=_PassThroughReranker(),
+        )
+        assert calls and calls[0] > 0

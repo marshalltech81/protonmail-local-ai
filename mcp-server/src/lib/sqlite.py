@@ -58,6 +58,12 @@ _FILTERED_OVERSAMPLE = 4
 # even on dense matches.
 _CHUNK_LANE_OVERSAMPLE = 10
 
+# sqlite-vec's largest accepted KNN ``k``; a larger one is an error, which
+# the vector lanes catch as "lane unavailable". The fetch windows multiply
+# RERANK_CANDIDATES by filter and chunk oversampling (200 x 4 x 10 = 8000),
+# so both lanes clamp here rather than silently lose the lane.
+_SQLITE_VEC_MAX_K = 4096
+
 
 def _addr_matches(haystack: list[str], query_lower: str) -> bool:
     """True if ``query_lower`` matches an address string in ``haystack``.
@@ -1655,7 +1661,7 @@ class Database:
                   AND k = ?
                 ORDER BY v.distance
                 """,
-                (serialized, limit),
+                (serialized, min(limit, _SQLITE_VEC_MAX_K)),
             )
             return [_row_to_chunk_result(r) for r in rows]
         except (sqlite3.Error, ValueError) as e:
@@ -1867,7 +1873,7 @@ class Database:
                   AND k = ?
                 ORDER BY v.distance
             """,
-                (serialized, limit),
+                (serialized, min(limit, _SQLITE_VEC_MAX_K)),
             )
             # Tag the dense thread lane so RRF fusion can record it as
             # ``thread_vec`` provenance on the surviving thread row.
