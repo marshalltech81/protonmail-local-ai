@@ -424,6 +424,35 @@ class TestReap:
         assert db.get_thread(thread_id) is not None
         assert queue.has_pending_row(str(path))
 
+    def test_reap_skips_a_message_re_trashed_after_the_snapshot(
+        self, db, threader, embedder, maildir, monkeypatch
+    ):
+        """Review round 4: restored and T-flagged again after the snapshot,
+        the message has a fresh tombstone, so its grace period restarts;
+        matching any tombstone by message ID deleted it at once."""
+        from src.queue import REASON_INITIAL_SCAN, IndexingQueue
+
+        rec = Reconciler(db, embedder, threader, _default_config(grace_days=7))
+        path = maildir / "1700000000.M1.host:2,S"
+        _write_eml(path, "again@example.com")
+        thread_id = _index(path, db, threader)
+        queue = IndexingQueue(db)
+        queue.enqueue(str(path), REASON_INITIAL_SCAN)
+        trashed = maildir / "1700000000.M1.host:2,ST"
+        path.rename(trashed)
+        rec.sweep()
+        with db.transaction():
+            db._conn.execute("UPDATE pending_deletions SET marked_at = '2000-01-01T00:00:00+00:00'")
+        snapshot = db.list_pending_deletions_older_than(datetime.now(UTC).isoformat())
+        # Restored, then trashed again: a new tombstone, a new grace period.
+        db.clear_pending_deletion(str(trashed))
+        db.add_pending_deletion(str(trashed), "again@example.com", thread_id)
+        monkeypatch.setattr(db, "list_pending_deletions_older_than", lambda _cutoff: snapshot)
+
+        assert rec.reap()["threads_reaped"] == 0
+        assert db.get_thread(thread_id) is not None
+        assert queue.has_pending_row(str(trashed))
+
     def test_partial_reap_skips_a_message_restored_after_the_snapshot(
         self, db, threader, reconciler, maildir, monkeypatch
     ):

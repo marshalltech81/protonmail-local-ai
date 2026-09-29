@@ -421,8 +421,9 @@ The indexer ships an opt-in reconciler
    reaped message's rows from `message_thread_map` / `indexed_files` and
    any indexing job still queued for its file (in the same transaction,
    which first re-checks that every message it removes is still
-   tombstoned, so a restore after the reaper read its tombstones is left
-   for the next pass), and
+   tombstoned past the grace window, so a restore — or a restore and a
+   fresh tombstone — after the reaper read its tombstones is left for a
+   later pass), and
    either rebuilds the parent thread from the surviving messages on disk
    (re-parsed, re-embedded) or deletes the thread entirely when nothing
    remains. Embedding-endpoint failures during rebuild (operator-supplied

@@ -2195,18 +2195,20 @@ class Database:
             raise
 
     @_synchronized
-    def delete_thread_completely(self, thread_id: str) -> bool:
+    def delete_thread_completely(self, thread_id: str, *, grace_cutoff: str | None = None) -> bool:
         """Remove a thread and every derived row. Used when the last message
         in a thread has been reaped.
 
         Returns False, changing nothing, when a message in the thread is no
-        longer tombstoned: the watcher restored it (or a new message
-        joined the thread) after the reaper read its tombstones.
+        longer tombstoned — the watcher restored it (or a new message
+        joined the thread) after the reaper read its tombstones — or, with
+        ``grace_cutoff``, has a tombstone newer than it (restored and
+        trashed again, so its grace period restarted).
         """
         cur = self._conn.cursor()
         try:
             cur.execute("BEGIN IMMEDIATE")
-            if self._has_untombstoned_messages(cur, thread_id):
+            if self._has_untombstoned_messages(cur, thread_id, grace_cutoff=grace_cutoff):
                 self._conn.rollback()
                 return False
             row = cur.execute(
@@ -2252,17 +2254,27 @@ class Database:
 
     @staticmethod
     def _has_untombstoned_messages(
-        cur: sqlite3.Cursor, thread_id: str, message_ids: list[str] | None = None
+        cur: sqlite3.Cursor,
+        thread_id: str,
+        message_ids: list[str] | None = None,
+        *,
+        grace_cutoff: str | None = None,
     ) -> bool:
         """Whether a message of ``thread_id`` (only ``message_ids``, when
-        given) has no tombstone. Read inside the reap transaction, so a
-        restore after the reaper's snapshot is seen."""
+        given) has no tombstone, or none marked at or before
+        ``grace_cutoff``. Read inside the reap transaction, so a restore
+        (or a restore and a new tombstone) after the reaper's snapshot is
+        seen."""
+        # Only fixed SQL fragments are interpolated; values are bound.
+        marked = " AND p.marked_at <= ?" if grace_cutoff is not None else ""
         sql = (
-            "SELECT 1 FROM message_thread_map m WHERE m.thread_id = ? "
+            "SELECT 1 FROM message_thread_map m WHERE m.thread_id = ? "  # nosec B608
             "AND NOT EXISTS (SELECT 1 FROM pending_deletions p "
-            "WHERE p.message_id = m.message_id)"
+            f"WHERE p.message_id = m.message_id{marked})"
         )
         params: list[str] = [thread_id]
+        if grace_cutoff is not None:
+            params.append(grace_cutoff)
         if message_ids is not None:
             sql += f" AND m.message_id IN ({','.join('?' * len(message_ids))})"  # nosec B608
             params.extend(message_ids)
@@ -2292,6 +2304,8 @@ class Database:
         thread,
         embedding: list[float],
         reaped_message_ids: list[str],
+        *,
+        grace_cutoff: str | None = None,
     ) -> list[str] | None:
         """Atomically rewrite a thread and remove reaped messages.
 
@@ -2309,13 +2323,16 @@ class Database:
         Returns the filepaths that were removed, so the caller can perform
         any on-disk unlink work outside the transaction, or ``None``,
         changing nothing, when a reaped message is no longer tombstoned
-        (the watcher restored it after the reaper read its tombstones).
+        (the watcher restored it after the reaper read its tombstones) or,
+        with ``grace_cutoff``, its tombstone is newer than that.
         """
         cur = self._conn.cursor()
         removed_filepaths: list[str] = []
         try:
             cur.execute("BEGIN IMMEDIATE")
-            if self._has_untombstoned_messages(cur, thread.thread_id, reaped_message_ids):
+            if self._has_untombstoned_messages(
+                cur, thread.thread_id, reaped_message_ids, grace_cutoff=grace_cutoff
+            ):
                 self._conn.rollback()
                 return None
             self._rewrite_thread_row(cur, thread, embedding)
