@@ -452,6 +452,18 @@ do not ship persisted claims without them.
 
 ## Recently Completed
 
+### 2026-09-28 — Right text reaches the model (#214, #215, #223)
+
+`summarize_thread` spends its recent-chunk tail budget newest-first and
+renders oldest-first (#214): one ordinary chunk filled the budget, so the
+newest reply was the first thing dropped. Evidence for a thread surfaced
+by an attachment filename match leads with that attachment's chunks,
+then other attachments, then body (#215); only the thread was
+remembered, so other attachments could fill the three slots. Both vector
+lanes clamp KNN `k` to sqlite-vec's 4096 (#223): a large
+`RERANK_CANDIDATES` with a filter asked for 8000 and silently lost the
+chunk lane. No schema change; `make baseline` unchanged.
+
 ### 2026-09-28 — MCP results no longer overclaim (#219, #220, #222)
 
 Three places where a tool's answer claimed more than it had. Neither
