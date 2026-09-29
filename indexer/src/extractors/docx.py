@@ -11,8 +11,9 @@ there, often inside layout tables.
 Each ``<w:tc>`` element is read once. python-docx's ``row.cells``
 repeats a cell for every grid column it spans and every row it merges
 down, so a tiny file declaring a huge span multiplied extraction work
-(#228). Nested tables are walked recursively (#226); lxml rejects XML
-nested deeper than 256 elements, which keeps the recursion shallow.
+(#228). Nested tables are walked recursively (#226), appending into one
+flat list per top-level row so their text is copied once; lxml rejects
+XML nested deeper than 256 elements, which keeps the recursion shallow.
 
 Legacy ``.doc`` (binary Word, not OOXML) cannot be parsed by
 ``python-docx``; the dispatcher routes those to this module too but
@@ -27,6 +28,7 @@ import io
 from collections.abc import Iterable
 
 import docx as _docx
+from docx.oxml.table import CT_Row
 from docx.table import Table, _Cell
 from docx.text.paragraph import Paragraph
 
@@ -77,15 +79,30 @@ def _table_lines(table: Table) -> list[str]:
     """
     lines: list[str] = []
     for row in table.rows:
-        cell_texts: list[str] = []
-        for tc in row._tr.tc_lst:
-            # A vertically merged cell's continuation rows hold no content
-            # of their own; ``row.cells`` would repeat the first row's.
-            if tc.vMerge == "continue":
-                continue
-            text = " ".join(_block_lines(_Cell(tc, table).iter_inner_content()))
-            if text:
-                cell_texts.append(text)
-        if cell_texts:
-            lines.append(" ".join(cell_texts))
+        pieces: list[str] = []
+        _row_pieces(row._tr, table, pieces)
+        if pieces:
+            lines.append(" ".join(pieces))
     return lines
+
+
+def _row_pieces(tr: CT_Row, table: Table, pieces: list[str]) -> None:
+    """Append the text of each cell in ``tr``, nested tables included.
+
+    Everything under a top-level row is appended to one flat list and
+    joined once, so text inside nested tables is copied once rather than
+    once per level of nesting.
+    """
+    for tc in tr.tc_lst:
+        # A vertically merged cell's continuation rows hold no content
+        # of their own; ``row.cells`` would repeat the first row's.
+        if tc.vMerge == "continue":
+            continue
+        for block in _Cell(tc, table).iter_inner_content():
+            if isinstance(block, Paragraph):
+                text = block.text.strip()
+                if text:
+                    pieces.append(text)
+            else:
+                for nested_row in block.rows:
+                    _row_pieces(nested_row._tr, block, pieces)

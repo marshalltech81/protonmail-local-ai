@@ -2507,6 +2507,49 @@ class TestRequeueStaleExtractions:
         assert row["extractor"] == "docx@2"
         assert main._requeue_stale_extractions(db, queue) == 0
 
+    def test_only_occurrences_resolving_to_the_extractor_are_requeued(self, tmp_path, monkeypatch):
+        maildir = tmp_path / "maildir"
+        monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
+        docx_path = maildir / "INBOX" / "cur" / "contract.eml"
+        self._write_docx_eml(docx_path, "contract@example.com")
+        # Same bytes, attached as an opaque blob.
+        blob_path = maildir / "INBOX" / "cur" / "blob.eml"
+        raw = docx_path.read_bytes()
+        raw = raw.replace(b"contract@example.com", b"blob@example.com")
+        raw = raw.replace(
+            b"application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            b"application/octet-stream",
+        ).replace(b"contract.docx", b"blob.bin")
+        blob_path.write_bytes(raw)
+        db = Database(tmp_path / "mail.db")
+        queue = _make_queue(db)
+        queue.enqueue(str(docx_path), REASON_INITIAL_SCAN)
+        queue.enqueue(str(blob_path), REASON_INITIAL_SCAN)
+        self._drain(db, queue)
+        with db.transaction():
+            db._conn.execute("UPDATE attachment_extractions SET extractor = 'docx'")
+
+        assert main._requeue_stale_extractions(db, queue) == 1
+        assert queue.has_pending_row(str(docx_path))
+        assert not queue.has_pending_row(str(blob_path))
+
+    def test_nothing_is_requeued_when_extraction_is_disabled(self, tmp_path, monkeypatch):
+        # The drain skips attachments then, so the rows would never be
+        # re-stamped and every restart would re-queue the same messages.
+        maildir = tmp_path / "maildir"
+        monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
+        path = maildir / "INBOX" / "cur" / "contract.eml"
+        self._write_docx_eml(path, "contract@example.com")
+        db = Database(tmp_path / "mail.db")
+        queue = _make_queue(db)
+        queue.enqueue(str(path), REASON_INITIAL_SCAN)
+        self._drain(db, queue)
+        with db.transaction():
+            db._conn.execute("UPDATE attachment_extractions SET extractor = 'docx'")
+
+        monkeypatch.setattr(main, "INDEXER_ATTACHMENT_EXTRACTION_ENABLED", False)
+        assert main._requeue_stale_extractions(db, queue) == 0
+
     def test_pending_and_dead_rows_are_left_alone(self, tmp_path, monkeypatch):
         maildir = tmp_path / "maildir"
         monkeypatch.setattr(main, "MAILDIR_PATH", maildir)

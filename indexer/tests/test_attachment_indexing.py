@@ -86,8 +86,17 @@ def test_successful_cached_extraction_is_reused(tmp_path, monkeypatch):
     )
 
 
-def _process_with_cached_extractor(db, extractor_name, status, text, monkeypatch):
-    attachment = _attachment(b"docx bytes", filename="c.docx", content_type="application/msword")
+def _process_with_cached_extractor(
+    db,
+    extractor_name,
+    status,
+    text,
+    monkeypatch,
+    *,
+    filename="c.docx",
+    content_type="application/msword",
+):
+    attachment = _attachment(b"docx bytes", filename=filename, content_type=content_type)
     db.store_attachment_extraction(
         attachment_id=attachment.content_hash,
         extraction_status=status,
@@ -138,6 +147,35 @@ def test_cache_row_from_the_current_extractor_version_is_reused(tmp_path, monkey
         db, "docx@2", STATUS_SUCCESS, "cached text", monkeypatch
     )
     extractor.assert_not_called()
+
+
+def test_cache_row_from_a_newer_extractor_version_is_reused(tmp_path, monkeypatch):
+    # After a rollback, rows the newer release wrote must not be
+    # downgraded by the older walker.
+    db = _seed_thread_for_cache_test(tmp_path)
+    extractor, row = _process_with_cached_extractor(
+        db, "docx@3", STATUS_SUCCESS, "newer text", monkeypatch
+    )
+    extractor.assert_not_called()
+    assert row["extractor"] == "docx@3"
+
+
+def test_stale_row_is_not_re_extracted_by_an_occurrence_of_another_type(tmp_path, monkeypatch):
+    """The same bytes attached as ``.bin`` resolve to no extractor. Re-running
+    them would overwrite the shared cache row with ``unsupported`` before
+    the DOCX occurrence could upgrade it."""
+    db = _seed_thread_for_cache_test(tmp_path)
+    extractor, row = _process_with_cached_extractor(
+        db,
+        "docx",
+        STATUS_SUCCESS,
+        "old text",
+        monkeypatch,
+        filename="blob.bin",
+        content_type="application/octet-stream",
+    )
+    extractor.assert_not_called()
+    assert row["extractor"] == "docx"
 
 
 def _seed_thread_for_cache_test(tmp_path):

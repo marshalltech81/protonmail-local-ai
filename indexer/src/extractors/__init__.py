@@ -117,12 +117,36 @@ class ExtractionResult:
 EXTRACTOR_VERSIONS: dict[str, str] = {"docx": "docx@2"}
 
 
+def _extractor_version(name: str) -> int:
+    """``docx@2`` -> 2. Names written before versioning count as 1."""
+    _, sep, version = name.partition("@")
+    return int(version) if sep and version.isdigit() else 1
+
+
 def is_stale_extractor(name: str | None) -> bool:
-    """True when ``name`` is an older version of a versioned extractor."""
+    """True when ``name`` is an older version of a versioned extractor.
+
+    Only older: after a rollback, rows a newer release wrote are kept
+    rather than downgraded by the older code.
+    """
     if not name:
         return False
     current = EXTRACTOR_VERSIONS.get(name.partition("@")[0])
-    return current is not None and name != current
+    return current is not None and _extractor_version(name) < _extractor_version(current)
+
+
+def needs_reextraction(cached_extractor: str | None, content_type: str, filename: str) -> bool:
+    """True when this occurrence should re-extract a stale cached row.
+
+    The cache is shared by every occurrence of the same bytes, whatever
+    their metadata. Only an occurrence that resolves to the stale
+    extractor re-runs it; another (the same file attached as ``.bin``)
+    would overwrite the shared row with a different result.
+    """
+    if not cached_extractor or not is_stale_extractor(cached_extractor):
+        return False
+    module_name, _ = _resolve_extractor(content_type, filename)
+    return module_name == cached_extractor.partition("@")[0]
 
 
 # Public statuses are exposed as constants so callers can compare without

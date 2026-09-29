@@ -42,7 +42,7 @@ from .extractors import (
     STATUS_TOO_LARGE,
     STATUS_UNSUPPORTED,
     ExtractionResult,
-    is_stale_extractor,
+    needs_reextraction,
 )
 from .extractors import (
     extract as extract_attachment,
@@ -84,7 +84,9 @@ def attachment_occurrence_id(
 _FAILED_CACHE_MAX_AGE = timedelta(days=7)
 
 
-def _cache_hit_short_circuits(cached: dict, ocr_enabled: bool) -> bool:
+def _cache_hit_short_circuits(
+    cached: dict, ocr_enabled: bool, *, content_type: str = "", filename: str = ""
+) -> bool:
     """Return True when ``cached`` should short-circuit re-extraction.
 
     ``STATUS_SUCCESS`` rows with non-empty text are the obvious hit. The
@@ -106,7 +108,7 @@ def _cache_hit_short_circuits(cached: dict, ocr_enabled: bool) -> bool:
       burning OCR cycles on every reappearance), otherwise honor the
       cache.
     """
-    if is_stale_extractor(cached["extractor"]):
+    if needs_reextraction(cached["extractor"], content_type, filename):
         # Written by an older version of an extractor that has since
         # been fixed; its result would be served forever otherwise.
         return False
@@ -188,7 +190,12 @@ def _resolve_extracted_text(
     fresh result.
     """
     cached = db.get_attachment_extraction(attachment.content_hash)
-    if cached is not None and _cache_hit_short_circuits(cached, ocr_enabled):
+    if cached is not None and _cache_hit_short_circuits(
+        cached,
+        ocr_enabled,
+        content_type=attachment.content_type,
+        filename=attachment.filename,
+    ):
         # Successful hits return the stored text; non-success hits
         # (empty / unsupported / too_large / failed-within-window)
         # return ``None`` text so the caller skips chunking but the
