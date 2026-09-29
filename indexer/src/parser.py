@@ -372,12 +372,13 @@ def _extract_body_and_attachments(
     # Depth-first in document order, like ``msg.walk()``, but an
     # attachment's subparts are never visited: an attached email's
     # text is not the parent's body. Iterative, so nesting depth cannot
-    # recurse.
+    # recurse. The root is classified too (a message can be one
+    # attachment part), unless it is a multipart container.
     stack: list[email.message.Message] = [msg]
     while stack:
         part = stack.pop()
         ct = part.get_content_type()
-        if part is not msg and _is_attachment(part):
+        if _is_attachment(part) and (part is not msg or not part.is_multipart()):
             payload = _attachment_payload(part)
             attachments.append(
                 Attachment(
@@ -395,7 +396,10 @@ def _extract_body_and_attachments(
                 payload = _decoded_payload(part)
                 charset = part.get_content_charset() or "utf-8"
                 html_text = _html_to_text(_safe_decode(payload, charset))
-        elif ct == "text/plain" or part is msg:
+        elif ct == "text/plain" or (part is msg and part.get_content_maintype() == "text"):
+            # A single-part message's text is its body whatever the text
+            # subtype (text/calendar, text/enriched); inside a multipart
+            # only text/plain is. Binary parts are never decoded as text.
             if not plain_text:
                 payload = _decoded_payload(part)
                 charset = part.get_content_charset() or "utf-8"

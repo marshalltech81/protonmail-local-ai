@@ -852,6 +852,50 @@ class TestAttachmentBoundaries:
         [attachment] = msg.attachments
         assert attachment.payload == b""
 
+    def test_single_part_attachment_is_an_attachment(self, tmp_path):
+        """#209: a message whose root part is an attachment had its payload
+        decoded as the body and no attachment recorded."""
+        message = EmailMessage()
+        message["Message-ID"] = "<single@example.test>"
+        message["From"] = "sender@example.test"
+        message["Subject"] = "Invoice"
+        message.set_content(
+            b"%PDF-1.4 SYNTHETIC_PDF_MARKER",
+            maintype="application",
+            subtype="pdf",
+            disposition="attachment",
+            filename="invoice.pdf",
+        )
+        msg = parse_email(_write_message(tmp_path, message))
+        assert msg is not None
+        assert msg.body_text == ""
+        assert msg.has_attachments is True
+        [attachment] = msg.attachments
+        assert attachment.filename == "invoice.pdf"
+        assert attachment.content_type == "application/pdf"
+        assert attachment.payload == b"%PDF-1.4 SYNTHETIC_PDF_MARKER"
+
+    def test_single_part_binary_body_is_not_decoded_as_text(self, tmp_path):
+        """#209: only text parts are message text; a nameless binary root
+        is skipped, as the same part is inside a multipart."""
+        message = EmailMessage()
+        message["Message-ID"] = "<binary@example.test>"
+        message["From"] = "sender@example.test"
+        message.set_content(b"BINARY_MARKER", maintype="application", subtype="octet-stream")
+        msg = parse_email(_write_message(tmp_path, message))
+        assert msg is not None
+        assert msg.body_text == ""
+        assert msg.attachments == []
+
+    def test_single_part_text_body_is_still_the_body(self, tmp_path):
+        message = EmailMessage()
+        message["Message-ID"] = "<calendar@example.test>"
+        message["From"] = "sender@example.test"
+        message.set_content("CALENDAR_MARKER", subtype="calendar")
+        msg = parse_email(_write_message(tmp_path, message))
+        assert msg is not None
+        assert msg.body_text == "CALENDAR_MARKER"
+
 
 class TestDecodeHeader:
     def test_plain_ascii(self):
