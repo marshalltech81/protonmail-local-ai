@@ -851,8 +851,10 @@ class TestAttachmentBoundaries:
         msg = parse_email(folder / "deep.eml")
         assert msg is not None
         assert msg.body_text == "PARENT_BODY"
-        [attachment] = msg.attachments
-        assert attachment.payload == b""
+        # Each nested attached email is recorded, as the old walk did;
+        # only the outermost is ever serialized, and this one is too deep.
+        assert len(msg.attachments) == 300
+        assert all(a.payload == b"" for a in msg.attachments)
 
     def test_attached_email_nested_past_the_cap_is_not_serialized(self, tmp_path):
         """Review round 1: serializing copies the subtree once per nesting
@@ -953,6 +955,75 @@ class TestAttachmentBoundaries:
         assert msg is not None
         [attachment] = msg.attachments
         assert attachment.filename.endswith(".pdf")
+
+    def _parse_raw(self, tmp_path, raw: bytes):
+        folder = tmp_path / "INBOX" / "cur"
+        folder.mkdir(parents=True, exist_ok=True)
+        path = folder / "raw.eml"
+        path.write_bytes(raw)
+        msg = parse_email(path)
+        assert msg is not None
+        return msg
+
+    _HEAD = (
+        b"Message-ID: <outer@example.test>\r\nFrom: sender@example.test\r\n"
+        b"Date: Mon, 28 Sep 2026 12:00:00 +0000\r\nMIME-Version: 1.0\r\n"
+    )
+
+    def test_attached_email_as_the_root_is_an_attachment(self, tmp_path):
+        """Review round 2: compat32 reports message/rfc822 as multipart, so
+        a root attached email skipped classification and its body was
+        taken as the outer message's."""
+        msg = self._parse_raw(
+            tmp_path,
+            self._HEAD + b"Content-Type: message/rfc822\r\n"
+            b'Content-Disposition: attachment; filename="forward.eml"\r\n\r\n'
+            b"Message-ID: <inner@example.test>\r\nFrom: other@example.test\r\n\r\n"
+            b"INNER_MARKER\r\n",
+        )
+        assert "INNER_MARKER" not in msg.body_text
+        assert [a.content_type for a in msg.attachments] == ["message/rfc822"]
+        assert b"INNER_MARKER" in msg.attachments[0].payload
+
+    def test_attachments_inside_attachments_are_still_found(self, tmp_path):
+        """Review round 2: the old walk found a PDF inside an attached
+        bundle or email; stopping at the boundary lost it. Text inside an
+        attachment is still never the parent's body."""
+        msg = self._parse_raw(
+            tmp_path,
+            self._HEAD + b'Content-Type: multipart/mixed; boundary="o"\r\n\r\n'
+            b"--o\r\nContent-Type: text/html\r\n\r\n<p>OUTER_BODY</p>\r\n"
+            b'--o\r\nContent-Type: multipart/mixed; boundary="i"\r\n'
+            b'Content-Disposition: attachment; filename="bundle.mime"\r\n\r\n'
+            b"--i\r\nContent-Type: text/plain\r\n\r\nBUNDLE_TEXT\r\n"
+            b"--i\r\nContent-Type: application/pdf\r\n"
+            b'Content-Disposition: attachment; filename="inner.pdf"\r\n\r\n%PDF-INNER\r\n'
+            b"--i--\r\n--o--\r\n",
+        )
+        assert "OUTER_BODY" in msg.body_text
+        assert "BUNDLE_TEXT" not in msg.body_text
+        by_name = {a.filename: a for a in msg.attachments}
+        assert set(by_name) == {"bundle.mime", "inner.pdf"}
+        assert b"%PDF-INNER" in by_name["inner.pdf"].payload
+        assert b"BUNDLE_TEXT" in by_name["bundle.mime"].payload
+
+    def test_every_delivery_status_block_is_kept(self, tmp_path):
+        """Review round 2: message/delivery-status parses into one block
+        per recipient; only the first was serialized."""
+        msg = self._parse_raw(
+            tmp_path,
+            self._HEAD + b'Content-Type: multipart/report; boundary="r"\r\n\r\n'
+            b"--r\r\nContent-Type: text/plain\r\n\r\nDelivery failed.\r\n"
+            b"--r\r\nContent-Type: message/delivery-status\r\n"
+            b'Content-Disposition: attachment; filename="status.txt"\r\n\r\n'
+            b"Reporting-MTA: dns; mx.example.test\r\n\r\n"
+            b"Final-Recipient: rfc822; first@example.test\r\nStatus: 5.1.1\r\n\r\n"
+            b"Final-Recipient: rfc822; second@example.test\r\nStatus: 5.2.2\r\n"
+            b"\r\n--r--\r\n",
+        )
+        [status] = msg.attachments
+        assert b"first@example.test" in status.payload
+        assert b"second@example.test" in status.payload
 
     def test_single_part_attachment_is_an_attachment(self, tmp_path):
         """#209: a message whose root part is an attachment had its payload

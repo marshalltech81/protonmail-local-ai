@@ -369,32 +369,52 @@ def _nesting_exceeds(root: email.message.Message, limit: int) -> bool:
     return False
 
 
-def _attachment_payload(part: email.message.Message) -> bytes:
+def _attachment_payload(part: email.message.Message, *, serialize_containers: bool) -> bytes:
     """The bytes an attachment carries.
 
-    An attached email (``message/rfc822``) is parsed into a nested
-    message, so it has no decoded payload: serialize the nested message
-    instead, or every attached email would hash to ``sha256(b"")`` and
-    share one attachment ID. One nested deeper than
-    ``MAX_ATTACHED_MESSAGE_DEPTH`` keeps the empty payload. A base64 or
-    quoted-printable wrapper (not allowed by RFC 2046, but sent) leaves
-    the nested message holding its transport form, so that is decoded
-    and parsed first: the same email hashes the same either way.
+    A container attachment — an attached email (``message/rfc822``), a
+    delivery report, a ``multipart/*`` bundle — is parsed into subparts,
+    so it has no decoded payload: serialize its body instead, or every
+    one would hash to ``sha256(b"")`` and share one attachment ID. That
+    is done only for an outermost container (``serialize_containers``)
+    nested at most ``MAX_ATTACHED_MESSAGE_DEPTH`` deep, since
+    serializing copies each subtree once per level above it; others
+    keep the empty payload. A base64 or quoted-printable attached email
+    (not allowed by RFC 2046, but sent) holds its transport form, so it
+    is decoded and parsed first: the same email hashes the same either
+    way.
     """
-    if part.get_content_maintype() == "message" and part.is_multipart():
-        nested = part.get_payload()
-        if isinstance(nested, list) and nested and isinstance(nested[0], email.message.Message):
-            attached = nested[0]
-            encoding = str(part.get("Content-Transfer-Encoding", "")).strip().lower()
-            if encoding in ("base64", "quoted-printable"):
-                decoded = _decode_transport_form(attached.as_bytes(), encoding)
-                if decoded is None:
-                    return b""
-                attached = decoded
-            if _nesting_exceeds(attached, MAX_ATTACHED_MESSAGE_DEPTH):
-                return b""
-            return attached.as_bytes()
-    return _decoded_payload(part)
+    if not part.is_multipart():
+        return _decoded_payload(part)
+    if not serialize_containers:
+        return b""
+    encoding = str(part.get("Content-Transfer-Encoding", "")).strip().lower()
+    nested = part.get_payload()
+    if (
+        part.get_content_maintype() == "message"
+        and encoding in ("base64", "quoted-printable")
+        and isinstance(nested, list)
+        and nested
+        and isinstance(nested[0], email.message.Message)
+    ):
+        decoded = _decode_transport_form(nested[0].as_bytes(), encoding)
+        if decoded is None or _nesting_exceeds(decoded, MAX_ATTACHED_MESSAGE_DEPTH):
+            return b""
+        return decoded.as_bytes()
+    # The part's own tree is one level deeper than the email it carries.
+    if _nesting_exceeds(part, MAX_ATTACHED_MESSAGE_DEPTH + 1):
+        return b""
+    return _serialized_body(part)
+
+
+def _serialized_body(part: email.message.Message) -> bytes:
+    """``part`` serialized without its own headers: its whole body, every
+    subpart included. The generator ends the header block with a blank
+    line, and a folded header line never contains one."""
+    data = part.as_bytes()
+    if data.startswith(b"\n"):
+        return data[1:]
+    return data.partition(b"\n\n")[2]
 
 
 def _decode_transport_form(data: bytes, encoding: str) -> email.message.Message | None:
@@ -414,17 +434,22 @@ def _extract_body_and_attachments(
     html_text = ""
     attachments: list[Attachment] = []
 
-    # Depth-first in document order, like ``msg.walk()``, but an
-    # attachment's subparts are never visited: an attached email's
-    # text is not the parent's body. Iterative, so nesting depth cannot
-    # recurse. The root is classified too (a message can be one
-    # attachment part), unless it is a multipart container.
-    stack: list[email.message.Message] = [msg]
+    # Depth-first in document order, like ``msg.walk()``, but nothing
+    # inside an attachment is a candidate for the body: an attached
+    # email's text is not the parent's. Attachments inside it are still
+    # recorded, as the old walk did (a PDF in a forwarded email).
+    # Iterative, so nesting depth cannot recurse. The root is classified
+    # too (a message can be one attachment part), unless it is a
+    # ``multipart/*`` container.
+    stack: list[tuple[email.message.Message, bool]] = [(msg, False)]
     while stack:
-        part = stack.pop()
+        part, in_attachment = stack.pop()
         ct = part.get_content_type()
-        if _is_attachment(part) and (part is not msg or not part.is_multipart()):
-            payload = _attachment_payload(part)
+        is_attachment = _is_attachment(part) and not (
+            part is msg and part.get_content_maintype() == "multipart"
+        )
+        if is_attachment:
+            payload = _attachment_payload(part, serialize_containers=not in_attachment)
             attachments.append(
                 Attachment(
                     filename=part.get_filename() or "unnamed",
@@ -434,10 +459,15 @@ def _extract_body_and_attachments(
                     content_hash=hashlib.sha256(payload).hexdigest(),
                 )
             )
-        elif part.is_multipart():
+        if part.is_multipart():
             children = part.get_payload()
             if isinstance(children, list):
-                stack.extend(c for c in reversed(children) if isinstance(c, email.message.Message))
+                inside = in_attachment or is_attachment
+                stack.extend(
+                    (c, inside) for c in reversed(children) if isinstance(c, email.message.Message)
+                )
+        elif is_attachment or in_attachment:
+            continue
         elif ct == "text/html":
             if not html_text:
                 payload = _decoded_payload(part)
