@@ -53,7 +53,7 @@ def test_successful_cached_extraction_is_reused(tmp_path, monkeypatch):
     db.store_attachment_extraction(
         attachment_id=attachment.content_hash,
         extraction_status=STATUS_SUCCESS,
-        extractor="text",
+        extractor="text@2",
         extracted_text="cached text",
         extraction_error=None,
     )
@@ -273,7 +273,7 @@ def _run_process_with_cached_status(
     db.store_attachment_extraction(
         attachment_id=attachment.content_hash,
         extraction_status=status,
-        extractor="text",
+        extractor="text@2",
         extracted_text=None,
         extraction_error=error,
     )
@@ -361,7 +361,7 @@ def test_recent_failed_cached_extraction_is_honored(tmp_path, monkeypatch):
     db.store_attachment_extraction(
         attachment_id=attachment.content_hash,
         extraction_status=STATUS_FAILED,
-        extractor="text",
+        extractor="text@2",
         extracted_text=None,
         extraction_error="recent failure",
     )
@@ -608,7 +608,7 @@ class TestPrepareApplyBoundary:
         db.store_attachment_extraction(
             attachment_id=attachment.content_hash,
             extraction_status=STATUS_SUCCESS,
-            extractor="text",
+            extractor="text@2",
             extracted_text="cached body",
             extraction_error=None,
         )

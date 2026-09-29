@@ -32,7 +32,7 @@ class TestDispatchByMime:
             payload=b"Hello there",
         )
         assert result.status == STATUS_SUCCESS
-        assert result.extractor == "text"
+        assert result.extractor == "text@2"
         assert result.text == "Hello there"
 
     def test_text_csv_uses_text_extractor(self):
@@ -65,7 +65,7 @@ class TestDispatchByMime:
             payload=b"text content",
         )
         assert result.status == STATUS_SUCCESS
-        assert result.extractor == "text"
+        assert result.extractor == "text@2"
 
     def test_no_dispatch_match_returns_unsupported(self):
         result = extract(
@@ -181,7 +181,7 @@ class TestSafetyGates:
         )
         assert result.status == STATUS_FAILED
         assert "simulated extractor crash" in result.error
-        assert result.extractor == "text"
+        assert result.extractor == "text@2"
 
 
 class TestEmptyExtraction:
@@ -229,6 +229,62 @@ class TestTextExtractorFallback:
         assert name == "text"
         assert "before" in text
         assert "after" in text
+
+
+class TestTextExtractorUnicode:
+    """#234: UTF-16 text decoded as cp1252 (or, without a BOM, as UTF-8)
+    came out NUL-interleaved, cached as a successful extraction, and
+    no word in it could be searched."""
+
+    WORDS = "COBALT invoice amount 1234 — résumé"
+
+    @pytest.mark.parametrize("encoding", ["utf-16", "utf-16-be", "utf-32", "utf-8-sig"])
+    def test_bom_selects_the_decoder(self, encoding):
+        import codecs
+
+        from src.extractors.text import extract as text_extract
+
+        payload = self.WORDS.encode(encoding)
+        if encoding == "utf-16-be":
+            payload = codecs.BOM_UTF16_BE + payload
+        text, _ = text_extract(payload)
+        assert text == self.WORDS
+
+    @pytest.mark.parametrize("encoding", ["utf-16-le", "utf-16-be"])
+    def test_bomless_utf16_is_recognised_by_its_nul_bytes(self, encoding):
+        from src.extractors.text import extract as text_extract
+
+        text, _ = text_extract(self.WORDS.encode(encoding))
+        assert text == self.WORDS
+
+    def test_utf8_with_a_stray_nul_stays_utf8(self):
+        from src.extractors.text import extract as text_extract
+
+        payload = "id\x00résumé line one\nline two".encode()
+        text, _ = text_extract(payload)
+        assert text == payload.decode("utf-8")
+
+    def test_mime_utf16_attachment_extracts_searchable_text(self):
+        """The issue's shape: Python's email package writes a BOM for
+        ``charset=utf-16``, which the parser hands on as payload bytes."""
+        import email
+        from email.message import EmailMessage
+
+        msg = EmailMessage()
+        msg.set_content("body")
+        msg.add_attachment(self.WORDS, subtype="plain", charset="utf-16", filename="report.txt")
+        part = list(email.message_from_bytes(bytes(msg)).walk())[-1]
+        result = extract(
+            content_type=part.get_content_type(),
+            filename="report.txt",
+            payload=part.get_payload(decode=True),
+        )
+        assert result.status == STATUS_SUCCESS
+        # The MIME writer appends a one-byte newline after the UTF-16
+        # bytes, which decodes as one replacement character.
+        assert result.text is not None and self.WORDS in result.text
+        assert "\x00" not in result.text
+        assert result.extractor == "text@2"
 
 
 class TestHtmlExtractorFallback:
