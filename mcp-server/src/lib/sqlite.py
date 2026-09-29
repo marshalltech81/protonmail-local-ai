@@ -78,6 +78,10 @@ _CHUNK_LANE_OVERSAMPLE = 10
 # so both lanes clamp here rather than silently lose the lane.
 _SQLITE_VEC_MAX_K = 4096
 
+# Characters of a candidate's subject sent to the reranker; matches the
+# tools' ``HEADER_CHAR_LIMIT``.
+_RERANK_SUBJECT_CHARS = 500
+
 
 def _addr_matches(haystack: list[str], query_lower: str) -> bool:
     """True if ``query_lower`` matches an address string in ``haystack``.
@@ -874,11 +878,14 @@ class Database:
         callers without ``with_evidence=True`` have to work with). The
         subject is included in both shapes so a query like "invoice
         from acme" can rerank on the subject even when the body is
-        boilerplate.
+        boilerplate. The subject is sender-controlled and unbounded, so it
+        is cut at ``_RERANK_SUBJECT_CHARS``: every candidate is sent to the
+        rerank provider in one request.
         """
+        subject = result.subject[:_RERANK_SUBJECT_CHARS]
         if result.evidence_chunks:
-            return f"Subject: {result.subject}\n\n{result.evidence_chunks[0].text}"
-        return f"Subject: {result.subject}\n\n{result.snippet}"
+            return f"Subject: {subject}\n\n{result.evidence_chunks[0].text}"
+        return f"Subject: {subject}\n\n{result.snippet}"
 
     def _apply_rerank(
         self,
