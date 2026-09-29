@@ -223,7 +223,8 @@ thread-level lanes alone.
 
 The rerank stage is best-effort: a transient rerank-service failure
 returns an empty result set from the reranker, and `hybrid_search`
-falls back to RRF order truncated to the caller's `limit`. A rerank
+falls back to RRF order truncated to the caller's `limit`. A ranking
+with an out-of-range or repeated index falls back the same way. A rerank
 outage degrades quality without failing the whole query.
 
 ## Thread Indexing

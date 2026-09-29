@@ -900,21 +900,27 @@ class Database:
 
         On reranker failure (returns empty list), the candidates fall
         back to RRF order — so a rerank outage degrades quality without
-        failing the whole query.
+        failing the whole query. A ranking with an out-of-range or
+        repeated index is a failure too: applying it would drop or
+        duplicate results. It is checked before any candidate is touched.
         """
         docs = [self._candidate_text(c) for c in candidates]
         scored = reranker.rerank(query, docs, top_n=limit)
         if not scored:
             return candidates[:limit]
+        indices = [orig_idx for orig_idx, _ in scored]
+        if len(set(indices)) != len(indices) or not all(0 <= i < len(candidates) for i in indices):
+            # Fixed text only: the ranking came from the provider.
+            log.warning("rerank returned invalid indices; falling back to RRF order")
+            return candidates[:limit]
         reordered: list[ThreadResult] = []
         for orig_idx, score in scored:
-            if 0 <= orig_idx < len(candidates):
-                result = candidates[orig_idx]
-                result.score = score
-                # Record the post-rerank position as the ``rerank`` lane
-                # rank — observability only, surfaced by get_evidence.
-                result.lane_ranks["rerank"] = len(reordered)
-                reordered.append(result)
+            result = candidates[orig_idx]
+            result.score = score
+            # Record the post-rerank position as the ``rerank`` lane
+            # rank — observability only, surfaced by get_evidence.
+            result.lane_ranks["rerank"] = len(reordered)
+            reordered.append(result)
         return reordered[:limit]
 
     def keyword_search(

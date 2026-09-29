@@ -821,6 +821,82 @@ class TestRerankInHybridSearch:
         )
         assert [r.thread_id for r in with_broken] == [r.thread_id for r in rrf_only]
 
+    @pytest.mark.parametrize(
+        "scored",
+        [
+            [(99, 0.9)],  # out of range
+            [(-1, 0.9)],  # negative
+            [(0, 0.9), (0, 0.8)],  # duplicate
+            [(1, 0.9), (99, 0.8)],  # one valid, one out of range
+        ],
+    )
+    def test_invalid_rerank_indices_fall_back_to_rrf_order(self, seeded_db: Database, scored):
+        # #225: an invalid ranking is a failed rerank. Applying it anyway
+        # dropped every result (out of range) or returned one thread twice
+        # (duplicate); the whole RRF slice must survive, scores untouched.
+        rrf_only = seeded_db.hybrid_search(
+            query_text="invoice",
+            query_embedding=[1.0, 0.0, 0.0, 0.0],
+            limit=2,
+        )
+        assert len(rrf_only) == 2, "fixture must surface at least 2 candidates"
+        results = seeded_db.hybrid_search(
+            query_text="invoice",
+            query_embedding=[1.0, 0.0, 0.0, 0.0],
+            limit=2,
+            reranker=_ScriptedReranker(scored),
+        )
+        assert [r.thread_id for r in results] == [r.thread_id for r in rrf_only]
+        assert [r.score for r in results] == [r.score for r in rrf_only]
+        assert all("rerank" not in r.lane_ranks for r in results)
+
+    def test_invalid_cohere_indices_fall_back_to_rrf_order(self, seeded_db: Database):
+        # Same path through the real client, with the SDK call stubbed to
+        # return a duplicate index as a malformed gateway response would.
+        from types import SimpleNamespace
+
+        from src.lib.reranker import CohereReranker, RerankConfig
+
+        reranker = CohereReranker(
+            RerankConfig(
+                base_url="",
+                model="rerank-v4.0-pro",
+                api_key="ck-test",  # pragma: allowlist secret
+                candidates=50,
+                top_n=5,
+            )
+        )
+        item = SimpleNamespace(index=0, relevance_score=0.9)
+        reranker.client.rerank = lambda **_: SimpleNamespace(results=[item, item])  # type: ignore[method-assign]
+        rrf_only = seeded_db.hybrid_search(
+            query_text="invoice", query_embedding=[1.0, 0.0, 0.0, 0.0], limit=2
+        )
+        results = seeded_db.hybrid_search(
+            query_text="invoice",
+            query_embedding=[1.0, 0.0, 0.0, 0.0],
+            limit=2,
+            reranker=reranker,
+        )
+        assert [r.thread_id for r in results] == [r.thread_id for r in rrf_only]
+
+
+class _ScriptedReranker:
+    """Stub returning a fixed ``[(index, score), ...]`` regardless of input."""
+
+    candidates = 50
+    top_n = 5
+
+    def __init__(self, scored: list[tuple[int, float]]):
+        self._scored = scored
+
+    def rerank(
+        self,
+        query: str,
+        documents: list[str],
+        top_n: int | None = None,
+    ) -> list[tuple[int, float]]:
+        return list(self._scored)
+
 
 class TestDirectLookups:
     def test_get_thread_returns_result(self, seeded_db: Database):
