@@ -191,6 +191,14 @@ Do not make any of the following changes unless the repository owner explicitly 
   keeps bytes only in the `.eml` on disk. ``attachment_extractions`` caches
   the extracted *text* per content hash so OCR / parse cost runs at most
   once per unique payload, not the bytes themselves.
+- When a change makes an attachment extractor return different text for
+  the same bytes, bump that module's entry in
+  `indexer/src/extractors/__init__.py` `EXTRACTOR_VERSIONS`. The
+  extraction cache is otherwise served forever, so the fix would never
+  reach mail indexed before it; with the bump, stale rows re-extract and
+  the startup sweep re-queues the messages carrying them once.
+  Dead-lettered messages are skipped and keep their stale chunks until
+  an operator runs `make requeue-dead`.
 
 ## Bridge-Specific Guardrails
 
@@ -206,14 +214,17 @@ Important facts:
 - Bridge binds to `0.0.0.0` via a source patch so mbsync can reach it from another container
 - Bridge TLS SANs are patched so the cert is valid for `protonmail-bridge` and `localhost`
 - Bridge's vault default `AutoUpdate: true` is patched to `false` so the
-  in-process auto-updater does not silently bypass `BRIDGE_VERSION`. Without
-  this patch Bridge fetches `proton.me/download/bridge/linux/x86/v1/version.json`
-  on every startup, downloads the latest release (the Qt/GUI variant —
-  exactly what `build-nogui` exists to avoid), and stages it under
-  `/data/local/protonmail/bridge-v3/updates/<version>/`. The pin then
-  controls only what gets compiled in the Dockerfile, not what ships at
-  runtime. The patch is verified at three layers: source string-count
-  guards in `bridge/patch-source.sh`, a synthetic `go test` against
+  in-process auto-updater stays off. Without this patch Bridge fetches
+  `proton.me/download/bridge/linux/x86/v1/version.json` on every startup,
+  downloads the latest release (the Qt/GUI variant — exactly what
+  `build-nogui` exists to avoid), and stages it under
+  `/data/local/protonmail/bridge-v3/updates/<version>/`. The image ships
+  no launcher, so a staged build is not executed, but the fetch is
+  unpinned network traffic and leaves unpinned code on the data volume.
+  The patch changes only the default for new vaults; vaults created
+  before it keep `AutoUpdate: true` (#245). The patch is verified at
+  three layers: source string-count guards in `bridge/patch-source.sh`,
+  a synthetic `go test` against
   `internal/vault.newDefaultSettings` run during the build, and an
   end-to-end `"Vault loaded ... autoUpdate=\"false\""` log assertion in
   `scripts/bridge-smoke.sh`.
@@ -270,25 +281,9 @@ Secrets are a hard boundary.
   uniformly. The file may be empty only when the matching layer's
   `*_MODE=none` (currently only `INFERENCE_MODE` and `RERANK_MODE`
   have a `none` mode; `EMBED_MODE` is always `openai`).
-- `INFERENCE_MODE=openai` uses the official `openai` SDK against any
-  OpenAI-compatible chat-completions endpoint. `INFERENCE_API_KEY` is
-  required (non-empty); `INFERENCE_BASE_URL` is optional — leave it
-  empty for OpenAI proper, or set it to a host-side server (LM Studio
-  / vLLM / `mlx_lm.server`) or alternative provider (DeepInfra,
-  OpenRouter, etc.). Local unauthenticated servers accept any
-  placeholder string for `INFERENCE_API_KEY`.
-- `INFERENCE_MODE=anthropic` (default) uses the official `anthropic`
-  SDK against the Anthropic Messages API. `INFERENCE_API_KEY` is
-  required (non-empty); leave `INFERENCE_BASE_URL` empty for the SDK
-  default or set it for compatible gateways.
-- `EMBED_MODE=openai` is the only valid value. `EMBED_API_KEY` is
-  required (non-empty); `EMBED_BASE_URL` is optional — leave it empty
-  for OpenAI proper, or set it to a host-side server or alternative
-  provider. Local unauthenticated servers accept any placeholder
-  string for `EMBED_API_KEY`.
-- `RERANK_MODE=cohere` uses the official `cohere` SDK against the
-  Cohere rerank API. `RERANK_API_KEY` is required; `RERANK_BASE_URL`
-  is optional (empty falls through to the SDK default).
+- Which `*_MODE` values exist, and which `*_BASE_URL` / `*_MODEL` /
+  `*_API_KEY` each requires, is defined once in the Architecture
+  Summary above; keep it there rather than restating it here.
 
 ### Commit hygiene
 
@@ -301,6 +296,58 @@ git diff --staged | grep -iE '(password|pass|secret|token|key|credential)' | gre
 If a secret was committed, rotate it and remove it from git history using `git filter-repo`.
 
 Do not rely on `git commit --amend` or interactive rebase for secret removal.
+
+## Untrusted Mail Content
+
+Every message and attachment is attacker-controlled input, and its
+content is as private as a credential.
+
+### Keep mailbox content out of logs and errors
+
+- Never write mailbox content (bodies, subjects, names, addresses,
+  attachment filenames and text), provider response fields, or
+  content-bearing tool-argument values to logs,
+  `indexing_jobs.last_error`, or exception messages that reach them.
+  The credential redaction rules above do not cover this: the text is
+  arbitrary, not a known secret. Tool arguments allowlisted in
+  `mcp-server/src/lib/security.py` `_LOGGABLE_TOOL_PARAMS` may be
+  logged when the value passes that field's own check (enums, numbers,
+  booleans and ISO dates today); `log_tool_call` withholds everything
+  else, including an allowlisted field whose value fails its check.
+- At a provider-call boundary, log an SDK status error as its type plus
+  status code. Keep the full text only of exceptions that cannot carry
+  provider or mail data: connection and timeout errors, and our own
+  fixed-message errors such as `EmbedResponseError`. Log anything else
+  (response parsing, validation, conversion) as its type alone, since
+  those errors quote the values they reject and a provider's response
+  can echo the text sent to it. `scrub_embed_error` and the reranker
+  follow this. `safe_provider_exception_text` reduces only status
+  errors and otherwise keeps the (secret-redacted) message, so it does
+  not satisfy this on its own.
+- Known gaps are tracked in #257, which holds the full list. Examples:
+  the parser logs a malformed `Date` header verbatim, the attachment
+  pipeline and extractors log filenames and raw parser/OCR exceptions,
+  and the search and intelligence tool handlers log non-status provider
+  exceptions through `safe_provider_exception_text`. Do not add to
+  them, and add any new one you find to #257.
+- Messages built from provider responses use fixed text and counts,
+  never the returned values.
+- A validation error quoting a tool argument may be returned to the
+  caller, but log only the field name (see `InvalidFilterError`).
+- Test with a synthetic marker: assert it is absent from `caplog` and
+  from any persisted error.
+
+### Bound the work per input
+
+- Parsing, regex, and extraction work must be bounded per input
+  (linear, or capped) before any size or character cap is applied to
+  the result. A small crafted email or attachment must not be able to
+  stall the single ingestion worker.
+- Extractors must not let input trigger `RecursionError` or
+  `MemoryError`: the dispatcher re-raises both as host pressure rather
+  than recording a `failed` extraction.
+- A fix gets a regression test with a synthetic worst case and a
+  generous time bound.
 
 ## Change Strategy
 
@@ -336,6 +383,24 @@ Examples:
 - `docs(setup): add mbsync verification steps`
 - `chore(pre-commit): add detect-secrets baseline`
 - `style: apply pre-commit autofixes across repo`
+
+## Pull Requests and Review
+
+- When a PR first lands, one test-first commit per issue, with a
+  `Fixes #N` line for each issue the PR closes; behaviour-changing or
+  schema-adjacent fixes get their own PR.
+- Every push starts a Codex code and security review. A round is done
+  when Codex's summary comment shows both rows completed on the head
+  commit; a 👍 reaction means no findings. Replies you post to review
+  threads also count as reviews on the head, so do not use "a review
+  exists" as the signal.
+- Verify each finding against the code before agreeing. Fix a review
+  round's findings test-first in one commit for that round (they answer
+  the same review, even when they touch different issues), and add a
+  "Review round N" section to the PR description.
+- Resolve a thread only once it is fixed or the owner has deferred it;
+  merging is blocked while line threads are open.
+- Merge (squash) only on the owner's explicit go-ahead.
 
 ## Common Commands
 
@@ -459,8 +524,13 @@ set -Eeuo pipefail
 ## Python Conventions
 
 - Python version is `3.14`
-- do not add `type: ignore` unless explicitly approved
-- fix types properly instead
+- do not add `type: ignore` in `src/` unless explicitly approved; fix
+  types properly instead
+- tests may use a code-scoped `# type: ignore[<code>]` for deliberate
+  test doubles (monkeypatching an SDK, library or project object, such
+  as replacing `client.embeddings.create` or a `Database` method) and
+  for negative tests that pass an invalid type or mutate a frozen
+  dataclass on purpose
 - MCP server code should remain async
 - indexer is sync except where the watchdog/event loop requires otherwise
 - local Python dependency management uses `uv`
@@ -518,9 +588,8 @@ Notes:
   `EMBED_MODEL` so query vectors are comparable to indexed vectors —
   swapping the embedder requires a full reindex if the new model
   produces vectors of a different shape or distribution
-- `EMBED_MODE=openai` is the only valid value. Embed has no disabled
-  mode because the indexer cannot ingest mail without an embedder and
-  semantic / hybrid search is the headline retrieval feature
+- embed has no disabled mode; see the Architecture Summary for the
+  provider contract
 
 ### `mcp-server/`
 
@@ -545,7 +614,7 @@ Notes:
 
 - use `pytest` for Python services
 - run `make typecheck` for mypy checks when Python service code changes
-- run `pre-commit run --all-files` when practical before opening a PR or finalising a substantial change
+- run `pre-commit run --all-files` when practical before opening a PR or finalising a substantial change; the `hadolint-docker` hook needs a running Docker daemon, so when Docker is down and no Dockerfile changed, run with `SKIP=hadolint-docker` and say so in the PR
 - for Docker Compose or env wiring changes, run `docker compose config --quiet`
 - for Dockerfile, build, or container-runtime changes, run the smallest relevant `docker compose build ...` subset when practical
 - for Bridge build, patch, or version-bump changes, run `make bridge-upgrade-check`
@@ -556,8 +625,8 @@ Notes:
 ### Coverage expectations
 
 - both `indexer` and `mcp-server` enforce a 90% coverage floor via `--cov-fail-under=90` in each service's `pyproject.toml`; a PR that drops coverage below 90% will fail CI
-- for `indexer`, coverage scope is `src/` with `src/main.py` omitted (service bootstrap is covered by docker-compose integration, not unit tests); for `mcp-server`, coverage scope is `src/lib` only — tool handlers, MCP framework wiring, and the main entrypoint do not yet have unit tests
-- when widening `mcp-server` unit coverage into `src/tools` or `src/main.py`, expand the `source` list in `mcp-server/pyproject.toml` under `[tool.coverage.run]` rather than lowering the threshold
+- for `indexer`, coverage scope is `src/` with `src/main.py` omitted (service bootstrap is covered by docker-compose integration, not unit tests); for `mcp-server`, coverage scope is `src/` with `src/main.py` omitted — tool handlers run against the `FakeMCPServer` stub in `tests/conftest.py`, and `main.py`'s testable helpers are unit-tested directly
+- when coverage drops, add tests rather than lowering the threshold or widening `omit`
 - CI runs `pytest --cov` in `.github/workflows/tests.yml` and uploads `coverage.xml` as an artifact per service
 
 ### Minimum expectations by area

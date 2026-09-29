@@ -314,24 +314,39 @@ Triaged against `d30e500` by four parallel agents; every issue is real
 and most reproduced with synthetic input. PRs in the order to land
 them (one test-first commit per issue, `Fixes #N` per issue):
 
-1. **#238** invalid date filters leak withheld input into logs — five
+**Status 2026-09-29 — next session starts here.** Items 1–5 are merged
+(#251, #252, #255, #253, #254). Next up, in order: item 6 (#233 +
+#225), item 7 (#243), item 8 (#230 + #209), then item 10 (#237 + #210)
+**before** item 9 (#231 + #234), then 11–12. Items 13–14 wait on owner
+decisions. Also new: **#257**, the known mailbox-content logging gaps
+(extractor filename/exception logs, `safe_provider_exception_text`
+passthrough in the search and intelligence handlers); AGENTS.md's
+"Untrusted Mail Content" section (#256) lists them.
+
+1. **Done (#251).** **#238** invalid date filters leak withheld input into logs — five
    handlers logged the `ValueError` quoting the value. Fixed with a
    dedicated `InvalidFilterError` the handlers log by field name only.
-2. **#239** (P1) reply-attribution regexes are quadratic, and wider than
+2. **Done (#252).** **#239** (P1) reply-attribution regexes are quadratic, and wider than
    filed: all six languages, and `wrote:` mid-line too. A 1 MB line
    blocks the worker for minutes. Fixed: skip lines over 300 chars in
    `_is_reply_header`.
-3. **#228 + #226** (#228 P1) DOCX walker rewrite: iterate serialized cells once
+3. **Done (#255, 5 Codex rounds).** **#228 + #226** (#228 P1) DOCX walker rewrite: iterate serialized cells once
    (no `gridSpan` expansion), skip vMerge continuations, recurse into
    nested and header/footer tables via `iter_inner_content()`. No
    character budget needed: work is now linear in the XML, and lxml's
    256-element depth limit bounds the recursion. Also lands the cache
    versioning (`EXTRACTOR_VERSIONS`, `docx@2`): an older version is a
-   cache miss and startup re-queues the affected messages once.
-4. **#224** malformed 200 provider responses leak mailbox text (embedder
+   cache miss and startup re-queues the affected messages once. Review
+   rounds settled the refresh semantics: any occurrence of a stale row
+   re-runs the module that wrote it (`extract(module_override=...)`),
+   the sweep re-queues every message carrying the bytes except
+   dead-lettered ones (those keep their stale chunks until an operator
+   runs `make requeue-dead`), and a plan
+   without usable text clears the attachment's chunk slice.
+4. **Done (#253).** **#224** malformed 200 provider responses leak mailbox text (embedder
    index errors reach logs and `indexing_jobs.last_error`; reranker
    `int()`/`float()` errors reach logs). Fixed-text diagnostics only.
-5. **#232** non-finite embeddings: sqlite-vec stores NaN; the row gets
+5. **Done (#254).** **#232** non-finite embeddings: sqlite-vec stores NaN; the row gets
    a NULL distance (thread lane raised on `float(None)`, chunk lanes
    scored it as a perfect match). Rejected at the embedder,
    `l2_normalize` and the MCP query embed; MCP skips non-finite
@@ -372,8 +387,8 @@ them (one test-first commit per issue, `Fixes #N` per issue):
     launcher a downloaded update is staged in `/data` but never
     executed; the exposure is unpinned fetches and code on disk. Fix is
     a fourth patch hunk forcing the `updates.go` gate off (three-layer
-    rule applies); AGENTS.md's "silently bypass" wording should be
-    corrected with it.
+    rule applies). AGENTS.md's "silently bypass" wording was corrected
+    in #256.
 
 ## Maintenance backlog (small, ongoing)
 
@@ -569,6 +584,22 @@ do not ship persisted claims without them.
    `issuer_url` even when only a verifier is used.
 
 ## Recently Completed
+
+### 2026-09-29 — Second review batch, items 1–5 (#251–#255)
+
+Triage of #224–#245 (four parallel agents) confirmed every issue; see
+the ordered list under Open review findings. Merged: rejected date
+filters logged by field name only (#238, PR #251); reply-header regexes
+skip lines over 300 chars (#239, PR #252); malformed provider responses
+no longer quote their values in logs or `last_error` (#224, PR #253);
+NaN/inf embeddings rejected at the embedder, `l2_normalize` and the MCP
+query embed, and skipped on read (#232, PR #254); DOCX walker reads each
+cell once and walks nested and header/footer tables (#228, #226, PR
+#255). #255 also added `EXTRACTOR_VERSIONS` cache versioning and a
+startup re-queue; five Codex rounds shaped its refresh semantics
+(recorded in item 3). AGENTS.md gained an "Untrusted Mail Content"
+section and a PR review section (#256); remaining logging gaps are
+#257.
 
 ### 2026-09-28 — Right text reaches the model (#214, #215, #223)
 
