@@ -299,11 +299,12 @@ How the first batch was worked, and what to repeat:
 
   Likely needs a schema change (store both claimants), so land it with
   the Phase 2 migration and reindex. That reindex also repairs databases
-  already damaged by #204, #205 and #232.
+  already damaged by #204, #205, #230 and #232.
 - **#208 chunk overlap exceeds `max_tokens`** — harmless at default
   settings; land it with Phase 2 item 4 (chunk `kind` tags), which
   rewrites the chunker and changes chunk IDs anyway.
-- **#209 single-part MIME attachment decoded as body**, **#210 stale
+- ~~**#209 single-part MIME attachment decoded as body**~~ (done with
+  #230 in item 8 below), **#210 stale
   unsupported-extraction cache entry** — low frequency, about 10 and 5
   lines; fix them when next in `parser.py` / `attachment_indexing.py`,
   or together as one small PR.
@@ -360,7 +361,7 @@ passthrough in the search and intelligence handlers); AGENTS.md's
 7. **#243** header clipping sweep (subject, participant names,
    attachment filename/MIME, reranker `_candidate_text`). Separate from
    the `get_message` / ID-length backlog items below.
-8. **#230 + #209** parser MIME traversal: do not descend into attached
+8. **Done (#260).** **#230 + #209** parser MIME traversal: do not descend into attached
    parts (and hash rfc822 attachments by their bytes — every one is
    currently `sha256(b"")`); apply the attachment check to a single-part
    root.
