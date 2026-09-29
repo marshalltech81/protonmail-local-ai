@@ -88,22 +88,48 @@ cert_fingerprint() {
         | tr '[:upper:]' '[:lower:]'
 }
 
+write_pin() {
+    # Write the pin to a temporary file in the state directory and rename
+    # it into place, so a failed write never leaves a partial pin and a
+    # failed rotation keeps the previous one. Called only as a condition,
+    # where errexit is off, so every step is checked.
+    local fp="$1"
+    local tmp
+
+    if ! tmp="$(mktemp "${PIN_FILE}.XXXXXX")"; then
+        return 1
+    fi
+    if ! printf '%s\n' "$fp" >"$tmp" || ! chmod 600 "$tmp" || ! mv -f "$tmp" "$PIN_FILE"; then
+        rm -f "$tmp"
+        return 1
+    fi
+}
+
 verify_cert_pin() {
     # First boot: no pin on disk yet → TOFU, save fingerprint.
     # Subsequent boots: fingerprint must match, or the operator must opt
     # in to rotation via BRIDGE_CERT_PIN_ROTATE=true (used when Bridge is
     # upgraded and its TLS cert is deliberately replaced).
+    #
+    # The caller runs this as an ``if`` condition, which turns errexit off
+    # inside it: every step that must succeed is checked explicitly, and
+    # the cert is accepted only once the pin is stored.
     local current_fp="$1"
     local pinned_fp
 
     if [[ ! -s "$PIN_FILE" ]]; then
-        printf '%s\n' "$current_fp" > "$PIN_FILE"
-        chmod 600 "$PIN_FILE"
+        if ! write_pin "$current_fp"; then
+            echo ">>> ERROR: could not save the Bridge cert pin to ${PIN_FILE} — refusing to sync." >&2
+            return 1
+        fi
         echo ">>> First boot — pinned Bridge cert fingerprint sha256:${current_fp}."
         return 0
     fi
 
-    pinned_fp="$(tr -d '[:space:]' < "$PIN_FILE")"
+    if ! pinned_fp="$(tr -d '[:space:]' <"$PIN_FILE")"; then
+        echo ">>> ERROR: could not read the Bridge cert pin at ${PIN_FILE} — refusing to sync." >&2
+        return 1
+    fi
     if [[ "$pinned_fp" == "$current_fp" ]]; then
         echo ">>> Bridge cert fingerprint matches the pinned value."
         return 0
@@ -113,8 +139,10 @@ verify_cert_pin() {
         echo ">>> WARNING: Bridge cert fingerprint changed and BRIDGE_CERT_PIN_ROTATE=true — rotating pin." >&2
         echo ">>>   pinned:  sha256:${pinned_fp}" >&2
         echo ">>>   current: sha256:${current_fp}" >&2
-        printf '%s\n' "$current_fp" > "$PIN_FILE"
-        chmod 600 "$PIN_FILE"
+        if ! write_pin "$current_fp"; then
+            echo ">>> ERROR: could not save the rotated pin to ${PIN_FILE}; the previous pin is kept — refusing to sync." >&2
+            return 1
+        fi
         return 0
     fi
 

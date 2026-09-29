@@ -429,7 +429,18 @@ BRIDGE_CERT_PIN_ROTATE=true docker compose up -d mbsync
 ```
 
 The container writes the new fingerprint to the pin file on startup and
-syncing resumes. Set `BRIDGE_CERT_PIN_ROTATE` back to `false` (or remove
+syncing resumes.
+
+If the pin cannot be saved — first boot or rotation, for example because
+the `mbsync-state` volume is full or not writable — `mbsync` refuses to
+sync rather than trust a cert it could not pin, and a failed rotation
+keeps the previous pin:
+
+```
+>>> ERROR: could not save the Bridge cert pin to /state/bridge-cert.fingerprint — refusing to sync.
+```
+
+Fix the volume and restart `mbsync`. Set `BRIDGE_CERT_PIN_ROTATE` back to `false` (or remove
 it from `.env`) before the next restart so the new pin is enforced going
 forward. Leaving it permanently true disables pin enforcement.
 

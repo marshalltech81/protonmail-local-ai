@@ -4,3 +4,5 @@
 *.md
 # TLS cert is extracted at runtime — never bake it into the image
 *.pem
+# Entrypoint tests run in CI, not in the image
+tests/
