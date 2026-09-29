@@ -12,6 +12,7 @@ from mcp.types import CallToolResult
 
 from ..lib.embed import embed_query
 from ..lib.security import log_tool_call, safe_exception_text, safe_provider_exception_text
+from ..lib.sqlite import InvalidFilterError
 from ..lib.validation import clamp_int
 from .outputs import (
     HEADER_CHAR_LIMIT,
@@ -309,6 +310,11 @@ def register_search_tools(
 
             return tool_result("\n".join(lines), output)
 
+        except InvalidFilterError as e:
+            # The message quotes the rejected value, which log_tool_call
+            # withheld. Return it to the caller; log only the field name.
+            log.warning("search_emails rejected invalid %s", e.field_name)
+            raise ToolError(f"Search error: {e}") from e
         except Exception as e:
             # Provider-SDK status errors (embed call, reranker call) can
             # echo request/response body fragments — for search that
@@ -476,6 +482,11 @@ def register_search_tools(
                     taken += len(chunks)
         except ToolError:
             raise
+        except InvalidFilterError as e:
+            # The message quotes the rejected value, which log_tool_call
+            # withheld. Return it to the caller; log only the field name.
+            log.warning("get_evidence rejected invalid %s", e.field_name)
+            raise ToolError(f"Evidence error: {e}") from e
         except Exception as e:
             # Mirror search_emails: provider-SDK status errors (the embed
             # call) can echo the query back, so reduce them to type +
@@ -627,6 +638,11 @@ def register_search_tools(
                 extracted_only=extracted_only,
                 limit=limit,
             )
+        except InvalidFilterError as e:
+            # The message quotes the rejected value, which log_tool_call
+            # withheld. Return it to the caller; log only the field name.
+            log.warning("search_attachments rejected invalid %s", e.field_name)
+            raise ToolError(f"Attachment search error: {e}") from e
         except Exception as e:
             # search_attachments is pure local-DB work (FTS + joins); the
             # only expected failure is a bad date filter (ValueError) or

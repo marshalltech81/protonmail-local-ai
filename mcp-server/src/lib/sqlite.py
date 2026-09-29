@@ -23,6 +23,19 @@ from .reranker import RerankerBackend
 log = logging.getLogger("mcp.sqlite")
 
 
+class InvalidFilterError(ValueError):
+    """A date filter the caller supplied could not be parsed.
+
+    The message quotes the rejected value so the caller learns why, which
+    means it must never be logged: tool handlers catch this and log only
+    which field failed.
+    """
+
+    def __init__(self, field_name: str, message: str) -> None:
+        super().__init__(message)
+        self.field_name = field_name
+
+
 def canonical_addr(value: str) -> str:
     """Extract the bare lowercased email from a display string.
 
@@ -2497,9 +2510,9 @@ class Database:
 def _normalize_date_bound(value: str | None, *, end_of_day: bool, field_name: str) -> str | None:
     """Return an ISO 8601 string suitable for lexicographic comparison against
     stored ``date_first`` / ``date_last`` values, or ``None`` if no filter was
-    supplied. Raises ``ValueError`` on invalid input (same policy as
-    ``_apply_filters``) so bad filters fail loudly instead of silently
-    returning the wrong rows.
+    supplied. Raises ``InvalidFilterError`` (a ``ValueError``) on invalid
+    input (same policy as ``_apply_filters``) so bad filters fail loudly
+    instead of silently returning the wrong rows.
     """
     if not value:
         return None
@@ -2533,7 +2546,7 @@ def _parse_filter_date(
         try:
             base = datetime.fromisoformat(normalized + "T00:00:00+00:00")
         except ValueError as exc:
-            raise ValueError(f"{_field_name}: invalid date {value!r}") from exc
+            raise InvalidFilterError(_field_name, f"{_field_name}: invalid date {value!r}") from exc
         if end_of_day:
             return base.replace(hour=23, minute=59, second=59, microsecond=999999)
         return base
@@ -2541,7 +2554,7 @@ def _parse_filter_date(
     try:
         dt = datetime.fromisoformat(normalized)
     except ValueError as exc:
-        raise ValueError(f"{_field_name}: invalid datetime {value!r}") from exc
+        raise InvalidFilterError(_field_name, f"{_field_name}: invalid datetime {value!r}") from exc
     if dt.tzinfo is None:
         return dt.replace(tzinfo=UTC)
     return dt.astimezone(UTC)

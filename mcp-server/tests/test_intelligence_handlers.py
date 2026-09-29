@@ -20,6 +20,7 @@ seeded DB and the FakeLocalLLM stub. Coverage targets:
 import asyncio
 import json
 
+import pytest
 from src.lib.inference import InferenceTruncatedError
 from src.tools.intelligence import register_intelligence_tools
 
@@ -522,3 +523,24 @@ class TestUntrustedSerialization:
         asyncio.run(handler(query="invoice", schema={"amount": "number"}))
         _system, user = fake_llm.complete_calls[0]
         _assert_fenced(user)
+
+
+class TestInvalidDateLogging:
+    @pytest.mark.parametrize("tool", ["ask_mailbox", "extract_from_emails"])
+    @pytest.mark.parametrize("field", ["date_from", "date_to"])
+    def test_invalid_date_value_is_not_logged(self, fake_server, seeded_db, caplog, tool, field):
+        # The rejected date is returned to the caller but, like every
+        # other withheld tool input, never written to the log (#238).
+        import logging
+
+        handlers = _handlers(fake_server, seeded_db, FakeLocalLLM())
+        if tool == "ask_mailbox":
+            kwargs = {"question": "any invoices?"}
+        else:
+            kwargs = {"query": "invoice", "schema": {"amount": "number"}}
+        kwargs[field] = "private-sentinel-value"
+        with caplog.at_level(logging.DEBUG):
+            text = _text(asyncio.run(handlers[tool](**kwargs)))
+        assert "private-sentinel-value" in text
+        assert "private-sentinel-value" not in caplog.text
+        assert field in caplog.text

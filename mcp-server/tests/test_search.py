@@ -746,6 +746,24 @@ class TestSearchAttachmentsTool:
 
 
 class TestLoggingPrivacy:
+    @pytest.mark.parametrize("tool", ["search_emails", "get_evidence", "search_attachments"])
+    @pytest.mark.parametrize("field", ["date_from", "date_to"])
+    def test_invalid_date_value_is_not_logged(
+        self, fake_server, fake_llm, seeded_db, caplog, tool, field
+    ):
+        # log_tool_call withholds a non-ISO date; the validation error
+        # quoting it must not put it back in the log (#238).
+        import logging
+
+        register_search_tools(fake_server, seeded_db, fake_llm)
+        handler = fake_server.tools[tool]
+        kwargs = {"query": "invoice", field: "private-sentinel-value"}
+        with caplog.at_level(logging.DEBUG):
+            text = _error(handler(**kwargs))
+        assert "private-sentinel-value" in text  # the caller still learns why
+        assert "private-sentinel-value" not in caplog.text
+        assert field in caplog.text
+
     def test_search_query_never_reaches_logs(self, fake_server, fake_llm, seeded_db, caplog):
         import logging
 
