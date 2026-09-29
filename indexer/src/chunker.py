@@ -90,6 +90,10 @@ def l2_normalize(vec: list[float]) -> list[float]:
     norm_sq = 0.0
     for x in vec:
         norm_sq += x * x
+    if not math.isfinite(norm_sq):
+        # NaN or inf in any component. sqlite-vec would store it and the
+        # row would then break semantic search (#232).
+        raise ValueError("vector has non-finite components")
     if norm_sq <= 0.0:
         return vec
     norm = math.sqrt(norm_sq)

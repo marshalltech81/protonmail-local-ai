@@ -239,6 +239,19 @@ class TestOpenAIEmbedder:
             assert marker not in scrubbed
             assert "5" not in str(exc.value)
 
+    @pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+    def test_non_finite_vector_values_are_rejected(self, bad):
+        # sqlite-vec stores NaN, and the row then breaks semantic
+        # search; the job must not be marked indexed (#232).
+        emb = _make_embedder()
+
+        def fake_create(**_kwargs):
+            return _embed_response([[1.0, 0.0], [0.0, bad]])
+
+        _patch_create(emb, fake_create)
+        with pytest.raises(EmbedResponseError, match="non-finite"):
+            emb.embed_batch(["a", "b"])
+
     def test_embed_batch_raises_on_count_mismatch(self):
         emb = _make_embedder()
 
@@ -493,6 +506,16 @@ class TestL2Normalize:
         _patch_create(emb, fake_create)
         out = emb.embed_batch(["x"])
         assert out == [l2_normalize([3.0, 4.0])]
+
+    @pytest.mark.parametrize("bad", [float("nan"), float("inf")])
+    def test_rejects_non_finite_vectors(self, bad):
+        # The DB write boundary normalizes vectors from any backend, so
+        # this is where a fake or future backend's NaN is stopped (#232).
+        with pytest.raises(ValueError, match="non-finite"):
+            l2_normalize([bad, 0.0])
+
+    def test_keeps_zero_placeholder(self):
+        assert l2_normalize([0.0, 0.0]) == [0.0, 0.0]
 
 
 class TestClassifyEmbedFailure:

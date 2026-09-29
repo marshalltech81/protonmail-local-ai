@@ -8,6 +8,7 @@ import base64
 import hashlib
 import json
 import logging
+import math
 import re
 import sqlite3
 from contextlib import closing
@@ -1683,7 +1684,7 @@ class Database:
                 """,
                 (serialized, min(limit, _SQLITE_VEC_MAX_K)),
             )
-            return [_row_to_chunk_result(r) for r in rows]
+            return [_row_to_chunk_result(r) for r in rows if _has_valid_distance(r)]
         except (sqlite3.Error, ValueError) as e:
             # ``sqlite3.Error`` covers OperationalError (missing vec
             # table) and DatabaseError (corruption); ``ValueError`` is
@@ -1789,7 +1790,8 @@ class Database:
         # ``per_thread_limit`` happens after the reorder.
         all_chunks: dict[str, list[ChunkResult]] = {tid: [] for tid in thread_ids}
         for r in rows:
-            all_chunks[r["thread_id"]].append(_row_to_chunk_result(r))
+            if _has_valid_distance(r):
+                all_chunks[r["thread_id"]].append(_row_to_chunk_result(r))
 
         matched_by_thread = matched_attachments or {}
         grouped: dict[str, list[ChunkResult]] = {}
@@ -1903,7 +1905,9 @@ class Database:
             )
             # Tag the dense thread lane so RRF fusion can record it as
             # ``thread_vec`` provenance on the surviving thread row.
-            return _tag_lane_ranks([self._row_to_result(r) for r in rows], "thread_vec")
+            return _tag_lane_ranks(
+                [self._row_to_result(r) for r in rows if _has_valid_distance(r)], "thread_vec"
+            )
         except (sqlite3.Error, ValueError) as e:
             # Same catch surface as ``_chunk_vector_search`` —
             # ``sqlite3.Error`` for table/connection issues, ``ValueError``
@@ -2505,6 +2509,18 @@ class Database:
             body_text=row["body_text"] or "",
             score=float(row["score"]) if "score" in row.keys() else 0.0,
         )
+
+
+def _has_valid_distance(row: sqlite3.Row) -> bool:
+    """False for a vector row stored with NaN or inf (#232).
+
+    sqlite-vec returns a NULL (NaN) or infinite distance for such a row.
+    Skipping it keeps one bad row from crashing the thread lane or
+    ranking as a perfect match in the chunk lanes. The indexer now
+    rejects these vectors; a full reindex removes any stored earlier.
+    """
+    score = row["score"]
+    return score is not None and math.isfinite(score)
 
 
 def _normalize_date_bound(value: str | None, *, end_of_day: bool, field_name: str) -> str | None:
