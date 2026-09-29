@@ -48,7 +48,13 @@ def canonical_addr(value: str) -> str:
     """
     if not value:
         return ""
-    _, addr = parseaddr(value)
+    try:
+        _, addr = parseaddr(value)
+    except Exception:
+        # parseaddr recurses on nested comments. Stored senders and
+        # participants are indexed mail, so one hostile entry must count
+        # as "no address", not abort a search whose filter is valid.
+        return ""
     addr = addr.strip().lower()
     if "@" not in addr:
         return ""
@@ -583,12 +589,9 @@ def address_match_mode(value: str) -> str:
     ``"substring"`` otherwise (a domain like ``@example.com`` or a name
     fragment): case-insensitive substring of the address or display name.
     """
-    try:
-        canonical = canonical_addr(value)
-    except RecursionError:
-        # parseaddr recurses on nested comments; such input has no
-        # usable address, so it can only be a substring.
-        return "substring"
+    # Nested-comment input that makes parseaddr recurse canonicalizes to
+    # "", so it can only be a substring.
+    canonical = canonical_addr(value)
     return "exact" if canonical and not canonical.startswith("@") else "substring"
 
 

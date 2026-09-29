@@ -8,7 +8,7 @@ import sqlite3
 from contextlib import closing
 
 import pytest
-from src.lib.sqlite import Database
+from src.lib.sqlite import Database, address_match_mode, canonical_addr
 
 from tests.conftest import write_ingestion
 
@@ -2839,6 +2839,72 @@ class TestFindContactHostileParticipants:
             assert [c["email"] for c in contacts] == ["bob@example.com"]
         finally:
             db.close()
+
+
+_NESTED_COMMENT_SENDER = "(" * 1200 + "nested" + ")" * 1200 + " mallory@example.com"
+
+
+class TestAddressFilterHostileSenders:
+    """#233: one stored sender string that makes ``parseaddr`` recurse must
+    count as a non-match, not abort a search whose filter is valid."""
+
+    def test_canonical_addr_degrades_to_no_address(self):
+        assert canonical_addr(_NESTED_COMMENT_SENDER) == ""
+        assert address_match_mode(_NESTED_COMMENT_SENDER) == "substring"
+
+    @pytest.fixture
+    def hostile_db(self, tmp_path):
+        from tests.conftest import _insert_attachment, _insert_thread
+
+        conn, path = _open_built_db_conn(tmp_path, "hostile-senders.db")
+        for thread_id, sender in (
+            ("t-healthy", "Alice <alice@example.com>"),
+            ("t-hostile", _NESTED_COMMENT_SENDER),
+        ):
+            _insert_thread(
+                conn,
+                thread_id=thread_id,
+                subject="invoice",
+                participants=[sender, "buyer@example.com"],
+                senders=[sender],
+                body_text="synthetic invoice text",
+                embedding=[1.0, 0.0, 0.0, 0.0],
+            )
+            _insert_attachment(
+                conn,
+                message_id=thread_id,
+                thread_id=thread_id,
+                attachment_id=f"att-{thread_id}",
+                filename="invoice.pdf",
+            )
+        conn.close()
+        db = Database(str(path))
+        yield db
+        db.close()
+
+    def test_keyword_search_sender_filter(self, hostile_db):
+        results = hostile_db.keyword_search("invoice", from_addr="alice@example.com")
+        assert [r.thread_id for r in results] == ["t-healthy"]
+
+    def test_hybrid_search_sender_filter(self, hostile_db):
+        results = hostile_db.hybrid_search(
+            query_text="invoice",
+            query_embedding=[1.0, 0.0, 0.0, 0.0],
+            from_addr="alice@example.com",
+        )
+        assert [r.thread_id for r in results] == ["t-healthy"]
+
+    def test_hybrid_search_participant_filter(self, hostile_db):
+        results = hostile_db.hybrid_search(
+            query_text="invoice",
+            query_embedding=[1.0, 0.0, 0.0, 0.0],
+            participant="alice@example.com",
+        )
+        assert [r.thread_id for r in results] == ["t-healthy"]
+
+    def test_search_attachments_sender_filter(self, hostile_db):
+        results = hostile_db.search_attachments(query="invoice", from_addr="alice@example.com")
+        assert [r.thread_id for r in results] == ["t-healthy"]
 
 
 def _ids(page) -> list[str]:
