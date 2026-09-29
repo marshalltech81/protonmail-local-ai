@@ -323,8 +323,11 @@ them (one test-first commit per issue, `Fixes #N` per issue):
    `_is_reply_header`.
 3. **#228 + #226** (#228 P1) DOCX walker rewrite: iterate serialized cells once
    (no `gridSpan` expansion), skip vMerge continuations, recurse into
-   nested and header/footer tables via `iter_inner_content()`, with a
-   running character budget.
+   nested and header/footer tables via `iter_inner_content()`. No
+   character budget needed: work is now linear in the XML, and lxml's
+   256-element depth limit bounds the recursion. Also lands the cache
+   versioning (`EXTRACTOR_VERSIONS`, `docx@2`): an older version is a
+   cache miss and startup re-queues the affected messages once.
 4. **#224** malformed 200 provider responses leak mailbox text (embedder
    index errors reach logs and `indexing_jobs.last_error`; reranker
    `int()`/`float()` errors reach logs). Fixed-text diagnostics only.
@@ -346,12 +349,10 @@ them (one test-first commit per issue, `Fixes #N` per issue):
    parts (and hash rfc822 attachments by their bytes — every one is
    currently `sha256(b"")`); apply the attachment check to a single-part
    root.
-9. **#231 + #234 + cache versioning** multipage TIFF (honour the
-   ignored `max_ocr_pages`), UTF-16 BOM / NUL detection. **Owner
-   decision:** wrong results are cached by content hash and served
-   forever; recommended fix is a version stamp in the existing
-   `extractor` column (`docx@2`) treated as a miss, plus a one-off
-   re-enqueue of affected messages.
+9. **#231 + #234** multipage TIFF (honour the ignored `max_ocr_pages`),
+   UTF-16 BOM / NUL detection. Bump the image and text extractors in
+   `EXTRACTOR_VERSIONS` (from item 3; owner approved 2026-09-29) so
+   their stale cache rows re-extract.
 10. **#237 + #210** extraction cache semantics: per-batch cache keyed
     by content hash, and re-run an `unsupported` row when an extractor
     now resolves.
