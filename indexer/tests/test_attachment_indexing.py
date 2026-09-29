@@ -141,6 +141,30 @@ def test_cache_row_from_an_older_extractor_version_is_re_extracted(tmp_path, mon
         assert row["extracted_text"] == "fresh text"
 
 
+def test_stale_ocr_row_is_served_while_ocr_is_off(tmp_path, monkeypatch):
+    """Review round 1 on #262: a refresh with OCR off would replace the
+    row's OCR text with "OCR disabled" and clear the indexed chunks."""
+    db = _seed_thread_for_cache_test(tmp_path)
+    attachment = _attachment(b"png bytes", filename="scan.png", content_type="image/png")
+    db.store_attachment_extraction(
+        attachment_id=attachment.content_hash,
+        extraction_status=STATUS_SUCCESS,
+        extractor="image-ocr",
+        extracted_text="old ocr text",
+        extraction_error=None,
+    )
+    extractor = MagicMock()
+    monkeypatch.setattr(attachment_indexing, "extract_attachment", extractor)
+    plan = prepare_attachment_writes(
+        db=db,
+        embedder=None,
+        **_kwargs(attachment, message_id="message@example.com", ocr_enabled=False),
+    )
+    extractor.assert_not_called()
+    assert plan.status == STATUS_SUCCESS and plan.chunks
+    assert db.get_attachment_extraction(attachment.content_hash)["extractor"] == "image-ocr"
+
+
 def test_cache_row_from_the_current_extractor_version_is_reused(tmp_path, monkeypatch):
     db = _seed_thread_for_cache_test(tmp_path)
     extractor, _ = _process_with_cached_extractor(

@@ -189,7 +189,11 @@ def _resolve_extracted_text(
     # whichever occurrence of the bytes arrives: the row is shared by
     # content hash, so an occurrence whose own metadata resolves to
     # another extractor must still refresh it with the same one.
-    refresh_module = stale_extractor_module(cached["extractor"]) if cached is not None else None
+    refresh_module = (
+        stale_extractor_module(cached["extractor"], ocr_enabled=ocr_enabled)
+        if cached is not None
+        else None
+    )
     if (
         cached is not None
         and refresh_module is None

@@ -35,9 +35,9 @@ def _bomless_utf16(payload: bytes) -> str | None:
         return None
     odd_nuls = payload[1::2].count(0)
     even_nuls = payload[0::2].count(0)
-    if odd_nuls > units // 2 and even_nuls < units // 10:
+    if odd_nuls > units // 2 and even_nuls <= units // 10:
         return "utf-16-le"
-    if even_nuls > units // 2 and odd_nuls < units // 10:
+    if even_nuls > units // 2 and odd_nuls <= units // 10:
         return "utf-16-be"
     return None
 

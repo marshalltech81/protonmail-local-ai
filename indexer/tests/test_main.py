@@ -2579,6 +2579,26 @@ class TestRequeueStaleExtractions:
         monkeypatch.setattr(main, "INDEXER_ATTACHMENT_EXTRACTION_ENABLED", False)
         assert main._requeue_stale_extractions(db, queue) == 0
 
+    def test_ocr_rows_are_not_requeued_while_ocr_is_off(self, tmp_path, monkeypatch):
+        # Review round 1 on #262: the refresh would hit the OCR-disabled
+        # gate and replace the indexed OCR text with nothing, and every
+        # restart would re-queue the same messages.
+        maildir = tmp_path / "maildir"
+        monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
+        path = maildir / "INBOX" / "cur" / "contract.eml"
+        self._write_docx_eml(path, "contract@example.com")
+        db = Database(tmp_path / "mail.db")
+        queue = _make_queue(db)
+        queue.enqueue(str(path), REASON_INITIAL_SCAN)
+        self._drain(db, queue)
+        with db.transaction():
+            db._conn.execute("UPDATE attachment_extractions SET extractor = 'image-ocr'")
+
+        monkeypatch.setattr(main, "INDEXER_OCR_ENABLED", False)
+        assert main._requeue_stale_extractions(db, queue) == 0
+        monkeypatch.setattr(main, "INDEXER_OCR_ENABLED", True)
+        assert main._requeue_stale_extractions(db, queue) == 1
+
     def test_thread_vector_is_replaced_when_the_last_chunks_are_cleared(
         self, tmp_path, monkeypatch
     ):

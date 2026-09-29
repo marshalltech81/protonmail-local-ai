@@ -140,23 +140,29 @@ def _extractor_version(name: str) -> int:
     return int(version) if sep and version.isdigit() else 1
 
 
-def is_stale_extractor(name: str | None) -> bool:
+def is_stale_extractor(name: str | None, *, ocr_enabled: bool = True) -> bool:
     """True when ``name`` was recorded by an older version of its module.
 
     Only older: after a rollback, rows a newer release wrote are kept
     rather than downgraded by the older code.
     """
-    return stale_extractor_module(name) is not None
+    return stale_extractor_module(name, ocr_enabled=ocr_enabled) is not None
 
 
-def stale_extractor_module(name: str | None) -> str | None:
+def stale_extractor_module(name: str | None, *, ocr_enabled: bool = True) -> str | None:
     """The module that recorded ``name`` when that was an older version
     of it, else ``None``. A stale row is refreshed by re-running this
     module from any occurrence of the same bytes: the cache is shared by
     content hash, so the same file attached as ``.bin`` must re-run the
     DOCX extractor rather than its own (none) and overwrite the row.
+
+    A row an OCR extractor wrote (``image-ocr``, ``pdf-ocr``) is not
+    stale while OCR is off: the refresh could only record "OCR disabled"
+    over its text, so it is kept until OCR is turned back on.
     """
     if not name:
+        return None
+    if not ocr_enabled and name.partition("@")[0].endswith("-ocr"):
         return None
     module = _extractor_module(name)
     current = EXTRACTOR_VERSIONS.get(module)

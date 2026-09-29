@@ -257,6 +257,14 @@ class TestTextExtractorUnicode:
         text, _ = text_extract(self.WORDS.encode(encoding))
         assert text == self.WORDS
 
+    def test_short_bomless_utf16_is_recognised(self):
+        """Review round 1: under ten code units, the "almost no NULs in the
+        other byte" allowance rounded to zero and could never pass."""
+        from src.extractors.text import extract as text_extract
+
+        assert text_extract(b"H\x00i\x00")[0] == "Hi"
+        assert text_extract(b"\x00H\x00i")[0] == "Hi"
+
     def test_utf8_with_a_stray_nul_stays_utf8(self):
         from src.extractors.text import extract as text_extract
 
@@ -285,6 +293,21 @@ class TestTextExtractorUnicode:
         assert result.text is not None and self.WORDS in result.text
         assert "\x00" not in result.text
         assert result.extractor == "text@2"
+
+
+class TestStaleOcrRowsWhileOcrIsOff:
+    """Review round 1: refreshing a stale OCR row with OCR off would
+    overwrite its text with "OCR disabled" and clear its chunks."""
+
+    def test_ocr_rows_are_not_stale_while_ocr_is_off(self, monkeypatch):
+        from src import extractors
+
+        monkeypatch.setattr(extractors, "EXTRACTOR_VERSIONS", {"image": 2, "pdf": 2})
+        for name, module in (("image-ocr", "image"), ("pdf-ocr", "pdf")):
+            assert extractors.stale_extractor_module(name) == module
+            assert extractors.stale_extractor_module(name, ocr_enabled=False) is None
+        # A digital PDF row needs no OCR to refresh.
+        assert extractors.stale_extractor_module("pdf-digital", ocr_enabled=False) == "pdf"
 
 
 class TestHtmlExtractorFallback:
@@ -1076,6 +1099,43 @@ class TestMultipageTiff:
             max_ocr_pages=2,
         )
         assert seen == ["PAGE_0", "PAGE_1"]
+
+    def test_frames_past_the_cap_are_never_enumerated(self, monkeypatch):
+        """Review round 1: ``n_frames`` walks every image directory before
+        a cap applies, so a compact TIFF with thousands of them stalled
+        the worker. Pages are reached by ``seek()`` up to the cap."""
+        from PIL import TiffImagePlugin
+
+        def walked(_self):
+            raise AssertionError("n_frames walks the whole frame chain")
+
+        monkeypatch.setattr(TiffImagePlugin.TiffImageFile, "n_frames", property(walked))
+        seen = self._ocr_by_color(monkeypatch)
+        result = extract(
+            content_type="image/tiff",
+            filename="scan.tiff",
+            payload=self._frames("TIFF", 3),
+            max_ocr_pages=2,
+        )
+        assert result.status == STATUS_SUCCESS
+        assert seen == ["PAGE_0", "PAGE_1"]
+
+    def test_a_later_page_over_the_pixel_cap_fails_before_decoding(self, monkeypatch):
+        """Review round 1: ``Image.open`` checks only the first frame's
+        size; a later oversized page must not be decoded."""
+        import io
+
+        from PIL import Image
+
+        buf = io.BytesIO()
+        Image.new("RGB", (32, 32), (255, 255, 255)).save(
+            buf, format="TIFF", save_all=True, append_images=[Image.new("RGB", (400, 400))]
+        )
+        monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", 10_000)
+        seen = self._ocr_by_color(monkeypatch)
+        result = extract(content_type="image/tiff", filename="scan.tiff", payload=buf.getvalue())
+        assert result.status == STATUS_FAILED
+        assert seen == ["PAGE_0"]
 
     def test_animated_gif_is_still_one_page(self, monkeypatch):
         # Animation frames are not pages; OCR'ing each would multiply the

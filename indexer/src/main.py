@@ -1624,7 +1624,11 @@ def _requeue_stale_extractions(db: Database, queue: IndexingQueue) -> int:
     """
     if not INDEXER_ATTACHMENT_EXTRACTION_ENABLED:
         return 0
-    stale = [name for name in db.get_extractor_names() if is_stale_extractor(name)]
+    stale = [
+        name
+        for name in db.get_extractor_names()
+        if is_stale_extractor(name, ocr_enabled=INDEXER_OCR_ENABLED)
+    ]
     re_enqueued = 0
     for filepath in db.find_filepaths_with_extractors(stale):
         if queue.has_pending_row(filepath) or queue.is_dead(filepath):

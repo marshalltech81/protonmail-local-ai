@@ -65,15 +65,21 @@ def extract(
         tesseract_kwargs: dict[str, float] = {}
         if ocr_timeout_seconds is not None and ocr_timeout_seconds > 0:
             tesseract_kwargs["timeout"] = float(ocr_timeout_seconds)
-        pages = getattr(image, "n_frames", 1) if image.format == "TIFF" else 1
-        if max_ocr_pages > 0:
-            pages = min(pages, max_ocr_pages)
         texts: list[str] = []
-        for page in range(pages):
-            image.seek(page)
+        page = 0
+        while True:
             # ``exif_transpose`` reads the EXIF Orientation tag and rotates
             # the pixels accordingly. No-op for images without EXIF.
             texts.append(
                 pytesseract.image_to_string(ImageOps.exif_transpose(image), **tesseract_kwargs)
             )
+            page += 1
+            if image.format != "TIFF" or (max_ocr_pages > 0 and page >= max_ocr_pages):
+                break
+            # Seek page by page rather than read ``n_frames``: that walks
+            # every image directory in the file before any cap applies.
+            try:
+                image.seek(page)
+            except EOFError:
+                break
     return "\n\n".join(texts), "image-ocr"
