@@ -829,14 +829,12 @@ class Database:
             # evidence slice — fixes the "filename match → wrong
             # evidence" gap where the LLM saw body text instead of
             # the attachment the user asked about.
-            attachment_won = self._attachment_won_thread_ids(
-                query_text, wanted, folders, date_from, date_to, has_attachments
-            )
+            matched_attachments = self._matched_attachments(query_text, wanted)
             grouped = self.get_evidence_chunks_for_threads(
                 wanted,
                 query_embedding,
                 per_thread_limit=3,
-                attachment_won_thread_ids=attachment_won,
+                matched_attachments=matched_attachments,
             )
             for result in candidates:
                 result.evidence_chunks = grouped.get(result.thread_id, [])
@@ -1455,39 +1453,38 @@ class Database:
         results = [self._row_to_result(r) for r in rows]
         return self._best_per_thread(results)[:limit]
 
-    def _attachment_won_thread_ids(
-        self,
-        query: str,
-        thread_ids: list[str],
-        folders: list[str] | None,
-        date_from: str | None,
-        date_to: str | None,
-        has_attachments: bool | None,
-    ) -> set[str]:
-        """Return the subset of ``thread_ids`` that match the attachment-FTS lane.
+    def _matched_attachments(self, query: str, thread_ids: list[str]) -> dict[str, set[str]]:
+        """Map each of ``thread_ids`` to the attachments whose filename or
+        MIME type matches ``query``.
 
-        Used by ``hybrid_search(with_evidence=True)`` to mark threads that
-        the attachment filename / MIME index lifted into the result set
-        — so per-thread evidence ranking can privilege attachment chunks
-        for them. Cheap one-shot FTS5 query; falls back to an empty set
-        on any error so the caller's main path is never blocked.
+        Used by ``hybrid_search(with_evidence=True)`` so per-thread
+        evidence leads with the specific attachment the query named, not
+        just any attachment in a thread that has one. The candidate
+        threads already passed the search's filters, so none are
+        re-applied. Cheap FTS5 query bounded by the candidates; falls
+        back to an empty map on any error so the caller's main path is
+        never blocked.
         """
-        if not thread_ids:
-            return set()
+        fts_query = _sanitize_fts_query(query)
+        if not thread_ids or not fts_query:
+            return {}
+        placeholders = ",".join(["?"] * len(thread_ids))
+        sql = (
+            "SELECT a.thread_id, a.attachment_id "
+            "FROM attachments_fts "
+            "JOIN attachments a ON attachments_fts.rowid = a.fts_rowid "
+            "WHERE attachments_fts MATCH ? "
+            f"AND a.thread_id IN ({placeholders})"  # nosec B608
+        )
         try:
-            attachment_hits = self._attachment_keyword_search(
-                query,
-                limit=len(thread_ids) * _CHUNK_LANE_OVERSAMPLE,
-                folders=folders,
-                date_from=date_from,
-                date_to=date_to,
-                has_attachments=has_attachments,
-            )
+            rows = self._fetchall(sql, [fts_query, *thread_ids])
         except sqlite3.Error as e:
-            log.warning("Attachment-won lookup failed; skipping bias: %s", e)
-            return set()
-        candidate_set = set(thread_ids)
-        return {r.thread_id for r in attachment_hits if r.thread_id in candidate_set}
+            log.warning("Attachment match lookup failed; skipping bias: %s", e)
+            return {}
+        matched: dict[str, set[str]] = {}
+        for r in rows:
+            matched.setdefault(r["thread_id"], set()).add(r["attachment_id"])
+        return matched
 
     @staticmethod
     def _append_thread_filter_sql(
@@ -1674,7 +1671,7 @@ class Database:
         thread_ids: list[str],
         embedding: list[float],
         per_thread_limit: int = 3,
-        attachment_won_thread_ids: set[str] | None = None,
+        matched_attachments: dict[str, set[str]] | None = None,
     ) -> dict[str, list[ChunkResult]]:
         """Return up to ``per_thread_limit`` best-matching chunks per thread.
 
@@ -1700,13 +1697,13 @@ class Database:
         this is a small sequential scan and beats N per-thread KNN
         queries on round-trip overhead.
 
-        ``attachment_won_thread_ids``: threads that ``hybrid_search``
-        surfaced via attachment-filename FTS. For those threads,
-        attachment chunks are floated to the front of the per-thread
-        slice so the LLM sees attachment text (the source the user
-        meant) before body text — even when a body chunk has higher
-        dense similarity. Closes the "filename match → wrong evidence"
-        gap in ``ask_mailbox``'s "reads attachment content" promise.
+        ``matched_attachments``: per thread, the attachments whose
+        filename / MIME matched the query. Their chunks lead the
+        per-thread slice, then the thread's other attachment chunks,
+        then body chunks — so the LLM sees the document the user named
+        even when a body chunk, or another attachment's chunk, has
+        higher dense similarity. Remembering only the thread let the cap
+        keep unrelated attachments and drop the one that matched.
         """
         if not thread_ids:
             return {}
@@ -1767,18 +1764,17 @@ class Database:
         for r in rows:
             all_chunks[r["thread_id"]].append(_row_to_chunk_result(r))
 
-        attachment_won = attachment_won_thread_ids or set()
+        matched_by_thread = matched_attachments or {}
         grouped: dict[str, list[ChunkResult]] = {}
         for tid, chunks in all_chunks.items():
-            if tid in attachment_won:
-                # Float attachment chunks to the front, preserving
-                # within-group order (already vec_distance ASC). The
-                # query was won by attachment-filename FTS, so the
-                # user's intent is attachment content; surface that
-                # first even when a body chunk dense-scored higher.
-                attachment_chunks = [c for c in chunks if c.attachment_id is not None]
-                body_chunks = [c for c in chunks if c.attachment_id is None]
-                ordered = attachment_chunks + body_chunks
+            matched = matched_by_thread.get(tid)
+            if matched:
+                # Matched attachment, then other attachments, then body;
+                # a stable sort keeps vec_distance order within each.
+                ordered = sorted(
+                    chunks,
+                    key=lambda c: 0 if c.attachment_id in matched else 1 if c.attachment_id else 2,
+                )
             else:
                 ordered = chunks
             grouped[tid] = ordered[:per_thread_limit]

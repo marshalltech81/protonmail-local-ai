@@ -1501,7 +1501,7 @@ class TestEvidenceAttachmentProvenance:
                 thread_ids=["t-quote"],
                 embedding=[1.0, 0.0, 0.0, 0.0],
                 per_thread_limit=1,
-                attachment_won_thread_ids={"t-quote"},
+                matched_attachments={"t-quote": {"att-quote"}},
             )
             evidence_no_bias = db.get_evidence_chunks_for_threads(
                 thread_ids=["t-quote"],
@@ -1514,6 +1514,67 @@ class TestEvidenceAttachmentProvenance:
         assert evidence_bias["t-quote"][0].attachment_id == "att-quote"
         # Without the bias, slot-0 is the body chunk (regression guard).
         assert evidence_no_bias["t-quote"][0].attachment_id is None
+
+    def _add_competing_attachments(self, db):
+        """Three more attachments in t-quote whose chunks sit closer to
+        the query embedding than the matched attachment's chunk."""
+        import sqlite_vec
+
+        from tests.conftest import _insert_attachment, _insert_chunk
+
+        with closing(sqlite3.connect(db.path)) as conn:
+            conn.enable_load_extension(True)
+            sqlite_vec.load(conn)
+            for i in range(3):
+                _insert_attachment(
+                    conn,
+                    message_id="t-quote",
+                    thread_id="t-quote",
+                    attachment_id=f"att-other-{i}",
+                    filename=f"exhibit-{i}.pdf",
+                )
+                _insert_chunk(
+                    conn,
+                    chunk_id=f"t-quote-other-{i}",
+                    message_id="t-quote",
+                    thread_id="t-quote",
+                    text=f"exhibit {i} boilerplate",
+                    embedding=[0.9, 0.1, 0.0, 0.0],
+                    chunk_index=10 + i,
+                    attachment_id=f"att-other-{i}",
+                )
+
+    def test_matched_attachment_leads_over_other_attachments(self, tmp_path):
+        """Regression (#215): only the thread was remembered, so every
+        attachment chunk in it was floated and the cap could keep three
+        unrelated exhibits instead of the document the filename matched."""
+        db = self._build_attachment_carrier_db(tmp_path)
+        self._add_competing_attachments(db)
+        try:
+            evidence = db.get_evidence_chunks_for_threads(
+                thread_ids=["t-quote"],
+                embedding=[1.0, 0.0, 0.0, 0.0],
+                per_thread_limit=3,
+                matched_attachments={"t-quote": {"att-quote"}},
+            )
+        finally:
+            db.close()
+        assert evidence["t-quote"][0].attachment_id == "att-quote"
+
+    def test_filename_hit_contributes_evidence_end_to_end(self, tmp_path):
+        db = self._build_attachment_carrier_db(tmp_path)
+        self._add_competing_attachments(db)
+        try:
+            results = db.hybrid_search(
+                query_text="proposal-quote",
+                query_embedding=[1.0, 0.0, 0.0, 0.0],
+                limit=5,
+                with_evidence=True,
+            )
+        finally:
+            db.close()
+        quote = next(r for r in results if r.thread_id == "t-quote")
+        assert "18450" in quote.evidence_chunks[0].text
 
     def test_hybrid_search_with_evidence_biases_filename_winners(self, tmp_path):
         """End-to-end: a query whose tokens hit the attachment-FTS lane
