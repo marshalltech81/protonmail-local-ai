@@ -560,3 +560,19 @@ class TestFilteredOutput:
         c._backend.client.messages.create = fake_create  # type: ignore[assignment]
         with pytest.raises(RuntimeError, match="refused"):
             asyncio.run(c.complete("sys", "user"))
+
+    def test_anthropic_context_window_stop_is_truncation(self):
+        """Review round 2: a context-window stop cuts the answer off just
+        like max_tokens does."""
+        c = InferenceClient.create(mode="anthropic", base_url="", model="m", api_key="k")
+
+        async def fake_create(**_kwargs):
+            return SimpleNamespace(
+                content=[SimpleNamespace(type="text", text="Partly")],
+                stop_reason="model_context_window_exceeded",
+            )
+
+        c._backend.client.messages.create = fake_create  # type: ignore[assignment]
+        with pytest.raises(InferenceTruncatedError) as err:
+            asyncio.run(c.complete("sys", "user"))
+        assert err.value.partial == "Partly"

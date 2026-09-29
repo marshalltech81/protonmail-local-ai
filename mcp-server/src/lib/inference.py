@@ -275,7 +275,7 @@ class _AnthropicBackend:
                 parts.append(text)
         result = "".join(parts)
         stop_reason = getattr(resp, "stop_reason", None)
-        if stop_reason == "max_tokens":
+        if stop_reason in ("max_tokens", "model_context_window_exceeded"):
             raise InferenceTruncatedError(result)
         if stop_reason == "refusal":
             raise RuntimeError("Inference provider refused to answer (mode=anthropic)")

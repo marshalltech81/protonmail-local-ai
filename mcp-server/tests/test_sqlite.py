@@ -2587,6 +2587,24 @@ class TestSearchAttachments:
 
         assert {a.attachment_id for a in results} == {"att-quote", "att-w2"}
 
+    def test_text_lane_filters_before_grouping(self, attachments_db: Database, monkeypatch):
+        """Review round 2: filters ran only after every matching chunk in
+        the mailbox was grouped; they now narrow the rows being grouped."""
+        captured: list[str] = []
+        real_fetchall = attachments_db._fetchall
+
+        def spy(sql, params=()):
+            captured.append(sql)
+            return real_fetchall(sql, params)
+
+        monkeypatch.setattr(attachments_db, "_fetchall", spy)
+        results = attachments_db.search_attachments(query="acme", content_type="application/pdf")
+
+        assert {a.attachment_id for a in results} == {"att-quote"}
+        text_sql = next(sql for sql in captured if "MATERIALIZED" in sql)
+        grouped = text_sql[: text_sql.index("GROUP BY")]
+        assert "a.content_type = ?" in grouped
+
     def test_filename_and_text_match_deduped(self, attachments_db: Database):
         # "acme" hits the filename AND the extracted text of att-quote;
         # the occurrence must be surfaced exactly once.
