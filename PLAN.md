@@ -299,7 +299,7 @@ How the first batch was worked, and what to repeat:
 
   Likely needs a schema change (store both claimants), so land it with
   the Phase 2 migration and reindex. That reindex also repairs databases
-  already damaged by #204 and #205.
+  already damaged by #204, #205 and #232.
 - **#208 chunk overlap exceeds `max_tokens`** — harmless at default
   settings; land it with Phase 2 item 4 (chunk `kind` tags), which
   rewrites the chunker and changes chunk IDs anyway.
@@ -319,7 +319,7 @@ them (one test-first commit per issue, `Fixes #N` per issue):
    dedicated `InvalidFilterError` the handlers log by field name only.
 2. **#239** (P1) reply-attribution regexes are quadratic, and wider than
    filed: all six languages, and `wrote:` mid-line too. A 1 MB line
-   blocks the worker for minutes. Fix: skip lines over ~500 chars in
+   blocks the worker for minutes. Fixed: skip lines over 300 chars in
    `_is_reply_header`.
 3. **#228 + #226** (#228 P1) DOCX walker rewrite: iterate serialized cells once
    (no `gridSpan` expansion), skip vMerge continuations, recurse into
@@ -328,12 +328,14 @@ them (one test-first commit per issue, `Fixes #N` per issue):
 4. **#224** malformed 200 provider responses leak mailbox text (embedder
    index errors reach logs and `indexing_jobs.last_error`; reranker
    `int()`/`float()` errors reach logs). Fixed-text diagnostics only.
-5. **#232** non-finite embeddings: sqlite-vec stores NaN, KNN returns
-   NULL distances that sort first; thread lane raises on `float(None)`,
-   chunk lane scores them as perfect matches. Reject at the embedder,
-   skip NULL distances in MCP, and a startup sweep
-   (`vec_distance_l2(e, e) IS NULL`) to reset poisoned threads so the
-   zero-vector recovery re-enqueues them. Needs `make baseline`.
+5. **#232** non-finite embeddings: sqlite-vec stores NaN; the row gets
+   a NULL distance (thread lane raised on `float(None)`, chunk lanes
+   scored it as a perfect match). Rejected at the embedder,
+   `l2_normalize` and the MCP query embed; MCP skips non-finite
+   distances. No startup repair sweep: in a realistic index these rows
+   sort last, reaching results only when `k` nears the row count, and
+   detecting them costs a full vector scan (15–30 s at 20k threads).
+   Already-stored rows are repaired by the Phase 2 reindex.
 6. **#233 + #225** MCP robustness: guard `parseaddr` in the mcp-server's
    `canonical_addr` (the indexer copy already does); validate reranker
    indices (unique, in range) before mutating any candidate.
