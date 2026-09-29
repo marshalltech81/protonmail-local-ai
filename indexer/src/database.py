@@ -1099,17 +1099,16 @@ class Database:
         return [r["extractor"] for r in rows]
 
     @_synchronized
-    def find_extraction_occurrences(self, extractors: list[str]) -> list[sqlite3.Row]:
-        """Attachment occurrences whose cached extraction was written by one
-        of ``extractors``: ``filepath``, ``content_type``, ``filename`` and
-        ``extractor`` per row, so callers can tell which occurrences would
-        resolve to that extractor."""
+    def find_filepaths_with_extractors(self, extractors: list[str]) -> list[str]:
+        """Maildir filepaths of messages carrying an attachment whose
+        cached extraction was written by one of ``extractors``, whatever
+        that occurrence's own filename or MIME type."""
         if not extractors:
             return []
         placeholders = ",".join(["?"] * len(extractors))
-        return self._conn.execute(
+        rows = self._conn.execute(
             f"""
-            SELECT m.filepath, a.content_type, a.filename, e.extractor
+            SELECT DISTINCT m.filepath
             FROM attachment_extractions e
             JOIN attachments a ON a.attachment_id = e.attachment_id
             JOIN message_thread_map m ON m.message_id = a.message_id
@@ -1118,6 +1117,7 @@ class Database:
             """,  # nosec B608 — placeholders only, values are bound
             extractors,
         ).fetchall()
+        return [r["filepath"] for r in rows]
 
     @_synchronized
     def get_attachment_extraction(self, attachment_id: str) -> sqlite3.Row | None:

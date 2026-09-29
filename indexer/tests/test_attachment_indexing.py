@@ -160,10 +160,11 @@ def test_cache_row_from_a_newer_extractor_version_is_reused(tmp_path, monkeypatc
     assert row["extractor"] == "docx@3"
 
 
-def test_stale_row_is_not_re_extracted_by_an_occurrence_of_another_type(tmp_path, monkeypatch):
-    """The same bytes attached as ``.bin`` resolve to no extractor. Re-running
-    them would overwrite the shared cache row with ``unsupported`` before
-    the DOCX occurrence could upgrade it."""
+def test_stale_row_is_refreshed_by_an_occurrence_of_another_type(tmp_path, monkeypatch):
+    """The same bytes attached as ``.bin`` resolve to no extractor. They
+    share the DOCX cache row, so they re-run the extractor that produced
+    it: re-running by their own metadata would overwrite the row with
+    ``unsupported``, and skipping would leave their chunks stale."""
     db = _seed_thread_for_cache_test(tmp_path)
     extractor, row = _process_with_cached_extractor(
         db,
@@ -174,11 +175,11 @@ def test_stale_row_is_not_re_extracted_by_an_occurrence_of_another_type(tmp_path
         filename="blob.bin",
         content_type="application/octet-stream",
     )
-    extractor.assert_not_called()
-    assert row["extractor"] == "docx"
-    # Nor may it index the stale text: in the same message it shares the
-    # DOCX occurrence's chunk slice and would overwrite the fresh chunks.
-    assert not db.get_chunk_ids_for_message(
+    extractor.assert_called_once()
+    assert extractor.call_args.kwargs["module_override"] == "docx"
+    assert row["extractor"] == "docx@2"
+    assert row["extracted_text"] == "fresh text"
+    assert db.get_chunk_ids_for_message(
         "message@example.com", attachment_id=hashlib.sha256(b"docx bytes").hexdigest()
     )
 

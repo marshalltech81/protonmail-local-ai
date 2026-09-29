@@ -389,11 +389,28 @@ class TestDocxExtractor:
         assert extractors._stamp_extractor("image", "image-ocr") == "image-ocr@2"
         assert extractors._stamp_extractor("pdf", "pdf-digital") == "pdf-digital@3"
         assert extractors._stamp_extractor("text", "text") == "text"
-        assert extractors.is_stale_extractor("image-ocr")
-        assert not extractors.is_stale_extractor("image-ocr@2")
-        assert extractors.needs_reextraction("image-ocr", "image/tiff", "scan.tif")
-        assert extractors.needs_reextraction("pdf-ocr@2", "application/pdf", "a.pdf")
-        assert not extractors.needs_reextraction("pdf-ocr@2", "image/tiff", "scan.tif")
+        assert extractors.stale_extractor_module("image-ocr") == "image"
+        assert extractors.stale_extractor_module("image-ocr@2") is None
+        assert extractors.stale_extractor_module("pdf-ocr@2") == "pdf"
+        assert extractors.stale_extractor_module("text") is None
+        assert extractors.stale_extractor_module(None) is None
+
+    def test_module_override_ignores_the_occurrence_metadata(self):
+        # Used to refresh a stale cache row from any occurrence of its bytes.
+        import docx
+        from src.extractors import STATUS_SUCCESS, extract
+
+        document = docx.Document()
+        document.add_paragraph("override text")
+        result = extract(
+            content_type="application/octet-stream",
+            filename="blob.bin",
+            payload=self._save(document),
+            module_override="docx",
+        )
+        assert result.status == STATUS_SUCCESS
+        assert result.extractor == "docx@2"
+        assert "override text" in (result.text or "")
 
 
 class TestXlsxExtractor:

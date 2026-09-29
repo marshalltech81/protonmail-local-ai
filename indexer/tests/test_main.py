@@ -2507,12 +2507,13 @@ class TestRequeueStaleExtractions:
         assert row["extractor"] == "docx@2"
         assert main._requeue_stale_extractions(db, queue) == 0
 
-    def test_only_occurrences_resolving_to_the_extractor_are_requeued(self, tmp_path, monkeypatch):
+    def test_alias_messages_are_requeued_and_rebuilt(self, tmp_path, monkeypatch):
+        """A message carrying the same bytes as ``.bin`` shares the stale
+        cache row and indexed its old text, so it is rebuilt too."""
         maildir = tmp_path / "maildir"
         monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
         docx_path = maildir / "INBOX" / "cur" / "contract.eml"
         self._write_docx_eml(docx_path, "contract@example.com")
-        # Same bytes, attached as an opaque blob.
         blob_path = maildir / "INBOX" / "cur" / "blob.eml"
         raw = docx_path.read_bytes()
         raw = raw.replace(b"contract@example.com", b"blob@example.com")
@@ -2525,13 +2526,30 @@ class TestRequeueStaleExtractions:
         queue = _make_queue(db)
         queue.enqueue(str(docx_path), REASON_INITIAL_SCAN)
         queue.enqueue(str(blob_path), REASON_INITIAL_SCAN)
-        self._drain(db, queue)
-        with db.transaction():
-            db._conn.execute("UPDATE attachment_extractions SET extractor = 'docx'")
+        from src import attachment_indexing
+        from src.extractors import STATUS_SUCCESS, ExtractionResult
 
-        assert main._requeue_stale_extractions(db, queue) == 1
-        assert queue.has_pending_row(str(docx_path))
-        assert not queue.has_pending_row(str(blob_path))
+        with monkeypatch.context() as m:
+            m.setattr(
+                attachment_indexing,
+                "extract_attachment",
+                lambda **_kw: ExtractionResult(
+                    status=STATUS_SUCCESS, extractor="docx", text="body paragraph", error=None
+                ),
+            )
+            self._drain(db, queue)
+
+        assert main._requeue_stale_extractions(db, queue) == 2
+        self._drain(db, queue)
+
+        for mid in ("contract@example.com", "blob@example.com"):
+            rows = db._conn.execute(
+                "SELECT text FROM message_chunks WHERE message_id = ? "
+                "AND attachment_id IS NOT NULL",
+                (mid,),
+            ).fetchall()
+            assert "HEADER_MARK" in " ".join(r["text"] for r in rows), mid
+        assert main._requeue_stale_extractions(db, queue) == 0
 
     def test_nothing_is_requeued_when_extraction_is_disabled(self, tmp_path, monkeypatch):
         # The drain skips attachments then, so the rows would never be

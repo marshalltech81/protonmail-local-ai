@@ -144,24 +144,23 @@ def is_stale_extractor(name: str | None) -> bool:
     Only older: after a rollback, rows a newer release wrote are kept
     rather than downgraded by the older code.
     """
-    if not name:
-        return False
-    current = EXTRACTOR_VERSIONS.get(_extractor_module(name))
-    return current is not None and _extractor_version(name) < current
+    return stale_extractor_module(name) is not None
 
 
-def needs_reextraction(cached_extractor: str | None, content_type: str, filename: str) -> bool:
-    """True when this occurrence should re-extract a stale cached row.
-
-    The cache is shared by every occurrence of the same bytes, whatever
-    their metadata. Only an occurrence that resolves to the stale row's
-    module re-runs it; another (the same file attached as ``.bin``)
-    would overwrite the shared row with a different result.
+def stale_extractor_module(name: str | None) -> str | None:
+    """The module that recorded ``name`` when that was an older version
+    of it, else ``None``. A stale row is refreshed by re-running this
+    module from any occurrence of the same bytes: the cache is shared by
+    content hash, so the same file attached as ``.bin`` must re-run the
+    DOCX extractor rather than its own (none) and overwrite the row.
     """
-    if not cached_extractor or not is_stale_extractor(cached_extractor):
-        return False
-    module_name, _ = _resolve_extractor(content_type, filename)
-    return module_name == _extractor_module(cached_extractor)
+    if not name:
+        return None
+    module = _extractor_module(name)
+    current = EXTRACTOR_VERSIONS.get(module)
+    if current is None or _extractor_version(name) >= current:
+        return None
+    return module
 
 
 # Public statuses are exposed as constants so callers can compare without
@@ -232,6 +231,7 @@ def extract(
     max_extracted_chars: int | None = None,
     ocr_timeout_seconds: float | None = None,
     max_pdf_pages: int | None = None,
+    module_override: str | None = None,
 ) -> ExtractionResult:
     """Run text extraction for one attachment payload.
 
@@ -246,6 +246,10 @@ def extract(
     multi-hundred-page OCR'd PDF can otherwise produce megabytes of
     text and bloat the ``attachment_extractions`` table well past the
     payload's on-disk size. ``None`` means no cap.
+
+    ``module_override`` runs that extractor module instead of the one the
+    metadata resolves to; used to refresh a stale cache row (see
+    ``stale_extractor_module``).
     """
     if len(payload) > max_bytes:
         return ExtractionResult(
@@ -255,7 +259,11 @@ def extract(
             error=f"payload {len(payload)} bytes exceeds cap {max_bytes}",
         )
 
-    module_name, dispatch_via = _resolve_extractor(content_type, filename)
+    module_name: str | None
+    if module_override is not None:
+        module_name, dispatch_via = module_override, "cache-refresh"
+    else:
+        module_name, dispatch_via = _resolve_extractor(content_type, filename)
 
     # Image types are gated by ``ocr_enabled`` because the only sensible
     # extractor is Tesseract. Disabling OCR globally should cleanly

@@ -54,7 +54,7 @@ from .embedder import (
     classify_embed_failure,
     scrub_embed_error,
 )
-from .extractors import is_stale_extractor, needs_reextraction
+from .extractors import is_stale_extractor
 from .maildir import (
     SYNC_STAMP_NAME,
     SyncStamp,
@@ -1599,11 +1599,12 @@ def _requeue_stale_extractions(db: Database, queue: IndexingQueue) -> int:
     """Re-queue messages whose cached attachment extraction came from an
     older version of an extractor (see ``extractors.EXTRACTOR_VERSIONS``).
 
-    Reprocessing re-extracts the attachment (an old version is a cache
-    miss) and replaces its chunks, and the cache row is rewritten with
-    the current version, so each message is re-queued once. Only
-    occurrences that resolve to that extractor count: the same bytes
-    attached as ``.bin`` would not re-extract them. Like the zero-vector
+    Reprocessing re-runs that extractor (a stale row is refreshed from
+    any occurrence of its bytes) and replaces the attachment's chunks,
+    and the row is rewritten with the current version, so each message
+    is re-queued once. Every message carrying the bytes is included, not
+    only those whose filename or MIME type resolves to the extractor:
+    they all indexed the shared stale text. Like the zero-vector
     recovery sweep, files already queued or dead-lettered are left
     alone. Skipped entirely when attachment extraction is disabled,
     since the drain would not re-stamp the rows. Returns the number of
@@ -1612,13 +1613,8 @@ def _requeue_stale_extractions(db: Database, queue: IndexingQueue) -> int:
     if not INDEXER_ATTACHMENT_EXTRACTION_ENABLED:
         return 0
     stale = [name for name in db.get_extractor_names() if is_stale_extractor(name)]
-    filepaths = {
-        row["filepath"]
-        for row in db.find_extraction_occurrences(stale)
-        if needs_reextraction(row["extractor"], row["content_type"], row["filename"])
-    }
     re_enqueued = 0
-    for filepath in sorted(filepaths):
+    for filepath in db.find_filepaths_with_extractors(stale):
         if queue.has_pending_row(filepath) or queue.is_dead(filepath):
             continue
         queue.enqueue(filepath, REASON_REEXTRACT)

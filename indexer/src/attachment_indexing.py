@@ -42,8 +42,7 @@ from .extractors import (
     STATUS_TOO_LARGE,
     STATUS_UNSUPPORTED,
     ExtractionResult,
-    is_stale_extractor,
-    needs_reextraction,
+    stale_extractor_module,
 )
 from .extractors import (
     extract as extract_attachment,
@@ -85,9 +84,7 @@ def attachment_occurrence_id(
 _FAILED_CACHE_MAX_AGE = timedelta(days=7)
 
 
-def _cache_hit_short_circuits(
-    cached: dict, ocr_enabled: bool, *, content_type: str = "", filename: str = ""
-) -> bool:
+def _cache_hit_short_circuits(cached: dict, ocr_enabled: bool) -> bool:
     """Return True when ``cached`` should short-circuit re-extraction.
 
     ``STATUS_SUCCESS`` rows with non-empty text are the obvious hit. The
@@ -109,10 +106,6 @@ def _cache_hit_short_circuits(
       burning OCR cycles on every reappearance), otherwise honor the
       cache.
     """
-    if needs_reextraction(cached["extractor"], content_type, filename):
-        # Written by an older version of an extractor that has since
-        # been fixed; its result would be served forever otherwise.
-        return False
     status = cached["extraction_status"]
     if status == STATUS_SUCCESS:
         return bool(cached["extracted_text"])
@@ -191,24 +184,16 @@ def _resolve_extracted_text(
     fresh result.
     """
     cached = db.get_attachment_extraction(attachment.content_hash)
+    # A row written by an older version of a since-fixed extractor would
+    # otherwise be served forever. Re-run the module that wrote it, from
+    # whichever occurrence of the bytes arrives: the row is shared by
+    # content hash, so an occurrence whose own metadata resolves to
+    # another extractor must still refresh it with the same one.
+    refresh_module = stale_extractor_module(cached["extractor"]) if cached is not None else None
     if (
         cached is not None
-        and is_stale_extractor(cached["extractor"])
-        and not needs_reextraction(
-            cached["extractor"], attachment.content_type, attachment.filename
-        )
-    ):
-        # The same bytes under metadata that resolves to another
-        # extractor. Re-running would overwrite the shared row with that
-        # extractor's result, and indexing the stale text would overwrite
-        # the fresh chunks of a DOCX occurrence in the same message, so
-        # neither: this occurrence's chunks are left as they are.
-        return None, cached["extraction_status"], None, True
-    if cached is not None and _cache_hit_short_circuits(
-        cached,
-        ocr_enabled,
-        content_type=attachment.content_type,
-        filename=attachment.filename,
+        and refresh_module is None
+        and _cache_hit_short_circuits(cached, ocr_enabled)
     ):
         # Successful hits return the stored text; non-success hits
         # (empty / unsupported / too_large / failed-within-window)
@@ -227,6 +212,7 @@ def _resolve_extracted_text(
         max_extracted_chars=max_extracted_chars,
         ocr_timeout_seconds=ocr_timeout_seconds,
         max_pdf_pages=max_pdf_pages,
+        module_override=refresh_module,
     )
     text = result.text if result.status == STATUS_SUCCESS else None
     return text, result.status, result, False
