@@ -357,7 +357,7 @@ passthrough in the search and intelligence handlers); AGENTS.md's
 6. **#233 + #225** MCP robustness: guard `parseaddr` in the mcp-server's
    `canonical_addr` (the indexer copy already does); validate reranker
    indices (unique, in range) before mutating any candidate.
-7. **#243** header clipping sweep (subject, participant names,
+7. **Done (#259).** **#243** header clipping sweep (subject, participant names,
    attachment filename/MIME, reranker `_candidate_text`). Separate from
    the `get_message` / ID-length backlog items below.
 8. **#230 + #209** parser MIME traversal: do not descend into attached
