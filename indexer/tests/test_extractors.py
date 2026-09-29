@@ -275,6 +275,95 @@ class TestDocxExtractor:
         assert "Vendor Amount" in text
         assert "Acme Corp $500" in text
 
+    @staticmethod
+    def _save(document) -> bytes:
+        import io
+
+        buf = io.BytesIO()
+        document.save(buf)
+        return buf.getvalue()
+
+    def test_huge_grid_span_is_read_once(self):
+        """Regression (#228): python-docx's ``row.cells`` repeats a cell
+        once per spanned grid column, so a tiny DOCX declaring a
+        million-column span made the extractor copy its text a million
+        times before any character cap applied."""
+        import time
+
+        import docx
+        from docx.oxml import OxmlElement
+        from docx.oxml.ns import qn
+        from src.extractors.docx import extract as docx_extract
+
+        document = docx.Document()
+        cell = document.add_table(rows=1, cols=1).cell(0, 0)
+        cell.text = "SYNTH_CELL"
+        span = OxmlElement("w:gridSpan")
+        span.set(qn("w:val"), "1000000")
+        cell._tc.get_or_add_tcPr().append(span)
+
+        started = time.monotonic()
+        text, _ = docx_extract(self._save(document))
+        assert time.monotonic() - started < 2.0
+        assert text.count("SYNTH_CELL") == 1
+
+    def test_merged_cells_are_not_repeated(self):
+        import docx
+        from src.extractors.docx import extract as docx_extract
+
+        document = docx.Document()
+        table = document.add_table(rows=3, cols=3)
+        table.cell(0, 0).merge(table.cell(0, 2)).text = "ACROSS"
+        table.cell(1, 0).merge(table.cell(2, 0)).text = "DOWN"
+        text, _ = docx_extract(self._save(document))
+        assert text.count("ACROSS") == 1
+        assert text.count("DOWN") == 1
+
+    def test_nested_and_header_footer_tables_are_read(self):
+        """Regression (#226): ``cell.text`` skips nested tables, and only
+        header/footer paragraphs were read, so this document extracted
+        as empty."""
+        import docx
+        from docx.shared import Inches
+        from src.extractors.docx import extract as docx_extract
+
+        document = docx.Document()
+        outer = document.add_table(rows=1, cols=1)
+        outer.cell(0, 0).add_table(rows=1, cols=1).cell(0, 0).text = "NESTED_MARK"
+        section = document.sections[0]
+        section.header.add_table(rows=1, cols=1, width=Inches(2)).cell(0, 0).text = "HEADER_MARK"
+        section.footer.add_table(rows=1, cols=1, width=Inches(2)).cell(0, 0).text = "FOOTER_MARK"
+        text, _ = docx_extract(self._save(document))
+        assert "NESTED_MARK" in text
+        assert "HEADER_MARK" in text
+        assert "FOOTER_MARK" in text
+
+    def test_deep_nesting_stays_within_the_recursion_limit(self):
+        # RecursionError escapes the dispatcher as host pressure. lxml
+        # rejects XML deeper than 256 elements, which caps table nesting
+        # near 80 levels, so the recursive walk stays far below the limit.
+        import docx
+        from src.extractors.docx import extract as docx_extract
+
+        document = docx.Document()
+        cell = document.add_table(rows=1, cols=1).cell(0, 0)
+        for _ in range(60):
+            cell = cell.add_table(rows=1, cols=1).cell(0, 0)
+        cell.text = "DEEPEST"
+        text, _ = docx_extract(self._save(document))
+        assert "DEEPEST" in text
+
+    def test_body_content_keeps_document_order(self):
+        import docx
+        from src.extractors.docx import extract as docx_extract
+
+        document = docx.Document()
+        document.add_paragraph("FIRST")
+        document.add_table(rows=1, cols=1).cell(0, 0).text = "SECOND"
+        document.add_paragraph("THIRD")
+        text, _ = docx_extract(self._save(document))
+        assert text.index("FIRST") < text.index("SECOND") < text.index("THIRD")
+
 
 class TestXlsxExtractor:
     def test_serializes_each_sheet_with_header_marker(self):
