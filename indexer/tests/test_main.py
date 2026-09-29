@@ -4294,7 +4294,10 @@ class TestBatchSharesExtraction:
         msg["Date"] = "Mon, 01 Jan 2024 12:00:00 +0000"
         msg.set_content(f"Body of {message_id}.")
         for filename in filenames:
-            msg.add_attachment(self.PAYLOAD, maintype="text", subtype="plain", filename=filename)
+            maintype, subtype = (
+                ("application", "octet-stream") if filename.endswith(".bin") else ("text", "plain")
+            )
+            msg.add_attachment(self.PAYLOAD, maintype=maintype, subtype=subtype, filename=filename)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(bytes(msg))
 
@@ -4375,4 +4378,41 @@ class TestBatchSharesExtraction:
         )
         isolated = [t for call in embedder.embed_batch.call_args_list[1:] for t in call.args[0]]
         assert sum("SHARED_ATTACHMENT_MARKER" in t for t in isolated) == 1
+        assert len(self._attachment_chunks(db)) == 1
+
+    def test_no_text_copy_does_not_clear_a_filled_copy(self, tmp_path, monkeypatch):
+        """Review round 2: re-indexing a message whose ``.bin`` copy still
+        reads the cached ``unsupported`` row while its ``.txt`` copy of the
+        same bytes extracts. The ``.bin`` plan cleared the shared chunk
+        slice, and the ``.txt`` plan, having embedded nothing because its
+        chunks were already stored, then failed to restore it."""
+        from src.extractors import STATUS_UNSUPPORTED
+
+        messages = {"m@example.com": ["blob.bin", "doc.txt"]}
+        db, _, _ = self._drain(tmp_path, monkeypatch, messages)
+        assert len(self._attachment_chunks(db)) == 1
+        content_hash = db._conn.execute(
+            "SELECT attachment_id FROM attachment_extractions"
+        ).fetchone()["attachment_id"]
+        db.store_attachment_extraction(
+            attachment_id=content_hash,
+            extraction_status=STATUS_UNSUPPORTED,
+            extractor=None,
+            extracted_text=None,
+            extraction_error="no extractor for content_type='application/octet-stream'",
+        )
+        queue = _make_queue(db)
+        path = tmp_path / "maildir" / "INBOX" / "cur" / "m@example.com.eml"
+        queue.enqueue(str(path), REASON_INITIAL_SCAN)
+        main._drain_queue_batched(
+            db,
+            make_mock_embedder(_UNIT_VECTOR),
+            Threader(db),
+            queue,
+            batch_size=10,
+            timing_aggregator=main.TimingAggregator(window=4),
+            max_passes=1,
+        )
+        # A succeeded job's row is deleted; a failed one stays queued.
+        assert db._conn.execute("SELECT COUNT(*) FROM indexing_jobs").fetchone()[0] == 0
         assert len(self._attachment_chunks(db)) == 1

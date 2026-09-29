@@ -383,19 +383,59 @@ def test_cached_unsupported_is_re_run_for_an_occurrence_with_an_extractor(tmp_pa
 
 
 def test_ocr_disabled_row_stays_cached_while_ocr_is_off(tmp_path, monkeypatch):
-    """A scanned PDF resolves to the PDF extractor either way; its
-    OCR-disabled row is re-run only once OCR is on."""
+    """A scanned PDF resolves to the PDF extractor either way; the row the
+    PDF extractor wrote is re-run only once OCR is on."""
+    from src.extractors import SCANNED_PDF_OCR_DISABLED_ERROR
+
     db = _seed_thread_for_cache_test(tmp_path)
     summary, extractor = _run_process_with_cached_status(
         db,
         _attachment(filename="scan.pdf", content_type="application/pdf"),
         STATUS_UNSUPPORTED,
         monkeypatch,
-        error="OCR disabled (INDEXER_OCR_ENABLED=false)",
+        error=SCANNED_PDF_OCR_DISABLED_ERROR,
         ocr_enabled=False,
     )
     assert summary["extractions_reused"] == 1
     extractor.assert_not_called()
+
+
+def test_image_ocr_disabled_row_does_not_block_a_pdf_occurrence(tmp_path, monkeypatch):
+    """Review round 2: the PDF extractor reads a digital text layer without
+    OCR, so an "OCR disabled" row written for the bytes as an image must
+    not keep a PDF occurrence of them unextracted while OCR is off."""
+    from src.extractors import OCR_DISABLED_ERROR
+
+    db = _seed_thread_for_cache_test(tmp_path)
+    attachment = _attachment(filename="report.pdf", content_type="application/pdf")
+    db.store_attachment_extraction(
+        attachment_id=attachment.content_hash,
+        extraction_status=STATUS_UNSUPPORTED,
+        extractor=None,
+        extracted_text=None,
+        extraction_error=OCR_DISABLED_ERROR,
+    )
+    extractor = MagicMock(
+        return_value=ExtractionResult(
+            status=STATUS_SUCCESS, extractor="pdf-digital", text="digital text", error=None
+        )
+    )
+    monkeypatch.setattr(attachment_indexing, "extract_attachment", extractor)
+    process_attachment(
+        message_date="2024-01-01T00:00:00+00:00",
+        attachment=attachment,
+        message_id="message@example.com",
+        thread_id="thread-1",
+        db=db,
+        embedder=make_mock_embedder([0.2] * EMBEDDING_DIM),
+        chunk_target_tokens=350,
+        chunk_max_tokens=500,
+        chunk_overlap_tokens=60,
+        ocr_enabled=False,
+        max_bytes=10_000_000,
+        max_ocr_pages=20,
+    )
+    extractor.assert_called_once()
 
 
 def test_recent_failed_cached_extraction_is_honored(tmp_path, monkeypatch):

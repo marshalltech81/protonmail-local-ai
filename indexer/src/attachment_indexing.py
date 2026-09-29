@@ -36,6 +36,7 @@ from .chunker import MessageChunk, chunk_message
 from .database import Database
 from .embedder import EmbeddingBackend
 from .extractors import (
+    SCANNED_PDF_OCR_DISABLED_ERROR,
     STATUS_EMPTY,
     STATUS_FAILED,
     STATUS_SUCCESS,
@@ -85,23 +86,21 @@ def attachment_occurrence_id(
 _FAILED_CACHE_MAX_AGE = timedelta(days=7)
 
 
-# Extractor modules whose result depends on OCR: images, and scanned PDFs
-# through the OCR fallback.
-_OCR_MODULES = frozenset({"image", "pdf"})
-
-
 def _unsupported_still_holds(error: str | None, attachment: Attachment, ocr_enabled: bool) -> bool:
     """Whether an ``unsupported`` result also applies to ``attachment``.
 
     Results are shared by content hash, but dispatch reads each
     occurrence's MIME type and filename, so the same bytes can arrive as
     ``.bin`` first and ``.txt`` later (#210). An "OCR disabled" result
-    holds for an occurrence that also needs OCR until OCR is turned on (a
-    scanned PDF resolves to the PDF extractor either way). Any other
-    holds only while this occurrence selects no extractor.
+    holds until OCR is turned on for an occurrence that needs OCR: an
+    image, or a PDF when the PDF extractor wrote the result (it found no
+    digital text layer). Any other result holds only while this
+    occurrence selects no extractor.
     """
     module = resolved_extractor_module(attachment.content_type, attachment.filename)
-    if "OCR disabled" in (error or "") and module in _OCR_MODULES:
+    error = error or ""
+    needs_ocr = module == "image" or (module == "pdf" and error == SCANNED_PDF_OCR_DISABLED_ERROR)
+    if "OCR disabled" in error and needs_ocr:
         return not ocr_enabled
     return module is None
 
@@ -176,6 +175,10 @@ class AttachmentWritePlan:
     extraction_reused: bool
     chunks: list[MessageChunk] = field(default_factory=list)
     embeddings_by_chunk_id: dict[str, list[float]] = field(default_factory=dict)
+    # Whether a plan without text clears the attachment's stored chunks.
+    # The batched indexer turns it off when another copy of the same bytes
+    # in the message fills that slice.
+    clears_stale_chunks: bool = True
 
 
 def _resolve_extracted_text(
@@ -434,6 +437,8 @@ def apply_attachment_writes(
         # message's re-extraction may have stamped it current after this
         # message indexed the stale text. Costs one indexed SELECT when
         # there is nothing to delete.
+        if not plan.clears_stale_chunks:
+            return summary
         db.replace_message_chunks(
             message_id=message_id,
             thread_id=thread_id,

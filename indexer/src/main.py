@@ -880,6 +880,7 @@ def _phase2a_collect_chunks(
         # Copies of the same bytes in one message chunk to the same chunk
         # IDs (the chunk key is message + content hash): embed each once.
         queued_attach_offsets: dict[str, int] = {}
+        attach_stored_ids: list[set[str]] = []
         if INDEXER_ATTACHMENT_EXTRACTION_ENABLED and msg.attachments:
             cap = (
                 INDEXER_ATTACHMENT_MAX_EXTRACTED_CHARS
@@ -914,12 +915,7 @@ def _phase2a_collect_chunks(
                 stored_attach_ids = db.get_chunk_ids_for_message(
                     msg.message_id, attachment_id=attachment.content_hash
                 )
-                if plan.chunks:
-                    plan_new = [c for c in plan.chunks if c.chunk_id not in stored_attach_ids]
-                else:
-                    # ``apply_attachment_writes`` clears this slice.
-                    plan_new = []
-                    clears_chunks = clears_chunks or bool(stored_attach_ids)
+                plan_new = [c for c in plan.chunks if c.chunk_id not in stored_attach_ids]
                 plan_offsets: list[int] = []
                 for c in plan_new:
                     if c.chunk_id not in queued_attach_offsets:
@@ -929,6 +925,19 @@ def _phase2a_collect_chunks(
                 attach_plans.append(plan)
                 attach_new_chunks.append(plan_new)
                 attach_offsets.append(plan_offsets)
+                attach_stored_ids.append(stored_attach_ids)
+        # A plan without text clears its attachment's chunk slice in
+        # Phase 2c, unless another copy of the same bytes in this message
+        # fills it: that copy counted the stored chunks as kept and
+        # embedded none of them, so it could not restore a cleared slice.
+        filled = {plan.attachment.content_hash for plan in attach_plans if plan.chunks}
+        for plan, stored_attach_ids in zip(attach_plans, attach_stored_ids):
+            if plan.chunks:
+                continue
+            if plan.attachment.content_hash in filled:
+                plan.clears_stale_chunks = False
+            else:
+                clears_chunks = clears_chunks or bool(stored_attach_ids)
         # Subject-fallback path: when this message contributes zero new
         # chunks AND the parent thread has no committed chunks, embed
         # the subject (or a sentinel string) so the thread vector is
