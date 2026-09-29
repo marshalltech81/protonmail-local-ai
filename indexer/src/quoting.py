@@ -86,6 +86,12 @@ _REPLY_HEADER_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(rf"^Op\b.*\bschreef\b.*{_EMAIL_RE_FRAGMENT}\s*:\s*$"),
 )
 
+# Longest line tested against ``_REPLY_HEADER_PATTERNS``. A long
+# attribution (weekday, full date, time zone, long display name and
+# address) is about 200 chars; the worst-case match on a hostile line at
+# this length is well under a millisecond.
+_MAX_REPLY_HEADER_CHARS = 300
+
 # Two-line wrapped reply headers. Gmail wraps the attribution when the
 # address makes it longer than ~78 chars, pushing the verb (and the
 # trailing colon) onto a line of its own. A pre-pass removes the
@@ -221,6 +227,12 @@ def _is_hard_cut(line: str) -> bool:
 
 
 def _is_reply_header(line: str) -> bool:
+    # The patterns' ``.*`` spans backtrack quadratically on a long line
+    # that starts with a lead word and repeats ``<addr>`` fragments
+    # (#239). Real attributions are well under the cap, so a longer
+    # line is prose, and skipping it bounds the work per line.
+    if len(line) > _MAX_REPLY_HEADER_CHARS:
+        return False
     return any(pattern.match(line) for pattern in _REPLY_HEADER_PATTERNS)
 
 
