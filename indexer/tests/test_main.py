@@ -4416,3 +4416,158 @@ class TestBatchSharesExtraction:
         # A succeeded job's row is deleted; a failed one stays queued.
         assert db._conn.execute("SELECT COUNT(*) FROM indexing_jobs").fetchone()[0] == 0
         assert len(self._attachment_chunks(db)) == 1
+
+
+class TestTrashedFilesWithReconciliation:
+    """#244: with deletion reconciliation on, a T-flagged file is deleted
+    upstream; stale or in-flight work must not index it back."""
+
+    def test_drain_drops_a_trashed_job(self, tmp_path, monkeypatch):
+        maildir = tmp_path / "maildir"
+        monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
+        path = maildir / "INBOX" / "cur" / "1700000000.M1.host:2,ST"
+        _write_eml(path, "trashed@example.com")
+        db = Database(tmp_path / "mail.db")
+        queue = _make_queue(db)
+        queue.enqueue(str(path), REASON_INITIAL_SCAN)
+        main._drain_queue_batched(
+            db,
+            make_mock_embedder(_UNIT_VECTOR),
+            Threader(db),
+            queue,
+            batch_size=10,
+            timing_aggregator=main.TimingAggregator(window=4),
+            max_passes=1,
+            skip_trashed=True,
+        )
+        assert not db.is_indexed(str(path))
+        assert not queue.has_pending_row(str(path))
+
+    def test_a_tombstoned_message_keeps_its_job_until_restored(self, tmp_path, monkeypatch):
+        """Review round 1: dropping the job of an indexed message lost its
+        only retry. If mbsync clears the T flag before the reap, nothing
+        re-queues a message whose thread already has chunks. The job is
+        parked instead, moves with the rename back, and then runs."""
+        from src.reconciler import Reconciler, ReconcilerConfig
+
+        maildir = tmp_path / "maildir"
+        monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
+        live = maildir / "INBOX" / "cur" / "1700000000.M1.host:2,S"
+        trashed = maildir / "INBOX" / "cur" / "1700000000.M1.host:2,ST"
+        _write_eml(live, "parked@example.com")
+        db = Database(tmp_path / "mail.db")
+        queue = _make_queue(db)
+
+        def drain():
+            main._drain_queue_batched(
+                db,
+                make_mock_embedder(_UNIT_VECTOR),
+                Threader(db),
+                queue,
+                batch_size=10,
+                timing_aggregator=main.TimingAggregator(window=4),
+                max_passes=1,
+                skip_trashed=True,
+            )
+
+        reconciler = Reconciler(
+            db,
+            make_mock_embedder(_UNIT_VECTOR),
+            Threader(db),
+            ReconcilerConfig(
+                enabled=True,
+                grace_days=7,
+                sweep_interval_secs=60,
+                max_batch_pct=1.0,
+                force=False,
+                unlink_on_reap=False,
+            ),
+        )
+        queue.enqueue(str(live), REASON_INITIAL_SCAN)
+        drain()
+        live.rename(trashed)
+        reconciler.handle_moved(str(live), str(trashed))  # tombstones it
+        queue.enqueue(str(trashed), REASON_INITIAL_SCAN)  # e.g. a retry still pending
+
+        drain()
+        job = db._conn.execute("SELECT filepath, attempts FROM indexing_jobs").fetchone()
+        assert (job["filepath"], job["attempts"]) == (str(trashed), 0)
+
+        # Restoring clears the tombstone, moves the job, and makes it due
+        # now rather than after the park delay.
+        trashed.rename(live)
+        reconciler.handle_moved(str(trashed), str(live))
+        drain()
+        assert not queue.has_pending_row(str(live))
+        assert db.is_indexed(str(live))
+
+    def test_a_parked_job_moved_without_a_tombstone_runs_at_once(self, tmp_path, monkeypatch):
+        """Review round 3: at startup ``sweep_paths`` can move a job onto a
+        T path and the drain park it before any tombstone exists, so a
+        restore has no tombstone to clear. Moving a parked job off the
+        path makes it due whatever the tombstone state."""
+        maildir = tmp_path / "maildir"
+        monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
+        live = maildir / "INBOX" / "cur" / "1700000000.M1.host:2,S"
+        trashed = maildir / "INBOX" / "cur" / "1700000000.M1.host:2,ST"
+        _write_eml(live, "startup@example.com")
+        db = Database(tmp_path / "mail.db")
+        queue = _make_queue(db)
+
+        def drain():
+            main._drain_queue_batched(
+                db,
+                make_mock_embedder(_UNIT_VECTOR),
+                Threader(db),
+                queue,
+                batch_size=10,
+                timing_aggregator=main.TimingAggregator(window=4),
+                max_passes=1,
+                skip_trashed=True,
+            )
+
+        queue.enqueue(str(live), REASON_INITIAL_SCAN)
+        drain()
+        live.rename(trashed)
+        db.update_filepath(str(live), str(trashed))
+        queue.enqueue(str(trashed), REASON_INITIAL_SCAN)
+        drain()  # parked
+        assert queue.has_pending_row(str(trashed))
+        assert not db.has_pending_deletion(str(trashed))
+
+        trashed.rename(live)
+        db.update_filepath(str(trashed), str(live))
+        drain()
+        assert not queue.has_pending_row(str(live))
+
+    def test_drain_indexes_a_trashed_file_without_reconciliation(self, tmp_path, monkeypatch):
+        # The index is append-only then: trashed mail is indexed as before.
+        maildir = tmp_path / "maildir"
+        monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
+        path = maildir / "INBOX" / "cur" / "1700000000.M1.host:2,ST"
+        _write_eml(path, "trashed@example.com")
+        db = Database(tmp_path / "mail.db")
+        queue = _make_queue(db)
+        queue.enqueue(str(path), REASON_INITIAL_SCAN)
+        main._drain_queue_batched(
+            db,
+            make_mock_embedder(_UNIT_VECTOR),
+            Threader(db),
+            queue,
+            batch_size=10,
+            timing_aggregator=main.TimingAggregator(window=4),
+            max_passes=1,
+        )
+        assert db.is_indexed(str(path))
+
+    def test_recovery_skips_trashed_files(self, tmp_path, monkeypatch):
+        db = Database(tmp_path / "mail.db")
+        queue = _make_queue(db)
+        trashed = str(tmp_path / "INBOX" / "cur" / "1.M1.host:2,ST")
+        live = str(tmp_path / "INBOX" / "cur" / "2.M2.host:2,S")
+        monkeypatch.setattr(
+            db, "find_zero_vector_chunkless_thread_filepaths", lambda: [trashed, live]
+        )
+        assert main._recover_zero_vector_threads(db, queue, skip_trashed=True) == 1
+        assert not queue.has_pending_row(trashed)
+        assert queue.has_pending_row(live)

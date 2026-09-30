@@ -373,7 +373,7 @@ passthrough in the search and intelligence handlers); AGENTS.md's
 10. **Done (#261).** **#237 + #210** extraction cache semantics: per-batch cache keyed
     by content hash, and re-run an `unsupported` row when an extractor
     now resolves.
-11. **#244** reaping leaves `indexing_jobs`, and the rename fix moves
+11. **Done (#263).** **#244** reaping leaves `indexing_jobs`, and the rename fix moves
     pending jobs onto the `T`-flagged path, so an embedder outage past
     the grace period resurrects deleted mail. Delete the job in both
     removal paths; skip trashed files at drain time.
