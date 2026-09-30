@@ -355,14 +355,14 @@ Triaged against `d30e500` by four parallel agents; every issue is real
 and most reproduced with synthetic input. PRs in the order to land
 them (one test-first commit per issue, `Fixes #N` per issue):
 
-**Status 2026-09-29 — next session starts here.** Items 1–6 are merged
-or in review (#251, #252, #255, #253, #254, #258). Next up, in order:
-item 7 (#243), item 8 (#230 + #209), then item 10 (#237 + #210)
-**before** item 9 (#231 + #234), then 11–12. Items 13–14 wait on owner
-decisions. Also new: **#257**, the known mailbox-content logging gaps
-(extractor filename/exception logs, `safe_provider_exception_text`
-passthrough in the search and intelligence handlers); AGENTS.md's
-"Untrusted Mail Content" section (#256) lists them.
+**Status 2026-09-30 — next session starts here.** Items 1–12 are
+merged (#251–#255, #258–#264). Items 13–14 wait on owner decisions, as
+does #217 (which Message-ID claimant wins). Next code work, in order:
+**#257** (the known mailbox-content logging gaps: extractor
+filename/exception logs, `safe_provider_exception_text` passthrough in
+the search and intelligence handlers, and parse-stage exception text
+reaching `last_error` through `_stage_error`; AGENTS.md's "Untrusted
+Mail Content" section lists the rules), then Phase 2.
 
 1. **Done (#251).** **#238** invalid date filters leak withheld input into logs — five
    handlers logged the `ValueError` quoting the value. Fixed with a
@@ -649,6 +649,26 @@ do not ship persisted claims without them.
    `issuer_url` even when only a verifier is used.
 
 ## Recently Completed
+
+### 2026-09-30 — Second review batch, items 6–12 (#258–#264)
+
+Seven PRs, one per item, each with a test-first commit per issue.
+MCP: a hostile stored sender no longer aborts sender-filtered searches
+and an invalid rerank ranking falls back to RRF order (#233, #225, PR
+#258); every tool and prompt cuts sender-controlled headers (#243, PR
+#259). Indexer: attachment boundaries in MIME traversal, with attached
+emails identified by their serialized form and transfer encodings
+made to agree on it (#230, #209, PR #260, fifteen Codex rounds — see
+the review-method notes above and the parser-policy candidate in
+Phase 2); extraction results shared within a batch and `unsupported`
+rows re-checked per occurrence (#237, #210, PR #261); every TIFF page
+OCR'd and UTF-16 text decoded, with `image` and `text` extractor
+versions bumped (#231, #234, PR #262); queued work can no longer
+resurrect reaped mail, with tombstones re-checked inside the reap
+transaction (#244, PR #263, six rounds). mbsync fails closed when the
+cert pin cannot be saved or the Maildir permission repair fails, with a
+shell test harness and CI job (#240, #227, PR #264). Lessons from the
+review loop went into AGENTS.md and here (PRs #265, #307).
 
 ### 2026-09-29 — Second review batch, items 1–5 (#251–#255)
 
