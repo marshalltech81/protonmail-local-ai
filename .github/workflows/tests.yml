@@ -11,6 +11,15 @@ permissions:
   contents: read
 
 jobs:
+  mbsync-entrypoint:
+    name: mbsync entrypoint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Run entrypoint tests
+        run: bash mbsync/tests/entrypoint_test.sh
+
   indexer-pytest:
     name: indexer pytest
     runs-on: ubuntu-latest

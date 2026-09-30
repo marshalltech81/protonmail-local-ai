@@ -79,7 +79,8 @@ class RerankerBackend(Protocol):
         """Return ``[(orig_index, score), ...]`` sorted descending by
         score, truncated to ``top_n`` (or ``self.top_n`` when omitted).
         Empty list signals failure — caller falls back to the original
-        document order."""
+        document order, as it does for an out-of-range or repeated
+        index."""
         ...
 
 

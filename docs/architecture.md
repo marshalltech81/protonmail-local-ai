@@ -223,7 +223,8 @@ thread-level lanes alone.
 
 The rerank stage is best-effort: a transient rerank-service failure
 returns an empty result set from the reranker, and `hybrid_search`
-falls back to RRF order truncated to the caller's `limit`. A rerank
+falls back to RRF order truncated to the caller's `limit`. A ranking
+with an out-of-range or repeated index falls back the same way. A rerank
 outage degrades quality without failing the whole query.
 
 ## Thread Indexing
@@ -344,7 +345,7 @@ as message bodies. Two extra tables sit alongside `message_chunks`:
 | Table | Keyed by | Purpose |
 |---|---|---|
 | `attachments` | attachment_occurrence_id | Per-occurrence row capturing filename + MIME + size as it appeared on a specific email. The occurrence id includes the message, payload hash, filename, and attachment slot so duplicate same-payload files in one email are still represented. |
-| `attachment_extractions` | attachment_id (= sha256 of payload) | Per-content-hash cache of extracted text + status. The expensive work (Tesseract OCR, pypdf parse, DOCX walk) runs at most once per unique payload. Non-success rows are also honored: `empty` / `too_large` / `unsupported` short-circuit unconditionally; `failed` short-circuits within a 7-day retry window so a chronic failure stops re-running on every reappearance, but a real fix landed via dependency upgrade can pick the payload up later. The `extractor` column carries a version (`docx@2`); a row written by an older version of a fixed extractor (`extractors.EXTRACTOR_VERSIONS`) is refreshed by re-running that extractor from whichever occurrence of the bytes arrives (whatever its own filename or MIME type), and the indexer re-queues every message carrying those bytes once at startup so their chunks are rebuilt, except dead-lettered messages, which keep their stale chunks until `make requeue-dead` rescues them. Rows from a newer version (after a rollback) are kept. A stale row an OCR extractor wrote (`image-ocr`, `pdf-ocr`) is kept and served while `INDEXER_OCR_ENABLED=false`, since a refresh could only replace its text with "OCR disabled"; it is refreshed once OCR is on. |
+| `attachment_extractions` | attachment_id (= sha256 of payload) | Per-content-hash cache of extracted text + status. The expensive work (Tesseract OCR, pypdf parse, DOCX walk) runs at most once per unique payload, including within one indexing batch, where results not yet committed are shared by content hash. Non-success rows are also honored: `empty` / `too_large` short-circuit unconditionally; `unsupported` short-circuits while it also holds for the occurrence at hand (an "OCR disabled" row, for an occurrence that needs OCR — an image, or a PDF whose row the PDF extractor wrote because it found no digital text layer — until OCR is turned on; any other until the occurrence's MIME type or filename selects an extractor, since the same bytes can arrive as `.bin` first and `.txt` later); `failed` short-circuits within a 7-day retry window so a chronic failure stops re-running on every reappearance, but a real fix landed via dependency upgrade can pick the payload up later. The `extractor` column carries a version (`docx@2`); a row written by an older version of a fixed extractor (`extractors.EXTRACTOR_VERSIONS`) is refreshed by re-running that extractor from whichever occurrence of the bytes arrives (whatever its own filename or MIME type), and the indexer re-queues every message carrying those bytes once at startup so their chunks are rebuilt, except dead-lettered messages, which keep their stale chunks until `make requeue-dead` rescues them. Rows from a newer version (after a rollback) are kept. A stale row an OCR extractor wrote (`image-ocr`, `pdf-ocr`) is kept and served while `INDEXER_OCR_ENABLED=false`, since a refresh could only replace its text with "OCR disabled"; it is refreshed once OCR is on. |
 
 Per-occurrence chunks land in `message_chunks` with the
 `attachment_id` column populated. They embed exactly like body chunks
@@ -420,7 +421,12 @@ The indexer ships an opt-in reconciler
    if mbsync un-flags the file on a later pull.
 2. **Reap** — after a configurable grace window
    (`INDEXER_DELETION_GRACE_DAYS`, default 7 days) the reaper removes the
-   reaped message's rows from `message_thread_map` / `indexed_files`, and
+   reaped message's rows from `message_thread_map` / `indexed_files` and
+   any indexing job still queued for its file (in the same transaction,
+   which first re-checks that every message it removes is still
+   tombstoned past the grace window, so a restore — or a restore and a
+   fresh tombstone — after the reaper read its tombstones is left for a
+   later pass), and
    either rebuilds the parent thread from the surviving messages on disk
    (re-parsed, re-embedded) or deletes the thread entirely when nothing
    remains. Embedding-endpoint failures during rebuild (operator-supplied
@@ -714,9 +720,13 @@ while the observer was not running — is therefore indexed
 eventually rather than omitted until the next container restart.
 
 When deletion reconciliation is enabled, every enqueue path — the
-startup scan, the periodic rescan, and the watchdog's
-`on_created` / new-delivery `on_moved` branches — skips `T`-flagged
-files. A reaped message's `.eml` stays on disk under the default
+startup scan, the periodic rescan, the zero-vector recovery sweep, and
+the watchdog's `on_created` / new-delivery `on_moved` branches — skips
+`T`-flagged files, and the drain never indexes a claimed job whose file
+has been `T`-flagged since it was queued (the reaper owns that message):
+a message still in the index keeps its job parked, which the reap
+deletes or, if mbsync clears the flag first, the rename moves back to the
+live path and makes due at once; a trashed file never indexed has its job dropped. A reaped message's `.eml` stays on disk under the default
 `INDEXER_UNLINK_ON_REAP=false` and is no longer indexed or queued, so
 treating it as undiscovered mail would resurrect it into search (and
 the next sweep would start a fresh grace window). If mbsync later

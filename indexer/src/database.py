@@ -2041,13 +2041,25 @@ class Database:
                 )
 
     @_synchronized
-    def update_filepath(self, old_path: str, new_path: str, *, folder: str | None = None) -> None:
+    def update_filepath(
+        self,
+        old_path: str,
+        new_path: str,
+        *,
+        folder: str | None = None,
+        clear_tombstone: bool = False,
+    ) -> None:
         """Update message_thread_map, indexed_files and the queue row after a Maildir rename.
 
         ``folder`` is the destination's folder when the rename crosses
         Maildir folders (``None`` for flag-only renames). It is written in
         the same transaction as the locator, so the per-message record can
         never point at one folder's file while claiming another.
+
+        ``clear_tombstone`` drops the file's tombstone in the same
+        transaction, for a rename that restores it (T flag cleared): the
+        reaper runs on another thread, and seeing the restored path with
+        its tombstone still in place it would delete the message.
 
         mbsync renames a Maildir file whenever flags change (e.g. S → SR when
         the message is replied to). Keep the stored path in sync so later
@@ -2098,10 +2110,13 @@ class Database:
                     prior["content_hash"] if prior else None,
                 ),
             )
-            cur.execute(
-                "UPDATE pending_deletions SET filepath = ? WHERE filepath = ?",
-                (new_path, old_path),
-            )
+            if clear_tombstone:
+                cur.execute("DELETE FROM pending_deletions WHERE filepath = ?", (old_path,))
+            else:
+                cur.execute(
+                    "UPDATE pending_deletions SET filepath = ? WHERE filepath = ?",
+                    (new_path, old_path),
+                )
             # The file's queue row moves too, retry or dead state intact:
             # a rename of a file whose Phase 1 committed (so the path is
             # indexed and ``on_moved`` does not re-enqueue it) but whose
@@ -2110,6 +2125,15 @@ class Database:
             cur.execute(
                 "UPDATE OR REPLACE indexing_jobs SET filepath = ? WHERE filepath = ?",
                 (new_path, old_path),
+            )
+            # A job the drain parked because its file was T-flagged is due
+            # at once on any rename: a restore must not wait out the park
+            # delay (there may be no tombstone yet to clear), and a job
+            # still on a trashed path is simply parked again.
+            cur.execute(
+                "UPDATE indexing_jobs SET next_attempt_at = ? "
+                "WHERE filepath = ? AND status = 'queued' AND last_stage = 'trashed'",
+                (datetime.now(UTC).isoformat(), new_path),
             )
             self._commit_if_started(started)
         except Exception:
@@ -2186,13 +2210,22 @@ class Database:
             raise
 
     @_synchronized
-    def delete_thread_completely(self, thread_id: str) -> None:
+    def delete_thread_completely(self, thread_id: str, *, grace_cutoff: str | None = None) -> bool:
         """Remove a thread and every derived row. Used when the last message
         in a thread has been reaped.
+
+        Returns False, changing nothing, when a message in the thread is no
+        longer tombstoned — the watcher restored it (or a new message
+        joined the thread) after the reaper read its tombstones — or, with
+        ``grace_cutoff``, has a tombstone newer than it (restored and
+        trashed again, so its grace period restarted).
         """
         cur = self._conn.cursor()
         try:
             cur.execute("BEGIN IMMEDIATE")
+            if self._has_untombstoned_messages(cur, thread_id, grace_cutoff=grace_cutoff):
+                self._conn.rollback()
+                return False
             row = cur.execute(
                 "SELECT fts_rowid FROM threads WHERE thread_id = ?", (thread_id,)
             ).fetchone()
@@ -2225,10 +2258,42 @@ class Database:
             cur.execute("DELETE FROM pending_deletions WHERE thread_id = ?", (thread_id,))
             for fp in filepaths:
                 cur.execute("DELETE FROM indexed_files WHERE filepath = ?", (fp,))
+                # A job still queued for the file (an embedder outage past
+                # the grace window) would re-index it from the kept .eml.
+                cur.execute("DELETE FROM indexing_jobs WHERE filepath = ?", (fp,))
             self._conn.commit()
         except Exception:
             self._conn.rollback()
             raise
+        return True
+
+    @staticmethod
+    def _has_untombstoned_messages(
+        cur: sqlite3.Cursor,
+        thread_id: str,
+        message_ids: list[str] | None = None,
+        *,
+        grace_cutoff: str | None = None,
+    ) -> bool:
+        """Whether a message of ``thread_id`` (only ``message_ids``, when
+        given) has no tombstone, or none marked at or before
+        ``grace_cutoff``. Read inside the reap transaction, so a restore
+        (or a restore and a new tombstone) after the reaper's snapshot is
+        seen."""
+        # Only fixed SQL fragments are interpolated; values are bound.
+        marked = " AND p.marked_at <= ?" if grace_cutoff is not None else ""
+        sql = (
+            "SELECT 1 FROM message_thread_map m WHERE m.thread_id = ? "  # nosec B608
+            "AND NOT EXISTS (SELECT 1 FROM pending_deletions p "
+            f"WHERE p.message_id = m.message_id{marked})"
+        )
+        params: list[str] = [thread_id]
+        if grace_cutoff is not None:
+            params.append(grace_cutoff)
+        if message_ids is not None:
+            sql += f" AND m.message_id IN ({','.join('?' * len(message_ids))})"  # nosec B608
+            params.extend(message_ids)
+        return cur.execute(sql + " LIMIT 1", params).fetchone() is not None
 
     @_synchronized
     def rebuild_thread(self, thread, embedding: list[float]) -> None:
@@ -2254,7 +2319,9 @@ class Database:
         thread,
         embedding: list[float],
         reaped_message_ids: list[str],
-    ) -> list[str]:
+        *,
+        grace_cutoff: str | None = None,
+    ) -> list[str] | None:
         """Atomically rewrite a thread and remove reaped messages.
 
         The reconciler previously called ``rebuild_thread`` and then looped
@@ -2269,12 +2336,20 @@ class Database:
         so either the whole reap lands or none of it does.
 
         Returns the filepaths that were removed, so the caller can perform
-        any on-disk unlink work outside the transaction.
+        any on-disk unlink work outside the transaction, or ``None``,
+        changing nothing, when a reaped message is no longer tombstoned
+        (the watcher restored it after the reaper read its tombstones) or,
+        with ``grace_cutoff``, its tombstone is newer than that.
         """
         cur = self._conn.cursor()
         removed_filepaths: list[str] = []
         try:
             cur.execute("BEGIN IMMEDIATE")
+            if self._has_untombstoned_messages(
+                cur, thread.thread_id, reaped_message_ids, grace_cutoff=grace_cutoff
+            ):
+                self._conn.rollback()
+                return None
             self._rewrite_thread_row(cur, thread, embedding)
             for mid in reaped_message_ids:
                 fp = self._remove_message_row(cur, mid)
@@ -2394,4 +2469,7 @@ class Database:
         cur.execute("DELETE FROM message_thread_map WHERE message_id = ?", (message_id,))
         cur.execute("DELETE FROM indexed_files WHERE filepath = ?", (filepath,))
         cur.execute("DELETE FROM pending_deletions WHERE filepath = ?", (filepath,))
+        # A job still queued for the file would re-index it from the kept
+        # .eml (see ``delete_thread_completely``).
+        cur.execute("DELETE FROM indexing_jobs WHERE filepath = ?", (filepath,))
         return filepath
