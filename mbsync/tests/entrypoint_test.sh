@@ -43,8 +43,10 @@ check() {
     fi
 }
 
-readonly FP_OLD="aaaa"
-readonly FP_NEW="bbbb"
+# Synthetic fingerprints in the pin's format: 64 lowercase hex digits.
+FP_OLD="$(printf 'a%.0s' {1..64})"
+FP_NEW="$(printf 'b%.0s' {1..64})"
+readonly FP_OLD FP_NEW
 
 # --- verify_cert_pin (#240) ------------------------------------------------
 
@@ -101,6 +103,27 @@ rotation_replaces_the_pin() {
     [[ "$(cat "$PIN_FILE")" == "$FP_NEW" ]]
 }
 
+# The flag lives in the container's environment and survives restarts
+# (#267), so the documented recovery recreates mbsync with it false. From
+# then on the rotated pin is enforced: a second change is refused.
+# shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
+rotation_then_disabled_flag_enforces_the_new_pin() {
+    local fp_third
+    fp_third="$(printf 'c%.0s' {1..64})"
+    pin_setup rotate-then-enforce
+    mkdir -p "$STATE_DIR"
+    printf '%s\n' "$FP_OLD" >"$PIN_FILE"
+    BRIDGE_CERT_PIN_ROTATE="true"
+    verify_cert_pin "$FP_NEW"
+    BRIDGE_CERT_PIN_ROTATE="false"
+    verify_cert_pin "$FP_NEW"
+    if verify_cert_pin "$fp_third"; then
+        echo "a second change was accepted without a new authorization"
+        return 1
+    fi
+    [[ "$(cat "$PIN_FILE")" == "$FP_NEW" ]]
+}
+
 # shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
 failed_rotation_fails_closed_and_keeps_the_old_pin() {
     pin_setup rotate-fail
@@ -116,6 +139,123 @@ failed_rotation_fails_closed_and_keeps_the_old_pin() {
     [[ "$(cat "$PIN_FILE")" == "$FP_OLD" ]]
     # No temporary file is left behind in the state directory.
     [[ "$(find "$STATE_DIR" -type f | wc -l)" -eq 1 ]]
+}
+
+# --- an existing invalid pin is not a first boot (#278) ---------------------
+#
+# Only an absent pin is a first boot. A pin that exists but is empty,
+# malformed, unreadable or a dangling link is refused and left in place.
+
+refuses_the_new_fingerprint() {
+    if verify_cert_pin "$FP_NEW"; then
+        echo "a cert was accepted over an invalid pin"
+        return 1
+    fi
+}
+
+empty_pin_is_refused_and_kept() {
+    pin_setup empty
+    mkdir -p "$STATE_DIR"
+    : >"$PIN_FILE"
+    refuses_the_new_fingerprint
+    [[ -f "$PIN_FILE" && ! -s "$PIN_FILE" ]]
+}
+
+malformed_pin_is_refused_and_kept() {
+    pin_setup malformed
+    mkdir -p "$STATE_DIR"
+    printf '%s\n' "${FP_OLD:0:32}" >"$PIN_FILE"
+    refuses_the_new_fingerprint
+    [[ "$(cat "$PIN_FILE")" == "${FP_OLD:0:32}" ]]
+}
+
+unreadable_pin_is_refused() {
+    pin_setup unreadable
+    # A directory in the pin's place cannot be read, even as root.
+    mkdir -p "$PIN_FILE"
+    refuses_the_new_fingerprint
+    [[ -d "$PIN_FILE" ]]
+}
+
+dangling_pin_link_is_refused_and_kept() {
+    pin_setup dangling
+    mkdir -p "$STATE_DIR"
+    ln -s "$STATE_DIR/missing" "$PIN_FILE"
+    refuses_the_new_fingerprint
+    [[ -L "$PIN_FILE" && ! -e "$STATE_DIR/missing" ]]
+}
+
+# shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
+rotation_replaces_an_invalid_pin() {
+    pin_setup invalid-rotate
+    mkdir -p "$STATE_DIR"
+    : >"$PIN_FILE"
+    BRIDGE_CERT_PIN_ROTATE="true"
+    verify_cert_pin "$FP_NEW"
+    [[ "$(cat "$PIN_FILE")" == "$FP_NEW" ]]
+}
+
+# Rotation must be able to repair a pin it cannot read (#342 review round
+# 1): the documented recovery is one run with BRIDGE_CERT_PIN_ROTATE=true.
+
+# shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
+rotation_replaces_a_dangling_pin_link() {
+    pin_setup dangling-rotate
+    mkdir -p "$STATE_DIR"
+    ln -s "$STATE_DIR/missing" "$PIN_FILE"
+    BRIDGE_CERT_PIN_ROTATE="true"
+    verify_cert_pin "$FP_NEW"
+    [[ ! -L "$PIN_FILE" && "$(cat "$PIN_FILE")" == "$FP_NEW" && ! -e "$STATE_DIR/missing" ]]
+}
+
+# shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
+rotation_replaces_an_unreadable_pin_file() {
+    pin_setup unreadable-rotate
+    mkdir -p "$STATE_DIR"
+    printf '%s\n' "$FP_OLD" >"$PIN_FILE"
+    chmod 000 "$PIN_FILE"
+    # root reads a mode-000 file, so there is nothing to test as root.
+    if [[ -r "$PIN_FILE" ]]; then
+        return 0
+    fi
+    BRIDGE_CERT_PIN_ROTATE="true"
+    verify_cert_pin "$FP_NEW"
+    [[ "$(cat "$PIN_FILE")" == "$FP_NEW" ]]
+}
+
+# shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
+rotation_refuses_a_directory_in_the_pins_place() {
+    pin_setup directory-rotate
+    mkdir -p "$PIN_FILE"
+    BRIDGE_CERT_PIN_ROTATE="true"
+    # mv would move the new pin into the directory and report success.
+    refuses_the_new_fingerprint
+    [[ -d "$PIN_FILE" && -z "$(find "$PIN_FILE" -mindepth 1)" ]]
+}
+
+# A pin path that exists but is not a regular file is refused before it is
+# opened (#342 review round 2): reading a FIFO blocks forever, so the
+# container would neither report the damage nor exit.
+
+# shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
+fifo_pin_is_refused_without_reading() {
+    local writer err
+    pin_setup fifo
+    mkdir -p "$STATE_DIR"
+    mkfifo "$PIN_FILE"
+    BRIDGE_CERT_PIN_ROTATE="true"
+    # If the FIFO is opened, this writer unblocks the read after 2 s, so a
+    # regression fails on the message check instead of hanging the suite.
+    { sleep 2 >"$PIN_FILE"; } &
+    writer=$!
+    if err="$(verify_cert_pin "$FP_NEW" 2>&1)"; then
+        echo "a cert was accepted over a FIFO pin"
+        kill "$writer" 2>/dev/null || true
+        return 1
+    fi
+    kill "$writer" 2>/dev/null || true
+    wait "$writer" 2>/dev/null || true
+    [[ "$err" == *"not a regular file"* && -p "$PIN_FILE" ]]
 }
 
 # --- run_sync (#227) -------------------------------------------------------
@@ -187,8 +327,20 @@ check "first boot fails closed when the pin cannot be saved" \
 check "a matching fingerprint is accepted" matching_fingerprint_is_accepted
 check "a mismatch is refused without rotation" mismatch_is_refused_without_rotation
 check "rotation replaces the pin" rotation_replaces_the_pin
+check "after a rotation, the flag set false enforces the new pin" \
+    rotation_then_disabled_flag_enforces_the_new_pin
 check "a failed rotation fails closed and keeps the old pin" \
     failed_rotation_fails_closed_and_keeps_the_old_pin
+check "an existing empty pin is refused and kept" empty_pin_is_refused_and_kept
+check "a malformed pin is refused and kept" malformed_pin_is_refused_and_kept
+check "an unreadable pin is refused" unreadable_pin_is_refused
+check "a dangling pin link is refused and kept" dangling_pin_link_is_refused_and_kept
+check "rotation replaces an invalid pin" rotation_replaces_an_invalid_pin
+check "rotation replaces a dangling pin link" rotation_replaces_a_dangling_pin_link
+check "rotation replaces an unreadable pin file" rotation_replaces_an_unreadable_pin_file
+check "rotation refuses a directory in the pin's place" \
+    rotation_refuses_a_directory_in_the_pins_place
+check "a FIFO pin is refused without reading it" fifo_pin_is_refused_without_reading
 check "sync succeeds when mbsync and the repair succeed" \
     sync_succeeds_when_mbsync_and_repair_succeed
 check "a failed directory repair fails the sync" failed_directory_repair_fails_the_sync

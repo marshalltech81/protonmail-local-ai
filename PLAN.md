@@ -759,8 +759,10 @@ Order of work, chosen to minimise reindexes:
    honesty (#333); event-loop hygiene (#320, #317, #334); folder
    discovery hiding reply-only folders (#308); the attachment-lane
    duplicate before MIME filters (#309); docs (#322, #323). mbsync:
-   the empty pin re-TOFU (#278) and the rotation flag surviving
-   restarts (#267, docs), the unbounded connect probe (#271), signal
+   ~~the empty pin re-TOFU (#278)~~ (done: only an absent pin is a
+   first boot) and ~~the rotation flag surviving restarts (#267,
+   docs)~~ (done: documented recreate-with-false; one-shot
+   authorization not built), the unbounded connect probe (#271), signal
    forwarding to the sync child (#280), and the smoke-test one-liner
    (#269) with #268's minimal fix. Bridge, both decided as items 13–14
    above and needing the first Bridge shell test harness: the
