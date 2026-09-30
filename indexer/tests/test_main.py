@@ -22,6 +22,7 @@ from src.database import EMBEDDING_DIM, Database
 from src.maildir import SyncStamp
 from src.queue import REASON_INITIAL_SCAN, IndexingQueue
 from src.threader import Threader
+from src.timings import TimingAggregator
 
 from tests.conftest import make_mock_embedder
 
@@ -43,6 +44,55 @@ def _make_queue(db: Database) -> IndexingQueue:
     """Queue with tight retry limits so tests that exercise failure
     paths don't wait on real-world 30 s backoffs."""
     return IndexingQueue(db, max_attempts=3, base_backoff_seconds=0)
+
+
+def _drain(
+    queue: IndexingQueue,
+    db: Database,
+    embedder,
+    threader: Threader,
+    *,
+    batch_size: int = 8,
+    max_passes: int | None = None,
+) -> int:
+    """Run ``main._drain_queue_batched`` with a throwaway timing aggregator."""
+    return main._drain_queue_batched(
+        db,
+        embedder,
+        threader,
+        queue,
+        batch_size=batch_size,
+        max_passes=max_passes,
+        timing_aggregator=TimingAggregator(window=4),
+    )
+
+
+def _index_one(path: Path, db: Database, embedder, threader: Threader):
+    """Drain one file through a private 1-attempt queue and report
+    ``(succeeded, stage, error)`` from its queue row.
+
+    One attempt means any failure dead-letters immediately, so the row
+    is either gone (indexed, or skipped because the file vanished) or
+    ``dead`` with the failing stage and error.
+    """
+    private_queue = IndexingQueue(db, max_attempts=1, base_backoff_seconds=0)
+    private_queue.enqueue(str(path), reason="index_one_file")
+    _drain(private_queue, db, embedder, threader, batch_size=1, max_passes=1)
+    row = db._conn.execute(
+        "SELECT status, last_stage, last_error FROM indexing_jobs WHERE filepath = ?",
+        (str(path),),
+    ).fetchone()
+    if row is None:
+        # Row deleted: indexed, or mark_skipped because the file vanished
+        # between enqueue and parse (the mbsync flag-rename race).
+        if not path.exists():
+            return (
+                False,
+                "parse_skipped_missing",
+                "FileNotFoundError(file moved between enqueue and parse)",
+            )
+        return True, "db_write", None
+    return False, row["last_stage"] or "unknown", row["last_error"] or ""
 
 
 def _write_eml(
@@ -179,7 +229,7 @@ class TestOnMovedIndexesDestination:
         # The event only enqueued — the file becomes indexed once the
         # worker drains the queue.
         assert not db.is_indexed(str(dest))
-        main.drain_queue(queue, db, embedder, threader)
+        _drain(queue, db, embedder, threader)
         assert db.is_indexed(str(dest))
 
     def test_pending_retry_survives_a_flag_rename(self, tmp_path):
@@ -198,13 +248,13 @@ class TestOnMovedIndexesDestination:
         root = tmp_path / "INBOX" / "cur" / "a:2,S"
         _write_eml(root, "a@example.com", subject="Plan")
         queue.enqueue(str(root), REASON_INITIAL_SCAN)
-        main.drain_queue(queue, db, embedder, threader)
+        _drain(queue, db, embedder, threader)
 
         reply = tmp_path / "INBOX" / "cur" / "b:2,S"
         _write_eml(reply, "b@example.com", subject="Re: Plan", in_reply_to="a@example.com")
         queue.enqueue(str(reply), REASON_INITIAL_SCAN)
         embedder.embed.side_effect = _connection_error()  # outage: deferred
-        main.drain_queue(queue, db, embedder, threader)
+        _drain(queue, db, embedder, threader)
         assert db.is_indexed(str(reply))
         assert not db.get_chunk_ids_for_message("b@example.com")
 
@@ -216,7 +266,7 @@ class TestOnMovedIndexesDestination:
 
         embedder.embed.side_effect = None
         _make_due(db)
-        main.drain_queue(queue, db, embedder, threader)
+        _drain(queue, db, embedder, threader)
 
         assert db.get_chunk_ids_for_message("b@example.com")
         assert queue.stats() == {"queued": 0, "dead": 0}
@@ -253,14 +303,14 @@ class TestOnMovedIndexesDestination:
 
         # First delivery enqueues and drains, indexing the message.
         handler.on_moved(_FakeEvent(src_path=str(tmp_path / "tmp" / "m"), dest_path=str(dest)))
-        main.drain_queue(queue, db, embedder, threader)
+        _drain(queue, db, embedder, threader)
         first_call_count = embedder.embed.call_count
         assert first_call_count == 1
 
         # Second move event on the same path (e.g., flag rename) must not
         # re-enqueue work or trigger another embed.
         handler.on_moved(_FakeEvent(src_path=str(dest), dest_path=str(dest)))
-        main.drain_queue(queue, db, embedder, threader)
+        _drain(queue, db, embedder, threader)
         assert embedder.embed.call_count == first_call_count
 
     def test_flag_rename_moves_filepath_without_reindexing(self, tmp_path):
@@ -286,7 +336,7 @@ class TestOnMovedIndexesDestination:
         handler.on_moved(
             _FakeEvent(src_path=str(tmp_path / "tmp" / "m"), dest_path=str(original_path))
         )
-        main.drain_queue(queue, db, embedder, threader)
+        _drain(queue, db, embedder, threader)
         deliveries = embedder.embed.call_count
         assert deliveries == 1
 
@@ -294,7 +344,7 @@ class TestOnMovedIndexesDestination:
         renamed_path = tmp_path / "INBOX" / "cur" / "1738500000.uniq.proton:2,SR"
         original_path.rename(renamed_path)
         handler.on_moved(_FakeEvent(src_path=str(original_path), dest_path=str(renamed_path)))
-        main.drain_queue(queue, db, embedder, threader)
+        _drain(queue, db, embedder, threader)
 
         # Must not have re-parsed or re-embedded.
         assert embedder.embed.call_count == deliveries
@@ -496,7 +546,7 @@ class TestInitialIndexDeadLetterRespect:
             main, "parse_email", lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("nope"))
         )
         queue.enqueue(str(dest), REASON_INITIAL_SCAN)
-        main.drain_queue(queue, db, embedder, threader)
+        _drain(queue, db, embedder, threader)
         assert queue.is_dead(str(dest)) is True
 
         # Restore the real parse_email so initial_index would otherwise
@@ -541,7 +591,7 @@ class TestDrainQueueRetryAndDeadLetter:
         ]
         queue.enqueue(str(dest), "test")
 
-        main.drain_queue(queue, db, embedder, threader, max_batch=1)
+        _drain(queue, db, embedder, threader, batch_size=1, max_passes=1)
 
         assert db.get_chunk_ids_for_message("retry@example.com")
         assert queue.stats() == {"queued": 0, "dead": 0}
@@ -568,7 +618,7 @@ class TestDrainQueueRetryAndDeadLetter:
         monkeypatch.setattr(main, "parse_email", unreadable)
         queue.enqueue(str(dest), "test")
         for _ in range(6):
-            main.drain_queue(queue, db, embedder, threader)
+            _drain(queue, db, embedder, threader)
             row = db._conn.execute(
                 "SELECT status, attempts, last_stage, next_attempt_at FROM indexing_jobs"
             ).fetchone()
@@ -578,7 +628,7 @@ class TestDrainQueueRetryAndDeadLetter:
             _make_due(db)
 
         monkeypatch.setattr(main, "parse_email", real_parse)
-        main.drain_queue(queue, db, embedder, threader)
+        _drain(queue, db, embedder, threader)
 
         assert db.get_chunk_ids_for_message("fresh@example.com")
         assert queue.stats() == {"queued": 0, "dead": 0}
@@ -599,7 +649,7 @@ class TestDrainQueueRetryAndDeadLetter:
         db._conn.execute("UPDATE indexing_jobs SET created_at = '2000-01-01T00:00:00+00:00'")
         db._conn.commit()
 
-        main.drain_queue(queue, db, make_mock_embedder(), Threader(db))
+        _drain(queue, db, make_mock_embedder(), Threader(db))
 
         assert queue.is_dead(str(dest))
 
@@ -636,9 +686,9 @@ class TestDrainQueueRetryAndDeadLetter:
         monkeypatch.setattr(parser, "_extract_body_and_attachments", boom)
 
         queue.enqueue(str(dest), "test")
-        main.drain_queue(queue, db, embedder, threader)
-        main.drain_queue(queue, db, embedder, threader)
-        main.drain_queue(queue, db, embedder, threader)
+        _drain(queue, db, embedder, threader)
+        _drain(queue, db, embedder, threader)
+        _drain(queue, db, embedder, threader)
 
         # Critical: the file must NOT be in indexed_files. A blanket
         # ``except Exception`` in the parser would collapse the
@@ -677,7 +727,7 @@ class TestDrainQueueRetryAndDeadLetter:
         queue.enqueue(str(dest), "test")
 
         for _ in range(5):
-            main.drain_queue(queue, db, embedder, threader)
+            _drain(queue, db, embedder, threader)
             _make_due(db)
 
         # Phase 1 commits thread membership + indexed_files eagerly, so
@@ -701,7 +751,7 @@ class TestDrainQueueRetryAndDeadLetter:
         # forever; retrying it 5 times wastes ~30 minutes of backoff
         # before dead-lettering, and the renamed file enters the queue
         # under its new name via a fresh IN_MOVED_TO event anyway.
-        # ``_index_one_file`` must distinguish this from EACCES so the
+        # ``_index_one`` must distinguish this from EACCES so the
         # worker can drop the row instead of consuming retry budget.
         dest = tmp_path / "INBOX" / "cur" / "definitely-not-here.eml"
 
@@ -710,7 +760,7 @@ class TestDrainQueueRetryAndDeadLetter:
         embedder = make_mock_embedder()
         embedder.embed.return_value = [0.0] * EMBEDDING_DIM
 
-        ok, stage, err, _ = main._index_one_file(dest, db, embedder, threader)
+        ok, stage, err = _index_one(dest, db, embedder, threader)
 
         assert ok is False
         assert stage == "parse_skipped_missing"
@@ -732,7 +782,7 @@ class TestDrainQueueRetryAndDeadLetter:
         gone = tmp_path / "INBOX" / "cur" / "vanished.eml"
         queue.enqueue(str(gone), REASON_INITIAL_SCAN)
 
-        main.drain_queue(queue, db, embedder, threader)
+        _drain(queue, db, embedder, threader)
 
         # Row is gone — no retry, no dead-letter row.
         assert queue.stats() == {"queued": 0, "dead": 0}
@@ -745,11 +795,11 @@ class TestDrainQueueRetryAndDeadLetter:
         # Models a >50 MB ``.eml``. Previous behavior routed oversized
         # through ``mark_skipped`` (delete the queue row); because the
         # file is still present on disk, ``initial_index`` re-enqueued
-        # the same file on every container restart, and ``_index_one_file``
+        # the same file on every container restart, and ``_index_one``
         # interpreted "row gone + file present" as success — the file
         # was never actually indexed. The fix routes oversized through
         # ``mark_dead_terminal``: row stays at status='dead', the
-        # ``is_dead`` gate skips it on restart, and ``_index_one_file``
+        # ``is_dead`` gate skips it on restart, and ``_index_one``
         # returns ``(False, "parse", ...)``.
         monkeypatch.setenv("INDEXER_PARSE_MAX_BYTES", "1024")
 
@@ -763,7 +813,7 @@ class TestDrainQueueRetryAndDeadLetter:
         embedder = make_mock_embedder()
         embedder.embed.return_value = [0.0] * EMBEDDING_DIM
 
-        ok, stage, err, _ = main._index_one_file(dest, db, embedder, threader)
+        ok, stage, err = _index_one(dest, db, embedder, threader)
 
         assert ok is False
         assert stage == "parse"
@@ -786,7 +836,7 @@ class TestDrainQueueRetryAndDeadLetter:
     def test_unreadable_file_routes_to_retry_not_terminal_success(self, tmp_path):
         # Models the mbsync 0600→0644 chmod race: the watchdog enqueues a
         # newly-delivered file before mbsync's post-sync chmod hook makes
-        # it readable. ``_index_one_file`` must surface that as a parse
+        # it readable. ``_index_one`` must surface that as a parse
         # failure so the queue retries on backoff. The previous behavior
         # (parse_email caught EACCES, returned None, worker treated None
         # as terminal success) silently dropped the message.
@@ -801,7 +851,7 @@ class TestDrainQueueRetryAndDeadLetter:
         embedder = make_mock_embedder()
         embedder.embed.return_value = [0.0] * EMBEDDING_DIM
         try:
-            ok, stage, err, _ = main._index_one_file(dest, db, embedder, threader)
+            ok, stage, err = _index_one(dest, db, embedder, threader)
         finally:
             os.chmod(dest, 0o644)
 
@@ -912,7 +962,7 @@ class TestValidateEmbeddingDim:
 
 class TestIndexOneFileChunking:
     """End-to-end of the schema-v9 chunker integration through the
-    real ``_index_one_file`` path — chunker is invoked for each new
+    real ``_index_one`` path — chunker is invoked for each new
     message, every new chunk gets an embed call, chunks land in the
     three chunk tables, and the thread vector is the mean of those
     chunk vectors rather than a single embed of the merged body.
@@ -964,7 +1014,7 @@ class TestIndexOneFileChunking:
         original_root = main_mod.MAILDIR_PATH
         main_mod.MAILDIR_PATH = tmp_path
         try:
-            ok, stage, err, _ = main._index_one_file(dest, db, embedder, threader)
+            ok, stage, err = _index_one(dest, db, embedder, threader)
         finally:
             main_mod.MAILDIR_PATH = original_root
 
@@ -1022,7 +1072,7 @@ class TestIndexOneFileChunking:
         original_root = main_mod.MAILDIR_PATH
         main_mod.MAILDIR_PATH = tmp_path
         try:
-            ok, _, _, _ = main._index_one_file(dest, db, embedder, threader)
+            ok, _, _ = _index_one(dest, db, embedder, threader)
             assert ok
             first_call_count = embedder.embed.call_count
 
@@ -1031,7 +1081,7 @@ class TestIndexOneFileChunking:
             # whose ``messages`` list contains just this re-arrived
             # message; the chunker emits the same chunk_ids; the diff
             # path skips them all and embed should not be called again.
-            ok2, _, _, _ = main._index_one_file(dest, db, embedder, threader)
+            ok2, _, _ = _index_one(dest, db, embedder, threader)
             assert ok2
         finally:
             main_mod.MAILDIR_PATH = original_root
@@ -1069,7 +1119,7 @@ class TestIndexOneFileChunking:
         original_root = main_mod.MAILDIR_PATH
         main_mod.MAILDIR_PATH = tmp_path
         try:
-            ok, stage, err, _ = main._index_one_file(dest, db, embedder, threader)
+            ok, stage, err = _index_one(dest, db, embedder, threader)
         finally:
             main_mod.MAILDIR_PATH = original_root
 
@@ -1110,7 +1160,7 @@ class TestInterruptedMessagesDeadLetter:
         for _ in range(max_restarts):
             queue = _make_queue(db)  # a restarted indexer, max_attempts=3
             try:
-                main.drain_queue(queue, db, embedder, Threader(db))
+                _drain(queue, db, embedder, Threader(db))
             except _WorkerKilled:
                 deaths += 1
                 healthy_charges.append(db.queue_get_attempts(str(healthy)))
@@ -1179,7 +1229,7 @@ class TestInterruptedMessagesDeadLetter:
         for _ in range(6):
             seen.clear()
             try:
-                main.drain_queue(_make_queue(db), db, embedder, Threader(db))
+                _drain(_make_queue(db), db, embedder, Threader(db))
             except _WorkerKilled:
                 deaths += 1
                 continue
@@ -1233,7 +1283,7 @@ class TestInterruptedEmbedPhase:
         deaths = 0
         for _ in range(max_restarts):
             try:
-                main.drain_queue(_make_queue(db), db, embedder, Threader(db))
+                _drain(_make_queue(db), db, embedder, Threader(db))
             except _WorkerKilled:
                 deaths += 1
                 continue
@@ -1287,7 +1337,7 @@ class TestStallGuardProgress:
         embedder = make_mock_embedder()
         embedder.embed.return_value = _UNIT_VECTOR
         embedder.embed_batch.side_effect = embed_batch
-        main.drain_queue(queue, db, embedder, Threader(db))
+        _drain(queue, db, embedder, Threader(db))
         assert db.get_chunk_ids_for_message("big@example.com")
         return progress
 
@@ -1352,17 +1402,17 @@ class TestReprocessKeepsThreadMembership:
         reply = tmp_path / "INBOX" / "cur" / "b:2,S"
         _write_eml(reply, "b@example.com", subject="Budget reply", in_reply_to="a@example.com")
         queue.enqueue(str(reply), REASON_INITIAL_SCAN)
-        main.drain_queue(queue, db, embedder, threader)
+        _drain(queue, db, embedder, threader)
         parent = tmp_path / "INBOX" / "cur" / "a:2,S"
         _write_eml(parent, "a@example.com", subject="Quarterly plan")
         queue.enqueue(str(parent), REASON_INITIAL_SCAN)
-        main.drain_queue(queue, db, embedder, threader)
+        _drain(queue, db, embedder, threader)
         thread_b = db.find_thread_by_message_id("b@example.com")
 
         renamed = reply.with_name("b:2,RS")
         reply.rename(renamed)
         queue.enqueue(str(renamed), REASON_INITIAL_SCAN)  # the startup walk
-        main.drain_queue(queue, db, embedder, threader)
+        _drain(queue, db, embedder, threader)
 
         assert db.find_thread_by_message_id("b@example.com") == thread_b
         chunk_threads = {
@@ -3051,7 +3101,7 @@ class TestReapedMessagesStayDeleted:
         enqueued = main._enqueue_unindexed_messages(
             db, queue, maildir, main.REASON_RESCAN, skip_trashed=True
         )
-        main.drain_queue(queue, db, embedder, threader)
+        _drain(queue, db, embedder, threader)
 
         assert enqueued == 0
         assert not queue.has_pending_row(str(trashed))
@@ -3548,7 +3598,7 @@ class TestRequestLimitIsNotSourceFailure:
             sizes.append(len(inputs))
             return handler(inputs)
 
-        main.drain_queue(queue, db, _mock_transport_embedder(recording), Threader(db))
+        _drain(queue, db, _mock_transport_embedder(recording), Threader(db))
         return db, queue, str(dest), sizes
 
     def test_multi_input_request_rejection_retries_one_input_per_request(
@@ -3617,7 +3667,7 @@ def test_stage_errors_never_persist_the_decoded_payload(tmp_path, monkeypatch):
         raise UnicodeDecodeError("utf-8", b"PRIVATE-BODY-TEXT\xff", 17, 18, "invalid start byte")
 
     monkeypatch.setattr(main, "parse_email", boom)
-    main.drain_queue(queue, db, make_mock_embedder(_UNIT_VECTOR), Threader(db), max_batch=1)
+    _drain(queue, db, make_mock_embedder(_UNIT_VECTOR), Threader(db), batch_size=1, max_passes=1)
 
     row = db._conn.execute(
         "SELECT last_stage, last_error FROM indexing_jobs WHERE filepath = ?", (str(dest),)
@@ -3731,7 +3781,7 @@ class TestMessageRecordsEndToEnd:
 
         db._conn.execute("DROP TRIGGER fail_folder")
         assert main._enqueue_unindexed_messages(db, queue, maildir, main.REASON_RESCAN) == 1
-        main.drain_queue(queue, db, embedder, Threader(db))
+        _drain(queue, db, embedder, Threader(db))
         row = db._conn.execute("SELECT folder, filepath FROM messages").fetchone()
         assert (row["folder"], row["filepath"]) == ("Archive", str(dest))
 

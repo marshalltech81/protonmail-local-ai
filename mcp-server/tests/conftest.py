@@ -636,10 +636,7 @@ def seeded_db(tmp_path: Path):
     conn.close()
 
     db = Database(str(db_path))
-    try:
-        yield db
-    finally:
-        db.close()
+    yield db
 
 
 @pytest.fixture
@@ -721,10 +718,7 @@ def chunked_db(tmp_path: Path):
 
     conn.close()
     db = Database(str(db_path))
-    try:
-        yield db
-    finally:
-        db.close()
+    yield db
 
 
 @pytest.fixture
@@ -812,10 +806,7 @@ def messages_db(tmp_path):
     )
     conn.close()
     db = Database(str(path))
-    try:
-        yield db
-    finally:
-        db.close()
+    yield db
 
 
 # Real indexer chunker output (``chunk_message(target_tokens=40,
@@ -856,10 +847,7 @@ def overlap_db(tmp_path: Path):
         )
     conn.close()
     db = Database(str(path))
-    try:
-        yield db
-    finally:
-        db.close()
+    yield db
 
 
 @pytest.fixture
@@ -872,10 +860,7 @@ def empty_db(tmp_path: Path):
     _build_schema(conn)
     conn.close()
     db = Database(str(db_path))
-    try:
-        yield db
-    finally:
-        db.close()
+    yield db
 
 
 @pytest.fixture
@@ -1019,10 +1004,7 @@ def attachments_db(tmp_path: Path):
 
     conn.close()
     db = Database(str(db_path))
-    try:
-        yield db
-    finally:
-        db.close()
+    yield db
 
 
 @pytest.fixture
@@ -1032,8 +1014,6 @@ def _build_thread_on():
     Regression tests for date-filter SQL pushdown need a ``date_first`` on
     a specific boundary day; ``seeded_db`` only covers Feb/Mar 2024.
     """
-
-    created: list[Database] = []
 
     def _factory(
         tmp_path: Path,
@@ -1064,15 +1044,9 @@ def _build_thread_on():
             embedding=[1.0, 0.0, 0.0, 0.0],
         )
         conn.close()
-        db = Database(str(db_path))
-        created.append(db)
-        return db
+        return Database(str(db_path))
 
-    try:
-        yield _factory
-    finally:
-        for db in created:
-            db.close()
+    yield _factory
 
 
 def _make_result(thread_id: str, folder: str = "INBOX"):
@@ -1187,59 +1161,16 @@ class FakeInferenceClient:
         return self._default_response
 
 
-class FakeLocalLLM:
-    """DEPRECATED — compatibility facade kept only for legacy callers.
-
-    Combines ``FakeEmbedClient`` + ``FakeInferenceClient`` so tests
-    written against the pre-split ``LocalLLMClient`` surface keep
-    passing without rewrite. **Do not use in new tests** — construct
-    ``FakeEmbedClient`` and ``FakeInferenceClient`` directly so the
-    test pins the same client split production uses.
-
-    Existing call sites live in ``tests/test_search.py`` and
-    ``tests/test_intelligence_handlers.py``; migrating them is a
-    follow-up task that should not silently grow.
-    """
-
-    def __init__(
-        self,
-        embedding: list[float] | None = None,
-        response: str = "mock answer",
-        complete_responses: list[str | BaseException] | None = None,
-    ) -> None:
-        self._embed = FakeEmbedClient(embedding=embedding)
-        self._inference = FakeInferenceClient(
-            response=response, complete_responses=complete_responses
-        )
-
-    @property
-    def embed_calls(self) -> list[str]:
-        return self._embed.embed_calls
-
-    @property
-    def complete_calls(self) -> list[tuple[str, str]]:
-        return self._inference.complete_calls
-
-    async def embed(self, text: str) -> list[float]:
-        return await self._embed.embed(text)
-
-    async def complete(self, system: str, user: str) -> str:
-        return await self._inference.complete(system, user)
-
-    @property
-    def embed_client(self) -> FakeEmbedClient:
-        return self._embed
-
-    @property
-    def inference_client(self) -> FakeInferenceClient:
-        return self._inference
-
-
 @pytest.fixture
 def fake_server() -> FakeMCPServer:
     return FakeMCPServer()
 
 
 @pytest.fixture
-def fake_llm() -> FakeLocalLLM:
-    return FakeLocalLLM()
+def fake_embed() -> FakeEmbedClient:
+    return FakeEmbedClient()
+
+
+@pytest.fixture
+def fake_inference() -> FakeInferenceClient:
+    return FakeInferenceClient()

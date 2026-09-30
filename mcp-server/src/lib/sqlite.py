@@ -679,25 +679,11 @@ class Database:
 
     def __init__(self, path: str):
         self.path = path
-        self._closed = False
         # Fail fast at startup with the same checks ``_connect`` runs
         # on every access. Catches a missing volume / typo'd
         # SQLITE_PATH / unhealthy indexer at process start instead of
         # waiting for the first tool call.
         self._validate_path()
-
-    def close(self) -> None:
-        # No-op kept for API compatibility — per-access connections
-        # are opened and closed inside each read helper, so there is
-        # no persistent resource to release.
-        # Existing test fixtures that call ``db.close()`` continue
-        # to work.
-        self._closed = True
-
-    @property
-    def _conn(self) -> sqlite3.Connection:
-        """Compatibility escape hatch; caller owns closing this connection."""
-        return self._connect()
 
     def _validate_path(self) -> None:
         # MCP is a read-only consumer of the indexer's output; the indexer
