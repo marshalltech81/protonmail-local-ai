@@ -134,11 +134,14 @@ shows a reviewed snapshot diff with golden checks still passing.
 ### Phase 2 — Swappable embedding / vector generations
 
 **Exit criterion:** changing embedding models never requires altering
-the source corpus (the Maildir) or the SQLite schema. Everything
-derived — vectors first, but the chunk index too — is disposable and
-regenerable: a context-compatible model switch regenerates vectors
-only; an incompatible one regenerates chunks and vectors through the
-reindex bundle path. Neither touches a source file or a migration.
+the source corpus (the Maildir) or the versioned schema — no numbered
+migration and no `SCHEMA_VERSION` bump. Everything derived — vectors
+first, but the chunk index too — is disposable and regenerable: a
+context-compatible model switch regenerates vectors only, creating
+and later dropping runtime-managed `gNN` tables that are exempt from
+`SCHEMA_VERSION` (the exception recorded under item 2); an
+incompatible one regenerates chunks and vectors through the reindex
+bundle path. Neither touches a source file or a migration.
 
 1. **`vector_generations` registry** — generation_id, provider,
    resolved endpoint, model, revision, dimensions, tokenizer, context
@@ -164,6 +167,15 @@ reindex bundle path. Neither touches a source file or a migration.
      dimension and any exposed revision, **plus a non-secret
      configuration label**, because two credentials at one gateway can
      route to different deployments behind identical public fields.
+     None of those fields fingerprints the model's *output*: a
+     host-side server can reload a different same-dimensional model
+     under the same name, and a provider can move an unversioned
+     alias. So the registry also stores a **calibration vector** — the
+     embedding of a fixed synthetic text taken when the generation is
+     created — and both services re-embed that text at startup and
+     periodically; a distance beyond tolerance means the deployment
+     behind the generation has changed, and the service refuses to
+     write to or query it until a new generation is built.
      **At most two generations are live at once** (active plus one of
      building or retained), and the registry refuses to start a build
      while a retained generation exists, since only two configuration
@@ -331,7 +343,12 @@ on #307):
   are quiesced, a **final watermark is taken after that quiescence**,
   and the candidate indexer drains through it before the swap — the
   build-time watermark is not enough, since mail added, changed or
-  reaped after it would be lost or resurrected;
+  reaped after it would be lost or resurrected; and an empty runnable
+  queue is not completeness, because the queue parks persistent
+  failures as `dead`, so cutover validation reconciles every source
+  file against the staged database and rejects unresolved or
+  dead-lettered work unless the operator has approved each as a
+  terminal skip;
 - **both** databases have their writers stopped and their WALs
   successfully checkpointed before either main file is renamed (the
   staged file is in WAL mode too, and a rename would orphan
@@ -347,7 +364,11 @@ on #307):
   remove-then-rename pair that leaves an interval with no `mail.db` —
   and startup recognises and resolves a half-finished cutover (a
   marker written before the swap and cleared after) rather than
-  finding an indeterminate state;
+  finding an indeterminate state; the ordering is durable at every
+  step — marker and retained link `fsync`ed before the rename, the
+  directory synced after it, and the marker's removal synced too — so
+  a crash between the rename and the sync cannot leave the new live
+  entry without its rollback target or marker;
 - rollback is the reverse swap onto the previous image tag, and it is
   only valid if the retained file is either kept synchronized with
   ingestion for the rollback window or caught up under the same
@@ -355,6 +376,12 @@ on #307):
   before the MCP server is started on it; the indexer touches its
   health file before `initial_index`, so "start the old image" alone
   would serve a stale database while catch-up runs;
+- the live database is **never migrated in place**: a bundled schema
+  change (#217) is applied only to the staged file by the rebuild
+  image, and the live indexer runs the previous image until cutover —
+  a behaviour gate alone cannot defer the migration runner, and a
+  retained file already on the forward-only schema would make the
+  reverse swap unusable;
 - a rebuild of the previous `pipeline_config_hash` is *not* a rollback:
   the bundle carries a forward-only migration (#217), so the previous
   image fails closed on the new schema and the new image lacks the old
