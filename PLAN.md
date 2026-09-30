@@ -564,6 +564,11 @@ linked from the Phase 3 items they track.
 - consolidate `BRIDGE_VERSION` to a single source of truth
   (`.env.example`); parameterize the Go toolchain as an `ARG`
 - `timeout-minutes` + path filters on `.github/workflows/docker.yml`
+- Bridge build: `go mod download` has no retry, so one blip at
+  `proxy.golang.org` (seen 2026-09-30: an HTTP/2 `INTERNAL_ERROR` on a
+  single module) fails the whole `docker compose build` check. Add a
+  bounded retry around the download (`go mod verify` stays
+  unconditional) or a module cache in the workflow
 - Trivy scan of the Bridge Go module graph in `security.yml` (#272
   closed as its duplicate; needs an exception policy for upstream
   Proton dependencies we cannot patch)
