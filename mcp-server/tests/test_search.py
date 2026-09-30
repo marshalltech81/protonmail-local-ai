@@ -774,22 +774,3 @@ class TestLoggingPrivacy:
         assert "tool=search_emails" in caplog.text
         assert "zq-private-medical-diagnosis" not in caplog.text
         assert "dr@example.com" not in caplog.text
-
-
-def test_get_message_body_format_text_never_reaches_logs(fake_server, fake_llm, seeded_db, caplog):
-    """Review repro: ``body_format`` is an allowlisted name but an
-    unvalidated string (the tool ignores it)."""
-    import logging
-
-    from src.tools.retrieval import register_retrieval_tools
-
-    register_retrieval_tools(fake_server, seeded_db)
-    handler = fake_server.tools["get_message"]
-    with caplog.at_level(logging.INFO), pytest.raises(ToolError, match="Message not found"):
-        asyncio.run(
-            handler(
-                message_id="m@example.com", body_format="Confidential acquisition: Example Corp"
-            )
-        )
-    assert "tool=get_message" in caplog.text
-    assert "Confidential acquisition" not in caplog.text

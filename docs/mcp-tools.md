@@ -201,8 +201,6 @@ source file's path, size, and SHA-256.
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `message_id` | string | required | Message-ID header value |
-| `folder` | string | `INBOX` | Retained for interface compatibility; ignored in the default local-only retrieval mode |
-| `body_format` | string | `text` | Retained for interface compatibility; ignored in the default local-only retrieval mode |
 
 ### `list_threads`
 Browse threads in a folder.
@@ -417,61 +415,3 @@ liveness in the `ingestion_state` table that this tool reads (see
 The same helper powers ``make status`` on the host: the Makefile target
 invokes the module-level ``get_mailbox_status`` directly against the
 shared SQLite index, so it reports what MCP clients see.
-
----
-
-## Appendix — Mail-changing actions (design only, not implemented)
-
-The MCP server is read-only. None of the tools below exist: there is no
-SMTP path and no draft, move, or flag operation, and no setting enables
-one. The decision is recorded under "Not doing" in `PLAN.md`, and the
-earlier unregistered implementation is in git history. This interface
-sketch is kept only as a starting point if that decision is reopened.
-
-#### `send_email`
-Send a new email via ProtonBridge SMTP.
-
-| Parameter | Type | Default | Description |
-|---|---|---|---|
-| `to` | list | required | Recipient addresses |
-| `subject` | string | required | Subject line |
-| `body` | string | required | Email body |
-| `body_format` | string | `text` | `text` or `html` |
-| `cc` | list | none | CC recipients |
-| `bcc` | list | none | BCC recipients |
-| `reply_to_message_id` | string | none | Sets threading headers |
-
-#### `move_message`
-Move a message from one folder to another.
-
-| Parameter | Type | Default | Description |
-|---|---|---|---|
-| `uid` | string | required | IMAP UID of the message |
-| `src_folder` | string | required | Source folder name |
-| `dst_folder` | string | required | Destination folder name |
-
-#### `mark_read`
-Mark one or more messages as read or unread.
-
-| Parameter | Type | Default | Description |
-|---|---|---|---|
-| `uids` | list | required | IMAP UIDs of the messages |
-| `folder` | string | `INBOX` | Folder containing the messages |
-| `read` | bool | `true` | `true` to mark read, `false` to mark unread |
-
-#### `flag_message`
-Flag or unflag a message (starred/important).
-
-| Parameter | Type | Default | Description |
-|---|---|---|---|
-| `uid` | string | required | IMAP UID of the message |
-| `folder` | string | `INBOX` | Folder containing the message |
-| `flagged` | bool | `true` | `true` to flag, `false` to unflag |
-
-#### `reply_to_thread`
-Never implemented even in the earlier code; the sketch was `send_email` with
-`reply_to_message_id` set to the Message-ID of the thread's last message.
-
-#### `create_draft`
-Never implemented even in the earlier code; it would need IMAP APPEND to the
-Drafts folder.

@@ -170,7 +170,7 @@ def parse_email(path: Path, maildir_root: Path | None = None) -> Message | None:
     can be merged by the subject-only fallback.
 
     When ``maildir_root`` is not provided the folder falls back to the
-    leaf name (``path.parent.parent.name``) for backward compatibility.
+    leaf name (``path.parent.parent.name``).
 
     Transient I/O errors (``PermissionError`` from the mbsync 0600→0644
     chmod race, ``FileNotFoundError`` from a rename mid-event) propagate
