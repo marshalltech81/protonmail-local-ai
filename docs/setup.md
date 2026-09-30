@@ -184,8 +184,7 @@ empty-URL path is not a usable recipe without a schema migration.
 # Leave INFERENCE_BASE_URL empty to hit api.anthropic.com.
 # Note: the Anthropic SDK appends '/v1/messages' itself, so when you
 # DO set INFERENCE_BASE_URL (compatible gateway, region override),
-# the value must NOT end with '/v1'. If you migrated from the old
-# INFERENCE_ANTHROPIC_BASE_URL, drop the trailing '/v1'.
+# the value must NOT end with '/v1'.
 INFERENCE_MODE=anthropic
 INFERENCE_BASE_URL=                       # optional; leave empty for Anthropic default
 INFERENCE_MODEL=claude-sonnet-4-6

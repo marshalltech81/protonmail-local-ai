@@ -60,23 +60,9 @@ require_mode_600() {
     }
 }
 
-reject_deprecated_env() {
-    local old_name="$1"
-    local new_name="$2"
-    local value
-
-    value="$(get_env_value "$old_name")"
-    [[ -z "$value" ]] || {
-        printf 'ERROR: %s has been renamed to %s. Update .env before starting.\n' \
-            "$old_name" "$new_name" >&2
-        exit 1
-    }
-}
-
 # API keys are wired as Docker secrets (see ``secrets:`` in
 # docker-compose.yml). Putting them in ``.env`` would surface them in
-# ``docker inspect`` and is therefore disallowed — both for old names
-# that have been renamed and for the current names themselves.
+# ``docker inspect`` and is therefore disallowed.
 reject_secret_in_env() {
     local key_name="$1"
     local secret_path="$2"
@@ -187,90 +173,22 @@ fi
 require_file "$ENV_FILE" ".env"
 require_file "$BRIDGE_PASS_FILE" "Bridge password secret"
 
-# Detect pre-collapse secret filenames before requiring the new ones,
-# so an operator upgrading from the prior layout sees explicit
-# migration guidance instead of a generic "file not found" followed by
-# ``init-secrets`` creating an empty new file (which would surface as
-# "API key empty" much later, never pointing back at the old file).
-# ``init-secrets`` does not detect this case either — it short-circuits
-# on the presence of the new filename — so the check has to land here
-# before ``require_file`` fires below.
-require_renamed_secret_migrated() {
-    local old_path="$1"
-    local new_path="$2"
-
-    [[ -f "$old_path" ]] || return 0
-    printf 'ERROR: legacy secret file %s exists.\n' "$old_path" >&2
-    printf '       The *_MODE collapse refactor renamed the secret files.\n' >&2
-    if [[ ! -s "$new_path" ]]; then
-        printf '       Move the key value before starting:\n' >&2
-        printf '         mv %s %s\n' "$old_path" "$new_path" >&2
-        printf '         chmod 600 %s\n' "$new_path" >&2
-    else
-        printf '       %s already holds a value; confirm it was migrated,\n' "$new_path" >&2
-        printf '       then remove the legacy file:\n' >&2
-        printf '         rm %s\n' "$old_path" >&2
-    fi
-    exit 1
-}
-require_renamed_secret_migrated \
-    "${ROOT_DIR}/.secrets/inference_anthropic_api_key.txt" "$INFERENCE_KEY_FILE"
-require_renamed_secret_migrated \
-    "${ROOT_DIR}/.secrets/inference_openai_api_key.txt" "$INFERENCE_KEY_FILE"
-require_renamed_secret_migrated \
-    "${ROOT_DIR}/.secrets/embed_openai_api_key.txt" "$EMBED_KEY_FILE"
-require_renamed_secret_migrated \
-    "${ROOT_DIR}/.secrets/anthropic_api_key.txt" "$INFERENCE_KEY_FILE"
-
 require_file "$INFERENCE_KEY_FILE" "Inference API key secret file"
 require_file "$EMBED_KEY_FILE" "Embed API key secret file"
 require_file "$RERANK_KEY_FILE" "Rerank API key secret file"
 
-# Inference / embed / rerank env vars collapsed into one *_MODE-based shape
-# (no provider-namespaced vars). Mode selects the wire protocol; the
-# remaining vars (BASE_URL, MODEL, API_KEY) configure that mode. ``none``
-# disables a layer entirely. There is no inter-mode fallback — choosing
-# a mode without its required vars is a startup error here, not a silent
-# reroute to a different provider.
+# Mode selects the wire protocol; BASE_URL, MODEL and API_KEY configure
+# that mode, and ``none`` disables a layer. There is no inter-mode
+# fallback: choosing a mode without its required vars is a startup error.
 #
-# API keys move via Docker secrets (``.secrets/*_api_key.txt``), not
-# ``.env``. The reject helpers below split into two flavors: renamed
-# non-secret vars get the standard "renamed → use new name in .env"
-# message; renamed secret vars get the "moved to Docker secret file"
-# message so the operator does not paste a key into .env where it would
-# surface in ``docker inspect``.
-reject_deprecated_env "LLM_BASE_URL" "INFERENCE_BASE_URL"
-reject_deprecated_env "LLM_MODEL" "INFERENCE_MODEL"
-reject_deprecated_env "LLM_MODE" "INFERENCE_MODE"
-reject_deprecated_env "CLAUDE_MODEL" "INFERENCE_MODEL"
-reject_secret_in_env "ANTHROPIC_API_KEY" "$INFERENCE_KEY_FILE"
-reject_deprecated_env "INFERENCE_OPENAI_BASE_URL" "INFERENCE_BASE_URL"
-reject_deprecated_env "INFERENCE_OPENAI_MODEL" "INFERENCE_MODEL"
-reject_secret_in_env "INFERENCE_OPENAI_API_KEY" "$INFERENCE_KEY_FILE"
-reject_deprecated_env "INFERENCE_ANTHROPIC_BASE_URL" "INFERENCE_BASE_URL"
-reject_deprecated_env "INFERENCE_ANTHROPIC_MODEL" "INFERENCE_MODEL"
-reject_secret_in_env "INFERENCE_ANTHROPIC_API_KEY" "$INFERENCE_KEY_FILE"
-reject_deprecated_env "EMBED_OPENAI_BASE_URL" "EMBED_BASE_URL"
-reject_deprecated_env "EMBED_OPENAI_MODEL" "EMBED_MODEL"
-reject_secret_in_env "EMBED_OPENAI_API_KEY" "$EMBED_KEY_FILE"
-reject_deprecated_env "RERANK_ENABLED" "RERANK_MODE"
-# Current *_API_KEY names must never appear in .env either — they are
-# wired as Docker secrets in docker-compose.yml. An operator who pastes
-# them into .env would (a) leak the value into ``docker inspect``
-# output and (b) silently mask the secret-file value, since both
-# services read the secret file first and only fall back to the env var.
+# *_API_KEY values must never appear in .env: they are wired as Docker
+# secrets in docker-compose.yml. A key pasted into .env would leak into
+# ``docker inspect`` output and silently mask the secret-file value,
+# since both services read the secret file first and only fall back to
+# the env var.
 reject_secret_in_env "INFERENCE_API_KEY" "$INFERENCE_KEY_FILE"
 reject_secret_in_env "EMBED_API_KEY" "$EMBED_KEY_FILE"
 reject_secret_in_env "RERANK_API_KEY" "$RERANK_KEY_FILE"
-# Earlier-era names that predate the *_MODE shape entirely. Carrying
-# any of these in .env would silently get the *_MODE default applied;
-# rejecting them keeps the migration message unambiguous.
-reject_deprecated_env "EMBED_SERVICE_URL" "EMBED_BASE_URL"
-reject_deprecated_env "MLX_SERVICE_URL" "EMBED_BASE_URL"
-reject_deprecated_env "OLLAMA_EMBED_MODEL" "EMBED_MODEL"
-reject_deprecated_env "OLLAMA_LLM_MODEL" "INFERENCE_MODEL"
-reject_deprecated_env "USE_MLX_EMBEDDER" "EMBED_MODE"
-reject_deprecated_env "USE_MLX_RERANKER" "RERANK_MODE"
 
 BRIDGE_USER="$(get_env_value BRIDGE_USER)"
 BRIDGE_VERSION="$(get_env_value BRIDGE_VERSION)"
@@ -354,10 +272,9 @@ if [[ "$INFERENCE_MODE" != "none" ]]; then
             exit 1
         }
         reject_url_userinfo "INFERENCE_BASE_URL" "$INFERENCE_BASE_URL"
-        # The Anthropic SDK appends '/v1/messages' to the base URL itself.
-        # Operators carrying over the pre-collapse
-        # INFERENCE_ANTHROPIC_BASE_URL=https://api.anthropic.com/v1 would
-        # produce '.../v1/v1/messages' and 404 every intelligence call.
+        # The Anthropic SDK appends '/v1/messages' to the base URL itself,
+        # so a base URL ending in '/v1' would produce '.../v1/v1/messages'
+        # and 404 every intelligence call.
         # OpenAI-compatible base URLs do end in '/v1' (the SDK appends
         # 'chat/completions' to that), so this guard only fires for
         # INFERENCE_MODE=anthropic.

@@ -121,9 +121,8 @@ class TestFactory:
             )
 
     def test_anthropic_rejects_base_url_ending_in_v1(self):
-        # Operators carrying over the pre-collapse
-        # INFERENCE_ANTHROPIC_BASE_URL=https://api.anthropic.com/v1 must
-        # see a clear error rather than a runtime 404 on
+        # A base URL such as https://api.anthropic.com/v1 must
+        # produce a clear error rather than a runtime 404 on
         # '.../v1/v1/messages'. The Anthropic SDK appends '/v1/messages'
         # itself, so the base URL must not already include '/v1'.
         with pytest.raises(ValueError, match=r"must not end with '/v1'"):

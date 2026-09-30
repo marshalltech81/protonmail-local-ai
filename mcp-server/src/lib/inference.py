@@ -214,12 +214,11 @@ class _AnthropicBackend:
         self.model = model
         self.max_tokens = max_tokens
         # The Anthropic SDK appends ``/v1/messages`` to ``base_url``
-        # itself. An operator carrying over the pre-collapse
-        # ``INFERENCE_ANTHROPIC_BASE_URL=https://api.anthropic.com/v1``
+        # itself, so a base URL such as ``https://api.anthropic.com/v1``
         # would produce a request to ``.../v1/v1/messages`` — every
         # intelligence tool 404s with an opaque SDK error. Reject the
         # ``/v1`` suffix at construction so the operator gets a clear
-        # migration message instead of a runtime mystery. Stripping
+        # configuration message instead of a runtime mystery. Stripping
         # silently would hide the misconfiguration; rejecting forces
         # the operator to confirm they meant the SDK base, not a
         # versioned path.
