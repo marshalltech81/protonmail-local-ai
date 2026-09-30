@@ -480,7 +480,13 @@ the cert Bridge presents now with the same one-time
 `BRIDGE_CERT_PIN_ROTATE=true` run as for a rotation; it replaces an
 empty, malformed or unreadable pin file and a dangling link.
 
-Rotation cannot replace a directory in the pin's place, and says so.
+A directory, FIFO or device in the pin's place is refused before it is
+read, with or without rotation:
+
+```
+>>> ERROR: the Bridge cert pin at /state/bridge-cert.fingerprint is not a regular file — refusing to sync.
+```
+
 Remove it from the `mbsync-state` volume by hand, for example with
 `docker compose run --rm --no-deps --entrypoint rm mbsync -r
 /state/bridge-cert.fingerprint` (pass the same `-f` overlay files as

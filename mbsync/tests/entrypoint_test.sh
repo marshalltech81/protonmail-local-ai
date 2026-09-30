@@ -233,6 +233,31 @@ rotation_refuses_a_directory_in_the_pins_place() {
     [[ -d "$PIN_FILE" && -z "$(find "$PIN_FILE" -mindepth 1)" ]]
 }
 
+# A pin path that exists but is not a regular file is refused before it is
+# opened (#342 review round 2): reading a FIFO blocks forever, so the
+# container would neither report the damage nor exit.
+
+# shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
+fifo_pin_is_refused_without_reading() {
+    local writer err
+    pin_setup fifo
+    mkdir -p "$STATE_DIR"
+    mkfifo "$PIN_FILE"
+    BRIDGE_CERT_PIN_ROTATE="true"
+    # If the FIFO is opened, this writer unblocks the read after 2 s, so a
+    # regression fails on the message check instead of hanging the suite.
+    { sleep 2 >"$PIN_FILE"; } &
+    writer=$!
+    if err="$(verify_cert_pin "$FP_NEW" 2>&1)"; then
+        echo "a cert was accepted over a FIFO pin"
+        kill "$writer" 2>/dev/null || true
+        return 1
+    fi
+    kill "$writer" 2>/dev/null || true
+    wait "$writer" 2>/dev/null || true
+    [[ "$err" == *"not a regular file"* && -p "$PIN_FILE" ]]
+}
+
 # --- run_sync (#227) -------------------------------------------------------
 
 # shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
@@ -315,6 +340,7 @@ check "rotation replaces a dangling pin link" rotation_replaces_a_dangling_pin_l
 check "rotation replaces an unreadable pin file" rotation_replaces_an_unreadable_pin_file
 check "rotation refuses a directory in the pin's place" \
     rotation_refuses_a_directory_in_the_pins_place
+check "a FIFO pin is refused without reading it" fifo_pin_is_refused_without_reading
 check "sync succeeds when mbsync and the repair succeed" \
     sync_succeeds_when_mbsync_and_repair_succeed
 check "a failed directory repair fails the sync" failed_directory_repair_fails_the_sync
