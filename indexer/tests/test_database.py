@@ -2618,6 +2618,96 @@ def test_rename_lookups_use_the_filepath_index(db):
         assert "idx_messages_filepath" in plan, plan
 
 
+MESSAGE_MAP_INDEXES = {
+    "idx_message_thread_map_filepath",
+    "idx_message_thread_map_thread",
+}
+
+
+def _message_map_indexes(conn) -> set[str]:
+    return {
+        r[0]
+        for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'message_thread_map'"
+        )
+    }
+
+
+class TestMessageMapLookupIndexes:
+    """#302: flag renames and thread rebuilds look ``message_thread_map``
+    up by filepath or thread_id; without indexes each lookup scans the
+    table, so N renames over N messages is quadratic."""
+
+    def test_fresh_install_creates_the_indexes(self, db):
+        assert _message_map_indexes(db._conn) >= MESSAGE_MAP_INDEXES
+
+    def test_v21_database_migrates_to_add_the_indexes(self, tmp_path):
+        db_path = tmp_path / "v21.db"
+        Database(db_path).close()
+        conn = sqlite3.connect(str(db_path))
+        try:
+            for name in MESSAGE_MAP_INDEXES:
+                conn.execute(f"DROP INDEX {name}")
+            conn.execute("UPDATE schema_version SET version = 21")
+            conn.commit()
+        finally:
+            conn.close()
+
+        database = Database(db_path)
+        try:
+            version = database._conn.execute("SELECT version FROM schema_version").fetchone()
+            assert version["version"] == SCHEMA_VERSION == 22
+            assert _message_map_indexes(database._conn) >= MESSAGE_MAP_INDEXES
+        finally:
+            database.close()
+
+    @pytest.mark.parametrize(
+        ("sql", "params", "index"),
+        [
+            (
+                "SELECT message_id, thread_id, filepath FROM message_thread_map WHERE filepath = ?",
+                ("/md/cur/7:2,S",),
+                "idx_message_thread_map_filepath",
+            ),
+            (
+                "UPDATE message_thread_map SET filepath = ? WHERE filepath = ?",
+                ("/md/cur/7:2,RS", "/md/cur/7:2,S"),
+                "idx_message_thread_map_filepath",
+            ),
+            (
+                "SELECT message_id, filepath FROM message_thread_map WHERE thread_id = ?",
+                ("t1",),
+                "idx_message_thread_map_thread",
+            ),
+            (
+                "DELETE FROM message_thread_map WHERE thread_id = ?",
+                ("t1",),
+                "idx_message_thread_map_thread",
+            ),
+            (
+                "SELECT filepath FROM message_thread_map WHERE thread_id IN (?, ?)",
+                ("t1", "t2"),
+                "idx_message_thread_map_thread",
+            ),
+        ],
+    )
+    def test_lookups_search_the_index(self, db, sql, params, index):
+        # Representative population so the planner's choice is not an
+        # empty-table artefact.
+        db._conn.execute("PRAGMA foreign_keys = OFF")
+        db._conn.executemany(
+            "INSERT INTO message_thread_map VALUES (?, ?, ?)",
+            ((f"<m{i}@x>", f"t{i // 4}", f"/md/cur/{i}:2,S") for i in range(2000)),
+        )
+        db._conn.commit()
+        db._conn.execute("ANALYZE")
+
+        plan = " ".join(r["detail"] for r in db._conn.execute("EXPLAIN QUERY PLAN " + sql, params))
+
+        assert f"SEARCH message_thread_map USING INDEX {index}" in plan, plan
+        assert "SCAN message_thread_map" not in plan, plan
+
+
 class TestUpdateFilepathMovesQueueRow:
     """#203: a flag rename must carry the file's queue row, with its
     retry or dead state, to the new path."""
