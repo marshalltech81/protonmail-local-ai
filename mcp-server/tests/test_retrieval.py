@@ -40,10 +40,7 @@ def _open_fixture_db(tmp_path):
     conn.enable_load_extension(False)
     _build_schema(conn)
     db = Database(str(path))
-    try:
-        yield conn, db
-    finally:
-        db.close()
+    yield conn, db
 
 
 def _handlers(fake_server, db):
@@ -395,12 +392,9 @@ class TestGetMessage:
         )
         conn.close()
         db = Database(str(path))
-        try:
-            handler = _handlers(fake_server, db)["get_message"]
-            out = asyncio.run(handler(message_id="t1"))
-            assert "snippet-only-content" in _text(out)
-        finally:
-            db.close()
+        handler = _handlers(fake_server, db)["get_message"]
+        out = asyncio.run(handler(message_id="t1"))
+        assert "snippet-only-content" in _text(out)
 
     def test_db_exception_returns_error_text(self, fake_server, seeded_db):
         def boom(_message_id):
