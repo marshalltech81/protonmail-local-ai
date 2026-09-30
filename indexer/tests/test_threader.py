@@ -6,8 +6,11 @@ Covers: Thread.text_for_embedding, Thread.snippet, Threader.assign_thread
 and participant deduplication.
 """
 
+import re
+import time
 from datetime import UTC, datetime
 
+from src import threader
 from src.database import EMBEDDING_DIM  # noqa: F401  -- via reuse
 from src.threader import Thread, Threader, _normalize_subject, canonical_addr
 
@@ -533,6 +536,116 @@ class TestNormalizeSubject:
 
     def test_collapses_whitespace(self):
         assert _normalize_subject("Re:    Project   Update") == "project update"
+
+
+_REFERENCE_PREFIX_RE = re.compile(
+    r"^(?:(?:re|fwd|fw|回复|答复)[\s:\[\]]+|(?:aw|ant|sv|tr)[:\[\]]+)",
+    re.IGNORECASE,
+)
+
+
+def _reference_normalize_subject(subject: str) -> str:
+    """The pre-#293 algorithm: strip one prefix per pass, copying the rest.
+
+    Ground truth for the differential test below; quadratic in the number
+    of prefixes, so only called on short inputs.
+    """
+    s = subject.lower().strip()
+    while True:
+        stripped = _REFERENCE_PREFIX_RE.sub("", s).strip()
+        if stripped == s:
+            break
+        s = stripped
+    return re.sub(r"\s+", " ", s).strip()
+
+
+# Fragments covering every prefix alternative, the separator class
+# (whitespace, colon, brackets), Unicode whitespace, lookalike words and
+# the empty string. Every ordered triple is checked, so prefixes appear
+# nested, mid-subject, separated by each kind of gap, and alone.
+_SUBJECT_FRAGMENTS = [
+    "Re:",
+    "re ",
+    "RE",
+    "Fwd:",
+    "fw[",
+    "FW]",
+    "Aw:",
+    "ant:",
+    "Sv",
+    "tr]",
+    "回复:",
+    "答复 ",
+    " ",
+    "\t",
+    "　",
+    " ",
+    ":",
+    "[",
+    "x",
+    "Report",
+    "",
+]
+
+
+class TestNormalizeSubjectMatchesReference:
+    def test_every_fragment_triple_matches_the_previous_algorithm(self):
+        mismatches = [
+            subject
+            for subject in (
+                a + b + c
+                for a in _SUBJECT_FRAGMENTS
+                for b in _SUBJECT_FRAGMENTS
+                for c in _SUBJECT_FRAGMENTS
+            )
+            if _normalize_subject(subject) != _reference_normalize_subject(subject)
+        ]
+        assert mismatches == []
+
+
+class _CopyCountingPattern:
+    """Wrap a compiled pattern and total the length of each new string
+    object it is handed, i.e. the characters the caller copied to get
+    there. Holds only the last string, so a quadratic caller cannot
+    exhaust memory while being measured."""
+
+    def __init__(self, pattern: re.Pattern[str]) -> None:
+        self._pattern = pattern
+        self._last: str | None = None
+        self.chars_copied = 0
+
+    def _see(self, string: str) -> None:
+        if string is not self._last:
+            self.chars_copied += len(string)
+            self._last = string
+
+    def sub(self, repl: str, string: str) -> str:
+        self._see(string)
+        return self._pattern.sub(repl, string)
+
+    def match(self, string: str, pos: int = 0) -> re.Match[str] | None:
+        self._see(string)
+        return self._pattern.match(string, pos)
+
+
+class TestNormalizeSubjectBoundedWork:
+    def test_repeated_prefixes_are_not_copied_once_per_prefix(self, monkeypatch):
+        # #293: stripping one prefix per pass copied the remaining
+        # subject each time, so n prefixes cost O(n^2) characters.
+        counter = _CopyCountingPattern(threader._SUBJECT_PREFIX_RE)
+        monkeypatch.setattr(threader, "_SUBJECT_PREFIX_RE", counter)
+        subject = "Re: " * 20_000 + "Hello"
+
+        assert _normalize_subject(subject) == "hello"
+        # One lowered copy of the subject, not one per prefix.
+        assert counter.chars_copied <= len(subject)
+
+    def test_worst_case_repeated_prefixes_finish_quickly(self):
+        # 1.6 MB of ``Re: `` took about 8 s before the fix (plain timing).
+        subject = "Re: " * 400_000 + "Hello"
+        start = time.perf_counter()
+        assert _normalize_subject(subject) == "hello"
+        assert time.perf_counter() - start < 2.0
 
 
 # ---------------------------------------------------------------------------
