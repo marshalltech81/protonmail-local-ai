@@ -109,7 +109,9 @@ verify_cert_pin() {
     # First boot: no pin on disk yet → TOFU, save fingerprint.
     # Subsequent boots: fingerprint must match, or the operator must opt
     # in to rotation via BRIDGE_CERT_PIN_ROTATE=true (used when Bridge is
-    # upgraded and its TLS cert is deliberately replaced).
+    # upgraded and its TLS cert is deliberately replaced). Only an absent
+    # pin is a first boot: one that exists but is empty, malformed,
+    # unreadable or a dangling link is refused like a mismatch.
     #
     # The caller runs this as an ``if`` condition, which turns errexit off
     # inside it: every step that must succeed is checked explicitly, and
@@ -117,7 +119,7 @@ verify_cert_pin() {
     local current_fp="$1"
     local pinned_fp
 
-    if [[ ! -s "$PIN_FILE" ]]; then
+    if [[ ! -e "$PIN_FILE" && ! -L "$PIN_FILE" ]]; then
         if ! write_pin "$current_fp"; then
             echo ">>> ERROR: could not save the Bridge cert pin to ${PIN_FILE} — refusing to sync." >&2
             return 1
@@ -126,13 +128,36 @@ verify_cert_pin() {
         return 0
     fi
 
-    if ! pinned_fp="$(tr -d '[:space:]' <"$PIN_FILE")"; then
-        echo ">>> ERROR: could not read the Bridge cert pin at ${PIN_FILE} — refusing to sync." >&2
+    # A directory, FIFO or device in the pin's place is refused before it
+    # is opened: reading a FIFO would block forever, and write_pin's mv
+    # would move the new pin into a directory. Rotation does not repair
+    # these; they are removed by hand.
+    if [[ -e "$PIN_FILE" && ! -f "$PIN_FILE" ]]; then
+        echo ">>> ERROR: the Bridge cert pin at ${PIN_FILE} is not a regular file — refusing to sync." >&2
+        echo ">>> Remove it by hand, then recreate mbsync." >&2
         return 1
+    fi
+
+    if ! pinned_fp="$(tr -d '[:space:]' <"$PIN_FILE")"; then
+        # Rotation replaces an unreadable file or a dangling link: write_pin
+        # renames over the path itself.
+        if [[ "$BRIDGE_CERT_PIN_ROTATE" != "true" ]]; then
+            echo ">>> ERROR: could not read the Bridge cert pin at ${PIN_FILE} — refusing to sync." >&2
+            return 1
+        fi
+        pinned_fp="(unreadable)"
     fi
     if [[ "$pinned_fp" == "$current_fp" ]]; then
         echo ">>> Bridge cert fingerprint matches the pinned value."
         return 0
+    fi
+
+    # write_pin stores 64 lowercase hex digits; anything else is damaged
+    # state, not a fingerprint to compare against.
+    if [[ ! "$pinned_fp" =~ ^[0-9a-f]{64}$ && "$BRIDGE_CERT_PIN_ROTATE" != "true" ]]; then
+        echo ">>> ERROR: the Bridge cert pin at ${PIN_FILE} is empty or malformed — refusing to sync." >&2
+        echo ">>> To re-pin the cert Bridge presents now, recreate mbsync once with BRIDGE_CERT_PIN_ROTATE=true." >&2
+        return 1
     fi
 
     if [[ "$BRIDGE_CERT_PIN_ROTATE" == "true" ]]; then
@@ -149,7 +174,7 @@ verify_cert_pin() {
     echo ">>> ERROR: Bridge cert fingerprint does not match pinned value — refusing to sync." >&2
     echo ">>>   pinned:  sha256:${pinned_fp}" >&2
     echo ">>>   current: sha256:${current_fp}" >&2
-    echo ">>> If this rotation is expected (e.g. Bridge upgrade), restart mbsync with BRIDGE_CERT_PIN_ROTATE=true." >&2
+    echo ">>> If this rotation is expected (e.g. Bridge upgrade), recreate mbsync once with BRIDGE_CERT_PIN_ROTATE=true." >&2
     echo ">>> Otherwise this is a security event — investigate before proceeding." >&2
     return 1
 }
@@ -250,15 +275,16 @@ record_successful_sync() {
 # =============================================================================
 require_prerequisites
 
-# BRIDGE_CERT_PIN_ROTATE is a single-restart opt-in for accepting a
-# legitimate Bridge cert rotation. Leaving it set to true across
-# restarts silently disables pin enforcement — every new cert will be
-# accepted without comparison. Surface that drift on every boot so the
-# operator notices if they forgot to flip it back to false.
+# BRIDGE_CERT_PIN_ROTATE is an opt-in for accepting one legitimate
+# Bridge cert rotation. It is part of the container's environment, so
+# it stays true through every restart of this container (manual or by
+# the restart policy) until the container is recreated with it false;
+# until then every new cert is accepted without comparison. Surface
+# that on every boot so the operator notices if they forgot.
 if [[ "$BRIDGE_CERT_PIN_ROTATE" == "true" ]]; then
     echo ">>> WARNING: BRIDGE_CERT_PIN_ROTATE=true — any Bridge cert fingerprint change this boot will be accepted without comparison." >&2
-    echo ">>> This is intended only for a single restart after a deliberate Bridge cert rotation (e.g. Bridge upgrade)." >&2
-    echo ">>> Set BRIDGE_CERT_PIN_ROTATE=false (or remove it from .env) and restart mbsync to re-enable pin enforcement." >&2
+    echo ">>> This is intended only for one boot after a deliberate Bridge cert rotation (e.g. Bridge upgrade); a restart keeps it enabled." >&2
+    echo ">>> Once the rotation succeeds, recreate mbsync with BRIDGE_CERT_PIN_ROTATE=false to re-enable pin enforcement (see docs/troubleshooting.md)." >&2
 fi
 
 envsubst < /etc/mbsyncrc.template > "$CONFIG_FILE"
@@ -279,7 +305,7 @@ wait_for_bridge_imap
 # saved to the persistent state volume ($PIN_FILE). On subsequent boots
 # the fingerprint must match the pinned value — otherwise mbsync refuses
 # to sync. A legitimate rotation (e.g. Bridge upgrade) is accepted by
-# restarting mbsync with BRIDGE_CERT_PIN_ROTATE=true. `make clean`
+# recreating mbsync once with BRIDGE_CERT_PIN_ROTATE=true. `make clean`
 # deletes the state volume and resets the pin.
 # =============================================================================
 extract_bridge_cert

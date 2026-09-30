@@ -75,9 +75,11 @@ services:
       BRIDGE_IMAP_PORT: 1143
       BRIDGE_USER: ${BRIDGE_USER}
       SYNC_INTERVAL: ${SYNC_INTERVAL:-60}
-      # Set to true once, for a single restart, when Bridge's TLS cert is
-      # deliberately rotated (e.g. Bridge version upgrade). mbsync refuses
-      # to sync on a fingerprint mismatch otherwise.
+      # Set to true for one container creation when Bridge's TLS cert is
+      # deliberately rotated (e.g. Bridge version upgrade), then recreate
+      # mbsync with it false: the value survives restarts of the same
+      # container. mbsync refuses to sync on a fingerprint mismatch
+      # otherwise. See docs/troubleshooting.md.
       BRIDGE_CERT_PIN_ROTATE: ${BRIDGE_CERT_PIN_ROTATE:-false}
     volumes:
       - maildir-volume:/maildir

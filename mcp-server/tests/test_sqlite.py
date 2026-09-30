@@ -957,8 +957,7 @@ class TestDirectLookups:
 
 class TestDisplaySubjectFallback:
     """``ThreadResult.subject`` surfaces ``display_subject`` when set
-    (added in v13) and falls back to the normalized ``subject`` for
-    legacy rows where ``display_subject`` is ``NULL``."""
+    and falls back to the normalized ``subject`` while it is ``NULL``."""
 
     def test_uses_display_subject_when_present(self, tmp_path):
         import sqlite3

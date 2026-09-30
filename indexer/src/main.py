@@ -983,9 +983,8 @@ def _phase2a_collect_chunks(
             # Phase 1 already committed this message's row via
             # ``upsert_thread``, so the display_subject reflecting the
             # oldest-seen message is in the DB before this read. Falls
-            # through to the message's own subject for legacy v12 rows
-            # where display_subject is NULL (an indexer pass will
-            # refresh those over time).
+            # through to the message's own subject while display_subject
+            # is NULL.
             stored_display = db.get_thread_display_subject(state.thread.thread_id)
             fallback_text = (stored_display or state.msg.subject or "").strip()
             if not fallback_text:

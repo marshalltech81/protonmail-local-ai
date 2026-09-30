@@ -86,7 +86,7 @@ def _is_iso_date(v: Any) -> bool:
 
 # Tool parameters whose values can be logged — but only when the value
 # passes that field's own check. Arguments arrive from an LLM before any
-# validation, so a name alone proves nothing: ``body_format`` or
+# validation, so a name alone proves nothing: ``style`` or
 # ``date_from`` can carry arbitrary text. Enum sets mirror what each tool
 # accepts (search modes: ``tools/search._VALID_SEARCH_MODES``; summary
 # styles: ``summarize_thread``). Everything else a tool receives — query
@@ -96,7 +96,6 @@ def _is_iso_date(v: Any) -> bool:
 _LOGGABLE_TOOL_PARAMS: dict[str, Callable[[Any], bool]] = {
     "mode": _one_of("hybrid", "semantic", "keyword"),
     "style": _one_of("brief", "detailed", "action-items", "timeline"),
-    "body_format": _one_of("text", "html"),
     "filter_type": _one_of("all", "unread", "flagged"),
     "limit": _is_int,
     "max_threads": _is_int,

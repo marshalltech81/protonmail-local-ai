@@ -624,10 +624,12 @@ advisories (#338). In review, merge when Codex is clean on the head:
 Next, in order: rebase any open PR that conflicts in this file after
 another merges (every third-batch PR strikes its own line below); then
 **deprecation cleanup** (owner-approved scope 2026-09-30, the project
-has never been deployed): slice 2 — drop `get_message`'s ignored
+has never been deployed): slice 1 (validate-env rename shims) done in
+#343, the owner declining its review round's request to keep rejecting
+old names; ~~slice 2 — drop `get_message`'s ignored
 `folder`/`body_format` parameters, the dead pre-v13 `display_subject`
 `try/except` in mcp-server `_row_to_result`, the write-tool sketch in
-`docs/mcp-tools.md`, and "legacy" wording on live code; slice 3 — fold
+`docs/mcp-tools.md`, and "legacy" wording on live code~~ (done); slice 3 — fold
 migration `0021` into the baseline (baseline becomes v21, drop the
 mcp-server `ingestion_state` existence guard, update AGENTS.md's
 migration paragraph; the dev database needs a rebuild); slice 4, test
@@ -732,8 +734,9 @@ Order of work, chosen to minimise reindexes:
    subject normalizer (#293)~~ (done: offset scan, one slice); the first half of #297 (keep the first
    persisted date on reprocess, so an undated message is never
    re-dated before the Phase 2 rebuild); the all-zero embedding guard (#304, fixed
-   message, no values logged); tombstone revalidation on restore
-   (#301); `message_thread_map` lookup indexes as migration `0022`
+   message, no values logged); ~~tombstone revalidation on restore
+   (#301)~~ (done: a tombstone is refused for a path the message no
+   longer maps to); `message_thread_map` lookup indexes as migration `0022`
    (#302, index-only); the unbounded recovery parameter list (#306);
    and the #257 sweep (classify parse-stage and provider exceptions
    at their boundary, `caplog` marker tests). MCP: ~~the two quadratic
@@ -758,8 +761,10 @@ Order of work, chosen to minimise reindexes:
    honesty (#333); event-loop hygiene (#320, #317, #334); folder
    discovery hiding reply-only folders (#308); the attachment-lane
    duplicate before MIME filters (#309); docs (#322, #323). mbsync:
-   the empty pin re-TOFU (#278) and the rotation flag surviving
-   restarts (#267, docs), the unbounded connect probe (#271), signal
+   ~~the empty pin re-TOFU (#278)~~ (done: only an absent pin is a
+   first boot) and ~~the rotation flag surviving restarts (#267,
+   docs)~~ (done: documented recreate-with-false; one-shot
+   authorization not built), the unbounded connect probe (#271), signal
    forwarding to the sync child (#280), and the smoke-test one-liner
    (#269) with #268's minimal fix. Bridge, both decided as items 13–14
    above and needing the first Bridge shell test harness: the

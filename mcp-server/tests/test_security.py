@@ -158,7 +158,7 @@ class TestLogToolCall:
     def test_allowlisted_names_still_withhold_unvalidated_values(self, caplog):
         """A parameter *name* being allowlisted does not make its *value*
         safe: tool arguments come from an LLM before any validation, so a
-        free-string field like ``body_format`` or ``date_from`` can carry
+        free-string field like ``style`` or ``date_from`` can carry
         arbitrary text. Only values that pass the field's own check are
         logged; anything else is withheld by name."""
         import logging
@@ -170,7 +170,6 @@ class TestLogToolCall:
                 logger,
                 "probe",
                 {
-                    "body_format": private_text,
                     "mode": private_text,
                     "style": private_text,
                     "filter_type": private_text,
@@ -183,7 +182,6 @@ class TestLogToolCall:
         assert private_text not in caplog.text
         assert "2024-13-45" not in caplog.text
         for name in (
-            "body_format",
             "date_from",
             "date_to",
             "filter_type",
@@ -205,7 +203,6 @@ class TestLogToolCall:
                 {
                     "mode": "keyword",
                     "style": "action-items",
-                    "body_format": "text",
                     "filter_type": "all",
                     "date_from": "2024-01-31",
                     "date_to": "2024-02-01T12:00:00+00:00",
@@ -217,7 +214,6 @@ class TestLogToolCall:
         for fragment in (
             "'mode': 'keyword'",
             "'style': 'action-items'",
-            "'body_format': 'text'",
             "'filter_type': 'all'",
             "'date_from': '2024-01-31'",
             "'date_to': '2024-02-01T12:00:00+00:00'",

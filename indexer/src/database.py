@@ -355,7 +355,7 @@ class Database:
                 has_attachments INTEGER DEFAULT 0,
                 body_text       TEXT,
                 fts_rowid       INTEGER,
-                display_subject TEXT                     -- original-cased subject for retrieval; NULL on legacy rows, COALESCE'd back to subject by readers
+                display_subject TEXT                     -- original-cased subject for retrieval; NULL until set, COALESCE'd back to subject by readers
             );
 
             -- mcp-server hybrid-search joins ``threads`` back from ``threads_fts``
@@ -692,8 +692,8 @@ class Database:
                 # display_subject merge: prefer the subject of the
                 # oldest message we have ever seen for this thread.
                 # Three cases:
-                #   1. Existing display_subject is NULL (legacy v12 row,
-                #      or first non-NULL writer hasn't arrived yet) →
+                #   1. Existing display_subject is NULL (the first
+                #      non-NULL writer hasn't arrived yet) →
                 #      take the incoming.
                 #   2. The incoming earliest message is older than the
                 #      currently-recorded ``date_first`` → the new
@@ -1421,8 +1421,7 @@ class Database:
         maintained by ``upsert_thread``'s merge so the value is stable
         across the lifetime of the thread except when a genuinely
         older message arrives out of order. ``None`` when the thread
-        does not exist OR is a legacy v12 row that has not been
-        refreshed since v13 added the column.
+        does not exist or its ``display_subject`` is not set.
 
         Used by the chunkless-thread subject-fallback path in the
         indexer's Phase 2a and the reconciler's reap rebuild so both
@@ -2154,14 +2153,23 @@ class Database:
         ``datetime('now')`` returns a space-separated format that sorts
         lexicographically before ``T``-separated ISO strings and would
         cause tombstones to be reaped up to a day early.
+
+        Refused when ``message_thread_map`` maps ``message_id`` to another
+        path (#301): the caller's path is stale because the watcher renamed
+        the file meanwhile (a restore, or a move to another folder). The
+        reaper matches tombstones by message ID, and no sweep revisits the
+        old path, so the tombstone would delete the live message. The check
+        and the insert are one statement, so a rename cannot land between
+        them.
         """
         cur = self._conn.cursor()
         marked_at = datetime.now(UTC).isoformat()
         cur.execute(
             "INSERT OR IGNORE INTO pending_deletions "
             "(filepath, message_id, thread_id, marked_at) "
-            "VALUES (?, ?, ?, ?)",
-            (filepath, message_id, thread_id, marked_at),
+            "SELECT ?, ?, ?, ? WHERE NOT EXISTS ("
+            "SELECT 1 FROM message_thread_map WHERE message_id = ? AND filepath != ?)",
+            (filepath, message_id, thread_id, marked_at, message_id, filepath),
         )
         self._conn.commit()
         return cur.rowcount > 0
@@ -2185,9 +2193,15 @@ class Database:
 
     @_synchronized
     def list_pending_deletions_older_than(self, cutoff_iso: str) -> list[sqlite3.Row]:
+        """Tombstones marked at or before ``cutoff_iso``, each with
+        ``mapped_filepath``: the path ``message_thread_map`` holds for the
+        message now (``None`` when the message is unmapped)."""
         return self._conn.execute(
-            "SELECT filepath, message_id, thread_id, marked_at "
-            "FROM pending_deletions WHERE marked_at <= ? ORDER BY marked_at ASC",
+            "SELECT p.filepath, p.message_id, p.thread_id, p.marked_at, "
+            "m.filepath AS mapped_filepath "
+            "FROM pending_deletions p "
+            "LEFT JOIN message_thread_map m ON m.message_id = p.message_id "
+            "WHERE p.marked_at <= ? ORDER BY p.marked_at ASC",
             (cutoff_iso,),
         ).fetchall()
 

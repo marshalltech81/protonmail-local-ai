@@ -344,7 +344,7 @@ def _row_to_attachment_result(r) -> AttachmentResult:
     source-file columns, a ``score`` alias), so no per-column key guard
     is needed. ``display_subject``
     is preferred over the normalized ``subject`` when the row carries
-    one (legacy rows have it NULL), mirroring ``_row_to_result``.
+    one, mirroring ``_row_to_result``.
     """
     return AttachmentResult(
         attachment_id=r["attachment_id"],
@@ -2495,19 +2495,11 @@ class Database:
     # -------------------------------------------------------------------------
 
     def _row_to_result(self, row) -> ThreadResult:
-        # Prefer the original-cased ``display_subject`` (added in
-        # SCHEMA_VERSION v13). Legacy rows written before v13 have NULL
-        # ``display_subject``; fall back to the normalized ``subject``
-        # so existing threads keep rendering instead of going blank.
-        # The fallback also covers the read-only-DB-pre-v13 case where
-        # the column itself is missing.
-        try:
-            display = row["display_subject"]
-        except KeyError, IndexError:
-            display = None
+        # Prefer the original-cased ``display_subject``; fall back to the
+        # normalized ``subject`` while it is NULL.
         return ThreadResult(
             thread_id=row["thread_id"],
-            subject=display or row["subject"],
+            subject=row["display_subject"] or row["subject"],
             participants=json.loads(row["participants"]),
             senders=json.loads(row["senders"]),
             folder=row["folder"],

@@ -421,7 +421,7 @@ pinned fingerprint. A mismatch is treated as a security event and
 ```
 
 Legitimate cert rotations happen when Bridge is upgraded or `vault.enc`
-is regenerated. To accept the new cert, start `mbsync` once with
+is regenerated. To accept the new cert, recreate `mbsync` once with
 `BRIDGE_CERT_PIN_ROTATE=true`:
 
 ```bash
@@ -429,7 +429,27 @@ BRIDGE_CERT_PIN_ROTATE=true docker compose up -d mbsync
 ```
 
 The container writes the new fingerprint to the pin file on startup and
-syncing resumes.
+syncing resumes. Check the `rotating pin` warning in `make logs` and
+that its `current:` fingerprint is the one you expect.
+
+The flag is not consumed by the rotation. It is part of the container's
+environment, so it stays `true` through every later restart of that
+container — `docker compose restart`, or Docker's restart policy after
+a crash — and changing your shell or `.env` does not update a container
+that already exists. While it stays `true`, every cert change is
+accepted without comparison. As soon as the rotation has succeeded,
+recreate `mbsync` with rotation disabled:
+
+```bash
+BRIDGE_CERT_PIN_ROTATE=false docker compose up -d --no-deps --force-recreate mbsync
+```
+
+The startup log no longer shows the `BRIDGE_CERT_PIN_ROTATE=true`
+warning once enforcement is back. Also make sure `.env` does not set
+`BRIDGE_CERT_PIN_ROTATE=true`, or the next `make up` re-enables it. If
+the stack was started with an overlay (such as
+`docker-compose.hardened.yml`), pass the same `-f` files to both
+commands, or the recreated container drops the overlay.
 
 If the pin cannot be saved — first boot or rotation, for example because
 the `mbsync-state` volume is full or not writable — `mbsync` refuses to
@@ -440,9 +460,38 @@ keeps the previous pin:
 >>> ERROR: could not save the Bridge cert pin to /state/bridge-cert.fingerprint — refusing to sync.
 ```
 
-Fix the volume and restart `mbsync`. Set `BRIDGE_CERT_PIN_ROTATE` back to `false` (or remove
-it from `.env`) before the next restart so the new pin is enforced going
-forward. Leaving it permanently true disables pin enforcement.
+Fix the volume and restart `mbsync`. After a successful rotation,
+recreate it with `BRIDGE_CERT_PIN_ROTATE=false` as above; a restart
+alone keeps rotation enabled, and leaving it enabled disables pin
+enforcement.
+
+Only a missing pin file is treated as a first boot. A pin file that
+exists but is empty, malformed, unreadable or a dangling link is
+damaged state: `mbsync` refuses to sync and leaves it in place rather
+than silently re-pinning whatever cert Bridge presents:
+
+```
+>>> ERROR: the Bridge cert pin at /state/bridge-cert.fingerprint is empty or malformed — refusing to sync.
+```
+
+(An unreadable pin or dangling link logs `could not read the Bridge
+cert pin` instead.) Find out how the pin was damaged first, then accept
+the cert Bridge presents now with the same one-time
+`BRIDGE_CERT_PIN_ROTATE=true` run as for a rotation; it replaces an
+empty, malformed or unreadable pin file and a dangling link.
+
+A directory, FIFO or device in the pin's place is refused before it is
+read, with or without rotation:
+
+```
+>>> ERROR: the Bridge cert pin at /state/bridge-cert.fingerprint is not a regular file — refusing to sync.
+```
+
+Remove it from the `mbsync-state` volume by hand, for example with
+`docker compose run --rm --no-deps --entrypoint rm mbsync -r
+/state/bridge-cert.fingerprint` (pass the same `-f` overlay files as
+for `up`). The next start is then a first boot and pins whatever cert
+Bridge presents, as a rotation would.
 
 `make clean` removes the `mbsync-state` volume along with everything
 else, so the next boot after `make clean` is treated as a first boot
