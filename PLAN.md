@@ -140,110 +140,78 @@ regenerable: a context-compatible model switch regenerates vectors
 only; an incompatible one regenerates chunks and vectors through the
 reindex bundle path. Neither touches a source file or a migration.
 
-1. **`vector_generations` registry**: generation_id, provider, model,
-   revision, dimensions, tokenizer, chunk_config_hash, created_at,
-   status. Dimension read from metadata, never a constant; pass the
-   `dimensions` request param where the provider supports it. The
-   registry's tokenizer and context-window fields **decide** whether a
-   model switch may reuse the existing chunks: only when the candidate
-   tokenizer counts every document input — every stored chunk **and**
-   every chunkless thread's display-subject fallback text, which the
-   rebuild embeds too — within the candidate's input window (verified
-   by counting, not by metadata equality) is the switch vector-only;
-   otherwise it is a rechunk, and goes through the reindex bundle path
-   below. Recording the metadata alone prevents
-   nothing.
-2. **Per-generation vec tables** (`vec_chunks_gNN` **and**
-   `vec_threads_gNN` — sqlite-vec bakes dimension into DDL, so
-   per-generation tables are structurally required, and the semantic
-   path fuses both dense lanes, so the thread vectors are rebuilt with
-   the candidate model — the mean of the new chunk vectors, or, for a
-   thread with no chunks, the candidate embedding of its stored display
-   subject, reproducing the fallback the pipeline uses today so no
-   thread drops out of semantic retrieval on activation — and both
-   tables switch in one transaction; switching one alone would fuse
-   old-model thread vectors with new-model query vectors, or error on
-   a dimension change). These tables are created and dropped by the
-   generation lifecycle at run time, which AGENTS.md's schema rule
-   (every schema change bumps `SCHEMA_VERSION` and ships a migration)
-   does not allow as written. Item 2 therefore lands with an explicit,
-   owner-approved amendment to that rule: the `vector_generations`
-   registry and the lifecycle code arrive by one numbered migration;
-   the `vec_*_gNN` tables it manages are runtime-managed derived
-   storage, registered in that table, outside `SCHEMA_VERSION`, and a
-   database whose registry and tables disagree fails closed at startup
-   with the same actionable message the migration runner gives.
-   Blue/green lifecycle: build → validate → activate atomically →
-   retain old generation → rollback if needed. Four parts of that are
-   protocol, not just DDL:
-   - **Validation gate:** the Phase 1.5 baseline runs both sides on a
-     hashed test embedder, so it proves wiring and snapshot stability
-     and nothing about a real model. Activation requires #283's
-     evidence-recall eval run against the **old and candidate
-     generations with query vectors from their respective real
-     embedders**, comparing recall before the switch.
-   - **Activation switches the query side in lockstep:** the MCP
-     server builds its query embedder from `EMBED_BASE_URL` /
-     `EMBED_MODEL` at startup, so a table switch alone would leave
-     old-model query vectors against new-model document vectors —
-     same dimension, incomparable space, silently broken retrieval.
-     The active generation's provider, **resolved endpoint** (the
-     SDK's `client.base_url` after construction, credential-sanitized
-     — not the configured `EMBED_BASE_URL`, which is empty when the SDK
-     inherits `OPENAI_BASE_URL`, so two processes can share an empty
-     setting and resolve different wire endpoints; two
-     OpenAI-compatible servers can serve the same model string with
-     incomparable spaces), model, dimension
-     and any revision the provider exposes are recorded in the
-     database; the MCP server reads them at startup and on each
-     semantic query, and **fails closed** (semantic lanes off, status
-     reporting the mismatch) while its configured embedder does not
-     match on every recorded field. Activation therefore includes
-     updating the MCP configuration and restarting or reloading it.
-   - **One generation per query:** the identity check, the query
-     embedding and the KNN run against the same generation — but the
-     network embed stays **outside** any SQLite transaction, because a
-     read mark held across a slow provider call blocks WAL truncation
-     (the unbounded-WAL bug fixed in May, and the reason the MCP layer
-     uses short-lived readers). The server reads the active generation
-     ID, embeds the query with that generation's model, then opens a
-     read transaction, re-reads the ID, and runs both dense lanes in
-     that snapshot; if the ID changed in between, it re-embeds once
-     with the new generation's model and retries, and otherwise fails
-     closed. An activation that commits mid-request can therefore
-     never pair one model's query vector with another's tables, and
-     no snapshot outlives a provider timeout.
-   - **Synchronized with ingestion:** mail keeps arriving during a
-     build. A candidate is built to an ingestion watermark, then the
-     indexer dual-writes every new or changed chunk (and thread mean)
-     into every generation that is active or building-and-caught-up,
-     so the candidate catches up incrementally; activation pauses the
-     indexer's drain for the switch and resumes it; the retained
-     generation stays dual-written for its rollback window and is
-     dropped only when that window closes. Without this, mail indexed
-     after the watermark would vanish from semantic retrieval on
-     activation, and a rollback would land on a stale generation.
-     Dual-writing needs an embedder client **per live generation**,
-     and the indexer builds exactly one from the `EMBED_*` set, while
-     the registry holds identity only, never credentials. So at most
-     two generations are live at once — the active one and the
-     candidate, which becomes the retained one after the switch — and
-     the second has its own configuration set (`EMBED_NEXT_BASE_URL`,
-     `EMBED_NEXT_MODEL`, and a second Docker secret,
-     `.secrets/embed_next_api_key.txt`, mode 600) for the life of the
-     build and the rollback window. **Both services receive both
-     sets**, and neither set means "active": the registry's active
-     generation names the live identity, and each service selects, at
-     startup and on the per-query check, the client whose resolved
-     identity matches it — the indexer additionally dual-writes with
-     the other client while a second generation is live. Activation is
-     therefore a registry change plus a restart or reload, never a
-     configuration edit; a service whose two sets match neither the
-     active nor the retained generation fails closed as above. When
-     the rollback window closes the operator drops the retired
-     generation's set (or copies the survivor's into `EMBED_*` as
-     housekeeping). This keeps the per-layer contract (mode / base URL
-     / model / secret) intact and doubles it only for the transition.
+1. **`vector_generations` registry** — generation_id, provider,
+   resolved endpoint, model, revision, dimensions, tokenizer, context
+   window, chunk_config_hash, created_at, status (building /
+   caught-up / active / retained / retired). Dimension read from
+   metadata, never a constant; pass the `dimensions` request param
+   where the provider supports it.
+2. **Per-generation vec tables and the blue/green lifecycle** —
+   `vec_chunks_gNN` and `vec_threads_gNN` (sqlite-vec bakes dimension
+   into DDL), built for a candidate, validated, switched atomically,
+   retained for rollback, retired. Seven review rounds on this plan
+   (2026-09-30, PR #307) turned that sentence into a protocol with a
+   state machine, and each round's findings were consequences of the
+   previous round's additions — the sign that it needs a design
+   document, not a longer bullet. **Deliverable before any
+   implementation:** `docs/design/vector-generations.md`, reviewed on
+   its own PR, satisfying every requirement below; the reviews that
+   produced them are on #307.
+   - **Identity and selection.** The registry records a generation's
+     resolved endpoint (the SDK's `client.base_url` after
+     construction, credential-sanitized — not the configured value,
+     which is empty when the SDK inherits `OPENAI_BASE_URL`), model,
+     dimension and any exposed revision, **plus a non-secret
+     configuration label**, because two credentials at one gateway can
+     route to different deployments behind identical public fields.
+     Both services receive both configuration sets (`EMBED_*` and
+     `EMBED_NEXT_*`, each with its own Docker secret); the registry's
+     active generation names the live one; each service selects the
+     client whose label and identity match, at startup and on every
+     semantic query, and **fails closed unless every live generation**
+     (active, building, retained) **has a matching client** — not
+     merely one of them, or the indexer could not dual-write. Activation
+     is a registry change plus a restart or reload, never a
+     configuration edit.
+   - **Vector-only or rechunk.** A model switch reuses the stored
+     chunks only when the candidate tokenizer counts every document
+     input — every stored chunk and every chunkless thread's
+     display-subject fallback text — within the candidate's input
+     window, verified by counting; otherwise it is a rechunk through
+     the reindex bundle below.
+   - **Validation gate.** The Phase 1.5 baseline runs on a hashed test
+     embedder and proves wiring only. Activation requires #283's
+     evidence-recall eval against the old and candidate generations
+     with query vectors from their respective real embedders.
+   - **One generation per query.** Read the active ID, embed the query
+     **outside any transaction** (a read mark held across a provider
+     call blocks WAL truncation — the May bug), then open a snapshot,
+     re-read the ID, and run both dense lanes in it; re-embed once and
+     retry if the ID changed, else fail closed.
+   - **Synchronized with ingestion.** Dual-writing into every live
+     generation is enabled and durably queued **before** the build
+     watermark is recorded (or ingestion pauses across an atomic
+     catch-up-and-enable), so nothing falls between backfill and
+     dual-write. Every new or changed chunk, every **deletion** (reaps
+     and reprocessing), and every survivor-thread mean recomputation
+     apply to all live generations in one transaction — orphan vectors
+     would otherwise consume the candidate window. The lifecycle is
+     active A + candidate B → retained A + active B; the retained
+     generation stays written for its rollback window and is retired
+     only when that closes. Thread vectors are rebuilt with the
+     candidate model, using the display-subject fallback for chunkless
+     threads so none drops out on activation.
+   - **Schema and secrets: two recorded exceptions.** The `gNN` tables
+     are created and dropped at run time, which the schema rule (every
+     change bumps `SCHEMA_VERSION` and ships a migration) does not
+     allow: the registry and lifecycle arrive by one numbered
+     migration; the tables it manages are runtime-managed derived
+     storage, registered there, outside `SCHEMA_VERSION`, failing
+     closed at startup on registry/table disagreement. And the second
+     Docker secret for the embed layer breaks the one-secret-per-layer
+     credential contract in AGENTS.md's Architecture Summary. Both are
+     owner-approved exceptions (2026-09-30) that the design PR records
+     in AGENTS.md before any wiring lands.
 3. **Stage-aware pipeline manifest.** One active generation
    operationally, but the identifier is not opaque: a canonical
    manifest records parser / normalizer / chunker / embedding
@@ -287,10 +255,13 @@ reindex bundle path. Neither touches a source file or a migration.
      body candidates;
    - **`_safe_decode` stays**: `get_content()` raises `LookupError` on
      an unknown body charset.
-   What is left is one targeted change: after the existing pre-screen
-   and raw-header cap, parse an address header with
-   `email.headerregistry` instead of `_split_address_list` /
-   `_parse_addrs`, and possibly retire `_format_address`. The work
+   What is left is one targeted change: keep `_split_address_list` —
+   it *is* the pre-screen, the linear structural split that keeps
+   large lists, nested comments and group syntax out of any
+   whole-header stdlib parse, and the raw-header cap alone does not
+   replace it — and parse each element it yields with
+   `email.headerregistry` instead of `_parse_addrs`, possibly retiring
+   `_format_address` too. The work
    is a differential, not a rewrite: every parser fixture and every
    shape in the encoding parity test (plus the filename-only text part
    and repeated body candidates) run through both the old helpers and
@@ -329,37 +300,33 @@ first generation is built: a slice of Phase 3 item 1 moves ahead of
 Phase 2.
 
 **Two kinds of reindex, and their order.** Items 1–2 version the vec
-tables only; the canonical `message_chunks` / FTS corpus stays keyed by
-deterministic chunk IDs. So the generation lifecycle is first proved
-on the **unchanged** corpus: a vector-only generation (new model or
-dimension, same chunks), built, validated against the baseline,
-activated, and rolled back by switching tables. The reindex bundle
-above changes chunk IDs, so it cannot be a table switch: it lands as
-a reparse + rechunk + re-embed into a new generation whose
-`pipeline_config_hash` (item 3) records the new parser and chunker
-identity. Its rollback cannot be a rebuild of the previous hash: the
-bundle carries a forward-only schema migration (#217), so the previous
-image fails closed on the new schema and the new image no longer has
-the old algorithms, and a hash records identity without being able to
-recreate code. The **executable rollback is a file swap**: the index
-is one SQLite file and is disposable, so a chunk-changing rebuild
-never edits `mail.db` in place — an in-place reparse replaces
-canonical chunk rows and their IDs while a running MCP server would
-see half-rebuilt FTS data and old-generation vectors that no longer
-join. Instead the new image builds `mail.next.db` from the source
-corpus alongside the live file, with the live services untouched;
-validation and the eval slice run against `mail.next.db`; then the
-indexer and MCP server stop, the WAL of the live file is checkpointed,
-the files are swapped by rename, and the services start on the new
-image. Rollback is the same swap in reverse onto the previous image
-tag, executable for as long as the old file is kept — through the
-validation gate and the eval slice at least. (The vector-only
-lifecycle above needs none of this: it switches tables inside one
-file.) The manifest still earns its place — it says which
-stages changed and so which kind of rebuild is needed — and chunk/FTS
-coexistence machinery stays deferred rather than built now. Rebuild
-time is the cost of that choice; measure it on the first vector-only
-generation so the bundle's cost is a known number, not a hope.
+tables only; the chunk index stays keyed by deterministic chunk IDs.
+So the generation lifecycle is first proved on the **unchanged**
+corpus: a context-compatible, vector-only generation built, validated,
+activated and rolled back by switching tables, entirely inside the
+live file. The reindex bundle above changes chunk IDs, so it cannot be
+a table switch, and it cannot be an in-place rebuild either — a
+running MCP server would see half-rebuilt FTS data and vectors that
+no longer join. It is a **staged rebuild with a file swap**, and the
+design document above specifies it too: the new image builds
+`mail.next.db` from the source corpus alongside the live file, with an
+ingestion watermark recorded and the candidate indexer catching up
+through it; validation and the eval slice run against `mail.next.db`;
+the cutover pauses mbsync and the live indexer, drains the candidate
+to the watermark, checkpoints the live WAL, swaps the files by rename,
+and starts the services on the new image — so mail added, changed or
+reaped during the build is neither lost nor resurrected. Rollback is
+the reverse swap onto the previous image tag, executable for as long
+as the old file is kept (through the gate and the eval slice at
+least). A rebuild of the previous `pipeline_config_hash` is *not* a
+rollback: the bundle carries a forward-only migration (#217), so the
+previous image fails closed on the new schema and the new image lacks
+the old algorithms; the manifest records which stages changed, not a
+way to recreate code. Chunk/FTS coexistence machinery stays deferred.
+The bundle's cost is measured on a **representative staged full
+rebuild** — reparse, extraction (unless the extraction cache is
+safely seeded), FTS, thread and message rows, embedding — not on the
+vector-only generation, whose timing is only an embedding lower bound.
 
 ### Phase 3 — Measurement and product vertical slice
 
