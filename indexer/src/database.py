@@ -58,7 +58,7 @@ def _dedupe_by_canonical(addrs: list[str]) -> list[str]:
 
 
 # ``_apply_initial_schema`` builds the complete current schema.
-# Migration history up to v20 was squashed into it while no deployed
+# Migration history up to v21 was squashed into it while no deployed
 # database existed; databases older than ``SCHEMA_BASELINE_VERSION``
 # cannot be upgraded and must be rebuilt from Maildir.
 #
@@ -69,7 +69,7 @@ def _dedupe_by_canonical(addrs: list[str]) -> list[str]:
 # up. See ``src/migrations/runner.py`` for the file layout and
 # transactional guarantees.
 SCHEMA_VERSION = 21
-SCHEMA_BASELINE_VERSION = 20
+SCHEMA_BASELINE_VERSION = 21
 
 # The schema uses FTS5 ``contentless_delete=1``, which SQLite added in 3.43.
 # Validate the runtime version at Database init and fail fast with a clear
