@@ -562,8 +562,8 @@ def _extract_body_and_attachments(
     # email's text is not the parent's. Attachments inside it are still
     # recorded, as the old walk did (a PDF in a forwarded email).
     # Iterative, so nesting depth cannot recurse. The root is classified
-    # too (a message can be one attachment part), unless it is a
-    # ``multipart/*`` container.
+    # too: a message can be one attachment part, or a bundle presented as
+    # one, whose text is then not the message's body.
     # Each entry carries its path (child indexes from the root) so a part
     # whose raw bytes are needed can be located in ``raw``.
     locator = _RawLocator(raw, msg) if raw is not None else None
@@ -571,9 +571,7 @@ def _extract_body_and_attachments(
     while stack:
         part, in_attachment, path = stack.pop()
         ct = part.get_content_type()
-        is_attachment = _is_attachment(part) and not (
-            part is msg and part.get_content_maintype() == "multipart"
-        )
+        is_attachment = _is_attachment(part)
         decoded: email.message.Message | None = None
         if is_attachment:
             payload, decoded = _attachment_payload(

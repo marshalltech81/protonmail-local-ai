@@ -1130,6 +1130,25 @@ class TestAttachmentBoundaries:
         assert [a.content_type for a in msg.attachments] == ["message/rfc822"]
         assert b"INNER_MARKER" in msg.attachments[0].payload
 
+    def test_multipart_root_presented_as_an_attachment_is_one(self, tmp_path):
+        """Review round 5: a multipart root with an attachment disposition
+        was exempt from classification, so the bundle went unrecorded and
+        its text became the body. It is classified like a single-part
+        root; the PDF inside is still found."""
+        msg = self._parse_raw(
+            tmp_path,
+            self._HEAD + b'Content-Type: multipart/mixed; boundary="b"\r\n'
+            b'Content-Disposition: attachment; filename="bundle.mime"\r\n\r\n'
+            b"--b\r\nContent-Type: text/plain\r\n\r\nBUNDLE_TEXT\r\n"
+            b"--b\r\nContent-Type: application/pdf\r\n"
+            b'Content-Disposition: attachment; filename="inner.pdf"\r\n\r\n%PDF-INNER\r\n'
+            b"--b--\r\n",
+        )
+        assert "BUNDLE_TEXT" not in msg.body_text
+        by_name = {a.filename: a for a in msg.attachments}
+        assert set(by_name) == {"bundle.mime", "inner.pdf"}
+        assert b"BUNDLE_TEXT" in by_name["bundle.mime"].payload
+
     def test_attachments_inside_attachments_are_still_found(self, tmp_path):
         """Review round 2: the old walk found a PDF inside an attached
         bundle or email; stopping at the boundary lost it. Text inside an
