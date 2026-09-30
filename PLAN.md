@@ -181,7 +181,11 @@ reindex bundle path. Neither touches a source file or a migration.
      input — every stored chunk and every chunkless thread's
      display-subject fallback text — within the candidate's input
      window, verified by counting; otherwise it is a rechunk through
-     the reindex bundle below.
+     the reindex bundle below. Queries are the other input: today a
+     tool's query string reaches `embed_query` unbounded, so the
+     switch also fixes a supported query length, enforced on the query
+     side from the active generation's window, or a query that fit the
+     old model fails after activation and disables the semantic path.
    - **Validation gate.** The Phase 1.5 baseline runs on a hashed test
      embedder and proves wiring only. Activation requires #283's
      evidence-recall eval against the old and candidate generations
@@ -327,7 +331,12 @@ on #307):
 - **both** databases have their writers stopped and their WALs
   successfully checkpointed before either main file is renamed (the
   staged file is in WAL mode too, and a rename would orphan
-  `mail.next.db-wal`);
+  `mail.next.db-wal`); the MCP server is stopped and its in-flight
+  requests drained before that checkpoint, and restarted only once the
+  new file is installed and validated — it opens `mail.db` read-only
+  per request, so a request could otherwise keep serving the old inode
+  after the swap or open the path while neither file carries the live
+  name;
 - rollback is the reverse swap onto the previous image tag, and it is
   only valid if the retained file is either kept synchronized with
   ingestion for the rollback window or caught up under the same
@@ -527,7 +536,14 @@ How the first batch was worked, and what to repeat:
   caller. Specify the identifier (Message-ID plus a short content-hash
   discriminator, or a derived opaque ID), propagate it through thread,
   message, search and evidence results and the retrieval parameters,
-  and keep the bare Message-ID working for the unambiguous case.
+  and keep the bare Message-ID working for the unambiguous case. The
+  identifier replaces the bare Message-ID in every per-message key,
+  not only `messages` and the MCP contract: the chunker's
+  `message_pk` (so the deterministic `sha256(message_pk || index ||
+  text)` shape is kept but two claimants' chunks cannot collide),
+  attachment occurrence and chunk IDs, and the deletion paths that
+  drop chunks and attachments by Message-ID — otherwise reprocessing
+  or reaping one claimant overwrites or deletes the other's evidence.
   #260's serialized-form attachment hash gives the "compare full
   attachment metadata" finding a deterministic identity. A schema
   change, so it lands with the Phase 2 migration and reindex. That
