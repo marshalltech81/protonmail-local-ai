@@ -129,8 +129,17 @@ verify_cert_pin() {
     fi
 
     if ! pinned_fp="$(tr -d '[:space:]' <"$PIN_FILE")"; then
-        echo ">>> ERROR: could not read the Bridge cert pin at ${PIN_FILE} — refusing to sync." >&2
-        return 1
+        # Rotation replaces an unreadable file or a dangling link: write_pin
+        # renames over the path itself. It cannot replace a directory (mv
+        # would move the new pin into it), so that stays a manual repair.
+        if [[ "$BRIDGE_CERT_PIN_ROTATE" != "true" || -d "$PIN_FILE" ]]; then
+            echo ">>> ERROR: could not read the Bridge cert pin at ${PIN_FILE} — refusing to sync." >&2
+            if [[ -d "$PIN_FILE" ]]; then
+                echo ">>> The pin path is a directory; remove it by hand, then recreate mbsync." >&2
+            fi
+            return 1
+        fi
+        pinned_fp="(unreadable)"
     fi
     if [[ "$pinned_fp" == "$current_fp" ]]; then
         echo ">>> Bridge cert fingerprint matches the pinned value."

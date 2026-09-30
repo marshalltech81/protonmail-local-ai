@@ -195,6 +195,44 @@ rotation_replaces_an_invalid_pin() {
     [[ "$(cat "$PIN_FILE")" == "$FP_NEW" ]]
 }
 
+# Rotation must be able to repair a pin it cannot read (#342 review round
+# 1): the documented recovery is one run with BRIDGE_CERT_PIN_ROTATE=true.
+
+# shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
+rotation_replaces_a_dangling_pin_link() {
+    pin_setup dangling-rotate
+    mkdir -p "$STATE_DIR"
+    ln -s "$STATE_DIR/missing" "$PIN_FILE"
+    BRIDGE_CERT_PIN_ROTATE="true"
+    verify_cert_pin "$FP_NEW"
+    [[ ! -L "$PIN_FILE" && "$(cat "$PIN_FILE")" == "$FP_NEW" && ! -e "$STATE_DIR/missing" ]]
+}
+
+# shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
+rotation_replaces_an_unreadable_pin_file() {
+    pin_setup unreadable-rotate
+    mkdir -p "$STATE_DIR"
+    printf '%s\n' "$FP_OLD" >"$PIN_FILE"
+    chmod 000 "$PIN_FILE"
+    # root reads a mode-000 file, so there is nothing to test as root.
+    if [[ -r "$PIN_FILE" ]]; then
+        return 0
+    fi
+    BRIDGE_CERT_PIN_ROTATE="true"
+    verify_cert_pin "$FP_NEW"
+    [[ "$(cat "$PIN_FILE")" == "$FP_NEW" ]]
+}
+
+# shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
+rotation_refuses_a_directory_in_the_pins_place() {
+    pin_setup directory-rotate
+    mkdir -p "$PIN_FILE"
+    BRIDGE_CERT_PIN_ROTATE="true"
+    # mv would move the new pin into the directory and report success.
+    refuses_the_new_fingerprint
+    [[ -d "$PIN_FILE" && -z "$(find "$PIN_FILE" -mindepth 1)" ]]
+}
+
 # --- run_sync (#227) -------------------------------------------------------
 
 # shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
@@ -273,6 +311,10 @@ check "a malformed pin is refused and kept" malformed_pin_is_refused_and_kept
 check "an unreadable pin is refused" unreadable_pin_is_refused
 check "a dangling pin link is refused and kept" dangling_pin_link_is_refused_and_kept
 check "rotation replaces an invalid pin" rotation_replaces_an_invalid_pin
+check "rotation replaces a dangling pin link" rotation_replaces_a_dangling_pin_link
+check "rotation replaces an unreadable pin file" rotation_replaces_an_unreadable_pin_file
+check "rotation refuses a directory in the pin's place" \
+    rotation_refuses_a_directory_in_the_pins_place
 check "sync succeeds when mbsync and the repair succeed" \
     sync_succeeds_when_mbsync_and_repair_succeed
 check "a failed directory repair fails the sync" failed_directory_repair_fails_the_sync

@@ -477,7 +477,15 @@ than silently re-pinning whatever cert Bridge presents:
 (An unreadable pin or dangling link logs `could not read the Bridge
 cert pin` instead.) Find out how the pin was damaged first, then accept
 the cert Bridge presents now with the same one-time
-`BRIDGE_CERT_PIN_ROTATE=true` run as for a rotation.
+`BRIDGE_CERT_PIN_ROTATE=true` run as for a rotation; it replaces an
+empty, malformed or unreadable pin file and a dangling link.
+
+Rotation cannot replace a directory in the pin's place, and says so.
+Remove it from the `mbsync-state` volume by hand, for example with
+`docker compose run --rm --no-deps --entrypoint rm mbsync -r
+/state/bridge-cert.fingerprint` (pass the same `-f` overlay files as
+for `up`). The next start is then a first boot and pins whatever cert
+Bridge presents, as a rotation would.
 
 `make clean` removes the `mbsync-state` volume along with everything
 else, so the next boot after `make clean` is treated as a first boot
