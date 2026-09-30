@@ -737,7 +737,8 @@ Order of work, chosen to minimise reindexes:
    message, no values logged); ~~tombstone revalidation on restore
    (#301)~~ (done: a tombstone is refused for a path the message no
    longer maps to); `message_thread_map` lookup indexes as migration `0022`
-   (#302, index-only); the unbounded recovery parameter list (#306);
+   (#302, index-only); ~~the unbounded recovery parameter list
+   (#306)~~ (done: recovery lookups bind IDs in batches of 500);
    and the #257 sweep (classify parse-stage and provider exceptions
    at their boundary, `caplog` marker tests). MCP: ~~the two quadratic
    regexes (#327, #328)~~ (done: one way to match each whitespace run);

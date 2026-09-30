@@ -81,6 +81,11 @@ MIN_SQLITE_VERSION = (3, 43, 0)
 # Qwen3-Embedding-8B is 4096-dim.
 EMBEDDING_DIM = 4096
 
+# Upper bound on the ``?`` placeholders bound into one ``IN (...)``
+# lookup. The connection's ``SQLITE_LIMIT_VARIABLE_NUMBER`` depends on
+# the SQLite build, so lookups over an unbounded ID list batch under it.
+_IN_CLAUSE_BATCH_SIZE = 500
+
 
 class SQLiteTooOldError(RuntimeError):
     """Raised when the runtime SQLite library is older than required."""
@@ -1377,26 +1382,30 @@ class Database:
         if not chunkless_rows:
             return []
 
-        # Step 2: pull every chunkless thread's stored vector in ONE
-        # query, then filter all-zero rows in Python. vec0 supports
-        # PK ``WHERE thread_id IN (...)`` lookups (each becomes an
-        # internal PK seek), so this is a single SELECT instead of
-        # one per thread. The all-zero check stays in Python because
-        # vec0 doesn't expose equality predicates against the
-        # embedding payload itself.
+        # Step 2: pull the chunkless threads' stored vectors in batches
+        # of ``_IN_CLAUSE_BATCH_SIZE``, then filter all-zero rows in
+        # Python. vec0 supports PK ``WHERE thread_id IN (...)`` lookups
+        # (each becomes an internal PK seek), so this is one SELECT per
+        # batch instead of one per thread; batching keeps each
+        # statement under the variable limit and holds at most one
+        # batch of embedding blobs in memory. The all-zero check stays
+        # in Python because vec0 doesn't expose equality predicates
+        # against the embedding payload itself.
         chunkless_ids = [r["thread_id"] for r in chunkless_rows]
-        placeholders = ",".join(["?"] * len(chunkless_ids))
-        vec_rows = self._conn.execute(
-            f"SELECT thread_id, embedding FROM threads_vec WHERE thread_id IN ({placeholders})",  # nosec B608
-            chunkless_ids,
-        ).fetchall()
         stuck_thread_ids: list[str] = []
-        for row in vec_rows:
-            blob = row["embedding"]
-            count = len(blob) // 4
-            vec = struct.unpack(f"{count}f", blob)
-            if all(v == 0.0 for v in vec):
-                stuck_thread_ids.append(row["thread_id"])
+        for start in range(0, len(chunkless_ids), _IN_CLAUSE_BATCH_SIZE):
+            id_batch = chunkless_ids[start : start + _IN_CLAUSE_BATCH_SIZE]
+            placeholders = ",".join(["?"] * len(id_batch))
+            vec_rows = self._conn.execute(
+                f"SELECT thread_id, embedding FROM threads_vec WHERE thread_id IN ({placeholders})",  # nosec B608
+                id_batch,
+            ).fetchall()
+            for row in vec_rows:
+                blob = row["embedding"]
+                count = len(blob) // 4
+                vec = struct.unpack(f"{count}f", blob)
+                if all(v == 0.0 for v in vec):
+                    stuck_thread_ids.append(row["thread_id"])
 
         if not stuck_thread_ids:
             return []
@@ -1405,12 +1414,17 @@ class Database:
         # threads. ``message_thread_map.filepath`` is the same value
         # the queue uses, so re-enqueueing routes through the same
         # parse → thread → embed → commit pipeline as a fresh scan.
-        placeholders = ",".join(["?"] * len(stuck_thread_ids))
-        rows = self._conn.execute(
-            f"SELECT filepath FROM message_thread_map WHERE thread_id IN ({placeholders})",  # nosec B608
-            stuck_thread_ids,
-        ).fetchall()
-        return [r["filepath"] for r in rows]
+        # Batched for the same variable limit as step 2.
+        filepaths: list[str] = []
+        for start in range(0, len(stuck_thread_ids), _IN_CLAUSE_BATCH_SIZE):
+            id_batch = stuck_thread_ids[start : start + _IN_CLAUSE_BATCH_SIZE]
+            placeholders = ",".join(["?"] * len(id_batch))
+            rows = self._conn.execute(
+                f"SELECT filepath FROM message_thread_map WHERE thread_id IN ({placeholders})",  # nosec B608
+                id_batch,
+            ).fetchall()
+            filepaths.extend(r["filepath"] for r in rows)
+        return filepaths
 
     @_synchronized
     def get_thread_display_subject(self, thread_id: str) -> str | None:

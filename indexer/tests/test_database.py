@@ -2685,3 +2685,39 @@ class TestInterruptedInitialSchema:
             SCHEMA_VERSION
         )
         assert db.count_total_messages() == 0
+
+
+class TestZeroVectorRecoveryBatching:
+    """#306: the recovery lookup must bind its thread IDs in bounded
+    batches, so a chunkless-thread count above the connection's
+    ``SQLITE_LIMIT_VARIABLE_NUMBER`` cannot abort startup."""
+
+    def test_recovery_batches_under_the_variable_limit(self, db, monkeypatch):
+        from src import database
+
+        monkeypatch.setattr(database, "_IN_CLAUSE_BATCH_SIZE", 10)
+        stuck_paths = []
+        for i in range(40):
+            stuck = i % 3 == 0  # 14 stuck, 26 healthy, interleaved
+            path = f"/maildir/INBOX/cur/m{i}"
+            msg = make_message(message_id=f"m{i}@example.com", filepath=path)
+            embedding = [0.0] * EMBEDDING_DIM if stuck else FAKE_EMBEDDING
+            db.upsert_thread(make_thread(messages=[msg], thread_id=f"t{i}"), embedding)
+            if stuck:
+                stuck_paths.append(path)
+
+        # Lower the limit below the 40 chunkless IDs before any recovery
+        # statement is prepared (the limit is checked at prepare time).
+        db._conn.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 16)
+        statements: list[str] = []
+        db._conn.set_trace_callback(statements.append)
+        try:
+            found = db.find_zero_vector_chunkless_thread_filepaths()
+        finally:
+            db._conn.set_trace_callback(None)
+
+        assert sorted(found) == sorted(stuck_paths)
+        vec_lookups = [s for s in statements if "FROM threads_vec WHERE thread_id IN" in s]
+        map_lookups = [s for s in statements if "FROM message_thread_map WHERE thread_id IN" in s]
+        assert len(vec_lookups) == 4  # ceil(40 / 10)
+        assert len(map_lookups) == 2  # ceil(14 / 10)
