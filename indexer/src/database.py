@@ -355,7 +355,7 @@ class Database:
                 has_attachments INTEGER DEFAULT 0,
                 body_text       TEXT,
                 fts_rowid       INTEGER,
-                display_subject TEXT                     -- original-cased subject for retrieval; NULL on legacy rows, COALESCE'd back to subject by readers
+                display_subject TEXT                     -- original-cased subject for retrieval; NULL until set, COALESCE'd back to subject by readers
             );
 
             -- mcp-server hybrid-search joins ``threads`` back from ``threads_fts``
@@ -692,8 +692,8 @@ class Database:
                 # display_subject merge: prefer the subject of the
                 # oldest message we have ever seen for this thread.
                 # Three cases:
-                #   1. Existing display_subject is NULL (legacy v12 row,
-                #      or first non-NULL writer hasn't arrived yet) →
+                #   1. Existing display_subject is NULL (the first
+                #      non-NULL writer hasn't arrived yet) →
                 #      take the incoming.
                 #   2. The incoming earliest message is older than the
                 #      currently-recorded ``date_first`` → the new
@@ -1421,8 +1421,7 @@ class Database:
         maintained by ``upsert_thread``'s merge so the value is stable
         across the lifetime of the thread except when a genuinely
         older message arrives out of order. ``None`` when the thread
-        does not exist OR is a legacy v12 row that has not been
-        refreshed since v13 added the column.
+        does not exist or its ``display_subject`` is not set.
 
         Used by the chunkless-thread subject-fallback path in the
         indexer's Phase 2a and the reconciler's reap rebuild so both

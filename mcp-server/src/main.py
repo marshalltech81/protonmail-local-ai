@@ -130,8 +130,8 @@ def _read_secret(secret_name: str, env_fallback: str = "") -> str:
     """Read a Docker secret file, falling back to an environment variable.
 
     Prefer the secret file so the value is never exposed via docker inspect.
-    The env fallback preserves backward compatibility for local dev without
-    Docker secrets configured.
+    The env fallback serves local dev runs without Docker secrets
+    configured.
 
     Both paths strip surrounding whitespace. Operators using ``echo`` or
     a heredoc to write a secret file commonly leave a trailing newline,

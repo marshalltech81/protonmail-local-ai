@@ -313,8 +313,6 @@ def register_retrieval_tools(server, db):
     @server.tool()
     async def get_message(
         message_id: str,
-        folder: str = "INBOX",
-        body_format: str = "text",
     ) -> Annotated[CallToolResult, GetMessageOutput]:
         """
         Get one message's own headers and indexed body.
@@ -338,8 +336,6 @@ def register_retrieval_tools(server, db):
 
         Args:
             message_id: The Message-ID header value
-            folder: Retained for interface compatibility; ignored in local-only mode
-            body_format: Retained for interface compatibility; ignored in local-only mode
 
         Returns:
             The message's headers, its thread ID and subject, and its
@@ -349,7 +345,7 @@ def register_retrieval_tools(server, db):
         log_tool_call(
             log,
             "get_message",
-            {"message_id": message_id, "folder": folder, "body_format": body_format},
+            {"message_id": message_id},
         )
         try:
             view = await asyncio.to_thread(db.get_message_view, message_id)
@@ -378,8 +374,8 @@ def register_retrieval_tools(server, db):
                     view.body.text,
                 ]
             else:
-                # No body chunks — a legacy thread, an empty-body
-                # message, or one not chunked yet. Fall back to the
+                # No body chunks — an empty-body message or one not
+                # chunked yet. Fall back to the
                 # accumulated parent-thread context.
                 lines += [
                     "",
