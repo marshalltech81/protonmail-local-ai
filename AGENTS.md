@@ -329,11 +329,13 @@ content is as private as a credential.
   embeds the header it refused, `UnicodeEncodeError` its data, and a
   parser defect raised under a `raise_on_defect` policy
   (`FirstHeaderLineIsContinuationDefect` carries the offending line;
-  `MessageDefect` is a `ValueError`, not a `MessageError`). Catch
-  `email.errors.MessageError`, `email.errors.MessageDefect` and
-  `UnicodeError` at the boundary that produced them and degrade with a
-  fixed message; never let them reach `indexing_jobs.last_error`
-  through `_stage_error`.
+  `MessageDefect` is a `ValueError`, not a `MessageError`), and a
+  codec lookup on a sender-supplied charset label raises `LookupError`
+  with the label in its message. Catch `email.errors.MessageError`,
+  `email.errors.MessageDefect`, `UnicodeError` and (at each decode
+  site) `LookupError` at the boundary that produced them and degrade
+  with a fixed message or a utf-8 fallback; never let them reach
+  `indexing_jobs.last_error` through `_stage_error`.
 - Known gaps are tracked in #257, which holds the full list. Examples:
   the parser logs a malformed `Date` header verbatim, the attachment
   pipeline and extractors log filenames and raw parser/OCR exceptions,

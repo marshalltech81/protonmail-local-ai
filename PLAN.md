@@ -286,8 +286,12 @@ reindex bundle path. Neither touches a source file or a migration.
    since a parse change can alter bodies and attachment identity.
 
 **Reindex bundle.** Fixes that change chunk IDs, bodies or message
-identity land together with the first Phase 2 generation, never one at
-a time: reply subjects in the embedding input and thread body (#303);
+identity share one rebuild with the first Phase 2 generation, never one
+reindex each. One rebuild, not one PR: each fix is its own reviewed PR
+per the review rules, and a fix that would change bodies or IDs for
+newly ingested mail before the rebuild is gated behind the pipeline
+configuration so the live index stays internally consistent until the
+single staged rebuild picks all of them up. The fixes: reply subjects in the embedding input and thread body (#303);
 chunk overlap past `max_tokens` (#208); Message-ID conflicts kept as
 both claimants (#217); a deterministic date source for undated mail
 (#297's second half, the deferred received-date item: the top
@@ -337,6 +341,13 @@ on #307):
   per request, so a request could otherwise keep serving the old inode
   after the swap or open the path while neither file carries the live
   name;
+- the swap is crash-consistent: the retained file is kept by a hard
+  link taken first, the staged file then replaces the live name in a
+  **single atomic rename**, and the directory is `fsync`ed — never a
+  remove-then-rename pair that leaves an interval with no `mail.db` —
+  and startup recognises and resolves a half-finished cutover (a
+  marker written before the swap and cleared after) rather than
+  finding an indeterminate state;
 - rollback is the reverse swap onto the previous image tag, and it is
   only valid if the retained file is either kept synchronized with
   ingestion for the rollback window or caught up under the same
@@ -352,7 +363,11 @@ on #307):
 - the bundle's cost is measured on a representative **staged full
   rebuild** (reparse, extraction unless the cache is safely seeded,
   FTS, thread and message rows, embedding); the vector-only
-  generation's timing is only an embedding lower bound.
+  generation's timing is only an embedding lower bound. The gate also
+  covers **peak storage**: two complete databases, their vector tables
+  and WALs, and the extraction cache must fit with headroom, since a
+  full data volume also fails the live indexer's commits, so a
+  conservative free-space preflight runs before staging begins.
 
 ### Phase 3 — Measurement and product vertical slice
 
