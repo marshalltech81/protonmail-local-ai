@@ -172,7 +172,7 @@ reindex bundle path. Neither touches a source file or a migration.
    database whose registry and tables disagree fails closed at startup
    with the same actionable message the migration runner gives.
    Blue/green lifecycle: build → validate → activate atomically →
-   retain old generation → rollback if needed. Two parts of that are
+   retain old generation → rollback if needed. Four parts of that are
    protocol, not just DDL:
    - **Validation gate:** the Phase 1.5 baseline runs both sides on a
      hashed test embedder, so it proves wiring and snapshot stability
@@ -196,8 +196,26 @@ reindex bundle path. Neither touches a source file or a migration.
      database; the MCP server reads them at startup and on each
      semantic query, and **fails closed** (semantic lanes off, status
      reporting the mismatch) while its configured embedder does not
-     match on every recorded field. Activation therefore includes updating the MCP
-     configuration and restarting or reloading it.
+     match on every recorded field. Activation therefore includes
+     updating the MCP configuration and restarting or reloading it.
+   - **One generation per query:** the identity check, the query
+     embedding and the KNN run against the same generation. The MCP
+     server reads the active generation ID and runs both dense lanes
+     inside one read transaction (SQLite's WAL gives that transaction
+     a stable snapshot), so an activation that commits mid-request
+     cannot make a request embed with model A and search model B's
+     tables; requests that began before the switch finish on the old
+     snapshot, and the restart or reload above drains them.
+   - **Synchronized with ingestion:** mail keeps arriving during a
+     build. A candidate is built to an ingestion watermark, then the
+     indexer dual-writes every new or changed chunk (and thread mean)
+     into every generation that is active or building-and-caught-up,
+     so the candidate catches up incrementally; activation pauses the
+     indexer's drain for the switch and resumes it; the retained
+     generation stays dual-written for its rollback window and is
+     dropped only when that window closes. Without this, mail indexed
+     after the watermark would vanish from semantic retrieval on
+     activation, and a rollback would land on a stale generation.
 3. **Stage-aware pipeline manifest.** One active generation
    operationally, but the identifier is not opaque: a canonical
    manifest records parser / normalizer / chunker / embedding
