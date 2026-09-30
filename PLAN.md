@@ -199,13 +199,18 @@ reindex bundle path. Neither touches a source file or a migration.
      match on every recorded field. Activation therefore includes
      updating the MCP configuration and restarting or reloading it.
    - **One generation per query:** the identity check, the query
-     embedding and the KNN run against the same generation. The MCP
-     server reads the active generation ID and runs both dense lanes
-     inside one read transaction (SQLite's WAL gives that transaction
-     a stable snapshot), so an activation that commits mid-request
-     cannot make a request embed with model A and search model B's
-     tables; requests that began before the switch finish on the old
-     snapshot, and the restart or reload above drains them.
+     embedding and the KNN run against the same generation — but the
+     network embed stays **outside** any SQLite transaction, because a
+     read mark held across a slow provider call blocks WAL truncation
+     (the unbounded-WAL bug fixed in May, and the reason the MCP layer
+     uses short-lived readers). The server reads the active generation
+     ID, embeds the query with that generation's model, then opens a
+     read transaction, re-reads the ID, and runs both dense lanes in
+     that snapshot; if the ID changed in between, it re-embeds once
+     with the new generation's model and retries, and otherwise fails
+     closed. An activation that commits mid-request can therefore
+     never pair one model's query vector with another's tables, and
+     no snapshot outlives a provider timeout.
    - **Synchronized with ingestion:** mail keeps arriving during a
      build. A candidate is built to an ingestion watermark, then the
      indexer dual-writes every new or changed chunk (and thread mean)
@@ -216,6 +221,18 @@ reindex bundle path. Neither touches a source file or a migration.
      dropped only when that window closes. Without this, mail indexed
      after the watermark would vanish from semantic retrieval on
      activation, and a rollback would land on a stale generation.
+     Dual-writing needs an embedder client **per live generation**,
+     and the indexer builds exactly one from the `EMBED_*` set, while
+     the registry holds identity only, never credentials. So at most
+     two generations are live at once — the active one and the
+     candidate, which becomes the retained one after the switch — and
+     the second has its own configuration set (`EMBED_NEXT_BASE_URL`,
+     `EMBED_NEXT_MODEL`, and a second Docker secret,
+     `.secrets/embed_next_api_key.txt`, mode 600) for the life of the
+     build and the rollback window; when the window closes the
+     operator promotes the candidate's set to `EMBED_*` and clears the
+     second. This keeps the per-layer contract (mode / base URL /
+     model / secret) intact and just doubles it for the transition.
 3. **Stage-aware pipeline manifest.** One active generation
    operationally, but the identifier is not opaque: a canonical
    manifest records parser / normalizer / chunker / embedding
@@ -313,15 +330,21 @@ identity. Its rollback cannot be a rebuild of the previous hash: the
 bundle carries a forward-only schema migration (#217), so the previous
 image fails closed on the new schema and the new image no longer has
 the old algorithms, and a hash records identity without being able to
-recreate code. The **executable rollback is a copy**: the index is one
-SQLite file and is disposable, so the rebuild starts by taking a
-**consistent** copy of `mail.db`: stop the indexer (the only writer)
-and the MCP server, checkpoint the WAL, copy the file — or use
-SQLite's online backup API (`Connection.backup()`), which is the only
-correct way to copy while anything is live — and rollback is stop,
-restore the copy, run the previous image tag. Keep that copy until the
-new generation has passed the validation gate above and the eval slice
-on real queries. The manifest still earns its place — it says which
+recreate code. The **executable rollback is a file swap**: the index
+is one SQLite file and is disposable, so a chunk-changing rebuild
+never edits `mail.db` in place — an in-place reparse replaces
+canonical chunk rows and their IDs while a running MCP server would
+see half-rebuilt FTS data and old-generation vectors that no longer
+join. Instead the new image builds `mail.next.db` from the source
+corpus alongside the live file, with the live services untouched;
+validation and the eval slice run against `mail.next.db`; then the
+indexer and MCP server stop, the WAL of the live file is checkpointed,
+the files are swapped by rename, and the services start on the new
+image. Rollback is the same swap in reverse onto the previous image
+tag, executable for as long as the old file is kept — through the
+validation gate and the eval slice at least. (The vector-only
+lifecycle above needs none of this: it switches tables inside one
+file.) The manifest still earns its place — it says which
 stages changed and so which kind of rebuild is needed — and chunk/FTS
 coexistence machinery stays deferred rather than built now. Rebuild
 time is the cost of that choice; measure it on the first vector-only
