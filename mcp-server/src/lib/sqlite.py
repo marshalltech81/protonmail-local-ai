@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from email.utils import parseaddr
 from pathlib import Path
+from urllib.parse import quote
 
 import sqlite_vec
 
@@ -729,7 +730,11 @@ class Database:
         # without the connection trying to create or write a journal sidecar.
         # ``PRAGMA query_only`` is kept as defense-in-depth — any accidental
         # mutation via extension or future code path still fails fast.
-        uri = f"file:{self.path}?mode=ro"
+        # The path is percent-encoded so URI-special characters (``#``,
+        # ``?``, ``%``) name the file instead of starting a fragment or
+        # query that would drop ``mode=ro`` and open or create a
+        # different file.
+        uri = f"file:{quote(str(self.path))}?mode=ro"
         conn = sqlite3.connect(uri, uri=True, check_same_thread=False)
         conn.row_factory = sqlite3.Row
         conn.enable_load_extension(True)

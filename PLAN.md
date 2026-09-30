@@ -711,9 +711,11 @@ Order of work, chosen to minimise reindexes:
    (#302, index-only); the unbounded recovery parameter list (#306);
    and the #257 sweep (classify parse-stage and provider exceptions
    at their boundary, `caplog` marker tests). MCP: the two quadratic
-   regexes (#327, #328); the privacy trio — redirects that would
+   regexes (#327, #328); ~~the privacy trio — redirects that would
    forward prompts and API keys (#325), inherited endpoint userinfo
-   in the startup log (#326), the read-only URI bypass (#311); the
+   in the startup log (#326), the read-only URI bypass (#311)~~
+   (done: same-origin request hook on the Anthropic backend, userinfo
+   check on the resolved endpoint, percent-encoded URI path); the
    "errors reported as success" cluster — intelligence tools
    returning `Error:` prose as `isError=false` (#319, the unfinished
    half of Phase 1 item 2; `docs/mcp-tools.md` already promises

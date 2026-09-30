@@ -389,6 +389,11 @@ def main():
         api_key=EMBED_API_KEY,
         timeout_secs=EMBED_TIMEOUT_SECS,
     )
+    # An empty ``*_BASE_URL`` lets the SDK read its own env var
+    # (``OPENAI_BASE_URL``, ``ANTHROPIC_BASE_URL``, ``CO_API_URL``),
+    # which bypasses the config-load userinfo guard above. Re-check the
+    # resolved endpoint before it reaches the startup log or an error.
+    _reject_url_userinfo("EMBED_BASE_URL (or the SDK's OPENAI_BASE_URL)", embed_client.base_url)
 
     inference_client: InferenceClient | None = None
     if INFERENCE_MODE in {"openai", "anthropic"}:
@@ -402,11 +407,21 @@ def main():
             max_tokens=INFERENCE_MAX_TOKENS,
             timeout_secs=INFERENCE_TIMEOUT_SECS,
         )
+        _reject_url_userinfo(
+            "INFERENCE_BASE_URL (or the SDK's OPENAI_BASE_URL / ANTHROPIC_BASE_URL)",
+            inference_client.base_url,
+        )
 
     reranker: CohereReranker | None = None
     if RERANK_MODE == "cohere":
         _require_env("RERANK_MODE", RERANK_MODE, "RERANK_MODEL", RERANK_MODEL)
         _require_env("RERANK_MODE", RERANK_MODE, "RERANK_API_KEY", RERANK_API_KEY)
+        # The Cohere SDK exposes its resolved URL only through private
+        # API, so check the env var it falls back to directly.
+        _reject_url_userinfo(
+            "RERANK_BASE_URL (or the SDK's CO_API_URL)",
+            RERANK_BASE_URL or os.environ.get("CO_API_URL", ""),
+        )
         reranker = CohereReranker(
             RerankConfig(
                 base_url=RERANK_BASE_URL,

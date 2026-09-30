@@ -30,6 +30,36 @@ class TestReadOnlyConnection:
         assert row["subject"] == "invoice for march"
 
 
+class TestUriSpecialCharactersInPath:
+    """The filesystem path is encoded into the SQLite file URI, so
+    URI-special characters in SQLITE_PATH name the file rather than
+    starting a fragment or query that drops ``mode=ro`` (#311)."""
+
+    @pytest.mark.parametrize(
+        "name",
+        ["mail#copy.db", "mail?copy.db", "mail%23copy.db", "mail copy.db", "mäil-コピー.db"],
+    )
+    def test_opens_intended_file_read_only_without_creating_sibling(self, tmp_path, name):
+        target = tmp_path / name
+        with closing(sqlite3.connect(target)) as seed:
+            seed.execute("CREATE TABLE intended_marker (x INTEGER)")
+            seed.commit()
+        before = sorted(p.name for p in tmp_path.iterdir())
+
+        with closing(Database(str(target))._connect()) as conn:
+            files = [row["file"] for row in conn.execute("PRAGMA database_list")]
+            tables = [
+                row["name"]
+                for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+            ]
+            with pytest.raises(sqlite3.OperationalError, match="readonly|read-only"):
+                conn.execute("CREATE TABLE should_fail (x INTEGER)")
+
+        assert files == [str(target)]
+        assert "intended_marker" in tables
+        assert sorted(p.name for p in tmp_path.iterdir()) == before
+
+
 class TestPing:
     def test_ping_succeeds_on_healthy_db(self, seeded_db: Database):
         # Returns None on success; no exception is the signal.

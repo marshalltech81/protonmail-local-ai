@@ -576,3 +576,72 @@ class TestFilteredOutput:
         with pytest.raises(InferenceTruncatedError) as err:
             asyncio.run(c.complete("sys", "user"))
         assert err.value.partial == "Partly"
+
+
+_MAIL_MARKER = "SYNTHETIC_MAIL"
+_KEY_MARKER = "sk-test-marker"  # pragma: allowlist secret
+
+
+def _anthropic_message_json() -> dict:
+    return {
+        "id": "msg_synthetic",
+        "type": "message",
+        "role": "assistant",
+        "model": "synthetic",
+        "content": [{"type": "text", "text": "done"}],
+        "stop_reason": "end_turn",
+        "stop_sequence": None,
+        "usage": {"input_tokens": 1, "output_tokens": 1},
+    }
+
+
+class TestAnthropicRedirectPolicy:
+    """A configured endpoint that redirects must not make the SDK
+    forward the prompt and ``x-api-key`` to another origin (#325).
+    Only the HTTP transport is replaced, so the SDK's own redirect
+    handling and header construction run as in production."""
+
+    def _backend_with_redirect(self, location: str):
+        import httpx2
+
+        seen: list = []
+
+        def handler(request):
+            seen.append(request)
+            if len(seen) == 1:
+                return httpx2.Response(307, headers={"location": location})
+            return httpx2.Response(200, json=_anthropic_message_json())
+
+        backend = _AnthropicBackend(
+            base_url="http://host.docker.internal:8001",
+            model="synthetic",
+            api_key=_KEY_MARKER,
+            max_tokens=16,
+            timeout_secs=5.0,
+        )
+        http_client = backend.client._client
+        http_client._transport = httpx2.MockTransport(handler)
+        http_client._mounts = {}
+        return backend, seen
+
+    def test_cross_origin_redirect_is_not_followed(self, caplog):
+        backend, seen = self._backend_with_redirect("https://different-origin.invalid/v1/messages")
+        with pytest.raises(Exception) as err:
+            asyncio.run(backend.complete("synthetic", _MAIL_MARKER))
+        # Only the configured endpoint was contacted; the body and key
+        # never reached the redirect target.
+        assert [r.url.host for r in seen] == ["host.docker.internal"]
+        assert "redirected to a different origin" in caplog.text
+        assert "different-origin.invalid" not in caplog.text
+        assert _MAIL_MARKER not in str(err.value)
+        assert _KEY_MARKER not in str(err.value)
+        assert _MAIL_MARKER not in caplog.text
+        assert _KEY_MARKER not in caplog.text
+
+    def test_same_origin_redirect_is_followed(self):
+        backend, seen = self._backend_with_redirect(
+            "http://host.docker.internal:8001/v1/messages?moved=1"
+        )
+        assert asyncio.run(backend.complete("synthetic", _MAIL_MARKER)) == "done"
+        assert len(seen) == 2
+        assert _MAIL_MARKER in seen[1].content.decode()
