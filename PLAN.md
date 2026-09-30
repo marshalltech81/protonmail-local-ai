@@ -134,8 +134,11 @@ shows a reviewed snapshot diff with golden checks still passing.
 ### Phase 2 — Swappable embedding / vector generations
 
 **Exit criterion:** changing embedding models never requires altering
-the canonical source corpus or its schema — vector storage is a
-disposable, regenerable index.
+the source corpus (the Maildir) or the SQLite schema. Everything
+derived — vectors first, but the chunk index too — is disposable and
+regenerable: a context-compatible model switch regenerates vectors
+only; an incompatible one regenerates chunks and vectors through the
+reindex bundle path. Neither touches a source file or a migration.
 
 1. **`vector_generations` registry**: generation_id, provider, model,
    revision, dimensions, tokenizer, chunk_config_hash, created_at,
@@ -151,12 +154,26 @@ disposable, regenerable index.
 2. **Per-generation vec tables** (`vec_chunks_gNN` **and**
    `vec_threads_gNN` — sqlite-vec bakes dimension into DDL, so
    per-generation tables are structurally required, and the semantic
-   path fuses both dense lanes, so the thread vectors are rebuilt from
-   the new chunk vectors and both tables switch in one transaction;
-   switching one alone would fuse old-model thread vectors with
-   new-model query vectors, or error on a dimension change). Blue/green lifecycle: build → validate → activate
-   atomically → retain old generation → rollback if needed. Two parts
-   of that are protocol, not just DDL:
+   path fuses both dense lanes, so the thread vectors are rebuilt with
+   the candidate model — the mean of the new chunk vectors, or, for a
+   thread with no chunks, the candidate embedding of its stored display
+   subject, reproducing the fallback the pipeline uses today so no
+   thread drops out of semantic retrieval on activation — and both
+   tables switch in one transaction; switching one alone would fuse
+   old-model thread vectors with new-model query vectors, or error on
+   a dimension change). These tables are created and dropped by the
+   generation lifecycle at run time, which AGENTS.md's schema rule
+   (every schema change bumps `SCHEMA_VERSION` and ships a migration)
+   does not allow as written. Item 2 therefore lands with an explicit,
+   owner-approved amendment to that rule: the `vector_generations`
+   registry and the lifecycle code arrive by one numbered migration;
+   the `vec_*_gNN` tables it manages are runtime-managed derived
+   storage, registered in that table, outside `SCHEMA_VERSION`, and a
+   database whose registry and tables disagree fails closed at startup
+   with the same actionable message the migration runner gives.
+   Blue/green lifecycle: build → validate → activate atomically →
+   retain old generation → rollback if needed. Two parts of that are
+   protocol, not just DDL:
    - **Validation gate:** the Phase 1.5 baseline runs both sides on a
      hashed test embedder, so it proves wiring and snapshot stability
      and nothing about a real model. Activation requires #283's
@@ -621,7 +638,12 @@ Order of work, chosen to minimise reindexes:
    the empty pin re-TOFU (#278) and the rotation flag surviving
    restarts (#267, docs), the unbounded connect probe (#271), signal
    forwarding to the sync child (#280), and the smoke-test one-liner
-   (#269) with #268's minimal fix.
+   (#269) with #268's minimal fix. Bridge, both decided as items 13–14
+   above and needing the first Bridge shell test harness: the
+   entrypoint PR (#242 `BRIDGE_FORCE_CLI`, #266 bootstrap order, #270
+   the impossible `su` shortcut) and the updater-gate PR (#245, with
+   its enabled-vault test) — before the eval slice, since existing
+   vaults make unpinned update requests until #245 lands.
 2. **Extractor version bumps, one PR per module** so each cache
    refresh happens once: `xlsx` (#294's shared-string budget — a
    behaviour change for the same bytes, so it lands with the bump
