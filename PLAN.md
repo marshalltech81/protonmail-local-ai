@@ -161,6 +161,26 @@ disposable, regenerable index.
    kinds. `quoting.py` already segments pre-chunk; this codifies it
    and lets the embedder skip/deprioritize by kind. No
    `content_blocks` table until a non-chunking consumer needs one.
+5. **Candidate: move the parser off `compat32`** (added 2026-09-30
+   after PR #260). `parser.py` uses the legacy `email` parser, and
+   most of its hand-rolled header code exists to work around that:
+   `_parse_addrs` / `_split_address_list` / `_format_address`
+   (address parsing pitfalls), `_decode_encoded_word_runs` (the
+   quadratic `decode_header`, #239), `str()` around header values that
+   come back as `Header` objects (the #260 round-1 crash), and
+   `_is_attachment`. The modern API — `email.policy.default` with
+   `EmailMessage`: `msg["From"].addresses`, decoded header values,
+   `is_attachment()`, `iter_attachments()`, `get_content()` — covers
+   these in the standard library. Scope it as a spike, not a swap: the
+   default policy is stricter and raises on some hostile input that
+   `compat32` tolerates, and it does not change how a transfer-encoded
+   `message/rfc822` is parsed (verified on 3.14: identical corruption).
+   Exit criterion: the parser fixture suite and the 25-shape encoding
+   parity test pass unchanged, the hand-rolled helpers above are
+   deleted or reduced to thin wrappers, and hostile-input tests
+   (nested comments, 8-bit headers, folded References) still degrade
+   rather than raise. Lands with the Phase 2 reindex, since any parse
+   change can alter bodies and attachment identity.
 
 ### Phase 3 — Measurement and product vertical slice
 
@@ -278,8 +298,8 @@ How the first batch was worked, and what to repeat:
 3. **Expect Codex rounds.** Every PR took 1–5 rounds, and later rounds
    found gaps in the fixes themselves. Record each round in the PR body
    and PLAN, and resolve threads only once fixed or deferred by the owner.
-4. **Guards in the loop, mechanisms out of it** (learned on #260, nine
-   rounds). A finding that needs a check, cap or fallback is fixed in
+4. **Guards in the loop, mechanisms out of it** (learned on #260,
+   fourteen rounds). A finding that needs a check, cap or fallback is fixed in
    the round. One that needs a new mechanism — new parsing of untrusted
    input above all — is a stop-and-ask, with "document the limitation"
    as the default; three rounds on one mechanism means re-scope. Before
