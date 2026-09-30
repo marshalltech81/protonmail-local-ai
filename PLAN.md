@@ -624,10 +624,12 @@ advisories (#338). In review, merge when Codex is clean on the head:
 Next, in order: rebase any open PR that conflicts in this file after
 another merges (every third-batch PR strikes its own line below); then
 **deprecation cleanup** (owner-approved scope 2026-09-30, the project
-has never been deployed): slice 2 — drop `get_message`'s ignored
+has never been deployed): slice 1 (validate-env rename shims) done in
+#343, the owner declining its review round's request to keep rejecting
+old names; ~~slice 2 — drop `get_message`'s ignored
 `folder`/`body_format` parameters, the dead pre-v13 `display_subject`
 `try/except` in mcp-server `_row_to_result`, the write-tool sketch in
-`docs/mcp-tools.md`, and "legacy" wording on live code; slice 3 — fold
+`docs/mcp-tools.md`, and "legacy" wording on live code~~ (done); slice 3 — fold
 migration `0021` into the baseline (baseline becomes v21, drop the
 mcp-server `ingestion_state` existence guard, update AGENTS.md's
 migration paragraph; the dev database needs a rebuild); slice 4, test
