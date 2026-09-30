@@ -27,7 +27,13 @@ import-time issue in an SDK the operator isn't using.
 
 from __future__ import annotations
 
-from typing import Protocol
+import logging
+from typing import TYPE_CHECKING, Protocol
+
+if TYPE_CHECKING:
+    import httpx2
+
+log = logging.getLogger("mcp.inference")
 
 # Steady-state ceiling for one completion. Qwen3 in thinking mode can
 # run ~1-2 minutes for a long answer; Anthropic Messages calls usually
@@ -203,7 +209,7 @@ class _AnthropicBackend:
         max_tokens: int,
         timeout_secs: float,
     ) -> None:
-        from anthropic import AsyncAnthropic
+        from anthropic import AsyncAnthropic, DefaultAsyncHttpxClient
 
         self.model = model
         self.max_tokens = max_tokens
@@ -226,6 +232,7 @@ class _AnthropicBackend:
                 "(e.g. use 'https://api.anthropic.com', or leave the "
                 "var empty to use the SDK default)."
             )
+
         # Pass ``base_url`` only when explicitly set so the SDK's real
         # default URL is used when the operator left the env var empty
         # (the documented contract for INFERENCE_MODE=anthropic).
@@ -233,18 +240,42 @@ class _AnthropicBackend:
         # malformed URL. ``max_retries=0`` for the same reason as
         # ``_OpenAIBackend``: keep ``timeout_secs`` the honest
         # wall-clock ceiling.
+        #
+        # The SDK's HTTP client follows redirects and re-sends the body
+        # and ``x-api-key`` to wherever ``Location`` points (#325). The
+        # request hook runs before every hop, so a redirect off the
+        # resolved endpoint's origin is refused before the prompt or
+        # key leaves; same-origin redirects still work.
+        async def _same_origin_only(request: httpx2.Request) -> None:
+            base = self.client.base_url
+            if (request.url.scheme, request.url.host, request.url.port) != (
+                base.scheme,
+                base.host,
+                base.port,
+            ):
+                log.warning(
+                    "Inference provider redirected to a different origin; "
+                    "request not sent (mode=anthropic)"
+                )
+                raise RuntimeError(
+                    "Inference provider redirected to a different origin (mode=anthropic)"
+                )
+
+        http_client = DefaultAsyncHttpxClient(event_hooks={"request": [_same_origin_only]})
         if stripped:
             self.client = AsyncAnthropic(
                 base_url=stripped,
                 api_key=api_key,
                 timeout=timeout_secs,
                 max_retries=0,
+                http_client=http_client,
             )
         else:
             self.client = AsyncAnthropic(
                 api_key=api_key,
                 timeout=timeout_secs,
                 max_retries=0,
+                http_client=http_client,
             )
         # After the SDK resolves its fallback chain, read the URL back
         # so ``self.base_url`` always reflects the wire endpoint — the
