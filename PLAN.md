@@ -200,15 +200,29 @@ disposable, regenerable index.
    `is_attachment()` is false) where the walker rightly treats both as
    body candidates, so explicit classification stays and repeated body
    candidates join the catalogue.
-   Exit criterion: the parser fixture suite and the 25-shape encoding
-   parity test pass unchanged (with the filename-only text part and
-   repeated body candidates added to the catalogue), the hand-rolled
-   helpers above are deleted or reduced to thin wrappers, and
-   hostile-input tests (nested comments, malformed address groups,
-   8-bit headers, folded References, malformed encoded-word runs,
-   unknown body charsets) still degrade rather than raise, with work
-   bounds asserted. Lands with the Phase 2 reindex, since any parse
-   change can alter bodies and attachment identity.
+   And the default policy parses structured headers eagerly: a
+   `Content-Type` whose `name=` holds a few hundred nested comments
+   raises `RecursionError` inside `message_from_bytes` itself (about
+   1 KB of input), before any walker guard runs, where `compat32`
+   parses it; so the spike either keeps `compat32` for the initial
+   parse or pre-screens structured headers, and the hostile-input
+   criterion below includes them.
+   Exit criterion: an old-vs-new differential catalogue — every parser
+   fixture and every shape in the encoding parity test parsed by both
+   `compat32` and the new policy, comparing headers, body selection,
+   attachment classification and attachment identity — with every
+   difference either fixed or recorded as intended (the encoding
+   parity test alone compares encodings under one parser, not the two
+   parsers); the parser fixture suite and the encoding parity test
+   pass unchanged, with the filename-only text part and repeated body
+   candidates added to the catalogue; the hand-rolled helpers above
+   are deleted or reduced to thin wrappers; and hostile-input tests
+   (nested comments in addresses and in `Content-Type` /
+   `Content-Disposition`, malformed address groups, 8-bit headers,
+   folded References, malformed encoded-word runs, unknown body
+   charsets) still degrade rather than raise, with work bounds
+   asserted. Lands with the Phase 2 reindex, since any parse change
+   can alter bodies and attachment identity.
 
 ### Phase 3 — Measurement and product vertical slice
 
