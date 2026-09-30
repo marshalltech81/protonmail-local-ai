@@ -1487,7 +1487,9 @@ class TestAttachmentBoundaries:
         assert msg.body_text == "PARENT_BODY"
         assert 1 < len(decoded_sizes) <= MAX_ATTACHED_MESSAGE_DEPTH
         assert sum(decoded_sizes) <= MAX_DECODED_ATTACHMENT_BYTES + decoded_sizes[-1]
-        assert len(msg.attachments) == len(decoded_sizes) + 1
+        # Every decoded level's attached email is recorded, plus the top
+        # and the first one past the caps (recorded, not decoded).
+        assert len(msg.attachments) == len(decoded_sizes) + 2
 
     def test_quoted_printable_delivery_status_keeps_every_block(self, tmp_path):
         """Review round 9: the transfer-encoded path serialized only the
