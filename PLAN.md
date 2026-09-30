@@ -204,6 +204,25 @@ disposable, regenerable index.
    and record why. Any retired helper lands with the Phase 2 reindex,
    since a parse change can alter bodies and attachment identity.
 
+**Reindex bundle.** Fixes that change chunk IDs, bodies or message
+identity land together with the first Phase 2 generation, never one at
+a time: reply subjects in the embedding input and thread body (#303);
+chunk overlap past `max_tokens` (#208); Message-ID conflicts kept as
+both claimants (#217); a deterministic date source for undated mail
+(#297's second half, the deferred received-date item; the first half —
+keep the first persisted date on reprocess — is a batch-1 guard);
+sequential inline text parts in `multipart/mixed` (#295, decided
+2026-09-30 to document for now and revisit when this bundle is
+assembled, since the reparse is free then); and repair of chunks
+committed with all-zero vectors (#304).
+
+**Sequencing (decided 2026-09-30, per #283).** Phase 2's blue/green
+lifecycle validates a new generation against the old, which needs a
+measurement that distinguishes evidence recall from hit rate. So the
+Phase 1.5 baseline plus #283's evidence-recall eval run before the
+first generation is built: a slice of Phase 3 item 1 moves ahead of
+Phase 2.
+
 ### Phase 3 — Measurement and product vertical slice
 
 **Exit criterion:** we can objectively measure whether the system
@@ -215,6 +234,10 @@ answers real knowledge questions, and identify why failures occur.
    retrieval-only harness in `mcp-server/tests/eval/` (Recall@10 /
    MRR, opt-in `pytest -m eval`) to the agent level; the old
    `scripts/eval_run.py` batch runner was removed with Open WebUI.
+   Tracked by **#283**, whose substantive addition is separating
+   jointly-required-evidence recall from any-hit rate (today's
+   "Recall@10" is the latter); its first slice precedes Phase 2 (see
+   Phase 2, Sequencing).
 2. **Latency instrumentation before performance redesign.** Stage
    timers through the query path (query_embedding / per-lane FTS+KNN /
    fusion / rerank / evidence_fetch / inference / total). `ask_mailbox`
@@ -224,11 +247,15 @@ answers real knowledge questions, and identify why failures occur.
    vector work won't fix the user problem. Then set request-level
    deadlines. (Project history endorses this: the 400s search hang
    was three wrong theories until the query plan was measured.)
+   Tracked by **#287** (adds content-safe telemetry, cold/warm
+   benchmarks, cancellation of thread-offloaded work).
 3. **Experimental ephemeral `brief_issue`.** Chronology, actors,
    positions, decisions, open questions, conflicting evidence — every
    assertion cited, **nothing persisted**. This is the proving ground
    for what a durable ontology should eventually contain; its
-   failures drive Phase 4.
+   failures drive Phase 4. Tracked by **#291** (chronology,
+   corrections, contradictions, "as of" questions; "newest is not
+   authoritative").
 4. **Adversarial injection suite** (hostile fixtures in the synthetic
    mailbox, asserting the Phase 0 serialization holds under real
    tool flows).
@@ -243,6 +270,27 @@ answers real knowledge questions, and identify why failures occur.
      survivor-mean path.
    - **Rerank value experiment** — `RERANK_MODE=cohere` vs `none` on
      the golden set.
+   Tracked by **#288** (thread-vector policy, with versioning and a
+   recompute spec) and **#289** (rerank, including candidate-text
+   representation; recommendation only, default stays off).
+6. **Prompt context budget with coverage disclosure** (#286 is
+   item 7; this is **#285**): replace the fixed 2,000-character
+   per-thread fill and 3-chunks-per-candidate slice with a
+   whole-prompt token budget, an evidence-selection policy, dedup,
+   and a statement of what was left out. Nothing in the plan covered
+   this; #214/#215 fixed only `summarize_thread`'s tail and
+   attachment identity.
+7. **Semantic recall under selective filters** (**#286**): the vector
+   lanes run unfiltered and sender/date/folder filters apply
+   afterwards, so a selective filter can empty the candidate window.
+   Measure the loss, then choose a bounded remedy (eligible-subset
+   scoring, filter pushdown, or candidate expansion).
+8. **A validated citation contract for today's answers** (**#284**):
+   stable evidence IDs and per-message identity in `ask_mailbox`
+   prompts, a structured claim→citation map checked against the
+   evidence, bounded repair. The plan verified quotes only for
+   Phase 5's persisted claims; ephemeral answers need it first.
+   Depends on #217's identity decision.
 
 ### Phase 4 — Deterministic knowledge scaffolding
 
@@ -346,9 +394,15 @@ How the first batch was worked, and what to repeat:
   - owner decision pending: which claimant wins; the first-arrival
     spoofing risk (the #246 round-1 P3)
 
-  Likely needs a schema change (store both claimants), so land it with
-  the Phase 2 migration and reindex. That reindex also repairs databases
-  already damaged by #204, #205, #230 and #232.
+  Decided 2026-09-30: **keep both claimants** — the thread stays keyed
+  by Message-ID, each message row is keyed by Message-ID plus content
+  hash, and a conflict is exposed by `get_message` and status rather
+  than resolved by an arrival-order rule (either order is spoofable).
+  #260's serialized-form attachment hash gives the "compare full
+  attachment metadata" finding a deterministic identity. A schema
+  change, so it lands with the Phase 2 migration and reindex. That
+  reindex also repairs databases already damaged by #204, #205, #230
+  and #232.
 - **#208 chunk overlap exceeds `max_tokens`** — harmless at default
   settings; land it with Phase 2 item 4 (chunk `kind` tags), which
   rewrites the chunker and changes chunk IDs anyway.
@@ -365,13 +419,11 @@ and most reproduced with synthetic input. PRs in the order to land
 them (one test-first commit per issue, `Fixes #N` per issue):
 
 **Status 2026-09-30 — next session starts here.** Items 1–12 are
-merged (#251–#255, #258–#264). Items 13–14 wait on owner decisions, as
-does #217 (which Message-ID claimant wins). Next code work, in order:
-**#257** (the known mailbox-content logging gaps: extractor
-filename/exception logs, `safe_provider_exception_text` passthrough in
-the search and intelligence handlers, and parse-stage exception text
-reaching `last_error` through `_stage_error`; AGENTS.md's "Untrusted
-Mail Content" section lists the rules), then Phase 2.
+merged (#251–#255, #258–#264); 13–14 and #217 are decided (below and in
+Resolved decisions). The third batch (#266–#334, triaged below) comes
+next, in its listed order — its batch-1 guards first, #257 among them —
+then the Phase 1.5/#283 eval slice, then Phase 2 with its reindex
+bundle.
 
 1. **Done (#251).** **#238** invalid date filters leak withheld input into logs — five
    handlers logged the `ValueError` quoting the value. Fixed with a
@@ -434,29 +486,96 @@ Mail Content" section lists the rules), then Phase 2.
 12. **Done (#264).** **#227 + #240** mbsync: functions called under `if` run without
     errexit, so a failed `chmod` / fingerprint write still reports
     success. Check each step; write the pin via temp file + `mv`.
-13. **#242** (**owner decision**) no non-interactive way to tell an
-    empty vault from a logged-in one. Recommended: `BRIDGE_FORCE_CLI=true`
-    in `docker-compose.first-run.yml`.
-14. **#245** (**owner decision**) impact is lower than filed: with no
+13. **#242** (decided 2026-09-30) no non-interactive way to tell an
+    empty vault from a logged-in one. Set `BRIDGE_FORCE_CLI=true` in
+    `docker-compose.first-run.yml`. Lands with #266 (bootstrap runs
+    key-gen before the vault check) and #270 (the documented `su`
+    shortcut cannot work), which restructure the same `LOGGED_IN`
+    branch; the first Bridge entrypoint PR also creates a shell test
+    harness like `mbsync/tests/entrypoint_test.sh`.
+14. **#245** (decided 2026-09-30) impact is lower than filed: with no
     launcher a downloaded update is staged in `/data` but never
     executed; the exposure is unpinned fetches and code on disk. Fix is
     a fourth patch hunk forcing the `updates.go` gate off (three-layer
-    rule applies). AGENTS.md's "silently bypass" wording was corrected
-    in #256.
+    rule applies), the only fix that holds for every vault. AGENTS.md's
+    "silently bypass" wording was corrected in #256.
+
+### Third batch (#266–#334) — triaged 2026-09-30
+
+69 issues filed from a whole-repository review. Triaged by four
+parallel agents reading (not verifying) one area each; every claim
+was judged plausible, and severity is miscalibrated in the usual
+direction (#301 and #306 need rare conditions; #293 and #294 are
+cheap to trigger). Decisions taken the same day are in Resolved
+decisions 3–11. Order of work, chosen to minimise reindexes:
+
+1. **No-reindex guards, small PRs by area.** Indexer: the quadratic
+   subject normalizer (#293) and XLSX shared-string amplification
+   (#294); the whitespace-only plain alternative (#298, a selection
+   line, not the walk); the all-zero embedding guard (#304, fixed
+   message, no values logged); tombstone revalidation on restore
+   (#301); `message_thread_map` lookup indexes as migration `0022`
+   (#302, index-only); the unbounded recovery parameter list (#306);
+   and the #257 sweep (classify parse-stage and provider exceptions
+   at their boundary, `caplog` marker tests). MCP: the two quadratic
+   regexes (#327, #328); the privacy trio — redirects that would
+   forward prompts and API keys (#325), inherited endpoint userinfo
+   in the startup log (#326), the read-only URI bypass (#311); the
+   "errors reported as success" cluster — intelligence tools
+   returning `Error:` prose as `isError=false` (#319, the unfinished
+   half of Phase 1 item 2; `docs/mcp-tools.md` already promises
+   otherwise), semantic search on missing vec tables (#318),
+   malformed provider content rendered as a summary (#321), future
+   timestamps marking the index current (#332), schema-violating
+   extraction records (#310), overwritten `_date`/`_source_thread`
+   fields (#329), the missing search instruction in extraction
+   prompts (#315), and typo'd thread IDs summarizing an unrelated
+   thread by domain-token overlap (#314: narrow the fallback rather
+   than parse IDs); the name-matching cluster (#313, #324, #331) and
+   its FTS analogue (#316); date filters (#312, #330); degraded-lane
+   honesty (#333); event-loop hygiene (#320, #317, #334); folder
+   discovery hiding reply-only folders (#308); the attachment-lane
+   duplicate before MIME filters (#309); docs (#322, #323). mbsync:
+   the empty pin re-TOFU (#278) and the rotation flag surviving
+   restarts (#267, docs), the unbounded connect probe (#271), signal
+   forwarding to the sync child (#280), and the smoke-test one-liner
+   (#269) with #268's minimal fix.
+2. **Extractor version bumps, one PR per module** so each cache
+   refresh happens once: `xlsx` (#294's budget shape, #296 empty
+   cells, #305 stale dimensions — add `xlsx` to `EXTRACTOR_VERSIONS`),
+   `docx` 2→3 (#299 first-page and even-page headers), `pdf`
+   (#292 page-level OCR selection — add `pdf`), with #300 (enabling
+   OCR re-queues skipped images) alongside since it shares the
+   OCR-disabled sentinel.
+3. **Design work before code**, both mbsync: the retained near-side
+   state family (#275, #276, #279, #281) and the sync-supervision
+   family (#271, #277, #280, #282); see Resolved decisions 9 and 10
+   for the chosen direction and the one measurement still needed.
+4. **The Phase 2 reindex bundle** (see Phase 2): #303, #208, #217,
+   #297's second half, #295 if revisited, and the zero-chunk repair
+   from #304.
+
+Closed as duplicates of plan lines: #272 and #273 (Maintenance
+backlog), #290 (Phase 2 items 1–3). Roadmap issues #283–#291 are
+linked from the Phase 3 items they track.
 
 ## Maintenance backlog (small, ongoing)
 
 - consolidate `BRIDGE_VERSION` to a single source of truth
   (`.env.example`); parameterize the Go toolchain as an `ARG`
 - `timeout-minutes` + path filters on `.github/workflows/docker.yml`
-- Trivy scan of the Bridge Go module graph in `security.yml`
+- Trivy scan of the Bridge Go module graph in `security.yml` (#272
+  closed as its duplicate; needs an exception policy for upstream
+  Proton dependencies we cannot patch)
 - pin `actions/checkout` to a commit SHA in `bridge.yml`; pinned
   `setup-go` in the patch-drift job
 - fix the `\t\t` BSD-sed portability bug in `bridge/patch-source.sh`
 - mbsync: move `BRIDGE_USER` to a file-backed secret; add log
   rotation + memory/CPU limits; evaluate runtime package pinning
 - resource limits for the remaining Compose services
-  (`protonmail-bridge` first — it holds live Proton credentials)
+  (`protonmail-bridge` first — it holds live Proton credentials; #273
+  closed as its duplicate: a measured, operator-overridable memory
+  budget, tested against the initial Gluon sync)
 - loud one-shot startup warning when `INFERENCE_MODE` sends retrieved
   excerpts to a remote provider
 - `get_message`: returns a message's full body and headers with no
@@ -616,6 +735,35 @@ do not ship persisted claims without them.
    (2026-09-28) rather than maintained as hypothetical capability.
 2. **Live Bridge integration lane (resolved 2026-09-26):** not doing
    (see Not doing).
+3. **#242 first-run retry (2026-09-30):** `BRIDGE_FORCE_CLI=true` in
+   the first-run overlay, landing with #266 and #270.
+4. **#245 auto-update in existing vaults (2026-09-30):** a fourth
+   Bridge patch hunk forcing the `updates.go` gate off, under the
+   three-layer rule.
+5. **#217 Message-ID conflicts (2026-09-30):** keep both claimants;
+   expose, do not resolve by arrival order. Phase 2 reindex bundle.
+6. **#292 mixed digital/scanned PDFs (2026-09-30):** page-level OCR
+   selection with a `pdf` extractor version bump, together with #300.
+7. **#295 sequential inline text parts (2026-09-30):** document the
+   limitation now; revisit with the Phase 2 reindex bundle.
+8. **#297 undated mail (2026-09-30):** keep the first persisted date on
+   reprocess now; a deterministic date source (`Received:`) with the
+   Phase 2 reindex.
+9. **#276 and family, retained near-side mbsync state (2026-09-30):**
+   tolerate a far-side box that cannot be opened (warn, keep syncing
+   the rest) rather than far-only patterns or `Remove Near`, which
+   deletes local mail. #275 and #281 change the on-disk layout and wait
+   for a real report.
+10. **#277/#282 health during a long first sync (2026-09-30):**
+    separate liveness (process alive, progress observed) from
+    freshness (the success stamp), so a first sync is "healthy, not
+    yet current"; then set #282's stall deadline above the observed
+    initial backfill — that duration is the one measurement still
+    needed, and #277 lands before #282.
+11. **#268 smoke-test scope (2026-09-30):** the minimal fix
+    (distinguish the intentional post-marker kill from a fatal exit)
+    with #269; the requested IMAP/STARTTLS/SAN/restart checks are the
+    live-Bridge lane declined in Not doing.
 
 ## Open decisions
 
