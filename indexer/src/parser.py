@@ -353,15 +353,19 @@ def _is_attachment(part: email.message.Message) -> bool:
 # forward chain (a few forwards, each a few multipart levels) stays well
 # below this.
 MAX_ATTACHED_MESSAGE_DEPTH = 20
-# Parts plus header fields, across every container attachment of one
-# message, that are still serialized. The generator's cost per field
-# and per part is several times the parser's, and a delivery report is
-# one field per line (or one headerless part per blank block), so a
-# crafted multi-megabyte report — or fifty of them side by side — would
-# cost the single worker seconds for payloads nothing extracts. A real
-# email has under a hundred fields; a report for two thousand
-# recipients is about ten thousand.
+# Serialization work, across every container attachment of one message,
+# that is still done: one unit per part, per header field, and per
+# ``_HEADER_BYTES_PER_UNIT`` bytes of header text, which are the three
+# things the generator spends time on (parsing is several times cheaper
+# for each; body bytes are a copy, bounded by the parse cap). A delivery
+# report is one field per line, or one headerless part per blank block,
+# and a header can be megabytes, so a crafted report — or fifty side by
+# side — would otherwise cost the single worker seconds for payloads
+# nothing extracts. A real email has under a hundred fields and some
+# kilobytes of headers; a report for two thousand recipients is about
+# ten thousand units.
 MAX_ATTACHED_MESSAGE_FIELDS = 10_000
+_HEADER_BYTES_PER_UNIT = 16
 
 
 @dataclass
@@ -374,13 +378,16 @@ class _SerializationBudget:
 
 def _nesting_exceeds(root: email.message.Message, limit: int, budget: _SerializationBudget) -> bool:
     """Whether ``root``'s part tree is more than ``limit`` levels deep or
-    exhausts ``budget`` (each part counts one plus its header fields).
-    Iterative, stops at the first part past either limit, and leaves an
-    exhausted budget exhausted for every later container."""
+    exhausts ``budget`` (each part counts one, plus one per header field
+    and per ``_HEADER_BYTES_PER_UNIT`` bytes of header text). Iterative,
+    stops at the first part past either limit, and leaves an exhausted
+    budget exhausted for every later container."""
     stack = [(root, 1)]
     while stack:
         part, depth = stack.pop()
-        budget.remaining -= 1 + len(part.keys())
+        headers = part.items()
+        header_bytes = sum(len(name) + len(str(value)) for name, value in headers)
+        budget.remaining -= 1 + len(headers) + header_bytes // _HEADER_BYTES_PER_UNIT
         if depth > limit or budget.remaining < 0:
             return True
         children = part.get_payload() if part.is_multipart() else None

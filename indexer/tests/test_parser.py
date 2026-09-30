@@ -1182,6 +1182,21 @@ class TestAttachmentBoundaries:
         assert msg.attachments[0].payload == b""
         assert calls == []
 
+    def test_header_bytes_count_against_the_budget(self, tmp_path, monkeypatch):
+        """Review round 11: one 5 MB header field counted as one unit but
+        cost the generator seconds to refold. Header bytes count too."""
+        raw = (
+            self._HEAD + b'Content-Type: multipart/report; boundary="r"\r\n\r\n'
+            b"--r\r\nContent-Type: text/plain\r\n\r\nDelivery failed.\r\n"
+            b"--r\r\nContent-Type: message/delivery-status\r\n"
+            b'Content-Disposition: attachment; filename="status.txt"\r\n\r\n'
+            b"X-Long: " + b"word " * 200_000 + b"\r\n\r\n--r--\r\n"
+        )
+        calls = self._count_serializations(monkeypatch)
+        msg = self._parse_raw(tmp_path, raw)
+        assert msg.attachments[0].payload == b""
+        assert calls == []
+
     def test_the_budget_spans_every_container_in_a_message(self, tmp_path, monkeypatch):
         """Review round 10: fifty sibling reports each under the budget
         cost fifty serializations. One budget covers the whole message,
