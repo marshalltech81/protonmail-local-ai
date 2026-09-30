@@ -11,8 +11,8 @@ seeded DB and the FakeEmbedClient / FakeInferenceClient stubs. Coverage targets:
   (the prompt-injection defense the security notice depends on);
 - max_threads / limit clamping forwards a sane bound to the db layer;
 - the no-results path returns a sentinel rather than calling the LLM;
-- exceptions on db, embed, or completion paths surface as ``Error: ...``
-  rather than crashing the tool;
+- exceptions on db, embed, or completion paths, and an unknown thread,
+  are raised as ``ToolError`` so the client receives ``isError: true``;
 - ``extract_from_emails`` tolerates both single-object and array LLM
   responses and skips invalid JSON without aborting the loop.
 """
@@ -21,6 +21,10 @@ import asyncio
 import json
 
 import pytest
+from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp.exceptions import ToolError
+from mcp.shared.memory import create_connected_server_and_client_session
+from mcp.types import CallToolResult
 from src.lib.inference import InferenceTruncatedError
 from src.tools.intelligence import register_intelligence_tools
 
@@ -98,16 +102,14 @@ class TestAskMailbox:
         asyncio.run(handler(question="invoice", max_threads=10_000))
         assert seen["limit"] == 10  # _MAX_ASK_THREADS
 
-    def test_db_exception_returns_error_text(
-        self, fake_server, seeded_db, fake_embed, fake_inference
-    ):
+    def test_db_exception_returns_error(self, fake_server, seeded_db, fake_embed, fake_inference):
         def boom(**_kwargs):
             raise RuntimeError("simulated db failure")
 
         seeded_db.hybrid_search = boom  # type: ignore[assignment]
         handler = _handlers(fake_server, seeded_db, fake_embed, fake_inference)["ask_mailbox"]
-        out = asyncio.run(handler(question="anything"))
-        assert "Error" in _text(out)
+        with pytest.raises(ToolError, match="simulated db failure"):
+            asyncio.run(handler(question="anything"))
 
     def test_secret_values_are_scrubbed_from_exception_text(
         self, fake_server, seeded_db, fake_embed, fake_inference
@@ -115,7 +117,7 @@ class TestAskMailbox:
         # Pin the main.py wiring of secret_values into the intelligence
         # registrar — a provider SDK exception that quotes the operator's
         # API key (e.g. an auth-header echo in the error body) must not
-        # leak to the caller via the user-visible Error: response.
+        # leak to the caller via the user-visible error result.
         leaked_key = "sk-leakedXYZ789"  # pragma: allowlist secret
 
         def boom(**_kwargs):
@@ -130,8 +132,9 @@ class TestAskMailbox:
             secret_values=[leaked_key],
         )
         handler = fake_server.tools["ask_mailbox"]
-        out = asyncio.run(handler(question="anything"))
-        text = _text(out)
+        with pytest.raises(ToolError) as excinfo:
+            asyncio.run(handler(question="anything"))
+        text = str(excinfo.value)
         assert leaked_key not in text
         assert "[REDACTED]" in text
 
@@ -206,9 +209,8 @@ class TestSummarizeThread:
         # on the invoice thread — silently wrong. Now we surface
         # "Thread not found" instead.
         handler = _handlers(fake_server, seeded_db, fake_embed, fake_inference)["summarize_thread"]
-        out = asyncio.run(handler(thread_id="zzznosuchsubject"))
-        text = _text(out)
-        assert "Thread not found" in text
+        with pytest.raises(ToolError, match="Thread not found"):
+            asyncio.run(handler(thread_id="zzznosuchsubject"))
         # And critically: no LLM was invoked, because we never
         # resolved a thread to summarize.
         assert fake_inference.complete_calls == []
@@ -221,8 +223,8 @@ class TestSummarizeThread:
         # summary. ``empty_db`` carries the schema but no rows, so this
         # exercises the fallback's miss branch cleanly.
         handler = _handlers(fake_server, empty_db, fake_embed, fake_inference)["summarize_thread"]
-        out = asyncio.run(handler(thread_id="anything"))
-        assert "Thread not found" in _text(out)
+        with pytest.raises(ToolError, match="Thread not found"):
+            asyncio.run(handler(thread_id="anything"))
         # No LLM completion call when the fallback finds nothing.
         assert fake_inference.complete_calls == []
 
@@ -235,16 +237,14 @@ class TestSummarizeThread:
         # ``brief`` instruction should be embedded in the user prompt.
         assert "2-3 sentences" in user
 
-    def test_db_exception_returns_error_text(
-        self, fake_server, seeded_db, fake_embed, fake_inference
-    ):
+    def test_db_exception_returns_error(self, fake_server, seeded_db, fake_embed, fake_inference):
         def boom(_thread_id):
             raise RuntimeError("simulated read failure")
 
         seeded_db.get_thread = boom  # type: ignore[assignment]
         handler = _handlers(fake_server, seeded_db, fake_embed, fake_inference)["summarize_thread"]
-        out = asyncio.run(handler(thread_id="t-alpha"))
-        assert "Error" in _text(out)
+        with pytest.raises(ToolError, match="simulated read failure"):
+            asyncio.run(handler(thread_id="t-alpha"))
 
     def test_recent_chunks_supplement_body_text(
         self, fake_server, chunked_db, fake_embed, fake_inference
@@ -307,8 +307,8 @@ class TestTruncatedProse:
     def test_truncated_with_no_text_is_an_error(self, fake_server, seeded_db):
         llm = FakeInferenceClient(complete_responses=[InferenceTruncatedError(partial="")])
         handler = _handlers(fake_server, seeded_db, FakeEmbedClient(), llm)["ask_mailbox"]
-        text = _text(asyncio.run(handler(question="What was the budget?")))
-        assert text.startswith("Error:")
+        with pytest.raises(ToolError, match="max_tokens"):
+            asyncio.run(handler(question="What was the budget?"))
 
 
 class TestExtractFromEmails:
@@ -458,9 +458,7 @@ class TestExtractFromEmails:
         assert "Acme" in text
         assert "Beta" in text
 
-    def test_db_exception_returns_error_text(
-        self, fake_server, seeded_db, fake_embed, fake_inference
-    ):
+    def test_db_exception_returns_error(self, fake_server, seeded_db, fake_embed, fake_inference):
         def boom(**_kwargs):
             raise RuntimeError("simulated read failure")
 
@@ -468,8 +466,8 @@ class TestExtractFromEmails:
         handler = _handlers(fake_server, seeded_db, fake_embed, fake_inference)[
             "extract_from_emails"
         ]
-        out = asyncio.run(handler(query="invoice", schema={"x": "string"}))
-        assert "Error" in _text(out)
+        with pytest.raises(ToolError, match="simulated read failure"):
+            asyncio.run(handler(query="invoice", schema={"x": "string"}))
 
 
 class TestInferenceDispatch:
@@ -587,8 +585,134 @@ class TestInvalidDateLogging:
         else:
             kwargs = {"query": "invoice", "schema": {"amount": "number"}}
         kwargs[field] = "private-sentinel-value"
-        with caplog.at_level(logging.DEBUG):
-            text = _text(asyncio.run(handlers[tool](**kwargs)))
-        assert "private-sentinel-value" in text
+        with caplog.at_level(logging.DEBUG), pytest.raises(ToolError) as excinfo:
+            asyncio.run(handlers[tool](**kwargs))
+        assert "private-sentinel-value" in str(excinfo.value)
         assert "private-sentinel-value" not in caplog.text
         assert field in caplog.text
+
+
+class _SyntheticStatusError(Exception):
+    """A provider SDK status error whose message echoes the request.
+
+    Real SDK status errors (``openai.APIStatusError`` and friends) carry
+    an integer ``status_code`` and stringify with the response body,
+    which can quote the prompt, and so the mail, sent to the provider.
+    """
+
+    def __init__(self, body: str) -> None:
+        super().__init__(body)
+        self.status_code = 502
+
+
+_MARKER = "synthetic-mail-marker-7f3a"
+
+
+def _wire_call(db, inference, name: str, args: dict, embed=None) -> CallToolResult:
+    """Call ``name`` through a real MCP ClientSession over the SDK's
+    in-memory transport, so the result is what a client receives."""
+    server = FastMCP("intelligence-wire-test")
+    register_intelligence_tools(server, db, embed or FakeEmbedClient(), inference)
+
+    async def run() -> CallToolResult:
+        async with create_connected_server_and_client_session(server) as client:
+            return await client.call_tool(name, args)
+
+    return asyncio.run(run())
+
+
+_TOOL_ARGS = {
+    "ask_mailbox": {"question": "What was the budget?"},
+    "summarize_thread": {"thread_id": "t-alpha"},
+    "extract_from_emails": {"query": "invoice", "schema": {"vendor": "string"}},
+}
+
+
+class TestFailuresAreErrorResults:
+    """#319: a failure reaches the client as ``isError: true``, never as a
+    successful result whose text happens to start with ``Error:``."""
+
+    @pytest.mark.parametrize("tool", sorted(_TOOL_ARGS))
+    def test_provider_failure_is_an_error_result(self, seeded_db, tool):
+        llm = FakeInferenceClient(complete_responses=[RuntimeError("synthetic provider failure")])
+        result = _wire_call(seeded_db, llm, tool, _TOOL_ARGS[tool])
+        assert result.isError
+        assert "synthetic provider failure" in result.content[0].text
+
+    @pytest.mark.parametrize("tool", sorted(_TOOL_ARGS))
+    def test_retrieval_failure_is_an_error_result(self, seeded_db, tool):
+        def boom(*_args, **_kwargs):
+            raise RuntimeError("simulated db failure")
+
+        seeded_db.hybrid_search = boom  # type: ignore[assignment]
+        seeded_db.get_thread = boom  # type: ignore[assignment]
+        result = _wire_call(seeded_db, FakeInferenceClient(), tool, _TOOL_ARGS[tool])
+        assert result.isError
+
+    def test_truncated_answer_with_no_text_is_an_error_result(self, seeded_db):
+        llm = FakeInferenceClient(complete_responses=[InferenceTruncatedError(partial="")])
+        result = _wire_call(seeded_db, llm, "summarize_thread", {"thread_id": "t-alpha"})
+        assert result.isError
+
+    @pytest.mark.parametrize("thread_id", ["zzznosuchsubject", "t-missing"])
+    def test_unknown_thread_is_an_error_result(self, seeded_db, thread_id):
+        llm = FakeInferenceClient()
+        result = _wire_call(seeded_db, llm, "summarize_thread", {"thread_id": thread_id})
+        assert result.isError
+        assert "Thread not found" in result.content[0].text
+        assert llm.complete_calls == []
+
+    def test_unknown_thread_with_empty_corpus_is_an_error_result(self, empty_db):
+        result = _wire_call(
+            empty_db, FakeInferenceClient(), "summarize_thread", {"thread_id": "anything"}
+        )
+        assert result.isError
+        assert "Thread not found" in result.content[0].text
+
+    def test_resolved_thread_that_vanishes_is_an_error_result(self, seeded_db):
+        # The phrase fallback picks a candidate, but the thread is gone
+        # by the time it is re-read.
+        original = seeded_db.get_thread
+        calls = []
+
+        def get_thread(thread_id):
+            calls.append(thread_id)
+            return None if len(calls) > 1 else original(thread_id)
+
+        seeded_db.get_thread = get_thread  # type: ignore[assignment]
+        result = _wire_call(
+            seeded_db, FakeInferenceClient(), "summarize_thread", {"thread_id": "invoice"}
+        )
+        assert result.isError
+        assert "Thread not found" in result.content[0].text
+
+    @pytest.mark.parametrize("tool", ["ask_mailbox", "extract_from_emails"])
+    def test_invalid_filter_is_an_error_result(self, seeded_db, tool):
+        args = {**_TOOL_ARGS[tool], "date_from": "not-a-date"}
+        result = _wire_call(seeded_db, FakeInferenceClient(), tool, args)
+        assert result.isError
+        assert "date_from" in result.content[0].text
+
+    @pytest.mark.parametrize("tool", sorted(_TOOL_ARGS))
+    def test_provider_text_stays_out_of_the_error_and_the_log(self, seeded_db, caplog, tool):
+        import logging
+
+        llm = FakeInferenceClient(
+            complete_responses=[_SyntheticStatusError(f"upstream echoed: {_MARKER}")]
+        )
+        with caplog.at_level(logging.DEBUG):
+            result = _wire_call(seeded_db, llm, tool, _TOOL_ARGS[tool])
+        assert result.isError
+        text = result.content[0].text
+        assert "status=502" in text
+        assert _MARKER not in text
+        assert _MARKER not in caplog.text
+
+    def test_answers_and_empty_matches_stay_successful(self, seeded_db):
+        for tool, args in _TOOL_ARGS.items():
+            llm = FakeInferenceClient(response='{"vendor": "Acme"}')
+            assert not _wire_call(seeded_db, llm, tool, args).isError
+        seeded_db.hybrid_search = lambda **_kw: []  # type: ignore[assignment]
+        for tool in ("ask_mailbox", "extract_from_emails"):
+            result = _wire_call(seeded_db, FakeInferenceClient(), tool, _TOOL_ARGS[tool])
+            assert not result.isError
