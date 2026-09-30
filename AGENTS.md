@@ -324,6 +324,18 @@ content is as private as a credential.
   follow this. `safe_provider_exception_text` reduces only status
   errors and otherwise keeps the (secret-redacted) message, so it does
   not satisfy this on its own.
+- Exceptions from the standard library's email parser and generator
+  and from the codecs quote their input: `email.errors.HeaderWriteError`
+  embeds the header it refused, `UnicodeEncodeError` its data, and a
+  parser defect raised under a `raise_on_defect` policy
+  (`FirstHeaderLineIsContinuationDefect` carries the offending line;
+  `MessageDefect` is a `ValueError`, not a `MessageError`), and a
+  codec lookup on a sender-supplied charset label raises `LookupError`
+  with the label in its message. Catch `email.errors.MessageError`,
+  `email.errors.MessageDefect`, `UnicodeError` and (at each decode
+  site) `LookupError` at the boundary that produced them and degrade
+  with a fixed message or a utf-8 fallback; never let them reach
+  `indexing_jobs.last_error` through `_stage_error`.
 - Known gaps are tracked in #257, which holds the full list. Examples:
   the parser logs a malformed `Date` header verbatim, the attachment
   pipeline and extractors log filenames and raw parser/OCR exceptions,
@@ -343,6 +355,12 @@ content is as private as a credential.
   (linear, or capped) before any size or character cap is applied to
   the result. A small crafted email or attachment must not be able to
   stall the single ingestion worker.
+- A work bound covers every dimension the operation's cost depends
+  on, in one guard. List them first (for `email.generator`: parts,
+  header fields, header bytes, body bytes; for a regex: input length
+  and match count) and budget them together, one counter per message.
+  A guard that models one dimension of a multi-dimensional cost is a
+  review round waiting to happen.
 - Extractors must not let input trigger `RecursionError` or
   `MemoryError`: the dispatcher re-raises both as host pressure rather
   than recording a `failed` extraction.
@@ -647,6 +665,14 @@ Notes:
   revision being rewritten (`main` for a fresh PR, the PR head for a
   rewrite in a later review round), then state the new invariant in
   one sentence and test that
+- a finding of the form "X differs from Y for input shape S" is fixed
+  by class, not by shape: first build a differential check over a
+  catalogue of shapes (plain, multipart, empty, 8-bit, folded and long
+  headers, nested containers, and so on), measure which diverge, fix
+  the class, and commit the catalogue as a parametrized test so the
+  class cannot return one review round at a time. Where an exact path
+  exists (a base64 decode is lossless), use it as ground truth for the
+  lossy one
 - threader changes should verify threading, subject fallback, references, and participant handling
 - database changes should verify schema creation, migration, and upsert/query behavior
 - MCP search changes should verify hybrid/RRF behavior where applicable
