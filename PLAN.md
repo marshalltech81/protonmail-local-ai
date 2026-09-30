@@ -175,12 +175,25 @@ disposable, regenerable index.
    default policy is stricter and raises on some hostile input that
    `compat32` tolerates, and it does not change how a transfer-encoded
    `message/rfc822` is parsed (verified on 3.14: identical corruption).
+   Three protections the modern API does not provide and the spike
+   must keep (verified on 3.14 during review): a filename-bearing
+   `text/*` part with no `Content-Disposition` is an attachment here
+   but `is_attachment()` says no and `get_body()` returns it, so the
+   filename check stays; the default policy's encoded-word decoding
+   is still superlinear on malformed `=?…?` runs (about 4 s for
+   32,000 prefixes), so the linear scanner stays or a work-bound
+   regression proves the replacement; and `get_content()` raises
+   `LookupError` on an unknown body charset where `_safe_decode`
+   falls back to UTF-8 with replacement, so that fallback stays and
+   gets a body fixture (the existing one covers only a `Subject`).
    Exit criterion: the parser fixture suite and the 25-shape encoding
-   parity test pass unchanged, the hand-rolled helpers above are
-   deleted or reduced to thin wrappers, and hostile-input tests
-   (nested comments, 8-bit headers, folded References) still degrade
-   rather than raise. Lands with the Phase 2 reindex, since any parse
-   change can alter bodies and attachment identity.
+   parity test pass unchanged (with the filename-only text part added
+   to the catalogue), the hand-rolled helpers above are deleted or
+   reduced to thin wrappers, and hostile-input tests (nested comments,
+   8-bit headers, folded References, malformed encoded-word runs,
+   unknown body charsets) still degrade rather than raise. Lands with
+   the Phase 2 reindex, since any parse change can alter bodies and
+   attachment identity.
 
 ### Phase 3 — Measurement and product vertical slice
 
