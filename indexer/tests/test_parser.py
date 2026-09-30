@@ -1162,6 +1162,52 @@ class TestAttachmentBoundaries:
         assert (status.payload != b"") is serialized
         assert (calls != []) is serialized
 
+    def test_headerless_blocks_count_against_the_budget(self, tmp_path, monkeypatch):
+        """Review round 10: a delivery report of blank blocks parses into
+        parts with no header fields, so a fields-only budget never
+        advanced while every part was still serialized. Parts count too."""
+        from src.parser import MAX_ATTACHED_MESSAGE_FIELDS
+
+        raw = (
+            self._HEAD + b'Content-Type: multipart/report; boundary="r"\r\n\r\n'
+            b"--r\r\nContent-Type: text/plain\r\n\r\nDelivery failed.\r\n"
+            b"--r\r\nContent-Type: message/delivery-status\r\n"
+            b'Content-Disposition: attachment; filename="status.txt"\r\n\r\n'
+            b"Reporting-MTA: dns; mx.example.test\r\n\r\n"
+            + b"\r\n" * (2 * MAX_ATTACHED_MESSAGE_FIELDS)
+            + b"--r--\r\n"
+        )
+        calls = self._count_serializations(monkeypatch)
+        msg = self._parse_raw(tmp_path, raw)
+        assert msg.attachments[0].payload == b""
+        assert calls == []
+
+    def test_the_budget_spans_every_container_in_a_message(self, tmp_path, monkeypatch):
+        """Review round 10: fifty sibling reports each under the budget
+        cost fifty serializations. One budget covers the whole message,
+        so once it is spent no later container is serialized."""
+        from src.parser import MAX_ATTACHED_MESSAGE_FIELDS
+
+        report = (
+            b"--r\r\nContent-Type: message/delivery-status\r\n"
+            b'Content-Disposition: attachment; filename="status.txt"\r\n\r\n'
+            b"Reporting-MTA: dns; mx.example.test\r\n"
+            + b"X-Field: value\r\n" * (MAX_ATTACHED_MESSAGE_FIELDS * 9 // 10)
+            + b"\r\n"
+        )
+        raw = (
+            self._HEAD + b'Content-Type: multipart/report; boundary="r"\r\n\r\n'
+            b"--r\r\nContent-Type: text/plain\r\n\r\nDelivery failed.\r\n"
+            + report * 50
+            + b"--r--\r\n"
+        )
+        calls = self._count_serializations(monkeypatch)
+        msg = self._parse_raw(tmp_path, raw)
+        assert len(msg.attachments) == 50
+        assert msg.attachments[0].payload != b""
+        assert all(a.payload == b"" for a in msg.attachments[1:])
+        assert len(calls) == 1
+
     def test_quoted_printable_delivery_status_keeps_every_block(self, tmp_path):
         """Review round 9: the transfer-encoded path serialized only the
         container's first child before decoding. An attached email has

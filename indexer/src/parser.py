@@ -353,25 +353,35 @@ def _is_attachment(part: email.message.Message) -> bool:
 # forward chain (a few forwards, each a few multipart levels) stays well
 # below this.
 MAX_ATTACHED_MESSAGE_DEPTH = 20
-# Header fields across a container attachment's part tree that are still
-# serialized. The generator's cost per field is several times the
-# parser's, and a delivery report is one field per line, so a crafted
-# multi-megabyte report would cost the single worker seconds for a
-# payload nothing extracts. A real email has under a hundred fields; a
-# report for two thousand recipients is about ten thousand.
+# Parts plus header fields, across every container attachment of one
+# message, that are still serialized. The generator's cost per field
+# and per part is several times the parser's, and a delivery report is
+# one field per line (or one headerless part per blank block), so a
+# crafted multi-megabyte report — or fifty of them side by side — would
+# cost the single worker seconds for payloads nothing extracts. A real
+# email has under a hundred fields; a report for two thousand
+# recipients is about ten thousand.
 MAX_ATTACHED_MESSAGE_FIELDS = 10_000
 
 
-def _nesting_exceeds(root: email.message.Message, limit: int) -> bool:
+@dataclass
+class _SerializationBudget:
+    """What one message's container attachments may still visit before
+    serialization; shared across them so the cap is per message."""
+
+    remaining: int = MAX_ATTACHED_MESSAGE_FIELDS
+
+
+def _nesting_exceeds(root: email.message.Message, limit: int, budget: _SerializationBudget) -> bool:
     """Whether ``root``'s part tree is more than ``limit`` levels deep or
-    carries more than ``MAX_ATTACHED_MESSAGE_FIELDS`` header fields.
-    Iterative, and stops at the first part past either limit."""
-    fields = 0
+    exhausts ``budget`` (each part counts one plus its header fields).
+    Iterative, stops at the first part past either limit, and leaves an
+    exhausted budget exhausted for every later container."""
     stack = [(root, 1)]
     while stack:
         part, depth = stack.pop()
-        fields += len(part.keys())
-        if depth > limit or fields > MAX_ATTACHED_MESSAGE_FIELDS:
+        budget.remaining -= 1 + len(part.keys())
+        if depth > limit or budget.remaining < 0:
             return True
         children = part.get_payload() if part.is_multipart() else None
         if isinstance(children, list):
@@ -383,6 +393,7 @@ def _attachment_payload(
     part: email.message.Message,
     *,
     serialize_containers: bool,
+    budget: _SerializationBudget,
 ) -> tuple[bytes, email.message.Message | None]:
     """The bytes an attachment carries, and, for a transfer-encoded
     attached email, its decoded tree to traverse (else ``None``).
@@ -425,16 +436,16 @@ def _attachment_payload(
         # (one child for an attached email, one per block for a delivery
         # report), so check that tree's depth before serializing it, and
         # serialize the whole body rather than the first child.
-        if _nesting_exceeds(part, MAX_ATTACHED_MESSAGE_DEPTH + 1):
+        if _nesting_exceeds(part, MAX_ATTACHED_MESSAGE_DEPTH + 1, budget):
             return b"", None
         decoded = _decode_transport_form(_serialized_body(part), encoding)
         if decoded is None:
             return b"", None
-        if _nesting_exceeds(decoded, MAX_ATTACHED_MESSAGE_DEPTH):
+        if _nesting_exceeds(decoded, MAX_ATTACHED_MESSAGE_DEPTH, budget):
             return b"", decoded
         return decoded.as_bytes(), decoded
     # The part's own tree is one level deeper than the email it carries.
-    if _nesting_exceeds(part, MAX_ATTACHED_MESSAGE_DEPTH + 1):
+    if _nesting_exceeds(part, MAX_ATTACHED_MESSAGE_DEPTH + 1, budget):
         return b"", None
     return _serialized_body(part), None
 
@@ -473,6 +484,7 @@ def _extract_body_and_attachments(
     # Iterative, so nesting depth cannot recurse. The root is classified
     # too: a message can be one attachment part, or a bundle presented as
     # one, whose text is then not the message's body.
+    budget = _SerializationBudget()
     stack: list[tuple[email.message.Message, bool]] = [(msg, False)]
     while stack:
         part, in_attachment = stack.pop()
@@ -480,7 +492,9 @@ def _extract_body_and_attachments(
         is_attachment = _is_attachment(part)
         decoded: email.message.Message | None = None
         if is_attachment:
-            payload, decoded = _attachment_payload(part, serialize_containers=not in_attachment)
+            payload, decoded = _attachment_payload(
+                part, serialize_containers=not in_attachment, budget=budget
+            )
             attachments.append(
                 Attachment(
                     filename=part.get_filename() or "unnamed",
