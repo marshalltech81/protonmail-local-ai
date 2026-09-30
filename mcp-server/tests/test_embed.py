@@ -189,6 +189,15 @@ class TestEmbedQueryDimValidation:
         with pytest.raises(ValueError, match="non-finite"):
             asyncio.run(embed_query(stub, "query", expected_dim=4))
 
+    @pytest.mark.parametrize("zero", [0.0, -0.0])
+    def test_raises_on_all_zero_vector(self, zero):
+        # A zero query vector is the same L2 distance from every stored
+        # unit vector, so semantic search would return an arbitrary
+        # order instead of an error (#304).
+        stub = _StubEmbed([zero] * 4)
+        with pytest.raises(ValueError, match="all-zero"):
+            asyncio.run(embed_query(stub, "query", expected_dim=4))
+
 
 _QUERY_MARKER = "SYNTHETIC_QUERY"
 _EMBED_KEY_MARKER = "sk-embed-marker"  # pragma: allowlist secret

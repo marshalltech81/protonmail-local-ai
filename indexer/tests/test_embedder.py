@@ -268,6 +268,31 @@ class TestOpenAIEmbedder:
         with pytest.raises(EmbedResponseError, match="non-finite"):
             emb.embed_batch(["a", "b"])
 
+    def test_all_zero_vector_is_rejected(self):
+        # A zero vector passes the finiteness check and l2_normalize keeps
+        # it (internal placeholders use zeros), so without this check a
+        # provider returning zeros would settle the job with an unusable
+        # semantic index (#304).
+        emb = _make_embedder()
+
+        def fake_create(**_kwargs):
+            return _embed_response([[1.0, 0.0], [0.0, -0.0]])
+
+        _patch_create(emb, fake_create)
+        with pytest.raises(EmbedResponseError, match="all-zero") as exc:
+            emb.embed_batch(["a", "b"])
+        assert classify_embed_failure(exc.value) == EMBED_FAILURE_UNCERTAIN
+        assert not _is_transient_embed_error(exc.value)
+
+    def test_nonzero_vectors_still_pass(self):
+        emb = _make_embedder()
+
+        def fake_create(**_kwargs):
+            return _embed_response([[0.0, 2.0], [1e-30, 0.0]])
+
+        _patch_create(emb, fake_create)
+        assert emb.embed_batch(["a", "b"]) == [[0.0, 1.0], [1.0, 0.0]]
+
     def test_embed_batch_raises_on_count_mismatch(self):
         emb = _make_embedder()
 

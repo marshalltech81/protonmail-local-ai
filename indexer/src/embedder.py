@@ -494,6 +494,14 @@ class OpenAIEmbedder:
                 f"embedder returned non-finite vector values for {len(texts)} inputs "
                 f"({self.base_url}, model={self.model!r})"
             )
+        # A zero vector is finite and ``l2_normalize`` keeps it (internal
+        # placeholders use zeros), so a provider returning zeros would
+        # otherwise settle the job with an unusable semantic index (#304).
+        if any(not any(vec) for vec in vectors):
+            raise EmbedResponseError(
+                f"embedder returned an all-zero vector for {len(texts)} inputs "
+                f"({self.base_url}, model={self.model!r})"
+            )
         # Normalize raw provider output here so chunk vectors land
         # unit-normed regardless of provider. The DB write boundary
         # in ``database.py`` also normalizes at ``upsert_thread`` /
