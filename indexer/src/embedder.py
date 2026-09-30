@@ -22,6 +22,7 @@ import logging
 import math
 import os
 import time
+import urllib.parse
 from collections.abc import Callable
 from typing import Protocol
 
@@ -305,6 +306,16 @@ class OpenAIEmbedder:
         # (e.g. the SDK default) rather than the empty string the
         # operator typed.
         self.base_url = str(self.client.base_url).rstrip("/")
+        # An empty ``base_url`` lets the SDK read ``OPENAI_BASE_URL``,
+        # which bypasses the startup userinfo check on ``EMBED_BASE_URL``
+        # (#339). Re-check the resolved endpoint before it reaches a log
+        # line or an error message; the message never echoes the URL.
+        if "@" in urllib.parse.urlsplit(self.base_url).netloc:
+            raise ValueError(
+                "EMBED_BASE_URL (or the SDK's OPENAI_BASE_URL) must not embed "
+                "credentials (user:pass@host). Put the API key in "
+                ".secrets/embed_api_key.txt instead."
+            )
 
     def wait_for_ready(self, timeout: int = 120) -> None:
         """Block until the embedder accepts a real ``/v1/embeddings``

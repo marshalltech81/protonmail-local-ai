@@ -152,6 +152,22 @@ class TestOpenAIEmbedder:
         # (CodeQL ``py/incomplete-url-substring-sanitization``).
         assert emb.base_url.startswith("https://api.openai.com/")
 
+    def test_inherited_endpoint_with_userinfo_is_rejected(self, monkeypatch, caplog):
+        """#339: an empty ``EMBED_BASE_URL`` lets the SDK read
+        ``OPENAI_BASE_URL``, which skipped the startup userinfo check, and
+        the resolved URL reaches the startup log and error messages. The
+        embedder rejects it once resolved, without echoing the URL."""
+        marker = "SYNTHETIC_URL_CREDENTIAL"
+        monkeypatch.setenv("OPENAI_BASE_URL", f"https://user:{marker}@provider.invalid/v1")
+        with caplog.at_level("DEBUG"), pytest.raises(ValueError, match="credentials") as exc:
+            _make_embedder(base_url="")
+        assert marker not in str(exc.value)
+        assert marker not in caplog.text
+
+    def test_empty_base_url_without_inherited_endpoint_starts(self, monkeypatch):
+        monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+        assert _make_embedder(base_url="").base_url.startswith("https://api.openai.com/")
+
     def test_embed_returns_vector_on_success(self):
         emb = _make_embedder()
         captured: dict = {}
