@@ -164,11 +164,14 @@ disposable, regenerable index.
      `EMBED_MODEL` at startup, so a table switch alone would leave
      old-model query vectors against new-model document vectors —
      same dimension, incomparable space, silently broken retrieval.
-     The active generation's provider, model and dimension are
-     recorded in the database; the MCP server reads them at startup
-     and on each semantic query, and **fails closed** (semantic lanes
-     off, status reporting the mismatch) while its configured embedder
-     does not match. Activation therefore includes updating the MCP
+     The active generation's provider, **normalized endpoint**
+     (`EMBED_BASE_URL`, since two OpenAI-compatible servers can serve
+     the same model string with incomparable spaces), model, dimension
+     and any revision the provider exposes are recorded in the
+     database; the MCP server reads them at startup and on each
+     semantic query, and **fails closed** (semantic lanes off, status
+     reporting the mismatch) while its configured embedder does not
+     match on every recorded field. Activation therefore includes updating the MCP
      configuration and restarting or reloading it.
 3. **Stage-aware pipeline manifest.** One active generation
    operationally, but the identifier is not opaque: a canonical
@@ -268,8 +271,11 @@ bundle carries a forward-only schema migration (#217), so the previous
 image fails closed on the new schema and the new image no longer has
 the old algorithms, and a hash records identity without being able to
 recreate code. The **executable rollback is a copy**: the index is one
-SQLite file and is disposable, so the rebuild starts by copying
-`mail.db` (with its WAL checkpointed) aside, and rollback is stop,
+SQLite file and is disposable, so the rebuild starts by taking a
+**consistent** copy of `mail.db`: stop the indexer (the only writer)
+and the MCP server, checkpoint the WAL, copy the file — or use
+SQLite's online backup API (`Connection.backup()`), which is the only
+correct way to copy while anything is live — and rollback is stop,
 restore the copy, run the previous image tag. Keep that copy until the
 new generation has passed the validation gate above and the eval slice
 on real queries. The manifest still earns its place — it says which
@@ -578,8 +584,7 @@ and a decision whose finding fails to reproduce is void, not binding.
 Order of work, chosen to minimise reindexes:
 
 1. **No-reindex guards, small PRs by area.** Indexer: the quadratic
-   subject normalizer (#293) and XLSX shared-string amplification
-   (#294); the all-zero embedding guard (#304, fixed
+   subject normalizer (#293); the all-zero embedding guard (#304, fixed
    message, no values logged); tombstone revalidation on restore
    (#301); `message_thread_map` lookup indexes as migration `0022`
    (#302, index-only); the unbounded recovery parameter list (#306);
@@ -608,8 +613,11 @@ Order of work, chosen to minimise reindexes:
    forwarding to the sync child (#280), and the smoke-test one-liner
    (#269) with #268's minimal fix.
 2. **Extractor version bumps, one PR per module** so each cache
-   refresh happens once: `xlsx` (#294's budget shape, #296 empty
-   cells, #305 stale dimensions — add `xlsx` to `EXTRACTOR_VERSIONS`),
+   refresh happens once: `xlsx` (#294's shared-string budget — a
+   behaviour change for the same bytes, so it lands with the bump
+   rather than as a guard, or cached rows would keep the old result —
+   #296 empty cells, #305 stale dimensions; add `xlsx` to
+   `EXTRACTOR_VERSIONS`),
    `docx` 2→3 (#299 first-page and even-page headers), `pdf`
    (#292 page-level OCR selection — add `pdf`), with #300 (enabling
    OCR re-queues skipped images) alongside since it shares the
