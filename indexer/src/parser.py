@@ -268,7 +268,7 @@ def parse_email(path: Path, maildir_root: Path | None = None) -> Message | None:
     cc_addrs = _parse_addrs(msg.get("Cc", ""))
     date = _parse_date(msg.get("Date", ""))
 
-    body_text, attachments = _extract_body_and_attachments(msg)
+    body_text, attachments = _extract_body_and_attachments(msg, raw)
 
     folder = _derive_folder(path, maildir_root)
 
@@ -369,7 +369,12 @@ def _nesting_exceeds(root: email.message.Message, limit: int) -> bool:
     return False
 
 
-def _attachment_payload(part: email.message.Message, *, serialize_containers: bool) -> bytes:
+def _attachment_payload(
+    part: email.message.Message,
+    *,
+    serialize_containers: bool,
+    raw_part: Callable[[], bytes | None] = lambda: None,
+) -> bytes:
     """The bytes an attachment carries.
 
     A container attachment — an attached email (``message/rfc822``), a
@@ -382,7 +387,10 @@ def _attachment_payload(part: email.message.Message, *, serialize_containers: bo
     keep the empty payload. A base64 or quoted-printable attached email
     (not allowed by RFC 2046, but sent) holds its transport form, so it
     is decoded and parsed first: the same email hashes the same either
-    way.
+    way. The parser has already split that form into headers and body,
+    which a soft line break in a header corrupts, so the part's own
+    bytes are taken from the raw message (``raw_part``) when they can be
+    located, and from the parsed form otherwise.
     """
     if not part.is_multipart():
         return _decoded_payload(part)
@@ -397,7 +405,9 @@ def _attachment_payload(part: email.message.Message, *, serialize_containers: bo
         and nested
         and isinstance(nested[0], email.message.Message)
     ):
-        decoded = _decode_transport_form(nested[0].as_bytes(), encoding)
+        raw = raw_part()
+        transport = _split_raw_headers(raw)[1] if raw is not None else nested[0].as_bytes()
+        decoded = _decode_transport_form(transport, encoding)
         if decoded is None or _nesting_exceeds(decoded, MAX_ATTACHED_MESSAGE_DEPTH):
             return b""
         return decoded.as_bytes()
@@ -405,6 +415,83 @@ def _attachment_payload(part: email.message.Message, *, serialize_containers: bo
     if _nesting_exceeds(part, MAX_ATTACHED_MESSAGE_DEPTH + 1):
         return b""
     return _serialized_body(part)
+
+
+def _split_raw_headers(data: bytes) -> tuple[bytes, bytes]:
+    """Split one raw MIME entity into its header block and body at the
+    first empty line (CRLF or LF). No header block when it starts empty."""
+    for newline in (b"\r\n", b"\n"):
+        if data.startswith(newline):
+            return b"", data[len(newline) :]
+    ends = [(i, sep) for sep in (b"\r\n\r\n", b"\n\n") if (i := data.find(sep)) >= 0]
+    if not ends:
+        return data, b""
+    i, sep = min(ends)
+    return data[:i], data[i + len(sep) :]
+
+
+def _split_on_boundary(body: bytes, boundary: bytes) -> list[bytes] | None:
+    """The raw parts of a multipart body, per RFC 2046: each starts after
+    a ``--boundary`` line, and the line break before the next delimiter
+    belongs to the delimiter. ``None`` without a closing delimiter's
+    worth of structure (no part at all). One pass over the lines."""
+    open_line, close_line = b"--" + boundary, b"--" + boundary + b"--"
+    parts: list[list[bytes]] = []
+    for line in body.splitlines(keepends=True):
+        stripped = line.rstrip(b" \t\r\n")
+        if stripped == close_line:
+            break
+        if stripped == open_line:
+            parts.append([])
+        elif parts:
+            parts[-1].append(line)
+    if not parts:
+        return None
+    result = []
+    for lines in parts:
+        data = b"".join(lines)
+        for newline in (b"\r\n", b"\n"):
+            if data.endswith(newline):
+                data = data[: -len(newline)]
+                break
+        result.append(data)
+    return result
+
+
+def _raw_part(raw: bytes, root: email.message.Message, path: tuple[int, ...]) -> bytes | None:
+    """The raw bytes (headers and body) of the part at ``path`` — child
+    indexes from ``root`` — sliced out of ``raw`` by MIME boundaries.
+    ``None`` when the bytes do not match the parsed tree (a boundary or
+    part count the parser saw differently) or the path is deeper than
+    ``MAX_ATTACHED_MESSAGE_DEPTH``; each level costs a pass over its
+    body."""
+    if len(path) > MAX_ATTACHED_MESSAGE_DEPTH:
+        return None
+    data, node = raw, root
+    for index in path:
+        children = node.get_payload()
+        if not isinstance(children, list) or index >= len(children):
+            return None
+        body = _split_raw_headers(data)[1]
+        if node.get_content_maintype() == "message":
+            # An (identity-encoded) attached email's body is the email.
+            data = body
+        else:
+            boundary = node.get_boundary()
+            if not boundary:
+                return None
+            try:
+                segments = _split_on_boundary(body, boundary.encode("ascii", "surrogateescape"))
+            except UnicodeEncodeError:
+                return None
+            if segments is None or len(segments) != len(children):
+                return None
+            data = segments[index]
+        child = children[index]
+        if not isinstance(child, email.message.Message):
+            return None
+        node = child
+    return data
 
 
 def _serialized_body(part: email.message.Message) -> bytes:
@@ -429,6 +516,7 @@ def _decode_transport_form(data: bytes, encoding: str) -> email.message.Message 
 
 def _extract_body_and_attachments(
     msg: email.message.Message,
+    raw: bytes | None = None,
 ) -> tuple[str, list[Attachment]]:
     plain_text = ""
     html_text = ""
@@ -441,15 +529,21 @@ def _extract_body_and_attachments(
     # Iterative, so nesting depth cannot recurse. The root is classified
     # too (a message can be one attachment part), unless it is a
     # ``multipart/*`` container.
-    stack: list[tuple[email.message.Message, bool]] = [(msg, False)]
+    # Each entry carries its path (child indexes from the root) so a part
+    # whose raw bytes are needed can be located in ``raw``.
+    stack: list[tuple[email.message.Message, bool, tuple[int, ...]]] = [(msg, False, ())]
     while stack:
-        part, in_attachment = stack.pop()
+        part, in_attachment, path = stack.pop()
         ct = part.get_content_type()
         is_attachment = _is_attachment(part) and not (
             part is msg and part.get_content_maintype() == "multipart"
         )
         if is_attachment:
-            payload = _attachment_payload(part, serialize_containers=not in_attachment)
+            payload = _attachment_payload(
+                part,
+                serialize_containers=not in_attachment,
+                raw_part=lambda: _raw_part(raw, msg, path) if raw is not None else None,
+            )
             attachments.append(
                 Attachment(
                     filename=part.get_filename() or "unnamed",
@@ -464,7 +558,9 @@ def _extract_body_and_attachments(
             if isinstance(children, list):
                 inside = in_attachment or is_attachment
                 stack.extend(
-                    (c, inside) for c in reversed(children) if isinstance(c, email.message.Message)
+                    (c, inside, (*path, i))
+                    for i, c in reversed(list(enumerate(children)))
+                    if isinstance(c, email.message.Message)
                 )
         elif is_attachment or in_attachment:
             continue
