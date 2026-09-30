@@ -5,10 +5,13 @@ Covers: plain text, HTML, multipart, attachments, inline Content-Disposition,
 encoded headers, address parsing, date fallback, and folder derivation.
 """
 
+import hashlib
 import textwrap
 from datetime import datetime
+from email.message import EmailMessage
 from pathlib import Path
 
+import pytest
 from src.parser import (
     OversizedMessageError,
     _clean_id,
@@ -770,6 +773,793 @@ class TestMimeHardening:
         assert "Plain body marker." in msg.body_text
         # html2text markdown would include asterisks for <b>; plain path doesn't.
         assert "**" not in msg.body_text
+
+
+def _write_message(tmp_path: Path, message: EmailMessage, name: str = "m.eml") -> Path:
+    folder = tmp_path / "INBOX" / "cur"
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / name
+    path.write_bytes(message.as_bytes())
+    return path
+
+
+def _attached_email(marker: str) -> EmailMessage:
+    inner = EmailMessage()
+    inner["Message-ID"] = f"<{marker}@example.test>"
+    inner["From"] = "other@example.test"
+    inner["Subject"] = "Old instructions"
+    inner.set_content(f"{marker} obsolete instructions")
+    return inner
+
+
+def _html_parent(*attached: EmailMessage) -> EmailMessage:
+    outer = EmailMessage()
+    outer["Message-ID"] = "<outer@example.test>"
+    outer["From"] = "sender@example.test"
+    outer["To"] = "owner@example.test"
+    outer["Date"] = "Mon, 28 Sep 2026 12:00:00 +0000"
+    outer["Subject"] = "New instructions"
+    outer.set_content("<p>OUTER_BODY_MARKER new instructions</p>", subtype="html")
+    for i, inner in enumerate(attached):
+        outer.add_attachment(inner, filename=f"forwarded-{i}.eml")
+    return outer
+
+
+class TestAttachmentBoundaries:
+    def test_attached_email_body_does_not_replace_the_parent_body(self, tmp_path):
+        """#230: the MIME walk descended into an attached message and its
+        text/plain beat the parent's HTML, so the parent was indexed with
+        the attached email's body."""
+        msg = parse_email(_write_message(tmp_path, _html_parent(_attached_email("INNER_MARKER"))))
+        assert msg is not None
+        assert "OUTER_BODY_MARKER" in msg.body_text
+        assert "INNER_MARKER" not in msg.body_text
+        assert msg.message_id == "outer@example.test"
+        assert [a.content_type for a in msg.attachments] == ["message/rfc822"]
+
+    def test_attached_email_is_hashed_by_its_bytes(self, tmp_path):
+        """#230: every attached email had an empty payload, so all of them
+        shared ``sha256(b"")`` as their content hash and attachment ID."""
+        first, second = _attached_email("FIRST_MARKER"), _attached_email("SECOND_MARKER")
+        msg = parse_email(_write_message(tmp_path, _html_parent(first, second)))
+        assert msg is not None
+        a, b = msg.attachments
+        assert b"FIRST_MARKER" in a.payload and b"SECOND_MARKER" in b.payload
+        assert a.size == len(a.payload) > 0
+        assert a.content_hash == hashlib.sha256(a.payload).hexdigest()
+        assert a.content_hash != b.content_hash
+
+    def test_deeply_nested_attached_email_degrades_to_empty_payload(self, tmp_path):
+        """A depth the stdlib parser accepts but that is past
+        ``MAX_ATTACHED_MESSAGE_DEPTH`` is never serialized (serializing
+        would recurse past the limit): the message stays indexable, with
+        the old empty payload."""
+        attached = 'Content-Type: message/rfc822\r\nContent-Disposition: attachment; filename="x.eml"\r\n\r\n'
+        nested = attached * 299 + "Content-Type: text/plain\r\n\r\nleaf\r\n"
+        content = (
+            "Message-ID: <deep@example.test>\r\n"
+            "From: sender@example.test\r\n"
+            "Date: Mon, 28 Sep 2026 12:00:00 +0000\r\n"
+            "MIME-Version: 1.0\r\n"
+            'Content-Type: multipart/mixed; boundary="b"\r\n'
+            "\r\n--b\r\nContent-Type: text/plain\r\n\r\nPARENT_BODY\r\n"
+            f"--b\r\n{attached}{nested}\r\n--b--\r\n"
+        )
+        folder = tmp_path / "INBOX" / "cur"
+        folder.mkdir(parents=True)
+        (folder / "deep.eml").write_bytes(content.encode())
+        msg = parse_email(folder / "deep.eml")
+        assert msg is not None
+        assert msg.body_text == "PARENT_BODY"
+        # Each nested attached email is recorded, as the old walk did;
+        # only the outermost is ever serialized, and this one is too deep.
+        assert len(msg.attachments) == 300
+        assert all(a.payload == b"" for a in msg.attachments)
+
+    @staticmethod
+    def _deep_attached_email(depth: int, leaf_bytes: int, cte: str | None = None) -> bytes:
+        """A message carrying an attached email whose body is ``depth``
+        nested message/rfc822 wrappers around a ``leaf_bytes`` text leaf.
+        ``cte`` labels the attachment with a transfer encoding, which the
+        parser ignores when it reads the body as MIME."""
+        line = b"x" * 76 + b"\r\n"
+        leaf = b"Content-Type: text/plain\r\n\r\n" + line * max(1, leaf_bytes // len(line))
+        nested = b"Content-Type: message/rfc822\r\n\r\n" * (depth - 1) + leaf
+        label = f"Content-Transfer-Encoding: {cte}\r\n".encode() if cte else b""
+        return (
+            b"Message-ID: <deep@example.test>\r\nFrom: sender@example.test\r\n"
+            b"Date: Mon, 28 Sep 2026 12:00:00 +0000\r\nMIME-Version: 1.0\r\n"
+            b'Content-Type: multipart/mixed; boundary="b"\r\n\r\n'
+            b"--b\r\nContent-Type: text/plain\r\n\r\nPARENT_BODY\r\n"
+            b"--b\r\nContent-Type: message/rfc822\r\n"
+            + label
+            + b'Content-Disposition: attachment; filename="x.eml"\r\n\r\n'
+            + nested
+            + b"\r\n--b--\r\n"
+        )
+
+    @staticmethod
+    def _count_serializations(monkeypatch) -> list[int]:
+        """Count ``Message.as_bytes`` calls: the parser never serializes,
+        so every call is the attachment walk serializing a container."""
+        import email.message
+
+        calls: list[int] = []
+        real = email.message.Message.as_bytes
+
+        def counting(self, *args, **kwargs):
+            calls.append(1)
+            return real(self, *args, **kwargs)
+
+        monkeypatch.setattr(email.message.Message, "as_bytes", counting)
+        return calls
+
+    # Serializing copies the subtree once per level above it, so the
+    # worst case is a large leaf under many wrappers: 24 MB (under the
+    # 50 MB parse cap) under 240, the shape the security review measured.
+    WORST_CASE_DEPTH = 240
+    WORST_CASE_LEAF = 24_000_000
+    # Generous: the bounded path parses the 24 MB in well under a second.
+    WORST_CASE_SECONDS = 10.0
+
+    def test_attached_email_at_the_cap_is_serialized(self, tmp_path):
+        from src.parser import MAX_ATTACHED_MESSAGE_DEPTH
+
+        folder = tmp_path / "INBOX" / "cur"
+        folder.mkdir(parents=True)
+        path = folder / "d.eml"
+        path.write_bytes(self._deep_attached_email(MAX_ATTACHED_MESSAGE_DEPTH, 100))
+        msg = parse_email(path)
+        assert msg is not None
+        [attachment] = msg.attachments
+        assert b"xxxx" in attachment.payload
+
+    @pytest.mark.parametrize("cte", [None, "base64"])
+    def test_attached_email_past_the_cap_is_never_serialized(self, tmp_path, monkeypatch, cte):
+        """Review rounds 1, 7 and 8: past the depth cap the attached email
+        keeps the empty payload without its tree ever being serialized —
+        including a transfer-encoded one, whose transport body the parser
+        still reads as MIME. The serialization count is the enforcing
+        check: on Python 3.14 the unbounded serialization of this worst
+        case measures well under a second, so elapsed time alone cannot
+        tell the two apart; the time bound is the safety net."""
+        import time
+
+        folder = tmp_path / "INBOX" / "cur"
+        folder.mkdir(parents=True)
+        path = folder / "d.eml"
+        path.write_bytes(
+            self._deep_attached_email(self.WORST_CASE_DEPTH, self.WORST_CASE_LEAF, cte)
+        )
+        calls = self._count_serializations(monkeypatch)
+        started = time.perf_counter()
+        msg = parse_email(path)
+        elapsed = time.perf_counter() - started
+        assert msg is not None
+        assert msg.body_text == "PARENT_BODY"
+        assert msg.attachments[0].payload == b""
+        assert calls == []
+        assert elapsed < self.WORST_CASE_SECONDS
+
+    @pytest.mark.parametrize("encoding", ["base64", "quoted-printable"])
+    def test_transfer_encoded_attached_email_is_hashed_decoded(self, tmp_path, encoding):
+        """Review round 1: a base64 / quoted-printable message/rfc822 part
+        (not allowed by RFC 2046, but sent) was hashed in its transport
+        form, so the same email got a different ID and size per encoding."""
+        import base64
+        import quopri
+
+        inner = (
+            b"Message-ID: <inner@example.test>\r\nFrom: other@example.test\r\n\r\nINNER=body\r\n"
+        )
+        encoded = base64.encodebytes(inner) if encoding == "base64" else quopri.encodestring(inner)
+
+        def parent(cte: str, body: bytes) -> bytes:
+            return (
+                b"Message-ID: <outer@example.test>\r\nFrom: sender@example.test\r\n"
+                b"Date: Mon, 28 Sep 2026 12:00:00 +0000\r\nMIME-Version: 1.0\r\n"
+                b'Content-Type: multipart/mixed; boundary="b"\r\n\r\n'
+                b"--b\r\nContent-Type: text/plain\r\n\r\nPARENT_BODY\r\n"
+                b"--b\r\nContent-Type: message/rfc822\r\n"
+                + f"Content-Transfer-Encoding: {cte}\r\n".encode()
+                + b'Content-Disposition: attachment; filename="x.eml"\r\n\r\n'
+                + body
+                + b"\r\n--b--\r\n"
+            )
+
+        folder = tmp_path / "INBOX" / "cur"
+        folder.mkdir(parents=True)
+        (folder / "plain.eml").write_bytes(parent("7bit", inner))
+        (folder / "encoded.eml").write_bytes(parent(encoding, encoded))
+        plain = parse_email(folder / "plain.eml")
+        coded = parse_email(folder / "encoded.eml")
+        assert plain is not None and coded is not None
+        assert b"INNER=body" in coded.attachments[0].payload
+        assert coded.attachments[0].content_hash == plain.attachments[0].content_hash
+
+    @pytest.mark.parametrize("encoding", ["base64", "quoted-printable"])
+    def test_attachments_inside_an_encoded_attached_email_are_found(self, tmp_path, encoding):
+        """Review round 4: traversal walked the parser's tree, where an
+        encoded attached email is transport text, so the PDF it carries
+        was recorded under 7bit but not base64 / quoted-printable."""
+        import base64
+        import quopri
+
+        inner = (
+            b"Message-ID: <inner@example.test>\r\nFrom: other@example.test\r\n"
+            b'MIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary="n"\r\n\r\n'
+            b"--n\r\nContent-Type: text/plain\r\n\r\nINNER_TEXT\r\n"
+            b"--n\r\nContent-Type: application/pdf\r\n"
+            b'Content-Disposition: attachment; filename="inside.pdf"\r\n\r\n%PDF-INSIDE\r\n'
+            b"--n--\r\n"
+        )
+        encoded = base64.encodebytes(inner) if encoding == "base64" else quopri.encodestring(inner)
+        folder = tmp_path / "INBOX" / "cur"
+        folder.mkdir(parents=True)
+        path = folder / "m.eml"
+        path.write_bytes(
+            b"Message-ID: <outer@example.test>\r\nFrom: sender@example.test\r\n"
+            b"Date: Mon, 28 Sep 2026 12:00:00 +0000\r\nMIME-Version: 1.0\r\n"
+            b'Content-Type: multipart/mixed; boundary="o"\r\n\r\n'
+            b"--o\r\nContent-Type: text/plain\r\n\r\nPARENT_BODY\r\n"
+            b"--o\r\nContent-Type: message/rfc822\r\n"
+            + f"Content-Transfer-Encoding: {encoding}\r\n".encode()
+            + b'Content-Disposition: attachment; filename="fwd.eml"\r\n\r\n'
+            + encoded
+            + b"\r\n--o--\r\n"
+        )
+        msg = parse_email(path)
+        assert msg is not None
+        assert msg.body_text == "PARENT_BODY"
+        by_name = {a.filename: a for a in msg.attachments}
+        assert set(by_name) == {"fwd.eml", "inside.pdf"}
+        assert b"%PDF-INSIDE" in by_name["inside.pdf"].payload
+
+    def test_undecodable_base64_attached_email_keeps_an_empty_payload(self, tmp_path):
+        folder = tmp_path / "INBOX" / "cur"
+        folder.mkdir(parents=True)
+        path = folder / "m.eml"
+        path.write_bytes(
+            b"Message-ID: <bad64@example.test>\r\nFrom: sender@example.test\r\n"
+            b"Date: Mon, 28 Sep 2026 12:00:00 +0000\r\nMIME-Version: 1.0\r\n"
+            b'Content-Type: multipart/mixed; boundary="b"\r\n\r\n'
+            b"--b\r\nContent-Type: text/plain\r\n\r\nPARENT_BODY\r\n"
+            b"--b\r\nContent-Type: message/rfc822\r\nContent-Transfer-Encoding: base64\r\n"
+            b'Content-Disposition: attachment; filename="x.eml"\r\n\r\nA\r\n--b--\r\n'
+        )
+        msg = parse_email(path)
+        assert msg is not None
+        assert msg.body_text == "PARENT_BODY"
+        assert msg.attachments[0].payload == b""
+
+    def test_eight_bit_disposition_does_not_abort_parsing(self, tmp_path):
+        """Review round 1: an unencoded 8-bit Content-Disposition comes back
+        from the compat32 parser as a Header, which has no ``lower()``."""
+        folder = tmp_path / "INBOX" / "cur"
+        folder.mkdir(parents=True)
+        path = folder / "m.eml"
+        path.write_bytes(
+            b"Message-ID: <eight@example.test>\r\nFrom: sender@example.test\r\n"
+            b"Date: Mon, 28 Sep 2026 12:00:00 +0000\r\nContent-Type: application/pdf\r\n"
+            b'Content-Disposition: attachment; filename="r\xe9sum\xe9.pdf"\r\n\r\n%PDF\r\n'
+        )
+        msg = parse_email(path)
+        assert msg is not None
+        [attachment] = msg.attachments
+        assert attachment.filename.endswith(".pdf")
+
+    def _parse_raw(self, tmp_path, raw: bytes):
+        folder = tmp_path / "INBOX" / "cur"
+        folder.mkdir(parents=True, exist_ok=True)
+        path = folder / "raw.eml"
+        path.write_bytes(raw)
+        msg = parse_email(path)
+        assert msg is not None
+        return msg
+
+    _HEAD = (
+        b"Message-ID: <outer@example.test>\r\nFrom: sender@example.test\r\n"
+        b"Date: Mon, 28 Sep 2026 12:00:00 +0000\r\nMIME-Version: 1.0\r\n"
+    )
+
+    def test_attached_email_as_the_root_is_an_attachment(self, tmp_path):
+        """Review round 2: compat32 reports message/rfc822 as multipart, so
+        a root attached email skipped classification and its body was
+        taken as the outer message's."""
+        msg = self._parse_raw(
+            tmp_path,
+            self._HEAD + b"Content-Type: message/rfc822\r\n"
+            b'Content-Disposition: attachment; filename="forward.eml"\r\n\r\n'
+            b"Message-ID: <inner@example.test>\r\nFrom: other@example.test\r\n\r\n"
+            b"INNER_MARKER\r\n",
+        )
+        assert "INNER_MARKER" not in msg.body_text
+        assert [a.content_type for a in msg.attachments] == ["message/rfc822"]
+        assert b"INNER_MARKER" in msg.attachments[0].payload
+
+    def test_multipart_root_presented_as_an_attachment_is_one(self, tmp_path):
+        """Review round 5: a multipart root with an attachment disposition
+        was exempt from classification, so the bundle went unrecorded and
+        its text became the body. It is classified like a single-part
+        root; the PDF inside is still found."""
+        msg = self._parse_raw(
+            tmp_path,
+            self._HEAD + b'Content-Type: multipart/mixed; boundary="b"\r\n'
+            b'Content-Disposition: attachment; filename="bundle.mime"\r\n\r\n'
+            b"--b\r\nContent-Type: text/plain\r\n\r\nBUNDLE_TEXT\r\n"
+            b"--b\r\nContent-Type: application/pdf\r\n"
+            b'Content-Disposition: attachment; filename="inner.pdf"\r\n\r\n%PDF-INNER\r\n'
+            b"--b--\r\n",
+        )
+        assert "BUNDLE_TEXT" not in msg.body_text
+        by_name = {a.filename: a for a in msg.attachments}
+        assert set(by_name) == {"bundle.mime", "inner.pdf"}
+        assert b"BUNDLE_TEXT" in by_name["bundle.mime"].payload
+
+    def test_attachments_inside_attachments_are_still_found(self, tmp_path):
+        """Review round 2: the old walk found a PDF inside an attached
+        bundle or email; stopping at the boundary lost it. Text inside an
+        attachment is still never the parent's body."""
+        msg = self._parse_raw(
+            tmp_path,
+            self._HEAD + b'Content-Type: multipart/mixed; boundary="o"\r\n\r\n'
+            b"--o\r\nContent-Type: text/html\r\n\r\n<p>OUTER_BODY</p>\r\n"
+            b'--o\r\nContent-Type: multipart/mixed; boundary="i"\r\n'
+            b'Content-Disposition: attachment; filename="bundle.mime"\r\n\r\n'
+            b"--i\r\nContent-Type: text/plain\r\n\r\nBUNDLE_TEXT\r\n"
+            b"--i\r\nContent-Type: application/pdf\r\n"
+            b'Content-Disposition: attachment; filename="inner.pdf"\r\n\r\n%PDF-INNER\r\n'
+            b"--i--\r\n--o--\r\n",
+        )
+        assert "OUTER_BODY" in msg.body_text
+        assert "BUNDLE_TEXT" not in msg.body_text
+        by_name = {a.filename: a for a in msg.attachments}
+        assert set(by_name) == {"bundle.mime", "inner.pdf"}
+        assert b"%PDF-INNER" in by_name["inner.pdf"].payload
+        assert b"BUNDLE_TEXT" in by_name["bundle.mime"].payload
+
+    def test_every_delivery_status_block_is_kept(self, tmp_path):
+        """Review round 2: message/delivery-status parses into one block
+        per recipient; only the first was serialized."""
+        msg = self._parse_raw(
+            tmp_path,
+            self._HEAD + b'Content-Type: multipart/report; boundary="r"\r\n\r\n'
+            b"--r\r\nContent-Type: text/plain\r\n\r\nDelivery failed.\r\n"
+            b"--r\r\nContent-Type: message/delivery-status\r\n"
+            b'Content-Disposition: attachment; filename="status.txt"\r\n\r\n'
+            b"Reporting-MTA: dns; mx.example.test\r\n\r\n"
+            b"Final-Recipient: rfc822; first@example.test\r\nStatus: 5.1.1\r\n\r\n"
+            b"Final-Recipient: rfc822; second@example.test\r\nStatus: 5.2.2\r\n"
+            b"\r\n--r--\r\n",
+        )
+        [status] = msg.attachments
+        assert b"first@example.test" in status.payload
+        assert b"second@example.test" in status.payload
+
+    @pytest.mark.parametrize("fields, serialized", [(100, True), (20_000, False)])
+    def test_container_with_too_many_fields_is_never_serialized(
+        self, tmp_path, monkeypatch, fields, serialized
+    ):
+        """Review round 9: the generator costs several times the parser
+        per header field, and a delivery report is one field per line, so
+        a report past MAX_ATTACHED_MESSAGE_FIELDS keeps the empty payload
+        without ever being serialized."""
+        from src.parser import MAX_ATTACHED_MESSAGE_FIELDS
+
+        assert (fields > MAX_ATTACHED_MESSAGE_FIELDS) is not serialized
+        raw = (
+            self._HEAD + b'Content-Type: multipart/report; boundary="r"\r\n\r\n'
+            b"--r\r\nContent-Type: text/plain\r\n\r\nDelivery failed.\r\n"
+            b"--r\r\nContent-Type: message/delivery-status\r\n"
+            b'Content-Disposition: attachment; filename="status.txt"\r\n\r\n'
+            b"Reporting-MTA: dns; mx.example.test\r\n"
+            + b"X-Field: value\r\n" * fields
+            + b"\r\n--r--\r\n"
+        )
+        calls = self._count_serializations(monkeypatch)
+        msg = self._parse_raw(tmp_path, raw)
+        [status] = msg.attachments
+        assert (status.payload != b"") is serialized
+        assert (calls != []) is serialized
+
+    def test_headerless_blocks_count_against_the_budget(self, tmp_path, monkeypatch):
+        """Review round 10: a delivery report of blank blocks parses into
+        parts with no header fields, so a fields-only budget never
+        advanced while every part was still serialized. Parts count too."""
+        from src.parser import MAX_ATTACHED_MESSAGE_FIELDS
+
+        raw = (
+            self._HEAD + b'Content-Type: multipart/report; boundary="r"\r\n\r\n'
+            b"--r\r\nContent-Type: text/plain\r\n\r\nDelivery failed.\r\n"
+            b"--r\r\nContent-Type: message/delivery-status\r\n"
+            b'Content-Disposition: attachment; filename="status.txt"\r\n\r\n'
+            b"Reporting-MTA: dns; mx.example.test\r\n\r\n"
+            + b"\r\n" * (2 * MAX_ATTACHED_MESSAGE_FIELDS)
+            + b"--r--\r\n"
+        )
+        calls = self._count_serializations(monkeypatch)
+        msg = self._parse_raw(tmp_path, raw)
+        assert msg.attachments[0].payload == b""
+        assert calls == []
+
+    def test_header_bytes_count_against_the_budget(self, tmp_path, monkeypatch):
+        """Review round 11: one 5 MB header field counted as one unit but
+        cost the generator seconds to refold. Header bytes count too."""
+        raw = (
+            self._HEAD + b'Content-Type: multipart/report; boundary="r"\r\n\r\n'
+            b"--r\r\nContent-Type: text/plain\r\n\r\nDelivery failed.\r\n"
+            b"--r\r\nContent-Type: message/delivery-status\r\n"
+            b'Content-Disposition: attachment; filename="status.txt"\r\n\r\n'
+            b"X-Long: " + b"word " * 200_000 + b"\r\n\r\n--r--\r\n"
+        )
+        calls = self._count_serializations(monkeypatch)
+        msg = self._parse_raw(tmp_path, raw)
+        assert msg.attachments[0].payload == b""
+        assert calls == []
+
+    def test_the_budget_spans_every_container_in_a_message(self, tmp_path, monkeypatch):
+        """Review round 10: fifty sibling reports each under the budget
+        cost fifty serializations. One budget covers the whole message,
+        so once it is spent no later container is serialized. Each
+        report is worth about 70% of the budget (its fields plus their
+        bytes), so the first fits and the second exhausts it."""
+        from src.parser import MAX_ATTACHED_MESSAGE_FIELDS
+
+        report = (
+            b"--r\r\nContent-Type: message/delivery-status\r\n"
+            b'Content-Disposition: attachment; filename="status.txt"\r\n\r\n'
+            b"Reporting-MTA: dns; mx.example.test\r\n"
+            + b"X-Field: value\r\n" * (MAX_ATTACHED_MESSAGE_FIELDS * 4 // 10)
+            + b"\r\n"
+        )
+        raw = (
+            self._HEAD + b'Content-Type: multipart/report; boundary="r"\r\n\r\n'
+            b"--r\r\nContent-Type: text/plain\r\n\r\nDelivery failed.\r\n"
+            + report * 50
+            + b"--r--\r\n"
+        )
+        calls = self._count_serializations(monkeypatch)
+        msg = self._parse_raw(tmp_path, raw)
+        assert len(msg.attachments) == 50
+        assert msg.attachments[0].payload != b""
+        assert all(a.payload == b"" for a in msg.attachments[1:])
+        assert len(calls) == 1
+
+    # Review round 12: an attached email must hash the same whatever its
+    # transfer encoding. Every shape here matched 7bit as base64 all along;
+    # quoted-printable diverged on six (a multipart body, and any header
+    # line of 76+ characters, which quoted-printable soft-breaks) until the
+    # transport text was rebuilt from the parser's raw tuples.
+    _INNER_HEAD = b"From: a@example.test\r\nTo: b@example.test\r\nSubject: Hi\r\n"
+    _INNER_MULTIPART = (
+        b'MIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary="n"\r\n\r\n'
+        b"--n\r\nContent-Type: text/plain\r\n\r\nhello\r\n--n--\r\n"
+    )
+    ENCODING_PARITY_SHAPES = {
+        "plain body": _INNER_HEAD + b"\r\nhello world\r\n",
+        "multipart body": _INNER_HEAD + _INNER_MULTIPART,
+        "no trailing newline": _INNER_HEAD + b"\r\nhello",
+        "extra blank lines at end": _INNER_HEAD + b"\r\nhello\r\n\r\n\r\n",
+        "empty body": _INNER_HEAD + b"\r\n",
+        "headers only": _INNER_HEAD,
+        "8-bit body": _INNER_HEAD + "\r\nr\u00e9sum\u00e9 \u2014 caf\u00e9\r\n".encode(),
+        "8-bit header": b"From: a@example.test\r\nSubject: r\xc3\xa9sum\xc3\xa9\r\n\r\nhello\r\n",
+        "long body line": _INNER_HEAD + b"\r\n" + b"w" * 300 + b"\r\n",
+        "trailing spaces": _INNER_HEAD + b"\r\nhello   \r\nworld \r\n",
+        "tabs": _INNER_HEAD + b"\r\na\tb\r\n",
+        "equals signs": _INNER_HEAD + b"\r\na=b=c ==\r\n",
+        "folded header": b"From: a@example.test\r\nSubject: aaa\r\n bbb\r\n\r\nhello\r\n",
+        "header 75 chars": b"From: a@example.test\r\nSubject: " + b"s" * 66 + b"\r\n\r\nhello\r\n",
+        "header 76 chars": b"From: a@example.test\r\nSubject: " + b"s" * 67 + b"\r\n\r\nhello\r\n",
+        "header 80 chars": b"From: a@example.test\r\nSubject: " + b"s" * 71 + b"\r\n\r\nhello\r\n",
+        "long DKIM-like header": (
+            b"From: a@example.test\r\nDKIM-Signature: v=1; a=rsa-sha256; b="
+            + b"Q" * 200
+            + b"\r\n\r\nhello\r\n"
+        ),
+        "equals in header": b"From: a@example.test\r\nX-Q: a=b\r\n\r\nhello\r\n",
+        "no space after colon": b"From:a@example.test\r\nSubject:Hi\r\n\r\nhello\r\n",
+        "LF line endings": _INNER_HEAD.replace(b"\r\n", b"\n") + b"\nhello\n",
+        "From at line start": _INNER_HEAD + b"\r\nFrom the top\r\n",
+        "From after blank line": _INNER_HEAD + b"\r\n\r\nFrom the top\r\n",
+        "nested attached email": (
+            _INNER_HEAD
+            + b'MIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary="n"\r\n\r\n'
+            b"--n\r\nContent-Type: message/rfc822\r\n\r\nFrom: c@example.test\r\n\r\ninner\r\n--n--\r\n"
+        ),
+        "folded Content-Type": (
+            _INNER_HEAD
+            + b'MIME-Version: 1.0\r\nContent-Type: multipart/mixed;\r\n boundary="abc"\r\n\r\n'
+            b"--abc\r\nContent-Type: text/plain\r\n\r\nhello\r\n--abc--\r\n"
+        ),
+        "QP-looking body text": _INNER_HEAD + b"\r\nprice =3D 5 and =20\r\n",
+    }
+
+    @pytest.mark.parametrize("shape", sorted(ENCODING_PARITY_SHAPES))
+    @pytest.mark.parametrize("encoding", ["base64", "quoted-printable"])
+    def test_transfer_encoded_attached_email_hashes_like_7bit(self, tmp_path, shape, encoding):
+        import base64
+        import quopri
+
+        inner = self.ENCODING_PARITY_SHAPES[shape]
+        encoded = base64.encodebytes(inner) if encoding == "base64" else quopri.encodestring(inner)
+
+        def outer(cte: str, body: bytes) -> bytes:
+            return (
+                self._HEAD + b'Content-Type: multipart/mixed; boundary="o"\r\n\r\n'
+                b"--o\r\nContent-Type: text/plain\r\n\r\nPARENT_BODY\r\n"
+                b"--o\r\nContent-Type: message/rfc822\r\n"
+                + f"Content-Transfer-Encoding: {cte}\r\n".encode()
+                + b'Content-Disposition: attachment; filename="x.eml"\r\n\r\n'
+                + body
+                + b"\r\n--o--\r\n"
+            )
+
+        folder = tmp_path / "INBOX" / "cur"
+        folder.mkdir(parents=True)
+        (folder / "plain.eml").write_bytes(outer("7bit", inner))
+        (folder / "coded.eml").write_bytes(outer(encoding, encoded))
+        plain = parse_email(folder / "plain.eml")
+        coded = parse_email(folder / "coded.eml")
+        assert plain is not None and coded is not None
+        assert plain.attachments[0].payload != b""
+        assert coded.attachments[0].content_hash == plain.attachments[0].content_hash
+
+    def test_header_the_generator_refuses_keeps_an_empty_payload(self, tmp_path):
+        """Review round 13 (P1): a header compat32 accepts but the
+        generator refuses raised HeaderWriteError, whose text quotes the
+        header, out of parse_email and into the job's recorded error."""
+        msg = self._parse_raw(
+            tmp_path,
+            self._HEAD + b'Content-Type: multipart/mixed; boundary="b"\r\n\r\n'
+            b"--b\r\nContent-Type: text/plain\r\n\r\nPARENT_BODY\r\n"
+            b'--b\r\nContent-Type: message/rfc822\r\nContent-Disposition: attachment; filename="x.eml"\r\n\r\n'
+            b"From: a@example.test\r\nX: PRIVATE_MARKER\x0brest\r\n\r\nhello\r\n--b--\r\n",
+        )
+        assert msg.body_text == "PARENT_BODY"
+        assert msg.attachments[0].payload == b""
+
+    def test_eight_bit_bytes_in_a_transport_form_keep_an_empty_payload(self, tmp_path):
+        """Review round 13: raw 8-bit bytes inside a quoted-printable
+        transport form (malformed) raised UnicodeEncodeError out of the
+        reconstruction and failed the whole message."""
+        msg = self._parse_raw(
+            tmp_path,
+            self._HEAD + b'Content-Type: multipart/mixed; boundary="b"\r\n\r\n'
+            b"--b\r\nContent-Type: text/plain\r\n\r\nPARENT_BODY\r\n"
+            b"--b\r\nContent-Type: message/rfc822\r\nContent-Transfer-Encoding: quoted-printable\r\n"
+            b'Content-Disposition: attachment; filename="x.eml"\r\n\r\n'
+            b"From: a@example.test\r\nSubject: caf\xc3\xa9\r\n\r\nhello\r\n--b--\r\n",
+        )
+        assert msg.body_text == "PARENT_BODY"
+        assert msg.attachments[0].payload == b""
+
+    def test_quoted_printable_delivery_status_hashes_like_7bit(self, tmp_path):
+        """Review round 13: the rebuilt report ended with a blank line the
+        text did not have, so the same report hashed differently."""
+        import quopri
+
+        report = (
+            b"Reporting-MTA: dns; mx.example.test\r\n\r\n"
+            b"Final-Recipient: rfc822; first@example.test\r\nStatus: 5.1.1\r\n\r\n"
+            b"Final-Recipient: rfc822; second@example.test\r\nStatus: 5.2.2\r\n"
+        )
+
+        def outer(cte: bytes, body: bytes) -> bytes:
+            return (
+                self._HEAD + b'Content-Type: multipart/report; boundary="r"\r\n\r\n'
+                b"--r\r\nContent-Type: text/plain\r\n\r\nDelivery failed.\r\n"
+                b"--r\r\nContent-Type: message/delivery-status\r\n"
+                + cte
+                + b'Content-Disposition: attachment; filename="status.txt"\r\n\r\n'
+                + body
+                + b"\r\n--r--\r\n"
+            )
+
+        folder = tmp_path / "INBOX" / "cur"
+        folder.mkdir(parents=True)
+        (folder / "plain.eml").write_bytes(outer(b"", report))
+        (folder / "qp.eml").write_bytes(
+            outer(b"Content-Transfer-Encoding: quoted-printable\r\n", quopri.encodestring(report))
+        )
+        plain = parse_email(folder / "plain.eml")
+        coded = parse_email(folder / "qp.eml")
+        assert plain is not None and coded is not None
+        assert coded.attachments[0].content_hash == plain.attachments[0].content_hash
+
+    @pytest.mark.parametrize("encoding", ["base64", "quoted-printable"])
+    def test_attachments_inside_a_nested_encoded_attached_email_are_found(self, tmp_path, encoding):
+        """Review round 13: a nested container's payload is not kept, and
+        that skipped decoding it too, so the tree walked was the transport
+        form and a PDF two forwards deep was lost."""
+        import base64
+        import quopri
+
+        innermost = (
+            b'From: c@example.test\r\nMIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary="z"\r\n\r\n'
+            b"--z\r\nContent-Type: application/pdf\r\n"
+            b'Content-Disposition: attachment; filename="deep.pdf"\r\n\r\n%PDF-DEEP\r\n--z--\r\n'
+        )
+        encoded = (
+            base64.encodebytes(innermost)
+            if encoding == "base64"
+            else quopri.encodestring(innermost)
+        )
+        middle = (
+            b'From: b@example.test\r\nMIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary="m"\r\n\r\n'
+            b"--m\r\nContent-Type: message/rfc822\r\n"
+            + f"Content-Transfer-Encoding: {encoding}\r\n".encode()
+            + b'Content-Disposition: attachment; filename="inner.eml"\r\n\r\n'
+            + encoded
+            + b"\r\n--m--\r\n"
+        )
+        msg = self._parse_raw(
+            tmp_path,
+            self._HEAD + b'Content-Type: multipart/mixed; boundary="o"\r\n\r\n'
+            b"--o\r\nContent-Type: text/plain\r\n\r\nPARENT_BODY\r\n"
+            b'--o\r\nContent-Type: message/rfc822\r\nContent-Disposition: attachment; filename="outer.eml"\r\n\r\n'
+            + middle
+            + b"\r\n--o--\r\n",
+        )
+        by_name = {a.filename: a for a in msg.attachments}
+        assert set(by_name) == {"outer.eml", "inner.eml", "deep.pdf"}
+        assert b"%PDF-DEEP" in by_name["deep.pdf"].payload
+
+    @pytest.mark.parametrize("encoding", ["base64", "quoted-printable"])
+    def test_encoded_delivery_status_keeps_block_semantics(self, tmp_path, encoding):
+        """Review round 14: the decoded report was parsed as a plain
+        message, so only its first block counted as headers and a long
+        header in a later block folded differently from the 7bit path.
+        The decoded text is now parsed as the part's own content type."""
+        import base64
+        import quopri
+
+        report = (
+            b"Reporting-MTA: dns; mx.example.test\r\n\r\n"
+            b"Final-Recipient: rfc822; first@example.test\r\nStatus: 5.1.1\r\n"
+            b"Diagnostic-Code: smtp; 550 5.1.1 the mailbox does not exist here, try again later\r\n"
+        )
+        encoded = (
+            base64.encodebytes(report) if encoding == "base64" else quopri.encodestring(report)
+        )
+
+        def outer(cte: bytes, body: bytes) -> bytes:
+            return (
+                self._HEAD + b'Content-Type: multipart/report; boundary="r"\r\n\r\n'
+                b"--r\r\nContent-Type: text/plain\r\n\r\nDelivery failed.\r\n"
+                b"--r\r\nContent-Type: message/delivery-status\r\n"
+                + cte
+                + b'Content-Disposition: attachment; filename="status.txt"\r\n\r\n'
+                + body
+                + b"\r\n--r--\r\n"
+            )
+
+        folder = tmp_path / "INBOX" / "cur"
+        folder.mkdir(parents=True)
+        (folder / "plain.eml").write_bytes(outer(b"", report))
+        (folder / "coded.eml").write_bytes(
+            outer(f"Content-Transfer-Encoding: {encoding}\r\n".encode(), encoded)
+        )
+        plain = parse_email(folder / "plain.eml")
+        coded = parse_email(folder / "coded.eml")
+        assert plain is not None and coded is not None
+        assert b"first@example.test" in coded.attachments[0].payload
+        assert coded.attachments[0].content_hash == plain.attachments[0].content_hash
+
+    def test_nested_encoded_attached_emails_stop_decoding_at_the_caps(self, tmp_path, monkeypatch):
+        """Review round 14: inside an attachment the decoded tree was
+        walked without the depth check, so a chain of transfer-encoded
+        attached emails decoded its large descendant at every level (40
+        decodes, 165 MB for a 10.8 MB fixture). Decoding now stops at the
+        depth cap or when the message's decodable bytes are spent."""
+        import quopri
+
+        from src import parser as parser_module
+        from src.parser import MAX_ATTACHED_MESSAGE_DEPTH, MAX_DECODED_ATTACHMENT_BYTES
+
+        decoded_sizes: list[int] = []
+        real = parser_module._decode_transport_form
+
+        def counting(data, encoding, content_type):
+            decoded_sizes.append(len(data))
+            return real(data, encoding, content_type)
+
+        monkeypatch.setattr(parser_module, "_decode_transport_form", counting)
+        inner = b"From: z@example.test\r\nSubject: leaf\r\n\r\n" + (b"y" * 76 + b"\r\n") * 6_000
+        for i in range(40):
+            inner = (
+                b"From: w@example.test\r\nMIME-Version: 1.0\r\n"
+                b'Content-Type: multipart/mixed; boundary="b%d"\r\n\r\n--b%d\r\n'
+                b"Content-Type: message/rfc822\r\nContent-Transfer-Encoding: quoted-printable\r\n"
+                b'Content-Disposition: attachment; filename="l%d.eml"\r\n\r\n'
+                % (i, i, i)
+                + quopri.encodestring(inner)
+                + b"\r\n--b%d--\r\n" % i
+            )
+        msg = self._parse_raw(
+            tmp_path,
+            self._HEAD + b'Content-Type: multipart/mixed; boundary="o"\r\n\r\n'
+            b"--o\r\nContent-Type: text/plain\r\n\r\nPARENT_BODY\r\n"
+            b'--o\r\nContent-Type: message/rfc822\r\nContent-Disposition: attachment; filename="top.eml"\r\n\r\n'
+            + inner
+            + b"\r\n--o--\r\n",
+        )
+        assert msg.body_text == "PARENT_BODY"
+        assert 1 < len(decoded_sizes) <= MAX_ATTACHED_MESSAGE_DEPTH
+        assert sum(decoded_sizes) <= MAX_DECODED_ATTACHMENT_BYTES + decoded_sizes[-1]
+        # Every decoded level's attached email is recorded, plus the top
+        # and the first one past the caps (recorded, not decoded).
+        assert len(msg.attachments) == len(decoded_sizes) + 2
+
+    def test_quoted_printable_delivery_status_keeps_every_block(self, tmp_path):
+        """Review round 9: the transfer-encoded path serialized only the
+        container's first child before decoding. An attached email has
+        one child, but a delivery report has one per block, so a
+        quoted-printable report lost every recipient's status."""
+        import quopri
+
+        report = (
+            b"Reporting-MTA: dns; mx.example.test\r\n\r\n"
+            b"Final-Recipient: rfc822; first@example.test\r\nStatus: 5.1.1\r\n\r\n"
+            b"Final-Recipient: rfc822; second@example.test\r\nStatus: 5.2.2\r\n"
+        )
+        msg = self._parse_raw(
+            tmp_path,
+            self._HEAD + b'Content-Type: multipart/report; boundary="r"\r\n\r\n'
+            b"--r\r\nContent-Type: text/plain\r\n\r\nDelivery failed.\r\n"
+            b"--r\r\nContent-Type: message/delivery-status\r\n"
+            b"Content-Transfer-Encoding: quoted-printable\r\n"
+            b'Content-Disposition: attachment; filename="status.txt"\r\n\r\n'
+            + quopri.encodestring(report)
+            + b"\r\n--r--\r\n",
+        )
+        [status] = msg.attachments
+        assert b"first@example.test" in status.payload
+        assert b"second@example.test" in status.payload
+
+    def test_single_part_attachment_is_an_attachment(self, tmp_path):
+        """#209: a message whose root part is an attachment had its payload
+        decoded as the body and no attachment recorded."""
+        message = EmailMessage()
+        message["Message-ID"] = "<single@example.test>"
+        message["From"] = "sender@example.test"
+        message["Subject"] = "Invoice"
+        message.set_content(
+            b"%PDF-1.4 SYNTHETIC_PDF_MARKER",
+            maintype="application",
+            subtype="pdf",
+            disposition="attachment",
+            filename="invoice.pdf",
+        )
+        msg = parse_email(_write_message(tmp_path, message))
+        assert msg is not None
+        assert msg.body_text == ""
+        assert msg.has_attachments is True
+        [attachment] = msg.attachments
+        assert attachment.filename == "invoice.pdf"
+        assert attachment.content_type == "application/pdf"
+        assert attachment.payload == b"%PDF-1.4 SYNTHETIC_PDF_MARKER"
+
+    def test_single_part_binary_body_is_not_decoded_as_text(self, tmp_path):
+        """#209: only text parts are message text; a nameless binary root
+        is skipped, as the same part is inside a multipart."""
+        message = EmailMessage()
+        message["Message-ID"] = "<binary@example.test>"
+        message["From"] = "sender@example.test"
+        message.set_content(b"BINARY_MARKER", maintype="application", subtype="octet-stream")
+        msg = parse_email(_write_message(tmp_path, message))
+        assert msg is not None
+        assert msg.body_text == ""
+        assert msg.attachments == []
+
+    def test_single_part_text_body_is_still_the_body(self, tmp_path):
+        message = EmailMessage()
+        message["Message-ID"] = "<calendar@example.test>"
+        message["From"] = "sender@example.test"
+        message.set_content("CALENDAR_MARKER", subtype="calendar")
+        msg = parse_email(_write_message(tmp_path, message))
+        assert msg is not None
+        assert msg.body_text == "CALENDAR_MARKER"
 
 
 class TestDecodeHeader:

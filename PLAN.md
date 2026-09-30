@@ -339,12 +339,13 @@ How the first batch was worked, and what to repeat:
 
   Likely needs a schema change (store both claimants), so land it with
   the Phase 2 migration and reindex. That reindex also repairs databases
-  already damaged by #204, #205 and #232.
+  already damaged by #204, #205, #230 and #232.
 - **#208 chunk overlap exceeds `max_tokens`** — harmless at default
   settings; land it with Phase 2 item 4 (chunk `kind` tags), which
   rewrites the chunker and changes chunk IDs anyway.
-- **#209 single-part MIME attachment decoded as body**, **#210 stale
-  unsupported-extraction cache entry** (#210 done in item 10 below) — low frequency, about 10 and 5
+- ~~**#209 single-part MIME attachment decoded as body**~~ (done with
+  #230 in item 8 below), ~~**#210 stale
+  unsupported-extraction cache entry**~~ (done in item 10 below) — low frequency, about 10 and 5
   lines; fix them when next in `parser.py` / `attachment_indexing.py`,
   or together as one small PR.
 
@@ -400,7 +401,7 @@ passthrough in the search and intelligence handlers); AGENTS.md's
 7. **Done (#259).** **#243** header clipping sweep (subject, participant names,
    attachment filename/MIME, reranker `_candidate_text`). Separate from
    the `get_message` / ID-length backlog items below.
-8. **#230 + #209** (PR #260) parser MIME traversal: nothing inside an
+8. **Done (#260).** **#230 + #209** parser MIME traversal: nothing inside an
    attachment is a body candidate, attachments inside attachments are
    still recorded, and a single-part or attachment-labelled root is
    classified. An attached email is identified by the hash of its
@@ -521,6 +522,26 @@ can be revisited with an explicit owner decision.
   Phase 2 reindex or when Phase 4/5 temporal reasoning needs it. First
   verify Bridge-delivered messages keep `Received:` headers (sent mail
   likely has none)
+- replacing the stdlib MIME parser (decided 2026-09-30 on PR #260):
+  Python's `email` package never exposes a part's raw byte offsets and
+  parses a transfer-encoded `message/rfc822` (forbidden by RFC 2046,
+  but sent) before decoding it, so an attached email's identity is the
+  hash of its re-serialized form (line endings and folding normalized),
+  not of its raw bytes. Encodings agree on that form for every shape a
+  25-case parity test covers, after the transport text was rebuilt
+  from the parser's raw tuples; the one residual is an inner email
+  declaring `multipart/*` with no usable boundary (malformed), which
+  compat32 parses differently nested and standalone. A hand-rolled
+  boundary slicer was tried and reverted after four Codex rounds of
+  real findings (quadratic and memory-heavy on hostile input, bare-CR
+  endings, depth caps). Every maintained Python parser
+  wraps the stdlib; `flanker` is unmaintained (last release 2019). The
+  one real candidate is Stalwart's Rust `mail-parser` (RFC-conformant,
+  no dependencies, exposes part offsets, built for hostile mail) via a
+  homegrown pyo3 binding and a Rust build stage in the indexer image —
+  an architecture change with a full reindex. Revisit if hostile-mail
+  robustness becomes a goal in its own right (Phase 3's adversarial
+  suite is the natural trigger), not for a bug fix
 
 ## Operational baseline (unchanged)
 
