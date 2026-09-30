@@ -56,12 +56,13 @@ _REAP_ABSOLUTE_FLOOR = 10
 _BLOCKED_ESCALATION_THRESHOLD = 3
 
 
-def _is_live(filepath: str | None) -> bool:
+def _is_live(filepath: str | None, listings: dict[Path, dict[str, Path]]) -> bool:
     """True when the message file at ``filepath`` (or its flag-renamed
-    successor) exists and is not trashed."""
+    successor) exists and is not trashed. ``listings`` is the caller's
+    per-pass directory cache for ``resolve_current_path``."""
     if filepath is None:
         return False
-    current = resolve_current_path(Path(filepath))
+    current = resolve_current_path(Path(filepath), listings)
     return current is not None and not is_trashed(current)
 
 
@@ -222,6 +223,23 @@ class Reconciler:
         """
         cutoff = (datetime.now(UTC) - timedelta(days=self.config.grace_days)).isoformat()
         tombstones = self.db.list_pending_deletions_older_than(cutoff)
+
+        # A tombstone claims the message was trashed or went missing when
+        # it was written. Check the file the message maps to now: if it
+        # exists outside the trash, the claim is stale (a move away and
+        # back during a sweep, or a tombstone left under a dead path by
+        # the #301 race), so clear it rather than reap. This runs before
+        # the brake so stale rows, which no sweep revisits, cannot hold it
+        # shut, and shares one listings cache so each folder is listed
+        # once per pass rather than once per tombstone.
+        listings: dict[Path, dict[str, Path]] = {}
+        eligible = []
+        for tomb in tombstones:
+            if _is_live(tomb["mapped_filepath"], listings):
+                self.db.clear_pending_deletion(tomb["filepath"])
+            else:
+                eligible.append(tomb)
+        tombstones = eligible
         if not tombstones:
             return {"threads_reaped": 0, "threads_rebuilt": 0, "aborted": False}
 
@@ -332,26 +350,12 @@ class Reconciler:
         transaction that each message is still tombstoned at or before
         ``cutoff``, since the watcher may restore (or restore and trash
         again) a message meanwhile."""
-        all_rows = self.db.get_thread_messages(thread_id)
-
-        # A tombstone claims the message was trashed or went missing when
-        # it was written. Before deleting, check the file the message maps
-        # to now: if it exists outside the trash, the claim is stale (a
-        # move away and back during a sweep, or a tombstone left under a
-        # dead path by the #301 race), so clear it instead of reaping.
-        mapped = {r["message_id"]: r["filepath"] for r in all_rows}
-        live = [t for t in tombs if _is_live(mapped.get(t["message_id"]))]
-        for tomb in live:
-            self.db.clear_pending_deletion(tomb["filepath"])
-        tombs = [t for t in tombs if t not in live]
-        if not tombs:
-            return False, False
-
         # Survivors are chosen by message ID, which removal also uses:
         # the watcher can rename a tombstoned file (a flag change) after
         # ``tombs`` was read, and a stale snapshot path would let the
         # deleted message be rebuilt into the thread as a survivor.
         dead_ids = {t["message_id"] for t in tombs}
+        all_rows = self.db.get_thread_messages(thread_id)
         survivor_rows = [r for r in all_rows if r["message_id"] not in dead_ids]
         dead_filepaths = {t["filepath"] for t in tombs} | {
             r["filepath"] for r in all_rows if r["message_id"] in dead_ids

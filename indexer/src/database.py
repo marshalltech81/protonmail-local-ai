@@ -2194,9 +2194,15 @@ class Database:
 
     @_synchronized
     def list_pending_deletions_older_than(self, cutoff_iso: str) -> list[sqlite3.Row]:
+        """Tombstones marked at or before ``cutoff_iso``, each with
+        ``mapped_filepath``: the path ``message_thread_map`` holds for the
+        message now (``None`` when the message is unmapped)."""
         return self._conn.execute(
-            "SELECT filepath, message_id, thread_id, marked_at "
-            "FROM pending_deletions WHERE marked_at <= ? ORDER BY marked_at ASC",
+            "SELECT p.filepath, p.message_id, p.thread_id, p.marked_at, "
+            "m.filepath AS mapped_filepath "
+            "FROM pending_deletions p "
+            "LEFT JOIN message_thread_map m ON m.message_id = p.message_id "
+            "WHERE p.marked_at <= ? ORDER BY p.marked_at ASC",
             (cutoff_iso,),
         ).fetchall()
 

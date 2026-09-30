@@ -426,7 +426,9 @@ The indexer ships an opt-in reconciler
    (`INDEXER_DELETION_GRACE_DAYS`, default 7 days) the reaper first checks
    the file each tombstoned message maps to now: if it exists and is not
    trashed, the tombstone is stale (the file moved away and back during a
-   sweep) and is cleared instead of reaped. Otherwise it removes the
+   sweep) and is cleared instead of reaped. This check runs before the
+   mass-delete brake below counts the batch, so stale tombstones cannot
+   hold the brake shut. Otherwise it removes the
    reaped message's rows from `message_thread_map` / `indexed_files` and
    any indexing job still queued for its file (in the same transaction,
    which first re-checks that every message it removes is still

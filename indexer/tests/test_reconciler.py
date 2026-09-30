@@ -439,6 +439,38 @@ class TestReap:
         assert path.exists()
         assert db.count_pending_deletions() == 0
 
+    def test_live_checks_list_each_directory_once(
+        self, db, threader, embedder, maildir, monkeypatch
+    ):
+        """#336 review round 2: each tombstone whose mapped file is gone
+        made the live check list the folder again, so a batch of missing
+        files in one large folder cost a folder scan per tombstone. The
+        reaper shares one listings cache across the pass, as the sweep
+        does."""
+        paths = []
+        for i in range(20):
+            p = maildir / f"1700000{i:04d}.M1.host:2,S"
+            _write_eml(p, f"gone{i}@example.com", subject=f"Subject {i}")
+            _index(p, db, threader)
+            paths.append(p)
+        for p in paths:
+            entry = db.find_message_entry_by_filepath(str(p))
+            db.add_pending_deletion(str(p), entry["message_id"], entry["thread_id"])
+            p.unlink()
+
+        listed: list[Path] = []
+        real_iterdir = Path.iterdir
+
+        def counting_iterdir(self):
+            listed.append(self)
+            return real_iterdir(self)
+
+        monkeypatch.setattr(Path, "iterdir", counting_iterdir)
+        rec = Reconciler(db, embedder, threader, _default_config(force=True))
+        assert rec.reap()["threads_reaped"] == 20
+        assert listed
+        assert len(listed) == len(set(listed))
+
     def test_reap_clears_an_orphan_tombstone_for_a_live_message(
         self, db, threader, embedder, maildir
     ):
@@ -1358,6 +1390,34 @@ class TestMassDeleteBrake:
         result = rec.reap()
         assert result["aborted"] is False
         assert db.count_total_messages() == 4  # 10 - 6 reaped
+
+    def test_stale_live_tombstones_do_not_trip_the_brake(self, db, threader, embedder, maildir):
+        """#336 review round 2: tombstones whose message maps to a live,
+        untrashed file are stale and cleared by the reaper, but they were
+        counted against the brake first. Eleven orphans in a small mailbox
+        aborted every pass, and no sweep revisits their dead paths, so the
+        brake blocked legitimate deletions forever."""
+        paths = self._stage_batch(maildir, db, threader, 12)
+        for p in paths[:11]:
+            entry = db.find_message_entry_by_filepath(str(p))
+            db._conn.execute(
+                "INSERT INTO pending_deletions (filepath, message_id, thread_id, marked_at) "
+                "VALUES (?, ?, ?, '2000-01-01T00:00:00+00:00')",
+                (str(p) + "T", entry["message_id"], entry["thread_id"]),
+            )
+        db._conn.commit()
+        trashed = paths[11].with_name(paths[11].name + "T")
+        paths[11].rename(trashed)
+
+        cfg = _default_config(grace_days=0, max_batch_pct=0.05)
+        rec = Reconciler(db, embedder, threader, cfg)
+        rec.sweep()
+
+        result = rec.reap()
+        assert result["aborted"] is False
+        assert result["threads_reaped"] == 1
+        assert db.count_total_messages() == 11
+        assert db.count_pending_deletions() == 0
 
     def test_force_overrides_brake(self, db, threader, embedder, maildir):
         paths = self._stage_batch(maildir, db, threader, 30)
