@@ -54,7 +54,7 @@ from .embedder import (
     classify_embed_failure,
     scrub_embed_error,
 )
-from .extractors import is_stale_extractor
+from .extractors import ExtractionResult, is_stale_extractor
 from .maildir import (
     SYNC_STAMP_NAME,
     SyncStamp,
@@ -687,6 +687,9 @@ class _BatchedMsg:
 # Unreadable-file handoff (see ``_phase1_commit_thread``): retry every
 # minute, for up to a day after the job was enqueued.
 PERMISSION_DEFER_SECS = 60
+# How long a job for a T-flagged, still-indexed file is parked while
+# deletion reconciliation decides its message (see ``_drain_queue_batched``).
+TRASHED_DEFER_SECS = 60 * 60
 PERMISSION_DEFER_WINDOW_SECS = 24 * 60 * 60
 
 
@@ -822,12 +825,15 @@ def _phase2a_collect_chunks(
     all_texts: list[str],
     *,
     progress: Callable[[], None] = lambda: None,
+    batch_extractions: dict[str, ExtractionResult] | None = None,
 ) -> tuple[bool, str | None]:
     """Phase 2a: chunk the body and attachments WITHOUT embedding.
 
     Appends every new chunk's text to the shared ``all_texts`` list and
     records the offsets on ``state`` so Phase 2c can read its vectors
-    back. Returns ``(True, None)`` on success or ``(False, error)`` on
+    back. ``batch_extractions`` carries the batch's uncommitted
+    extraction results, so identical bytes are extracted once per batch
+    (#237). Returns ``(True, None)`` on success or ``(False, error)`` on
     a chunk/extract failure (rare — usually only attachment OCR errors)
     so the caller can mark the queue row failed without aborting the
     rest of the batch.
@@ -874,6 +880,10 @@ def _phase2a_collect_chunks(
         attach_plans: list[AttachmentWritePlan] = []
         attach_new_chunks: list[list[MessageChunk]] = []
         attach_offsets: list[list[int]] = []
+        # Copies of the same bytes in one message chunk to the same chunk
+        # IDs (the chunk key is message + content hash): embed each once.
+        queued_attach_offsets: dict[str, int] = {}
+        attach_stored_ids: list[set[str]] = []
         if INDEXER_ATTACHMENT_EXTRACTION_ENABLED and msg.attachments:
             cap = (
                 INDEXER_ATTACHMENT_MAX_EXTRACTED_CHARS
@@ -903,23 +913,34 @@ def _phase2a_collect_chunks(
                     max_pdf_pages=INDEXER_PDF_MAX_DIGITAL_PAGES or None,
                     occurrence_index=occurrence_index,
                     max_extracted_chars=cap,
+                    batch_extractions=batch_extractions,
                 )
                 stored_attach_ids = db.get_chunk_ids_for_message(
                     msg.message_id, attachment_id=attachment.content_hash
                 )
-                if plan.chunks:
-                    plan_new = [c for c in plan.chunks if c.chunk_id not in stored_attach_ids]
-                else:
-                    # ``apply_attachment_writes`` clears this slice.
-                    plan_new = []
-                    clears_chunks = clears_chunks or bool(stored_attach_ids)
+                plan_new = [c for c in plan.chunks if c.chunk_id not in stored_attach_ids]
                 plan_offsets: list[int] = []
                 for c in plan_new:
-                    plan_offsets.append(len(all_texts))
-                    all_texts.append(c.text)
+                    if c.chunk_id not in queued_attach_offsets:
+                        queued_attach_offsets[c.chunk_id] = len(all_texts)
+                        all_texts.append(c.text)
+                    plan_offsets.append(queued_attach_offsets[c.chunk_id])
                 attach_plans.append(plan)
                 attach_new_chunks.append(plan_new)
                 attach_offsets.append(plan_offsets)
+                attach_stored_ids.append(stored_attach_ids)
+        # A plan without text clears its attachment's chunk slice in
+        # Phase 2c, unless another copy of the same bytes in this message
+        # fills it: that copy counted the stored chunks as kept and
+        # embedded none of them, so it could not restore a cleared slice.
+        filled = {plan.attachment.content_hash for plan in attach_plans if plan.chunks}
+        for plan, stored_attach_ids in zip(attach_plans, attach_stored_ids):
+            if plan.chunks:
+                continue
+            if plan.attachment.content_hash in filled:
+                plan.clears_stale_chunks = False
+            else:
+                clears_chunks = clears_chunks or bool(stored_attach_ids)
         # Subject-fallback path: when this message contributes zero new
         # chunks AND the parent thread has no committed chunks, embed
         # the subject (or a sentinel string) so the thread vector is
@@ -1120,13 +1141,14 @@ def _probe_embedder(embedder: EmbeddingBackend) -> BaseException | None:
 
 def _entry_text_offsets(entry: _BatchedMsg) -> list[int]:
     """Every index into the batch's flat embed-input list that belongs
-    to ``entry`` — body chunks, attachment chunks, subject fallback."""
+    to ``entry`` — body chunks, attachment chunks, subject fallback —
+    each once (copies of one attachment share their chunks' offsets)."""
     offsets = list(entry.new_body_offsets)
     for plan_offsets in entry.attach_offsets:
         offsets.extend(plan_offsets)
     if entry.subject_fallback_offset is not None:
         offsets.append(entry.subject_fallback_offset)
-    return offsets
+    return list(dict.fromkeys(offsets))
 
 
 def _pause_embedding(
@@ -1304,6 +1326,7 @@ def _drain_queue_batched(
     timing_aggregator: TimingAggregator,
     max_passes: int | None = None,
     breaker: _EmbedOutageBreaker | None = None,
+    skip_trashed: bool = False,
 ) -> int:
     """Drain the queue in two-phase batches.
 
@@ -1328,6 +1351,15 @@ def _drain_queue_batched(
     the main loop pass ``max_passes=1`` so each tick interleaves
     cleanly with the reconciler sweep, WAL checkpoint, and health-file
     refresh instead of starving them on a long burst.
+
+    ``skip_trashed`` (set whenever deletion reconciliation is enabled;
+    see ``_enqueue_unindexed_messages``) never indexes a claimed job
+    whose file is T-flagged: the reconciler owns that message now, and
+    indexing it would outlive its reap. The job of a message still in
+    the index is parked without spending an attempt: the reap deletes it
+    with the message's rows, or, if mbsync clears the flag first, the
+    rename moves it to the live path where it runs. A trashed file that
+    was never indexed has nothing to keep, so its job is dropped.
 
     Failure isolation:
 
@@ -1372,6 +1404,18 @@ def _drain_queue_batched(
             rows = interrupted[:1]
         batch: list[_BatchedMsg] = []
         for row in rows:
+            if skip_trashed and is_trashed(row["filepath"]):
+                if db.find_message_entry_by_filepath(row["filepath"]) is None:
+                    queue.mark_skipped(row["filepath"], reason="trashed")
+                else:
+                    queue.defer(
+                        row["filepath"],
+                        stage="trashed",
+                        error="file is T-flagged; parked until reaped or restored",
+                        error_class=ERROR_CLASS_RETRYABLE,
+                        delay_seconds=TRASHED_DEFER_SECS,
+                    )
+                continue
             # Parse and extraction are the steps hostile input can crash
             # or hang, so each runs with its message charged one attempt
             # (see ``IndexingQueue.begin_attempt``). The refund is not in
@@ -1397,10 +1441,17 @@ def _drain_queue_batched(
         # entry — not just before/after the bulk embed.
         all_texts: list[str] = []
         survivors: list[_BatchedMsg] = []
+        batch_extractions: dict[str, ExtractionResult] = {}
         for entry in batch:
             if not queue.begin_attempt(entry.row["filepath"]):
                 continue
-            ok, err = _phase2a_collect_chunks(entry, db, all_texts, progress=queue.note_progress)
+            ok, err = _phase2a_collect_chunks(
+                entry,
+                db,
+                all_texts,
+                progress=queue.note_progress,
+                batch_extractions=batch_extractions,
+            )
             queue.end_attempt(entry.row["filepath"])
             if ok:
                 survivors.append(entry)
@@ -1508,7 +1559,11 @@ def _drain_queue_batched(
 
 
 def _recover_zero_vector_threads(
-    db: Database, queue: IndexingQueue, *, resurrect_dead: bool = False
+    db: Database,
+    queue: IndexingQueue,
+    *,
+    resurrect_dead: bool = False,
+    skip_trashed: bool = False,
 ) -> int:
     """Re-enqueue messages stuck on chunkless zero-vector threads.
 
@@ -1554,7 +1609,8 @@ def _recover_zero_vector_threads(
 
     Skips files that already have a 'queued' row (active retry
     cascade in flight; clobbering its row would reset the attempts
-    counter mid-cascade).
+    counter mid-cascade), and with ``skip_trashed`` (deletion
+    reconciliation enabled) T-flagged files, which the reaper owns.
 
     Returns the number of files re-enqueued for visibility in logs.
     """
@@ -1566,6 +1622,8 @@ def _recover_zero_vector_threads(
     skipped_pending = 0
     skipped_dead = 0
     for filepath in candidates:
+        if skip_trashed and is_trashed(filepath):
+            continue
         if queue.has_pending_row(filepath):
             skipped_pending += 1
             continue
@@ -1757,7 +1815,7 @@ def initial_index(
     # ``_recover_zero_vector_threads`` for the rationale and the
     # ``resurrect_dead=True`` opt-in path. Run BEFORE the drain so
     # recovery rows ride the same batched-index pass as fresh enqueues.
-    _recover_zero_vector_threads(db, queue)
+    _recover_zero_vector_threads(db, queue, skip_trashed=skip_trashed)
     # Messages whose attachments an extractor fix would now read
     # differently; re-queued once per version bump.
     _requeue_stale_extractions(db, queue)
@@ -1775,6 +1833,7 @@ def initial_index(
         batch_size=INITIAL_INDEX_BATCH_SIZE,
         timing_aggregator=timing_aggregator,
         breaker=breaker,
+        skip_trashed=skip_trashed,
     )
     # Always emit a final summary at the end of the initial scan, even
     # if the count was not a multiple of ``TIMING_LOG_EVERY`` — the
@@ -1966,6 +2025,7 @@ def main():
                     timing_aggregator=timing_aggregator,
                     max_passes=1,
                     breaker=breaker,
+                    skip_trashed=reconciler is not None,
                 )
                 drained_since_log += drained
                 if drained_since_log >= TIMING_LOG_EVERY:
@@ -2006,7 +2066,7 @@ def main():
             # watchdog event was missed still gets indexed eventually.
             if now - last_recovery_sweep >= RECOVERY_SWEEP_INTERVAL_SECS:
                 try:
-                    _recover_zero_vector_threads(db, queue)
+                    _recover_zero_vector_threads(db, queue, skip_trashed=reconciler is not None)
                 except Exception as e:
                     log.error("periodic recovery sweep failed: %s", e)
                 try:

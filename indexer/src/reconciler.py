@@ -181,7 +181,15 @@ class Reconciler:
         if entry is None:
             return
         if entry["filepath"] != dest_path:
-            self.db.update_filepath(entry["filepath"], dest_path, folder=folder)
+            # A restore clears the tombstone in the same write as the
+            # rename: the reaper, on the main thread, must never see the
+            # live path with an eligible tombstone still attached.
+            self.db.update_filepath(
+                entry["filepath"],
+                dest_path,
+                folder=folder,
+                clear_tombstone=not is_trashed(dest_path),
+            )
         if is_trashed(dest_path):
             self.db.add_pending_deletion(dest_path, entry["message_id"], entry["thread_id"])
             log.info("tombstoned via on_moved: %s", dest_path)
@@ -249,7 +257,7 @@ class Reconciler:
         threads_rebuilt = 0
 
         for thread_id, tombs in grouped.items():
-            reaped, rebuilt = self._reap_thread(thread_id, tombs)
+            reaped, rebuilt = self._reap_thread(thread_id, tombs, cutoff)
             threads_reaped += int(reaped)
             threads_rebuilt += int(rebuilt)
 
@@ -308,8 +316,13 @@ class Reconciler:
         self._blocked_thread_attempts.pop(thread_id, None)
         self._escalated_threads.discard(thread_id)
 
-    def _reap_thread(self, thread_id: str, tombs: list) -> tuple[bool, bool]:
-        """Reap one thread. Returns (fully_reaped, rebuilt)."""
+    def _reap_thread(self, thread_id: str, tombs: list, cutoff: str) -> tuple[bool, bool]:
+        """Reap one thread. Returns (fully_reaped, rebuilt).
+
+        ``tombs`` is a snapshot; the database re-checks inside the reap
+        transaction that each message is still tombstoned at or before
+        ``cutoff``, since the watcher may restore (or restore and trash
+        again) a message meanwhile."""
         # Survivors are chosen by message ID, which removal also uses:
         # the watcher can rename a tombstoned file (a flag change) after
         # ``tombs`` was read, and a stale snapshot path would let the
@@ -323,7 +336,12 @@ class Reconciler:
 
         if not survivor_rows:
             # Whole thread gone. Drop everything, then optionally unlink files.
-            self.db.delete_thread_completely(thread_id)
+            if not self.db.delete_thread_completely(thread_id, grace_cutoff=cutoff):
+                log.info(
+                    "reaper: thread %s changed since its tombstones were read; retrying next pass",
+                    thread_id,
+                )
+                return False, False
             if self.config.unlink_on_reap:
                 for fp in dead_filepaths:
                     self._safe_unlink(fp)
@@ -471,7 +489,15 @@ class Reconciler:
             rebuilt_thread,
             embedding,
             [tomb["message_id"] for tomb in tombs],
+            grace_cutoff=cutoff,
         )
+        if removed_filepaths is None:
+            log.info(
+                "reaper: a message in thread %s was restored since its tombstones "
+                "were read; retrying next pass",
+                thread_id,
+            )
+            return False, False
         if self.config.unlink_on_reap:
             for fp in removed_filepaths:
                 self._safe_unlink(fp)

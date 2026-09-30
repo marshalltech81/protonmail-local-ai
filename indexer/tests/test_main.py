@@ -4273,3 +4273,301 @@ class TestMessageRecordsEndToEnd:
 
         assert db._conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0] == 0
         assert db._conn.execute("SELECT COUNT(*) FROM message_participants").fetchone()[0] == 0
+
+
+class TestBatchSharesExtraction:
+    """#237: identical attachment bytes prepared in one batch were
+    extracted once per occurrence, because each occurrence consulted only
+    the committed cache, and copies inside one message queued their
+    identical chunks for embedding once per copy."""
+
+    PAYLOAD = b"SHARED_ATTACHMENT_MARKER quarterly figures"
+
+    def _write(self, path: Path, message_id: str, filenames: list[str]) -> None:
+        from email.message import EmailMessage
+
+        msg = EmailMessage()
+        msg["From"] = "alice@example.com"
+        msg["To"] = "bob@example.com"
+        msg["Subject"] = f"Report {message_id}"
+        msg["Message-ID"] = f"<{message_id}>"
+        msg["Date"] = "Mon, 01 Jan 2024 12:00:00 +0000"
+        msg.set_content(f"Body of {message_id}.")
+        for filename in filenames:
+            maintype, subtype = (
+                ("application", "octet-stream") if filename.endswith(".bin") else ("text", "plain")
+            )
+            msg.add_attachment(self.PAYLOAD, maintype=maintype, subtype=subtype, filename=filename)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(bytes(msg))
+
+    def _drain(self, tmp_path, monkeypatch, messages: dict[str, list[str]], embedder=None):
+        from src import attachment_indexing
+        from src.extractors import extract
+
+        maildir = tmp_path / "maildir"
+        monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
+        db = Database(tmp_path / "mail.db")
+        queue = _make_queue(db)
+        for message_id, filenames in messages.items():
+            path = maildir / "INBOX" / "cur" / f"{message_id}.eml"
+            self._write(path, message_id, filenames)
+            queue.enqueue(str(path), REASON_INITIAL_SCAN)
+        calls: list[str] = []
+
+        def counting_extract(**kwargs):
+            calls.append(kwargs["filename"])
+            return extract(**kwargs)
+
+        monkeypatch.setattr(attachment_indexing, "extract_attachment", counting_extract)
+        embedder = embedder or make_mock_embedder(_UNIT_VECTOR)
+        main._drain_queue_batched(
+            db,
+            embedder,
+            Threader(db),
+            queue,
+            batch_size=10,
+            timing_aggregator=main.TimingAggregator(window=4),
+            max_passes=1,
+        )
+        embedded = [t for call in embedder.embed_batch.call_args_list for t in call.args[0]]
+        return db, calls, embedded
+
+    def _attachment_chunks(self, db) -> list[tuple[str, str]]:
+        rows = db._conn.execute(
+            "SELECT message_id, text FROM message_chunks WHERE attachment_id IS NOT NULL"
+        ).fetchall()
+        return sorted((r["message_id"], r["text"]) for r in rows)
+
+    def test_same_bytes_across_messages_extract_once(self, tmp_path, monkeypatch):
+        messages = {f"m{i}@example.com": [f"report{i}.txt"] for i in range(5)}
+        db, calls, _ = self._drain(tmp_path, monkeypatch, messages)
+        assert len(calls) == 1
+        chunks = self._attachment_chunks(db)
+        assert [mid for mid, _ in chunks] == sorted(messages)
+        assert all("SHARED_ATTACHMENT_MARKER" in text for _, text in chunks)
+        assert db._conn.execute("SELECT COUNT(*) FROM attachments").fetchone()[0] == 5
+        assert db._conn.execute("SELECT COUNT(*) FROM attachment_extractions").fetchone()[0] == 1
+
+    def test_copies_in_one_message_extract_and_embed_once(self, tmp_path, monkeypatch):
+        db, calls, embedded = self._drain(
+            tmp_path, monkeypatch, {"m@example.com": ["scan0.txt", "scan1.txt"]}
+        )
+        assert len(calls) == 1
+        assert sum("SHARED_ATTACHMENT_MARKER" in t for t in embedded) == 1
+        assert len(self._attachment_chunks(db)) == 1
+        assert db._conn.execute("SELECT COUNT(*) FROM attachments").fetchone()[0] == 2
+
+    def test_copies_in_one_message_embed_once_when_isolated(self, tmp_path, monkeypatch):
+        # The bulk embed fails, the probe passes, and each message is
+        # embedded on its own: the shared slot is still embedded once.
+        embedder = make_mock_embedder(_UNIT_VECTOR)
+        delegate = embedder.embed_batch.side_effect
+
+        def fail_first(texts, **kwargs):
+            if embedder.embed_batch.call_count == 1:
+                raise RuntimeError("batch rejected")
+            return delegate(texts, **kwargs)
+
+        embedder.embed_batch.side_effect = fail_first
+        db, _, embedded = self._drain(
+            tmp_path,
+            monkeypatch,
+            {"m@example.com": ["scan0.txt", "scan1.txt"]},
+            embedder=embedder,
+        )
+        isolated = [t for call in embedder.embed_batch.call_args_list[1:] for t in call.args[0]]
+        assert sum("SHARED_ATTACHMENT_MARKER" in t for t in isolated) == 1
+        assert len(self._attachment_chunks(db)) == 1
+
+    def test_no_text_copy_does_not_clear_a_filled_copy(self, tmp_path, monkeypatch):
+        """Review round 2: re-indexing a message whose ``.bin`` copy still
+        reads the cached ``unsupported`` row while its ``.txt`` copy of the
+        same bytes extracts. The ``.bin`` plan cleared the shared chunk
+        slice, and the ``.txt`` plan, having embedded nothing because its
+        chunks were already stored, then failed to restore it."""
+        from src.extractors import STATUS_UNSUPPORTED
+
+        messages = {"m@example.com": ["blob.bin", "doc.txt"]}
+        db, _, _ = self._drain(tmp_path, monkeypatch, messages)
+        assert len(self._attachment_chunks(db)) == 1
+        content_hash = db._conn.execute(
+            "SELECT attachment_id FROM attachment_extractions"
+        ).fetchone()["attachment_id"]
+        db.store_attachment_extraction(
+            attachment_id=content_hash,
+            extraction_status=STATUS_UNSUPPORTED,
+            extractor=None,
+            extracted_text=None,
+            extraction_error="no extractor for content_type='application/octet-stream'",
+        )
+        queue = _make_queue(db)
+        path = tmp_path / "maildir" / "INBOX" / "cur" / "m@example.com.eml"
+        queue.enqueue(str(path), REASON_INITIAL_SCAN)
+        main._drain_queue_batched(
+            db,
+            make_mock_embedder(_UNIT_VECTOR),
+            Threader(db),
+            queue,
+            batch_size=10,
+            timing_aggregator=main.TimingAggregator(window=4),
+            max_passes=1,
+        )
+        # A succeeded job's row is deleted; a failed one stays queued.
+        assert db._conn.execute("SELECT COUNT(*) FROM indexing_jobs").fetchone()[0] == 0
+        assert len(self._attachment_chunks(db)) == 1
+
+
+class TestTrashedFilesWithReconciliation:
+    """#244: with deletion reconciliation on, a T-flagged file is deleted
+    upstream; stale or in-flight work must not index it back."""
+
+    def test_drain_drops_a_trashed_job(self, tmp_path, monkeypatch):
+        maildir = tmp_path / "maildir"
+        monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
+        path = maildir / "INBOX" / "cur" / "1700000000.M1.host:2,ST"
+        _write_eml(path, "trashed@example.com")
+        db = Database(tmp_path / "mail.db")
+        queue = _make_queue(db)
+        queue.enqueue(str(path), REASON_INITIAL_SCAN)
+        main._drain_queue_batched(
+            db,
+            make_mock_embedder(_UNIT_VECTOR),
+            Threader(db),
+            queue,
+            batch_size=10,
+            timing_aggregator=main.TimingAggregator(window=4),
+            max_passes=1,
+            skip_trashed=True,
+        )
+        assert not db.is_indexed(str(path))
+        assert not queue.has_pending_row(str(path))
+
+    def test_a_tombstoned_message_keeps_its_job_until_restored(self, tmp_path, monkeypatch):
+        """Review round 1: dropping the job of an indexed message lost its
+        only retry. If mbsync clears the T flag before the reap, nothing
+        re-queues a message whose thread already has chunks. The job is
+        parked instead, moves with the rename back, and then runs."""
+        from src.reconciler import Reconciler, ReconcilerConfig
+
+        maildir = tmp_path / "maildir"
+        monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
+        live = maildir / "INBOX" / "cur" / "1700000000.M1.host:2,S"
+        trashed = maildir / "INBOX" / "cur" / "1700000000.M1.host:2,ST"
+        _write_eml(live, "parked@example.com")
+        db = Database(tmp_path / "mail.db")
+        queue = _make_queue(db)
+
+        def drain():
+            main._drain_queue_batched(
+                db,
+                make_mock_embedder(_UNIT_VECTOR),
+                Threader(db),
+                queue,
+                batch_size=10,
+                timing_aggregator=main.TimingAggregator(window=4),
+                max_passes=1,
+                skip_trashed=True,
+            )
+
+        reconciler = Reconciler(
+            db,
+            make_mock_embedder(_UNIT_VECTOR),
+            Threader(db),
+            ReconcilerConfig(
+                enabled=True,
+                grace_days=7,
+                sweep_interval_secs=60,
+                max_batch_pct=1.0,
+                force=False,
+                unlink_on_reap=False,
+            ),
+        )
+        queue.enqueue(str(live), REASON_INITIAL_SCAN)
+        drain()
+        live.rename(trashed)
+        reconciler.handle_moved(str(live), str(trashed))  # tombstones it
+        queue.enqueue(str(trashed), REASON_INITIAL_SCAN)  # e.g. a retry still pending
+
+        drain()
+        job = db._conn.execute("SELECT filepath, attempts FROM indexing_jobs").fetchone()
+        assert (job["filepath"], job["attempts"]) == (str(trashed), 0)
+
+        # Restoring clears the tombstone, moves the job, and makes it due
+        # now rather than after the park delay.
+        trashed.rename(live)
+        reconciler.handle_moved(str(trashed), str(live))
+        drain()
+        assert not queue.has_pending_row(str(live))
+        assert db.is_indexed(str(live))
+
+    def test_a_parked_job_moved_without_a_tombstone_runs_at_once(self, tmp_path, monkeypatch):
+        """Review round 3: at startup ``sweep_paths`` can move a job onto a
+        T path and the drain park it before any tombstone exists, so a
+        restore has no tombstone to clear. Moving a parked job off the
+        path makes it due whatever the tombstone state."""
+        maildir = tmp_path / "maildir"
+        monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
+        live = maildir / "INBOX" / "cur" / "1700000000.M1.host:2,S"
+        trashed = maildir / "INBOX" / "cur" / "1700000000.M1.host:2,ST"
+        _write_eml(live, "startup@example.com")
+        db = Database(tmp_path / "mail.db")
+        queue = _make_queue(db)
+
+        def drain():
+            main._drain_queue_batched(
+                db,
+                make_mock_embedder(_UNIT_VECTOR),
+                Threader(db),
+                queue,
+                batch_size=10,
+                timing_aggregator=main.TimingAggregator(window=4),
+                max_passes=1,
+                skip_trashed=True,
+            )
+
+        queue.enqueue(str(live), REASON_INITIAL_SCAN)
+        drain()
+        live.rename(trashed)
+        db.update_filepath(str(live), str(trashed))
+        queue.enqueue(str(trashed), REASON_INITIAL_SCAN)
+        drain()  # parked
+        assert queue.has_pending_row(str(trashed))
+        assert not db.has_pending_deletion(str(trashed))
+
+        trashed.rename(live)
+        db.update_filepath(str(trashed), str(live))
+        drain()
+        assert not queue.has_pending_row(str(live))
+
+    def test_drain_indexes_a_trashed_file_without_reconciliation(self, tmp_path, monkeypatch):
+        # The index is append-only then: trashed mail is indexed as before.
+        maildir = tmp_path / "maildir"
+        monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
+        path = maildir / "INBOX" / "cur" / "1700000000.M1.host:2,ST"
+        _write_eml(path, "trashed@example.com")
+        db = Database(tmp_path / "mail.db")
+        queue = _make_queue(db)
+        queue.enqueue(str(path), REASON_INITIAL_SCAN)
+        main._drain_queue_batched(
+            db,
+            make_mock_embedder(_UNIT_VECTOR),
+            Threader(db),
+            queue,
+            batch_size=10,
+            timing_aggregator=main.TimingAggregator(window=4),
+            max_passes=1,
+        )
+        assert db.is_indexed(str(path))
+
+    def test_recovery_skips_trashed_files(self, tmp_path, monkeypatch):
+        db = Database(tmp_path / "mail.db")
+        queue = _make_queue(db)
+        trashed = str(tmp_path / "INBOX" / "cur" / "1.M1.host:2,ST")
+        live = str(tmp_path / "INBOX" / "cur" / "2.M2.host:2,S")
+        monkeypatch.setattr(
+            db, "find_zero_vector_chunkless_thread_filepaths", lambda: [trashed, live]
+        )
+        assert main._recover_zero_vector_threads(db, queue, skip_trashed=True) == 1
+        assert not queue.has_pending_row(trashed)
+        assert queue.has_pending_row(live)

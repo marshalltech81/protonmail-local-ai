@@ -333,13 +333,109 @@ def test_cached_unsupported_for_unknown_mime_is_honored(tmp_path, monkeypatch):
     db = _seed_thread_for_cache_test(tmp_path)
     summary, extractor = _run_process_with_cached_status(
         db,
-        _attachment(),
+        _attachment(filename="data.foo", content_type="application/x-foo"),
         STATUS_UNSUPPORTED,
         monkeypatch,
         error="no extractor for content_type='application/x-foo'",
     )
     assert summary["extractions_reused"] == 1
     extractor.assert_not_called()
+
+
+def test_cached_unsupported_is_re_run_for_an_occurrence_with_an_extractor(tmp_path, monkeypatch):
+    """#210: the cache is keyed by bytes, but dispatch is by MIME type and
+    filename. Bytes first seen as ``.bin`` cached ``unsupported``; the
+    same bytes later attached as ``text/plain`` must be extracted."""
+    db = _seed_thread_for_cache_test(tmp_path)
+    attachment = _attachment(filename="document.txt", content_type="text/plain")
+    db.store_attachment_extraction(
+        attachment_id=attachment.content_hash,
+        extraction_status=STATUS_UNSUPPORTED,
+        extractor=None,
+        extracted_text=None,
+        extraction_error="no extractor for content_type='application/octet-stream'",
+    )
+    extractor = MagicMock(
+        return_value=ExtractionResult(
+            status=STATUS_SUCCESS, extractor="text", text="now extracted", error=None
+        )
+    )
+    monkeypatch.setattr(attachment_indexing, "extract_attachment", extractor)
+    summary = process_attachment(
+        message_date="2024-01-01T00:00:00+00:00",
+        attachment=attachment,
+        message_id="message@example.com",
+        thread_id="thread-1",
+        db=db,
+        embedder=make_mock_embedder([0.2] * EMBEDDING_DIM),
+        chunk_target_tokens=350,
+        chunk_max_tokens=500,
+        chunk_overlap_tokens=60,
+        ocr_enabled=True,
+        max_bytes=10_000_000,
+        max_ocr_pages=20,
+    )
+    assert summary["extractions_run"] == 1
+    extractor.assert_called_once()
+    assert db.get_attachment_extraction(attachment.content_hash)["extraction_status"] == (
+        STATUS_SUCCESS
+    )
+
+
+def test_ocr_disabled_row_stays_cached_while_ocr_is_off(tmp_path, monkeypatch):
+    """A scanned PDF resolves to the PDF extractor either way; the row the
+    PDF extractor wrote is re-run only once OCR is on."""
+    from src.extractors import SCANNED_PDF_OCR_DISABLED_ERROR
+
+    db = _seed_thread_for_cache_test(tmp_path)
+    summary, extractor = _run_process_with_cached_status(
+        db,
+        _attachment(filename="scan.pdf", content_type="application/pdf"),
+        STATUS_UNSUPPORTED,
+        monkeypatch,
+        error=SCANNED_PDF_OCR_DISABLED_ERROR,
+        ocr_enabled=False,
+    )
+    assert summary["extractions_reused"] == 1
+    extractor.assert_not_called()
+
+
+def test_image_ocr_disabled_row_does_not_block_a_pdf_occurrence(tmp_path, monkeypatch):
+    """Review round 2: the PDF extractor reads a digital text layer without
+    OCR, so an "OCR disabled" row written for the bytes as an image must
+    not keep a PDF occurrence of them unextracted while OCR is off."""
+    from src.extractors import OCR_DISABLED_ERROR
+
+    db = _seed_thread_for_cache_test(tmp_path)
+    attachment = _attachment(filename="report.pdf", content_type="application/pdf")
+    db.store_attachment_extraction(
+        attachment_id=attachment.content_hash,
+        extraction_status=STATUS_UNSUPPORTED,
+        extractor=None,
+        extracted_text=None,
+        extraction_error=OCR_DISABLED_ERROR,
+    )
+    extractor = MagicMock(
+        return_value=ExtractionResult(
+            status=STATUS_SUCCESS, extractor="pdf-digital", text="digital text", error=None
+        )
+    )
+    monkeypatch.setattr(attachment_indexing, "extract_attachment", extractor)
+    process_attachment(
+        message_date="2024-01-01T00:00:00+00:00",
+        attachment=attachment,
+        message_id="message@example.com",
+        thread_id="thread-1",
+        db=db,
+        embedder=make_mock_embedder([0.2] * EMBEDDING_DIM),
+        chunk_target_tokens=350,
+        chunk_max_tokens=500,
+        chunk_overlap_tokens=60,
+        ocr_enabled=False,
+        max_bytes=10_000_000,
+        max_ocr_pages=20,
+    )
+    extractor.assert_called_once()
 
 
 def test_recent_failed_cached_extraction_is_honored(tmp_path, monkeypatch):
@@ -834,3 +930,103 @@ class TestExtractedTextCap:
         # whitespace stripped by the dispatcher but assert it covers the
         # full payload size (within stripping tolerance).
         assert len(cached["extracted_text"]) >= len(long_payload) - 5
+
+
+def test_batch_results_are_shared_but_do_not_block_a_supported_occurrence(tmp_path, monkeypatch):
+    """#237 + #210 within one batch: a pending result is reused by later
+    occurrences of the same bytes, except an ``unsupported`` one when
+    the occurrence's metadata now selects an extractor."""
+    from src.extractors import extract
+
+    db = _setup_db_for_attachment(tmp_path)
+    calls: list[str] = []
+
+    def counting_extract(**kwargs):
+        calls.append(kwargs["filename"])
+        return extract(**kwargs)
+
+    monkeypatch.setattr(attachment_indexing, "extract_attachment", counting_extract)
+    batch: dict[str, ExtractionResult] = {}
+    payload = b"plain words in a file"
+
+    def prepare(filename, content_type):
+        return prepare_attachment_writes(
+            db=db,
+            embedder=None,
+            batch_extractions=batch,
+            **_kwargs(_attachment(payload, filename=filename, content_type=content_type)),
+        )
+
+    blob = prepare("blob.bin", "application/octet-stream")
+    text = prepare("doc.txt", "text/plain")
+    again = prepare("copy.bin", "application/octet-stream")
+
+    assert calls == ["blob.bin", "doc.txt"]
+    assert blob.status == STATUS_UNSUPPORTED
+    assert text.status == STATUS_SUCCESS and text.chunks
+    assert again.status == STATUS_SUCCESS and again.extraction_reused
+    # Reused but uncommitted: the reusing message still persists the row.
+    assert again.extraction_to_persist is text.extraction_to_persist
+
+
+def test_ocr_disabled_row_does_not_block_a_non_ocr_occurrence(tmp_path, monkeypatch):
+    """Review round 1: bytes cached "OCR disabled" from an image must not
+    block the same bytes attached as text while OCR is off — the text
+    extractor does not need OCR."""
+    db = _seed_thread_for_cache_test(tmp_path)
+    attachment = _attachment(filename="document.txt", content_type="text/plain")
+    db.store_attachment_extraction(
+        attachment_id=attachment.content_hash,
+        extraction_status=STATUS_UNSUPPORTED,
+        extractor=None,
+        extracted_text=None,
+        extraction_error="OCR disabled (INDEXER_OCR_ENABLED=false)",
+    )
+    extractor = MagicMock(
+        return_value=ExtractionResult(
+            status=STATUS_SUCCESS, extractor="text", text="now extracted", error=None
+        )
+    )
+    monkeypatch.setattr(attachment_indexing, "extract_attachment", extractor)
+    process_attachment(
+        message_date="2024-01-01T00:00:00+00:00",
+        attachment=attachment,
+        message_id="message@example.com",
+        thread_id="thread-1",
+        db=db,
+        embedder=make_mock_embedder([0.2] * EMBEDDING_DIM),
+        chunk_target_tokens=350,
+        chunk_max_tokens=500,
+        chunk_overlap_tokens=60,
+        ocr_enabled=False,
+        max_bytes=10_000_000,
+        max_ocr_pages=20,
+    )
+    extractor.assert_called_once()
+
+
+def test_batch_ocr_disabled_result_does_not_block_a_non_ocr_occurrence(tmp_path, monkeypatch):
+    from src.extractors import extract
+
+    db = _setup_db_for_attachment(tmp_path)
+    calls: list[str] = []
+
+    def counting_extract(**kwargs):
+        calls.append(kwargs["filename"])
+        return extract(**kwargs)
+
+    monkeypatch.setattr(attachment_indexing, "extract_attachment", counting_extract)
+    batch: dict[str, ExtractionResult] = {}
+    payload = b"plain words in a file"
+    for filename, content_type in (("scan.png", "image/png"), ("doc.txt", "text/plain")):
+        plan = prepare_attachment_writes(
+            db=db,
+            embedder=None,
+            batch_extractions=batch,
+            **_kwargs(
+                _attachment(payload, filename=filename, content_type=content_type),
+                ocr_enabled=False,
+            ),
+        )
+    assert calls == ["scan.png", "doc.txt"]
+    assert plan.status == STATUS_SUCCESS

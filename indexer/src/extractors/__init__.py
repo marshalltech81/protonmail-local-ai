@@ -171,6 +171,13 @@ STATUS_UNSUPPORTED = "unsupported"
 STATUS_TOO_LARGE = "too_large"
 STATUS_FAILED = "failed"
 
+# ``unsupported`` errors for input that needs OCR while it is off. A scanned
+# PDF's row is marked apart from an image's: the PDF extractor also reads a
+# digital text layer without OCR, so only its own row says the bytes have
+# none.
+OCR_DISABLED_ERROR = "OCR disabled (INDEXER_OCR_ENABLED=false)"
+SCANNED_PDF_OCR_DISABLED_ERROR = f"{OCR_DISABLED_ERROR}; scanned PDF"
+
 
 # Maps normalized MIME -> per-format extractor module name (under
 # ``indexer.extractors``). The module is imported lazily so a missing
@@ -273,7 +280,7 @@ def extract(
             status=STATUS_UNSUPPORTED,
             extractor=None,
             text=None,
-            error="OCR disabled (INDEXER_OCR_ENABLED=false)",
+            error=OCR_DISABLED_ERROR,
         )
 
     if module_name is None:
@@ -348,7 +355,7 @@ def extract(
             status=STATUS_UNSUPPORTED,
             extractor=None,
             text=None,
-            error="OCR disabled (INDEXER_OCR_ENABLED=false)",
+            error=SCANNED_PDF_OCR_DISABLED_ERROR,
         )
 
     extractor_name = _stamp_extractor(module_name, extractor_name)
@@ -375,6 +382,14 @@ def extract(
         text=cleaned,
         error=None,
     )
+
+
+def resolved_extractor_module(content_type: str, filename: str) -> str | None:
+    """The extractor module this metadata selects, or ``None``. Dispatch
+    reads the MIME type and filename, not the bytes, so the same bytes
+    can be unsupported under one occurrence and extractable under
+    another."""
+    return _resolve_extractor(content_type, filename)[0]
 
 
 def _resolve_extractor(content_type: str, filename: str) -> tuple[str | None, str]:
