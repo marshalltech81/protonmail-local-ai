@@ -56,8 +56,8 @@ The stack runs four containers:
   sync, TOFU cert pinning with explicit rotation flag.
 - **indexer** — Docker, parses Maildir, threads, embeds via any
   OpenAI-compatible `/v1/embeddings` provider (operator-supplied),
-  writes SQLite. Schema v21 (v20 squashed baseline plus
-  `ingestion_state`): 4096-dim L2-unit-norm
+  writes SQLite. Schema v21 (squashed baseline; the first new
+  migration is `0022`): 4096-dim L2-unit-norm
   vectors, `NOT NULL` `message_chunks.message_date`,
   `indexing_jobs.last_error_class`, per-message `messages` +
   `message_participants`. Initial scan and steady-state both
@@ -629,10 +629,10 @@ has never been deployed): slice 1 (validate-env rename shims) done in
 old names; ~~slice 2 — drop `get_message`'s ignored
 `folder`/`body_format` parameters, the dead pre-v13 `display_subject`
 `try/except` in mcp-server `_row_to_result`, the write-tool sketch in
-`docs/mcp-tools.md`, and "legacy" wording on live code~~ (done); slice 3 — fold
+`docs/mcp-tools.md`, and "legacy" wording on live code~~ (done); ~~slice 3 — fold
 migration `0021` into the baseline (baseline becomes v21, drop the
 mcp-server `ingestion_state` existence guard, update AGENTS.md's
-migration paragraph; the dev database needs a rebuild); slice 4, test
+migration paragraph; the dev database needs a rebuild)~~ (done); slice 4, test
 only — migrate `FakeLocalLLM` users to the split fakes, drop the
 indexer `_index_one_file`/`drain_queue` wrappers and mcp-server
 `Database.close()`/`_conn`. Keep the migration runner, the `_read_secret`
