@@ -225,6 +225,22 @@ Phase 1.5 baseline plus #283's evidence-recall eval run before the
 first generation is built: a slice of Phase 3 item 1 moves ahead of
 Phase 2.
 
+**Two kinds of reindex, and their order.** Items 1–2 version the vec
+tables only; the canonical `message_chunks` / FTS corpus stays keyed by
+deterministic chunk IDs. So the generation lifecycle is first proved
+on the **unchanged** corpus: a vector-only generation (new model or
+dimension, same chunks), built, validated against the baseline,
+activated, and rolled back by switching tables. The reindex bundle
+above changes chunk IDs, so it cannot be a table switch: it lands as
+a reparse + rechunk + re-embed into a new generation whose
+`pipeline_config_hash` (item 3) records the new parser and chunker
+identity, and its rollback is a rebuild of the previous
+`pipeline_config_hash` from the source corpus — which is exactly what
+the manifest exists to make possible, and why chunk/FTS coexistence
+machinery stays deferred rather than built now. Rebuild time is the
+cost of that choice; measure it on the first vector-only generation
+so the bundle's rollback is a known number, not a hope.
+
 ### Phase 3 — Measurement and product vertical slice
 
 **Exit criterion:** we can objectively measure whether the system
