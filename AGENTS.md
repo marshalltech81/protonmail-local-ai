@@ -643,8 +643,10 @@ Notes:
 
 - parser changes should add or update parser fixtures/tests; before
   rewriting a traversal, classifier or serializer, pin what the current
-  code does on the shapes it handles with tests written against `main`,
-  then state the new invariant in one sentence and test that
+  code does on the shapes it handles with tests written against the
+  revision being rewritten (`main` for a fresh PR, the PR head for a
+  rewrite in a later review round), then state the new invariant in
+  one sentence and test that
 - threader changes should verify threading, subject fallback, references, and participant handling
 - database changes should verify schema creation, migration, and upsert/query behavior
 - MCP search changes should verify hybrid/RRF behavior where applicable
