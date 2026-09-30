@@ -1305,6 +1305,106 @@ class TestAttachmentBoundaries:
         assert plain.attachments[0].payload != b""
         assert coded.attachments[0].content_hash == plain.attachments[0].content_hash
 
+    def test_header_the_generator_refuses_keeps_an_empty_payload(self, tmp_path):
+        """Review round 13 (P1): a header compat32 accepts but the
+        generator refuses raised HeaderWriteError, whose text quotes the
+        header, out of parse_email and into the job's recorded error."""
+        msg = self._parse_raw(
+            tmp_path,
+            self._HEAD + b'Content-Type: multipart/mixed; boundary="b"\r\n\r\n'
+            b"--b\r\nContent-Type: text/plain\r\n\r\nPARENT_BODY\r\n"
+            b'--b\r\nContent-Type: message/rfc822\r\nContent-Disposition: attachment; filename="x.eml"\r\n\r\n'
+            b"From: a@example.test\r\nX: PRIVATE_MARKER\x0brest\r\n\r\nhello\r\n--b--\r\n",
+        )
+        assert msg.body_text == "PARENT_BODY"
+        assert msg.attachments[0].payload == b""
+
+    def test_eight_bit_bytes_in_a_transport_form_keep_an_empty_payload(self, tmp_path):
+        """Review round 13: raw 8-bit bytes inside a quoted-printable
+        transport form (malformed) raised UnicodeEncodeError out of the
+        reconstruction and failed the whole message."""
+        msg = self._parse_raw(
+            tmp_path,
+            self._HEAD + b'Content-Type: multipart/mixed; boundary="b"\r\n\r\n'
+            b"--b\r\nContent-Type: text/plain\r\n\r\nPARENT_BODY\r\n"
+            b"--b\r\nContent-Type: message/rfc822\r\nContent-Transfer-Encoding: quoted-printable\r\n"
+            b'Content-Disposition: attachment; filename="x.eml"\r\n\r\n'
+            b"From: a@example.test\r\nSubject: caf\xc3\xa9\r\n\r\nhello\r\n--b--\r\n",
+        )
+        assert msg.body_text == "PARENT_BODY"
+        assert msg.attachments[0].payload == b""
+
+    def test_quoted_printable_delivery_status_hashes_like_7bit(self, tmp_path):
+        """Review round 13: the rebuilt report ended with a blank line the
+        text did not have, so the same report hashed differently."""
+        import quopri
+
+        report = (
+            b"Reporting-MTA: dns; mx.example.test\r\n\r\n"
+            b"Final-Recipient: rfc822; first@example.test\r\nStatus: 5.1.1\r\n\r\n"
+            b"Final-Recipient: rfc822; second@example.test\r\nStatus: 5.2.2\r\n"
+        )
+
+        def outer(cte: bytes, body: bytes) -> bytes:
+            return (
+                self._HEAD + b'Content-Type: multipart/report; boundary="r"\r\n\r\n'
+                b"--r\r\nContent-Type: text/plain\r\n\r\nDelivery failed.\r\n"
+                b"--r\r\nContent-Type: message/delivery-status\r\n"
+                + cte
+                + b'Content-Disposition: attachment; filename="status.txt"\r\n\r\n'
+                + body
+                + b"\r\n--r--\r\n"
+            )
+
+        folder = tmp_path / "INBOX" / "cur"
+        folder.mkdir(parents=True)
+        (folder / "plain.eml").write_bytes(outer(b"", report))
+        (folder / "qp.eml").write_bytes(
+            outer(b"Content-Transfer-Encoding: quoted-printable\r\n", quopri.encodestring(report))
+        )
+        plain = parse_email(folder / "plain.eml")
+        coded = parse_email(folder / "qp.eml")
+        assert plain is not None and coded is not None
+        assert coded.attachments[0].content_hash == plain.attachments[0].content_hash
+
+    @pytest.mark.parametrize("encoding", ["base64", "quoted-printable"])
+    def test_attachments_inside_a_nested_encoded_attached_email_are_found(self, tmp_path, encoding):
+        """Review round 13: a nested container's payload is not kept, and
+        that skipped decoding it too, so the tree walked was the transport
+        form and a PDF two forwards deep was lost."""
+        import base64
+        import quopri
+
+        innermost = (
+            b'From: c@example.test\r\nMIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary="z"\r\n\r\n'
+            b"--z\r\nContent-Type: application/pdf\r\n"
+            b'Content-Disposition: attachment; filename="deep.pdf"\r\n\r\n%PDF-DEEP\r\n--z--\r\n'
+        )
+        encoded = (
+            base64.encodebytes(innermost)
+            if encoding == "base64"
+            else quopri.encodestring(innermost)
+        )
+        middle = (
+            b'From: b@example.test\r\nMIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary="m"\r\n\r\n'
+            b"--m\r\nContent-Type: message/rfc822\r\n"
+            + f"Content-Transfer-Encoding: {encoding}\r\n".encode()
+            + b'Content-Disposition: attachment; filename="inner.eml"\r\n\r\n'
+            + encoded
+            + b"\r\n--m--\r\n"
+        )
+        msg = self._parse_raw(
+            tmp_path,
+            self._HEAD + b'Content-Type: multipart/mixed; boundary="o"\r\n\r\n'
+            b"--o\r\nContent-Type: text/plain\r\n\r\nPARENT_BODY\r\n"
+            b'--o\r\nContent-Type: message/rfc822\r\nContent-Disposition: attachment; filename="outer.eml"\r\n\r\n'
+            + middle
+            + b"\r\n--o--\r\n",
+        )
+        by_name = {a.filename: a for a in msg.attachments}
+        assert set(by_name) == {"outer.eml", "inner.eml", "deep.pdf"}
+        assert b"%PDF-DEEP" in by_name["deep.pdf"].payload
+
     def test_quoted_printable_delivery_status_keeps_every_block(self, tmp_path):
         """Review round 9: the transfer-encoded path serialized only the
         container's first child before decoding. An attached email has
