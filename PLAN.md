@@ -161,68 +161,48 @@ disposable, regenerable index.
    kinds. `quoting.py` already segments pre-chunk; this codifies it
    and lets the embedder skip/deprioritize by kind. No
    `content_blocks` table until a non-chunking consumer needs one.
-5. **Candidate: move the parser off `compat32`** (added 2026-09-30
-   after PR #260). `parser.py` uses the legacy `email` parser, and
-   most of its hand-rolled header code exists to work around that:
-   `_parse_addrs` / `_split_address_list` / `_format_address`
-   (address parsing pitfalls), `_decode_encoded_word_runs` (the
-   quadratic `decode_header`, #239), `str()` around header values that
-   come back as `Header` objects (the #260 round-1 crash), and
-   `_is_attachment`. The modern API — `email.policy.default` with
-   `EmailMessage`: `msg["From"].addresses`, decoded header values,
-   `is_attachment()`, `iter_attachments()`, `get_content()` — covers
-   these in the standard library. Scope it as a spike, not a swap: the
-   default policy is stricter and raises on some hostile input that
-   `compat32` tolerates, and it does not change how a transfer-encoded
-   `message/rfc822` is parsed (verified on 3.14: identical corruption).
-   Three protections the modern API does not provide and the spike
-   must keep (verified on 3.14 during review): a filename-bearing
-   `text/*` part with no `Content-Disposition` is an attachment here
-   but `is_attachment()` says no and `get_body()` returns it, so the
-   filename check stays; the default policy's encoded-word decoding
-   is still superlinear on malformed `=?…?` runs (about 4 s for
-   32,000 prefixes), so the linear scanner stays or a work-bound
-   regression proves the replacement; and `get_content()` raises
-   `LookupError` on an unknown body charset where `_safe_decode`
-   falls back to UTF-8 with replacement, so that fallback stays and
-   gets a body fixture (the existing one covers only a `Subject`).
-   Two more from the second review round: merely reading
-   `msg["From"].addresses` raises `RecursionError` on about a thousand
-   nested comments and mishandles malformed group syntax
-   (`Team: , a@x, ,b@x, ; c@x` came back with a bogus empty `<>`
-   address on 3.14.7; the review saw `AttributeError`), and a large
-   list enters
-   `headerregistry` parsing before any wrapper can look at it, so the
-   raw-header cap and the linear structural split (`_split_address_list`
-   / `_parse_addrs`) stay, with a work-bound address regression, not a
-   catch-only wrapper; and `iter_attachments()` yields the second of
-   two bare `text/plain` parts in a `multipart/mixed` (its
-   `is_attachment()` is false) where the walker rightly treats both as
-   body candidates, so explicit classification stays and repeated body
-   candidates join the catalogue.
-   And the default policy parses structured headers eagerly: a
-   `Content-Type` whose `name=` holds a few hundred nested comments
-   raises `RecursionError` inside `message_from_bytes` itself (about
-   1 KB of input), before any walker guard runs, where `compat32`
-   parses it; so the spike either keeps `compat32` for the initial
-   parse or pre-screens structured headers, and the hostile-input
-   criterion below includes them.
-   Exit criterion: an old-vs-new differential catalogue — every parser
-   fixture and every shape in the encoding parity test parsed by both
-   `compat32` and the new policy, comparing headers, body selection,
-   attachment classification and attachment identity — with every
-   difference either fixed or recorded as intended (the encoding
-   parity test alone compares encodings under one parser, not the two
-   parsers); the parser fixture suite and the encoding parity test
-   pass unchanged, with the filename-only text part and repeated body
-   candidates added to the catalogue; the hand-rolled helpers above
-   are deleted or reduced to thin wrappers; and hostile-input tests
-   (nested comments in addresses and in `Content-Type` /
-   `Content-Disposition`, malformed address groups, 8-bit headers,
-   folded References, malformed encoded-word runs, unknown body
-   charsets) still degrade rather than raise, with work bounds
-   asserted. Lands with the Phase 2 reindex, since any parse change
-   can alter bodies and attachment identity.
+5. **Spike: retire the hand-rolled address parsing behind the
+   existing bounds** (added 2026-09-30 after PR #260; reduced on
+   review from a parser migration). `parser.py` uses the legacy
+   `compat32` parser, and its header helpers work around it:
+   `_split_address_list` / `_parse_addrs` / `_format_address`,
+   `_decode_encoded_word_runs`, `str()` around `Header` values, and
+   `_is_attachment`. The modern API (`email.policy.default`,
+   `EmailMessage`, `email.headerregistry`) was proposed as the
+   replacement, and review established what it cannot replace, each
+   point verified on 3.14:
+   - the **initial parse stays `compat32`**: the default policy parses
+     structured headers during `message_from_bytes`, and a
+     `Content-Type` `name=` holding a few hundred nested comments
+     (about 1 KB) raises `RecursionError` there, before any guard;
+   - the **encoded-word scanner stays**: the default policy's decoding
+     is quadratic on malformed `=?…?` runs (0.28 s at 8,000 prefixes,
+     4.1 s at 32,000);
+   - the **address pre-screen stays**: reading `.addresses` recurses
+     on about a thousand nested comments, mishandles malformed group
+     syntax (a bogus empty `<>` address), and a large list enters
+     `headerregistry` before a wrapper can look at it;
+   - the **attachment classifier stays**: a filename-bearing `text/*`
+     part with no `Content-Disposition` is an attachment here but
+     `is_attachment()` says no and `get_body()` returns it, while
+     `iter_attachments()` yields the second of two bare `text/plain`
+     body candidates;
+   - **`_safe_decode` stays**: `get_content()` raises `LookupError` on
+     an unknown body charset.
+   What is left is one targeted change: after the existing pre-screen
+   and raw-header cap, parse an address header with
+   `email.headerregistry` instead of `_split_address_list` /
+   `_parse_addrs`, and possibly retire `_format_address`. The work
+   is a differential, not a rewrite: every parser fixture and every
+   shape in the encoding parity test (plus the filename-only text part
+   and repeated body candidates) run through both the old helpers and
+   the new call, comparing addresses, names, body selection,
+   attachment classification and identity; a helper is retired only
+   where the differential is equivalent and its bounds survive, with
+   a work-bound regression for each hostile input above. If the
+   differential retires nothing without a new bound, close this item
+   and record why. Any retired helper lands with the Phase 2 reindex,
+   since a parse change can alter bodies and attachment identity.
 
 ### Phase 3 — Measurement and product vertical slice
 
