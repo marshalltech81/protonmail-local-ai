@@ -148,9 +148,13 @@ disposable, regenerable index.
    switch vector-only; otherwise it is a rechunk, and goes through the
    reindex bundle path below. Recording the metadata alone prevents
    nothing.
-2. **Per-generation vec tables** (`vec_chunks_gNN` — sqlite-vec bakes
-   dimension into DDL, so per-generation tables are structurally
-   required). Blue/green lifecycle: build → validate → activate
+2. **Per-generation vec tables** (`vec_chunks_gNN` **and**
+   `vec_threads_gNN` — sqlite-vec bakes dimension into DDL, so
+   per-generation tables are structurally required, and the semantic
+   path fuses both dense lanes, so the thread vectors are rebuilt from
+   the new chunk vectors and both tables switch in one transaction;
+   switching one alone would fuse old-model thread vectors with
+   new-model query vectors, or error on a dimension change). Blue/green lifecycle: build → validate → activate
    atomically → retain old generation → rollback if needed. Two parts
    of that are protocol, not just DDL:
    - **Validation gate:** the Phase 1.5 baseline runs both sides on a
@@ -164,9 +168,13 @@ disposable, regenerable index.
      `EMBED_MODEL` at startup, so a table switch alone would leave
      old-model query vectors against new-model document vectors —
      same dimension, incomparable space, silently broken retrieval.
-     The active generation's provider, **normalized endpoint**
-     (`EMBED_BASE_URL`, since two OpenAI-compatible servers can serve
-     the same model string with incomparable spaces), model, dimension
+     The active generation's provider, **resolved endpoint** (the
+     SDK's `client.base_url` after construction, credential-sanitized
+     — not the configured `EMBED_BASE_URL`, which is empty when the SDK
+     inherits `OPENAI_BASE_URL`, so two processes can share an empty
+     setting and resolve different wire endpoints; two
+     OpenAI-compatible servers can serve the same model string with
+     incomparable spaces), model, dimension
      and any revision the provider exposes are recorded in the
      database; the MCP server reads them at startup and on each
      semantic query, and **fails closed** (semantic lanes off, status
@@ -584,7 +592,9 @@ and a decision whose finding fails to reproduce is void, not binding.
 Order of work, chosen to minimise reindexes:
 
 1. **No-reindex guards, small PRs by area.** Indexer: the quadratic
-   subject normalizer (#293); the all-zero embedding guard (#304, fixed
+   subject normalizer (#293); the first half of #297 (keep the first
+   persisted date on reprocess, so an undated message is never
+   re-dated before the Phase 2 rebuild); the all-zero embedding guard (#304, fixed
    message, no values logged); tombstone revalidation on restore
    (#301); `message_thread_map` lookup indexes as migration `0022`
    (#302, index-only); the unbounded recovery parameter list (#306);
@@ -624,8 +634,10 @@ Order of work, chosen to minimise reindexes:
    OCR-disabled sentinel.
 3. **Design work before code**, both mbsync: the retained near-side
    state family (#275, #276, #279, #281) and the sync-supervision
-   family (#271, #277, #280, #282); see Resolved decisions 9 and 10
-   for the chosen direction and the one measurement still needed.
+   pair (#277, #282; their small siblings #271 and #280 are batch-1
+   guards above and are not repeated here); see Resolved decisions 9
+   and 10 for the chosen direction and the one measurement still
+   needed.
 4. **The Phase 2 reindex bundle** (see Phase 2): #303, #208, #217,
    #297's second half, #298 (a one-line selection fix, but it changes
    persisted bodies, so it lands with a rebuild rather than making
