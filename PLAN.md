@@ -706,8 +706,9 @@ Order of work, chosen to minimise reindexes:
    subject normalizer (#293)~~ (done: offset scan, one slice); the first half of #297 (keep the first
    persisted date on reprocess, so an undated message is never
    re-dated before the Phase 2 rebuild); the all-zero embedding guard (#304, fixed
-   message, no values logged); tombstone revalidation on restore
-   (#301); `message_thread_map` lookup indexes as migration `0022`
+   message, no values logged); ~~tombstone revalidation on restore
+   (#301)~~ (done: a tombstone is refused for a path the message no
+   longer maps to); `message_thread_map` lookup indexes as migration `0022`
    (#302, index-only); the unbounded recovery parameter list (#306);
    and the #257 sweep (classify parse-stage and provider exceptions
    at their boundary, `caplog` marker tests). MCP: the two quadratic

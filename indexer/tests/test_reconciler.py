@@ -179,6 +179,75 @@ class TestSweep:
         result = reconciler.sweep()
         assert result["missing"] == 1
 
+    def test_restore_during_sweep_leaves_no_stale_tombstone(
+        self, db, threader, embedder, maildir, monkeypatch
+    ):
+        """#301: the sweep resolved the trashed path, the watcher then
+        restored the file and cleared its tombstone, and the sweep
+        recorded a new tombstone under the obsolete trashed path. Later
+        sweeps look only at the live path, so the reaper deleted the
+        restored message (and, with ``unlink_on_reap``, its file)."""
+        import src.reconciler as reconciler_module
+
+        rec = Reconciler(db, embedder, threader, _default_config(unlink_on_reap=True))
+        path = maildir / "1700000000.M1.host:2,S"
+        _write_eml(path, "restored@example.com")
+        thread_id = _index(path, db, threader)
+        trashed = maildir / "1700000000.M1.host:2,ST"
+        path.rename(trashed)
+        rec.handle_moved(str(path), str(trashed))
+        assert db.has_pending_deletion(str(trashed))
+
+        real_resolve = reconciler_module.resolve_current_path
+
+        def resolve_then_restore(stored, listings=None):
+            current = real_resolve(stored, listings)
+            trashed.rename(path)
+            rec.handle_moved(str(trashed), str(path))  # the watcher wins the lock here
+            return current
+
+        monkeypatch.setattr(reconciler_module, "resolve_current_path", resolve_then_restore)
+        assert rec.sweep()["tombstoned"] == 0
+        monkeypatch.setattr(reconciler_module, "resolve_current_path", real_resolve)
+
+        assert db.find_message_entry_by_filepath(str(path)) is not None
+        assert db.count_pending_deletions() == 0
+        rec.sweep()
+        assert rec.reap()["threads_reaped"] == 0
+        assert db.get_thread(thread_id) is not None
+        assert path.exists()
+
+    def test_move_during_sweep_does_not_tombstone_the_old_path(
+        self, db, threader, embedder, maildir, monkeypatch
+    ):
+        """#301, missing-file branch: the watcher moved the file to another
+        folder while the sweep resolved the stale path, which no longer
+        exists; the sweep tombstoned the old path as missing and the
+        reaper deleted the moved message."""
+        import src.reconciler as reconciler_module
+
+        rec = Reconciler(db, embedder, threader, _default_config())
+        path = maildir / "1700000000.M1.host:2,S"
+        _write_eml(path, "moved@example.com")
+        thread_id = _index(path, db, threader)
+        archived = maildir.parent.parent / "Archive" / "cur" / path.name
+        archived.parent.mkdir(parents=True)
+
+        real_resolve = reconciler_module.resolve_current_path
+
+        def move_then_resolve(stored, listings=None):
+            path.rename(archived)
+            rec.handle_moved(str(path), str(archived), folder="Archive")
+            return real_resolve(stored, listings)
+
+        monkeypatch.setattr(reconciler_module, "resolve_current_path", move_then_resolve)
+        assert rec.sweep()["missing"] == 0
+        monkeypatch.setattr(reconciler_module, "resolve_current_path", real_resolve)
+
+        assert db.count_pending_deletions() == 0
+        assert rec.reap()["threads_reaped"] == 0
+        assert db.get_thread(thread_id) is not None
+
 
 # ---------------------------------------------------------------------------
 # sweep_paths — always-on startup rename sweep

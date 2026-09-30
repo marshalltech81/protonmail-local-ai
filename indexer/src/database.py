@@ -2154,14 +2154,23 @@ class Database:
         ``datetime('now')`` returns a space-separated format that sorts
         lexicographically before ``T``-separated ISO strings and would
         cause tombstones to be reaped up to a day early.
+
+        Refused when ``message_thread_map`` maps ``message_id`` to another
+        path (#301): the caller's path is stale because the watcher renamed
+        the file meanwhile (a restore, or a move to another folder). The
+        reaper matches tombstones by message ID, and no sweep revisits the
+        old path, so the tombstone would delete the live message. The check
+        and the insert are one statement, so a rename cannot land between
+        them.
         """
         cur = self._conn.cursor()
         marked_at = datetime.now(UTC).isoformat()
         cur.execute(
             "INSERT OR IGNORE INTO pending_deletions "
             "(filepath, message_id, thread_id, marked_at) "
-            "VALUES (?, ?, ?, ?)",
-            (filepath, message_id, thread_id, marked_at),
+            "SELECT ?, ?, ?, ? WHERE NOT EXISTS ("
+            "SELECT 1 FROM message_thread_map WHERE message_id = ? AND filepath != ?)",
+            (filepath, message_id, thread_id, marked_at, message_id, filepath),
         )
         self._conn.commit()
         return cur.rowcount > 0
