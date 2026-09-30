@@ -1136,6 +1136,58 @@ class TestAttachmentBoundaries:
         assert b"first@example.test" in status.payload
         assert b"second@example.test" in status.payload
 
+    @pytest.mark.parametrize("fields, serialized", [(100, True), (20_000, False)])
+    def test_container_with_too_many_fields_is_never_serialized(
+        self, tmp_path, monkeypatch, fields, serialized
+    ):
+        """Review round 9: the generator costs several times the parser
+        per header field, and a delivery report is one field per line, so
+        a report past MAX_ATTACHED_MESSAGE_FIELDS keeps the empty payload
+        without ever being serialized."""
+        from src.parser import MAX_ATTACHED_MESSAGE_FIELDS
+
+        assert (fields > MAX_ATTACHED_MESSAGE_FIELDS) is not serialized
+        raw = (
+            self._HEAD + b'Content-Type: multipart/report; boundary="r"\r\n\r\n'
+            b"--r\r\nContent-Type: text/plain\r\n\r\nDelivery failed.\r\n"
+            b"--r\r\nContent-Type: message/delivery-status\r\n"
+            b'Content-Disposition: attachment; filename="status.txt"\r\n\r\n'
+            b"Reporting-MTA: dns; mx.example.test\r\n"
+            + b"X-Field: value\r\n" * fields
+            + b"\r\n--r--\r\n"
+        )
+        calls = self._count_serializations(monkeypatch)
+        msg = self._parse_raw(tmp_path, raw)
+        [status] = msg.attachments
+        assert (status.payload != b"") is serialized
+        assert (calls != []) is serialized
+
+    def test_quoted_printable_delivery_status_keeps_every_block(self, tmp_path):
+        """Review round 9: the transfer-encoded path serialized only the
+        container's first child before decoding. An attached email has
+        one child, but a delivery report has one per block, so a
+        quoted-printable report lost every recipient's status."""
+        import quopri
+
+        report = (
+            b"Reporting-MTA: dns; mx.example.test\r\n\r\n"
+            b"Final-Recipient: rfc822; first@example.test\r\nStatus: 5.1.1\r\n\r\n"
+            b"Final-Recipient: rfc822; second@example.test\r\nStatus: 5.2.2\r\n"
+        )
+        msg = self._parse_raw(
+            tmp_path,
+            self._HEAD + b'Content-Type: multipart/report; boundary="r"\r\n\r\n'
+            b"--r\r\nContent-Type: text/plain\r\n\r\nDelivery failed.\r\n"
+            b"--r\r\nContent-Type: message/delivery-status\r\n"
+            b"Content-Transfer-Encoding: quoted-printable\r\n"
+            b'Content-Disposition: attachment; filename="status.txt"\r\n\r\n'
+            + quopri.encodestring(report)
+            + b"\r\n--r--\r\n",
+        )
+        [status] = msg.attachments
+        assert b"first@example.test" in status.payload
+        assert b"second@example.test" in status.payload
+
     def test_single_part_attachment_is_an_attachment(self, tmp_path):
         """#209: a message whose root part is an attachment had its payload
         decoded as the body and no attachment recorded."""

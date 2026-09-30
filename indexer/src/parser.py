@@ -353,15 +353,25 @@ def _is_attachment(part: email.message.Message) -> bool:
 # forward chain (a few forwards, each a few multipart levels) stays well
 # below this.
 MAX_ATTACHED_MESSAGE_DEPTH = 20
+# Header fields across a container attachment's part tree that are still
+# serialized. The generator's cost per field is several times the
+# parser's, and a delivery report is one field per line, so a crafted
+# multi-megabyte report would cost the single worker seconds for a
+# payload nothing extracts. A real email has under a hundred fields; a
+# report for two thousand recipients is about ten thousand.
+MAX_ATTACHED_MESSAGE_FIELDS = 10_000
 
 
 def _nesting_exceeds(root: email.message.Message, limit: int) -> bool:
-    """Whether ``root``'s part tree is more than ``limit`` levels deep.
-    Iterative, and stops at the first part past the limit."""
+    """Whether ``root``'s part tree is more than ``limit`` levels deep or
+    carries more than ``MAX_ATTACHED_MESSAGE_FIELDS`` header fields.
+    Iterative, and stops at the first part past either limit."""
+    fields = 0
     stack = [(root, 1)]
     while stack:
         part, depth = stack.pop()
-        if depth > limit:
+        fields += len(part.keys())
+        if depth > limit or fields > MAX_ATTACHED_MESSAGE_FIELDS:
             return True
         children = part.get_payload() if part.is_multipart() else None
         if isinstance(children, list):
@@ -411,11 +421,13 @@ def _attachment_payload(
         and nested
         and isinstance(nested[0], email.message.Message)
     ):
-        # The parser read the transport form as MIME whatever the label,
-        # so check that tree's depth before serializing it too.
-        if _nesting_exceeds(nested[0], MAX_ATTACHED_MESSAGE_DEPTH):
+        # The parser read the transport form as MIME whatever the label
+        # (one child for an attached email, one per block for a delivery
+        # report), so check that tree's depth before serializing it, and
+        # serialize the whole body rather than the first child.
+        if _nesting_exceeds(part, MAX_ATTACHED_MESSAGE_DEPTH + 1):
             return b"", None
-        decoded = _decode_transport_form(nested[0].as_bytes(), encoding)
+        decoded = _decode_transport_form(_serialized_body(part), encoding)
         if decoded is None:
             return b"", None
         if _nesting_exceeds(decoded, MAX_ATTACHED_MESSAGE_DEPTH):
