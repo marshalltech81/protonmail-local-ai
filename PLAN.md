@@ -164,9 +164,12 @@ reindex bundle path. Neither touches a source file or a migration.
      dimension and any exposed revision, **plus a non-secret
      configuration label**, because two credentials at one gateway can
      route to different deployments behind identical public fields.
-     Both services receive both configuration sets (`EMBED_*` and
-     `EMBED_NEXT_*`, each with its own Docker secret); the registry's
-     active generation names the live one; each service selects the
+     **At most two generations are live at once** (active plus one of
+     building or retained), and the registry refuses to start a build
+     while a retained generation exists, since only two configuration
+     sets are available. Both services receive both sets (`EMBED_*`
+     and `EMBED_NEXT_*`, each with its own Docker secret); the
+     registry's active generation names the live one; each service selects the
      client whose label and identity match, at startup and on every
      semantic query, and **fails closed unless every live generation**
      (active, building, retained) **has a matching client** — not
@@ -192,7 +195,12 @@ reindex bundle path. Neither touches a source file or a migration.
      generation is enabled and durably queued **before** the build
      watermark is recorded (or ingestion pauses across an atomic
      catch-up-and-enable), so nothing falls between backfill and
-     dual-write. Every new or changed chunk, every **deletion** (reaps
+     dual-write; and backfill is **ordered behind concurrent
+     mutations** — a monotonic sequence with conditional writes, or a
+     replay of every post-snapshot mutation before the candidate is
+     marked caught-up — so a stale backfill read of a chunk that
+     ingestion has since replaced or deleted can never overwrite the
+     newer state or leave an orphan vector. Every new or changed chunk, every **deletion** (reaps
      and reprocessing), and every survivor-thread mean recomputation
      apply to all live generations in one transaction — orphan vectors
      would otherwise consume the candidate window. The lifecycle is
@@ -299,34 +307,43 @@ Phase 1.5 baseline plus #283's evidence-recall eval run before the
 first generation is built: a slice of Phase 3 item 1 moves ahead of
 Phase 2.
 
-**Two kinds of reindex, and their order.** Items 1–2 version the vec
-tables only; the chunk index stays keyed by deterministic chunk IDs.
-So the generation lifecycle is first proved on the **unchanged**
-corpus: a context-compatible, vector-only generation built, validated,
-activated and rolled back by switching tables, entirely inside the
-live file. The reindex bundle above changes chunk IDs, so it cannot be
-a table switch, and it cannot be an in-place rebuild either — a
-running MCP server would see half-rebuilt FTS data and vectors that
-no longer join. It is a **staged rebuild with a file swap**, and the
-design document above specifies it too: the new image builds
-`mail.next.db` from the source corpus alongside the live file, with an
-ingestion watermark recorded and the candidate indexer catching up
-through it; validation and the eval slice run against `mail.next.db`;
-the cutover pauses mbsync and the live indexer, drains the candidate
-to the watermark, checkpoints the live WAL, swaps the files by rename,
-and starts the services on the new image — so mail added, changed or
-reaped during the build is neither lost nor resurrected. Rollback is
-the reverse swap onto the previous image tag, executable for as long
-as the old file is kept (through the gate and the eval slice at
-least). A rebuild of the previous `pipeline_config_hash` is *not* a
-rollback: the bundle carries a forward-only migration (#217), so the
-previous image fails closed on the new schema and the new image lacks
-the old algorithms; the manifest records which stages changed, not a
-way to recreate code. Chunk/FTS coexistence machinery stays deferred.
-The bundle's cost is measured on a **representative staged full
-rebuild** — reparse, extraction (unless the extraction cache is
-safely seeded), FTS, thread and message rows, embedding — not on the
-vector-only generation, whose timing is only an embedding lower bound.
+**Two kinds of reindex.** Items 1–2 version the vec tables only; the
+chunk index stays keyed by deterministic chunk IDs. A context-compatible
+model switch is therefore a **table switch inside the live file**, and
+the lifecycle is proved on that first, on the unchanged corpus. The
+reindex bundle above changes chunk IDs, so it is a **staged rebuild
+with a file swap**, which the design document specifies as well; the
+plan records only what it must satisfy (each point from a review round
+on #307):
+- no in-place rebuild: a running MCP server must never see half-rebuilt
+  FTS data or vectors that no longer join, so the new image builds
+  `mail.next.db` from the source corpus alongside the live file, and
+  validation and the eval slice run against the staged file;
+- the staged file is complete at cutover: mbsync and the live indexer
+  are quiesced, a **final watermark is taken after that quiescence**,
+  and the candidate indexer drains through it before the swap — the
+  build-time watermark is not enough, since mail added, changed or
+  reaped after it would be lost or resurrected;
+- **both** databases have their writers stopped and their WALs
+  successfully checkpointed before either main file is renamed (the
+  staged file is in WAL mode too, and a rename would orphan
+  `mail.next.db-wal`);
+- rollback is the reverse swap onto the previous image tag, and it is
+  only valid if the retained file is either kept synchronized with
+  ingestion for the rollback window or caught up under the same
+  quiescence — with reconciliation and the queue fully drained —
+  before the MCP server is started on it; the indexer touches its
+  health file before `initial_index`, so "start the old image" alone
+  would serve a stale database while catch-up runs;
+- a rebuild of the previous `pipeline_config_hash` is *not* a rollback:
+  the bundle carries a forward-only migration (#217), so the previous
+  image fails closed on the new schema and the new image lacks the old
+  algorithms; the manifest records which stages changed, not a way to
+  recreate code, and chunk/FTS coexistence machinery stays deferred;
+- the bundle's cost is measured on a representative **staged full
+  rebuild** (reparse, extraction unless the cache is safely seeded,
+  FTS, thread and message rows, embedding); the vector-only
+  generation's timing is only an embedding lower bound.
 
 ### Phase 3 — Measurement and product vertical slice
 
