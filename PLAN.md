@@ -278,6 +278,13 @@ How the first batch was worked, and what to repeat:
 3. **Expect Codex rounds.** Every PR took 1–5 rounds, and later rounds
    found gaps in the fixes themselves. Record each round in the PR body
    and PLAN, and resolve threads only once fixed or deferred by the owner.
+4. **Guards in the loop, mechanisms out of it** (learned on #260, nine
+   rounds). A finding that needs a check, cap or fallback is fixed in
+   the round. One that needs a new mechanism — new parsing of untrusted
+   input above all — is a stop-and-ask, with "document the limitation"
+   as the default; three rounds on one mechanism means re-scope. Before
+   fixing a "wrong" derived value (a hash, a size), ask what consumes
+   it. Before rewriting a walk, pin the old behaviour with tests.
 
 ### Carried over from the first batch
 

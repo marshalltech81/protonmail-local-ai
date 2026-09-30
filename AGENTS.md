@@ -347,7 +347,17 @@ content is as private as a credential.
   `MemoryError`: the dispatcher re-raises both as host pressure rather
   than recording a `failed` extraction.
 - A fix gets a regression test with a synthetic worst case and a
-  generous time bound.
+  generous time bound, and the test must assert the work done (a call
+  count, bytes copied, pages visited) as well as the result: elapsed
+  time often cannot tell a bounded path from an unbounded one, and a
+  test that checks only the output passes whether or not the work
+  happened. Measure the worst case with a plain timing before sizing
+  a bound; figures taken under a profiler (`cProfile`, `tracemalloc`)
+  overstate it several times over.
+- A review finding that calls for new parsing of untrusted input, or
+  any new mechanism rather than a guard (a check, a cap, a fallback),
+  is a design decision: stop and ask, with "document the limitation"
+  as the first option. Do not build a parser inside a bug fix.
 
 ## Change Strategy
 
@@ -631,7 +641,10 @@ Notes:
 
 ### Minimum expectations by area
 
-- parser changes should add or update parser fixtures/tests
+- parser changes should add or update parser fixtures/tests; before
+  rewriting a traversal, classifier or serializer, pin what the current
+  code does on the shapes it handles with tests written against `main`,
+  then state the new invariant in one sentence and test that
 - threader changes should verify threading, subject fallback, references, and participant handling
 - database changes should verify schema creation, migration, and upsert/query behavior
 - MCP search changes should verify hybrid/RRF behavior where applicable
@@ -678,6 +691,9 @@ Stop and ask for direction before proceeding if a proposed change would:
 - replace the current Bridge build/runtime assumptions
 - disable or weaken TLS verification in any service (`CERT_NONE`, `check_hostname = False`)
 - suppress or remove credential redaction from any log or error path
+- add hand-written parsing of attacker-controlled input (MIME, headers,
+  document formats) where the standard library or an existing
+  dependency already parses it, even to fix a review finding
 
 ## Out of Scope for Root AGENTS.md
 
