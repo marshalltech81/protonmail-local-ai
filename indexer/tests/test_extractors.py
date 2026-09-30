@@ -32,7 +32,7 @@ class TestDispatchByMime:
             payload=b"Hello there",
         )
         assert result.status == STATUS_SUCCESS
-        assert result.extractor == "text"
+        assert result.extractor == "text@2"
         assert result.text == "Hello there"
 
     def test_text_csv_uses_text_extractor(self):
@@ -65,7 +65,7 @@ class TestDispatchByMime:
             payload=b"text content",
         )
         assert result.status == STATUS_SUCCESS
-        assert result.extractor == "text"
+        assert result.extractor == "text@2"
 
     def test_no_dispatch_match_returns_unsupported(self):
         result = extract(
@@ -181,7 +181,7 @@ class TestSafetyGates:
         )
         assert result.status == STATUS_FAILED
         assert "simulated extractor crash" in result.error
-        assert result.extractor == "text"
+        assert result.extractor == "text@2"
 
 
 class TestEmptyExtraction:
@@ -229,6 +229,85 @@ class TestTextExtractorFallback:
         assert name == "text"
         assert "before" in text
         assert "after" in text
+
+
+class TestTextExtractorUnicode:
+    """#234: UTF-16 text decoded as cp1252 (or, without a BOM, as UTF-8)
+    came out NUL-interleaved, cached as a successful extraction, and
+    no word in it could be searched."""
+
+    WORDS = "COBALT invoice amount 1234 — résumé"
+
+    @pytest.mark.parametrize("encoding", ["utf-16", "utf-16-be", "utf-32", "utf-8-sig"])
+    def test_bom_selects_the_decoder(self, encoding):
+        import codecs
+
+        from src.extractors.text import extract as text_extract
+
+        payload = self.WORDS.encode(encoding)
+        if encoding == "utf-16-be":
+            payload = codecs.BOM_UTF16_BE + payload
+        text, _ = text_extract(payload)
+        assert text == self.WORDS
+
+    @pytest.mark.parametrize("encoding", ["utf-16-le", "utf-16-be"])
+    def test_bomless_utf16_is_recognised_by_its_nul_bytes(self, encoding):
+        from src.extractors.text import extract as text_extract
+
+        text, _ = text_extract(self.WORDS.encode(encoding))
+        assert text == self.WORDS
+
+    def test_short_bomless_utf16_is_recognised(self):
+        """Review round 1: under ten code units, the "almost no NULs in the
+        other byte" allowance rounded to zero and could never pass."""
+        from src.extractors.text import extract as text_extract
+
+        assert text_extract(b"H\x00i\x00")[0] == "Hi"
+        assert text_extract(b"\x00H\x00i")[0] == "Hi"
+
+    def test_utf8_with_a_stray_nul_stays_utf8(self):
+        from src.extractors.text import extract as text_extract
+
+        payload = "id\x00résumé line one\nline two".encode()
+        text, _ = text_extract(payload)
+        assert text == payload.decode("utf-8")
+
+    def test_mime_utf16_attachment_extracts_searchable_text(self):
+        """The issue's shape: Python's email package writes a BOM for
+        ``charset=utf-16``, which the parser hands on as payload bytes."""
+        import email
+        from email.message import EmailMessage
+
+        msg = EmailMessage()
+        msg.set_content("body")
+        msg.add_attachment(self.WORDS, subtype="plain", charset="utf-16", filename="report.txt")
+        part = list(email.message_from_bytes(bytes(msg)).walk())[-1]
+        result = extract(
+            content_type=part.get_content_type(),
+            filename="report.txt",
+            payload=part.get_payload(decode=True),
+        )
+        assert result.status == STATUS_SUCCESS
+        # The MIME writer appends a one-byte newline after the UTF-16
+        # bytes, which decodes as one replacement character.
+        assert result.text is not None and self.WORDS in result.text
+        assert "\x00" not in result.text
+        assert result.extractor == "text@2"
+
+
+class TestStaleOcrRowsWhileOcrIsOff:
+    """Review round 1: refreshing a stale OCR row with OCR off would
+    overwrite its text with "OCR disabled" and clear its chunks."""
+
+    def test_ocr_rows_are_not_stale_while_ocr_is_off(self, monkeypatch):
+        from src import extractors
+
+        monkeypatch.setattr(extractors, "EXTRACTOR_VERSIONS", {"image": 2, "pdf": 2})
+        for name, module in (("image-ocr", "image"), ("pdf-ocr", "pdf")):
+            assert extractors.stale_extractor_module(name) == module
+            assert extractors.stale_extractor_module(name, ocr_enabled=False) is None
+        # A digital PDF row needs no OCR to refresh.
+        assert extractors.stale_extractor_module("pdf-digital", ocr_enabled=False) == "pdf"
 
 
 class TestHtmlExtractorFallback:
@@ -969,6 +1048,101 @@ class TestImageExtractor:
         image_module.extract(buf.getvalue())
 
         assert Image.MAX_IMAGE_PIXELS == before
+
+
+class TestMultipageTiff:
+    """#231: a multipage TIFF was OCR'd from its first frame only and
+    cached as a complete extraction."""
+
+    COLORS = [(255, 255, 255), (0, 0, 0), (255, 0, 0)]
+
+    def _frames(self, fmt: str, count: int) -> bytes:
+        import io
+
+        from PIL import Image
+
+        frames = [Image.new("RGB", (32, 32), c) for c in self.COLORS[:count]]
+        buf = io.BytesIO()
+        frames[0].save(buf, format=fmt, save_all=True, append_images=frames[1:])
+        return buf.getvalue()
+
+    def _ocr_by_color(self, monkeypatch) -> list[str]:
+        from src.extractors import image as image_module
+
+        seen: list[str] = []
+
+        def fake_ocr(img, **_kwargs):
+            marker = f"PAGE_{self.COLORS.index(img.convert('RGB').getpixel((0, 0)))}"
+            seen.append(marker)
+            return marker
+
+        monkeypatch.setattr(image_module.pytesseract, "image_to_string", fake_ocr)
+        return seen
+
+    def test_every_page_is_ocrd_in_order(self, monkeypatch):
+        seen = self._ocr_by_color(monkeypatch)
+        result = extract(
+            content_type="image/tiff", filename="scan.tiff", payload=self._frames("TIFF", 3)
+        )
+        assert seen == ["PAGE_0", "PAGE_1", "PAGE_2"]
+        assert result.status == STATUS_SUCCESS
+        assert result.text is not None
+        assert result.text.split() == ["PAGE_0", "PAGE_1", "PAGE_2"]
+        assert result.extractor == "image-ocr@2"
+
+    def test_pages_are_capped_by_max_ocr_pages(self, monkeypatch):
+        seen = self._ocr_by_color(monkeypatch)
+        extract(
+            content_type="image/tiff",
+            filename="scan.tiff",
+            payload=self._frames("TIFF", 3),
+            max_ocr_pages=2,
+        )
+        assert seen == ["PAGE_0", "PAGE_1"]
+
+    def test_frames_past_the_cap_are_never_enumerated(self, monkeypatch):
+        """Review round 1: ``n_frames`` walks every image directory before
+        a cap applies, so a compact TIFF with thousands of them stalled
+        the worker. Pages are reached by ``seek()`` up to the cap."""
+        from PIL import TiffImagePlugin
+
+        def walked(_self):
+            raise AssertionError("n_frames walks the whole frame chain")
+
+        monkeypatch.setattr(TiffImagePlugin.TiffImageFile, "n_frames", property(walked))
+        seen = self._ocr_by_color(monkeypatch)
+        result = extract(
+            content_type="image/tiff",
+            filename="scan.tiff",
+            payload=self._frames("TIFF", 3),
+            max_ocr_pages=2,
+        )
+        assert result.status == STATUS_SUCCESS
+        assert seen == ["PAGE_0", "PAGE_1"]
+
+    def test_a_later_page_over_the_pixel_cap_fails_before_decoding(self, monkeypatch):
+        """Review round 1: ``Image.open`` checks only the first frame's
+        size; a later oversized page must not be decoded."""
+        import io
+
+        from PIL import Image
+
+        buf = io.BytesIO()
+        Image.new("RGB", (32, 32), (255, 255, 255)).save(
+            buf, format="TIFF", save_all=True, append_images=[Image.new("RGB", (400, 400))]
+        )
+        monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", 10_000)
+        seen = self._ocr_by_color(monkeypatch)
+        result = extract(content_type="image/tiff", filename="scan.tiff", payload=buf.getvalue())
+        assert result.status == STATUS_FAILED
+        assert seen == ["PAGE_0"]
+
+    def test_animated_gif_is_still_one_page(self, monkeypatch):
+        # Animation frames are not pages; OCR'ing each would multiply the
+        # work for no new text.
+        seen = self._ocr_by_color(monkeypatch)
+        extract(content_type="image/gif", filename="a.gif", payload=self._frames("GIF", 3))
+        assert seen == ["PAGE_0"]
 
 
 class TestGlobalImagePixelCap:

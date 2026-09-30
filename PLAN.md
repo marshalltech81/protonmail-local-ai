@@ -278,6 +278,13 @@ How the first batch was worked, and what to repeat:
 3. **Expect Codex rounds.** Every PR took 1–5 rounds, and later rounds
    found gaps in the fixes themselves. Record each round in the PR body
    and PLAN, and resolve threads only once fixed or deferred by the owner.
+4. **Guards in the loop, mechanisms out of it** (learned on #260, nine
+   rounds). A finding that needs a check, cap or fallback is fixed in
+   the round. One that needs a new mechanism — new parsing of untrusted
+   input above all — is a stop-and-ask, with "document the limitation"
+   as the default; three rounds on one mechanism means re-scope. Before
+   fixing a "wrong" derived value (a hash, a size), ask what consumes
+   it. Before rewriting a walk, pin the old behaviour with tests.
 
 ### Carried over from the first batch
 
@@ -361,11 +368,15 @@ passthrough in the search and intelligence handlers); AGENTS.md's
 7. **Done (#259).** **#243** header clipping sweep (subject, participant names,
    attachment filename/MIME, reranker `_candidate_text`). Separate from
    the `get_message` / ID-length backlog items below.
-8. **Done (#260).** **#230 + #209** parser MIME traversal: do not descend into attached
-   parts (and hash rfc822 attachments by their bytes — every one is
-   currently `sha256(b"")`); apply the attachment check to a single-part
-   root.
-9. **#231 + #234** multipage TIFF (honour the ignored `max_ocr_pages`),
+8. **Done (#260).** **#230 + #209** parser MIME traversal: nothing inside an
+   attachment is a body candidate, attachments inside attachments are
+   still recorded, and a single-part or attachment-labelled root is
+   classified. An attached email is identified by the hash of its
+   serialized form (deterministic, the same across transfer encodings),
+   not of its raw bytes; every one used to hash to `sha256(b"")`. Exact
+   raw-byte identity was tried and reverted (see Deferred), since
+   nothing extracts `message/rfc822`.
+9. **Done (#262).** **#231 + #234** multipage TIFF (honour the ignored `max_ocr_pages`),
    UTF-16 BOM / NUL detection. Bump the `image` and `text` modules in
    `EXTRACTOR_VERSIONS` (from item 3; owner approved 2026-09-29) so
    their stale cache rows re-extract. **Land #237 (item 10) first:**
