@@ -42,8 +42,11 @@ from .parser import Message
 # excluded — even with the colon-only restriction, the false-strip
 # surface for one-letter starts (e.g. ``R: meeting`` vs ``R&D recap``)
 # is too narrow to disambiguate.
+#
+# No ``^`` anchor: callers use ``.match(s, pos)``, which anchors at
+# ``pos``, where ``^`` would only ever match at index 0.
 _SUBJECT_PREFIX_RE = re.compile(
-    r"^(?:(?:re|fwd|fw|回复|答复)[\s:\[\]]+|(?:aw|ant|sv|tr)[:\[\]]+)",
+    r"(?:(?:re|fwd|fw|回复|答复)[\s:\[\]]+|(?:aw|ant|sv|tr)[:\[\]]+)",
     re.IGNORECASE,
 )
 _SUBJECT_WHITESPACE_RE = re.compile(r"\s+")
@@ -342,11 +345,17 @@ def _normalize_subject(subject: str) -> str:
     chains ('Re: Re: Fwd: Hello') collapse to the bare subject
     ('hello'). The prefix set is the conservative cross-language list
     described in ``_SUBJECT_PREFIX_RE``.
+
+    Advances an offset past each prefix and the whitespace after it,
+    then slices once, so the work is linear in the subject length. The
+    earlier strip-and-copy per prefix was quadratic in the prefix count
+    and let a crafted ``Re: Re: ...`` subject stall the worker (#293).
     """
     s = subject.lower().strip()
-    while True:
-        stripped = _SUBJECT_PREFIX_RE.sub("", s).strip()
-        if stripped == s:
-            break
-        s = stripped
-    return _SUBJECT_WHITESPACE_RE.sub(" ", s).strip()
+    pos = 0
+    while match := _SUBJECT_PREFIX_RE.match(s, pos):
+        pos = match.end()
+        # Same whitespace set ``str.strip()`` removed between passes.
+        while pos < len(s) and s[pos].isspace():
+            pos += 1
+    return _SUBJECT_WHITESPACE_RE.sub(" ", s[pos:]).strip()
