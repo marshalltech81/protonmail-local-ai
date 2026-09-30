@@ -410,7 +410,11 @@ def _untrusted_email_block(content: str, *, index: int | None = None) -> str:
 
 
 # A whole response wrapped in a markdown code fence: ```json ... ```.
-_CODE_FENCE_RE = re.compile(r"^```[A-Za-z]*\s*\n(.*?)\n?```$", re.DOTALL)
+# Only horizontal whitespace may precede the first newline, so the
+# opening line has one way to match; a looser ``\s*\n`` let an unclosed
+# fence retry the body scan once per newline (#327). Whitespace moved
+# into the body by this is removed by the caller's ``strip``.
+_CODE_FENCE_RE = re.compile(r"^```[A-Za-z]*+[^\S\n]*+\n(.*?)\n?```$", re.DOTALL)
 
 
 # Appended to a prose answer the model stopped writing at max_tokens.
