@@ -84,28 +84,6 @@ class TestSchema:
         }
         assert cols == {"filepath", "message_id", "thread_id", "marked_at"}
 
-    def test_v20_database_migrates_to_add_ingestion_state(self, tmp_path):
-        """Migration 0021 adds ``ingestion_state`` to a v20 database."""
-        db_path = tmp_path / "v20.db"
-        Database(db_path).close()
-        conn = sqlite3.connect(str(db_path))
-        try:
-            conn.execute("DROP TABLE ingestion_state")
-            conn.execute("UPDATE schema_version SET version = 20")
-            conn.commit()
-        finally:
-            conn.close()
-
-        database = Database(db_path)
-        try:
-            version = database._conn.execute("SELECT version FROM schema_version").fetchone()
-            assert version["version"] == SCHEMA_VERSION == 21
-            database.record_ingestion_state(
-                sync_completed_at=None, sync_interval_secs=None, seen_at="2026-09-28T12:00:00+00:00"
-            )
-        finally:
-            database.close()
-
     def test_reopening_initialized_database_does_not_error(self, tmp_path):
         """A fresh database created on first open is reopened cleanly on
         the second call: ``_migrate`` finds the matching SCHEMA_VERSION

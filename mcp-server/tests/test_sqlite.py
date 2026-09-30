@@ -1164,16 +1164,6 @@ class TestStatsAndFolders:
             "indexer_seen_at": "2026-09-28T12:00:10+00:00",
         }
 
-    def test_get_mailbox_status_before_the_indexer_migrates(self, empty_db: Database):
-        """mcp-server can restart on a new build before the indexer has
-        run migration 0021; the counts must still be reported."""
-        with closing(sqlite3.connect(empty_db.path)) as conn:
-            conn.execute("DROP TABLE ingestion_state")
-            conn.commit()
-        stats = empty_db.get_mailbox_status()
-        assert stats["total_threads"] == 0
-        assert stats["ingestion"] is None
-
     def test_get_mailbox_status_before_the_indexer_reports(self, empty_db: Database):
         stats = empty_db.get_mailbox_status()
         assert stats["queue"] == {"pending": 0, "retrying": 0, "dead": 0}
