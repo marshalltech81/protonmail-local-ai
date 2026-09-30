@@ -856,36 +856,90 @@ class TestAttachmentBoundaries:
         assert len(msg.attachments) == 300
         assert all(a.payload == b"" for a in msg.attachments)
 
-    def test_attached_email_nested_past_the_cap_is_not_serialized(self, tmp_path):
-        """Review round 1: serializing copies the subtree once per nesting
-        level, so a large leaf under many wrappers cost depth x size. Past
-        the depth cap the attached email keeps the empty payload."""
-        from src.parser import MAX_ATTACHED_MESSAGE_DEPTH
+    @staticmethod
+    def _deep_attached_email(depth: int, leaf_bytes: int, cte: str | None = None) -> bytes:
+        """A message carrying an attached email whose body is ``depth``
+        nested message/rfc822 wrappers around a ``leaf_bytes`` text leaf.
+        ``cte`` labels the attachment with a transfer encoding, which the
+        parser ignores when it reads the body as MIME."""
+        line = b"x" * 76 + b"\r\n"
+        leaf = b"Content-Type: text/plain\r\n\r\n" + line * max(1, leaf_bytes // len(line))
+        nested = b"Content-Type: message/rfc822\r\n\r\n" * (depth - 1) + leaf
+        label = f"Content-Transfer-Encoding: {cte}\r\n".encode() if cte else b""
+        return (
+            b"Message-ID: <deep@example.test>\r\nFrom: sender@example.test\r\n"
+            b"Date: Mon, 28 Sep 2026 12:00:00 +0000\r\nMIME-Version: 1.0\r\n"
+            b'Content-Type: multipart/mixed; boundary="b"\r\n\r\n'
+            b"--b\r\nContent-Type: text/plain\r\n\r\nPARENT_BODY\r\n"
+            b"--b\r\nContent-Type: message/rfc822\r\n"
+            + label
+            + b'Content-Disposition: attachment; filename="x.eml"\r\n\r\n'
+            + nested
+            + b"\r\n--b--\r\n"
+        )
 
-        def parent(depth: int) -> str:
-            wrapper = "Content-Type: message/rfc822\r\n\r\n"
-            nested = wrapper * (depth - 1) + "Content-Type: text/plain\r\n\r\nleaf\r\n"
-            return (
-                "Message-ID: <deep@example.test>\r\n"
-                "From: sender@example.test\r\n"
-                "Date: Mon, 28 Sep 2026 12:00:00 +0000\r\n"
-                "MIME-Version: 1.0\r\n"
-                'Content-Type: multipart/mixed; boundary="b"\r\n'
-                "\r\n--b\r\nContent-Type: text/plain\r\n\r\nPARENT_BODY\r\n"
-                '--b\r\nContent-Type: message/rfc822\r\nContent-Disposition: attachment; filename="x.eml"\r\n\r\n'
-                f"{nested}\r\n--b--\r\n"
-            )
+    @staticmethod
+    def _count_serializations(monkeypatch) -> list[int]:
+        """Count ``Message.as_bytes`` calls: the parser never serializes,
+        so every call is the attachment walk serializing a container."""
+        import email.message
+
+        calls: list[int] = []
+        real = email.message.Message.as_bytes
+
+        def counting(self, *args, **kwargs):
+            calls.append(1)
+            return real(self, *args, **kwargs)
+
+        monkeypatch.setattr(email.message.Message, "as_bytes", counting)
+        return calls
+
+    # Serializing copies the subtree once per level above it, so the
+    # worst case is a large leaf under many wrappers: 24 MB (under the
+    # 50 MB parse cap) under 240, the shape the security review measured.
+    WORST_CASE_DEPTH = 240
+    WORST_CASE_LEAF = 24_000_000
+    # Generous: the bounded path parses the 24 MB in well under a second.
+    WORST_CASE_SECONDS = 10.0
+
+    def test_attached_email_at_the_cap_is_serialized(self, tmp_path):
+        from src.parser import MAX_ATTACHED_MESSAGE_DEPTH
 
         folder = tmp_path / "INBOX" / "cur"
         folder.mkdir(parents=True)
-        for depth, serialized in ((MAX_ATTACHED_MESSAGE_DEPTH, True), (50, False)):
-            path = folder / f"d{depth}.eml"
-            path.write_bytes(parent(depth).encode())
-            msg = parse_email(path)
-            assert msg is not None
-            assert msg.body_text == "PARENT_BODY"
-            [attachment] = msg.attachments
-            assert (b"leaf" in attachment.payload) is serialized, depth
+        path = folder / "d.eml"
+        path.write_bytes(self._deep_attached_email(MAX_ATTACHED_MESSAGE_DEPTH, 100))
+        msg = parse_email(path)
+        assert msg is not None
+        [attachment] = msg.attachments
+        assert b"xxxx" in attachment.payload
+
+    @pytest.mark.parametrize("cte", [None, "base64"])
+    def test_attached_email_past_the_cap_is_never_serialized(self, tmp_path, monkeypatch, cte):
+        """Review rounds 1, 7 and 8: past the depth cap the attached email
+        keeps the empty payload without its tree ever being serialized —
+        including a transfer-encoded one, whose transport body the parser
+        still reads as MIME. The serialization count is the enforcing
+        check: on Python 3.14 the unbounded serialization of this worst
+        case measures well under a second, so elapsed time alone cannot
+        tell the two apart; the time bound is the safety net."""
+        import time
+
+        folder = tmp_path / "INBOX" / "cur"
+        folder.mkdir(parents=True)
+        path = folder / "d.eml"
+        path.write_bytes(
+            self._deep_attached_email(self.WORST_CASE_DEPTH, self.WORST_CASE_LEAF, cte)
+        )
+        calls = self._count_serializations(monkeypatch)
+        started = time.perf_counter()
+        msg = parse_email(path)
+        elapsed = time.perf_counter() - started
+        assert msg is not None
+        assert msg.body_text == "PARENT_BODY"
+        assert msg.attachments[0].payload == b""
+        assert calls == []
+        assert elapsed < self.WORST_CASE_SECONDS
 
     @pytest.mark.parametrize("encoding", ["base64", "quoted-printable"])
     def test_transfer_encoded_attached_email_is_hashed_decoded(self, tmp_path, encoding):
@@ -960,29 +1014,6 @@ class TestAttachmentBoundaries:
         by_name = {a.filename: a for a in msg.attachments}
         assert set(by_name) == {"fwd.eml", "inside.pdf"}
         assert b"%PDF-INSIDE" in by_name["inside.pdf"].payload
-
-    def test_encoded_attached_email_with_a_deep_transport_body_is_not_serialized(self, tmp_path):
-        """Review round 7: compat32 parses a base64-labelled attached
-        email's body as MIME whatever the label, so a deeply nested body
-        was serialized (depth x size, or RecursionError past ~300) before
-        the depth check ran. The parsed tree is checked first."""
-        wrapper = "Content-Type: message/rfc822\r\n\r\n"
-        deep = (wrapper * 320 + "Content-Type: text/plain\r\n\r\nleaf\r\n").encode()
-        folder = tmp_path / "INBOX" / "cur"
-        folder.mkdir(parents=True)
-        path = folder / "m.eml"
-        path.write_bytes(
-            b"Message-ID: <deepb64@example.test>\r\nFrom: sender@example.test\r\n"
-            b"Date: Mon, 28 Sep 2026 12:00:00 +0000\r\nMIME-Version: 1.0\r\n"
-            b'Content-Type: multipart/mixed; boundary="b"\r\n\r\n'
-            b"--b\r\nContent-Type: text/plain\r\n\r\nPARENT_BODY\r\n"
-            b"--b\r\nContent-Type: message/rfc822\r\nContent-Transfer-Encoding: base64\r\n"
-            b'Content-Disposition: attachment; filename="x.eml"\r\n\r\n' + deep + b"\r\n--b--\r\n"
-        )
-        msg = parse_email(path)
-        assert msg is not None
-        assert msg.body_text == "PARENT_BODY"
-        assert msg.attachments[0].payload == b""
 
     def test_undecodable_base64_attached_email_keeps_an_empty_payload(self, tmp_path):
         folder = tmp_path / "INBOX" / "cur"
