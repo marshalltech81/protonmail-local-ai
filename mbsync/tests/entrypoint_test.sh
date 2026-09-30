@@ -43,8 +43,10 @@ check() {
     fi
 }
 
-readonly FP_OLD="aaaa"
-readonly FP_NEW="bbbb"
+# Synthetic fingerprints in the pin's format: 64 lowercase hex digits.
+FP_OLD="$(printf 'a%.0s' {1..64})"
+FP_NEW="$(printf 'b%.0s' {1..64})"
+readonly FP_OLD FP_NEW
 
 # --- verify_cert_pin (#240) ------------------------------------------------
 
@@ -118,6 +120,60 @@ failed_rotation_fails_closed_and_keeps_the_old_pin() {
     [[ "$(find "$STATE_DIR" -type f | wc -l)" -eq 1 ]]
 }
 
+# --- an existing invalid pin is not a first boot (#278) ---------------------
+#
+# Only an absent pin is a first boot. A pin that exists but is empty,
+# malformed, unreadable or a dangling link is refused and left in place.
+
+refuses_the_new_fingerprint() {
+    if verify_cert_pin "$FP_NEW"; then
+        echo "a cert was accepted over an invalid pin"
+        return 1
+    fi
+}
+
+empty_pin_is_refused_and_kept() {
+    pin_setup empty
+    mkdir -p "$STATE_DIR"
+    : >"$PIN_FILE"
+    refuses_the_new_fingerprint
+    [[ -f "$PIN_FILE" && ! -s "$PIN_FILE" ]]
+}
+
+malformed_pin_is_refused_and_kept() {
+    pin_setup malformed
+    mkdir -p "$STATE_DIR"
+    printf '%s\n' "${FP_OLD:0:32}" >"$PIN_FILE"
+    refuses_the_new_fingerprint
+    [[ "$(cat "$PIN_FILE")" == "${FP_OLD:0:32}" ]]
+}
+
+unreadable_pin_is_refused() {
+    pin_setup unreadable
+    # A directory in the pin's place cannot be read, even as root.
+    mkdir -p "$PIN_FILE"
+    refuses_the_new_fingerprint
+    [[ -d "$PIN_FILE" ]]
+}
+
+dangling_pin_link_is_refused_and_kept() {
+    pin_setup dangling
+    mkdir -p "$STATE_DIR"
+    ln -s "$STATE_DIR/missing" "$PIN_FILE"
+    refuses_the_new_fingerprint
+    [[ -L "$PIN_FILE" && ! -e "$STATE_DIR/missing" ]]
+}
+
+# shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
+rotation_replaces_an_invalid_pin() {
+    pin_setup invalid-rotate
+    mkdir -p "$STATE_DIR"
+    : >"$PIN_FILE"
+    BRIDGE_CERT_PIN_ROTATE="true"
+    verify_cert_pin "$FP_NEW"
+    [[ "$(cat "$PIN_FILE")" == "$FP_NEW" ]]
+}
+
 # --- run_sync (#227) -------------------------------------------------------
 
 # shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
@@ -189,6 +245,11 @@ check "a mismatch is refused without rotation" mismatch_is_refused_without_rotat
 check "rotation replaces the pin" rotation_replaces_the_pin
 check "a failed rotation fails closed and keeps the old pin" \
     failed_rotation_fails_closed_and_keeps_the_old_pin
+check "an existing empty pin is refused and kept" empty_pin_is_refused_and_kept
+check "a malformed pin is refused and kept" malformed_pin_is_refused_and_kept
+check "an unreadable pin is refused" unreadable_pin_is_refused
+check "a dangling pin link is refused and kept" dangling_pin_link_is_refused_and_kept
+check "rotation replaces an invalid pin" rotation_replaces_an_invalid_pin
 check "sync succeeds when mbsync and the repair succeed" \
     sync_succeeds_when_mbsync_and_repair_succeed
 check "a failed directory repair fails the sync" failed_directory_repair_fails_the_sync

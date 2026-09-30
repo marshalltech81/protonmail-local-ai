@@ -109,7 +109,9 @@ verify_cert_pin() {
     # First boot: no pin on disk yet → TOFU, save fingerprint.
     # Subsequent boots: fingerprint must match, or the operator must opt
     # in to rotation via BRIDGE_CERT_PIN_ROTATE=true (used when Bridge is
-    # upgraded and its TLS cert is deliberately replaced).
+    # upgraded and its TLS cert is deliberately replaced). Only an absent
+    # pin is a first boot: one that exists but is empty, malformed,
+    # unreadable or a dangling link is refused like a mismatch.
     #
     # The caller runs this as an ``if`` condition, which turns errexit off
     # inside it: every step that must succeed is checked explicitly, and
@@ -117,7 +119,7 @@ verify_cert_pin() {
     local current_fp="$1"
     local pinned_fp
 
-    if [[ ! -s "$PIN_FILE" ]]; then
+    if [[ ! -e "$PIN_FILE" && ! -L "$PIN_FILE" ]]; then
         if ! write_pin "$current_fp"; then
             echo ">>> ERROR: could not save the Bridge cert pin to ${PIN_FILE} — refusing to sync." >&2
             return 1
@@ -133,6 +135,14 @@ verify_cert_pin() {
     if [[ "$pinned_fp" == "$current_fp" ]]; then
         echo ">>> Bridge cert fingerprint matches the pinned value."
         return 0
+    fi
+
+    # write_pin stores 64 lowercase hex digits; anything else is damaged
+    # state, not a fingerprint to compare against.
+    if [[ ! "$pinned_fp" =~ ^[0-9a-f]{64}$ && "$BRIDGE_CERT_PIN_ROTATE" != "true" ]]; then
+        echo ">>> ERROR: the Bridge cert pin at ${PIN_FILE} is empty or malformed — refusing to sync." >&2
+        echo ">>> To re-pin the cert Bridge presents now, recreate mbsync once with BRIDGE_CERT_PIN_ROTATE=true." >&2
+        return 1
     fi
 
     if [[ "$BRIDGE_CERT_PIN_ROTATE" == "true" ]]; then

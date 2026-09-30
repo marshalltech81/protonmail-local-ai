@@ -444,6 +444,20 @@ Fix the volume and restart `mbsync`. Set `BRIDGE_CERT_PIN_ROTATE` back to `false
 it from `.env`) before the next restart so the new pin is enforced going
 forward. Leaving it permanently true disables pin enforcement.
 
+Only a missing pin file is treated as a first boot. A pin file that
+exists but is empty, malformed, unreadable or a dangling link is
+damaged state: `mbsync` refuses to sync and leaves it in place rather
+than silently re-pinning whatever cert Bridge presents:
+
+```
+>>> ERROR: the Bridge cert pin at /state/bridge-cert.fingerprint is empty or malformed — refusing to sync.
+```
+
+(An unreadable pin or dangling link logs `could not read the Bridge
+cert pin` instead.) Find out how the pin was damaged first, then accept
+the cert Bridge presents now with the same one-time
+`BRIDGE_CERT_PIN_ROTATE=true` run as for a rotation.
+
 `make clean` removes the `mbsync-state` volume along with everything
 else, so the next boot after `make clean` is treated as a first boot
 and trust-on-first-use re-pins whatever cert Bridge presents.
