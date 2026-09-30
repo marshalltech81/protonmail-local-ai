@@ -103,6 +103,27 @@ rotation_replaces_the_pin() {
     [[ "$(cat "$PIN_FILE")" == "$FP_NEW" ]]
 }
 
+# The flag lives in the container's environment and survives restarts
+# (#267), so the documented recovery recreates mbsync with it false. From
+# then on the rotated pin is enforced: a second change is refused.
+# shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
+rotation_then_disabled_flag_enforces_the_new_pin() {
+    local fp_third
+    fp_third="$(printf 'c%.0s' {1..64})"
+    pin_setup rotate-then-enforce
+    mkdir -p "$STATE_DIR"
+    printf '%s\n' "$FP_OLD" >"$PIN_FILE"
+    BRIDGE_CERT_PIN_ROTATE="true"
+    verify_cert_pin "$FP_NEW"
+    BRIDGE_CERT_PIN_ROTATE="false"
+    verify_cert_pin "$FP_NEW"
+    if verify_cert_pin "$fp_third"; then
+        echo "a second change was accepted without a new authorization"
+        return 1
+    fi
+    [[ "$(cat "$PIN_FILE")" == "$FP_NEW" ]]
+}
+
 # shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
 failed_rotation_fails_closed_and_keeps_the_old_pin() {
     pin_setup rotate-fail
@@ -243,6 +264,8 @@ check "first boot fails closed when the pin cannot be saved" \
 check "a matching fingerprint is accepted" matching_fingerprint_is_accepted
 check "a mismatch is refused without rotation" mismatch_is_refused_without_rotation
 check "rotation replaces the pin" rotation_replaces_the_pin
+check "after a rotation, the flag set false enforces the new pin" \
+    rotation_then_disabled_flag_enforces_the_new_pin
 check "a failed rotation fails closed and keeps the old pin" \
     failed_rotation_fails_closed_and_keeps_the_old_pin
 check "an existing empty pin is refused and kept" empty_pin_is_refused_and_kept

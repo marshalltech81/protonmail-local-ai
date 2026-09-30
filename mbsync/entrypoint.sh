@@ -159,7 +159,7 @@ verify_cert_pin() {
     echo ">>> ERROR: Bridge cert fingerprint does not match pinned value — refusing to sync." >&2
     echo ">>>   pinned:  sha256:${pinned_fp}" >&2
     echo ">>>   current: sha256:${current_fp}" >&2
-    echo ">>> If this rotation is expected (e.g. Bridge upgrade), restart mbsync with BRIDGE_CERT_PIN_ROTATE=true." >&2
+    echo ">>> If this rotation is expected (e.g. Bridge upgrade), recreate mbsync once with BRIDGE_CERT_PIN_ROTATE=true." >&2
     echo ">>> Otherwise this is a security event — investigate before proceeding." >&2
     return 1
 }
@@ -260,15 +260,16 @@ record_successful_sync() {
 # =============================================================================
 require_prerequisites
 
-# BRIDGE_CERT_PIN_ROTATE is a single-restart opt-in for accepting a
-# legitimate Bridge cert rotation. Leaving it set to true across
-# restarts silently disables pin enforcement — every new cert will be
-# accepted without comparison. Surface that drift on every boot so the
-# operator notices if they forgot to flip it back to false.
+# BRIDGE_CERT_PIN_ROTATE is an opt-in for accepting one legitimate
+# Bridge cert rotation. It is part of the container's environment, so
+# it stays true through every restart of this container (manual or by
+# the restart policy) until the container is recreated with it false;
+# until then every new cert is accepted without comparison. Surface
+# that on every boot so the operator notices if they forgot.
 if [[ "$BRIDGE_CERT_PIN_ROTATE" == "true" ]]; then
     echo ">>> WARNING: BRIDGE_CERT_PIN_ROTATE=true — any Bridge cert fingerprint change this boot will be accepted without comparison." >&2
-    echo ">>> This is intended only for a single restart after a deliberate Bridge cert rotation (e.g. Bridge upgrade)." >&2
-    echo ">>> Set BRIDGE_CERT_PIN_ROTATE=false (or remove it from .env) and restart mbsync to re-enable pin enforcement." >&2
+    echo ">>> This is intended only for one boot after a deliberate Bridge cert rotation (e.g. Bridge upgrade); a restart keeps it enabled." >&2
+    echo ">>> Once the rotation succeeds, recreate mbsync with BRIDGE_CERT_PIN_ROTATE=false to re-enable pin enforcement (see docs/troubleshooting.md)." >&2
 fi
 
 envsubst < /etc/mbsyncrc.template > "$CONFIG_FILE"
@@ -289,7 +290,7 @@ wait_for_bridge_imap
 # saved to the persistent state volume ($PIN_FILE). On subsequent boots
 # the fingerprint must match the pinned value — otherwise mbsync refuses
 # to sync. A legitimate rotation (e.g. Bridge upgrade) is accepted by
-# restarting mbsync with BRIDGE_CERT_PIN_ROTATE=true. `make clean`
+# recreating mbsync once with BRIDGE_CERT_PIN_ROTATE=true. `make clean`
 # deletes the state volume and resets the pin.
 # =============================================================================
 extract_bridge_cert
