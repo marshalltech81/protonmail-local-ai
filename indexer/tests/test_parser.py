@@ -1200,14 +1200,16 @@ class TestAttachmentBoundaries:
     def test_the_budget_spans_every_container_in_a_message(self, tmp_path, monkeypatch):
         """Review round 10: fifty sibling reports each under the budget
         cost fifty serializations. One budget covers the whole message,
-        so once it is spent no later container is serialized."""
+        so once it is spent no later container is serialized. Each
+        report is worth about 70% of the budget (its fields plus their
+        bytes), so the first fits and the second exhausts it."""
         from src.parser import MAX_ATTACHED_MESSAGE_FIELDS
 
         report = (
             b"--r\r\nContent-Type: message/delivery-status\r\n"
             b'Content-Disposition: attachment; filename="status.txt"\r\n\r\n'
             b"Reporting-MTA: dns; mx.example.test\r\n"
-            + b"X-Field: value\r\n" * (MAX_ATTACHED_MESSAGE_FIELDS * 9 // 10)
+            + b"X-Field: value\r\n" * (MAX_ATTACHED_MESSAGE_FIELDS * 4 // 10)
             + b"\r\n"
         )
         raw = (
