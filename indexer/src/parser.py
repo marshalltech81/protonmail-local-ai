@@ -157,6 +157,11 @@ class Message:
     size: int | None = None
     mtime_ns: int | None = None
     content_hash: str | None = None
+    # True when ``date`` is the parser's current-time fallback for a
+    # missing or unparseable Date header. Reprocessing keeps the date
+    # already persisted for the message instead (#297), so an undated
+    # message is not re-dated every time it is parsed.
+    date_is_fallback: bool = False
 
 
 def parse_email(path: Path, maildir_root: Path | None = None) -> Message | None:
@@ -266,7 +271,8 @@ def parse_email(path: Path, maildir_root: Path | None = None) -> Message | None:
     from_addr = from_addrs[0] if from_addrs else _decode_header(msg.get("From", ""))
     to_addrs = _parse_addrs(msg.get("To", ""))
     cc_addrs = _parse_addrs(msg.get("Cc", ""))
-    date = _parse_date(msg.get("Date", ""))
+    parsed_date = _parse_date(msg.get("Date", ""))
+    date = parsed_date if parsed_date is not None else datetime.now(UTC)
 
     body_text, attachments = _extract_body_and_attachments(msg)
 
@@ -295,6 +301,7 @@ def parse_email(path: Path, maildir_root: Path | None = None) -> Message | None:
         to_addrs=to_addrs,
         cc_addrs=cc_addrs,
         date=date,
+        date_is_fallback=parsed_date is None,
         body_text=body_text,
         folder=folder,
         filepath=str(path),
@@ -959,7 +966,7 @@ def _parse_addrs(value: str | email.header.Header) -> list[str]:
     return addresses
 
 
-def _parse_date(value: str) -> datetime:
+def _parse_date(value: str) -> datetime | None:
     """Parse an RFC 2822 date header and normalize to a UTC-aware datetime.
 
     ``parsedate_to_datetime`` returns a naive datetime for ``-0000`` ("no TZ
@@ -967,10 +974,11 @@ def _parse_date(value: str) -> datetime:
     sorts and compares message dates, which raises ``TypeError`` when naive
     and aware values are mixed — so every parsed date is forced to UTC here.
 
-    Unparseable headers fall back to the current UTC time so threading
-    doesn't crash, but that fabricates a date — log at WARNING with the
-    offending value so an operator notices a corrupt mailbox before the
-    fabricated dates dominate "recent" sorts.
+    Unparseable headers return ``None``; ``parse_email`` then falls back
+    to the current UTC time so threading doesn't crash, but that
+    fabricates a date — log at WARNING with the offending value so an
+    operator notices a corrupt mailbox before the fabricated dates
+    dominate "recent" sorts.
     """
     try:
         from email.utils import parsedate_to_datetime
@@ -980,16 +988,16 @@ def _parse_date(value: str) -> datetime:
         # Older Python releases occasionally raise TypeError on malformed
         # dates; ``parsedate_to_datetime`` proper raises ValueError below.
         log.warning("date header type error, using now(): %r", value)
-        return datetime.now(UTC)
+        return None
     except ValueError:
         # ``parsedate_to_datetime`` raises ValueError on unparseable headers
-        # (empty string, single-token gibberish, malformed timezone). Force
-        # current UTC so threader doesn't crash on a bad header.
+        # (empty string, single-token gibberish, malformed timezone);
+        # ``parse_email`` substitutes current UTC so threader doesn't crash.
         log.warning("date header unparseable, using now(): %r", value)
-        return datetime.now(UTC)
+        return None
     if dt is None:
         log.warning("date header parsed to None, using now(): %r", value)
-        return datetime.now(UTC)
+        return None
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=UTC)
     return dt.astimezone(UTC)

@@ -14,10 +14,11 @@ exercise it with stub collaborators rather than booting a live indexer.
 
 import json
 import sqlite3
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
-from src import main
+from src import main, parser
 from src.database import EMBEDDING_DIM, Database
 from src.maildir import SyncStamp
 from src.queue import REASON_INITIAL_SCAN, IndexingQueue
@@ -31,6 +32,17 @@ from tests.conftest import make_mock_embedder
 _REAL_ITER_MAILDIR_MESSAGES = main._iter_maildir_messages
 
 _UNIT_VECTOR = [1.0] + [0.0] * (EMBEDDING_DIM - 1)
+
+
+def _set_parser_clock(monkeypatch, when: datetime) -> None:
+    """Pin the parser's ``datetime.now`` (its missing-Date fallback)."""
+
+    class _Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return when
+
+    monkeypatch.setattr(parser, "datetime", _Clock)
 
 
 class _FakeEvent:
@@ -102,19 +114,21 @@ def _write_eml(
     *,
     in_reply_to: str | None = None,
     references: list[str] | None = None,
-    date: str = "Mon, 01 Jan 2024 12:00:00 +0000",
+    date: str | None = "Mon, 01 Jan 2024 12:00:00 +0000",
     from_addr: str = "alice@example.com",
     to_addr: str = "bob@example.com",
 ) -> None:
+    """``date=None`` omits the Date header entirely."""
     path.parent.mkdir(parents=True, exist_ok=True)
     headers = [
         f"From: {from_addr}",
         f"To: {to_addr}",
         f"Subject: {subject}",
         f"Message-ID: <{message_id}>",
-        f"Date: {date}",
         "Content-Type: text/plain; charset=utf-8",
     ]
+    if date is not None:
+        headers.insert(4, f"Date: {date}")
     if in_reply_to:
         headers.append(f"In-Reply-To: <{in_reply_to}>")
     if references:
@@ -1428,6 +1442,135 @@ class TestReprocessKeepsThreadMembership:
             if "b@example.com" in json.loads(r["message_ids"])
         ]
         assert listing_b == [thread_b]
+
+
+def _message_dates(db: Database, message_id: str) -> tuple[str, set[str], tuple[str, str]]:
+    """``(messages.sent_at, chunk message_dates, (date_first, date_last))``."""
+    sent_at = db._conn.execute(
+        "SELECT sent_at FROM messages WHERE message_id = ?", (message_id,)
+    ).fetchone()["sent_at"]
+    chunk_dates = {
+        r["message_date"]
+        for r in db._conn.execute(
+            "SELECT message_date FROM message_chunks WHERE message_id = ?", (message_id,)
+        )
+    }
+    thread = db._conn.execute(
+        "SELECT date_first, date_last FROM threads WHERE thread_id = ?",
+        (db.find_thread_by_message_id(message_id),),
+    ).fetchone()
+    return sent_at, chunk_dates, (thread["date_first"], thread["date_last"])
+
+
+class TestReprocessKeepsFirstDate:
+    """#297, first half: the parser falls back to the current time for a
+    missing or unparseable Date header, so reprocessing an undated
+    message (a rename seen while the indexer was down, a retry) used to
+    re-date its ``messages`` row and widen its thread's range while the
+    retained chunks kept the first date. The first persisted date wins
+    for a fallback date; a real header date is still taken as parsed."""
+
+    _FIRST = datetime(2026, 1, 1, tzinfo=UTC)
+    _LATER = datetime(2026, 9, 30, tzinfo=UTC)
+
+    def _index(self, db, threader, path):
+        queue = _make_queue(db)
+        queue.enqueue(str(path), REASON_INITIAL_SCAN)
+        _drain(queue, db, make_mock_embedder(_UNIT_VECTOR), threader)
+
+    def test_dated_message_keeps_header_date_on_reprocess(self, tmp_path, monkeypatch):
+        db = Database(tmp_path / "mail.db")
+        threader = Threader(db)
+        path = tmp_path / "INBOX" / "cur" / "d:2,S"
+        _write_eml(path, "dated@example.com")
+        _set_parser_clock(monkeypatch, self._FIRST)
+        self._index(db, threader, path)
+
+        renamed = path.with_name("d:2,RS")
+        path.rename(renamed)
+        _set_parser_clock(monkeypatch, self._LATER)
+        self._index(db, threader, renamed)
+
+        header = "2024-01-01T12:00:00+00:00"
+        assert _message_dates(db, "dated@example.com") == (header, {header}, (header, header))
+
+    def test_changed_header_date_still_replaces_sent_at(self, tmp_path, monkeypatch):
+        """Only a fallback date defers to the stored one: a message whose
+        real Date header differs on reprocess takes the new header."""
+        db = Database(tmp_path / "mail.db")
+        threader = Threader(db)
+        path = tmp_path / "INBOX" / "cur" / "c:2,S"
+        _write_eml(path, "changed@example.com")
+        self._index(db, threader, path)
+
+        rewritten = path.with_name("c:2,RS")
+        path.unlink()
+        _write_eml(rewritten, "changed@example.com", date="Tue, 02 Jan 2024 12:00:00 +0000")
+        self._index(db, threader, rewritten)
+
+        sent_at, _, _ = _message_dates(db, "changed@example.com")
+        assert sent_at == "2024-01-02T12:00:00+00:00"
+
+    @pytest.mark.parametrize("date", [None, "not-a-date"], ids=["missing", "malformed"])
+    def test_undated_message_keeps_first_date_on_reprocess(self, tmp_path, monkeypatch, date):
+        db = Database(tmp_path / "mail.db")
+        threader = Threader(db)
+        path = tmp_path / "INBOX" / "cur" / "u:2,S"
+        _write_eml(path, "undated@example.com", date=date)
+        _set_parser_clock(monkeypatch, self._FIRST)
+        self._index(db, threader, path)
+
+        renamed = path.with_name("u:2,RS")
+        path.rename(renamed)
+        _set_parser_clock(monkeypatch, self._LATER)
+        self._index(db, threader, renamed)
+
+        first = self._FIRST.isoformat()
+        assert _message_dates(db, "undated@example.com") == (first, {first}, (first, first))
+
+    def test_reap_rebuild_keeps_undated_survivor_first_date(self, tmp_path, monkeypatch):
+        """The reaper re-parses a thread's survivors to rebuild its row;
+        an undated survivor must not re-date the thread there either."""
+        from src.reconciler import Reconciler, ReconcilerConfig
+
+        maildir = tmp_path / "maildir"
+        inbox = maildir / "INBOX" / "cur"
+        root = inbox / "1700000000.M1.host:2,S"
+        reply = inbox / "1700000001.M1.host:2,S"
+        _write_eml(root, "root@example.com", subject="Plan", date=None)
+        _write_eml(reply, "reply@example.com", subject="Re: Plan", in_reply_to="root@example.com")
+        monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
+        db = Database(tmp_path / "mail.db")
+        threader = Threader(db)
+        embedder = make_mock_embedder(_UNIT_VECTOR)
+        _set_parser_clock(monkeypatch, self._FIRST)
+        # One file at a time: the Maildir walk order is filesystem order.
+        self._index(db, threader, root)
+        self._index(db, threader, reply)
+        assert db.find_thread_by_message_id("reply@example.com") == "root@example.com"
+
+        reply.rename(inbox / "1700000001.M1.host:2,ST")
+        reconciler = Reconciler(
+            db,
+            embedder,
+            threader,
+            ReconcilerConfig(
+                enabled=True,
+                grace_days=0,
+                sweep_interval_secs=60,
+                max_batch_pct=1.0,
+                force=False,
+                unlink_on_reap=False,
+            ),
+            maildir_root=maildir,
+        )
+        reconciler.sweep()
+        _set_parser_clock(monkeypatch, self._LATER)
+        reconciler.reap()
+
+        assert db.find_thread_by_message_id("reply@example.com") is None
+        first = self._FIRST.isoformat()
+        assert _message_dates(db, "root@example.com") == (first, {first}, (first, first))
 
 
 class TestBatchedInitialIndex:

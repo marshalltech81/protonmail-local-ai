@@ -731,9 +731,10 @@ and a decision whose finding fails to reproduce is void, not binding.
 Order of work, chosen to minimise reindexes:
 
 1. **No-reindex guards, small PRs by area.** Indexer: ~~the quadratic
-   subject normalizer (#293)~~ (done: offset scan, one slice); the first half of #297 (keep the first
+   subject normalizer (#293)~~ (done: offset scan, one slice); ~~the first half of #297 (keep the first
    persisted date on reprocess, so an undated message is never
-   re-dated before the Phase 2 rebuild); the all-zero embedding guard (#304, fixed
+   re-dated before the Phase 2 rebuild)~~ (done: a fallback date
+   defers to the stored `sent_at` on reprocess and reap rebuild); the all-zero embedding guard (#304, fixed
    message, no values logged); ~~tombstone revalidation on restore
    (#301)~~ (done: a tombstone is refused for a path the message no
    longer maps to); `message_thread_map` lookup indexes as migration `0022`

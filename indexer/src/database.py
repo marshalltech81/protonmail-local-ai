@@ -1967,6 +1967,25 @@ class Database:
         ).fetchone()
 
     @_synchronized
+    def get_message_sent_at(self, message_id: str) -> datetime | None:
+        """The ``messages.sent_at`` already stored for ``message_id``, if any."""
+        row = self._conn.execute(
+            "SELECT sent_at FROM messages WHERE message_id = ?", (message_id,)
+        ).fetchone()
+        return datetime.fromisoformat(row["sent_at"]) if row else None
+
+    def keep_persisted_fallback_date(self, msg) -> None:
+        """Give a fallback-dated ``msg`` the date first persisted for it.
+
+        The parser dates a message with a missing or unparseable Date
+        header at the current time, so every reprocess (a rename seen
+        while the indexer was down, a retry, a reap rebuild) would
+        otherwise re-date it (#297). A real header date is left alone.
+        """
+        if msg.date_is_fallback:
+            msg.date = self.get_message_sent_at(msg.message_id) or msg.date
+
+    @_synchronized
     def count_total_messages(self) -> int:
         row = self._conn.execute("SELECT COUNT(*) FROM message_thread_map").fetchone()
         return int(row[0]) if row else 0
