@@ -710,8 +710,9 @@ Order of work, chosen to minimise reindexes:
    (#301); `message_thread_map` lookup indexes as migration `0022`
    (#302, index-only); the unbounded recovery parameter list (#306);
    and the #257 sweep (classify parse-stage and provider exceptions
-   at their boundary, `caplog` marker tests). MCP: the two quadratic
-   regexes (#327, #328); ~~the privacy trio — redirects that would
+   at their boundary, `caplog` marker tests). MCP: ~~the two quadratic
+   regexes (#327, #328)~~ (done: one way to match each whitespace run);
+   ~~the privacy trio — redirects that would
    forward prompts and API keys (#325), inherited endpoint userinfo
    in the startup log (#326), the read-only URI bypass (#311)~~
    (done: same-origin request hook on the Anthropic backend, userinfo

@@ -6,6 +6,9 @@ targets ``_thread_context``, the pure function that selects between
 budget fed into LLM prompts.
 """
 
+import re
+import time
+from collections.abc import Callable
 from datetime import UTC, datetime
 
 from src.lib.sqlite import ChunkResult, ThreadResult
@@ -680,3 +683,220 @@ class TestIsMeaningfulQueryToken:
         # from accidentally clobbering legitimate acronyms.
         for acronym in ("IT", "OR", "AT", "TO", "BE", "DO", "AS"):
             assert _is_meaningful_query_token(acronym) is True, acronym
+
+
+def _best_time(func: Callable[[str], object], value: str, repeats: int = 3) -> float:
+    best = float("inf")
+    for _ in range(repeats):
+        start = time.perf_counter()
+        func(value)
+        best = min(best, time.perf_counter() - start)
+    return best
+
+
+class _CallCountingPattern:
+    """Wrap a compiled pattern and record the length of every string
+    it is asked to scan, so a test can assert one pass over the input."""
+
+    def __init__(self, pattern: re.Pattern[str]) -> None:
+        self._pattern = pattern
+        self.scanned: list[int] = []
+
+    def match(self, string: str) -> re.Match[str] | None:
+        self.scanned.append(len(string))
+        return self._pattern.match(string)
+
+    def sub(self, repl: str, string: str) -> str:
+        self.scanned.append(len(string))
+        return self._pattern.sub(repl, string)
+
+
+# ---------------------------------------------------------------------------
+# _strip_code_fence (#327)
+# ---------------------------------------------------------------------------
+
+# Verbatim copy of the fence recognizer before #327, kept as ground
+# truth: the fix must return the same text for every input.
+_REFERENCE_CODE_FENCE_RE = re.compile(r"^```[A-Za-z]*\s*\n(.*?)\n?```$", re.DOTALL)
+
+
+def _reference_strip_code_fence(text: str) -> str:
+    stripped = text.strip()
+    match = _REFERENCE_CODE_FENCE_RE.match(stripped)
+    return match.group(1).strip() if match else stripped
+
+
+# Pieces of a fenced response: each fence and language-tag spelling,
+# each whitespace kind (ASCII, CRLF, Unicode, and the \x1c separator
+# that ``str.isspace`` accepts), bodies, stray backticks, and empty.
+_FENCE_FRAGMENTS = (
+    "",
+    "`",
+    "```",
+    "```json",
+    "```JSON",
+    "json",
+    "\n",
+    "\r\n",
+    " ",
+    "\t",
+    " ",
+    "\x1c",
+    "\n```",
+    '{"a": 1}',
+    "x`",
+)
+
+
+class TestStripCodeFenceMatchesReference:
+    def test_valid_fence_variants(self):
+        from src.tools.intelligence import _strip_code_fence
+
+        assert _strip_code_fence('```json\n{"a": 1}\n```') == '{"a": 1}'
+        assert _strip_code_fence("```\n[1]\n```") == "[1]"
+        assert _strip_code_fence("  ```JSON\nnull\n```  ") == "null"
+        assert _strip_code_fence("```json \t\r\n\n  {}  \n\n```") == "{}"
+        assert _strip_code_fence('```json\n{"a": 1}```') == '{"a": 1}'
+        assert _strip_code_fence('  {"a": 1}\n') == '{"a": 1}'
+        # No newline after the opening fence: not a fenced block.
+        assert _strip_code_fence("```json {}```") == "```json {}```"
+        # No closing fence: returned stripped, otherwise unchanged.
+        assert _strip_code_fence("```json\n{}") == "```json\n{}"
+
+    def test_every_fragment_quadruple_matches_the_previous_algorithm(self):
+        from src.tools.intelligence import _strip_code_fence
+
+        mismatches = [
+            text
+            for text in (
+                a + b + c + d
+                for a in _FENCE_FRAGMENTS
+                for b in _FENCE_FRAGMENTS
+                for c in _FENCE_FRAGMENTS
+                for d in _FENCE_FRAGMENTS
+            )
+            if _strip_code_fence(text) != _reference_strip_code_fence(text)
+        ]
+        assert mismatches == []
+
+
+class TestStripCodeFenceBoundedWork:
+    def test_one_match_over_the_stripped_response(self, monkeypatch):
+        from src.tools import intelligence
+
+        counter = _CallCountingPattern(intelligence._CODE_FENCE_RE)
+        monkeypatch.setattr(intelligence, "_CODE_FENCE_RE", counter)
+        text = "```json\n" + "\n" * 50_000 + "x"
+
+        intelligence._strip_code_fence(text)
+        assert counter.scanned == [len(text)]
+
+    def test_newline_run_scales_linearly(self):
+        # #327: an unclosed fence followed by a newline run made the
+        # regex retry the lazy body scan once per split of the run, so
+        # 8x the input cost ~64x the time. One scan costs ~8x, and
+        # fixed overhead only lowers the ratio.
+        from src.tools.intelligence import _strip_code_fence
+
+        small = _best_time(_strip_code_fence, "```json\n" + "\n" * 2_000 + "x")
+        large = _best_time(_strip_code_fence, "```json\n" + "\n" * 16_000 + "x")
+        assert large < 24 * max(small, 1e-4)
+
+    def test_worst_case_newline_run_finishes_quickly(self):
+        # 64k newlines took about 13 s before the fix (plain timing).
+        from src.tools.intelligence import _strip_code_fence
+
+        text = "```json\n" + "\n" * 64_000 + "x"
+        start = time.perf_counter()
+        assert _strip_code_fence(text) == text
+        assert time.perf_counter() - start < 1.0
+
+
+# ---------------------------------------------------------------------------
+# _untrusted_email_block delimiter escaping (#328)
+# ---------------------------------------------------------------------------
+
+# Verbatim copy of the delimiter pattern before #328, kept as ground
+# truth: the fix must escape exactly the same spans.
+_REFERENCE_DELIMITER_TAG_RE = re.compile(r"<(\s*/?\s*untrusted_email)", re.IGNORECASE)
+
+
+def _reference_escape(content: str) -> str:
+    return _REFERENCE_DELIMITER_TAG_RE.sub(r"&lt;\1", content)
+
+
+# Pieces of a delimiter tag: its opening and closing spellings, each
+# case, each whitespace kind, partial names, already-escaped text,
+# lookalike characters, and empty.
+_DELIMITER_FRAGMENTS = (
+    "",
+    "<",
+    "< ",
+    "/",
+    " / ",
+    " ",
+    "\t\n",
+    " ",
+    "\x1c",
+    "untrusted_email",
+    "UNTRUSTED_Email",
+    "untrusted",
+    "_email",
+    "x",
+    ">",
+    "&lt;",
+)
+
+
+def _escaped_body(block: str) -> str:
+    return block.removeprefix("<untrusted_email>\n").removesuffix("\n</untrusted_email>")
+
+
+class TestDelimiterEscapeMatchesReference:
+    def test_every_fragment_quadruple_matches_the_previous_pattern(self):
+        from src.tools.intelligence import _untrusted_email_block
+
+        mismatches = [
+            content
+            for content in (
+                a + b + c + d
+                for a in _DELIMITER_FRAGMENTS
+                for b in _DELIMITER_FRAGMENTS
+                for c in _DELIMITER_FRAGMENTS
+                for d in _DELIMITER_FRAGMENTS
+            )
+            if _escaped_body(_untrusted_email_block(content)) != _reference_escape(content)
+        ]
+        assert mismatches == []
+
+
+class TestDelimiterEscapeBoundedWork:
+    def test_one_substitution_pass_over_the_content(self, monkeypatch):
+        from src.tools import intelligence
+
+        counter = _CallCountingPattern(intelligence._DELIMITER_TAG_RE)
+        monkeypatch.setattr(intelligence, "_DELIMITER_TAG_RE", counter)
+        content = "<" + " " * 50_000 + "x"
+
+        intelligence._untrusted_email_block(content)
+        assert counter.scanned == [len(content)]
+
+    def test_whitespace_run_scales_linearly(self):
+        # #328: with no slash, the whitespace before and after the
+        # optional ``/`` could split a run every way, so 8x the input
+        # cost ~64x the time. One scan costs ~8x, and fixed overhead
+        # only lowers the ratio.
+        from src.tools.intelligence import _untrusted_email_block
+
+        small = _best_time(_untrusted_email_block, "<" + " " * 2_000 + "x")
+        large = _best_time(_untrusted_email_block, "<" + " " * 16_000 + "x")
+        assert large < 24 * max(small, 1e-4)
+
+    def test_worst_case_whitespace_run_finishes_quickly(self):
+        # 64k spaces took about 9 s before the fix (plain timing).
+        from src.tools.intelligence import _untrusted_email_block
+
+        content = "<" + " " * 64_000 + "x"
+        start = time.perf_counter()
+        assert _escaped_body(_untrusted_email_block(content)) == content
+        assert time.perf_counter() - start < 1.0
