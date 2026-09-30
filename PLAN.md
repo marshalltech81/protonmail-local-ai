@@ -606,12 +606,38 @@ Triaged against `d30e500` by four parallel agents; every issue is real
 and most reproduced with synthetic input. PRs in the order to land
 them (one test-first commit per issue, `Fixes #N` per issue):
 
-**Status 2026-09-30 — next session starts here.** Items 1–12 are
-merged (#251–#255, #258–#264); 13–14 and #217 are decided (below and in
-Resolved decisions). The third batch (#266–#334, triaged below) comes
-next, in its listed order — its batch-1 guards first, #257 among them —
-then the Phase 1.5/#283 eval slice, then Phase 2 with its reindex
-bundle.
+**Status 2026-09-30 (evening) — next session starts here.** Second
+batch items 1–12 are merged; 13–14 and #217 are decided (below and in
+Resolved decisions). Third batch progress: #293 merged (#335), the
+privacy trio #311/#325/#326 merged (#337), urllib3 bumped for two HIGH
+advisories (#338). In review, merge when Codex is clean on the head:
+
+- **#336** — #301 tombstone revalidation; review round 1 (reaper clears
+  a tombstone whose mapped file is live) pushed, round 2 pending.
+- **#341** — #327/#328 quadratic regexes; round 1 pending.
+- **#342** — #278 damaged-pin guard and #267 rotation-flag docs; round 1
+  pending. Owner decision open on #267: keep "document the limitation"
+  (done in the PR), or a one-shot rotation (flag holds the expected
+  fingerprint, or a consumed marker in `/state`).
+- **#343** — deprecation cleanup slice 1: validate-env rename shims.
+
+Next, in order: rebase any open PR that conflicts in this file after
+another merges (every third-batch PR strikes its own line below); then
+**deprecation cleanup** (owner-approved scope 2026-09-30, the project
+has never been deployed): slice 2 — drop `get_message`'s ignored
+`folder`/`body_format` parameters, the dead pre-v13 `display_subject`
+`try/except` in mcp-server `_row_to_result`, the write-tool sketch in
+`docs/mcp-tools.md`, and "legacy" wording on live code; slice 3 — fold
+migration `0021` into the baseline (baseline becomes v21, drop the
+mcp-server `ingestion_state` existence guard, update AGENTS.md's
+migration paragraph; the dev database needs a rebuild); slice 4, test
+only — migrate `FakeLocalLLM` users to the split fakes, drop the
+indexer `_index_one_file`/`drain_queue` wrappers and mcp-server
+`Database.close()`/`_conn`. Keep the migration runner, the `_read_secret`
+env fallback (reword "backward compatibility"), the defusedxml warning
+filter and the parser's `maildir_root=None` fallback. Then the rest of
+the third batch in its listed order, then the Phase 1.5/#283 eval
+slice, then Phase 2 with its reindex bundle.
 
 1. **Done (#251).** **#238** invalid date filters leak withheld input into logs — five
    handlers logged the `ValueError` quoting the value. Fixed with a
@@ -761,6 +787,12 @@ Order of work, chosen to minimise reindexes:
    persisted bodies, so it lands with a rebuild rather than making
    results depend on processing history), #295 if revisited, and the
    zero-chunk repair from #304.
+
+Follow-ups filed 2026-09-30 from the privacy trio, both unreproduced
+and batch-1 guards: #339 (indexer logs an SDK-inherited embed URL
+without the userinfo check, counterpart of #326) and #340 (OpenAI SDK
+clients re-send request bodies on cross-origin redirects, counterpart
+of #325; reuse #337's same-origin hook).
 
 Closed as duplicates of plan lines: #272 and #273 (Maintenance
 backlog), #290 (Phase 2 items 1–3). Roadmap issues #283–#291 are
