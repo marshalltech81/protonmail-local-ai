@@ -211,8 +211,10 @@ chunk overlap past `max_tokens` (#208); Message-ID conflicts kept as
 both claimants (#217); a deterministic date source for undated mail
 (#297's second half, the deferred received-date item; the first half —
 keep the first persisted date on reprocess — is a batch-1 guard);
-sequential inline text parts in `multipart/mixed` (#295, decided
-2026-09-30 to document for now and revisit when this bundle is
+the whitespace-only plain alternative that suppresses a non-empty HTML
+body (#298: one line, but a body change, so it rebuilds with the
+bundle); sequential inline text parts in `multipart/mixed` (#295,
+decided 2026-09-30 to document for now and revisit when this bundle is
 assembled, since the reparse is free then); and repair of chunks
 committed with all-zero vectors (#304).
 
@@ -398,6 +400,14 @@ How the first batch was worked, and what to repeat:
   by Message-ID, each message row is keyed by Message-ID plus content
   hash, and a conflict is exposed by `get_message` and status rather
   than resolved by an arrival-order rule (either order is spoofable).
+  That needs a **stable claimant identifier in the MCP contract**
+  before the schema: today the chain is `get_thread` →
+  `messages[].message_id` → `get_message`, and `get_message` takes a
+  bare Message-ID, so two claimants would be indistinguishable to a
+  caller. Specify the identifier (Message-ID plus a short content-hash
+  discriminator, or a derived opaque ID), propagate it through thread,
+  message, search and evidence results and the retrieval parameters,
+  and keep the bare Message-ID working for the unambiguous case.
   #260's serialized-form attachment hash gives the "compare full
   attachment metadata" finding a deterministic identity. A schema
   change, so it lands with the Phase 2 migration and reindex. That
@@ -503,16 +513,20 @@ bundle.
 ### Third batch (#266–#334) — triaged 2026-09-30
 
 69 issues filed from a whole-repository review. Triaged by four
-parallel agents reading (not verifying) one area each; every claim
-was judged plausible, and severity is miscalibrated in the usual
-direction (#301 and #306 need rare conditions; #293 and #294 are
-cheap to trigger). Decisions taken the same day are in Resolved
-decisions 3–11. Order of work, chosen to minimise reindexes:
+parallel agents reading (not reproducing) one area each; every claim
+was judged plausible against the source, and severity is miscalibrated
+in the usual direction (#301 and #306 need rare conditions; #293 and
+#294 are cheap to trigger). **This queue is provisional:** rule 1
+above applies to every item — reproduce the claim on the current head
+in the PR that fixes it, and drop or re-scope an item whose claim does
+not hold. Decisions 6–11 in Resolved decisions were taken on the same
+basis: each states a direction conditional on its finding reproducing,
+and a decision whose finding fails to reproduce is void, not binding.
+Order of work, chosen to minimise reindexes:
 
 1. **No-reindex guards, small PRs by area.** Indexer: the quadratic
    subject normalizer (#293) and XLSX shared-string amplification
-   (#294); the whitespace-only plain alternative (#298, a selection
-   line, not the walk); the all-zero embedding guard (#304, fixed
+   (#294); the all-zero embedding guard (#304, fixed
    message, no values logged); tombstone revalidation on restore
    (#301); `message_thread_map` lookup indexes as migration `0022`
    (#302, index-only); the unbounded recovery parameter list (#306);
@@ -552,8 +566,10 @@ decisions 3–11. Order of work, chosen to minimise reindexes:
    family (#271, #277, #280, #282); see Resolved decisions 9 and 10
    for the chosen direction and the one measurement still needed.
 4. **The Phase 2 reindex bundle** (see Phase 2): #303, #208, #217,
-   #297's second half, #295 if revisited, and the zero-chunk repair
-   from #304.
+   #297's second half, #298 (a one-line selection fix, but it changes
+   persisted bodies, so it lands with a rebuild rather than making
+   results depend on processing history), #295 if revisited, and the
+   zero-chunk repair from #304.
 
 Closed as duplicates of plan lines: #272 and #273 (Maintenance
 backlog), #290 (Phase 2 items 1–3). Roadmap issues #283–#291 are
@@ -746,7 +762,9 @@ do not ship persisted claims without them.
    Bridge patch hunk forcing the `updates.go` gate off, under the
    three-layer rule.
 5. **#217 Message-ID conflicts (2026-09-30):** keep both claimants;
-   expose, do not resolve by arrival order. Phase 2 reindex bundle.
+   expose, do not resolve by arrival order; a stable claimant
+   identifier goes through the MCP contract first. Phase 2 reindex
+   bundle.
 6. **#292 mixed digital/scanned PDFs (2026-09-30):** page-level OCR
    selection with a `pdf` extractor version bump, together with #300.
 7. **#295 sequential inline text parts (2026-09-30):** document the

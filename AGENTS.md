@@ -326,10 +326,14 @@ content is as private as a credential.
   not satisfy this on its own.
 - Exceptions from the standard library's email parser and generator
   and from the codecs quote their input: `email.errors.HeaderWriteError`
-  embeds the header it refused, `UnicodeEncodeError` its data. Catch
-  `email.errors.MessageError` and `UnicodeError` at the boundary that
-  produced them and degrade with a fixed message; never let them reach
-  `indexing_jobs.last_error` through `_stage_error`.
+  embeds the header it refused, `UnicodeEncodeError` its data, and a
+  parser defect raised under a `raise_on_defect` policy
+  (`FirstHeaderLineIsContinuationDefect` carries the offending line;
+  `MessageDefect` is a `ValueError`, not a `MessageError`). Catch
+  `email.errors.MessageError`, `email.errors.MessageDefect` and
+  `UnicodeError` at the boundary that produced them and degrade with a
+  fixed message; never let them reach `indexing_jobs.last_error`
+  through `_stage_error`.
 - Known gaps are tracked in #257, which holds the full list. Examples:
   the parser logs a malformed `Date` header verbatim, the attachment
   pipeline and extractors log filenames and raw parser/OCR exceptions,
