@@ -794,8 +794,8 @@ Order of work, chosen to minimise reindexes:
    results depend on processing history), #295 if revisited, and the
    zero-chunk repair from #304.
 
-Follow-ups filed 2026-09-30 from the privacy trio, both unreproduced
-and batch-1 guards: #339 (indexer logs an SDK-inherited embed URL
+Follow-ups filed 2026-09-30 from the privacy trio, both batch-1 guards
+(done, both reproduced): #339 (indexer logs an SDK-inherited embed URL
 without the userinfo check, counterpart of #326) and #340 (OpenAI SDK
 clients re-send request bodies on cross-origin redirects, counterpart
 of #325; reuse #337's same-origin hook).

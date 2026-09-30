@@ -22,6 +22,7 @@ import logging
 import math
 import os
 import time
+import urllib.parse
 from collections.abc import Callable
 from typing import Protocol
 
@@ -29,6 +30,7 @@ from openai import (
     APIConnectionError,
     APIStatusError,
     APITimeoutError,
+    DefaultHttpxClient,
     OpenAI,
 )
 from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
@@ -261,6 +263,7 @@ class OpenAIEmbedder:
     ):
         self.model = model
         self.batch_size = batch_size
+
         # ``api_key`` is required (non-empty) — startup validation in
         # ``main._validate_embed_config`` rejects an empty value before
         # this constructor runs. The key is the explicit-intent signal:
@@ -287,24 +290,53 @@ class OpenAIEmbedder:
         # tenacity wrapper below — the SDK's built-in retry would
         # double-up exponential backoff and obscure the 4xx-fast-fail
         # / 5xx-retry classification.
+        #
+        # The SDK's HTTP client follows redirects and re-sends the body
+        # (chunk text) to wherever ``Location`` points (#340). The request
+        # hook runs before every hop and refuses one off the resolved
+        # endpoint's origin before anything is sent; same-origin redirects
+        # still work. The SDK reports the refusal as a connection error.
+        def _same_origin_only(request) -> None:
+            base = self.client.base_url
+            if (request.url.scheme, request.url.host, request.url.port) != (
+                base.scheme,
+                base.host,
+                base.port,
+            ):
+                log.warning("Embed provider redirected to a different origin; request not sent")
+                raise RuntimeError("Embed provider redirected to a different origin")
+
+        http_client = DefaultHttpxClient(event_hooks={"request": [_same_origin_only]})
         if base_url:
             self.client = OpenAI(
                 base_url=base_url.rstrip("/"),
                 api_key=api_key,
                 timeout=request_timeout,
                 max_retries=0,
+                http_client=http_client,
             )
         else:
             self.client = OpenAI(
                 api_key=api_key,
                 timeout=request_timeout,
                 max_retries=0,
+                http_client=http_client,
             )
         # After the SDK resolves its fallback chain, read the URL back
         # so logs and error messages name the actual wire endpoint
         # (e.g. the SDK default) rather than the empty string the
         # operator typed.
         self.base_url = str(self.client.base_url).rstrip("/")
+        # An empty ``base_url`` lets the SDK read ``OPENAI_BASE_URL``,
+        # which bypasses the startup userinfo check on ``EMBED_BASE_URL``
+        # (#339). Re-check the resolved endpoint before it reaches a log
+        # line or an error message; the message never echoes the URL.
+        if "@" in urllib.parse.urlsplit(self.base_url).netloc:
+            raise ValueError(
+                "EMBED_BASE_URL (or the SDK's OPENAI_BASE_URL) must not embed "
+                "credentials (user:pass@host). Put the API key in "
+                ".secrets/embed_api_key.txt instead."
+            )
 
     def wait_for_ready(self, timeout: int = 120) -> None:
         """Block until the embedder accepts a real ``/v1/embeddings``

@@ -11,7 +11,12 @@ etc.) target the OpenAI SDK as their reference client by design, so
 pointing the SDK at them via ``base_url`` is the supported path.
 """
 
+import logging
 import math
+
+from .security import same_origin_request_hook
+
+log = logging.getLogger("mcp.embed")
 
 # Per-call HTTP deadline for embed. A single short string through
 # Qwen3-Embedding-8B runs sub-second steady-state; cold-start (first
@@ -35,7 +40,7 @@ class EmbedClient:
         api_key: str,
         timeout_secs: float = DEFAULT_EMBED_TIMEOUT_SECS,
     ) -> None:
-        from openai import AsyncOpenAI
+        from openai import AsyncOpenAI, DefaultAsyncHttpxClient
 
         self.model = model
         # ``api_key`` is required (non-empty) — startup validation in
@@ -73,18 +78,27 @@ class EmbedClient:
         # ``max_retries=0`` (it owns retries above via tenacity;
         # mcp-server has no higher retry layer and deliberately doesn't
         # add one).
+        #
+        # The SDK re-sends the body on a redirect; the request hook
+        # refuses a hop off the resolved endpoint's origin (#340).
+        same_origin_only = same_origin_request_hook(
+            lambda: self.client.base_url, "Embed provider", log
+        )
+        http_client = DefaultAsyncHttpxClient(event_hooks={"request": [same_origin_only]})
         if base_url:
             self.client = AsyncOpenAI(
                 base_url=base_url.rstrip("/"),
                 api_key=api_key,
                 timeout=timeout_secs,
                 max_retries=0,
+                http_client=http_client,
             )
         else:
             self.client = AsyncOpenAI(
                 api_key=api_key,
                 timeout=timeout_secs,
                 max_retries=0,
+                http_client=http_client,
             )
         # After the SDK resolves its fallback chain, read the URL back
         # so ``self.base_url`` always reflects the wire endpoint.
