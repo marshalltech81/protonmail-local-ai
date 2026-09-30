@@ -146,10 +146,12 @@ reindex bundle path. Neither touches a source file or a migration.
    `dimensions` request param where the provider supports it. The
    registry's tokenizer and context-window fields **decide** whether a
    model switch may reuse the existing chunks: only when the candidate
-   tokenizer counts every stored chunk within the candidate's input
-   window (verified by counting, not by metadata equality) is the
-   switch vector-only; otherwise it is a rechunk, and goes through the
-   reindex bundle path below. Recording the metadata alone prevents
+   tokenizer counts every document input — every stored chunk **and**
+   every chunkless thread's display-subject fallback text, which the
+   rebuild embeds too — within the candidate's input window (verified
+   by counting, not by metadata equality) is the switch vector-only;
+   otherwise it is a rechunk, and goes through the reindex bundle path
+   below. Recording the metadata alone prevents
    nothing.
 2. **Per-generation vec tables** (`vec_chunks_gNN` **and**
    `vec_threads_gNN` — sqlite-vec bakes dimension into DDL, so
@@ -229,10 +231,19 @@ reindex bundle path. Neither touches a source file or a migration.
      the second has its own configuration set (`EMBED_NEXT_BASE_URL`,
      `EMBED_NEXT_MODEL`, and a second Docker secret,
      `.secrets/embed_next_api_key.txt`, mode 600) for the life of the
-     build and the rollback window; when the window closes the
-     operator promotes the candidate's set to `EMBED_*` and clears the
-     second. This keeps the per-layer contract (mode / base URL /
-     model / secret) intact and just doubles it for the transition.
+     build and the rollback window. **Both services receive both
+     sets**, and neither set means "active": the registry's active
+     generation names the live identity, and each service selects, at
+     startup and on the per-query check, the client whose resolved
+     identity matches it — the indexer additionally dual-writes with
+     the other client while a second generation is live. Activation is
+     therefore a registry change plus a restart or reload, never a
+     configuration edit; a service whose two sets match neither the
+     active nor the retained generation fails closed as above. When
+     the rollback window closes the operator drops the retired
+     generation's set (or copies the survivor's into `EMBED_*` as
+     housekeeping). This keeps the per-layer contract (mode / base URL
+     / model / secret) intact and doubles it only for the transition.
 3. **Stage-aware pipeline manifest.** One active generation
    operationally, but the identifier is not opaque: a canonical
    manifest records parser / normalizer / chunker / embedding
