@@ -374,8 +374,9 @@ def _attachment_payload(
     *,
     serialize_containers: bool,
     raw_part: Callable[[], bytes | None] = lambda: None,
-) -> bytes:
-    """The bytes an attachment carries.
+) -> tuple[bytes, email.message.Message | None]:
+    """The bytes an attachment carries, and, for a transfer-encoded
+    attached email, its decoded tree to traverse (else ``None``).
 
     A container attachment — an attached email (``message/rfc822``), a
     delivery report, a ``multipart/*`` bundle — is parsed into subparts,
@@ -390,12 +391,14 @@ def _attachment_payload(
     way. The parser has already split that form into headers and body,
     which a soft line break in a header corrupts, so the part's own
     bytes are taken from the raw message (``raw_part``) when they can be
-    located, and from the parsed form otherwise.
+    located, and from the parsed form otherwise. The parsed form holds
+    none of the email's attachments either, so the decoded tree is
+    returned for the caller to walk instead.
     """
     if not part.is_multipart():
-        return _decoded_payload(part)
+        return _decoded_payload(part), None
     if not serialize_containers:
-        return b""
+        return b"", None
     encoding = str(part.get("Content-Transfer-Encoding", "")).strip().lower()
     nested = part.get_payload()
     if (
@@ -408,13 +411,15 @@ def _attachment_payload(
         raw = raw_part()
         transport = _split_raw_headers(raw)[1] if raw is not None else nested[0].as_bytes()
         decoded = _decode_transport_form(transport, encoding)
-        if decoded is None or _nesting_exceeds(decoded, MAX_ATTACHED_MESSAGE_DEPTH):
-            return b""
-        return decoded.as_bytes()
+        if decoded is None:
+            return b"", None
+        if _nesting_exceeds(decoded, MAX_ATTACHED_MESSAGE_DEPTH):
+            return b"", decoded
+        return decoded.as_bytes(), decoded
     # The part's own tree is one level deeper than the email it carries.
     if _nesting_exceeds(part, MAX_ATTACHED_MESSAGE_DEPTH + 1):
-        return b""
-    return _serialized_body(part)
+        return b"", None
+    return _serialized_body(part), None
 
 
 def _split_raw_headers(data: bytes) -> tuple[bytes, bytes]:
@@ -458,40 +463,70 @@ def _split_on_boundary(body: bytes, boundary: bytes) -> list[bytes] | None:
     return result
 
 
-def _raw_part(raw: bytes, root: email.message.Message, path: tuple[int, ...]) -> bytes | None:
-    """The raw bytes (headers and body) of the part at ``path`` — child
-    indexes from ``root`` — sliced out of ``raw`` by MIME boundaries.
-    ``None`` when the bytes do not match the parsed tree (a boundary or
-    part count the parser saw differently) or the path is deeper than
-    ``MAX_ATTACHED_MESSAGE_DEPTH``; each level costs a pass over its
-    body."""
-    if len(path) > MAX_ATTACHED_MESSAGE_DEPTH:
-        return None
-    data, node = raw, root
-    for index in path:
+class _RawLocator:
+    """Finds a part's raw bytes (headers and body) in the raw message by
+    its path of child indexes from the root, slicing along MIME
+    boundaries. Each located part and each multipart body's split is
+    cached, so every body is split at most once per message however
+    many of its parts are looked up; paths are capped at
+    ``MAX_ATTACHED_MESSAGE_DEPTH``."""
+
+    def __init__(self, raw: bytes, root: email.message.Message) -> None:
+        self._parts: dict[tuple[int, ...], tuple[bytes, email.message.Message] | None] = {
+            (): (raw, root)
+        }
+        self._segments: dict[tuple[int, ...], list[bytes] | None] = {}
+
+    def part(self, path: tuple[int, ...]) -> bytes | None:
+        """``None`` when the bytes do not match the parsed tree (a
+        boundary or part count the parser saw differently) or the path is
+        too deep."""
+        if len(path) > MAX_ATTACHED_MESSAGE_DEPTH:
+            return None
+        for depth in range(1, len(path) + 1):
+            prefix = path[:depth]
+            if prefix not in self._parts:
+                self._parts[prefix] = self._locate(prefix)
+        found = self._parts[path]
+        return found[0] if found is not None else None
+
+    def _locate(self, path: tuple[int, ...]) -> tuple[bytes, email.message.Message] | None:
+        parent = self._parts[path[:-1]]
+        if parent is None:
+            return None
+        data, node = parent
+        index = path[-1]
         children = node.get_payload()
         if not isinstance(children, list) or index >= len(children):
             return None
-        body = _split_raw_headers(data)[1]
-        if node.get_content_maintype() == "message":
-            # An (identity-encoded) attached email's body is the email.
-            data = body
-        else:
-            boundary = node.get_boundary()
-            if not boundary:
-                return None
-            try:
-                segments = _split_on_boundary(body, boundary.encode("ascii", "surrogateescape"))
-            except UnicodeEncodeError:
-                return None
-            if segments is None or len(segments) != len(children):
-                return None
-            data = segments[index]
         child = children[index]
         if not isinstance(child, email.message.Message):
             return None
-        node = child
-    return data
+        if node.get_content_maintype() == "message":
+            # An (identity-encoded) attached email's body is the email.
+            return _split_raw_headers(data)[1], child
+        if path[:-1] not in self._segments:
+            self._segments[path[:-1]] = self._split(data, node)
+        segments = self._segments[path[:-1]]
+        if segments is None or len(segments) != len(children):
+            return None
+        return segments[index], child
+
+    @staticmethod
+    def _split(data: bytes, node: email.message.Message) -> list[bytes] | None:
+        boundary = node.get_boundary()
+        if not boundary:
+            return None
+        try:
+            encoded = boundary.encode("ascii", "surrogateescape")
+        except UnicodeEncodeError:
+            return None
+        return _split_on_boundary(_split_raw_headers(data)[1], encoded)
+
+
+def _raw_part(raw: bytes, root: email.message.Message, path: tuple[int, ...]) -> bytes | None:
+    """The raw bytes of the part at ``path`` (see ``_RawLocator``)."""
+    return _RawLocator(raw, root).part(path)
 
 
 def _serialized_body(part: email.message.Message) -> bytes:
@@ -531,6 +566,7 @@ def _extract_body_and_attachments(
     # ``multipart/*`` container.
     # Each entry carries its path (child indexes from the root) so a part
     # whose raw bytes are needed can be located in ``raw``.
+    locator = _RawLocator(raw, msg) if raw is not None else None
     stack: list[tuple[email.message.Message, bool, tuple[int, ...]]] = [(msg, False, ())]
     while stack:
         part, in_attachment, path = stack.pop()
@@ -538,11 +574,12 @@ def _extract_body_and_attachments(
         is_attachment = _is_attachment(part) and not (
             part is msg and part.get_content_maintype() == "multipart"
         )
+        decoded: email.message.Message | None = None
         if is_attachment:
-            payload = _attachment_payload(
+            payload, decoded = _attachment_payload(
                 part,
                 serialize_containers=not in_attachment,
-                raw_part=lambda: _raw_part(raw, msg, path) if raw is not None else None,
+                raw_part=lambda: locator.part(path) if locator is not None else None,
             )
             attachments.append(
                 Attachment(
@@ -554,7 +591,8 @@ def _extract_body_and_attachments(
                 )
             )
         if part.is_multipart():
-            children = part.get_payload()
+            # A decoded attached email stands in for its transport form.
+            children = [decoded] if decoded is not None else part.get_payload()
             if isinstance(children, list):
                 inside = in_attachment or is_attachment
                 stack.extend(

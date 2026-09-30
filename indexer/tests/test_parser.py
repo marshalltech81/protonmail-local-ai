@@ -980,6 +980,81 @@ class TestAttachmentBoundaries:
         assert b"INNER=body" in coded.attachments[0].payload
         assert coded.attachments[0].content_hash == plain.attachments[0].content_hash
 
+    @pytest.mark.parametrize("encoding", ["base64", "quoted-printable"])
+    def test_attachments_inside_an_encoded_attached_email_are_found(self, tmp_path, encoding):
+        """Review round 4: traversal walked the parser's tree, where an
+        encoded attached email is transport text, so the PDF it carries
+        was recorded under 7bit but not base64 / quoted-printable."""
+        import base64
+        import quopri
+
+        inner = (
+            b"Message-ID: <inner@example.test>\r\nFrom: other@example.test\r\n"
+            b'MIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary="n"\r\n\r\n'
+            b"--n\r\nContent-Type: text/plain\r\n\r\nINNER_TEXT\r\n"
+            b"--n\r\nContent-Type: application/pdf\r\n"
+            b'Content-Disposition: attachment; filename="inside.pdf"\r\n\r\n%PDF-INSIDE\r\n'
+            b"--n--\r\n"
+        )
+        encoded = base64.encodebytes(inner) if encoding == "base64" else quopri.encodestring(inner)
+        folder = tmp_path / "INBOX" / "cur"
+        folder.mkdir(parents=True)
+        path = folder / "m.eml"
+        path.write_bytes(
+            b"Message-ID: <outer@example.test>\r\nFrom: sender@example.test\r\n"
+            b"Date: Mon, 28 Sep 2026 12:00:00 +0000\r\nMIME-Version: 1.0\r\n"
+            b'Content-Type: multipart/mixed; boundary="o"\r\n\r\n'
+            b"--o\r\nContent-Type: text/plain\r\n\r\nPARENT_BODY\r\n"
+            b"--o\r\nContent-Type: message/rfc822\r\n"
+            + f"Content-Transfer-Encoding: {encoding}\r\n".encode()
+            + b'Content-Disposition: attachment; filename="fwd.eml"\r\n\r\n'
+            + encoded
+            + b"\r\n--o--\r\n"
+        )
+        msg = parse_email(path)
+        assert msg is not None
+        assert msg.body_text == "PARENT_BODY"
+        by_name = {a.filename: a for a in msg.attachments}
+        assert set(by_name) == {"fwd.eml", "inside.pdf"}
+        assert b"%PDF-INSIDE" in by_name["inside.pdf"].payload
+
+    def test_sibling_encoded_attachments_split_the_parent_once(self, tmp_path, monkeypatch):
+        """Review round 4 (security): each encoded sibling re-split the
+        whole parent body, quadratic in the part count. Each multipart
+        body is now split at most once per message."""
+        import quopri
+
+        from src import parser as parser_module
+
+        calls = []
+        real_split = parser_module._split_on_boundary
+
+        def counting_split(body, boundary):
+            calls.append(boundary)
+            return real_split(body, boundary)
+
+        monkeypatch.setattr(parser_module, "_split_on_boundary", counting_split)
+        part = (
+            b"--o\r\nContent-Type: message/rfc822\r\n"
+            b"Content-Transfer-Encoding: quoted-printable\r\n"
+            b'Content-Disposition: attachment; filename="x.eml"\r\n\r\n'
+            + quopri.encodestring(b"From: a@example.test\r\n\r\nbody\r\n")
+            + b"\r\n"
+        )
+        folder = tmp_path / "INBOX" / "cur"
+        folder.mkdir(parents=True)
+        path = folder / "m.eml"
+        path.write_bytes(
+            b"Message-ID: <many@example.test>\r\nFrom: sender@example.test\r\n"
+            b"Date: Mon, 28 Sep 2026 12:00:00 +0000\r\nMIME-Version: 1.0\r\n"
+            b'Content-Type: multipart/mixed; boundary="o"\r\n\r\n' + part * 50 + b"--o--\r\n"
+        )
+        msg = parse_email(path)
+        assert msg is not None
+        assert len(msg.attachments) == 50
+        assert all(b"body" in a.payload for a in msg.attachments)
+        assert len(calls) == 1
+
     def test_raw_slicing_gives_up_when_the_bytes_do_not_match_the_tree(self):
         """A boundary missing from the raw bytes (here, bytes of another
         message) returns nothing, and the caller keeps its best effort."""
