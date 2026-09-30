@@ -493,11 +493,15 @@ can be revisited with an explicit owner decision.
   Python's `email` package never exposes a part's raw byte offsets and
   parses a transfer-encoded `message/rfc822` (forbidden by RFC 2046,
   but sent) before decoding it, so an attached email's identity is the
-  hash of its re-serialized form, and a quoted-printable one with a
-  soft break inside a header can hash differently from its 7bit twin.
-  A hand-rolled boundary slicer was tried and reverted after four
-  Codex rounds of real findings (quadratic and memory-heavy on hostile
-  input, bare-CR endings, depth caps). Every maintained Python parser
+  hash of its re-serialized form (line endings and folding normalized),
+  not of its raw bytes. Encodings agree on that form for every shape a
+  25-case parity test covers, after the transport text was rebuilt
+  from the parser's raw tuples; the one residual is an inner email
+  declaring `multipart/*` with no usable boundary (malformed), which
+  compat32 parses differently nested and standalone. A hand-rolled
+  boundary slicer was tried and reverted after four Codex rounds of
+  real findings (quadratic and memory-heavy on hostile input, bare-CR
+  endings, depth caps). Every maintained Python parser
   wraps the stdlib; `flanker` is unmaintained (last release 2019). The
   one real candidate is Stalwart's Rust `mail-parser` (RFC-conformant,
   no dependencies, exposes part offsets, built for hostile mail) via a

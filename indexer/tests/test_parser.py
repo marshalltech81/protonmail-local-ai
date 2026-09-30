@@ -1405,6 +1405,90 @@ class TestAttachmentBoundaries:
         assert set(by_name) == {"outer.eml", "inner.eml", "deep.pdf"}
         assert b"%PDF-DEEP" in by_name["deep.pdf"].payload
 
+    @pytest.mark.parametrize("encoding", ["base64", "quoted-printable"])
+    def test_encoded_delivery_status_keeps_block_semantics(self, tmp_path, encoding):
+        """Review round 14: the decoded report was parsed as a plain
+        message, so only its first block counted as headers and a long
+        header in a later block folded differently from the 7bit path.
+        The decoded text is now parsed as the part's own content type."""
+        import base64
+        import quopri
+
+        report = (
+            b"Reporting-MTA: dns; mx.example.test\r\n\r\n"
+            b"Final-Recipient: rfc822; first@example.test\r\nStatus: 5.1.1\r\n"
+            b"Diagnostic-Code: smtp; 550 5.1.1 the mailbox does not exist here, try again later\r\n"
+        )
+        encoded = (
+            base64.encodebytes(report) if encoding == "base64" else quopri.encodestring(report)
+        )
+
+        def outer(cte: bytes, body: bytes) -> bytes:
+            return (
+                self._HEAD + b'Content-Type: multipart/report; boundary="r"\r\n\r\n'
+                b"--r\r\nContent-Type: text/plain\r\n\r\nDelivery failed.\r\n"
+                b"--r\r\nContent-Type: message/delivery-status\r\n"
+                + cte
+                + b'Content-Disposition: attachment; filename="status.txt"\r\n\r\n'
+                + body
+                + b"\r\n--r--\r\n"
+            )
+
+        folder = tmp_path / "INBOX" / "cur"
+        folder.mkdir(parents=True)
+        (folder / "plain.eml").write_bytes(outer(b"", report))
+        (folder / "coded.eml").write_bytes(
+            outer(f"Content-Transfer-Encoding: {encoding}\r\n".encode(), encoded)
+        )
+        plain = parse_email(folder / "plain.eml")
+        coded = parse_email(folder / "coded.eml")
+        assert plain is not None and coded is not None
+        assert b"first@example.test" in coded.attachments[0].payload
+        assert coded.attachments[0].content_hash == plain.attachments[0].content_hash
+
+    def test_nested_encoded_attached_emails_stop_decoding_at_the_caps(self, tmp_path, monkeypatch):
+        """Review round 14: inside an attachment the decoded tree was
+        walked without the depth check, so a chain of transfer-encoded
+        attached emails decoded its large descendant at every level (40
+        decodes, 165 MB for a 10.8 MB fixture). Decoding now stops at the
+        depth cap or when the message's decodable bytes are spent."""
+        import quopri
+
+        from src import parser as parser_module
+        from src.parser import MAX_ATTACHED_MESSAGE_DEPTH, MAX_DECODED_ATTACHMENT_BYTES
+
+        decoded_sizes: list[int] = []
+        real = parser_module._decode_transport_form
+
+        def counting(data, encoding, content_type):
+            decoded_sizes.append(len(data))
+            return real(data, encoding, content_type)
+
+        monkeypatch.setattr(parser_module, "_decode_transport_form", counting)
+        inner = b"From: z@example.test\r\nSubject: leaf\r\n\r\n" + (b"y" * 76 + b"\r\n") * 6_000
+        for i in range(40):
+            inner = (
+                b"From: w@example.test\r\nMIME-Version: 1.0\r\n"
+                b'Content-Type: multipart/mixed; boundary="b%d"\r\n\r\n--b%d\r\n'
+                b"Content-Type: message/rfc822\r\nContent-Transfer-Encoding: quoted-printable\r\n"
+                b'Content-Disposition: attachment; filename="l%d.eml"\r\n\r\n'
+                % (i, i, i)
+                + quopri.encodestring(inner)
+                + b"\r\n--b%d--\r\n" % i
+            )
+        msg = self._parse_raw(
+            tmp_path,
+            self._HEAD + b'Content-Type: multipart/mixed; boundary="o"\r\n\r\n'
+            b"--o\r\nContent-Type: text/plain\r\n\r\nPARENT_BODY\r\n"
+            b'--o\r\nContent-Type: message/rfc822\r\nContent-Disposition: attachment; filename="top.eml"\r\n\r\n'
+            + inner
+            + b"\r\n--o--\r\n",
+        )
+        assert msg.body_text == "PARENT_BODY"
+        assert 1 < len(decoded_sizes) <= MAX_ATTACHED_MESSAGE_DEPTH
+        assert sum(decoded_sizes) <= MAX_DECODED_ATTACHMENT_BYTES + decoded_sizes[-1]
+        assert len(msg.attachments) == len(decoded_sizes) + 1
+
     def test_quoted_printable_delivery_status_keeps_every_block(self, tmp_path):
         """Review round 9: the transfer-encoded path serialized only the
         container's first child before decoding. An attached email has

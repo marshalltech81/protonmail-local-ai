@@ -366,14 +366,22 @@ MAX_ATTACHED_MESSAGE_DEPTH = 20
 # ten thousand units.
 MAX_ATTACHED_MESSAGE_FIELDS = 10_000
 _HEADER_BYTES_PER_UNIT = 16
+# Transfer-encoded attachment bytes decoded per message. Each nested
+# transfer-encoded attached email is decoded whole, so a chain of them
+# would otherwise decode its large descendant once per level; this
+# allows the outermost to be decoded in full (the parse cap is 50 MB by
+# default) and stops a chain soon after.
+MAX_DECODED_ATTACHMENT_BYTES = 64_000_000
 
 
 @dataclass
 class _SerializationBudget:
     """What one message's container attachments may still visit before
-    serialization; shared across them so the cap is per message."""
+    serialization, and how many transfer-encoded bytes they may still
+    decode; shared across them so both caps are per message."""
 
     remaining: int = MAX_ATTACHED_MESSAGE_FIELDS
+    decodable: int = MAX_DECODED_ATTACHMENT_BYTES
 
 
 def _nesting_exceeds(root: email.message.Message, limit: int, budget: _SerializationBudget) -> bool:
@@ -401,6 +409,7 @@ def _attachment_payload(
     *,
     serialize_containers: bool,
     budget: _SerializationBudget,
+    decode_depth: int = 0,
 ) -> tuple[bytes, email.message.Message | None]:
     """The bytes an attachment carries, and, for a transfer-encoded
     attached email, its decoded tree to traverse (else ``None``).
@@ -414,10 +423,14 @@ def _attachment_payload(
     serializing copies each subtree once per level above it; others
     keep the empty payload. A base64 or quoted-printable attached email
     (not allowed by RFC 2046, but sent) holds its transport form, so it
-    is decoded and parsed first: the same email hashes the same either
-    way. The parsed form holds none of the email's attachments, so the
-    decoded tree is returned for the caller to walk instead — for a
-    nested container too, whose payload is not kept.
+    is decoded and parsed first, into a container with this part's own
+    Content-Type, which is then handled exactly as an identity-encoded
+    part is: the same email hashes the same either way, and a decoded
+    delivery report keeps its blocks. The parsed form holds none of the
+    email's attachments, so the decoded container is returned for the
+    caller to walk instead — for a nested container too, whose payload
+    is not kept, until ``decode_depth`` reaches the depth cap or the
+    message's decodable bytes are spent.
 
     The identity is that of the serialized form, not of the bytes in
     the file: ``as_bytes`` normalizes line endings and header folding.
@@ -440,22 +453,32 @@ def _attachment_payload(
         # The parser read the transport form as MIME whatever the label
         # (one child for an attached email, one per block for a delivery
         # report), so check that tree's depth before rebuilding it.
-        if _nesting_exceeds(part, MAX_ATTACHED_MESSAGE_DEPTH + 1, budget):
+        if decode_depth >= MAX_ATTACHED_MESSAGE_DEPTH or _nesting_exceeds(
+            part, MAX_ATTACHED_MESSAGE_DEPTH + 1, budget
+        ):
             return b"", None
         try:
-            decoded = _decode_transport_form(_transport_text(part), encoding)
+            transport = _transport_text(part)
         except email.errors.MessageError, UnicodeError:
             return b"", None
+        budget.decodable -= len(transport)
+        if budget.decodable < 0:
+            return b"", None
+        content_type = str(part.get("Content-Type", "message/rfc822"))
+        decoded = _decode_transport_form(transport, encoding, content_type)
         if decoded is None:
             return b"", None
-        if not serialize_containers or _nesting_exceeds(
-            decoded, MAX_ATTACHED_MESSAGE_DEPTH, budget
-        ):
-            return b"", decoded
+        # From here the decoded container is the part: the same depth
+        # check, serialization and traversal as an identity-encoded one.
+        part = decoded
+        if _nesting_exceeds(part, MAX_ATTACHED_MESSAGE_DEPTH + 1, budget):
+            return b"", None
+        if not serialize_containers:
+            return b"", part
         try:
-            return decoded.as_bytes(), decoded
+            return _serialized_body(part), part
         except email.errors.MessageError, UnicodeError:
-            return b"", decoded
+            return b"", part
     if not serialize_containers:
         return b"", None
     # The part's own tree is one level deeper than the email it carries.
@@ -536,13 +559,19 @@ def _serialized_body(part: email.message.Message) -> bytes:
     return data.partition(b"\n\n")[2]
 
 
-def _decode_transport_form(data: bytes, encoding: str) -> email.message.Message | None:
-    """Parse an attached email held in its transfer encoding, or ``None``
-    when it does not decode or nests too deeply for the parser."""
+def _decode_transport_form(
+    data: bytes, encoding: str, content_type: str
+) -> email.message.Message | None:
+    """Decode a container's transfer-encoded text and parse it as a
+    container of ``content_type`` (the part's own), so an attached email
+    is one nested message and a delivery report its blocks, exactly as
+    the parser reads an identity-encoded part. ``None`` when the text
+    does not decode or nests too deeply for the parser."""
     try:
         decoded = base64.b64decode(data) if encoding == "base64" else quopri.decodestring(data)
-        return email.message_from_bytes(decoded)
-    except binascii.Error, RecursionError:
+        header = b"Content-Type: " + content_type.encode("ascii", "surrogateescape") + b"\r\n\r\n"
+        return email.message_from_bytes(header + decoded)
+    except binascii.Error, RecursionError, UnicodeError:
         return None
 
 
@@ -561,15 +590,18 @@ def _extract_body_and_attachments(
     # too: a message can be one attachment part, or a bundle presented as
     # one, whose text is then not the message's body.
     budget = _SerializationBudget()
-    stack: list[tuple[email.message.Message, bool]] = [(msg, False)]
+    stack: list[tuple[email.message.Message, bool, int]] = [(msg, False, 0)]
     while stack:
-        part, in_attachment = stack.pop()
+        part, in_attachment, decode_depth = stack.pop()
         ct = part.get_content_type()
         is_attachment = _is_attachment(part)
         decoded: email.message.Message | None = None
         if is_attachment:
             payload, decoded = _attachment_payload(
-                part, serialize_containers=not in_attachment, budget=budget
+                part,
+                serialize_containers=not in_attachment,
+                budget=budget,
+                decode_depth=decode_depth,
             )
             attachments.append(
                 Attachment(
@@ -581,12 +613,18 @@ def _extract_body_and_attachments(
                 )
             )
         if part.is_multipart():
-            # A decoded attached email stands in for its transport form.
-            children = [decoded] if decoded is not None else part.get_payload()
+            # A decoded container stands in for its transport form; its
+            # children are one decode deeper.
+            if decoded is not None:
+                children, depth = decoded.get_payload(), decode_depth + 1
+            else:
+                children, depth = part.get_payload(), decode_depth
             if isinstance(children, list):
                 inside = in_attachment or is_attachment
                 stack.extend(
-                    (c, inside) for c in reversed(children) if isinstance(c, email.message.Message)
+                    (c, inside, depth)
+                    for c in reversed(children)
+                    if isinstance(c, email.message.Message)
                 )
         elif is_attachment or in_attachment:
             continue
