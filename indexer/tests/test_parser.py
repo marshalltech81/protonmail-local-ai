@@ -961,6 +961,29 @@ class TestAttachmentBoundaries:
         assert set(by_name) == {"fwd.eml", "inside.pdf"}
         assert b"%PDF-INSIDE" in by_name["inside.pdf"].payload
 
+    def test_encoded_attached_email_with_a_deep_transport_body_is_not_serialized(self, tmp_path):
+        """Review round 7: compat32 parses a base64-labelled attached
+        email's body as MIME whatever the label, so a deeply nested body
+        was serialized (depth x size, or RecursionError past ~300) before
+        the depth check ran. The parsed tree is checked first."""
+        wrapper = "Content-Type: message/rfc822\r\n\r\n"
+        deep = (wrapper * 320 + "Content-Type: text/plain\r\n\r\nleaf\r\n").encode()
+        folder = tmp_path / "INBOX" / "cur"
+        folder.mkdir(parents=True)
+        path = folder / "m.eml"
+        path.write_bytes(
+            b"Message-ID: <deepb64@example.test>\r\nFrom: sender@example.test\r\n"
+            b"Date: Mon, 28 Sep 2026 12:00:00 +0000\r\nMIME-Version: 1.0\r\n"
+            b'Content-Type: multipart/mixed; boundary="b"\r\n\r\n'
+            b"--b\r\nContent-Type: text/plain\r\n\r\nPARENT_BODY\r\n"
+            b"--b\r\nContent-Type: message/rfc822\r\nContent-Transfer-Encoding: base64\r\n"
+            b'Content-Disposition: attachment; filename="x.eml"\r\n\r\n' + deep + b"\r\n--b--\r\n"
+        )
+        msg = parse_email(path)
+        assert msg is not None
+        assert msg.body_text == "PARENT_BODY"
+        assert msg.attachments[0].payload == b""
+
     def test_undecodable_base64_attached_email_keeps_an_empty_payload(self, tmp_path):
         folder = tmp_path / "INBOX" / "cur"
         folder.mkdir(parents=True)

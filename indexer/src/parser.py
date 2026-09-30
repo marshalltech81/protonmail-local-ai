@@ -411,6 +411,10 @@ def _attachment_payload(
         and nested
         and isinstance(nested[0], email.message.Message)
     ):
+        # The parser read the transport form as MIME whatever the label,
+        # so check that tree's depth before serializing it too.
+        if _nesting_exceeds(nested[0], MAX_ATTACHED_MESSAGE_DEPTH):
+            return b"", None
         decoded = _decode_transport_form(nested[0].as_bytes(), encoding)
         if decoded is None:
             return b"", None
