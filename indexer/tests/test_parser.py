@@ -1225,6 +1225,86 @@ class TestAttachmentBoundaries:
         assert all(a.payload == b"" for a in msg.attachments[1:])
         assert len(calls) == 1
 
+    # Review round 12: an attached email must hash the same whatever its
+    # transfer encoding. Every shape here matched 7bit as base64 all along;
+    # quoted-printable diverged on six (a multipart body, and any header
+    # line of 76+ characters, which quoted-printable soft-breaks) until the
+    # transport text was rebuilt from the parser's raw tuples.
+    _INNER_HEAD = b"From: a@example.test\r\nTo: b@example.test\r\nSubject: Hi\r\n"
+    _INNER_MULTIPART = (
+        b'MIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary="n"\r\n\r\n'
+        b"--n\r\nContent-Type: text/plain\r\n\r\nhello\r\n--n--\r\n"
+    )
+    ENCODING_PARITY_SHAPES = {
+        "plain body": _INNER_HEAD + b"\r\nhello world\r\n",
+        "multipart body": _INNER_HEAD + _INNER_MULTIPART,
+        "no trailing newline": _INNER_HEAD + b"\r\nhello",
+        "extra blank lines at end": _INNER_HEAD + b"\r\nhello\r\n\r\n\r\n",
+        "empty body": _INNER_HEAD + b"\r\n",
+        "headers only": _INNER_HEAD,
+        "8-bit body": _INNER_HEAD + "\r\nr\u00e9sum\u00e9 \u2014 caf\u00e9\r\n".encode(),
+        "8-bit header": b"From: a@example.test\r\nSubject: r\xc3\xa9sum\xc3\xa9\r\n\r\nhello\r\n",
+        "long body line": _INNER_HEAD + b"\r\n" + b"w" * 300 + b"\r\n",
+        "trailing spaces": _INNER_HEAD + b"\r\nhello   \r\nworld \r\n",
+        "tabs": _INNER_HEAD + b"\r\na\tb\r\n",
+        "equals signs": _INNER_HEAD + b"\r\na=b=c ==\r\n",
+        "folded header": b"From: a@example.test\r\nSubject: aaa\r\n bbb\r\n\r\nhello\r\n",
+        "header 75 chars": b"From: a@example.test\r\nSubject: " + b"s" * 66 + b"\r\n\r\nhello\r\n",
+        "header 76 chars": b"From: a@example.test\r\nSubject: " + b"s" * 67 + b"\r\n\r\nhello\r\n",
+        "header 80 chars": b"From: a@example.test\r\nSubject: " + b"s" * 71 + b"\r\n\r\nhello\r\n",
+        "long DKIM-like header": (
+            b"From: a@example.test\r\nDKIM-Signature: v=1; a=rsa-sha256; b="
+            + b"Q" * 200
+            + b"\r\n\r\nhello\r\n"
+        ),
+        "equals in header": b"From: a@example.test\r\nX-Q: a=b\r\n\r\nhello\r\n",
+        "no space after colon": b"From:a@example.test\r\nSubject:Hi\r\n\r\nhello\r\n",
+        "LF line endings": _INNER_HEAD.replace(b"\r\n", b"\n") + b"\nhello\n",
+        "From at line start": _INNER_HEAD + b"\r\nFrom the top\r\n",
+        "From after blank line": _INNER_HEAD + b"\r\n\r\nFrom the top\r\n",
+        "nested attached email": (
+            _INNER_HEAD
+            + b'MIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary="n"\r\n\r\n'
+            b"--n\r\nContent-Type: message/rfc822\r\n\r\nFrom: c@example.test\r\n\r\ninner\r\n--n--\r\n"
+        ),
+        "folded Content-Type": (
+            _INNER_HEAD
+            + b'MIME-Version: 1.0\r\nContent-Type: multipart/mixed;\r\n boundary="abc"\r\n\r\n'
+            b"--abc\r\nContent-Type: text/plain\r\n\r\nhello\r\n--abc--\r\n"
+        ),
+        "QP-looking body text": _INNER_HEAD + b"\r\nprice =3D 5 and =20\r\n",
+    }
+
+    @pytest.mark.parametrize("shape", sorted(ENCODING_PARITY_SHAPES))
+    @pytest.mark.parametrize("encoding", ["base64", "quoted-printable"])
+    def test_transfer_encoded_attached_email_hashes_like_7bit(self, tmp_path, shape, encoding):
+        import base64
+        import quopri
+
+        inner = self.ENCODING_PARITY_SHAPES[shape]
+        encoded = base64.encodebytes(inner) if encoding == "base64" else quopri.encodestring(inner)
+
+        def outer(cte: str, body: bytes) -> bytes:
+            return (
+                self._HEAD + b'Content-Type: multipart/mixed; boundary="o"\r\n\r\n'
+                b"--o\r\nContent-Type: text/plain\r\n\r\nPARENT_BODY\r\n"
+                b"--o\r\nContent-Type: message/rfc822\r\n"
+                + f"Content-Transfer-Encoding: {cte}\r\n".encode()
+                + b'Content-Disposition: attachment; filename="x.eml"\r\n\r\n'
+                + body
+                + b"\r\n--o--\r\n"
+            )
+
+        folder = tmp_path / "INBOX" / "cur"
+        folder.mkdir(parents=True)
+        (folder / "plain.eml").write_bytes(outer("7bit", inner))
+        (folder / "coded.eml").write_bytes(outer(encoding, encoded))
+        plain = parse_email(folder / "plain.eml")
+        coded = parse_email(folder / "coded.eml")
+        assert plain is not None and coded is not None
+        assert plain.attachments[0].payload != b""
+        assert coded.attachments[0].content_hash == plain.attachments[0].content_hash
+
     def test_quoted_printable_delivery_status_keeps_every_block(self, tmp_path):
         """Review round 9: the transfer-encoded path serialized only the
         container's first child before decoding. An attached email has

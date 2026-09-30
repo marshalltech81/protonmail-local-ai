@@ -445,7 +445,7 @@ def _attachment_payload(
         # serialize the whole body rather than the first child.
         if _nesting_exceeds(part, MAX_ATTACHED_MESSAGE_DEPTH + 1, budget):
             return b"", None
-        decoded = _decode_transport_form(_serialized_body(part), encoding)
+        decoded = _decode_transport_form(_transport_text(part), encoding)
         if decoded is None:
             return b"", None
         if _nesting_exceeds(decoded, MAX_ATTACHED_MESSAGE_DEPTH, budget):
@@ -455,6 +455,62 @@ def _attachment_payload(
     if _nesting_exceeds(part, MAX_ATTACHED_MESSAGE_DEPTH + 1, budget):
         return b"", None
     return _serialized_body(part), None
+
+
+def _transport_text(container: email.message.Message) -> bytes:
+    """The transfer-encoded text of a container attachment, recovered
+    from the messages the parser made of it.
+
+    The parser reads the transport text as MIME whatever the label: an
+    attached email becomes one pseudo-message whose first lines are
+    header fields and the rest the body, a delivery report one
+    pseudo-message per block. Rendering those with the generator refolds
+    the "headers" and adds multipart framing, either of which corrupts
+    the text before it is decoded; the raw header tuples and body
+    strings are put back together instead. A quoted-printable soft
+    break at the end of a header line leaves the next line looking like
+    neither a header nor a continuation, which the parser records as a
+    missing header/body separator: no blank line is inserted then, so
+    the soft break still joins the two lines when decoded.
+    Quoted-printable encodes every ``=``, so a boundary never survives
+    and a pseudo-message's body is always a string; a list payload
+    (never seen for real transport text) falls back to the generator.
+    """
+    children = container.get_payload()
+    if not isinstance(children, list) or not children:
+        return _serialized_body(container)
+    texts: list[str] = []
+    for child in children:
+        if not isinstance(child, email.message.Message) or isinstance(child.get_payload(), list):
+            return _serialized_body(container)
+        texts.append(_pseudo_message_text(child))
+    return "".join(texts).encode("ascii", "surrogateescape")
+
+
+def _pseudo_message_text(pseudo: email.message.Message) -> str:
+    """One pseudo-message's transport text: see ``_transport_text``. When
+    its first lines name a multipart type, the parser keeps one more line
+    break at the end of the body than the file has (that break belongs
+    to the MIME delimiter), so it is dropped."""
+    import email.errors
+
+    body = pseudo.get_payload()
+    body = body if isinstance(body, str) else ""
+    if pseudo.get_content_maintype() == "multipart":
+        for newline in ("\r\n", "\n"):
+            if body.endswith(newline):
+                body = body[: -len(newline)]
+                break
+    lines = [f"{name}: {value}" for name, value in pseudo.items()]
+    separated = not any(
+        isinstance(d, email.errors.MissingHeaderBodySeparatorDefect) for d in pseudo.defects
+    )
+    text = "\r\n".join(lines)
+    if lines:
+        text += "\r\n"
+    if separated and lines:
+        text += "\r\n"
+    return text + body
 
 
 def _serialized_body(part: email.message.Message) -> bytes:
