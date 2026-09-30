@@ -188,8 +188,10 @@ disposable, regenerable index.
    gets a body fixture (the existing one covers only a `Subject`).
    Two more from the second review round: merely reading
    `msg["From"].addresses` raises `RecursionError` on about a thousand
-   nested comments and `AttributeError` on malformed group syntax
-   (`Team: , a@x, ,b@x, ; c@x`), and a large list enters
+   nested comments and mishandles malformed group syntax
+   (`Team: , a@x, ,b@x, ; c@x` came back with a bogus empty `<>`
+   address on 3.14.7; the review saw `AttributeError`), and a large
+   list enters
    `headerregistry` parsing before any wrapper can look at it, so the
    raw-header cap and the linear structural split (`_split_address_list`
    / `_parse_addrs`) stay, with a work-bound address regression, not a
