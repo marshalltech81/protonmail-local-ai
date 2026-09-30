@@ -1180,6 +1180,19 @@ class TestPendingDeletions:
         assert db.add_pending_deletion("/p", "msg@x", "t1") is False
         assert db.count_pending_deletions() == 1
 
+    def test_add_pending_deletion_refuses_a_path_the_message_no_longer_maps_to(self, db):
+        """#301: a sweep holding a stale path must not tombstone a message
+        the watcher has since moved; the reaper matches tombstones by
+        message ID, so the stale row would delete the live message."""
+        msg = make_message(message_id="moved@x", filepath="/cur/moved:2,ST")
+        thread = make_thread(messages=[msg])
+        db.upsert_thread(thread, FAKE_EMBEDDING)
+        db.update_filepath("/cur/moved:2,ST", "/cur/moved:2,S", clear_tombstone=True)
+
+        assert db.add_pending_deletion("/cur/moved:2,ST", "moved@x", thread.thread_id) is False
+        assert db.count_pending_deletions() == 0
+        assert db.add_pending_deletion("/cur/moved:2,S", "moved@x", thread.thread_id) is True
+
     def test_add_pending_deletion_writes_iso8601_utc_timestamp(self, db):
         """Regression: ``datetime('now')`` produced a space-separated,
         TZ-less timestamp that sorted lexicographically before the

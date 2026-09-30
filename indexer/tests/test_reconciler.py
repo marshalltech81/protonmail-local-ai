@@ -179,6 +179,75 @@ class TestSweep:
         result = reconciler.sweep()
         assert result["missing"] == 1
 
+    def test_restore_during_sweep_leaves_no_stale_tombstone(
+        self, db, threader, embedder, maildir, monkeypatch
+    ):
+        """#301: the sweep resolved the trashed path, the watcher then
+        restored the file and cleared its tombstone, and the sweep
+        recorded a new tombstone under the obsolete trashed path. Later
+        sweeps look only at the live path, so the reaper deleted the
+        restored message (and, with ``unlink_on_reap``, its file)."""
+        import src.reconciler as reconciler_module
+
+        rec = Reconciler(db, embedder, threader, _default_config(unlink_on_reap=True))
+        path = maildir / "1700000000.M1.host:2,S"
+        _write_eml(path, "restored@example.com")
+        thread_id = _index(path, db, threader)
+        trashed = maildir / "1700000000.M1.host:2,ST"
+        path.rename(trashed)
+        rec.handle_moved(str(path), str(trashed))
+        assert db.has_pending_deletion(str(trashed))
+
+        real_resolve = reconciler_module.resolve_current_path
+
+        def resolve_then_restore(stored, listings=None):
+            current = real_resolve(stored, listings)
+            trashed.rename(path)
+            rec.handle_moved(str(trashed), str(path))  # the watcher wins the lock here
+            return current
+
+        monkeypatch.setattr(reconciler_module, "resolve_current_path", resolve_then_restore)
+        assert rec.sweep()["tombstoned"] == 0
+        monkeypatch.setattr(reconciler_module, "resolve_current_path", real_resolve)
+
+        assert db.find_message_entry_by_filepath(str(path)) is not None
+        assert db.count_pending_deletions() == 0
+        rec.sweep()
+        assert rec.reap()["threads_reaped"] == 0
+        assert db.get_thread(thread_id) is not None
+        assert path.exists()
+
+    def test_move_during_sweep_does_not_tombstone_the_old_path(
+        self, db, threader, embedder, maildir, monkeypatch
+    ):
+        """#301, missing-file branch: the watcher moved the file to another
+        folder while the sweep resolved the stale path, which no longer
+        exists; the sweep tombstoned the old path as missing and the
+        reaper deleted the moved message."""
+        import src.reconciler as reconciler_module
+
+        rec = Reconciler(db, embedder, threader, _default_config())
+        path = maildir / "1700000000.M1.host:2,S"
+        _write_eml(path, "moved@example.com")
+        thread_id = _index(path, db, threader)
+        archived = maildir.parent.parent / "Archive" / "cur" / path.name
+        archived.parent.mkdir(parents=True)
+
+        real_resolve = reconciler_module.resolve_current_path
+
+        def move_then_resolve(stored, listings=None):
+            path.rename(archived)
+            rec.handle_moved(str(path), str(archived), folder="Archive")
+            return real_resolve(stored, listings)
+
+        monkeypatch.setattr(reconciler_module, "resolve_current_path", move_then_resolve)
+        assert rec.sweep()["missing"] == 0
+        monkeypatch.setattr(reconciler_module, "resolve_current_path", real_resolve)
+
+        assert db.count_pending_deletions() == 0
+        assert rec.reap()["threads_reaped"] == 0
+        assert db.get_thread(thread_id) is not None
+
 
 # ---------------------------------------------------------------------------
 # sweep_paths — always-on startup rename sweep
@@ -333,6 +402,97 @@ class TestReap:
         assert (
             db.get_thread(db.find_message_entry_by_filepath(str(trashed))["thread_id"]) is not None
         )
+
+    def test_aba_move_during_sweep_does_not_reap_the_live_message(
+        self, db, threader, embedder, maildir, monkeypatch
+    ):
+        """#336 review round 1: the sweep resolved path A as missing while
+        the file was briefly at B, and the watcher moved it back to A
+        before the tombstone was written. The map holds A again, so the
+        tombstone passes the path check; with a zero grace window the
+        next reap deleted the live message and unlinked its file."""
+        import src.reconciler as reconciler_module
+
+        rec = Reconciler(db, embedder, threader, _default_config(unlink_on_reap=True))
+        path = maildir / "1700000000.M1.host:2,S"
+        _write_eml(path, "aba@example.com")
+        thread_id = _index(path, db, threader)
+        elsewhere = maildir.parent.parent / "Archive" / "cur" / path.name
+        elsewhere.parent.mkdir(parents=True)
+
+        real_resolve = reconciler_module.resolve_current_path
+
+        def move_away_resolve_move_back(stored, listings=None):
+            path.rename(elsewhere)
+            rec.handle_moved(str(path), str(elsewhere), folder="Archive")
+            current = real_resolve(stored, listings)
+            elsewhere.rename(path)
+            rec.handle_moved(str(elsewhere), str(path), folder="INBOX")
+            return current
+
+        monkeypatch.setattr(reconciler_module, "resolve_current_path", move_away_resolve_move_back)
+        rec.sweep()
+        monkeypatch.setattr(reconciler_module, "resolve_current_path", real_resolve)
+
+        assert rec.reap()["threads_reaped"] == 0
+        assert db.get_thread(thread_id) is not None
+        assert path.exists()
+        assert db.count_pending_deletions() == 0
+
+    def test_live_checks_list_each_directory_once(
+        self, db, threader, embedder, maildir, monkeypatch
+    ):
+        """#336 review round 2: each tombstone whose mapped file is gone
+        made the live check list the folder again, so a batch of missing
+        files in one large folder cost a folder scan per tombstone. The
+        reaper shares one listings cache across the pass, as the sweep
+        does."""
+        paths = []
+        for i in range(20):
+            p = maildir / f"1700000{i:04d}.M1.host:2,S"
+            _write_eml(p, f"gone{i}@example.com", subject=f"Subject {i}")
+            _index(p, db, threader)
+            paths.append(p)
+        for p in paths:
+            entry = db.find_message_entry_by_filepath(str(p))
+            db.add_pending_deletion(str(p), entry["message_id"], entry["thread_id"])
+            p.unlink()
+
+        listed: list[Path] = []
+        real_iterdir = Path.iterdir
+
+        def counting_iterdir(self):
+            listed.append(self)
+            return real_iterdir(self)
+
+        monkeypatch.setattr(Path, "iterdir", counting_iterdir)
+        rec = Reconciler(db, embedder, threader, _default_config(force=True))
+        assert rec.reap()["threads_reaped"] == 20
+        assert listed
+        assert len(listed) == len(set(listed))
+
+    def test_reap_clears_an_orphan_tombstone_for_a_live_message(
+        self, db, threader, embedder, maildir
+    ):
+        """A tombstone left under a dead path by the #301 race before its
+        fix: the message now maps to a live, untrashed file, so the
+        reaper clears the tombstone instead of deleting the message."""
+        rec = Reconciler(db, embedder, threader, _default_config(unlink_on_reap=True))
+        path = maildir / "1700000000.M1.host:2,S"
+        _write_eml(path, "orphan@example.com")
+        thread_id = _index(path, db, threader)
+        entry = db.find_message_entry_by_filepath(str(path))
+        db._conn.execute(
+            "INSERT INTO pending_deletions (filepath, message_id, thread_id, marked_at) "
+            "VALUES (?, ?, ?, '2000-01-01T00:00:00+00:00')",
+            (str(maildir / "1700000000.M1.host:2,ST"), entry["message_id"], thread_id),
+        )
+        db._conn.commit()
+
+        assert rec.reap()["threads_reaped"] == 0
+        assert db.get_thread(thread_id) is not None
+        assert path.exists()
+        assert db.count_pending_deletions() == 0
 
     def test_full_reap_when_last_message_tombstoned(self, db, threader, reconciler, maildir):
         path = maildir / "1700000000.M1.host:2,S"
@@ -1230,6 +1390,34 @@ class TestMassDeleteBrake:
         result = rec.reap()
         assert result["aborted"] is False
         assert db.count_total_messages() == 4  # 10 - 6 reaped
+
+    def test_stale_live_tombstones_do_not_trip_the_brake(self, db, threader, embedder, maildir):
+        """#336 review round 2: tombstones whose message maps to a live,
+        untrashed file are stale and cleared by the reaper, but they were
+        counted against the brake first. Eleven orphans in a small mailbox
+        aborted every pass, and no sweep revisits their dead paths, so the
+        brake blocked legitimate deletions forever."""
+        paths = self._stage_batch(maildir, db, threader, 12)
+        for p in paths[:11]:
+            entry = db.find_message_entry_by_filepath(str(p))
+            db._conn.execute(
+                "INSERT INTO pending_deletions (filepath, message_id, thread_id, marked_at) "
+                "VALUES (?, ?, ?, '2000-01-01T00:00:00+00:00')",
+                (str(p) + "T", entry["message_id"], entry["thread_id"]),
+            )
+        db._conn.commit()
+        trashed = paths[11].with_name(paths[11].name + "T")
+        paths[11].rename(trashed)
+
+        cfg = _default_config(grace_days=0, max_batch_pct=0.05)
+        rec = Reconciler(db, embedder, threader, cfg)
+        rec.sweep()
+
+        result = rec.reap()
+        assert result["aborted"] is False
+        assert result["threads_reaped"] == 1
+        assert db.count_total_messages() == 11
+        assert db.count_pending_deletions() == 0
 
     def test_force_overrides_brake(self, db, threader, embedder, maildir):
         paths = self._stage_batch(maildir, db, threader, 30)

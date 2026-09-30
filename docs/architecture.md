@@ -418,9 +418,17 @@ The indexer ships an opt-in reconciler
 1. **Tombstone** — a startup sweep plus a live `on_moved` watchdog handler
    record every `T`-flagged file in a `pending_deletions` table. No primary
    data is mutated at tombstone time, so the soft-delete is fully reversible
-   if mbsync un-flags the file on a later pull.
+   if mbsync un-flags the file on a later pull. A tombstone is recorded
+   only for the path `message_thread_map` currently holds for the
+   message, so a sweep that resolved a path before the watcher restored
+   or moved the file cannot leave a stale tombstone for the reaper.
 2. **Reap** — after a configurable grace window
-   (`INDEXER_DELETION_GRACE_DAYS`, default 7 days) the reaper removes the
+   (`INDEXER_DELETION_GRACE_DAYS`, default 7 days) the reaper first checks
+   the file each tombstoned message maps to now: if it exists and is not
+   trashed, the tombstone is stale (the file moved away and back during a
+   sweep) and is cleared instead of reaped. This check runs before the
+   mass-delete brake below counts the batch, so stale tombstones cannot
+   hold the brake shut. Otherwise it removes the
    reaped message's rows from `message_thread_map` / `indexed_files` and
    any indexing job still queued for its file (in the same transaction,
    which first re-checks that every message it removes is still

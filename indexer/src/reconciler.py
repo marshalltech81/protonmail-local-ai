@@ -56,6 +56,16 @@ _REAP_ABSOLUTE_FLOOR = 10
 _BLOCKED_ESCALATION_THRESHOLD = 3
 
 
+def _is_live(filepath: str | None, listings: dict[Path, dict[str, Path]]) -> bool:
+    """True when the message file at ``filepath`` (or its flag-renamed
+    successor) exists and is not trashed. ``listings`` is the caller's
+    per-pass directory cache for ``resolve_current_path``."""
+    if filepath is None:
+        return False
+    current = resolve_current_path(Path(filepath), listings)
+    return current is not None and not is_trashed(current)
+
+
 @dataclass(frozen=True)
 class ReconcilerConfig:
     enabled: bool
@@ -213,6 +223,23 @@ class Reconciler:
         """
         cutoff = (datetime.now(UTC) - timedelta(days=self.config.grace_days)).isoformat()
         tombstones = self.db.list_pending_deletions_older_than(cutoff)
+
+        # A tombstone claims the message was trashed or went missing when
+        # it was written. Check the file the message maps to now: if it
+        # exists outside the trash, the claim is stale (a move away and
+        # back during a sweep, or a tombstone left under a dead path by
+        # the #301 race), so clear it rather than reap. This runs before
+        # the brake so stale rows, which no sweep revisits, cannot hold it
+        # shut, and shares one listings cache so each folder is listed
+        # once per pass rather than once per tombstone.
+        listings: dict[Path, dict[str, Path]] = {}
+        eligible = []
+        for tomb in tombstones:
+            if _is_live(tomb["mapped_filepath"], listings):
+                self.db.clear_pending_deletion(tomb["filepath"])
+            else:
+                eligible.append(tomb)
+        tombstones = eligible
         if not tombstones:
             return {"threads_reaped": 0, "threads_rebuilt": 0, "aborted": False}
 
