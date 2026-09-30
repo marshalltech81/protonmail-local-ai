@@ -478,6 +478,22 @@ can be revisited with an explicit owner decision.
   Phase 2 reindex or when Phase 4/5 temporal reasoning needs it. First
   verify Bridge-delivered messages keep `Received:` headers (sent mail
   likely has none)
+- replacing the stdlib MIME parser (decided 2026-09-30 on PR #260):
+  Python's `email` package never exposes a part's raw byte offsets and
+  parses a transfer-encoded `message/rfc822` (forbidden by RFC 2046,
+  but sent) before decoding it, so an attached email's identity is the
+  hash of its re-serialized form, and a quoted-printable one with a
+  soft break inside a header can hash differently from its 7bit twin.
+  A hand-rolled boundary slicer was tried and reverted after four
+  Codex rounds of real findings (quadratic and memory-heavy on hostile
+  input, bare-CR endings, depth caps). Every maintained Python parser
+  wraps the stdlib; `flanker` is unmaintained (last release 2019). The
+  one real candidate is Stalwart's Rust `mail-parser` (RFC-conformant,
+  no dependencies, exposes part offsets, built for hostile mail) via a
+  homegrown pyo3 binding and a Rust build stage in the indexer image —
+  an architecture change with a full reindex. Revisit if hostile-mail
+  robustness becomes a goal in its own right (Phase 3's adversarial
+  suite is the natural trigger), not for a bug fix
 
 ## Operational baseline (unchanged)
 
