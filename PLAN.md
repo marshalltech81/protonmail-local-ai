@@ -140,12 +140,36 @@ disposable, regenerable index.
 1. **`vector_generations` registry**: generation_id, provider, model,
    revision, dimensions, tokenizer, chunk_config_hash, created_at,
    status. Dimension read from metadata, never a constant; pass the
-   `dimensions` request param where the provider supports it.
+   `dimensions` request param where the provider supports it. The
+   registry's tokenizer and context-window fields **decide** whether a
+   model switch may reuse the existing chunks: only when the candidate
+   tokenizer counts every stored chunk within the candidate's input
+   window (verified by counting, not by metadata equality) is the
+   switch vector-only; otherwise it is a rechunk, and goes through the
+   reindex bundle path below. Recording the metadata alone prevents
+   nothing.
 2. **Per-generation vec tables** (`vec_chunks_gNN` — sqlite-vec bakes
    dimension into DDL, so per-generation tables are structurally
-   required). Blue/green lifecycle: build → validate (against the
-   Phase 1.5 baseline) → activate atomically → retain old generation
-   → rollback if needed.
+   required). Blue/green lifecycle: build → validate → activate
+   atomically → retain old generation → rollback if needed. Two parts
+   of that are protocol, not just DDL:
+   - **Validation gate:** the Phase 1.5 baseline runs both sides on a
+     hashed test embedder, so it proves wiring and snapshot stability
+     and nothing about a real model. Activation requires #283's
+     evidence-recall eval run against the **old and candidate
+     generations with query vectors from their respective real
+     embedders**, comparing recall before the switch.
+   - **Activation switches the query side in lockstep:** the MCP
+     server builds its query embedder from `EMBED_BASE_URL` /
+     `EMBED_MODEL` at startup, so a table switch alone would leave
+     old-model query vectors against new-model document vectors —
+     same dimension, incomparable space, silently broken retrieval.
+     The active generation's provider, model and dimension are
+     recorded in the database; the MCP server reads them at startup
+     and on each semantic query, and **fails closed** (semantic lanes
+     off, status reporting the mismatch) while its configured embedder
+     does not match. Activation therefore includes updating the MCP
+     configuration and restarting or reloading it.
 3. **Stage-aware pipeline manifest.** One active generation
    operationally, but the identifier is not opaque: a canonical
    manifest records parser / normalizer / chunker / embedding
@@ -209,8 +233,13 @@ identity land together with the first Phase 2 generation, never one at
 a time: reply subjects in the embedding input and thread body (#303);
 chunk overlap past `max_tokens` (#208); Message-ID conflicts kept as
 both claimants (#217); a deterministic date source for undated mail
-(#297's second half, the deferred received-date item; the first half —
-keep the first persisted date on reprocess — is a batch-1 guard);
+(#297's second half, the deferred received-date item: the top
+`Received:` header, then — since sent mail and stripped messages have
+none — the Maildir filename's delivery timestamp, which is sync time
+but stable for the life of the file, then the previously persisted
+date carried forward by the rebuild; `now()` only for a message with
+none of the three, on first sight, and persisted once; the first half
+— keep the first persisted date on reprocess — is a batch-1 guard);
 the whitespace-only plain alternative that suppresses a non-empty HTML
 body (#298: one line, but a body change, so it rebuilds with the
 bundle); sequential inline text parts in `multipart/mixed` (#295,
@@ -234,12 +263,20 @@ activated, and rolled back by switching tables. The reindex bundle
 above changes chunk IDs, so it cannot be a table switch: it lands as
 a reparse + rechunk + re-embed into a new generation whose
 `pipeline_config_hash` (item 3) records the new parser and chunker
-identity, and its rollback is a rebuild of the previous
-`pipeline_config_hash` from the source corpus — which is exactly what
-the manifest exists to make possible, and why chunk/FTS coexistence
-machinery stays deferred rather than built now. Rebuild time is the
-cost of that choice; measure it on the first vector-only generation
-so the bundle's rollback is a known number, not a hope.
+identity. Its rollback cannot be a rebuild of the previous hash: the
+bundle carries a forward-only schema migration (#217), so the previous
+image fails closed on the new schema and the new image no longer has
+the old algorithms, and a hash records identity without being able to
+recreate code. The **executable rollback is a copy**: the index is one
+SQLite file and is disposable, so the rebuild starts by copying
+`mail.db` (with its WAL checkpointed) aside, and rollback is stop,
+restore the copy, run the previous image tag. Keep that copy until the
+new generation has passed the validation gate above and the eval slice
+on real queries. The manifest still earns its place — it says which
+stages changed and so which kind of rebuild is needed — and chunk/FTS
+coexistence machinery stays deferred rather than built now. Rebuild
+time is the cost of that choice; measure it on the first vector-only
+generation so the bundle's cost is a known number, not a hope.
 
 ### Phase 3 — Measurement and product vertical slice
 
@@ -776,7 +813,12 @@ do not ship persisted claims without them.
    the first-run overlay, landing with #266 and #270.
 4. **#245 auto-update in existing vaults (2026-09-30):** a fourth
    Bridge patch hunk forcing the `updates.go` gate off, under the
-   three-layer rule.
+   three-layer rule — with one addition to the pattern: the existing
+   layers prove only the new-vault default, so the `go test` for this
+   hunk must exercise the patched gate with an **enabled** existing
+   setting (`AutoUpdate: true`) and prove the version fetch and staging
+   path is not entered, and the smoke test asserts the same from the
+   log on a vault seeded that way where seeding is feasible.
 5. **#217 Message-ID conflicts (2026-09-30):** keep both claimants;
    expose, do not resolve by arrival order; a stable claimant
    identifier goes through the MCP contract first. Phase 2 reindex
@@ -786,8 +828,10 @@ do not ship persisted claims without them.
 7. **#295 sequential inline text parts (2026-09-30):** document the
    limitation now; revisit with the Phase 2 reindex bundle.
 8. **#297 undated mail (2026-09-30):** keep the first persisted date on
-   reprocess now; a deterministic date source (`Received:`) with the
-   Phase 2 reindex.
+   reprocess now; with the Phase 2 reindex, a deterministic chain —
+   top `Received:`, else the Maildir filename timestamp, else the
+   previously persisted date — so a rebuild never re-dates a message
+   (see the Phase 2 reindex bundle).
 9. **#276 and family, retained near-side mbsync state (2026-09-30):**
    tolerate a far-side box that cannot be opened (warn, keep syncing
    the rest) rather than far-only patterns or `Remove Near`, which
