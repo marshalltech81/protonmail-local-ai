@@ -644,3 +644,70 @@ class TestAnthropicRedirectPolicy:
         assert asyncio.run(backend.complete("synthetic", _MAIL_MARKER)) == "done"
         assert len(seen) == 2
         assert _MAIL_MARKER in seen[1].content.decode()
+
+
+def _chat_completion_json() -> dict:
+    return {
+        "id": "chatcmpl-synthetic",
+        "object": "chat.completion",
+        "created": 0,
+        "model": "synthetic",
+        "choices": [
+            {
+                "index": 0,
+                "message": {"role": "assistant", "content": "done"},
+                "finish_reason": "stop",
+            }
+        ],
+    }
+
+
+class TestOpenAIRedirectPolicy:
+    """#340: the OpenAI SDK re-sends the request body on a 307/308, so a
+    redirecting endpoint must not receive the prompt's mail excerpts at
+    another origin. Only the HTTP transport is replaced."""
+
+    def _backend_with_redirect(self, location: str):
+        import httpx2
+
+        seen: list = []
+
+        def handler(request):
+            seen.append(request)
+            if len(seen) == 1:
+                return httpx2.Response(307, headers={"location": location})
+            return httpx2.Response(200, json=_chat_completion_json())
+
+        backend = _OpenAIBackend(
+            base_url="http://host.docker.internal:8001/v1",
+            model="synthetic",
+            api_key=_KEY_MARKER,
+            max_tokens=16,
+            timeout_secs=5.0,
+        )
+        http_client = backend.client._client
+        http_client._transport = httpx2.MockTransport(handler)
+        http_client._mounts = {}
+        return backend, seen
+
+    def test_cross_origin_redirect_is_not_followed(self, caplog):
+        backend, seen = self._backend_with_redirect(
+            "https://different-origin.invalid/v1/chat/completions"
+        )
+        with pytest.raises(Exception) as err:
+            asyncio.run(backend.complete("synthetic", _MAIL_MARKER))
+        assert [r.url.host for r in seen] == ["host.docker.internal"]
+        assert "redirected to a different origin" in caplog.text
+        assert "different-origin.invalid" not in caplog.text
+        assert _MAIL_MARKER not in str(err.value)
+        assert _KEY_MARKER not in str(err.value)
+        assert _MAIL_MARKER not in caplog.text
+        assert _KEY_MARKER not in caplog.text
+
+    def test_same_origin_redirect_is_followed(self):
+        backend, seen = self._backend_with_redirect(
+            "http://host.docker.internal:8001/v1/chat/completions?moved=1"
+        )
+        assert asyncio.run(backend.complete("synthetic", _MAIL_MARKER)) == "done"
+        assert len(seen) == 2
+        assert _MAIL_MARKER in seen[1].content.decode()

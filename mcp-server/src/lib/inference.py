@@ -28,10 +28,9 @@ import-time issue in an SDK the operator isn't using.
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Protocol
+from typing import Protocol
 
-if TYPE_CHECKING:
-    import httpx2
+from .security import same_origin_request_hook
 
 log = logging.getLogger("mcp.inference")
 
@@ -101,7 +100,7 @@ class _OpenAIBackend:
         max_tokens: int,
         timeout_secs: float,
     ) -> None:
-        from openai import AsyncOpenAI
+        from openai import AsyncOpenAI, DefaultAsyncHttpxClient
 
         self.model = model
         self.max_tokens = max_tokens
@@ -143,18 +142,27 @@ class _OpenAIBackend:
         # indexer, which also pins ``max_retries=0`` (it owns retries
         # above via tenacity; mcp-server has no higher retry layer and
         # deliberately doesn't add one).
+        #
+        # The SDK re-sends the body on a redirect; the request hook
+        # refuses a hop off the resolved endpoint's origin (#340).
+        same_origin_only = same_origin_request_hook(
+            lambda: self.client.base_url, "Inference provider (mode=openai)", log
+        )
+        http_client = DefaultAsyncHttpxClient(event_hooks={"request": [same_origin_only]})
         if base_url:
             self.client = AsyncOpenAI(
                 base_url=base_url.rstrip("/"),
                 api_key=api_key,
                 timeout=timeout_secs,
                 max_retries=0,
+                http_client=http_client,
             )
         else:
             self.client = AsyncOpenAI(
                 api_key=api_key,
                 timeout=timeout_secs,
                 max_retries=0,
+                http_client=http_client,
             )
         # After the SDK resolves its fallback chain, read the URL back
         # so ``self.base_url`` always reflects the wire endpoint —
@@ -245,22 +253,10 @@ class _AnthropicBackend:
         # request hook runs before every hop, so a redirect off the
         # resolved endpoint's origin is refused before the prompt or
         # key leaves; same-origin redirects still work.
-        async def _same_origin_only(request: httpx2.Request) -> None:
-            base = self.client.base_url
-            if (request.url.scheme, request.url.host, request.url.port) != (
-                base.scheme,
-                base.host,
-                base.port,
-            ):
-                log.warning(
-                    "Inference provider redirected to a different origin; "
-                    "request not sent (mode=anthropic)"
-                )
-                raise RuntimeError(
-                    "Inference provider redirected to a different origin (mode=anthropic)"
-                )
-
-        http_client = DefaultAsyncHttpxClient(event_hooks={"request": [_same_origin_only]})
+        same_origin_only = same_origin_request_hook(
+            lambda: self.client.base_url, "Inference provider (mode=anthropic)", log
+        )
+        http_client = DefaultAsyncHttpxClient(event_hooks={"request": [same_origin_only]})
         if stripped:
             self.client = AsyncAnthropic(
                 base_url=stripped,

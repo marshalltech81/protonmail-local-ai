@@ -577,3 +577,55 @@ class TestScrubEmbedError:
         # can quote response values that echo the submitted text.
         scrubbed = scrub_embed_error(ValueError("input_value='SYNTHETIC_PRIVATE_MAIL'"))
         assert scrubbed == "ValueError"
+
+
+_CHUNK_MARKER = "SYNTHETIC_CHUNK"
+
+
+class TestRedirectPolicy:
+    """#340: the OpenAI SDK re-sends the request body on a 307/308, so a
+    redirecting embed endpoint must not receive chunk text at another
+    origin. Only the HTTP transport is replaced."""
+
+    def _embedder_with_redirect(self, location: str):
+        seen: list = []
+
+        def handler(request):
+            seen.append(request)
+            if len(seen) == 1:
+                return httpx2.Response(307, headers={"location": location})
+            return httpx2.Response(
+                200,
+                json={
+                    "object": "list",
+                    "data": [{"object": "embedding", "index": 0, "embedding": [0.6, 0.8]}],
+                    "model": "synthetic",
+                    "usage": {"prompt_tokens": 1, "total_tokens": 1},
+                },
+            )
+
+        emb = _make_embedder(base_url="http://host.docker.internal:8001/v1")
+        http_client = emb.client._client
+        http_client._transport = httpx2.MockTransport(handler)
+        http_client._mounts = {}
+        return emb, seen
+
+    def test_cross_origin_redirect_is_not_followed(self, caplog, monkeypatch):
+        monkeypatch.setattr(time, "sleep", lambda _s: None)
+        emb, seen = self._embedder_with_redirect("https://different-origin.invalid/v1/embeddings")
+        with pytest.raises(Exception) as err:
+            emb.embed(_CHUNK_MARKER)
+        assert seen
+        assert {r.url.host for r in seen} == {"host.docker.internal"}
+        assert "redirected to a different origin" in caplog.text
+        assert "different-origin.invalid" not in caplog.text
+        assert _CHUNK_MARKER not in str(err.value)
+        assert _CHUNK_MARKER not in caplog.text
+
+    def test_same_origin_redirect_is_followed(self):
+        emb, seen = self._embedder_with_redirect(
+            "http://host.docker.internal:8001/v1/embeddings?moved=1"
+        )
+        assert emb.embed(_CHUNK_MARKER) == pytest.approx([0.6, 0.8])
+        assert len(seen) == 2
+        assert _CHUNK_MARKER in seen[1].content.decode()

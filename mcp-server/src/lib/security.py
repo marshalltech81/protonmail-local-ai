@@ -4,7 +4,7 @@ Security helpers for redaction and safe error formatting.
 
 import logging
 import re
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from datetime import datetime
 from typing import Any
 
@@ -125,3 +125,31 @@ def log_tool_call(logger: logging.Logger, tool: str, params: Mapping[str, Any]) 
     }
     withheld = sorted(k for k in provided if k not in loggable)
     logger.info("tool=%s %s withheld=%s", tool, loggable, withheld)
+
+
+def same_origin_request_hook(
+    get_base_url: Callable[[], Any], provider: str, logger: logging.Logger
+) -> Callable[[Any], Awaitable[None]]:
+    """An httpx request hook refusing any hop off the provider's origin.
+
+    The SDK HTTP clients follow redirects and re-send the request body
+    (prompts with mail excerpts, query text) to wherever ``Location``
+    points (#325, #340). The hook runs before every hop, so a redirect
+    whose scheme, host or port differs from the resolved base URL is
+    refused before anything is sent; same-origin redirects still work.
+    ``get_base_url`` is called per request because the client that owns
+    the base URL is built after the hook. Log and error text are fixed:
+    neither names the redirect target.
+    """
+
+    async def hook(request: Any) -> None:
+        base = get_base_url()
+        if (request.url.scheme, request.url.host, request.url.port) != (
+            base.scheme,
+            base.host,
+            base.port,
+        ):
+            logger.warning("%s redirected to a different origin; request not sent", provider)
+            raise RuntimeError(f"{provider} redirected to a different origin")
+
+    return hook

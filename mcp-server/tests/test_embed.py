@@ -188,3 +188,66 @@ class TestEmbedQueryDimValidation:
         stub = _StubEmbed([0.1, bad, 0.3, 0.4])
         with pytest.raises(ValueError, match="non-finite"):
             asyncio.run(embed_query(stub, "query", expected_dim=4))
+
+
+_QUERY_MARKER = "SYNTHETIC_QUERY"
+_EMBED_KEY_MARKER = "sk-embed-marker"  # pragma: allowlist secret
+
+
+class TestEmbedRedirectPolicy:
+    """#340: a redirecting embed endpoint must not receive the query text
+    at another origin. Only the HTTP transport is replaced."""
+
+    def _client_with_redirect(self, location: str):
+        import httpx2
+        from src.lib.embed import EmbedClient
+
+        seen: list = []
+
+        def handler(request):
+            seen.append(request)
+            if len(seen) == 1:
+                return httpx2.Response(307, headers={"location": location})
+            return httpx2.Response(
+                200,
+                json={
+                    "object": "list",
+                    "data": [{"object": "embedding", "index": 0, "embedding": [0.1, 0.2]}],
+                    "model": "synthetic",
+                    "usage": {"prompt_tokens": 1, "total_tokens": 1},
+                },
+            )
+
+        client = EmbedClient(
+            base_url="http://host.docker.internal:8001/v1",
+            model="synthetic",
+            api_key=_EMBED_KEY_MARKER,
+            timeout_secs=5.0,
+        )
+        http_client = client.client._client
+        http_client._transport = httpx2.MockTransport(handler)
+        http_client._mounts = {}
+        return client, seen
+
+    def test_cross_origin_redirect_is_not_followed(self, caplog):
+        import asyncio
+
+        client, seen = self._client_with_redirect("https://different-origin.invalid/v1/embeddings")
+        with pytest.raises(Exception) as err:
+            asyncio.run(client.embed(_QUERY_MARKER))
+        assert [r.url.host for r in seen] == ["host.docker.internal"]
+        assert "redirected to a different origin" in caplog.text
+        assert "different-origin.invalid" not in caplog.text
+        assert _QUERY_MARKER not in str(err.value)
+        assert _EMBED_KEY_MARKER not in str(err.value)
+        assert _QUERY_MARKER not in caplog.text
+
+    def test_same_origin_redirect_is_followed(self):
+        import asyncio
+
+        client, seen = self._client_with_redirect(
+            "http://host.docker.internal:8001/v1/embeddings?moved=1"
+        )
+        assert asyncio.run(client.embed(_QUERY_MARKER)) == [0.1, 0.2]
+        assert len(seen) == 2
+        assert _QUERY_MARKER in seen[1].content.decode()
