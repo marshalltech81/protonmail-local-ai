@@ -186,14 +186,27 @@ disposable, regenerable index.
    `LookupError` on an unknown body charset where `_safe_decode`
    falls back to UTF-8 with replacement, so that fallback stays and
    gets a body fixture (the existing one covers only a `Subject`).
+   Two more from the second review round: merely reading
+   `msg["From"].addresses` raises `RecursionError` on about a thousand
+   nested comments and `AttributeError` on malformed group syntax
+   (`Team: , a@x, ,b@x, ; c@x`), and a large list enters
+   `headerregistry` parsing before any wrapper can look at it, so the
+   raw-header cap and the linear structural split (`_split_address_list`
+   / `_parse_addrs`) stay, with a work-bound address regression, not a
+   catch-only wrapper; and `iter_attachments()` yields the second of
+   two bare `text/plain` parts in a `multipart/mixed` (its
+   `is_attachment()` is false) where the walker rightly treats both as
+   body candidates, so explicit classification stays and repeated body
+   candidates join the catalogue.
    Exit criterion: the parser fixture suite and the 25-shape encoding
-   parity test pass unchanged (with the filename-only text part added
-   to the catalogue), the hand-rolled helpers above are deleted or
-   reduced to thin wrappers, and hostile-input tests (nested comments,
+   parity test pass unchanged (with the filename-only text part and
+   repeated body candidates added to the catalogue), the hand-rolled
+   helpers above are deleted or reduced to thin wrappers, and
+   hostile-input tests (nested comments, malformed address groups,
    8-bit headers, folded References, malformed encoded-word runs,
-   unknown body charsets) still degrade rather than raise. Lands with
-   the Phase 2 reindex, since any parse change can alter bodies and
-   attachment identity.
+   unknown body charsets) still degrade rather than raise, with work
+   bounds asserted. Lands with the Phase 2 reindex, since any parse
+   change can alter bodies and attachment identity.
 
 ### Phase 3 — Measurement and product vertical slice
 
