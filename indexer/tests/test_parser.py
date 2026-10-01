@@ -9,7 +9,7 @@ import email.utils
 import hashlib
 import logging
 import textwrap
-from datetime import datetime
+from datetime import UTC, datetime
 from email.message import EmailMessage
 from pathlib import Path
 
@@ -195,6 +195,34 @@ class TestParseEmail:
         assert msg.date_is_fallback is True
         assert any("date header" in r.getMessage().lower() for r in caplog.records)
         assert marker not in caplog.text
+
+    @pytest.mark.parametrize(
+        ("date_bytes", "fallback"),
+        [
+            (b"Mon, 1 Jan 2024 10:00:00 +0000 \xe9", False),
+            (b"Mon, 1 Jan 2024 10:00:00 +0000\xe9", False),
+            (b"Mon, 1 Jan 2024 15:00:00 +0500\xe9", False),
+            (b"Mon, 1 Jan 2024 07:00:00 -0300\xe9\xe9", False),
+            (b"\xe9\xe9 not a date", True),
+        ],
+    )
+    def test_8bit_date_header_does_not_crash(self, tmp_path, date_bytes, fallback):
+        """#361: a raw 8-bit Date header comes back from the parser as an
+        ``email.header.Header``, which ``parsedate_to_datetime`` cannot
+        split; it must parse like the text it holds, or fall back."""
+        path = tmp_path / "INBOX" / "cur" / "eightbit.eml"
+        path.parent.mkdir(parents=True)
+        path.write_bytes(
+            b"From: alice@example.com\nSubject: s\nMessage-ID: <eightbit@example.com>\n"
+            + b"Date: "
+            + date_bytes
+            + b"\n\nBody.\n"
+        )
+        msg = parse_email(path)
+        assert msg is not None
+        assert msg.date_is_fallback is fallback
+        if not fallback:
+            assert msg.date == datetime(2024, 1, 1, 10, 0, tzinfo=UTC)
 
     def test_date_minus_zero_normalized_to_aware_utc(self, tmp_path):
         """RFC 2822 ``-0000`` means "local time, offset unknown".
