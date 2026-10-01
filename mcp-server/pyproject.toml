@@ -70,8 +70,8 @@ branch = true
 # so handler logic is exercised without standing up the real FastMCP
 # transport. ``src/main.py`` is excluded as a whole: it is the service
 # bootstrap (env wiring, tool registration, ``server.run``), covered by
-# docker-compose integration. Its helpers (``_env_bool``,
-# ``_read_secret``, the ``/health`` route) are unit-tested directly but
+# docker-compose integration. Its helpers (``_read_secret``,
+# ``_float_env``, the ``/health`` route) are unit-tested directly but
 # do not count toward the figure.
 source = ["src"]
 omit = [
