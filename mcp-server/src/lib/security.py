@@ -34,32 +34,60 @@ def safe_exception_text(error: Exception, secrets: Iterable[str] | None = None) 
     return redact_sensitive_text(str(error), secrets)
 
 
+class ProviderResponseError(RuntimeError):
+    """A provider call failed in a way we describe in fixed text.
+
+    Raised for a response we reject (no choices, empty or non-text
+    content, a wrong-sized vector). The message never quotes the
+    response, the prompt or the query, so it is safe to log and return
+    in full. Subclasses ``RuntimeError`` so existing ``except
+    RuntimeError`` paths still catch it.
+    """
+
+
+def _is_connection_error(error: Exception) -> bool:
+    """True for a connection or timeout failure.
+
+    Duck-typed on the class name so this module never imports a
+    provider SDK: ``openai.APIConnectionError`` and
+    ``anthropic.APIConnectionError`` (and their ``APITimeoutError``
+    subclasses) carry fixed SDK text, and the builtin errors carry the
+    socket's.
+    """
+    if isinstance(error, (ConnectionError, TimeoutError)):
+        return True
+    return any(
+        cls.__name__ == "APIConnectionError"
+        and cls.__module__.split(".")[0] in ("openai", "anthropic")
+        for cls in type(error).__mro__
+    )
+
+
 def safe_provider_exception_text(
     error: Exception,
     secrets: Iterable[str] | None = None,
 ) -> str:
-    """Render a provider-SDK exception into a log/MCP-callable-safe string.
+    """Render an exception from a provider-calling tool for logs and callers.
 
-    Mirrors the indexer's ``scrub_embed_error`` posture for the mcp-server
-    side. The OpenAI / Anthropic / Cohere SDKs all surface HTTP errors as
-    exceptions whose stringification can echo the provider's response
-    body. For tools that send retrieved email content into the request
-    (intelligence prompts, reranker documents), that body can quote
-    fragments of mailbox content back at us — and ``safe_exception_text``
-    would propagate the full string to logs and MCP callers.
+    Mirrors the indexer's ``scrub_embed_error``. A provider's response
+    can echo the request, and for the search and intelligence tools the
+    request carries the query or retrieved mail, so:
 
-    Detection is duck-typed on the ``status_code`` attribute every
-    SDK status error carries (``openai.APIStatusError``,
-    ``anthropic.APIStatusError``, ``cohere.errors.*Error``). When
-    matched, the formatter returns ``type + status`` only — never the
-    body. Connection / timeout / unrelated exceptions fall through to
-    the standard secret-redacting formatter so non-provider failures
-    keep the diagnostic detail an operator needs.
+    - an SDK status error (any exception with an int ``status_code``:
+      ``openai.APIStatusError``, ``anthropic.APIStatusError``, Cohere's
+      errors) becomes its type plus status, never the body;
+    - a connection or timeout error and our own fixed-message
+      ``ProviderResponseError`` keep their (secret-redacted) text;
+    - anything else becomes its type name alone, since parse,
+      validation, conversion and database errors quote the values they
+      reject.
     """
     status = getattr(error, "status_code", None)
     if isinstance(status, int):
         return f"{type(error).__name__}: status={status}"
-    return safe_exception_text(error, secrets)
+    if isinstance(error, ProviderResponseError) or _is_connection_error(error):
+        return safe_exception_text(error, secrets)
+    return type(error).__name__
 
 
 def _one_of(*allowed: str) -> Callable[[Any], bool]:

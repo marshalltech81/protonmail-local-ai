@@ -45,6 +45,15 @@ database error) is an MCP error result (`isError: true`) whose text
 states the reason; it carries no structured content. An empty match is
 not a failure: it is a normal result with an empty list.
 
+In the tools that call the embed or inference provider (`search_emails`,
+`get_evidence` and the intelligence tools), a provider or database
+failure is reported, and logged, as follows, because a provider's
+response or an SQLite message can quote the query or the mail: an SDK
+status error as its type and status code, a connection or timeout error
+and the server's own fixed-text errors (such as an empty or wrong-sized
+response) in full with secrets redacted, and anything else as its
+exception type name alone.
+
 The intelligence tools (Group 3) have no typed output model; their
 answer is the prose in `content`.
 

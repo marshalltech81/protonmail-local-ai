@@ -11,6 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 from src.lib.embed import EmbedClient, embed_query
+from src.lib.security import ProviderResponseError
 
 
 def _embedding_response(vector: list[float]) -> SimpleNamespace:
@@ -100,7 +101,7 @@ class TestEmbed:
         # A buggy / not-quite-compatible provider that returns
         # ``data=[]`` would otherwise trip ``IndexError: list index
         # out of range`` from a bare ``resp.data[0]`` access. Mirror
-        # the indexer's batch-cardinality check: raise ``RuntimeError``
+        # the indexer's batch-cardinality check: raise ``ProviderResponseError``
         # naming the operator-controllable knobs (base URL + model),
         # never the query text — the indexer's shape-validation path
         # explicitly omits payload bytes from its error message and
@@ -111,7 +112,7 @@ class TestEmbed:
             return SimpleNamespace(data=[])
 
         c.client.embeddings.create = fake_create  # type: ignore[assignment]
-        with pytest.raises(RuntimeError) as excinfo:
+        with pytest.raises(ProviderResponseError) as excinfo:
             asyncio.run(c.embed("secret-query-text"))
         msg = str(excinfo.value)
         assert "http://wrong-provider/v1" in msg
@@ -173,7 +174,7 @@ class TestEmbedQueryDimValidation:
             base_url="http://wrong-provider/v1",
             model="other-embed-model",
         )
-        with pytest.raises(ValueError) as excinfo:
+        with pytest.raises(ProviderResponseError) as excinfo:
             asyncio.run(embed_query(stub, "query", expected_dim=4))
         msg = str(excinfo.value)
         assert "3" in msg
@@ -186,7 +187,7 @@ class TestEmbedQueryDimValidation:
         # A NaN query vector gets a NULL distance to every stored row,
         # so semantic search would silently return nothing (#232).
         stub = _StubEmbed([0.1, bad, 0.3, 0.4])
-        with pytest.raises(ValueError, match="non-finite"):
+        with pytest.raises(ProviderResponseError, match="non-finite"):
             asyncio.run(embed_query(stub, "query", expected_dim=4))
 
     @pytest.mark.parametrize("zero", [0.0, -0.0])
@@ -195,7 +196,7 @@ class TestEmbedQueryDimValidation:
         # unit vector, so semantic search would return an arbitrary
         # order instead of an error (#304).
         stub = _StubEmbed([zero] * 4)
-        with pytest.raises(ValueError, match="all-zero"):
+        with pytest.raises(ProviderResponseError, match="all-zero"):
             asyncio.run(embed_query(stub, "query", expected_dim=4))
 
 

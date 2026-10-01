@@ -1247,6 +1247,139 @@ class TestReap:
             f"subject text ({deleted_subject!r}); embedded: {embedded!r}"
         )
 
+    def test_reap_chunkless_fallback_skips_blank_oldest_survivor(
+        self, db, threader, embedder, reconciler, maildir
+    ):
+        # Several survivors, the oldest with an empty subject and a later
+        # one with a subject. The fallback must take the later survivor's
+        # subject rather than drop to the stored ``display_subject``,
+        # which still holds the deleted message's subject.
+        deleted_subject = "SYNTHETIC_DELETED_SUBJECT"
+        live_subject = "SYNTHETIC_LIVE_SUBJECT"
+
+        orig_path = maildir / "1700000000.M1.host:2,S"
+        _write_eml(orig_path, "ms1@example.com", subject=deleted_subject, body="")
+        thread_id = _index(orig_path, db, threader)
+
+        blank_path = maildir / "1700000001.M2.host:2,S"
+        _write_eml(
+            blank_path,
+            "ms2@example.com",
+            subject="",
+            body="",
+            in_reply_to="ms1@example.com",
+            date=datetime(2024, 2, 1, tzinfo=UTC),
+        )
+        _index(blank_path, db, threader)
+
+        live_path = maildir / "1700000002.M3.host:2,S"
+        _write_eml(
+            live_path,
+            "ms3@example.com",
+            subject=live_subject,
+            body="",
+            in_reply_to="ms2@example.com",
+            date=datetime(2024, 3, 1, tzinfo=UTC),
+        )
+        _index(live_path, db, threader)
+        assert db.get_thread_display_subject(thread_id) == deleted_subject
+
+        orig_path.rename(maildir / "1700000000.M1.host:2,ST")
+        reconciler.sweep()
+
+        embedded: list[str] = []
+        original_embed = embedder.embed
+
+        def _capture(text: str) -> list[float]:
+            embedded.append(text)
+            return original_embed(text)
+
+        embedder.embed = _capture
+
+        result = reconciler.reap()
+        assert result["threads_rebuilt"] == 1
+        assert embedded == [live_subject]
+        assert all(deleted_subject not in text for text in embedded)
+
+    def test_reap_chunkless_fallback_uses_sentinel_when_no_subject_anywhere(
+        self, db, threader, embedder, reconciler, maildir
+    ):
+        # No survivor and no stored display subject: the sentinel is
+        # embedded.
+        orig_path = maildir / "1700000000.M1.host:2,S"
+        _write_eml(orig_path, "ns1@example.com", subject="", body="")
+        thread_id = _index(orig_path, db, threader)
+
+        reply_path = maildir / "1700000001.M2.host:2,S"
+        _write_eml(
+            reply_path,
+            "ns2@example.com",
+            subject="",
+            body="",
+            in_reply_to="ns1@example.com",
+            date=datetime(2024, 2, 1, tzinfo=UTC),
+        )
+        _index(reply_path, db, threader)
+        assert db.get_thread_display_subject(thread_id) is None
+
+        orig_path.rename(maildir / "1700000000.M1.host:2,ST")
+        reconciler.sweep()
+
+        embedded: list[str] = []
+        original_embed = embedder.embed
+
+        def _capture(text: str) -> list[float]:
+            embedded.append(text)
+            return original_embed(text)
+
+        embedder.embed = _capture
+
+        result = reconciler.reap()
+        assert result["threads_rebuilt"] == 1
+        assert embedded == ["(empty thread)"]
+
+    def test_reap_chunkless_fallback_ignores_stored_subject_when_survivors_blank(
+        self, db, threader, embedder, reconciler, maildir
+    ):
+        # Every survivor's subject is empty, so a non-empty stored
+        # ``display_subject`` can only come from the deleted message.
+        # The fallback must go straight to the sentinel.
+        deleted_subject = "SYNTHETIC_DELETED_SUBJECT"
+
+        orig_path = maildir / "1700000000.M1.host:2,S"
+        _write_eml(orig_path, "bs1@example.com", subject=deleted_subject, body="")
+        thread_id = _index(orig_path, db, threader)
+
+        for i, day in ((2, 1), (3, 2)):
+            path = maildir / f"170000000{i - 1}.M{i}.host:2,S"
+            _write_eml(
+                path,
+                f"bs{i}@example.com",
+                subject="",
+                body="",
+                in_reply_to=f"bs{i - 1}@example.com",
+                date=datetime(2024, 2, day, tzinfo=UTC),
+            )
+            _index(path, db, threader)
+        assert db.get_thread_display_subject(thread_id) == deleted_subject
+
+        orig_path.rename(maildir / "1700000000.M1.host:2,ST")
+        reconciler.sweep()
+
+        embedded: list[str] = []
+        original_embed = embedder.embed
+
+        def _capture(text: str) -> list[float]:
+            embedded.append(text)
+            return original_embed(text)
+
+        embedder.embed = _capture
+
+        result = reconciler.reap()
+        assert result["threads_rebuilt"] == 1
+        assert embedded == ["(empty thread)"]
+        assert all(deleted_subject not in text for text in embedded)
+
     def test_reap_drops_chunks_for_reaped_messages_and_keeps_survivor_chunks(
         self, db, threader, embedder, reconciler, maildir
     ):

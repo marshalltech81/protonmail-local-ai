@@ -1,11 +1,22 @@
 """Tests for src.lib.security redaction helpers."""
 
+import json
+import sqlite3
+
+import anthropic
+import httpx2
+import openai
+import pytest
+from src.lib.inference import InferenceTruncatedError
 from src.lib.security import (
+    ProviderResponseError,
     log_tool_call,
     redact_sensitive_text,
     safe_exception_text,
     safe_provider_exception_text,
 )
+
+_REQUEST = httpx2.Request("POST", "http://host.docker.internal:1234/v1/chat/completions")
 
 
 class TestRedactSensitiveText:
@@ -93,31 +104,54 @@ class TestSafeProviderExceptionText:
         )
         assert safe_provider_exception_text(err) == "FakeSDKStatusError: status=429"
 
-    def test_non_status_exception_falls_through_to_redaction(self):
-        # Connection / timeout / unrelated exceptions don't carry a
-        # status_code, so the helper falls through to the standard
-        # secret-redacting formatter and keeps diagnostic detail an
-        # operator needs (timeout duration, DNS failure, etc.).
-        err = TimeoutError("read timeout after 60s")
-        assert safe_provider_exception_text(err) == "read timeout after 60s"
+    @pytest.mark.parametrize(
+        "error",
+        [
+            TimeoutError("read timeout after 60s"),
+            ConnectionError("connection refused by host.docker.internal"),
+            openai.APIConnectionError(message="Connection error.", request=_REQUEST),
+            openai.APITimeoutError(request=_REQUEST),
+            anthropic.APIConnectionError(message="Connection error.", request=_REQUEST),
+            anthropic.APITimeoutError(request=_REQUEST),
+            ProviderResponseError("Inference provider returned empty content (mode=openai)"),
+            InferenceTruncatedError(partial="partial answer"),
+        ],
+        ids=lambda e: type(e).__name__,
+    )
+    def test_connection_timeout_and_fixed_message_errors_keep_their_text(self, error):
+        # These carry no provider response or mail content, and their
+        # text is the diagnostic an operator needs.
+        assert safe_provider_exception_text(error) == str(error)
 
-    def test_non_int_status_code_falls_through(self):
-        # Defensive: an exception with a non-integer ``status_code``
-        # (string, None) doesn't match the SDK contract — fall through
-        # to the standard formatter rather than producing a misleading
-        # ``status=<garbage>`` line.
+    @pytest.mark.parametrize(
+        "error",
+        [
+            RuntimeError("bad field 'Subject: confidential'"),
+            ValueError("could not convert 'Subject: confidential'"),
+            TypeError("unexpected 'Subject: confidential'"),
+            json.JSONDecodeError("Unexpected 'Subject: confidential'", "doc", 0),
+            sqlite3.OperationalError("fts5: syntax error near 'Subject: confidential'"),
+        ],
+        ids=lambda e: type(e).__name__,
+    )
+    def test_anything_else_is_reduced_to_its_type(self, error):
+        # Parse, validation and conversion errors quote the values they
+        # reject, and a provider's response can echo the mail sent to it.
+        assert safe_provider_exception_text(error) == type(error).__name__
+
+    def test_non_int_status_code_is_reduced_to_its_type(self):
+        # An exception with a non-integer ``status_code`` doesn't match
+        # the SDK contract, so it gets neither a misleading
+        # ``status=<garbage>`` line nor its message.
         class WeirdError(Exception):
             status_code = "unknown"
 
         err = WeirdError("some message")
-        assert safe_provider_exception_text(err) == "some message"
+        assert safe_provider_exception_text(err) == "WeirdError"
 
-    def test_falls_through_path_still_redacts_secrets(self):
-        # When the helper falls through (non-status exception), it
-        # must still apply the standard redaction so a secret quoted
-        # in the message doesn't leak just because the exception
-        # wasn't a provider status error.
-        err = RuntimeError("connect failed with key sk-ant-abc123XYZ")
+    def test_kept_text_still_redacts_secrets(self):
+        # A message that is kept must still be secret-redacted.
+        err = ConnectionError("connect failed with key sk-ant-abc123XYZ")
         out = safe_provider_exception_text(err, secrets=[])
         assert "sk-ant-abc123XYZ" not in out
         assert "[REDACTED]" in out
