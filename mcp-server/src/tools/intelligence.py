@@ -894,9 +894,8 @@ def register_intelligence_tools(
         """
         Summarize indexed context for an email thread.
 
-        ``thread_id`` accepts EITHER an opaque thread ID returned by
-        search_emails / list_threads / get_message, OR a subject-line
-        phrase. Opaque IDs are looked up directly. When that lookup
+        ``thread_id`` accepts EITHER an opaque ``Thread ID`` that a tool
+        result returned, OR a subject-line phrase. Opaque IDs are looked up directly. When that lookup
         misses, the tool falls back to a hybrid keyword + vector
         search on the same string and resolves ONLY when at least one
         candidate's subject line shares a query token — so a call

@@ -184,8 +184,8 @@ def register_retrieval_tools(server, db):
         also wrong — the local index has
         already extracted that PDF's text.
 
-        ``thread_id`` is OPAQUE. Obtain it from search_emails,
-        list_threads, or get_message. Do NOT pass a subject line, a
+        ``thread_id`` is OPAQUE: pass only a ``Thread ID`` that a tool
+        result returned. Do NOT pass a subject line, a
         slugged phrase like ``"weekly_status_update"``, or any other
         human-readable string — those are not valid thread IDs and
         will return ``Thread not found``.
