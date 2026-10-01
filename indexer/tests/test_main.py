@@ -15,6 +15,7 @@ exercise it with stub collaborators rather than booting a live indexer.
 import email.errors
 import json
 import logging
+import os
 import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -3978,21 +3979,34 @@ class TestStageErrorsKeepMailOutOfLastError:
         assert SYNTHETIC_MARKER not in caplog.text
         assert f"error={type_name}" in caplog.text
 
-    def test_os_error_keeps_its_text(self, tmp_path, monkeypatch, caplog):
-        """An ``OSError`` carries an errno string and the mbsync-generated
-        Maildir path, which operators need to diagnose a file fault."""
+    def test_os_error_keeps_errno_text_only(self, tmp_path, monkeypatch, caplog):
+        """An ``OSError`` keeps its errno and the fixed ``os.strerror``
+        text, which operators need to diagnose a file fault. Its message
+        and filename are not kept: any library can raise ``OSError`` with
+        arbitrary text, and the job row already records the path."""
         row = self._drain_one(
             tmp_path,
             monkeypatch,
             caplog,
             "chunk_message",
-            PermissionError(13, "Permission denied", "/maildir/INBOX/cur/x"),
+            PermissionError(13, f"{SYNTHETIC_MARKER} denied", f"/x/{SYNTHETIC_MARKER}"),
         )
 
         assert row["last_stage"] == "chunk"
-        assert row["last_error"] == (
-            "PermissionError: [Errno 13] Permission denied: '/maildir/INBOX/cur/x'"
-        )
+        assert row["last_error"] == f"PermissionError: [Errno 13] {os.strerror(13)}"
+        assert SYNTHETIC_MARKER not in caplog.text
+
+    @pytest.mark.parametrize(
+        "exc",
+        [
+            OSError(SYNTHETIC_MARKER),
+            OSError("not-an-errno", SYNTHETIC_MARKER),
+        ],
+    )
+    def test_os_error_without_an_errno_is_type_only(self, exc):
+        """Library code raises ``OSError`` with free text (no errno);
+        that text can quote the attachment being read."""
+        assert main._stage_error(exc) == "OSError"
 
     def test_oversized_message_error_keeps_its_text(self):
         exc = parser.OversizedMessageError(Path("/maildir/INBOX/cur/x"), 20, 10)

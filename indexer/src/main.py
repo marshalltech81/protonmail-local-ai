@@ -536,9 +536,9 @@ def _iter_maildir_messages(root: Path):
 # (email parser/generator errors, codec and charset-lookup errors,
 # ``ValueError``, ``sqlite3.Error``, library errors) is reduced to its
 # name, which costs debuggability but cannot leak a message.
+# ``OSError`` is not listed: any library can raise it with free text,
+# so ``_stage_error`` renders it from its errno alone.
 _STAGE_ERROR_KEEP_TEXT: tuple[type[BaseException], ...] = (
-    # Errno string plus the mbsync-generated Maildir path.
-    OSError,
     # Path and byte sizes only (parser.py).
     OversizedMessageError,
     # Fixed text plus counts by contract (embedder.py).
@@ -560,6 +560,10 @@ def _stage_error(exc: BaseException) -> str:
     """
     if isinstance(exc, _STAGE_ERROR_KEEP_TEXT):
         return f"{type(exc).__name__}: {exc}"
+    if isinstance(exc, OSError) and isinstance(exc.errno, int):
+        # The errno's fixed ``os.strerror`` text, never the exception's
+        # own message or filename; the job row already holds the path.
+        return f"{type(exc).__name__}: [Errno {exc.errno}] {os.strerror(exc.errno)}"
     return type(exc).__name__
 
 
