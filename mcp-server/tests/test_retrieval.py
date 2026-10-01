@@ -652,3 +652,40 @@ class TestQueryMessages:
         messages_db.query_messages = boom  # type: ignore[assignment]
         handler = _handlers(fake_server, messages_db)["query_messages"]
         assert "Error" in _error(handler())
+
+
+_ERROR_MARKER = "privatemarkerq7z"
+
+
+class TestHandlerErrorTextWithheld:
+    """A query-path failure reaches the log and the caller as its type
+    only: an SQLite error can quote withheld arguments (an FTS5 error
+    quotes the term) or stored mail (#257)."""
+
+    @pytest.mark.parametrize(
+        ("fixture", "tool", "method", "kwargs"),
+        [
+            ("seeded_db", "get_thread", "get_thread_page", {"thread_id": "t-alpha"}),
+            ("seeded_db", "get_message", "get_message_view", {"message_id": "t-alpha"}),
+            ("seeded_db", "list_threads", "list_threads", {"folder": "INBOX"}),
+            ("messages_db", "query_messages", "query_messages", {"text": "budget"}),
+            ("seeded_db", "find_contact", "find_contact", {"query": "alice"}),
+            ("seeded_db", "list_folders", "list_folders", {}),
+        ],
+    )
+    def test_sqlite_error_text_is_withheld(
+        self, request, fake_server, monkeypatch, caplog, fixture, tool, method, kwargs
+    ):
+        db = request.getfixturevalue(fixture)
+
+        def boom(*_args, **_kwargs):
+            raise sqlite3.OperationalError(f"no such column: {_ERROR_MARKER}")
+
+        monkeypatch.setattr(db, method, boom)
+        handler = _handlers(fake_server, db)[tool]
+        with caplog.at_level("DEBUG"):
+            text = _error(handler(**kwargs))
+        assert _ERROR_MARKER not in text
+        assert _ERROR_MARKER not in caplog.text
+        assert "OperationalError" in text
+        assert "OperationalError" in caplog.text

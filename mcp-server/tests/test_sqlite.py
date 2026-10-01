@@ -3350,3 +3350,91 @@ class TestVectorLaneKLimit:
             reranker=_PassThroughReranker(),
         )
         assert calls and calls[0] > 0
+
+
+# A synthetic stand-in for query text or mail content. It is a bare word
+# so FTS5 accepts it as a column name and quotes it back in its error.
+_ERROR_MARKER = "privatemarkerq7z"
+_VEC = [0.0, 0.0, 0.0, 0.0]
+
+
+class TestFallbackErrorTextWithheld:
+    """Every read-path fallback logs the exception type, never its text:
+    an SQLite error can quote the query (FTS5 reports ``<term>:foo`` as
+    ``no such column: <term>``), and the query is withheld from the
+    tool-call log (#257)."""
+
+    @pytest.mark.parametrize(
+        ("call", "expected"),
+        [
+            pytest.param(
+                lambda db: db._attachment_filename_lane("x", [], [], 5), [], id="att-name"
+            ),
+            pytest.param(lambda db: db._attachment_text_lane("x", [], [], 5), [], id="att-text"),
+            pytest.param(lambda db: db._attachment_scan([], [], 5), [], id="att-scan"),
+            pytest.param(lambda db: db._thread_keyword_search("x", 5), [], id="thread-fts"),
+            pytest.param(lambda db: db._chunk_keyword_search("x", 5), [], id="chunk-fts"),
+            pytest.param(lambda db: db._attachment_keyword_search("x", 5), [], id="att-fts"),
+            pytest.param(lambda db: db._matched_attachments("x", ["t-alpha"]), {}, id="att-match"),
+            pytest.param(lambda db: db._like_fallback("x", 5), [], id="like"),
+            pytest.param(lambda db: db._chunk_vector_search(_VEC, 5), None, id="chunk-vec"),
+            pytest.param(
+                lambda db: db.get_evidence_chunks_for_threads(["t-alpha"], _VEC),
+                {"t-alpha": []},
+                id="evidence",
+            ),
+            pytest.param(
+                lambda db: db.get_recent_chunks_for_thread("t-alpha"), [], id="recent-chunks"
+            ),
+            pytest.param(lambda db: db._vector_search(_VEC, 5), None, id="thread-vec"),
+        ],
+    )
+    def test_fallback_logs_type_not_text(self, seeded_db, monkeypatch, caplog, call, expected):
+        calls = []
+
+        def boom(*_args, **_kwargs):
+            calls.append(1)
+            raise sqlite3.OperationalError(f"no such column: {_ERROR_MARKER}")
+
+        monkeypatch.setattr(seeded_db, "_fetchall", boom)
+        with caplog.at_level("DEBUG"):
+            assert call(seeded_db) == expected
+        assert calls, "the patched query must have run"
+        assert _ERROR_MARKER not in caplog.text
+        assert "OperationalError" in caplog.text
+
+    def test_recent_chunks_failure_omits_thread_id(self, seeded_db, monkeypatch, caplog):
+        """A thread id is a Message-ID, which the tool-call log withholds."""
+
+        def boom(*_args, **_kwargs):
+            raise sqlite3.OperationalError("disk I/O error")
+
+        monkeypatch.setattr(seeded_db, "_fetchall", boom)
+        with caplog.at_level("DEBUG"):
+            seeded_db.get_recent_chunks_for_thread(f"<{_ERROR_MARKER}@example.com>")
+        assert _ERROR_MARKER not in caplog.text
+
+    def test_real_fts5_error_quotes_term_but_log_does_not(self, seeded_db, monkeypatch, caplog):
+        """An unsanitized ``<term>:foo`` makes FTS5 quote ``<term>``; the
+        keyword lane still falls back to LIKE and logs only the type."""
+        import src.lib.sqlite as sqlite_mod
+
+        query = f"{_ERROR_MARKER}:foo"
+        with pytest.raises(sqlite3.OperationalError, match=_ERROR_MARKER):
+            seeded_db._fetchall("SELECT rowid FROM threads_fts WHERE threads_fts MATCH ?", [query])
+
+        monkeypatch.setattr(sqlite_mod, "_sanitize_fts_query", lambda q: q)
+        sentinel = [object()]
+        seen = []
+
+        def like(q, *_args, **_kwargs):
+            seen.append(q)
+            return sentinel
+
+        monkeypatch.setattr(seeded_db, "_like_fallback", like)
+        with caplog.at_level("DEBUG"):
+            result = seeded_db._thread_keyword_search(query, 5)
+        assert result is sentinel
+        assert seen == [query]
+        assert _ERROR_MARKER not in caplog.text
+        assert "OperationalError" in caplog.text

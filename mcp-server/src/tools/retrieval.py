@@ -307,8 +307,8 @@ def register_retrieval_tools(server, db):
         except ToolError:
             raise
         except Exception as e:
-            log.error(f"get_thread error: {e}")
-            raise ToolError(f"Error: {e}") from e
+            log.error("get_thread error: %s", type(e).__name__)
+            raise ToolError(f"Error: {type(e).__name__}") from e
 
     @server.tool()
     async def get_message(
@@ -401,8 +401,8 @@ def register_retrieval_tools(server, db):
         except ToolError:
             raise
         except Exception as e:
-            log.error(f"get_message error: {e}")
-            raise ToolError(f"Error: {e}") from e
+            log.error("get_message error: %s", type(e).__name__)
+            raise ToolError(f"Error: {type(e).__name__}") from e
 
     @server.tool()
     async def list_threads(
@@ -481,9 +481,16 @@ def register_retrieval_tools(server, db):
 
             return tool_result("\n".join(lines), output)
 
-        except Exception as e:
-            log.error(f"list_threads error: {e}")
+        except ValueError as e:
+            # The only ValueError is the fixed filter_type message, which
+            # the caller needs; log only that the input was rejected.
+            log.warning("list_threads rejected invalid input (filter_type)")
             raise ToolError(f"Error: {e}") from e
+        except Exception as e:
+            # Type only, here and in the other handlers: an SQLite error
+            # can quote query text or stored mail (#257).
+            log.error("list_threads error: %s", type(e).__name__)
+            raise ToolError(f"Error: {type(e).__name__}") from e
 
     @server.tool()
     async def query_messages(
@@ -569,8 +576,8 @@ def register_retrieval_tools(server, db):
             log.warning("query_messages rejected invalid input (date_from/date_to/text/cursor)")
             raise ToolError(f"Error: {e}") from e
         except Exception as e:
-            log.error(f"query_messages error: {e}")
-            raise ToolError(f"Error: {e}") from e
+            log.error("query_messages error: %s", type(e).__name__)
+            raise ToolError(f"Error: {type(e).__name__}") from e
 
         uses = _filter_uses(args)
         output = QueryMessagesOutput(
@@ -652,8 +659,8 @@ def register_retrieval_tools(server, db):
         try:
             contacts = await asyncio.to_thread(db.find_contact, query, limit)
         except Exception as e:
-            log.error(f"find_contact error: {e}")
-            raise ToolError(f"Error: {e}") from e
+            log.error("find_contact error: %s", type(e).__name__)
+            raise ToolError(f"Error: {type(e).__name__}") from e
 
         output = FindContactOutput(
             contacts=[
@@ -702,5 +709,5 @@ def register_retrieval_tools(server, db):
             return tool_result("\n".join(lines), output)
 
         except Exception as e:
-            log.error(f"list_folders error: {e}")
-            raise ToolError(f"Error: {e}") from e
+            log.error("list_folders error: %s", type(e).__name__)
+            raise ToolError(f"Error: {type(e).__name__}") from e
