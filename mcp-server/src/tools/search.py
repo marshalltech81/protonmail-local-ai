@@ -12,7 +12,7 @@ from mcp.types import CallToolResult
 
 from ..lib.embed import embed_query
 from ..lib.security import log_tool_call, safe_exception_text, safe_provider_exception_text
-from ..lib.sqlite import InvalidFilterError, VectorLanesUnavailableError
+from ..lib.sqlite import InvalidFilterError, VectorLanesUnavailableError, validate_date_range
 from ..lib.validation import clamp_int
 from .outputs import (
     HEADER_CHAR_LIMIT,
@@ -197,6 +197,12 @@ def register_search_tools(
         # raw value is missing or unparseable rather than raising a bare
         # ValueError before the try/except below.
         limit = clamp_int(limit, default=10, minimum=1, maximum=_MAX_SEARCH_LIMIT)
+        # Reject a bad date range before any provider or retrieval work.
+        try:
+            validate_date_range(date_from, date_to)
+        except InvalidFilterError as e:
+            log.warning("search_emails rejected invalid %s", e.field_name)
+            raise ToolError(f"Search error: {e}") from e
 
         # Resolve ``from_name`` -> canonical SENDER address via
         # find_contact. Skipped when the caller already passed a
@@ -442,6 +448,15 @@ def register_search_tools(
         # evidence chunks, and an LLM-inflated value would drive a large
         # per-thread chunk fetch and an oversized response payload.
         limit = clamp_int(limit, default=12, minimum=1, maximum=_MAX_SEARCH_LIMIT)
+        # Reject a bad date range before any provider or retrieval work.
+        # The thread-scoped path takes no dates (blank ones are ignored
+        # above), so only the mailbox-wide path checks them.
+        if not thread_id:
+            try:
+                validate_date_range(date_from, date_to)
+            except InvalidFilterError as e:
+                log.warning("get_evidence rejected invalid %s", e.field_name)
+                raise ToolError(f"Evidence error: {e}") from e
 
         # groups: list of (subject, thread_id, lane_ranks | None,
         # thread_score | None, chunks). ``lane_ranks`` is None for the
@@ -636,6 +651,12 @@ def register_search_tools(
             },
         )
         limit = clamp_int(limit, default=20, minimum=1, maximum=_MAX_SEARCH_LIMIT)
+        # Reject a bad date range before any provider or retrieval work.
+        try:
+            validate_date_range(date_from, date_to)
+        except InvalidFilterError as e:
+            log.warning("search_attachments rejected invalid %s", e.field_name)
+            raise ToolError(f"Attachment search error: {e}") from e
         try:
             results = await asyncio.to_thread(
                 db.search_attachments,
