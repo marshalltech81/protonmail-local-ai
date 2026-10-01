@@ -2740,6 +2740,20 @@ class TestFindContact:
         assert results[0]["email"] == "alice@example.com"
         assert results[0]["thread_count"] == 2
 
+    def test_reports_the_contact_organization(self, messages_db: Database):
+        # The organization is the indexer's ``org:<domain>`` entity; an
+        # address without one (a free-mail provider) reports None.
+        with closing(sqlite3.connect(messages_db.path)) as conn:
+            conn.execute(
+                "UPDATE entities SET organization_id = NULL "
+                "WHERE entity_id = 'person:carol@other.org'"
+            )
+            conn.commit()
+        orgs = {c["email"]: c["organization"] for c in messages_db.find_contact("@")}
+        assert orgs["jane@example.com"] == "example.com"
+        assert orgs["jose@other.org"] == "other.org"
+        assert orgs["carol@other.org"] is None
+
     def test_match_by_domain_fragment(self, seeded_db: Database):
         # ``@example.com`` should pull every distinct address sharing
         # that domain — alice, bob, carol, dave (one each across the
@@ -2866,7 +2880,14 @@ class TestFindContact:
         db = Database(str(path))
         results = db.find_contact("jane")
         assert results == [
-            {"email": "jane@example.com", "names": ["J. Doe", "Jane Doe"], "thread_count": 1}
+            {
+                "email": "jane@example.com",
+                "names": ["J. Doe", "Jane Doe"],
+                "thread_count": 1,
+                "organization": "example.com",
+                "authority_class": "unclassified",
+                "authority_rule": None,
+            }
         ]
 
     def test_name_match_reports_the_whole_contact(self, tmp_path):
@@ -2897,6 +2918,9 @@ class TestFindContact:
             "email": "person@example.test",
             "names": ["J. Smith", "Jane Smith", "Janet Doe"],
             "thread_count": 3,
+            "organization": "example.test",
+            "authority_class": "unclassified",
+            "authority_rule": None,
         }
         assert db.find_contact("Jane Smith") == [whole]
         assert db.find_contact("person@example.test") == [whole]

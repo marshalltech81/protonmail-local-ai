@@ -135,6 +135,10 @@ _LOGGABLE_TOOL_PARAMS: dict[str, Callable[[Any], bool]] = {
     "include_attachments_metadata": _is_bool,
     "date_from": _is_iso_date,
     "date_to": _is_iso_date,
+    # ``lib/sqlite.AUTHORITY_CLASSES``.
+    "authority_class": _one_of(
+        "counsel", "management", "vendor", "government", "personal", "other", "unclassified"
+    ),
 }
 
 

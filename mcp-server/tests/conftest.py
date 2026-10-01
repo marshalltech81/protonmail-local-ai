@@ -3,6 +3,7 @@
 import hashlib
 import json
 import sqlite3
+from contextlib import closing
 from datetime import UTC, datetime
 from email.utils import parseaddr
 from pathlib import Path
@@ -178,6 +179,23 @@ def _build_schema(conn: sqlite3.Connection) -> None:
             sync_completed_at  TEXT,
             sync_interval_secs INTEGER,
             indexer_seen_at    TEXT NOT NULL
+        );
+
+        -- Deterministic entities (indexer ``_run_entity_schema_script``).
+        CREATE TABLE entities (
+            entity_id       TEXT PRIMARY KEY,
+            kind            TEXT NOT NULL CHECK (kind IN ('person', 'organization')),
+            canonical_key   TEXT NOT NULL,
+            organization_id TEXT REFERENCES entities(entity_id),
+            authority_class TEXT NOT NULL DEFAULT 'unclassified',
+            authority_rule  TEXT
+        );
+        CREATE INDEX idx_entities_organization ON entities(organization_id);
+        CREATE INDEX idx_entities_authority ON entities(authority_class);
+        CREATE TABLE entity_aliases (
+            entity_id TEXT NOT NULL REFERENCES entities(entity_id) ON DELETE CASCADE,
+            alias     TEXT NOT NULL,
+            PRIMARY KEY (entity_id, alias)
         );
         """
     )
@@ -427,6 +445,38 @@ def _insert_message_record(
             "INSERT OR IGNORE INTO message_participants VALUES (?, ?, ?, ?)",
             (claimant_of(message_id, variant), role, address, name or None),
         )
+        _insert_entity(cur, address, name)
+
+
+def _insert_entity(cur: sqlite3.Cursor, address: str, name: str | None) -> None:
+    """The indexer's entity rows for one participant: a person per
+    address with an organization per domain (the fixtures do not model
+    the indexer's free-mail exclusion) and the display name as alias."""
+    domain = address.rpartition("@")[2]
+    cur.execute(
+        "INSERT OR IGNORE INTO entities (entity_id, kind, canonical_key, organization_id) "
+        "VALUES (?, 'organization', ?, NULL)",
+        (f"org:{domain}", domain),
+    )
+    cur.execute(
+        "INSERT OR IGNORE INTO entities (entity_id, kind, canonical_key, organization_id) "
+        "VALUES (?, 'person', ?, ?)",
+        (f"person:{address}", address, f"org:{domain}"),
+    )
+    if name:
+        cur.execute(
+            "INSERT OR IGNORE INTO entity_aliases VALUES (?, ?)", (f"person:{address}", name)
+        )
+
+
+def set_authority(db_path, address: str, authority_class: str, rule: str) -> None:
+    """Classify ``address``'s person entity as the indexer's rules file would."""
+    with closing(sqlite3.connect(str(db_path))) as conn:
+        conn.execute(
+            "UPDATE entities SET authority_class = ?, authority_rule = ? WHERE entity_id = ?",
+            (authority_class, rule, f"person:{address}"),
+        )
+        conn.commit()
 
 
 def _insert_message(

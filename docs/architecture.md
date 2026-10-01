@@ -59,6 +59,7 @@ embedder (operator-supplied)  sqlite-volume
                                  - indexed_files, indexing_jobs,
                                    ingestion_state
                                  - pending_deletions (reconciler)
+                                 - entities, entity_aliases
 
 inference (operator-supplied)
   - INFERENCE_MODE=anthropic →
@@ -421,6 +422,79 @@ message's `message_thread_map` row. `messages` references
 `message_thread_map` and `message_participants` references `messages`,
 both `ON DELETE CASCADE`, so every existing removal path — reaper,
 whole-thread delete, rebuild — cleans them up without separate code.
+
+## Entities
+
+Entity resolution is deterministic: no model suggests or performs a
+merge. Each `message_participants` row also writes, in the same
+transaction:
+
+- a **person** entity per canonical address (`entity_id`
+  `person:<address>`), with every display name seen for that address
+  recorded in `entity_aliases`. Two different addresses are never
+  merged, however similar their names: display names are
+  sender-controlled.
+- an **organization** entity per exact address domain
+  (`org:<domain>`), linked from the person through `organization_id`.
+  The domain is used as written, with no public-suffix lookup, so
+  `mail.example.com` and `example.com` are two organizations rather
+  than a guessed merge. Addresses at a short list of free-mail
+  providers (`FREE_MAIL_DOMAINS` in `indexer/src/entities.py`) get no
+  organization.
+
+IDs are derived from the address and domain, so reprocessing a message
+rewrites the same rows. Entity and alias writes are capped at
+`MAX_ENTITY_PARTICIPANTS_PER_MESSAGE` (200) distinct addresses per
+message, authors first (a repeated address is written once, with the
+first display name it carries in that message, and does not count
+again), so a crafted header listing thousands of recipients
+cannot drive unbounded writes; later participants still get their
+`message_participants` rows, just no new entity. The MCP server's
+`find_contact` reports each contact's organization.
+
+Known limitation: entities are not pruned when messages are removed,
+so an address seen only in reaped mail keeps its `entities` row and
+aliases. Every read joins through `message_participants`, which is
+pruned, so such an entity never surfaces in results; it only takes
+space.
+
+### Source authority
+
+`entities.authority_class` comes only from an operator-written rules
+file, `config/authority.toml` (mounted read-only at `/config`; see
+`docs/setup.md`), mapping exact addresses and domains (with their
+subdomains) to `counsel`, `management`, `vendor`, `government`,
+`personal` or `other`. `authority_rule` records the rule that matched
+(`address:<pattern>` or `domain:<pattern>`) as provenance; an entity no
+rule matches is `unclassified` with no rule. An address rule beats a
+domain rule, and the closest listed parent domain wins. No model
+classifies anything.
+
+Known limitation: authority reflects the **claimed** From address. The
+index does not authenticate senders, so spoofed mail claiming an
+address or domain from a classified rule is classified too (see #463).
+Treat the class as a description of who the message says it is from,
+not proof.
+
+The indexer loads the file once at startup, before opening the
+database. An absent file classifies nothing; a file that cannot be
+inspected (a dangling symlink, an unreadable parent directory) or is
+malformed fails closed, with errors naming positions only (table,
+key and entry numbers), never the file's text. Domain rules must be
+LDH labels joined by single dots, at most 16 labels and 253
+characters, so a wildcard, URL or empty label is rejected rather than
+loaded as a rule that can never match. Loading is bounded (1 MiB,
+10,000 patterns), and every existing entity is reclassified under the
+loaded rules in one transaction, so an edit takes effect at the next
+start. Classifying a sender's domain does at most one lookup per label
+over at most 16 labels and 253 characters; a longer or deeper
+sender-supplied domain is unclassified without any lookup.
+
+Authority is metadata, never a ranking weight. The MCP server exposes it
+as an `authority_class` filter on `search_emails` and `query_messages`
+(a message matches when one of its From senders carries the class; a
+thread when one of its messages does) and on `find_contact` results.
+Filtering removes results without reordering or rescoring the rest.
 
 ## Attachment Indexing
 

@@ -370,6 +370,19 @@ class Contact(_Output):
     )
     name_count: int
     thread_count: int
+    organization: str | None = Field(
+        description="The contact's organization: its exact address domain, or null for a "
+        "free-mail provider. Never inferred from display names."
+    )
+    authority_class: str = Field(
+        description="Source authority from the operator's rules file: counsel, "
+        "management, vendor, government, personal, other, or unclassified. "
+        "Metadata only; it does not affect ranking."
+    )
+    authority_rule: str | None = Field(
+        description="The rule that assigned authority_class (address:<pattern> or "
+        "domain:<pattern>); null when unclassified."
+    )
 
 
 class FindContactOutput(_Output):

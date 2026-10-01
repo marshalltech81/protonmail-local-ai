@@ -15,6 +15,7 @@ from ..lib.sqlite import (
     PROMPT_EVIDENCE_CHUNKS_PER_THREAD,
     InvalidFilterError,
     VectorLanesUnavailableError,
+    normalize_authority_class,
     validate_date_range,
 )
 from ..lib.timings import count, rerank_mode, stage, timed_tool
@@ -99,6 +100,7 @@ def register_search_tools(
         has_attachments: bool | None = None,
         participant: str | None = None,
         limit: int = 10,
+        authority_class: str | None = None,
     ) -> CallToolResult:
         """
         Search the mailbox and return matching THREADS (conversations),
@@ -177,6 +179,13 @@ def register_search_tools(
                          Accepts an address, a domain (@example.com),
                          or a bare name fragment.
             limit: Maximum number of threads to return (default 10)
+            authority_class: Keep only threads with a message whose
+                             sender the operator's rules file classes
+                             as this: "counsel", "management",
+                             "vendor", "government", "personal",
+                             "other", or "unclassified" (no rule
+                             matched). A filter only; it never changes
+                             ranking. find_contact shows a sender's class.
 
         Returns:
             List of matching email threads with subject, participants,
@@ -196,6 +205,7 @@ def register_search_tools(
                 "has_attachments": has_attachments,
                 "participant": participant,
                 "limit": limit,
+                "authority_class": authority_class,
             },
         )
         if mode not in _VALID_SEARCH_MODES:
@@ -209,6 +219,7 @@ def register_search_tools(
         # Reject a bad date range before any provider or retrieval work.
         try:
             validate_date_range(date_from, date_to)
+            authority_class = normalize_authority_class(authority_class)
         except InvalidFilterError as e:
             log.warning("search_emails rejected invalid %s", e.field_name)
             raise ToolError(f"Search error: {e}") from e
@@ -269,6 +280,7 @@ def register_search_tools(
                     has_attachments=has_attachments,
                     participant=participant,
                     limit=limit,
+                    authority_class=authority_class,
                 )
             elif mode == "semantic":
                 embedding = await embed_query(embed_client, query, expected_embed_dim)
@@ -282,6 +294,7 @@ def register_search_tools(
                     has_attachments=has_attachments,
                     participant=participant,
                     limit=limit,
+                    authority_class=authority_class,
                 )
             else:  # hybrid (default)
                 embedding = await embed_query(embed_client, query, expected_embed_dim)
@@ -310,6 +323,7 @@ def register_search_tools(
                     limit=limit,
                     with_evidence=reranker is not None,
                     reranker=reranker,
+                    authority_class=authority_class,
                 )
 
             count("results", len(results))

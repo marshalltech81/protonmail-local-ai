@@ -287,6 +287,9 @@ Secrets are a hard boundary.
 - `.secrets/bridge_pass.txt`
 - `mbsync/bridge-cert.pem`
 - any `.pem`, `.key`, `.p12`, or `.pfx` file
+- `config/authority.toml` (the operator's source-authority rules: real
+  addresses and domains; only `config/authority.toml.example` with
+  `.example` domains is tracked)
 - any ad hoc export containing credentials, tokens, or private keys
 
 ### Credential-specific rules

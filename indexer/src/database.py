@@ -19,6 +19,12 @@ from pathlib import Path
 import sqlite_vec
 
 from .chunker import l2_normalize, truncate_to_tokens
+from .entities import (
+    AuthorityRules,
+    org_entity_id,
+    organization_domain,
+    person_entity_id,
+)
 from .extractors import OCR_DISABLED_ERROR, SCANNED_PDF_OCR_DISABLED_ERROR
 from .threader import (
     FTS_SUBJECT_SCAN_CHARS,
@@ -95,6 +101,12 @@ EMBEDDING_DIM = 4096
 # the SQLite build, so lookups over an unbounded ID list batch under it.
 _IN_CLAUSE_BATCH_SIZE = 500
 
+# Participants per message that get entity and alias writes (From first,
+# then To, then Cc). Later participants still get ``message_participants``
+# rows, just no new entities, so one crafted message cannot drive an
+# unbounded number of entity writes.
+MAX_ENTITY_PARTICIPANTS_PER_MESSAGE = 200
+
 
 class SQLiteTooOldError(RuntimeError):
     """Raised when the runtime SQLite library is older than required."""
@@ -141,6 +153,8 @@ class Database:
         self.path = path
         self._lock = threading.RLock()
         self._transaction_depth = 0
+        # Operator source-authority rules; empty until ``set_authority_rules``.
+        self._authority_rules = AuthorityRules()
         path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = self._connect()
         self._closed = False
@@ -609,6 +623,48 @@ class Database:
                 indexer_seen_at    TEXT NOT NULL
             );
         """)
+        self._run_entity_schema_script(cur)
+
+    @staticmethod
+    def _run_entity_schema_script(cur: sqlite3.Cursor) -> None:
+        """Deterministic entities (PLAN Phase 4), inside the initial
+        schema's open transaction (``execute`` per statement, so nothing
+        commits early).
+
+        ``entities`` holds one person per canonical address
+        (``person:<address>``) and one organization per non-free-mail
+        sender domain (``org:<domain>``); see ``src/entities.py``.
+        ``entity_aliases`` records every display name seen for a person.
+        ``authority_class`` / ``authority_rule`` are the operator rules
+        file's class for the entity and the rule that matched it
+        (``unclassified`` / NULL when none did); metadata only, never a
+        ranking weight. Rows are written alongside ``message_participants`` and are not
+        pruned when a message is removed: the table is a directory of
+        identities ever indexed, and every query joins through
+        ``message_participants``, which is.
+        """
+        for statement in (
+            """
+            CREATE TABLE entities (
+                entity_id       TEXT PRIMARY KEY,
+                kind            TEXT NOT NULL CHECK (kind IN ('person', 'organization')),
+                canonical_key   TEXT NOT NULL,
+                organization_id TEXT REFERENCES entities(entity_id),
+                authority_class TEXT NOT NULL DEFAULT 'unclassified',
+                authority_rule  TEXT
+            )
+            """,
+            "CREATE INDEX idx_entities_organization ON entities(organization_id)",
+            "CREATE INDEX idx_entities_authority ON entities(authority_class)",
+            """
+            CREATE TABLE entity_aliases (
+                entity_id TEXT NOT NULL REFERENCES entities(entity_id) ON DELETE CASCADE,
+                alias     TEXT NOT NULL,
+                PRIMARY KEY (entity_id, alias)
+            )
+            """,
+        ):
+            cur.execute(statement)
 
     # -------------------------------------------------------------------------
     # Write operations
@@ -2087,6 +2143,12 @@ class Database:
         # that build a Message by hand.
         authors = msg.from_addrs or [msg.from_addr]
         roles = [("from", authors), ("to", msg.to_addrs), ("cc", msg.cc_addrs)]
+        # Entity writes are bounded per message (a crafted header can list
+        # thousands of recipients) by distinct address, so a repeated
+        # address cannot spend the budget; authors come first, so the
+        # senders keep their entities. Participant rows are written for
+        # everyone.
+        entity_addresses: set[str] = set()
         for role, values in roles:
             for value in values:
                 address = canonical_addr(value or "")
@@ -2098,6 +2160,74 @@ class Database:
                     "(claimant_id, role, address, name) VALUES (?, ?, ?, ?)",
                     (msg.claimant_id, role, address, name),
                 )
+                if (
+                    address not in entity_addresses
+                    and len(entity_addresses) < MAX_ENTITY_PARTICIPANTS_PER_MESSAGE
+                ):
+                    entity_addresses.add(address)
+                    self._write_entity(cur, address, name)
+
+    def _write_entity(self, cur: sqlite3.Cursor, address: str, name: str | None) -> None:
+        """Record ``address`` as a person entity (with its organization,
+        if any) and ``name`` as one of its aliases, each classified by the
+        current authority rules. Deterministic IDs and ``ON CONFLICT``
+        writes make a reprocess rewrite the same rows. Runs inside
+        ``_write_message_record``'s transaction."""
+        rules = self._authority_rules
+        org_id = None
+        domain = organization_domain(address)
+        if domain:
+            org_id = org_entity_id(domain)
+            cur.execute(
+                "INSERT INTO entities (entity_id, kind, canonical_key, organization_id, "
+                "authority_class, authority_rule) "
+                "VALUES (?, 'organization', ?, NULL, ?, ?) ON CONFLICT(entity_id) DO UPDATE SET "
+                "authority_class = excluded.authority_class, "
+                "authority_rule = excluded.authority_rule",
+                (org_id, domain, *rules.classify_domain(domain)),
+            )
+        person_id = person_entity_id(address)
+        cur.execute(
+            "INSERT INTO entities (entity_id, kind, canonical_key, organization_id, "
+            "authority_class, authority_rule) "
+            "VALUES (?, 'person', ?, ?, ?, ?) ON CONFLICT(entity_id) DO UPDATE SET "
+            "authority_class = excluded.authority_class, "
+            "authority_rule = excluded.authority_rule",
+            (person_id, address, org_id, *rules.classify(address)),
+        )
+        if name:
+            cur.execute(
+                "INSERT OR IGNORE INTO entity_aliases (entity_id, alias) VALUES (?, ?)",
+                (person_id, name),
+            )
+
+    @_synchronized
+    def set_authority_rules(self, rules: AuthorityRules) -> int:
+        """Use ``rules`` for every later entity write and reclassify every
+        existing entity under them in one transaction, so an edited rules
+        file takes effect at the next indexer start. Returns the number
+        of entities whose class or rule changed. One dictionary lookup
+        per entity (plus one per domain label), so cost follows the
+        entity count, not the rule count."""
+        self._authority_rules = rules
+        with self.transaction():
+            rows = self._conn.execute(
+                "SELECT entity_id, kind, canonical_key, authority_class, authority_rule "
+                "FROM entities"
+            ).fetchall()
+            changes = []
+            for row in rows:
+                key = row["canonical_key"]
+                cls, rule = (
+                    rules.classify(key) if row["kind"] == "person" else rules.classify_domain(key)
+                )
+                if (cls, rule) != (row["authority_class"], row["authority_rule"]):
+                    changes.append((cls, rule, row["entity_id"]))
+            self._conn.executemany(
+                "UPDATE entities SET authority_class = ?, authority_rule = ? WHERE entity_id = ?",
+                changes,
+            )
+        return len(changes)
 
     @_synchronized
     def update_filepath(
