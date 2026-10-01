@@ -2088,6 +2088,26 @@ class TestEvidenceAttachmentProvenance:
         quote = next(r for r in results if r.thread_id == "t-quote")
         assert "18450" in quote.evidence_chunks[0].text
 
+    def test_evidence_per_thread_sets_the_chunk_cap(self, tmp_path):
+        """#285: ``ask_mailbox`` asks for more than the default three
+        chunks per thread so a later matching passage can reach the
+        prompt's shared budget."""
+        db = self._build_attachment_carrier_db(tmp_path)
+        self._add_competing_attachments(db)
+
+        def quote_chunks(**kwargs) -> int:
+            results = db.hybrid_search(
+                query_text="proposal-quote",
+                query_embedding=[1.0, 0.0, 0.0, 0.0],
+                limit=5,
+                with_evidence=True,
+                **kwargs,
+            )
+            return len(next(r for r in results if r.thread_id == "t-quote").evidence_chunks)
+
+        assert quote_chunks() == 3
+        assert quote_chunks(evidence_per_thread=6) == 5  # the quote, 3 exhibits, the body
+
     def test_a_generic_mime_word_does_not_dilute_the_named_file(self, tmp_path):
         """Review round 1: attachments_fts indexes MIME types and query
         words are OR'd, so "proposal-quote pdf" also matched every other

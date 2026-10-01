@@ -1,9 +1,9 @@
 """Tests for src/tools/intelligence.py pure helpers.
 
 Tool handlers themselves are covered by integration wiring; this file
-targets ``_thread_context``, the pure function that selects between
-``body_text`` and ``snippet`` and enforces the per-thread character
-budget fed into LLM prompts.
+targets ``_build_evidence``, the pure function that selects between
+evidence chunks, ``body_text`` and ``snippet`` and enforces the
+character budget fed into LLM prompts.
 """
 
 import re
@@ -17,9 +17,16 @@ from src.tools.intelligence import (
     _SUMMARIZE_BODY_CHAR_BUDGET,
     _SUMMARIZE_TAIL_CHAR_BUDGET,
     PER_THREAD_CHAR_BUDGET,
+    EvidenceCoverage,
+    _build_evidence,
+    _coverage_note,
     _summarize_context,
-    _thread_context,
 )
+
+
+def _thread_context(thread: ThreadResult, limit: int = PER_THREAD_CHAR_BUDGET) -> str:
+    """One thread's evidence under ``limit`` — the single-thread prompt."""
+    return _build_evidence([thread], limit)[0][0]
 
 
 def _result(
@@ -168,6 +175,190 @@ class TestThreadContextWithChunks:
         out = _thread_context(r)
         assert "attachment attachment" in out  # generic placeholder
         assert "(unknown)" in out
+
+
+class TestPromptEvidenceBudget:
+    """#285: one evidence budget is shared by every thread in the prompt,
+    duplicate passages are dropped before they spend it, and whatever
+    is left out is counted."""
+
+    def test_a_long_top_chunk_borrows_what_short_threads_leave(self):
+        """The old fixed 2,000-character slice cut the top thread's
+        matching chunk before its answer while the short threads below it
+        left most of their share unused."""
+        answer_at = PER_THREAD_CHAR_BUDGET + 500
+        top = _result(
+            evidence_chunks=[_chunk("x" * answer_at + " ANSWER: invoice 4471 is paid", index=0)]
+        )
+        others = [_result(evidence_chunks=[_chunk(f"short note {i}")]) for i in range(4)]
+        threads = [top, *others]
+        texts, coverage = _build_evidence(threads, PER_THREAD_CHAR_BUDGET * len(threads))
+        assert "ANSWER: invoice 4471 is paid" in texts[0]
+        assert all(f"short note {i}" in texts[i + 1] for i in range(4))
+        assert coverage.omitted == 0
+        assert coverage.truncated == 0
+
+    def test_threads_needing_more_than_an_equal_share_split_the_rest(self):
+        big = [_result(evidence_chunks=[_chunk(f"{i}" + "y" * 5000)]) for i in range(2)]
+        small = _result(evidence_chunks=[_chunk("tiny")])
+        texts, coverage = _build_evidence([*big, small], 3000)
+        assert "tiny" in texts[2]
+        # Both long threads get an equal part of what the short one left.
+        assert abs(len(texts[0]) - len(texts[1])) <= 1
+        assert coverage.truncated == 2
+
+    @pytest.mark.parametrize("budget", [0, 1, 37, 500, 2000, 6001, 20000])
+    def test_total_evidence_never_exceeds_the_budget(self, budget):
+        threads = [
+            _result(
+                evidence_chunks=[
+                    _chunk(f"thread {t} passage {i} " + "z" * (300 * i + 50 * t), index=i)
+                    for i in range(5)
+                ]
+            )
+            for t in range(6)
+        ]
+        threads.append(_result(body_text="b" * 9000))
+        texts, _coverage = _build_evidence(threads, budget)
+        assert sum(len(t) for t in texts) <= budget
+
+    def test_matching_chunks_are_kept_ahead_of_the_thread_body(self):
+        r = _result(
+            body_text="leading thread text " * 200,
+            evidence_chunks=[_chunk("the matched passage")],
+        )
+        texts, _coverage = _build_evidence([r], 5000)
+        assert "the matched passage" in texts[0]
+        assert "leading thread text" not in texts[0]
+
+    def test_quoted_duplicate_chunk_is_dropped_before_spending_budget(self):
+        """A reply quoting an earlier message in the same thread produces a
+        chunk whose text matches the original once quote markers and
+        spacing are ignored."""
+        detail = "The venue, catering and parking are unchanged from the earlier plan. " * 3
+        original = f"Meeting moved to Thursday.\nBring the signed form.\n{detail}"
+        quoted = f"> Meeting moved to   Thursday.\n>  Bring the signed form.\n> {detail}\n"
+        thread = _result(
+            evidence_chunks=[
+                _chunk(original, index=0),
+                _chunk(quoted, index=3, message_id="m2"),
+                _chunk("REPLY: confirmed for Thursday", index=4, message_id="m2"),
+            ]
+        )
+        [text], coverage = _build_evidence([thread], 10_000)
+        assert text.count("Bring the signed form") == 1
+        assert "REPLY: confirmed for Thursday" in text
+        assert coverage.duplicates == 1
+        assert coverage.omitted == 0
+
+    def test_short_identical_replies_in_one_thread_are_all_kept(self):
+        """Review round 2: several recipients replying "Approved." in one
+        thread are independent answers, not quotes."""
+        thread = _result(
+            evidence_chunks=[
+                _chunk("Approved.", index=0, message_id="m1"),
+                _chunk("Approved.", index=0, message_id="m2"),
+            ]
+        )
+        [text], coverage = _build_evidence([thread], 10_000)
+        assert text.count("Approved.") == 2
+        assert coverage.duplicates == 0
+
+    def test_identical_attachment_chunks_are_all_kept(self):
+        """Review round 2: two attachments with the same clause are two
+        sources, never a quote of each other."""
+        clause = "Either party may terminate on thirty days written notice. " * 6
+        thread = _result(
+            evidence_chunks=[
+                _chunk(clause, index=0, attachment_id="att-a", attachment_filename="a.pdf"),
+                _chunk(clause, index=0, attachment_id="att-b", attachment_filename="b.pdf"),
+            ]
+        )
+        [text], coverage = _build_evidence([thread], 10_000)
+        assert "a.pdf" in text and "b.pdf" in text
+        assert coverage.duplicates == 0
+
+    def test_the_same_short_passage_is_kept_in_every_thread(self):
+        """Review round 1: dedup across threads emptied a lower-ranked
+        thread whose only evidence was a short reply another thread also
+        held ("Approved"), and reported nothing lost."""
+        threads = [
+            _result(evidence_chunks=[_chunk("Approved.", message_id=f"m{i}")]) for i in range(2)
+        ]
+        texts, coverage = _build_evidence(threads, 10_000)
+        assert all("Approved." in text for text in texts)
+        assert coverage.duplicates == 0
+        assert _coverage_note(coverage) == ""
+
+    def test_a_duplicate_of_a_cut_original_is_counted_as_left_out(self):
+        """Review round 1: a duplicate dropped because its original is in
+        the prompt must not vanish silently when the budget cuts that
+        original."""
+        original = "Deposit due Friday. " + "terms " * 100
+        thread = _result(
+            evidence_chunks=[
+                _chunk(original, index=0),
+                _chunk("> " + original, index=5, message_id="m2"),
+            ]
+        )
+        _texts, coverage = _build_evidence([thread], 120)
+        assert coverage.truncated == 1
+        assert coverage.omitted == 1
+        assert coverage.duplicates == 0
+        assert _coverage_note(coverage)
+
+    def test_counts_omitted_and_truncated_passages(self):
+        r = _result(
+            evidence_chunks=[
+                _chunk("a" * 150, index=0),
+                _chunk("b" * 150, index=1),
+                _chunk("c" * 150, index=2),
+            ]
+        )
+        texts, coverage = _build_evidence([r], 200)
+        assert "a" * 150 in texts[0]
+        assert coverage == EvidenceCoverage(
+            omitted=1, truncated=1, duplicates=0, threads_without_evidence=0
+        )
+
+    def test_counts_threads_left_without_any_evidence(self):
+        threads = [_result(evidence_chunks=[_chunk(f"{i}" + "p" * 100)]) for i in range(3)]
+        _texts, coverage = _build_evidence(threads, 0)
+        assert coverage.threads_without_evidence == 3
+        assert coverage.omitted == 3
+
+    def test_a_truncated_chunk_header_states_the_kept_range(self):
+        r = _result(evidence_chunks=[_chunk("q" * 1000, index=2, char_start=100)])
+        out = _thread_context(r, limit=300)
+        header = out.splitlines()[0]
+        kept = len(out) - len(header) - 1
+        assert header == f"[chunk 2 chars 100-{100 + kept}]"
+
+    def test_truncated_body_fallback_is_counted(self):
+        _texts, coverage = _build_evidence([_result(body_text="w" * 500)], 100)
+        assert coverage.truncated == 1
+
+
+class TestCoverageNote:
+    def test_no_note_when_everything_fit(self):
+        assert _coverage_note(EvidenceCoverage(duplicates=4)) == ""
+
+    def test_note_states_counts_and_asks_for_disclosure(self):
+        note = _coverage_note(
+            EvidenceCoverage(omitted=3, truncated=2, duplicates=1, threads_without_evidence=1)
+        )
+        assert "3 retrieved passages were left out" in note
+        assert "2 were cut short" in note
+        assert "1 retrieved thread" in note
+        assert "incomplete" in note
+
+    def test_note_carries_no_mail_content(self):
+        marker = "SYNTHETIC_MARKER_7731"
+        threads = [_result(evidence_chunks=[_chunk(f"{marker} " * 200, index=i)]) for i in range(3)]
+        _texts, coverage = _build_evidence(threads, 300)
+        note = _coverage_note(coverage)
+        assert note
+        assert marker not in note
 
 
 class TestSummarizeContext:
