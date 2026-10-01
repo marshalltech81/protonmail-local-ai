@@ -53,6 +53,70 @@ if touch /bridge-smoke-rootfs 2>/dev/null; then
 fi
 '
 
+# Existing-vault check for the update-gate patch (#245). Seed a vault with
+# AutoUpdate=true through the CLI, as vaults created before the default patch
+# hold, then restart on the production --noninteractive path and wait for its
+# startup update check. Assert the stored true value loads and the check ends
+# without the silent install path or anything staged under updates/. Proton's
+# live release feed decides whether an update is offered at all, so this
+# cannot force the gate decision; the go test in patch-source.sh does that.
+printf 'Verifying the auto-updater stays off for a vault seeded with AutoUpdate=true...\n'
+SEEDED_STATUS=0
+SEEDED_OUT="$(docker run --rm \
+    --init \
+    --tmpfs /data:uid=1000,gid=1000,mode=700 \
+    --tmpfs /home/bridge:uid=1000,gid=1000,mode=700 \
+    --user 1000:1000 \
+    --entrypoint /bin/sh \
+    "$IMAGE" -c '
+        set -e
+        mkdir -p /data/config /data/local /data/cache /data/gnupg /data/pass
+        chmod 700 /data/config /data/local /data/cache /data/gnupg /data/pass
+        LOGS=/data/local/protonmail/bridge-v3/logs
+        # Run 1: no vault yet, so the entrypoint opens the CLI. Enable
+        # auto-updates there; EOF then ends the session.
+        printf "updates autoupdates enable\nyes\n" \
+            | timeout 60 /entrypoint.sh >/tmp/seed.out 2>&1 || echo "SEED_EXIT=$?"
+        # Run 2: the vault now exists, so the entrypoint runs
+        # bridge --noninteractive, which checks for updates at startup.
+        /entrypoint.sh </dev/null >/tmp/run.out 2>&1 &
+        PID=$!
+        DEADLINE=$(( $(date +%s) + 60 ))
+        while [ "$(date +%s)" -lt "$DEADLINE" ]; do
+            if cat "$LOGS"/*.log 2>/dev/null | grep -qE "event=\"UpdateNotAvailable\"|auto-update is disabled|silent=\"true\""; then
+                break
+            fi
+            sleep 0.5
+        done
+        kill -TERM "$PID" 2>/dev/null || true
+        sleep 1
+        kill -KILL "$PID" 2>/dev/null || true
+        echo "STAGED_UPDATES=$(find /data/local/protonmail/bridge-v3/updates -mindepth 1 2>/dev/null | wc -l)"
+        cat "$LOGS"/*.log 2>/dev/null || true
+        echo "--- entrypoint output ---"
+        cat /tmp/seed.out /tmp/run.out 2>/dev/null || true
+    ' 2>&1)" || SEEDED_STATUS=$?
+
+seeded_fail() {
+    printf 'ERROR: %s\n' "$1" >&2
+    printf '%s\n' '--- captured output (first 60 lines) ---' >&2
+    printf '%s\n' "$SEEDED_OUT" | head -60 >&2
+    exit 1
+}
+
+if [[ "$SEEDED_STATUS" -ne 0 ]]; then
+    seeded_fail "Seeded-vault check container exited with status $SEEDED_STATUS."
+elif ! grep -E 'msg="Vault loaded".*autoUpdate="true"' <<< "$SEEDED_OUT" >/dev/null; then
+    seeded_fail 'Seeded vault did not load with autoUpdate="true".'
+elif grep -E 'silent="true"|The update was installed' <<< "$SEEDED_OUT" >/dev/null; then
+    seeded_fail 'Bridge queued a silent update install for a vault with AutoUpdate=true.'
+elif ! grep -Fx 'STAGED_UPDATES=0' <<< "$SEEDED_OUT" >/dev/null; then
+    seeded_fail 'Bridge staged an update under bridge-v3/updates.'
+elif ! grep -E 'event="UpdateNotAvailable"|auto-update is disabled' <<< "$SEEDED_OUT" >/dev/null; then
+    seeded_fail 'Startup update check did not finish for the seeded vault.'
+fi
+printf 'Auto-updater verified off for a vault seeded with AutoUpdate=true.\n'
+
 # End-to-end check that the AutoUpdate source patch reached the built
 # binary's runtime default. We start the real entrypoint with an ephemeral
 # tmpfs /data, let GPG / pass / vault initialize, capture the structured

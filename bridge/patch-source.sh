@@ -5,6 +5,7 @@ readonly REPO_DIR="${1:-/build}"
 readonly CONSTANTS_FILE="${REPO_DIR}/internal/constants/constants.go"
 readonly CERTS_FILE="${REPO_DIR}/internal/certs/tls.go"
 readonly SETTINGS_FILE="${REPO_DIR}/internal/vault/types_settings.go"
+readonly UPDATES_FILE="${REPO_DIR}/internal/bridge/updates.go"
 
 # Resolve early so the post-patch compile step can locate bridge/Dockerfile
 # (the source of truth for the pinned Go image) when invoked from a host
@@ -25,6 +26,13 @@ readonly PATCHED_CERT='DNSNames:    []string{"protonmail-bridge", "localhost"},'
 # pin and the bridge-patch-check / bridge-smoke gates). See AGENTS.md.
 readonly UPSTREAM_AUTOUPDATE='AutoUpdate:        true,'
 readonly PATCHED_AUTOUPDATE='AutoUpdate:        false,'
+# The default above reaches only new vaults: an existing vault keeps the
+# AutoUpdate=true it stored before that patch, and handleUpdate() reads the
+# stored value at its install gate. Forcing the gate's input to false keeps
+# the silent download-and-stage path off for every vault (#245). Bridge
+# still announces an available update; installing one stays a manual step.
+readonly UPSTREAM_UPDATE_GATE='autoUpdateEnabled := bridge.vault.GetAutoUpdate()'
+readonly PATCHED_UPDATE_GATE='autoUpdateEnabled := false'
 
 # Path to the synthetic Go test file written by verify_autoupdate_default.
 # Tracked at script scope so the EXIT/INT/TERM trap below can clean it up
@@ -32,9 +40,13 @@ readonly PATCHED_AUTOUPDATE='AutoUpdate:        false,'
 # trap would not fire on Ctrl-C and would leak the file into the patched
 # tree, breaking the next re-run against a reused checkout.
 ASSERT_TEST_FILE=""
+GATE_TEST_FILE=""
 cleanup_assert_test_file() {
     if [[ -n "$ASSERT_TEST_FILE" ]]; then
         rm -f "$ASSERT_TEST_FILE"
+    fi
+    if [[ -n "$GATE_TEST_FILE" ]]; then
+        rm -f "$GATE_TEST_FILE"
     fi
 }
 trap cleanup_assert_test_file EXIT INT TERM
@@ -77,7 +89,7 @@ sed_in_place() {
     fi
 }
 
-if [[ ! -f "$CONSTANTS_FILE" || ! -f "$CERTS_FILE" || ! -f "$SETTINGS_FILE" ]]; then
+if [[ ! -f "$CONSTANTS_FILE" || ! -f "$CERTS_FILE" || ! -f "$SETTINGS_FILE" || ! -f "$UPDATES_FILE" ]]; then
     printf 'Bridge source files not found under %s.\n' "$REPO_DIR" >&2
     exit 1
 fi
@@ -88,6 +100,8 @@ require_count "$CERTS_FILE" "$UPSTREAM_CERT" "1" "upstream TLS SAN source line"
 require_count "$CERTS_FILE" "$PATCHED_CERT" "0" "patched TLS SAN line before patch"
 require_count "$SETTINGS_FILE" "$UPSTREAM_AUTOUPDATE" "1" "upstream AutoUpdate default"
 require_count "$SETTINGS_FILE" "$PATCHED_AUTOUPDATE" "0" "patched AutoUpdate default before patch"
+require_count "$UPDATES_FILE" "$UPSTREAM_UPDATE_GATE" "1" "upstream auto-update gate"
+require_count "$UPDATES_FILE" "$PATCHED_UPDATE_GATE" "0" "patched auto-update gate before patch"
 
 sed_in_place 's/Host = "127.0.0.1"/Host = "0.0.0.0"/' "$CONSTANTS_FILE"
 sed_in_place \
@@ -95,6 +109,7 @@ sed_in_place \
 \t\tDNSNames:    []string{"protonmail-bridge", "localhost"},|' \
     "$CERTS_FILE"
 sed_in_place 's/AutoUpdate:        true,/AutoUpdate:        false,/' "$SETTINGS_FILE"
+sed_in_place 's/autoUpdateEnabled := bridge\.vault\.GetAutoUpdate()/autoUpdateEnabled := false/' "$UPDATES_FILE"
 
 require_count "$CONSTANTS_FILE" "$UPSTREAM_HOST" "0" "upstream host binding after patch"
 require_count "$CONSTANTS_FILE" "$PATCHED_HOST" "1" "patched host binding"
@@ -102,6 +117,8 @@ require_count "$CERTS_FILE" "$UPSTREAM_CERT" "0" "upstream TLS SAN source line a
 require_count "$CERTS_FILE" "$PATCHED_CERT" "1" "patched TLS SAN line"
 require_count "$SETTINGS_FILE" "$UPSTREAM_AUTOUPDATE" "0" "upstream AutoUpdate default after patch"
 require_count "$SETTINGS_FILE" "$PATCHED_AUTOUPDATE" "1" "patched AutoUpdate default"
+require_count "$UPDATES_FILE" "$UPSTREAM_UPDATE_GATE" "0" "upstream auto-update gate after patch"
+require_count "$UPDATES_FILE" "$PATCHED_UPDATE_GATE" "1" "patched auto-update gate"
 
 # Compile the patched packages to confirm the patches produce valid Go.
 # String-count checks above verify content; this verifies the result compiles.
@@ -268,7 +285,7 @@ run_go_in_pinned_image() {
 
 compile_patched_packages() {
     if host_go_is_usable; then
-        run_go_on_host build ./internal/constants/... ./internal/certs/... ./internal/vault/...
+        run_go_on_host build ./internal/constants/... ./internal/certs/... ./internal/vault/... ./internal/bridge/...
         return
     fi
 
@@ -284,7 +301,7 @@ compile_patched_packages() {
 
     printf 'Compiling patched packages inside %s...\n' "$go_image"
     run_go_in_pinned_image "$go_image" \
-        build ./internal/constants/... ./internal/certs/... ./internal/vault/...
+        build ./internal/constants/... ./internal/certs/... ./internal/vault/... ./internal/bridge/...
 }
 
 # Layer 3: prove the AutoUpdate patch flips the *runtime* default, not just
@@ -334,10 +351,118 @@ GOEOF
         test -count=1 -run TestPatchedAutoUpdateDefaultIsFalse ./internal/vault/
 }
 
+# Layer 2 for the update-gate hunk (#245). The default test above covers new
+# vaults only, so this one reopens a vault that already stores
+# AutoUpdate=true, offers an eligible release through Bridge's own mock
+# updater, and asserts the gate only announces it: no silent install job is
+# queued, so the package download and staging path is never entered. It
+# runs in the external bridge_test package to reuse upstream's withEnv /
+# withBridge harness (an in-process fake Proton API, no network).
+verify_autoupdate_gate() {
+    GATE_TEST_FILE="${REPO_DIR}/internal/bridge/autoupdate_gate_patch_assert_test.go"
+
+    cat > "$GATE_TEST_FILE" <<'GOEOF'
+package bridge_test
+
+import (
+	"context"
+	"testing"
+	"time"
+
+	"github.com/Masterminds/semver/v3"
+	"github.com/ProtonMail/gluon/async"
+	"github.com/ProtonMail/go-proton-api"
+	"github.com/ProtonMail/go-proton-api/server"
+	bridgePkg "github.com/ProtonMail/proton-bridge/v3/internal/bridge"
+	"github.com/ProtonMail/proton-bridge/v3/internal/events"
+	"github.com/ProtonMail/proton-bridge/v3/internal/updater"
+	"github.com/ProtonMail/proton-bridge/v3/internal/updater/versioncompare"
+	"github.com/ProtonMail/proton-bridge/v3/internal/vault"
+	"github.com/stretchr/testify/require"
+)
+
+// TestPatchedAutoUpdateGateIgnoresEnabledVault is generated by
+// bridge/patch-source.sh after the update-gate hunk is applied. It reopens
+// a vault that already stores AutoUpdate=true (as vaults created before the
+// default patch do), offers an eligible release, and verifies Bridge only
+// announces it: no silent install job is queued, so the package download
+// and staging path is never entered.
+func TestPatchedAutoUpdateGateIgnoresEnabledVault(t *testing.T) {
+	withEnv(t, func(ctx context.Context, s *server.Server, netCtl *proton.NetCtl, locator bridgePkg.Locator, vaultKey []byte) {
+		vaultDir, err := locator.ProvideSettingsPath()
+		require.NoError(t, err)
+		seeded, _, err := vault.New(vaultDir, t.TempDir(), vaultKey, async.NoopPanicHandler{})
+		require.NoError(t, err)
+		require.NoError(t, seeded.SetAutoUpdate(true))
+		require.NoError(t, seeded.Close())
+
+		withBridge(ctx, t, s.GetHostURL(), netCtl, locator, vaultKey, func(bridge *bridgePkg.Bridge, mocks *bridgePkg.Mocks) {
+			require.True(t, bridge.GetAutoUpdate(), "seeded vault did not load AutoUpdate=true")
+
+			updateCh, done := bridge.GetEvents(events.UpdateAvailable{}, events.UpdateInstalled{})
+			defer done()
+
+			bridge.SetCurrentVersionTest(semver.MustParse("2.1.1"))
+
+			release := updater.Release{
+				ReleaseCategory:   updater.StableReleaseCategory,
+				Version:           semver.MustParse("2.1.3"),
+				SystemVersion:     versioncompare.SystemVersion{},
+				RolloutProportion: 1.0,
+				MinAuto:           &semver.Version{},
+				File: []updater.File{
+					{URL: "RANDOM_PACKAGE_URL", Identifier: updater.PackageIdentifier},
+				},
+			}
+			mocks.Updater.SetLatestVersion(updater.VersionInfo{Releases: []updater.Release{release}})
+			bridge.CheckForUpdates()
+
+			// The gate's announce-only branch publishes a non-silent
+			// UpdateAvailable. The install job would instead publish a
+			// silent UpdateAvailable and then UpdateInstalled.
+			select {
+			case event := <-updateCh:
+				require.Equal(t, events.UpdateAvailable{Release: release, Compatible: true, Silent: false}, event,
+					"auto-update gate queued an install for a vault with AutoUpdate=true")
+			case <-time.After(30 * time.Second):
+				t.Fatal("no update event after CheckForUpdates")
+			}
+
+			select {
+			case event := <-updateCh:
+				t.Fatalf("unexpected update event after the gate: %T", event)
+			case <-time.After(2 * time.Second):
+			}
+		})
+	})
+}
+GOEOF
+
+    if host_go_is_usable; then
+        run_go_on_host test -count=1 -run TestPatchedAutoUpdateGateIgnoresEnabledVault ./internal/bridge/
+        return
+    fi
+
+    if ! command -v docker >/dev/null 2>&1; then
+        printf 'ERROR: no usable host Go toolchain and no docker on PATH; cannot run the auto-update gate assertion.\n' >&2
+        return 1
+    fi
+
+    local go_image
+    go_image="$(resolve_go_image)" || return 1
+
+    printf 'Running auto-update gate assertion inside %s...\n' "$go_image"
+    run_go_in_pinned_image "$go_image" \
+        test -count=1 -run TestPatchedAutoUpdateGateIgnoresEnabledVault ./internal/bridge/
+}
+
 compile_patched_packages \
     || { printf 'ERROR: post-patch compilation failed in %s.\n' "$REPO_DIR" >&2; exit 1; }
 
 verify_autoupdate_default \
     || { printf 'ERROR: AutoUpdate runtime-default assertion failed in %s.\n' "$REPO_DIR" >&2; exit 1; }
+
+verify_autoupdate_gate \
+    || { printf 'ERROR: auto-update gate assertion failed in %s.\n' "$REPO_DIR" >&2; exit 1; }
 
 printf 'Bridge source patches applied cleanly in %s.\n' "$REPO_DIR"
