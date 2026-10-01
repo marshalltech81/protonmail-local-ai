@@ -303,8 +303,7 @@ reindex each. One rebuild, not one PR: each fix is its own reviewed PR
 per the review rules, and a fix that would change bodies or IDs for
 newly ingested mail before the rebuild is gated behind the pipeline
 configuration so the live index stays internally consistent until the
-single staged rebuild picks all of them up. The fixes: reply subjects in the embedding input and thread body (#303);
-chunk overlap past `max_tokens` (#208); Message-ID conflicts kept as
+single staged rebuild picks all of them up. The fixes: chunk overlap past `max_tokens` (#208); Message-ID conflicts kept as
 both claimants (#217); a deterministic date source for undated mail
 (#297's second half, the deferred received-date item: the top
 `Received:` header, then — since sent mail and stripped messages have
@@ -313,12 +312,11 @@ but stable for the life of the file, then the previously persisted
 date carried forward by the rebuild; `now()` only for a message with
 none of the three, on first sight, and persisted once; the first half
 — keep the first persisted date on reprocess — is a batch-1 guard);
-the whitespace-only plain alternative that suppresses a non-empty HTML
-body (#298: one line, but a body change, so it rebuilds with the
-bundle); sequential inline text parts in `multipart/mixed` (#295,
-decided 2026-09-30 to document for now and revisit when this bundle is
-assembled, since the reparse is free then); and repair of chunks
-committed with all-zero vectors (#304).
+and repair of chunks committed with all-zero vectors (#304). Reply
+subjects (#303), the whitespace-only plain alternative (#298) and
+sequential inline text parts (#295) left the bundle on 2026-10-01:
+with no live index yet they land directly (see "Result quality
+first").
 
 **Sequencing (decided 2026-09-30, per #283).** Phase 2's blue/green
 lifecycle validates a new generation against the old, which needs a
@@ -862,11 +860,9 @@ Order of work, chosen to minimise reindexes:
    guards above and are not repeated here); see Resolved decisions 9
    and 10 for the chosen direction and the one measurement still
    needed.
-4. **The Phase 2 reindex bundle** (see Phase 2): #303, #208, #217,
-   #297's second half, #298 (a one-line selection fix, but it changes
-   persisted bodies, so it lands with a rebuild rather than making
-   results depend on processing history), #295 if revisited, and the
-   zero-chunk repair from #304.
+4. **The Phase 2 reindex bundle** (see Phase 2): #208, #217, #297's
+   second half, and the zero-chunk repair from #304. #303, #298 and
+   #295 land directly instead (2026-10-01, no live index yet).
 
 Follow-ups filed 2026-09-30 from the privacy trio, both batch-1 guards
 (done, both reproduced): #339 (indexer logs an SDK-inherited embed URL
@@ -1079,7 +1075,8 @@ do not ship persisted claims without them.
 7. **#295 sequential inline text parts (2026-09-30):** document the
    limitation now (queued as cleanup batch C7, since the note belongs
    in `docs/architecture.md`); revisit with the Phase 2 reindex
-   bundle.
+   bundle. Superseded 2026-10-01: fixed directly while no live index
+   exists.
 8. **#297 undated mail (2026-09-30):** keep the first persisted date on
    reprocess now; with the Phase 2 reindex, a deterministic chain —
    top `Received:`, else the Maildir filename timestamp, else the
