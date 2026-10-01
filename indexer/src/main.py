@@ -635,10 +635,11 @@ def _phase1_commit_thread(
 ) -> _BatchedMsg | None:
     """Phase 1 of the batched indexer for one message.
 
-    Parse → thread → ``upsert_thread`` with a seed vector
-    (``mean`` of the thread's existing chunk vectors when the thread
-    is already indexed; placeholder zero for new / chunk-less
-    threads). Returns a populated ``_BatchedMsg`` on success. On any
+    Parse → thread → ``upsert_thread`` with a seed vector chosen from
+    a three-case priority chain: ``mean`` of the thread's existing
+    chunk vectors when it has any; the prior non-zero ``threads_vec``
+    row when the thread is chunkless (subject-fallback threads);
+    placeholder zero only for genuinely new threads. Returns a populated ``_BatchedMsg`` on success. On any
     failure, marks the queue row appropriately and returns ``None`` so
     the caller skips the message without aborting the whole batch.
     """
@@ -1262,8 +1263,9 @@ def _drain_queue_batched(
     """Drain the queue in two-phase batches.
 
     Phase 1 commits thread membership per-message with a seed thread
-    vector — ``mean(existing chunk vectors)`` for already-indexed
-    threads, placeholder zero for new ones — so (a) the next message
+    vector — ``mean(existing chunk vectors)`` for threads with chunks,
+    the prior non-zero ``threads_vec`` row for chunkless ones,
+    placeholder zero for new ones — so (a) the next message
     in the batch's threader can see this message's thread, and (b) a
     Phase 2 failure cannot regress an already-good thread vector to
     zero.
