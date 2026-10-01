@@ -626,9 +626,9 @@ Also merged since the handoff: #416 date filters (#312, #330, #333),
 #418 name matching (#313, #324, #331; #316 query side), #419 mbsync
 (#271, #280), #420 folders and attachment filters (#308, #309, #415).
 
-Filed 2026-10-01: #362 (`idna` RFC 2231 filename raises
-`UnicodeError`; needs a fallback-filename decision) and #415 (search
-`folders` filters still use the thread's representative folder).
+Filed 2026-10-01 and still open: #362 (`idna` RFC 2231 filename
+raises `UnicodeError`; needs a fallback-filename decision). (#415,
+filed the same day, was fixed in #420.)
 
 Open owner decision: **#267** one-shot rotation. #342 shipped the
 documented limitation (recreate with `BRIDGE_CERT_PIN_ROTATE=false`);
