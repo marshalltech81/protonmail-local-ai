@@ -198,13 +198,22 @@ the called tools return) to Anthropic, regardless of `INFERENCE_MODE`.** Anthrop
 data handling for Claude Desktop applies — see Anthropic's current privacy
 policy for retention and training-use details.
 
-If you want end-to-end local conversations:
+If you want end-to-end local conversations, both the client and the
+server's providers have to stay local. For the client:
 
 - Drive the MCP intelligence tools directly via `docker exec mcp-server
-  python -c "..."`. Less ergonomic; nothing leaves your laptop.
+  python -c "..."`. Less ergonomic, but no chat client sees the results.
 - Or use another MCP client backed by a local LLM. Keep the client bound to
   localhost and point it at the MCP server transport it supports (`/sse` by
   default, or `/mcp` when `MCP_TRANSPORT=streamable-http` or `dual`).
+
+Neither option changes where the server itself sends data. The tools
+still send queries and retrieved email content to the embed, inference
+and (when enabled) rerank endpoints you configured, and the indexer
+sends message text to the embed endpoint. Nothing leaves your laptop
+only when every enabled layer's `{LAYER}_BASE_URL` points at a
+host-side server; an empty base URL selects the SDK's remote default
+(Anthropic, OpenAI or Cohere).
 
 Most users accept the Claude-Desktop-as-frontend tradeoff because the
 alternative is much less useful, but it is a real tradeoff and it is not
