@@ -16,8 +16,9 @@ synthetic mailbox) and a trace of the calls an agent made, score
 - **citation recall**: the fraction of required evidence groups the
   answer cites (a cited message covers its thread);
 - **enumeration completeness**: for an exhaustive question, the
-  fraction of expected messages ``query_messages`` returned, and
-  whether the last page said ``has_more: false``;
+  fraction of expected messages listed by one ``query_messages``
+  cursor chain over exactly the expected filters (any page size), and
+  whether that chain's last page said ``has_more: false``;
 - **unnecessary calls**: calls over the scenario's budget, and calls
   identical (tool and arguments) to an earlier one.
 
@@ -50,6 +51,9 @@ ID_FIELDS = ("thread_id", "message_id", "claimant_id")
 # ``query_messages`` fields that say whether an enumeration is complete.
 PAGING_FIELDS = ("has_more", "next_cursor", "messages")
 ENUMERATING_TOOL = "query_messages"
+# Its arguments that page rather than filter: the agent picks the page
+# size, and the cursor is checked against the previous page.
+_PAGING_ARGUMENTS = ("limit", "cursor")
 
 # The synthetic baseline mailbox (indexer/tests/baseline/corpus.py):
 # golden.json writes thread "t05" for "t05.1@baseline.example" and
@@ -119,8 +123,8 @@ def _returned_ids(calls: Sequence[dict]) -> tuple[set[str], dict[str, str]]:
     """IDs the tool results returned, and each message ID's thread.
 
     A message row carries its thread in a ``thread_id`` beside it or, in
-    ``get_thread``, on the enclosing result, so the nearest enclosing
-    ``thread_id`` is the message's thread.
+    ``get_thread``, in the ``thread`` summary of the enclosing result, so
+    the nearest enclosing thread ID is the message's thread.
     """
     seen: set[str] = set()
     thread_of: dict[str, str] = {}
@@ -132,9 +136,13 @@ def _returned_ids(calls: Sequence[dict]) -> tuple[set[str], dict[str, str]]:
             return
         if not isinstance(value, dict):
             return
-        own = value.get("thread_id")
-        if isinstance(own, str):
-            thread = own
+        # get_thread puts its thread ID in the ``thread`` summary, a
+        # sibling of ``messages``, so read it before visiting children.
+        summary = value.get("thread")
+        for own in (value.get("thread_id"), isinstance(summary, dict) and summary.get("thread_id")):
+            if isinstance(own, str):
+                thread = own
+                break
         for name in ID_FIELDS:
             item = value.get(name)
             if isinstance(item, str):
@@ -151,6 +159,37 @@ def _returned_ids(calls: Sequence[dict]) -> tuple[set[str], dict[str, str]]:
 
 def _groups_covered(ids: set[str], groups: list[list[str]]) -> float:
     return evidence_recall(sorted(ids), groups, k=len(ids))
+
+
+def _enumeration_chains(calls: Sequence[dict], predicates: dict[str, Any]) -> list[list[dict]]:
+    """The ``query_messages`` page results of each cursor chain over ``predicates``.
+
+    Only calls whose filters are exactly the expected predicates count
+    (blank filters are ignored, as the tool ignores them). A call with no
+    cursor starts a chain; one whose cursor is the previous page's
+    ``next_cursor`` continues it; any other cursor breaks the chain, and
+    its page joins none.
+    """
+    chains: list[list[dict]] = []
+    current: list[dict] | None = None
+    for call in calls:
+        if call["tool"] != ENUMERATING_TOOL:
+            continue
+        arguments = call["arguments"]
+        filters = {
+            k: v for k, v in arguments.items() if k not in _PAGING_ARGUMENTS and v not in (None, "")
+        }
+        if filters != predicates:
+            continue
+        cursor = arguments.get("cursor")
+        if not cursor:
+            current = [call["result"]]
+            chains.append(current)
+        elif current is not None and cursor == current[-1].get("next_cursor"):
+            current.append(call["result"])
+        else:
+            current = None
+    return chains
 
 
 def score_trace(scenario: Scenario, trace: dict) -> AgentScore:
@@ -186,11 +225,15 @@ def score_trace(scenario: Scenario, trace: dict) -> AgentScore:
     enumeration_recall: float | None = None
     exhausted: bool | None = None
     if scenario.expected_messages:
-        pages = [c["result"] for c in calls if c["tool"] == ENUMERATING_TOOL]
-        listed = {m["message_id"] for page in pages for m in page.get("messages", [])}
         expected = set(scenario.expected_messages)
-        enumeration_recall = len(expected & listed) / len(expected)
-        exhausted = bool(pages) and pages[-1].get("has_more") is False
+        enumeration_recall, exhausted = 0.0, False
+        for chain in _enumeration_chains(calls, scenario.expected_arguments):
+            listed = {m["message_id"] for page in chain for m in page.get("messages", [])}
+            chain_score = (
+                len(expected & listed) / len(expected),
+                chain[-1].get("has_more") is False,
+            )
+            enumeration_recall, exhausted = max((enumeration_recall, exhausted), chain_score)
 
     signatures = [json.dumps([c["tool"], c["arguments"]], sort_keys=True) for c in calls]
     repeated = len(signatures) - len(set(signatures))

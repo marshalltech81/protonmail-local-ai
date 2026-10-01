@@ -125,7 +125,8 @@ expected argument), evidence recall (required evidence groups with a
 thread in any tool result), citation validity (cited IDs some tool
 returned), citation recall (required groups cited; a cited message
 covers its thread), enumeration completeness (expected messages
-`query_messages` returned, and whether its last page said
+listed by one `query_messages` cursor chain over exactly the expected
+filters, any page size, and whether that chain's last page said
 `has_more: false`), and calls over budget or repeated. `summarize`
 prints the aggregates and the failing scenarios by category. Failure
 cases for each scorer are in `tests/test_agent_metrics.py`.

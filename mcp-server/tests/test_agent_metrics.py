@@ -34,8 +34,15 @@ def _search(thread_ids: list[str], **arguments: object) -> dict:
     }
 
 
-def _page(message_ids: list[str], *, has_more: bool, cursor: str | None = None) -> dict:
-    arguments: dict = {"folder": "Sent", "limit": 2}
+def _page(
+    message_ids: list[str],
+    *,
+    has_more: bool,
+    cursor: str | None = None,
+    next_cursor: str = "next",
+    filters: dict | None = None,
+) -> dict:
+    arguments: dict = {"folder": "Sent", "limit": 2} if filters is None else dict(filters)
     if cursor:
         arguments["cursor"] = cursor
     return {
@@ -43,7 +50,7 @@ def _page(message_ids: list[str], *, has_more: bool, cursor: str | None = None) 
         "arguments": arguments,
         "result": {
             "has_more": has_more,
-            "next_cursor": "next" if has_more else None,
+            "next_cursor": next_cursor if has_more else None,
             "messages": [
                 {"message_id": m, "claimant_id": f"{m}#0000abcd", "thread_id": "t.1@x.example"}
                 for m in message_ids
@@ -171,11 +178,15 @@ class TestCitations:
         call = {
             "tool": "get_thread",
             "arguments": {"thread_id": "a.1@x.example"},
+            # GetThreadOutput: the thread ID sits in the ``thread`` summary,
+            # a sibling of ``messages``, not on each message row.
             "result": {
-                "thread_id": "a.1@x.example",
+                "thread": {"thread_id": "a.1@x.example", "message_count": 2},
+                "total_messages": 2,
                 "messages": [
                     {"message_id": "a.2@x.example", "claimant_id": "a.2@x.example#0000abcd"}
                 ],
+                "next_offset": None,
             },
         }
         trace = _trace([call], cited=["a.2@x.example#0000abcd"])
@@ -226,6 +237,59 @@ class TestEnumeration:
         assert score.enumeration_recall == pytest.approx(2 / 3)
         assert score.exhausted is False
         assert {"enumeration_recall", "exhausted"} <= set(score.failures)
+
+    def test_a_different_query_does_not_complete_a_partial_one(self) -> None:
+        # One partial Sent page, then an unfiltered query that happens to
+        # list every expected message: the Sent enumeration never finished.
+        trace = _trace(
+            [
+                _page(["m1@x.example"], has_more=True),
+                _page(
+                    ["m1@x.example", "m2@x.example", "m3@x.example"],
+                    has_more=False,
+                    filters={"limit": 100},
+                ),
+            ]
+        )
+        score = score_trace(self._scenario(), trace)
+        assert score.enumeration_recall == pytest.approx(1 / 3)
+        assert score.exhausted is False
+
+    def test_a_page_off_the_cursor_chain_breaks_it(self) -> None:
+        # The second page was fetched with a cursor the first page never
+        # issued, so its has_more: false does not finish the first page's chain.
+        trace = _trace(
+            [
+                _page(["m1@x.example", "m2@x.example"], has_more=True, next_cursor="c1"),
+                _page(["m3@x.example"], has_more=False, cursor="stale"),
+            ]
+        )
+        score = score_trace(self._scenario(), trace)
+        assert score.exhausted is False
+        assert score.enumeration_recall == pytest.approx(2 / 3)
+
+    def test_three_chained_pages_are_complete(self) -> None:
+        trace = _trace(
+            [
+                _page(["m1@x.example"], has_more=True, next_cursor="c1"),
+                _page(["m2@x.example"], has_more=True, cursor="c1", next_cursor="c2"),
+                _page(["m3@x.example"], has_more=False, cursor="c2"),
+            ]
+        )
+        score = score_trace(self._scenario(), trace)
+        assert score.enumeration_recall == 1.0
+        assert score.exhausted is True
+
+    def test_page_size_is_free_but_extra_filters_are_not(self) -> None:
+        # The expected arguments are the enumeration's predicates: the page
+        # size is the agent's choice, an extra filter narrows the set.
+        everything = ["m1@x.example", "m2@x.example", "m3@x.example"]
+        narrowed = _page(
+            everything, has_more=False, filters={"folder": "Sent", "has_attachments": False}
+        )
+        assert score_trace(self._scenario(), _trace([narrowed])).enumeration_recall == 0.0
+        whole = _page(everything, has_more=False, filters={"folder": "Sent", "limit": 100})
+        assert score_trace(self._scenario(), _trace([whole])).exhausted is True
 
     def test_messages_from_other_tools_do_not_count(self) -> None:
         # Only query_messages enumerates with an exact total; a message
