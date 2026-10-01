@@ -540,6 +540,7 @@ def register_search_tools(
                     chunks=[
                         EvidenceChunk(
                             message_id=c.message_id,
+                            claimant_id=c.claimant_id,
                             chunk_index=c.chunk_index,
                             source="body" if c.attachment_id is None else "attachment",
                             attachment_id=c.attachment_id,
@@ -577,7 +578,7 @@ def register_search_tools(
             for chunk in chunks:
                 msg_date = (chunk.message_date or "")[:10] or "unknown date"
                 lines.append(
-                    f"    --- chunk {chunk.chunk_index} | msg {chunk.message_id} | {msg_date}"
+                    f"    --- chunk {chunk.chunk_index} | msg {chunk.claimant_id} | {msg_date}"
                 )
                 if chunk.attachment_id is not None:
                     fname = clip(chunk.attachment_filename or "attachment", HEADER_CHAR_LIMIT)
@@ -702,6 +703,7 @@ def register_search_tools(
                     size_bytes=a.size_bytes,
                     thread_id=a.thread_id,
                     message_id=a.message_id,
+                    claimant_id=a.claimant_id,
                     subject=clip(a.subject, HEADER_CHAR_LIMIT),
                     folder=a.folder,
                     date_last=a.date_last,
@@ -724,7 +726,10 @@ def register_search_tools(
             mime = clip(a.content_type, HEADER_CHAR_LIMIT)
             lines.append(f"[{i}] {fname}  ({mime}, {size_kb:.1f} KB)")
             lines.append(f"    Thread: {clip(a.subject, HEADER_CHAR_LIMIT)}  [{a.folder}]")
-            lines.append(f"    Thread ID: {a.thread_id} | Message-ID: {a.message_id}")
+            lines.append(
+                f"    Thread ID: {a.thread_id} | Message-ID: {a.message_id} "
+                f"| Claimant ID: {a.claimant_id}"
+            )
             lines.append(f"    Date: {a.date_last.strftime('%Y-%m-%d')}")
             if a.senders:
                 senders = ", ".join(clip(s, HEADER_CHAR_LIMIT) for s in a.senders[:3])

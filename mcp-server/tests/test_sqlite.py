@@ -11,7 +11,7 @@ from contextlib import closing
 import pytest
 from src.lib.sqlite import Database, address_match_mode, canonical_addr
 
-from tests.conftest import write_ingestion
+from tests.conftest import claimant_of, write_ingestion
 
 
 class TestReadOnlyConnection:
@@ -2473,6 +2473,87 @@ class TestAttachmentProvenanceJoin:
         assert chunks[0].attachment_filename == "invoice-a.pdf"
 
 
+class TestMessageIdClaimantProvenance:
+    """#217: two files claiming one Message-ID each carry the same
+    attachment bytes under their own filename. Each claimant's chunk must
+    be attributed to its own occurrence and report its own claimant ID,
+    in every chunk and attachment lane."""
+
+    def _db(self, tmp_path):
+        from tests.conftest import (
+            _build_schema,
+            _insert_attachment,
+            _insert_chunk,
+            _insert_message,
+        )
+
+        db_path = tmp_path / "claimants.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.enable_load_extension(True)
+        import sqlite_vec
+
+        sqlite_vec.load(conn)
+        conn.enable_load_extension(False)
+        _build_schema(conn)
+        for variant, filename, vec in (
+            ("", "first-copy.pdf", [1.0, 0.0, 0.0, 0.0]),
+            ("b", "second-copy.pdf", [0.0, 1.0, 0.0, 0.0]),
+        ):
+            _insert_message(
+                conn,
+                message_id="dup@example.com",
+                variant=variant,
+                thread_id="t-dup",
+                sent_at="2024-01-10T09:00:00+00:00",
+                has_attachments=True,
+            )
+            _insert_attachment(
+                conn,
+                message_id="dup@example.com",
+                variant=variant,
+                thread_id="t-dup",
+                attachment_id="same-bytes",
+                filename=filename,
+            )
+            _insert_chunk(
+                conn,
+                chunk_id=f"c-{variant or 'a'}",
+                message_id="dup@example.com",
+                variant=variant,
+                thread_id="t-dup",
+                text="quarterly ledger figures",
+                embedding=vec,
+                attachment_id="same-bytes",
+            )
+        conn.close()
+        return Database(str(db_path))
+
+    def test_chunk_lanes_keep_claimants_apart(self, tmp_path):
+        db = self._db(tmp_path)
+        expected = {
+            (claimant_of("dup@example.com"), "first-copy.pdf"),
+            (claimant_of("dup@example.com", "b"), "second-copy.pdf"),
+        }
+        vector = db._chunk_vector_search([1.0, 1.0, 0.0, 0.0], limit=10)
+        evidence = db.get_evidence_chunks_for_threads(
+            ["t-dup"], [1.0, 1.0, 0.0, 0.0], per_thread_limit=10
+        )["t-dup"]
+        for chunks in (vector, evidence):
+            assert {(c.claimant_id, c.attachment_filename) for c in chunks} == expected
+            assert {c.message_id for c in chunks} == {"dup@example.com"}
+
+    def test_attachment_search_lists_each_claimants_occurrence(self, tmp_path):
+        db = self._db(tmp_path)
+        for query in ("copy", "ledger"):
+            hits = db.search_attachments(query=query, limit=10)
+            assert sorted((h.claimant_id, h.filename) for h in hits) == sorted(
+                [
+                    (claimant_of("dup@example.com"), "first-copy.pdf"),
+                    (claimant_of("dup@example.com", "b"), "second-copy.pdf"),
+                ]
+            ), query
+
+
 class TestHybridSearchChunkLane:
     def test_chunk_specific_query_lifts_parent_thread(self, chunked_db: Database):
         """A query whose terms appear in a chunk but not the thread body
@@ -2534,6 +2615,7 @@ class TestRRFChunkLifting:
             ChunkResult(
                 chunk_id=f"x{i}",
                 message_id="t-alpha",
+                claimant_id="t-alpha",
                 thread_id="t-alpha",
                 chunk_index=i,
                 text="x",
@@ -2545,6 +2627,7 @@ class TestRRFChunkLifting:
             ChunkResult(
                 chunk_id="y0",
                 message_id="t-beta",
+                claimant_id="t-beta",
                 thread_id="t-beta",
                 chunk_index=0,
                 text="y",
@@ -2576,6 +2659,7 @@ class TestRRFChunkOnlyMaterialization:
             ChunkResult(
                 chunk_id=f"c{i}",
                 message_id=tid,
+                claimant_id=tid,
                 thread_id=tid,
                 chunk_index=0,
                 text="x",
@@ -4118,17 +4202,17 @@ class TestThreadPage:
         assert [m.message_id for m in second.messages] == ["m2"]
         assert first.total_messages == second.total_messages == 2
         # Bodies are read only for the page's messages.
-        assert set(first.bodies) == {"m1"}
+        assert set(first.bodies) == {claimant_of("m1")}
 
     def test_bodies_exclude_attachment_text(self, messages_db):
         page = messages_db.get_thread_page("t1", offset=0, limit=10, body_char_limit=4000)
-        assert page.bodies["m2"].text == "thanks, budget noted"
+        assert page.bodies[claimant_of("m2")].text == "thanks, budget noted"
 
     def test_overlapping_chunks_rebuild_the_body_exactly(self, overlap_db):
         from tests.conftest import OVERLAP_BODY
 
         body = overlap_db.get_thread_page("t-ov", offset=0, limit=10, body_char_limit=4000).bodies[
-            "ov1"
+            claimant_of("ov1")
         ]
         # Each overlapped paragraph once; the paragraph that really
         # repeats at two offsets stays twice.
@@ -4140,14 +4224,14 @@ class TestThreadPage:
         from tests.conftest import OVERLAP_BODY
 
         body = overlap_db.get_thread_page("t-ov", offset=0, limit=10, body_char_limit=300).bodies[
-            "ov1"
+            claimant_of("ov1")
         ]
         assert body.text == OVERLAP_BODY[:300]
         assert body.omitted_chars == len(OVERLAP_BODY) - 300
 
     def test_separate_chunks_join_at_a_paragraph_break(self, messages_db):
         page = messages_db.get_thread_page("t2", offset=0, limit=10, body_char_limit=4000)
-        assert page.bodies["m3"].text == "lunch friday?\n\nat the noodle place"
+        assert page.bodies[claimant_of("m3")].text == "lunch friday?\n\nat the noodle place"
 
     def test_has_bodies_reflects_the_whole_thread(self, messages_db, seeded_db):
         page = messages_db.get_thread_page("t1", offset=5, limit=10, body_char_limit=4000)

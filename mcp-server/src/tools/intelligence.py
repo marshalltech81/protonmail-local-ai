@@ -796,7 +796,7 @@ def _summarize_context(thread: ThreadResult, recent_chunks: list[ChunkResult]) -
     # Everything renders oldest-first.
     by_message: dict[str, list[ChunkResult]] = {}
     for chunk in recent_chunks:  # oldest-first, so dict order is too
-        by_message.setdefault(chunk.message_id, []).append(chunk)
+        by_message.setdefault(chunk.claimant_id, []).append(chunk)
     kept_by_message: list[list[str]] = []
     used = 0
     exhausted = False

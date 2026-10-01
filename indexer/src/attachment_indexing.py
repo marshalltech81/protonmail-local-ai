@@ -59,12 +59,15 @@ log = logging.getLogger("indexer.attachments")
 
 def attachment_occurrence_id(
     *,
-    message_id: str,
+    claimant_id: str,
     content_hash: str,
     filename: str,
     occurrence_index: int,
 ) -> str:
     """Deterministic id for one attachment occurrence on one message.
+
+    Keyed by the message's claimant ID (``parser.claimant_id``), so two
+    files claiming one Message-ID never share an occurrence row (#217).
 
     Same payload appearing twice on the same message (e.g. inline + as
     a regular attachment) gets two distinct rows differentiated by
@@ -76,7 +79,7 @@ def attachment_occurrence_id(
     computing it.
     """
     return hashlib.sha256(
-        f"{message_id}\0{content_hash}\0{filename}\0{occurrence_index}".encode()
+        f"{claimant_id}\0{content_hash}\0{filename}\0{occurrence_index}".encode()
     ).hexdigest()
 
 
@@ -275,7 +278,7 @@ def _resolve_extracted_text(
 def prepare_attachment_writes(
     *,
     attachment: Attachment,
-    message_id: str,
+    claimant_id: str,
     db: Database,
     embedder: EmbeddingBackend | None,
     chunk_target_tokens: int,
@@ -312,7 +315,7 @@ def prepare_attachment_writes(
     can decide whether to retry the message.
     """
     occurrence_id = attachment_occurrence_id(
-        message_id=message_id,
+        claimant_id=claimant_id,
         content_hash=attachment.content_hash,
         filename=attachment.filename,
         occurrence_index=occurrence_index,
@@ -345,10 +348,10 @@ def prepare_attachment_writes(
         )
 
     # Chunk the extracted text and embed. The chunker takes
-    # ``message_pk`` = composite of message_id + content_hash so chunk
+    # ``message_pk`` = composite of claimant_id + content_hash so chunk
     # IDs are stable across re-runs of the same attachment in the same
-    # email and distinct from body chunks (whose pk = message_id alone).
-    chunk_pk = f"{message_id}::{attachment.content_hash}"
+    # email and distinct from body chunks (whose pk = claimant_id alone).
+    chunk_pk = f"{claimant_id}::{attachment.content_hash}"
     chunks = chunk_message(
         message_pk=chunk_pk,
         body_text=text,
@@ -356,7 +359,7 @@ def prepare_attachment_writes(
         max_tokens=chunk_max_tokens,
         overlap_tokens=chunk_overlap_tokens,
     )
-    stored_ids = db.get_chunk_ids_for_message(message_id, attachment_id=attachment.content_hash)
+    stored_ids = db.get_chunk_ids_for_message(claimant_id, attachment_id=attachment.content_hash)
     new_chunks = [c for c in chunks if c.chunk_id not in stored_ids]
     # Embedding happens HERE — outside any DB transaction the caller owns.
     # A multi-page PDF with N new chunks issues a single batched embed
@@ -385,7 +388,7 @@ def prepare_attachment_writes(
 def apply_attachment_writes(
     *,
     plan: AttachmentWritePlan,
-    message_id: str,
+    claimant_id: str,
     thread_id: str,
     db: Database,
     message_date: str,
@@ -423,7 +426,7 @@ def apply_attachment_writes(
     }
 
     if db.upsert_attachment(
-        message_id=message_id,
+        claimant_id=claimant_id,
         thread_id=thread_id,
         attachment_id=plan.attachment.content_hash,
         filename=plan.attachment.filename,
@@ -453,7 +456,7 @@ def apply_attachment_writes(
         if not plan.clears_stale_chunks:
             return summary
         db.replace_message_chunks(
-            message_id=message_id,
+            claimant_id=claimant_id,
             thread_id=thread_id,
             chunks=[],
             embeddings_by_chunk_id={},
@@ -463,7 +466,7 @@ def apply_attachment_writes(
         return summary
 
     write_summary = db.replace_message_chunks(
-        message_id=message_id,
+        claimant_id=claimant_id,
         thread_id=thread_id,
         chunks=plan.chunks,
         embeddings_by_chunk_id=plan.embeddings_by_chunk_id,

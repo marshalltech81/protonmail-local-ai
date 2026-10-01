@@ -74,7 +74,9 @@ def _dedupe_by_canonical(addrs: list[str]) -> list[str]:
 # Fresh installs apply ``_apply_initial_schema`` directly and stamp the
 # current version; existing installs run the migration runner to catch
 # up. See ``src/migrations/runner.py`` for the file layout and
-# transactional guarantees.
+# transactional guarantees. Until the first deployment, schema changes
+# fold into ``_apply_initial_schema`` instead, with no migration and no
+# bump (owner, 2026-10-01).
 SCHEMA_VERSION = 0
 SCHEMA_APPLICATION_ID = 0x504D4149  # "PMAI"
 
@@ -366,7 +368,7 @@ class Database:
                 folder          TEXT NOT NULL,
                 date_first      TEXT NOT NULL,
                 date_last       TEXT NOT NULL,
-                message_ids     TEXT NOT NULL,           -- JSON array
+                message_ids     TEXT NOT NULL,           -- JSON array of claimant IDs
                 snippet         TEXT,
                 has_attachments INTEGER DEFAULT 0,
                 body_text       TEXT,
@@ -412,7 +414,7 @@ class Database:
             -- Per-message chunks (precision retrieval)
             CREATE TABLE message_chunks (
                 chunk_id        TEXT PRIMARY KEY,
-                message_id      TEXT NOT NULL,
+                claimant_id     TEXT NOT NULL,           -- the message's claimant ID (parser.claimant_id)
                 thread_id       TEXT NOT NULL,
                 chunk_index     INTEGER NOT NULL,
                 text            TEXT NOT NULL,
@@ -423,13 +425,13 @@ class Database:
                 fts_rowid       INTEGER,
                 attachment_id   TEXT,
                 message_date    TEXT NOT NULL,           -- source message's Date: header; timeline retrieval orders by it
-                FOREIGN KEY (message_id) REFERENCES message_thread_map(message_id)
+                FOREIGN KEY (claimant_id) REFERENCES message_thread_map(claimant_id)
                     ON DELETE CASCADE,
                 FOREIGN KEY (thread_id) REFERENCES threads(thread_id)
                     ON DELETE CASCADE
             );
 
-            CREATE INDEX idx_message_chunks_message ON message_chunks(message_id);
+            CREATE INDEX idx_message_chunks_claimant ON message_chunks(claimant_id);
             CREATE INDEX idx_message_chunks_thread ON message_chunks(thread_id);
             CREATE INDEX idx_message_chunks_attachment ON message_chunks(attachment_id);
             -- Hybrid-search chunk lane joins ``message_chunks`` back from
@@ -452,7 +454,7 @@ class Database:
             -- Attachment indexing
             CREATE TABLE attachments (
                 attachment_occurrence_id TEXT PRIMARY KEY,
-                message_id                TEXT NOT NULL,
+                claimant_id               TEXT NOT NULL,
                 attachment_id             TEXT NOT NULL,
                 thread_id                 TEXT NOT NULL,
                 filename                  TEXT NOT NULL,
@@ -460,7 +462,7 @@ class Database:
                 size_bytes                INTEGER NOT NULL,
                 seen_at                   TEXT NOT NULL,
                 fts_rowid                 INTEGER,
-                FOREIGN KEY (message_id) REFERENCES message_thread_map(message_id)
+                FOREIGN KEY (claimant_id) REFERENCES message_thread_map(claimant_id)
                     ON DELETE CASCADE,
                 FOREIGN KEY (thread_id) REFERENCES threads(thread_id)
                     ON DELETE CASCADE
@@ -468,7 +470,7 @@ class Database:
 
             CREATE INDEX idx_attachments_attachment_id ON attachments(attachment_id);
             CREATE INDEX idx_attachments_thread ON attachments(thread_id);
-            CREATE INDEX idx_attachments_message ON attachments(message_id);
+            CREATE INDEX idx_attachments_claimant ON attachments(claimant_id);
             -- Hybrid-search attachment lane joins ``attachments`` back from
             -- ``attachments_fts`` on ``fts_rowid``.
             CREATE INDEX idx_attachments_fts_rowid ON attachments(fts_rowid);
@@ -491,12 +493,23 @@ class Database:
             );
 
             -- Cross-cutting tables
+            --
+            -- Every per-message row is keyed by ``claimant_id``: the
+            -- Message-ID plus a short hash of the file's bytes
+            -- (``parser.claimant_id``). A Message-ID is sender-controlled,
+            -- so two different files can claim one; both are kept, under
+            -- distinct claimant IDs, and neither's rows can overwrite or
+            -- delete the other's (#217). ``message_id`` stays alongside
+            -- as the bare Message-ID: threading resolves In-Reply-To and
+            -- References through it, and readers look a message up by it.
             CREATE TABLE message_thread_map (
-                message_id TEXT PRIMARY KEY,
-                thread_id  TEXT NOT NULL,
-                filepath   TEXT NOT NULL,
+                claimant_id TEXT PRIMARY KEY,
+                message_id  TEXT NOT NULL,
+                thread_id   TEXT NOT NULL,
+                filepath    TEXT NOT NULL,
                 FOREIGN KEY (thread_id) REFERENCES threads(thread_id)
             );
+            CREATE INDEX idx_message_thread_map_message ON message_thread_map(message_id);
             -- Flag renames match rows by filepath; thread rebuilds and
             -- removals match them by thread_id.
             CREATE INDEX idx_message_thread_map_filepath ON message_thread_map(filepath);
@@ -508,7 +521,8 @@ class Database:
             -- Cascades from ``message_thread_map`` so every existing
             -- message / thread removal path cleans it up.
             CREATE TABLE messages (
-                message_id      TEXT PRIMARY KEY,
+                claimant_id     TEXT PRIMARY KEY,
+                message_id      TEXT NOT NULL,
                 thread_id       TEXT NOT NULL,
                 filepath        TEXT NOT NULL,
                 folder          TEXT NOT NULL,
@@ -520,9 +534,10 @@ class Database:
                 size_bytes      INTEGER,
                 content_hash    TEXT,
                 indexed_at      TEXT NOT NULL,
-                FOREIGN KEY (message_id) REFERENCES message_thread_map(message_id)
+                FOREIGN KEY (claimant_id) REFERENCES message_thread_map(claimant_id)
                     ON DELETE CASCADE
             );
+            CREATE INDEX idx_messages_message ON messages(message_id);
             CREATE INDEX idx_messages_thread_sent ON messages(thread_id, sent_at);
             CREATE INDEX idx_messages_folder_sent ON messages(folder, sent_at);
             CREATE INDEX idx_messages_sent ON messages(sent_at);
@@ -533,12 +548,12 @@ class Database:
             -- lowercased bare address, so "every message from/to X" is an
             -- indexed lookup rather than a scan of JSON participant lists.
             CREATE TABLE message_participants (
-                message_id TEXT NOT NULL,
-                role       TEXT NOT NULL CHECK (role IN ('from', 'to', 'cc')),
-                address    TEXT NOT NULL,
-                name       TEXT,
-                PRIMARY KEY (message_id, role, address),
-                FOREIGN KEY (message_id) REFERENCES messages(message_id)
+                claimant_id TEXT NOT NULL,
+                role        TEXT NOT NULL CHECK (role IN ('from', 'to', 'cc')),
+                address     TEXT NOT NULL,
+                name        TEXT,
+                PRIMARY KEY (claimant_id, role, address),
+                FOREIGN KEY (claimant_id) REFERENCES messages(claimant_id)
                     ON DELETE CASCADE
             );
             CREATE INDEX idx_message_participants_address
@@ -556,10 +571,10 @@ class Database:
             -- is ISO 8601 UTC so the reaper's lexicographic cutoff
             -- comparison is well-defined.
             CREATE TABLE pending_deletions (
-                filepath   TEXT PRIMARY KEY,
-                message_id TEXT NOT NULL,
-                thread_id  TEXT NOT NULL,
-                marked_at  TEXT NOT NULL
+                filepath    TEXT PRIMARY KEY,
+                claimant_id TEXT NOT NULL,
+                thread_id   TEXT NOT NULL,
+                marked_at   TEXT NOT NULL
             );
             CREATE INDEX idx_pending_deletions_thread
                 ON pending_deletions(thread_id);
@@ -609,8 +624,12 @@ class Database:
         regenerating from scratch.
         """
         if existing and existing["body_text"]:
-            existing_message_ids = set(json.loads(existing["message_ids"]))
-            new_messages = [m for m in thread.messages if m.message_id not in existing_message_ids]
+            # ``message_ids`` lists claimant IDs, so a second claimant of
+            # a Message-ID already in the thread is new content (#217).
+            existing_claimant_ids = set(json.loads(existing["message_ids"]))
+            new_messages = [
+                m for m in thread.messages if m.claimant_id not in existing_claimant_ids
+            ]
             if new_messages:
                 # Per-message char cap shared with ``Thread.text_for_embedding``
                 # so a thread that arrived as one message gets the same FTS
@@ -640,7 +659,7 @@ class Database:
         ``has_attachments`` into the ON CONFLICT UPDATE would clobber the
         existing thread's accumulated state. Merge rules:
 
-        - ``message_ids``: union existing and incoming, preserving order
+        - ``message_ids``: union existing and incoming claimant IDs, preserving order
         - ``participants``: union existing and incoming, preserving order
         - ``has_attachments``: true if previously true or newly true
         - ``date_first``: min(existing, incoming)
@@ -661,7 +680,7 @@ class Database:
 
         cur = self._conn.cursor()
 
-        incoming_message_ids = [m.message_id for m in thread.messages]
+        incoming_message_ids = [m.claimant_id for m in thread.messages]
         incoming_participants = list(thread.participants)
         incoming_senders = [m.from_addr for m in thread.messages if m.from_addr]
         incoming_has_attachments = int(any(m.has_attachments for m in thread.messages))
@@ -807,13 +826,13 @@ class Database:
                 cur.execute(
                     """
                     INSERT INTO message_thread_map
-                        (message_id, thread_id, filepath)
-                    VALUES (?, ?, ?)
-                    ON CONFLICT(message_id) DO UPDATE SET
+                        (claimant_id, message_id, thread_id, filepath)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(claimant_id) DO UPDATE SET
                         thread_id = excluded.thread_id,
                         filepath  = excluded.filepath
                     """,
-                    (msg.message_id, thread.thread_id, msg.filepath),
+                    (msg.claimant_id, msg.message_id, thread.thread_id, msg.filepath),
                 )
 
                 cur.execute(
@@ -872,9 +891,9 @@ class Database:
 
     @_synchronized
     def get_chunk_ids_for_message(
-        self, message_id: str, attachment_id: str | None = None
+        self, claimant_id: str, attachment_id: str | None = None
     ) -> set[str]:
-        """Return the set of stored ``chunk_id`` values for ``message_id``.
+        """Return the set of stored ``chunk_id`` values for ``claimant_id``.
 
         Used by the indexer write path to compute the diff between newly
         chunked output and what is already stored. Chunks are paragraph-
@@ -895,13 +914,13 @@ class Database:
         if attachment_id is None:
             rows = self._conn.execute(
                 "SELECT chunk_id FROM message_chunks "
-                "WHERE message_id = ? AND attachment_id IS NULL",
-                (message_id,),
+                "WHERE claimant_id = ? AND attachment_id IS NULL",
+                (claimant_id,),
             ).fetchall()
         else:
             rows = self._conn.execute(
-                "SELECT chunk_id FROM message_chunks WHERE message_id = ? AND attachment_id = ?",
-                (message_id, attachment_id),
+                "SELECT chunk_id FROM message_chunks WHERE claimant_id = ? AND attachment_id = ?",
+                (claimant_id, attachment_id),
             ).fetchall()
         return {row["chunk_id"] for row in rows}
 
@@ -909,7 +928,7 @@ class Database:
     def replace_message_chunks(
         self,
         *,
-        message_id: str,
+        claimant_id: str,
         thread_id: str,
         chunks,
         embeddings_by_chunk_id: dict[str, list[float]],
@@ -964,14 +983,14 @@ class Database:
             if attachment_id is None:
                 existing_rows = cur.execute(
                     "SELECT chunk_id, fts_rowid FROM message_chunks "
-                    "WHERE message_id = ? AND attachment_id IS NULL",
-                    (message_id,),
+                    "WHERE claimant_id = ? AND attachment_id IS NULL",
+                    (claimant_id,),
                 ).fetchall()
             else:
                 existing_rows = cur.execute(
                     "SELECT chunk_id, fts_rowid FROM message_chunks "
-                    "WHERE message_id = ? AND attachment_id = ?",
-                    (message_id, attachment_id),
+                    "WHERE claimant_id = ? AND attachment_id = ?",
+                    (claimant_id, attachment_id),
                 ).fetchall()
             existing_ids = {row["chunk_id"] for row in existing_rows}
             existing_fts_rowids = {
@@ -994,10 +1013,7 @@ class Database:
             for chunk in to_insert:
                 embedding = embeddings_by_chunk_id.get(chunk.chunk_id)
                 if embedding is None:
-                    raise ValueError(
-                        f"missing embedding for new chunk {chunk.chunk_id!r} "
-                        f"(message_id={message_id!r})"
-                    )
+                    raise ValueError(f"missing embedding for new chunk {chunk.chunk_id!r}")
                 if len(embedding) != EMBEDDING_DIM:
                     raise ValueError(
                         f"chunk embedding has {len(embedding)} dims but "
@@ -1024,14 +1040,14 @@ class Database:
                 cur.execute(
                     """
                     INSERT INTO message_chunks
-                        (chunk_id, message_id, thread_id, chunk_index, text,
+                        (chunk_id, claimant_id, thread_id, chunk_index, text,
                          char_start, char_end, token_est,
                          chunked_at, fts_rowid, attachment_id, message_date)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         chunk.chunk_id,
-                        message_id,
+                        claimant_id,
                         thread_id,
                         chunk.chunk_index,
                         chunk.text,
@@ -1060,7 +1076,7 @@ class Database:
     def upsert_attachment(
         self,
         *,
-        message_id: str,
+        claimant_id: str,
         thread_id: str,
         attachment_id: str,
         filename: str,
@@ -1108,13 +1124,13 @@ class Database:
             cur.execute(
                 """
                 INSERT INTO attachments
-                    (attachment_occurrence_id, message_id, attachment_id, thread_id, filename,
+                    (attachment_occurrence_id, claimant_id, attachment_id, thread_id, filename,
                      content_type, size_bytes, seen_at, fts_rowid)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     occurrence_id,
-                    message_id,
+                    claimant_id,
                     attachment_id,
                     thread_id,
                     filename,
@@ -1151,7 +1167,7 @@ class Database:
             SELECT DISTINCT m.filepath
             FROM attachment_extractions e
             JOIN attachments a ON a.attachment_id = e.attachment_id
-            JOIN message_thread_map m ON m.message_id = a.message_id
+            JOIN message_thread_map m ON m.claimant_id = a.claimant_id
             WHERE e.extractor IN ({placeholders})
             ORDER BY m.filepath
             """,  # nosec B608 — placeholders only, values are bound
@@ -1169,7 +1185,7 @@ class Database:
             SELECT m.filepath, a.filename, a.content_type, e.extraction_error
             FROM attachment_extractions e
             JOIN attachments a ON a.attachment_id = e.attachment_id
-            JOIN message_thread_map m ON m.message_id = a.message_id
+            JOIN message_thread_map m ON m.claimant_id = a.claimant_id
             WHERE e.extraction_status = 'unsupported'
               AND e.extraction_error IN (?, ?)
             ORDER BY m.filepath
@@ -1245,8 +1261,8 @@ class Database:
             self._rollback_if_started(started)
             raise
 
-    def _delete_attachments_for_message(self, cur: sqlite3.Cursor, message_id: str) -> None:
-        """Drop all ``attachments`` occurrences and their FTS rows for ``message_id``.
+    def _delete_attachments_for_message(self, cur: sqlite3.Cursor, claimant_id: str) -> None:
+        """Drop all ``attachments`` occurrences and their FTS rows for ``claimant_id``.
 
         Cached ``attachment_extractions`` rows are left in place: another
         message may still reference the same content_hash, and even when
@@ -1255,12 +1271,12 @@ class Database:
         cost. A separate sweep can prune true orphans periodically.
         """
         rows = cur.execute(
-            "SELECT fts_rowid FROM attachments WHERE message_id = ?", (message_id,)
+            "SELECT fts_rowid FROM attachments WHERE claimant_id = ?", (claimant_id,)
         ).fetchall()
         for row in rows:
             if row["fts_rowid"] is not None:
                 cur.execute("DELETE FROM attachments_fts WHERE rowid = ?", (row["fts_rowid"],))
-        cur.execute("DELETE FROM attachments WHERE message_id = ?", (message_id,))
+        cur.execute("DELETE FROM attachments WHERE claimant_id = ?", (claimant_id,))
 
     @_synchronized
     def replace_thread_vector(self, thread_id: str, embedding: list[float]) -> None:
@@ -1298,20 +1314,20 @@ class Database:
             raise
 
     @_synchronized
-    def get_chunk_embeddings_for_messages(self, message_ids: list[str]) -> list[list[float]]:
-        """Return every chunk embedding for the given ``message_ids``.
+    def get_chunk_embeddings_for_messages(self, claimant_ids: list[str]) -> list[list[float]]:
+        """Return every chunk embedding for the given ``claimant_ids``.
 
         Used by the reconciler's reap path to compute a survivor-only
         thread vector after a partial reap: the caller passes the
-        surviving message ids, gets back their chunk embeddings, and
+        surviving claimant IDs, gets back their chunk embeddings, and
         means them with ``chunker.mean_vector``. Skipping the reaped
         messages here (rather than after a thread-wide fetch) keeps the
         reconciler's pre-transaction read cheap on threads with a long
         tail of historical messages.
         """
-        if not message_ids:
+        if not claimant_ids:
             return []
-        placeholders = ",".join(["?"] * len(message_ids))
+        placeholders = ",".join(["?"] * len(claimant_ids))
         # Composed SQL is a fixed SELECT; user values are bound through
         # ``?`` placeholders. nosec B608.
         # ``ORDER BY c.chunk_id`` pins read order so ``mean_vector`` sums
@@ -1322,10 +1338,10 @@ class Database:
             "SELECT v.embedding AS embedding "
             "FROM message_chunks c "
             "JOIN message_chunks_vec v ON v.chunk_id = c.chunk_id "
-            f"WHERE c.message_id IN ({placeholders}) "  # nosec B608
+            f"WHERE c.claimant_id IN ({placeholders}) "  # nosec B608
             "ORDER BY c.chunk_id"
         )
-        rows = self._conn.execute(sql, list(message_ids)).fetchall()
+        rows = self._conn.execute(sql, list(claimant_ids)).fetchall()
         result: list[list[float]] = []
         for row in rows:
             blob = row["embedding"]
@@ -1602,18 +1618,18 @@ class Database:
                 str_batch,
             )
 
-    def _delete_chunks_for_message(self, cur: sqlite3.Cursor, message_id: str) -> None:
-        """Drop every chunk row + FTS + vec entry for ``message_id``.
+    def _delete_chunks_for_message(self, cur: sqlite3.Cursor, claimant_id: str) -> None:
+        """Drop every chunk row + FTS + vec entry for ``claimant_id``.
 
         Internal helper used inside an enclosing transaction by
         ``_remove_message_row`` and the reconciler's reap path.
         """
         rows = cur.execute(
-            "SELECT chunk_id, fts_rowid FROM message_chunks WHERE message_id = ?",
-            (message_id,),
+            "SELECT chunk_id, fts_rowid FROM message_chunks WHERE claimant_id = ?",
+            (claimant_id,),
         ).fetchall()
         self._delete_chunks_in_batches(cur, rows)
-        cur.execute("DELETE FROM message_chunks WHERE message_id = ?", (message_id,))
+        cur.execute("DELETE FROM message_chunks WHERE claimant_id = ?", (claimant_id,))
 
     def _delete_chunks_for_thread(self, cur: sqlite3.Cursor, thread_id: str) -> None:
         """Drop every chunk row + FTS + vec entry for ``thread_id``.
@@ -1664,8 +1680,16 @@ class Database:
 
     @_synchronized
     def find_thread_by_message_id(self, message_id: str) -> str | None:
+        """The thread holding a message with the bare ``message_id``.
+
+        Every claimant of one Message-ID joins the thread the first
+        claimant was filed in (the threader looks the Message-ID up here
+        before anything else), so any of their rows answers; the lowest
+        claimant ID is taken so the answer does not depend on row order.
+        """
         row = self._conn.execute(
-            "SELECT thread_id FROM message_thread_map WHERE message_id = ?",
+            "SELECT thread_id FROM message_thread_map WHERE message_id = ? "
+            "ORDER BY claimant_id LIMIT 1",
             (message_id,),
         ).fetchone()
         return row["thread_id"] if row else None
@@ -1969,23 +1993,24 @@ class Database:
 
     @_synchronized
     def iter_message_map(self) -> list[sqlite3.Row]:
-        """Return every (message_id, thread_id, filepath) row for sweeping."""
+        """Return every (claimant_id, message_id, thread_id, filepath) row for sweeping."""
         return self._conn.execute(
-            "SELECT message_id, thread_id, filepath FROM message_thread_map"
+            "SELECT claimant_id, message_id, thread_id, filepath FROM message_thread_map"
         ).fetchall()
 
     @_synchronized
     def find_message_entry_by_filepath(self, filepath: str) -> sqlite3.Row | None:
         return self._conn.execute(
-            "SELECT message_id, thread_id, filepath FROM message_thread_map WHERE filepath = ?",
+            "SELECT claimant_id, message_id, thread_id, filepath FROM message_thread_map "
+            "WHERE filepath = ?",
             (filepath,),
         ).fetchone()
 
     @_synchronized
-    def get_message_sent_at(self, message_id: str) -> datetime | None:
-        """The ``messages.sent_at`` already stored for ``message_id``, if any."""
+    def get_message_sent_at(self, claimant_id: str) -> datetime | None:
+        """The ``messages.sent_at`` already stored for ``claimant_id``, if any."""
         row = self._conn.execute(
-            "SELECT sent_at FROM messages WHERE message_id = ?", (message_id,)
+            "SELECT sent_at FROM messages WHERE claimant_id = ?", (claimant_id,)
         ).fetchone()
         return datetime.fromisoformat(row["sent_at"]) if row else None
 
@@ -1998,7 +2023,7 @@ class Database:
         otherwise re-date it (#297). A real header date is left alone.
         """
         if msg.date_is_fallback:
-            msg.date = self.get_message_sent_at(msg.message_id) or msg.date
+            msg.date = self.get_message_sent_at(msg.claimant_id) or msg.date
 
     @_synchronized
     def count_total_messages(self) -> int:
@@ -2007,9 +2032,9 @@ class Database:
 
     @_synchronized
     def get_thread_messages(self, thread_id: str) -> list[sqlite3.Row]:
-        """All (message_id, filepath) rows for a thread, used to rebuild it."""
+        """All (claimant_id, message_id, filepath) rows for a thread, used to rebuild it."""
         return self._conn.execute(
-            "SELECT message_id, filepath FROM message_thread_map WHERE thread_id = ?",
+            "SELECT claimant_id, message_id, filepath FROM message_thread_map WHERE thread_id = ?",
             (thread_id,),
         ).fetchall()
 
@@ -2024,11 +2049,11 @@ class Database:
         cur.execute(
             """
             INSERT INTO messages
-                (message_id, thread_id, filepath, folder, subject, sent_at,
+                (claimant_id, message_id, thread_id, filepath, folder, subject, sent_at,
                  in_reply_to, references_json, has_attachments, size_bytes,
                  content_hash, indexed_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(message_id) DO UPDATE SET
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(claimant_id) DO UPDATE SET
                 thread_id       = excluded.thread_id,
                 filepath        = excluded.filepath,
                 folder          = excluded.folder,
@@ -2042,6 +2067,7 @@ class Database:
                 indexed_at      = excluded.indexed_at
             """,
             (
+                msg.claimant_id,
                 msg.message_id,
                 thread_id,
                 msg.filepath,
@@ -2056,7 +2082,7 @@ class Database:
                 datetime.now(UTC).isoformat(),
             ),
         )
-        cur.execute("DELETE FROM message_participants WHERE message_id = ?", (msg.message_id,))
+        cur.execute("DELETE FROM message_participants WHERE claimant_id = ?", (msg.claimant_id,))
         # ``from_addrs`` holds every author; ``from_addr`` alone for callers
         # that build a Message by hand.
         authors = msg.from_addrs or [msg.from_addr]
@@ -2068,9 +2094,9 @@ class Database:
                     continue
                 name = parseaddr(value)[0].strip() or None
                 cur.execute(
-                    "INSERT OR IGNORE INTO message_participants (message_id, role, address, name) "
-                    "VALUES (?, ?, ?, ?)",
-                    (msg.message_id, role, address, name),
+                    "INSERT OR IGNORE INTO message_participants "
+                    "(claimant_id, role, address, name) VALUES (?, ?, ?, ?)",
+                    (msg.claimant_id, role, address, name),
                 )
 
     @_synchronized
@@ -2174,7 +2200,7 @@ class Database:
             raise
 
     @_synchronized
-    def add_pending_deletion(self, filepath: str, message_id: str, thread_id: str) -> bool:
+    def add_pending_deletion(self, filepath: str, claimant_id: str, thread_id: str) -> bool:
         """Record a tombstone. Returns True if newly inserted, False if already present.
 
         Uses INSERT OR IGNORE so repeated sweeps over the same T-flagged file
@@ -2188,10 +2214,10 @@ class Database:
         lexicographically before ``T``-separated ISO strings and would
         cause tombstones to be reaped up to a day early.
 
-        Refused when ``message_thread_map`` maps ``message_id`` to another
+        Refused when ``message_thread_map`` maps ``claimant_id`` to another
         path (#301): the caller's path is stale because the watcher renamed
         the file meanwhile (a restore, or a move to another folder). The
-        reaper matches tombstones by message ID, and no sweep revisits the
+        reaper matches tombstones by claimant ID, and no sweep revisits the
         old path, so the tombstone would delete the live message. The check
         and the insert are one statement, so a rename cannot land between
         them.
@@ -2200,10 +2226,10 @@ class Database:
         marked_at = datetime.now(UTC).isoformat()
         cur.execute(
             "INSERT OR IGNORE INTO pending_deletions "
-            "(filepath, message_id, thread_id, marked_at) "
+            "(filepath, claimant_id, thread_id, marked_at) "
             "SELECT ?, ?, ?, ? WHERE NOT EXISTS ("
-            "SELECT 1 FROM message_thread_map WHERE message_id = ? AND filepath != ?)",
-            (filepath, message_id, thread_id, marked_at, message_id, filepath),
+            "SELECT 1 FROM message_thread_map WHERE claimant_id = ? AND filepath != ?)",
+            (filepath, claimant_id, thread_id, marked_at, claimant_id, filepath),
         )
         self._conn.commit()
         return cur.rowcount > 0
@@ -2226,10 +2252,10 @@ class Database:
         ``mapped_filepath``: the path ``message_thread_map`` holds for the
         message now (``None`` when the message is unmapped)."""
         return self._conn.execute(
-            "SELECT p.filepath, p.message_id, p.thread_id, p.marked_at, "
+            "SELECT p.filepath, p.claimant_id, p.thread_id, p.marked_at, "
             "m.filepath AS mapped_filepath "
             "FROM pending_deletions p "
-            "LEFT JOIN message_thread_map m ON m.message_id = p.message_id "
+            "LEFT JOIN message_thread_map m ON m.claimant_id = p.claimant_id "
             "WHERE p.marked_at <= ? ORDER BY p.marked_at ASC",
             (cutoff_iso,),
         ).fetchall()
@@ -2266,18 +2292,18 @@ class Database:
             cur.execute("DELETE FROM threads_vec WHERE thread_id = ?", (thread_id,))
             self._delete_chunks_for_thread(cur, thread_id)
             # Walk every message in the thread to drop its attachments
-            # rows + FTS shadows. ``message_id``-keyed deletes from
+            # rows + FTS shadows. ``claimant_id``-keyed deletes from
             # ``message_thread_map`` happen below; do attachments first
             # so the per-message lookup still finds rows.
-            message_ids = [
-                r["message_id"]
+            claimant_ids = [
+                r["claimant_id"]
                 for r in cur.execute(
-                    "SELECT message_id FROM message_thread_map WHERE thread_id = ?",
+                    "SELECT claimant_id FROM message_thread_map WHERE thread_id = ?",
                     (thread_id,),
                 ).fetchall()
             ]
-            for mid in message_ids:
-                self._delete_attachments_for_message(cur, mid)
+            for cid in claimant_ids:
+                self._delete_attachments_for_message(cur, cid)
             cur.execute("DELETE FROM message_thread_map WHERE thread_id = ?", (thread_id,))
             cur.execute("DELETE FROM threads WHERE thread_id = ?", (thread_id,))
             cur.execute("DELETE FROM pending_deletions WHERE thread_id = ?", (thread_id,))
@@ -2296,11 +2322,11 @@ class Database:
     def _has_untombstoned_messages(
         cur: sqlite3.Cursor,
         thread_id: str,
-        message_ids: list[str] | None = None,
+        claimant_ids: list[str] | None = None,
         *,
         grace_cutoff: str | None = None,
     ) -> bool:
-        """Whether a message of ``thread_id`` (only ``message_ids``, when
+        """Whether a message of ``thread_id`` (only ``claimant_ids``, when
         given) has no tombstone, or none marked at or before
         ``grace_cutoff``. Read inside the reap transaction, so a restore
         (or a restore and a new tombstone) after the reaper's snapshot is
@@ -2310,14 +2336,14 @@ class Database:
         sql = (
             "SELECT 1 FROM message_thread_map m WHERE m.thread_id = ? "  # nosec B608
             "AND NOT EXISTS (SELECT 1 FROM pending_deletions p "
-            f"WHERE p.message_id = m.message_id{marked})"
+            f"WHERE p.claimant_id = m.claimant_id{marked})"
         )
         params: list[str] = [thread_id]
         if grace_cutoff is not None:
             params.append(grace_cutoff)
-        if message_ids is not None:
-            sql += f" AND m.message_id IN ({','.join('?' * len(message_ids))})"  # nosec B608
-            params.extend(message_ids)
+        if claimant_ids is not None:
+            sql += f" AND m.claimant_id IN ({','.join('?' * len(claimant_ids))})"  # nosec B608
+            params.extend(claimant_ids)
         return cur.execute(sql + " LIMIT 1", params).fetchone() is not None
 
     @_synchronized
@@ -2325,7 +2351,7 @@ class Database:
         self,
         thread,
         embedding: list[float],
-        reaped_message_ids: list[str],
+        reaped_claimant_ids: list[str],
         *,
         grace_cutoff: str | None = None,
     ) -> list[str] | None:
@@ -2348,13 +2374,13 @@ class Database:
         try:
             cur.execute("BEGIN IMMEDIATE")
             if self._has_untombstoned_messages(
-                cur, thread.thread_id, reaped_message_ids, grace_cutoff=grace_cutoff
+                cur, thread.thread_id, reaped_claimant_ids, grace_cutoff=grace_cutoff
             ):
                 self._conn.rollback()
                 return None
             self._rewrite_thread_row(cur, thread, embedding)
-            for mid in reaped_message_ids:
-                fp = self._remove_message_row(cur, mid)
+            for cid in reaped_claimant_ids:
+                fp = self._remove_message_row(cur, cid)
                 if fp is not None:
                     removed_filepaths.append(fp)
             self._conn.commit()
@@ -2384,7 +2410,7 @@ class Database:
         senders_json = json.dumps(
             _dedupe_by_canonical([m.from_addr for m in thread.messages if m.from_addr])
         )
-        message_ids_json = json.dumps([m.message_id for m in thread.messages])
+        message_ids_json = json.dumps([m.claimant_id for m in thread.messages])
         snippet = thread.snippet()
         date_first = thread.date_first.isoformat()
         date_last = thread.date_last.isoformat()
@@ -2454,7 +2480,7 @@ class Database:
             (thread.thread_id, sqlite_vec.serialize_float32(embedding)),
         )
 
-    def _remove_message_row(self, cur: sqlite3.Cursor, message_id: str) -> str | None:
+    def _remove_message_row(self, cur: sqlite3.Cursor, claimant_id: str) -> str | None:
         """Remove a message's map / indexed_files / tombstone / chunk /
         attachment rows using ``cur``. Returns the message's filepath
         (for optional on-disk cleanup), or ``None`` if no such message
@@ -2462,21 +2488,21 @@ class Database:
         the enclosing transaction.
         """
         row = cur.execute(
-            "SELECT filepath FROM message_thread_map WHERE message_id = ?",
-            (message_id,),
+            "SELECT filepath FROM message_thread_map WHERE claimant_id = ?",
+            (claimant_id,),
         ).fetchone()
         if row is None:
             return None
         filepath = row["filepath"]
         # Per-message chunk cascade. ``_delete_chunks_for_message``
         # drops both body-chunk and attachment-chunk rows because both
-        # carry this message_id; the deduped extraction cache stays.
-        self._delete_chunks_for_message(cur, message_id)
+        # carry this claimant_id; the deduped extraction cache stays.
+        self._delete_chunks_for_message(cur, claimant_id)
         # Attachment occurrences for this message. Cached extractions
         # in ``attachment_extractions`` are deliberately kept — see
         # ``_delete_attachments_for_message``.
-        self._delete_attachments_for_message(cur, message_id)
-        cur.execute("DELETE FROM message_thread_map WHERE message_id = ?", (message_id,))
+        self._delete_attachments_for_message(cur, claimant_id)
+        cur.execute("DELETE FROM message_thread_map WHERE claimant_id = ?", (claimant_id,))
         cur.execute("DELETE FROM indexed_files WHERE filepath = ?", (filepath,))
         cur.execute("DELETE FROM pending_deletions WHERE filepath = ?", (filepath,))
         # A job still queued for the file would re-index it from the kept

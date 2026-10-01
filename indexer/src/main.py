@@ -829,13 +829,13 @@ def _phase2a_collect_chunks(
     t0 = time.perf_counter()
     try:
         body_chunks = chunk_message(
-            message_pk=msg.message_id,
+            message_pk=msg.claimant_id,
             body_text=strip_for_embedding(msg.body_text or ""),
             target_tokens=CHUNK_TARGET_TOKENS,
             max_tokens=CHUNK_MAX_TOKENS,
             overlap_tokens=CHUNK_OVERLAP_TOKENS,
         )
-        stored_ids = db.get_chunk_ids_for_message(msg.message_id)
+        stored_ids = db.get_chunk_ids_for_message(msg.claimant_id)
         new_body = [c for c in body_chunks if c.chunk_id not in stored_ids]
         # Whether Phase 2c will delete chunks this message committed
         # earlier without adding any (a body or a re-extracted
@@ -880,7 +880,7 @@ def _phase2a_collect_chunks(
                 # Phase 2c populates it from the batched embed result.
                 plan = prepare_attachment_writes(
                     attachment=attachment,
-                    message_id=msg.message_id,
+                    claimant_id=msg.claimant_id,
                     db=db,
                     embedder=None,
                     chunk_target_tokens=CHUNK_TARGET_TOKENS,
@@ -896,7 +896,7 @@ def _phase2a_collect_chunks(
                     batch_extractions=batch_extractions,
                 )
                 stored_attach_ids = db.get_chunk_ids_for_message(
-                    msg.message_id, attachment_id=attachment.content_hash
+                    msg.claimant_id, attachment_id=attachment.content_hash
                 )
                 plan_new = [c for c in plan.chunks if c.chunk_id not in stored_attach_ids]
                 plan_offsets: list[int] = []
@@ -1021,7 +1021,7 @@ def _phase2c_commit_vectors(
     try:
         with db.transaction():
             db.replace_message_chunks(
-                message_id=msg.message_id,
+                claimant_id=msg.claimant_id,
                 thread_id=thread.thread_id,
                 chunks=state.body_chunks,
                 embeddings_by_chunk_id=body_embs,
@@ -1030,7 +1030,7 @@ def _phase2c_commit_vectors(
             for plan in state.attach_plans:
                 apply_attachment_writes(
                     plan=plan,
-                    message_id=msg.message_id,
+                    claimant_id=msg.claimant_id,
                     thread_id=thread.thread_id,
                     db=db,
                     message_date=msg_date_iso,

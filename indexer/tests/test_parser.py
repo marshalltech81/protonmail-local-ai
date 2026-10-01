@@ -5,9 +5,11 @@ Covers: plain text, HTML, multipart, attachments, inline Content-Disposition,
 encoded headers, address parsing, date fallback, and folder derivation.
 """
 
+import base64
 import email.utils
 import hashlib
 import logging
+import quopri
 import textwrap
 from datetime import UTC, datetime
 from email.message import EmailMessage
@@ -575,6 +577,68 @@ class TestFileIdentity:
         assert msg_seen is not None and msg_seen_replied is not None
         assert msg_seen.content_hash == msg_seen_replied.content_hash
         assert msg_seen.size == msg_seen_replied.size
+
+
+class TestClaimantId:
+    """#217: the per-message key is the Message-ID plus the first eight
+    hex digits of the SHA-256 of the file's raw bytes, so two files
+    claiming one Message-ID with different content get distinct keys,
+    while the same file keeps its key across reparses, flag renames and
+    folder moves (none of which change its bytes)."""
+
+    _RAW = (
+        b"From: alice@example.com\r\n"
+        b"To: bob@example.com\r\n"
+        b"Subject: Claimant\r\n"
+        b"Message-ID: <claimant@example.com>\r\n"
+        b"Date: Mon, 01 Jan 2024 12:00:00 +0000\r\n"
+        b"\r\n"
+        b"Body.\r\n"
+    )
+
+    def _parse(self, tmp_path, rel: str, raw: bytes):
+        path = tmp_path / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(raw)
+        msg = parse_email(path, maildir_root=tmp_path)
+        assert msg is not None
+        return msg
+
+    def test_is_message_id_plus_raw_bytes_hash_prefix(self, tmp_path):
+        msg = self._parse(tmp_path, "INBOX/cur/a:2,S", self._RAW)
+        digest = hashlib.sha256(self._RAW).hexdigest()
+        assert msg.claimant_id == f"claimant@example.com#{digest[:8]}"
+
+    def test_independent_of_flags_filename_and_folder(self, tmp_path):
+        first = self._parse(tmp_path, "INBOX/cur/a:2,S", self._RAW)
+        renamed = self._parse(tmp_path, "Archive/cur/b:2,RS", self._RAW)
+        assert renamed.claimant_id == first.claimant_id
+
+    def test_differs_for_different_content(self, tmp_path):
+        first = self._parse(tmp_path, "INBOX/cur/a:2,S", self._RAW)
+        other = self._parse(tmp_path, "INBOX/cur/b:2,S", self._RAW.replace(b"Body.", b"Other."))
+        assert other.message_id == first.message_id
+        assert other.claimant_id != first.claimant_id
+
+    def test_hand_built_message_without_hash_keys_on_message_id(self):
+        """Messages built in tests without file identity fall back to
+        the bare Message-ID."""
+        from src.parser import Message
+
+        msg = Message(
+            message_id="bare@example.com",
+            in_reply_to=None,
+            references=[],
+            subject="",
+            from_addr="",
+            to_addrs=[],
+            cc_addrs=[],
+            date=datetime(2024, 1, 1, tzinfo=UTC),
+            body_text="",
+            folder="INBOX",
+            filepath="/x",
+        )
+        assert msg.claimant_id == "bare@example.com"
 
 
 # ---------------------------------------------------------------------------
@@ -1928,3 +1992,267 @@ def test_parse_addrs_output_is_always_a_parseaddr_fixed_point():
         for formatted in _parse_addrs(header):
             addr = parseaddr(formatted)[1]
             assert addr and parseaddr(addr)[1] == addr
+
+
+# ---------------------------------------------------------------------------
+# Body assembly shape catalogue (#295)
+# ---------------------------------------------------------------------------
+#
+# Each shape is a MIME tree: a leaf is ``(content_type, text, headers)``,
+# a container is ``(multipart_type, [children], headers)``. The expected
+# body is exact. Invariant: the body is the concatenation, in document
+# order and separated by a blank line, of every non-blank inline text
+# part outside attachments, where a multipart/alternative contributes
+# one of its children (the first carrying non-blank plain text, else the
+# first carrying any text).
+
+_PDF = ("application/pdf", "JVBERi0=", {"Content-Disposition": 'attachment; filename="r.pdf"'})
+_IMG = ("image/png", "iVBORw0=", {"Content-Disposition": 'inline; filename="i.png"'})
+_FORWARDED = (
+    "message/rfc822",
+    "FORWARDED_MARKER",
+    {"Content-Disposition": 'attachment; filename="fwd.eml"'},
+)
+
+
+def _plain(text: str, disposition: str = "") -> tuple:
+    return ("text/plain", text, {"Content-Disposition": disposition} if disposition else {})
+
+
+def _html(text: str) -> tuple:
+    return ("text/html", f"<p>{text}</p>", {})
+
+
+def _multi(subtype: str, *children: tuple) -> tuple:
+    return (f"multipart/{subtype}", list(children), {})
+
+
+def _render(node: tuple, counter: list[int]) -> str:
+    """Raw MIME text for a shape; ``counter`` numbers the boundaries."""
+    ctype, content, headers = node
+    head = f"Content-Type: {ctype}"
+    if ctype.startswith("multipart/"):
+        counter[0] += 1
+        boundary = f"b{counter[0]}"
+        head += f'; boundary="{boundary}"'
+    elif ctype.startswith("text/"):
+        head += "; charset=utf-8\r\nContent-Transfer-Encoding: 8bit"
+    elif ctype != "message/rfc822":
+        head += "\r\nContent-Transfer-Encoding: base64"
+    head += "".join(f"\r\n{name}: {value}" for name, value in headers.items()) + "\r\n\r\n"
+    if ctype == "message/rfc822":
+        inner = (
+            "Message-ID: <inner@example.test>\r\nFrom: other@example.test\r\n"
+            f"Content-Type: text/plain\r\n\r\n{content}\r\n"
+        )
+        encoding = headers.get("Content-Transfer-Encoding", "").lower()
+        if encoding == "base64":
+            inner = base64.encodebytes(inner.encode()).decode().replace("\n", "\r\n")
+        elif encoding == "quoted-printable":
+            inner = quopri.encodestring(inner.encode()).decode()
+        return head + inner
+    if not ctype.startswith("multipart/"):
+        return head + content + "\r\n"
+    body = "".join(f"--{boundary}\r\n{_render(child, counter)}" for child in content)
+    return head + body + f"--{boundary}--\r\n"
+
+
+_BODY_SHAPES = {
+    # Shapes handled before #295; the expected bodies pin that behaviour.
+    "single-plain": (_plain("P1"), "P1"),
+    "single-html": (_html("H1"), "H1"),
+    "single-8bit": (_plain("café P1"), "café P1"),
+    "single-blank": (_plain(" \r\n"), ""),
+    "alt-plain-html": (_multi("alternative", _plain("P1"), _html("H1")), "P1"),
+    "alt-html-plain": (_multi("alternative", _html("H1"), _plain("P1")), "P1"),
+    "alt-blank-plain-html": (_multi("alternative", _plain("  "), _html("H1")), "H1"),
+    "mixed-plain-attachment": (_multi("mixed", _plain("P1"), _PDF), "P1"),
+    "mixed-attachment-only": (_multi("mixed", _PDF), ""),
+    "mixed-inline-plain": (_multi("mixed", _plain("P1", "inline")), "P1"),
+    "mixed-alt-attachment": (
+        _multi("mixed", _multi("alternative", _plain("P1"), _html("H1")), _PDF),
+        "P1",
+    ),
+    "alt-plain-related-html": (
+        _multi("alternative", _plain("P1"), _multi("related", _html("H1"), _IMG)),
+        "P1",
+    ),
+    # A multipart/related contributes only its root, the first child;
+    # later parts are resources it references (review round 2 on #444).
+    "related-html-root-html-resource": (
+        _multi("related", _html("H1"), _html("RESOURCE")),
+        "H1",
+    ),
+    "related-html-root-plain-resource": (
+        _multi("related", _html("H1"), _plain("RESOURCE")),
+        "H1",
+    ),
+    "related-alt-root-image": (
+        _multi("related", _multi("alternative", _plain("P1"), _html("H1")), _IMG),
+        "P1",
+    ),
+    "related-blank-root-html-resource": (
+        _multi("related", _html(""), _html("RESOURCE")),
+        "",
+    ),
+    "mixed-related-then-plain": (
+        _multi("mixed", _multi("related", _html("H1"), _html("RESOURCE")), _plain("P2")),
+        "H1\n\nP2",
+    ),
+    "mixed-labelled-text-attachments": (
+        _multi(
+            "mixed",
+            _plain("P1"),
+            _plain("ATTACHED_TEXT", 'attachment; filename="n.txt"'),
+            _plain("NAMED_TEXT", 'inline; filename="a.txt"'),
+            _plain("NAMELESS_ATTACHED_TEXT", "attachment"),
+        ),
+        "P1",
+    ),
+    "mixed-html-forwarded-email": (_multi("mixed", _html("H1"), _FORWARDED), "H1"),
+    # Sequential inline text parts (#295): each is kept, in order.
+    "mixed-plain-attachment-plain": (
+        _multi("mixed", _plain("P1"), _PDF, _plain("P2")),
+        "P1\n\nP2",
+    ),
+    "mixed-html-attachment-html": (
+        _multi("mixed", _html("H1"), _PDF, _html("H2")),
+        "H1\n\nH2",
+    ),
+    "mixed-alt-attachment-plain": (
+        _multi("mixed", _multi("alternative", _plain("P1"), _html("H1")), _PDF, _plain("P2")),
+        "P1\n\nP2",
+    ),
+    "mixed-two-alternatives": (
+        _multi(
+            "mixed",
+            _multi("alternative", _plain("P1"), _html("H1")),
+            _multi("alternative", _html("H2"), _plain("P2")),
+        ),
+        "P1\n\nP2",
+    ),
+    "mixed-alt-blank-plain-then-plain": (
+        _multi("mixed", _multi("alternative", _plain(""), _html("H1")), _plain("P2")),
+        "H1\n\nP2",
+    ),
+    "mixed-plain-blank-plain": (
+        _multi("mixed", _plain("P1"), _plain(" \r\n"), _plain("P2")),
+        "P1\n\nP2",
+    ),
+    "mixed-plain-forwarded-plain": (
+        _multi("mixed", _plain("P1"), _FORWARDED, _plain("P2")),
+        "P1\n\nP2",
+    ),
+    "mixed-plain-inline-email": (
+        _multi("mixed", _plain("P1"), ("message/rfc822", "INLINE_EMAIL", {})),
+        "P1\n\nINLINE_EMAIL",
+    ),
+    "mixed-plain-inline-7bit-email": (
+        _multi(
+            "mixed",
+            _plain("P1"),
+            ("message/rfc822", "INLINE_EMAIL", {"Content-Transfer-Encoding": "7bit"}),
+        ),
+        "P1\n\nINLINE_EMAIL",
+    ),
+    # An inline email in a transfer encoding is exposed by the parser as
+    # its encoded transport text, so it contributes nothing (review round
+    # 1 on #444).
+    "mixed-plain-inline-base64-email": (
+        _multi(
+            "mixed",
+            _plain("P1"),
+            ("message/rfc822", "ENCODED_EMAIL_" * 8, {"Content-Transfer-Encoding": "base64"}),
+            _plain("P2"),
+        ),
+        "P1\n\nP2",
+    ),
+    "mixed-plain-inline-qp-email": (
+        _multi(
+            "mixed",
+            _plain("P1"),
+            (
+                "message/rfc822",
+                "ENCODED_EMAIL=",
+                {"Content-Transfer-Encoding": "quoted-printable"},
+            ),
+        ),
+        "P1",
+    ),
+    "inline-base64-email-only": (
+        _multi(
+            "mixed",
+            ("message/rfc822", "ENCODED_EMAIL", {"Content-Transfer-Encoding": "BASE64"}),
+        ),
+        "",
+    ),
+    "alt-plain-mixed-html": (
+        _multi("alternative", _plain("P1"), _multi("mixed", _html("H1"), _IMG, _html("H2"))),
+        "P1",
+    ),
+    "alt-blank-plain-mixed-html": (
+        _multi("alternative", _plain(""), _multi("mixed", _html("H1"), _PDF, _html("H2"))),
+        "H1\n\nH2",
+    ),
+    "nested-mixed": (
+        _multi("mixed", _plain("P1"), _multi("mixed", _PDF, _plain("P2")), _plain("P3")),
+        "P1\n\nP2\n\nP3",
+    ),
+}
+
+
+@pytest.mark.parametrize(("shape", "expected"), _BODY_SHAPES.values(), ids=_BODY_SHAPES.keys())
+def test_body_assembly_shape_catalogue(tmp_path, shape, expected):
+    """#295: separate inline text parts outside a multipart/alternative
+    are sequential content, so later ones were lost from the body."""
+    raw = (
+        "Message-ID: <shape@example.test>\r\nFrom: sender@example.test\r\n"
+        "Date: Mon, 28 Sep 2026 12:00:00 +0000\r\nMIME-Version: 1.0\r\n"
+    ) + _render(shape, [0])
+    folder = tmp_path / "INBOX" / "cur"
+    folder.mkdir(parents=True)
+    path = folder / "shape.eml"
+    path.write_bytes(raw.encode("utf-8"))
+    msg = parse_email(path)
+    assert msg is not None
+    assert msg.body_text == expected
+    for marker in ("FORWARDED_MARKER", "ATTACHED_TEXT", "NAMED_TEXT"):
+        assert marker not in msg.body_text
+
+
+def test_body_text_parts_decoded_are_capped(tmp_path, monkeypatch):
+    """#295: every inline text part is now decoded, each with a fresh
+    html2text converter, so the number decoded per message is capped."""
+    import time
+
+    from src import parser
+
+    calls = 0
+    real = parser._html_to_text
+
+    def counting(html: str) -> str:
+        nonlocal calls
+        calls += 1
+        return real(html)
+
+    monkeypatch.setattr(parser, "_html_to_text", counting)
+    parts = 20_000
+    raw = (
+        b"Message-ID: <many@example.test>\r\nFrom: sender@example.test\r\n"
+        b'MIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary="b"\r\n\r\n'
+        + b"".join(
+            b"--b\r\nContent-Type: text/html\r\n\r\n<p>S%d</p>\r\n" % i for i in range(parts)
+        )
+        + b"--b--\r\n"
+    )
+    folder = tmp_path / "INBOX" / "cur"
+    folder.mkdir(parents=True)
+    path = folder / "many.eml"
+    path.write_bytes(raw)
+    started = time.perf_counter()
+    msg = parse_email(path)
+    assert time.perf_counter() - started < 10
+    assert msg is not None
+    assert calls == parser.MAX_BODY_TEXT_PARTS
+    segments = msg.body_text.split("\n\n")
+    assert segments == [f"S{i}" for i in range(parser.MAX_BODY_TEXT_PARTS)]

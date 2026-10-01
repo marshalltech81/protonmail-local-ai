@@ -323,18 +323,25 @@ A renamed reply with no body text (for example attachment-only) has no
 body chunk to carry the prefix, so its subject is keyword-searchable
 only, with no semantic representation.
 
-**Known limitation (#295):** a message's body text is the first
-`text/plain` part outside attachments, or failing that the first
-`text/html` part. A plain part that holds only whitespace counts as
-empty, so the HTML text is used instead (#298). Otherwise "first" means
-first, not first non-empty: a later plain part is never read after a
-leading whitespace-only one. That suits `multipart/alternative`,
-where the parts are alternative renderings of one body, but a
-`multipart/mixed` message with several sequential inline text parts
-(for example text, an attachment, then more text) keeps only the first
-plain and first HTML part; later inline text parts are neither stored
-nor searchable. Fixing it changes stored bodies, so it is revisited
-with the Phase 2 reindex bundle.
+**Message body assembly (#295, #298):** a message's body text is every
+non-blank inline `text/plain` and `text/html` part outside attachments
+(HTML through html2text), in document order, separated by a blank line.
+The parts of a `multipart/alternative` are renderings of one body, so
+it contributes a single child: the first carrying non-blank plain text,
+else the first carrying any text. A whitespace-only plain alternative
+therefore gives way to the HTML one. A `multipart/related` contributes
+only its root, taken to be its first part (RFC 2387's default), since
+its other parts are resources the root refers to; a `start` parameter
+naming a different root is not read, so such a message gets its first
+part's text instead. The parts of any other container
+(`multipart/mixed`, an inline `message/rfc822`) are
+sequential content, so text, an attachment, then more text keeps both
+texts. Nothing inside an attachment, such as a forwarded email attached
+as a file, is body text. Neither is an inline `message/*` part sent
+in a transfer encoding (base64 or quoted-printable, which RFC 2046
+forbids for it): the parser exposes it as its encoded transport text,
+so it adds nothing to the body. At most 200 text parts per message
+(`MAX_BODY_TEXT_PARTS`) are decoded; later ones are left out.
 
 A query like "what did my landlord say about the heating?" returns the
 full landlord thread (via the coarse lanes) and surfaces the specific
@@ -350,14 +357,41 @@ Chunk IDs are `sha256(message_pk || index || chunk_text)` — the same
 body always produces the same ID set. The indexer's per-message chunk
 write diffs the new chunk IDs against stored IDs, embeds only the new
 ones, and deletes any that are no longer present. Re-running on
-unchanged input is therefore zero embed cost. Attachment chunks use a
-composite `message_pk` of `f"{message_id}::{attachment_id}"` so their
-chunk IDs are distinct from body chunks for the same message.
+unchanged input is therefore zero embed cost. A body chunk's
+`message_pk` is its message's claimant ID (see Per-Message Records);
+attachment chunks use a composite `message_pk` of
+`f"{claimant_id}::{attachment_id}"` so their chunk IDs are distinct from
+body chunks for the same message.
 
 ## Per-Message Records
 
 Threads are the retrieval unit; `messages` is the authoritative
-per-message record. Each indexed message gets one row — its own
+per-message record.
+
+**Claimant IDs.** A Message-ID is set by the sender, so two different
+files can claim the same one, by accident or to overwrite another
+message's evidence. Every per-message row is therefore keyed by a
+claimant ID rather than the bare Message-ID: the Message-ID plus `#`
+and the first eight hex digits of the SHA-256 of the file's raw bytes
+(`parser.claimant_id`). The bytes are the identity because nothing that
+happens to a Maildir file changes them: flags and the delivery name
+live in the filename and the folder is the directory, so a flag rename,
+a folder move and a reparse keep the key, while different content gets
+a new one. Both claimants are kept, each with its own `messages`,
+`message_thread_map`, `message_participants`, chunk and attachment
+rows (attachment occurrence IDs and chunk `message_pk`s are derived
+from the claimant ID), and reaping or reprocessing one never touches
+the other's rows. Neither wins by arrival order. Thread membership
+still resolves by Message-ID (In-Reply-To / References and the
+known-Message-ID lookup), so a second claimant joins the first one's
+thread; `threads.message_ids` lists claimant IDs, and the thread body
+carries both texts. A byte-identical copy of a message (the same mail
+filed twice) shares one claimant ID, as it shared one Message-ID
+before. The MCP tools return `claimant_id` beside `message_id`, and
+`get_message` accepts either, listing the claimants when a bare
+Message-ID names several (see `docs/mcp-tools.md`).
+
+Each indexed message gets one row — its own
 subject, `sent_at` (`Date:` header; a missing or unparseable header is
 dated at first index and that date is kept when the message is
 reprocessed or its thread rebuilt), folder, `in_reply_to` /
@@ -376,7 +410,7 @@ An index on `(address, role)` makes "every message from / to X" an
 exact indexed lookup — the basis for exhaustive enumeration, as
 opposed to relevance search. The MCP server's `query_messages`
 enumerates over these tables (count plus keyset pages ordered by
-`(sent_at, message_id)`), and `find_contact` aggregates
+`(sent_at, claimant_id)`), and `find_contact` aggregates
 `message_participants` instead of parsing each thread's participant
 JSON.
 
@@ -459,7 +493,7 @@ scanned pages are not re-read when OCR is turned on later.
 When a message is reaped, `_delete_attachments_for_message` drops its
 `attachments` rows and FTS shadows; the `_delete_chunks_for_message`
 cascade also drops the message's attachment chunks (they share the
-`message_id` key). Cached extractions in `attachment_extractions` are
+`claimant_id` key). Cached extractions in `attachment_extractions` are
 **deliberately preserved** — another message may still reference the
 same content_hash, and even when nothing does today the cached
 extraction means a future re-arrival skips the OCR cost.

@@ -61,6 +61,7 @@ def _chunk(
     return ChunkResult(
         chunk_id=f"{message_id}-c{index}",
         message_id=message_id,
+        claimant_id=f"{message_id}#00000000",
         thread_id="t",
         chunk_index=index,
         text=text,

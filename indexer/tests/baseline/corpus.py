@@ -14,6 +14,11 @@ Their golden queries are misspelled or re-split forms that porter
 stemming does not map back to the corpus word, so keyword search misses
 them (a stem-preserving typo such as "maintenence" would not count).
 
+Threads 21-28 back the multi-source questions: a fact split across two
+threads (t21 + t22, t25 + t26), the same fact in either of two threads
+(t27 / t28), an answer only in an attachment (t23) and a correction in
+a later reply (t24).
+
 Thread IDs are the root Message-IDs: ``t<NN>.1@baseline.example``.
 """
 
@@ -496,6 +501,120 @@ THREADS: dict[int, list[Msg]] = {
             "Greta, splitting the cost is fair. Could we see the surveyor's "
             "stakes together before choosing a contractor?\n\nSam",
             cc="Ravi Menon <ravi@neighbors.example>",
+        ),
+    ],
+    21: [
+        Msg(
+            "INBOX",
+            "Mon, 08 Jul 2024 10:00:00 +0000",
+            "Nadia Brooks <nadia@riverbendoutfitters.example>",
+            ME,
+            "Kayak rental quote for July 27",
+            "Hi Sam,\n\nTandem kayaks rent for $65 per boat for the full day, "
+            "paddles and life jackets included. The shuttle to the upper put-in "
+            "leaves at 8:30am. Reply with how many boats you need.\n\n"
+            "Nadia Brooks\nRiverbend Outfitters",
+        ),
+    ],
+    22: [
+        Msg(
+            "INBOX",
+            "Wed, 10 Jul 2024 18:20:00 +0000",
+            "Theo Marsh <theo@friends.example>",
+            ME,
+            "Kayak day headcount",
+            "Sam, final headcount for the kayak day is eight people, so we need "
+            "four tandem boats. I will bring the cooler.\n\nTheo",
+        ),
+    ],
+    23: [
+        Msg(
+            "INBOX",
+            "Thu, 01 Aug 2024 09:00:00 +0000",
+            "Property Office <leasing@cedarparkapts.example>",
+            ME,
+            "Lease renewal for unit 5B",
+            "Hello Sam,\n\nYour renewal paperwork is attached. Please sign and "
+            "return them by August 15.\n\nCedar Park Apartments",
+            attachments=(
+                Attachment(
+                    "renewal-terms.txt",
+                    "text/plain",
+                    "LEASE RENEWAL - Unit 5B\n"
+                    "New monthly rent: $2,140 (was $2,050)\n"
+                    "Term: 12 months from September 1, 2024\n"
+                    "Parking space 14 included.\n",
+                ),
+            ),
+        ),
+    ],
+    24: [
+        Msg(
+            "INBOX",
+            "Mon, 15 Jul 2024 16:00:00 +0000",
+            "Ilona Petrov <ilona@lindenmusic.example>",
+            "Studio Families <families@lindenmusic.example>",
+            "Summer piano recital",
+            "Dear families,\n\nThe summer piano recital is on Saturday August 10 "
+            "at 2pm in Linden Hall. Each student plays one piece; please arrive "
+            "30 minutes early.\n\nIlona Petrov",
+        ),
+        Msg(
+            "INBOX",
+            "Fri, 19 Jul 2024 08:10:00 +0000",
+            "Ilona Petrov <ilona@lindenmusic.example>",
+            "Studio Families <families@lindenmusic.example>",
+            "Re: Summer piano recital",
+            "Correction: the hall is double-booked on the 10th, so the recital "
+            "moves to Sunday August 11 at 4pm. Everything else is unchanged.\n\n"
+            "Ilona",
+        ),
+    ],
+    25: [
+        Msg(
+            "INBOX",
+            "Tue, 06 Aug 2024 12:30:00 +0000",
+            "Felix Ward <felix@wardpainting.example>",
+            ME,
+            "Exterior painting quote",
+            "Sam,\n\nOur quote for the exterior painting is $6,900: two coats on "
+            "siding and trim, with the shutters done in black. A deposit of $1,000 "
+            "holds a slot.\n\nFelix Ward\nWard Painting",
+        ),
+    ],
+    26: [
+        Msg(
+            "INBOX",
+            "Mon, 12 Aug 2024 07:45:00 +0000",
+            "Scheduling <schedule@wardpainting.example>",
+            ME,
+            "Crew start date confirmed",
+            "Hi Sam,\n\nThanks for the deposit. The exterior painting crew starts "
+            "Tuesday September 3 at 7:30am, weather permitting.\n\n"
+            "Ward Painting Scheduling",
+        ),
+    ],
+    27: [
+        Msg(
+            "INBOX",
+            "Wed, 21 Aug 2024 20:00:00 +0000",
+            "Pinecrest Cabins <stay@pinecrestcabins.example>",
+            ME,
+            "Booking confirmed: Pinecrest cabin, September 20-22",
+            "Your cabin is booked for two nights, September 20 to 22. The address "
+            "is 88 Hemlock Ridge Road, Fairhaven. Check-in after 4pm.",
+        ),
+    ],
+    28: [
+        Msg(
+            "Archive",
+            "Wed, 18 Sep 2024 15:00:00 +0000",
+            "Hollis Grant <hollis@pinecrestcabins.example>",
+            ME,
+            "Directions to your cabin",
+            "Hi Sam,\n\nMap apps sometimes send guests up the old logging road. "
+            "The cabin is at 88 Hemlock Ridge Road; turn left at the red mailbox."
+            "\n\nHollis",
         ),
     ],
 }

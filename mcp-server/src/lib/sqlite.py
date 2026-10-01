@@ -216,6 +216,9 @@ class SourceFile:
 
 # Selected by every query that reports a message's source file; ``m`` is
 # the ``messages`` row (LEFT JOINed where the row may be missing).
+# Chunk and attachment rows carry only the claimant ID (#217); their bare
+# Message-ID comes from that same ``messages`` row, falling back to the
+# claimant ID itself (which begins with the Message-ID) when it is missing.
 _SOURCE_COLUMNS = (
     "m.filepath AS source_locator, m.content_hash AS source_sha256, "
     "m.size_bytes AS source_size_bytes, m.indexed_at AS source_indexed_at"
@@ -261,10 +264,14 @@ class ChunkResult:
     ``source_file`` is the raw file of the chunk's message (for an
     attachment chunk, the message that carries the attachment); ``None``
     for query paths that do not SELECT it.
+
+    ``claimant_id`` identifies the chunk's message among every file
+    claiming its ``message_id`` (see ``MessageRecord``).
     """
 
     chunk_id: str
     message_id: str
+    claimant_id: str
     thread_id: str
     chunk_index: int
     text: str
@@ -292,6 +299,7 @@ def _row_to_chunk_result(r) -> ChunkResult:
     return ChunkResult(
         chunk_id=r["chunk_id"],
         message_id=r["message_id"],
+        claimant_id=r["claimant_id"],
         thread_id=r["thread_id"],
         chunk_index=int(r["chunk_index"]),
         text=r["text"],
@@ -369,6 +377,7 @@ class AttachmentResult:
 
     attachment_id: str
     message_id: str
+    claimant_id: str
     thread_id: str
     filename: str
     content_type: str
@@ -397,6 +406,7 @@ def _row_to_attachment_result(r) -> AttachmentResult:
     return AttachmentResult(
         attachment_id=r["attachment_id"],
         message_id=r["message_id"],
+        claimant_id=r["claimant_id"],
         thread_id=r["thread_id"],
         filename=r["filename"],
         content_type=r["content_type"],
@@ -424,9 +434,15 @@ class Participant:
 @dataclass
 class MessageRecord:
     """One message's own headers, from ``messages`` +
-    ``message_participants``."""
+    ``message_participants``.
+
+    ``message_id`` is the RFC 5322 Message-ID, which the sender controls,
+    so several indexed files can claim one. ``claimant_id`` tells them
+    apart: the Message-ID plus ``#`` and the first eight hex digits of
+    the file's SHA-256 (#217). Every per-message row is keyed by it."""
 
     message_id: str
+    claimant_id: str
     thread_id: str
     subject: str
     sent_at: str
@@ -441,7 +457,7 @@ class MessageRecord:
 
 
 _MESSAGE_COLUMNS = (
-    "m.message_id, m.thread_id, m.subject, m.sent_at, m.folder, "
+    "m.message_id, m.claimant_id, m.thread_id, m.subject, m.sent_at, m.folder, "
     "m.has_attachments, m.in_reply_to, m.references_json, " + _SOURCE_COLUMNS
 )
 
@@ -449,6 +465,7 @@ _MESSAGE_COLUMNS = (
 def _row_to_message_record(r) -> MessageRecord:
     return MessageRecord(
         message_id=r["message_id"],
+        claimant_id=r["claimant_id"],
         thread_id=r["thread_id"],
         subject=r["subject"],
         sent_at=r["sent_at"],
@@ -462,19 +479,19 @@ def _row_to_message_record(r) -> MessageRecord:
 
 def _attach_participants(conn: sqlite3.Connection, records: list[MessageRecord]) -> None:
     """Fill each record's From / To / Cc from ``message_participants``."""
-    by_id = {rec.message_id: rec for rec in records}
+    by_id = {rec.claimant_id: rec for rec in records}
     if not by_id:
         return
     placeholders = ",".join(["?"] * len(by_id))
     # rowid order is insertion order, i.e. header order.
     rows = conn.execute(
-        "SELECT message_id, role, address, name FROM message_participants "
-        f"WHERE message_id IN ({placeholders}) ORDER BY rowid",  # nosec B608
+        "SELECT claimant_id, role, address, name FROM message_participants "
+        f"WHERE claimant_id IN ({placeholders}) ORDER BY rowid",  # nosec B608
         list(by_id),
     ).fetchall()
     for p in rows:
         role_list = {"from": "from_", "to": "to", "cc": "cc"}[p["role"]]
-        getattr(by_id[p["message_id"]], role_list).append(
+        getattr(by_id[p["claimant_id"]], role_list).append(
             Participant(name=p["name"], address=p["address"])
         )
 
@@ -482,12 +499,12 @@ def _attach_participants(conn: sqlite3.Connection, records: list[MessageRecord])
 def _message_records(
     conn: sqlite3.Connection, where_sql: str, params: tuple, *, limit: int = -1, offset: int = 0
 ) -> list[MessageRecord]:
-    """Messages matching ``where_sql``, oldest first (``message_id`` breaks
+    """Messages matching ``where_sql``, oldest first (``claimant_id`` breaks
     ties), with participants. ``sent_at`` is stored as UTC ISO 8601, so
     string order is chronological order. ``limit=-1`` means no limit."""
     rows = conn.execute(
         f"SELECT {_MESSAGE_COLUMNS} FROM messages m WHERE {where_sql} "  # nosec B608
-        "ORDER BY m.sent_at ASC, m.message_id ASC LIMIT ? OFFSET ?",
+        "ORDER BY m.sent_at ASC, m.claimant_id ASC LIMIT ? OFFSET ?",
         (*params, limit, offset),
     ).fetchall()
     records = [_row_to_message_record(r) for r in rows]
@@ -532,32 +549,32 @@ def _rebuild_body(chunks: list[sqlite3.Row], total_chars: int, limit: int | None
 
 
 def _message_bodies(
-    conn: sqlite3.Connection, message_ids: list[str], limit: int | None
+    conn: sqlite3.Connection, claimant_ids: list[str], limit: int | None
 ) -> dict[str, MessageBody]:
-    """Bodies for ``message_ids`` (absent when a message has no body
+    """Bodies for ``claimant_ids`` (absent when a message has no body
     chunks), each cut at body offset ``limit``. Chunks starting past the
     limit are never read, so a huge message loads only what is shown."""
-    if not message_ids:
+    if not claimant_ids:
         return {}
-    placeholders = ",".join(["?"] * len(message_ids))
-    scope = f"message_id IN ({placeholders}) AND attachment_id IS NULL"
+    placeholders = ",".join(["?"] * len(claimant_ids))
+    scope = f"claimant_id IN ({placeholders}) AND attachment_id IS NULL"
     totals = dict(
         conn.execute(
-            f"SELECT message_id, MAX(char_end) FROM message_chunks WHERE {scope} "  # nosec B608
-            "GROUP BY message_id",
-            message_ids,
+            f"SELECT claimant_id, MAX(char_end) FROM message_chunks WHERE {scope} "  # nosec B608
+            "GROUP BY claimant_id",
+            claimant_ids,
         ).fetchall()
     )
     cutoff = "" if limit is None else " AND char_start < ?"
     rows = conn.execute(
-        f"SELECT message_id, text, char_start FROM message_chunks WHERE {scope}{cutoff} "  # nosec B608
-        "ORDER BY message_id, chunk_index",
-        [*message_ids] + ([] if limit is None else [limit]),
+        f"SELECT claimant_id, text, char_start FROM message_chunks WHERE {scope}{cutoff} "  # nosec B608
+        "ORDER BY claimant_id, chunk_index",
+        [*claimant_ids] + ([] if limit is None else [limit]),
     ).fetchall()
     grouped: dict[str, list[sqlite3.Row]] = {}
     for r in rows:
-        grouped.setdefault(r["message_id"], []).append(r)
-    return {mid: _rebuild_body(chunks, totals[mid], limit) for mid, chunks in grouped.items()}
+        grouped.setdefault(r["claimant_id"], []).append(r)
+    return {cid: _rebuild_body(chunks, totals[cid], limit) for cid, chunks in grouped.items()}
 
 
 @dataclass
@@ -568,7 +585,7 @@ class ThreadPage:
     total_messages: int
     offset: int
     messages: list[MessageRecord]
-    # By message_id; a message with no indexed body is absent.
+    # By claimant_id; a message with no indexed body is absent.
     bodies: dict[str, MessageBody]
     # Whether any message of the whole thread has an indexed body.
     has_bodies: bool
@@ -576,11 +593,29 @@ class ThreadPage:
 
 @dataclass
 class MessageView:
-    """One message, its thread, and its full body, read from one snapshot."""
+    """One message, its thread, and its full body, read from one snapshot.
+
+    ``other_claimants`` lists the claimant IDs of every other indexed
+    file claiming the same Message-ID (#217); empty in the usual case."""
 
     record: MessageRecord
     thread: ThreadResult
     body: MessageBody | None
+    other_claimants: list[str] = field(default_factory=list)
+
+
+@dataclass
+class AmbiguousMessageId:
+    """A bare Message-ID that several indexed files claim (#217).
+
+    ``get_message_view`` returns this rather than choosing one: an
+    arrival-order rule would let a later (or earlier) file with a reused
+    Message-ID stand in for the message the caller meant. ``claimants``
+    holds each one's headers, oldest first, so the caller can pick a
+    claimant ID."""
+
+    message_id: str
+    claimants: list[MessageRecord]
 
 
 @dataclass
@@ -657,13 +692,13 @@ def _participant_clause(value: str, roles: tuple[str, ...], params: list) -> str
     if address_match_mode(value) == "exact":
         params.extend([canonical_addr(value), *roles])
         return (
-            "m.message_id IN (SELECT message_id FROM message_participants "  # nosec B608
+            "m.claimant_id IN (SELECT claimant_id FROM message_participants "  # nosec B608
             f"WHERE address = ? AND role IN ({role_sql}))"
         )
     # Addresses are stored lowercased; names fold with ``mcp_casefold``.
     params.extend([*roles, value.strip().lower(), value.strip().casefold()])
     return (
-        "m.message_id IN (SELECT message_id FROM message_participants "  # nosec B608
+        "m.claimant_id IN (SELECT claimant_id FROM message_participants "  # nosec B608
         f"WHERE role IN ({role_sql}) "
         "AND (instr(address, ?) > 0 OR instr(mcp_casefold(name), ?) > 0))"
     )
@@ -671,13 +706,13 @@ def _participant_clause(value: str, roles: tuple[str, ...], params: list) -> str
 
 def _encode_cursor(digest: str, last: MessageRecord, offset: int) -> str:
     payload = json.dumps(
-        {"v": 1, "q": digest, "s": last.sent_at, "m": last.message_id, "o": offset}
+        {"v": 1, "q": digest, "s": last.sent_at, "m": last.claimant_id, "o": offset}
     )
     return base64.urlsafe_b64encode(payload.encode()).rstrip(b"=").decode()
 
 
 def _decode_cursor(cursor: str, digest: str) -> tuple[str, str, int]:
-    """Return ``(sent_at, message_id, offset)`` of the last row already
+    """Return ``(sent_at, claimant_id, offset)`` of the last row already
     returned. Raises ``InvalidFilterError`` (a ``ValueError``) on a
     malformed cursor or one issued for different predicates (keyset positions only mean something within
     the same filtered ordering)."""
@@ -729,7 +764,7 @@ def _aggregate_participants(
         """
         SELECT DISTINCT p.address, p.name, m.thread_id
         FROM message_participants p
-        JOIN messages m ON m.message_id = p.message_id
+        JOIN messages m ON m.claimant_id = p.claimant_id
         WHERE p.address IN (
             SELECT address FROM message_participants
             WHERE instr(address, ?) > 0 OR instr(mcp_casefold(name), ?) > 0
@@ -805,7 +840,7 @@ def _aggregate_senders(conn: sqlite3.Connection, needle: str, name_needle: str) 
         """
         SELECT DISTINCT p.address, p.name, m.thread_id
         FROM message_participants p
-        JOIN messages m ON m.message_id = p.message_id
+        JOIN messages m ON m.claimant_id = p.claimant_id
         WHERE p.role = 'from' AND p.address IN (SELECT value FROM json_each(?))
         """,
         (json.dumps(candidates),),
@@ -1270,11 +1305,11 @@ class Database:
             results = self._attachment_filename_lane(
                 fts_query, extra_clauses, extra_params, fetch_limit
             )
-            seen = {(r.attachment_id, r.message_id, r.filename) for r in results}
+            seen = {(r.attachment_id, r.claimant_id, r.filename) for r in results}
             for r in self._attachment_text_lane(
                 fts_query, content_type, extra_clauses, extra_params, fetch_limit
             ):
-                key = (r.attachment_id, r.message_id, r.filename)
+                key = (r.attachment_id, r.claimant_id, r.filename)
                 if key not in seen:
                     seen.add(key)
                     results.append(r)
@@ -1337,7 +1372,8 @@ class Database:
         # WHERE clauses are fixed literals (the MATCH plus the
         # filter-clause literals); every user value is ``?``-bound.
         sql = (
-            "SELECT a.attachment_id, a.message_id, a.thread_id, a.filename, "
+            "SELECT a.attachment_id, COALESCE(m.message_id, a.claimant_id) AS message_id, "
+            "a.claimant_id, a.thread_id, a.filename, "
             "a.content_type, a.size_bytes, t.subject, t.display_subject, "
             "t.folder, t.date_last, t.senders, e.extraction_status, "
             "substr(e.extracted_text, 1, 240) AS text_snippet, "
@@ -1347,7 +1383,7 @@ class Database:
             "JOIN attachments a ON attachments_fts.rowid = a.fts_rowid "
             "JOIN threads t ON a.thread_id = t.thread_id "
             "LEFT JOIN attachment_extractions e ON e.attachment_id = a.attachment_id "
-            "LEFT JOIN messages m ON m.message_id = a.message_id "
+            "LEFT JOIN messages m ON m.claimant_id = a.claimant_id "
             "WHERE " + " AND ".join(where) + " "  # nosec B608
             "ORDER BY score LIMIT ?"
         )
@@ -1400,13 +1436,14 @@ class Database:
             "    JOIN attachments a ON a.attachment_occurrence_id = ( "
             "        SELECT MIN(a2.attachment_occurrence_id) FROM attachments a2 "
             "        WHERE a2.attachment_id = c.attachment_id "
-            "          AND a2.message_id = c.message_id "
+            "          AND a2.claimant_id = c.claimant_id "
             "          AND (? IS NULL OR a2.content_type = ?) ) "
             "    JOIN threads t ON a.thread_id = t.thread_id "
             "    LEFT JOIN attachment_extractions e ON e.attachment_id = a.attachment_id "
             "    WHERE " + " AND ".join(where) + " "  # nosec B608
             "    GROUP BY a.attachment_occurrence_id ) "
-            "SELECT a.attachment_id, a.message_id, a.thread_id, a.filename, "
+            "SELECT a.attachment_id, COALESCE(m.message_id, a.claimant_id) AS message_id, "
+            "a.claimant_id, a.thread_id, a.filename, "
             "a.content_type, a.size_bytes, t.subject, t.display_subject, "
             "t.folder, t.date_last, t.senders, e.extraction_status, "
             "substr(e.extracted_text, 1, 240) AS text_snippet, "
@@ -1416,7 +1453,7 @@ class Database:
             "JOIN attachments a ON a.attachment_occurrence_id = best.attachment_occurrence_id "
             "JOIN threads t ON a.thread_id = t.thread_id "
             "LEFT JOIN attachment_extractions e ON e.attachment_id = a.attachment_id "
-            "LEFT JOIN messages m ON m.message_id = a.message_id "
+            "LEFT JOIN messages m ON m.claimant_id = a.claimant_id "
             "ORDER BY score LIMIT ?"
         )
         try:
@@ -1428,7 +1465,7 @@ class Database:
         seen: set[tuple[str, str, str]] = set()
         for r in rows:
             result = _row_to_attachment_result(r)
-            key = (result.attachment_id, result.message_id, result.filename)
+            key = (result.attachment_id, result.claimant_id, result.filename)
             if key in seen:
                 continue
             seen.add(key)
@@ -1446,7 +1483,8 @@ class Database:
         where = ["1=1", *extra_clauses]
         params = [*extra_params, limit]
         sql = (
-            "SELECT a.attachment_id, a.message_id, a.thread_id, a.filename, "
+            "SELECT a.attachment_id, COALESCE(m.message_id, a.claimant_id) AS message_id, "
+            "a.claimant_id, a.thread_id, a.filename, "
             "a.content_type, a.size_bytes, t.subject, t.display_subject, "
             "t.folder, t.date_last, t.senders, e.extraction_status, "
             "substr(e.extracted_text, 1, 240) AS text_snippet, "
@@ -1455,7 +1493,7 @@ class Database:
             "FROM attachments a "
             "JOIN threads t ON a.thread_id = t.thread_id "
             "LEFT JOIN attachment_extractions e ON e.attachment_id = a.attachment_id "
-            "LEFT JOIN messages m ON m.message_id = a.message_id "
+            "LEFT JOIN messages m ON m.claimant_id = a.claimant_id "
             "WHERE " + " AND ".join(where) + " "  # nosec B608
             "ORDER BY t.date_last DESC LIMIT ?"
         )
@@ -1876,14 +1914,14 @@ class Database:
             # construction below.
             #
             # The JOIN anchors on the SINGLE representative occurrence
-            # row per ``(attachment_id, message_id)`` pair (the one
+            # row per ``(attachment_id, claimant_id)`` pair (the one
             # with the lowest ``attachment_occurrence_id``). The
             # indexer permits the same content hash to be attached
             # under multiple filenames in one message (a user attaching
             # the same PDF twice with different display names); each
             # occurrence is its own row in ``attachments`` but only
             # ONE chunk set is stored per content hash, so a naive
-            # ``ON (attachment_id, message_id)`` JOIN multiplies the
+            # ``ON (attachment_id, claimant_id)`` JOIN multiplies the
             # chunk by the occurrence count and emits non-deterministic
             # filename attribution. Picking the lowest occurrence id
             # gives a stable, deterministic choice and eliminates the
@@ -1891,19 +1929,21 @@ class Database:
             rows = self._fetchall(
                 """
                 SELECT
-                    c.chunk_id, c.message_id, c.thread_id, c.chunk_index,
+                    c.chunk_id, COALESCE(m.message_id, c.claimant_id) AS message_id,
+                    c.claimant_id, c.thread_id, c.chunk_index,
                     c.text, c.char_start, c.char_end, c.attachment_id,
                     a.filename AS attachment_filename,
                     a.content_type AS attachment_mime,
                     v.distance AS score
                 FROM message_chunks_vec v
                 JOIN message_chunks c ON c.chunk_id = v.chunk_id
+                LEFT JOIN messages m ON m.claimant_id = c.claimant_id
                 LEFT JOIN attachments a
                     ON a.attachment_occurrence_id = (
                         SELECT MIN(a2.attachment_occurrence_id)
                         FROM attachments a2
                         WHERE a2.attachment_id = c.attachment_id
-                          AND a2.message_id = c.message_id
+                          AND a2.claimant_id = c.claimant_id
                     )
                 WHERE v.embedding MATCH ?
                   AND k = ?
@@ -1970,19 +2010,20 @@ class Database:
             # bound parameter goes through the driver. nosec B608.
             #
             # LEFT JOIN ``attachments`` on the SINGLE representative
-            # occurrence row per ``(attachment_id, message_id)`` (the
+            # occurrence row per ``(attachment_id, claimant_id)`` (the
             # one with the lowest ``attachment_occurrence_id``). The
             # indexer allows the same content hash to be attached
             # under multiple display filenames in one message but
             # stores ONLY ONE chunk set per content hash, so a naive
-            # ``ON (attachment_id, message_id)`` JOIN multiplies the
+            # ``ON (attachment_id, claimant_id)`` JOIN multiplies the
             # chunk row by the occurrence count. See
             # ``_chunk_vector_search`` for the full rationale; both
             # call sites apply the same fix. Body chunks have
             # ``c.attachment_id IS NULL`` so the subquery returns
             # NULL and the LEFT JOIN yields NULL filename/MIME.
             sql = (
-                "SELECT c.chunk_id, c.message_id, c.thread_id, c.chunk_index, "
+                "SELECT c.chunk_id, COALESCE(m.message_id, c.claimant_id) AS message_id, "
+                "c.claimant_id, c.thread_id, c.chunk_index, "
                 "c.text, c.char_start, c.char_end, c.attachment_id, c.message_date, "
                 "a.filename AS attachment_filename, "
                 "a.content_type AS attachment_mime, "
@@ -1990,13 +2031,13 @@ class Database:
                 "vec_distance_l2(v.embedding, ?) AS score "
                 "FROM message_chunks c "
                 "JOIN message_chunks_vec v ON c.chunk_id = v.chunk_id "
-                "LEFT JOIN messages m ON m.message_id = c.message_id "
+                "LEFT JOIN messages m ON m.claimant_id = c.claimant_id "
                 "LEFT JOIN attachments a "
                 "  ON a.attachment_occurrence_id = ( "
                 "       SELECT MIN(a2.attachment_occurrence_id) "
                 "       FROM attachments a2 "
                 "       WHERE a2.attachment_id = c.attachment_id "
-                "         AND a2.message_id = c.message_id "
+                "         AND a2.claimant_id = c.claimant_id "
                 "  ) "
                 f"WHERE c.thread_id IN ({placeholders}) "  # nosec B608
                 "ORDER BY score ASC"
@@ -2092,12 +2133,14 @@ class Database:
         try:
             rows = self._fetchall(
                 """
-                SELECT c.chunk_id, c.message_id, c.thread_id, c.chunk_index,
+                SELECT c.chunk_id, COALESCE(m.message_id, c.claimant_id) AS message_id,
+                       c.claimant_id, c.thread_id, c.chunk_index,
                        c.text, c.char_start, c.char_end, c.attachment_id,
                        NULL AS attachment_filename,
                        NULL AS attachment_mime,
                        0.0 AS score
                 FROM message_chunks c
+                LEFT JOIN messages m ON m.claimant_id = c.claimant_id
                 WHERE c.thread_id = ?
                   AND c.attachment_id IS NULL
                 ORDER BY c.message_date DESC,
@@ -2422,7 +2465,7 @@ class Database:
             messages = _message_records(
                 conn, "m.thread_id = ?", (thread_id,), limit=limit, offset=offset
             )
-            bodies = _message_bodies(conn, [m.message_id for m in messages], body_char_limit)
+            bodies = _message_bodies(conn, [m.claimant_id for m in messages], body_char_limit)
             has_bodies = bool(bodies) or bool(
                 conn.execute(
                     "SELECT EXISTS (SELECT 1 FROM message_chunks "
@@ -2439,21 +2482,43 @@ class Database:
             has_bodies=has_bodies,
         )
 
-    def get_message_view(self, message_id: str) -> MessageView | None:
+    def get_message_view(self, identifier: str) -> MessageView | AmbiguousMessageId | None:
         """One message's headers, its thread, and its full body, from one
-        read snapshot."""
+        read snapshot.
+
+        ``identifier`` is a claimant ID or a bare Message-ID. One that
+        names several messages (#217) returns an ``AmbiguousMessageId``
+        listing them instead of one of them: a bare Message-ID several
+        indexed files claim, or a crafted Message-ID equal to another
+        message's claimant ID.
+        """
         with closing(self._connect()) as conn:
             conn.execute("BEGIN")
-            records = _message_records(conn, "m.message_id = ?", (message_id,))
+            records = _message_records(
+                conn, "m.claimant_id = ? OR m.message_id = ?", (identifier, identifier)
+            )
+            if len(records) > 1:
+                return AmbiguousMessageId(message_id=identifier, claimants=records)
             if not records:
                 return None
+            record = records[0]
             row = conn.execute(
-                "SELECT * FROM threads WHERE thread_id = ?", (records[0].thread_id,)
+                "SELECT * FROM threads WHERE thread_id = ?", (record.thread_id,)
             ).fetchone()
             if row is None:
                 return None
-            body = _message_bodies(conn, [message_id], None).get(message_id)
-        return MessageView(record=records[0], thread=self._row_to_result(row), body=body)
+            others = [
+                r["claimant_id"]
+                for r in conn.execute(
+                    "SELECT claimant_id FROM messages WHERE message_id = ? AND claimant_id != ? "
+                    "ORDER BY claimant_id",
+                    (record.message_id, record.claimant_id),
+                )
+            ]
+            body = _message_bodies(conn, [record.claimant_id], None).get(record.claimant_id)
+        return MessageView(
+            record=record, thread=self._row_to_result(row), body=body, other_claimants=others
+        )
 
     def list_threads(
         self,
@@ -2662,7 +2727,7 @@ class Database:
         """Enumerate every message matching all given predicates.
 
         Unlike the search methods this does not rank: the result is the
-        exact matching set, newest ``sent_at`` first (``message_id``
+        exact matching set, newest ``sent_at`` first (``claimant_id``
         breaks ties), with ``total_matches`` counted over the whole set
         and keyset pagination through ``cursor``. Blank predicates are
         ignored.
@@ -2713,7 +2778,7 @@ class Database:
             # any (FTS5 string escaping) keeps FTS syntax out regardless.
             for term in terms:
                 where.append(
-                    "m.message_id IN (SELECT c.message_id FROM message_chunks_fts f "
+                    "m.claimant_id IN (SELECT c.claimant_id FROM message_chunks_fts f "
                     "JOIN message_chunks c ON c.fts_rowid = f.rowid "
                     "WHERE message_chunks_fts MATCH ? AND c.attachment_id IS NULL)"
                 )
@@ -2746,7 +2811,7 @@ class Database:
             last_sent_at, last_id, offset = _decode_cursor(cursor, digest)
             # Row-value form: SQLite seeks idx_messages_sent to the cursor;
             # the equivalent OR expansion sorted every earlier row.
-            page_where.append("(m.sent_at, m.message_id) < (?, ?)")
+            page_where.append("(m.sent_at, m.claimant_id) < (?, ?)")
             page_params += [last_sent_at, last_id]
 
         where_sql = " AND ".join(where) or "1"
@@ -2763,7 +2828,7 @@ class Database:
             rows = conn.execute(
                 f"SELECT {_MESSAGE_COLUMNS} FROM messages m WHERE "  # nosec B608
                 + page_where_sql
-                + " ORDER BY m.sent_at DESC, m.message_id DESC LIMIT ?",
+                + " ORDER BY m.sent_at DESC, m.claimant_id DESC LIMIT ?",
                 [*page_params, limit + 1],
             ).fetchall()
             has_more = len(rows) > limit

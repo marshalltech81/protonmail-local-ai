@@ -111,6 +111,19 @@ def _index_one(path: Path, db: Database, embedder, threader: Threader):
     return False, row["last_stage"] or "unknown", row["last_error"] or ""
 
 
+def _chunk_ids(db: Database, message_id: str, attachment_id: str | None = None) -> set[str]:
+    """Chunk IDs stored for every claimant of the bare ``message_id``.
+
+    Chunks are keyed by claimant ID (Message-ID plus a hash of the
+    file's bytes), which tests writing real files do not know."""
+    ids: set[str] = set()
+    for row in db._conn.execute(
+        "SELECT claimant_id FROM message_thread_map WHERE message_id = ?", (message_id,)
+    ):
+        ids |= db.get_chunk_ids_for_message(row["claimant_id"], attachment_id=attachment_id)
+    return ids
+
+
 def _write_eml(
     path: Path,
     message_id: str,
@@ -145,7 +158,9 @@ def _write_eml(
     )
 
 
-def _write_eml_with_text_attachment(path: Path, message_id: str) -> None:
+def _write_eml_with_text_attachment(
+    path: Path, message_id: str, *, body: str | None = None
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         f"From: alice@example.com\r\n"
@@ -159,7 +174,7 @@ def _write_eml_with_text_attachment(path: Path, message_id: str) -> None:
         f"--frontier\r\n"
         f"Content-Type: text/plain; charset=utf-8\r\n"
         f"\r\n"
-        f"Body of {message_id}.\r\n"
+        f"{body or f'Body of {message_id}.'}\r\n"
         f"\r\n"
         f"--frontier\r\n"
         f"Content-Type: text/plain; name=note.txt\r\n"
@@ -276,7 +291,7 @@ class TestOnMovedIndexesDestination:
         embedder.embed.side_effect = _connection_error()  # outage: deferred
         _drain(queue, db, embedder, threader)
         assert db.is_indexed(str(reply))
-        assert not db.get_chunk_ids_for_message("b@example.com")
+        assert not _chunk_ids(db, "b@example.com")
 
         renamed = reply.with_name("b:2,RS")
         reply.rename(renamed)
@@ -288,7 +303,7 @@ class TestOnMovedIndexesDestination:
         _make_due(db)
         _drain(queue, db, embedder, threader)
 
-        assert db.get_chunk_ids_for_message("b@example.com")
+        assert _chunk_ids(db, "b@example.com")
         assert queue.stats() == {"queued": 0, "dead": 0}
 
     def test_directory_moves_are_ignored(self, tmp_path):
@@ -613,7 +628,7 @@ class TestDrainQueueRetryAndDeadLetter:
 
         _drain(queue, db, embedder, threader, batch_size=1, max_passes=1)
 
-        assert db.get_chunk_ids_for_message("retry@example.com")
+        assert _chunk_ids(db, "retry@example.com")
         assert queue.stats() == {"queued": 0, "dead": 0}
 
     def test_unreadable_file_during_sync_is_deferred_not_dead_lettered(self, tmp_path, monkeypatch):
@@ -650,7 +665,7 @@ class TestDrainQueueRetryAndDeadLetter:
         monkeypatch.setattr(main, "parse_email", real_parse)
         _drain(queue, db, embedder, threader)
 
-        assert db.get_chunk_ids_for_message("fresh@example.com")
+        assert _chunk_ids(db, "fresh@example.com")
         assert queue.stats() == {"queued": 0, "dead": 0}
 
     def test_file_unreadable_for_a_day_takes_the_normal_retry_path(self, tmp_path, monkeypatch):
@@ -754,7 +769,7 @@ class TestDrainQueueRetryAndDeadLetter:
         # the file is keyword-searchable but chunkless until the
         # embedder returns.
         assert db.is_indexed(str(dest))
-        assert not db.get_chunk_ids_for_message("giveup@example.com")
+        assert not _chunk_ids(db, "giveup@example.com")
         assert queue.stats() == {"queued": 1, "dead": 0}
         row = db._conn.execute(
             "SELECT attempts, last_stage, last_error_class FROM indexing_jobs WHERE filepath = ?",
@@ -1042,7 +1057,7 @@ class TestIndexOneFileChunking:
         assert ok, f"failed at {stage}: {err}"
 
         # Chunk(s) for this message landed in all three indexes.
-        chunk_ids = db.get_chunk_ids_for_message("chunked@x")
+        chunk_ids = _chunk_ids(db, "chunked@x")
         assert len(chunk_ids) >= 1
         for cid in chunk_ids:
             vec_count = db._conn.execute(
@@ -1154,7 +1169,7 @@ class TestIndexOneFileChunking:
         # Phase 1 commit is durable (thread membership + indexed_files);
         # Phase 2c never ran, so chunks / attachments / extractions
         # remain unwritten and the queue retry can replay cleanly.
-        assert not db.get_chunk_ids_for_message("attachment-retry@x")
+        assert not _chunk_ids(db, "attachment-retry@x")
         assert db._conn.execute("SELECT COUNT(*) FROM attachments").fetchone()[0] == 0
         assert db._conn.execute("SELECT COUNT(*) FROM attachment_extractions").fetchone()[0] == 0
 
@@ -1217,7 +1232,7 @@ class TestInterruptedMessagesDeadLetter:
             == "interrupted"
         )
         assert all(charge in (None, 0) for charge in healthy_charges)
-        assert db.get_chunk_ids_for_message("healthy@example.com")
+        assert _chunk_ids(db, "healthy@example.com")
 
     def test_crash_from_batch_memory_retries_the_row_alone(self, tmp_path, monkeypatch):
         """Review round 1: an out-of-memory kill at row N can come from
@@ -1259,8 +1274,8 @@ class TestInterruptedMessagesDeadLetter:
 
         assert deaths == 1
         assert db.queue_stats() == {"queued": 0, "dead": 0}
-        assert db.get_chunk_ids_for_message("first@example.com")
-        assert db.get_chunk_ids_for_message("second@example.com")
+        assert _chunk_ids(db, "first@example.com")
+        assert _chunk_ids(db, "second@example.com")
 
     def test_message_that_kills_extraction_reaches_dead(self, tmp_path, monkeypatch):
         poison = tmp_path / "INBOX" / "new" / "poison.eml"
@@ -1282,7 +1297,7 @@ class TestInterruptedMessagesDeadLetter:
         assert deaths == 3
         assert queue.is_dead(str(poison))
         assert all(charge in (None, 0) for charge in healthy_charges)
-        assert db.get_chunk_ids_for_message("healthy@example.com")
+        assert _chunk_ids(db, "healthy@example.com")
 
 
 class TestInterruptedEmbedPhase:
@@ -1324,8 +1339,8 @@ class TestInterruptedEmbedPhase:
 
         assert deaths == 1
         assert db.queue_stats() == {"queued": 0, "dead": 0}
-        assert db.get_chunk_ids_for_message("a@example.com")
-        assert db.get_chunk_ids_for_message("b@example.com")
+        assert _chunk_ids(db, "a@example.com")
+        assert _chunk_ids(db, "b@example.com")
 
     def test_message_that_kills_the_embed_alone_reaches_dead(self, tmp_path):
         def embed_batch(texts, **_kw):
@@ -1338,7 +1353,7 @@ class TestInterruptedEmbedPhase:
         assert deaths == 4  # once in the batch, then 3 times alone
         assert db.queue_stats() == {"queued": 0, "dead": 1}
         assert _make_queue(db).is_dead(str(tmp_path / "INBOX" / "new" / "a.eml"))
-        assert db.get_chunk_ids_for_message("b@example.com")
+        assert _chunk_ids(db, "b@example.com")
 
 
 class TestStallGuardProgress:
@@ -1359,7 +1374,7 @@ class TestStallGuardProgress:
         embedder.embed.return_value = _UNIT_VECTOR
         embedder.embed_batch.side_effect = embed_batch
         _drain(queue, db, embedder, Threader(db))
-        assert db.get_chunk_ids_for_message("big@example.com")
+        assert _chunk_ids(db, "big@example.com")
         return progress
 
     def test_each_embed_sub_batch_counts_as_progress(self, tmp_path, monkeypatch):
@@ -1439,14 +1454,17 @@ class TestReprocessKeepsThreadMembership:
         chunk_threads = {
             r["thread_id"]
             for r in db._conn.execute(
-                "SELECT thread_id FROM message_chunks WHERE message_id = ?", ("b@example.com",)
+                "SELECT thread_id FROM message_chunks WHERE "
+                "claimant_id IN (SELECT claimant_id FROM message_thread_map WHERE message_id = ?)",
+                ("b@example.com",),
             )
         }
         assert chunk_threads == {thread_b}
         listing_b = [
             r["thread_id"]
             for r in db._conn.execute("SELECT thread_id, message_ids FROM threads")
-            if "b@example.com" in json.loads(r["message_ids"])
+            # ``message_ids`` lists claimant IDs: Message-ID plus "#<hash>".
+            if any(c.startswith("b@example.com#") for c in json.loads(r["message_ids"]))
         ]
         assert listing_b == [thread_b]
 
@@ -1459,7 +1477,9 @@ def _message_dates(db: Database, message_id: str) -> tuple[str, set[str], tuple[
     chunk_dates = {
         r["message_date"]
         for r in db._conn.execute(
-            "SELECT message_date FROM message_chunks WHERE message_id = ?", (message_id,)
+            "SELECT message_date FROM message_chunks WHERE "
+            "claimant_id IN (SELECT claimant_id FROM message_thread_map WHERE message_id = ?)",
+            (message_id,),
         )
     }
     thread = db._conn.execute(
@@ -1501,9 +1521,11 @@ class TestReprocessKeepsFirstDate:
         header = "2024-01-01T12:00:00+00:00"
         assert _message_dates(db, "dated@example.com") == (header, {header}, (header, header))
 
-    def test_changed_header_date_still_replaces_sent_at(self, tmp_path, monkeypatch):
-        """Only a fallback date defers to the stored one: a message whose
-        real Date header differs on reprocess takes the new header."""
+    def test_changed_header_date_is_its_own_claimant(self, tmp_path, monkeypatch):
+        """Only a fallback date defers to the stored one, and only for the
+        same file: a file whose real Date header differs has different
+        bytes, so it is another claimant of the Message-ID (#217) with its
+        own header date, and the first keeps its own."""
         db = Database(tmp_path / "mail.db")
         threader = Threader(db)
         path = tmp_path / "INBOX" / "cur" / "c:2,S"
@@ -1515,8 +1537,14 @@ class TestReprocessKeepsFirstDate:
         _write_eml(rewritten, "changed@example.com", date="Tue, 02 Jan 2024 12:00:00 +0000")
         self._index(db, threader, rewritten)
 
-        sent_at, _, _ = _message_dates(db, "changed@example.com")
-        assert sent_at == "2024-01-02T12:00:00+00:00"
+        rows = db._conn.execute(
+            "SELECT filepath, sent_at FROM messages WHERE message_id = ?",
+            ("changed@example.com",),
+        ).fetchall()
+        assert {(r["filepath"], r["sent_at"]) for r in rows} == {
+            (str(path), "2024-01-01T12:00:00+00:00"),
+            (str(rewritten), "2024-01-02T12:00:00+00:00"),
+        }
 
     @pytest.mark.parametrize("date", [None, "not-a-date"], ids=["missing", "malformed"])
     def test_undated_message_keeps_first_date_on_reprocess(self, tmp_path, monkeypatch, date):
@@ -1683,8 +1711,8 @@ class TestBatchedInitialIndex:
         assert not db.is_indexed(str(inbox / "bad.eml"))
         # Survivors have at least one chunk vector each (Phase 2c
         # actually wrote chunks, not just Phase 1 placeholder).
-        assert db.get_chunk_ids_for_message("ok1@example.com")
-        assert db.get_chunk_ids_for_message("ok2@example.com")
+        assert _chunk_ids(db, "ok1@example.com")
+        assert _chunk_ids(db, "ok2@example.com")
 
     def test_phase2_embed_failure_leaves_phase1_state_and_requeues(self, tmp_path, monkeypatch):
         # When the bulk embed call fails, every message in the batch
@@ -1706,7 +1734,7 @@ class TestBatchedInitialIndex:
             assert db.find_thread_by_message_id(f"m{i}@example.com") is not None
         # Phase 2 never wrote chunks, so search-by-chunks misses these.
         for i in range(3):
-            assert not db.get_chunk_ids_for_message(f"m{i}@example.com")
+            assert not _chunk_ids(db, f"m{i}@example.com")
         # Queue rows are marked failed (advancing attempts), eligible for
         # retry on the next pass. With max_attempts=3 and the embed
         # always failing, they end up dead-lettered after retries.
@@ -2114,7 +2142,7 @@ class TestBatchedInitialIndex:
         thread_id = db.find_thread_by_message_id("m@example.com")
         assert thread_id is not None
         assert db.is_indexed(str(inbox / "m.eml"))
-        assert not db.get_chunk_ids_for_message("m@example.com")
+        assert not _chunk_ids(db, "m@example.com")
         row = db._conn.execute(
             "SELECT embedding FROM threads_vec WHERE thread_id = ?", (thread_id,)
         ).fetchone()
@@ -2142,7 +2170,7 @@ class TestBatchedInitialIndex:
         assert all(v == 0.0 for v in vec_after), (
             "thread vector must stay at zero — no auto-resurrection"
         )
-        assert not db.get_chunk_ids_for_message("m@example.com"), (
+        assert not _chunk_ids(db, "m@example.com"), (
             "no chunks should materialize without operator intervention"
         )
 
@@ -2195,7 +2223,7 @@ class TestBatchedInitialIndex:
             struct.unpack(f"<{len(row_after['embedding']) // 4}f", row_after["embedding"])
         )
         assert any(v != 0.0 for v in vec_after)
-        assert db.get_chunk_ids_for_message("m@example.com")
+        assert _chunk_ids(db, "m@example.com")
         assert queue.stats() == {"queued": 0, "dead": 0}
 
     def test_recovery_sweep_skips_chunkless_subject_fallback_threads(self, tmp_path, monkeypatch):
@@ -2225,7 +2253,7 @@ class TestBatchedInitialIndex:
         # Sanity: chunkless but non-zero vector, queue empty.
         thread_id = db.find_thread_by_message_id("blank@example.com")
         assert thread_id is not None
-        assert not db.get_chunk_ids_for_message("blank@example.com")
+        assert not _chunk_ids(db, "blank@example.com")
         assert queue.stats() == {"queued": 0, "dead": 0}
 
         # Recovery sweep should be a no-op — the DB query filters out
@@ -2284,7 +2312,7 @@ class TestBatchedInitialIndex:
         original = db.replace_message_chunks
 
         def selective_fail(*args, **kwargs):
-            if kwargs.get("message_id") == "victim@example.com":
+            if kwargs["claimant_id"].startswith("victim@example.com#"):
                 raise RuntimeError("simulated db error for victim")
             return original(*args, **kwargs)
 
@@ -2294,10 +2322,10 @@ class TestBatchedInitialIndex:
         # Survivors fully indexed
         assert db.is_indexed(str(inbox / "ok1.eml"))
         assert db.is_indexed(str(inbox / "ok2.eml"))
-        assert db.get_chunk_ids_for_message("ok1@example.com")
-        assert db.get_chunk_ids_for_message("ok2@example.com")
+        assert _chunk_ids(db, "ok1@example.com")
+        assert _chunk_ids(db, "ok2@example.com")
         # Victim never got chunks (Phase 2c rolled back its transaction)
-        assert not db.get_chunk_ids_for_message("victim@example.com")
+        assert not _chunk_ids(db, "victim@example.com")
 
     def test_same_thread_phase2c_failure_does_not_leave_sibling_with_zero_vec(
         self, tmp_path, monkeypatch
@@ -2354,7 +2382,7 @@ class TestBatchedInitialIndex:
         original = db.replace_message_chunks
 
         def fail_for_a(*args, **kwargs):
-            if kwargs.get("message_id") == "a@example.com":
+            if kwargs["claimant_id"].startswith("a@example.com#"):
                 raise RuntimeError("simulated Phase 2c failure for A")
             return original(*args, **kwargs)
 
@@ -2362,7 +2390,7 @@ class TestBatchedInitialIndex:
         self._run(db, embedder, threader, queue, monkeypatch, maildir)
 
         # A failed Phase 2c → marked failed, queue retains a row.
-        assert not db.get_chunk_ids_for_message("a@example.com"), (
+        assert not _chunk_ids(db, "a@example.com"), (
             "A's chunk write rolled back via per-message transaction"
         )
         # B is chunkless by construction, but its thread vector must
@@ -2436,7 +2464,7 @@ class TestSteadyStateBatchedDrain:
             ("m3@example.com", inbox / "m3.eml"),
         ):
             assert db.is_indexed(str(path))
-            assert db.get_chunk_ids_for_message(mid)
+            assert _chunk_ids(db, mid)
         assert queue.stats() == {"queued": 0, "dead": 0}
 
     def test_max_passes_one_yields_after_one_batch(self, tmp_path, monkeypatch):
@@ -2768,7 +2796,8 @@ class TestRequeueStaleExtractions:
 
         for mid in ("contract@example.com", "blob@example.com"):
             rows = db._conn.execute(
-                "SELECT text FROM message_chunks WHERE message_id = ? "
+                "SELECT text FROM message_chunks WHERE "
+                "claimant_id IN (SELECT claimant_id FROM message_thread_map WHERE message_id = ?) "
                 "AND attachment_id IS NOT NULL",
                 (mid,),
             ).fetchall()
@@ -2886,7 +2915,7 @@ class TestRequeueStaleExtractions:
                 max_passes=1,
             )
 
-        assert not db.get_chunk_ids_for_message("contract@example.com", attachment_id=None)
+        assert not _chunk_ids(db, "contract@example.com", attachment_id=None)
         assert not db.thread_has_chunks(thread_id)
         assert self._thread_vector(db, thread_id) == fallback_vector
 
@@ -3633,7 +3662,7 @@ class TestEmbedFailureHandling:
         self._drain(db, embedder, threader, queue)
 
         assert queue.stats() == {"queued": 0, "dead": 0}
-        assert db.get_chunk_ids_for_message("a@example.com")
+        assert _chunk_ids(db, "a@example.com")
 
     def test_config_error_defers_as_operator_action(self, tmp_path, monkeypatch):
         db, threader, queue, paths = self._setup(tmp_path, monkeypatch, {"a": "alpha body"})
@@ -3666,8 +3695,8 @@ class TestEmbedFailureHandling:
 
         self._drain(db, embedder, threader, queue)
 
-        assert db.get_chunk_ids_for_message("good1@example.com")
-        assert db.get_chunk_ids_for_message("good2@example.com")
+        assert _chunk_ids(db, "good1@example.com")
+        assert _chunk_ids(db, "good2@example.com")
         row = self._row(db, paths["bad"])
         assert row["status"] == "dead"
         assert row["last_stage"] == "embed"
@@ -3710,9 +3739,9 @@ class TestEmbedFailureHandling:
 
         self._drain(db, _mock_transport_embedder(handler), threader, queue)
 
-        assert db.get_chunk_ids_for_message("good1@example.com")
-        assert db.get_chunk_ids_for_message("good2@example.com")
-        assert not db.get_chunk_ids_for_message("bad@example.com")
+        assert _chunk_ids(db, "good1@example.com")
+        assert _chunk_ids(db, "good2@example.com")
+        assert not _chunk_ids(db, "bad@example.com")
         assert self._row(db, paths["bad"])["status"] in ("queued", "dead")
         for row in db._conn.execute("SELECT embedding FROM threads_vec").fetchall():
             blob = row["embedding"]
@@ -3755,9 +3784,9 @@ class TestEmbedFailureHandling:
         with caplog.at_level("DEBUG"):
             self._drain(db, _mock_transport_embedder(handler), threader, queue)
 
-        assert db.get_chunk_ids_for_message("good1@example.com")
-        assert db.get_chunk_ids_for_message("good2@example.com")
-        assert not db.get_chunk_ids_for_message("bad@example.com")
+        assert _chunk_ids(db, "good1@example.com")
+        assert _chunk_ids(db, "good2@example.com")
+        assert not _chunk_ids(db, "bad@example.com")
         assert self._row(db, paths["bad"])["status"] in ("queued", "dead")
         last_error = db._conn.execute(
             "SELECT last_error FROM indexing_jobs WHERE filepath = ?", (paths["bad"],)
@@ -3791,7 +3820,7 @@ class TestEmbedFailureHandling:
 
         self._drain(db, embedder, threader, queue, breaker=breaker)
 
-        assert db.get_chunk_ids_for_message("good@example.com")
+        assert _chunk_ids(db, "good@example.com")
         row = self._row(db, paths["bad"])
         assert row["status"] == "queued"
         assert row["attempts"] == 1
@@ -3856,8 +3885,8 @@ class TestEmbedFailureHandling:
 
         self._recover_and_drain(db, embedder, threader, queue)
         assert queue.stats() == {"queued": 0, "dead": 0}
-        assert db.get_chunk_ids_for_message("a@example.com")
-        assert db.get_chunk_ids_for_message("b@example.com")
+        assert _chunk_ids(db, "a@example.com")
+        assert _chunk_ids(db, "b@example.com")
 
     def test_rate_limit_on_real_requests_never_dead_letters(self, tmp_path, monkeypatch):
         """The tiny probe fits the provider's remaining capacity but the
@@ -3884,7 +3913,7 @@ class TestEmbedFailureHandling:
 
         self._recover_and_drain(db, embedder, threader, queue)
         assert queue.stats() == {"queued": 0, "dead": 0}
-        assert db.get_chunk_ids_for_message("a@example.com")
+        assert _chunk_ids(db, "a@example.com")
 
     def test_pause_mid_isolation_commits_messages_already_embedded(self, tmp_path, monkeypatch):
         """Isolation embeds messages in batch order. If the provider
@@ -3915,7 +3944,7 @@ class TestEmbedFailureHandling:
         # Rows are claimed in enqueue order: a1, b2, c3.
         self._drain(db, embedder, threader, queue)
 
-        embedded = [n for n in paths if db.get_chunk_ids_for_message(f"{n}@example.com")]
+        embedded = [n for n in paths if _chunk_ids(db, f"{n}@example.com")]
         deferred = [n for n in paths if queue.has_pending_row(paths[n])]
         assert embedded == ["a1"]
         assert deferred == ["b2", "c3"]
@@ -4040,7 +4069,7 @@ class TestRequestLimitIsNotSourceFailure:
 
         assert sizes[:3] == [2, 1, 2], "batch, probe, then the message's own combined request"
         assert all(n == 1 for n in sizes[3:])
-        assert db.get_chunk_ids_for_message("limits@example.com")
+        assert _chunk_ids(db, "limits@example.com")
         assert queue.stats() == {"queued": 0, "dead": 0}
 
     def test_input_rejected_on_its_own_is_a_permanent_source_failure(self, tmp_path, monkeypatch):
@@ -4058,7 +4087,7 @@ class TestRequestLimitIsNotSourceFailure:
         ).fetchone()
         assert row["status"] == "dead"
         assert row["last_error_class"] == "permanent_source_failure"
-        assert not db.get_chunk_ids_for_message("limits@example.com")
+        assert not _chunk_ids(db, "limits@example.com")
 
 
 def test_probe_refreshes_heartbeat_before_its_own_retry_cycle(monkeypatch):
@@ -4292,7 +4321,7 @@ class TestMessageRecordsEndToEnd:
         main.initial_index(db, make_mock_embedder(_UNIT_VECTOR), Threader(db), queue)
 
         assert queue.stats() == {"queued": 0, "dead": 0}
-        assert db.get_chunk_ids_for_message("utf8@example.com")
+        assert _chunk_ids(db, "utf8@example.com")
         participants = {
             (r["role"], r["address"], r["name"])
             for r in db._conn.execute("SELECT role, address, name FROM message_participants")
@@ -4372,7 +4401,7 @@ class TestMessageRecordsEndToEnd:
             "malformed@example.com",
         )
         assert queue.stats() == {"queued": 0, "dead": 0}
-        assert db.get_chunk_ids_for_message("malformed@example.com")
+        assert _chunk_ids(db, "malformed@example.com")
         assert participants == {
             ("from", "alice@example.com", None),
             ("to", "bob@example.com", "=?utf-8?b?x?="),
@@ -4624,7 +4653,7 @@ class TestMessageRecordsEndToEnd:
             "nested-labels@example.com",
         )
         assert queue.stats() == {"queued": 0, "dead": 0}
-        assert db.get_chunk_ids_for_message("nested-labels@example.com")
+        assert _chunk_ids(db, "nested-labels@example.com")
         assert {p[1] for p in participants if p[0] == "from"} == {"bob@example.com"}
 
     def test_encoded_word_parentheses_cannot_alter_the_sender_address(self, tmp_path, monkeypatch):
@@ -4674,7 +4703,7 @@ class TestMessageRecordsEndToEnd:
             "restored-bomb@example.com",
         )
         assert queue.stats() == {"queued": 0, "dead": 0}
-        assert db.get_chunk_ids_for_message("restored-bomb@example.com")
+        assert _chunk_ids(db, "restored-bomb@example.com")
         assert not any("(" in addr for _role, addr, _name in participants)
 
     def test_group_syntax_inside_encoded_words_parses_in_linear_time(self, tmp_path):
@@ -4769,7 +4798,7 @@ class TestMessageRecordsEndToEnd:
             message_id,
         )
         assert queue.stats() == {"queued": 0, "dead": 0}, "message must never be dead-lettered"
-        assert db.get_chunk_ids_for_message(message_id), "body must be indexed"
+        assert _chunk_ids(db, message_id), "body must be indexed"
         assert participants == {("from", "sender@example.com", "Sender")} | expected_recipients
 
     @pytest.mark.parametrize("with_reconciler", [False, True])
@@ -4958,7 +4987,9 @@ class TestBatchSharesExtraction:
 
     def _attachment_chunks(self, db) -> list[tuple[str, str]]:
         rows = db._conn.execute(
-            "SELECT message_id, text FROM message_chunks WHERE attachment_id IS NOT NULL"
+            "SELECT m.message_id, c.text FROM message_chunks c "
+            "JOIN message_thread_map m ON m.claimant_id = c.claimant_id "
+            "WHERE c.attachment_id IS NOT NULL"
         ).fetchall()
         return sorted((r["message_id"], r["text"]) for r in rows)
 
@@ -5256,8 +5287,9 @@ class TestReplySubjectSearchable:
         return {
             r[0]
             for r in db._conn.execute(
-                "SELECT c.message_id FROM message_chunks_fts f JOIN message_chunks c "
-                "ON c.fts_rowid = f.rowid WHERE message_chunks_fts MATCH ?",
+                "SELECT m.message_id FROM message_chunks_fts f JOIN message_chunks c "
+                "ON c.fts_rowid = f.rowid JOIN message_thread_map m "
+                "ON m.claimant_id = c.claimant_id WHERE message_chunks_fts MATCH ?",
                 (term,),
             )
         }
@@ -5276,13 +5308,16 @@ class TestReplySubjectSearchable:
     def test_stored_chunks_stay_body_only(self, tmp_path):
         from src.chunker import chunk_message
 
-        db, *_ = self._index_thread(tmp_path)
+        db, _, _, (_root, changed, _same), _ = self._index_thread(tmp_path)
         rows = db._conn.execute(
-            "SELECT chunk_id, text, char_start FROM message_chunks WHERE message_id = ?",
+            "SELECT chunk_id, text, char_start FROM message_chunks WHERE "
+            "claimant_id IN (SELECT claimant_id FROM message_thread_map WHERE message_id = ?)",
             ("changed@example.com",),
         ).fetchall()
+        parsed = parser.parse_email(changed)
+        assert parsed is not None
         expected = chunk_message(
-            message_pk="changed@example.com",
+            message_pk=parsed.claimant_id,
             body_text="Body of changed@example.com.",
             target_tokens=main.CHUNK_TARGET_TOKENS,
             max_tokens=main.CHUNK_MAX_TOKENS,
@@ -5300,7 +5335,8 @@ class TestReplySubjectSearchable:
         texts = [
             r[0]
             for r in db._conn.execute(
-                "SELECT text FROM message_chunks WHERE message_id = ? ORDER BY chunk_index",
+                "SELECT text FROM message_chunks WHERE "
+                "claimant_id IN (SELECT claimant_id FROM message_thread_map WHERE message_id = ?) ORDER BY chunk_index",
                 ("changed@example.com",),
             )
         ]
@@ -5393,7 +5429,9 @@ class TestReplySubjectSearchable:
         first = next(t for t in inputs if t.endswith("Body of changed@example.com."))
         assert first.startswith("Subject: Re: Budget review s0 s1")
         stored = db._conn.execute(
-            "SELECT text FROM message_chunks WHERE message_id = ?", ("changed@example.com",)
+            "SELECT text FROM message_chunks WHERE "
+            "claimant_id IN (SELECT claimant_id FROM message_thread_map WHERE message_id = ?)",
+            ("changed@example.com",),
         ).fetchone()[0]
         assert stored == "Body of changed@example.com."
 
@@ -5412,3 +5450,152 @@ class TestReplySubjectSearchable:
         full = truncate_to_tokens(full, 120)
         assert estimate_tokens(full) == 120
         assert main._chunk_embed_input(subject_line, full) == full
+
+
+class TestMessageIdClaimants:
+    """#217: two files claiming one Message-ID with different content are
+    both kept, each under its own claimant ID (the Message-ID plus a
+    short hash of the file's bytes). The second used to overwrite the
+    first's message record, source locator, participants and chunks,
+    while the thread body kept the first's text and its file stayed
+    marked indexed."""
+
+    MID = "dup@example.com"
+
+    def _setup(self, tmp_path, monkeypatch):
+        maildir = tmp_path / "maildir"
+        monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
+        inbox = maildir / "INBOX" / "cur"
+        first = inbox / "1700000000.M1.host:2,S"
+        second = inbox / "1700000001.M1.host:2,S"
+        _write_eml_with_text_attachment(first, self.MID, body="Original wording alphaword.")
+        _write_eml_with_text_attachment(second, self.MID, body="Replacement wording betaword.")
+        db = Database(tmp_path / "mail.db")
+        threader = Threader(db)
+        embedder = make_mock_embedder(_UNIT_VECTOR)
+        return maildir, inbox, first, second, db, threader, embedder
+
+    def _index(self, db, threader, embedder, *paths):
+        queue = _make_queue(db)
+        # One file per drain: the arrival order is part of the shape.
+        for path in paths:
+            queue.enqueue(str(path), REASON_INITIAL_SCAN)
+            _drain(queue, db, embedder, threader, batch_size=1)
+
+    @staticmethod
+    def _claimant(path: Path) -> str:
+        msg = parser.parse_email(path)
+        assert msg is not None
+        return msg.claimant_id
+
+    @staticmethod
+    def _state(db) -> dict[str, list[tuple]]:
+        """Every per-message row, for before/after comparisons."""
+
+        def rows(sql: str) -> list[tuple]:
+            return sorted(tuple(r) for r in db._conn.execute(sql))
+
+        return {
+            "messages": rows("SELECT claimant_id, message_id, filepath FROM messages"),
+            "map": rows("SELECT claimant_id, message_id, filepath FROM message_thread_map"),
+            "chunks": rows("SELECT claimant_id, chunk_id, attachment_id FROM message_chunks"),
+            "attachments": rows("SELECT attachment_occurrence_id, claimant_id FROM attachments"),
+            "participants": rows("SELECT claimant_id, role, address FROM message_participants"),
+            "threads": rows("SELECT thread_id, message_ids, body_text FROM threads"),
+        }
+
+    def _chunk_text(self, db, claimant: str, *, attachment: bool) -> str:
+        op = "IS NOT NULL" if attachment else "IS NULL"
+        return " ".join(
+            r["text"]
+            for r in db._conn.execute(
+                f"SELECT text FROM message_chunks WHERE claimant_id = ? AND attachment_id {op}",
+                (claimant,),
+            )
+        )
+
+    def test_both_claimants_are_indexed_and_kept_apart(self, tmp_path, monkeypatch):
+        _, _, first, second, db, threader, embedder = self._setup(tmp_path, monkeypatch)
+        self._index(db, threader, embedder, first, second)
+
+        a, b = self._claimant(first), self._claimant(second)
+        assert a != b
+        assert a.startswith(self.MID + "#") and b.startswith(self.MID + "#")
+        rows = db._conn.execute(
+            "SELECT claimant_id, filepath FROM messages WHERE message_id = ?", (self.MID,)
+        ).fetchall()
+        assert {(r["claimant_id"], r["filepath"]) for r in rows} == {
+            (a, str(first)),
+            (b, str(second)),
+        }
+        assert db.is_indexed(str(first)) and db.is_indexed(str(second))
+
+        body_a = self._chunk_text(db, a, attachment=False)
+        body_b = self._chunk_text(db, b, attachment=False)
+        assert "alphaword" in body_a and "betaword" not in body_a
+        assert "betaword" in body_b and "alphaword" not in body_b
+        # Each claimant owns its own occurrence and chunks of the
+        # attachment both carry.
+        assert "attachment text" in self._chunk_text(db, a, attachment=True)
+        assert "attachment text" in self._chunk_text(db, b, attachment=True)
+        occurrences = db._conn.execute("SELECT claimant_id FROM attachments").fetchall()
+        assert sorted(r["claimant_id"] for r in occurrences) == sorted([a, b])
+
+        # One thread (membership stays keyed by Message-ID) listing both
+        # claimants, its body carrying both texts, so coarse and precise
+        # retrieval agree.
+        threads = db._conn.execute("SELECT message_ids, body_text FROM threads").fetchall()
+        assert len(threads) == 1
+        assert sorted(json.loads(threads[0]["message_ids"])) == sorted([a, b])
+        assert "alphaword" in threads[0]["body_text"]
+        assert "betaword" in threads[0]["body_text"]
+
+    def test_reprocessing_is_idempotent(self, tmp_path, monkeypatch):
+        _, _, first, second, db, threader, embedder = self._setup(tmp_path, monkeypatch)
+        self._index(db, threader, embedder, first, second)
+        before = self._state(db)
+        embedder.embed_batch.reset_mock()
+
+        self._index(db, threader, embedder, second, first)
+
+        assert self._state(db) == before
+        # Every chunk ID was already stored, so nothing is re-embedded.
+        embedded = [t for call in embedder.embed_batch.call_args_list for t in call.args[0]]
+        assert embedded == []
+
+    def test_reaping_one_claimant_leaves_the_other_intact(self, tmp_path, monkeypatch):
+        from src.reconciler import Reconciler, ReconcilerConfig
+
+        maildir, inbox, first, second, db, threader, embedder = self._setup(tmp_path, monkeypatch)
+        self._index(db, threader, embedder, first, second)
+        a, b = self._claimant(first), self._claimant(second)
+        survivor_before = {
+            table: [row for row in rows if b in row] for table, rows in self._state(db).items()
+        }
+
+        first.rename(inbox / "1700000000.M1.host:2,ST")
+        reconciler = Reconciler(
+            db,
+            embedder,
+            threader,
+            ReconcilerConfig(
+                enabled=True,
+                grace_days=0,
+                sweep_interval_secs=60,
+                max_batch_pct=1.0,
+                force=False,
+                unlink_on_reap=False,
+            ),
+            maildir_root=maildir,
+        )
+        reconciler.sweep()
+        reconciler.reap()
+
+        after = self._state(db)
+        for table in ("messages", "map", "chunks", "attachments", "participants"):
+            assert not [row for row in after[table] if a in row], table
+            assert [row for row in after[table] if b in row] == survivor_before[table], table
+        (thread,) = after["threads"]
+        assert json.loads(thread[1]) == [b]
+        assert "betaword" in thread[2] and "alphaword" not in thread[2]
+        assert db.is_indexed(str(second))

@@ -144,7 +144,7 @@ class Reconciler:
                 # treat it as a tombstone so the index can heal. The reaper
                 # will still wait out the grace window before acting.
                 if self.db.add_pending_deletion(
-                    row["filepath"], row["message_id"], row["thread_id"]
+                    row["filepath"], row["claimant_id"], row["thread_id"]
                 ):
                     missing += 1
                 continue
@@ -158,7 +158,7 @@ class Reconciler:
             current_filepath = str(current)
             if is_trashed(current):
                 if self.db.add_pending_deletion(
-                    current_filepath, row["message_id"], row["thread_id"]
+                    current_filepath, row["claimant_id"], row["thread_id"]
                 ):
                     tombstoned += 1
             elif self.db.has_pending_deletion(current_filepath):
@@ -202,7 +202,7 @@ class Reconciler:
                 clear_tombstone=not is_trashed(dest_path),
             )
         if is_trashed(dest_path):
-            self.db.add_pending_deletion(dest_path, entry["message_id"], entry["thread_id"])
+            self.db.add_pending_deletion(dest_path, entry["claimant_id"], entry["thread_id"])
             log.info("tombstoned via on_moved: %s", dest_path)
         elif self.db.has_pending_deletion(dest_path):
             self.db.clear_pending_deletion(dest_path)
@@ -353,15 +353,15 @@ class Reconciler:
         transaction that each message is still tombstoned at or before
         ``cutoff``, since the watcher may restore (or restore and trash
         again) a message meanwhile."""
-        # Survivors are chosen by message ID, which removal also uses:
+        # Survivors are chosen by claimant ID, which removal also uses:
         # the watcher can rename a tombstoned file (a flag change) after
         # ``tombs`` was read, and a stale snapshot path would let the
         # deleted message be rebuilt into the thread as a survivor.
-        dead_ids = {t["message_id"] for t in tombs}
+        dead_ids = {t["claimant_id"] for t in tombs}
         all_rows = self.db.get_thread_messages(thread_id)
-        survivor_rows = [r for r in all_rows if r["message_id"] not in dead_ids]
+        survivor_rows = [r for r in all_rows if r["claimant_id"] not in dead_ids]
         dead_filepaths = {t["filepath"] for t in tombs} | {
-            r["filepath"] for r in all_rows if r["message_id"] in dead_ids
+            r["filepath"] for r in all_rows if r["claimant_id"] in dead_ids
         }
 
         if not survivor_rows:
@@ -458,14 +458,14 @@ class Reconciler:
 
         try:
             # Recompute the thread vector as the mean of the survivors'
-            # chunk embeddings. Reading chunks for survivor message_ids
+            # chunk embeddings. Reading chunks for survivor claimant IDs
             # excludes the reaped messages even though their chunk rows
             # are still on disk at this point — the reap transaction
             # below tears them down atomically. Falls back to embedding
             # the subject line in the rare case that no survivor has
             # any indexed chunks (e.g. all bodies empty).
-            survivor_message_ids = [r["message_id"] for r in survivor_rows]
-            survivor_chunks = self.db.get_chunk_embeddings_for_messages(survivor_message_ids)
+            survivor_claimant_ids = [r["claimant_id"] for r in survivor_rows]
+            survivor_chunks = self.db.get_chunk_embeddings_for_messages(survivor_claimant_ids)
             if survivor_chunks:
                 embedding = mean_vector(survivor_chunks)
             else:
@@ -505,7 +505,7 @@ class Reconciler:
         removed_filepaths = self.db.reap_thread_messages(
             rebuilt_thread,
             embedding,
-            [tomb["message_id"] for tomb in tombs],
+            [tomb["claimant_id"] for tomb in tombs],
             grace_cutoff=cutoff,
         )
         if removed_filepaths is None:
