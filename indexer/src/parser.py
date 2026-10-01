@@ -32,10 +32,12 @@ class OversizedMessageError(Exception):
     """Raised when an ``.eml`` exceeds ``INDEXER_PARSE_MAX_BYTES``.
 
     Distinct from the parser's other ``None``-return paths (no
-    Message-ID, etc.) so the indexer worker can route oversized files
-    through ``mark_skipped(reason="oversized")`` rather than
-    ``mark_succeeded`` — the file was never indexed, and the queue
-    log line should reflect that for operator visibility.
+    Message-ID, etc.) so the indexer worker can dead-letter oversized
+    files terminally (``mark_dead_terminal``) rather than
+    ``mark_succeeded`` — the file was never indexed. The dead row is
+    durable, so startup discovery does not re-enqueue the same file on
+    every restart, and it stays visible in ``queue.stats()['dead']``
+    until an operator raises the cap and runs ``make requeue-dead``.
     """
 
     def __init__(self, path: Path, size: int, cap: int) -> None:
@@ -198,9 +200,9 @@ def parse_email(path: Path, maildir_root: Path | None = None) -> Message | None:
     reading — whichever fires first — so a malicious or corrupt Maildir
     entry cannot exhaust container memory even if the file grew between
     fstat and read or fstat itself failed. The worker catches the
-    error and routes the row through ``mark_skipped(reason="oversized")``
-    — terminal, no retry, but visible in operator logs as a skip
-    rather than a silent success-deletion.
+    error and dead-letters the row through ``mark_dead_terminal`` —
+    terminal, no retry, and kept as a durable dead row rather than a
+    silent success-deletion.
     """
     # Open the file once, fstat that descriptor, and bound the read on
     # the same fd. Opening first means the cap check and the read see

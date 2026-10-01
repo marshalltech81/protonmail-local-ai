@@ -253,7 +253,7 @@ class TestParseEmail:
 
     def test_oversized_file_raises_oversized_message_error(self, tmp_path, monkeypatch):
         # Files past INDEXER_PARSE_MAX_BYTES must raise so the worker
-        # routes them through ``mark_skipped(reason="oversized")``
+        # dead-letters them terminally (``mark_dead_terminal``)
         # instead of the previous silent ``return None`` /
         # ``mark_succeeded`` path that hid oversized entries from
         # operator-visible logs.
