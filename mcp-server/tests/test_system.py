@@ -8,7 +8,11 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from src.tools.outputs import QueueCounts
-from src.tools.system import get_mailbox_status, not_current_reasons
+from src.tools.system import (
+    FUTURE_SKEW_TOLERANCE_SECS,
+    get_mailbox_status,
+    not_current_reasons,
+)
 
 from tests.conftest import write_ingestion
 
@@ -69,6 +73,36 @@ class TestNotCurrentReasons:
 
     def test_indexer_stale(self):
         assert _reasons(indexer_age=timedelta(minutes=11)) == ["the indexer last reported 11m ago"]
+
+    def test_future_sync_stamp_is_not_current(self):
+        """A stamp ahead of the checking clock (a clock rollback or a bad
+        write) cannot vouch for a recent sync."""
+        assert _reasons(sync_age=-timedelta(days=1)) == [
+            "the last successful mail sync is timestamped 1d 0h in the future"
+        ]
+
+    def test_future_indexer_stamp_is_not_current(self):
+        assert _reasons(indexer_age=-timedelta(days=1)) == [
+            "the indexer last reported 1d 0h in the future"
+        ]
+
+    def test_both_stamps_in_the_future(self):
+        assert _reasons(sync_age=-timedelta(days=1), indexer_age=-timedelta(minutes=10)) == [
+            "the last successful mail sync is timestamped 1d 0h in the future",
+            "the indexer last reported 10m in the future",
+        ]
+
+    @pytest.mark.parametrize(
+        ("skew_secs", "flagged"),
+        [
+            (FUTURE_SKEW_TOLERANCE_SECS, False),
+            (FUTURE_SKEW_TOLERANCE_SECS + 1, True),
+        ],
+    )
+    def test_future_skew_tolerance(self, skew_secs, flagged):
+        skew = -timedelta(seconds=skew_secs)
+        reasons = _reasons(sync_age=skew, indexer_age=skew)
+        assert len(reasons) == (2 if flagged else 0)
 
     def test_waiting_messages(self):
         reasons = _reasons(queue=QueueCounts(pending=3, retrying=2, dead=1))

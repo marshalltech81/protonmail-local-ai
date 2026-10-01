@@ -370,8 +370,17 @@ class _IngestionStateRecorder:
         # Called from the watcher thread and the main thread; keep the
         # newest so a walk that read an older stamp cannot move it back.
         # Timestamps share one UTC ISO format, so they compare as strings.
+        # An acknowledged stamp ahead of our clock (the clock rolled back)
+        # yields to any new one; otherwise every later sync would sort
+        # earlier and be dropped until the clock caught up (#332).
         acked = self._acked
-        if stamp is not None and (acked is None or stamp.completed_at > acked.completed_at):
+        if stamp is None:
+            return
+        if (
+            acked is None
+            or stamp.completed_at > acked.completed_at
+            or datetime.fromisoformat(acked.completed_at) > datetime.now(UTC)
+        ):
             self._acked = stamp
 
     def maybe_record(self, now: float) -> None:
