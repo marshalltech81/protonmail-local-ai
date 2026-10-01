@@ -26,11 +26,12 @@ log = logging.getLogger("mcp.sqlite")
 
 
 class InvalidFilterError(ValueError):
-    """A date filter the caller supplied could not be parsed.
+    """A date filter the caller supplied could not be parsed, or the two
+    bounds name an empty interval.
 
-    The message quotes the rejected value so the caller learns why, which
-    means it must never be logged: tool handlers catch this and log only
-    which field failed.
+    The message may quote the rejected value so the caller learns why,
+    which means it must never be logged: tool handlers catch this and log
+    only which field failed.
     """
 
     def __init__(self, field_name: str, message: str) -> None:
@@ -1107,8 +1108,7 @@ class Database:
         if content_type:
             clauses.append("a.content_type = ?")
             params.append(content_type)
-        date_from_iso = _normalize_date_bound(date_from, end_of_day=False, field_name="date_from")
-        date_to_iso = _normalize_date_bound(date_to, end_of_day=True, field_name="date_to")
+        date_from_iso, date_to_iso = _normalize_date_range(date_from, date_to)
         if date_from_iso is not None:
             clauses.append("t.date_last >= ?")
             params.append(date_from_iso)
@@ -1359,8 +1359,7 @@ class Database:
         # date-only values to start/end of day in UTC so the comparison is
         # correct. date_from also benefits from explicit UTC normalization
         # for inputs that arrive with ``Z`` or offset suffixes.
-        date_from_iso = _normalize_date_bound(date_from, end_of_day=False, field_name="date_from")
-        date_to_iso = _normalize_date_bound(date_to, end_of_day=True, field_name="date_to")
+        date_from_iso, date_to_iso = _normalize_date_range(date_from, date_to)
         if date_from_iso is not None:
             where_clauses.append("t.date_last >= ?")
             params.append(date_from_iso)
@@ -1557,8 +1556,7 @@ class Database:
             placeholders = ",".join(["?"] * len(folders))
             where_clauses.append(f"t.folder IN ({placeholders})")
             params.extend(folders)
-        date_from_iso = _normalize_date_bound(date_from, end_of_day=False, field_name="date_from")
-        date_to_iso = _normalize_date_bound(date_to, end_of_day=True, field_name="date_to")
+        date_from_iso, date_to_iso = _normalize_date_range(date_from, date_to)
         if date_from_iso is not None:
             where_clauses.append("t.date_last >= ?")
             params.append(date_from_iso)
@@ -1619,8 +1617,7 @@ class Database:
             params.extend(folders)
         # See ``_keyword_search`` for why date bounds are normalized before
         # being pushed into SQL.
-        date_from_iso = _normalize_date_bound(date_from, end_of_day=False, field_name="date_from")
-        date_to_iso = _normalize_date_bound(date_to, end_of_day=True, field_name="date_to")
+        date_from_iso, date_to_iso = _normalize_date_range(date_from, date_to)
         if date_from_iso is not None:
             where_clauses.append("date_last >= ?")
             params.append(date_from_iso)
@@ -2059,14 +2056,7 @@ class Database:
         has_attachments: bool | None = None,
         participant: str | None = None,
     ) -> list[ThreadResult]:
-        date_from_dt = (
-            _parse_filter_date(date_from, end_of_day=False, _field_name="date_from")
-            if date_from
-            else None
-        )
-        date_to_dt = (
-            _parse_filter_date(date_to, end_of_day=True, _field_name="date_to") if date_to else None
-        )
+        date_from_dt, date_to_dt = _parse_date_range(date_from, date_to)
 
         filtered = results
         if folders:
@@ -2403,8 +2393,7 @@ class Database:
             v.strip() if v and v.strip() else None
             for v in (sender, recipient, participant, subject, text, folder)
         )
-        date_from_iso = _normalize_date_bound(date_from, end_of_day=False, field_name="date_from")
-        date_to_iso = _normalize_date_bound(date_to, end_of_day=True, field_name="date_to")
+        date_from_iso, date_to_iso = _normalize_date_range(date_from, date_to)
 
         where: list[str] = []
         params: list = []
@@ -2532,16 +2521,44 @@ def _has_valid_distance(row: sqlite3.Row) -> bool:
     return score is not None and math.isfinite(score)
 
 
-def _normalize_date_bound(value: str | None, *, end_of_day: bool, field_name: str) -> str | None:
-    """Return an ISO 8601 string suitable for lexicographic comparison against
-    stored ``date_first`` / ``date_last`` values, or ``None`` if no filter was
-    supplied. Raises ``InvalidFilterError`` (a ``ValueError``) on invalid
-    input (same policy as ``_apply_filters``) so bad filters fail loudly
-    instead of silently returning the wrong rows.
+def _parse_date_range(
+    date_from: str | None, date_to: str | None
+) -> tuple[datetime | None, datetime | None]:
+    """Parse the ``date_from`` / ``date_to`` filters into tz-aware UTC
+    bounds, ``None`` for a bound that was not supplied.
+
+    Every tool that takes both bounds parses them here, so they all
+    reject the same input. Raises ``InvalidFilterError`` (a
+    ``ValueError``) on an unparseable value, and on ``date_from`` after
+    ``date_to`` (#312): that interval is empty, but the thread overlap
+    predicates (``date_last >= from AND date_first <= to``) would still
+    accept a thread spanning it. The comparison runs on the parsed UTC
+    instants, after date-only promotion, so a single date names its whole
+    day and two offsets for one instant compare equal.
     """
-    if not value:
-        return None
-    return _parse_filter_date(value, end_of_day=end_of_day, _field_name=field_name).isoformat()
+    start = (
+        _parse_filter_date(date_from, end_of_day=False, _field_name="date_from")
+        if date_from
+        else None
+    )
+    end = _parse_filter_date(date_to, end_of_day=True, _field_name="date_to") if date_to else None
+    if start is not None and end is not None and start > end:
+        raise InvalidFilterError("date_from/date_to", "date_from must not be after date_to")
+    return start, end
+
+
+def _normalize_date_range(
+    date_from: str | None, date_to: str | None
+) -> tuple[str | None, str | None]:
+    """``_parse_date_range`` as ISO 8601 strings for SQL pushdown, where
+    they are compared lexicographically against stored ``+00:00``
+    timestamps (``date_first`` / ``date_last`` / ``sent_at``).
+    """
+    start, end = _parse_date_range(date_from, date_to)
+    return (
+        start.isoformat() if start is not None else None,
+        end.isoformat() if end is not None else None,
+    )
 
 
 def _parse_filter_date(

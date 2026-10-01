@@ -1160,19 +1160,80 @@ class TestFilterDateUtcNormalization:
         filtered = seeded_db._apply_filters([after_cutoff], date_to="2024-06-01T08:29:00-04:00")
         assert filtered == []
 
-    def test_normalize_date_bound_returns_utc_isoformat(self):
-        """``_normalize_date_bound`` produces the string handed straight to
-        SQL pushdown — it must carry a ``+00:00`` offset regardless of the
+    def test_normalize_date_range_returns_utc_isoformat(self):
+        """``_normalize_date_range`` produces the strings handed straight to
+        SQL pushdown — they must carry a ``+00:00`` offset regardless of the
         offset the caller supplied, so lexicographic comparison against
         stored UTC timestamps is well-defined."""
-        from src.lib.sqlite import _normalize_date_bound
+        from src.lib.sqlite import _normalize_date_range
 
-        normalized = _normalize_date_bound(
-            "2024-06-01T08:00:00-04:00", end_of_day=False, field_name="date_from"
-        )
+        normalized, no_upper_bound = _normalize_date_range("2024-06-01T08:00:00-04:00", None)
+        assert no_upper_bound is None
         assert normalized is not None
         assert normalized.endswith("+00:00")
         assert normalized.startswith("2024-06-01T12:00:00")
+
+
+class TestInvertedDateRange:
+    """#312: ``date_from`` after ``date_to`` names an empty interval. The
+    thread overlap predicates (``date_last >= from AND date_first <= to``)
+    still accept a long-lived thread for it, so every entry point that
+    takes both bounds rejects the pair instead, after UTC normalization."""
+
+    # A thread spanning 2023-2026 overlaps any interval in that span, so
+    # an unchecked inverted range inside it would return the thread.
+    _SPAN = {"date_first": "2023-01-01T00:00:00+00:00", "date_last": "2026-01-01T00:00:00+00:00"}
+
+    _ENTRY_POINTS = {
+        "keyword_search": lambda db, **kw: db.keyword_search("report", **kw),
+        "semantic_search": lambda db, **kw: db.semantic_search([1.0, 0.0, 0.0, 0.0], **kw),
+        "hybrid_search": lambda db, **kw: db.hybrid_search("report", [1.0, 0.0, 0.0, 0.0], **kw),
+        "like_fallback": lambda db, **kw: db._like_fallback("report", 10, **kw),
+        "search_attachments": lambda db, **kw: db.search_attachments(**kw),
+        "query_messages": lambda db, **kw: db.query_messages(**kw),
+    }
+
+    @pytest.mark.parametrize("entry", sorted(_ENTRY_POINTS))
+    @pytest.mark.parametrize(
+        ("date_from", "date_to"),
+        [
+            ("2025-01-01", "2024-01-01"),  # date-only, a year apart
+            ("2024-06-02", "2024-06-01"),  # adjacent days
+            ("2024-06-01T12:00:01+00:00", "2024-06-01T12:00:00+00:00"),  # one second
+            # 13:00Z vs 12:00Z: the strings sort the other way round.
+            ("2024-06-01T09:00:00-04:00", "2024-06-01T12:00:00Z"),
+        ],
+    )
+    def test_inverted_range_is_rejected(
+        self, tmp_path, _build_thread_on, entry, date_from, date_to
+    ):
+        from src.lib.sqlite import InvalidFilterError
+
+        db = _build_thread_on(tmp_path, **self._SPAN)
+        with pytest.raises(InvalidFilterError) as exc:
+            self._ENTRY_POINTS[entry](db, date_from=date_from, date_to=date_to)
+        assert str(exc.value) == "date_from must not be after date_to"
+        assert exc.value.field_name == "date_from/date_to"
+
+    @pytest.mark.parametrize("entry", sorted(_ENTRY_POINTS))
+    @pytest.mark.parametrize(
+        ("date_from", "date_to"),
+        [
+            ("2024-06-01", "2024-06-01"),  # one whole day
+            ("2024-06-01T12:00:00+00:00", "2024-06-01T12:00:00+00:00"),  # one instant
+            # The same instant written with two offsets.
+            ("2024-06-01T08:00:00-04:00", "2024-06-01T12:00:00Z"),
+            ("2024-01-01", "2025-01-01"),
+        ],
+    )
+    def test_ordered_range_is_accepted(self, tmp_path, _build_thread_on, entry, date_from, date_to):
+        db = _build_thread_on(tmp_path, **self._SPAN)
+        self._ENTRY_POINTS[entry](db, date_from=date_from, date_to=date_to)
+
+    def test_ordered_range_still_returns_the_overlapping_thread(self, tmp_path, _build_thread_on):
+        db = _build_thread_on(tmp_path, **self._SPAN)
+        results = db.keyword_search("report", date_from="2024-01-01", date_to="2025-01-01")
+        assert [r.thread_id for r in results] == ["on-last-day"]
 
 
 class TestFtsSanitization:

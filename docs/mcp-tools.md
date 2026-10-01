@@ -109,6 +109,11 @@ drive an unbounded query against the index.
   value (``"2024-12-31"``); date-only values are promoted to start/end
   of day in UTC before being pushed into SQL so the filter matches
   the full day the user named.
+- A `date_from` later than `date_to` names an empty interval and is
+  rejected with an error naming both fields, the same way by every tool
+  that takes both bounds. The bounds are compared after UTC
+  normalization and date-only promotion, so `date_from` and `date_to`
+  set to the same date select that whole day.
 
 ---
 
@@ -276,7 +281,8 @@ questions.
 | `cursor` | string | none | `next_cursor` from the previous page of the same query |
 
 All given filters must match; blank filters are ignored, and with
-none every indexed message is enumerated.
+none every indexed message is enumerated. A `date_from` later than
+`date_to` is rejected, as in `search_emails`.
 
 **Address matching.** A value that is a full address
 (`jane@example.com`, `Jane <jane@example.com>`) matches by canonical

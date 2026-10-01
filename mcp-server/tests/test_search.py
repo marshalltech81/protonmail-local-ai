@@ -835,3 +835,31 @@ class TestLoggingPrivacy:
         assert "tool=search_emails" in caplog.text
         assert "zq-private-medical-diagnosis" not in caplog.text
         assert "dr@example.com" not in caplog.text
+
+
+class TestInvertedDateRange:
+    """#312: every search tool rejects ``date_from`` after ``date_to`` as
+    an empty interval, and logs which fields were rejected."""
+
+    @pytest.mark.parametrize(
+        ("tool", "extra"),
+        [
+            ("search_emails", {"mode": "keyword"}),
+            ("search_emails", {"mode": "semantic"}),
+            ("search_emails", {"mode": "hybrid"}),
+            ("get_evidence", {}),
+            ("search_attachments", {}),
+        ],
+    )
+    def test_inverted_range_is_an_error(
+        self, fake_server, fake_embed, seeded_db, caplog, tool, extra
+    ):
+        import logging
+
+        register_search_tools(fake_server, seeded_db, fake_embed)
+        handler = fake_server.tools[tool]
+        kwargs = {"query": "invoice", "date_from": "2099-03-04", "date_to": "2098-05-06", **extra}
+        with caplog.at_level(logging.DEBUG):
+            text = _error(handler(**kwargs))
+        assert "date_from must not be after date_to" in text
+        assert f"{tool} rejected invalid date_from/date_to" in caplog.text
