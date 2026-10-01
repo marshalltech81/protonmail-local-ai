@@ -1,5 +1,6 @@
 """Tests for src/stall_guard.py — ends a worker stuck on one message (#235)."""
 
+import logging
 import threading
 
 from src.database import Database
@@ -27,22 +28,34 @@ def _running_queue(tmp_path, clock: _Clock) -> IndexingQueue:
 
 def test_idle_worker_is_never_stalled(tmp_path):
     db = Database(tmp_path / "q.db")
-    guard = StallGuard(IndexingQueue(db), limit_seconds=60, clock=_Clock())
-    assert guard.stalled() is None
+    exits: list[int] = []
+    guard = StallGuard(IndexingQueue(db), limit_seconds=60, clock=_Clock(), exit_fn=exits.append)
+    assert guard.check() is False
+    assert exits == []
 
 
 def test_step_within_the_limit_is_not_stalled(tmp_path):
     clock = _Clock()
-    guard = StallGuard(_running_queue(tmp_path, clock), limit_seconds=60, clock=clock)
+    exits: list[int] = []
+    guard = StallGuard(
+        _running_queue(tmp_path, clock), limit_seconds=60, clock=clock, exit_fn=exits.append
+    )
     clock.now += 60
-    assert guard.stalled() is None
+    assert guard.check() is False
+    assert exits == []
 
 
-def test_step_past_the_limit_is_stalled(tmp_path):
+def test_step_past_the_limit_is_stalled(tmp_path, caplog):
     clock = _Clock()
-    guard = StallGuard(_running_queue(tmp_path, clock), limit_seconds=60, clock=clock)
+    exits: list[int] = []
+    guard = StallGuard(
+        _running_queue(tmp_path, clock), limit_seconds=60, clock=clock, exit_fn=exits.append
+    )
     clock.now += 61
-    assert guard.stalled() == "/m/stuck"
+    with caplog.at_level(logging.ERROR, logger="indexer.stall_guard"):
+        assert guard.check() is True
+    assert exits == [1]
+    assert "/m/stuck" in caplog.text
 
 
 def test_check_exits_the_process_only_when_stalled(tmp_path):
