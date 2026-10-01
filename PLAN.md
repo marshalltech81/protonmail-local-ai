@@ -620,15 +620,11 @@ batch is done: the 36 stale-text issues #365–#400 and the #395
 reconciler fix merged as #402–#410 (decisions: `RERANK_TOP_N` removed,
 the eval's unused query fields dropped, its fallback notice printed).
 
-In review or queued (three PRs in flight; Codex-clean PRs are merged
-without waiting, per the owner):
-
-- Merged since: #416 date filters (#312, #330, #333) and #418 name
-  matching (#313, #324, #331; #316 query side).
-- In review: #419 mbsync #271/#280, #420 #308/#309. Queued: the
-  `fastmcp` 4.0.10 migration (owner's choice over `mcp` 1.30.0;
-  closes #317 with an explicit session idle timeout and keeps
-  Host/Origin checks on both transports).
+Open PRs are tracked on GitHub, not here; three are kept in flight
+and a Codex-clean PR is merged without waiting (owner, 2026-10-01).
+Also merged since the handoff: #416 date filters (#312, #330, #333),
+#418 name matching (#313, #324, #331; #316 query side), #419 mbsync
+(#271, #280), #420 folders and attachment filters (#308, #309, #415).
 
 Filed 2026-10-01: #362 (`idna` RFC 2231 filename raises
 `UnicodeError`; needs a fallback-filename decision) and #415 (search
@@ -655,13 +651,11 @@ first, one test-first commit per issue, keep three PRs in flight):
    #363, attachments #401, MCP provider errors #412 with a dedicated
    `ProviderResponseError` and caller text classified like the log,
    MCP SQLite logs #411; AGENTS.md updated in this closing PR).
-4. MCP: ~~event-loop hygiene #320, #334~~ (done: #417), ~~date
-   filters #312/#330/#333~~ (done: #416), ~~name matching
-   #313/#324/#331~~ (done: #418; #316's remainder needs the Phase 2
-   reindex). In review: #308/#309 (#420). Queued: #317 through the
-   `fastmcp` 4.0.10 migration, then #415 (search `folders` filters).
-5. mbsync: #271, #280 (in review, #419). Parser: ~~#361~~ (done: #414); #362
-   needs a fallback-filename decision first.
+4. MCP: ~~#320, #334, #312, #330, #333, #313, #324, #331, #308,
+   #309, #415~~ (done: #416–#420); #316's remainder needs the Phase 2
+   reindex; #317 through the `fastmcp` 4.0.10 migration.
+5. ~~mbsync #271, #280~~ (done: #419). Parser: ~~#361~~ (done: #414);
+   #362 needs a fallback-filename decision first.
 6. Bridge, needing Docker for `make bridge-upgrade-check` and the
    first Bridge shell test harness: the entrypoint PR (#242, #266,
    #270), the smoke-test fix (#269 with #268's minimal fix, both in
@@ -811,14 +805,14 @@ Order of work, chosen to minimise reindexes:
    #418; the rest needs the Phase 2 reindex); ~~date filters (#312,
    #330); degraded-lane honesty (#333)~~ (done: #416); event-loop
    hygiene (~~#320, #334~~ done in #417; #317 via the `fastmcp`
-   migration); folder discovery hiding reply-only folders (#308); the
-   attachment-lane duplicate before MIME filters (#309); ~~docs (#322,
+   migration); ~~folder discovery hiding reply-only folders (#308); the
+   attachment-lane duplicate before MIME filters (#309)~~ (done: #420); ~~docs (#322,
    #323)~~ (done: #403, #404). mbsync:
    ~~the empty pin re-TOFU (#278)~~ (done: only an absent pin is a
    first boot) and ~~the rotation flag surviving restarts (#267,
    docs)~~ (done: documented recreate-with-false; one-shot
-   authorization not built), the unbounded connect probe (#271), and
-   signal forwarding to the sync child (#280). Bridge, both decided as
+   authorization not built), ~~the unbounded connect probe (#271), and
+   signal forwarding to the sync child (#280)~~ (done: #419). Bridge, both decided as
    items 13–14 above and needing the first Bridge shell test harness:
    the smoke-test one-liner (#269) with #268's minimal fix, the
    entrypoint PR (#242 `BRIDGE_FORCE_CLI`, #266 bootstrap order, #270
