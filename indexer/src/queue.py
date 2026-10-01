@@ -277,12 +277,6 @@ class IndexingQueue:
             filepaths=filepaths, marker_stage=INTERRUPTED_STAGE, marker_error=_INTERRUPTED_ERROR
         )
 
-    def in_flight(self) -> tuple[str, float] | None:
-        """The message whose step is running and its ``time.monotonic()``
-        start, or ``None``."""
-        with self._lock:
-            return self._in_flight
-
     @contextmanager
     def holding_in_flight(self) -> Iterator[tuple[str, float] | None]:
         """Yield the in-flight message while blocking its refund.

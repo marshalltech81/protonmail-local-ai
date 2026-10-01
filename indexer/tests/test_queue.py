@@ -23,6 +23,12 @@ from src.queue import (
 )
 
 
+def _in_flight(q: IndexingQueue) -> tuple[str, float] | None:
+    """The in-flight message as the stall guard reads it."""
+    with q.holding_in_flight() as in_flight:
+        return in_flight
+
+
 def _queue(db: Database, max_attempts: int = 3, base_backoff_seconds: int = 0) -> IndexingQueue:
     """Queue with fast backoff so retry tests run in-process without
     needing to manipulate the clock."""
@@ -546,7 +552,7 @@ class TestInFlightAttempts:
         q.end_attempt("/m/a")
 
         assert _row(db, "/m/a")["attempts"] == 0
-        assert q.in_flight() is None
+        assert _in_flight(q) is None
 
     def test_worker_death_mid_step_counts_one_attempt(self, tmp_path):
         db = Database(tmp_path / "q.db")
@@ -572,7 +578,7 @@ class TestInFlightAttempts:
         assert row["last_stage"] == "interrupted"
         assert row["last_error_class"] == ERROR_CLASS_RETRYABLE
         assert "stopped while processing" in row["last_error"]
-        assert restarted.in_flight() is None
+        assert _in_flight(restarted) is None
 
     def test_only_the_running_message_is_charged(self, tmp_path):
         """Charging the whole claimed batch would let an ordinary restart
@@ -597,7 +603,7 @@ class TestInFlightAttempts:
         q.end_attempt("/m/a")
 
         assert _row(db, "/m/a")["attempts"] == 1
-        assert q.in_flight() is None
+        assert _in_flight(q) is None
 
     def test_defer_during_a_step_spends_no_attempt(self, tmp_path):
         db = Database(tmp_path / "q.db")
@@ -629,7 +635,7 @@ class TestInFlightAttempts:
         q.mark_dead_terminal("/m/huge", stage="parse", error="oversized")
 
         assert _row(db, "/m/huge")["attempts"] == 1
-        assert q.in_flight() is None
+        assert _in_flight(q) is None
 
     def test_in_flight_reports_the_running_message_and_its_start(self, tmp_path):
         import time
@@ -641,7 +647,7 @@ class TestInFlightAttempts:
 
         q.begin_attempt("/m/a")
 
-        in_flight = q.in_flight()
+        in_flight = _in_flight(q)
         assert in_flight is not None
         assert in_flight[0] == "/m/a"
         assert before <= in_flight[1] <= time.monotonic()
@@ -709,7 +715,7 @@ class TestInFlightAttempts:
 
         q.note_progress()
 
-        in_flight = q.in_flight()
+        in_flight = _in_flight(q)
         assert in_flight is not None
         assert in_flight[0] == "/m/a"
         assert in_flight[1] > 0.0
@@ -717,7 +723,7 @@ class TestInFlightAttempts:
     def test_progress_with_nothing_in_flight_is_a_no_op(self, tmp_path):
         q = _queue(Database(tmp_path / "q.db"))
         q.note_progress()
-        assert q.in_flight() is None
+        assert _in_flight(q) is None
 
     def test_marking_a_batch_interrupted_spends_no_attempts(self, tmp_path):
         """Review round 2: before the bulk embed a multi-message batch is
