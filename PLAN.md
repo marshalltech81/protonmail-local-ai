@@ -749,10 +749,11 @@ Order of work, chosen to minimise reindexes:
    in the startup log (#326), the read-only URI bypass (#311)~~
    (done: same-origin request hook on the Anthropic backend, userinfo
    check on the resolved endpoint, percent-encoded URI path); the
-   "errors reported as success" cluster — intelligence tools
+   "errors reported as success" cluster — ~~intelligence tools
    returning `Error:` prose as `isError=false` (#319, the unfinished
    half of Phase 1 item 2; `docs/mcp-tools.md` already promises
-   otherwise), semantic search on missing vec tables (#318),
+   otherwise)~~ (done: failures and unknown threads are raised as
+   `ToolError`), semantic search on missing vec tables (#318),
    malformed provider content rendered as a summary (#321), future
    timestamps marking the index current (#332), schema-violating
    extraction records (#310), overwritten `_date`/`_source_thread`

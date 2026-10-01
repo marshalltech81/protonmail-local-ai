@@ -8,6 +8,7 @@ import json
 import logging
 import re
 
+from mcp.server.fastmcp.exceptions import ToolError
 from mcp.types import TextContent
 
 from ..lib.embed import embed_query
@@ -779,11 +780,11 @@ def register_intelligence_tools(
             # The message quotes the rejected value, which log_tool_call
             # withheld. Return it to the caller; log only the field name.
             log.warning("ask_mailbox rejected invalid %s", e.field_name)
-            return [TextContent(type="text", text=f"Error: {e}")]
+            raise ToolError(f"Error: {e}") from e
         except Exception as e:
             safe_error = safe_provider_exception_text(e, secret_values)
             log.error("ask_mailbox error: %s", safe_error)
-            return [TextContent(type="text", text=f"Error: {safe_error}")]
+            raise ToolError(f"Error: {safe_error}") from e
 
     @server.tool()
     async def summarize_thread(
@@ -844,7 +845,7 @@ def register_intelligence_tools(
                     reranker=reranker,
                 )
                 if not resolved:
-                    return [TextContent(type="text", text=f"Thread not found: {thread_id}")]
+                    raise ToolError(f"Thread not found: {thread_id}")
                 # Apply the subject-overlap gate. The fallback resolves
                 # ONLY when at least one candidate's subject line shares
                 # a query token; otherwise the call surfaces "Thread not
@@ -855,10 +856,10 @@ def register_intelligence_tools(
                 # a confident summary of an unrelated thread.
                 best = _pick_resolution_candidate(thread_id, resolved)
                 if best is None:
-                    return [TextContent(type="text", text=f"Thread not found: {thread_id}")]
+                    raise ToolError(f"Thread not found: {thread_id}")
                 thread = await asyncio.to_thread(db.get_thread, best.thread_id)
                 if not thread:
-                    return [TextContent(type="text", text=f"Thread not found: {thread_id}")]
+                    raise ToolError(f"Thread not found: {thread_id}")
 
             # Fetch the tail of the chunk store. The stored ``body_text``
             # is front-preserved: once a thread crosses
@@ -906,10 +907,12 @@ def register_intelligence_tools(
 
             return [TextContent(type="text", text=f"Summary ({style}) — {subject}:\n\n{summary}")]
 
+        except ToolError:
+            raise
         except Exception as e:
             safe_error = safe_provider_exception_text(e, secret_values)
             log.error("summarize_thread error: %s", safe_error)
-            return [TextContent(type="text", text=f"Error: {safe_error}")]
+            raise ToolError(f"Error: {safe_error}") from e
 
     @server.tool()
     async def extract_from_emails(
@@ -1082,8 +1085,8 @@ def register_intelligence_tools(
             # The message quotes the rejected value, which log_tool_call
             # withheld. Return it to the caller; log only the field name.
             log.warning("extract_from_emails rejected invalid %s", e.field_name)
-            return [TextContent(type="text", text=f"Error: {e}")]
+            raise ToolError(f"Error: {e}") from e
         except Exception as e:
             safe_error = safe_provider_exception_text(e, secret_values)
             log.error("extract_from_emails error: %s", safe_error)
-            return [TextContent(type="text", text=f"Error: {safe_error}")]
+            raise ToolError(f"Error: {safe_error}") from e
