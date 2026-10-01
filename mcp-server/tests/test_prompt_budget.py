@@ -177,6 +177,7 @@ class TestPromptBudget:
                 "no_citations",
                 "too_few_labels",
                 "insufficient_but_populated",
+                "empty_but_sufficient",
             )
         ]
         brief = len(_BRIEF_REPAIR_INSTRUCTION.format(reason=_repair_reason(_BRIEF, every_brief)))
