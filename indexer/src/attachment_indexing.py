@@ -8,10 +8,15 @@ Two-phase shape:
 
 * ``prepare_attachment_writes`` runs everything that must NOT happen
   inside a SQLite write transaction — extractor (OCR / pypdf / openpyxl)
-  CPU work and the per-chunk ``embedder.embed`` HTTP roundtrips against
-  the embedding service. It only reads the DB (cache lookups and existing
-  chunk-id diffing). The output is a fully-materialised ``AttachmentWritePlan``
-  that the caller can hold in memory until it's ready to commit.
+  CPU work and chunking. It only reads the DB (cache lookups and existing
+  chunk-id diffing). The output is an ``AttachmentWritePlan`` that the
+  caller can hold in memory until it's ready to commit. Embedding is
+  optional here: given an embedder, it embeds the plan's new chunks in
+  one ``embed_batch`` call; given ``embedder=None``, it leaves
+  ``embeddings_by_chunk_id`` empty for the caller to fill. The batched
+  drain pipeline in ``main.py`` passes ``None``, then embeds the new
+  chunks of every message in the batch together (Phase 2b) and fills
+  each plan from that result before applying it.
 
 * ``apply_attachment_writes`` performs only DB writes and is intended
   to be called inside the indexer's outer ``with db.transaction():``
