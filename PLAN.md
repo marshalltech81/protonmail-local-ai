@@ -606,40 +606,65 @@ Triaged against `d30e500` by four parallel agents; every issue is real
 and most reproduced with synthetic input. PRs in the order to land
 them (one test-first commit per issue, `Fixes #N` per issue):
 
-**Status 2026-09-30 (evening) — next session starts here.** Second
-batch items 1–12 are merged; 13–14 and #217 are decided (below and in
-Resolved decisions). Third batch progress: #293 merged (#335), the
-privacy trio #311/#325/#326 merged (#337), urllib3 bumped for two HIGH
-advisories (#338). In review, merge when Codex is clean on the head:
+**Status 2026-09-30 (late) — next session starts here.** Second batch
+items 1–12 are merged; 13–14 and #217 are decided (below and in
+Resolved decisions). The deprecation cleanup is finished: slice 1 in
+#343 (the owner declined its review round's request to keep rejecting
+old env names), slice 2 in #345, slice 3 in #346 (baseline is now v21),
+slice 4 in #348. Third batch merged so far: #293 (#335), the privacy
+trio #311/#325/#326 (#337), #327/#328 (#341), #301 (#336), #278/#267
+(#342), #339/#340 (#347), #304 batch-1 half (#349), #297 first half
+(#350), #306 (#351).
 
-- **#336** — #301 tombstone revalidation; review round 1 (reaper clears
-  a tombstone whose mapped file is live) pushed, round 2 pending.
-- **#341** — #327/#328 quadratic regexes; round 1 pending.
-- **#342** — #278 damaged-pin guard and #267 rotation-flag docs; round 1
-  pending. Owner decision open on #267: keep "document the limitation"
-  (done in the PR), or a one-shot rotation (flag holds the expected
-  fingerprint, or a consumed marker in `/state`).
-- **#343** — deprecation cleanup slice 1: validate-env rename shims.
+In review, merge when Codex is clean on the head (the owner merges):
 
-Next, in order: rebase any open PR that conflicts in this file after
-another merges (every third-batch PR strikes its own line below); then
-**deprecation cleanup** (owner-approved scope 2026-09-30, the project
-has never been deployed): slice 1 (validate-env rename shims) done in
-#343, the owner declining its review round's request to keep rejecting
-old names; ~~slice 2 — drop `get_message`'s ignored
-`folder`/`body_format` parameters, the dead pre-v13 `display_subject`
-`try/except` in mcp-server `_row_to_result`, the write-tool sketch in
-`docs/mcp-tools.md`, and "legacy" wording on live code~~ (done); ~~slice 3 — fold
-migration `0021` into the baseline (baseline becomes v21, drop the
-mcp-server `ingestion_state` existence guard, update AGENTS.md's
-migration paragraph; the dev database needs a rebuild)~~ (done); slice 4, test
-only — migrate `FakeLocalLLM` users to the split fakes, drop the
-indexer `_index_one_file`/`drain_queue` wrappers and mcp-server
-`Database.close()`/`_conn`. Keep the migration runner, the `_read_secret`
-env fallback (reword "backward compatibility"), the defusedxml warning
-filter and the parser's `maildir_root=None` fallback. Then the rest of
-the third batch in its listed order, then the Phase 1.5/#283 eval
-slice, then Phase 2 with its reindex bundle.
+- **#352** — #302 `message_thread_map` indexes as migration `0022`
+  (schema v22).
+- **#353** — #319 intelligence-tool failures raised as `ToolError`
+  (`isError=true`).
+
+Both strike their own entries in the third-batch list below, so
+whichever merges second will conflict in this file: merge `main` into
+its branch (force-push is blocked) and keep both strikes.
+
+Open owner decision: **#267** one-shot rotation. #342 shipped the
+documented limitation (recreate with `BRIDGE_CERT_PIN_ROTATE=false`);
+the alternatives are a flag that holds the expected new fingerprint, or
+a consumed marker in `/state`.
+
+Before `make up`: the operator's `.env` and `.secrets` use current
+names, but the embedding provider (`EMBED_MODEL`, `EMBED_BASE_URL`,
+`.secrets/embed_api_key.txt`) still needs configuring. A dev database
+at v20 must be rebuilt from Maildir; v21 opens and migrates to v22.
+
+Next, in order (each item is a batch-1 guard unless noted; reproduce
+first, one test-first commit per issue, keep three PRs in flight):
+
+1. Rest of the MCP "errors reported as success" cluster: #318, #321,
+   #332, then #310 + #329 + #315 together (all in
+   `extract_from_emails`), then #314 (narrow the fallback, do not
+   parse IDs).
+2. Indexer #257 sweep (classify parse-stage and provider exceptions at
+   their boundary, `caplog` marker tests). The largest batch-1 item;
+   consider splitting by boundary.
+3. MCP: name matching (#313, #324, #331) with #316; date filters (#312,
+   #330); #333; event-loop hygiene (#320, #317, #334); #308; #309;
+   docs (#322, #323).
+4. mbsync: #271, #280, #269 with #268's minimal fix.
+5. Bridge, needing Docker for `make bridge-upgrade-check` and the
+   first Bridge shell test harness: the entrypoint PR (#242, #266,
+   #270) and the updater-gate PR (#245). Land both before the eval
+   slice: existing vaults make unpinned update fetches until #245.
+6. Then third-batch items 2–4 below (extractor bumps, mbsync design,
+   the Phase 2 reindex bundle), the Phase 1.5/#283 eval slice, and
+   Phase 2.
+
+How this session worked, worth repeating: fixes were prepared by
+background agents, one per issue in its own `git worktree` off
+`origin/main`, committing locally only; each diff was reviewed before
+its PR opened, and rebased on `main` first (several hit stale test
+helpers or neighbouring PLAN strikes). Codex inline findings are
+matched to a round by `original_commit_id`, not by timestamp.
 
 1. **Done (#251).** **#238** invalid date filters leak withheld input into logs — five
    handlers logged the `ValueError` quoting the value. Fixed with a
