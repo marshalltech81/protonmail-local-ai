@@ -778,7 +778,8 @@ Order of work, chosen to minimise reindexes:
    returning `Error:` prose as `isError=false` (#319, the unfinished
    half of Phase 1 item 2; `docs/mcp-tools.md` already promises
    otherwise)~~ (done: failures and unknown threads are raised as
-   `ToolError`), semantic search on missing vec tables (#318),
+   `ToolError`), ~~semantic search on missing vec tables (#318)~~
+   (done: semantic mode errors when neither vector lane answers),
    malformed provider content rendered as a summary (#321), future
    timestamps marking the index current (#332), schema-violating
    extraction records (#310), overwritten `_date`/`_source_thread`
