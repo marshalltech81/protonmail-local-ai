@@ -1673,40 +1673,6 @@ class Database:
         ).fetchone()
         return row is not None
 
-    @_synchronized
-    def find_indexed_paths_by_content_hash(self, content_hash: str) -> list[str]:
-        """Return every indexed filepath whose content_hash matches.
-
-        Enables future reconciler passes to spot "file at path A
-        disappeared, but the same content_hash is indexed at path B" —
-        a rename mbsync performed without emitting an ``on_moved`` event
-        (e.g. across folder moves or restarts) — and to catch genuine
-        duplicate deliveries. Rows whose identity capture failed have
-        ``content_hash IS NULL`` and are excluded from the match.
-        """
-        if not content_hash:
-            return []
-        rows = self._conn.execute(
-            "SELECT filepath FROM indexed_files WHERE content_hash = ?",
-            (content_hash,),
-        ).fetchall()
-        return [row["filepath"] for row in rows]
-
-    @_synchronized
-    def get_stats(self) -> dict:
-        stats = {}
-        stats["total_threads"] = self._conn.execute("SELECT COUNT(*) FROM threads").fetchone()[0]
-        stats["total_messages"] = self._conn.execute(
-            "SELECT COUNT(*) FROM message_thread_map"
-        ).fetchone()[0]
-        stats["oldest_message"] = self._conn.execute(
-            "SELECT MIN(date_first) FROM threads"
-        ).fetchone()[0]
-        stats["newest_message"] = self._conn.execute(
-            "SELECT MAX(date_last) FROM threads"
-        ).fetchone()[0]
-        return stats
-
     # -------------------------------------------------------------------------
     # indexing_jobs — durable retry / dead-letter queue.
     #

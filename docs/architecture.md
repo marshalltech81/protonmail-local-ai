@@ -821,13 +821,13 @@ left on the old path would be dropped as missing.
 The columns exist to let future reconciler passes distinguish a
 flag-only rename from a genuine content change, and to spot a "file
 vanished from path A but the same `content_hash` reappears at path B"
-rename that mbsync performed without emitting an `on_moved` event. No
-pass reads them yet; such a pass needs a content-hash lookup on
-`indexed_files`.
+rename that mbsync performed without emitting an `on_moved` event.
+No code reads them yet: a content-hash lookup and its consumers would
+land together with such a pass.
 
 Rows for which `stat` / hash capture failed at parse time carry NULL
-identity values, which such a lookup must skip; the columns are
-populated lazily on the next reindex of the file.
+identity values, which a future content-hash lookup must skip; the
+columns are populated lazily on the next reindex of the file.
 
 ## Privacy Model
 

@@ -103,10 +103,6 @@ class TimingAggregator:
         with self._lock:
             self._timings.append(timings)
 
-    def reset(self) -> None:
-        with self._lock:
-            self._timings.clear()
-
     def summary(self) -> dict[str, dict[str, float]]:
         """Return ``{stage: {p50, p95, max}}`` plus ``{'total': ...}``.
 
