@@ -970,9 +970,6 @@ class Database:
             date_to=date_to,
             has_attachments=has_attachments,
         )
-        # A failed lane (``None``) contributes nothing; hybrid keeps its
-        # existing silent fallback to the remaining lanes.
-        vec_results = self._vector_search(query_embedding, fetch_limit) or []
         # Per-message chunks. Oversample heavily because many chunks
         # may belong to a single thread — without enough chunks the lane
         # only contributes a handful of unique threads. The chunk lane
@@ -989,9 +986,23 @@ class Database:
         # only one credit to RRF" failure mode — leaving the vec lane
         # at the prior ``* 3`` would re-create that asymmetry between
         # the keyword and dense chunk paths.
-        chunk_hits = (
-            self._chunk_vector_search(query_embedding, fetch_limit * _CHUNK_LANE_OVERSAMPLE) or []
+        #
+        # A failed lane (``None``) contributes nothing; hybrid keeps its
+        # existing silent fallback to the remaining lanes.
+        vec_results, chunk_hits = self._vector_lanes(
+            query_embedding,
+            fetch_limit,
+            fetch_limit * _CHUNK_LANE_OVERSAMPLE,
+            target_count,
+            folders=folders,
+            from_addr=from_addr,
+            date_from=date_from,
+            date_to=date_to,
+            has_attachments=has_attachments,
+            participant=participant,
         )
+        vec_results = vec_results or []
+        chunk_hits = chunk_hits or []
         fused = self._reciprocal_rank_fusion(bm25_results, vec_results, chunk_hits)
         filtered = self._apply_filters(
             fused, folders, from_addr, date_from, date_to, has_attachments, participant
@@ -1174,12 +1185,20 @@ class Database:
             else _UNFILTERED_OVERSAMPLE
         )
         fetch_limit = limit * oversample
-        vec_results = self._vector_search(query_embedding, fetch_limit)
         # Same chunk-lane oversample reasoning as ``hybrid_search``:
         # without enough chunks, a long thread monopolises the top-K
         # and other threads never enter the lane.
-        chunk_hits = self._chunk_vector_search(
-            query_embedding, fetch_limit * _CHUNK_LANE_OVERSAMPLE
+        vec_results, chunk_hits = self._vector_lanes(
+            query_embedding,
+            fetch_limit,
+            fetch_limit * _CHUNK_LANE_OVERSAMPLE,
+            limit,
+            folders=folders,
+            from_addr=from_addr,
+            date_from=date_from,
+            date_to=date_to,
+            has_attachments=has_attachments,
+            participant=participant,
         )
         if vec_results is None and chunk_hits is None:
             raise VectorLanesUnavailableError()
@@ -2087,6 +2106,62 @@ class Database:
         # the timeline reads naturally.
         chunks.reverse()
         return chunks
+
+    def _vector_lanes(
+        self,
+        embedding: list[float],
+        thread_k: int,
+        chunk_k: int,
+        target: int,
+        **filters,
+    ) -> tuple[list[ThreadResult] | None, list[ChunkResult] | None]:
+        """Run the thread- and chunk-vector lanes for one query embedding.
+
+        Unfiltered, each lane runs once with the given ``k``. With a
+        post-fusion filter active (#286), the KNN windows are global and
+        the filters apply afterwards, so a selective filter can leave a
+        lane holding few or no eligible threads. Each lane then doubles
+        its ``k`` and re-queries until its window holds ``target``
+        eligible threads, the window comes back short (the table is
+        exhausted), or ``k`` reaches sqlite-vec's ``_SQLITE_VEC_MAX_K``.
+        Ranked search stays ranked, not exhaustive: an eligible thread
+        beyond the 4096 nearest rows of a lane is still not seen by it.
+
+        Each query opens its own short-lived connection, and the caller
+        embeds once before this runs, so no read transaction spans the
+        provider call and the expansion never re-embeds.
+        """
+        vec = self._vector_search(embedding, thread_k)
+        chunks = self._chunk_vector_search(embedding, chunk_k)
+        if not self._has_post_fusion_filter(**filters):
+            return vec, chunks
+
+        thread_k = min(thread_k, _SQLITE_VEC_MAX_K)
+        while (
+            vec is not None
+            and len(vec) >= thread_k
+            and thread_k < _SQLITE_VEC_MAX_K
+            and len(self._apply_filters(vec, **filters)) < target
+        ):
+            thread_k = min(thread_k * 2, _SQLITE_VEC_MAX_K)
+            vec = self._vector_search(embedding, thread_k)
+
+        chunk_k = min(chunk_k, _SQLITE_VEC_MAX_K)
+        while (
+            chunks is not None
+            and len(chunks) >= chunk_k
+            and chunk_k < _SQLITE_VEC_MAX_K
+            and self._eligible_chunk_threads(chunks, filters) < target
+        ):
+            chunk_k = min(chunk_k * 2, _SQLITE_VEC_MAX_K)
+            chunks = self._chunk_vector_search(embedding, chunk_k)
+        return vec, chunks
+
+    def _eligible_chunk_threads(self, chunks: list[ChunkResult], filters: dict) -> int:
+        """How many distinct parent threads of ``chunks`` pass ``filters``."""
+        thread_ids = list(dict.fromkeys(c.thread_id for c in chunks))
+        threads = self._get_threads(thread_ids)
+        return len(self._apply_filters(list(threads.values()), **filters))
 
     def _vector_search(self, embedding: list[float], limit: int) -> list[ThreadResult] | None:
         """Thread-vector lane. ``None`` means the lane failed (see

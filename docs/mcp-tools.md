@@ -127,7 +127,11 @@ drive an unbounded query against the index.
 - When any filter (folder, sender, date range, attachment flag) is
   applied, search oversamples raw candidates by ``limit * 4`` rather
   than ``limit * 2`` so deeper-ranked matches still qualify after
-  filtering.
+  filtering. The vector lanes then widen their KNN window (doubling,
+  up to sqlite-vec's cap of 4096 rows per lane) until it holds enough
+  threads that pass the filters, so a narrow filter still finds its
+  best semantic match when many closer out-of-scope threads exist.
+  Results remain a ranking, not an exhaustive list of every match.
 - Date bounds accept either a full ISO 8601 timestamp or a date-only
   value. Every date-only form Python's `date.fromisoformat` accepts
   counts (`"2024-12-31"`, `"20241231"`, the week date `"2025-W01-2"`),

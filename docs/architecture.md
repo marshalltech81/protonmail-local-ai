@@ -220,7 +220,12 @@ Folder, date, and attachment-flag filters are pushed into the FTS
 lanes' SQL so deep-ranked matches are not truncated before they could
 qualify; sqlite-vec has no equivalent pushdown, so the vector lanes
 run unfiltered and the post-fusion filter applies every filter
-uniformly.
+uniformly. When a filter is active, each vector lane doubles its KNN
+`k` and re-queries until its window holds enough eligible threads for
+the request (`max(limit, RERANK_CANDIDATES)` for hybrid), the table is
+exhausted, or `k` reaches sqlite-vec's 4096 cap. The query is embedded
+once. This is ranked search, not enumeration: an eligible thread
+outside a lane's 4096 nearest rows is still missed by that lane.
 
 Threads with no chunk rows — empty bodies, or chunks whose embedding
 has not landed yet — never appear in the chunk lanes and rank on the

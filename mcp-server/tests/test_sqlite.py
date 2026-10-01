@@ -4383,3 +4383,177 @@ class TestFallbackErrorTextWithheld:
         assert seen == [query]
         assert _ERROR_MARKER not in caplog.text
         assert "OperationalError" in caplog.text
+
+
+_SCOPE_QUERY = [1.0, 0.0, 0.0, 0.0]
+_TARGET = "t-scoped-target"
+_NOISE_ROWS = 60
+
+
+def _scoped_recall_db(tmp_path, *, long_thread: bool = False) -> Database:
+    """A mailbox where every out-of-scope record is closer to
+    ``_SCOPE_QUERY`` than the one in-scope target, and there are more of
+    them than either vector lane's first window (#286).
+
+    ``long_thread`` puts all the noise chunks in one out-of-scope thread
+    (a mailbox dominated by one long conversation); otherwise each noise
+    thread owns one chunk and one thread vector. The target has no
+    lexical overlap with the query text the tests use.
+    """
+    import sqlite_vec
+
+    from tests.conftest import _build_schema, _insert_chunk, _insert_thread
+
+    db_path = tmp_path / "scoped.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.enable_load_extension(True)
+    sqlite_vec.load(conn)
+    conn.enable_load_extension(False)
+    _build_schema(conn)
+
+    if long_thread:
+        noise_ids = ["t-noise-long"] * _NOISE_ROWS
+    else:
+        noise_ids = [f"t-noise-{i:02d}" for i in range(_NOISE_ROWS)]
+    for i, tid in enumerate(dict.fromkeys(noise_ids)):
+        _insert_thread(
+            conn,
+            thread_id=tid,
+            subject="weekly digest",
+            participants=["digest@noise.example", "reader@noise.example"],
+            senders=["digest@noise.example"],
+            folder="INBOX",
+            date_first="2024-01-01T10:00:00+00:00",
+            date_last="2024-01-01T10:00:00+00:00",
+            body_text="weekly digest",
+            embedding=[1.0, 0.001 * i, 0.0, 0.0],
+        )
+    for i, tid in enumerate(noise_ids):
+        _insert_chunk(
+            conn,
+            chunk_id=f"c-noise-{i:02d}",
+            message_id=tid,
+            thread_id=tid,
+            chunk_index=i,
+            text="weekly digest",
+            embedding=[1.0, 0.001 * i, 0.0, 0.0],
+        )
+    _insert_thread(
+        conn,
+        thread_id=_TARGET,
+        subject="site survey",
+        participants=["rowan@scope.example", "quinn@scope.example"],
+        senders=["rowan@scope.example"],
+        folder="Projects",
+        date_first="2025-06-10T10:00:00+00:00",
+        date_last="2025-06-10T10:00:00+00:00",
+        has_attachments=True,
+        body_text="site survey",
+        embedding=[0.6, 0.8, 0.0, 0.0],
+    )
+    _insert_chunk(
+        conn,
+        chunk_id="c-target",
+        message_id=_TARGET,
+        thread_id=_TARGET,
+        text="site survey",
+        embedding=[0.6, 0.8, 0.0, 0.0],
+    )
+    conn.close()
+    return Database(str(db_path))
+
+
+_SCOPES = [
+    pytest.param({"folders": ["Projects"]}, id="folder"),
+    pytest.param({"from_addr": "rowan@scope.example"}, id="sender"),
+    pytest.param({"participant": "quinn@scope.example"}, id="participant"),
+    pytest.param({"date_from": "2025-06-01"}, id="date"),
+    pytest.param({"has_attachments": True}, id="attachments"),
+    pytest.param(
+        {"folders": ["Projects"], "from_addr": "rowan@scope.example", "date_to": "2025-12-31"},
+        id="combined",
+    ),
+]
+
+
+def _search(db: Database, mode: str, **filters):
+    if mode == "semantic":
+        return db.semantic_search(_SCOPE_QUERY, limit=1, **filters)
+    return db.hybrid_search("zzqqnohit", _SCOPE_QUERY, limit=1, **filters)
+
+
+def _spy_vector_k(db: Database, monkeypatch, *, pretend_full: bool = False) -> dict:
+    """Record the ``k`` each vector-lane call asks for. ``pretend_full``
+    pads every answer to ``k`` rows so the window never looks exhausted."""
+    ks: dict[str, list[int]] = {"thread": [], "chunk": []}
+    real_thread, real_chunk = db._vector_search, db._chunk_vector_search
+
+    def thread(embedding, limit):
+        ks["thread"].append(limit)
+        rows = real_thread(embedding, limit)
+        return (rows * limit)[:limit] if pretend_full and rows else rows
+
+    def chunk(embedding, limit):
+        ks["chunk"].append(limit)
+        rows = real_chunk(embedding, limit)
+        return (rows * limit)[:limit] if pretend_full and rows else rows
+
+    monkeypatch.setattr(db, "_vector_search", thread)
+    monkeypatch.setattr(db, "_chunk_vector_search", chunk)
+    return ks
+
+
+class TestScopedSemanticRecall:
+    """#286: the vector lanes fetch a global KNN window and the filters
+    apply afterwards, so a selective filter could leave them with no
+    eligible candidate even when the best eligible match exists. A
+    filtered search now widens each lane's window until it holds enough
+    eligible threads, the table is exhausted, or ``k`` reaches
+    sqlite-vec's 4096 cap.
+
+    The filters keep their thread-level meaning: a thread qualifies when
+    the thread matches each filter, not when one message matches all.
+    """
+
+    @pytest.mark.parametrize("mode", ["semantic", "hybrid"])
+    @pytest.mark.parametrize("filters", _SCOPES)
+    def test_best_eligible_match_is_found_in_both_lanes(self, tmp_path, mode, filters):
+        db = _scoped_recall_db(tmp_path)
+        results = _search(db, mode, **filters)
+        # The exact reference over the eligible records is the target
+        # alone; both vector lanes must have reached it.
+        assert [r.thread_id for r in results] == [_TARGET]
+        assert {"thread_vec", "chunk_vec"} <= results[0].lane_ranks.keys()
+
+    @pytest.mark.parametrize("mode", ["semantic", "hybrid"])
+    def test_long_out_of_scope_thread_does_not_hide_the_chunk_lane(self, tmp_path, mode):
+        db = _scoped_recall_db(tmp_path, long_thread=True)
+        results = _search(db, mode, folders=["Projects"])
+        assert [r.thread_id for r in results] == [_TARGET]
+        assert "chunk_vec" in results[0].lane_ranks
+
+    @pytest.mark.parametrize("mode", ["semantic", "hybrid"])
+    def test_empty_eligible_set_stops_at_the_end_of_the_table(self, tmp_path, mode, monkeypatch):
+        db = _scoped_recall_db(tmp_path)
+        ks = _spy_vector_k(db, monkeypatch)
+        assert _search(db, mode, folders=["Nowhere"]) == []
+        # Each lane grows until its window outruns the table (61 rows),
+        # not to the 4096 cap.
+        assert max(ks["thread"]) < 4096 and max(ks["chunk"]) < 4096
+        assert len(ks["thread"]) <= 7 and len(ks["chunk"]) <= 3
+
+    def test_expansion_stops_at_the_sqlite_vec_cap(self, tmp_path, monkeypatch):
+        """A lane whose window is always full and never eligible stops at
+        k = 4096 rather than looping."""
+        db = _scoped_recall_db(tmp_path)
+        ks = _spy_vector_k(db, monkeypatch, pretend_full=True)
+        db.semantic_search(_SCOPE_QUERY, limit=1, folders=["Nowhere"])
+        assert ks["thread"][-1] == 4096 and ks["chunk"][-1] == 4096
+        assert len(ks["thread"]) <= 12 and len(ks["chunk"]) <= 8
+
+    @pytest.mark.parametrize("mode", ["semantic", "hybrid"])
+    def test_unfiltered_search_runs_each_lane_once(self, tmp_path, mode, monkeypatch):
+        db = _scoped_recall_db(tmp_path)
+        ks = _spy_vector_k(db, monkeypatch)
+        _search(db, mode)
+        assert len(ks["thread"]) == 1 and len(ks["chunk"]) == 1
