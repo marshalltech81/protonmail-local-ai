@@ -140,9 +140,11 @@ from Acme", "which emails had W-2 attachments?"). With no `query` it
 lists attachments by the structured filters alone, newest thread
 activity first.
 
-To read the full text inside an attachment, use `ask_mailbox` or
-`get_evidence` — this tool locates attachments and previews their
-extracted text; it does not return the whole document.
+To read what an attachment says, use `get_evidence` (the matching
+passages of its extracted text, each capped at 1600 characters) or
+`ask_mailbox` (an answer synthesized from those passages). This tool
+locates attachments and previews their extracted text; none of the
+three returns the whole document.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
@@ -220,10 +222,15 @@ List all folders and thread counts.
 
 ### `find_contact`
 Resolve a name / address / domain fragment to canonical email
-addresses found in the index. Use this **before** `search_emails`
-when the user names a person but not their address (e.g. "emails
-from Jane Smith"); pass the chosen result's email to
-`search_emails(from_addr=<email>)` for sender-filtered results.
+addresses found in the index. Use it when the user asks **about** a
+person ("do I have Jane Smith's email?", "show me everyone at
+example.com"). For "emails from Jane Smith", call
+`search_emails(from_name=...)` directly instead: it resolves the name
+internally to the most-active matching sender and reports the address
+it used in `resolved_from_addr`. Resolve a name here first only when
+you need a different matching contact than that one (then pass it as
+`from_addr`), or for a tool that filters by address alone, such as
+`get_evidence` or `search_attachments`.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
@@ -290,11 +297,23 @@ than silently restarting.
 
 ## Group 3 — Intelligence
 
-The intelligence tools build LLM prompts from the most relevant indexed
-chunks returned by hybrid search, bounded by a fixed per-thread character
-budget (``2000`` by default) so multi-thread contexts stay within local-LLM
-context windows. If a thread has no matching chunks, the tool falls back to
-the indexed thread body and finally to the 200-character ``snippet``.
+The intelligence tools bound the email text they put in each prompt so
+it stays within local-LLM context windows. The bounds differ by tool:
+
+- **`ask_mailbox` and `extract_from_emails`** build the prompt from the
+  most relevant indexed chunks (message bodies and attachment text)
+  returned by hybrid search, bounded by a fixed per-thread character
+  budget (``2000``). `ask_mailbox` puts several threads in one prompt;
+  `extract_from_emails` sends one prompt per thread. If a thread has
+  no matching chunks, the tool falls back to the indexed thread body
+  and finally to the 200-character ``snippet``.
+- **`summarize_thread`** works on a single thread and does not use the
+  per-chunk path. Its context is the thread's accumulated indexed body
+  (or the ``snippet`` when the body is empty), up to ``8000``
+  characters, followed by up to ``4000`` characters of the thread's most
+  recent body chunks, which recovers the newest replies that the
+  indexer's front-preserved body cap drops. It is body-only: attachment
+  text is never included.
 
 ### Prompt-injection hardening
 
