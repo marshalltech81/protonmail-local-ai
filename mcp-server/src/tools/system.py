@@ -184,8 +184,8 @@ def register_system_tools(server, db):
         try:
             output = _mailbox_status(db)
         except Exception as e:
-            log.error(f"get_mailbox_status error: {e}")
-            raise ToolError(f"Mailbox status error: {e}") from e
+            log.error("get_mailbox_status error: %s", type(e).__name__)
+            raise ToolError(f"Mailbox status error: {type(e).__name__}") from e
         return tool_result(_render(output), output)
 
 

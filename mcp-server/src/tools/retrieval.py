@@ -12,6 +12,7 @@ from mcp.types import CallToolResult
 
 from ..lib.security import log_tool_call
 from ..lib.sqlite import (
+    InvalidFilterError,
     MessageBody,
     MessageRecord,
     Participant,
@@ -307,8 +308,8 @@ def register_retrieval_tools(server, db):
         except ToolError:
             raise
         except Exception as e:
-            log.error(f"get_thread error: {e}")
-            raise ToolError(f"Error: {e}") from e
+            log.error("get_thread error: %s", type(e).__name__)
+            raise ToolError(f"Error: {type(e).__name__}") from e
 
     @server.tool()
     async def get_message(
@@ -401,8 +402,8 @@ def register_retrieval_tools(server, db):
         except ToolError:
             raise
         except Exception as e:
-            log.error(f"get_message error: {e}")
-            raise ToolError(f"Error: {e}") from e
+            log.error("get_message error: %s", type(e).__name__)
+            raise ToolError(f"Error: {type(e).__name__}") from e
 
     @server.tool()
     async def list_threads(
@@ -450,6 +451,11 @@ def register_retrieval_tools(server, db):
         # interactive use of list_threads.
         limit = clamp_int(limit, default=20, minimum=1, maximum=100)
         offset = clamp_int(offset, default=0, minimum=0, maximum=1_000_000)
+        # Validated here so its fixed message is the only text returned;
+        # every other failure below is reported by type (#257).
+        if filter_type != "all":
+            log.warning("list_threads rejected invalid input (filter_type)")
+            raise ToolError("Error: filter_type must be 'all'; unread/flagged state is not indexed")
 
         try:
             threads = await asyncio.to_thread(
@@ -482,8 +488,10 @@ def register_retrieval_tools(server, db):
             return tool_result("\n".join(lines), output)
 
         except Exception as e:
-            log.error(f"list_threads error: {e}")
-            raise ToolError(f"Error: {e}") from e
+            # Type only, here and in the other handlers: an SQLite error
+            # can quote query text or stored mail (#257).
+            log.error("list_threads error: %s", type(e).__name__)
+            raise ToolError(f"Error: {type(e).__name__}") from e
 
     @server.tool()
     async def query_messages(
@@ -562,15 +570,17 @@ def register_retrieval_tools(server, db):
 
         try:
             page = await asyncio.to_thread(db.query_messages, **args, limit=limit, cursor=cursor)
-        except ValueError as e:
+        except InvalidFilterError as e:
             # Validation messages quote the offending input (an invalid
             # date echoes its text), which log_tool_call deliberately
-            # withheld. Return it to the caller; log only that it failed.
-            log.warning("query_messages rejected invalid input (date_from/date_to/text/cursor)")
+            # withheld. Return it to the caller; log only the field. Any
+            # other ValueError (converting stored rows) can quote mail and
+            # falls through to the type-only branch (#257).
+            log.warning("query_messages rejected invalid input (%s)", e.field_name)
             raise ToolError(f"Error: {e}") from e
         except Exception as e:
-            log.error(f"query_messages error: {e}")
-            raise ToolError(f"Error: {e}") from e
+            log.error("query_messages error: %s", type(e).__name__)
+            raise ToolError(f"Error: {type(e).__name__}") from e
 
         uses = _filter_uses(args)
         output = QueryMessagesOutput(
@@ -652,8 +662,8 @@ def register_retrieval_tools(server, db):
         try:
             contacts = await asyncio.to_thread(db.find_contact, query, limit)
         except Exception as e:
-            log.error(f"find_contact error: {e}")
-            raise ToolError(f"Error: {e}") from e
+            log.error("find_contact error: %s", type(e).__name__)
+            raise ToolError(f"Error: {type(e).__name__}") from e
 
         output = FindContactOutput(
             contacts=[
@@ -702,5 +712,5 @@ def register_retrieval_tools(server, db):
             return tool_result("\n".join(lines), output)
 
         except Exception as e:
-            log.error(f"list_folders error: {e}")
-            raise ToolError(f"Error: {e}") from e
+            log.error("list_folders error: %s", type(e).__name__)
+            raise ToolError(f"Error: {type(e).__name__}") from e
