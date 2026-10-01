@@ -2614,4 +2614,9 @@ def _parse_filter_date(
         raise InvalidFilterError(_field_name, f"{_field_name}: invalid datetime {value!r}") from exc
     if dt.tzinfo is None:
         return dt.replace(tzinfo=UTC)
-    return dt.astimezone(UTC)
+    try:
+        return dt.astimezone(UTC)
+    except OverflowError as exc:
+        # A parseable value at datetime's limit with an outward offset
+        # ("0001-01-01T00:00:00+14:00") has no UTC instant.
+        raise InvalidFilterError(_field_name, f"{_field_name}: invalid datetime {value!r}") from exc

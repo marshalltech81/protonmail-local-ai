@@ -1217,7 +1217,17 @@ class TestDateFilterFormCatalogue:
         "2024-01-01T00:00:00": _START,
         "2024-01-01T00:00:00Z": _START,
     }
-    REJECTED = ["2024-001", "2024-01", "2024", "2024-1-1", "2024-13-01", "2024-01-01T25:00"]
+    REJECTED = [
+        "2024-001",
+        "2024-01",
+        "2024",
+        "2024-1-1",
+        "2024-13-01",
+        "2024-01-01T25:00",
+        # Parseable, but converting to UTC leaves datetime's range.
+        "0001-01-01T00:00:00+14:00",
+        "9999-12-31T23:59:59-14:00",
+    ]
 
     @pytest.mark.parametrize("value", DATE_ONLY)
     def test_date_only_form_names_the_whole_day(self, value):

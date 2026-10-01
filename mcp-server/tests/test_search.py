@@ -928,3 +928,15 @@ class TestDateRangeRejectedBeforeWork:
         assert llm.complete_calls == []
         assert retrieval_calls == []
         assert "rejected invalid" in caplog.text
+
+
+def test_utc_overflowing_date_bound_is_a_filter_error(fake_server, fake_embed, seeded_db, caplog):
+    """A bound whose UTC conversion overflows reaches the caller as the
+    date-filter error, not a raw OverflowError, before any provider work."""
+    value = "0001-01-01T00:00:00+14:00"
+    register_search_tools(fake_server, seeded_db, fake_embed)
+    with caplog.at_level("DEBUG"):
+        text = _error(fake_server.tools["search_emails"](query="invoice", date_from=value))
+    assert "date_from" in text
+    assert "OverflowError" not in caplog.text
+    assert fake_embed.embed_calls == []
