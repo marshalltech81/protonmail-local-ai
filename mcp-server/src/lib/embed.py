@@ -14,7 +14,7 @@ pointing the SDK at them via ``base_url`` is the supported path.
 import logging
 import math
 
-from .security import same_origin_request_hook
+from .security import ProviderResponseError, same_origin_request_hook
 
 log = logging.getLogger("mcp.embed")
 
@@ -124,7 +124,7 @@ class EmbedClient:
         # not land in logs or tracebacks (mailbox content can flow
         # through query strings).
         if len(resp.data) != 1:
-            raise RuntimeError(
+            raise ProviderResponseError(
                 f"embedder returned {len(resp.data)} vectors for 1 input "
                 f"({self.base_url}, model={self.model!r})"
             )
@@ -149,13 +149,13 @@ async def embed_query(client, text: str, expected_dim: int | None) -> list[float
     against and we pass the vector through; the DB layer will surface
     the missing-table case naturally.
 
-    Raises ``ValueError`` on mismatch with a message naming the
+    Raises ``ProviderResponseError`` on mismatch with a message naming the
     operator-controllable knobs (``EMBED_BASE_URL`` / ``EMBED_MODEL``)
     so the fix path is obvious from the log line.
     """
     vector = await client.embed(text)
     if expected_dim is not None and len(vector) != expected_dim:
-        raise ValueError(
+        raise ProviderResponseError(
             f"Embedding dimension mismatch: provider returned {len(vector)}, "
             f"index expects {expected_dim}. Check that EMBED_BASE_URL="
             f"{client.base_url!r} and EMBED_MODEL={client.model!r} match "
@@ -164,14 +164,14 @@ async def embed_query(client, text: str, expected_dim: int | None) -> list[float
     # A NaN query vector gets a NULL distance to every stored row, so
     # semantic search would silently return nothing (#232).
     if not all(math.isfinite(x) for x in vector):
-        raise ValueError(
+        raise ProviderResponseError(
             f"Embedding provider returned non-finite values. Check EMBED_BASE_URL="
             f"{client.base_url!r} and EMBED_MODEL={client.model!r}."
         )
     # A zero query vector is the same L2 distance from every stored unit
     # vector, so semantic search would return an arbitrary order (#304).
     if not any(vector):
-        raise ValueError(
+        raise ProviderResponseError(
             f"Embedding provider returned an all-zero vector. Check EMBED_BASE_URL="
             f"{client.base_url!r} and EMBED_MODEL={client.model!r}."
         )

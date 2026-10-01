@@ -28,6 +28,7 @@ from mcp.server.fastmcp.exceptions import ToolError
 from mcp.shared.memory import create_connected_server_and_client_session
 from mcp.types import CallToolResult
 from src.lib.inference import InferenceTruncatedError
+from src.lib.security import ProviderResponseError
 from src.tools.intelligence import register_intelligence_tools
 
 from tests.conftest import FakeEmbedClient, FakeInferenceClient
@@ -110,7 +111,7 @@ class TestAskMailbox:
 
         seeded_db.hybrid_search = boom  # type: ignore[assignment]
         handler = _handlers(fake_server, seeded_db, fake_embed, fake_inference)["ask_mailbox"]
-        with pytest.raises(ToolError, match="simulated db failure"):
+        with pytest.raises(ToolError, match="RuntimeError"):
             asyncio.run(handler(question="anything"))
 
     def test_secret_values_are_scrubbed_from_exception_text(
@@ -123,7 +124,7 @@ class TestAskMailbox:
         leaked_key = "sk-leakedXYZ789"  # pragma: allowlist secret
 
         def boom(**_kwargs):
-            raise RuntimeError(f"upstream auth: Bearer {leaked_key}")
+            raise ConnectionError(f"upstream auth: Bearer {leaked_key}")
 
         seeded_db.hybrid_search = boom  # type: ignore[assignment]
         register_intelligence_tools(
@@ -261,7 +262,7 @@ class TestSummarizeThread:
 
         seeded_db.get_thread = boom  # type: ignore[assignment]
         handler = _handlers(fake_server, seeded_db, fake_embed, fake_inference)["summarize_thread"]
-        with pytest.raises(ToolError, match="simulated read failure"):
+        with pytest.raises(ToolError, match="RuntimeError"):
             asyncio.run(handler(thread_id="t-alpha"))
 
     def test_recent_chunks_supplement_body_text(
@@ -544,7 +545,7 @@ class TestExtractFromEmails:
         handler = _handlers(fake_server, seeded_db, fake_embed, fake_inference)[
             "extract_from_emails"
         ]
-        with pytest.raises(ToolError, match="simulated read failure"):
+        with pytest.raises(ToolError, match="RuntimeError"):
             asyncio.run(handler(query="invoice", schema={"x": "string"}))
 
 
@@ -815,7 +816,9 @@ class TestFailuresAreErrorResults:
 
     @pytest.mark.parametrize("tool", sorted(_TOOL_ARGS))
     def test_provider_failure_is_an_error_result(self, seeded_db, tool):
-        llm = FakeInferenceClient(complete_responses=[RuntimeError("synthetic provider failure")])
+        llm = FakeInferenceClient(
+            complete_responses=[ProviderResponseError("synthetic provider failure")]
+        )
         result = _wire_call(seeded_db, llm, tool, _TOOL_ARGS[tool])
         assert result.isError
         assert "synthetic provider failure" in result.content[0].text
