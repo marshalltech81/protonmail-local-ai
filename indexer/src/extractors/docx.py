@@ -1,7 +1,8 @@
 """DOCX (Word .docx) extractor.
 
 Uses ``python-docx`` to walk the body, headers and footers in document
-order. Tables are serialized cell-by-cell separated by single spaces so
+order. Headers and footers cover the default, first-page and even-page
+parts each section displays (#299). Tables are serialized cell-by-cell separated by single spaces so
 a row's cells read together for retrieval, while preserving paragraph
 structure elsewhere so the downstream chunker has paragraph boundaries
 to pack on. Header / footer text is included because invoices and
@@ -28,7 +29,9 @@ import io
 from collections.abc import Iterable
 
 import docx as _docx
+from docx.document import Document as DocxDocument
 from docx.oxml.table import CT_Row
+from docx.section import _Footer, _Header
 from docx.table import Table, _Cell
 from docx.text.paragraph import Paragraph
 
@@ -48,14 +51,42 @@ def extract(
     # Body paragraphs keep the document's natural paragraph structure —
     # the chunker keys off blank-line gaps between paragraphs.
     parts.extend(_block_lines(document.iter_inner_content()))
-    # Headers + footers (per section). A header linked to the previous
-    # section repeats that section's content, so it is skipped.
-    for section in document.sections:
-        for part in (section.header, section.footer):
-            if not part.is_linked_to_previous:
-                parts.extend(_block_lines(part.iter_inner_content()))
-
+    parts.extend(_header_footer_lines(document))
     return "\n\n".join(parts), "docx"
+
+
+def _header_footer_lines(document: DocxDocument) -> list[str]:
+    """Lines of every header and footer Word displays, each part once.
+
+    A section has a default, a first-page and an even-page header and
+    footer. The first-page pair shows when the section's
+    ``different_first_page_header_footer`` is set, the even-page pair
+    when the document's ``odd_and_even_pages_header_footer`` is. A part a
+    section does not define (``is_linked_to_previous``) is inherited from
+    the nearest earlier section that defines it. python-docx resolves that
+    by recursing through every earlier section, so it is tracked here
+    instead: the latest definition of each kind waits in ``pending``
+    until a section shows it, and is read once. Each section's settings
+    and references are visited once, so the work is linear in the XML.
+    """
+    even_pages = document.settings.odd_and_even_pages_header_footer
+    pending: dict[str, _Header | _Footer] = {}
+    lines: list[str] = []
+    for section in document.sections:
+        first_page = section.different_first_page_header_footer
+        for kind, part, shown in (
+            ("header", section.header, True),
+            ("footer", section.footer, True),
+            ("first_page_header", section.first_page_header, first_page),
+            ("first_page_footer", section.first_page_footer, first_page),
+            ("even_page_header", section.even_page_header, even_pages),
+            ("even_page_footer", section.even_page_footer, even_pages),
+        ):
+            if not part.is_linked_to_previous:
+                pending[kind] = part
+            if shown and kind in pending:
+                lines.extend(_block_lines(pending.pop(kind).iter_inner_content()))
+    return lines
 
 
 def _block_lines(blocks: Iterable[Paragraph | Table]) -> list[str]:

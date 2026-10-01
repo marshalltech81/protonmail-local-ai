@@ -606,29 +606,58 @@ Triaged against `d30e500` by four parallel agents; every issue is real
 and most reproduced with synthetic input. PRs in the order to land
 them (one test-first commit per issue, `Fixes #N` per issue):
 
-**Status 2026-10-01 (late) — next session starts here.** Second batch
-items 1–12 are merged; 13–14 and #217 are decided (below and in
-Resolved decisions). The deprecation cleanup is finished (#343, #345,
-#346, #348; baseline is v21). Third batch merged so far: #293 (#335),
-the privacy trio #311/#325/#326 (#337), #327/#328 (#341), #301 (#336),
-#278/#267 (#342), #339/#340 (#347), #304 batch-1 half (#349), #297
-first half (#350), #306 (#351), #302 (#352, schema v22), #319 (#353),
-#332 (#356), #321 (#357), #318 (#358), #310/#329/#315 (#359), #314
-(#360), #361 (#414), #320/#334 (#417), and the whole #257 sweep (#364,
-#363, #401, #412, #411, closed by this PR). The 2026-10-01 cleanup
-batch is done: the 36 stale-text issues #365–#400 and the #395
-reconciler fix merged as #402–#410 (decisions: `RERANK_TOP_N` removed,
-the eval's unused query fields dropped, its fallback notice printed).
+**Status 2026-10-01 (end of session) — next session starts here.**
+Focus has moved from hardening to running the stack for real
+(owner, 2026-10-01). Merged this session: the cleanup batch
+#365–#400 (#402–#410), the whole #257 sweep (#364, #363, #401, #412,
+#411, #413), MCP fixes #312–#334 and #308/#309/#415 (#416–#420), the
+`fastmcp` 4.0.10 migration closing #317 (#421), Bridge first run
+#242/#266/#270 with the first Bridge test harness (#423), the Bridge
+smoke check #268/#269 (#422), mbsync #271/#280 (#419) and its Bash 3.2
+harness fix #425 (#427), #361 (#414), and docx@3 #299 (#426).
 
-Open PRs are tracked on GitHub, not here; three are kept in flight
-and a Codex-clean PR is merged without waiting (owner, 2026-10-01).
-Also merged since the handoff: #416 date filters (#312, #330, #333),
-#418 name matching (#313, #324, #331; #316 query side), #419 mbsync
-(#271, #280), #420 folders and attachment filters (#308, #309, #415).
+Open at handoff, each Codex-reviewed or awaiting review; finish them
+under the two-round cap in AGENTS.md:
 
-Filed 2026-10-01 and still open: #362 (`idna` RFC 2231 filename
-raises `UnicodeError`; needs a fallback-filename decision). (#415,
-filed the same day, was fixed in #420.)
+- #424 xlsx@2 (#294, #296, #305); round 1 done, pre-walk load
+  documented as #428.
+- #429 Bridge updater gate (#245).
+- #430 pdf@2 page-level OCR (#292) and OCR-on requeue (#300). #424 and
+  #430 both add to `EXTRACTOR_VERSIONS`; the second to merge rebases.
+
+Go-live checklist (do these before more hardening):
+
+1. Merge #424, #429, #430.
+2. Choose providers and fill `.env` / `.secrets` (see
+   `docs/setup.md`). The embedder must return 4096-dim vectors (the
+   schema is fixed at 4096); OpenAI's public models return 3072 or
+   1536, so an empty `EMBED_BASE_URL` (OpenAI proper) fails the
+   indexer's startup probe. Use a 4096-dim model such as the
+   Qwen3-Embedding-8B family on a host-side server: `EMBED_BASE_URL`,
+   `EMBED_MODEL`, `.secrets/embed_api_key.txt`. For inference set
+   `INFERENCE_MODE`, `INFERENCE_MODEL` (the default is an Anthropic
+   model id), `INFERENCE_BASE_URL` for a non-default provider, and
+   `.secrets/inference_api_key.txt`. Leave `RERANK_MODE=none` to start.
+3. `make build`, then `make first-run` and log in to Proton in the
+   Bridge CLI (`login`, then `info` for `BRIDGE_USER` and the bridge
+   password into `.secrets/bridge_pass.txt`), `exit`.
+4. `make up` (it runs `make validate-env` first, which needs the Bridge
+   credentials from step 3); watch `make logs` for the mbsync initial sync and the
+   indexer's progress; `make status` until the index is current.
+   Record how long the initial sync takes: it is the measurement the
+   mbsync supervision design (#277, #282) is waiting for.
+5. Point an MCP client at `http://localhost:${MCP_PORT}` plus `/sse`
+   (the default `MCP_TRANSPORT=sse`) or `/mcp` (`streamable-http`;
+   `dual` serves both), and try real questions by hand; `mcp-server/tests/eval/README.md` covers turning
+   the good ones into a retrieval eval.
+6. Let what breaks set the next priorities; then the #283 eval slice,
+   which must precede the first Phase 2 generation as its validation
+   gate, then the Phase 2 reindex bundle.
+
+Deferred as issues: #362 (owner chose: fall back to the raw filename
+parameter when `get_filename()` raises), #428 (xlsx parts openpyxl
+loads whole), #316's index-side remainder (Phase 2 reindex), and the
+mbsync design families (#275, #276, #279, #281; #277, #282).
 
 Open owner decision: **#267** one-shot rotation. #342 shipped the
 documented limitation (recreate with `BRIDGE_CERT_PIN_ROTATE=false`);
@@ -656,16 +685,11 @@ first, one test-first commit per issue, keep three PRs in flight):
    4.0.10 migration with an explicit session idle timeout); #316's
    remainder needs the Phase 2 reindex.
 5. ~~mbsync #271, #280~~ (done: #419). Parser: ~~#361~~ (done: #414);
-   #362 needs a fallback-filename decision first.
-6. Bridge, needing Docker for `make bridge-upgrade-check` and the
-   first Bridge shell test harness: the entrypoint PR (#242, #266,
-   #270), the smoke-test fix (#269 with #268's minimal fix, both in
-   `scripts/bridge-smoke.sh`), and the updater-gate PR (#245). Land
-   them before the eval slice: existing vaults make unpinned update
-   fetches until #245.
-7. Then third-batch items 2–4 below (extractor bumps, mbsync design,
-   the Phase 2 reindex bundle), the Phase 1.5/#283 eval slice, and
-   Phase 2.
+   #362 is decided (fall back to the raw filename parameter) and filed.
+6. ~~Bridge entrypoint (#242, #266, #270) and smoke check (#268,
+   #269)~~ (done: #423, #422); the updater gate (#245) is #429.
+7. Then the go-live checklist above, the Phase 1.5/#283 eval slice,
+   the mbsync design work, and Phase 2.
 
 How this session worked, worth repeating: fixes were prepared by
 background agents, one per issue in its own `git worktree` off
@@ -813,13 +837,12 @@ Order of work, chosen to minimise reindexes:
    first boot) and ~~the rotation flag surviving restarts (#267,
    docs)~~ (done: documented recreate-with-false; one-shot
    authorization not built), ~~the unbounded connect probe (#271), and
-   signal forwarding to the sync child (#280)~~ (done: #419). Bridge, both decided as
-   items 13–14 above and needing the first Bridge shell test harness:
-   the smoke-test one-liner (#269) with #268's minimal fix, the
-   entrypoint PR (#242 `BRIDGE_FORCE_CLI`, #266 bootstrap order, #270
-   the impossible `su` shortcut) and the updater-gate PR (#245, with
-   its enabled-vault test) — before the eval slice, since existing
-   vaults make unpinned update requests until #245 lands.
+   signal forwarding to the sync child (#280)~~ (done: #419). Bridge:
+   ~~the smoke-test one-liner (#269) with #268's minimal fix, the
+   entrypoint PR (#242, #266, #270)~~ (done: #422, #423), and the
+   updater-gate PR (#245, with its enabled-vault test; #429) — before
+   the eval slice, since existing vaults make unpinned update requests
+   until #245 lands.
 2. **Extractor version bumps, one PR per module** so each cache
    refresh happens once: ~~`xlsx` (#294's shared-string budget — a
    behaviour change for the same bytes, so it lands with the bump
@@ -827,7 +850,7 @@ Order of work, chosen to minimise reindexes:
    #296 empty cells, #305 stale dimensions; add `xlsx` to
    `EXTRACTOR_VERSIONS`)~~ (done: `xlsx@2` with a 10M-character text
    budget, column-preserving rows and `reset_dimensions()`),
-   `docx` 2→3 (#299 first-page and even-page headers), `pdf`
+   ~~`docx` 2→3 (#299 first-page and even-page headers)~~ (done: #426), `pdf`
    (#292 page-level OCR selection — add `pdf`), with #300 (enabling
    OCR re-queues skipped images) alongside since it shares the
    OCR-disabled sentinel.

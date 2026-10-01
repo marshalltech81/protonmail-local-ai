@@ -32,8 +32,10 @@ load() {
 }
 
 # Runs each case in a subshell outside any condition, so errexit stays on
-# inside it and every assertion counts, not only the last one. A case that
-# exercises a function the way its caller does (as a condition) says so.
+# inside it. Bash 3.2 (macOS /bin/bash) does not apply errexit to a failed
+# [[ ]] or (( )), so every such assertion ends in `|| return 1`; otherwise
+# only a case's last line would count there. A case that exercises a
+# function the way its caller does (as a condition) says so.
 check() {
     local description="$1" rc=0
     shift
@@ -68,8 +70,8 @@ first_boot_pins_the_fingerprint() {
     pin_setup first
     mkdir -p "$STATE_DIR"
     verify_cert_pin "$FP_NEW"
-    [[ "$(cat "$PIN_FILE")" == "$FP_NEW" ]]
-    [[ "$(stat -c %a "$PIN_FILE" 2>/dev/null || stat -f %Lp "$PIN_FILE")" == "600" ]]
+    [[ "$(cat "$PIN_FILE")" == "$FP_NEW" ]] || return 1
+    [[ "$(stat -c %a "$PIN_FILE" 2>/dev/null || stat -f %Lp "$PIN_FILE")" == "600" ]] || return 1
 }
 
 first_boot_fails_closed_when_the_pin_cannot_be_saved() {
@@ -80,7 +82,7 @@ first_boot_fails_closed_when_the_pin_cannot_be_saved() {
         echo "pin accepted although it was never saved"
         return 1
     fi
-    [[ ! -e "$PIN_FILE" ]]
+    [[ ! -e "$PIN_FILE" ]] || return 1
 }
 
 matching_fingerprint_is_accepted() {
@@ -97,7 +99,7 @@ mismatch_is_refused_without_rotation() {
     if verify_cert_pin "$FP_NEW"; then
         return 1
     fi
-    [[ "$(cat "$PIN_FILE")" == "$FP_OLD" ]]
+    [[ "$(cat "$PIN_FILE")" == "$FP_OLD" ]] || return 1
 }
 
 # shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
@@ -107,7 +109,7 @@ rotation_replaces_the_pin() {
     printf '%s\n' "$FP_OLD" >"$PIN_FILE"
     BRIDGE_CERT_PIN_ROTATE="true"
     verify_cert_pin "$FP_NEW"
-    [[ "$(cat "$PIN_FILE")" == "$FP_NEW" ]]
+    [[ "$(cat "$PIN_FILE")" == "$FP_NEW" ]] || return 1
 }
 
 # The flag lives in the container's environment and survives restarts
@@ -128,7 +130,7 @@ rotation_then_disabled_flag_enforces_the_new_pin() {
         echo "a second change was accepted without a new authorization"
         return 1
     fi
-    [[ "$(cat "$PIN_FILE")" == "$FP_NEW" ]]
+    [[ "$(cat "$PIN_FILE")" == "$FP_NEW" ]] || return 1
 }
 
 # shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
@@ -143,9 +145,9 @@ failed_rotation_fails_closed_and_keeps_the_old_pin() {
         echo "rotation accepted although the new pin was never saved"
         return 1
     fi
-    [[ "$(cat "$PIN_FILE")" == "$FP_OLD" ]]
+    [[ "$(cat "$PIN_FILE")" == "$FP_OLD" ]] || return 1
     # No temporary file is left behind in the state directory.
-    [[ "$(find "$STATE_DIR" -type f | wc -l)" -eq 1 ]]
+    [[ "$(find "$STATE_DIR" -type f | wc -l)" -eq 1 ]] || return 1
 }
 
 # --- an existing invalid pin is not a first boot (#278) ---------------------
@@ -165,7 +167,7 @@ empty_pin_is_refused_and_kept() {
     mkdir -p "$STATE_DIR"
     : >"$PIN_FILE"
     refuses_the_new_fingerprint
-    [[ -f "$PIN_FILE" && ! -s "$PIN_FILE" ]]
+    [[ -f "$PIN_FILE" && ! -s "$PIN_FILE" ]] || return 1
 }
 
 malformed_pin_is_refused_and_kept() {
@@ -173,7 +175,7 @@ malformed_pin_is_refused_and_kept() {
     mkdir -p "$STATE_DIR"
     printf '%s\n' "${FP_OLD:0:32}" >"$PIN_FILE"
     refuses_the_new_fingerprint
-    [[ "$(cat "$PIN_FILE")" == "${FP_OLD:0:32}" ]]
+    [[ "$(cat "$PIN_FILE")" == "${FP_OLD:0:32}" ]] || return 1
 }
 
 unreadable_pin_is_refused() {
@@ -181,7 +183,7 @@ unreadable_pin_is_refused() {
     # A directory in the pin's place cannot be read, even as root.
     mkdir -p "$PIN_FILE"
     refuses_the_new_fingerprint
-    [[ -d "$PIN_FILE" ]]
+    [[ -d "$PIN_FILE" ]] || return 1
 }
 
 dangling_pin_link_is_refused_and_kept() {
@@ -189,7 +191,7 @@ dangling_pin_link_is_refused_and_kept() {
     mkdir -p "$STATE_DIR"
     ln -s "$STATE_DIR/missing" "$PIN_FILE"
     refuses_the_new_fingerprint
-    [[ -L "$PIN_FILE" && ! -e "$STATE_DIR/missing" ]]
+    [[ -L "$PIN_FILE" && ! -e "$STATE_DIR/missing" ]] || return 1
 }
 
 # shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
@@ -199,7 +201,7 @@ rotation_replaces_an_invalid_pin() {
     : >"$PIN_FILE"
     BRIDGE_CERT_PIN_ROTATE="true"
     verify_cert_pin "$FP_NEW"
-    [[ "$(cat "$PIN_FILE")" == "$FP_NEW" ]]
+    [[ "$(cat "$PIN_FILE")" == "$FP_NEW" ]] || return 1
 }
 
 # Rotation must be able to repair a pin it cannot read (#342 review round
@@ -212,7 +214,7 @@ rotation_replaces_a_dangling_pin_link() {
     ln -s "$STATE_DIR/missing" "$PIN_FILE"
     BRIDGE_CERT_PIN_ROTATE="true"
     verify_cert_pin "$FP_NEW"
-    [[ ! -L "$PIN_FILE" && "$(cat "$PIN_FILE")" == "$FP_NEW" && ! -e "$STATE_DIR/missing" ]]
+    [[ ! -L "$PIN_FILE" && "$(cat "$PIN_FILE")" == "$FP_NEW" && ! -e "$STATE_DIR/missing" ]] || return 1
 }
 
 # shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
@@ -227,7 +229,7 @@ rotation_replaces_an_unreadable_pin_file() {
     fi
     BRIDGE_CERT_PIN_ROTATE="true"
     verify_cert_pin "$FP_NEW"
-    [[ "$(cat "$PIN_FILE")" == "$FP_NEW" ]]
+    [[ "$(cat "$PIN_FILE")" == "$FP_NEW" ]] || return 1
 }
 
 # shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
@@ -237,7 +239,7 @@ rotation_refuses_a_directory_in_the_pins_place() {
     BRIDGE_CERT_PIN_ROTATE="true"
     # mv would move the new pin into the directory and report success.
     refuses_the_new_fingerprint
-    [[ -d "$PIN_FILE" && -z "$(find "$PIN_FILE" -mindepth 1)" ]]
+    [[ -d "$PIN_FILE" && -z "$(find "$PIN_FILE" -mindepth 1)" ]] || return 1
 }
 
 # A pin path that exists but is not a regular file is refused before it is
@@ -262,7 +264,7 @@ fifo_pin_is_refused_without_reading() {
     fi
     kill "$writer" 2>/dev/null || true
     wait "$writer" 2>/dev/null || true
-    [[ "$err" == *"not a regular file"* && -p "$PIN_FILE" ]]
+    [[ "$err" == *"not a regular file"* && -p "$PIN_FILE" ]] || return 1
 }
 
 # --- run_sync (#227) -------------------------------------------------------
@@ -290,8 +292,8 @@ sync_succeeds_when_mbsync_and_repair_succeed() {
     mbsync() { mbsync_ok; }
     find() { printf 'find\n' >>"$FIND_CALLS"; }
     run_sync || rc=$?
-    ((rc == 0))
-    [[ "$(wc -l <"$FIND_CALLS")" -eq 2 ]]
+    ((rc == 0)) || return 1
+    [[ "$(wc -l <"$FIND_CALLS")" -eq 2 ]] || return 1
 }
 
 # shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
@@ -304,7 +306,7 @@ failed_directory_repair_fails_the_sync() {
         [[ "$3" != "d" ]]
     }
     run_sync || rc=$?
-    ((rc == 1))
+    ((rc == 1)) || return 1
 }
 
 # shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
@@ -317,7 +319,7 @@ failed_file_repair_fails_the_sync() {
         [[ "$3" != "f" ]]
     }
     run_sync || rc=$?
-    ((rc == 1))
+    ((rc == 1)) || return 1
 }
 
 # shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
@@ -328,8 +330,8 @@ repair_still_runs_after_a_failed_mbsync() {
     find() { printf 'find\n' >>"$FIND_CALLS"; }
     # mbsync's own status, not the repair's, is what the sync reports.
     run_sync || rc=$?
-    ((rc == 3))
-    [[ "$(wc -l <"$FIND_CALLS")" -eq 2 ]]
+    ((rc == 3)) || return 1
+    [[ "$(wc -l <"$FIND_CALLS")" -eq 2 ]] || return 1
 }
 
 # --- wait_for_bridge_imap (#271) ---------------------------------------------
@@ -368,21 +370,21 @@ hung_probes_are_cut_off_by_the_per_attempt_bound() {
     BRIDGE_WAIT_MAX_ATTEMPTS=2
     start=$SECONDS
     err="$(wait_for_bridge_imap 2>&1)" || rc=$?
-    ((rc == 1))
+    ((rc == 1)) || return 1
     # Two attempts of at most two seconds each; without the bound the
     # first probe alone takes 10 s.
-    ((SECONDS - start < 8))
-    [[ "$(wc -l <"$NC_CALLS")" -eq 2 ]]
+    ((SECONDS - start < 8)) || return 1
+    [[ "$(wc -l <"$NC_CALLS")" -eq 2 ]] || return 1
     # nc gets its own connect timeout inside the outer timeout(1).
     grep -qx -- "-z -w 1 bridge.invalid 1143" "$NC_CALLS"
-    [[ "$err" == *"after 2 attempts (at most 4 seconds)"* ]]
+    [[ "$err" == *"after 2 attempts (at most 4 seconds)"* ]] || return 1
 }
 
 reachable_bridge_returns_after_one_probe() {
     probe_setup reachable
     mock_nc reachable 'exit 0'
     wait_for_bridge_imap
-    [[ "$(wc -l <"$NC_CALLS")" -eq 1 ]]
+    [[ "$(wc -l <"$NC_CALLS")" -eq 1 ]] || return 1
 }
 
 refused_probes_fail_after_the_attempts_with_nc_stderr() {
@@ -390,9 +392,9 @@ refused_probes_fail_after_the_attempts_with_nc_stderr() {
     probe_setup refused
     mock_nc refused 'echo "synthetic-refused" >&2; exit 1'
     err="$(wait_for_bridge_imap 2>&1)" || rc=$?
-    ((rc == 1))
-    [[ "$(wc -l <"$NC_CALLS")" -eq 3 ]]
-    [[ "$err" == *"synthetic-refused"* ]]
+    ((rc == 1)) || return 1
+    [[ "$(wc -l <"$NC_CALLS")" -eq 3 ]] || return 1
+    [[ "$err" == *"synthetic-refused"* ]] || return 1
 }
 
 # --- shutdown signals reach the active child (#280) -------------------------
@@ -446,15 +448,21 @@ term_during_a_sync_stops_mbsync_and_exits() {
     stop_setup sync-term
     (install_signal_handlers && run_sync) &
     signal_once_started "$!" TERM
-    ((STOP_RC == 143 && STOP_SECONDS < 5))
+    ((STOP_RC == 143 && STOP_SECONDS < 5)) || return 1
     grep -qx term "$CHILD_LOG"
 }
 
 int_during_a_sync_stops_mbsync_and_exits() {
     stop_setup sync-int
+    # Without job control, a background subshell starts with INT ignored,
+    # and Bash 3.2 then refuses to trap it (Bash 5 allows the trap). The
+    # entrypoint starts with INT at its default, so turn job control on
+    # for the launch to give the stand-in the same start on both shells.
+    set -m
     (install_signal_handlers && run_sync) &
+    set +m
     signal_once_started "$!" INT
-    ((STOP_RC == 130 && STOP_SECONDS < 5))
+    ((STOP_RC == 130 && STOP_SECONDS < 5)) || return 1
     grep -qx term "$CHILD_LOG"
 }
 
@@ -464,7 +472,7 @@ term_during_the_sleep_between_syncs_exits_promptly() {
     # stands in for a long sleep.
     (install_signal_handlers && run_child mbsync) &
     signal_once_started "$!" TERM
-    ((STOP_RC == 143 && STOP_SECONDS < 5))
+    ((STOP_RC == 143 && STOP_SECONDS < 5)) || return 1
     grep -qx term "$CHILD_LOG"
 }
 
@@ -479,7 +487,7 @@ run_child_returns_the_child_status() {
     if run_child false; then
         return 1
     fi
-    [[ -z "$child_pid" ]]
+    [[ -z "$child_pid" ]] || return 1
 }
 
 check "TERM during a sync stops mbsync and exits 143" term_during_a_sync_stops_mbsync_and_exits

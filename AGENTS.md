@@ -438,6 +438,13 @@ Examples:
   "Review round N" section to the PR description.
 - Resolve a thread only once it is fixed or the owner has deferred it;
   merging is blocked while line threads are open.
+- Cap review at two fix rounds per PR (owner, 2026-10-01). A finding
+  raised in round three or later is verified, filed as its own issue,
+  linked from a reply on its thread, and the thread resolved as
+  deferred; the PR is then ready for the owner's merge go-ahead once
+  CI is green (the go-ahead rule below still applies).
+- File P3 findings as issues rather than fixing them ahead of
+  go-live or P1/P2 work.
 - Merge (squash) only on the owner's explicit go-ahead.
 
 ## Common Commands
@@ -696,6 +703,7 @@ Notes:
 - database changes should verify schema creation, migration, and upsert/query behavior
 - MCP search changes should verify hybrid/RRF behavior where applicable
 - mbsync entrypoint changes should update `mbsync/tests/entrypoint_test.sh`, which loads the real functions with external commands mocked
+- Bridge entrypoint changes should update `bridge/tests/entrypoint_test.sh`, which does the same with a synthetic GPG keyring and pass store
 - indexing, chunking, embedding-storage, or retrieval changes should pass `make baseline`; if ranking changes on purpose, regenerate the snapshot with `make baseline UPDATE=1` and explain the snapshot diff in the PR
 - before opening PRs that touch TLS, auth, logging, subprocess execution, or credential handling, run `bandit -r src/` and resolve any findings rated medium or higher (a CI job in `.github/workflows/security.yml` enforces this at medium+ severity for both services)
 
@@ -705,6 +713,7 @@ Run tests with:
 cd indexer    && uv run pytest
 cd mcp-server && uv run pytest
 make test-mbsync
+make test-bridge
 make baseline
 make typecheck
 ```

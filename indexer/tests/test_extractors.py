@@ -444,6 +444,125 @@ class TestDocxExtractor:
         text, _ = docx_extract(self._save(document))
         assert text.index("FIRST") < text.index("SECOND") < text.index("THIRD")
 
+    @staticmethod
+    def _first_and_even_page_document():
+        """Section 1 defines every header and footer type, with a table in
+        its first-page header. Section 2 links all of them to section 1."""
+        import docx
+        from docx.enum.section import WD_SECTION
+        from docx.shared import Inches
+
+        document = docx.Document()
+        document.settings.odd_and_even_pages_header_footer = True
+        document.add_paragraph("BODY_MARK")
+        first = document.sections[0]
+        first.different_first_page_header_footer = True
+        first.header.paragraphs[0].text = "DEFAULT_HEADER_MARK"
+        first.footer.paragraphs[0].text = "DEFAULT_FOOTER_MARK"
+        first_header = first.first_page_header
+        first_header.paragraphs[0].text = "FIRST_HEADER_MARK"
+        header_table = first_header.add_table(rows=1, cols=1, width=Inches(2))
+        header_table.cell(0, 0).text = "FIRST_HEADER_TABLE_MARK"
+        first.first_page_footer.paragraphs[0].text = "FIRST_FOOTER_MARK"
+        first.even_page_header.paragraphs[0].text = "EVEN_HEADER_MARK"
+        first.even_page_footer.paragraphs[0].text = "EVEN_FOOTER_MARK"
+        second = document.add_section(WD_SECTION.NEW_PAGE)
+        second.different_first_page_header_footer = True
+        return document
+
+    MARKS = (
+        "DEFAULT_HEADER_MARK",
+        "DEFAULT_FOOTER_MARK",
+        "FIRST_HEADER_MARK",
+        "FIRST_HEADER_TABLE_MARK",
+        "FIRST_FOOTER_MARK",
+        "EVEN_HEADER_MARK",
+        "EVEN_FOOTER_MARK",
+    )
+
+    def test_first_page_and_even_page_headers_and_footers_are_read(self):
+        """Regression (#299): only the default header and footer were read,
+        so first-page and even-page text (and tables there) was dropped.
+        Section 2 links every part to section 1, so each mark appears once."""
+        from src.extractors.docx import extract as docx_extract
+
+        text, _ = docx_extract(self._save(self._first_and_even_page_document()))
+        for mark in self.MARKS:
+            assert text.count(mark) == 1, mark
+
+    def test_a_part_inherited_by_a_later_section_is_read_once(self):
+        """Section 1 defines a first-page header but does not show it;
+        section 2 turns the first page on and inherits it by linking."""
+        import docx
+        from docx.enum.section import WD_SECTION
+        from src.extractors.docx import extract as docx_extract
+
+        document = docx.Document()
+        first = document.sections[0]
+        first.first_page_header.paragraphs[0].text = "INHERITED_FIRST_MARK"
+        first.different_first_page_header_footer = False
+        second = document.add_section(WD_SECTION.NEW_PAGE)
+        second.different_first_page_header_footer = True
+        third = document.add_section(WD_SECTION.NEW_PAGE)
+        third.different_first_page_header_footer = True
+        text, _ = docx_extract(self._save(document))
+        assert text.count("INHERITED_FIRST_MARK") == 1
+
+    def test_parts_the_settings_switch_off_are_not_read(self):
+        """A first-page or even-page part Word never displays (its setting
+        is off in every section) is not indexed."""
+        import docx
+        from src.extractors.docx import extract as docx_extract
+
+        document = docx.Document()
+        section = document.sections[0]
+        section.first_page_header.paragraphs[0].text = "HIDDEN_FIRST_MARK"
+        section.even_page_footer.paragraphs[0].text = "HIDDEN_EVEN_MARK"
+        section.different_first_page_header_footer = False
+        document.settings.odd_and_even_pages_header_footer = False
+        text, _ = docx_extract(self._save(document))
+        assert "HIDDEN_FIRST_MARK" not in text
+        assert "HIDDEN_EVEN_MARK" not in text
+
+    def test_many_linked_sections_are_walked_linearly(self, monkeypatch):
+        """python-docx resolves a linked part by recursing through every
+        prior section, which is quadratic and can exceed the recursion
+        limit. The extractor must read each defined part once instead."""
+        import time
+
+        import docx
+        from docx.enum.section import WD_SECTION
+        from docx.section import _BaseHeaderFooter
+        from src.extractors.docx import extract as docx_extract
+
+        document = docx.Document()
+        document.settings.odd_and_even_pages_header_footer = True
+        first = document.sections[0]
+        first.different_first_page_header_footer = True
+        first.first_page_header.paragraphs[0].text = "MANY_FIRST_MARK"
+        first.even_page_footer.paragraphs[0].text = "MANY_EVEN_MARK"
+        for _ in range(3000):
+            document.add_section(WD_SECTION.NEW_PAGE).different_first_page_header_footer = True
+        payload = self._save(document)
+
+        resolutions = 0
+        original = _BaseHeaderFooter._get_or_add_definition
+
+        def counting(self):
+            nonlocal resolutions
+            resolutions += 1
+            return original(self)
+
+        monkeypatch.setattr(_BaseHeaderFooter, "_get_or_add_definition", counting)
+        started = time.monotonic()
+        text, _ = docx_extract(payload)
+        assert time.monotonic() - started < 10.0
+        # One resolution per defined part read (two here), none per
+        # linked section.
+        assert resolutions <= 6
+        assert text.count("MANY_FIRST_MARK") == 1
+        assert text.count("MANY_EVEN_MARK") == 1
+
     def test_dispatcher_stamps_the_current_extractor_version(self):
         # The cache stores this name; bumping the version is what makes
         # rows written by the old walker re-extract.
@@ -457,7 +576,14 @@ class TestDocxExtractor:
             filename="v.docx",
             payload=self._save(document),
         )
-        assert result.extractor == "docx@2"
+        assert result.extractor == "docx@3"
+
+    def test_docx_version_2_rows_are_stale(self):
+        # docx@2 missed first-page and even-page headers/footers (#299).
+        from src import extractors
+
+        assert extractors.stale_extractor_module("docx@2") == "docx"
+        assert extractors.stale_extractor_module("docx@3") is None
 
     def test_versions_are_keyed_by_dispatch_module(self, monkeypatch):
         """The image module records ``image-ocr`` and the PDF module
@@ -489,7 +615,7 @@ class TestDocxExtractor:
             module_override="docx",
         )
         assert result.status == STATUS_SUCCESS
-        assert result.extractor == "docx@2"
+        assert result.extractor == "docx@3"
         assert "override text" in (result.text or "")
 
 

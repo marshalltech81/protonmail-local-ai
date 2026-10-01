@@ -125,7 +125,7 @@ def _process_with_cached_extractor(
     )
     extractor = MagicMock(
         return_value=ExtractionResult(
-            status=STATUS_SUCCESS, extractor="docx@2", text="fresh text", error=None
+            status=STATUS_SUCCESS, extractor="docx@3", text="fresh text", error=None
         )
     )
     monkeypatch.setattr(attachment_indexing, "extract_attachment", extractor)
@@ -156,7 +156,18 @@ def test_cache_row_from_an_older_extractor_version_is_re_extracted(tmp_path, mon
         db = _seed_thread_for_cache_test(tmp_path / status)
         extractor, row = _process_with_cached_extractor(db, "docx", status, text, monkeypatch)
         extractor.assert_called_once()
-        assert row["extractor"] == "docx@2"
+        assert row["extractor"] == "docx@3"
+        assert row["extracted_text"] == "fresh text"
+
+
+def test_cache_row_from_docx_version_2_is_re_extracted(tmp_path, monkeypatch):
+    """Rows the docx@2 walker wrote miss first-page and even-page headers
+    and footers (#299), so they are stale once docx is at version 3."""
+    for status, text in ((STATUS_SUCCESS, "old text"), (STATUS_EMPTY, None)):
+        db = _seed_thread_for_cache_test(tmp_path / status)
+        extractor, row = _process_with_cached_extractor(db, "docx@2", status, text, monkeypatch)
+        extractor.assert_called_once()
+        assert row["extractor"] == "docx@3"
         assert row["extracted_text"] == "fresh text"
 
 
@@ -206,7 +217,7 @@ def test_stale_ocr_row_is_served_while_ocr_is_off(tmp_path, monkeypatch):
 def test_cache_row_from_the_current_extractor_version_is_reused(tmp_path, monkeypatch):
     db = _seed_thread_for_cache_test(tmp_path)
     extractor, _ = _process_with_cached_extractor(
-        db, "docx@2", STATUS_SUCCESS, "cached text", monkeypatch
+        db, "docx@3", STATUS_SUCCESS, "cached text", monkeypatch
     )
     extractor.assert_not_called()
 
@@ -216,10 +227,10 @@ def test_cache_row_from_a_newer_extractor_version_is_reused(tmp_path, monkeypatc
     # downgraded by the older walker.
     db = _seed_thread_for_cache_test(tmp_path)
     extractor, row = _process_with_cached_extractor(
-        db, "docx@3", STATUS_SUCCESS, "newer text", monkeypatch
+        db, "docx@4", STATUS_SUCCESS, "newer text", monkeypatch
     )
     extractor.assert_not_called()
-    assert row["extractor"] == "docx@3"
+    assert row["extractor"] == "docx@4"
 
 
 def test_stale_row_is_refreshed_by_an_occurrence_of_another_type(tmp_path, monkeypatch):
@@ -239,7 +250,7 @@ def test_stale_row_is_refreshed_by_an_occurrence_of_another_type(tmp_path, monke
     )
     extractor.assert_called_once()
     assert extractor.call_args.kwargs["module_override"] == "docx"
-    assert row["extractor"] == "docx@2"
+    assert row["extractor"] == "docx@3"
     assert row["extracted_text"] == "fresh text"
     assert db.get_chunk_ids_for_message(
         "message@example.com", attachment_id=hashlib.sha256(b"docx bytes").hexdigest()
@@ -252,13 +263,13 @@ def test_reused_terminal_row_clears_the_stale_chunks(tmp_path, monkeypatch):
     it, so it must still drop the chunks its own stale extraction left."""
     db = _seed_thread_for_cache_test(tmp_path)
     attachment_id = hashlib.sha256(b"docx bytes").hexdigest()
-    _process_with_cached_extractor(db, "docx@2", STATUS_SUCCESS, "old text", monkeypatch)
+    _process_with_cached_extractor(db, "docx@3", STATUS_SUCCESS, "old text", monkeypatch)
     assert db.get_chunk_ids_for_message("message@example.com", attachment_id=attachment_id)
 
     db.store_attachment_extraction(
         attachment_id=attachment_id,
         extraction_status=STATUS_EMPTY,
-        extractor="docx@2",
+        extractor="docx@3",
         extracted_text=None,
         extraction_error=None,
     )
@@ -288,14 +299,14 @@ def test_re_extraction_without_text_clears_the_stale_chunks(tmp_path, monkeypatc
     later sweep would repair it."""
     db = _seed_thread_for_cache_test(tmp_path)
     attachment_id = hashlib.sha256(b"docx bytes").hexdigest()
-    _process_with_cached_extractor(db, "docx@2", STATUS_SUCCESS, "old text", monkeypatch)
+    _process_with_cached_extractor(db, "docx@3", STATUS_SUCCESS, "old text", monkeypatch)
     assert db.get_chunk_ids_for_message("message@example.com", attachment_id=attachment_id)
 
     with db.transaction():
         db._conn.execute("UPDATE attachment_extractions SET extractor = 'docx'")
     extractor = MagicMock(
         return_value=ExtractionResult(
-            status=STATUS_EMPTY, extractor="docx@2", text=None, error=None
+            status=STATUS_EMPTY, extractor="docx@3", text=None, error=None
         )
     )
     monkeypatch.setattr(attachment_indexing, "extract_attachment", extractor)

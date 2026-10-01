@@ -4,7 +4,9 @@
 #
 # Disables the json-file log driver for the bridge container so that Bridge
 # credentials printed by `bridge --cli → info` are never written to
-# /var/lib/docker/containers/<id>/*.log on the host.
+# /var/lib/docker/containers/<id>/*.log on the host, and sets
+# BRIDGE_FORCE_CLI so the entrypoint opens the interactive CLI even when the
+# bridge-data volume already holds a vault.
 #
 # Usage: docker compose -f docker-compose.yml -f docker-compose.first-run.yml \
 #            run --rm --no-deps protonmail-bridge
@@ -13,3 +15,8 @@ services:
   protonmail-bridge:
     logging:
       driver: none
+    environment:
+      # Open the interactive CLI even when the volume already holds a
+      # vault: Bridge writes vault.enc before any login, so a retried,
+      # unfinished first run would otherwise start noninteractive.
+      BRIDGE_FORCE_CLI: "true"

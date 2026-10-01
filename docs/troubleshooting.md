@@ -24,7 +24,18 @@ make update
 docker compose logs protonmail-bridge
 ```
 
-If the GPG/pass store is corrupt, wipe the bridge data volume and re-run first-run:
+When `vault.enc` exists, the entrypoint checks the credential chain before
+starting Bridge: the `ProtonBridge` GPG private key is present, the pass
+store's `.gpg-id` names that key, and Bridge's vault key entry
+(`docker-credential-helpers/.../bridge-vault-key.gpg` under `/data/pass`)
+exists and decrypts. If any check fails it exits with `ERROR: vault.enc exists but ...` and changes nothing; it
+never generates a replacement key or re-initializes pass over an existing
+vault, because Bridge's vault key is stored in that pass store. Key generation
+and `pass init` run only when there is no vault yet.
+
+Restore the `bridge-data` volume from a backup if you have one. Otherwise the
+GPG/pass store is unrecoverable: wipe the bridge data volume and re-run
+first-run:
 
 ```bash
 docker compose down
@@ -36,10 +47,12 @@ This is a full re-authentication: finish with the remaining steps in
 [Bridge credentials expired / need to re-authenticate](#bridge-credentials-expired--need-to-re-authenticate),
 including the mbsync cert pin rotation.
 
-## Bridge starts but shows "No Proton account found" every time
+## Bridge drops to the interactive CLI on every `make up`
 
-The account detection looks for `vault.enc` in the bridge-data volume.
-If it keeps dropping to the interactive CLI, the volume may not be persisting correctly:
+`make first-run` always opens the interactive CLI. Under `make up`, the
+entrypoint starts Bridge noninteractively when the bridge-data volume holds
+`vault.enc`, and opens the CLI otherwise. If `make up` keeps dropping to the
+interactive CLI, the volume may not be persisting correctly:
 
 ```bash
 docker volume inspect protonmail-local-ai_bridge-data
@@ -61,9 +74,12 @@ docker run --rm -v protonmail-local-ai_bridge-data:/data:ro debian:bookworm-slim
 
 ## Startup warnings: "Failed to add test credentials to keychain" / "no vault key found"
 
-These are harmless. Bridge cannot use the desktop keychain (no dbus session in a
-container) and falls back to its own encrypted vault. The "no vault key found" warning
-only appears once — on the very first run before the vault is created.
+These are harmless when they refer to the desktop keychain: Bridge cannot use it
+(no dbus session in a container) and uses the GPG-backed `pass` store instead. The
+"no vault key found" warning only appears once — on the very first run before the
+vault is created. An unusable `pass` store is not harmless, and the entrypoint
+refuses to start Bridge over an existing vault when it is; see
+[Bridge won't start — keychain / GPG errors](#bridge-wont-start--keychain--gpg-errors).
 
 ## Reading Bridge logs directly from the volume
 

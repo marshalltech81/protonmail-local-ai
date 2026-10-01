@@ -63,6 +63,7 @@ printf 'Verifying AutoUpdate runtime default in built Bridge image...\n'
 SMOKE_OUT="$(mktemp)"
 trap 'rm -f "$SMOKE_OUT"' EXIT
 
+SMOKE_STATUS=0
 docker run --rm \
     --init \
     --tmpfs /data:uid=1000,gid=1000,mode=700 \
@@ -96,34 +97,89 @@ docker run --rm \
             fi
             sleep 0.5
         done
-        # Best-effort terminate; bridge may have already exited from EOF.
-        kill -TERM "$ENTRY_PID" 2>/dev/null || true
-        sleep 1
-        kill -KILL "$ENTRY_PID" 2>/dev/null || true
-        # Dump the most recent log so the host can grep for the marker.
-        # On the no-log path, also dump entrypoint output so a pre-Bridge
-        # failure (GPG init, missing binary, exec error) is visible
-        # instead of silently swallowed.
+        # Bridge usually exits on its own from EOF by now. One still
+        # running is stopped here, which is the intended end of the check.
+        # kill succeeds only while the process is alive, so it records
+        # whether this harness sent a signal: the host accepts a TERM/KILL
+        # status (143/137) only then, not from an OOM or external kill.
+        HARNESS_SIGNAL=none
+        # Give Bridge a bounded grace period to exit on its own first, so
+        # a failure it would report just after the marker (a fatal log, a
+        # non-zero exit) is observed rather than pre-empted by our TERM.
+        GRACE_DEADLINE=$(( $(date +%s) + 10 ))
+        while kill -0 "$ENTRY_PID" 2>/dev/null && [ "$(date +%s)" -lt "$GRACE_DEADLINE" ]; do
+            sleep 0.5
+        done
+        # Record the strongest signal this check actually delivered, so a
+        # 143 or 137 from anyone else is not mistaken for our stop.
+        if kill -TERM "$ENTRY_PID" 2>/dev/null; then
+            HARNESS_SIGNAL=term
+            sleep 1
+            if kill -KILL "$ENTRY_PID" 2>/dev/null; then
+                HARNESS_SIGNAL=kill
+            fi
+        fi
+        ENTRY_EXIT=0
+        wait "$ENTRY_PID" || ENTRY_EXIT=$?
+        # Dump the most recent log so the host can grep for the marker,
+        # then the status lines, then the entrypoint output so a failure
+        # outside the log (GPG init, exec error, a Go panic on stderr)
+        # is visible instead of silently swallowed.
         LOG="$(find /data/local/protonmail/bridge-v3/logs -name "*.log" 2>/dev/null | sort | tail -1)"
         if [ -n "$LOG" ]; then
             cat "$LOG"
         else
             echo "NO_BRIDGE_LOG_WRITTEN"
-            echo "--- entrypoint output ---"
-            cat "$ENTRY_OUT" 2>/dev/null || true
         fi
-    ' > "$SMOKE_OUT" 2>&1 || true
+        echo "SMOKE_ENTRYPOINT_EXIT=$ENTRY_EXIT"
+        echo "SMOKE_HARNESS_SIGNAL=$HARNESS_SIGNAL"
+        echo "--- entrypoint output ---"
+        cat "$ENTRY_OUT" 2>/dev/null || true
+    ' > "$SMOKE_OUT" 2>&1 || SMOKE_STATUS=$?
 
-if grep -F 'autoUpdate="false"' "$SMOKE_OUT" >/dev/null; then
-    printf 'AutoUpdate runtime default verified off in built image.\n'
+# Print the first 60 lines of the log and of the entrypoint output, so a
+# long log cannot hide an error that only reached the entrypoint stream.
+smoke_fail() {
+    printf 'ERROR: %s\n' "$1" >&2
+    printf '%s\n' '--- captured output (first 60 lines) ---' >&2
+    awk '
+        !entry && $0 == "--- entrypoint output ---" {
+            entry = 1
+            print "--- entrypoint output (first 60 lines) ---"
+            next
+        }
+        !entry && ++log_lines <= 60 { print }
+        entry && ++entry_lines <= 60 { print }
+    ' "$SMOKE_OUT" >&2
+    exit 1
+}
+
+# Bridge ended as intended: it exited 0, or this check stopped it.
+entrypoint_ended_cleanly() {
+    grep -Fx 'SMOKE_ENTRYPOINT_EXIT=0' "$SMOKE_OUT" >/dev/null && return 0
+    # 143 (TERM) only after the check's TERM landed; 137 (KILL) only
+    # after the check's own KILL landed.
+    if grep -Fx 'SMOKE_ENTRYPOINT_EXIT=143' "$SMOKE_OUT" >/dev/null; then
+        grep -Ex 'SMOKE_HARNESS_SIGNAL=(term|kill)' "$SMOKE_OUT" >/dev/null
+        return
+    fi
+    grep -Fx 'SMOKE_ENTRYPOINT_EXIT=137' "$SMOKE_OUT" >/dev/null &&
+        grep -Fx 'SMOKE_HARNESS_SIGNAL=kill' "$SMOKE_OUT" >/dev/null
+}
+
+# The marker alone is not enough: the run must also have ended the way
+# the check intends, with Bridge exiting 0 or stopped after the marker.
+if [[ "$SMOKE_STATUS" -ne 0 ]]; then
+    smoke_fail "AutoUpdate check container exited with status $SMOKE_STATUS."
 elif grep -F 'autoUpdate="true"' "$SMOKE_OUT" >/dev/null; then
-    printf 'ERROR: AutoUpdate runtime default is true in built image; patch did not take effect.\n' >&2
-    exit 1
-else
-    printf 'ERROR: AutoUpdate marker not found in Bridge log output.\n' >&2
-    printf '--- captured output (first 60 lines) ---\n' >&2
-    head -60 "$SMOKE_OUT" >&2
-    exit 1
+    smoke_fail 'AutoUpdate runtime default is true in built image; patch did not take effect.'
+elif ! grep -F 'autoUpdate="false"' "$SMOKE_OUT" >/dev/null; then
+    smoke_fail 'AutoUpdate marker not found in Bridge log output.'
+elif grep -E 'level="?(fatal|panic)' "$SMOKE_OUT" >/dev/null; then
+    smoke_fail 'Bridge logged a fatal or panic error during the AutoUpdate check.'
+elif ! entrypoint_ended_cleanly; then
+    smoke_fail 'Bridge did not exit cleanly during the AutoUpdate check.'
 fi
+printf 'AutoUpdate runtime default verified off in built image.\n'
 
 printf 'Proton Bridge smoke checks passed.\n'
