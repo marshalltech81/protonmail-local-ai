@@ -232,23 +232,52 @@ class TestPromptEvidenceBudget:
         assert "leading thread text" not in texts[0]
 
     def test_quoted_duplicate_chunk_is_dropped_before_spending_budget(self):
-        """A reply quoting an earlier message produces a chunk whose text
-        matches the original once quote markers and spacing are ignored."""
+        """A reply quoting an earlier message in the same thread produces a
+        chunk whose text matches the original once quote markers and
+        spacing are ignored."""
         original = "Meeting moved to Thursday.\nBring the signed form."
         quoted = "> Meeting moved to   Thursday.\n>  Bring the signed form.\n"
-        first = _result(evidence_chunks=[_chunk(original, index=0)])
-        second = _result(
+        thread = _result(
             evidence_chunks=[
+                _chunk(original, index=0),
                 _chunk(quoted, index=3, message_id="m2"),
                 _chunk("REPLY: confirmed for Thursday", index=4, message_id="m2"),
             ]
         )
-        texts, coverage = _build_evidence([first, second], 10_000)
-        assert "Bring the signed form" in texts[0]
-        assert "Bring the signed form" not in texts[1]
-        assert "REPLY: confirmed for Thursday" in texts[1]
+        [text], coverage = _build_evidence([thread], 10_000)
+        assert text.count("Bring the signed form") == 1
+        assert "REPLY: confirmed for Thursday" in text
         assert coverage.duplicates == 1
         assert coverage.omitted == 0
+
+    def test_the_same_short_passage_is_kept_in_every_thread(self):
+        """Review round 1: dedup across threads emptied a lower-ranked
+        thread whose only evidence was a short reply another thread also
+        held ("Approved"), and reported nothing lost."""
+        threads = [
+            _result(evidence_chunks=[_chunk("Approved.", message_id=f"m{i}")]) for i in range(2)
+        ]
+        texts, coverage = _build_evidence(threads, 10_000)
+        assert all("Approved." in text for text in texts)
+        assert coverage.duplicates == 0
+        assert _coverage_note(coverage) == ""
+
+    def test_a_duplicate_of_a_cut_original_is_counted_as_left_out(self):
+        """Review round 1: a duplicate dropped because its original is in
+        the prompt must not vanish silently when the budget cuts that
+        original."""
+        original = "Deposit due Friday. " + "terms " * 100
+        thread = _result(
+            evidence_chunks=[
+                _chunk(original, index=0),
+                _chunk("> " + original, index=5, message_id="m2"),
+            ]
+        )
+        _texts, coverage = _build_evidence([thread], 120)
+        assert coverage.truncated == 1
+        assert coverage.omitted == 1
+        assert coverage.duplicates == 0
+        assert _coverage_note(coverage)
 
     def test_counts_omitted_and_truncated_passages(self):
         r = _result(

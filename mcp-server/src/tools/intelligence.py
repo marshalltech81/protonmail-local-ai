@@ -584,7 +584,7 @@ class EvidenceCoverage:
 
     omitted: int = 0  # passages left out entirely for budget
     truncated: int = 0  # passages cut short to fit
-    duplicates: int = 0  # passages dropped as repeats of one already shown
+    duplicates: int = 0  # passages dropped as repeats of one shown in full
     threads_without_evidence: int = 0  # threads whose every passage was left out
 
 
@@ -657,33 +657,40 @@ def _build_evidence(threads: list[ThreadResult], budget: int) -> tuple[list[str]
        provenance header. A thread without chunks falls back to its
        accumulated ``body_text`` (capped at ``THREAD_BODY_TEXT_MAX_TOKENS``
        by the indexer), then to its ``snippet``.
-    2. Drop a chunk whose normalized text repeats one already chosen
-       earlier in the prompt (a quoted reply), before it spends budget.
+    2. Drop a chunk whose normalized text repeats an earlier chunk of the
+       same thread (a quoted reply), before it spends budget. Dedup stays
+       within a thread: two threads holding the same short reply
+       ("Approved.") each keep it.
     3. Split ``budget`` across threads with ``_allocate_budget``.
     4. Spend each thread's share passage by passage; the passage that
        crosses it is cut (its header then states the kept range) and the
        rest are left out. Everything not shown is counted in the
-       returned ``EvidenceCoverage``.
+       returned ``EvidenceCoverage``; a dropped duplicate counts as left
+       out when its original was not rendered in full.
 
     Returns one rendered string per thread, in input order.
     """
     coverage = EvidenceCoverage()
-    seen: set[str] = set()
     pieces_by_thread: list[list[tuple[ChunkResult | None, str]]] = []
+    # Per thread, the piece index of each dropped duplicate's original.
+    duplicates_by_thread: list[list[int]] = []
     for thread in threads:
         pieces: list[tuple[ChunkResult | None, str]] = []
+        duplicate_of: list[int] = []
+        seen: dict[str, int] = {}
         for candidate in thread.evidence_chunks:
             key = _normalized_passage(candidate.text)
             if key in seen:
-                coverage.duplicates += 1
+                duplicate_of.append(seen[key])
                 continue
-            seen.add(key)
+            seen[key] = len(pieces)
             pieces.append((candidate, candidate.text))
         if not thread.evidence_chunks:
             fallback = thread.body_text or thread.snippet or ""
             if fallback:
                 pieces.append((None, fallback))
         pieces_by_thread.append(pieces)
+        duplicates_by_thread.append(duplicate_of)
 
     # Each thread's full cost: headers, texts and the "\n\n" joins.
     demands = [
@@ -693,9 +700,12 @@ def _build_evidence(threads: list[ThreadResult], budget: int) -> tuple[list[str]
     allocation = _allocate_budget(demands, budget)
 
     rendered: list[str] = []
-    for pieces, share in zip(pieces_by_thread, allocation, strict=True):
+    for pieces, duplicate_of, share in zip(
+        pieces_by_thread, duplicates_by_thread, allocation, strict=True
+    ):
         parts: list[str] = []
         used = 0
+        complete = 0  # pieces rendered in full; later ones were cut or left out
         for k, (chunk, text) in enumerate(pieces):
             separator = 2 if parts else 0
             header_len = _piece_header_len(chunk)
@@ -706,6 +716,8 @@ def _build_evidence(threads: list[ThreadResult], budget: int) -> tuple[list[str]
             if len(text) > room:
                 text = text[:room]
                 coverage.truncated += 1
+            else:
+                complete += 1
             if chunk is None:
                 parts.append(text)
             else:
@@ -716,6 +728,11 @@ def _build_evidence(threads: list[ThreadResult], budget: int) -> tuple[list[str]
             used += separator + header_len + len(text)
         if pieces and not parts:
             coverage.threads_without_evidence += 1
+        for original in duplicate_of:
+            if original < complete:
+                coverage.duplicates += 1
+            else:
+                coverage.omitted += 1
         rendered.append("\n\n".join(parts))
     return rendered, coverage
 
