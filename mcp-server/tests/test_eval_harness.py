@@ -112,8 +112,12 @@ class TestLoadQueries:
         [
             {"expected_thread_ids": ["t1"], "required_evidence": [["t1"]]},
             {"required_evidence": [["t1"], []]},
+            {"required_evidence": ["flight-id", "hotel-id"]},
+            {"required_evidence": [["t1", ""]]},
+            {"required_evidence": [["t1", 7]]},
+            {"required_evidence": "t1"},
         ],
-        ids=["both-keys", "empty-group"],
+        ids=["both-keys", "empty-group", "flat-list", "empty-id", "non-string-id", "not-a-list"],
     )
     def test_ambiguous_or_unsatisfiable_evidence_is_rejected(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, row: dict

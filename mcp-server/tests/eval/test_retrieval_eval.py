@@ -120,10 +120,19 @@ def _evidence_groups(row: dict) -> list[list[str]]:
             raise ValueError(
                 f"{row['id']}: give required_evidence or expected_thread_ids, not both"
             )
-        groups = [list(group) for group in row["required_evidence"]]
-        if not all(groups):
+        raw_groups = row["required_evidence"]
+        # Each group must itself be a list of thread IDs: a flat list of
+        # IDs would otherwise split each ID into characters and pass.
+        if not isinstance(raw_groups, list) or not all(
+            isinstance(group, list) and all(isinstance(t, str) and t for t in group)
+            for group in raw_groups
+        ):
+            raise ValueError(
+                f"{row['id']}: required_evidence must be a list of lists of thread IDs"
+            )
+        if not all(raw_groups):
             raise ValueError(f"{row['id']}: required_evidence has an empty group")
-        return groups
+        return [list(group) for group in raw_groups]
     expected = list(row.get("expected_thread_ids", []))
     return [expected] if expected else []
 
