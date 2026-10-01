@@ -26,7 +26,8 @@ log = logging.getLogger("mcp.sqlite")
 
 
 class InvalidFilterError(ValueError):
-    """A date filter the caller supplied could not be parsed.
+    """A filter or query argument the caller supplied was rejected (a
+    date, a cursor, the ``query_messages`` text).
 
     The message quotes the rejected value so the caller learns why, which
     means it must never be logged: tool handlers catch this and log only
@@ -641,14 +642,14 @@ def _encode_cursor(digest: str, last: MessageRecord, offset: int) -> str:
 
 def _decode_cursor(cursor: str, digest: str) -> tuple[str, str, int]:
     """Return ``(sent_at, message_id, offset)`` of the last row already
-    returned. Raises ``ValueError`` on a malformed cursor or one issued
-    for different predicates (keyset positions only mean something within
+    returned. Raises ``InvalidFilterError`` (a ``ValueError``) on a
+    malformed cursor or one issued for different predicates (keyset positions only mean something within
     the same filtered ordering)."""
     try:
         raw = base64.urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4))
         data = json.loads(raw)
     except ValueError as exc:
-        raise ValueError(_INVALID_CURSOR) from exc
+        raise InvalidFilterError("cursor", _INVALID_CURSOR) from exc
     if not (
         isinstance(data, dict)
         and data.get("v") == 1
@@ -658,11 +659,12 @@ def _decode_cursor(cursor: str, digest: str) -> tuple[str, str, int]:
         and isinstance(data.get("o"), int)
         and data["o"] >= 0
     ):
-        raise ValueError(_INVALID_CURSOR)
+        raise InvalidFilterError("cursor", _INVALID_CURSOR)
     if data["q"] != digest:
-        raise ValueError(
+        raise InvalidFilterError(
+            "cursor",
             "cursor was issued for different filters; pass the same filters "
-            "as the call that returned it, or restart without a cursor"
+            "as the call that returned it, or restart without a cursor",
         )
     return data["s"], data["m"], data["o"]
 
@@ -2421,9 +2423,9 @@ class Database:
         if text:
             terms = _text_terms(text)
             if not terms:
-                raise ValueError("text must contain at least one word")
+                raise InvalidFilterError("text", "text must contain at least one word")
             if len(terms) > _MAX_TEXT_TERMS:
-                raise ValueError(f"text supports at most {_MAX_TEXT_TERMS} words")
+                raise InvalidFilterError("text", f"text supports at most {_MAX_TEXT_TERMS} words")
             # One subquery per word, so the words may fall in different
             # chunks of the same message. Each is a quoted FTS phrase;
             # unicode61 never keeps a quote inside a token, but doubling

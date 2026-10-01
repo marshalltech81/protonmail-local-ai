@@ -12,6 +12,7 @@ from mcp.types import CallToolResult
 
 from ..lib.security import log_tool_call
 from ..lib.sqlite import (
+    InvalidFilterError,
     MessageBody,
     MessageRecord,
     Participant,
@@ -569,11 +570,13 @@ def register_retrieval_tools(server, db):
 
         try:
             page = await asyncio.to_thread(db.query_messages, **args, limit=limit, cursor=cursor)
-        except ValueError as e:
+        except InvalidFilterError as e:
             # Validation messages quote the offending input (an invalid
             # date echoes its text), which log_tool_call deliberately
-            # withheld. Return it to the caller; log only that it failed.
-            log.warning("query_messages rejected invalid input (date_from/date_to/text/cursor)")
+            # withheld. Return it to the caller; log only the field. Any
+            # other ValueError (converting stored rows) can quote mail and
+            # falls through to the type-only branch (#257).
+            log.warning("query_messages rejected invalid input (%s)", e.field_name)
             raise ToolError(f"Error: {e}") from e
         except Exception as e:
             log.error("query_messages error: %s", type(e).__name__)
