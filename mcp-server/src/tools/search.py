@@ -132,9 +132,8 @@ def register_search_tools(
         ``ask_mailbox`` (synthesized answers), or
         ``extract_from_emails`` (structured fields) — neither this tool nor
         get_thread surfaces attachment chunks. Never invent a
-        thread_id from the subject —
-        IDs are opaque values returned only from this tool,
-        list_threads, or get_message.
+        thread_id from the subject — IDs are opaque; pass only a
+        ``Thread ID`` that a tool result returned.
 
         Args:
             query: Natural language or keyword query
