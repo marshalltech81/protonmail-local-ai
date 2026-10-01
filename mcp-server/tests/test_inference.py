@@ -711,3 +711,76 @@ class TestOpenAIRedirectPolicy:
         assert asyncio.run(backend.complete("synthetic", _MAIL_MARKER)) == "done"
         assert len(seen) == 2
         assert _MAIL_MARKER in seen[1].content.decode()
+
+
+def _mock_transport_backend(backend_cls, base_url: str, body: dict):
+    """A real SDK backend whose HTTP transport returns ``body`` (HTTP 200)."""
+    import httpx2
+
+    backend = backend_cls(
+        base_url=base_url, model="synthetic", api_key="k", max_tokens=16, timeout_secs=5.0
+    )
+    http_client = backend.client._client
+    http_client._transport = httpx2.MockTransport(lambda _req: httpx2.Response(200, json=body))
+    http_client._mounts = {}
+    return backend
+
+
+# Content that is not usable answer text. The OpenAI SDK does not
+# validate ``message.content`` on a 200, so each reaches ``complete()``.
+_MALFORMED_CONTENT = [
+    pytest.param({"synthetic": _MAIL_MARKER}, id="dict"),
+    pytest.param([_MAIL_MARKER], id="list"),
+    pytest.param(7, id="int"),
+    pytest.param("", id="blank"),
+    pytest.param("   \n\t", id="whitespace"),
+]
+
+
+class TestOpenAIContentValidation:
+    """#321: ``complete()`` must return non-blank text, not whatever JSON
+    value an OpenAI-compatible provider put in ``message.content``."""
+
+    def _backend(self, content, finish_reason="stop"):
+        body = _chat_completion_json()
+        body["choices"][0]["message"]["content"] = content
+        body["choices"][0]["finish_reason"] = finish_reason
+        return _mock_transport_backend(_OpenAIBackend, "http://h.invalid/v1", body)
+
+    @pytest.mark.parametrize("content", _MALFORMED_CONTENT)
+    def test_malformed_content_is_an_error(self, content, caplog):
+        backend = self._backend(content)
+        with pytest.raises(RuntimeError) as err:
+            asyncio.run(backend.complete("sys", "user"))
+        assert not isinstance(err.value, InferenceTruncatedError)
+        assert "(mode=openai)" in str(err.value)
+        assert _MAIL_MARKER not in str(err.value)
+        assert _MAIL_MARKER not in caplog.text
+
+    @pytest.mark.parametrize("content", [{"synthetic": _MAIL_MARKER}, [_MAIL_MARKER], 7])
+    def test_non_text_truncated_content_is_not_a_partial_answer(self, content):
+        backend = self._backend(content, finish_reason="length")
+        with pytest.raises(RuntimeError) as err:
+            asyncio.run(backend.complete("sys", "user"))
+        assert not isinstance(err.value, InferenceTruncatedError)
+        assert _MAIL_MARKER not in str(err.value)
+
+    def test_text_content_is_returned(self):
+        assert asyncio.run(self._backend(" answer ").complete("sys", "user")) == " answer "
+
+
+class TestAnthropicContentValidation:
+    """#321: a response whose text blocks hold only whitespace is not an
+    answer either."""
+
+    def _backend(self, text):
+        body = _anthropic_message_json()
+        body["content"] = [{"type": "text", "text": text}]
+        return _mock_transport_backend(_AnthropicBackend, "http://h.invalid", body)
+
+    def test_whitespace_only_text_is_an_error(self):
+        with pytest.raises(RuntimeError, match="no text"):
+            asyncio.run(self._backend("   \n").complete("sys", "user"))
+
+    def test_text_is_returned(self):
+        assert asyncio.run(self._backend("answer").complete("sys", "user")) == "answer"
