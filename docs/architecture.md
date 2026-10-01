@@ -355,8 +355,10 @@ intelligence tools (`ask_mailbox`, `extract_from_emails`) feed those
 matched chunks to the LLM with `[chunk N chars X-Y]` provenance
 headers rather than the truncated accumulated body. `ask_mailbox`
 labels each passage (`E1`, `E2` ...) with its message's claimant ID,
-sender and sent date, and checks the labels its answer cites against
-the passages supplied (see `docs/mcp-tools.md`).
+sender and sent date, and checks the labels its answer cites, that
+each statement cites a passage or is marked unsupported or uncertain,
+and that its quotes appear in the indexed text of the passages cited
+(see `docs/mcp-tools.md`).
 
 ### Chunk write idempotency
 
