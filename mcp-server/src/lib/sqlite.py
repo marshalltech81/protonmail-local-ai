@@ -11,10 +11,12 @@ import logging
 import math
 import re
 import sqlite3
+import unicodedata
 from contextlib import closing
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from email.utils import parseaddr
+from itertools import groupby
 from pathlib import Path
 from urllib.parse import quote
 
@@ -155,6 +157,15 @@ def _matches_participant(result, participant_lower: str) -> bool:
     return _addr_matches(result.participants, participant_lower)
 
 
+def _is_fts_query_token_char(ch: str) -> bool:
+    """Whether ``ch`` belongs inside a sanitized query token: a regex word
+    character (alphanumeric or ``_``), one of ``@ . -``, or a combining
+    mark. The regex word class excludes marks, but unicode61 keeps them in
+    the word, so splitting there turned a decomposed ``résumé`` (``e``
+    followed by U+0301) into the unrelated terms ``re`` and ``sume``."""
+    return ch.isalnum() or ch in "_@.-" or unicodedata.category(ch).startswith("M")
+
+
 def _sanitize_fts_query(query: str) -> str:
     """Build a safe FTS5 MATCH expression from arbitrary user input.
 
@@ -166,11 +177,17 @@ def _sanitize_fts_query(query: str) -> str:
     like their query "doesn't match anything."
 
     The sanitizer extracts word-like tokens (keeping ``@ . -`` so email
-    addresses and hostnames survive), quotes each one as an FTS phrase, and
+    addresses and hostnames survive, and combining marks so a decomposed
+    accent stays in its word), quotes each one as an FTS phrase, and
     joins with ``OR`` so any-term match is preserved — the typical
-    search-box expectation.
+    search-box expectation. One pass over the characters, so the work is
+    linear in the query length.
     """
-    tokens = re.findall(r"[\w@.\-]+", query or "")
+    tokens = [
+        "".join(chars)
+        for is_token, chars in groupby(query or "", key=_is_fts_query_token_char)
+        if is_token
+    ]
     if not tokens:
         return ""
     return " OR ".join(f'"{t}"' for t in tokens)

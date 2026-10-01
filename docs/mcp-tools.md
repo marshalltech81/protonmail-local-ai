@@ -102,7 +102,14 @@ drive an unbounded query against the index.
   colons, and unbalanced quotes are stripped so natural search strings
   (``"Who sent the invoice?"``) run a valid ``MATCH`` instead of
   silently returning no results. Email addresses and hostnames are
-  preserved as single tokens.
+  preserved as single tokens, and combining marks stay inside their
+  word, so a decomposed accent (`e` + U+0301) matches like the
+  precomposed letter. Known gap: the indexes tokenize with unicode61
+  `remove_diacritics=1`, which does not fold a precomposed letter
+  carrying two diacritics (Vietnamese `ệ`) and does not relate composed
+  and decomposed spellings of scripts it does not fold (Hangul), so
+  those spellings match only the form the mail was indexed in until an
+  index-side normalization and reindex.
 - If FTS5 still rejects a sanitized query, search falls back to a
   ``LIKE`` scan over subject / body / participants so recall is
   preserved.

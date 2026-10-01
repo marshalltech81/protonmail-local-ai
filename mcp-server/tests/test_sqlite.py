@@ -1202,6 +1202,123 @@ class TestFtsSanitization:
         assert _sanitize_fts_query("") == ""
 
 
+def _nfd(text: str) -> str:
+    import unicodedata
+
+    return unicodedata.normalize("NFD", text)
+
+
+# (indexed text, query) pairs every keyword lane must match. Combining
+# marks are word characters to unicode61, so the sanitizer must keep them
+# inside a token rather than split the word around them.
+_COMBINING_MARK_CASES = [
+    ("r\u00e9sum\u00e9", "r\u00e9sum\u00e9"),
+    ("r\u00e9sum\u00e9", _nfd("r\u00e9sum\u00e9")),
+    (_nfd("r\u00e9sum\u00e9"), "r\u00e9sum\u00e9"),
+    ("na\u00efve", _nfd("na\u00efve") + "?"),
+    ("Vi\u1ec7t", "Vi\u1ec7t"),
+    (_nfd("Vi\u1ec7t"), _nfd("Vi\u1ec7t")),
+    # Known gap, not a query-side one: the indexes tokenize with
+    # unicode61 remove_diacritics=1, which leaves a precomposed letter
+    # with two diacritics (U+1EC7) unfolded while its decomposed spelling
+    # folds to "viet". Matching across the two needs index-side
+    # normalization or remove_diacritics=2, i.e. a reindex.
+    pytest.param(
+        ("Vi\u1ec7t", _nfd("Vi\u1ec7t")),
+        marks=pytest.mark.xfail(strict=True, reason="needs index-side folding (reindex)"),
+    ),
+    pytest.param(
+        (_nfd("Vi\u1ec7t"), "Vi\u1ec7t"),
+        marks=pytest.mark.xfail(strict=True, reason="needs index-side folding (reindex)"),
+    ),
+    # Hangul is not folded by unicode61 at all, so composed syllables and
+    # their conjoining jamo are different tokens: the same gap.
+    pytest.param(
+        ("\ud55c\uad6d", _nfd("\ud55c\uad6d")),
+        marks=pytest.mark.xfail(strict=True, reason="needs index-side folding (reindex)"),
+    ),
+    # No precomposed form exists for q + combining tilde.
+    ("q\u0303uux", "q\u0303uux"),
+    # Devanagari vowel signs and virama are marks (Mn / Mc).
+    ("\u0939\u093f\u0928\u094d\u0926\u0940", "\u0939\u093f\u0928\u094d\u0926\u0940"),
+    ("jos\u00e9@example.com", _nfd("jos\u00e9@example.com")),
+]
+
+
+class TestFtsSanitizationCombiningMarks:
+    def test_marks_stay_inside_their_token(self):
+        from src.lib.sqlite import _sanitize_fts_query
+
+        assert _sanitize_fts_query(_nfd("r\u00e9sum\u00e9 cv")) == (
+            '"' + _nfd("r\u00e9sum\u00e9") + '" OR "cv"'
+        )
+        hindi = "\u0939\u093f\u0928\u094d\u0926\u0940"
+        assert _sanitize_fts_query(hindi) == f'"{hindi}"'
+
+    def test_token_characters_unchanged_outside_marks(self):
+        # Differential over every code point: apart from combining marks,
+        # a character is a token character exactly when the previous
+        # ``[\w@.\-]`` class said so.
+        import re
+        import unicodedata
+
+        from src.lib.sqlite import _is_fts_query_token_char
+
+        old = re.compile(r"[\w@.\-]")
+        diverging = [
+            cp
+            for cp in range(0x110000)
+            if not unicodedata.category(chr(cp)).startswith("M")
+            and bool(old.fullmatch(chr(cp))) != _is_fts_query_token_char(chr(cp))
+        ]
+        assert diverging == []
+
+    def test_lone_mark_query_runs(self, seeded_db: Database):
+        # A token of marks alone tokenizes to nothing in FTS; the query
+        # must still run rather than raise.
+        assert seeded_db.keyword_search("\u0301") == []
+
+    @pytest.fixture(params=_COMBINING_MARK_CASES, ids=ascii)
+    def lanes_db(self, request, tmp_path):
+        from tests.conftest import _insert_attachment, _insert_message, _insert_thread
+
+        indexed, query = request.param
+        conn, path = _open_built_db_conn(tmp_path, "marks.db")
+        _insert_thread(conn, thread_id="t-thread", subject=indexed, participants=[])
+        _insert_message(
+            conn,
+            message_id="m1",
+            thread_id="t-chunk",
+            sent_at="2024-01-01T00:00:00+00:00",
+            body=f"about {indexed} here",
+        )
+        _insert_attachment(
+            conn,
+            message_id="m1",
+            thread_id="t-chunk",
+            attachment_id="a1",
+            filename=f"{indexed}.pdf",
+        )
+        conn.close()
+        return Database(str(path)), query
+
+    def test_thread_lane(self, lanes_db):
+        db, query = lanes_db
+        assert [r.thread_id for r in db._thread_keyword_search(query, 10)] == ["t-thread"]
+
+    def test_chunk_lane(self, lanes_db):
+        db, query = lanes_db
+        assert [r.thread_id for r in db._chunk_keyword_search(query, 10)] == ["t-chunk"]
+
+    def test_attachment_lane(self, lanes_db):
+        db, query = lanes_db
+        assert [r.thread_id for r in db._attachment_keyword_search(query, 10)] == ["t-chunk"]
+
+    def test_search_attachments(self, lanes_db):
+        db, query = lanes_db
+        assert [a.filename for a in db.search_attachments(query)] != []
+
+
 class TestKeywordSearchSanitization:
     def test_punctuation_query_does_not_crash(self, seeded_db: Database):
         """A natural-language query full of punctuation previously returned
