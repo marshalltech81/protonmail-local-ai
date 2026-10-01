@@ -34,6 +34,7 @@ from src.tools.brief import (
 )
 from src.tools.intelligence import (
     _REPAIR_INSTRUCTION,
+    _REPAIR_REASONS,
     PER_THREAD_CHAR_BUDGET,
     REPAIR_RESERVE_CHARS,
     _build_evidence,
@@ -166,9 +167,11 @@ class TestPromptBudget:
 
     def test_repair_reserve_covers_every_repair_instruction(self):
         """The reserve must hold the longest repair suffix any tool appends."""
-        ask = max(
-            len(_REPAIR_INSTRUCTION.format(reason=r))
-            for r in ("cited evidence labels that no passage header has", "cited no evidence label")
+        # Every reason at once, each with a five-digit count.
+        ask = len(
+            _REPAIR_INSTRUCTION.format(
+                reason="; ".join(r.format(n=99999) for r in _REPAIR_REASONS.values())
+            )
         )
         every_brief = [
             BriefCitationProblem(section="brief", item=0, kind=kind, labels=[])

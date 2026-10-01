@@ -598,17 +598,61 @@ is read from the index with its display name and address each cut to
 1,000 characters; the structured citation's `sender` is cut at 500.
 
 The model is asked to cite the label of the passage supporting each
-statement inline (`[E2]`, `[E1, E3]`), to mark unsupported statements
-`[unsupported]`, and to open with "Not found in the provided emails"
-when the passages do not answer the question. After generation the
-server checks the cited labels against the passages it supplied: a
-label no supplied passage has is an `unknown_labels` problem, and an
-answer that cites nothing (and does not open with that phrase) is a
-`no_citations` problem. A failed check gets exactly one repair call:
-the same prompt plus a fixed corrective instruction after the question
-(the rejected answer is not replayed). Its answer is checked again and
-returned with whatever problems remain. An answer cut off at
-`INFERENCE_MAX_TOKENS` is not repaired. Only counts are logged.
+statement inline (`[E2]`, `[E1, E3]`), to mark statements the passages
+do not support `[unsupported]` (or only partly support `[uncertain]`),
+to quote only words copied exactly from the passage a statement cites,
+and to open with "Not found in the provided emails" when the passages
+do not answer the question. After generation the server checks the
+answer against the passages it supplied:
+
+- **Labels.** A label no supplied passage has is an `unknown_labels`
+  problem, and an answer that cites nothing (and does not open with
+  that phrase) is a `no_citations` problem.
+- **Statements.** The answer is cut into statements at line breaks and
+  at sentence ends followed by whitespace (a label written after the
+  full stop, as in `Moved. [E2]`, belongs to the sentence before it; a
+  closing quote, parenthesis or Markdown `*`, `_` or backtick may sit
+  between the full stop and the space; a full stop inside a quotation
+  does not end a statement). The full-width `。！？` end a statement
+  without a following space. A label or `[unsupported]` written inside
+  a quotation is quoted text, not a citation or a mark. A statement
+  that cites no supplied passage and is not marked `[unsupported]` or
+  `[uncertain]` is an `uncited_statements` problem, reported only when
+  the answer cites something (otherwise it is `no_citations`).
+  Markdown headings (`#` to `######` and a space), lines ending in a
+  colon, fragments of fewer than three words (each kana or CJK
+  ideograph counts as a word) and every statement of a not-found
+  answer are not checked.
+- **Quotes.** Text of three or more words in double quotes (straight
+  or curly, on one line, paired left to right) is a quotation. A pair
+  whose text starts or ends with a space is the outer side of a nested
+  quotation or a stray mark (`27"`): it is listed as `not_checked` and
+  its text is not treated as quoted, so nested quotations are never
+  verified by their outer fragments. A quotation is searched in the text
+  shown to the model for the passages its statement cites (with
+  delimiter tags escaped as the prompt escapes them): the comparison
+  collapses whitespace, treats curly and straight quote marks alike,
+  ignores trailing `.,;:` and lets an ellipsis (`...` or `…`) skip
+  text, but is otherwise exact (case included) and matches whole words
+  only (`"on Fri"` does not match "on Friday"; kana and CJK ideographs
+  need no word boundary). A quote found
+  there is `verified`; one found only in another supplied passage is
+  `misattributed` (a `misattributed_quotes` problem naming where it was
+  found); one found nowhere is `unmatched` (an `unmatched_quotes`
+  problem). A quote in a statement that cites nothing is `uncited` and
+  is not searched. At most 20 quotes per answer of at most 1,000
+  characters each are searched, each in each supplied passage at most
+  once; further or longer quotes are `not_checked`. The text compared
+  is the indexed text (extracted and normalized by the indexer), not
+  the raw message, so a verified quote shows the words are in the
+  index, not that they are the exact bytes of the MIME source.
+
+Any problem gets exactly one repair call: the same prompt plus a fixed
+corrective instruction after the question, naming the problem kinds
+with counts only (the rejected answer is not replayed). Its answer is
+checked again and returned with whatever problems remain. An answer
+cut off at `INFERENCE_MAX_TOKENS` is not repaired. Only counts are
+logged.
 
 Structured output:
 
@@ -616,20 +660,26 @@ Structured output:
 |---|---|
 | `answer` | The model's answer with its inline labels |
 | `citations` | One entry per valid cited label, in first-cited order: `label`, `chunk_id`, `claimant_id`, `message_id`, `thread_id`, `sender`, `sent_at`, `source` (`body`, `attachment` or `thread`), `attachment_id`, `attachment_filename`, `char_start`, `char_end` (end of the part shown to the model) |
-| `citation_problems` | `[]` when the check passed, else entries `{kind: "unknown_labels" \| "no_citations", labels}` |
+| `statements` | The answer cut into statements: `text`, `labels` (the supplied passages it cites) and `status` (`cited`, `unsupported`, `uncertain`, `uncited`, `invalid` for only unknown labels, or `not_checked`) |
+| `quotes` | Each quotation: `text` (cut at 1,000 characters), `statement` (index into `statements`), `status` (`verified`, `misattributed`, `unmatched`, `uncited`, `not_checked`) and `found_in` (labels of the passages it was found in) |
+| `citation_problems` | `[]` when the check passed, else entries `{kind, labels, statements, quotes}`, `kind` one of `unknown_labels`, `no_citations`, `uncited_statements`, `unmatched_quotes`, `misattributed_quotes`; `statements` and `quotes` are indexes into those lists, and `labels` holds the unknown labels or, for `misattributed_quotes`, the passages the quotes were found in |
 | `repair_attempted` | Whether the one repair call was made |
 | `threads` | The threads searched, best match first (the `search_emails` thread shape) |
 
 The prose in `content` is the answer, a `Citations:` list, any
-citation-check notice, and the `Sources searched:` list. To audit a
+citation-check lines (fixed text with counts and labels, never the
+model's words), a `Quote check:` count when the answer quotes, and
+the `Sources searched:` list. To audit a
 citation, call `get_evidence` with the same question and the
 citation's `thread_id`: the cited `chunk_id` is among the returned
 chunks (pass `limit` up to 50 for a long thread). A `thread` citation
 has no chunk; read it with `get_thread`.
 
-The check is about labels only. A valid label does not show that the
-passage supports the statement, and no quote is compared with the
-indexed text. A passage whose text imitates a header (`[E7 | from
+The check is about labels, statement coverage and quoted words, not
+meaning. A valid label or a verified quote does not show that the
+passage supports the statement, and statement splitting is a heuristic:
+an abbreviation followed by a space ("Oct. 5") can split a sentence and
+flag its first half as uncited. A passage whose text imitates a header (`[E7 | from
 ...]`) stays inside its untrusted block, and the structured citation
 for a label comes from the server's own map, not from text the model
 read; a label that exists only in mail text is reported as unknown.

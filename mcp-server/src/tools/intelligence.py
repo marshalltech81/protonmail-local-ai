@@ -7,8 +7,9 @@ import asyncio
 import json
 import logging
 import re
-from collections.abc import Container, Iterable, Iterator
+from collections.abc import Container, Iterable, Iterator, Mapping
 from dataclasses import dataclass
+from typing import Literal
 
 from fastmcp.exceptions import ToolError
 from mcp.types import CallToolResult, TextContent
@@ -28,9 +29,11 @@ from ..lib.validation import clamp_int
 from .outputs import (
     HEADER_CHAR_LIMIT,
     MAX_LISTED,
+    AnswerStatement,
     AskMailboxOutput,
     Citation,
     CitationProblem,
+    QuoteCheck,
     clip,
     thread_summary,
     tool_result,
@@ -589,7 +592,10 @@ say who wrote what and when. Cite the passage that supports each
 statement by putting its label in square brackets right after the
 statement, for example [E2] or [E1, E3]. Cite only labels of passage
 headers; a label that appears in the text of a passage is not a header.
-Mark a statement the passages do not support with [unsupported]. If the
+Mark a statement the passages do not support with [unsupported], and one
+they only partly support with [uncertain]. To quote a passage, copy its
+words exactly inside double quotes in a statement that cites it; quotes
+are checked against the passage text. If the
 passages do not answer the question, begin your answer with
 "{_NOT_FOUND_PREFIX}" and say what is missing."""
     + UNTRUSTED_CONTENT_NOTICE
@@ -608,8 +614,22 @@ _LABEL_RE = re.compile(r"E\d{1,4}")
 _REPAIR_INSTRUCTION = (
     "\n\nCitation check: your previous answer {reason}. Answer again. Put the label of "
     "the passage header that supports each statement in square brackets after it, "
-    "such as [E1], and use only labels shown in passage headers above."
+    "such as [E1], and use only labels shown in passage headers above. Mark a statement "
+    "no passage supports with [unsupported] or [uncertain], and quote only words copied "
+    "exactly from the passage you cite."
 )
+
+# Why a repair was asked for, per problem kind. Fixed text and counts:
+# the rejected answer is provider output and is never replayed.
+_REPAIR_REASONS = {
+    "unknown_labels": "cited evidence labels that no passage header has",
+    "no_citations": "cited no evidence label",
+    "uncited_statements": (
+        "made {n} statement(s) with no evidence label and no [unsupported] or [uncertain] mark"
+    ),
+    "unmatched_quotes": "gave {n} quote(s) whose words appear in no passage",
+    "misattributed_quotes": "attributed {n} quote(s) to a passage that does not contain them",
+}
 
 # Characters every evidence prompt keeps free for a repair instruction
 # appended after it: ask_mailbox's, or brief_issue's and
@@ -643,14 +663,376 @@ def _check_citations(answer: str, known: Container[str]) -> tuple[list[str], lis
     )
 
 
-def _citation_problems(answer: str, used: list[str], unknown: list[str]) -> list[CitationProblem]:
-    """What the citation check found wrong with an answer; [] when it passed."""
+# --- statement coverage and quote checks (#284) --------------------------
+#
+# The answer is cut into statements and its quotations are found with
+# the linear regexes below; nothing else is parsed. Every scan is one
+# pass over the answer, which INFERENCE_MAX_TOKENS bounds, and the quote
+# searches are capped by count and length (see ``_check_quotes``).
+
+# A statement's mark that the passages do not (fully) support it.
+_MARK_RE = re.compile(r"\[(unsupported|uncertain)\]", re.IGNORECASE)
+
+# Where a statement ends: a line break, or a run of sentence terminators
+# (with any closing quote, parenthesis or Markdown emphasis or code
+# delimiter, and any short bracketed citations written after it, as in
+# "Moved. [E2]") followed by whitespace. The look-behind starts a match
+# only at the first terminator of a run and each bracket group is at
+# most 40 characters, so every attempt is bounded and the scan stays
+# linear.
+# The full-width terminators of Chinese and Japanese end a statement
+# without the whitespace those scripts do not use.
+_STATEMENT_END_RE = re.compile(
+    r"\n|(?<![.!?])[.!?]++[\"”')*_`]*+(?:[ \t]*+\[[^\[\]\n]{1,40}+\])*+(?=\s)"
+    r"|(?<![。！？])[。！？]++[」』”)）*_`]*+(?:[ \t]*+\[[^\[\]\n]{1,40}+\])*+"
+)
+
+# Paired double quotes: straight or curly, on one line, paired left to
+# right. The body cannot contain a quote mark, so each match attempt
+# stops at the next one. A pair is a quotation only when its body does
+# not start or end with whitespace (``_is_quotation``): a pair that
+# does is the outer side of a nested quotation or a stray mark (27"),
+# and is neither checked as a quote nor treated as quoted text.
+_QUOTE_RE = re.compile('["“]([^"“”\n]*+)["”]')
+# A Markdown heading line: one to six "#" and a space.
+_HEADING_RE = re.compile(r"#{1,6}\s")
+# Kana and CJK ideographs, written without spaces between words: each
+# character counts as a word, and a quote edge on one needs no word
+# boundary.
+_CJK = "぀-ヿ㐀-䶿一-鿿豈-﫿"
+_CJK_RE = re.compile(f"[{_CJK}]")
+_WORD_RE = re.compile(f"[{_CJK}]|[^\\W{_CJK}]+")
+_ELLIPSIS_RE = re.compile(r"\.\.\.|…")
+_QUOTE_FOLD = str.maketrans({"‘": "'", "’": "'", "“": '"', "”": '"'})
+
+# Words a statement needs before it must cite (shorter fragments such
+# as "All good." or a split "e.g." are not claims), and that quoted text
+# needs before it is a quotation rather than a scare-quoted term.
+_MIN_CHECKED_WORDS = 3
+# Quotes checked per answer, and the longest quote checked. Further or
+# longer quotes are listed as not_checked. Each checked quote searches
+# each supplied passage at most once.
+_MAX_CHECKED_QUOTES = 20
+_MAX_QUOTE_CHARS = 1000
+
+
+def _fold(text: str) -> str:
+    """``text`` with whitespace runs collapsed and curly quote marks made
+    straight, for comparing a quote with indexed text."""
+    return " ".join(text.translate(_QUOTE_FOLD).split())
+
+
+def _quote_fragments(quote: str) -> list[str]:
+    """A quote's folded parts between ellipses, each without the trailing
+    punctuation a writer may add inside the closing quote mark."""
+    fragments = (_fold(part).rstrip(".,;:").strip() for part in _ELLIPSIS_RE.split(quote))
+    return [f for f in fragments if f]
+
+
+def _is_word_char(char: str) -> bool:
+    """A letter, digit or underscore of a script that spaces its words."""
+    return (char.isalnum() or char == "_") and not _CJK_RE.match(char)
+
+
+def _candidates(text: str, fragment: str, pos: int) -> Iterator[int]:
+    """Each start of ``fragment`` in ``text`` from ``pos`` on, in order."""
+    found = text.find(fragment, pos)
+    while found >= 0:
+        yield found
+        found = text.find(fragment, found + 1)
+
+
+def _quote_in(fragments: list[str], text: str) -> bool:
+    """Whether ``fragments`` occur in folded ``text`` in order, each as
+    whole words: a fragment edge that is a word character may not touch
+    another word character, so "on Fri" does not match "on Friday".
+    Each fragment takes its first whole-word occurrence after the one
+    before, which is the earliest any later fragment can follow; each
+    occurrence is tried at most once."""
+    pos = 0
+    for fragment in fragments:
+        for found in _candidates(text, fragment, pos):
+            end = found + len(fragment)
+            if (found and _is_word_char(fragment[0]) and _is_word_char(text[found - 1])) or (
+                end < len(text) and _is_word_char(fragment[-1]) and _is_word_char(text[end])
+            ):
+                continue
+            pos = end
+            break
+        else:
+            return False
+    return True
+
+
+@dataclass
+class AnswerCheck:
+    """What ``_check_answer`` found in one answer."""
+
+    used: list[str]  # cited labels that name a supplied passage, first-cited order
+    unknown: list[str]  # cited labels that do not
+    statements: list[AnswerStatement]
+    quotes: list[QuoteCheck]
+    problems: list[CitationProblem]
+
+
+def _statement_spans(body: str, quote_spans: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    """``body`` cut into statement spans at ``_STATEMENT_END_RE``, never
+    inside a quotation. A span with no words (a citation on its own line)
+    joins the statement before it."""
+    spans: list[tuple[int, int]] = []
+    start = 0
+    q = 0
+    for match in _STATEMENT_END_RE.finditer(body):
+        end = match.end()
+        while q < len(quote_spans) and quote_spans[q][1] <= end:
+            q += 1
+        if q < len(quote_spans) and quote_spans[q][0] < end:
+            continue  # inside a quotation
+        spans.append((start, end))
+        start = end
+    spans.append((start, len(body)))
+    merged: list[tuple[int, int]] = []
+    for s, e in spans:
+        if not body[s:e].strip():
+            continue
+        if merged and _word_count(body[s:e]) == 0:
+            merged[-1] = (merged[-1][0], e)
+        else:
+            merged.append((s, e))
+    return merged
+
+
+def _is_quotation(match: re.Match[str]) -> bool:
+    """Whether a ``_QUOTE_RE`` pair is a quotation (see ``_QUOTE_RE``)."""
+    body = match.group(1)
+    return bool(body) and not body[0].isspace() and not body[-1].isspace()
+
+
+def _outside(
+    matches: Iterable[re.Match[str]], quoted: list[tuple[int, int]]
+) -> list[re.Match[str]]:
+    """``matches`` (in position order) that start outside every span in
+    ``quoted`` (in position order). One pointer walk."""
+    kept: list[re.Match[str]] = []
+    q = 0
+    for match in matches:
+        while q < len(quoted) and quoted[q][1] <= match.start():
+            q += 1
+        if q < len(quoted) and quoted[q][0] < match.start():
+            continue
+        kept.append(match)
+    return kept
+
+
+def _word_count(text: str) -> int:
+    """Words of ``text`` outside citations and marks."""
+    return len(_WORD_RE.findall(_MARK_RE.sub("", _CITATION_RE.sub("", text))))
+
+
+def _statement_status(
+    text: str, labels: list[str], invalid: bool, mark: str | None, not_found: bool
+) -> Literal["cited", "unsupported", "uncertain", "uncited", "invalid", "not_checked"]:
+    """A statement's status; see ``AnswerStatement.status``."""
+    if labels:
+        return "cited"
+    if invalid:
+        return "invalid"
+    if mark:
+        return "unsupported" if mark == "unsupported" else "uncertain"
+    stripped = text.strip()
+    if (
+        not_found
+        or _HEADING_RE.match(stripped)
+        or stripped.endswith(":")
+        or _word_count(stripped) < _MIN_CHECKED_WORDS
+    ):
+        return "not_checked"
+    return "uncited"
+
+
+def _check_quotes(
+    quote_matches: list[re.Match[str]],
+    statement_of: list[int],
+    statements: list[AnswerStatement],
+    evidence_map: Mapping[str, EvidenceRef],
+) -> list[QuoteCheck]:
+    """Each quotation of ``_MIN_CHECKED_WORDS`` or more words, checked
+    against the text shown for the passages its statement cites, then,
+    if not there, against the other supplied passages.
+
+    Bounded: at most ``_MAX_CHECKED_QUOTES`` quotes of at most
+    ``_MAX_QUOTE_CHARS`` characters are searched, each in each supplied
+    passage at most once, and each passage's text is folded once.
+    """
+    folded: dict[str, str] = {}
+
+    def passage(label: str) -> str:
+        if label not in folded:
+            folded[label] = _fold(evidence_map[label].text)
+        return folded[label]
+
+    quotes: list[QuoteCheck] = []
+    checked = 0
+    for match, statement in zip(quote_matches, statement_of, strict=True):
+        raw = match.group(1)
+        if len(_WORD_RE.findall(raw[: _MAX_QUOTE_CHARS + 1])) < _MIN_CHECKED_WORDS:
+            continue
+        text = raw if len(raw) <= _MAX_QUOTE_CHARS else raw[:_MAX_QUOTE_CHARS] + "…"
+        cited = statements[statement].labels
+        fragments = (
+            _quote_fragments(raw) if len(raw) <= _MAX_QUOTE_CHARS and _is_quotation(match) else []
+        )
+        if not fragments or checked >= _MAX_CHECKED_QUOTES:
+            quotes.append(
+                QuoteCheck(text=text, statement=statement, status="not_checked", found_in=[])
+            )
+            continue
+        if not cited:
+            quotes.append(QuoteCheck(text=text, statement=statement, status="uncited", found_in=[]))
+            continue
+        checked += 1
+        found = [label for label in cited if _quote_in(fragments, passage(label))]
+        status: Literal["verified", "misattributed", "unmatched"] = "verified"
+        if not found:
+            found = [
+                label
+                for label in evidence_map
+                if label not in cited and _quote_in(fragments, passage(label))
+            ]
+            status = "misattributed" if found else "unmatched"
+        quotes.append(QuoteCheck(text=text, statement=statement, status=status, found_in=found))
+    return quotes
+
+
+def _check_answer(answer: str, evidence_map: Mapping[str, EvidenceRef]) -> AnswerCheck:
+    """Check an ``ask_mailbox`` answer against the evidence it was given.
+
+    1. Labels: every cited label must name a supplied passage, and an
+       answer must cite something unless it opens with the not-found
+       phrase. Labels and marks inside a quotation are quoted text.
+    2. Statements: the answer is cut into statements (sentences and
+       lines); each must cite a supplied passage or be marked
+       [unsupported] / [uncertain]. Headings, list introductions,
+       fragments under ``_MIN_CHECKED_WORDS`` words and the statements of
+       a not-found answer are not checked.
+    3. Quotes: each quotation is searched in the text shown for the
+       passages its statement cites (``_check_quotes``).
+
+    Labels and quotes are checked, not meaning: a valid label or a
+    verified quote does not prove the passage supports the claim.
+    """
+    body = answer.removesuffix(_TRUNCATED_NOTICE)
+    not_found = body.lstrip().startswith(_NOT_FOUND_PREFIX)
+
+    quote_matches = list(_QUOTE_RE.finditer(body))
+    quoted = [(m.start(), m.end()) for m in quote_matches if _is_quotation(m)]
+    spans = _statement_spans(body, quoted)
+
+    # A label or mark inside a quotation is quoted mail text, not a
+    # citation or a mark the model made.
+    citation_matches = _outside(_CITATION_RE.finditer(body), quoted)
+    mark_matches = _outside(_MARK_RE.finditer(body), quoted)
+    used, unknown = _sort_labels(
+        (label for m in citation_matches for label in _LABEL_RE.findall(m.group(1))),
+        evidence_map,
+    )
+
+    # Assign citations, marks and quotes to statements by position; each
+    # list is in position order, so one pointer walk per list.
+    def owner(positions: Iterable[int]) -> list[int]:
+        owners: list[int] = []
+        i = 0
+        for pos in positions:
+            while i + 1 < len(spans) and pos >= spans[i + 1][0]:
+                i += 1
+            owners.append(i)
+        return owners
+
+    labels: list[list[str]] = [[] for _ in spans]
+    invalid = [False] * len(spans)
+    marks: list[str | None] = [None] * len(spans)
+    for match, i in zip(citation_matches, owner(m.start() for m in citation_matches), strict=True):
+        for label in _LABEL_RE.findall(match.group(1)):
+            if label not in evidence_map:
+                invalid[i] = True
+            elif label not in labels[i]:
+                labels[i].append(label)
+    for match, i in zip(mark_matches, owner(m.start() for m in mark_matches), strict=True):
+        marks[i] = marks[i] or match.group(1).lower()
+
+    statements = [
+        AnswerStatement(
+            text=body[s:e].strip(),
+            labels=labels[i],
+            status=_statement_status(body[s:e], labels[i], invalid[i], marks[i], not_found),
+        )
+        for i, (s, e) in enumerate(spans)
+    ]
+    quotes = _check_quotes(
+        quote_matches, owner(m.start() for m in quote_matches), statements, evidence_map
+    )
+
     problems: list[CitationProblem] = []
     if unknown:
         problems.append(CitationProblem(kind="unknown_labels", labels=unknown))
-    if not used and not unknown and not answer.lstrip().startswith(_NOT_FOUND_PREFIX):
+    if not used and not unknown and not not_found:
         problems.append(CitationProblem(kind="no_citations", labels=[]))
-    return problems
+    uncited = [i for i, s in enumerate(statements) if s.status == "uncited"]
+    if used and uncited:
+        problems.append(CitationProblem(kind="uncited_statements", labels=[], statements=uncited))
+    unmatched = [i for i, q in enumerate(quotes) if q.status == "unmatched"]
+    if unmatched:
+        problems.append(CitationProblem(kind="unmatched_quotes", labels=[], quotes=unmatched))
+    misattributed = [i for i, q in enumerate(quotes) if q.status == "misattributed"]
+    if misattributed:
+        found_in = list(dict.fromkeys(label for i in misattributed for label in quotes[i].found_in))
+        problems.append(
+            CitationProblem(kind="misattributed_quotes", labels=found_in, quotes=misattributed)
+        )
+    return AnswerCheck(used, unknown, statements, quotes, problems)
+
+
+def _repair_reason(problems: list[CitationProblem]) -> str:
+    """The fixed-text reason a repair is asked for, with counts only."""
+    return "; ".join(
+        _REPAIR_REASONS[p.kind].format(n=len(p.statements) or len(p.quotes) or len(p.labels))
+        for p in problems
+    )
+
+
+def _problem_lines(check: AnswerCheck) -> list[str]:
+    """The prose report of a check: fixed text, counts and validated labels."""
+    lines: list[str] = []
+    for problem in check.problems:
+        if problem.kind == "unknown_labels":
+            lines.append(
+                "\nCitation check: the answer cites labels that name no supplied "
+                f"passage: {', '.join(problem.labels)}."
+            )
+        elif problem.kind == "no_citations":
+            lines.append("\nCitation check: the answer cites no evidence.")
+        elif problem.kind == "uncited_statements":
+            lines.append(
+                f"\nCitation check: {len(problem.statements)} statement(s) cite no supplied "
+                "passage and are not marked [unsupported] or [uncertain]."
+            )
+        elif problem.kind == "unmatched_quotes":
+            lines.append(
+                f"\nCitation check: {len(problem.quotes)} quote(s) match the indexed text of "
+                "no supplied passage."
+            )
+        else:
+            lines.append(
+                f"\nCitation check: {len(problem.quotes)} quote(s) match only a passage their "
+                f"statement does not cite ({', '.join(problem.labels)})."
+            )
+    if check.quotes:
+        verified = sum(q.status == "verified" for q in check.quotes)
+        lines.append(
+            f"\nQuote check: {verified} of {len(check.quotes)} quote(s) match the indexed text "
+            "of a cited passage (extracted, whitespace-normalized text, not the raw message)."
+        )
+    return lines
 
 
 def _citation(ref: EvidenceRef) -> Citation:
@@ -737,12 +1119,14 @@ class EvidenceRef:
     ``chunk`` is ``None`` for a thread shown by its indexed text (it had
     no matching chunks). ``char_end`` is the end of the part shown,
     which is short of ``chunk.char_end`` when the passage was cut.
+    ``text`` is the passage text shown, which quotes are checked against.
     """
 
     label: str
     thread_id: str
     chunk: ChunkResult | None
     char_end: int | None
+    text: str = ""
 
 
 # Upper bound on a labelled passage header (#284). A header whose values
@@ -968,7 +1352,11 @@ def _build_evidence(
             header = _piece_header(chunk, char_end or 0, label)
             parts.append(f"{header}\n{text}" if header else text)
             if evidence_map is not None and label is not None:
-                evidence_map[label] = EvidenceRef(label, thread.thread_id, chunk, char_end)
+                # Quotes are checked against the text as the model sees it,
+                # with delimiter tags escaped as ``_untrusted_email_block``
+                # escapes them (a tag cannot span a passage's edges).
+                shown = _DELIMITER_TAG_RE.sub(r"&lt;\1", text)
+                evidence_map[label] = EvidenceRef(label, thread.thread_id, chunk, char_end, shown)
             used += separator + header_len + len(text)
         if pieces and not parts:
             coverage.threads_without_evidence += 1
@@ -1362,8 +1750,11 @@ def register_intelligence_tools(
             inline ([E1]), and as structured output the answer, each
             cited label's source (chunk_id, claimant_id, thread_id,
             sender, sent_at; chunk_id resolves through get_evidence),
-            any citation problems (unknown labels, no citations), and
-            the threads searched.
+            the answer's statements with the labels each cites, each
+            quote checked against the indexed text of the passages its
+            statement cites, any citation problems (unknown labels, no
+            citations, uncited statements, unmatched or misattributed
+            quotes), and the threads searched.
         """
         log_tool_call(
             log,
@@ -1457,38 +1848,29 @@ def register_intelligence_tools(
             # An answer cut off at max_tokens is not repaired: a second
             # try would most likely be cut off too.
             answer = await llm_complete_prose(ASK_SYSTEM, user_prompt)
-            used, unknown = _check_citations(answer, evidence_map)
-            problems = _citation_problems(answer, used, unknown)
-            repair_attempted = bool(problems) and not answer.endswith(_TRUNCATED_NOTICE)
+            check = _check_answer(answer, evidence_map)
+            repair_attempted = bool(check.problems) and not answer.endswith(_TRUNCATED_NOTICE)
             if repair_attempted:
-                reason = (
-                    "cited evidence labels that no passage header has"
-                    if unknown
-                    else "cited no evidence label"
-                )
+                reason = _repair_reason(check.problems)
                 answer = await llm_complete_prose(
                     ASK_SYSTEM, user_prompt + _REPAIR_INSTRUCTION.format(reason=reason)
                 )
-                used, unknown = _check_citations(answer, evidence_map)
-                problems = _citation_problems(answer, used, unknown)
-            # Counts only: labels and answers are provider output.
+                check = _check_answer(answer, evidence_map)
+            # Counts only: labels, statements and quotes are provider output.
             log.debug(
-                "ask_mailbox citations: %d valid, %d unknown, repair %s",
-                len(used),
-                len(unknown),
+                "ask_mailbox citations: %d valid, %d unknown, %d statements (%d uncited), "
+                "%d quotes (%d verified), repair %s",
+                len(check.used),
+                len(check.unknown),
+                len(check.statements),
+                sum(s.status == "uncited" for s in check.statements),
+                len(check.quotes),
+                sum(q.status == "verified" for q in check.quotes),
                 "attempted" if repair_attempted else "not needed",
             )
 
-            citations = [_citation(evidence_map[label]) for label in used]
-            lines = [answer, *_citation_lines(citations)]
-            for problem in problems:
-                if problem.kind == "unknown_labels":
-                    lines.append(
-                        "\nCitation check: the answer cites labels that name no supplied "
-                        f"passage: {', '.join(problem.labels)}."
-                    )
-                else:
-                    lines.append("\nCitation check: the answer cites no evidence.")
+            citations = [_citation(evidence_map[label]) for label in check.used]
+            lines = [answer, *_citation_lines(citations), *_problem_lines(check)]
             lines.append(_sources_searched(results))
 
             return tool_result(
@@ -1496,7 +1878,9 @@ def register_intelligence_tools(
                 AskMailboxOutput(
                     answer=answer,
                     citations=citations,
-                    citation_problems=problems,
+                    statements=check.statements,
+                    quotes=check.quotes,
+                    citation_problems=check.problems,
                     repair_attempted=repair_attempted,
                     threads=[thread_summary(r) for r in results],
                 ),

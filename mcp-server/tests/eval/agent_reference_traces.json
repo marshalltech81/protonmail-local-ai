@@ -1,0 +1,129 @@
+{
+  "_comment": "Scripted reference traces, one per scenario in agent_scenarios.json: the calls a good agent makes on the synthetic baseline mailbox, each call's structuredContent trimmed to the fields the scorers read, and the IDs the answer cites. tests/test_agent_eval.py requires each to score with no failures. Claimant-ID hash suffixes are placeholders, not the real file hashes.",
+  "traces": [
+    {
+      "scenario": "roof-estimate-total",
+      "calls": [
+        {
+          "tool": "get_evidence",
+          "arguments": {"query": "roof repair estimate total"},
+          "result": {"chunk_count": 1, "threads": [{"thread_id": "t01.1@baseline.example", "chunks": [{"chunk_id": "c-t01-a", "message_id": "t01.1@baseline.example", "claimant_id": "t01.1@baseline.example#00000001", "source": "attachment"}]}]}
+        }
+      ],
+      "answer": {"text": "The estimate totals $14,200.", "cited": ["t01.1@baseline.example#00000001"]}
+    },
+    {
+      "scenario": "renewal-rent",
+      "calls": [
+        {
+          "tool": "search_attachments",
+          "arguments": {"query": "new monthly rent"},
+          "result": {"results": [{"attachment_id": "a-t23", "thread_id": "t23.1@baseline.example", "message_id": "t23.1@baseline.example", "claimant_id": "t23.1@baseline.example#00000023"}]}
+        }
+      ],
+      "answer": {"text": "The renewal terms set the new monthly rent.", "cited": ["t23.1@baseline.example#00000023"]}
+    },
+    {
+      "scenario": "archived-pool-bids",
+      "calls": [
+        {
+          "tool": "search_emails",
+          "arguments": {"query": "pool resurfacing", "folders": ["Archive"]},
+          "result": {"mode": "hybrid", "results": [{"thread_id": "t05.1@baseline.example"}]}
+        }
+      ],
+      "answer": {"text": "The archived thread is the pool resurfacing bids.", "cited": ["t05.1@baseline.example"]}
+    },
+    {
+      "scenario": "frontdesk-appointment",
+      "calls": [
+        {
+          "tool": "search_emails",
+          "arguments": {"query": "appointment", "participant": "frontdesk@brightsmile.example"},
+          "result": {"mode": "hybrid", "results": [{"thread_id": "t06.1@baseline.example"}]}
+        }
+      ],
+      "answer": {"text": "The dental cleaning reschedule thread.", "cited": ["t06.1@baseline.example"]}
+    },
+    {
+      "scenario": "kayak-total-cost",
+      "calls": [
+        {
+          "tool": "search_emails",
+          "arguments": {"query": "tandem kayak boats cost headcount"},
+          "result": {"mode": "hybrid", "results": [{"thread_id": "t21.1@baseline.example"}, {"thread_id": "t22.1@baseline.example"}]}
+        },
+        {
+          "tool": "get_evidence",
+          "arguments": {"query": "tandem kayak price per boat", "thread_id": "t21.1@baseline.example"},
+          "result": {"chunk_count": 1, "threads": [{"thread_id": "t21.1@baseline.example", "chunks": [{"chunk_id": "c-t21-a", "message_id": "t21.1@baseline.example", "claimant_id": "t21.1@baseline.example#00000021", "source": "body"}]}]}
+        },
+        {
+          "tool": "get_evidence",
+          "arguments": {"query": "kayak day headcount boats", "thread_id": "t22.1@baseline.example"},
+          "result": {"chunk_count": 1, "threads": [{"thread_id": "t22.1@baseline.example", "chunks": [{"chunk_id": "c-t22-a", "message_id": "t22.1@baseline.example", "claimant_id": "t22.1@baseline.example#00000022", "source": "body"}]}]}
+        }
+      ],
+      "answer": {"text": "Four boats at $65 each: $260.", "cited": ["t21.1@baseline.example#00000021", "t22.1@baseline.example#00000022"]}
+    },
+    {
+      "scenario": "cabin-address",
+      "calls": [
+        {
+          "tool": "ask_mailbox",
+          "arguments": {"question": "What is the street address of the cabin on Hemlock Ridge?"},
+          "result": {"answer": "[E1]", "citations": [{"label": "E1", "chunk_id": "c-t28-a", "claimant_id": "t28.1@baseline.example#00000028", "message_id": "t28.1@baseline.example", "thread_id": "t28.1@baseline.example", "source": "body"}], "citation_problems": [], "repair_attempted": false, "threads": [{"thread_id": "t28.1@baseline.example"}, {"thread_id": "t27.1@baseline.example"}]}
+        }
+      ],
+      "answer": {"text": "The cabin address is in the cited passage.", "cited": ["t28.1@baseline.example#00000028"]}
+    },
+    {
+      "scenario": "sent-folder-count",
+      "calls": [
+        {
+          "tool": "query_messages",
+          "arguments": {"folder": "Sent", "limit": 4},
+          "result": {"total_matches": 10, "returned": 4, "offset": 0, "has_more": true, "next_cursor": "cursor-1", "messages": [
+            {"message_id": "t20.2@baseline.example", "claimant_id": "t20.2@baseline.example#00000202", "thread_id": "t20.1@baseline.example"},
+            {"message_id": "t18.1@baseline.example", "claimant_id": "t18.1@baseline.example#00000181", "thread_id": "t18.1@baseline.example"},
+            {"message_id": "t17.2@baseline.example", "claimant_id": "t17.2@baseline.example#00000172", "thread_id": "t17.1@baseline.example"},
+            {"message_id": "t15.2@baseline.example", "claimant_id": "t15.2@baseline.example#00000152", "thread_id": "t15.1@baseline.example"}
+          ]}
+        },
+        {
+          "tool": "query_messages",
+          "arguments": {"folder": "Sent", "limit": 4, "cursor": "cursor-1"},
+          "result": {"total_matches": 10, "returned": 4, "offset": 4, "has_more": true, "next_cursor": "cursor-2", "messages": [
+            {"message_id": "t11.2@baseline.example", "claimant_id": "t11.2@baseline.example#00000112", "thread_id": "t11.1@baseline.example"},
+            {"message_id": "t10.2@baseline.example", "claimant_id": "t10.2@baseline.example#00000102", "thread_id": "t10.1@baseline.example"},
+            {"message_id": "t06.2@baseline.example", "claimant_id": "t06.2@baseline.example#00000062", "thread_id": "t06.1@baseline.example"},
+            {"message_id": "t05.2@baseline.example", "claimant_id": "t05.2@baseline.example#00000052", "thread_id": "t05.1@baseline.example"}
+          ]}
+        },
+        {
+          "tool": "query_messages",
+          "arguments": {"folder": "Sent", "limit": 4, "cursor": "cursor-2"},
+          "result": {"total_matches": 10, "returned": 2, "offset": 8, "has_more": false, "next_cursor": null, "messages": [
+            {"message_id": "t02.2@baseline.example", "claimant_id": "t02.2@baseline.example#00000022", "thread_id": "t02.1@baseline.example"},
+            {"message_id": "t01.2@baseline.example", "claimant_id": "t01.2@baseline.example#00000012", "thread_id": "t01.1@baseline.example"}
+          ]}
+        }
+      ],
+      "answer": {"text": "Ten messages are in Sent.", "cited": []}
+    },
+    {
+      "scenario": "adjuster-messages",
+      "calls": [
+        {
+          "tool": "query_messages",
+          "arguments": {"sender": "adjuster@keystoneins.example"},
+          "result": {"total_matches": 2, "returned": 2, "offset": 0, "has_more": false, "next_cursor": null, "messages": [
+            {"message_id": "t10.3@baseline.example", "claimant_id": "t10.3@baseline.example#00000103", "thread_id": "t10.1@baseline.example"},
+            {"message_id": "t10.1@baseline.example", "claimant_id": "t10.1@baseline.example#00000101", "thread_id": "t10.1@baseline.example"}
+          ]}
+        }
+      ],
+      "answer": {"text": "Two messages.", "cited": ["t10.3@baseline.example#00000103", "t10.1@baseline.example#00000101"]}
+    }
+  ]
+}
