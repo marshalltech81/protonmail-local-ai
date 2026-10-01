@@ -22,6 +22,7 @@ from ..lib.sqlite import (
 from ..lib.validation import clamp_int
 from .outputs import (
     HEADER_CHAR_LIMIT,
+    MAX_LISTED,
     Contact,
     FilterUse,
     FindContactOutput,
@@ -665,9 +666,16 @@ def register_retrieval_tools(server, db):
             log.error("find_contact error: %s", type(e).__name__)
             raise ToolError(f"Error: {type(e).__name__}") from e
 
+        # A contact's names are sender-controlled and unbounded in number
+        # and length: list at most MAX_LISTED, each cut, with the count.
         output = FindContactOutput(
             contacts=[
-                Contact(email=c["email"], names=c["names"], thread_count=c["thread_count"])
+                Contact(
+                    email=c["email"],
+                    names=[clip(n, HEADER_CHAR_LIMIT) for n in c["names"][:MAX_LISTED]],
+                    name_count=len(c["names"]),
+                    thread_count=c["thread_count"],
+                )
                 for c in contacts
             ]
         )
@@ -675,11 +683,11 @@ def register_retrieval_tools(server, db):
             return tool_result(f"No contacts found matching: '{query}'", output)
 
         lines = [f"Contacts matching '{query}' ({len(contacts)} shown):\n"]
-        for i, c in enumerate(contacts, 1):
-            names = ", ".join(c["names"]) if c["names"] else "(no display name)"
-            lines.append(
-                f"{i}. {c['email']}\n   Name(s): {names}\n   Threads: {c['thread_count']}\n"
-            )
+        for i, c in enumerate(output.contacts, 1):
+            names = ", ".join(c.names) if c.names else "(no display name)"
+            if c.name_count > len(c.names):
+                names += f" (+{c.name_count - len(c.names)} more)"
+            lines.append(f"{i}. {c.email}\n   Name(s): {names}\n   Threads: {c.thread_count}\n")
         return tool_result("\n".join(lines), output)
 
     @server.tool()

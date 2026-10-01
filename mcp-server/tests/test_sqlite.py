@@ -2716,6 +2716,120 @@ class TestFindContactSendersOnly:
             (c["email"], c["thread_count"]) for c in db.find_contact("person", senders_only=True)
         ] == [("person@example.test", 1)]
 
+    def test_senders_only_eligibility_is_per_thread(self, tmp_path):
+        # Documented limitation: the index records no author order per
+        # message, so a name is eligible on any thread the address
+        # primarily sent. Once person@ sent m1, an "Alias" written for
+        # them as a second author of m2 in the same thread resolves.
+        from tests.conftest import _insert_message
+
+        conn, path = _open_built_db_conn(tmp_path, "same-thread-alias.db")
+        _insert_message(
+            conn,
+            message_id="m1",
+            thread_id="t1",
+            sent_at="2024-01-01T00:00:00+00:00",
+            from_=["Person <person@example.test>"],
+        )
+        _insert_message(
+            conn,
+            message_id="m2",
+            thread_id="t1",
+            sent_at="2024-01-02T00:00:00+00:00",
+            from_=["Lead <lead@example.test>", "Alias <person@example.test>"],
+        )
+        conn.close()
+        db = Database(str(path))
+        assert [c["email"] for c in db.find_contact("alias", senders_only=True)] == [
+            "person@example.test"
+        ]
+
+    def test_senders_only_work_is_scoped_to_candidates(self, tmp_path, monkeypatch):
+        # A name that matches nobody must not parse every thread's
+        # senders; a name that matches one sender parses only that
+        # sender's threads.
+        from src.lib import sqlite as sqlite_mod
+
+        from tests.conftest import _insert_message
+
+        conn, path = _open_built_db_conn(tmp_path, "large.db")
+        for n in range(2000):
+            _insert_message(
+                conn,
+                message_id=f"m{n}",
+                thread_id=f"t{n}",
+                sent_at="2024-01-01T00:00:00+00:00",
+                from_=[f"Sender {n} <s{n}@example.test>"],
+            )
+        for n in range(3):
+            _insert_message(
+                conn,
+                message_id=f"z{n}",
+                thread_id=f"tz{n}",
+                sent_at="2024-01-01T00:00:00+00:00",
+                from_=["Zed Target <zed@example.test>"],
+            )
+        conn.commit()
+        conn.close()
+        db = Database(str(path))
+
+        calls = {"parseaddr": 0, "json": 0}
+        real_parseaddr, real_loads = sqlite_mod.parseaddr, sqlite_mod.json.loads
+
+        def counting_parseaddr(value):
+            calls["parseaddr"] += 1
+            return real_parseaddr(value)
+
+        class _CountingJson:
+            def __getattr__(self, name):
+                return getattr(json, name)
+
+            @staticmethod
+            def loads(value):
+                calls["json"] += 1
+                return real_loads(value)
+
+        monkeypatch.setattr(sqlite_mod, "parseaddr", counting_parseaddr)
+        monkeypatch.setattr(sqlite_mod, "json", _CountingJson())
+
+        assert db.find_contact("nobody-by-this-name", senders_only=True) == []
+        assert calls == {"parseaddr": 0, "json": 0}
+
+        contacts = db.find_contact("zed target", senders_only=True)
+        assert [(c["email"], c["thread_count"]) for c in contacts] == [("zed@example.test", 3)]
+        assert calls["json"] == 3
+        assert calls["parseaddr"] == 3
+
+    def test_senders_only_reads_one_snapshot(self, tmp_path, monkeypatch):
+        # Every query of one lookup runs on one connection inside one
+        # read transaction, so an indexer commit between them cannot mix
+        # two database states.
+        from tests.conftest import _insert_message
+
+        conn, path = _open_built_db_conn(tmp_path, "snapshot.db")
+        _insert_message(
+            conn,
+            message_id="m1",
+            thread_id="t1",
+            sent_at="2024-01-01T00:00:00+00:00",
+            from_=["Pat <pat@example.test>"],
+        )
+        conn.close()
+        db = Database(str(path))
+        opened = []
+        real_connect = db._connect
+
+        def counting_connect():
+            c = real_connect()
+            opened.append(c)
+            return c
+
+        monkeypatch.setattr(db, "_connect", counting_connect)
+        for senders_only in (True, False):
+            opened.clear()
+            assert db.find_contact("pat", senders_only=senders_only)
+            assert len(opened) == 1
+
     def test_senders_only_default_is_false_for_back_compat(self, seeded_db: Database):
         # The standalone find_contact MCP tool relies on the broader
         # participants ranking by default — it's used for general

@@ -696,6 +696,128 @@ def _decode_cursor(cursor: str, digest: str) -> tuple[str, str, int]:
     return data["s"], data["m"], data["o"]
 
 
+def _add_contact(by_email: dict[str, dict], address: str, name: str | None, thread_id: str) -> None:
+    """Record ``address`` on ``thread_id`` under display ``name`` in a
+    ``find_contact`` aggregation (canonical email -> names, threads)."""
+    bucket = by_email.setdefault(address, {"names": set(), "threads": set()})
+    if name and name.strip():
+        bucket["names"].add(name.strip())
+    bucket["threads"].add(thread_id)
+
+
+def _aggregate_participants(
+    conn: sqlite3.Connection, needle: str, name_needle: str
+) -> dict[str, dict]:
+    """``find_contact``'s default aggregation, on ``conn``.
+
+    The query selects addresses; every row of a selected address then
+    aggregates, so a name match reports the contact's other names and
+    threads too. Addresses are stored canonical (lowercased); names
+    need the Unicode-aware ``mcp_casefold``.
+    """
+    by_email: dict[str, dict] = {}
+    rows = conn.execute(
+        """
+        SELECT DISTINCT p.address, p.name, m.thread_id
+        FROM message_participants p
+        JOIN messages m ON m.message_id = p.message_id
+        WHERE p.address IN (
+            SELECT address FROM message_participants
+            WHERE instr(address, ?) > 0 OR instr(mcp_casefold(name), ?) > 0
+        )
+        """,
+        (needle, name_needle),
+    ).fetchall()
+    for row in rows:
+        _add_contact(by_email, row["address"], row["name"], row["thread_id"])
+    return by_email
+
+
+def _thread_primaries(conn: sqlite3.Connection, thread_ids: list[str]) -> dict[str, dict[str, str]]:
+    """``thread_id -> {canonical address: display name}`` from each listed
+    thread's ``senders`` (every message's primary author)."""
+    primaries: dict[str, dict[str, str]] = {}
+    rows = conn.execute(
+        "SELECT thread_id, senders FROM threads WHERE thread_id IN (SELECT value FROM json_each(?))",
+        (json.dumps(thread_ids),),
+    )
+    for row in rows:
+        senders: dict[str, str] = {}
+        try:
+            entries = json.loads(row["senders"])
+        except json.JSONDecodeError, TypeError:
+            entries = []
+        for entry in entries if isinstance(entries, list) else []:
+            if not isinstance(entry, str):
+                continue
+            try:
+                name, addr = parseaddr(entry)
+            except Exception:
+                # Sender strings come from indexed mail; an entry that
+                # blows up parseaddr (nested-comment recursion) must cost
+                # that entry, not the lookup.
+                continue
+            addr = addr.strip().lower()
+            if "@" in addr:
+                senders.setdefault(addr, name)
+        primaries[row["thread_id"]] = senders
+    return primaries
+
+
+def _aggregate_senders(conn: sqlite3.Connection, needle: str, name_needle: str) -> dict[str, dict]:
+    """``find_contact(senders_only=True)``'s aggregation, on ``conn``.
+
+    An address counts on a thread whose ``senders`` (each message's
+    primary author, one display string per address) lists it. Its
+    names are that senders entry plus its From rows on those threads,
+    so a name first used on a later message still matches. The index
+    records no author order within a message, so a name written for
+    the address as a secondary author on a thread it primarily sent
+    counts too.
+
+    Work follows the query, not the mailbox: candidate addresses come
+    from the From rows the query matches, and only the threads those
+    candidates appear on have their ``senders`` parsed.
+    """
+    candidates = [
+        row["address"]
+        for row in conn.execute(
+            """
+            SELECT DISTINCT address FROM message_participants
+            WHERE role = 'from'
+              AND (instr(address, ?) > 0 OR instr(mcp_casefold(name), ?) > 0)
+            """,
+            (needle, name_needle),
+        )
+    ]
+    if not candidates:
+        return {}
+    rows = conn.execute(
+        """
+        SELECT DISTINCT p.address, p.name, m.thread_id
+        FROM message_participants p
+        JOIN messages m ON m.message_id = p.message_id
+        WHERE p.role = 'from' AND p.address IN (SELECT value FROM json_each(?))
+        """,
+        (json.dumps(candidates),),
+    ).fetchall()
+    primaries = _thread_primaries(conn, sorted({row["thread_id"] for row in rows}))
+    by_email: dict[str, dict] = {}
+    for row in rows:
+        senders = primaries.get(row["thread_id"], {})
+        if row["address"] in senders:
+            _add_contact(by_email, row["address"], senders[row["address"]], row["thread_id"])
+            _add_contact(by_email, row["address"], row["name"], row["thread_id"])
+    # A candidate matched on some From row; keep it only if the match
+    # holds on a thread it primarily sent. Each kept address keeps its
+    # whole sent history.
+    return {
+        addr: bucket
+        for addr, bucket in by_email.items()
+        if needle in addr or any(name_needle in n.casefold() for n in bucket["names"])
+    }
+
+
 class Database:
     """Read-only handle to the indexer's SQLite output.
 
@@ -2331,7 +2453,8 @@ class Database:
         ``senders_only`` instead aggregates ``threads.senders`` — each
         message's primary From author as the thread records it — with
         the display names that author's From rows carry on those same
-        threads (``threads.senders`` keeps only one per address). That is
+        threads (``threads.senders`` keeps only one per address; see
+        ``_aggregate_senders`` for the thread-level limit). That is
         exactly the set ``search_emails(from_addr=...)`` filters on, so a
         resolved address always matches that filter; ranking over the
         participant table's From rows could promote a secondary author
@@ -2359,77 +2482,15 @@ class Database:
         needle = query.strip().lower()
         name_needle = query.strip().casefold()
 
-        # canonical email -> {"names": set[str], "threads": set[str]}
-        by_email: dict[str, dict] = {}
-
-        def add(address: str, name: str | None, thread_id: str) -> None:
-            bucket = by_email.setdefault(address, {"names": set(), "threads": set()})
-            if name and name.strip():
-                bucket["names"].add(name.strip())
-            bucket["threads"].add(thread_id)
-
-        if senders_only:
-            for row in self._fetchall("SELECT thread_id, senders FROM threads"):
-                try:
-                    entries = json.loads(row["senders"])
-                except json.JSONDecodeError, TypeError:
-                    continue
-                for entry in entries:
-                    if not isinstance(entry, str):
-                        continue
-                    try:
-                        name, addr = parseaddr(entry)
-                    except Exception:
-                        # Sender strings come from indexed mail; an entry
-                        # that blows up parseaddr (nested-comment
-                        # recursion) must cost that entry, not the lookup.
-                        continue
-                    addr = addr.strip().lower()
-                    if "@" in addr:
-                        add(addr, name, row["thread_id"])
-            # ``threads.senders`` keeps one display string per address, so
-            # a name first used on a later message survives only in that
-            # message's From row. Collect those names for (address,
-            # thread) pairs already eligible above; a secondary author's
-            # row on a thread they never primarily sent stays out.
-            from_rows = self._fetchall(
-                """
-                SELECT DISTINCT p.address, p.name, m.thread_id
-                FROM message_participants p
-                JOIN messages m ON m.message_id = p.message_id
-                WHERE p.role = 'from' AND p.name IS NOT NULL
-                """
-            )
-            for row in from_rows:
-                bucket = by_email.get(row["address"])
-                if bucket is not None and row["thread_id"] in bucket["threads"]:
-                    add(row["address"], row["name"], row["thread_id"])
-            # Keep the addresses the query selects; each keeps its whole
-            # sent history, as in the participants branch below.
-            by_email = {
-                addr: bucket
-                for addr, bucket in by_email.items()
-                if needle in addr or any(name_needle in n.casefold() for n in bucket["names"])
-            }
-        else:
-            # The query selects addresses; every row of a selected address
-            # then aggregates, so a name match reports the contact's other
-            # names and threads too. Addresses are stored canonical
-            # (lowercased); names need the Unicode-aware ``mcp_casefold``.
-            rows = self._fetchall(
-                """
-                SELECT DISTINCT p.address, p.name, m.thread_id
-                FROM message_participants p
-                JOIN messages m ON m.message_id = p.message_id
-                WHERE p.address IN (
-                    SELECT address FROM message_participants
-                    WHERE instr(address, ?) > 0 OR instr(mcp_casefold(name), ?) > 0
-                )
-                """,
-                (needle, name_needle),
-            )
-            for row in rows:
-                add(row["address"], row["name"], row["thread_id"])
+        with closing(self._connect()) as conn:
+            # One read transaction: every query below sees the same
+            # snapshot even while the indexer commits.
+            conn.execute("BEGIN")
+            if senders_only:
+                by_email = _aggregate_senders(conn, needle, name_needle)
+            else:
+                by_email = _aggregate_participants(conn, needle, name_needle)
+            conn.rollback()
 
         # Most-active contact first; tiebreak on email so the order is
         # stable across runs (important for both eval reproducibility

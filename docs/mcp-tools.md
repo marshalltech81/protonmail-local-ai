@@ -77,7 +77,7 @@ contents of a returned thread, follow up with `get_thread` or
 | `mode` | string | `hybrid` | `hybrid`, `semantic`, or `keyword` |
 | `folders` | list | all | Scope to specific folders |
 | `from_addr` | string | none | Filter by canonical sender address (or domain like `@example.com`); substring fallback when the value can't canonicalize |
-| `from_name` | string | none | Filter by sender name; resolved through `find_contact` to a canonical address before applying, matching any display name the sender used as a message's primary author. Use when the user names a person but not their email. `from_addr` wins if both are given. |
+| `from_name` | string | none | Filter by sender name; resolved through `find_contact` to a canonical address before applying, matching any display name the address carries in a From header on a thread it primarily sent (the index keeps no author order within one message, so a name written for it as a second author on such a thread also matches). Use when the user names a person but not their email. `from_addr` wins if both are given. |
 | `date_from` | string | none | ISO 8601 date lower bound |
 | `date_to` | string | none | ISO 8601 date upper bound |
 | `has_attachments` | bool | none | Filter by attachment presence |
@@ -265,8 +265,10 @@ then aggregates every row of each matched canonical email (so the same
 contact across many threads collapses to one row, and a match on one
 display name still reports the contact's other names and threads), and
 ranks results by `thread_count` descending with email as the
-tiebreaker. Every display name the contact was written with is
-reported. Same-thread duplicates do not double-count.
+tiebreaker. `thread_count` counts every thread; `names` lists at most
+10 of the display names the contact was written with, each cut at 500
+characters, and `name_count` gives the full number. Same-thread
+duplicates do not double-count.
 
 ### `query_messages`
 Enumerate **every** message matching exact criteria, with an exact
