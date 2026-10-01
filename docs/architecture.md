@@ -289,6 +289,19 @@ history. Stripping is intentionally conservative: quoted text is still
 searchable through FTS and falls back to the original body when the
 stripped result would be empty.
 
+**Known limitation (#295):** a message's body text is the first
+`text/plain` part outside attachments, or failing that the first
+`text/html` part. "First" means first, not first non-empty: a leading
+plain part that holds only whitespace still wins, so a later plain part
+is never read and the HTML fallback is suppressed, leaving an empty
+body (#298). That suits `multipart/alternative`,
+where the parts are alternative renderings of one body, but a
+`multipart/mixed` message with several sequential inline text parts
+(for example text, an attachment, then more text) keeps only the first
+plain and first HTML part; later inline text parts are neither stored
+nor searchable. Fixing it changes stored bodies, so it is revisited
+with the Phase 2 reindex bundle.
+
 A query like "what did my landlord say about the heating?" returns the
 full landlord thread (via the coarse lanes) and surfaces the specific
 chunk where the heating discussion appears (via the chunk lane). The
@@ -754,12 +767,13 @@ files are indexed like any other.
 
 Two stage outcomes short-circuit the retry path entirely:
 
-- `parse_skipped_missing` — `parse_email` raised `FileNotFoundError`,
-  almost always because mbsync renamed the file (added an IMAP flag
-  suffix) between enqueue and read. The path is permanently invalid;
-  the renamed file enters the queue under its new name via a fresh
-  `IN_MOVED_TO` event. The worker calls `mark_skipped` instead of
-  `mark_failed`: row deleted, no retry, no dead-letter.
+- `FileNotFoundError` at parse — almost always because mbsync renamed
+  the file (added an IMAP flag suffix) between enqueue and read. The
+  path is permanently invalid; the renamed file enters the queue under
+  its new name via a fresh `IN_MOVED_TO` event. The worker calls
+  `mark_skipped(reason="file_missing")` instead of `mark_failed`: row
+  deleted, no retry, no dead-letter, and an INFO
+  `skipped: <path> reason=file_missing` log line.
 - `PermissionError` at parse is deferred (60 s) without spending an
   attempt. mbsync `chmod go+r`s new files only after its whole sync
   finishes, so during a long sync a delivered file stays unreadable to

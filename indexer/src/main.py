@@ -249,10 +249,12 @@ INITIAL_INDEX_BATCH_SIZE = _int_env("INITIAL_INDEX_BATCH_SIZE", 50)
 STEADY_STATE_BATCH_SIZE = _int_env("INDEXER_STEADY_STATE_BATCH_SIZE", 8)
 
 # How often (seconds) the main loop calls ``Database.wal_checkpoint_truncate``.
-# The single shared sqlite3 connection used by ``Database`` keeps a WAL
-# read snapshot open for the duration of the indexer process; without an
-# explicit truncate-checkpoint the WAL file grows monotonically. 10 min
-# keeps the file size bounded without churning IO.
+# An open connection does not pin the WAL; only an open read transaction
+# does. SQLite's automatic checkpoint lets the WAL be reused from the
+# start once its frames are checkpointed, but it never shrinks the file,
+# so the WAL stays at its high-water size after a burst of writes. The
+# explicit truncate-checkpoint reclaims that space. 10 min keeps the file
+# size bounded without churning IO.
 WAL_CHECKPOINT_INTERVAL_SECS = _int_env("INDEXER_WAL_CHECKPOINT_INTERVAL_SECS", 600, minimum=60)
 
 # How often (seconds) the main loop runs ``_recover_zero_vector_threads``.
@@ -266,8 +268,8 @@ WAL_CHECKPOINT_INTERVAL_SECS = _int_env("INDEXER_WAL_CHECKPOINT_INTERVAL_SECS", 
 # (``_enqueue_unindexed_messages``).
 RECOVERY_SWEEP_INTERVAL_SECS = _int_env("INDEXER_RECOVERY_SWEEP_INTERVAL_SECS", 1800, minimum=60)
 
-# Phase 1 seed for genuinely new threads (the only branch that uses
-# this constant). Phase 1's seed-selection runs a three-case priority
+# Phase 1 seed for new threads and already-zero chunkless ones (the
+# only branch that uses this constant). Phase 1's seed-selection runs a three-case priority
 # chain:
 #   1. Thread has chunk vectors → mean(chunks).
 #   2. No chunks but a prior threads_vec row carries a non-zero
@@ -512,12 +514,11 @@ class MaildirHandler(FileSystemEventHandler):
             self.queue.enqueue(dest_path, REASON_ON_MOVED)
 
 
-HEALTH_REFRESH_EVERY = 25
-# Emit a p50/p95/max timing summary at most this often. The aggregator
-# itself has an independent rolling window — this constant only controls
-# how often the line is logged, not how many samples back the percentiles
-# look. Keeping it equal to ``HEALTH_REFRESH_EVERY`` lines summaries up
-# with the same cadence as the health-file refresh.
+# Emit a p50/p95/max timing summary roughly once per this many processed
+# messages. The aggregator itself has an independent rolling window —
+# this constant only controls how often the line is logged, not how many
+# samples back the percentiles look. It is unrelated to the health-file
+# heartbeat, which is refreshed per message and around each embed call.
 TIMING_LOG_EVERY = 25
 
 
@@ -581,8 +582,9 @@ class _BatchedMsg:
     priority chain: ``mean(existing chunk vectors)`` when the thread
     is already indexed with content; the prior ``threads_vec`` row
     when the thread is chunkless but has a non-zero embedding (covers
-    subject-fallback threads); placeholder zero only for genuinely
-    new threads. Phase 2a populates the chunk + attachment-plan
+    subject-fallback threads); otherwise placeholder zero (a new
+    thread, or a chunkless one whose stored vector is still zero after
+    a crash between phases). Phase 2a populates the chunk + attachment-plan
     fields and the offsets that point each new chunk into the batch's
     flat embed-input list. Phase 2c reads the bulk-embedded vectors
     back through those offsets and applies the per-message DB writes,
@@ -636,10 +638,13 @@ def _phase1_commit_thread(
 ) -> _BatchedMsg | None:
     """Phase 1 of the batched indexer for one message.
 
-    Parse → thread → ``upsert_thread`` with a seed vector
-    (``mean`` of the thread's existing chunk vectors when the thread
-    is already indexed; placeholder zero for new / chunk-less
-    threads). Returns a populated ``_BatchedMsg`` on success. On any
+    Parse → thread → ``upsert_thread`` with a seed vector chosen from
+    a three-case priority chain: ``mean`` of the thread's existing
+    chunk vectors when it has any; the prior non-zero ``threads_vec``
+    row when the thread is chunkless (subject-fallback threads);
+    otherwise the placeholder zero, for a new thread or a chunkless one
+    whose stored vector is still zero (a retry after a crash between
+    phases). Returns a populated ``_BatchedMsg`` on success. On any
     failure, marks the queue row appropriately and returns ``None`` so
     the caller skips the message without aborting the whole batch.
     """
@@ -1263,8 +1268,10 @@ def _drain_queue_batched(
     """Drain the queue in two-phase batches.
 
     Phase 1 commits thread membership per-message with a seed thread
-    vector — ``mean(existing chunk vectors)`` for already-indexed
-    threads, placeholder zero for new ones — so (a) the next message
+    vector — ``mean(existing chunk vectors)`` for threads with chunks,
+    the prior non-zero ``threads_vec`` row for chunkless ones,
+    placeholder zero for new ones and for chunkless ones whose stored
+    vector is still zero after a crash — so (a) the next message
     in the batch's threader can see this message's thread, and (b) a
     Phase 2 failure cannot regress an already-good thread vector to
     zero.
@@ -2020,12 +2027,12 @@ def main():
                 last_recovery_sweep = now
 
             # WAL checkpoint: keep the WAL file size bounded over a
-            # long-running container. The indexer holds a single
-            # writer connection for the life of the process; that
-            # connection's read snapshot prevents SQLite's automatic
-            # checkpoint thresholds from truncating the WAL, so an
-            # explicit periodic ``wal_checkpoint(TRUNCATE)`` is what
-            # reclaims space on the writer side.
+            # long-running container. SQLite's automatic checkpoint
+            # lets the WAL be reused once checkpointed but never
+            # shrinks the file, so an explicit periodic
+            # ``wal_checkpoint(TRUNCATE)`` is what reclaims space. It
+            # can only complete when no reader holds an open read
+            # transaction on the WAL (``busy`` below).
             if now - last_wal_checkpoint >= WAL_CHECKPOINT_INTERVAL_SECS:
                 try:
                     busy, _log_pages, ckpt_pages = db.wal_checkpoint_truncate()
