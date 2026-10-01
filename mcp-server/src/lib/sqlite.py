@@ -95,6 +95,14 @@ _FILTERED_OVERSAMPLE = 4
 # even on dense matches.
 _CHUNK_LANE_OVERSAMPLE = 10
 
+# Evidence chunks per thread that ``ask_mailbox`` puts in its prompt and
+# ``get_evidence`` returns from the same retrieval, so the audit tool
+# shows the passages the model saw (#285). Chunks are per-message, so a
+# thread's short replies often fit several to the prompt's shared
+# budget. It costs no extra query: the per-thread chunk scan already
+# reads every chunk of each surfaced thread.
+PROMPT_EVIDENCE_CHUNKS_PER_THREAD = 6
+
 # sqlite-vec's largest accepted KNN ``k``; a larger one is an error, which
 # the vector lanes catch as "lane unavailable". The fetch windows multiply
 # RERANK_CANDIDATES by filter and chunk oversampling (200 x 4 x 10 = 8000),
@@ -939,6 +947,7 @@ class Database:
         limit: int = 10,
         with_evidence: bool = False,
         reranker: RerankerBackend | None = None,
+        evidence_per_thread: int = 3,
     ) -> list[ThreadResult]:
         oversample = (
             _FILTERED_OVERSAMPLE
@@ -1049,7 +1058,7 @@ class Database:
             grouped = self.get_evidence_chunks_for_threads(
                 wanted,
                 query_embedding,
-                per_thread_limit=3,
+                per_thread_limit=evidence_per_thread,
                 matched_attachments=matched_attachments,
             )
             for result in candidates:
@@ -2058,7 +2067,7 @@ class Database:
 
         Returned chunks are in chronological (oldest-first by message
         date within the selected tail) order so the LLM prompt reads naturally as a
-        timeline. Caller can render them via ``_thread_context``.
+        timeline. Caller can render them via ``_summarize_context``.
 
         Ordering: ``c.message_date DESC, c.chunk_index DESC``.
         ``message_date`` is the indexed message date stored at
