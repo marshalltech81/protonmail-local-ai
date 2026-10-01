@@ -512,12 +512,11 @@ class MaildirHandler(FileSystemEventHandler):
             self.queue.enqueue(dest_path, REASON_ON_MOVED)
 
 
-HEALTH_REFRESH_EVERY = 25
-# Emit a p50/p95/max timing summary at most this often. The aggregator
-# itself has an independent rolling window — this constant only controls
-# how often the line is logged, not how many samples back the percentiles
-# look. Keeping it equal to ``HEALTH_REFRESH_EVERY`` lines summaries up
-# with the same cadence as the health-file refresh.
+# Emit a p50/p95/max timing summary roughly once per this many processed
+# messages. The aggregator itself has an independent rolling window —
+# this constant only controls how often the line is logged, not how many
+# samples back the percentiles look. It is unrelated to the health-file
+# heartbeat, which is refreshed per message and around each embed call.
 TIMING_LOG_EVERY = 25
 
 
