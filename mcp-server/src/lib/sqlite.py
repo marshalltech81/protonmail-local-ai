@@ -819,6 +819,25 @@ def _aggregate_senders(conn: sqlite3.Connection, needle: str, name_needle: str) 
     }
 
 
+def _append_folder_membership_sql(
+    where_clauses: list[str], params: list, thread_id_column: str, folders: list[str]
+) -> None:
+    """Keep rows whose thread has a message filed in one of ``folders``.
+
+    Membership is per message (``messages.folder``), the rule
+    ``list_threads`` and ``list_folders`` use, not ``threads.folder``,
+    which only records where the thread's first message was filed
+    (#308, #415). ``thread_id_column`` is a fixed literal from the
+    caller; folder names are ``?``-bound.
+    """
+    placeholders = ",".join("?" * len(folders))
+    where_clauses.append(
+        f"{thread_id_column} IN (SELECT thread_id FROM messages "  # nosec B608
+        f"WHERE folder IN ({placeholders}))"
+    )
+    params.extend(folders)
+
+
 class Database:
     """Read-only handle to the indexer's SQLite output.
 
@@ -1509,9 +1528,7 @@ class Database:
         where_clauses = ["threads_fts MATCH ?"]
         params: list = [fts_query]
         if folders:
-            placeholders = ",".join(["?"] * len(folders))
-            where_clauses.append(f"t.folder IN ({placeholders})")
-            params.extend(folders)
+            _append_folder_membership_sql(where_clauses, params, "t.thread_id", folders)
         # Normalize before SQL pushdown. Stored dates are full ISO timestamps
         # (``"2024-12-31T10:00:00+00:00"``); a bare user filter ``"2024-12-31"``
         # would lexicographically sort *below* any same-day stored timestamp
@@ -1713,9 +1730,7 @@ class Database:
         has_attachments: bool | None = None,
     ) -> None:
         if folders:
-            placeholders = ",".join(["?"] * len(folders))
-            where_clauses.append(f"t.folder IN ({placeholders})")
-            params.extend(folders)
+            _append_folder_membership_sql(where_clauses, params, "t.thread_id", folders)
         date_from_iso, date_to_iso = _normalize_date_range(date_from, date_to)
         if date_from_iso is not None:
             where_clauses.append("t.date_last >= ?")
@@ -1779,9 +1794,7 @@ class Database:
         ]
         params: list = [pattern, pattern, pattern]
         if folders:
-            placeholders = ",".join(["?"] * len(folders))
-            where_clauses.append(f"folder IN ({placeholders})")
-            params.extend(folders)
+            _append_folder_membership_sql(where_clauses, params, "thread_id", folders)
         # See ``_keyword_search`` for why date bounds are normalized before
         # being pushed into SQL.
         date_from_iso, date_to_iso = _normalize_date_range(date_from, date_to)
@@ -2225,8 +2238,6 @@ class Database:
         date_from_dt, date_to_dt = _parse_date_range(date_from, date_to)
 
         filtered = results
-        if folders:
-            filtered = [r for r in filtered if r.folder in folders]
         if from_addr:
             fa = from_addr.lower()
             # Filter by sender (the From-only subset, not all participants).
@@ -2251,7 +2262,31 @@ class Database:
             filtered = [r for r in filtered if r.date_first <= date_to_dt]
         if has_attachments is not None:
             filtered = [r for r in filtered if r.has_attachments == has_attachments]
+        if folders and filtered:
+            # Last, so the lookup covers only the survivors of the
+            # in-memory filters.
+            members = self._threads_in_folders([r.thread_id for r in filtered], folders)
+            filtered = [r for r in filtered if r.thread_id in members]
         return filtered
+
+    def _threads_in_folders(self, thread_ids: list[str], folders: list[str]) -> set[str]:
+        """The subset of ``thread_ids`` with a message filed in one of
+        ``folders``: the same per-message membership ``list_threads``
+        uses (#415). One connection; the id list is batched under
+        ``_IN_CLAUSE_BATCH_SIZE``."""
+        found: set[str] = set()
+        folder_marks = ",".join("?" * len(folders))
+        with closing(self._connect()) as conn:
+            for start in range(0, len(thread_ids), _IN_CLAUSE_BATCH_SIZE):
+                batch = thread_ids[start : start + _IN_CLAUSE_BATCH_SIZE]
+                id_marks = ",".join("?" * len(batch))
+                rows = conn.execute(
+                    "SELECT DISTINCT thread_id FROM messages "  # nosec B608
+                    f"WHERE thread_id IN ({id_marks}) AND folder IN ({folder_marks})",
+                    [*batch, *folders],
+                ).fetchall()
+                found.update(r["thread_id"] for r in rows)
+        return found
 
     # -------------------------------------------------------------------------
     # Direct lookups

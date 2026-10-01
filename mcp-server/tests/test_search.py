@@ -971,3 +971,133 @@ class TestLocalDbErrorTextWithheld:
         assert _LOCAL_DB_MARKER not in text
         assert _LOCAL_DB_MARKER not in caplog.text
         assert "ValueError" in text
+
+
+@pytest.fixture
+def cross_folder_db(tmp_path):
+    """Thread ``t-x`` started in INBOX with a reply filed in Sent; thread
+    ``t-o`` lives in Archive. Both match "ledger" in every keyword lane
+    (thread FTS, body chunk, attachment filename) and the vector lanes."""
+    import sqlite3
+
+    import sqlite_vec
+    from src.lib.sqlite import Database
+
+    from tests.conftest import (
+        _build_schema,
+        _insert_attachment,
+        _insert_chunk,
+        _insert_message,
+        _insert_thread,
+    )
+
+    path = tmp_path / "cross-folder.db"
+    conn = sqlite3.connect(str(path))
+    conn.enable_load_extension(True)
+    sqlite_vec.load(conn)
+    conn.enable_load_extension(False)
+    _build_schema(conn)
+    for thread_id, folder, root in (("t-x", "INBOX", "x1"), ("t-o", "Archive", "o1")):
+        _insert_thread(
+            conn,
+            thread_id=thread_id,
+            subject="ledger",
+            participants=["alice@example.com"],
+            senders=["alice@example.com"],
+            folder=folder,
+            message_ids=[root],
+            body_text="ledger totals",
+            embedding=[1.0, 0.0, 0.0, 0.0],
+        )
+    _insert_message(
+        conn,
+        message_id="x2",
+        thread_id="t-x",
+        folder="Sent",
+        sent_at="2024-01-02T10:00:00+00:00",
+        body="ledger reply",
+        in_reply_to="x1",
+    )
+    _insert_chunk(
+        conn,
+        chunk_id="o1-body",
+        message_id="o1",
+        thread_id="t-o",
+        text="ledger archived",
+        embedding=[1.0, 0.0, 0.0, 0.0],
+    )
+    _insert_attachment(
+        conn, message_id="x2", thread_id="t-x", attachment_id="att-x", filename="ledger.pdf"
+    )
+    conn.close()
+    return Database(str(path))
+
+
+def _db_thread_ids(db, call, folder):
+    """Thread IDs one search path returns for ``folders=[folder]``."""
+    embedding = [1.0, 0.0, 0.0, 0.0]
+    if call == "keyword":
+        results = db.keyword_search("ledger", folders=[folder])
+    elif call == "semantic":
+        results = db.semantic_search(embedding, folders=[folder])
+    elif call == "hybrid":
+        results = db.hybrid_search("ledger", embedding, folders=[folder])
+    elif call == "hybrid_evidence":
+        # ask_mailbox / extract_from_emails call this shape.
+        results = db.hybrid_search("ledger", embedding, folders=[folder], with_evidence=True)
+    elif call == "like_fallback":
+        results = db._like_fallback("ledger", 50, folders=[folder])
+    else:
+        lane = {
+            "thread_fts": db._thread_keyword_search,
+            "chunk_fts": db._chunk_keyword_search,
+            "attachment_fts": db._attachment_keyword_search,
+        }[call]
+        results = lane("ledger", 50, folders=[folder])
+    return {r.thread_id for r in results}
+
+
+class TestFolderFilterMatchesListThreads:
+    """Regression (#415): search folder filters compared ``threads.folder``
+    (the folder of the thread's first message) while ``list_threads``
+    reads per-message folders, so a thread listed under Sent was missing
+    from a Sent-scoped search. Every path must agree on membership."""
+
+    FOLDERS = ["INBOX", "Sent", "Archive"]
+
+    @pytest.mark.parametrize("folder", FOLDERS)
+    @pytest.mark.parametrize(
+        "call",
+        [
+            "keyword",
+            "semantic",
+            "hybrid",
+            "hybrid_evidence",
+            "like_fallback",
+            "thread_fts",
+            "chunk_fts",
+            "attachment_fts",
+        ],
+    )
+    def test_db_search_paths(self, cross_folder_db, call, folder):
+        listed = {t.thread_id for t in cross_folder_db.list_threads(folder=folder)}
+        found = _db_thread_ids(cross_folder_db, call, folder)
+        if call == "attachment_fts":
+            # Only t-x carries a matching attachment.
+            listed &= {"t-x"}
+        assert found == listed
+
+    @pytest.mark.parametrize("folder", FOLDERS)
+    @pytest.mark.parametrize("mode", ["hybrid", "semantic", "keyword"])
+    def test_search_emails(self, fake_server, fake_embed, cross_folder_db, mode, folder):
+        listed = {t.thread_id for t in cross_folder_db.list_threads(folder=folder)}
+        handler = _handler(fake_server, fake_embed, cross_folder_db)
+        out = asyncio.run(handler(query="ledger", mode=mode, folders=[folder]))
+        assert {r["thread_id"] for r in out.structuredContent["results"]} == listed
+
+    @pytest.mark.parametrize("folder", FOLDERS)
+    def test_get_evidence_mailbox_wide(self, fake_server, fake_embed, cross_folder_db, folder):
+        listed = {t.thread_id for t in cross_folder_db.list_threads(folder=folder)}
+        register_search_tools(fake_server, cross_folder_db, fake_embed)
+        out = asyncio.run(fake_server.tools["get_evidence"](query="ledger", folders=[folder]))
+        assert {t["thread_id"] for t in out.structuredContent["threads"]} == listed

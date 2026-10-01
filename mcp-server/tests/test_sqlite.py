@@ -172,13 +172,36 @@ class TestBestPerThread:
 
 class TestApplyFilters:
     def test_folder_filter(self, seeded_db: Database, make_result):
+        # Membership comes from the indexed messages (t-alpha and t-beta
+        # in INBOX, t-gamma in Archive), not the result's ``folder``
+        # field, which is deliberately set wrong here (#415).
         results = [
-            make_result("a", folder="INBOX"),
-            make_result("b", folder="Archive"),
-            make_result("c", folder="INBOX"),
+            make_result("t-alpha", folder="Archive"),
+            make_result("t-gamma", folder="INBOX"),
+            make_result("t-beta", folder="Archive"),
         ]
         filtered = seeded_db._apply_filters(results, folders=["INBOX"])
-        assert [r.thread_id for r in filtered] == ["a", "c"]
+        assert [r.thread_id for r in filtered] == ["t-alpha", "t-beta"]
+
+    def test_folder_lookup_batches_over_one_connection(
+        self, seeded_db: Database, make_result, monkeypatch
+    ):
+        from src.lib import sqlite as sqlite_mod
+
+        monkeypatch.setattr(sqlite_mod, "_IN_CLAUSE_BATCH_SIZE", 2)
+        opened: list[object] = []
+        real_connect = seeded_db._connect
+
+        def counting_connect():
+            conn = real_connect()
+            opened.append(conn)
+            return conn
+
+        monkeypatch.setattr(seeded_db, "_connect", counting_connect)
+        ids = ["t-alpha", "x1", "t-gamma", "x2", "t-beta"]
+        filtered = seeded_db._apply_filters([make_result(i) for i in ids], folders=["INBOX"])
+        assert [r.thread_id for r in filtered] == ["t-alpha", "t-beta"]
+        assert len(opened) == 1
 
     def test_from_addr_substring_match_case_insensitive(self, seeded_db: Database, make_result):
         a = make_result("a")
