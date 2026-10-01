@@ -1,6 +1,6 @@
 """
 Structured output for the search, retrieval, evidence, and status tools,
-and for ask_mailbox's checked citations.
+and for ask_mailbox's checked citations and the experimental brief_issue.
 
 Each tool declares one of these models as its ``outputSchema`` (via
 ``@server.tool(output_schema=Model.model_json_schema())``; FastMCP does
@@ -470,5 +470,106 @@ class AskMailboxOutput(_Output):
     )
     repair_attempted: bool = Field(
         description="True when the first answer failed the check and the model was asked once more."
+    )
+    threads: list[ThreadSummary] = Field(description="The threads searched, best match first.")
+
+
+# --- experimental tools -------------------------------------------------
+#
+# brief_issue (MCP_EXPERIMENTAL_TOOLS=true only). The Brief* models are
+# both the JSON shape the model is asked for (a reply missing a section
+# or with a wrong type does not parse as a brief) and the brief in the
+# output. Every string in them is model output.
+
+_LABELS_DESCRIPTION = "Evidence labels (E1, ...) the model cited for this entry."
+
+
+class BriefEvent(_Output):
+    date: str | None = Field(description="YYYY-MM-DD as the model gave it; null when undated.")
+    date_source: Literal["sent", "mentioned", "unknown"] = Field(
+        description="sent: the cited message's own sent date. mentioned: a date the "
+        "passage states for the event. unknown: neither."
+    )
+    actor: str
+    event: str
+    labels: list[str] = Field(description=_LABELS_DESCRIPTION)
+
+
+class BriefPosition(_Output):
+    actor: str
+    position: str
+    labels: list[str] = Field(description=_LABELS_DESCRIPTION)
+
+
+class BriefDecision(_Output):
+    decision: str
+    labels: list[str] = Field(description=_LABELS_DESCRIPTION)
+
+
+class BriefQuestion(_Output):
+    question: str
+    labels: list[str] = Field(description=_LABELS_DESCRIPTION)
+
+
+class BriefConflict(_Output):
+    description: str
+    labels: list[str] = Field(
+        description="Labels of the passages that disagree; at least two are expected."
+    )
+
+
+class Brief(_Output):
+    chronology: list[BriefEvent] = Field(description="Dated events, oldest first.")
+    positions: list[BriefPosition] = Field(description="Actors and the positions they state.")
+    decisions: list[BriefDecision]
+    open_questions: list[BriefQuestion]
+    conflicts: list[BriefConflict] = Field(
+        description="Passages that disagree where none states which is right."
+    )
+    insufficient_evidence: bool = Field(
+        description="True when the model found nothing about the topic in the passages."
+    )
+
+
+BriefSection = Literal["chronology", "positions", "decisions", "open_questions", "conflicts"]
+
+
+class BriefCitationProblem(_Output):
+    section: BriefSection
+    item: int = Field(description="0-based index of the entry within its section.")
+    kind: Literal["unknown_labels", "no_citations", "too_few_labels"] = Field(
+        description="unknown_labels: the entry cites labels no supplied passage has. "
+        "no_citations: it cites none. too_few_labels: a conflict cites fewer than two "
+        "supplied passages."
+    )
+    labels: list[str] = Field(description="The unknown labels; empty for the other kinds.")
+
+
+class BriefIssueOutput(_Output):
+    experimental: Literal[True] = Field(
+        description="Always true: brief_issue is experimental and this format may change."
+    )
+    status: Literal["ok", "invalid_json", "truncated"] = Field(
+        description="ok: brief holds the parsed brief. invalid_json: the reply was not "
+        "the brief JSON even after one repair; raw_text holds it. truncated: the reply "
+        "was cut off at INFERENCE_MAX_TOKENS; raw_text holds the part produced."
+    )
+    brief: Brief | None = Field(description="The parsed brief; null unless status is ok.")
+    raw_text: str | None = Field(
+        description="The model's unparsed reply when status is not ok; null otherwise."
+    )
+    as_of: str | None = Field(
+        description="Latest sent date (YYYY-MM-DD) among the passages supplied to the "
+        "model; the brief describes the evidence up to then. Null when none is dated."
+    )
+    citations: list[Citation] = Field(
+        description="Each cited label that names a supplied passage, in first-cited order."
+    )
+    citation_problems: list[BriefCitationProblem] = Field(
+        description="Empty when every entry passed the label check. Labels only: a valid "
+        "label does not prove the passage supports the entry, and quotes are not verified."
+    )
+    repair_attempted: bool = Field(
+        description="True when the first reply failed the check and the model was asked once more."
     )
     threads: list[ThreadSummary] = Field(description="The threads searched, best match first.")

@@ -77,6 +77,9 @@ Of the intelligence tools (Group 3), `ask_mailbox` publishes an
 [`ask_mailbox`](#ask_mailbox)). `summarize_thread` and
 `extract_from_emails` have no typed output model; their answer is the
 prose in `content`, with no `outputSchema` and no `structuredContent`.
+The opt-in experimental `brief_issue` also publishes an `outputSchema`
+(see [Experimental tools](#experimental-tools)); unlike the others, its
+format may change.
 
 Arguments are checked against each tool's input schema before the tool
 runs: a wrong type or an argument the tool does not declare is an error
@@ -84,9 +87,9 @@ result naming the problem.
 
 ## Stage timings in the server log
 
-`search_emails`, `get_evidence`, `search_attachments` and the three
-intelligence tools log one line per call at `INFO` on the `mcp.timings`
-logger, on success and on failure:
+`search_emails`, `get_evidence`, `search_attachments`, the three
+intelligence tools and the experimental `brief_issue` log one line per
+call at `INFO` on the `mcp.timings` logger, on success and on failure:
 
 ```text
 tool=search_emails outcome=ok total_ms=41.7 stages_ms={'query_embedding': 22.4, 'thread_fts': 3.1, 'chunk_fts': 2.0, 'attachment_fts': 0.9, 'thread_vec': 4.6, 'chunk_vec': 6.2, 'fusion': 0.8} counts={'thread_fts': 4, 'chunk_fts': 9, 'attachment_fts': 0, 'thread_vec': 100, 'chunk_vec': 812, 'filtered': 57, 'results': 10} config={'rerank': 'none'}
@@ -454,7 +457,8 @@ inject instructions into the user's inbox that an LLM might treat as
 commands. The intelligence tools mitigate this two ways:
 
 1. **System-prompt framing.** Every `ask_mailbox`, `summarize_thread`,
-   and `extract_from_emails` call prepends a security notice telling the
+   and `extract_from_emails` call (and the experimental `brief_issue`)
+   prepends a security notice telling the
    model that email content is untrusted data, must not be followed as
    instructions, and that the model must not reveal the system prompt or
    act on URLs/addresses/phone numbers found inside email bodies.
@@ -628,6 +632,88 @@ second item says how many of the searched threads could not be
 extracted and why; if none were extracted the response says so rather
 than "No structured data … found", which is reserved for every thread
 answering `null` or `[]`.
+
+---
+
+## Experimental tools
+
+**EXPERIMENTAL: the output format may change between releases.**
+Experimental tools are registered only when `MCP_EXPERIMENTAL_TOOLS=true`
+(default `false`; any value other than `true` / `false` / empty, in any
+case, fails startup). They also need inference: with
+`INFERENCE_MODE=none` they are not registered and the startup log says
+so. They are read-only and store nothing.
+
+### `brief_issue`
+An ephemeral, cited brief of one issue across the mailbox (PLAN.md
+Phase 3 item 3, #291): a chronology, actors' positions, decisions, open
+questions and conflicting evidence. Nothing it produces is persisted or
+indexed, so a brief can never come back as evidence.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `topic` | string | required | The issue to brief, as the user phrased it |
+| `folders` | list | all | Scope to threads with a message in any of these folders |
+| `from_addr` | string | none | Scope to a specific sender |
+| `date_from` | string | none | Date lower bound |
+| `date_to` | string | none | Date upper bound |
+| `max_threads` | int | `5` | Context threads to use, clamped to `[1, 10]` |
+
+Retrieval and evidence are those of `ask_mailbox`: hybrid search with
+evidence chunks, one shared prompt budget, and the same labelled
+passage headers (`[E3 | message <claimant ID> | from <sender> | sent
+<date> | ...]`) inside the `<untrusted_email>` blocks, with the
+coverage note when passages were left out. The topic and a fixed task
+line follow the blocks. The system prompt asks for one JSON object of
+a fixed shape and says that every entry must cite the labels of the
+passages that state it; that the newest message is not authoritative
+because it is newest, so a correction, cancellation or supersession is
+reported only when a passage states it; that passages which disagree
+with none saying which is right go in `conflicts`; and that a topic the
+passages do not cover returns empty lists with `insufficient_evidence:
+true`.
+
+The reply is cut at 100,000 characters (an oversized reply is not
+parsed), unwrapped from a code fence, parsed with `json.loads`, and
+validated against the brief shape: every section must be present with
+the right types. Each entry's labels are then checked against the
+passages supplied: a label no passage has is `unknown_labels`, an entry
+with no label is `no_citations`, and a conflict citing fewer than two
+supplied passages is `too_few_labels`. A reply that is not a brief, or
+that has any problem, gets exactly one repair call: the same prompt
+plus a fixed instruction after the task (the rejected reply is not
+replayed). The repaired brief is used when it parses; otherwise the
+first one when it parsed; otherwise the raw reply is returned with
+`status: "invalid_json"`. A reply cut off at `INFERENCE_MAX_TOKENS` is
+not repaired and comes back with `status: "truncated"`; a brief needs
+more output than an `ask_mailbox` answer, so raise
+`INFERENCE_MAX_TOKENS` (for example to 4096) when that happens. Only
+counts are logged.
+
+Structured output:
+
+| Field | Description |
+|---|---|
+| `experimental` | Always `true` |
+| `status` | `ok`, `invalid_json` or `truncated` |
+| `brief` | When `ok`: `chronology` (`date`, `date_source`: `sent` / `mentioned` / `unknown`, `actor`, `event`, `labels`; oldest first), `positions` (`actor`, `position`, `labels`), `decisions` (`decision`, `labels`), `open_questions` (`question`, `labels`), `conflicts` (`description`, `labels`), `insufficient_evidence`; else `null` |
+| `raw_text` | The unparsed reply when `status` is not `ok`, else `null` |
+| `as_of` | Latest sent date (`YYYY-MM-DD`) among the passages supplied; the brief describes the evidence up to then |
+| `citations` | Each valid cited label, first-cited order, in the `ask_mailbox` citation shape (claimant, sender, own sent date, chunk) |
+| `citation_problems` | Entries `{section, item, kind, labels}`; `[]` when every entry passed |
+| `repair_attempted` | Whether the one repair call was made |
+| `threads` | The threads searched, best match first |
+
+The prose in `content` opens with an EXPERIMENTAL notice and the
+"Evidence as of" date, then the brief's sections, the `Citations:`
+list, any citation-check lines and `Sources searched:`.
+
+Limits: the check is about labels only. Quotes are not verified against
+the indexed text, a valid label does not prove the passage supports the
+entry, and an entry's `actor` and `date` are the model's reading. The
+date in a passage header is the message's own sent date; the receiving
+date is not indexed. `as_of` is computed by the server from the
+passages, not by the model.
 
 ---
 
