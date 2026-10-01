@@ -38,6 +38,18 @@ class InvalidFilterError(ValueError):
         self.field_name = field_name
 
 
+class VectorLanesUnavailableError(RuntimeError):
+    """Neither vector lane could be queried, so semantic search has no
+    retrieval path left. Carries fixed text only: the underlying SQLite
+    error is logged by the lane helper, never quoted here."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            "semantic search unavailable: no vector index could be queried. "
+            "Check the indexer and mcp-server logs, or use mode='keyword'."
+        )
+
+
 def canonical_addr(value: str) -> str:
     """Extract the bare lowercased email from a display string.
 
@@ -786,7 +798,9 @@ class Database:
             date_to=date_to,
             has_attachments=has_attachments,
         )
-        vec_results = self._vector_search(query_embedding, fetch_limit)
+        # A failed lane (``None``) contributes nothing; hybrid keeps its
+        # existing silent fallback to the remaining lanes.
+        vec_results = self._vector_search(query_embedding, fetch_limit) or []
         # Per-message chunks. Oversample heavily because many chunks
         # may belong to a single thread — without enough chunks the lane
         # only contributes a handful of unique threads. The chunk lane
@@ -803,8 +817,8 @@ class Database:
         # only one credit to RRF" failure mode — leaving the vec lane
         # at the prior ``* 3`` would re-create that asymmetry between
         # the keyword and dense chunk paths.
-        chunk_hits = self._chunk_vector_search(
-            query_embedding, fetch_limit * _CHUNK_LANE_OVERSAMPLE
+        chunk_hits = (
+            self._chunk_vector_search(query_embedding, fetch_limit * _CHUNK_LANE_OVERSAMPLE) or []
         )
         fused = self._reciprocal_rank_fusion(bm25_results, vec_results, chunk_hits)
         filtered = self._apply_filters(
@@ -975,6 +989,10 @@ class Database:
         Mirrors the dense half of ``hybrid_search`` — without the
         chunk lane the mode silently returned the worse retrieval
         whenever a caller chose ``mode="semantic"``.
+
+        Raises ``VectorLanesUnavailableError`` when both lanes fail, so a
+        broken index is not reported as "no matches". One failed lane
+        still answers from the other.
         """
         oversample = (
             _FILTERED_OVERSAMPLE
@@ -991,7 +1009,11 @@ class Database:
         chunk_hits = self._chunk_vector_search(
             query_embedding, fetch_limit * _CHUNK_LANE_OVERSAMPLE
         )
-        fused = self._reciprocal_rank_fusion(bm25=[], vec=vec_results, chunks=chunk_hits)
+        if vec_results is None and chunk_hits is None:
+            raise VectorLanesUnavailableError()
+        fused = self._reciprocal_rank_fusion(
+            bm25=[], vec=vec_results or [], chunks=chunk_hits or []
+        )
         filtered = self._apply_filters(
             fused, folders, from_addr, date_from, date_to, has_attachments, participant
         )
@@ -1628,8 +1650,11 @@ class Database:
             log.warning(f"LIKE fallback search error: {e}")
             return []
 
-    def _chunk_vector_search(self, embedding: list[float], limit: int) -> list[ChunkResult]:
+    def _chunk_vector_search(self, embedding: list[float], limit: int) -> list[ChunkResult] | None:
         """Return per-message chunks whose vectors are closest to ``embedding``.
+
+        Returns ``None`` when the lane itself fails (missing or corrupt
+        vec table, malformed vector), distinct from ``[]`` for no matches.
 
         The chunk vec table is populated incrementally by the indexer.
         Threads with no chunks (empty bodies) simply do not appear in
@@ -1687,7 +1712,7 @@ class Database:
             # raised by sqlite-vec on malformed embedding payloads. Any
             # other exception type is unexpected and should propagate.
             log.warning(f"Chunk vector search error: {e}")
-            return []
+            return None
 
     def get_evidence_chunks_for_threads(
         self,
@@ -1881,7 +1906,9 @@ class Database:
         chunks.reverse()
         return chunks
 
-    def _vector_search(self, embedding: list[float], limit: int) -> list[ThreadResult]:
+    def _vector_search(self, embedding: list[float], limit: int) -> list[ThreadResult] | None:
+        """Thread-vector lane. ``None`` means the lane failed (see
+        ``_chunk_vector_search``); ``[]`` means no matches."""
         try:
             serialized = sqlite_vec.serialize_float32(embedding)
             rows = self._fetchall(
@@ -1910,7 +1937,7 @@ class Database:
             # for malformed serialised vectors. Other exception types
             # should propagate so corrupt-state bugs aren't masked.
             log.warning(f"Vector search error: {e}")
-            return []
+            return None
 
     def _reciprocal_rank_fusion(
         self,
