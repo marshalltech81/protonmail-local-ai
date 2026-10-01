@@ -7,6 +7,7 @@ helper used by the Makefile.
 """
 
 import asyncio
+import sqlite3
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -84,3 +85,18 @@ class TestGetMailboxStatus:
         monkeypatch.setattr(seeded_db, "get_mailbox_status", boom)
         with pytest.raises(ToolError, match="Mailbox status error"):
             asyncio.run(_handler(fake_server, seeded_db)())
+
+    def test_db_error_text_is_withheld(self, fake_server, seeded_db, monkeypatch, caplog):
+        """An SQLite error can quote stored data; the log and the caller
+        get its type only (#257)."""
+
+        def boom():
+            raise sqlite3.OperationalError("no such column: privatemarkerq7z")
+
+        monkeypatch.setattr(seeded_db, "get_mailbox_status", boom)
+        with caplog.at_level("DEBUG"), pytest.raises(ToolError) as exc:
+            asyncio.run(_handler(fake_server, seeded_db)())
+        assert "privatemarkerq7z" not in str(exc.value)
+        assert "privatemarkerq7z" not in caplog.text
+        assert "OperationalError" in str(exc.value)
+        assert "OperationalError" in caplog.text
