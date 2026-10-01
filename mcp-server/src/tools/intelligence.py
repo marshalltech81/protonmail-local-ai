@@ -15,7 +15,13 @@ from mcp.types import TextContent
 from ..lib.embed import embed_query
 from ..lib.inference import InferenceTruncatedError
 from ..lib.security import log_tool_call, safe_provider_exception_text
-from ..lib.sqlite import ChunkResult, InvalidFilterError, ThreadResult, validate_date_range
+from ..lib.sqlite import (
+    PROMPT_EVIDENCE_CHUNKS_PER_THREAD,
+    ChunkResult,
+    InvalidFilterError,
+    ThreadResult,
+    validate_date_range,
+)
 from ..lib.validation import clamp_int
 from .outputs import HEADER_CHAR_LIMIT, MAX_LISTED, clip
 
@@ -359,13 +365,6 @@ log = logging.getLogger("mcp.tools.intelligence")
 # 2000 chars when the others need less.
 PER_THREAD_CHAR_BUDGET = 2000
 
-# Evidence chunks ``ask_mailbox`` requests per thread. Chunks are
-# per-message, so a thread's short replies often fit several to the
-# shared budget; the old three left a later matching passage out even
-# when there was room. Raising it costs no extra query: the per-thread
-# chunk scan already reads every chunk of each surfaced thread.
-_ASK_EVIDENCE_CHUNKS_PER_THREAD = 6
-
 # Hard ceilings on caller-supplied limits. MCP tool calls can be generated
 # by an LLM; an inflated ``max_threads=5000`` or ``limit=100000`` would
 # otherwise drive huge retrievals and, for intelligence tools, assemble
@@ -588,6 +587,11 @@ class EvidenceCoverage:
     threads_without_evidence: int = 0  # threads whose every passage was left out
 
 
+# Shortest normalized body passage treated as a quote of an earlier one
+# in the same thread. Shorter identical passages ("Approved.", "Thanks")
+# are usually independent replies from different people, not quotes.
+_MIN_QUOTED_PASSAGE_CHARS = 200
+
 # Quote markers and indentation at line starts. Stripping them (with
 # whitespace collapsed and case folded) makes a quoted copy of an earlier
 # message compare equal to the original. One linear pass per passage.
@@ -657,10 +661,11 @@ def _build_evidence(threads: list[ThreadResult], budget: int) -> tuple[list[str]
        provenance header. A thread without chunks falls back to its
        accumulated ``body_text`` (capped at ``THREAD_BODY_TEXT_MAX_TOKENS``
        by the indexer), then to its ``snippet``.
-    2. Drop a chunk whose normalized text repeats an earlier chunk of the
-       same thread (a quoted reply), before it spends budget. Dedup stays
-       within a thread: two threads holding the same short reply
-       ("Approved.") each keep it.
+    2. Drop a body chunk whose normalized text repeats an earlier body
+       chunk of the same thread (a quoted reply), before it spends
+       budget. Dedup stays within a thread, skips attachment chunks, and
+       skips passages shorter than ``_MIN_QUOTED_PASSAGE_CHARS``, so
+       independent short replies ("Approved.") are all kept.
     3. Split ``budget`` across threads with ``_allocate_budget``.
     4. Spend each thread's share passage by passage; the passage that
        crosses it is cut (its header then states the kept range) and the
@@ -679,7 +684,12 @@ def _build_evidence(threads: list[ThreadResult], budget: int) -> tuple[list[str]
         duplicate_of: list[int] = []
         seen: dict[str, int] = {}
         for candidate in thread.evidence_chunks:
-            key = _normalized_passage(candidate.text)
+            # Only long body passages can be quotes; attachments are
+            # separate sources even when their text matches.
+            key = _normalized_passage(candidate.text) if candidate.attachment_id is None else ""
+            if len(key) < _MIN_QUOTED_PASSAGE_CHARS:
+                pieces.append((candidate, candidate.text))
+                continue
             if key in seen:
                 duplicate_of.append(seen[key])
                 continue
@@ -976,7 +986,7 @@ def register_intelligence_tools(
                 limit=max_threads,
                 with_evidence=True,
                 reranker=reranker,
-                evidence_per_thread=_ASK_EVIDENCE_CHUNKS_PER_THREAD,
+                evidence_per_thread=PROMPT_EVIDENCE_CHUNKS_PER_THREAD,
             )
 
             if not results:

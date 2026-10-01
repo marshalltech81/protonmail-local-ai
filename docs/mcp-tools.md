@@ -172,8 +172,9 @@ chunks (extracted PDF / OCR / document text) are included — unlike
 | `limit` | int | `12` | Max evidence chunks to return; clamped to `[1, 50]` |
 | `include_scores` | bool | `false` | Annotate each thread with the retrieval lanes that matched (`thread_fts` / `chunk_fts` / `attachment_fts` / `thread_vec` / `chunk_vec` / `rerank`) and each chunk with its vector distance |
 
-The mailbox-wide path runs the same hybrid retrieval as `ask_mailbox`
-and flattens the per-thread evidence into a flat `limit`-chunk budget.
+The mailbox-wide path runs the same hybrid retrieval as `ask_mailbox`,
+with the same cap of six chunks per thread, and flattens the
+per-thread evidence into a flat `limit`-chunk budget.
 The `thread_id`-scoped path returns that thread's chunks ranked
 against the query; it bypasses RRF fusion, so `include_scores` shows
 per-chunk vector distance but no lane provenance.
@@ -368,10 +369,11 @@ it stays within local-LLM context windows. The bounds differ by tool:
   most relevant indexed chunks (message bodies and attachment text)
   returned by hybrid search. If a thread has no matching chunks, the
   tool falls back to the indexed thread body and finally to the
-  200-character ``snippet``. A chunk whose text repeats an earlier
-  chunk of the same thread (ignoring `>` quote markers, spacing and
-  case, as with a quoted reply) is dropped before it uses any space;
-  different threads keep their own copies.
+  200-character ``snippet``. A body chunk of at least 200 characters
+  whose text repeats an earlier body chunk of the same thread (ignoring
+  `>` quote markers, spacing and case, as with a quoted reply) is
+  dropped before it uses any space. Shorter passages ("Approved."),
+  attachment chunks and copies in different threads are all kept.
   `extract_from_emails` sends one prompt per thread, with up to ``2000``
   characters of evidence (three chunks at most). `ask_mailbox` puts up
   to ``max_threads`` threads in one prompt, with up to six chunks per

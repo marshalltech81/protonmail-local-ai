@@ -235,8 +235,9 @@ class TestPromptEvidenceBudget:
         """A reply quoting an earlier message in the same thread produces a
         chunk whose text matches the original once quote markers and
         spacing are ignored."""
-        original = "Meeting moved to Thursday.\nBring the signed form."
-        quoted = "> Meeting moved to   Thursday.\n>  Bring the signed form.\n"
+        detail = "The venue, catering and parking are unchanged from the earlier plan. " * 3
+        original = f"Meeting moved to Thursday.\nBring the signed form.\n{detail}"
+        quoted = f"> Meeting moved to   Thursday.\n>  Bring the signed form.\n> {detail}\n"
         thread = _result(
             evidence_chunks=[
                 _chunk(original, index=0),
@@ -249,6 +250,33 @@ class TestPromptEvidenceBudget:
         assert "REPLY: confirmed for Thursday" in text
         assert coverage.duplicates == 1
         assert coverage.omitted == 0
+
+    def test_short_identical_replies_in_one_thread_are_all_kept(self):
+        """Review round 2: several recipients replying "Approved." in one
+        thread are independent answers, not quotes."""
+        thread = _result(
+            evidence_chunks=[
+                _chunk("Approved.", index=0, message_id="m1"),
+                _chunk("Approved.", index=0, message_id="m2"),
+            ]
+        )
+        [text], coverage = _build_evidence([thread], 10_000)
+        assert text.count("Approved.") == 2
+        assert coverage.duplicates == 0
+
+    def test_identical_attachment_chunks_are_all_kept(self):
+        """Review round 2: two attachments with the same clause are two
+        sources, never a quote of each other."""
+        clause = "Either party may terminate on thirty days written notice. " * 6
+        thread = _result(
+            evidence_chunks=[
+                _chunk(clause, index=0, attachment_id="att-a", attachment_filename="a.pdf"),
+                _chunk(clause, index=0, attachment_id="att-b", attachment_filename="b.pdf"),
+            ]
+        )
+        [text], coverage = _build_evidence([thread], 10_000)
+        assert "a.pdf" in text and "b.pdf" in text
+        assert coverage.duplicates == 0
 
     def test_the_same_short_passage_is_kept_in_every_thread(self):
         """Review round 1: dedup across threads emptied a lower-ranked

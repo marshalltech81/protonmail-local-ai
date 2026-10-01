@@ -95,6 +95,14 @@ _FILTERED_OVERSAMPLE = 4
 # even on dense matches.
 _CHUNK_LANE_OVERSAMPLE = 10
 
+# Evidence chunks per thread that ``ask_mailbox`` puts in its prompt and
+# ``get_evidence`` returns from the same retrieval, so the audit tool
+# shows the passages the model saw (#285). Chunks are per-message, so a
+# thread's short replies often fit several to the prompt's shared
+# budget. It costs no extra query: the per-thread chunk scan already
+# reads every chunk of each surfaced thread.
+PROMPT_EVIDENCE_CHUNKS_PER_THREAD = 6
+
 # sqlite-vec's largest accepted KNN ``k``; a larger one is an error, which
 # the vector lanes catch as "lane unavailable". The fetch windows multiply
 # RERANK_CANDIDATES by filter and chunk oversampling (200 x 4 x 10 = 8000),
