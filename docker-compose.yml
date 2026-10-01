@@ -1,3 +1,14 @@
+# Log rotation shared by every service: the json-file driver keeps at most
+# three 10 MiB files per container. Without it a service inherits the
+# daemon's policy, which on stock json-file is unbounded (#484).
+# docker-compose.first-run.yml swaps Bridge to ``driver: none``; Compose
+# drops these options when the driver changes, so none of them leak.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
 
   # ---------------------------------------------------------------------------
@@ -33,11 +44,7 @@ services:
       - /home/bridge:uid=1000,gid=1000,mode=700
     volumes:
       - bridge-data:/data
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
+    logging: *default-logging
     networks:
       - bridge-net
     healthcheck:
@@ -84,6 +91,7 @@ services:
     volumes:
       - maildir-volume:/maildir
       - mbsync-state:/state
+    logging: *default-logging
     networks:
       - bridge-net
 
@@ -247,6 +255,7 @@ services:
       # The directory is mounted rather than the file, so an absent file
       # stays absent instead of Docker creating a directory in its place.
       - ./config:/config:ro
+    logging: *default-logging
     networks:
       - app-net
 
@@ -355,6 +364,7 @@ services:
       # container (and its healthcheck probes MCP_PORT), so mapping the
       # host port to a fixed container port would point at nothing.
       - "127.0.0.1:${MCP_PORT:-3000}:${MCP_PORT:-3000}"
+    logging: *default-logging
     networks:
       - app-net
     # Healthcheck is defined in mcp-server/Dockerfile and inherited here.
