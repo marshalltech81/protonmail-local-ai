@@ -838,7 +838,7 @@ is queued:
 Acknowledgements only move forward. With every health heartbeat
 (per message and per embed batch, at most every 30 s), the indexer
 upserts the latest acknowledged sync and its own timestamp into the
-one-row `ingestion_state` table (schema v21). A missed stamp event
+one-row `ingestion_state` table. A missed stamp event
 reads as a stale sync until the next rescan; a missed delivery event
 stays invisible to `current` until the rescan queues it.
 

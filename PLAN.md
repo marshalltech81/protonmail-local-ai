@@ -56,8 +56,8 @@ The stack runs four containers:
   sync, TOFU cert pinning with explicit rotation flag.
 - **indexer** — Docker, parses Maildir, threads, embeds via any
   OpenAI-compatible `/v1/embeddings` provider (operator-supplied),
-  writes SQLite. Schema v22 (v21 squashed baseline plus migration
-  `0022`, the `message_thread_map` lookup indexes): 4096-dim L2-unit-norm
+  writes SQLite. Schema v0 (the squashed, renumbered baseline,
+  including the `message_thread_map` lookup indexes): 4096-dim L2-unit-norm
   vectors, `NOT NULL` `message_chunks.message_date`,
   `indexing_jobs.last_error_class`, per-message `messages` +
   `message_participants`. Initial scan and steady-state both
@@ -666,8 +666,9 @@ a consumed marker in `/state`.
 
 Before `make up`: the operator's `.env` and `.secrets` use current
 names, but the embedding provider (`EMBED_MODEL`, `EMBED_BASE_URL`,
-`.secrets/embed_api_key.txt`) still needs configuring. A dev database
-at v20 must be rebuilt from Maildir; v21 opens and migrates to v22.
+`.secrets/embed_api_key.txt`) still needs configuring. Any index
+volume from before the v0 renumber must be rebuilt from Maildir (see
+`docs/troubleshooting.md`, "Indexer refuses to start").
 
 Next, in order (each item is a batch-1 guard unless noted; reproduce
 first, one test-first commit per issue, keep three PRs in flight):
