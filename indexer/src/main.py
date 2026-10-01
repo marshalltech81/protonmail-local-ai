@@ -20,9 +20,10 @@ placeholder string for the key. ``EMBED_MODE`` is the wire-shape
 selector kept for symmetry with the other layers; only ``openai`` is
 valid today.
 
-When ``INDEXER_DELETION_ENABLED=true`` the indexer also runs a reconciler
-that records tombstones for mbsync-flagged (``T``) Maildir files and reaps
-them after a grace window. See ``src/reconciler.py``.
+By default (mirror mode) the indexer also runs a reconciler that records
+tombstones for mbsync-flagged (``T``) Maildir files and reaps them after a
+grace window; ``INDEXER_DELETION_ENABLED=false`` (archive mode) turns it
+off. See ``src/reconciler.py``.
 """
 
 import logging
@@ -1861,11 +1862,14 @@ def _validate_embedding_dim(embedder: EmbeddingBackend) -> None:
 
 def _log_reconciler_config(cfg: ReconcilerConfig) -> None:
     if not cfg.enabled:
-        log.info("Deletion reconciliation: disabled (set INDEXER_DELETION_ENABLED=true to enable)")
+        log.info(
+            "Deletion reconciliation: disabled (archive mode; "
+            "unset INDEXER_DELETION_ENABLED to mirror upstream deletions)"
+        )
         return
     log.info(
         "Deletion reconciliation: enabled "
-        "(grace=%dd, sweep=%ds, max_batch=%.1f%%, force=%s, unlink=%s)",
+        "(mirror mode; grace=%dd, sweep=%ds, max_batch=%.1f%%, force=%s, unlink=%s)",
         cfg.grace_days,
         cfg.sweep_interval_secs,
         cfg.max_batch_pct * 100,
@@ -1963,7 +1967,7 @@ def main():
     # ``indexed_files``, which makes later lookups on the renamed file
     # miss. sweep_paths() only updates filepath rows; it does not
     # tombstone missing files, so running it unconditionally preserves
-    # the opt-in posture of deletion reconciliation. It runs before the
+    # archive mode (INDEXER_DELETION_ENABLED=false). It runs before the
     # initial walk so a renamed file's new path is already recorded as
     # indexed: otherwise the walk reprocesses every file renamed while
     # the indexer was down as new mail.

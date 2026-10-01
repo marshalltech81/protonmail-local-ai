@@ -498,7 +498,7 @@ cascade also drops the message's attachment chunks (they share the
 same content_hash, and even when nothing does today the cached
 extraction means a future re-arrival skips the OCR cost.
 
-## Deletion Reconciliation (opt-in)
+## Deletion Reconciliation (mirror by default)
 
 `mbsync` is configured `Sync Pull` + `Expunge None`, which means a message
 deleted on ProtonMail is never physically removed from the local Maildir.
@@ -506,8 +506,11 @@ Instead, mbsync renames the file to add the IMAP `\Deleted` (Maildir `T`)
 flag. Without reconciliation, the local SQLite index keeps those messages
 forever.
 
-The indexer ships an opt-in reconciler
-(`INDEXER_DELETION_ENABLED=true`) that handles this in two phases:
+The indexer runs a reconciler that handles this in two phases. It is on
+by default (mirror mode: upstream deletions leave the local index);
+`INDEXER_DELETION_ENABLED=false` turns it off (archive mode: the index is
+append-only and keeps deleted mail). An unrecognized value fails indexer
+startup rather than picking a mode.
 
 1. **Tombstone** — a startup sweep plus a live `on_moved` watchdog handler
    record every `T`-flagged file in a `pending_deletions` table. No primary
@@ -841,8 +844,8 @@ treating it as undiscovered mail would resurrect it into search (and
 the next sweep would start a fresh grace window). If mbsync later
 clears the `T` flag because the message was restored upstream, the
 file is live mail again and is re-indexed normally. With
-reconciliation disabled, the index is append-only and `T`-flagged
-files are indexed like any other.
+reconciliation disabled (archive mode), the index is append-only and
+`T`-flagged files are indexed like any other.
 
 Two stage outcomes short-circuit the retry path entirely:
 

@@ -302,9 +302,8 @@ class TestSweepPaths:
     def test_does_not_tombstone_missing_files(self, db, threader, maildir):
         """sweep_paths is the always-on variant; a missing file must be
         counted as unreachable but NOT recorded in pending_deletions.
-        The opt-in Reconciler.sweep() is still responsible for
-        tombstoning when the operator has enabled deletion
-        reconciliation."""
+        Reconciler.sweep() is still responsible for tombstoning when
+        deletion reconciliation is enabled (mirror mode)."""
         path = maildir / "1700000000.M1.host:2,S"
         _write_eml(path, "sp2@example.com")
         _index(path, db, threader)
@@ -317,7 +316,7 @@ class TestSweepPaths:
     def test_does_not_tombstone_t_flagged_files(self, db, threader, maildir):
         """A trashed file is reachable at its new path, so sweep_paths
         updates the filepath and keeps the row alive. Tombstoning of
-        T-flagged files stays opt-in via the full Reconciler."""
+        T-flagged files belongs to the full Reconciler."""
         path = maildir / "1700000000.M1.host:2,S"
         _write_eml(path, "sp3@example.com")
         _index(path, db, threader)
@@ -1627,9 +1626,11 @@ class TestMassDeleteBrake:
 
 
 class TestLoadConfig:
-    def test_defaults_disabled(self):
+    def test_defaults_to_mirror(self):
+        """Mirror is the shipped default (owner decision 2026-10-01):
+        with no variable set, upstream deletions are reconciled."""
         cfg = load_config_from_env({})
-        assert cfg.enabled is False
+        assert cfg.enabled is True
         assert cfg.grace_days == 7
         assert cfg.sweep_interval_secs == 3600
         assert cfg.max_batch_pct == pytest.approx(0.05)
@@ -1640,6 +1641,20 @@ class TestLoadConfig:
         for val in ("1", "true", "TRUE", "yes", "on"):
             cfg = load_config_from_env({"INDEXER_DELETION_ENABLED": val})
             assert cfg.enabled is True, val
+
+    def test_empty_value_keeps_mirror_default(self):
+        cfg = load_config_from_env({"INDEXER_DELETION_ENABLED": "  "})
+        assert cfg.enabled is True
+
+    def test_archive_opt_out_parses_falsy_values(self):
+        for val in ("0", "false", "FALSE", "no", "off", " false "):
+            cfg = load_config_from_env({"INDEXER_DELETION_ENABLED": val})
+            assert cfg.enabled is False, val
+
+    def test_unknown_enabled_value_fails_closed(self):
+        """A typo must not silently pick a retention mode."""
+        with pytest.raises(ValueError, match="INDEXER_DELETION_ENABLED"):
+            load_config_from_env({"INDEXER_DELETION_ENABLED": "archive-please"})
 
     def test_invalid_numeric_falls_back_to_default(self):
         cfg = load_config_from_env({"INDEXER_DELETION_GRACE_DAYS": "not-a-number"})
