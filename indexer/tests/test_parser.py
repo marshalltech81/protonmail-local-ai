@@ -858,6 +858,35 @@ class TestMimeHardening:
         # html2text markdown would include asterisks for <b>; plain path doesn't.
         assert "**" not in msg.body_text
 
+    @pytest.mark.parametrize(
+        ("plain", "expected"),
+        [
+            ("", "HTML_INVOICE_MARKER"),
+            ("\n", "HTML_INVOICE_MARKER"),
+            ("\r\n\r\n", "HTML_INVOICE_MARKER"),
+            ("   \t ", "HTML_INVOICE_MARKER"),
+            ("PLAIN_BODY_MARKER", "PLAIN_BODY_MARKER"),
+        ],
+        ids=["empty", "newline", "blank-lines", "spaces", "nonempty-plain-wins"],
+    )
+    def test_whitespace_only_plain_falls_back_to_html(self, tmp_path, plain, expected):
+        """#298: a whitespace-only text/plain alternative was truthy, so
+        it suppressed a substantive HTML alternative and was then stripped
+        to an empty body. Plain text wins only when it has content."""
+        message = EmailMessage()
+        message["Message-ID"] = "<blank-plain@example.test>"
+        message["From"] = "billing@example.test"
+        message["To"] = "owner@example.test"
+        message["Date"] = "Mon, 28 Sep 2026 12:00:00 +0000"
+        message["Subject"] = "Invoice"
+        message.set_content(plain)
+        message.add_alternative("<p>HTML_INVOICE_MARKER total due</p>", subtype="html")
+        msg = parse_email(_write_message(tmp_path, message))
+        assert msg is not None
+        assert expected in msg.body_text
+        if expected == "PLAIN_BODY_MARKER":
+            assert "HTML_INVOICE_MARKER" not in msg.body_text
+
 
 def _write_message(tmp_path: Path, message: EmailMessage, name: str = "m.eml") -> Path:
     folder = tmp_path / "INBOX" / "cur"
