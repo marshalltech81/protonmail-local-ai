@@ -101,6 +101,12 @@ EMBEDDING_DIM = 4096
 # the SQLite build, so lookups over an unbounded ID list batch under it.
 _IN_CLAUSE_BATCH_SIZE = 500
 
+# Participants per message that get entity and alias writes (From first,
+# then To, then Cc). Later participants still get ``message_participants``
+# rows, just no new entities, so one crafted message cannot drive an
+# unbounded number of entity writes.
+MAX_ENTITY_PARTICIPANTS_PER_MESSAGE = 200
+
 
 class SQLiteTooOldError(RuntimeError):
     """Raised when the runtime SQLite library is older than required."""
@@ -2137,6 +2143,10 @@ class Database:
         # that build a Message by hand.
         authors = msg.from_addrs or [msg.from_addr]
         roles = [("from", authors), ("to", msg.to_addrs), ("cc", msg.cc_addrs)]
+        # Entity writes are bounded per message (a crafted header can list
+        # thousands of recipients); authors come first, so the sender keeps
+        # its entity. Participant rows are written for everyone.
+        entity_budget = MAX_ENTITY_PARTICIPANTS_PER_MESSAGE
         for role, values in roles:
             for value in values:
                 address = canonical_addr(value or "")
@@ -2148,7 +2158,9 @@ class Database:
                     "(claimant_id, role, address, name) VALUES (?, ?, ?, ?)",
                     (msg.claimant_id, role, address, name),
                 )
-                self._write_entity(cur, address, name)
+                if entity_budget > 0:
+                    entity_budget -= 1
+                    self._write_entity(cur, address, name)
 
     def _write_entity(self, cur: sqlite3.Cursor, address: str, name: str | None) -> None:
         """Record ``address`` as a person entity (with its organization,

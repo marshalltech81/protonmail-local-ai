@@ -441,9 +441,18 @@ transaction:
   organization.
 
 IDs are derived from the address and domain, so reprocessing a message
-rewrites the same rows. Entities are not pruned when messages are
-removed; every read joins through `message_participants`, which is.
-The MCP server's `find_contact` reports each contact's organization.
+rewrites the same rows. Entity and alias writes are capped at
+`MAX_ENTITY_PARTICIPANTS_PER_MESSAGE` (200) participants per message,
+authors first, so a crafted header listing thousands of recipients
+cannot drive unbounded writes; later participants still get their
+`message_participants` rows, just no new entity. The MCP server's
+`find_contact` reports each contact's organization.
+
+Known limitation: entities are not pruned when messages are removed,
+so an address seen only in reaped mail keeps its `entities` row and
+aliases. Every read joins through `message_participants`, which is
+pruned, so such an entity never surfaces in results; it only takes
+space.
 
 ### Source authority
 
@@ -457,11 +466,25 @@ rule matches is `unclassified` with no rule. An address rule beats a
 domain rule, and the closest listed parent domain wins. No model
 classifies anything.
 
+Known limitation: authority reflects the **claimed** From address. The
+index does not authenticate senders, so spoofed mail claiming an
+address or domain from a classified rule is classified too (see #463).
+Treat the class as a description of who the message says it is from,
+not proof.
+
 The indexer loads the file once at startup, before opening the
-database, and fails closed on a malformed one; an absent file
-classifies nothing. Loading is bounded (1 MiB, 10,000 patterns), and
-every existing entity is reclassified under the loaded rules in one
-transaction, so an edit takes effect at the next start.
+database. An absent file classifies nothing; a file that cannot be
+inspected (a dangling symlink, an unreadable parent directory) or is
+malformed fails closed, with errors naming positions only (table,
+key and entry numbers), never the file's text. Domain rules must be
+LDH labels joined by single dots, at most 16 labels and 253
+characters, so a wildcard, URL or empty label is rejected rather than
+loaded as a rule that can never match. Loading is bounded (1 MiB,
+10,000 patterns), and every existing entity is reclassified under the
+loaded rules in one transaction, so an edit takes effect at the next
+start. Classifying a sender's domain does at most one lookup per label
+over at most 16 labels and 253 characters; a longer or deeper
+sender-supplied domain is unclassified without any lookup.
 
 Authority is metadata, never a ranking weight. The MCP server exposes it
 as an `authority_class` filter on `search_emails` and `query_messages`

@@ -23,6 +23,8 @@ the rule that matched (provenance) and is never a ranking weight. No
 model classifies anything.
 """
 
+import re
+import stat
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -105,6 +107,18 @@ AUTHORITY_RULES_MAX_PATTERNS = 10_000
 
 _RULE_KEYS = ("addresses", "domains")
 
+# Domain bounds, shared by rule validation and classification. DNS caps
+# a name at 253 characters; 16 labels is far deeper than any real mail
+# domain. Classification looks at most ``_MAX_DOMAIN_LABELS`` suffixes of
+# at most ``_MAX_DOMAIN_CHARS`` characters each, so the work per address
+# is bounded however the sender shapes its domain; a longer or deeper
+# domain is unclassified. A rule beyond either bound could never match,
+# so loading rejects it.
+_MAX_DOMAIN_CHARS = 253
+_MAX_DOMAIN_LABELS = 16
+# One LDH label: letters, digits and inner hyphens, 1-63 characters.
+_LDH_LABEL_RE = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
+
 
 class AuthorityRulesError(ValueError):
     """The rules file is unusable. The message names the file position
@@ -136,21 +150,39 @@ class AuthorityRules:
         return self.classify_domain(address_domain(address))
 
     def classify_domain(self, domain: str) -> tuple[str, str | None]:
-        labels = domain.split(".") if domain else []
-        for start in range(len(labels)):
-            candidate = ".".join(labels[start:])
+        """Longest listed suffix of ``domain`` (on label boundaries).
+
+        The domain is sender-controlled, so the length and label count
+        are checked before any suffix is built: at most
+        ``_MAX_DOMAIN_LABELS`` lookups of at most ``_MAX_DOMAIN_CHARS``
+        characters each.
+        """
+        if not domain or len(domain) > _MAX_DOMAIN_CHARS or domain.count(".") >= _MAX_DOMAIN_LABELS:
+            return UNCLASSIFIED, None
+        # Suffix start offsets, whole domain first (closest parent wins).
+        starts = [0]
+        position = domain.find(".")
+        while position != -1:
+            starts.append(position + 1)
+            position = domain.find(".", position + 1)
+        for start in starts:
+            candidate = domain[start:]
             if candidate in self.domains:
                 return self.domains[candidate], f"domain:{candidate}"
         return UNCLASSIFIED, None
 
 
 def _is_bare_domain(value: str) -> bool:
-    return (
-        bool(value)
-        and "@" not in value
-        and not any(ch.isspace() for ch in value)
-        and not value.startswith(".")
-        and not value.endswith(".")
+    """LDH labels joined by single dots, within the classification bounds.
+
+    Anything else (a wildcard, a URL, an empty label) could never equal a
+    canonical address domain, so a rule written that way would silently
+    never match."""
+    if not value or len(value) > _MAX_DOMAIN_CHARS:
+        return False
+    labels = value.split(".")
+    return len(labels) <= _MAX_DOMAIN_LABELS and all(
+        _LDH_LABEL_RE.fullmatch(label) for label in labels
     )
 
 
@@ -171,9 +203,24 @@ def load_authority_rules(path: Path) -> AuthorityRules:
         domains = ["lawfirm.example"]
         addresses = ["outside.counsel@mail.example"]
     """
-    if not path.exists():
+    # Only a missing final path entry means "no rules". Any other
+    # failure to inspect it (a dangling symlink, an unsearchable parent)
+    # fails closed rather than silently classifying nothing.
+    try:
+        path.lstat()
+    except FileNotFoundError:
         return AuthorityRules()
-    if not path.is_file():
+    except OSError as exc:
+        raise AuthorityRulesError(
+            f"authority rules {path} could not be inspected ({type(exc).__name__})"
+        ) from None
+    try:
+        mode = path.stat().st_mode
+    except OSError as exc:
+        raise AuthorityRulesError(
+            f"authority rules {path} could not be inspected ({type(exc).__name__})"
+        ) from None
+    if not stat.S_ISREG(mode):
         raise AuthorityRulesError(f"authority rules {path} is not a regular file")
     try:
         with path.open("rb") as handle:
@@ -195,18 +242,20 @@ def load_authority_rules(path: Path) -> AuthorityRules:
 
     addresses: dict[str, str] = {}
     domains: dict[str, str] = {}
-    for cls, table in data.items():
+    # Errors name positions, never the file's text: a table or key name
+    # the operator mistyped may itself be an address.
+    for table_number, (cls, table) in enumerate(data.items(), 1):
         if cls not in AUTHORITY_CLASSES:
             raise AuthorityRulesError(
-                f"authority rules {path}: unknown authority class [{cls}]; "
+                f"authority rules {path}: unknown authority class (table {table_number}); "
                 f"use one of {', '.join(AUTHORITY_CLASSES)}"
             )
         if not isinstance(table, dict):
             raise AuthorityRulesError(f"authority rules {path}: [{cls}] must be a table")
-        for key, entries in table.items():
+        for key_number, (key, entries) in enumerate(table.items(), 1):
             if key not in _RULE_KEYS:
                 raise AuthorityRulesError(
-                    f"authority rules {path}: unknown key {cls}.{key}; "
+                    f"authority rules {path}: unknown key in [{cls}] (key {key_number}); "
                     f"use {' or '.join(_RULE_KEYS)}"
                 )
             if not isinstance(entries, list) or not all(isinstance(e, str) for e in entries):
@@ -232,8 +281,9 @@ def load_authority_rules(path: Path) -> AuthorityRules:
                 else:
                     if not _is_bare_domain(pattern):
                         raise AuthorityRulesError(
-                            f"authority rules {path}: {where} must be a bare domain "
-                            "(no @, no spaces)"
+                            f"authority rules {path}: {where} must be a bare domain: "
+                            "dot-separated labels of letters, digits and hyphens, at most "
+                            f"{_MAX_DOMAIN_LABELS} labels and {_MAX_DOMAIN_CHARS} characters"
                         )
                     target = domains
                 if pattern in target:

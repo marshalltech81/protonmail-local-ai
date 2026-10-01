@@ -8,6 +8,10 @@
 #
 #   addresses — bare addresses, matched exactly (case-insensitive)
 #   domains   — bare domains, matching the domain and its subdomains
+#               (letters, digits and hyphens; no wildcards or URLs)
+#
+# Authority reflects the claimed From address, which is not
+# authenticated: spoofed mail from a listed domain is classified too.
 #
 # An address rule beats a domain rule, and the closest listed parent
 # domain wins. A pattern may appear only once in the whole file. A

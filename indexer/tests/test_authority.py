@@ -6,6 +6,7 @@ matched it (provenance); an entity no rule matches is ``unclassified``.
 A malformed file fails closed; an absent file classifies nothing.
 """
 
+import os
 from pathlib import Path
 
 import pytest
@@ -224,3 +225,128 @@ class TestStartup:
         assert _load_authority_rules(_write(tmp_path, RULES)).pattern_count == 5
         assert _load_authority_rules(tmp_path / "missing.toml").pattern_count == 0
         assert "lawfirm" not in caplog.text
+
+
+class _CountingDict(dict):
+    """A rules table that counts membership lookups."""
+
+    lookups = 0
+
+    def __contains__(self, key):
+        type(self).lookups += 1
+        return super().__contains__(key)
+
+
+class TestReviewRound1:
+    """Codex round 1 on #459."""
+
+    def _counting_rules(self) -> AuthorityRules:
+        _CountingDict.lookups = 0
+        return AuthorityRules(domains=_CountingDict({"lawfirm.example": "counsel"}))
+
+    def test_many_label_domain_does_bounded_work(self):
+        # 500 one-character labels: the old walk joined every suffix
+        # (quadratic). Past the DNS length cap it is unclassified with
+        # no lookups at all.
+        rules = self._counting_rules()
+        domain = "a." * 500 + "lawfirm.example"
+        assert rules.classify(f"x@{domain}") == (UNCLASSIFIED, None)
+        assert rules.classify_domain(domain) == (UNCLASSIFIED, None)
+        assert _CountingDict.lookups == 0
+
+    def test_lookups_are_capped_by_label_count(self):
+        rules = self._counting_rules()
+        # 17 labels, well under 253 characters: over the label cap.
+        assert rules.classify_domain("a." * 15 + "lawfirm.example") == (UNCLASSIFIED, None)
+        assert _CountingDict.lookups == 0
+        # 16 labels: classified, with at most one lookup per label.
+        assert rules.classify_domain("a." * 14 + "lawfirm.example") == (
+            "counsel",
+            "domain:lawfirm.example",
+        )
+        assert _CountingDict.lookups <= 16
+
+    def test_unknown_table_name_is_not_quoted(self, tmp_path, caplog):
+        from src.main import _load_authority_rules
+
+        caplog.set_level("INFO")
+        path = _write(tmp_path, '["secret-marker@x.example"]\ndomains = ["x.example"]\n')
+        with pytest.raises(AuthorityRulesError) as exc:
+            load_authority_rules(path)
+        assert "secret-marker" not in str(exc.value)
+        assert "table 1" in str(exc.value)
+        with pytest.raises(SystemExit) as stop:
+            _load_authority_rules(path)
+        assert "secret-marker" not in str(stop.value)
+        assert "secret-marker" not in caplog.text
+
+    def test_unknown_key_name_is_not_quoted(self, tmp_path):
+        path = _write(tmp_path, '[counsel]\n"secret-marker@x.example" = ["x.example"]\n')
+        with pytest.raises(AuthorityRulesError, match="unknown key") as exc:
+            load_authority_rules(path)
+        assert "secret-marker" not in str(exc.value)
+
+    def test_dangling_symlink_fails_closed(self, tmp_path):
+        link = tmp_path / "authority.toml"
+        link.symlink_to(tmp_path / "gone.toml")
+        with pytest.raises(AuthorityRulesError, match="could not be inspected"):
+            load_authority_rules(link)
+
+    @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory permissions")
+    def test_unsearchable_parent_fails_closed(self, tmp_path):
+        parent = tmp_path / "locked"
+        parent.mkdir()
+        (parent / "authority.toml").write_text(RULES, encoding="utf-8")
+        parent.chmod(0)
+        try:
+            with pytest.raises(AuthorityRulesError, match="could not be inspected"):
+                load_authority_rules(parent / "authority.toml")
+        finally:
+            parent.chmod(0o700)
+
+    @pytest.mark.parametrize(
+        "domain",
+        [
+            "*.x.example",
+            "https://x.example",
+            "x.example/path",
+            "a..b.example",
+            "-x.example",
+            "x-.example",
+            "x_y.example",
+            "a" * 64 + ".example",
+            "a." * 16 + "example",
+            ("a" * 60 + ".") * 5 + "example",
+        ],
+    )
+    def test_unmatchable_domain_rules_fail_closed(self, tmp_path, domain):
+        with pytest.raises(AuthorityRulesError, match=r"counsel\.domains\[0\]") as exc:
+            load_authority_rules(_write(tmp_path, f'[counsel]\ndomains = ["{domain}"]\n'))
+        assert domain not in str(exc.value)
+
+    def test_address_rule_domain_is_validated_too(self, tmp_path):
+        with pytest.raises(AuthorityRulesError, match=r"counsel\.addresses\[0\]"):
+            load_authority_rules(_write(tmp_path, '[counsel]\naddresses = ["jo@a..example"]\n'))
+
+    def test_valid_ldh_domains_load(self, tmp_path):
+        text = '[vendor]\ndomains = ["x-1.example", "mail.x2.example", "A.Example"]\n'
+        assert load_authority_rules(_write(tmp_path, text)).pattern_count == 3
+
+    def test_entity_writes_are_capped_per_message(self, db):
+        from src.database import MAX_ENTITY_PARTICIPANTS_PER_MESSAGE
+
+        recipients = [f"r{n}@d{n}.example" for n in range(MAX_ENTITY_PARTICIPANTS_PER_MESSAGE + 50)]
+        msg = make_message(
+            message_id="m1@example.com", from_addr="s@sender.example", to_addrs=recipients
+        )
+        db.upsert_thread(make_thread(messages=[msg], thread_id="t1"), _vec())
+
+        count = db._conn.execute
+        participants = count("SELECT COUNT(*) FROM message_participants").fetchone()[0]
+        people = count("SELECT COUNT(*) FROM entities WHERE kind = 'person'").fetchone()[0]
+        assert participants == len(recipients) + 1
+        assert people == MAX_ENTITY_PARTICIPANTS_PER_MESSAGE
+        # The sender is written first, so it always gets its entity.
+        assert count(
+            "SELECT 1 FROM entities WHERE entity_id = 'person:s@sender.example'"
+        ).fetchone()

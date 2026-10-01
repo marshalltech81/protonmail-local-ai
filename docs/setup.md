@@ -355,11 +355,20 @@ file every sender is `unclassified`. A malformed file (invalid TOML,
 an unknown class or key, a pattern that is not a bare address or
 domain, a pattern listed twice, more than 10,000 patterns or more than
 1 MiB) stops the indexer at startup with an error naming the entry's
-position; check `docker compose logs indexer`.
+position; so does a path that exists but cannot be read, such as a
+dangling symlink. Check `docker compose logs indexer`.
 
-An address rule beats a domain rule, and the closest listed parent
-domain wins (`domains = ["example.com"]` covers `mail.example.com`
-unless `mail.example.com` has its own rule).
+Domains are written bare: letters, digits and hyphens in dot-separated
+labels (at most 16 labels, 253 characters). There are no wildcards:
+`domains = ["example.com"]` already covers every subdomain. An address
+rule beats a domain rule, and the closest listed parent domain wins
+(`example.com` covers `mail.example.com` unless `mail.example.com` has
+its own rule).
+
+Authority reflects the claimed From address: the index does not
+authenticate senders, so spoofed mail from a classified address or
+domain is classified too (see #463). Treat the class as who a message
+says it is from, not proof.
 
 ### Pointing at a different embedder provider
 
