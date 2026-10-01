@@ -606,7 +606,7 @@ Triaged against `d30e500` by four parallel agents; every issue is real
 and most reproduced with synthetic input. PRs in the order to land
 them (one test-first commit per issue, `Fixes #N` per issue):
 
-**Status 2026-10-01 — next session starts here.** Second batch
+**Status 2026-10-01 (late) — next session starts here.** Second batch
 items 1–12 are merged; 13–14 and #217 are decided (below and in
 Resolved decisions). The deprecation cleanup is finished (#343, #345,
 #346, #348; baseline is v21). Third batch merged so far: #293 (#335),
@@ -614,45 +614,26 @@ the privacy trio #311/#325/#326 (#337), #327/#328 (#341), #301 (#336),
 #278/#267 (#342), #339/#340 (#347), #304 batch-1 half (#349), #297
 first half (#350), #306 (#351), #302 (#352, schema v22), #319 (#353),
 #332 (#356), #321 (#357), #318 (#358), #310/#329/#315 (#359), #314
-(#360), and #257 slices 1–3: the parser (#364), `last_error` keeping
-the type name only, with errno text for `OSError` (#363), and
-attachment filenames and extractor errors out of logs and
-`extraction_error` (#401). Next-list item 1 below is done.
+(#360), #361 (#414), #320/#334 (#417), and the whole #257 sweep (#364,
+#363, #401, #412, #411, closed by this PR). The 2026-10-01 cleanup
+batch is done: the 36 stale-text issues #365–#400 and the #395
+reconciler fix merged as #402–#410 (decisions: `RERANK_TOP_N` removed,
+the eval's unused query fields dropped, its fallback notice printed).
 
-In review, merge when Codex is clean on the head (the owner merges):
+In review or queued (three PRs in flight; Codex-clean PRs are merged
+without waiting, per the owner):
 
-- **#402** — this status update (C1 below).
-- **#403** — cleanup C2, MCP tool docs.
-- **#404** — cleanup C3, ops docs.
+- #416 date filters (#312, #330, #333); #418 name matching (#313,
+  #324, #331; #316 partly, the rest needs the Phase 2 reindex).
+- Queued: #308/#309 (folders that hold only replies; MIME filter
+  before choosing the attachment occurrence), mbsync #271/#280, and
+  the `fastmcp` 4.0.10 migration (owner's choice over `mcp` 1.30.0;
+  closes #317 with an explicit session idle timeout and keeps
+  Host/Origin checks on both transports).
 
-Cleanup batch, triaged 2026-10-01: the 36 issues #365–#400 came from a
-whole-repository stale-text review. Every claim held on `2454d0e`, and
-nothing was closable as already fixed. All but #395 are docs, comments,
-dead code or test text. They come first because they are cheap and
-remove misleading guidance; one PR per file group so none conflict:
-
-- C1 PLAN fixes: #372 (#402).
-- C2 MCP tool docs: #391, #392, #393, #390, #322 (#403).
-- C3 ops docs: #394, #323, #396, #397, #381 (#404).
-- C4 MCP config and comments: #370, #375, #380, #389, #398, #399, #400,
-  #373 (owner: remove `RERANK_TOP_N`; the only caller passes `top_n`).
-- C5 eval harness: #383, #384, #382 (owner: drop the unused `question`
-  and `expected_substrings` fields), #387 (owner: print the fallback
-  notice).
-- C6 indexer: #365, #366, #368, #369, #371, #385,
-  #388.
-- C7 indexer `main.py` and architecture docs: #367, #374, #378, #379, and the #295 limitation note
-  that Resolved decision 7 asks for (still undocumented).
-- C8 attachment and PDF docs: #376, #377, #386.
-- #395 is a real fix (reconciliation reads only the first survivor's
-  subject, so a deleted message's subject can be embedded): its own
-  test-first PR after the cleanup PRs.
-
-Also filed 2026-10-01 from the #257 parser slice: #361 (8-bit `Date`
-header raises `AttributeError`) and #362 (`idna` RFC 2231 filename
-raises `UnicodeError`), both P3 crashes that dead-letter a message
-without leaking content; batch-1 guards, #362 needs a fallback-filename
-decision first.
+Filed 2026-10-01: #362 (`idna` RFC 2231 filename raises
+`UnicodeError`; needs a fallback-filename decision) and #415 (search
+`folders` filters still use the thread's representative folder).
 
 Open owner decision: **#267** one-shot rotation. #342 shipped the
 documented limitation (recreate with `BRIDGE_CERT_PIN_ROTATE=false`);
