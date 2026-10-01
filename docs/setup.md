@@ -445,8 +445,8 @@ By failure:
   do not hand-edit the upstream source or skip the check.
 - **Smoke failure** (`make bridge-smoke`): the patched image built but does
   not start as expected (for example, the `autoUpdate="false"` vault marker
-  is missing from its log). Treat it the same way — stay on the previous
-  release.
+  is missing from its log, or Bridge exits non-zero or logs a fatal error
+  around it). Treat it the same way — stay on the previous release.
 - **Commit mismatch**: `BRIDGE_VERSION` does not resolve to
   `BRIDGE_COMMIT`. What to do depends on whether the pin was already
   verified for this version:
