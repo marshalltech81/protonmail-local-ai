@@ -58,10 +58,13 @@ def _dedupe_by_canonical(addrs: list[str]) -> list[str]:
     return result
 
 
-# ``_apply_initial_schema`` builds the complete current schema.
-# Migration history up to v21 was squashed into it while no deployed
-# database existed; databases older than ``SCHEMA_BASELINE_VERSION``
-# cannot be upgraded and must be rebuilt from Maildir.
+# ``_apply_initial_schema`` builds the complete current schema, stamped
+# version 0. Earlier history (v1-v22) was squashed into it and
+# renumbered while no deployed database existed; a database from that
+# numbering must be rebuilt from Maildir. Its version numbers will
+# collide with the new sequence, so the initial schema also stamps
+# ``SCHEMA_APPLICATION_ID`` into the SQLite header and a database
+# without it is refused whatever its version.
 #
 # Bumping ``SCHEMA_VERSION`` requires shipping a forward migration file
 # at ``src/migrations/<NNNN>_<slug>.sql`` covering the new version.
@@ -69,8 +72,8 @@ def _dedupe_by_canonical(addrs: list[str]) -> list[str]:
 # current version; existing installs run the migration runner to catch
 # up. See ``src/migrations/runner.py`` for the file layout and
 # transactional guarantees.
-SCHEMA_VERSION = 22
-SCHEMA_BASELINE_VERSION = 21
+SCHEMA_VERSION = 0
+SCHEMA_APPLICATION_ID = 0x504D4149  # "PMAI"
 
 # The schema uses FTS5 ``contentless_delete=1``, which SQLite added in 3.43.
 # Validate the runtime version at Database init and fail fast with a clear
@@ -268,6 +271,13 @@ class Database:
             log.info(f"Database initialized at {self.path} (schema v{SCHEMA_VERSION})")
             return
 
+        if cur.execute("PRAGMA application_id").fetchone()[0] != SCHEMA_APPLICATION_ID:
+            raise RuntimeError(
+                "Database predates the v0 schema renumbering and cannot be "
+                "migrated. Stop the stack, wipe the sqlite-volume and let the "
+                "indexer rebuild the index from Maildir."
+            )
+
         stored = row["version"]
         if stored == SCHEMA_VERSION:
             log.info(f"Database ready at {self.path} (schema v{SCHEMA_VERSION})")
@@ -279,13 +289,6 @@ class Database:
                 f"v{SCHEMA_VERSION}. Downgrade migrations are not supported; "
                 "either upgrade the indexer image or wipe the sqlite-volume "
                 "and let the indexer rebuild from Maildir."
-            )
-
-        if stored < SCHEMA_BASELINE_VERSION:
-            raise RuntimeError(
-                f"Schema version v{stored} predates the v{SCHEMA_BASELINE_VERSION} "
-                "baseline and cannot be migrated. Wipe the sqlite-volume and let "
-                "the indexer rebuild the index from Maildir."
             )
 
         migration_dir = Path(__file__).parent / "migrations"
@@ -341,6 +344,7 @@ class Database:
         try:
             self._run_initial_schema_script(cur)
             cur.execute("INSERT INTO schema_version VALUES (?)", (SCHEMA_VERSION,))
+            cur.execute(f"PRAGMA application_id = {SCHEMA_APPLICATION_ID}")
             self._conn.commit()
         except BaseException:
             if self._conn.in_transaction:
