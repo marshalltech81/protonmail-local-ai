@@ -310,9 +310,9 @@ services:
       # or dual) may sit idle before the server ends it, so a session a
       # client abandons does not hold a server task until restart.
       MCP_SESSION_IDLE_TIMEOUT_SECS: ${MCP_SESSION_IDLE_TIMEOUT_SECS:-1800}
-      # "true" registers the experimental tools (brief_issue; needs
-      # inference); their output format may change. Any value other
-      # than true / false / empty fails startup.
+      # "true" registers the experimental tools (brief_issue and
+      # check_conclusion; both need inference); their output format may
+      # change. Any value other than true / false / empty fails startup.
       MCP_EXPERIMENTAL_TOOLS: ${MCP_EXPERIMENTAL_TOOLS:-false}
       # OpenAI-compatible embedder for query-time embedding via the
       # openai SDK. Must point at the same provider + model as the

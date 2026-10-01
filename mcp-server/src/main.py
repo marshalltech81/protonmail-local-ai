@@ -286,8 +286,9 @@ MCP_TRANSPORT = os.environ.get("MCP_TRANSPORT", "sse")
 # A client whose session expires gets 404 on its next request and starts
 # a new one.
 MCP_SESSION_IDLE_TIMEOUT_SECS = _float_env("MCP_SESSION_IDLE_TIMEOUT_SECS", 1800.0, minimum=1.0)
-# Experimental tools (brief_issue) are registered only when this is
-# ``true``; their output format may change (PLAN.md Resolved decisions 12).
+# Experimental tools (brief_issue, check_conclusion) are registered only
+# when this is ``true``; their output format may change (PLAN.md Resolved
+# decisions 12).
 MCP_EXPERIMENTAL_TOOLS = _flag_env("MCP_EXPERIMENTAL_TOOLS")
 
 # Paths the transports are served on; fastmcp's defaults, pinned here so
@@ -627,7 +628,10 @@ def main():
             secret_values=secret_values,
             expected_embed_dim=expected_embed_dim,
         )
-        log.info("Experimental tools registered (MCP_EXPERIMENTAL_TOOLS=true): brief_issue.")
+        log.info(
+            "Experimental tools registered (MCP_EXPERIMENTAL_TOOLS=true): "
+            "brief_issue, check_conclusion."
+        )
     elif MCP_EXPERIMENTAL_TOOLS:
         log.info("Experimental tools not registered: they need inference (INFERENCE_MODE=none).")
     register_system_tools(server, db)
