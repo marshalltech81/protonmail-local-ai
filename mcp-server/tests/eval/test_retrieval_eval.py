@@ -6,8 +6,11 @@ Why this is separate from the unit suite:
 The chunker / threader / search-knob discussions in this repo keep hitting
 the same wall: there's no held-out set of "query → expected message"
 mappings to measure whether a change actually helped retrieval. Without
-that signal, every change to ``PER_THREAD_CHAR_BUDGET``, ``THREAD_BODY_TEXT_MAX_TOKENS``,
-embedding model, or RRF weights is shipped on faith.
+that signal, every change to chunking, ``THREAD_BODY_TEXT_MAX_TOKENS``,
+the embedding model, or the RRF fusion in ``hybrid_search`` is shipped
+on faith. The harness measures retrieval only (the thread ids and ranks
+``keyword_search`` / ``hybrid_search`` return); prompt-side settings such
+as ``PER_THREAD_CHAR_BUDGET`` never reach it.
 
 This harness fills that gap with a tiny, JSON-driven loop the operator
 extends with real-mailbox queries. It does NOT ship with meaningful seed
@@ -34,8 +37,8 @@ Metrics emitted per query:
   if missed (used to compute mean reciprocal rank).
 
 ``test_eval_summary`` prints aggregate Recall@K and MRR across the
-loaded query set (``-s`` keeps pytest from capturing it) so two runs (e.g. before/after raising
-``PER_THREAD_CHAR_BUDGET``) can be compared directly.
+loaded query set (``-s`` keeps pytest from capturing it) so two runs (e.g.
+before/after a change to RRF fusion) can be compared directly.
 """
 
 from __future__ import annotations
