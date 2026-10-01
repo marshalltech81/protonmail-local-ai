@@ -155,7 +155,7 @@ class TestInferencePrompts:
         out = asyncio.run(
             self._tools(fake_server, huge_db, llm)["ask_mailbox"](question="invoice", max_threads=1)
         )
-        self._assert_bounded(llm, out)
+        self._assert_bounded(llm, out.content)
 
     def test_summarize_thread(self, fake_server, huge_db):
         llm = FakeInferenceClient()

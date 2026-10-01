@@ -352,12 +352,17 @@ def _extract_template(query: str, schema: dict) -> str:
 # --- Tool flows -------------------------------------------------------------
 
 
+# A cited answer passes ask_mailbox's citation check (#284), so the flow
+# makes one call and the prompt under test is the only one.
+_CITED_ANSWER = "Open invoices are listed [E1]."
+
+
 class TestAskMailbox:
     QUESTION = "which invoices are open?"
 
     def test_every_hostile_vector_stays_inside_its_block(self, hostile_db, caplog):
         caplog.set_level(logging.DEBUG)
-        inference = FakeInferenceClient()
+        inference = FakeInferenceClient(response=_CITED_ANSWER)
         asyncio.run(
             _tools(hostile_db, inference)["ask_mailbox"](question=self.QUESTION, max_threads=10)
         )
@@ -374,7 +379,7 @@ class TestAskMailbox:
         _assert_no_marker(caplog.text)
 
     def test_oversized_headers_stay_clipped(self, hostile_db):
-        inference = FakeInferenceClient()
+        inference = FakeInferenceClient(response=_CITED_ANSWER)
         asyncio.run(
             _tools(hostile_db, inference)["ask_mailbox"](question=self.QUESTION, max_threads=10)
         )

@@ -72,9 +72,11 @@ and the server's own fixed-text errors (such as an empty or wrong-sized
 response) in full with secrets redacted, and anything else as its
 exception type name alone.
 
-The intelligence tools (Group 3) have no typed output model; their
-answer is the prose in `content`, with no `outputSchema` and no
-`structuredContent`.
+Of the intelligence tools (Group 3), `ask_mailbox` publishes an
+`outputSchema`: its answer with checked citations (see
+[`ask_mailbox`](#ask_mailbox)). `summarize_thread` and
+`extract_from_emails` have no typed output model; their answer is the
+prose in `content`, with no `outputSchema` and no `structuredContent`.
 
 Arguments are checked against each tool's input schema before the tool
 runs: a wrong type or an argument the tool does not declare is an error
@@ -167,7 +169,8 @@ question — the same chunks `ask_mailbox` feeds its model, but with
 **no LLM synthesis**. Use it to audit or cite an answer, or as the
 fast synthesis-free path when only the source text is needed.
 
-Each chunk carries its parent thread, Message-ID and claimant ID, the source
+Each chunk carries its `chunk_id` (the ID `ask_mailbox` citations
+name), its parent thread, Message-ID and claimant ID, the source
 (message body, or an attachment with filename + MIME type), the
 message date, and the passage's character offsets. Attachment-derived
 chunks (extracted PDF / OCR / document text) are included — unlike
@@ -455,6 +458,58 @@ Retrieves relevant threads and synthesizes an answer.
 `max_threads` is clamped to `[1, 10]` at the tool boundary so an
 inflated caller-supplied value cannot expand into an oversized prompt
 that blows past the model's context window.
+
+**Citations (#284).** Each passage in the prompt starts with a header
+line holding a server-assigned evidence label and the passage's own
+message: `[E3 | message <claimant ID> | from <sender> | sent
+<date> | chunk N chars X-Y]` (attachment passages also name the file
+and MIME type; a thread shown by its indexed text, because it had no
+matching chunks, gets `[E4 | thread text]`). The sender is the
+message's first `From` entry and the date its own sent date, not the
+thread's latest, so passages from different messages with the same
+chunk index stay distinct. Labels are numbered by thread rank, then
+passage order, before the prompt budget is spent, so the same
+retrieval gives the same labels; a passage left out for budget leaves
+its number unused. The headers, like every other mail-derived value,
+sit inside the `<untrusted_email>` blocks; the instruction to cite
+labels is in the system prompt.
+
+The model is asked to cite the label of the passage supporting each
+statement inline (`[E2]`, `[E1, E3]`), to mark unsupported statements
+`[unsupported]`, and to open with "Not found in the provided emails"
+when the passages do not answer the question. After generation the
+server checks the cited labels against the passages it supplied: a
+label no supplied passage has is an `unknown_labels` problem, and an
+answer that cites nothing (and does not open with that phrase) is a
+`no_citations` problem. A failed check gets exactly one repair call:
+the same prompt plus a fixed corrective instruction after the question
+(the rejected answer is not replayed). Its answer is checked again and
+returned with whatever problems remain. An answer cut off at
+`INFERENCE_MAX_TOKENS` is not repaired. Only counts are logged.
+
+Structured output:
+
+| Field | Description |
+|---|---|
+| `answer` | The model's answer with its inline labels |
+| `citations` | One entry per valid cited label, in first-cited order: `label`, `chunk_id`, `claimant_id`, `message_id`, `thread_id`, `sender`, `sent_at`, `source` (`body`, `attachment` or `thread`), `attachment_id`, `attachment_filename`, `char_start`, `char_end` (end of the part shown to the model) |
+| `citation_problems` | `[]` when the check passed, else entries `{kind: "unknown_labels" \| "no_citations", labels}` |
+| `repair_attempted` | Whether the one repair call was made |
+| `threads` | The threads searched, best match first (the `search_emails` thread shape) |
+
+The prose in `content` is the answer, a `Citations:` list, any
+citation-check notice, and the `Sources searched:` list. To audit a
+citation, call `get_evidence` with the same question and the
+citation's `thread_id`: the cited `chunk_id` is among the returned
+chunks (pass `limit` up to 50 for a long thread). A `thread` citation
+has no chunk; read it with `get_thread`.
+
+The check is about labels only. A valid label does not show that the
+passage supports the statement, and no quote is compared with the
+indexed text. A passage whose text imitates a header (`[E7 | from
+...]`) stays inside its untrusted block, and the structured citation
+for a label comes from the server's own map, not from text the model
+read; a label that exists only in mail text is reported as unknown.
 
 An answer the model stopped writing at `INFERENCE_MAX_TOKENS` is
 returned with a closing `[Answer cut off …]` notice rather than as if

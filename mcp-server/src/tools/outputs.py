@@ -1,5 +1,6 @@
 """
-Structured output for the search, retrieval, evidence, and status tools.
+Structured output for the search, retrieval, evidence, and status tools,
+and for ask_mailbox's checked citations.
 
 Each tool declares one of these models as its ``outputSchema`` (via
 ``@server.tool(output_schema=Model.model_json_schema())``; FastMCP does
@@ -222,6 +223,9 @@ class SearchEmailsOutput(_Output):
 
 
 class EvidenceChunk(_Output):
+    chunk_id: str = Field(
+        description="Stable ID of the passage; ask_mailbox citations name it (chunk_id)."
+    )
     message_id: str
     claimant_id: str = Field(description="The chunk's message; pass it to get_message.")
     chunk_index: int
@@ -416,3 +420,55 @@ class MailboxStatusOutput(_Output):
     oldest_message: str | None
     newest_message: str | None
     checked_at: datetime
+
+
+# --- intelligence tools -------------------------------------------------
+
+
+class Citation(_Output):
+    label: str = Field(description="The evidence label as cited in the answer, e.g. E3.")
+    chunk_id: str | None = Field(
+        description="The cited passage; get_evidence(query, thread_id) returns it under this "
+        "ID. Null when the passage was the thread's indexed text (source thread)."
+    )
+    claimant_id: str | None = Field(
+        description="The passage's message; pass it to get_message. Null for source thread."
+    )
+    message_id: str | None
+    thread_id: str
+    sender: str | None = Field(
+        description="That message's sender, cut for length; null when none is recorded."
+    )
+    sent_at: str | None = Field(
+        description="That message's own sent date (not the thread's); null when unknown."
+    )
+    source: Literal["body", "attachment", "thread"]
+    attachment_id: str | None
+    attachment_filename: str | None
+    char_start: int | None
+    char_end: int | None = Field(
+        description="End offset of the part of the passage the model was shown."
+    )
+
+
+class CitationProblem(_Output):
+    kind: Literal["unknown_labels", "no_citations"] = Field(
+        description="unknown_labels: the answer cites labels no supplied passage has. "
+        "no_citations: the answer cites nothing and does not say the evidence lacks an answer."
+    )
+    labels: list[str] = Field(description="The unknown labels; empty for no_citations.")
+
+
+class AskMailboxOutput(_Output):
+    answer: str = Field(description="The model's answer, with inline labels such as [E1].")
+    citations: list[Citation] = Field(
+        description="Each cited label that names a supplied passage, in first-cited order."
+    )
+    citation_problems: list[CitationProblem] = Field(
+        description="Empty when the citation check passed. It checks labels only: a "
+        "valid label does not prove the passage supports the claim."
+    )
+    repair_attempted: bool = Field(
+        description="True when the first answer failed the check and the model was asked once more."
+    )
+    threads: list[ThreadSummary] = Field(description="The threads searched, best match first.")

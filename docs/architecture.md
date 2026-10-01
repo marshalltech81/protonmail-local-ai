@@ -348,8 +348,10 @@ full landlord thread (via the coarse lanes) and surfaces the specific
 chunk where the heating discussion appears (via the chunk lane). The
 intelligence tools (`ask_mailbox`, `extract_from_emails`) feed those
 matched chunks to the LLM with `[chunk N chars X-Y]` provenance
-headers rather than the truncated accumulated body, so answers cite
-exact passages.
+headers rather than the truncated accumulated body. `ask_mailbox`
+labels each passage (`E1`, `E2` ...) with its message's claimant ID,
+sender and sent date, and checks the labels its answer cites against
+the passages supplied (see `docs/mcp-tools.md`).
 
 ### Chunk write idempotency
 

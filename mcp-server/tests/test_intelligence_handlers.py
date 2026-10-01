@@ -44,8 +44,9 @@ def _handlers(fake_server, db, embed, inference):
 
 
 def _text(result) -> str:
-    assert len(result) == 1
-    return result[0].text
+    content = result.content if isinstance(result, CallToolResult) else result
+    assert len(content) == 1
+    return content[0].text
 
 
 def _all_text(result) -> str:
@@ -352,6 +353,9 @@ class TestTruncatedProse:
         text = _text(asyncio.run(handler(question="What was the budget?")))
         assert text.startswith("The budget was")
         assert "cut off" in text
+        # A cut-off answer is reported, not repaired (#284).
+        assert len(llm.complete_calls) == 1
+        assert "cites no evidence" in text
 
     def test_summarize_thread_marks_a_truncated_summary(self, fake_server, seeded_db):
         llm = FakeInferenceClient(

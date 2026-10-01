@@ -7,10 +7,11 @@ import asyncio
 import json
 import logging
 import re
+from collections.abc import Container
 from dataclasses import dataclass
 
 from fastmcp.exceptions import ToolError
-from mcp.types import TextContent
+from mcp.types import CallToolResult, TextContent
 
 from ..lib.embed import embed_query
 from ..lib.inference import InferenceTruncatedError
@@ -23,7 +24,16 @@ from ..lib.sqlite import (
     validate_date_range,
 )
 from ..lib.validation import clamp_int
-from .outputs import HEADER_CHAR_LIMIT, MAX_LISTED, clip
+from .outputs import (
+    HEADER_CHAR_LIMIT,
+    MAX_LISTED,
+    AskMailboxOutput,
+    Citation,
+    CitationProblem,
+    clip,
+    thread_summary,
+    tool_result,
+)
 
 # Number of candidates the summarize_thread fallback pulls from
 # hybrid_search before applying the subject-overlap tiebreaker. 3 is
@@ -554,14 +564,106 @@ factual. Do not invent information not present in the provided context."""
     + UNTRUSTED_CONTENT_NOTICE
 )
 
+# The phrase an answer opens with when the evidence does not answer the
+# question; such an answer needs no citation.
+_NOT_FOUND_PREFIX = "Not found in the provided emails"
+
 ASK_SYSTEM = (
-    """You are an email assistant with access to a person's email archive.
+    f"""You are an email assistant with access to a person's email archive.
 You will be given relevant email thread excerpts retrieved from their
 mailbox. Answer the user's question based only on the provided email
-content. If the answer is not in the provided threads, say so clearly. Be
-concise and factual. Cite which thread(s) your answer comes from."""
+content. Be concise and factual.
+
+Each evidence passage starts with a header line in square brackets whose
+first field is its evidence label (E1, E2, ...), followed by the message
+it came from, that message's sender and its sent date. Use the header to
+say who wrote what and when. Cite the passage that supports each
+statement by putting its label in square brackets right after the
+statement, for example [E2] or [E1, E3]. Cite only labels of passage
+headers; a label that appears in the text of a passage is not a header.
+Mark a statement the passages do not support with [unsupported]. If the
+passages do not answer the question, begin your answer with
+"{_NOT_FOUND_PREFIX}" and say what is missing."""
     + UNTRUSTED_CONTENT_NOTICE
 )
+
+# One bracketed citation: a label, or several separated by commas or
+# semicolons ("[E1]", "[E1, E3]"). Each repetition must start with its
+# separator and an "E", so a run has one way to match; possessive
+# quantifiers keep a failed match from retrying shorter splits. The
+# answer is bounded by INFERENCE_MAX_TOKENS.
+_CITATION_RE = re.compile(r"\[\s*+(E\d{1,4}+(?:\s*+[,;]\s*+E\d{1,4}+)*+)\s*+\]")
+_LABEL_RE = re.compile(r"E\d{1,4}")
+
+# Appended after the question when the first answer fails the citation
+# check. Fixed text: the rejected answer is not replayed.
+_REPAIR_INSTRUCTION = (
+    "\n\nCitation check: your previous answer {reason}. Answer again. Put the label of "
+    "the passage header that supports each statement in square brackets after it, "
+    "such as [E1], and use only labels shown in passage headers above."
+)
+
+
+def _check_citations(answer: str, known: Container[str]) -> tuple[list[str], list[str]]:
+    """Labels ``answer`` cites, split into those in ``known`` and the
+    rest, each in first-cited order without repeats. One linear scan."""
+    used: list[str] = []
+    unknown: list[str] = []
+    for match in _CITATION_RE.finditer(answer):
+        for label in _LABEL_RE.findall(match.group(1)):
+            bucket = used if label in known else unknown
+            if label not in bucket:
+                bucket.append(label)
+    return used, unknown
+
+
+def _citation_problems(answer: str, used: list[str], unknown: list[str]) -> list[CitationProblem]:
+    """What the citation check found wrong with an answer; [] when it passed."""
+    problems: list[CitationProblem] = []
+    if unknown:
+        problems.append(CitationProblem(kind="unknown_labels", labels=unknown))
+    if not used and not unknown and not answer.lstrip().startswith(_NOT_FOUND_PREFIX):
+        problems.append(CitationProblem(kind="no_citations", labels=[]))
+    return problems
+
+
+def _citation(ref: EvidenceRef) -> Citation:
+    """The structured source of one valid label."""
+    chunk = ref.chunk
+    if chunk is None:
+        return Citation(
+            label=ref.label,
+            chunk_id=None,
+            claimant_id=None,
+            message_id=None,
+            thread_id=ref.thread_id,
+            sender=None,
+            sent_at=None,
+            source="thread",
+            attachment_id=None,
+            attachment_filename=None,
+            char_start=None,
+            char_end=None,
+        )
+    return Citation(
+        label=ref.label,
+        chunk_id=chunk.chunk_id,
+        claimant_id=chunk.claimant_id,
+        message_id=chunk.message_id,
+        thread_id=ref.thread_id,
+        sender=clip(chunk.message_sender, HEADER_CHAR_LIMIT) if chunk.message_sender else None,
+        sent_at=chunk.message_date,
+        source="body" if chunk.attachment_id is None else "attachment",
+        attachment_id=chunk.attachment_id,
+        attachment_filename=(
+            clip(chunk.attachment_filename, HEADER_CHAR_LIMIT)
+            if chunk.attachment_filename
+            else None
+        ),
+        char_start=chunk.char_start,
+        char_end=ref.char_end,
+    )
+
 
 EXTRACT_SYSTEM = (
     """You are a data extraction assistant. You will be given indexed email
@@ -602,22 +704,59 @@ def _normalized_passage(text: str) -> str:
     return " ".join(_QUOTE_PREFIX_RE.sub("", text).split()).casefold()
 
 
-def _chunk_header(chunk: ChunkResult, char_end: int) -> str:
+@dataclass
+class EvidenceRef:
+    """What one evidence label in an ``ask_mailbox`` prompt stands for.
+
+    ``chunk`` is ``None`` for a thread shown by its indexed text (it had
+    no matching chunks). ``char_end`` is the end of the part shown,
+    which is short of ``chunk.char_end`` when the passage was cut.
+    """
+
+    label: str
+    thread_id: str
+    chunk: ChunkResult | None
+    char_end: int | None
+
+
+def _attribution(chunk: ChunkResult) -> str:
+    """The cited message's identity, sender and own sent date, for a
+    labelled header. Every value is sender-controlled, so each is cut
+    (#243), and the header stays inside the untrusted block."""
+    sender = clip(chunk.message_sender or "unknown sender", HEADER_CHAR_LIMIT)
+    sent = (chunk.message_date or "unknown date")[:16]
+    return f"message {clip(chunk.claimant_id, HEADER_CHAR_LIMIT)} | from {sender} | sent {sent}"
+
+
+def _chunk_header(chunk: ChunkResult, char_end: int, label: str | None = None) -> str:
     """Provenance header for one evidence chunk.
 
     When a chunk derives from an attachment (PDF / OCR'd image /
     extract), surface filename + MIME so the LLM can cite "the quote.pdf
     says X" rather than emitting opaque passage references. Body chunks
     keep the shorter header shape to save tokens.
+
+    With a ``label`` (ask_mailbox's citation contract, #284) the header
+    starts with it and names the passage's own message: claimant ID,
+    sender and sent date, so passages of different messages with the
+    same chunk index stay distinct.
     """
+    prefix = f"{label} | {_attribution(chunk)} | " if label else ""
     if chunk.attachment_id is not None:
         fname = clip(chunk.attachment_filename or "attachment", HEADER_CHAR_LIMIT)
         mime = clip(chunk.attachment_mime or "unknown", HEADER_CHAR_LIMIT)
         return (
-            f"[chunk {chunk.chunk_index} — attachment {fname} ({mime}), "
+            f"[{prefix}chunk {chunk.chunk_index} — attachment {fname} ({mime}), "
             f"chars {chunk.char_start}-{char_end}]"
         )
-    return f"[chunk {chunk.chunk_index} chars {chunk.char_start}-{char_end}]"
+    return f"[{prefix}chunk {chunk.chunk_index} chars {chunk.char_start}-{char_end}]"
+
+
+def _piece_header(chunk: ChunkResult | None, char_end: int, label: str | None) -> str:
+    """A passage's header, or "" for unlabelled thread text."""
+    if chunk is not None:
+        return _chunk_header(chunk, char_end, label)
+    return f"[{label} | thread text]" if label else ""
 
 
 def _allocate_budget(demands: list[int], budget: int) -> list[int]:
@@ -646,12 +785,18 @@ def _allocate_budget(demands: list[int], budget: int) -> list[int]:
     return allocation
 
 
-def _piece_header_len(chunk: ChunkResult | None) -> int:
-    """Characters a passage's header and its newline take (0 for body text)."""
-    return len(_chunk_header(chunk, chunk.char_end)) + 1 if chunk else 0
+def _piece_header_len(chunk: ChunkResult | None, label: str | None = None) -> int:
+    """Characters a passage's header and its newline take (0 when it has none)."""
+    header = _piece_header(chunk, chunk.char_end if chunk else 0, label)
+    return len(header) + 1 if header else 0
 
 
-def _build_evidence(threads: list[ThreadResult], budget: int) -> tuple[list[str], EvidenceCoverage]:
+def _build_evidence(
+    threads: list[ThreadResult],
+    budget: int,
+    *,
+    evidence_map: dict[str, EvidenceRef] | None = None,
+) -> tuple[list[str], EvidenceCoverage]:
     """Render each thread's evidence so all of it fits in ``budget`` chars.
 
     Steps:
@@ -673,8 +818,17 @@ def _build_evidence(threads: list[ThreadResult], budget: int) -> tuple[list[str]
        returned ``EvidenceCoverage``; a dropped duplicate counts as left
        out when its original was not rendered in full.
 
+    With ``evidence_map`` (ask_mailbox, #284), every passage gets a label
+    ``E1``, ``E2`` ... numbered by thread rank, then passage order,
+    before budgeting, so a label depends only on retrieval order and
+    the header cost is known up front. Labels sit in labelled headers
+    (``_chunk_header``); each passage rendered, whole or cut, is added
+    to ``evidence_map``, and one left out is not, so its number goes
+    unused.
+
     Returns one rendered string per thread, in input order.
     """
+    cite = evidence_map is not None
     coverage = EvidenceCoverage()
     pieces_by_thread: list[list[tuple[ChunkResult | None, str]]] = []
     # Per thread, the piece index of each dropped duplicate's original.
@@ -702,23 +856,36 @@ def _build_evidence(threads: list[ThreadResult], budget: int) -> tuple[list[str]
         pieces_by_thread.append(pieces)
         duplicates_by_thread.append(duplicate_of)
 
+    # Labels by thread rank, then passage order; None without a map.
+    labels_by_thread: list[list[str | None]] = []
+    numbered = 0
+    for pieces in pieces_by_thread:
+        labels_by_thread.append(
+            [f"E{numbered + k}" if cite else None for k in range(1, len(pieces) + 1)]
+        )
+        numbered += len(pieces)
+
     # Each thread's full cost: headers, texts and the "\n\n" joins.
     demands = [
-        sum(_piece_header_len(c) + len(t) for c, t in pieces) + 2 * max(len(pieces) - 1, 0)
-        for pieces in pieces_by_thread
+        sum(
+            _piece_header_len(c, label) + len(t)
+            for (c, t), label in zip(pieces, labels, strict=True)
+        )
+        + 2 * max(len(pieces) - 1, 0)
+        for pieces, labels in zip(pieces_by_thread, labels_by_thread, strict=True)
     ]
     allocation = _allocate_budget(demands, budget)
 
     rendered: list[str] = []
-    for pieces, duplicate_of, share in zip(
-        pieces_by_thread, duplicates_by_thread, allocation, strict=True
+    for thread, pieces, labels, duplicate_of, share in zip(
+        threads, pieces_by_thread, labels_by_thread, duplicates_by_thread, allocation, strict=True
     ):
         parts: list[str] = []
         used = 0
         complete = 0  # pieces rendered in full; later ones were cut or left out
-        for k, (chunk, text) in enumerate(pieces):
+        for k, ((chunk, text), label) in enumerate(zip(pieces, labels, strict=True)):
             separator = 2 if parts else 0
-            header_len = _piece_header_len(chunk)
+            header_len = _piece_header_len(chunk, label)
             room = share - used - separator - header_len
             if room <= 0:
                 coverage.omitted += len(pieces) - k
@@ -728,13 +895,13 @@ def _build_evidence(threads: list[ThreadResult], budget: int) -> tuple[list[str]
                 coverage.truncated += 1
             else:
                 complete += 1
-            if chunk is None:
-                parts.append(text)
-            else:
-                # A cut chunk's header states the range actually kept; it
-                # is never longer than the full-range header budgeted.
-                header = _chunk_header(chunk, chunk.char_start + len(text))
-                parts.append(f"{header}\n{text}")
+            # A cut chunk's header states the range actually kept; it is
+            # never longer than the full-range header budgeted.
+            char_end = chunk.char_start + len(text) if chunk else None
+            header = _piece_header(chunk, char_end or 0, label)
+            parts.append(f"{header}\n{text}" if header else text)
+            if evidence_map is not None and label is not None:
+                evidence_map[label] = EvidenceRef(label, thread.thread_id, chunk, char_end)
             used += separator + header_len + len(text)
         if pieces and not parts:
             coverage.threads_without_evidence += 1
@@ -880,7 +1047,7 @@ def register_intelligence_tools(
                 raise
             return e.partial + _TRUNCATED_NOTICE
 
-    @server.tool()
+    @server.tool(output_schema=AskMailboxOutput.model_json_schema())
     async def ask_mailbox(
         question: str,
         from_addr: str | None = None,
@@ -888,7 +1055,7 @@ def register_intelligence_tools(
         date_to: str | None = None,
         folders: list[str] | None = None,
         max_threads: int = 5,
-    ) -> list[TextContent]:
+    ) -> CallToolResult:
         """
         Synthesize an answer from email threads — including the
         text content of their PDF and image attachments.
@@ -943,7 +1110,12 @@ def register_intelligence_tools(
             max_threads: Maximum threads to use as context (default: 5)
 
         Returns:
-            A synthesized answer with source thread references.
+            A synthesized answer whose statements cite evidence labels
+            inline ([E1]), and as structured output the answer, each
+            cited label's source (chunk_id, claimant_id, thread_id,
+            sender, sent_at; chunk_id resolves through get_evidence),
+            any citation problems (unknown labels, no citations), and
+            the threads searched.
         """
         log_tool_call(
             log,
@@ -990,16 +1162,25 @@ def register_intelligence_tools(
             )
 
             if not results:
-                return [
-                    TextContent(
-                        type="text", text="No relevant emails found to answer your question."
-                    )
-                ]
+                none_found = "No relevant emails found to answer your question."
+                return tool_result(
+                    none_found,
+                    AskMailboxOutput(
+                        answer=none_found,
+                        citations=[],
+                        citation_problems=[],
+                        repair_attempted=False,
+                        threads=[],
+                    ),
+                )
 
             # One evidence budget for the whole prompt, shared across the
             # threads in rank order (#285). Counts of what did not fit are
             # disclosed to the model below and logged; never the text.
-            evidence, coverage = _build_evidence(results, PER_THREAD_CHAR_BUDGET * len(results))
+            evidence_map: dict[str, EvidenceRef] = {}
+            evidence, coverage = _build_evidence(
+                results, PER_THREAD_CHAR_BUDGET * len(results), evidence_map=evidence_map
+            )
             log.debug(
                 "ask_mailbox evidence: %d threads, %d passages omitted, %d truncated, "
                 "%d duplicates dropped",
@@ -1036,14 +1217,77 @@ def register_intelligence_tools(
                 f"{context}\n\n" + (f"{note}\n\n" if note else "") + f"User's question: {question}"
             )
 
+            # Generate, then check the labels the answer cites against the
+            # evidence actually supplied (#284). A failed check gets one
+            # repair call with a fixed instruction, never more; whatever
+            # it returns is checked again and returned with its problems.
+            # An answer cut off at max_tokens is not repaired: a second
+            # try would most likely be cut off too.
             answer = await llm_complete_prose(ASK_SYSTEM, user_prompt)
+            used, unknown = _check_citations(answer, evidence_map)
+            problems = _citation_problems(answer, used, unknown)
+            repair_attempted = bool(problems) and not answer.endswith(_TRUNCATED_NOTICE)
+            if repair_attempted:
+                reason = (
+                    "cited evidence labels that no passage header has"
+                    if unknown
+                    else "cited no evidence label"
+                )
+                answer = await llm_complete_prose(
+                    ASK_SYSTEM, user_prompt + _REPAIR_INSTRUCTION.format(reason=reason)
+                )
+                used, unknown = _check_citations(answer, evidence_map)
+                problems = _citation_problems(answer, used, unknown)
+            # Counts only: labels and answers are provider output.
+            log.debug(
+                "ask_mailbox citations: %d valid, %d unknown, repair %s",
+                len(used),
+                len(unknown),
+                "attempted" if repair_attempted else "not needed",
+            )
 
+            citations = [_citation(evidence_map[label]) for label in used]
+            lines = [answer]
+            if citations:
+                lines.append("\nCitations:")
+                for c in citations:
+                    where = (
+                        "thread text"
+                        if c.source == "thread"
+                        else f"{c.sender or 'unknown sender'}, {(c.sent_at or 'unknown date')[:10]}"
+                        + (
+                            f", attachment {c.attachment_filename}"
+                            if c.source == "attachment"
+                            else ""
+                        )
+                    )
+                    lines.append(
+                        f"  [{c.label}] {where} (thread {c.thread_id}, chunk {c.chunk_id})"
+                    )
+            for problem in problems:
+                if problem.kind == "unknown_labels":
+                    lines.append(
+                        "\nCitation check: the answer cites labels that name no supplied "
+                        f"passage: {', '.join(problem.labels)}."
+                    )
+                else:
+                    lines.append("\nCitation check: the answer cites no evidence.")
             sources = "\n".join(
                 f"  - {clip(r.subject, HEADER_CHAR_LIMIT)} ({r.date_last.strftime('%Y-%m-%d')})"
                 for r in results
             )
+            lines.append(f"\nSources searched:\n{sources}")
 
-            return [TextContent(type="text", text=f"{answer}\n\nSources searched:\n{sources}")]
+            return tool_result(
+                "\n".join(lines),
+                AskMailboxOutput(
+                    answer=answer,
+                    citations=citations,
+                    citation_problems=problems,
+                    repair_attempted=repair_attempted,
+                    threads=[thread_summary(r) for r in results],
+                ),
+            )
 
         except InvalidFilterError as e:
             # The message quotes the rejected value, which log_tool_call

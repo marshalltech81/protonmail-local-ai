@@ -267,6 +267,11 @@ class ChunkResult:
 
     ``claimant_id`` identifies the chunk's message among every file
     claiming its ``message_id`` (see ``MessageRecord``).
+
+    ``message_sender`` is that message's first ``From`` entry as
+    ``Name <address>`` (or the bare address), so a prompt can attribute
+    the passage to its own author; ``None`` for query paths that do not
+    SELECT it or a message with no recorded sender.
     """
 
     chunk_id: str
@@ -283,6 +288,7 @@ class ChunkResult:
     attachment_mime: str | None = None
     message_date: str | None = None
     source_file: SourceFile | None = None
+    message_sender: str | None = None
 
 
 def _row_to_chunk_result(r) -> ChunkResult:
@@ -311,6 +317,7 @@ def _row_to_chunk_result(r) -> ChunkResult:
         attachment_mime=r["attachment_mime"] if "attachment_mime" in keys else None,
         message_date=r["message_date"] if "message_date" in keys else None,
         source_file=_row_to_source(r),
+        message_sender=r["message_sender"] if "message_sender" in keys else None,
     )
 
 
@@ -2028,6 +2035,13 @@ class Database:
                 "a.filename AS attachment_filename, "
                 "a.content_type AS attachment_mime, "
                 f"{_SOURCE_COLUMNS}, "
+                # The message's own first From entry, for per-passage
+                # attribution in prompts (#284).
+                "(SELECT CASE WHEN p.name IS NOT NULL AND p.name != '' "
+                "  THEN p.name || ' <' || p.address || '>' ELSE p.address END "
+                "  FROM message_participants p "
+                "  WHERE p.claimant_id = c.claimant_id AND p.role = 'from' "
+                "  ORDER BY p.address LIMIT 1) AS message_sender, "
                 "vec_distance_l2(v.embedding, ?) AS score "
                 "FROM message_chunks c "
                 "JOIN message_chunks_vec v ON c.chunk_id = v.chunk_id "
