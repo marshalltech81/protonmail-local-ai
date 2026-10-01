@@ -437,8 +437,10 @@ questions.
 | `limit` | int | `25` | Messages per page; clamped to `[1, 100]` |
 | `cursor` | string | none | `next_cursor` from the previous page of the same query |
 
-All given filters must match; blank filters are ignored, and with
-none every indexed message is enumerated. A `date_from` later than
+All given filters must match; blank filters are ignored. With none,
+every indexed message outside Trash is enumerated, so a count from an
+unfiltered query is not a mailbox-wide total: Trash takes a separate
+`folder="Trash"` query. A `date_from` later than
 `date_to` is rejected, as in `search_emails`.
 
 **Address matching.** A value that is a full address

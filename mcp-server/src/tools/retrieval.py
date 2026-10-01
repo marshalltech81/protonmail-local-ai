@@ -146,7 +146,7 @@ def _describe_filters(uses: list[FilterUse]) -> str:
             parts.append(f"text={u.value!r} (all words, message body)")
         else:
             parts.append(f"{u.filter}={u.value!r}")
-    return ", ".join(parts) or "no filters (every indexed message)"
+    return ", ".join(parts) or "no filters (every indexed message outside Trash)"
 
 
 def register_retrieval_tools(server, db):
@@ -551,7 +551,9 @@ def register_retrieval_tools(server, db):
         this tool can.
 
         All given filters must match (AND). Omitted or blank filters
-        are ignored; with none, every indexed message is enumerated.
+        are ignored; with none, every indexed message outside Trash is
+        enumerated. Messages in Trash are counted only by a separate
+        call with ``folder="Trash"``.
 
         Paging: the response states ``total_matches``, how many were
         returned, and ``has_more``. When ``has_more`` is true, call
