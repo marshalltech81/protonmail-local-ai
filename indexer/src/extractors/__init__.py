@@ -122,7 +122,10 @@ class ExtractionResult:
 # docx 3: first-page and even-page headers and footers (#299).
 # image 2: OCRs every page of a multipage TIFF (#231).
 # text 2: decodes UTF-16 / UTF-32 by BOM and BOM-less UTF-16 (#234).
-EXTRACTOR_VERSIONS: dict[str, int] = {"docx": 3, "image": 2, "pdf": 2, "text": 2}
+# xlsx 2: stops at a text budget instead of expanding every shared-string
+# reference (#294); keeps empty cells' column positions (#296); reads
+# cells outside a stale worksheet dimension (#305).
+EXTRACTOR_VERSIONS: dict[str, int] = {"docx": 3, "image": 2, "pdf": 2, "text": 2, "xlsx": 2}
 
 
 def _stamp_extractor(module_name: str, extractor_name: str) -> str:

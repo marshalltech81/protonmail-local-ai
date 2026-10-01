@@ -844,11 +844,12 @@ Order of work, chosen to minimise reindexes:
    the eval slice, since existing vaults make unpinned update requests
    until #245 lands.
 2. **Extractor version bumps, one PR per module** so each cache
-   refresh happens once: `xlsx` (#294's shared-string budget — a
+   refresh happens once: ~~`xlsx` (#294's shared-string budget — a
    behaviour change for the same bytes, so it lands with the bump
    rather than as a guard, or cached rows would keep the old result —
    #296 empty cells, #305 stale dimensions; add `xlsx` to
-   `EXTRACTOR_VERSIONS`),
+   `EXTRACTOR_VERSIONS`)~~ (done: `xlsx@2` with a 10M-character text
+   budget, column-preserving rows and `reset_dimensions()`),
    ~~`docx` 2→3 (#299 first-page and even-page headers)~~ (done: #426), `pdf`
    (#292 page-level OCR selection — add `pdf`), with #300 (enabling
    OCR re-queues skipped images) alongside since it shares the
