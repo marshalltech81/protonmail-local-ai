@@ -24,15 +24,18 @@ import sqlite_vec
 from fastmcp import Client, FastMCP
 from fastmcp.exceptions import ToolError
 from src.lib.inference import InferenceTruncatedError
-from src.lib.sqlite import Database
+from src.lib.sqlite import ChunkResult, Database
 from src.tools.brief import (
     _CONCLUSION_EXCERPT_CHARS,
     _MAX_CONCLUSION_CHARS,
     CHECK_SYSTEM,
+    _finding_lines,
+    _finding_source,
     _parse_check,
     register_experimental_tools,
 )
-from src.tools.outputs import MAX_CONCLUSION_FINDINGS
+from src.tools.intelligence import EvidenceRef
+from src.tools.outputs import HEADER_CHAR_LIMIT, MAX_CONCLUSION_FINDINGS, CheckedFinding
 
 from tests.conftest import (
     FakeEmbedClient,
@@ -466,6 +469,71 @@ class TestTimings:
         assert f"'results': {len(_MAILBOX)}" in line
         assert "'inference':" in line and "'query_embedding':" in line
         assert _MARKER not in line
+
+
+class TestReviewRound2:
+    def test_insufficient_evidence_with_findings_is_a_problem_and_repaired(self, check_db):
+        def contradictory(user: str) -> str:
+            return json.dumps({**json.loads(_good_check(user)), "insufficient_evidence": True})
+
+        llm = ScriptedInference(contradictory, contradictory)
+        out = _run(check_db, llm)
+        assert len(llm.complete_calls) == 2
+        corrective = llm.complete_calls[1][1][len(llm.complete_calls[0][1]) :]
+        assert "insufficient_evidence" in corrective
+        assert out.structured_content["citation_problems"] == [
+            {"item": None, "kind": "insufficient_but_populated", "labels": []}
+        ]
+
+    def test_no_findings_but_sufficient_is_a_problem_and_repaired(self, check_db):
+        llm = ScriptedInference(lambda _u: _check(), _good_check)
+        out = _run(check_db, llm)
+        assert len(llm.complete_calls) == 2
+        corrective = llm.complete_calls[1][1][len(llm.complete_calls[0][1]) :]
+        assert "no findings" in corrective
+        data = out.structured_content
+        assert data["repair_attempted"] is True
+        assert data["citation_problems"] == []
+        assert len(data["findings"]) == 4
+
+    def test_no_findings_but_sufficient_is_reported_when_the_repair_repeats_it(self, check_db):
+        llm = ScriptedInference(lambda _u: _check(), lambda _u: _check())
+        out = _run(check_db, llm)
+        assert len(llm.complete_calls) == 2
+        assert out.structured_content["citation_problems"] == [
+            {"item": None, "kind": "no_findings_but_sufficient", "labels": []}
+        ]
+        assert (
+            "Citation check: the check as a whole: no_findings_but_sufficient."
+            in out.content[0].text
+        )
+
+    def test_attachment_source_is_rendered_with_its_clipped_filename(self):
+        filename = "q" * 10_000 + ".pdf"
+        chunk = ChunkResult(
+            chunk_id="c-att",
+            message_id="m@example.com",
+            claimant_id="m@example.com#1a2b3c4d",
+            thread_id="t",
+            chunk_index=0,
+            text="Renewal clause: renews each year.",
+            char_start=0,
+            char_end=33,
+            attachment_id="att",
+            attachment_filename=filename,
+            attachment_mime="application/pdf",
+            message_sender="Alice Example <alice@example.com>",
+            message_date="2024-03-01T09:00:00+00:00",
+        )
+        source = _finding_source(EvidenceRef("E1", "t", chunk, 33))
+        finding = CheckedFinding(
+            relation="supports", explanation="x", labels=["E1"], sources=[source]
+        )
+        [line] = [ln for ln in _finding_lines([finding]) if ln.lstrip().startswith("[E1]")]
+        assert "Alice Example <alice@example.com>, 2024-03-01, attachment qqq" in line
+        assert filename not in line  # clipped as in the Citations list
+        assert len(line) < HEADER_CHAR_LIMIT + 200
+        assert line.endswith('"Renewal clause: renews each year."')
 
 
 class TestWire:

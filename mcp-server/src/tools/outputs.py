@@ -624,7 +624,9 @@ class ConclusionCheck(_Output):
     verdict_summary: str
     findings: list[ConclusionFinding] = Field(max_length=MAX_CONCLUSION_FINDINGS)
     insufficient_evidence: bool = Field(
-        description="True when the model found nothing about the conclusion in the passages."
+        description="True when the model found nothing about the conclusion in the "
+        "passages, with no findings. True with findings is reported as "
+        "insufficient_but_populated, false with none as no_findings_but_sufficient."
     )
 
 
@@ -643,11 +645,21 @@ class CheckedFinding(ConclusionFinding):
 
 
 class ConclusionCitationProblem(_Output):
-    item: int = Field(description="0-based index of the finding.")
-    kind: Literal["unknown_labels", "no_citations", "invalid_relation"] = Field(
+    item: int | None = Field(
+        description="0-based index of the finding; null for a problem of the check as a whole."
+    )
+    kind: Literal[
+        "unknown_labels",
+        "no_citations",
+        "invalid_relation",
+        "insufficient_but_populated",
+        "no_findings_but_sufficient",
+    ] = Field(
         description="unknown_labels: the finding cites labels no supplied passage has. "
         "no_citations: it cites none. invalid_relation: its relation is not supports, "
-        "contradicts, qualifies or supersedes."
+        "contradicts, qualifies or supersedes. insufficient_but_populated (item null): "
+        "insufficient_evidence is true but there are findings. no_findings_but_sufficient "
+        "(item null): there are no findings but insufficient_evidence is false."
     )
     labels: list[str] = Field(description="The unknown labels; empty for the other kinds.")
 

@@ -349,7 +349,9 @@ def _check_findings(
 ) -> tuple[list[list[str]], list[ConclusionCitationProblem]]:
     """Each finding's valid labels, in first-cited order, and every
     finding's problems: a relation outside the four, unknown labels, or
-    no label at all. Labels are read with ask_mailbox's label pattern and
+    no label at all; plus one problem for the check as a whole (``item``
+    null) when ``insufficient_evidence`` disagrees with the findings:
+    true with findings, or false with none. Labels are read with ask_mailbox's label pattern and
     written back in canonical form, as ``_check_brief`` does, so each
     finding joins to its ``sources[].label``."""
     used_by_finding: list[list[str]] = []
@@ -369,6 +371,14 @@ def _check_findings(
             )
         if not used and not unknown:
             problems.append(ConclusionCitationProblem(item=index, kind="no_citations", labels=[]))
+    if check.insufficient_evidence and check.findings:
+        problems.append(
+            ConclusionCitationProblem(item=None, kind="insufficient_but_populated", labels=[])
+        )
+    elif not check.insufficient_evidence and not check.findings:
+        problems.append(
+            ConclusionCitationProblem(item=None, kind="no_findings_but_sufficient", labels=[])
+        )
     return used_by_finding, problems
 
 
@@ -386,6 +396,13 @@ def _check_repair_reason(
         reasons.append("cited evidence labels that no passage header has")
     if "no_citations" in kinds:
         reasons.append("had findings that cite no evidence label")
+    if "insufficient_but_populated" in kinds:
+        reasons.append("set insufficient_evidence to true but also listed findings")
+    if "no_findings_but_sufficient" in kinds:
+        reasons.append(
+            "listed no findings but set insufficient_evidence to false; list the findings "
+            "or set it to true"
+        )
     return "; ".join(reasons)
 
 
@@ -410,10 +427,13 @@ def _finding_lines(findings: list[CheckedFinding]) -> list[str]:
         cites = f" [{', '.join(f.labels)}]" if f.labels else ""
         lines.append(f"  - {f.relation.upper()}: {f.explanation}{cites}")
         for s in f.sources:
+            # The same attribution as the Citations list of ask_mailbox
+            # and brief_issue; the filename is already clipped.
             where = (
                 "thread text"
                 if s.source == "thread"
                 else f"{s.sender or 'unknown sender'}, {(s.sent_at or 'unknown date')[:10]}"
+                + (f", attachment {s.attachment_filename}" if s.source == "attachment" else "")
             )
             lines.append(f'      [{s.label}] {where}: "{s.excerpt}"')
     return lines
@@ -849,7 +869,8 @@ def register_experimental_tools(
                 lines.append(f"\nThe model's reply {why}; its raw text follows.\n\n{raw_text}")
             for p in problems:
                 detail = f": {', '.join(p.labels)}" if p.labels else ""
-                lines.append(f"\nCitation check: finding {p.item + 1}: {p.kind}{detail}.")
+                where = "the check as a whole" if p.item is None else f"finding {p.item + 1}"
+                lines.append(f"\nCitation check: {where}: {p.kind}{detail}.")
             lines.append(_sources_searched(results))
 
             return tool_result(

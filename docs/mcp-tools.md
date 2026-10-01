@@ -773,7 +773,11 @@ finding's labels are rewritten to the canonical `E<n>` form (`"[E1]"`
 becomes `E1`, repeats dropped) so they join to its `sources[].label`,
 and the finding is checked: a relation other than the four is
 `invalid_relation`, a label no supplied passage has is
-`unknown_labels`, and a finding with no label is `no_citations`. Any
+`unknown_labels`, and a finding with no label is `no_citations`. The
+check as a whole (problem `item` null) must agree with its abstention
+flag: `insufficient_evidence: true` with findings is
+`insufficient_but_populated`, and no findings with
+`insufficient_evidence: false` is `no_findings_but_sufficient`. Any
 failure gets exactly one repair call with fixed text; a reply that is
 still not a check comes back raw with `status: "invalid_json"`, and a
 reply cut off at `INFERENCE_MAX_TOKENS` comes back with `status:
@@ -796,14 +800,15 @@ Structured output:
 | `insufficient_evidence` | The model's abstention flag; `null` unless `ok` |
 | `raw_text` | The unparsed reply when `status` is not `ok`, else `null` |
 | `as_of` | Latest sent date (`YYYY-MM-DD`) among the passages supplied |
-| `citation_problems` | Entries `{item, kind, labels}`; `[]` when every finding passed |
+| `citation_problems` | Entries `{item, kind, labels}` (`item` null for a problem of the check as a whole); `[]` when the check passed |
 | `repair_attempted` | Whether the one repair call was made |
 | `threads` | The threads searched, best match first |
 
 The prose in `content` opens with an EXPERIMENTAL notice and the
 "Evidence as of" date, then the verdict, each finding (relation in
-capitals, explanation, labels) followed by its sources' sender, date and
-quoted excerpt, any citation-check lines and `Sources searched:`.
+capitals, explanation, labels) followed by its sources' sender, date
+(and, for an attachment passage, `attachment <filename>`, cut for
+length as in the `Citations:` list) and quoted excerpt, any citation-check lines and `Sources searched:`.
 
 Limits: the check is about labels and relations only. A valid label
 does not prove the passage says what the finding claims, and the
