@@ -76,7 +76,10 @@ contents of a returned thread, follow up with `get_thread` or
 - `semantic` — conceptual queries, topic-based search
 
 An unrecognized `mode` returns an error; it is not silently remapped
-to `hybrid`. `limit` is clamped to `[1, 50]` at the tool boundary so
+to `hybrid`. In `semantic` mode, if neither vector table
+(`threads_vec`, `message_chunks_vec`) can be queried, the call returns
+an error rather than an empty result; if only one fails, the other
+still answers. `limit` is clamped to `[1, 50]` at the tool boundary so
 an out-of-range value (e.g. from an LLM-generated tool call) cannot
 drive an unbounded query against the index.
 
