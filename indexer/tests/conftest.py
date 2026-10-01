@@ -82,6 +82,11 @@ def make_thread(
     )
 
 
+def count_pending_deletions(db: Database) -> int:
+    """Number of tombstones in ``pending_deletions``."""
+    return int(db._conn.execute("SELECT COUNT(*) FROM pending_deletions").fetchone()[0])
+
+
 @pytest.fixture
 def db(tmp_path: Path) -> Database:
     database = Database(tmp_path / "test.db")

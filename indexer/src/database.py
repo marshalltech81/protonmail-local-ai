@@ -2172,11 +2172,6 @@ class Database:
         return row is not None
 
     @_synchronized
-    def count_pending_deletions(self) -> int:
-        row = self._conn.execute("SELECT COUNT(*) FROM pending_deletions").fetchone()
-        return int(row[0]) if row else 0
-
-    @_synchronized
     def list_pending_deletions_older_than(self, cutoff_iso: str) -> list[sqlite3.Row]:
         """Tombstones marked at or before ``cutoff_iso``, each with
         ``mapped_filepath``: the path ``message_thread_map`` holds for the

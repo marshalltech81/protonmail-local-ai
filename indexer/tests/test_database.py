@@ -20,7 +20,7 @@ from src.database import (
     Database,
 )
 
-from tests.conftest import make_message, make_thread
+from tests.conftest import count_pending_deletions, make_message, make_thread
 
 FAKE_EMBEDDING = [0.1] * EMBEDDING_DIM
 
@@ -1094,7 +1094,7 @@ class TestPendingDeletions:
         db.add_pending_deletion("/p", "msg@x", "t1")
         # Second call must not update marked_at nor report an insert
         assert db.add_pending_deletion("/p", "msg@x", "t1") is False
-        assert db.count_pending_deletions() == 1
+        assert count_pending_deletions(db) == 1
 
     def test_add_pending_deletion_refuses_a_path_the_message_no_longer_maps_to(self, db):
         """#301: a sweep holding a stale path must not tombstone a message
@@ -1106,7 +1106,7 @@ class TestPendingDeletions:
         db.update_filepath("/cur/moved:2,ST", "/cur/moved:2,S", clear_tombstone=True)
 
         assert db.add_pending_deletion("/cur/moved:2,ST", "moved@x", thread.thread_id) is False
-        assert db.count_pending_deletions() == 0
+        assert count_pending_deletions(db) == 0
         assert db.add_pending_deletion("/cur/moved:2,S", "moved@x", thread.thread_id) is True
 
     def test_add_pending_deletion_writes_iso8601_utc_timestamp(self, db):

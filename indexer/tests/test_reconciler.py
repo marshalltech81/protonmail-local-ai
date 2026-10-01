@@ -22,6 +22,8 @@ from src.database import (
 from src.reconciler import Reconciler, ReconcilerConfig, load_config_from_env, sweep_paths
 from src.threader import Threader
 
+from tests.conftest import count_pending_deletions
+
 FAKE_EMBEDDING = [0.0] * EMBEDDING_DIM
 
 
@@ -168,7 +170,7 @@ class TestSweep:
         second = reconciler.sweep()
         assert first["tombstoned"] == 1
         assert second["tombstoned"] == 0  # already recorded
-        assert db.count_pending_deletions() == 1
+        assert count_pending_deletions(db) == 1
 
     def test_marks_missing_file_as_tombstone(self, db, threader, reconciler, maildir):
         path = maildir / "1700000000.M1.host:2,S"
@@ -211,7 +213,7 @@ class TestSweep:
         monkeypatch.setattr(reconciler_module, "resolve_current_path", real_resolve)
 
         assert db.find_message_entry_by_filepath(str(path)) is not None
-        assert db.count_pending_deletions() == 0
+        assert count_pending_deletions(db) == 0
         rec.sweep()
         assert rec.reap()["threads_reaped"] == 0
         assert db.get_thread(thread_id) is not None
@@ -244,7 +246,7 @@ class TestSweep:
         assert rec.sweep()["missing"] == 0
         monkeypatch.setattr(reconciler_module, "resolve_current_path", real_resolve)
 
-        assert db.count_pending_deletions() == 0
+        assert count_pending_deletions(db) == 0
         assert rec.reap()["threads_reaped"] == 0
         assert db.get_thread(thread_id) is not None
 
@@ -309,7 +311,7 @@ class TestSweepPaths:
 
         result = sweep_paths(db)
         assert result["unreachable"] == 1
-        assert db.count_pending_deletions() == 0
+        assert count_pending_deletions(db) == 0
 
     def test_does_not_tombstone_t_flagged_files(self, db, threader, maildir):
         """A trashed file is reachable at its new path, so sweep_paths
@@ -324,7 +326,7 @@ class TestSweepPaths:
 
         result = sweep_paths(db)
         assert result["renamed"] == 1
-        assert db.count_pending_deletions() == 0
+        assert count_pending_deletions(db) == 0
 
     def test_idempotent(self, db, threader, maildir):
         path = maildir / "1700000000.M1.host:2,S"
@@ -376,7 +378,7 @@ class TestHandleMoved:
         dest = maildir / "unknown:2,ST"
         # Must not raise, must not record anything
         reconciler.handle_moved(str(src), str(dest))
-        assert db.count_pending_deletions() == 0
+        assert count_pending_deletions(db) == 0
 
 
 # ---------------------------------------------------------------------------
@@ -437,7 +439,7 @@ class TestReap:
         assert rec.reap()["threads_reaped"] == 0
         assert db.get_thread(thread_id) is not None
         assert path.exists()
-        assert db.count_pending_deletions() == 0
+        assert count_pending_deletions(db) == 0
 
     def test_live_checks_list_each_directory_once(
         self, db, threader, embedder, maildir, monkeypatch
@@ -492,7 +494,7 @@ class TestReap:
         assert rec.reap()["threads_reaped"] == 0
         assert db.get_thread(thread_id) is not None
         assert path.exists()
-        assert db.count_pending_deletions() == 0
+        assert count_pending_deletions(db) == 0
 
     def test_full_reap_when_last_message_tombstoned(self, db, threader, reconciler, maildir):
         path = maildir / "1700000000.M1.host:2,S"
@@ -508,7 +510,7 @@ class TestReap:
         assert result["threads_rebuilt"] == 0
         assert db.get_thread(thread_id) is None
         assert db.count_total_messages() == 0
-        assert db.count_pending_deletions() == 0
+        assert count_pending_deletions(db) == 0
 
     def test_full_reap_removes_the_pending_job(self, db, threader, reconciler, maildir):
         """#244: a job still queued for the message (an embedder outage
@@ -1368,7 +1370,7 @@ class TestMassDeleteBrake:
         assert result["aborted"] is True
         # Index was not touched
         assert db.count_total_messages() == 30
-        assert db.count_pending_deletions() == 20
+        assert count_pending_deletions(db) == 20
 
     def test_small_mailbox_floor_permits_routine_cleanup(self, db, threader, embedder, maildir):
         """Regression: without an absolute floor a 10-message mailbox
@@ -1417,7 +1419,7 @@ class TestMassDeleteBrake:
         assert result["aborted"] is False
         assert result["threads_reaped"] == 1
         assert db.count_total_messages() == 11
-        assert db.count_pending_deletions() == 0
+        assert count_pending_deletions(db) == 0
 
     def test_force_overrides_brake(self, db, threader, embedder, maildir):
         paths = self._stage_batch(maildir, db, threader, 30)
