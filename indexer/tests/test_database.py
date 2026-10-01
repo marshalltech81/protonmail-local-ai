@@ -9,7 +9,7 @@ and stats.
 import json
 import sqlite3
 import threading
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from src.attachment_indexing import attachment_occurrence_id
@@ -1395,6 +1395,53 @@ class TestReapRewritesThreadRow:
     """The reap's thread rewrite regenerates the row from the survivors
     rather than merging into the stored row as ``upsert_thread`` does."""
 
+    def test_reap_rewrites_reply_subjects_in_fts(self, db, threader):
+        """#303: a changed reply subject is keyword-searchable through
+        the ``threads_fts`` subject column; the reap rewrite keeps the
+        survivors' and drops the reaped message's."""
+        from src.threader import Thread
+
+        original = make_message(message_id="s1@x", subject="Hello world", filepath="/s/1")
+        kept = make_message(
+            message_id="s2@x",
+            subject="Re: Hello world KEPTZX1",
+            in_reply_to="s1@x",
+            filepath="/s/2",
+            date=datetime(2024, 2, 1, tzinfo=UTC),
+        )
+        reaped = make_message(
+            message_id="s3@x",
+            subject="Re: Hello world GONEZX2",
+            in_reply_to="s1@x",
+            filepath="/s/3",
+            date=datetime(2024, 3, 1, tzinfo=UTC),
+        )
+        t1 = threader.assign_thread(original)
+        db.upsert_thread(t1, FAKE_EMBEDDING)
+        for msg in (kept, reaped):
+            db.upsert_thread(threader.assign_thread(msg), FAKE_EMBEDDING)
+
+        def hits(term):
+            return db._conn.execute(
+                "SELECT COUNT(*) FROM threads_fts WHERE threads_fts MATCH ?", (f"subject:{term}",)
+            ).fetchone()[0]
+
+        assert (hits("keptzx1"), hits("gonezx2")) == (1, 1)
+
+        rebuilt = Thread(
+            thread_id=t1.thread_id,
+            subject=t1.subject,
+            participants=["only@x"],
+            messages=[original, kept],
+            folder="INBOX",
+            date_first=original.date,
+            date_last=kept.date,
+        )
+        db.add_pending_deletion("/s/3", "s3@x", t1.thread_id)
+        assert db.reap_thread_messages(rebuilt, FAKE_EMBEDDING, ["s3@x"]) == ["/s/3"]
+        assert (hits("keptzx1"), hits("gonezx2")) == (1, 0)
+        assert db.get_thread(t1.thread_id).subject == "hello world"
+
     def test_reap_replaces_body_text_instead_of_appending(self, db, threader):
         original = make_message(message_id="r1@x", body_text="First message body.", filepath="/r/1")
         reply = make_message(
@@ -1548,14 +1595,19 @@ class TestReapRewritesThreadRow:
         db.upsert_thread(t1, FAKE_EMBEDDING)
         db.upsert_thread(threader.assign_thread(reply), FAKE_EMBEDDING)
 
-        # Reap the reply and rewrite with a different subject
+        # Reap the reply and rewrite with a different subject. The
+        # survivor carries that subject too: a survivor whose own subject
+        # differs from the thread's is indexed in the FTS subject column
+        # (#303), which would keep "hello" searchable for a real reason.
+        from dataclasses import replace
+
         from src.threader import Thread
 
         rebuilt = Thread(
             thread_id=t1.thread_id,
             subject="brand new subject",
             participants=["only@x"],
-            messages=[original],
+            messages=[replace(original, subject="Brand new subject")],
             folder="INBOX",
             date_first=original.date,
             date_last=original.date,
@@ -2820,3 +2872,68 @@ class TestZeroVectorRecoveryBatching:
         map_lookups = [s for s in statements if "FROM message_thread_map WHERE thread_id IN" in s]
         assert len(vec_lookups) == 4  # ceil(40 / 10)
         assert len(map_lookups) == 2  # ceil(14 / 10)
+
+
+class TestFtsSubjectScanBound:
+    """#439 review round 2: rebuilding the ``threads_fts`` subject read
+    and normalized every stored subject of the thread on each upsert,
+    quadratic in a long thread of long subjects. Rows and characters
+    examined per rewrite are now capped."""
+
+    def test_long_thread_of_long_subjects_is_bounded(self, db, monkeypatch):
+        import time
+
+        from src import threader as threader_mod
+
+        subject = "Re: " + "x" * 10_000
+        calls: list[int] = []
+        real = threader_mod._normalize_subject
+
+        def counting(s):
+            calls.append(len(s))
+            return real(s)
+
+        monkeypatch.setattr(threader_mod, "_normalize_subject", counting)
+        start = time.perf_counter()
+        per_upsert: list[int] = []
+        messages = []
+        for i in range(300):
+            msg = make_message(
+                message_id=f"long{i}@x",
+                subject=subject,
+                filepath=f"/long/{i}",
+                date=datetime(2024, 1, 1, tzinfo=UTC) + timedelta(minutes=i),
+            )
+            messages.append(msg)
+            before = len(calls)
+            db.upsert_thread(
+                make_thread(messages=[msg], thread_id="long0@x", subject="x" * 10_000),
+                FAKE_EMBEDDING,
+            )
+            per_upsert.append(len(calls) - before)
+        elapsed = time.perf_counter() - start
+
+        assert max(per_upsert) <= 1 + threader_mod.FTS_SUBJECT_SCAN_ROWS
+        assert max(calls) <= threader_mod.FTS_SUBJECT_SCAN_CHARS
+        assert elapsed < 60, f"300 upserts took {elapsed:.1f}s"
+        row = db._conn.execute("SELECT message_ids FROM threads").fetchone()
+        assert len(json.loads(row["message_ids"])) == 300
+
+        # The reap rewrite builds the same column from its survivors.
+        from src.threader import Thread
+
+        survivors = messages[1:]
+        rebuilt = Thread(
+            thread_id="long0@x",
+            subject="x" * 10_000,
+            participants=["alice@example.com"],
+            messages=survivors,
+            folder="INBOX",
+            date_first=survivors[0].date,
+            date_last=survivors[-1].date,
+        )
+        db.add_pending_deletion("/long/0", "long0@x", "long0@x")
+        before = len(calls)
+        assert db.reap_thread_messages(rebuilt, FAKE_EMBEDDING, ["long0@x"]) == ["/long/0"]
+        assert len(calls) - before <= 1 + threader_mod.FTS_SUBJECT_SCAN_ROWS
+        assert max(calls[before:]) <= threader_mod.FTS_SUBJECT_SCAN_CHARS

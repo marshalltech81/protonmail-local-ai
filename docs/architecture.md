@@ -299,6 +299,30 @@ history. Stripping is intentionally conservative: quoted text is still
 searchable through FTS and falls back to the original body when the
 stripped result would be empty.
 
+A reply can rename the conversation and still join it through
+References / In-Reply-To. Its subject, when it differs from the
+thread's after `Re:`/`Fwd:` normalization, is kept searchable (#303):
+
+- Keyword: the `subject` column of the thread's `threads_fts` row holds
+  the thread subject plus each distinct changed reply subject
+  (normalized, at most `FTS_REPLY_SUBJECTS_MAX` subjects and
+  `FTS_REPLY_SUBJECTS_MAX_CHARS` characters), so a body already at its
+  token cap cannot drop them; `threads.subject` stays the thread
+  subject. Each rewrite of the row examines at most the oldest
+  `FTS_SUBJECT_SCAN_ROWS` subjects of the thread, each cut to
+  `FTS_SUBJECT_SCAN_CHARS` characters, so a change first seen past
+  those bounds is not added.
+- Semantic: the embedding input of the reply's first body chunk is
+  prefixed with `Subject: <its subject>`, cut so the input stays within
+  `INDEXER_CHUNK_MAX_TOKENS` and dropped when the chunk alone is at that
+  ceiling. The stored chunk text, offsets and chunk ID stay body-only,
+  since chunks are the authoritative body store (`get_message`,
+  `query_messages(text=...)`).
+
+A renamed reply with no body text (for example attachment-only) has no
+body chunk to carry the prefix, so its subject is keyword-searchable
+only, with no semantic representation.
+
 **Known limitation (#295):** a message's body text is the first
 `text/plain` part outside attachments, or failing that the first
 `text/html` part. A plain part that holds only whitespace counts as
