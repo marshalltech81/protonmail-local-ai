@@ -1842,15 +1842,15 @@ class Database:
         thread_id: str,
         limit: int = 6,
     ) -> list[ChunkResult]:
-        """Return the most-recently-indexed BODY chunks for ``thread_id``.
+        """Return the BODY chunks of ``thread_id``'s latest-dated messages.
 
         Used by ``summarize_thread`` / timeline-style intelligence tools
         that need "what does the thread say lately" — NOT "what matches
         a query." The stored ``body_text`` is front-preserving and
         token-capped, so a long thread that crosses ``THREAD_BODY_TEXT_MAX_TOKENS``
         silently drops its newest replies. The chunk store carries every
-        message in full, so reading the tail of ``chunked_at`` recovers
-        the missing context.
+        message in full, so reading the chunks of the latest-dated
+        messages recovers the missing context.
 
         Attachment chunks (rows with a non-NULL ``attachment_id``) are
         deliberately excluded via ``c.attachment_id IS NULL``.
@@ -1861,19 +1861,21 @@ class Database:
         would silently broaden which indexed content can leave the host
         for a remote inference endpoint.
 
-        Returned chunks are in chronological (oldest-first within the
-        selected tail) order so the LLM prompt reads naturally as a
+        Returned chunks are in chronological (oldest-first by message
+        date within the selected tail) order so the LLM prompt reads naturally as a
         timeline. Caller can render them via ``_thread_context``.
 
         Ordering: ``c.message_date DESC, c.chunk_index DESC``.
-        ``message_date`` is the message's ``Date:`` header captured at
-        chunk-write — the authoritative "when did this message arrive"
-        signal, correct across reindex, reap-rebuild, dead-letter
-        retry, and recovery-sweep paths (unlike ``chunked_at``, the
-        chunker's wall-clock at insert). ``chunk_index DESC`` tiebreaks
-        chunks of the same message so the last chunk emitted by the
-        chunker comes first in selection.
-        Selection picks the latest ``limit`` chunks, then the result
+        ``message_date`` is the indexed message date stored at
+        chunk-write: the sender-supplied ``Date:`` header, or the
+        indexer's ingest time when that header is missing or
+        unparseable. It is not an IMAP delivery timestamp, but it is
+        stable across reindex, reap-rebuild, dead-letter retry, and
+        recovery-sweep paths (unlike ``chunked_at``, the chunker's
+        wall-clock at insert, which this query does not use).
+        ``chunk_index DESC`` tiebreaks chunks of the same message so the
+        last chunk emitted by the chunker comes first in selection.
+        Selection picks the latest-dated ``limit`` chunks, then the result
         is reversed in Python for ascending display order.
 
         Body-only filter: because attachment chunks are excluded, no
