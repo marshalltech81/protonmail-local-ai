@@ -19,6 +19,7 @@ from pathlib import Path
 import sqlite_vec
 
 from .chunker import l2_normalize, truncate_to_tokens
+from .entities import org_entity_id, organization_domain, person_entity_id
 from .extractors import OCR_DISABLED_ERROR, SCANNED_PDF_OCR_DISABLED_ERROR
 from .threader import (
     FTS_SUBJECT_SCAN_CHARS,
@@ -609,6 +610,42 @@ class Database:
                 indexer_seen_at    TEXT NOT NULL
             );
         """)
+        self._run_entity_schema_script(cur)
+
+    @staticmethod
+    def _run_entity_schema_script(cur: sqlite3.Cursor) -> None:
+        """Deterministic entities (PLAN Phase 4), inside the initial
+        schema's open transaction (``execute`` per statement, so nothing
+        commits early).
+
+        ``entities`` holds one person per canonical address
+        (``person:<address>``) and one organization per non-free-mail
+        sender domain (``org:<domain>``); see ``src/entities.py``.
+        ``entity_aliases`` records every display name seen for a person.
+        Rows are written alongside ``message_participants`` and are not
+        pruned when a message is removed: the table is a directory of
+        identities ever indexed, and every query joins through
+        ``message_participants``, which is.
+        """
+        for statement in (
+            """
+            CREATE TABLE entities (
+                entity_id       TEXT PRIMARY KEY,
+                kind            TEXT NOT NULL CHECK (kind IN ('person', 'organization')),
+                canonical_key   TEXT NOT NULL,
+                organization_id TEXT REFERENCES entities(entity_id)
+            )
+            """,
+            "CREATE INDEX idx_entities_organization ON entities(organization_id)",
+            """
+            CREATE TABLE entity_aliases (
+                entity_id TEXT NOT NULL REFERENCES entities(entity_id) ON DELETE CASCADE,
+                alias     TEXT NOT NULL,
+                PRIMARY KEY (entity_id, alias)
+            )
+            """,
+        ):
+            cur.execute(statement)
 
     # -------------------------------------------------------------------------
     # Write operations
@@ -2098,6 +2135,34 @@ class Database:
                     "(claimant_id, role, address, name) VALUES (?, ?, ?, ?)",
                     (msg.claimant_id, role, address, name),
                 )
+                self._write_entity(cur, address, name)
+
+    @staticmethod
+    def _write_entity(cur: sqlite3.Cursor, address: str, name: str | None) -> None:
+        """Record ``address`` as a person entity (with its organization,
+        if any) and ``name`` as one of its aliases. Deterministic IDs and
+        ``ON CONFLICT`` writes make a reprocess rewrite the same rows.
+        Runs inside ``_write_message_record``'s transaction."""
+        org_id = None
+        domain = organization_domain(address)
+        if domain:
+            org_id = org_entity_id(domain)
+            cur.execute(
+                "INSERT INTO entities (entity_id, kind, canonical_key, organization_id) "
+                "VALUES (?, 'organization', ?, NULL) ON CONFLICT(entity_id) DO NOTHING",
+                (org_id, domain),
+            )
+        person_id = person_entity_id(address)
+        cur.execute(
+            "INSERT INTO entities (entity_id, kind, canonical_key, organization_id) "
+            "VALUES (?, 'person', ?, ?) ON CONFLICT(entity_id) DO NOTHING",
+            (person_id, address, org_id),
+        )
+        if name:
+            cur.execute(
+                "INSERT OR IGNORE INTO entity_aliases (entity_id, alias) VALUES (?, ?)",
+                (person_id, name),
+            )
 
     @_synchronized
     def update_filepath(

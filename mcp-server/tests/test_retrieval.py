@@ -599,6 +599,12 @@ class TestFindContact:
         # the most-active sender when several match.
         assert "Threads: 2" in text
 
+    def test_renders_the_contact_organization(self, fake_server, seeded_db):
+        handler = _handlers(fake_server, seeded_db)["find_contact"]
+        out = asyncio.run(handler(query="alice"))
+        assert "Organization: example.com" in _text(out)
+        assert out.structuredContent["contacts"][0]["organization"] == "example.com"
+
     def test_no_match_returns_empty_sentinel(self, fake_server, seeded_db):
         handler = _handlers(fake_server, seeded_db)["find_contact"]
         out = asyncio.run(handler(query="zzznosuchname"))
@@ -635,7 +641,14 @@ class TestFindContact:
         names = [f"Alias{n:02d} " + "x" * 2000 for n in range(30)]
 
         def many(_query, _limit):
-            return [{"email": "p@example.test", "names": names, "thread_count": 30}]
+            return [
+                {
+                    "email": "p@example.test",
+                    "names": names,
+                    "thread_count": 30,
+                    "organization": "example.test",
+                }
+            ]
 
         seeded_db.find_contact = many  # type: ignore[assignment]
         handler = _handlers(fake_server, seeded_db)["find_contact"]

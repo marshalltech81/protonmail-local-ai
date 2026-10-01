@@ -710,6 +710,7 @@ def register_retrieval_tools(server, db):
                     names=[clip(n, HEADER_CHAR_LIMIT) for n in c["names"][:MAX_LISTED]],
                     name_count=len(c["names"]),
                     thread_count=c["thread_count"],
+                    organization=c["organization"],
                 )
                 for c in contacts
             ]
@@ -722,7 +723,11 @@ def register_retrieval_tools(server, db):
             names = ", ".join(c.names) if c.names else "(no display name)"
             if c.name_count > len(c.names):
                 names += f" (+{c.name_count - len(c.names)} more)"
-            lines.append(f"{i}. {c.email}\n   Name(s): {names}\n   Threads: {c.thread_count}\n")
+            lines.append(
+                f"{i}. {c.email}\n   Name(s): {names}\n"
+                f"   Organization: {c.organization or '(none)'}\n"
+                f"   Threads: {c.thread_count}\n"
+            )
         return tool_result("\n".join(lines), output)
 
     @server.tool(output_schema=ListFoldersOutput.model_json_schema())

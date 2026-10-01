@@ -59,6 +59,7 @@ embedder (operator-supplied)  sqlite-volume
                                  - indexed_files, indexing_jobs,
                                    ingestion_state
                                  - pending_deletions (reconciler)
+                                 - entities, entity_aliases
 
 inference (operator-supplied)
   - INFERENCE_MODE=anthropic →
@@ -419,6 +420,30 @@ message's `message_thread_map` row. `messages` references
 `message_thread_map` and `message_participants` references `messages`,
 both `ON DELETE CASCADE`, so every existing removal path — reaper,
 whole-thread delete, rebuild — cleans them up without separate code.
+
+## Entities
+
+Entity resolution is deterministic: no model suggests or performs a
+merge. Each `message_participants` row also writes, in the same
+transaction:
+
+- a **person** entity per canonical address (`entity_id`
+  `person:<address>`), with every display name seen for that address
+  recorded in `entity_aliases`. Two different addresses are never
+  merged, however similar their names: display names are
+  sender-controlled.
+- an **organization** entity per exact address domain
+  (`org:<domain>`), linked from the person through `organization_id`.
+  The domain is used as written, with no public-suffix lookup, so
+  `mail.example.com` and `example.com` are two organizations rather
+  than a guessed merge. Addresses at a short list of free-mail
+  providers (`FREE_MAIL_DOMAINS` in `indexer/src/entities.py`) get no
+  organization.
+
+IDs are derived from the address and domain, so reprocessing a message
+rewrites the same rows. Entities are not pruned when messages are
+removed; every read joins through `message_participants`, which is.
+The MCP server's `find_contact` reports each contact's organization.
 
 ## Attachment Indexing
 

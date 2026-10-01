@@ -862,6 +862,22 @@ def _aggregate_senders(conn: sqlite3.Connection, needle: str, name_needle: str) 
     }
 
 
+def _contact_entities(conn: sqlite3.Connection, addresses: list[str]) -> dict[str, str | None]:
+    """``address -> organization domain`` from the indexer's person
+    entities (``person:<address>``); ``None`` when the person has no
+    organization (a free-mail address)."""
+    rows = conn.execute(
+        """
+        SELECT p.canonical_key AS address, o.canonical_key AS organization
+        FROM entities p
+        LEFT JOIN entities o ON o.entity_id = p.organization_id
+        WHERE p.entity_id IN (SELECT 'person:' || value FROM json_each(?))
+        """,
+        (json.dumps(addresses),),
+    ).fetchall()
+    return {row["address"]: row["organization"] for row in rows}
+
+
 def _append_folder_membership_sql(
     where_clauses: list[str], params: list, thread_id_column: str, folders: list[str]
 ) -> None:
@@ -2694,19 +2710,23 @@ class Database:
                 by_email = _aggregate_senders(conn, needle, name_needle)
             else:
                 by_email = _aggregate_participants(conn, needle, name_needle)
+            # Most-active contact first; tiebreak on email so the order is
+            # stable across runs (important for both eval reproducibility
+            # and the unit tests below).
+            ranked = sorted(by_email.items(), key=lambda item: (-len(item[1]["threads"]), item[0]))[
+                :limit
+            ]
+            entities = _contact_entities(conn, [addr for addr, _ in ranked])
             conn.rollback()
 
-        # Most-active contact first; tiebreak on email so the order is
-        # stable across runs (important for both eval reproducibility
-        # and the unit tests below).
-        ranked = sorted(by_email.items(), key=lambda item: (-len(item[1]["threads"]), item[0]))
         return [
             {
                 "email": addr,
                 "names": sorted(bucket["names"]),
                 "thread_count": len(bucket["threads"]),
+                "organization": entities.get(addr),
             }
-            for addr, bucket in ranked[:limit]
+            for addr, bucket in ranked
         ]
 
     def query_messages(

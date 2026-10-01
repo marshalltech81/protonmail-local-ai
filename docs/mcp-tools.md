@@ -325,7 +325,10 @@ ranks results by `thread_count` descending with email as the
 tiebreaker. `thread_count` counts every thread; `names` lists at most
 10 of the display names the contact was written with, each cut at 500
 characters, and `name_count` gives the full number. Same-thread
-duplicates do not double-count.
+duplicates do not double-count. `organization` is the contact's
+exact address domain from the indexer's deterministic entities, or
+null for a free-mail provider (see `docs/architecture.md`, Entities);
+it is never inferred from display names.
 
 ### `query_messages`
 Enumerate **every** message matching exact criteria, with an exact

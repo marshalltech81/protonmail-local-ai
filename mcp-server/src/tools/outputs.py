@@ -366,6 +366,10 @@ class Contact(_Output):
     )
     name_count: int
     thread_count: int
+    organization: str | None = Field(
+        description="The contact's organization: its exact address domain, or null for a "
+        "free-mail provider. Never inferred from display names."
+    )
 
 
 class FindContactOutput(_Output):
