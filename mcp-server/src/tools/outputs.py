@@ -378,7 +378,9 @@ class Contact(_Output):
     authority_class: str = Field(
         description="Source authority from the operator's rules file: counsel, "
         "management, vendor, government, personal, other, or unclassified. "
-        "Metadata only; it does not affect ranking."
+        "Metadata only; it does not affect ranking. It reflects the claimed From "
+        "address, not a verified sender; the authority_class search filters skip "
+        "Spam-folder mail."
     )
     authority_rule: str | None = Field(
         description="The rule that assigned authority_class (address:<pattern> or "
