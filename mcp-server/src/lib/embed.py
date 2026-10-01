@@ -168,4 +168,11 @@ async def embed_query(client, text: str, expected_dim: int | None) -> list[float
             f"Embedding provider returned non-finite values. Check EMBED_BASE_URL="
             f"{client.base_url!r} and EMBED_MODEL={client.model!r}."
         )
+    # A zero query vector is the same L2 distance from every stored unit
+    # vector, so semantic search would return an arbitrary order (#304).
+    if not any(vector):
+        raise ValueError(
+            f"Embedding provider returned an all-zero vector. Check EMBED_BASE_URL="
+            f"{client.base_url!r} and EMBED_MODEL={client.model!r}."
+        )
     return vector

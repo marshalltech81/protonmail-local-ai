@@ -3489,6 +3489,59 @@ class TestEmbedFailureHandling:
             blob = row["embedding"]
             assert all(math.isfinite(v) for v in struct.unpack(f"{len(blob) // 4}f", blob))
 
+    def test_all_zero_vector_is_isolated_and_never_committed(self, tmp_path, monkeypatch, caplog):
+        """A 200 response carrying an all-zero vector must not settle the
+        job as successfully embedded, its batchmates must still be
+        indexed, and neither the mail text nor response values may reach
+        the log or ``last_error`` (#304)."""
+        import base64
+        import struct
+
+        import httpx2
+
+        marker = "SYNTHETIC_ZERO_MARKER"
+        db, threader, queue, paths = self._setup(
+            tmp_path,
+            monkeypatch,
+            {"good1": "fine text one", "bad": f"POISON {marker}", "good2": "fine text two"},
+        )
+        zero_b64 = base64.b64encode(struct.pack(f"{EMBEDDING_DIM}f", *([0.0] * EMBEDDING_DIM)))
+        unit_b64 = base64.b64encode(struct.pack(f"{EMBEDDING_DIM}f", *_UNIT_VECTOR)).decode()
+
+        def handler(request):
+            inputs = json.loads(request.content)["input"]
+            data = [
+                {
+                    "object": "embedding",
+                    "index": i,
+                    "embedding": zero_b64.decode() if "POISON" in text else unit_b64,
+                }
+                for i, text in enumerate(inputs)
+            ]
+            return httpx2.Response(
+                200,
+                json={"object": "list", "model": "m", "data": data, "usage": {}},
+            )
+
+        with caplog.at_level("DEBUG"):
+            self._drain(db, _mock_transport_embedder(handler), threader, queue)
+
+        assert db.get_chunk_ids_for_message("good1@example.com")
+        assert db.get_chunk_ids_for_message("good2@example.com")
+        assert not db.get_chunk_ids_for_message("bad@example.com")
+        assert self._row(db, paths["bad"])["status"] in ("queued", "dead")
+        last_error = db._conn.execute(
+            "SELECT last_error FROM indexing_jobs WHERE filepath = ?", (paths["bad"],)
+        ).fetchone()["last_error"]
+        assert "all-zero" in last_error
+        assert marker not in last_error
+        assert marker not in caplog.text
+        # The failed thread keeps its intentional phase-one zero placeholder
+        # in ``threads_vec``; only chunk vectors are checked.
+        zero_blob = struct.pack(f"{EMBEDDING_DIM}f", *([0.0] * EMBEDDING_DIM))
+        for row in db._conn.execute("SELECT embedding FROM message_chunks_vec").fetchall():
+            assert row["embedding"] != zero_blob
+
     def test_input_that_crashes_provider_spends_attempts_not_the_queue(self, tmp_path, monkeypatch):
         """A provider that 500s on one specific input looks like an
         outage from the batch alone. The probe proves the embedder is
