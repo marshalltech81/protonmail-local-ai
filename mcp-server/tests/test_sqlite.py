@@ -1160,19 +1160,189 @@ class TestFilterDateUtcNormalization:
         filtered = seeded_db._apply_filters([after_cutoff], date_to="2024-06-01T08:29:00-04:00")
         assert filtered == []
 
-    def test_normalize_date_bound_returns_utc_isoformat(self):
-        """``_normalize_date_bound`` produces the string handed straight to
-        SQL pushdown — it must carry a ``+00:00`` offset regardless of the
+    def test_normalize_date_range_returns_utc_isoformat(self):
+        """``_normalize_date_range`` produces the strings handed straight to
+        SQL pushdown — they must carry a ``+00:00`` offset regardless of the
         offset the caller supplied, so lexicographic comparison against
         stored UTC timestamps is well-defined."""
-        from src.lib.sqlite import _normalize_date_bound
+        from src.lib.sqlite import _normalize_date_range
 
-        normalized = _normalize_date_bound(
-            "2024-06-01T08:00:00-04:00", end_of_day=False, field_name="date_from"
-        )
+        normalized, no_upper_bound = _normalize_date_range("2024-06-01T08:00:00-04:00", None)
+        assert no_upper_bound is None
         assert normalized is not None
         assert normalized.endswith("+00:00")
         assert normalized.startswith("2024-06-01T12:00:00")
+
+
+class TestDateFilterFormCatalogue:
+    """#330: every ISO 8601 form the date filters accept, and what each
+    bound becomes. The upper bound used to get end-of-day promotion only
+    when the string was exactly ``YYYY-MM-DD``, so other date-only forms
+    (``20240101``, week dates) cut off all but the first instant of the
+    day they name. Date-only is now decided by what the parser accepts.
+
+    Invariant: a value ``date.fromisoformat`` accepts (with or without a
+    trailing ``Z``) names a whole UTC day; any other accepted value names
+    one instant, the same for both bounds."""
+
+    _START = "2024-01-01T00:00:00+00:00"
+    _END_OF_DAY = "2024-01-01T23:59:59.999999+00:00"
+    _NOON = "2024-01-01T12:00:00+00:00"
+
+    # Every form names 2024-01-01 (a Monday, so ISO week 2024-W01-1).
+    DATE_ONLY = [
+        "2024-01-01",  # extended calendar date
+        "20240101",  # basic calendar date
+        "2024-W01-1",  # extended week date
+        "2024W011",  # basic week date
+        "2024-W01",  # week without a weekday: the parser reads its Monday
+        "2024W01",
+        "2024-01-01Z",  # a date with the UTC designator: still the whole day
+        "20240101Z",
+        "2024-W01-1Z",
+    ]
+    DATETIME = {
+        "2024-01-01T12:00:00": _NOON,  # naive: read as UTC
+        "2024-01-01T12:00": _NOON,
+        "2024-01-01T12": _NOON,
+        "2024-01-01 12:00:00": _NOON,  # space separator
+        "20240101T120000": _NOON,  # basic format
+        "2024-W01-1T12:00": _NOON,  # week date with a time
+        "2024-01-01T12:00:00Z": _NOON,
+        "2024-01-01T12:00:00.000000Z": _NOON,
+        "2024-01-01T12:00:00+00:00": _NOON,
+        "2024-01-01T07:00:00-05:00": _NOON,  # offset converted to UTC
+        "2024-01-01T21:00:00+09:00": _NOON,
+        # An explicit midnight is an instant, not a day, even as date_to.
+        "2024-01-01T00:00:00": _START,
+        "2024-01-01T00:00:00Z": _START,
+    }
+    REJECTED = [
+        "2024-001",
+        "2024-01",
+        "2024",
+        "2024-1-1",
+        "2024-13-01",
+        "2024-01-01T25:00",
+        # Parseable, but converting to UTC leaves datetime's range.
+        "0001-01-01T00:00:00+14:00",
+        "9999-12-31T23:59:59-14:00",
+    ]
+
+    @pytest.mark.parametrize("value", DATE_ONLY)
+    def test_date_only_form_names_the_whole_day(self, value):
+        from src.lib.sqlite import _parse_filter_date
+
+        assert _parse_filter_date(value, end_of_day=False).isoformat() == self._START
+        assert _parse_filter_date(value, end_of_day=True).isoformat() == self._END_OF_DAY
+
+    @pytest.mark.parametrize(("value", "instant"), sorted(DATETIME.items()))
+    def test_datetime_form_names_one_instant(self, value, instant):
+        from src.lib.sqlite import _parse_filter_date
+
+        assert _parse_filter_date(value, end_of_day=False).isoformat() == instant
+        assert _parse_filter_date(value, end_of_day=True).isoformat() == instant
+
+    @pytest.mark.parametrize("value", REJECTED)
+    def test_unaccepted_form_is_rejected(self, value):
+        from src.lib.sqlite import InvalidFilterError, _parse_filter_date
+
+        with pytest.raises(InvalidFilterError):
+            _parse_filter_date(value, end_of_day=True, _field_name="date_to")
+
+    @pytest.mark.parametrize("value", DATE_ONLY)
+    def test_date_only_bound_includes_the_named_day_end_to_end(self, tmp_path, make_result, value):
+        """The reproduction from #330, through ``query_messages`` (SQL
+        pushdown) and the post-fusion thread filter: a message at noon
+        on the named day is inside either bound."""
+        from datetime import UTC, datetime
+
+        from tests.conftest import _insert_message
+
+        conn, path = _open_built_db_conn(tmp_path, "date-forms.db")
+        _insert_message(
+            conn,
+            message_id="m-noon",
+            thread_id="t-noon",
+            sent_at=self._NOON,
+            subject="quarterly report",
+        )
+        conn.execute(
+            "UPDATE threads SET date_first = ?, date_last = ? WHERE thread_id = 't-noon'",
+            (self._NOON, self._NOON),
+        )
+        conn.commit()
+        conn.close()
+        db = Database(str(path))
+        assert db.query_messages(date_to=value).total_matches == 1
+        assert db.query_messages(date_from=value).total_matches == 1
+
+        at_noon = make_result("at-noon")
+        at_noon.date_first = at_noon.date_last = datetime(2024, 1, 1, 12, tzinfo=UTC)
+        assert db._apply_filters([at_noon], date_to=value) == [at_noon]
+        assert db._apply_filters([at_noon], date_from=value) == [at_noon]
+
+
+class TestInvertedDateRange:
+    """#312: ``date_from`` after ``date_to`` names an empty interval. The
+    thread overlap predicates (``date_last >= from AND date_first <= to``)
+    still accept a long-lived thread for it, so every entry point that
+    takes both bounds rejects the pair instead, after UTC normalization."""
+
+    # A thread spanning 2023-2026 overlaps any interval in that span, so
+    # an unchecked inverted range inside it would return the thread.
+    _SPAN = {"date_first": "2023-01-01T00:00:00+00:00", "date_last": "2026-01-01T00:00:00+00:00"}
+
+    _ENTRY_POINTS = {
+        "keyword_search": lambda db, **kw: db.keyword_search("report", **kw),
+        "semantic_search": lambda db, **kw: db.semantic_search([1.0, 0.0, 0.0, 0.0], **kw),
+        "hybrid_search": lambda db, **kw: db.hybrid_search("report", [1.0, 0.0, 0.0, 0.0], **kw),
+        "like_fallback": lambda db, **kw: db._like_fallback("report", 10, **kw),
+        "search_attachments": lambda db, **kw: db.search_attachments(**kw),
+        "query_messages": lambda db, **kw: db.query_messages(**kw),
+    }
+
+    @pytest.mark.parametrize("entry", sorted(_ENTRY_POINTS))
+    @pytest.mark.parametrize(
+        ("date_from", "date_to"),
+        [
+            ("2025-01-01", "2024-01-01"),  # date-only, a year apart
+            ("2024-06-02", "2024-06-01"),  # adjacent days
+            ("2024-06-01T12:00:01+00:00", "2024-06-01T12:00:00+00:00"),  # one second
+            # 13:00Z vs 12:00Z: the strings sort the other way round.
+            ("2024-06-01T09:00:00-04:00", "2024-06-01T12:00:00Z"),
+        ],
+    )
+    def test_inverted_range_is_rejected(
+        self, tmp_path, _build_thread_on, entry, date_from, date_to
+    ):
+        from src.lib.sqlite import InvalidFilterError
+
+        db = _build_thread_on(tmp_path, **self._SPAN)
+        with pytest.raises(InvalidFilterError) as exc:
+            self._ENTRY_POINTS[entry](db, date_from=date_from, date_to=date_to)
+        assert str(exc.value) == "date_from must not be after date_to"
+        assert exc.value.field_name == "date_from/date_to"
+
+    @pytest.mark.parametrize("entry", sorted(_ENTRY_POINTS))
+    @pytest.mark.parametrize(
+        ("date_from", "date_to"),
+        [
+            ("2024-06-01", "2024-06-01"),  # one whole day
+            ("2024-06-01T12:00:00+00:00", "2024-06-01T12:00:00+00:00"),  # one instant
+            # The same instant written with two offsets.
+            ("2024-06-01T08:00:00-04:00", "2024-06-01T12:00:00Z"),
+            ("2024-01-01", "2025-01-01"),
+        ],
+    )
+    def test_ordered_range_is_accepted(self, tmp_path, _build_thread_on, entry, date_from, date_to):
+        db = _build_thread_on(tmp_path, **self._SPAN)
+        self._ENTRY_POINTS[entry](db, date_from=date_from, date_to=date_to)
+
+    def test_ordered_range_still_returns_the_overlapping_thread(self, tmp_path, _build_thread_on):
+        db = _build_thread_on(tmp_path, **self._SPAN)
+        results = db.keyword_search("report", date_from="2024-01-01", date_to="2025-01-01")
+        assert [r.thread_id for r in results] == ["on-last-day"]
 
 
 class TestFtsSanitization:
@@ -1244,6 +1414,74 @@ class TestLikeFallback:
         monkeypatch.setattr(sqlite_mod, "_sanitize_fts_query", lambda q: "AND OR NEAR")
         results = seeded_db.keyword_search("invoice")
         assert any(r.thread_id == "t-alpha" for r in results)
+
+
+class TestLikeFallbackLiteralCharacters:
+    """#333: the LIKE fallback matches the query as a literal substring.
+    Without escaping, ``_`` matched any one character and ``%`` any run,
+    so ``budget_invoice`` returned ``budgetXinvoice``. Each shape below is
+    checked against the same corpus, directly and through
+    ``keyword_search`` with FTS forced to fail."""
+
+    # Each subject is distinct; bodies and participants carry nothing the
+    # queries below could match.
+    _SUBJECTS = {
+        "t-x": "budgetXinvoice",
+        "t-underscore": "budget_invoice",
+        "t-percent": "discount 100% off",
+        "t-no-percent": "discount 100 off",
+        "t-backslash": r"share at c:\temp\notes",
+        "t-no-backslash": "share at c:tempnotes",
+        "t-mixed": r"code 5%_\x end",
+        "t-plain": "quarterly planning",
+    }
+
+    @pytest.fixture
+    def like_db(self, tmp_path):
+        from tests.conftest import _insert_thread
+
+        conn, path = _open_built_db_conn(tmp_path, "like.db")
+        for thread_id, subject in self._SUBJECTS.items():
+            _insert_thread(
+                conn,
+                thread_id=thread_id,
+                subject=subject,
+                participants=["someone@example.com"],
+                body_text="body",
+            )
+        conn.commit()
+        conn.close()
+        return Database(str(path))
+
+    CATALOGUE = [
+        ("budget_invoice", {"t-underscore"}),  # _ is not a one-character wildcard
+        ("_", {"t-underscore", "t-mixed"}),
+        ("100%", {"t-percent"}),  # % is not a run wildcard
+        ("%", {"t-percent", "t-mixed"}),
+        ("discount%off", set()),
+        (r"c:\temp", {"t-backslash"}),  # the escape character itself
+        ("\\", {"t-backslash", "t-mixed"}),
+        (r"5%_\x", {"t-mixed"}),  # all three together
+        (r"\%", set()),  # an escape sequence in the query stays literal
+        (r"\_", set()),
+        ("quarterly", {"t-plain"}),  # ordinary literal
+        ("QUARTERLY", {"t-plain"}),  # LIKE stays case-insensitive for ASCII
+    ]
+
+    @pytest.mark.parametrize(("query", "expected"), CATALOGUE)
+    def test_like_fallback_matches_query_literally(self, like_db, query, expected):
+        results = like_db._like_fallback(query, limit=50)
+        assert {r.thread_id for r in results} == expected
+
+    @pytest.mark.parametrize(("query", "expected"), CATALOGUE)
+    def test_keyword_search_fallback_matches_query_literally(
+        self, like_db, monkeypatch, query, expected
+    ):
+        from src.lib import sqlite as sqlite_mod
+
+        monkeypatch.setattr(sqlite_mod, "_sanitize_fts_query", lambda q: "AND OR NEAR")
+        results = like_db.keyword_search(query, limit=50)
+        assert {r.thread_id for r in results} == expected
 
 
 class TestOversampleOnFilter:

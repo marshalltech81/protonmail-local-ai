@@ -565,6 +565,12 @@ class TestQueryMessages:
         assert "Message-ID: m5" in text
         assert "Thread ID: t3" in text
 
+    def test_inverted_date_range_is_an_error(self, fake_server, messages_db):
+        # #312: an empty interval is rejected rather than answered.
+        handler = _handlers(fake_server, messages_db)["query_messages"]
+        text = _error(handler(date_from="2024-02-01", date_to="2024-01-01"))
+        assert "date_from must not be after date_to" in text
+
     def test_following_the_cursor_returns_the_rest(self, fake_server, messages_db):
         handler = _handlers(fake_server, messages_db)["query_messages"]
         first = _text(asyncio.run(handler(sender="jane@example.com", limit=2)))

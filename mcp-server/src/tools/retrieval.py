@@ -18,6 +18,7 @@ from ..lib.sqlite import (
     Participant,
     address_match_mode,
     canonical_addr,
+    validate_date_range,
 )
 from ..lib.validation import clamp_int
 from .outputs import (
@@ -567,6 +568,12 @@ def register_retrieval_tools(server, db):
         }
         log_tool_call(log, "query_messages", {**args, "limit": limit, "cursor": cursor})
         limit = clamp_int(limit, default=25, minimum=1, maximum=_MAX_QUERY_LIMIT)
+        # Reject a bad date range before any retrieval work.
+        try:
+            validate_date_range(date_from, date_to)
+        except InvalidFilterError as e:
+            log.warning("query_messages rejected invalid %s", e.field_name)
+            raise ToolError(f"Error: {e}") from e
 
         try:
             page = await asyncio.to_thread(db.query_messages, **args, limit=limit, cursor=cursor)

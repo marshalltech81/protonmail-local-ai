@@ -105,15 +105,25 @@ drive an unbounded query against the index.
   preserved as single tokens.
 - If FTS5 still rejects a sanitized query, search falls back to a
   ``LIKE`` scan over subject / body / participants so recall is
-  preserved.
+  preserved. The scan matches the query as a literal substring: `%`,
+  `_` and `\` in the query match only themselves.
 - When any filter (folder, sender, date range, attachment flag) is
   applied, search oversamples raw candidates by ``limit * 4`` rather
   than ``limit * 2`` so deeper-ranked matches still qualify after
   filtering.
 - Date bounds accept either a full ISO 8601 timestamp or a date-only
-  value (``"2024-12-31"``); date-only values are promoted to start/end
-  of day in UTC before being pushed into SQL so the filter matches
-  the full day the user named.
+  value. Every date-only form Python's `date.fromisoformat` accepts
+  counts (`"2024-12-31"`, `"20241231"`, the week date `"2025-W01-2"`),
+  with or without a trailing `Z`; date-only values are promoted to
+  start/end of day in UTC before being pushed into SQL so the filter
+  matches the full day the user named. A timestamp, including an
+  explicit midnight, bounds at that instant; naive timestamps are read
+  as UTC.
+- A `date_from` later than `date_to` names an empty interval and is
+  rejected with an error naming both fields, the same way by every tool
+  that takes both bounds. The bounds are compared after UTC
+  normalization and date-only promotion, so `date_from` and `date_to`
+  set to the same date select that whole day.
 
 ---
 
@@ -281,7 +291,8 @@ questions.
 | `cursor` | string | none | `next_cursor` from the previous page of the same query |
 
 All given filters must match; blank filters are ignored, and with
-none every indexed message is enumerated.
+none every indexed message is enumerated. A `date_from` later than
+`date_to` is rejected, as in `search_emails`.
 
 **Address matching.** A value that is a full address
 (`jane@example.com`, `Jane <jane@example.com>`) matches by canonical
