@@ -310,8 +310,10 @@ none — the Maildir filename's delivery timestamp, which is sync time
 but stable for the life of the file, then the previously persisted
 date carried forward by the rebuild; `now()` only for a message with
 none of the three, on first sight, and persisted once; the first half
-— keep the first persisted date on reprocess — is a batch-1 guard);
-and repair of chunks committed with all-zero vectors (#304). Reply
+— keep the first persisted date on reprocess — is a batch-1 guard).
+The all-zero chunk repair (#304) left the bundle: #349 rejects
+all-zero provider embeddings and no index older than that guard
+exists. Reply
 subjects (#303), the whitespace-only plain alternative (#298) and
 sequential inline text parts (#295) left the bundle on 2026-10-01:
 with no live index yet they land directly (see "Result quality
@@ -375,14 +377,15 @@ on #307):
   health file before `initial_index`, so "start the old image" alone
   would serve a stale database while catch-up runs;
 - the live database is **never migrated in place**: a bundled schema
-  change (#217) is applied only to the staged file by the rebuild
-  image, and the live indexer runs the previous image until cutover —
+  change, if the bundle ever carries one, is applied only to the
+  staged file by the rebuild image, and the live indexer runs the
+  previous image until cutover —
   a behaviour gate alone cannot defer the migration runner, and a
   retained file already on the forward-only schema would make the
   reverse swap unusable;
 - a rebuild of the previous `pipeline_config_hash` is *not* a rollback:
-  the bundle carries a forward-only migration (#217), so the previous
-  image fails closed on the new schema and the new image lacks the old
+  a bundle that carries a forward-only migration makes the previous
+  image fail closed on the new schema, and the new image lacks the old
   algorithms; the manifest records which stages changed, not a way to
   recreate code, and chunk/FTS coexistence machinery stays deferred;
 - the bundle's cost is measured on a representative **staged full
@@ -426,7 +429,9 @@ answers real knowledge questions, and identify why failures occur.
    for what a durable ontology should eventually contain; its
    failures drive Phase 4. Tracked by **#291** (chronology,
    corrections, contradictions, "as of" questions; "newest is not
-   authoritative").
+   authoritative"). An experimental MCP tool, registered only when
+   `MCP_EXPERIMENTAL_TOOLS=true` (off by default; Resolved
+   decisions 12).
 4. **Adversarial injection suite** (hostile fixtures in the synthetic
    mailbox, asserting the Phase 0 serialization holds under real
    tool flows).
@@ -461,28 +466,34 @@ answers real knowledge questions, and identify why failures occur.
    prompts, a structured claim→citation map checked against the
    evidence, bounded repair. The plan verified quotes only for
    Phase 5's persisted claims; ephemeral answers need it first.
-   Depends on #217's identity decision.
+   Depends on #217's identity decision (landed in #453).
 
 ### Phase 4 — Deterministic knowledge scaffolding
+
+Items 1 and 2 were built before go-live (#459), so their tables are in
+the v0 schema. Any Phase 4 schema change after the first deployment
+needs a numbered migration like any other.
 
 1. **Entity resolution, phase 1 (deterministic):** address
    canonicalization, display-name clustering, domain→organization
    mapping; `entities` / `entity_aliases` relational tables.
-   LLM-*suggested* merges are gated on human confirmation — never
-   auto-merge on model say-so.
+   Deterministic only (Resolved decisions 12): two addresses are never
+   merged by display name, and no model-suggested merges or
+   confirmation flow are built.
 2. **Source authority metadata:** `source_type` / `authority_class`
-   as explicit, filterable metadata with provenance. Deterministic
-   where possible (sender domain → counsel/management/vendor;
-   document type for governing docs), classifier-assigned with
-   confidence otherwise. **Never silently folded into ranking
-   weights** — authority is contextual; reasoning distinguishes "a
+   as explicit, filterable metadata with provenance, assigned only
+   from an operator rules file (domain/address → class; Resolved
+   decisions 12). There is no model classifier: it would send mail
+   to the inference provider from the indexer. **Never silently
+   folded into ranking weights** — authority is contextual; reasoning distinguishes "a
    vendor represented X" from "the executed agreement states X".
 3. **Richer temporal retrieval:** capture and expose
    occurred_at/sent_at consistently; bitemporal claim modeling waits
    for Phase 5.
-4. **Deletion/retention semantics.** Define the product policy:
-   mirror mode (upstream delete → corpus delete; the reconciler,
-   on by default since 2026-10-01), archive mode (retain locally),
+4. **Deletion/retention semantics.** Mirror is the default
+   (upstream delete → index delete after the grace window; #451),
+   archive (`INDEXER_DELETION_ENABLED=false`) is the opt-in, and
+   whether Trash copies leave search is open (#441). Still to define:
    user-controlled retention. Provenance must define behavior when a
    citation's source is reaped (evidence row retained, source marked
    unavailable, chain never silently broken).
@@ -493,7 +504,8 @@ answers real knowledge questions, and identify why failures occur.
 2. Support / contradict / qualify / supersede analysis as a
    query-time tool ("here is a conclusion for the Board packet —
    find evidence that supports, contradicts, qualifies, or
-   supersedes it").
+   supersedes it"). Experimental, behind `MCP_EXPERIMENTAL_TOOLS`
+   like `brief_issue`.
 3. Temporal position/change reasoning ("position as of date X" vs
    "current position").
 4. **Only then** evaluate persisted claims/events — and only under
@@ -622,9 +634,15 @@ P3s. No live index exists yet, so the reindex bundle's body and text
 fixes land directly rather than waiting for the Phase 2 rebuild:
 #298, #295 and #303. Alongside them: filtered semantic recall (#286),
 the first #283 evidence-recall slice, and the `ask_mailbox` evidence
-budget (#285). #208, #297 and #304 stay in the bundle; each needs an
-unusual setting, undated mail or a faulty provider to show up. #217
-leaves it too (see Resolved decisions 12).
+budget (#285). #208 and #297 stay in the bundle; each needs an
+unusual setting or undated mail to show up. #217 and #304 leave it
+too (see Resolved decisions 12 and the bundle paragraph).
+
+Landed the same day: #298 (#438), #303 (#439), #286 (#440), #295
+(#444), #285 (#445), the adversarial injection suite (#448), the
+first #283 slice (#452), #217 (#453), mirror retention (#451) and
+#287's stage timings (#458). Edge cases from their reviews are filed
+as #446, #447, #449, #450, #454, #455, #456, #460 and #461.
 
 Go-live checklist (do these before more hardening):
 
@@ -862,9 +880,10 @@ Order of work, chosen to minimise reindexes:
    guards above and are not repeated here); see Resolved decisions 9
    and 10 for the chosen direction and the one measurement still
    needed.
-4. **The Phase 2 reindex bundle** (see Phase 2): #208, #297's second
-   half, and the zero-chunk repair from #304. #303, #298, #295 and
-   #217 land directly instead (2026-10-01, no live index yet).
+4. **The Phase 2 reindex bundle** (see Phase 2): #208 and #297's
+   second half. #303, #298, #295 and #217 landed directly instead
+   (2026-10-01, no live index yet), and #304's repair is unneeded
+   (#349).
 
 Follow-ups filed 2026-09-30 from the privacy trio, both batch-1 guards
 (done, both reproduced): #339 (indexer logs an SDK-inherited embed URL
