@@ -22,6 +22,11 @@ SYNC_STALE_FLOOR_SECS = 300
 # The indexer reports every 30 s while it runs (``_IngestionStateRecorder``)
 # and its own healthcheck allows 600 s between heartbeats.
 INDEXER_STALE_SECS = 600
+# Containers share the host clock, so a stamp written by mbsync or the
+# indexer should never be ahead of ours; two minutes covers rounding and
+# a host clock step. Anything further ahead (a clock rollback, a bad
+# write) cannot vouch for a recent sync or heartbeat.
+FUTURE_SKEW_TOLERANCE_SECS = 120
 
 
 def _age(seconds: float) -> str:
@@ -62,7 +67,11 @@ def not_current_reasons(
         reasons.append("no successful mail sync has been recorded")
     else:
         age = (now - last_sync_at).total_seconds()
-        if age > max(SYNC_STALE_INTERVALS * sync_interval_secs, SYNC_STALE_FLOOR_SECS):
+        if -age > FUTURE_SKEW_TOLERANCE_SECS:
+            reasons.append(
+                f"the last successful mail sync is timestamped {_age(-age)} in the future"
+            )
+        elif age > max(SYNC_STALE_INTERVALS * sync_interval_secs, SYNC_STALE_FLOOR_SECS):
             reasons.append(
                 f"last successful mail sync was {_age(age)} ago "
                 f"(mbsync syncs every {sync_interval_secs}s)"
@@ -71,7 +80,9 @@ def not_current_reasons(
         reasons.append("the indexer has not reported")
     else:
         age = (now - indexer_last_seen_at).total_seconds()
-        if age > INDEXER_STALE_SECS:
+        if -age > FUTURE_SKEW_TOLERANCE_SECS:
+            reasons.append(f"the indexer last reported {_age(-age)} in the future")
+        elif age > INDEXER_STALE_SECS:
             reasons.append(f"the indexer last reported {_age(age)} ago")
     waiting = queue.pending + queue.retrying
     if waiting:
