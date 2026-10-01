@@ -31,10 +31,17 @@ load() {
     done
 }
 
+# Runs each case in a subshell outside any condition, so errexit stays on
+# inside it and every assertion counts, not only the last one. A case that
+# exercises a function the way its caller does (as a condition) says so.
 check() {
-    local description="$1"
+    local description="$1" rc=0
     shift
-    if ("$@") >"$WORK/output" 2>&1; then
+    set +e
+    (set -e; "$@") >"$WORK/output" 2>&1
+    rc=$?
+    set -e
+    if ((rc == 0)); then
         printf 'ok   %s\n' "$description"
     else
         printf 'FAIL %s\n' "$description"
@@ -267,60 +274,226 @@ sync_setup() {
     FIND_CALLS="$WORK/find-calls-$1"
     mkdir -p "$MAILDIR_PATH"
     : >"$FIND_CALLS"
-    load relax_new_maildir_perms run_sync
+    load run_child relax_new_maildir_perms run_sync
 }
 
+# run_sync is called as `run_sync || rc=$?`, a condition like the
+# entrypoint's `if run_sync`, so errexit is off inside it there too.
+
 mbsync_ok() { return 0; }
-mbsync_fails() { return 1; }
+mbsync_fails() { return 3; }
 
 # shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
 sync_succeeds_when_mbsync_and_repair_succeed() {
+    local rc=0
     sync_setup ok
     mbsync() { mbsync_ok; }
     find() { printf 'find\n' >>"$FIND_CALLS"; }
-    run_sync
+    run_sync || rc=$?
+    ((rc == 0))
     [[ "$(wc -l <"$FIND_CALLS")" -eq 2 ]]
 }
 
 # shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
 failed_directory_repair_fails_the_sync() {
+    local rc=0
     sync_setup dir-fail
     mbsync() { mbsync_ok; }
     find() {
         printf 'find\n' >>"$FIND_CALLS"
         [[ "$3" != "d" ]]
     }
-    if run_sync; then
-        echo "sync reported success although the directory repair failed"
-        return 1
-    fi
+    run_sync || rc=$?
+    ((rc == 1))
 }
 
 # shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
 failed_file_repair_fails_the_sync() {
+    local rc=0
     sync_setup file-fail
     mbsync() { mbsync_ok; }
     find() {
         printf 'find\n' >>"$FIND_CALLS"
         [[ "$3" != "f" ]]
     }
-    if run_sync; then
-        echo "sync reported success although the file repair failed"
-        return 1
-    fi
+    run_sync || rc=$?
+    ((rc == 1))
 }
 
 # shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
 repair_still_runs_after_a_failed_mbsync() {
+    local rc=0
     sync_setup mbsync-fail
     mbsync() { mbsync_fails; }
     find() { printf 'find\n' >>"$FIND_CALLS"; }
-    if run_sync; then
-        return 1
-    fi
+    # mbsync's own status, not the repair's, is what the sync reports.
+    run_sync || rc=$?
+    ((rc == 3))
     [[ "$(wc -l <"$FIND_CALLS")" -eq 2 ]]
 }
 
+# --- wait_for_bridge_imap (#271) ---------------------------------------------
+#
+# Each probe is bounded, so the wait's total is bounded by its attempts.
+# The probe runs under timeout(1), which can only run executables, so the
+# mock nc is a script on PATH that logs its arguments.
+
+# shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
+probe_setup() {
+    RUNTIME_DIR="$WORK/runtime-$1"
+    BRIDGE_HOST="bridge.invalid"
+    BRIDGE_IMAP_PORT=1143
+    BRIDGE_WAIT_INTERVAL_SECONDS=0
+    BRIDGE_WAIT_MAX_ATTEMPTS=3
+    BRIDGE_PROBE_TIMEOUT_SECONDS=1
+    NC_CALLS="$WORK/nc-calls-$1"
+    mkdir -p "$RUNTIME_DIR" "$WORK/bin-$1"
+    : >"$NC_CALLS"
+    PATH="$WORK/bin-$1:$PATH"
+    load wait_for_bridge_imap
+}
+
+# Writes a mock nc that logs its arguments and then runs the given body.
+mock_nc() {
+    printf '#!/bin/bash\nprintf "%%s\\n" "$*" >>"%s"\n%s\n' "$NC_CALLS" "$2" >"$WORK/bin-$1/nc"
+    chmod 755 "$WORK/bin-$1/nc"
+}
+
+# shellcheck disable=SC2034 # used by the entrypoint functions loaded with eval
+hung_probes_are_cut_off_by_the_per_attempt_bound() {
+    local start rc=0 err
+    probe_setup hung
+    # A blackholed connect: the probe never returns on its own.
+    mock_nc hung 'exec sleep 10'
+    BRIDGE_WAIT_MAX_ATTEMPTS=2
+    start=$SECONDS
+    err="$(wait_for_bridge_imap 2>&1)" || rc=$?
+    ((rc == 1))
+    # Two attempts of at most two seconds each; without the bound the
+    # first probe alone takes 10 s.
+    ((SECONDS - start < 8))
+    [[ "$(wc -l <"$NC_CALLS")" -eq 2 ]]
+    # nc gets its own connect timeout inside the outer timeout(1).
+    grep -qx -- "-z -w 1 bridge.invalid 1143" "$NC_CALLS"
+    [[ "$err" == *"after 2 attempts (at most 4 seconds)"* ]]
+}
+
+reachable_bridge_returns_after_one_probe() {
+    probe_setup reachable
+    mock_nc reachable 'exit 0'
+    wait_for_bridge_imap
+    [[ "$(wc -l <"$NC_CALLS")" -eq 1 ]]
+}
+
+refused_probes_fail_after_the_attempts_with_nc_stderr() {
+    local rc=0 err
+    probe_setup refused
+    mock_nc refused 'echo "synthetic-refused" >&2; exit 1'
+    err="$(wait_for_bridge_imap 2>&1)" || rc=$?
+    ((rc == 1))
+    [[ "$(wc -l <"$NC_CALLS")" -eq 3 ]]
+    [[ "$err" == *"synthetic-refused"* ]]
+}
+
+# --- shutdown signals reach the active child (#280) -------------------------
+#
+# The entrypoint is the only process Tini signals, so it must pass a stop on
+# to the sync (or the sleep between syncs) and exit once that child ends.
+# Each case runs the entrypoint's handlers in a background subshell that
+# stands in for the entrypoint, signals it, and checks the child got TERM.
+
+# shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
+stop_setup() {
+    MAILDIR_PATH="$WORK/maildir-stop-$1"
+    CONFIG_FILE="$WORK/mbsyncrc"
+    CHILD_LOG="$WORK/child-$1"
+    mkdir -p "$MAILDIR_PATH" "$WORK/bin-stop-$1"
+    : >"$CHILD_LOG"
+    # A long-running child that records its start and any TERM it gets.
+    # Background commands ignore INT, so TERM is what must reach it.
+    export CHILD_LOG
+    cat >"$WORK/bin-stop-$1/mbsync" <<'MOCK'
+#!/bin/bash
+trap 'echo term >>"$CHILD_LOG"; kill "$sleeper"; exit 143' TERM
+echo started >>"$CHILD_LOG"
+sleep 30 &
+sleeper=$!
+wait
+MOCK
+    chmod 755 "$WORK/bin-stop-$1/mbsync"
+    PATH="$WORK/bin-stop-$1:$PATH"
+    load run_child stop_on_signal install_signal_handlers relax_new_maildir_perms run_sync
+}
+
+# Signals the stand-in entrypoint once its child has started and waits for
+# it; sets STOP_RC to its exit status and STOP_SECONDS to how long it took.
+# Runs in the shell that started the stand-in, since only it can wait.
+signal_once_started() {
+    local entrypoint="$1" signal="$2" start i
+    for ((i = 0; i < 50; i++)); do
+        grep -q started "$CHILD_LOG" && break
+        sleep 0.1
+    done
+    grep -q started "$CHILD_LOG"
+    start=$SECONDS
+    kill "-$signal" "$entrypoint"
+    STOP_RC=0
+    wait "$entrypoint" || STOP_RC=$?
+    STOP_SECONDS=$((SECONDS - start))
+}
+
+term_during_a_sync_stops_mbsync_and_exits() {
+    stop_setup sync-term
+    (install_signal_handlers && run_sync) &
+    signal_once_started "$!" TERM
+    ((STOP_RC == 143 && STOP_SECONDS < 5))
+    grep -qx term "$CHILD_LOG"
+}
+
+int_during_a_sync_stops_mbsync_and_exits() {
+    stop_setup sync-int
+    (install_signal_handlers && run_sync) &
+    signal_once_started "$!" INT
+    ((STOP_RC == 130 && STOP_SECONDS < 5))
+    grep -qx term "$CHILD_LOG"
+}
+
+term_during_the_sleep_between_syncs_exits_promptly() {
+    stop_setup sleep-term
+    # The loop's sleep goes through run_child like the sync; the mock
+    # stands in for a long sleep.
+    (install_signal_handlers && run_child mbsync) &
+    signal_once_started "$!" TERM
+    ((STOP_RC == 143 && STOP_SECONDS < 5))
+    grep -qx term "$CHILD_LOG"
+}
+
+the_sleep_between_syncs_runs_through_run_child() {
+    grep -qxF "    run_child sleep \"\$SYNC_INTERVAL\"" "$ENTRYPOINT"
+}
+
+# shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
+run_child_returns_the_child_status() {
+    load run_child
+    run_child true
+    if run_child false; then
+        return 1
+    fi
+    [[ -z "$child_pid" ]]
+}
+
+check "TERM during a sync stops mbsync and exits 143" term_during_a_sync_stops_mbsync_and_exits
+check "INT during a sync stops mbsync and exits 130" int_during_a_sync_stops_mbsync_and_exits
+check "TERM during the sleep between syncs exits promptly" \
+    term_during_the_sleep_between_syncs_exits_promptly
+check "the sleep between syncs runs through run_child" \
+    the_sleep_between_syncs_runs_through_run_child
+check "run_child returns the child's status" run_child_returns_the_child_status
+check "hung probes are cut off by the per-attempt bound" \
+    hung_probes_are_cut_off_by_the_per_attempt_bound
+check "a reachable Bridge returns after one probe" reachable_bridge_returns_after_one_probe
+check "refused probes fail after the attempts with nc's stderr" \
+    refused_probes_fail_after_the_attempts_with_nc_stderr
 check "first boot pins the fingerprint (mode 600)" first_boot_pins_the_fingerprint
 check "first boot fails closed when the pin cannot be saved" \
     first_boot_fails_closed_when_the_pin_cannot_be_saved
