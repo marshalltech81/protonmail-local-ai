@@ -583,24 +583,29 @@ answer against the passages it supplied:
   full stop, as in `Moved. [E2]`, belongs to the sentence before it; a
   closing quote, parenthesis or Markdown `*`, `_` or backtick may sit
   between the full stop and the space; a full stop inside a quotation
-  does not end a statement). A label or `[unsupported]` written inside
+  does not end a statement). The full-width `。！？` end a statement
+  without a following space. A label or `[unsupported]` written inside
   a quotation is quoted text, not a citation or a mark. A statement
   that cites no supplied passage and is not marked `[unsupported]` or
   `[uncertain]` is an `uncited_statements` problem, reported only when
   the answer cites something (otherwise it is `no_citations`).
   Markdown headings (`#` to `######` and a space), lines ending in a
-  colon, fragments of fewer than three words and every statement of a
-  not-found answer are not checked.
+  colon, fragments of fewer than three words (each kana or CJK
+  ideograph counts as a word) and every statement of a not-found
+  answer are not checked.
 - **Quotes.** Text of three or more words in double quotes (straight
   or curly, on one line, paired left to right) is a quotation. A pair
   whose text starts or ends with a space is the outer side of a nested
   quotation or a stray mark (`27"`): it is listed as `not_checked` and
   its text is not treated as quoted, so nested quotations are never
   verified by their outer fragments. A quotation is searched in the text
-  shown to the model for the passages its statement cites: the
-  comparison collapses whitespace, treats curly and straight quote
-  marks alike, ignores trailing `.,;:` and lets an ellipsis (`...` or
-  `…`) skip text, but is otherwise exact (case included). A quote found
+  shown to the model for the passages its statement cites (with
+  delimiter tags escaped as the prompt escapes them): the comparison
+  collapses whitespace, treats curly and straight quote marks alike,
+  ignores trailing `.,;:` and lets an ellipsis (`...` or `…`) skip
+  text, but is otherwise exact (case included) and matches whole words
+  only (`"on Fri"` does not match "on Friday"; kana and CJK ideographs
+  need no word boundary). A quote found
   there is `verified`; one found only in another supplied passage is
   `misattributed` (a `misattributed_quotes` problem naming where it was
   found); one found nowhere is `unmatched` (an `unmatched_quotes`

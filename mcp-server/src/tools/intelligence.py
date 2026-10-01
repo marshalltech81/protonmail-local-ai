@@ -7,7 +7,7 @@ import asyncio
 import json
 import logging
 import re
-from collections.abc import Container, Iterable, Mapping
+from collections.abc import Container, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from typing import Literal
 
@@ -667,8 +667,11 @@ _MARK_RE = re.compile(r"\[(unsupported|uncertain)\]", re.IGNORECASE)
 # only at the first terminator of a run and each bracket group is at
 # most 40 characters, so every attempt is bounded and the scan stays
 # linear.
+# The full-width terminators of Chinese and Japanese end a statement
+# without the whitespace those scripts do not use.
 _STATEMENT_END_RE = re.compile(
     r"\n|(?<![.!?])[.!?]++[\"”')*_`]*+(?:[ \t]*+\[[^\[\]\n]{1,40}+\])*+(?=\s)"
+    r"|(?<![。！？])[。！？]++[」』”)）*_`]*+(?:[ \t]*+\[[^\[\]\n]{1,40}+\])*+"
 )
 
 # Paired double quotes: straight or curly, on one line, paired left to
@@ -680,7 +683,12 @@ _STATEMENT_END_RE = re.compile(
 _QUOTE_RE = re.compile('["“]([^"“”\n]*+)["”]')
 # A Markdown heading line: one to six "#" and a space.
 _HEADING_RE = re.compile(r"#{1,6}\s")
-_WORD_RE = re.compile(r"\w+")
+# Kana and CJK ideographs, written without spaces between words: each
+# character counts as a word, and a quote edge on one needs no word
+# boundary.
+_CJK = "぀-ヿ㐀-䶿一-鿿豈-﫿"
+_CJK_RE = re.compile(f"[{_CJK}]")
+_WORD_RE = re.compile(f"[{_CJK}]|[^\\W{_CJK}]+")
 _ELLIPSIS_RE = re.compile(r"\.\.\.|…")
 _QUOTE_FOLD = str.maketrans({"‘": "'", "’": "'", "“": '"', "”": '"'})
 
@@ -708,14 +716,38 @@ def _quote_fragments(quote: str) -> list[str]:
     return [f for f in fragments if f]
 
 
+def _is_word_char(char: str) -> bool:
+    """A letter, digit or underscore of a script that spaces its words."""
+    return (char.isalnum() or char == "_") and not _CJK_RE.match(char)
+
+
+def _candidates(text: str, fragment: str, pos: int) -> Iterator[int]:
+    """Each start of ``fragment`` in ``text`` from ``pos`` on, in order."""
+    found = text.find(fragment, pos)
+    while found >= 0:
+        yield found
+        found = text.find(fragment, found + 1)
+
+
 def _quote_in(fragments: list[str], text: str) -> bool:
-    """Whether ``fragments`` occur in folded ``text`` in order."""
+    """Whether ``fragments`` occur in folded ``text`` in order, each as
+    whole words: a fragment edge that is a word character may not touch
+    another word character, so "on Fri" does not match "on Friday".
+    Each fragment takes its first whole-word occurrence after the one
+    before, which is the earliest any later fragment can follow; each
+    occurrence is tried at most once."""
     pos = 0
     for fragment in fragments:
-        found = text.find(fragment, pos)
-        if found < 0:
+        for found in _candidates(text, fragment, pos):
+            end = found + len(fragment)
+            if (found and _is_word_char(fragment[0]) and _is_word_char(text[found - 1])) or (
+                end < len(text) and _is_word_char(fragment[-1]) and _is_word_char(text[end])
+            ):
+                continue
+            pos = end
+            break
+        else:
             return False
-        pos = found + len(fragment)
     return True
 
 
@@ -1307,7 +1339,11 @@ def _build_evidence(
             header = _piece_header(chunk, char_end or 0, label)
             parts.append(f"{header}\n{text}" if header else text)
             if evidence_map is not None and label is not None:
-                evidence_map[label] = EvidenceRef(label, thread.thread_id, chunk, char_end, text)
+                # Quotes are checked against the text as the model sees it,
+                # with delimiter tags escaped as ``_untrusted_email_block``
+                # escapes them (a tag cannot span a passage's edges).
+                shown = _DELIMITER_TAG_RE.sub(r"&lt;\1", text)
+                evidence_map[label] = EvidenceRef(label, thread.thread_id, chunk, char_end, shown)
             used += separator + header_len + len(text)
         if pieces and not parts:
             coverage.threads_without_evidence += 1

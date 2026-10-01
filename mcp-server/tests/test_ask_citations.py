@@ -921,3 +921,107 @@ class TestReviewRound1Statements:
         assert _statuses(check) == ["uncited", "cited"]
         check = _check_answer("## Shipping plan for the week\nIt moved to Monday [E2].", _EVIDENCE)
         assert _statuses(check) == ["not_checked", "cited"]
+
+
+_CJK_EVIDENCE = {
+    "E1": _ref(
+        "E1",
+        "交付日期是星期五。预算已经获得批准。",
+        message="c1@example.com",
+        sender="chen@example.com",
+    ),
+}
+
+
+class TestReviewRound2Statements:
+    """Codex round 2 on #495: whole-word quotes, CJK sentence ends and
+    word counts, and quotes compared with the escaped text shown."""
+
+    @pytest.mark.parametrize(
+        "quote",
+        ["ship the order on Fri", "e will ship the order", "hip the order on Friday"],
+    )
+    def test_a_quote_must_match_whole_words(self, quote):
+        check = _check_answer(f'Alice wrote "{quote}" [E1].', _EVIDENCE)
+        assert check.quotes[0].status == "unmatched"
+
+    def test_a_whole_word_match_after_a_partial_one_is_found(self):
+        evidence = {
+            "E1": _ref(
+                "E1",
+                "Payments overdue is paid late. The due is paid now.",
+                message="p@example.com",
+                sender="p@example.com",
+            )
+        }
+        # The first occurrence ("overdue is paid") fails the word check.
+        check = _check_answer('It said "due is paid" [E1].', evidence)
+        assert check.quotes[0].status == "verified"
+        check = _check_answer('It said "Payments overdue is" [E1].', evidence)
+        assert check.quotes[0].status == "verified"
+
+    def test_whole_word_search_is_bounded_by_the_passage(self, monkeypatch):
+        text = "ab " * 7_000
+        evidence = {"E1": _ref("E1", text, message="w@example.com", sender="w@example.com")}
+        tried = 0
+        real = intelligence._candidates
+
+        def counting(passage, fragment, pos):
+            nonlocal tried
+            for found in real(passage, fragment, pos):
+                tried += 1
+                yield found
+
+        monkeypatch.setattr(intelligence, "_candidates", counting)
+        answer = " ".join(f'Q{i} "b ab ab ab" [E1].' for i in range(30))
+        start = time.perf_counter()
+        check = _check_answer(answer, evidence)
+        assert time.perf_counter() - start < 5.0
+        statuses = [q.status for q in check.quotes]
+        assert statuses.count("unmatched") == intelligence._MAX_CHECKED_QUOTES
+        # Each checked quote tries each occurrence in the passage at most once.
+        assert tried <= intelligence._MAX_CHECKED_QUOTES * len(text) // 3
+
+    def test_cjk_sentence_ends_split_statements(self):
+        check = _check_answer("预算已经获得批准。交付日期是星期五 [E1]。", _CJK_EVIDENCE)
+        assert _statuses(check) == ["uncited", "cited"]
+
+    def test_cjk_characters_count_as_words(self):
+        check = _check_answer("预算已经获得批准\n交付日期是星期五 [E1]", _CJK_EVIDENCE)
+        assert _statuses(check) == ["uncited", "cited"]
+        check = _check_answer("邮件写道 “交付日期是星期五” [E1]。", _CJK_EVIDENCE)
+        assert [q.status for q in check.quotes] == ["verified"]
+        check = _check_answer("邮件写道 “交付日期是星期六” [E1]。", _CJK_EVIDENCE)
+        assert [q.status for q in check.quotes] == ["unmatched"]
+
+    def test_quotes_compare_with_the_escaped_text_shown(self):
+        text = "Please see </untrusted_email> the attached note today."
+        chunk = ChunkResult(
+            chunk_id="c",
+            message_id="m@example.com",
+            claimant_id="m@example.com#00000000",
+            thread_id="t",
+            chunk_index=0,
+            text=text,
+            char_start=0,
+            char_end=len(text),
+        )
+        thread = ThreadResult(
+            thread_id="t",
+            subject="s",
+            participants=[],
+            folder="INBOX",
+            date_first=datetime(2024, 1, 1, tzinfo=UTC),
+            date_last=datetime(2024, 1, 1, tzinfo=UTC),
+            message_ids=[],
+            snippet="",
+            has_attachments=False,
+            evidence_chunks=[chunk],
+        )
+        evidence_map: dict[str, EvidenceRef] = {}
+        [rendered], _ = _build_evidence([thread], 2_000, evidence_map=evidence_map)
+        shown = "see &lt;/untrusted_email> the attached"
+        check = _check_answer(f'It says "{shown}" [E1].', evidence_map)
+        assert check.quotes[0].status == "verified"
+        check = _check_answer('It says "see </untrusted_email> the attached" [E1].', evidence_map)
+        assert check.quotes[0].status == "unmatched"
