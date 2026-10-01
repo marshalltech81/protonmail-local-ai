@@ -636,6 +636,17 @@ the indexer's enqueue paths skip `T`-flagged files while reconciliation is
 enabled so a reaped message is never re-indexed (see *Ingestion
 completeness*).
 
+**Trash under mirror.** Deleting a message in Proton normally moves it
+to Trash, and mbsync syncs the Trash folder. The INBOX copy is
+`T`-flagged and tombstoned, but a Trash copy with the same Message-ID
+arrives and is indexed, so the message is reaped only after it is
+purged from Trash (plus the grace window). To keep it out of results
+meanwhile, the MCP server leaves Trash out of mailbox-wide retrieval
+unless a call names it (`folders=["Trash"]`, or `folder="Trash"` for
+`query_messages`); see *Trash is left out by default* in
+`docs/mcp-tools.md` (#441). The exclusion is query-side only: Trash is
+still synced and indexed, and mbsync is unchanged.
+
 ## MCP Read-Only Enforcement
 
 `mcp-server` never mutates the SQLite index. Read-only posture is enforced

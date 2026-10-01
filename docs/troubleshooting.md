@@ -344,7 +344,14 @@ ProtonMail is removed from the local index after a grace window
 searchable locally instead (archive mode, an append-only index), set
 `INDEXER_DELETION_ENABLED=false` in `.env` and recreate the indexer. Any
 value other than true/false (or 1/0, yes/no, on/off) stops the indexer at
-startup. See the `Indexer — deletion reconciliation` block in
+startup. A message deleted in Proton usually moves to Trash, and its
+Trash copy stays indexed until it is purged there; the MCP tools leave
+Trash out of results unless a call names it (`folders=["Trash"]`). A
+deleted message that still shows up under Trash (in such a call,
+`list_threads(folder="Trash")` or `list_folders`) is expected, not a
+reconciliation fault (see *Trash is left out by default* in
+`docs/mcp-tools.md`).
+See the `Indexer — deletion reconciliation` block in
 `.env.example` for all knobs (grace window, sweep interval, mass-delete
 brake, unlink-on-reap).
 

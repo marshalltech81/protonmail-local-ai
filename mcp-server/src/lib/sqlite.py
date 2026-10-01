@@ -127,6 +127,16 @@ def canonical_addr(value: str) -> str:
 _UNFILTERED_OVERSAMPLE = 2
 _FILTERED_OVERSAMPLE = 4
 
+# Folders whose mail stays synced and indexed but is left out of
+# mailbox-wide retrieval unless the caller names them (#441). Under
+# mirror retention a deleted message lives on as its Trash copy until
+# it is purged from Trash. Matched exactly, as ``folders`` filters are.
+# Thread searches leave out a thread only when every message of it is
+# in one of these folders (the per-message membership the ``folders``
+# filter uses); message and attachment lookups leave out the messages
+# filed there. Lookups of one named thread or message are unaffected.
+DEFAULT_EXCLUDED_FOLDERS = ("Trash",)
+
 # Oversample factor for the chunk and attachment FTS lanes, where one
 # thread can legitimately own many matching rows (a long thread, a
 # popular term). Without enough oversample, those threads absorb every
@@ -1038,6 +1048,25 @@ class Database:
         with closing(self._connect()) as conn:
             return conn.execute(sql, params).fetchone()
 
+    def _default_folder_scope(self, folders: list[str] | None) -> list[str] | None:
+        """The ``folders`` filter a mailbox-wide thread search applies.
+
+        A caller's non-empty ``folders`` is kept as given, so naming a
+        ``DEFAULT_EXCLUDED_FOLDERS`` folder includes it. Otherwise, when
+        the mailbox holds mail in an excluded folder, the scope is every
+        other folder holding mail (``[]`` when there is none), so the
+        exclusion runs through the ``folders`` path: pushed into the
+        keyword SQL, applied post-fusion, and counted as a filter that
+        widens the vector windows (#286). A mailbox with no excluded
+        mail gets ``None``, the unfiltered search exactly as before.
+        """
+        if folders:
+            return folders
+        present = [r["folder"] for r in self._fetchall("SELECT DISTINCT folder FROM messages")]
+        if not any(f in DEFAULT_EXCLUDED_FOLDERS for f in present):
+            return None
+        return [f for f in present if f not in DEFAULT_EXCLUDED_FOLDERS]
+
     # -------------------------------------------------------------------------
     # Hybrid search — BM25 + vector, merged via Reciprocal Rank Fusion
     # -------------------------------------------------------------------------
@@ -1059,6 +1088,9 @@ class Database:
         authority_class: str | None = None,
     ) -> list[ThreadResult]:
         authority_class = normalize_authority_class(authority_class)
+        folders = self._default_folder_scope(folders)
+        if folders == []:
+            return []
         oversample = (
             _FILTERED_OVERSAMPLE
             if self._has_post_fusion_filter(
@@ -1272,6 +1304,9 @@ class Database:
         authority_class: str | None = None,
     ) -> list[ThreadResult]:
         authority_class = normalize_authority_class(authority_class)
+        folders = self._default_folder_scope(folders)
+        if folders == []:
+            return []
         # Previously dropped every filter except ``folders`` on the floor, so
         # a keyword search with a date or sender filter returned unfiltered
         # results. All four filters now flow through, matching hybrid_search.
@@ -1337,6 +1372,9 @@ class Database:
         still answers from the other.
         """
         authority_class = normalize_authority_class(authority_class)
+        folders = self._default_folder_scope(folders)
+        if folders == []:
+            return []
         oversample = (
             _FILTERED_OVERSAMPLE
             if self._has_post_fusion_filter(
@@ -1474,8 +1512,14 @@ class Database:
         same way the thread-search lanes normalize them so a bare
         ``"2024-12-31"`` includes the full day it names.
         """
-        clauses: list[str] = []
-        params: list = []
+        # Attachments on messages filed in an excluded folder are left
+        # out (#441); the tool has no folder filter to name them.
+        excluded = ",".join("?" * len(DEFAULT_EXCLUDED_FOLDERS))
+        clauses: list[str] = [
+            "a.claimant_id NOT IN (SELECT claimant_id FROM messages "  # nosec B608
+            f"WHERE folder IN ({excluded}))"
+        ]
+        params: list = [*DEFAULT_EXCLUDED_FOLDERS]
         if content_type:
             clauses.append("a.content_type = ?")
             params.append(content_type)
@@ -2938,7 +2982,8 @@ class Database:
         - ``text``: every word must occur in the message's indexed body
           (FTS word match with stemming, any chunk; attachment text and
           stripped quoted replies are not searched).
-        - ``folder``: exact folder name.
+        - ``folder``: exact folder name. Without it, messages filed in a
+          ``DEFAULT_EXCLUDED_FOLDERS`` folder are left out.
         - ``date_from`` / ``date_to``: inclusive ``sent_at`` bounds;
           date-only values cover the whole UTC day.
         - ``has_attachments``: the message's own attachment flag.
@@ -2988,6 +3033,12 @@ class Database:
         if folder:
             where.append("m.folder = ?")
             params.append(folder)
+        else:
+            # Without a folder, messages filed in an excluded folder are
+            # left out (#441); ``folder="Trash"`` lists them.
+            marks = ",".join("?" * len(DEFAULT_EXCLUDED_FOLDERS))
+            where.append(f"m.folder NOT IN ({marks})")
+            params.extend(DEFAULT_EXCLUDED_FOLDERS)
         if date_from_iso is not None:
             where.append("m.sent_at >= ?")
             params.append(date_from_iso)

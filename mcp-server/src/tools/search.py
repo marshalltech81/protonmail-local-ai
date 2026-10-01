@@ -152,7 +152,9 @@ def register_search_tools(
                   semantic = vector similarity only (best for conceptual queries)
                   keyword = BM25 only (best for exact names, numbers, dates)
             folders: Filter to threads with a message in these folders,
-                     e.g. ["INBOX", "Sent"]
+                     e.g. ["INBOX", "Sent"]. Without it, threads filed
+                     only in Trash are left out; name "Trash" to
+                     include them.
             from_addr: Filter by canonical sender ADDRESS — only use when
                        the user gave an email address or domain
                        ("jane@example.com", "@example.com"). For names
@@ -411,7 +413,9 @@ def register_search_tools(
                        Cannot be combined with folders, from_addr,
                        date_from, date_to or has_attachments.
             folders: Restrict to threads with a message in these folders,
-                     e.g. ["INBOX", "Sent"].
+                     e.g. ["INBOX", "Sent"]. Without it, threads filed
+                     only in Trash are left out; name "Trash" to
+                     include them.
             from_addr: Restrict to a sender ADDRESS or domain
                        ("jane@example.com", "@example.com"). For a
                        person's name, resolve it via find_contact first.
@@ -649,7 +653,7 @@ def register_search_tools(
 
         With no query it lists attachments by the structured filters
         alone (content_type / date / sender), newest thread activity
-        first.
+        first. Attachments on messages filed in Trash are left out.
 
         To read what an attachment says, use get_evidence (the matching
         passages of its extracted text, each capped at 1600 characters)

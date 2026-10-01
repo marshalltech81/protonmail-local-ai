@@ -571,7 +571,9 @@ def register_retrieval_tools(server, db):
                   match with stemming). Searches the message's own
                   text only — not attachments and not quoted earlier
                   replies. For attachment content use search_attachments.
-            folder: Exact folder name (see list_folders).
+            folder: Exact folder name (see list_folders). Without it,
+                    messages filed in Trash are left out; pass "Trash"
+                    to list them.
             date_from: ISO 8601 lower bound on the send date, inclusive.
             date_to: ISO 8601 upper bound, inclusive; a date-only value
                      covers the whole day (UTC).
