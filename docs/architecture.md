@@ -754,12 +754,13 @@ files are indexed like any other.
 
 Two stage outcomes short-circuit the retry path entirely:
 
-- `parse_skipped_missing` — `parse_email` raised `FileNotFoundError`,
-  almost always because mbsync renamed the file (added an IMAP flag
-  suffix) between enqueue and read. The path is permanently invalid;
-  the renamed file enters the queue under its new name via a fresh
-  `IN_MOVED_TO` event. The worker calls `mark_skipped` instead of
-  `mark_failed`: row deleted, no retry, no dead-letter.
+- `FileNotFoundError` at parse — almost always because mbsync renamed
+  the file (added an IMAP flag suffix) between enqueue and read. The
+  path is permanently invalid; the renamed file enters the queue under
+  its new name via a fresh `IN_MOVED_TO` event. The worker calls
+  `mark_skipped(reason="file_missing")` instead of `mark_failed`: row
+  deleted, no retry, no dead-letter, and an INFO
+  `skipped: <path> reason=file_missing` log line.
 - `PermissionError` at parse is deferred (60 s) without spending an
   attempt. mbsync `chmod go+r`s new files only after its whole sync
   finishes, so during a long sync a delivered file stays unreadable to
