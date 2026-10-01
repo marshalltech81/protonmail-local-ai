@@ -343,7 +343,7 @@ class Database:
 
         Plus the cross-cutting tables: ``message_thread_map`` (message
         → thread index), ``indexed_files`` (file identity for rename
-        detection), ``pending_deletions`` (tombstones for the opt-in
+        detection), ``pending_deletions`` (tombstones for the
         deletion reconciler), ``indexing_jobs`` (durable retry +
         dead-letter queue for the parse → embed → upsert pipeline), and
         ``ingestion_state`` (last sync + indexer liveness for status).
