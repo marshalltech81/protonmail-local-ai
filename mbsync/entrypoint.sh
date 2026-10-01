@@ -17,6 +17,10 @@ readonly STATE_DIR="/state"
 readonly PIN_FILE="${STATE_DIR}/bridge-cert.fingerprint"
 readonly BRIDGE_WAIT_INTERVAL_SECONDS=2
 readonly BRIDGE_WAIT_MAX_ATTEMPTS=300
+# Per-probe connect timeout (nc -w). timeout(1) allows one second more
+# and bounds the whole probe, name resolution included, so each attempt
+# takes at most BRIDGE_PROBE_TIMEOUT_SECONDS + 1 seconds plus the interval.
+readonly BRIDGE_PROBE_TIMEOUT_SECONDS=2
 readonly CERT_EXTRACT_TIMEOUT_SECONDS=20
 readonly MAX_CONSECUTIVE_SYNC_FAILURES=5
 readonly BRIDGE_CERT_PIN_ROTATE="${BRIDGE_CERT_PIN_ROTATE:-false}"
@@ -59,7 +63,9 @@ wait_for_bridge_imap() {
     nc_err_file="$(mktemp "${RUNTIME_DIR}/nc-check.XXXXXX")"
     echo ">>> Waiting for ProtonBridge IMAP on ${BRIDGE_HOST}:${BRIDGE_IMAP_PORT}..."
     for ((attempt = 1; attempt <= BRIDGE_WAIT_MAX_ATTEMPTS; attempt++)); do
-        if nc -z "$BRIDGE_HOST" "$BRIDGE_IMAP_PORT" 2>"$nc_err_file"; then
+        if timeout "$((BRIDGE_PROBE_TIMEOUT_SECONDS + 1))s" \
+            nc -z -w "$BRIDGE_PROBE_TIMEOUT_SECONDS" "$BRIDGE_HOST" "$BRIDGE_IMAP_PORT" \
+            2>"$nc_err_file"; then
             rm -f "$nc_err_file"
             echo ">>> Bridge IMAP port is reachable."
             return 0
@@ -68,7 +74,7 @@ wait_for_bridge_imap() {
         sleep "$BRIDGE_WAIT_INTERVAL_SECONDS"
     done
 
-    echo ">>> ERROR: Bridge IMAP did not become reachable after $((BRIDGE_WAIT_MAX_ATTEMPTS * BRIDGE_WAIT_INTERVAL_SECONDS)) seconds." >&2
+    echo ">>> ERROR: Bridge IMAP did not become reachable after ${BRIDGE_WAIT_MAX_ATTEMPTS} attempts (at most $((BRIDGE_WAIT_MAX_ATTEMPTS * (BRIDGE_PROBE_TIMEOUT_SECONDS + 1 + BRIDGE_WAIT_INTERVAL_SECONDS))) seconds)." >&2
     if [[ -s "$nc_err_file" ]]; then
         echo ">>> Last nc stderr follows:" >&2
         cat "$nc_err_file" >&2
@@ -293,8 +299,9 @@ chmod 600 "$CONFIG_FILE" # protect the file because it contains credentials
 # =============================================================================
 # Wait for ProtonBridge IMAP to be available
 # Bridge takes time to start and complete its internal Gluon sync before
-# it will accept IMAP connections. Retry every 2 seconds, then fail so
-# Docker restart policy makes the problem visible instead of hanging forever.
+# it will accept IMAP connections. Probe with a bounded connect, retry
+# every 2 seconds, then fail so Docker restart policy makes the problem
+# visible instead of hanging forever.
 # =============================================================================
 wait_for_bridge_imap
 

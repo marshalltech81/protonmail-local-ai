@@ -321,6 +321,74 @@ repair_still_runs_after_a_failed_mbsync() {
     [[ "$(wc -l <"$FIND_CALLS")" -eq 2 ]]
 }
 
+# --- wait_for_bridge_imap (#271) ---------------------------------------------
+#
+# Each probe is bounded, so the wait's total is bounded by its attempts.
+# The probe runs under timeout(1), which can only run executables, so the
+# mock nc is a script on PATH that logs its arguments.
+
+# shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
+probe_setup() {
+    RUNTIME_DIR="$WORK/runtime-$1"
+    BRIDGE_HOST="bridge.invalid"
+    BRIDGE_IMAP_PORT=1143
+    BRIDGE_WAIT_INTERVAL_SECONDS=0
+    BRIDGE_WAIT_MAX_ATTEMPTS=3
+    BRIDGE_PROBE_TIMEOUT_SECONDS=1
+    NC_CALLS="$WORK/nc-calls-$1"
+    mkdir -p "$RUNTIME_DIR" "$WORK/bin-$1"
+    : >"$NC_CALLS"
+    PATH="$WORK/bin-$1:$PATH"
+    load wait_for_bridge_imap
+}
+
+# Writes a mock nc that logs its arguments and then runs the given body.
+mock_nc() {
+    printf '#!/bin/bash\nprintf "%%s\\n" "$*" >>"%s"\n%s\n' "$NC_CALLS" "$2" >"$WORK/bin-$1/nc"
+    chmod 755 "$WORK/bin-$1/nc"
+}
+
+# shellcheck disable=SC2034 # used by the entrypoint functions loaded with eval
+hung_probes_are_cut_off_by_the_per_attempt_bound() {
+    local start rc=0 err
+    probe_setup hung
+    # A blackholed connect: the probe never returns on its own.
+    mock_nc hung 'exec sleep 10'
+    BRIDGE_WAIT_MAX_ATTEMPTS=2
+    start=$SECONDS
+    err="$(wait_for_bridge_imap 2>&1)" || rc=$?
+    ((rc == 1))
+    # Two attempts of at most two seconds each; without the bound the
+    # first probe alone takes 10 s.
+    ((SECONDS - start < 8))
+    [[ "$(wc -l <"$NC_CALLS")" -eq 2 ]]
+    # nc gets its own connect timeout inside the outer timeout(1).
+    grep -qx -- "-z -w 1 bridge.invalid 1143" "$NC_CALLS"
+    [[ "$err" == *"after 2 attempts (at most 4 seconds)"* ]]
+}
+
+reachable_bridge_returns_after_one_probe() {
+    probe_setup reachable
+    mock_nc reachable 'exit 0'
+    wait_for_bridge_imap
+    [[ "$(wc -l <"$NC_CALLS")" -eq 1 ]]
+}
+
+refused_probes_fail_after_the_attempts_with_nc_stderr() {
+    local rc=0 err
+    probe_setup refused
+    mock_nc refused 'echo "synthetic-refused" >&2; exit 1'
+    err="$(wait_for_bridge_imap 2>&1)" || rc=$?
+    ((rc == 1))
+    [[ "$(wc -l <"$NC_CALLS")" -eq 3 ]]
+    [[ "$err" == *"synthetic-refused"* ]]
+}
+
+check "hung probes are cut off by the per-attempt bound" \
+    hung_probes_are_cut_off_by_the_per_attempt_bound
+check "a reachable Bridge returns after one probe" reachable_bridge_returns_after_one_probe
+check "refused probes fail after the attempts with nc's stderr" \
+    refused_probes_fail_after_the_attempts_with_nc_stderr
 check "first boot pins the fingerprint (mode 600)" first_boot_pins_the_fingerprint
 check "first boot fails closed when the pin cannot be saved" \
     first_boot_fails_closed_when_the_pin_cannot_be_saved
