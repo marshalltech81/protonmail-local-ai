@@ -1,7 +1,7 @@
 """
 Tests for the registered handlers in src/tools/intelligence.py.
 
-``test_intelligence.py`` already covers ``_thread_context``. This file
+``test_intelligence.py`` already covers ``_build_evidence``. This file
 covers the three @server.tool() handlers (``ask_mailbox``,
 ``summarize_thread``, ``extract_from_emails``) end-to-end against the
 seeded DB and the FakeEmbedClient / FakeInferenceClient stubs. Coverage targets:
@@ -103,6 +103,46 @@ class TestAskMailbox:
         handler = _handlers(fake_server, seeded_db, fake_embed, fake_inference)["ask_mailbox"]
         asyncio.run(handler(question="invoice", max_threads=10_000))
         assert seen["limit"] == 10  # _MAX_ASK_THREADS
+
+    def test_requests_more_evidence_chunks_per_thread(
+        self, fake_server, seeded_db, fake_embed, fake_inference
+    ):
+        """#285: three chunks per thread left a later matching passage out
+        of the prompt even when the shared budget had room for it."""
+        seen: dict = {}
+        original = seeded_db.hybrid_search
+
+        def spy(**kwargs):
+            seen["evidence_per_thread"] = kwargs.get("evidence_per_thread")
+            return original(**kwargs)
+
+        seeded_db.hybrid_search = spy  # type: ignore[assignment]
+        handler = _handlers(fake_server, seeded_db, fake_embed, fake_inference)["ask_mailbox"]
+        asyncio.run(handler(question="invoice"))
+        assert seen["evidence_per_thread"] == 6
+
+    def test_prompt_discloses_left_out_evidence_outside_the_mail(
+        self, fake_server, seeded_db, fake_embed, fake_inference
+    ):
+        long_thread = _hostile_thread()
+        long_thread.body_text = "SYNTHETIC_MARKER_5512 " * 2000
+        seeded_db.hybrid_search = lambda **_kw: [long_thread]  # type: ignore[assignment]
+        handler = _handlers(fake_server, seeded_db, fake_embed, fake_inference)["ask_mailbox"]
+        asyncio.run(handler(question="what changed?"))
+        _system, user = fake_inference.complete_calls[0]
+        after_mail = user.rpartition("</untrusted_email>")[2]
+        assert "were cut short" in after_mail
+        assert "SYNTHETIC_MARKER_5512" not in after_mail
+        assert after_mail.rstrip().endswith("User's question: what changed?")
+
+    def test_no_disclosure_when_all_evidence_fits(
+        self, fake_server, seeded_db, fake_embed, fake_inference
+    ):
+        seeded_db.hybrid_search = lambda **_kw: [_hostile_thread()]  # type: ignore[assignment]
+        handler = _handlers(fake_server, seeded_db, fake_embed, fake_inference)["ask_mailbox"]
+        asyncio.run(handler(question="what changed?"))
+        _system, user = fake_inference.complete_calls[0]
+        assert "Evidence note" not in user
 
     def test_db_exception_returns_error(self, fake_server, seeded_db, fake_embed, fake_inference):
         def boom(**_kwargs):

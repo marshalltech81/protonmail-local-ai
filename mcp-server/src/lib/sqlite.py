@@ -939,6 +939,7 @@ class Database:
         limit: int = 10,
         with_evidence: bool = False,
         reranker: RerankerBackend | None = None,
+        evidence_per_thread: int = 3,
     ) -> list[ThreadResult]:
         oversample = (
             _FILTERED_OVERSAMPLE
@@ -1049,7 +1050,7 @@ class Database:
             grouped = self.get_evidence_chunks_for_threads(
                 wanted,
                 query_embedding,
-                per_thread_limit=3,
+                per_thread_limit=evidence_per_thread,
                 matched_attachments=matched_attachments,
             )
             for result in candidates:
@@ -2058,7 +2059,7 @@ class Database:
 
         Returned chunks are in chronological (oldest-first by message
         date within the selected tail) order so the LLM prompt reads naturally as a
-        timeline. Caller can render them via ``_thread_context``.
+        timeline. Caller can render them via ``_summarize_context``.
 
         Ordering: ``c.message_date DESC, c.chunk_index DESC``.
         ``message_date`` is the indexed message date stored at

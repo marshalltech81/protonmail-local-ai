@@ -366,11 +366,23 @@ it stays within local-LLM context windows. The bounds differ by tool:
 
 - **`ask_mailbox` and `extract_from_emails`** build the prompt from the
   most relevant indexed chunks (message bodies and attachment text)
-  returned by hybrid search, bounded by a fixed per-thread character
-  budget (``2000``). `ask_mailbox` puts several threads in one prompt;
-  `extract_from_emails` sends one prompt per thread. If a thread has
-  no matching chunks, the tool falls back to the indexed thread body
-  and finally to the 200-character ``snippet``.
+  returned by hybrid search. If a thread has no matching chunks, the
+  tool falls back to the indexed thread body and finally to the
+  200-character ``snippet``. A chunk whose text repeats one already in
+  the prompt (ignoring `>` quote markers, spacing and case, as with a
+  quoted reply) is dropped before it uses any space.
+  `extract_from_emails` sends one prompt per thread, with up to ``2000``
+  characters of evidence (three chunks at most). `ask_mailbox` puts up
+  to ``max_threads`` threads in one prompt, with up to six chunks per
+  thread and one evidence budget of ``2000`` characters per thread
+  retrieved, shared across them: a thread that needs less leaves the
+  rest to the others, so a long top-ranked passage is not cut at 2000
+  characters while shorter threads below it leave room unused. Within
+  a thread, the best-matching chunk is spent first; a chunk cut to fit
+  says which characters it kept. When passages are left out or cut,
+  `ask_mailbox` adds a fixed-text note after the email blocks giving
+  the counts (never any content) and asks the model to say its answer
+  may be incomplete.
 - **`summarize_thread`** works on a single thread and does not use the
   per-chunk path. Its context is the thread's accumulated indexed body
   (or the ``snippet`` when the body is empty), up to ``8000``
