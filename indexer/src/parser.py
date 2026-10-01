@@ -592,12 +592,69 @@ def _decode_transport_form(
         return None
 
 
+# Inline text parts decoded for one message's body. Each costs a fixed
+# setup (a fresh html2text converter is about 9 µs) on top of its bytes,
+# which the parse cap already bounds, so a crafted message of a million
+# tiny parts would otherwise spend seconds converting them. Real mail has
+# a handful; parts past the cap are left out of the body.
+MAX_BODY_TEXT_PARTS = 200
+
+
+@dataclass
+class _BodyNode:
+    """One part outside every attachment, as a candidate for the body.
+
+    ``text`` is a leaf's stripped text; ``has_plain`` / ``has_text`` say
+    whether the part (with its subtree, once assembled) contributes
+    non-blank plain text / any non-blank text. An alternative records its
+    children in document order and which one it contributes."""
+
+    parent: int
+    alternative: bool
+    text: str = ""
+    has_plain: bool = False
+    has_text: bool = False
+    children: list[int] = field(default_factory=list)
+    chosen: int = -1
+
+
+def _assemble_body(nodes: list[_BodyNode]) -> str:
+    """The body: every non-blank inline text part in document order,
+    separated by a blank line, where a ``multipart/alternative``
+    contributes one child, the first carrying plain text, else the first
+    carrying any text (the parts of an alternative are renderings of one
+    body; those of any other container are sequential content, #295).
+
+    ``nodes`` is in walk (pre-)order, so a child always follows its
+    parent: one backward pass settles each alternative's choice, one
+    forward pass keeps the parts every alternative above them chose."""
+    for i in range(len(nodes) - 1, -1, -1):
+        node = nodes[i]
+        if node.alternative:
+            with_plain = (c for c in node.children if nodes[c].has_plain)
+            with_text = (c for c in node.children if nodes[c].has_text)
+            node.chosen = next(with_plain, next(with_text, -1))
+            if node.chosen >= 0:
+                node.has_plain = nodes[node.chosen].has_plain
+                node.has_text = True
+        if node.parent >= 0 and not nodes[node.parent].alternative:
+            nodes[node.parent].has_plain |= node.has_plain
+            nodes[node.parent].has_text |= node.has_text
+    kept = [False] * len(nodes)
+    for i, node in enumerate(nodes):
+        parent = node.parent
+        kept[i] = parent < 0 or (
+            kept[parent] and (not nodes[parent].alternative or nodes[parent].chosen == i)
+        )
+    return "\n\n".join(node.text for i, node in enumerate(nodes) if kept[i] and node.text)
+
+
 def _extract_body_and_attachments(
     msg: email.message.Message,
 ) -> tuple[str, list[Attachment]]:
-    plain_text = ""
-    html_text = ""
     attachments: list[Attachment] = []
+    nodes: list[_BodyNode] = []
+    text_parts = 0
 
     # Depth-first in document order, like ``msg.walk()``, but nothing
     # inside an attachment is a candidate for the body: an attached
@@ -605,11 +662,13 @@ def _extract_body_and_attachments(
     # recorded, as the old walk did (a PDF in a forwarded email).
     # Iterative, so nesting depth cannot recurse. The root is classified
     # too: a message can be one attachment part, or a bundle presented as
-    # one, whose text is then not the message's body.
+    # one, whose text is then not the message's body. Each part outside
+    # attachments becomes a ``_BodyNode`` under its parent's index (-1 for
+    # none), and ``_assemble_body`` turns those into the body.
     budget = _SerializationBudget()
-    stack: list[tuple[email.message.Message, bool, int]] = [(msg, False, 0)]
+    stack: list[tuple[email.message.Message, bool, int, int]] = [(msg, False, 0, -1)]
     while stack:
-        part, in_attachment, decode_depth = stack.pop()
+        part, in_attachment, decode_depth, parent = stack.pop()
         ct = part.get_content_type()
         is_attachment = _is_attachment(part)
         decoded: email.message.Message | None = None
@@ -629,6 +688,13 @@ def _extract_body_and_attachments(
                     content_hash=hashlib.sha256(payload).hexdigest(),
                 )
             )
+        inside = in_attachment or is_attachment
+        node: _BodyNode | None = None
+        if not inside:
+            node = _BodyNode(parent, alternative=ct == "multipart/alternative")
+            nodes.append(node)
+            if parent >= 0 and nodes[parent].alternative:
+                nodes[parent].children.append(len(nodes) - 1)
         if part.is_multipart():
             # A decoded container stands in for its transport form; its
             # children are one decode deeper.
@@ -637,35 +703,34 @@ def _extract_body_and_attachments(
             else:
                 children, depth = part.get_payload(), decode_depth
             if isinstance(children, list):
-                inside = in_attachment or is_attachment
+                index = -1 if node is None else len(nodes) - 1
                 stack.extend(
-                    (c, inside, depth)
+                    (c, inside, depth, index)
                     for c in reversed(children)
                     if isinstance(c, email.message.Message)
                 )
-        elif is_attachment or in_attachment:
             continue
-        elif ct == "text/html":
-            if not html_text:
-                payload = _decoded_payload(part)
-                charset = part.get_content_charset() or "utf-8"
-                html_text = _html_to_text(_safe_decode(payload, charset))
-        elif ct == "text/plain" or (part is msg and part.get_content_maintype() == "text"):
-            # A single-part message's text is its body whatever the text
-            # subtype (text/calendar, text/enriched); inside a multipart
-            # only text/plain is. Binary parts are never decoded as text.
-            if not plain_text:
-                payload = _decoded_payload(part)
-                charset = part.get_content_charset() or "utf-8"
-                plain_text = _safe_decode(payload, charset)
+        if node is None or text_parts >= MAX_BODY_TEXT_PARTS:
+            continue
+        # A single-part message's text is its body whatever the text
+        # subtype (text/calendar, text/enriched); inside a multipart only
+        # text/plain and text/html are. Binary parts are never decoded as
+        # text. Plain text is preferred over the html2text rendering of an
+        # HTML alternative whatever their order (the LLM should get the
+        # sender's clean plain text); a whitespace-only plain part has no
+        # content to prefer (#298).
+        is_html = ct == "text/html"
+        if not is_html and not (
+            ct == "text/plain" or (part is msg and part.get_content_maintype() == "text")
+        ):
+            continue
+        text_parts += 1
+        text = _safe_decode(_decoded_payload(part), part.get_content_charset() or "utf-8")
+        node.text = (_html_to_text(text) if is_html else text).strip()
+        node.has_text = bool(node.text)
+        node.has_plain = node.has_text and not is_html
 
-    # Prefer ``text/plain`` over ``text/html`` regardless of the order parts
-    # appear in the message — otherwise a multipart where the HTML part
-    # comes first wins, and the LLM gets html2text-converted output even
-    # when the sender provided a clean plain-text body. A whitespace-only
-    # plain part has no content to prefer, so the HTML text is used.
-    plain_text = plain_text.strip()
-    return plain_text or html_text.strip(), attachments
+    return _assemble_body(nodes), attachments
 
 
 def _safe_decode(payload: bytes, charset: str) -> str:
