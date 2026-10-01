@@ -313,7 +313,7 @@ class Reconciler:
             "blocked_threads": blocked_count,
         }
 
-    def _record_blocked(self, thread_id: str) -> int:
+    def _record_blocked(self, thread_id: str, survivor_path: str) -> int:
         """Bump the blocked-attempts counter for ``thread_id`` and return it.
 
         Crossing ``_BLOCKED_ESCALATION_THRESHOLD`` for the first time
@@ -327,12 +327,14 @@ class Reconciler:
         self._blocked_thread_attempts[thread_id] = attempts
         if attempts >= _BLOCKED_ESCALATION_THRESHOLD and thread_id not in self._escalated_threads:
             log.warning(
-                "reconciler: a thread has been blocked from reaping for "
-                "%d consecutive passes; this is no longer a transient retry. "
-                "Check embedder availability, parser errors, or stuck "
-                "survivor files (named in earlier reaper lines). Sweeps will "
-                "continue, but this message will not repeat until the thread "
-                "reaps cleanly.",
+                "reconciler: the thread of survivor %s has been blocked from "
+                "reaping for %d consecutive passes; this is no longer a "
+                "transient retry. Check embedder availability, parser errors, "
+                "or that survivor file. Sweeps will continue, but this message "
+                "will not repeat until the thread reaps cleanly.",
+                # The survivor's mbsync-generated path, never the thread ID
+                # (the root Message-ID) (#257).
+                survivor_path,
                 attempts,
             )
             self._escalated_threads.add(thread_id)
@@ -387,7 +389,7 @@ class Reconciler:
                 # survivor exceeds ``INDEXER_PARSE_MAX_BYTES``. Skip the
                 # pass; a later sweep retries (the underlying condition
                 # is typically transient or operator-actionable).
-                attempts = self._record_blocked(thread_id)
+                attempts = self._record_blocked(thread_id, row["filepath"])
                 log.warning(
                     "reaper: could not read survivor %s "
                     "(%s); skipping this reap pass (blocked attempts=%d)",
@@ -412,7 +414,7 @@ class Reconciler:
                 # ``reap()``'s return dict so deterministic failures
                 # (which retry forever under this catch) are not just
                 # buried log lines.
-                attempts = self._record_blocked(thread_id)
+                attempts = self._record_blocked(thread_id, row["filepath"])
                 log.error(
                     "reaper: parse_email raised %s on survivor %s; "
                     "skipping this reap pass (blocked attempts=%d)",
@@ -424,7 +426,7 @@ class Reconciler:
             if msg is None:
                 # Survivor unparseable; skip it from the rebuild but do not
                 # delete the DB row. A later sweep can pick it up again.
-                attempts = self._record_blocked(thread_id)
+                attempts = self._record_blocked(thread_id, row["filepath"])
                 log.warning(
                     "reaper: could not re-parse survivor %s; "
                     "skipping this reap pass (blocked attempts=%d)",
@@ -483,10 +485,11 @@ class Reconciler:
         except Exception as e:
             # Embedding service unavailable or embedding failed — leave state untouched
             # and retry on the next sweep rather than committing partial work.
-            attempts = self._record_blocked(thread_id)
+            attempts = self._record_blocked(thread_id, survivor_rows[0]["filepath"])
             log.warning(
-                "reaper: embedding failed for a thread (%s); will retry next pass "
-                "(blocked attempts=%d)",
+                "reaper: embedding failed for the thread of survivor %s (%s); "
+                "will retry next pass (blocked attempts=%d)",
+                survivor_rows[0]["filepath"],
                 # A provider status error can echo the input (a subject).
                 scrub_embed_error(e),
                 attempts,

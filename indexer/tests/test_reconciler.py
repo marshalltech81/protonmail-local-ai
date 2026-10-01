@@ -795,6 +795,10 @@ class TestReap:
         assert "reaper: embedding failed" in caplog.text
         assert "SYNTHETIC_PRIVATE_SUBJECT" not in caplog.text
         assert "status=400" in caplog.text
+        # The operator can tell which thread is stuck from the survivor's
+        # mbsync path, without the thread ID (#257).
+        assert str(reply_path) in caplog.text
+        assert "e1@example.com" not in caplog.text
 
     def test_flag_rename_during_reap_does_not_revive_the_deleted_message(
         self, db, threader, embedder, reconciler, maildir, monkeypatch
@@ -980,8 +984,10 @@ class TestReap:
             reconciler.reap()
         escalation_lines = [r for r in caplog.records if "no longer a transient retry" in r.message]
         assert len(escalation_lines) == 1
-        # The thread ID is the root Message-ID (sender domain); not logged (#257).
+        # The thread ID is the root Message-ID (sender domain); not logged
+        # (#257). A survivor's mbsync path identifies the thread instead.
         assert thread_id not in escalation_lines[0].message
+        assert str(reply_path) in escalation_lines[0].message
         assert thread_id in reconciler._escalated_threads
 
     def test_escalation_latch_resets_after_successful_reap(
