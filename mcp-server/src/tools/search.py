@@ -185,7 +185,8 @@ def register_search_tools(
                              "vendor", "government", "personal",
                              "other", or "unclassified" (no rule
                              matched). A filter only; it never changes
-                             ranking. find_contact shows a sender's class.
+                             ranking. Spam-folder messages never count.
+                             find_contact shows a sender's class.
 
         Returns:
             List of matching email threads with subject, participants,

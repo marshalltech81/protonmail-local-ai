@@ -370,7 +370,11 @@ its own rule).
 Authority reflects the claimed From address: the index does not
 authenticate senders, so spoofed mail from a classified address or
 domain is classified too (see #463). Treat the class as who a message
-says it is from, not proof.
+says it is from, not proof. Mail in Proton's `Spam` folder, where most
+spoofed and DMARC-failing mail lands, never counts toward an
+`authority_class` filter; spoofed mail that reaches the inbox still
+does. Checking DKIM/DMARC verdicts is deferred until Bridge's headers
+have been checked on real mail.
 
 ### Pointing at a different embedder provider
 

@@ -581,7 +581,8 @@ def register_retrieval_tools(server, db):
                              file classes as this: "counsel",
                              "management", "vendor", "government",
                              "personal", "other", or "unclassified"
-                             (no rule matched).
+                             (no rule matched). Spam-folder messages
+                             never match.
             limit: Messages per page (default 25, clamped to [1, 100]).
             cursor: ``next_cursor`` from the previous page of the same query.
 
@@ -684,6 +685,11 @@ def register_retrieval_tools(server, db):
         the name through this tool internally, so chaining
         ``find_contact`` → ``search_emails(from_addr=...)`` is an extra
         round-trip with no quality benefit.
+
+        Each contact's authority class comes from the operator's rules
+        file matched against the claimed From address, not a verified
+        sender; the authority_class filters on search_emails and
+        query_messages skip Spam-folder mail.
 
         Args:
             query: Name, address, or domain fragment (case-insensitive).
