@@ -656,10 +656,13 @@ first, one test-first commit per issue, keep three PRs in flight):
    #363, attachments #401, MCP provider errors #412 with a dedicated
    `ProviderResponseError` and caller text classified like the log,
    MCP SQLite logs #411; AGENTS.md updated in this closing PR).
-4. MCP: name matching (#313, #324, #331) with #316; date filters (#312,
-   #330); #333; event-loop hygiene (#320, #317, #334); #308; #309.
-   (#322 and #323 moved to the cleanup batch.)
-5. mbsync: #271, #280. Parser: #361, #362.
+4. MCP: ~~event-loop hygiene #320, #334~~ (done: #417). In review:
+   date filters #312/#330/#333 (#416); name matching #313/#324/#331
+   with #316's query-side half (#418; the rest needs the Phase 2
+   reindex). Queued: #308/#309, then #317 through the `fastmcp`
+   4.0.10 migration, then #415 (search `folders` filters).
+5. mbsync: #271, #280 (queued). Parser: ~~#361~~ (done: #414); #362
+   needs a fallback-filename decision first.
 6. Bridge, needing Docker for `make bridge-upgrade-check` and the
    first Bridge shell test harness: the entrypoint PR (#242, #266,
    #270), the smoke-test fix (#269 with #268's minimal fix, both in
