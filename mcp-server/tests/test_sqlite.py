@@ -1406,6 +1406,74 @@ class TestLikeFallback:
         assert any(r.thread_id == "t-alpha" for r in results)
 
 
+class TestLikeFallbackLiteralCharacters:
+    """#333: the LIKE fallback matches the query as a literal substring.
+    Without escaping, ``_`` matched any one character and ``%`` any run,
+    so ``budget_invoice`` returned ``budgetXinvoice``. Each shape below is
+    checked against the same corpus, directly and through
+    ``keyword_search`` with FTS forced to fail."""
+
+    # Each subject is distinct; bodies and participants carry nothing the
+    # queries below could match.
+    _SUBJECTS = {
+        "t-x": "budgetXinvoice",
+        "t-underscore": "budget_invoice",
+        "t-percent": "discount 100% off",
+        "t-no-percent": "discount 100 off",
+        "t-backslash": r"share at c:\temp\notes",
+        "t-no-backslash": "share at c:tempnotes",
+        "t-mixed": r"code 5%_\x end",
+        "t-plain": "quarterly planning",
+    }
+
+    @pytest.fixture
+    def like_db(self, tmp_path):
+        from tests.conftest import _insert_thread
+
+        conn, path = _open_built_db_conn(tmp_path, "like.db")
+        for thread_id, subject in self._SUBJECTS.items():
+            _insert_thread(
+                conn,
+                thread_id=thread_id,
+                subject=subject,
+                participants=["someone@example.com"],
+                body_text="body",
+            )
+        conn.commit()
+        conn.close()
+        return Database(str(path))
+
+    CATALOGUE = [
+        ("budget_invoice", {"t-underscore"}),  # _ is not a one-character wildcard
+        ("_", {"t-underscore", "t-mixed"}),
+        ("100%", {"t-percent"}),  # % is not a run wildcard
+        ("%", {"t-percent", "t-mixed"}),
+        ("discount%off", set()),
+        (r"c:\temp", {"t-backslash"}),  # the escape character itself
+        ("\\", {"t-backslash", "t-mixed"}),
+        (r"5%_\x", {"t-mixed"}),  # all three together
+        (r"\%", set()),  # an escape sequence in the query stays literal
+        (r"\_", set()),
+        ("quarterly", {"t-plain"}),  # ordinary literal
+        ("QUARTERLY", {"t-plain"}),  # LIKE stays case-insensitive for ASCII
+    ]
+
+    @pytest.mark.parametrize(("query", "expected"), CATALOGUE)
+    def test_like_fallback_matches_query_literally(self, like_db, query, expected):
+        results = like_db._like_fallback(query, limit=50)
+        assert {r.thread_id for r in results} == expected
+
+    @pytest.mark.parametrize(("query", "expected"), CATALOGUE)
+    def test_keyword_search_fallback_matches_query_literally(
+        self, like_db, monkeypatch, query, expected
+    ):
+        from src.lib import sqlite as sqlite_mod
+
+        monkeypatch.setattr(sqlite_mod, "_sanitize_fts_query", lambda q: "AND OR NEAR")
+        results = like_db.keyword_search(query, limit=50)
+        assert {r.thread_id for r in results} == expected
+
+
 class TestOversampleOnFilter:
     def test_fetch_limit_grows_when_filter_present(self, seeded_db: Database, monkeypatch):
         """A folder filter must trigger the higher oversample multiplier so

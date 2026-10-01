@@ -100,7 +100,8 @@ drive an unbounded query against the index.
   preserved as single tokens.
 - If FTS5 still rejects a sanitized query, search falls back to a
   ``LIKE`` scan over subject / body / participants so recall is
-  preserved.
+  preserved. The scan matches the query as a literal substring: `%`,
+  `_` and `\` in the query match only themselves.
 - When any filter (folder, sender, date range, attachment flag) is
   applied, search oversamples raw candidates by ``limit * 4`` rather
   than ``limit * 2`` so deeper-ranked matches still qualify after

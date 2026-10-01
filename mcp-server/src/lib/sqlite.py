@@ -1608,8 +1608,15 @@ class Database:
         date_to: str | None = None,
         has_attachments: bool | None = None,
     ) -> list[ThreadResult]:
-        pattern = f"%{query}%"
-        where_clauses = ["(subject LIKE ? OR body_text LIKE ? OR participants LIKE ?)"]
+        # The query is a literal substring: escape LIKE's wildcards and the
+        # escape character itself so ``_`` and ``%`` match only themselves
+        # (#333). Every LIKE below names the same ``ESCAPE`` character.
+        escaped = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        pattern = f"%{escaped}%"
+        where_clauses = [
+            "(subject LIKE ? ESCAPE '\\' OR body_text LIKE ? ESCAPE '\\' "
+            "OR participants LIKE ? ESCAPE '\\')"
+        ]
         params: list = [pattern, pattern, pattern]
         if folders:
             placeholders = ",".join(["?"] * len(folders))
