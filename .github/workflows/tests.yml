@@ -20,6 +20,15 @@ jobs:
       - name: Run entrypoint tests
         run: bash mbsync/tests/entrypoint_test.sh
 
+  bridge-smoke-script:
+    name: bridge smoke script
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Run bridge-smoke.sh tests
+        run: bash scripts/tests/bridge_smoke_test.sh
+
   indexer-pytest:
     name: indexer pytest
     runs-on: ubuntu-latest

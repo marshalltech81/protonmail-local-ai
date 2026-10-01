@@ -1,0 +1,94 @@
+#!/bin/bash
+set -Eeuo pipefail
+
+# Tests for the pass/fail decision in scripts/bridge-smoke.sh.
+#
+# Each case runs the real script with a stub `docker` first on PATH. The
+# stub succeeds silently for every call except the end-to-end AutoUpdate
+# run (the one that mounts a tmpfs /data), where it prints STUB_OUTPUT and
+# exits with STUB_STATUS. No image is built and no container is started;
+# the in-container steps are exercised by `make bridge-smoke` itself.
+#
+# Run: bash scripts/tests/bridge_smoke_test.sh
+
+SCRIPT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/bridge-smoke.sh"
+WORK="$(mktemp -d)"
+trap 'rm -rf "$WORK"' EXIT
+FAILURES=0
+
+mkdir -p "$WORK/bin"
+cat >"$WORK/bin/docker" <<'STUB'
+#!/bin/bash
+set -Eeuo pipefail
+for arg in "$@"; do
+    if [[ "$arg" == "/data:uid=1000,gid=1000,mode=700" ]]; then
+        printf '%s\n' "$STUB_OUTPUT"
+        exit "$STUB_STATUS"
+    fi
+done
+STUB
+chmod +x "$WORK/bin/docker"
+
+# Run the smoke script against the stub; keep its stdout, stderr and status.
+run_smoke() {
+    STUB_OUTPUT="$1" STUB_STATUS="$2" PATH="$WORK/bin:$PATH" \
+        bash "$SCRIPT" >"$WORK/stdout" 2>"$WORK/stderr" && SMOKE_STATUS=0 || SMOKE_STATUS=$?
+}
+
+# Each case runs in a subshell with errexit on and outside any `if`, so a
+# failed assertion ends the case instead of being ignored.
+check() {
+    local description="$1" status
+    shift
+    set +e
+    (
+        set -e
+        "$@"
+    ) >"$WORK/output" 2>&1
+    status=$?
+    set -e
+    if ((status == 0)); then
+        printf 'ok   %s\n' "$description"
+    else
+        printf 'FAIL %s\n' "$description"
+        sed 's/^/     /' "$WORK/output"
+        FAILURES=$((FAILURES + 1))
+    fi
+}
+
+show() {
+    printf -- '--- stdout ---\n'
+    cat "$WORK/stdout"
+    printf -- '--- stderr ---\n'
+    cat "$WORK/stderr"
+}
+
+marker_present_passes() {
+    run_smoke 'level=info msg="Vault loaded" autoUpdate="false"' 0
+    show
+    [[ "$SMOKE_STATUS" -eq 0 ]]
+    grep -F 'Proton Bridge smoke checks passed.' "$WORK/stdout"
+}
+
+# #269: the diagnostics header must not be parsed as a printf option.
+missing_marker_fails_and_prints_the_captured_output() {
+    run_smoke $'NO_BRIDGE_LOG_WRITTEN\nSYNTHETIC_GPG_FAILURE' 0
+    show
+    [[ "$SMOKE_STATUS" -eq 1 ]]
+    grep -F 'AutoUpdate marker not found' "$WORK/stderr"
+    grep -F -- '--- captured output (first 60 lines) ---' "$WORK/stderr"
+    grep -F 'SYNTHETIC_GPG_FAILURE' "$WORK/stderr"
+    if grep -F 'invalid option' "$WORK/stderr"; then
+        return 1
+    fi
+}
+
+check "the marker with a clean run passes" marker_present_passes
+check "a missing marker fails and prints the captured output" \
+    missing_marker_fails_and_prints_the_captured_output
+
+if ((FAILURES > 0)); then
+    printf '%d test(s) failed\n' "$FAILURES" >&2
+    exit 1
+fi
+printf 'all tests passed\n'

@@ -121,7 +121,7 @@ elif grep -F 'autoUpdate="true"' "$SMOKE_OUT" >/dev/null; then
     exit 1
 else
     printf 'ERROR: AutoUpdate marker not found in Bridge log output.\n' >&2
-    printf '--- captured output (first 60 lines) ---\n' >&2
+    printf '%s\n' '--- captured output (first 60 lines) ---' >&2
     head -60 "$SMOKE_OUT" >&2
     exit 1
 fi
