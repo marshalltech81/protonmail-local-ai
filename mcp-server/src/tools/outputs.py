@@ -339,7 +339,11 @@ class QueryMessagesOutput(_Output):
 
 class Contact(_Output):
     email: str
-    names: list[str]
+    names: list[str] = Field(
+        description=f"Display names the contact was written with, at most {MAX_LISTED}; "
+        "see name_count."
+    )
+    name_count: int
     thread_count: int
 
 

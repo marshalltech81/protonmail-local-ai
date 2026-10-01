@@ -877,6 +877,16 @@ class TestFailuresAreErrorResults:
         assert result.isError
         assert "date_from" in result.content[0].text
 
+    @pytest.mark.parametrize("tool", ["ask_mailbox", "extract_from_emails"])
+    def test_inverted_date_range_is_an_error_result(self, seeded_db, tool):
+        # #312: date_from after date_to names an empty interval.
+        args = {**_TOOL_ARGS[tool], "date_from": "2025-01-01", "date_to": "2024-01-01"}
+        llm = FakeInferenceClient()
+        result = _wire_call(seeded_db, llm, tool, args)
+        assert result.isError
+        assert "date_from must not be after date_to" in result.content[0].text
+        assert llm.complete_calls == []
+
     @pytest.mark.parametrize("tool", sorted(_TOOL_ARGS))
     def test_provider_text_stays_out_of_the_error_and_the_log(self, seeded_db, caplog, tool):
         import logging

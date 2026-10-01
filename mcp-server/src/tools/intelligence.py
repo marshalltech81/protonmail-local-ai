@@ -14,7 +14,7 @@ from mcp.types import TextContent
 from ..lib.embed import embed_query
 from ..lib.inference import InferenceTruncatedError
 from ..lib.security import log_tool_call, safe_provider_exception_text
-from ..lib.sqlite import ChunkResult, InvalidFilterError, ThreadResult
+from ..lib.sqlite import ChunkResult, InvalidFilterError, ThreadResult, validate_date_range
 from ..lib.validation import clamp_int
 from .outputs import HEADER_CHAR_LIMIT, MAX_LISTED, clip
 
@@ -812,6 +812,12 @@ def register_intelligence_tools(
         # ``max_threads=5000`` (or a non-numeric value) can't expand
         # into a massive prompt or raise before the try/except below.
         max_threads = clamp_int(max_threads, default=5, minimum=1, maximum=_MAX_ASK_THREADS)
+        # Reject a bad date range before any provider or retrieval work.
+        try:
+            validate_date_range(date_from, date_to)
+        except InvalidFilterError as e:
+            log.warning("ask_mailbox rejected invalid %s", e.field_name)
+            raise ToolError(f"Error: {e}") from e
 
         try:
             # Retrieve relevant threads via hybrid search. ``with_evidence``
@@ -1085,6 +1091,12 @@ def register_intelligence_tools(
                 f"Error: schema declares {', '.join(reserved)}, which are reserved for "
                 "each record's source thread subject and date; rename the field."
             )
+        # Reject a bad date range before any provider or retrieval work.
+        try:
+            validate_date_range(date_from, date_to)
+        except InvalidFilterError as e:
+            log.warning("extract_from_emails rejected invalid %s", e.field_name)
+            raise ToolError(f"Error: {e}") from e
 
         try:
             embedding = await embed_query(embed_client, query, expected_embed_dim)

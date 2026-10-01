@@ -541,6 +541,30 @@ class TestFindContact:
         asyncio.run(handler(query="alice", limit=99999))
         assert seen["limit"] == 50
 
+    def test_many_long_aliases_are_bounded(self, fake_server, seeded_db):
+        # A contact's whole history can carry any number of
+        # sender-controlled display names: list at most MAX_LISTED, cut
+        # each one, and report the full count.
+        from src.tools.outputs import HEADER_CHAR_LIMIT, MAX_LISTED
+
+        names = [f"Alias{n:02d} " + "x" * 2000 for n in range(30)]
+
+        def many(_query, _limit):
+            return [{"email": "p@example.test", "names": names, "thread_count": 30}]
+
+        seeded_db.find_contact = many  # type: ignore[assignment]
+        handler = _handlers(fake_server, seeded_db)["find_contact"]
+        out = asyncio.run(handler(query="alias"))
+        contact = out.structuredContent["contacts"][0]
+        assert contact["name_count"] == 30
+        assert contact["thread_count"] == 30
+        assert len(contact["names"]) == MAX_LISTED
+        assert all(len(n) < HEADER_CHAR_LIMIT + 40 for n in contact["names"])
+        text = _text(out)
+        assert "Alias09" in text and "Alias10" not in text
+        assert "20 more" in text
+        assert "x" * (HEADER_CHAR_LIMIT + 1) not in text
+
     def test_db_exception_returns_error_text(self, fake_server, seeded_db):
         def boom(_query, _limit):
             raise RuntimeError("simulated read failure")
@@ -564,6 +588,12 @@ class TestQueryMessages:
         assert "next_cursor: " in text
         assert "Message-ID: m5" in text
         assert "Thread ID: t3" in text
+
+    def test_inverted_date_range_is_an_error(self, fake_server, messages_db):
+        # #312: an empty interval is rejected rather than answered.
+        handler = _handlers(fake_server, messages_db)["query_messages"]
+        text = _error(handler(date_from="2024-02-01", date_to="2024-01-01"))
+        assert "date_from must not be after date_to" in text
 
     def test_following_the_cursor_returns_the_rest(self, fake_server, messages_db):
         handler = _handlers(fake_server, messages_db)["query_messages"]

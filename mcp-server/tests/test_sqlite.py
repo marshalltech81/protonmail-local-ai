@@ -4,6 +4,7 @@ Covers pure fusion/filter logic against synthetic ThreadResult lists and
 real read queries against an in-memory-style database seeded via conftest.
 """
 
+import json
 import sqlite3
 from contextlib import closing
 
@@ -1160,19 +1161,189 @@ class TestFilterDateUtcNormalization:
         filtered = seeded_db._apply_filters([after_cutoff], date_to="2024-06-01T08:29:00-04:00")
         assert filtered == []
 
-    def test_normalize_date_bound_returns_utc_isoformat(self):
-        """``_normalize_date_bound`` produces the string handed straight to
-        SQL pushdown — it must carry a ``+00:00`` offset regardless of the
+    def test_normalize_date_range_returns_utc_isoformat(self):
+        """``_normalize_date_range`` produces the strings handed straight to
+        SQL pushdown — they must carry a ``+00:00`` offset regardless of the
         offset the caller supplied, so lexicographic comparison against
         stored UTC timestamps is well-defined."""
-        from src.lib.sqlite import _normalize_date_bound
+        from src.lib.sqlite import _normalize_date_range
 
-        normalized = _normalize_date_bound(
-            "2024-06-01T08:00:00-04:00", end_of_day=False, field_name="date_from"
-        )
+        normalized, no_upper_bound = _normalize_date_range("2024-06-01T08:00:00-04:00", None)
+        assert no_upper_bound is None
         assert normalized is not None
         assert normalized.endswith("+00:00")
         assert normalized.startswith("2024-06-01T12:00:00")
+
+
+class TestDateFilterFormCatalogue:
+    """#330: every ISO 8601 form the date filters accept, and what each
+    bound becomes. The upper bound used to get end-of-day promotion only
+    when the string was exactly ``YYYY-MM-DD``, so other date-only forms
+    (``20240101``, week dates) cut off all but the first instant of the
+    day they name. Date-only is now decided by what the parser accepts.
+
+    Invariant: a value ``date.fromisoformat`` accepts (with or without a
+    trailing ``Z``) names a whole UTC day; any other accepted value names
+    one instant, the same for both bounds."""
+
+    _START = "2024-01-01T00:00:00+00:00"
+    _END_OF_DAY = "2024-01-01T23:59:59.999999+00:00"
+    _NOON = "2024-01-01T12:00:00+00:00"
+
+    # Every form names 2024-01-01 (a Monday, so ISO week 2024-W01-1).
+    DATE_ONLY = [
+        "2024-01-01",  # extended calendar date
+        "20240101",  # basic calendar date
+        "2024-W01-1",  # extended week date
+        "2024W011",  # basic week date
+        "2024-W01",  # week without a weekday: the parser reads its Monday
+        "2024W01",
+        "2024-01-01Z",  # a date with the UTC designator: still the whole day
+        "20240101Z",
+        "2024-W01-1Z",
+    ]
+    DATETIME = {
+        "2024-01-01T12:00:00": _NOON,  # naive: read as UTC
+        "2024-01-01T12:00": _NOON,
+        "2024-01-01T12": _NOON,
+        "2024-01-01 12:00:00": _NOON,  # space separator
+        "20240101T120000": _NOON,  # basic format
+        "2024-W01-1T12:00": _NOON,  # week date with a time
+        "2024-01-01T12:00:00Z": _NOON,
+        "2024-01-01T12:00:00.000000Z": _NOON,
+        "2024-01-01T12:00:00+00:00": _NOON,
+        "2024-01-01T07:00:00-05:00": _NOON,  # offset converted to UTC
+        "2024-01-01T21:00:00+09:00": _NOON,
+        # An explicit midnight is an instant, not a day, even as date_to.
+        "2024-01-01T00:00:00": _START,
+        "2024-01-01T00:00:00Z": _START,
+    }
+    REJECTED = [
+        "2024-001",
+        "2024-01",
+        "2024",
+        "2024-1-1",
+        "2024-13-01",
+        "2024-01-01T25:00",
+        # Parseable, but converting to UTC leaves datetime's range.
+        "0001-01-01T00:00:00+14:00",
+        "9999-12-31T23:59:59-14:00",
+    ]
+
+    @pytest.mark.parametrize("value", DATE_ONLY)
+    def test_date_only_form_names_the_whole_day(self, value):
+        from src.lib.sqlite import _parse_filter_date
+
+        assert _parse_filter_date(value, end_of_day=False).isoformat() == self._START
+        assert _parse_filter_date(value, end_of_day=True).isoformat() == self._END_OF_DAY
+
+    @pytest.mark.parametrize(("value", "instant"), sorted(DATETIME.items()))
+    def test_datetime_form_names_one_instant(self, value, instant):
+        from src.lib.sqlite import _parse_filter_date
+
+        assert _parse_filter_date(value, end_of_day=False).isoformat() == instant
+        assert _parse_filter_date(value, end_of_day=True).isoformat() == instant
+
+    @pytest.mark.parametrize("value", REJECTED)
+    def test_unaccepted_form_is_rejected(self, value):
+        from src.lib.sqlite import InvalidFilterError, _parse_filter_date
+
+        with pytest.raises(InvalidFilterError):
+            _parse_filter_date(value, end_of_day=True, _field_name="date_to")
+
+    @pytest.mark.parametrize("value", DATE_ONLY)
+    def test_date_only_bound_includes_the_named_day_end_to_end(self, tmp_path, make_result, value):
+        """The reproduction from #330, through ``query_messages`` (SQL
+        pushdown) and the post-fusion thread filter: a message at noon
+        on the named day is inside either bound."""
+        from datetime import UTC, datetime
+
+        from tests.conftest import _insert_message
+
+        conn, path = _open_built_db_conn(tmp_path, "date-forms.db")
+        _insert_message(
+            conn,
+            message_id="m-noon",
+            thread_id="t-noon",
+            sent_at=self._NOON,
+            subject="quarterly report",
+        )
+        conn.execute(
+            "UPDATE threads SET date_first = ?, date_last = ? WHERE thread_id = 't-noon'",
+            (self._NOON, self._NOON),
+        )
+        conn.commit()
+        conn.close()
+        db = Database(str(path))
+        assert db.query_messages(date_to=value).total_matches == 1
+        assert db.query_messages(date_from=value).total_matches == 1
+
+        at_noon = make_result("at-noon")
+        at_noon.date_first = at_noon.date_last = datetime(2024, 1, 1, 12, tzinfo=UTC)
+        assert db._apply_filters([at_noon], date_to=value) == [at_noon]
+        assert db._apply_filters([at_noon], date_from=value) == [at_noon]
+
+
+class TestInvertedDateRange:
+    """#312: ``date_from`` after ``date_to`` names an empty interval. The
+    thread overlap predicates (``date_last >= from AND date_first <= to``)
+    still accept a long-lived thread for it, so every entry point that
+    takes both bounds rejects the pair instead, after UTC normalization."""
+
+    # A thread spanning 2023-2026 overlaps any interval in that span, so
+    # an unchecked inverted range inside it would return the thread.
+    _SPAN = {"date_first": "2023-01-01T00:00:00+00:00", "date_last": "2026-01-01T00:00:00+00:00"}
+
+    _ENTRY_POINTS = {
+        "keyword_search": lambda db, **kw: db.keyword_search("report", **kw),
+        "semantic_search": lambda db, **kw: db.semantic_search([1.0, 0.0, 0.0, 0.0], **kw),
+        "hybrid_search": lambda db, **kw: db.hybrid_search("report", [1.0, 0.0, 0.0, 0.0], **kw),
+        "like_fallback": lambda db, **kw: db._like_fallback("report", 10, **kw),
+        "search_attachments": lambda db, **kw: db.search_attachments(**kw),
+        "query_messages": lambda db, **kw: db.query_messages(**kw),
+    }
+
+    @pytest.mark.parametrize("entry", sorted(_ENTRY_POINTS))
+    @pytest.mark.parametrize(
+        ("date_from", "date_to"),
+        [
+            ("2025-01-01", "2024-01-01"),  # date-only, a year apart
+            ("2024-06-02", "2024-06-01"),  # adjacent days
+            ("2024-06-01T12:00:01+00:00", "2024-06-01T12:00:00+00:00"),  # one second
+            # 13:00Z vs 12:00Z: the strings sort the other way round.
+            ("2024-06-01T09:00:00-04:00", "2024-06-01T12:00:00Z"),
+        ],
+    )
+    def test_inverted_range_is_rejected(
+        self, tmp_path, _build_thread_on, entry, date_from, date_to
+    ):
+        from src.lib.sqlite import InvalidFilterError
+
+        db = _build_thread_on(tmp_path, **self._SPAN)
+        with pytest.raises(InvalidFilterError) as exc:
+            self._ENTRY_POINTS[entry](db, date_from=date_from, date_to=date_to)
+        assert str(exc.value) == "date_from must not be after date_to"
+        assert exc.value.field_name == "date_from/date_to"
+
+    @pytest.mark.parametrize("entry", sorted(_ENTRY_POINTS))
+    @pytest.mark.parametrize(
+        ("date_from", "date_to"),
+        [
+            ("2024-06-01", "2024-06-01"),  # one whole day
+            ("2024-06-01T12:00:00+00:00", "2024-06-01T12:00:00+00:00"),  # one instant
+            # The same instant written with two offsets.
+            ("2024-06-01T08:00:00-04:00", "2024-06-01T12:00:00Z"),
+            ("2024-01-01", "2025-01-01"),
+        ],
+    )
+    def test_ordered_range_is_accepted(self, tmp_path, _build_thread_on, entry, date_from, date_to):
+        db = _build_thread_on(tmp_path, **self._SPAN)
+        self._ENTRY_POINTS[entry](db, date_from=date_from, date_to=date_to)
+
+    def test_ordered_range_still_returns_the_overlapping_thread(self, tmp_path, _build_thread_on):
+        db = _build_thread_on(tmp_path, **self._SPAN)
+        results = db.keyword_search("report", date_from="2024-01-01", date_to="2025-01-01")
+        assert [r.thread_id for r in results] == ["on-last-day"]
 
 
 class TestFtsSanitization:
@@ -1199,6 +1370,123 @@ class TestFtsSanitization:
 
         assert _sanitize_fts_query("!!!") == ""
         assert _sanitize_fts_query("") == ""
+
+
+def _nfd(text: str) -> str:
+    import unicodedata
+
+    return unicodedata.normalize("NFD", text)
+
+
+# (indexed text, query) pairs every keyword lane must match. Combining
+# marks are word characters to unicode61, so the sanitizer must keep them
+# inside a token rather than split the word around them.
+_COMBINING_MARK_CASES = [
+    ("r\u00e9sum\u00e9", "r\u00e9sum\u00e9"),
+    ("r\u00e9sum\u00e9", _nfd("r\u00e9sum\u00e9")),
+    (_nfd("r\u00e9sum\u00e9"), "r\u00e9sum\u00e9"),
+    ("na\u00efve", _nfd("na\u00efve") + "?"),
+    ("Vi\u1ec7t", "Vi\u1ec7t"),
+    (_nfd("Vi\u1ec7t"), _nfd("Vi\u1ec7t")),
+    # Known gap, not a query-side one: the indexes tokenize with
+    # unicode61 remove_diacritics=1, which leaves a precomposed letter
+    # with two diacritics (U+1EC7) unfolded while its decomposed spelling
+    # folds to "viet". Matching across the two needs index-side
+    # normalization or remove_diacritics=2, i.e. a reindex.
+    pytest.param(
+        ("Vi\u1ec7t", _nfd("Vi\u1ec7t")),
+        marks=pytest.mark.xfail(strict=True, reason="needs index-side folding (reindex)"),
+    ),
+    pytest.param(
+        (_nfd("Vi\u1ec7t"), "Vi\u1ec7t"),
+        marks=pytest.mark.xfail(strict=True, reason="needs index-side folding (reindex)"),
+    ),
+    # Hangul is not folded by unicode61 at all, so composed syllables and
+    # their conjoining jamo are different tokens: the same gap.
+    pytest.param(
+        ("\ud55c\uad6d", _nfd("\ud55c\uad6d")),
+        marks=pytest.mark.xfail(strict=True, reason="needs index-side folding (reindex)"),
+    ),
+    # No precomposed form exists for q + combining tilde.
+    ("q\u0303uux", "q\u0303uux"),
+    # Devanagari vowel signs and virama are marks (Mn / Mc).
+    ("\u0939\u093f\u0928\u094d\u0926\u0940", "\u0939\u093f\u0928\u094d\u0926\u0940"),
+    ("jos\u00e9@example.com", _nfd("jos\u00e9@example.com")),
+]
+
+
+class TestFtsSanitizationCombiningMarks:
+    def test_marks_stay_inside_their_token(self):
+        from src.lib.sqlite import _sanitize_fts_query
+
+        assert _sanitize_fts_query(_nfd("r\u00e9sum\u00e9 cv")) == (
+            '"' + _nfd("r\u00e9sum\u00e9") + '" OR "cv"'
+        )
+        hindi = "\u0939\u093f\u0928\u094d\u0926\u0940"
+        assert _sanitize_fts_query(hindi) == f'"{hindi}"'
+
+    def test_token_characters_unchanged_outside_marks(self):
+        # Differential over every code point: apart from combining marks,
+        # a character is a token character exactly when the previous
+        # ``[\w@.\-]`` class said so.
+        import re
+        import unicodedata
+
+        from src.lib.sqlite import _is_fts_query_token_char
+
+        old = re.compile(r"[\w@.\-]")
+        diverging = [
+            cp
+            for cp in range(0x110000)
+            if not unicodedata.category(chr(cp)).startswith("M")
+            and bool(old.fullmatch(chr(cp))) != _is_fts_query_token_char(chr(cp))
+        ]
+        assert diverging == []
+
+    def test_lone_mark_query_runs(self, seeded_db: Database):
+        # A token of marks alone tokenizes to nothing in FTS; the query
+        # must still run rather than raise.
+        assert seeded_db.keyword_search("\u0301") == []
+
+    @pytest.fixture(params=_COMBINING_MARK_CASES, ids=ascii)
+    def lanes_db(self, request, tmp_path):
+        from tests.conftest import _insert_attachment, _insert_message, _insert_thread
+
+        indexed, query = request.param
+        conn, path = _open_built_db_conn(tmp_path, "marks.db")
+        _insert_thread(conn, thread_id="t-thread", subject=indexed, participants=[])
+        _insert_message(
+            conn,
+            message_id="m1",
+            thread_id="t-chunk",
+            sent_at="2024-01-01T00:00:00+00:00",
+            body=f"about {indexed} here",
+        )
+        _insert_attachment(
+            conn,
+            message_id="m1",
+            thread_id="t-chunk",
+            attachment_id="a1",
+            filename=f"{indexed}.pdf",
+        )
+        conn.close()
+        return Database(str(path)), query
+
+    def test_thread_lane(self, lanes_db):
+        db, query = lanes_db
+        assert [r.thread_id for r in db._thread_keyword_search(query, 10)] == ["t-thread"]
+
+    def test_chunk_lane(self, lanes_db):
+        db, query = lanes_db
+        assert [r.thread_id for r in db._chunk_keyword_search(query, 10)] == ["t-chunk"]
+
+    def test_attachment_lane(self, lanes_db):
+        db, query = lanes_db
+        assert [r.thread_id for r in db._attachment_keyword_search(query, 10)] == ["t-chunk"]
+
+    def test_search_attachments(self, lanes_db):
+        db, query = lanes_db
+        assert [a.filename for a in db.search_attachments(query)] != []
 
 
 class TestKeywordSearchSanitization:
@@ -1244,6 +1532,74 @@ class TestLikeFallback:
         monkeypatch.setattr(sqlite_mod, "_sanitize_fts_query", lambda q: "AND OR NEAR")
         results = seeded_db.keyword_search("invoice")
         assert any(r.thread_id == "t-alpha" for r in results)
+
+
+class TestLikeFallbackLiteralCharacters:
+    """#333: the LIKE fallback matches the query as a literal substring.
+    Without escaping, ``_`` matched any one character and ``%`` any run,
+    so ``budget_invoice`` returned ``budgetXinvoice``. Each shape below is
+    checked against the same corpus, directly and through
+    ``keyword_search`` with FTS forced to fail."""
+
+    # Each subject is distinct; bodies and participants carry nothing the
+    # queries below could match.
+    _SUBJECTS = {
+        "t-x": "budgetXinvoice",
+        "t-underscore": "budget_invoice",
+        "t-percent": "discount 100% off",
+        "t-no-percent": "discount 100 off",
+        "t-backslash": r"share at c:\temp\notes",
+        "t-no-backslash": "share at c:tempnotes",
+        "t-mixed": r"code 5%_\x end",
+        "t-plain": "quarterly planning",
+    }
+
+    @pytest.fixture
+    def like_db(self, tmp_path):
+        from tests.conftest import _insert_thread
+
+        conn, path = _open_built_db_conn(tmp_path, "like.db")
+        for thread_id, subject in self._SUBJECTS.items():
+            _insert_thread(
+                conn,
+                thread_id=thread_id,
+                subject=subject,
+                participants=["someone@example.com"],
+                body_text="body",
+            )
+        conn.commit()
+        conn.close()
+        return Database(str(path))
+
+    CATALOGUE = [
+        ("budget_invoice", {"t-underscore"}),  # _ is not a one-character wildcard
+        ("_", {"t-underscore", "t-mixed"}),
+        ("100%", {"t-percent"}),  # % is not a run wildcard
+        ("%", {"t-percent", "t-mixed"}),
+        ("discount%off", set()),
+        (r"c:\temp", {"t-backslash"}),  # the escape character itself
+        ("\\", {"t-backslash", "t-mixed"}),
+        (r"5%_\x", {"t-mixed"}),  # all three together
+        (r"\%", set()),  # an escape sequence in the query stays literal
+        (r"\_", set()),
+        ("quarterly", {"t-plain"}),  # ordinary literal
+        ("QUARTERLY", {"t-plain"}),  # LIKE stays case-insensitive for ASCII
+    ]
+
+    @pytest.mark.parametrize(("query", "expected"), CATALOGUE)
+    def test_like_fallback_matches_query_literally(self, like_db, query, expected):
+        results = like_db._like_fallback(query, limit=50)
+        assert {r.thread_id for r in results} == expected
+
+    @pytest.mark.parametrize(("query", "expected"), CATALOGUE)
+    def test_keyword_search_fallback_matches_query_literally(
+        self, like_db, monkeypatch, query, expected
+    ):
+        from src.lib import sqlite as sqlite_mod
+
+        monkeypatch.setattr(sqlite_mod, "_sanitize_fts_query", lambda q: "AND OR NEAR")
+        results = like_db.keyword_search(query, limit=50)
+        assert {r.thread_id for r in results} == expected
 
 
 class TestOversampleOnFilter:
@@ -2328,6 +2684,67 @@ class TestFindContact:
             {"email": "jane@example.com", "names": ["J. Doe", "Jane Doe"], "thread_count": 1}
         ]
 
+    def test_name_match_reports_the_whole_contact(self, tmp_path):
+        # The name selects the address; names and thread_count then
+        # describe every row for that address, not just the rows whose
+        # name matched. A repeat within one thread still counts once.
+        from tests.conftest import _insert_message
+
+        conn, path = _open_built_db_conn(tmp_path, "aliases.db")
+        for n, name in enumerate(["Jane Smith", "J. Smith", "Janet Doe"]):
+            _insert_message(
+                conn,
+                message_id=f"m{n}",
+                thread_id=f"t{n}",
+                sent_at="2024-01-01T00:00:00+00:00",
+                from_=[f"{name} <person@example.test>"],
+            )
+        _insert_message(
+            conn,
+            message_id="m3",
+            thread_id="t0",
+            sent_at="2024-01-02T00:00:00+00:00",
+            to=["Jane Smith <person@example.test>"],
+        )
+        conn.close()
+        db = Database(str(path))
+        whole = {
+            "email": "person@example.test",
+            "names": ["J. Smith", "Jane Smith", "Janet Doe"],
+            "thread_count": 3,
+        }
+        assert db.find_contact("Jane Smith") == [whole]
+        assert db.find_contact("person@example.test") == [whole]
+
+    def test_ranking_counts_unmatched_aliases(self, tmp_path):
+        # alpha matched as "Pat" on one thread but appears on three; beta
+        # matched on two. Ranking on matching rows alone put pat-b first.
+        from tests.conftest import _insert_message
+
+        conn, path = _open_built_db_conn(tmp_path, "ranking.db")
+        for n, name in enumerate(["Pat Alpha", "A. Alpha", "Alpha"]):
+            _insert_message(
+                conn,
+                message_id=f"a{n}",
+                thread_id=f"ta{n}",
+                sent_at="2024-01-01T00:00:00+00:00",
+                from_=[f"{name} <alpha@example.test>"],
+            )
+        for n in range(2):
+            _insert_message(
+                conn,
+                message_id=f"b{n}",
+                thread_id=f"tb{n}",
+                sent_at="2024-01-01T00:00:00+00:00",
+                from_=["Pat Beta <beta@example.test>"],
+            )
+        conn.close()
+        db = Database(str(path))
+        assert [(c["email"], c["thread_count"]) for c in db.find_contact("pat")] == [
+            ("alpha@example.test", 3),
+            ("beta@example.test", 2),
+        ]
+
     def test_non_ascii_name_matches_case_insensitively(self, tmp_path):
         # SQLite's own lower() folds ASCII only; the match must fold
         # "JOSÉ" to "josé" the way Python does.
@@ -2455,6 +2872,201 @@ class TestFindContactSendersOnly:
         # alice still resolves under both modes.
         assert db.find_contact("alice")[0]["email"] == "alice@example.com"
         assert db.find_contact("alice", senders_only=True)[0]["email"] == "alice@example.com"
+
+    @staticmethod
+    def _keep_first_sender_per_address(conn, thread_id: str) -> None:
+        # The indexer dedupes ``threads.senders`` by canonical address,
+        # keeping the first display string; the fixture helper dedupes by
+        # exact string, so collapse the later duplicates here.
+        senders = json.loads(
+            conn.execute(
+                "SELECT senders FROM threads WHERE thread_id = ?", (thread_id,)
+            ).fetchone()[0]
+        )
+        kept: dict[str, str] = {}
+        for entry in senders:
+            kept.setdefault(canonical_addr(entry), entry)
+        conn.execute(
+            "UPDATE threads SET senders = ? WHERE thread_id = ?",
+            (json.dumps(list(kept.values())), thread_id),
+        )
+
+    @pytest.mark.parametrize(
+        "first_from",
+        ["Old Name <person@example.test>", "person@example.test"],
+        ids=["renamed", "bare-then-named"],
+    )
+    def test_senders_only_matches_a_later_display_name(self, tmp_path, first_from):
+        # threads.senders keeps one display string per address, so a
+        # name first used on a later reply is only in that message's
+        # From participant row.
+        from tests.conftest import _insert_message
+
+        conn, path = _open_built_db_conn(tmp_path, "later-name.db")
+        _insert_message(
+            conn,
+            message_id="m1",
+            thread_id="t1",
+            sent_at="2024-01-01T00:00:00+00:00",
+            from_=[first_from],
+        )
+        _insert_message(
+            conn,
+            message_id="m2",
+            thread_id="t1",
+            sent_at="2024-01-02T00:00:00+00:00",
+            from_=["New Name <person@example.test>"],
+        )
+        self._keep_first_sender_per_address(conn, "t1")
+        conn.commit()
+        conn.close()
+        db = Database(str(path))
+        contacts = db.find_contact("new name", senders_only=True)
+        assert [(c["email"], c["thread_count"]) for c in contacts] == [("person@example.test", 1)]
+        assert "New Name" in contacts[0]["names"]
+
+    def test_senders_only_ignores_a_name_used_only_as_secondary_author(self, tmp_path):
+        # person is a primary sender in t1, but "Alias" only names them
+        # as the second author of a t2 message: that thread is not one
+        # the sender filter matches, so the alias must not resolve.
+        from tests.conftest import _insert_message
+
+        conn, path = _open_built_db_conn(tmp_path, "secondary-alias.db")
+        _insert_message(
+            conn,
+            message_id="m1",
+            thread_id="t1",
+            sent_at="2024-01-01T00:00:00+00:00",
+            from_=["Person <person@example.test>"],
+        )
+        _insert_message(
+            conn,
+            message_id="m2",
+            thread_id="t2",
+            sent_at="2024-01-02T00:00:00+00:00",
+            from_=["Lead <lead@example.test>", "Alias <person@example.test>"],
+        )
+        conn.close()
+        db = Database(str(path))
+        assert db.find_contact("alias", senders_only=True) == []
+        # The primary sender's own name still resolves, counting t1 only.
+        assert [
+            (c["email"], c["thread_count"]) for c in db.find_contact("person", senders_only=True)
+        ] == [("person@example.test", 1)]
+
+    def test_senders_only_eligibility_is_per_thread(self, tmp_path):
+        # Documented limitation: the index records no author order per
+        # message, so a name is eligible on any thread the address
+        # primarily sent. Once person@ sent m1, an "Alias" written for
+        # them as a second author of m2 in the same thread resolves.
+        from tests.conftest import _insert_message
+
+        conn, path = _open_built_db_conn(tmp_path, "same-thread-alias.db")
+        _insert_message(
+            conn,
+            message_id="m1",
+            thread_id="t1",
+            sent_at="2024-01-01T00:00:00+00:00",
+            from_=["Person <person@example.test>"],
+        )
+        _insert_message(
+            conn,
+            message_id="m2",
+            thread_id="t1",
+            sent_at="2024-01-02T00:00:00+00:00",
+            from_=["Lead <lead@example.test>", "Alias <person@example.test>"],
+        )
+        conn.close()
+        db = Database(str(path))
+        assert [c["email"] for c in db.find_contact("alias", senders_only=True)] == [
+            "person@example.test"
+        ]
+
+    def test_senders_only_work_is_scoped_to_candidates(self, tmp_path, monkeypatch):
+        # A name that matches nobody must not parse every thread's
+        # senders; a name that matches one sender parses only that
+        # sender's threads.
+        from src.lib import sqlite as sqlite_mod
+
+        from tests.conftest import _insert_message
+
+        conn, path = _open_built_db_conn(tmp_path, "large.db")
+        for n in range(2000):
+            _insert_message(
+                conn,
+                message_id=f"m{n}",
+                thread_id=f"t{n}",
+                sent_at="2024-01-01T00:00:00+00:00",
+                from_=[f"Sender {n} <s{n}@example.test>"],
+            )
+        for n in range(3):
+            _insert_message(
+                conn,
+                message_id=f"z{n}",
+                thread_id=f"tz{n}",
+                sent_at="2024-01-01T00:00:00+00:00",
+                from_=["Zed Target <zed@example.test>"],
+            )
+        conn.commit()
+        conn.close()
+        db = Database(str(path))
+
+        calls = {"parseaddr": 0, "json": 0}
+        real_parseaddr, real_loads = sqlite_mod.parseaddr, sqlite_mod.json.loads
+
+        def counting_parseaddr(value):
+            calls["parseaddr"] += 1
+            return real_parseaddr(value)
+
+        class _CountingJson:
+            def __getattr__(self, name):
+                return getattr(json, name)
+
+            @staticmethod
+            def loads(value):
+                calls["json"] += 1
+                return real_loads(value)
+
+        monkeypatch.setattr(sqlite_mod, "parseaddr", counting_parseaddr)
+        monkeypatch.setattr(sqlite_mod, "json", _CountingJson())
+
+        assert db.find_contact("nobody-by-this-name", senders_only=True) == []
+        assert calls == {"parseaddr": 0, "json": 0}
+
+        contacts = db.find_contact("zed target", senders_only=True)
+        assert [(c["email"], c["thread_count"]) for c in contacts] == [("zed@example.test", 3)]
+        assert calls["json"] == 3
+        assert calls["parseaddr"] == 3
+
+    def test_senders_only_reads_one_snapshot(self, tmp_path, monkeypatch):
+        # Every query of one lookup runs on one connection inside one
+        # read transaction, so an indexer commit between them cannot mix
+        # two database states.
+        from tests.conftest import _insert_message
+
+        conn, path = _open_built_db_conn(tmp_path, "snapshot.db")
+        _insert_message(
+            conn,
+            message_id="m1",
+            thread_id="t1",
+            sent_at="2024-01-01T00:00:00+00:00",
+            from_=["Pat <pat@example.test>"],
+        )
+        conn.close()
+        db = Database(str(path))
+        opened = []
+        real_connect = db._connect
+
+        def counting_connect():
+            c = real_connect()
+            opened.append(c)
+            return c
+
+        monkeypatch.setattr(db, "_connect", counting_connect)
+        for senders_only in (True, False):
+            opened.clear()
+            assert db.find_contact("pat", senders_only=senders_only)
+            assert len(opened) == 1
 
     def test_senders_only_default_is_false_for_back_compat(self, seeded_db: Database):
         # The standalone find_contact MCP tool relies on the broader
@@ -3133,6 +3745,88 @@ class TestQueryMessagesUnicodeText:
     def test_bare_combining_mark_is_not_a_term(self, messages_db):
         with pytest.raises(ValueError, match="text"):
             messages_db.query_messages(text="\u0301")
+
+
+# (stored header text, query) pairs that are equal under Unicode caseless
+# matching. ``lower()`` misses the expansions (\u00df -> ss, the \ufb01 ligature).
+_CASELESS_PAIRS = [
+    ("Jane", "JANE"),
+    ("Jos\u00e9", "JOS\u00c9"),
+    ("Stra\u00dfe", "STRASSE"),
+    ("STRASSE", "stra\u00dfe"),
+    ("\u038c\u03c3\u03bf\u03c2", "\u038c\u03a3\u039f\u03a3"),
+    ("\ufb01le", "FILE"),
+]
+
+
+class TestUnicodeCaselessMatching:
+    """Every case-insensitive name and subject match folds both sides the
+    same way, with ``casefold``. One fixture per pair, checked through
+    each matching site, so a site left on ``lower`` shows up here."""
+
+    @pytest.fixture(params=_CASELESS_PAIRS, ids=lambda p: ascii(p[1]))
+    def case(self, request, tmp_path):
+        from tests.conftest import _insert_message
+
+        stored, query = request.param
+        conn, path = _open_built_db_conn(tmp_path, "caseless.db")
+        _insert_message(
+            conn,
+            message_id="m1",
+            thread_id="t1",
+            sent_at="2024-01-01T00:00:00+00:00",
+            subject=f"re {stored} notes",
+            from_=[f"{stored} Person <person@example.test>"],
+            to=[f"{stored} Recipient <recipient@example.test>"],
+        )
+        conn.close()
+        return Database(str(path)), stored, query
+
+    def test_find_contact(self, case):
+        db, _, query = case
+        assert [c["email"] for c in db.find_contact(query)] == [
+            "person@example.test",
+            "recipient@example.test",
+        ]
+
+    def test_find_contact_senders_only(self, case):
+        db, _, query = case
+        emails = [c["email"] for c in db.find_contact(query, senders_only=True)]
+        assert emails == ["person@example.test"]
+
+    def test_query_messages_subject(self, case):
+        db, _, query = case
+        assert db.query_messages(subject=query).total_matches == 1
+
+    @pytest.mark.parametrize("field", ["sender", "recipient", "participant"])
+    def test_query_messages_name_fragment(self, case, field):
+        db, _, query = case
+        assert db.query_messages(**{field: query}).total_matches == 1
+
+    def test_thread_filter_name_fragment(self, case):
+        from src.lib.sqlite import _addr_matches
+
+        _, stored, query = case
+        # Callers lowercase the filter value before matching.
+        assert _addr_matches([f"{stored} Person <person@example.test>"], query.lower())
+
+    def test_address_needle_keeps_matching_stored_addresses(self, tmp_path):
+        # Addresses are stored lowercased; a fragment of one must still
+        # match after the name side moved to casefold.
+        from tests.conftest import _insert_message
+
+        conn, path = _open_built_db_conn(tmp_path, "addr.db")
+        _insert_message(
+            conn,
+            message_id="m1",
+            thread_id="t1",
+            sent_at="2024-01-01T00:00:00+00:00",
+            from_=["stra\u00dfe@example.test"],
+        )
+        conn.close()
+        db = Database(str(path))
+        assert [c["email"] for c in db.find_contact("STRA\u00dfE@")] == ["stra\u00dfe@example.test"]
+        assert db.query_messages(sender="STRA\u00dfE@").total_matches == 1
 
 
 class TestQueryMessagesPaging:

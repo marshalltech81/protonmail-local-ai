@@ -837,6 +837,111 @@ class TestLoggingPrivacy:
         assert "dr@example.com" not in caplog.text
 
 
+class TestInvertedDateRange:
+    """#312: every search tool rejects ``date_from`` after ``date_to`` as
+    an empty interval, and logs which fields were rejected."""
+
+    @pytest.mark.parametrize(
+        ("tool", "extra"),
+        [
+            ("search_emails", {"mode": "keyword"}),
+            ("search_emails", {"mode": "semantic"}),
+            ("search_emails", {"mode": "hybrid"}),
+            ("get_evidence", {}),
+            ("search_attachments", {}),
+        ],
+    )
+    def test_inverted_range_is_an_error(
+        self, fake_server, fake_embed, seeded_db, caplog, tool, extra
+    ):
+        import logging
+
+        register_search_tools(fake_server, seeded_db, fake_embed)
+        handler = fake_server.tools[tool]
+        kwargs = {"query": "invoice", "date_from": "2099-03-04", "date_to": "2098-05-06", **extra}
+        with caplog.at_level(logging.DEBUG):
+            text = _error(handler(**kwargs))
+        assert "date_from must not be after date_to" in text
+        assert f"{tool} rejected invalid date_from/date_to" in caplog.text
+
+
+class TestDateRangeRejectedBeforeWork:
+    """Review round 1 on #416: an inverted range is rejected at each tool's
+    entry, before the embed call, any retrieval, or the model. Checked
+    only in the database, it still cost a (possibly remote) embedding
+    request, and an embedder or vector-index failure masked the
+    documented date-range error."""
+
+    _RETRIEVAL = (
+        "find_contact",
+        "keyword_search",
+        "semantic_search",
+        "hybrid_search",
+        "search_attachments",
+        "query_messages",
+        "get_thread",
+    )
+
+    @pytest.mark.parametrize(
+        ("tool", "args"),
+        [
+            ("search_emails", {"query": "invoice", "mode": "keyword"}),
+            ("search_emails", {"query": "invoice", "mode": "semantic"}),
+            ("search_emails", {"query": "invoice", "mode": "hybrid"}),
+            ("search_emails", {"query": "invoice", "from_name": "alice"}),
+            ("get_evidence", {"query": "invoice"}),
+            ("search_attachments", {"query": "invoice"}),
+            ("query_messages", {}),
+            ("ask_mailbox", {"question": "What was the budget?"}),
+            ("extract_from_emails", {"query": "invoice", "schema": {"vendor": "string"}}),
+        ],
+    )
+    def test_inverted_range_is_rejected_before_any_work(
+        self, fake_server, seeded_db, caplog, tool, args
+    ):
+        import logging
+
+        from src.tools.intelligence import register_intelligence_tools
+        from src.tools.retrieval import register_retrieval_tools
+
+        from tests.conftest import FakeEmbedClient, FakeInferenceClient
+
+        retrieval_calls: list[str] = []
+        for name in self._RETRIEVAL:
+
+            def record(*_args, _name=name, **_kwargs):
+                retrieval_calls.append(_name)
+                raise AssertionError(f"{_name} ran before the date range was checked")
+
+            setattr(seeded_db, name, record)
+        embed = FakeEmbedClient()
+        llm = FakeInferenceClient()
+        register_search_tools(fake_server, seeded_db, embed)
+        register_retrieval_tools(fake_server, seeded_db)
+        register_intelligence_tools(fake_server, seeded_db, embed, llm)
+
+        kwargs = {**args, "date_from": "2025-01-01", "date_to": "2024-01-01"}
+        with caplog.at_level(logging.DEBUG):
+            text = _error(fake_server.tools[tool](**kwargs))
+        assert "date_from must not be after date_to" in text
+        assert embed.embed_calls == []
+        assert llm.complete_calls == []
+        assert retrieval_calls == []
+        assert "rejected invalid" in caplog.text
+
+
+def test_utc_overflowing_date_bound_is_a_filter_error(fake_server, fake_embed, seeded_db, caplog):
+    """A bound whose UTC conversion overflows reaches the caller as the
+    date-filter error, not a raw OverflowError, before any provider work."""
+    value = "0001-01-01T00:00:00+14:00"
+    register_search_tools(fake_server, seeded_db, fake_embed)
+    with caplog.at_level("DEBUG"):
+        text = _error(fake_server.tools["search_emails"](query="invoice", date_from=value))
+    assert "date_from" in text
+    assert "OverflowError" not in caplog.text
+    assert fake_embed.embed_calls == []
+
+
 _LOCAL_DB_MARKER = "privatemarkerq7z"
 
 
