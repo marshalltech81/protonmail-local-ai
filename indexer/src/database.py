@@ -2191,24 +2191,6 @@ class Database:
         ).fetchall()
 
     @_synchronized
-    def remove_message(self, message_id: str) -> None:
-        """Remove a message's map + indexed_files + tombstone rows.
-
-        Does not touch the parent thread row — the caller is responsible for
-        rebuilding or deleting the thread after determining how many messages
-        remain. Prefer ``reap_thread_messages`` when the thread rebuild and
-        the message removals need to land atomically as one transaction.
-        """
-        cur = self._conn.cursor()
-        try:
-            cur.execute("BEGIN IMMEDIATE")
-            self._remove_message_row(cur, message_id)
-            self._conn.commit()
-        except Exception:
-            self._conn.rollback()
-            raise
-
-    @_synchronized
     def delete_thread_completely(self, thread_id: str, *, grace_cutoff: str | None = None) -> bool:
         """Remove a thread and every derived row. Used when the last message
         in a thread has been reaped.
@@ -2295,24 +2277,6 @@ class Database:
         return cur.execute(sql + " LIMIT 1", params).fetchone() is not None
 
     @_synchronized
-    def rebuild_thread(self, thread, embedding: list[float]) -> None:
-        """Fully rewrite a thread row after a message has been removed.
-
-        Unlike ``upsert_thread``, this path always regenerates ``body_text``
-        from the supplied messages rather than appending to the stored body.
-        The caller is expected to pass a ``Thread`` whose ``messages`` list
-        reflects the surviving messages only (re-parsed from disk).
-        """
-        cur = self._conn.cursor()
-        try:
-            cur.execute("BEGIN IMMEDIATE")
-            self._rewrite_thread_row(cur, thread, embedding)
-            self._conn.commit()
-        except Exception:
-            self._conn.rollback()
-            raise
-
-    @_synchronized
     def reap_thread_messages(
         self,
         thread,
@@ -2323,16 +2287,11 @@ class Database:
     ) -> list[str] | None:
         """Atomically rewrite a thread and remove reaped messages.
 
-        The reconciler previously called ``rebuild_thread`` and then looped
-        ``remove_message`` — three or more separate transactions. If the
-        process crashed between them, the thread row reflected only
-        survivors while ``message_thread_map`` and ``pending_deletions``
-        still held rows for the reaped messages. The recovery path worked
-        (a second reap pass completed idempotently) but any observer
-        running between the two commits saw inconsistent state.
-
-        All writes now happen inside a single ``BEGIN IMMEDIATE`` / commit
-        so either the whole reap lands or none of it does.
+        All writes happen inside a single ``BEGIN IMMEDIATE`` / commit so
+        either the whole reap lands or none of it does: a crash cannot
+        leave the thread row reflecting only survivors while
+        ``message_thread_map`` and ``pending_deletions`` still hold rows
+        for the reaped messages.
 
         Returns the filepaths that were removed, so the caller can perform
         any on-disk unlink work outside the transaction, or ``None``,
@@ -2363,9 +2322,9 @@ class Database:
     def _rewrite_thread_row(self, cur: sqlite3.Cursor, thread, embedding: list[float]) -> None:
         """Replace a thread row and its FTS/vec entries using ``cur``.
 
-        Shared by ``rebuild_thread`` and ``reap_thread_messages`` so the
-        same rewrite can participate in a larger transaction when needed.
-        The caller owns ``BEGIN`` / ``COMMIT`` / ``ROLLBACK``.
+        Used by ``reap_thread_messages`` so the rewrite participates in
+        its larger transaction. The caller owns ``BEGIN`` / ``COMMIT`` /
+        ``ROLLBACK``.
         """
         if len(embedding) != EMBEDDING_DIM:
             raise ValueError(
@@ -2446,9 +2405,8 @@ class Database:
         """Remove a message's map / indexed_files / tombstone / chunk /
         attachment rows using ``cur``. Returns the message's filepath
         (for optional on-disk cleanup), or ``None`` if no such message
-        was tracked. Shared by ``remove_message`` and
-        ``reap_thread_messages``; the caller owns the enclosing
-        transaction.
+        was tracked. Used by ``reap_thread_messages``; the caller owns
+        the enclosing transaction.
         """
         row = cur.execute(
             "SELECT filepath FROM message_thread_map WHERE message_id = ?",
