@@ -481,8 +481,8 @@ answers real knowledge questions, and identify why failures occur.
    occurred_at/sent_at consistently; bitemporal claim modeling waits
    for Phase 5.
 4. **Deletion/retention semantics.** Define the product policy:
-   mirror mode (upstream delete → corpus delete; the opt-in
-   reconciler is the existing seed), archive mode (retain locally),
+   mirror mode (upstream delete → corpus delete; the reconciler,
+   on by default since 2026-10-01), archive mode (retain locally),
    user-controlled retention. Provenance must define behavior when a
    citation's source is reaped (evidence row retained, source marked
    unavailable, chain never silently broken).
@@ -1005,9 +1005,9 @@ can be revisited with an explicit owner decision.
 - Bridge password lives in `.secrets/bridge_pass.txt` (Docker
   Compose secret), never `.env`. `make first-run` uses
   `logging: driver: none` to keep credentials out of Docker logs.
-- Deletion reconciliation is opt-in (`INDEXER_DELETION_ENABLED=true`)
-  with a grace window, mass-delete brake, and atomic
-  reap-or-rollback.
+- Deletion reconciliation (mirror) is on by default
+  (`INDEXER_DELETION_ENABLED=false` selects archive) with a grace
+  window, mass-delete brake, and atomic reap-or-rollback.
 - A durable `indexing_jobs` queue retries transient failures with
   exponential backoff and dead-letters persistent ones for operator
   visibility.
@@ -1022,7 +1022,7 @@ can be revisited with an explicit owner decision.
   XLSX / HTML / TXT / images are extracted, chunked, and searchable
 - `list_threads(filter_type=...)` rejects unsupported values cleanly;
   unread/flagged state remains unindexed
-- deletion reconciliation is opt-in and not yet validated under
+- deletion reconciliation is on by default (mirror) and not yet validated under
   long-running real-world conditions; `INDEXER_UNLINK_ON_REAP=true`
   only removes the `.eml` when Maildir is mounted read-write
 - coverage scope: both services measure `src/` with `src/main.py`
