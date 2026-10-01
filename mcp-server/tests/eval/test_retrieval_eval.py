@@ -6,8 +6,11 @@ Why this is separate from the unit suite:
 The chunker / threader / search-knob discussions in this repo keep hitting
 the same wall: there's no held-out set of "query → expected message"
 mappings to measure whether a change actually helped retrieval. Without
-that signal, every change to ``PER_THREAD_CHAR_BUDGET``, ``THREAD_BODY_TEXT_MAX_TOKENS``,
-embedding model, or RRF weights is shipped on faith.
+that signal, every change to chunking, ``THREAD_BODY_TEXT_MAX_TOKENS``,
+the embedding model, or the RRF fusion in ``hybrid_search`` is shipped
+on faith. The harness measures retrieval only (the thread ids and ranks
+``keyword_search`` / ``hybrid_search`` return); prompt-side settings such
+as ``PER_THREAD_CHAR_BUDGET`` never reach it.
 
 This harness fills that gap with a tiny, JSON-driven loop the operator
 extends with real-mailbox queries. It does NOT ship with meaningful seed
@@ -34,8 +37,8 @@ Metrics emitted per query:
   if missed (used to compute mean reciprocal rank).
 
 ``test_eval_summary`` prints aggregate Recall@K and MRR across the
-loaded query set (``-s`` keeps pytest from capturing it) so two runs (e.g. before/after raising
-``PER_THREAD_CHAR_BUDGET``) can be compared directly.
+loaded query set (``-s`` keeps pytest from capturing it) so two runs (e.g.
+before/after a change to RRF fusion) can be compared directly.
 """
 
 from __future__ import annotations
@@ -73,10 +76,13 @@ class EvalQuery:
     """
 
     id: str
-    question: str
     search_query: str
     expected_thread_ids: list[str]
-    expected_substrings: list[str]
+
+
+def _using_example_queries() -> bool:
+    """True when no operator ``queries.json`` exists and the example is used."""
+    return not DEFAULT_QUERY_FILE.exists()
 
 
 def _load_queries() -> list[EvalQuery]:
@@ -85,18 +91,20 @@ def _load_queries() -> list[EvalQuery]:
     The example file is shipped with placeholder thread ids and exists
     only as a template. If a test runs against the example file, the
     expected_thread_ids will not match anything in a real index, and
-    every query will report a miss — this is intentional and the
-    summary line points it out so the operator notices.
+    every query will report a miss — this is intentional and
+    ``test_eval_summary`` prints a notice so the operator notices.
+
+    Keys other than ``id``, ``search_query`` and ``expected_thread_ids``
+    (``notes``, or the retired ``question`` / ``expected_substrings``)
+    are ignored.
     """
-    path = DEFAULT_QUERY_FILE if DEFAULT_QUERY_FILE.exists() else EXAMPLE_QUERY_FILE
+    path = EXAMPLE_QUERY_FILE if _using_example_queries() else DEFAULT_QUERY_FILE
     raw = json.loads(path.read_text())
     return [
         EvalQuery(
             id=q["id"],
-            question=q["question"],
             search_query=q["search_query"],
             expected_thread_ids=list(q.get("expected_thread_ids", [])),
-            expected_substrings=list(q.get("expected_substrings", [])),
         )
         for q in raw
     ]
@@ -263,6 +271,11 @@ def test_eval_summary(eval_db: Database, eval_embedder, eval_queries: list[EvalQ
     ]
     for qid, rank in rank_records:
         lines.append(f"    {qid:<30s} rank={rank}")
+    if _using_example_queries():
+        lines.append(
+            f"  NOTE: no {DEFAULT_QUERY_FILE.name} found; ran the placeholder "
+            f"queries in {EXAMPLE_QUERY_FILE.name}, so every miss above is expected."
+        )
     lines.append("=" * 60)
     # Use ``pytest -s`` to see this; otherwise pytest captures stdout.
     print("\n".join(lines))
