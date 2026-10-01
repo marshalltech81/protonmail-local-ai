@@ -2,6 +2,9 @@
 
 Uses ``openpyxl`` in read-only mode to walk every cell of every sheet.
 Each row becomes a single text line of tab-separated cell values; each
+cell keeps its column position, so an empty cell is an empty field
+between tabs (#296) and tabs or line breaks inside a value become
+spaces. Trailing empty cells and wholly empty rows are dropped. Each
 sheet is preceded by ``[Sheet: name]`` so a search can land on the
 right sheet when several share columns. Formula cells return their
 last-computed value (``data_only=True``) — for a forwarded-as-PDF /
@@ -35,12 +38,17 @@ import openpyxl
 _MAX_EXPANDED_CELLS = 20_000_000
 
 # Characters read from cell values and sheet titles across the
-# workbook, plus a separator for each, so it also bounds the returned
+# workbook, plus each separator emitted, so it also bounds the returned
 # length. Charged before stripping so blank values cost their full
-# length. Five times the default ``INDEXER_ATTACHMENT_MAX_EXTRACTED_CHARS``
+# length; trailing empty cells emit nothing and cost only the cell
+# budget. Five times the default ``INDEXER_ATTACHMENT_MAX_EXTRACTED_CHARS``
 # (2,000,000), so the dispatcher's cap still decides the stored length
 # unless an operator raises it past this.
 _MAX_TEXT_CHARS = 10_000_000
+
+# A tab or line break inside a value would read as a column or row
+# boundary.
+_CELL_SEPARATORS = str.maketrans("\t\r\n", "   ")
 
 
 def extract(
@@ -76,16 +84,31 @@ def _serialize(workbook: openpyxl.Workbook) -> str:
             if expanded_cells > _MAX_EXPANDED_CELLS:
                 raise ValueError(f"workbook exceeds the {_MAX_EXPANDED_CELLS}-cell budget")
             cells: list[str] = []
+            blanks = 0  # empty cells since the last value
             for value in row:
-                if value is None or chars_left <= 0:
+                if chars_left <= 0:
+                    break
+                if value is None:
+                    blanks += 1
                     continue
                 # Slice before stripping so no value costs more work
                 # than the budget has left.
                 text = str(value)[:chars_left]
-                chars_left -= len(text) + 1  # and its tab or newline
-                text = text.strip()
-                if text:
-                    cells.append(text)
+                chars_left -= len(text)
+                text = text.translate(_CELL_SEPARATORS).strip()
+                if not text:
+                    blanks += 1
+                    continue
+                # The empty cells before a value become empty fields, so
+                # their tabs are charged now; trailing ones are dropped
+                # and cost only the cell budget.
+                if blanks + 1 > chars_left:
+                    chars_left = 0
+                    break
+                chars_left -= blanks + 1  # and the value's tab or newline
+                cells.extend([""] * blanks)
+                cells.append(text)
+                blanks = 0
             if cells:
                 sheet_lines.append("\t".join(cells))
             if chars_left <= 0:

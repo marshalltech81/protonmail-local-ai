@@ -641,6 +641,63 @@ class TestXlsxSharedStringBudget:
         assert extractors.stale_extractor_module("xlsx@2") is None
 
 
+class TestXlsxColumnPositions:
+    """#296: dropping empty cells shifted later values left, so a value
+    in one column read as belonging to another."""
+
+    _ROWS: list[list[object]] = [
+        ["Project", "Approved", "Paid"],
+        ["alpha", 500, None],
+        ["beta", None, 500],
+        [None, None, "gamma"],
+        ["  ", "delta", None],
+    ]
+
+    def test_each_value_stays_under_its_column(self):
+        from src.extractors import xlsx
+
+        text, _ = xlsx.extract(_xlsx_bytes(self._ROWS))
+
+        assert text.split("\n")[1:] == [
+            "Project\tApproved\tPaid",
+            "alpha\t500",
+            "beta\t\t500",
+            "\t\tgamma",
+            "\tdelta",
+        ]
+        header = self._ROWS[0]
+        for source, line in zip(self._ROWS[1:], text.split("\n")[2:], strict=True):
+            for column, value in enumerate(line.split("\t")):
+                expected = source[column]
+                assert value == ("" if expected is None else str(expected).strip()), header[column]
+
+    def test_tabs_and_line_breaks_inside_a_value_do_not_shift_columns(self):
+        from src.extractors import xlsx
+
+        text, _ = xlsx.extract(_xlsx_bytes([["a\tb", "c\nd", "e\r\nf", "last"]]))
+        assert text.split("\n")[1:] == ["a b\tc d\te  f\tlast"]
+
+    def test_positions_survive_attachment_chunking(self):
+        from src.chunker import chunk_message
+        from src.extractors import xlsx
+
+        text, _ = xlsx.extract(_xlsx_bytes(self._ROWS))
+        chunks = chunk_message(message_pk="m::a", body_text=text)
+        joined = "\n".join(c.text for c in chunks)
+        assert "beta\t\t500" in joined
+        assert "\t\tgamma" in joined
+
+    def test_empty_cells_are_charged_to_the_text_budget(self, monkeypatch):
+        """Empty cells now emit a tab each, so they count against the
+        budget that bounds the returned length."""
+        from src.extractors import xlsx
+
+        monkeypatch.setattr(xlsx, "_MAX_TEXT_CHARS", 1_000)
+        text, _ = xlsx.extract(_xlsx_bytes([["x"] + [None] * 5_000 + ["y"]]))
+        assert len(text) <= 1_000
+        assert "y" not in text
+
+
 class TestXlsxExtractor:
     def test_serializes_each_sheet_with_header_marker(self):
         import io
