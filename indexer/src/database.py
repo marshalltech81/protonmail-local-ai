@@ -2344,17 +2344,19 @@ class Database:
         date_last = thread.date_last.isoformat()
         has_attachments = int(any(m.has_attachments for m in thread.messages))
         body = thread.text_for_embedding()
-        # display_subject: derive from the surviving messages the same way
-        # ``upsert_thread`` derives it (oldest message's original subject).
+        # display_subject: derive from the surviving messages — the
+        # first original subject, in date order, that is non-empty, so a
+        # blank oldest survivor does not drop the label.
         # Without this rewrite, reaping the original root of a thread
         # leaves the dead message's subject as the user-facing label —
         # search results would render with text from a message that no
-        # longer exists in the index. None when the thread has no
-        # messages (the deletion-reconciler then drops the thread row
+        # longer exists in the index. None when no survivor has a
+        # subject, or when the thread has no messages (the deletion-reconciler then drops the thread row
         # entirely a few lines below; the value never reaches storage).
-        display_subject: str | None = None
-        if thread.messages:
-            display_subject = min(thread.messages, key=lambda m: m.date).subject or None
+        display_subject = next(
+            (m.subject for m in sorted(thread.messages, key=lambda m: m.date) if m.subject),
+            None,
+        )
 
         cur.execute(
             """

@@ -1463,6 +1463,54 @@ class TestReapRewritesThreadRow:
         ).fetchone()
         assert row["display_subject"] == "Re: Original Display Subject"
 
+    @pytest.mark.parametrize(
+        ("survivor_subjects", "expected"),
+        [
+            (["", "Re: Live Label", "Re: Later Label"], "Re: Live Label"),
+            (["", ""], None),
+        ],
+    )
+    def test_reap_display_subject_skips_blank_oldest_survivor(
+        self, db, threader, survivor_subjects, expected
+    ):
+        """The label after a reap is the first survivor subject, in date
+        order, that is non-empty; NULL only when no survivor has one."""
+        from src.threader import Thread
+
+        original = make_message(
+            message_id="bl-0@x",
+            subject="Deleted Label",
+            filepath="/bl/0",
+            date=datetime(2024, 1, 1, tzinfo=UTC),
+        )
+        db.upsert_thread(threader.assign_thread(original), FAKE_EMBEDDING)
+        survivors = []
+        for i, subject in enumerate(survivor_subjects, start=1):
+            msg = make_message(
+                message_id=f"bl-{i}@x",
+                subject=subject,
+                in_reply_to=f"bl-{i - 1}@x",
+                filepath=f"/bl/{i}",
+                date=datetime(2024, 2, i, tzinfo=UTC),
+            )
+            thread = threader.assign_thread(msg)
+            db.upsert_thread(thread, FAKE_EMBEDDING)
+            survivors.append(msg)
+
+        rebuilt = Thread(
+            thread_id=thread.thread_id,
+            subject=thread.subject,
+            participants=[survivors[0].from_addr],
+            messages=survivors,
+            folder="INBOX",
+            date_first=survivors[0].date,
+            date_last=survivors[-1].date,
+        )
+        db.add_pending_deletion("/bl/0", "bl-0@x", thread.thread_id)
+        assert db.reap_thread_messages(rebuilt, FAKE_EMBEDDING, ["bl-0@x"]) == ["/bl/0"]
+
+        assert db.get_thread_display_subject(thread.thread_id) == expected
+
     def test_reap_updates_fts_and_vec_rows(self, db, threader):
         original = make_message(message_id="r3@x", filepath="/r/3")
         reply = make_message(
