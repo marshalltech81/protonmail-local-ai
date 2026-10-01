@@ -14,10 +14,14 @@ Two paths share one entry point:
 
 The OCR fallback is gated by ``ocr_enabled`` and bounded by
 ``max_ocr_pages`` so a 500-page scanned book attachment does not
-monopolise CPU. Pages beyond the cap are silently skipped — the
-indexer logs the truncation via the dispatcher's ``failed`` /
-``empty`` accounting and the operator can lift the cap and reprocess
-the cached extraction if needed.
+monopolise CPU. Pages beyond the cap are never rendered, and the
+truncation is silent: nothing is logged and nothing is recorded. If
+the pages within the cap yield text, the dispatcher records an
+ordinary ``success`` that cannot be told apart from a complete
+extraction; if they yield none, the usual ``empty`` (or short
+digital-text ``success``) applies. The result is cached by content
+hash, so raising the cap later does not re-extract a payload already
+cached; it applies only to payloads extracted after the change.
 """
 
 from __future__ import annotations

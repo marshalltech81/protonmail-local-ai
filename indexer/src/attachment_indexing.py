@@ -8,10 +8,15 @@ Two-phase shape:
 
 * ``prepare_attachment_writes`` runs everything that must NOT happen
   inside a SQLite write transaction — extractor (OCR / pypdf / openpyxl)
-  CPU work and the per-chunk ``embedder.embed`` HTTP roundtrips against
-  the embedding service. It only reads the DB (cache lookups and existing
-  chunk-id diffing). The output is a fully-materialised ``AttachmentWritePlan``
-  that the caller can hold in memory until it's ready to commit.
+  CPU work and chunking. It only reads the DB (cache lookups and existing
+  chunk-id diffing). The output is an ``AttachmentWritePlan`` that the
+  caller can hold in memory until it's ready to commit. Embedding is
+  optional here: given an embedder, it embeds the plan's new chunks in
+  one ``embed_batch`` call; given ``embedder=None``, it leaves
+  ``embeddings_by_chunk_id`` empty for the caller to fill. The batched
+  drain pipeline in ``main.py`` passes ``None``, then embeds the new
+  chunks of every message in the batch together (Phase 2b) and fills
+  each plan from that result before applying it.
 
 * ``apply_attachment_writes`` performs only DB writes and is intended
   to be called inside the indexer's outer ``with db.transaction():``
@@ -64,9 +69,11 @@ def attachment_occurrence_id(
     Same payload appearing twice on the same message (e.g. inline + as
     a regular attachment) gets two distinct rows differentiated by
     ``occurrence_index``. The hash inputs and order are part of the
-    on-disk identity and must not change without a schema bump — both
-    the indexer write path and ``Database.upsert_attachment`` derive ids
-    from this function so they cannot drift.
+    on-disk identity and must not change without a schema bump. This
+    function is the only place the id is derived: callers derive it here
+    (``prepare_attachment_writes`` stores it on the plan) and
+    ``Database.upsert_attachment`` persists the id it is given without
+    computing it.
     """
     return hashlib.sha256(
         f"{message_id}\0{content_hash}\0{filename}\0{occurrence_index}".encode()
