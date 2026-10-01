@@ -551,6 +551,7 @@ def register_search_tools(
                     retrieval_score=score if include_scores else None,
                     chunks=[
                         EvidenceChunk(
+                            chunk_id=c.chunk_id,
                             message_id=c.message_id,
                             claimant_id=c.claimant_id,
                             chunk_index=c.chunk_index,

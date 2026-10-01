@@ -310,7 +310,11 @@ class TestIntelligenceTimings:
     ):
         caplog.set_level(logging.INFO)
         register_intelligence_tools(
-            fake_server, chunked_db, fake_embed, FakeInferenceClient(mode="openai")
+            fake_server,
+            chunked_db,
+            fake_embed,
+            # Cites a label so #284's citation check passes without a repair call.
+            FakeInferenceClient(response="mock answer [E1]", mode="openai"),
         )
         asyncio.run(fake_server.tools["ask_mailbox"](question="invoice"))
         line = _one_line(caplog)
@@ -354,7 +358,7 @@ class TestNoContentInLogs:
     def test_search_and_intelligence_tools(self, caplog, fake_server, marker_db):
         caplog.set_level(logging.DEBUG)
         embed = FakeEmbedClient()
-        inference = FakeInferenceClient(response=f"the answer is {MARKER}")
+        inference = FakeInferenceClient(response=f"the answer is {MARKER} [E1]")
         register_search_tools(fake_server, marker_db, embed, reranker=_Reranker())
         register_intelligence_tools(fake_server, marker_db, embed, inference, reranker=_Reranker())
         tools = fake_server.tools
@@ -365,7 +369,7 @@ class TestNoContentInLogs:
             await tools["get_evidence"](query=f"{MARKER} figures")
             await tools["search_attachments"](query=MARKER)
             out = await tools["ask_mailbox"](question=f"what are the {MARKER} figures?")
-            assert MARKER in out[0].text  # the marker did flow through the call
+            assert MARKER in out.content[0].text  # the marker did flow through the call
             await tools["extract_from_emails"](query=MARKER, schema={"n": "string"})
             await tools["summarize_thread"](thread_id="t-marker")
 

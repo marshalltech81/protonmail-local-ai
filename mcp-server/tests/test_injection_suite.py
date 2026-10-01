@@ -34,9 +34,11 @@ import sqlite_vec
 from fastmcp.exceptions import ToolError
 from src.lib.sqlite import Database
 from src.tools.intelligence import (
+    _LABELLED_HEADER_MAX_CHARS,
     ASK_SYSTEM,
     EXTRACT_SYSTEM,
     SUMMARIZE_SYSTEM,
+    _short,
     register_intelligence_tools,
 )
 from src.tools.outputs import HEADER_CHAR_LIMIT, clip
@@ -352,12 +354,17 @@ def _extract_template(query: str, schema: dict) -> str:
 # --- Tool flows -------------------------------------------------------------
 
 
+# A cited answer passes ask_mailbox's citation check (#284), so the flow
+# makes one call and the prompt under test is the only one.
+_CITED_ANSWER = "Open invoices are listed [E1]."
+
+
 class TestAskMailbox:
     QUESTION = "which invoices are open?"
 
     def test_every_hostile_vector_stays_inside_its_block(self, hostile_db, caplog):
         caplog.set_level(logging.DEBUG)
-        inference = FakeInferenceClient()
+        inference = FakeInferenceClient(response=_CITED_ANSWER)
         asyncio.run(
             _tools(hostile_db, inference)["ask_mailbox"](question=self.QUESTION, max_threads=10)
         )
@@ -374,7 +381,7 @@ class TestAskMailbox:
         _assert_no_marker(caplog.text)
 
     def test_oversized_headers_stay_clipped(self, hostile_db):
-        inference = FakeInferenceClient()
+        inference = FakeInferenceClient(response=_CITED_ANSWER)
         asyncio.run(
             _tools(hostile_db, inference)["ask_mailbox"](question=self.QUESTION, max_threads=10)
         )
@@ -389,10 +396,15 @@ class TestAskMailbox:
         huge = MAILBOX[-1]
         assert f"Subject: {clip(huge['subject'], HEADER_CHAR_LIMIT)}\n" in user
         attachment = huge["attachment"]
-        assert (
-            f"attachment {clip(attachment['filename'], HEADER_CHAR_LIMIT)} "
-            f"({clip(attachment['mime'], HEADER_CHAR_LIMIT)})"
-        ) in user
+        # A labelled header that would pass _LABELLED_HEADER_MAX_CHARS is
+        # rebuilt with each value cut shorter (#284, review round 1).
+        header = next(
+            line
+            for line in user.splitlines()
+            if f"attachment {_short(attachment['filename'])} " in line
+        )
+        assert f"({_short(attachment['mime'])})" in header
+        assert len(header) <= _LABELLED_HEADER_MAX_CHARS
 
 
 class TestSummarizeThread:
