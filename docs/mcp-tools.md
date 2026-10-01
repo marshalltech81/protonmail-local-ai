@@ -180,7 +180,7 @@ three returns the whole document.
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `query` | string | none | Match against filename, MIME type, and extracted text; omit to list by filter alone |
-| `content_type` | string | none | Exact MIME-type filter, e.g. `application/pdf` |
+| `content_type` | string | none | Exact MIME-type filter, e.g. `application/pdf`; blank means no filter |
 | `from_addr` | string | none | Restrict to attachments on threads sent by this address or domain |
 | `date_from` | string | none | ISO 8601 date lower bound (parent thread activity) |
 | `date_to` | string | none | ISO 8601 date upper bound |

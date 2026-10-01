@@ -3602,6 +3602,20 @@ class TestSearchAttachments:
         results = db.search_attachments(query="uniquemarker", **filters)
         assert [r.filename for r in results] == expected
 
+    @pytest.mark.parametrize("content_type", [None, "", "  "])
+    @pytest.mark.parametrize("query", ["uniquemarker", "acme", "wage", None])
+    def test_blank_content_type_is_no_filter(self, tmp_path, attachments_db, content_type, query):
+        """Review round 1: the text lane's occurrence anchor matched
+        ``content_type=""`` exactly while the shared filter clauses
+        treated it as absent, so every extracted-text hit disappeared.
+        A blank filter is no filter in every lane."""
+        for db in (self._duplicate_content_db(tmp_path), attachments_db):
+            unfiltered = db.search_attachments(query=query)
+            filtered = db.search_attachments(query=query, content_type=content_type)
+            assert [(r.attachment_id, r.filename) for r in filtered] == [
+                (r.attachment_id, r.filename) for r in unfiltered
+            ]
+
     def test_lanes_degrade_when_attachments_table_missing(self, tmp_path):
         # Every lane JOINs/scans ``attachments``; dropping it exercises the
         # OperationalError branch in all three lanes — the search degrades

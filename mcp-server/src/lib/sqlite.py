@@ -1202,8 +1202,12 @@ class Database:
         includes the whole day); ``extracted_only`` keeps only
         attachments whose text extraction succeeded; ``from_addr`` keeps
         only attachments on threads the address sent on (matched against
-        the thread's From-line senders, post-query in Python).
+        the thread's From-line senders, post-query in Python). A blank
+        ``content_type`` is no filter, normalized here once so every lane
+        applies the same rule.
         """
+        if content_type is not None and not content_type.strip():
+            content_type = None
         extra_clauses, extra_params = self._attachment_filter_clauses(
             content_type, date_from, date_to, extracted_only
         )
