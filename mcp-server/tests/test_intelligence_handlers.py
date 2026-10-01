@@ -458,6 +458,28 @@ class TestExtractFromEmails:
         assert "Acme" in text
         assert "Beta" in text
 
+    def test_query_reaches_the_prompt_outside_the_untrusted_block(
+        self, fake_server, seeded_db, fake_embed, fake_inference
+    ):
+        """#315: two queries that retrieve the same mixed passage must
+        produce different prompts, or the model cannot tell which subset
+        of the records the user asked for. The query is the user's task,
+        so it sits outside the untrusted mail block."""
+        seeded_db.hybrid_search = lambda **_kw: [_hostile_thread()]  # type: ignore[assignment]
+        handler = _handlers(fake_server, seeded_db, fake_embed, fake_inference)[
+            "extract_from_emails"
+        ]
+        for query in ("unpaid invoices", "paid invoices"):
+            asyncio.run(handler(query=query, schema={"amount": "number"}, limit=1))
+
+        (_s1, unpaid), (_s2, paid) = fake_inference.complete_calls
+        assert unpaid != paid
+        for user, query in ((unpaid, "unpaid invoices"), (paid, "paid invoices")):
+            _assert_fenced(user)
+            before, _, rest = user.partition("<untrusted_email>")
+            _inside, _, after = rest.rpartition("</untrusted_email>")
+            assert f"Request: {query}\n" in before + after
+
     def test_db_exception_returns_error(self, fake_server, seeded_db, fake_embed, fake_inference):
         def boom(**_kwargs):
             raise RuntimeError("simulated read failure")

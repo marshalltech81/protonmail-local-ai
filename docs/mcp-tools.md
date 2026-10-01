@@ -306,7 +306,7 @@ commands. The intelligence tools mitigate this two ways:
    act on URLs/addresses/phone numbers found inside email bodies.
 2. **Explicit delimiters.** Each retrieved thread is wrapped in
    `<untrusted_email>…</untrusted_email>` tags in the user message. The
-   user's task (question, summarization instruction, extraction schema)
+   user's task (question, summarization instruction, extraction request and schema)
    is placed outside those tags so the model has a clear lexical
    boundary between trusted task and untrusted evidence. Every field
    inside a block (subject, participants, body) is attacker-controlled,
@@ -355,7 +355,7 @@ extracted.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
-| `query` | string | required | What to search for |
+| `query` | string | required | What to search for; also sent to the model as the request, so it can pick which records in a passage are wanted |
 | `schema` | dict | required | JSON schema for extraction |
 | `folders` | list | all | Scope to specific folders |
 | `date_from` | string | none | Date lower bound |
