@@ -8,13 +8,17 @@ metadata with its provenance rule. It never changes ranking.
 
 import asyncio
 import logging
+import sqlite3
+from contextlib import closing
 
 import pytest
+import sqlite_vec
 from fastmcp.exceptions import ToolError
 from src.lib.security import log_tool_call
 from src.lib.sqlite import AUTHORITY_CLASSES, Database, InvalidFilterError
 
-from tests.conftest import set_authority
+from tests.conftest import _build_schema, _insert_thread, claimant_of, set_authority
+from tests.test_sqlite import _TARGET, _scoped_recall_db, _search
 
 
 def _ids(page) -> list[str]:
@@ -222,3 +226,117 @@ class TestReviewRound2Blank:
     def test_surrounding_whitespace_is_stripped(self, counsel_messages_db):
         page = counsel_messages_db.query_messages(authority_class=" counsel ")
         assert _ids(page) == ["m5", "m3", "m1"]
+
+
+_COUNSEL = "counsel@firm.example"
+_READER = "reader@home.example"
+
+
+@pytest.fixture
+def spam_db(tmp_path) -> Database:
+    """A counsel-classified sender with mail in INBOX and in Spam (#463).
+
+    - ``t-inbox``: the sender's message in INBOX.
+    - ``t-spam``: an identical message from the same sender in Spam.
+    - ``t-mixed``: two messages from the sender, ``mixed-1`` in Spam
+      and ``mixed-2`` in INBOX.
+    - ``t-spam-reply``: the sender's ``sr-1`` in Spam answered by the
+      unclassified reader's ``sr-2`` in INBOX.
+    """
+    db_path = tmp_path / "spam.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.enable_load_extension(True)
+    sqlite_vec.load(conn)
+    conn.enable_load_extension(False)
+    _build_schema(conn)
+    for thread_id, folder, message_ids in [
+        ("t-inbox", "INBOX", None),
+        ("t-spam", "Spam", None),
+        ("t-mixed", "INBOX", ["mixed-1", "mixed-2"]),
+        ("t-spam-reply", "INBOX", ["sr-1", "sr-2"]),
+    ]:
+        _insert_thread(
+            conn,
+            thread_id=thread_id,
+            subject="retainer terms",
+            participants=[_COUNSEL, _READER],
+            senders=[_COUNSEL],
+            folder=folder,
+            body_text="retainer terms",
+            message_ids=message_ids,
+            embedding=[1.0, 0.0, 0.0, 0.0],
+        )
+    conn.execute("UPDATE messages SET folder = 'Spam' WHERE message_id IN ('mixed-1', 'sr-1')")
+    # sr-2 is the reader's reply: the reader sent it, counsel received it.
+    conn.execute(
+        "UPDATE message_participants SET role = CASE address WHEN ? THEN 'to' ELSE 'from' END "
+        "WHERE claimant_id = ?",
+        (_COUNSEL, claimant_of("sr-2")),
+    )
+    conn.commit()
+    conn.close()
+    set_authority(db_path, _COUNSEL, "counsel", "domain:firm.example")
+    return Database(str(db_path))
+
+
+class TestSpamIsNeverAuthority:
+    """#463 (first step): authority comes from the claimed From address,
+    and Proton files most spoofed mail in Spam, so a Spam message never
+    counts toward an authority filter. A thread counts only through its
+    non-Spam messages."""
+
+    def test_query_messages_skips_spam(self, spam_db):
+        page = spam_db.query_messages(authority_class="counsel")
+        assert sorted(_ids(page)) == ["mixed-2", "t-inbox"]
+
+    def test_spam_is_not_unclassified_either(self, spam_db):
+        # The filter ignores Spam for every class: with no rule for the
+        # sender, only the non-Spam messages are unclassified matches.
+        with closing(sqlite3.connect(spam_db.path)) as conn:
+            conn.execute(
+                "UPDATE entities SET authority_class = 'unclassified', authority_rule = NULL"
+            )
+            conn.commit()
+        page = spam_db.query_messages(authority_class="unclassified")
+        assert sorted(_ids(page)) == ["mixed-2", "sr-2", "t-inbox"]
+
+    def test_spam_still_matches_without_the_filter(self, spam_db):
+        assert spam_db.query_messages(folder="Spam").total_matches == 3
+
+    def test_keyword_search(self, spam_db):
+        assert len(spam_db.keyword_search("retainer", limit=10)) == 4
+        results = spam_db.keyword_search("retainer", authority_class="counsel", limit=10)
+        assert sorted(r.thread_id for r in results) == ["t-inbox", "t-mixed"]
+
+    def test_semantic_search(self, spam_db):
+        results = spam_db.semantic_search(
+            query_embedding=[1.0, 0.0, 0.0, 0.0], authority_class="counsel", limit=10
+        )
+        assert sorted(r.thread_id for r in results) == ["t-inbox", "t-mixed"]
+
+    def test_hybrid_search(self, spam_db):
+        results = spam_db.hybrid_search(
+            query_text="retainer",
+            query_embedding=[1.0, 0.0, 0.0, 0.0],
+            authority_class="counsel",
+            limit=10,
+        )
+        assert sorted(r.thread_id for r in results) == ["t-inbox", "t-mixed"]
+
+    def test_find_contact_stays_entity_level(self, spam_db):
+        (contact,) = [c for c in spam_db.find_contact("firm.example") if c["email"] == _COUNSEL]
+        assert contact["authority_class"] == "counsel"
+
+    @pytest.mark.parametrize("mode", ["semantic", "hybrid"])
+    def test_vector_window_widens_past_spam(self, tmp_path, mode):
+        # Every noise thread nearer the query than the target is now a
+        # counsel sender's mail in Spam. The window must not count them
+        # as eligible, so it still widens until it reaches the target.
+        db = _scoped_recall_db(tmp_path)
+        with closing(sqlite3.connect(db.path)) as conn:
+            conn.execute("UPDATE messages SET folder = 'Spam' WHERE thread_id LIKE 't-noise-%'")
+            conn.commit()
+        set_authority(db.path, "digest@noise.example", "counsel", "domain:noise.example")
+        results = _search(db, mode, authority_class="counsel")
+        assert [r.thread_id for r in results] == [_TARGET]
+        assert {"thread_vec", "chunk_vec"} <= results[0].lane_ranks.keys()

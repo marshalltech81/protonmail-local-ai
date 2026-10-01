@@ -72,14 +72,25 @@ def normalize_authority_class(value: str | None) -> str | None:
     return value
 
 
+# Folders whose messages never count toward an ``authority_class``
+# filter (#463). Authority comes from the claimed From address, which is
+# sender-controlled, and Proton files most spoofed or DMARC-failing mail
+# in Spam. Matched exactly against ``messages.folder``, like the folder
+# filters.
+AUTHORITY_EXCLUDED_FOLDERS = ("Spam",)
+
 # Claimants (per-message keys) whose From sender's person entity carries
-# the bound class.
+# the bound class, outside ``AUTHORITY_EXCLUDED_FOLDERS``. Bind the class
+# followed by the excluded folders.
 # Driven from ``idx_entities_authority`` into the participant address
 # index.
 _SENDER_CLASS_MESSAGES = (
-    "SELECT p.claimant_id FROM entities e "
+    # The f-string adds ``?`` placeholders only; the folders are bound.
+    "SELECT p.claimant_id FROM entities e "  # nosec B608
     "JOIN message_participants p ON p.address = e.canonical_key AND p.role = 'from' "
-    "WHERE e.kind = 'person' AND e.authority_class = ?"
+    "JOIN messages am ON am.claimant_id = p.claimant_id "
+    "WHERE e.kind = 'person' AND e.authority_class = ? "
+    f"AND am.folder NOT IN ({','.join('?' * len(AUTHORITY_EXCLUDED_FOLDERS))})"
 )
 
 
@@ -2637,7 +2648,7 @@ class Database:
                     "SELECT DISTINCT thread_id FROM messages "  # nosec B608
                     f"WHERE thread_id IN ({id_marks}) "
                     f"AND claimant_id IN ({_SENDER_CLASS_MESSAGES})",
-                    [*batch, authority_class],
+                    [*batch, authority_class, *AUTHORITY_EXCLUDED_FOLDERS],
                 ).fetchall()
                 found.update(r["thread_id"] for r in rows)
         return found
@@ -3016,7 +3027,8 @@ class Database:
           date-only values cover the whole UTC day.
         - ``has_attachments``: the message's own attachment flag.
         - ``authority_class``: the class the indexer gave the message's
-          From sender (``AUTHORITY_CLASSES``).
+          From sender (``AUTHORITY_CLASSES``); a message in
+          ``AUTHORITY_EXCLUDED_FOLDERS`` never matches.
 
         Raises ``ValueError`` for an invalid date, a ``text`` with no
         words or more than ``_MAX_TEXT_TERMS``, or a malformed / foreign
@@ -3078,7 +3090,7 @@ class Database:
             params.append(1 if has_attachments else 0)
         if authority_class:
             where.append(f"m.claimant_id IN ({_SENDER_CLASS_MESSAGES})")
-            params.append(authority_class)
+            params.extend([authority_class, *AUTHORITY_EXCLUDED_FOLDERS])
 
         # A cursor is only meaningful for the predicates it was issued
         # under; bind it to a digest of them.

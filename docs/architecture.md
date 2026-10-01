@@ -478,7 +478,12 @@ Known limitation: authority reflects the **claimed** From address. The
 index does not authenticate senders, so spoofed mail claiming an
 address or domain from a classified rule is classified too (see #463).
 Treat the class as a description of who the message says it is from,
-not proof.
+not proof. One guard applies: Proton files most spoofed and
+DMARC-failing mail in Spam, so a message in the `Spam` folder never
+counts toward an `authority_class` filter (`AUTHORITY_EXCLUDED_FOLDERS`
+in `mcp-server/src/lib/sqlite.py`). Spoofed mail Proton leaves in the
+inbox still matches; gating on DKIM/DMARC verdict headers is deferred
+until Bridge's headers have been checked on real mail (#463).
 
 The indexer loads the file once at startup, before opening the
 database. An absent file classifies nothing; a file that cannot be
@@ -496,8 +501,9 @@ sender-supplied domain is unclassified without any lookup.
 
 Authority is metadata, never a ranking weight. The MCP server exposes it
 as an `authority_class` filter on `search_emails` and `query_messages`
-(a message matches when one of its From senders carries the class; a
-thread when one of its messages does) and on `find_contact` results.
+(a message outside Spam matches when one of its From senders carries
+the class; a thread when one of its non-Spam messages does) and on
+`find_contact` results, which stay per contact and ignore folders.
 Filtering removes results without reordering or rescoring the rest.
 
 ## Attachment Indexing
