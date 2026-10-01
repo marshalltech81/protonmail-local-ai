@@ -2348,12 +2348,12 @@ class TestAttachmentCascadeOnMessageRemoval:
 class TestWalCheckpoint:
     """``Database.wal_checkpoint_truncate`` shrinks the WAL file.
 
-    The single shared connection used by every ``Database`` method
-    keeps a WAL read snapshot live for the duration of the indexer
-    process. SQLite's automatic checkpoint at the page-count threshold
-    can run, but it cannot truncate the file while the snapshot is
-    live — so the WAL grows monotonically. The main-loop periodic
-    truncate-checkpoint is what reclaims that space.
+    SQLite's automatic checkpoint at the page-count threshold copies
+    frames back and lets later writes reuse the WAL, but it never
+    shrinks the file, and an open read transaction on any connection
+    (an open connection alone does not pin a snapshot) lets it grow
+    further. The main-loop periodic truncate-checkpoint is what
+    reclaims that space.
     """
 
     def test_returns_three_int_tuple(self, tmp_path):

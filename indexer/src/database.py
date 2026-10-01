@@ -175,14 +175,17 @@ class Database:
         """Run ``PRAGMA wal_checkpoint(TRUNCATE)`` and return the counters.
 
         Returns ``(busy, log_pages, checkpointed_pages)`` straight from
-        SQLite. ``busy`` is non-zero when a concurrent reader holds a
-        WAL frame open and the checkpoint could not complete — the
-        next pass will retry. The single shared connection used by
-        every ``Database`` method tends to keep one read snapshot live
-        for the duration of the indexer process; without this periodic
-        truncate the WAL file grows monotonically and never reclaims
-        space, which on a long-running container has been observed to
-        balloon to hundreds of MB.
+        SQLite. ``busy`` is non-zero when another connection holds an
+        open read or write transaction that the checkpoint must wait
+        for, so it could not complete — the next pass will retry. An
+        open connection does not pin a snapshot by itself; only an
+        open transaction does. SQLite's automatic checkpoint copies
+        frames back and lets later writes reuse the WAL from the
+        start, but it never shrinks the file, and while any reader
+        holds a transaction open the WAL keeps growing. Without this
+        periodic truncate the file stays at its high-water size, which
+        on a long-running container has been observed to reach
+        hundreds of MB.
 
         Goes through ``_synchronized`` so a checkpoint cannot interleave
         with an open writer's transaction. The PRAGMA itself is a
