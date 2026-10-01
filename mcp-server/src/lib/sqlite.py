@@ -102,6 +102,12 @@ _SQLITE_VEC_MAX_K = 4096
 # tools' ``HEADER_CHAR_LIMIT``.
 _RERANK_SUBJECT_CHARS = 500
 
+# Upper bound on the ``?`` placeholders bound into one ``IN (...)``
+# lookup. The connection's ``SQLITE_LIMIT_VARIABLE_NUMBER`` depends on
+# the SQLite build, so lookups over an unbounded ID list batch under it
+# (same bound as the indexer's).
+_IN_CLAUSE_BATCH_SIZE = 500
+
 
 def _addr_matches(haystack: list[str], query_lower: str) -> bool:
     """True if ``query_lower`` matches an address string in ``haystack``.
@@ -1987,6 +1993,7 @@ class Database:
 
         if chunks:
             seen_threads: set[str] = set()
+            chunk_only: list[str] = []
             for rank, chunk in enumerate(chunks):
                 tid = chunk.thread_id
                 # Best-rank-only contribution: skip any later (worse-
@@ -1999,14 +2006,12 @@ class Database:
                 scores[tid] = scores.get(tid, 0) + 1.0 / (k + rank + 1)
                 lane_ranks.setdefault(tid, {})["chunk_vec"] = rank
                 if tid not in index:
-                    # Materialize chunk-only threads via a thread fetch.
-                    # Skip silently if the thread row is missing (shouldn't
-                    # happen in steady state — chunk rows live and die
-                    # with their thread — but defensive against stale
-                    # state mid-reap).
-                    fetched = self.get_thread(tid)
-                    if fetched is not None:
-                        index[tid] = fetched
+                    chunk_only.append(tid)
+            # Materialize chunk-only threads in one batched fetch. A
+            # missing thread row is skipped silently (shouldn't happen
+            # in steady state — chunk rows live and die with their
+            # thread — but defensive against stale state mid-reap).
+            index.update(self._get_threads(chunk_only))
 
         ranked = sorted(scores.items(), key=lambda x: x[1], reverse=True)
         results = []
@@ -2106,6 +2111,27 @@ class Database:
     def get_thread(self, thread_id: str) -> ThreadResult | None:
         row = self._fetchone("SELECT * FROM threads WHERE thread_id = ?", (thread_id,))
         return self._row_to_result(row) if row else None
+
+    def _get_threads(self, thread_ids: list[str]) -> dict[str, ThreadResult]:
+        """Thread rows for ``thread_ids`` keyed by id, over one connection.
+
+        The IN list is batched under ``_IN_CLAUSE_BATCH_SIZE``; ids with
+        no row are absent from the result.
+        """
+        found: dict[str, ThreadResult] = {}
+        if not thread_ids:
+            return found
+        with closing(self._connect()) as conn:
+            for start in range(0, len(thread_ids), _IN_CLAUSE_BATCH_SIZE):
+                batch = thread_ids[start : start + _IN_CLAUSE_BATCH_SIZE]
+                placeholders = ",".join("?" * len(batch))
+                rows = conn.execute(
+                    f"SELECT * FROM threads WHERE thread_id IN ({placeholders})",  # nosec B608
+                    batch,
+                ).fetchall()
+                for row in rows:
+                    found[row["thread_id"]] = self._row_to_result(row)
+        return found
 
     def get_thread_page(
         self, thread_id: str, *, offset: int, limit: int, body_char_limit: int
