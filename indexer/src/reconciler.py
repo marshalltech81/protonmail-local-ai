@@ -394,7 +394,8 @@ class Reconciler:
                     "(%s); skipping this reap pass (blocked attempts=%d)",
                     row["filepath"],
                     thread_id,
-                    e,
+                    # Type only: the message can quote mail (#257).
+                    type(e).__name__,
                     attempts,
                 )
                 return False, False
@@ -415,12 +416,12 @@ class Reconciler:
                 # buried log lines.
                 attempts = self._record_blocked(thread_id)
                 log.error(
-                    "reaper: parse_email raised on survivor %s in thread %s; "
+                    "reaper: parse_email raised %s on survivor %s in thread %s; "
                     "skipping this reap pass (blocked attempts=%d)",
+                    type(e).__name__,
                     row["filepath"],
                     thread_id,
                     attempts,
-                    exc_info=e,
                 )
                 return False, False
             if msg is None:

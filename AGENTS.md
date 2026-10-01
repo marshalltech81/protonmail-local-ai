@@ -343,9 +343,11 @@ content is as private as a credential.
   or the output of a formatter that enforces this: `scrub_embed_error`
   (`indexer/src/embedder.py`) for the embed stage and `_stage_error`
   (`indexer/src/main.py`, a short fixed-text allowlist, `OSError` from
-  its errno, everything else by type) for the other stages. A few
-  paths write fixed strings directly (oversized, no `Message-ID`, the
-  trashed-file defer); a new direct write must follow the same rule. A
+  its errno, everything else by type) for the other stages. Some paths
+  write fixed strings directly (for example the oversized and no
+  `Message-ID` dead letters, the trashed-file defer and the queue's
+  interruption marker); any direct write, existing or new, must follow
+  the same rule. A
   query-path failure in the MCP server (an SQLite or conversion error)
   is logged and returned as its type name alone. Rows written before
   these rules (2026-10-01, #257) may still hold old text; nothing
