@@ -103,6 +103,13 @@ docker run --rm \
         # whether this harness sent a signal: the host accepts a TERM/KILL
         # status (143/137) only then, not from an OOM or external kill.
         HARNESS_SIGNAL=none
+        # Give Bridge a bounded grace period to exit on its own first, so
+        # a failure it would report just after the marker (a fatal log, a
+        # non-zero exit) is observed rather than pre-empted by our TERM.
+        GRACE_DEADLINE=$(( $(date +%s) + 10 ))
+        while kill -0 "$ENTRY_PID" 2>/dev/null && [ "$(date +%s)" -lt "$GRACE_DEADLINE" ]; do
+            sleep 0.5
+        done
         # Record the strongest signal this check actually delivered, so a
         # 143 or 137 from anyone else is not mistaken for our stop.
         if kill -TERM "$ENTRY_PID" 2>/dev/null; then
