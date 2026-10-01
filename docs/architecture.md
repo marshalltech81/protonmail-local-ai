@@ -357,14 +357,41 @@ Chunk IDs are `sha256(message_pk || index || chunk_text)` — the same
 body always produces the same ID set. The indexer's per-message chunk
 write diffs the new chunk IDs against stored IDs, embeds only the new
 ones, and deletes any that are no longer present. Re-running on
-unchanged input is therefore zero embed cost. Attachment chunks use a
-composite `message_pk` of `f"{message_id}::{attachment_id}"` so their
-chunk IDs are distinct from body chunks for the same message.
+unchanged input is therefore zero embed cost. A body chunk's
+`message_pk` is its message's claimant ID (see Per-Message Records);
+attachment chunks use a composite `message_pk` of
+`f"{claimant_id}::{attachment_id}"` so their chunk IDs are distinct from
+body chunks for the same message.
 
 ## Per-Message Records
 
 Threads are the retrieval unit; `messages` is the authoritative
-per-message record. Each indexed message gets one row — its own
+per-message record.
+
+**Claimant IDs.** A Message-ID is set by the sender, so two different
+files can claim the same one, by accident or to overwrite another
+message's evidence. Every per-message row is therefore keyed by a
+claimant ID rather than the bare Message-ID: the Message-ID plus `#`
+and the first eight hex digits of the SHA-256 of the file's raw bytes
+(`parser.claimant_id`). The bytes are the identity because nothing that
+happens to a Maildir file changes them: flags and the delivery name
+live in the filename and the folder is the directory, so a flag rename,
+a folder move and a reparse keep the key, while different content gets
+a new one. Both claimants are kept, each with its own `messages`,
+`message_thread_map`, `message_participants`, chunk and attachment
+rows (attachment occurrence IDs and chunk `message_pk`s are derived
+from the claimant ID), and reaping or reprocessing one never touches
+the other's rows. Neither wins by arrival order. Thread membership
+still resolves by Message-ID (In-Reply-To / References and the
+known-Message-ID lookup), so a second claimant joins the first one's
+thread; `threads.message_ids` lists claimant IDs, and the thread body
+carries both texts. A byte-identical copy of a message (the same mail
+filed twice) shares one claimant ID, as it shared one Message-ID
+before. The MCP tools return `claimant_id` beside `message_id`, and
+`get_message` accepts either, listing the claimants when a bare
+Message-ID names several (see `docs/mcp-tools.md`).
+
+Each indexed message gets one row — its own
 subject, `sent_at` (`Date:` header; a missing or unparseable header is
 dated at first index and that date is kept when the message is
 reprocessed or its thread rebuilt), folder, `in_reply_to` /
@@ -383,7 +410,7 @@ An index on `(address, role)` makes "every message from / to X" an
 exact indexed lookup — the basis for exhaustive enumeration, as
 opposed to relevance search. The MCP server's `query_messages`
 enumerates over these tables (count plus keyset pages ordered by
-`(sent_at, message_id)`), and `find_contact` aggregates
+`(sent_at, claimant_id)`), and `find_contact` aggregates
 `message_participants` instead of parsing each thread's participant
 JSON.
 
@@ -466,7 +493,7 @@ scanned pages are not re-read when OCR is turned on later.
 When a message is reaped, `_delete_attachments_for_message` drops its
 `attachments` rows and FTS shadows; the `_delete_chunks_for_message`
 cascade also drops the message's attachment chunks (they share the
-`message_id` key). Cached extractions in `attachment_extractions` are
+`claimant_id` key). Cached extractions in `attachment_extractions` are
 **deliberately preserved** — another message may still reference the
 same content_hash, and even when nothing does today the cached
 extraction means a future re-arrival skips the OCR cost.

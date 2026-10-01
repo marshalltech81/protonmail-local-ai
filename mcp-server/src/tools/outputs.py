@@ -5,7 +5,7 @@ Each tool declares one of these models as its ``outputSchema`` (via
 ``@server.tool(output_schema=Model.model_json_schema())``; FastMCP does
 not derive a schema from a ``CallToolResult`` return) and returns it as
 ``structuredContent`` next to the unchanged prose in ``content``. A client
-chains IDs (thread_id -> message_id -> attachment_id) from typed fields
+chains IDs (thread_id -> claimant_id -> attachment_id) from typed fields
 instead of scraping text.
 
 Failures are raised as ``ToolError``, so the client receives an
@@ -134,7 +134,15 @@ def thread_summary(t: ThreadResult) -> ThreadSummary:
 
 
 class MessageHeaders(_Output):
-    message_id: str = Field(description="RFC 5322 Message-ID; pass it to get_message.")
+    message_id: str = Field(
+        description="RFC 5322 Message-ID. The sender sets it, so two indexed messages "
+        "can share one; get_message accepts it while only one message has it."
+    )
+    claimant_id: str = Field(
+        description="This message's own ID: the Message-ID plus '#' and a short hash "
+        "of its raw file. Differs from message_id only in suffix; distinguishes "
+        "different files that claim the same Message-ID. Pass it to get_message."
+    )
     subject: str
     sent_at: str = Field(description="Send date (the sender's Date: header) in UTC, ISO 8601.")
     folder: str
@@ -175,6 +183,7 @@ def message_headers(m: MessageRecord, *, full: bool = False) -> MessageHeaders:
 
     return MessageHeaders(
         message_id=m.message_id,
+        claimant_id=m.claimant_id,
         subject=clip(m.subject, chars),
         sent_at=m.sent_at,
         folder=m.folder,
@@ -214,6 +223,7 @@ class SearchEmailsOutput(_Output):
 
 class EvidenceChunk(_Output):
     message_id: str
+    claimant_id: str = Field(description="The chunk's message; pass it to get_message.")
     chunk_index: int
     source: Literal["body", "attachment"]
     attachment_id: str | None = Field(
@@ -260,6 +270,9 @@ class AttachmentHit(_Output):
     size_bytes: int
     thread_id: str
     message_id: str
+    claimant_id: str = Field(
+        description="The message carrying the attachment; pass it to get_message."
+    )
     subject: str = Field(description="Parent thread subject.")
     folder: str
     date_last: datetime = Field(description="Parent thread's latest activity.")
@@ -306,6 +319,10 @@ class GetThreadOutput(_Output):
 
 class GetMessageOutput(_Output):
     message: ListedMessage
+    other_claimants: list[str] = Field(
+        description="Claimant IDs of other indexed messages with the same Message-ID "
+        "(different files reusing it); empty in the usual case."
+    )
     thread_subject: str
     body: str | None = Field(
         description="Full indexed body after quoted-reply stripping; null when none is indexed."

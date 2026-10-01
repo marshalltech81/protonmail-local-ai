@@ -26,7 +26,7 @@ from fastmcp.exceptions import ToolError
 from src.lib.sqlite import Database
 from src.tools.retrieval import register_retrieval_tools
 
-from tests.conftest import _build_schema, _insert_message, _insert_thread
+from tests.conftest import _build_schema, _insert_message, _insert_thread, claimant_of
 
 
 @contextmanager
@@ -193,7 +193,10 @@ class TestGetThread:
             conn.close()
             text = _text(asyncio.run(_handlers(fake_server, db)["get_thread"](thread_id="t")))
         assert "TAIL" not in text
-        assert '[1,000 more characters not shown; get_message("a") returns the full body]' in text
+        assert (
+            f'[1,000 more characters not shown; get_message("{claimant_of("a")}") '
+            "returns the full body]"
+        ) in text
 
     def test_overlapping_chunks_render_once(self, fake_server, overlap_db):
         from tests.conftest import OVERLAP_BODY
@@ -403,6 +406,88 @@ class TestGetMessage:
         seeded_db.get_message_view = boom  # type: ignore[assignment]
         handler = _handlers(fake_server, seeded_db)["get_message"]
         assert "Error" in _error(handler(message_id="anything"))
+
+
+class TestMessageIdClaimants:
+    """#217: two files can claim one Message-ID. The index keeps both,
+    each under a claimant ID (``<Message-ID>#<hash prefix>``), and the
+    tools carry that ID so a caller can address either one. The bare
+    Message-ID still works while it names one message; when it names
+    several, get_message lists them instead of picking one."""
+
+    def _two_claimants(self, tmp_path):
+        with _open_fixture_db(tmp_path) as (conn, db):
+            for variant, sent_at, body in (
+                ("", "2024-01-10T09:00:00+00:00", "original wording alphaword"),
+                ("b", "2024-01-11T09:00:00+00:00", "replacement wording betaword"),
+            ):
+                _insert_message(
+                    conn,
+                    message_id="dup@example.com",
+                    variant=variant,
+                    thread_id="t1",
+                    sent_at=sent_at,
+                    subject="Shared subject",
+                    from_=["jane@example.com"],
+                    body=body,
+                )
+            conn.close()
+        return db, claimant_of("dup@example.com"), claimant_of("dup@example.com", "b")
+
+    def test_bare_message_id_with_several_claimants_lists_them(self, fake_server, tmp_path):
+        db, first, second = self._two_claimants(tmp_path)
+        text = _error(_handlers(fake_server, db)["get_message"](message_id="dup@example.com"))
+        assert "2 messages" in text
+        assert first in text and second in text
+        assert "alphaword" not in text and "betaword" not in text
+
+    def test_claimant_id_selects_one_message(self, fake_server, tmp_path):
+        db, first, second = self._two_claimants(tmp_path)
+        out = asyncio.run(_handlers(fake_server, db)["get_message"](message_id=second))
+        text = _text(out)
+        assert "betaword" in text and "alphaword" not in text
+        assert f"Claimant ID: {second}" in text
+        assert first in text  # named as the other claimant
+        message = out.structured_content["message"]
+        assert message["message_id"] == "dup@example.com"
+        assert message["claimant_id"] == second
+        assert out.structured_content["other_claimants"] == [first]
+
+    def test_message_id_crafted_to_equal_a_claimant_id_is_ambiguous(self, fake_server, tmp_path):
+        """A sender can set a Message-ID equal to another message's
+        claimant ID; that ID then names both, so neither is returned."""
+        victim = claimant_of("victim@example.com")
+        with _open_fixture_db(tmp_path) as (conn, db):
+            for mid in ("victim@example.com", victim):
+                _insert_message(conn, message_id=mid, thread_id="t1", sent_at="2024-01-10")
+            conn.close()
+        text = _error(_handlers(fake_server, db)["get_message"](message_id=victim))
+        assert "2 messages" in text
+        assert claimant_of(victim) in text
+
+    def test_single_claimant_bare_message_id_unchanged(self, fake_server, messages_db):
+        out = asyncio.run(_handlers(fake_server, messages_db)["get_message"](message_id="m1"))
+        assert "the budget is approved" in _text(out)
+        assert out.structured_content["message"]["claimant_id"] == claimant_of("m1")
+        assert out.structured_content["other_claimants"] == []
+
+    def test_get_thread_lists_each_claimant_with_its_own_body(self, fake_server, tmp_path):
+        db, first, second = self._two_claimants(tmp_path)
+        out = asyncio.run(_handlers(fake_server, db)["get_thread"](thread_id="t1"))
+        messages = out.structured_content["messages"]
+        assert [(m["claimant_id"], m["message_id"]) for m in messages] == [
+            (first, "dup@example.com"),
+            (second, "dup@example.com"),
+        ]
+        assert "alphaword" in messages[0]["body"] and "betaword" in messages[1]["body"]
+        text = _text(out)
+        assert f"Claimant ID: {first}" in text and f"Claimant ID: {second}" in text
+
+    def test_query_messages_returns_both_claimants(self, fake_server, tmp_path):
+        db, first, second = self._two_claimants(tmp_path)
+        out = asyncio.run(_handlers(fake_server, db)["query_messages"](sender="jane@example.com"))
+        assert out.structured_content["total_matches"] == 2
+        assert [m["claimant_id"] for m in out.structured_content["messages"]] == [second, first]
 
 
 class TestListThreads:

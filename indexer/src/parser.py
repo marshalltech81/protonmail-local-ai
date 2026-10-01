@@ -132,6 +132,33 @@ class Attachment:
     content_hash: str = ""
 
 
+# Hex digits of the file hash in a claimant ID (see ``claimant_id``).
+CLAIMANT_HASH_CHARS = 8
+
+
+def claimant_id(message_id: str, content_hash: str | None) -> str:
+    """The per-message key: ``"<Message-ID>#<hash prefix>"`` (#217).
+
+    A Message-ID is sender-controlled, so two different files can claim
+    the same one. Both are kept, each keyed by the Message-ID plus the
+    first ``CLAIMANT_HASH_CHARS`` hex digits of the SHA-256 of the
+    file's raw bytes (``Message.content_hash``). The bytes are the
+    identity because they are the one input that does not change while
+    the file lives: Maildir flags and the delivery name are in the
+    filename and the folder is the directory, so a flag rename, a folder
+    move and a reparse (even by a changed parser) all keep the key,
+    while any difference in content gives a new one. A byte-identical
+    copy of a message (the same mail filed twice) shares its key, as it
+    did when the key was the bare Message-ID.
+
+    A ``Message`` built without file identity (only in tests) keys on
+    the bare Message-ID.
+    """
+    if not content_hash:
+        return message_id
+    return f"{message_id}#{content_hash[:CLAIMANT_HASH_CHARS]}"
+
+
 @dataclass
 class Message:
     message_id: str
@@ -164,6 +191,11 @@ class Message:
     # already persisted for the message instead (#297), so an undated
     # message is not re-dated every time it is parsed.
     date_is_fallback: bool = False
+
+    @property
+    def claimant_id(self) -> str:
+        """This file's per-message key; see the module-level ``claimant_id``."""
+        return claimant_id(self.message_id, self.content_hash)
 
 
 def parse_email(path: Path, maildir_root: Path | None = None) -> Message | None:

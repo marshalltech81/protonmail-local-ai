@@ -11,6 +11,7 @@ from mcp.types import CallToolResult
 
 from ..lib.security import log_tool_call
 from ..lib.sqlite import (
+    AmbiguousMessageId,
     InvalidFilterError,
     MessageBody,
     MessageRecord,
@@ -258,9 +259,10 @@ def register_retrieval_tools(server, db):
                 lines.append(f"No messages at offset {offset}; the thread has {total}.")
             for i, m in enumerate(messages, offset + 1):
                 lines += ["", f"[{i}/{total}] Message-ID: {m.message_id}"]
+                lines.append(f"Claimant ID: {m.claimant_id}")
                 lines += _header_lines(m, full=False)
                 lines.append("")
-                body = page.bodies.get(m.message_id)
+                body = page.bodies.get(m.claimant_id)
                 if body is None:
                     lines.append("(No body text is indexed for this message.)")
                     continue
@@ -268,7 +270,7 @@ def register_retrieval_tools(server, db):
                 if body.omitted_chars:
                     lines.append(
                         f"[{body.omitted_chars:,} more characters not shown; "
-                        f'get_message("{m.message_id}") returns the full body]'
+                        f'get_message("{m.claimant_id}") returns the full body]'
                     )
             if offset + len(messages) < total:
                 lines += [
@@ -300,7 +302,7 @@ def register_retrieval_tools(server, db):
                 thread=thread_summary(thread),
                 total_messages=total,
                 offset=offset,
-                messages=[_thread_message(m, page.bodies.get(m.message_id)) for m in messages],
+                messages=[_thread_message(m, page.bodies.get(m.claimant_id)) for m in messages],
                 next_offset=next_offset if next_offset < total else None,
                 indexed_thread_text=thread_text,
             )
@@ -331,13 +333,18 @@ def register_retrieval_tools(server, db):
         body chunks are indexed for the message, falls back to
         parent-thread context.
 
-        ``message_id`` is the RFC 5322 Message-ID header value. Obtain
-        it from a thread's message list (via get_thread or
-        search_emails). Do NOT pass a subject line or a phrase —
-        invented IDs return ``Message not found``.
+        ``message_id`` is a ``Claimant ID`` (the Message-ID plus
+        ``#`` and a short hash, which names exactly one message) or the
+        bare RFC 5322 Message-ID. Obtain it from a thread's message list
+        (via get_thread), query_messages, or get_evidence. The sender
+        sets the Message-ID, so different messages can share one: a
+        bare Message-ID several messages claim returns an error listing
+        their claimant IDs; call again with one of them. Do NOT pass a
+        subject line or a phrase — invented IDs return
+        ``Message not found``.
 
         Args:
-            message_id: The Message-ID header value
+            message_id: A claimant ID, or the Message-ID header value
 
         Returns:
             The message's headers, its thread ID and subject, and its
@@ -353,11 +360,29 @@ def register_retrieval_tools(server, db):
             view = await asyncio.to_thread(db.get_message_view, message_id)
             if not view:
                 raise ToolError(f"Message not found: {message_id}")
+            if isinstance(view, AmbiguousMessageId):
+                # Never pick one: either claimant may be the reused ID.
+                listed = "; ".join(
+                    f"{c.claimant_id} (sent {c.sent_at}, folder {c.folder})" for c in view.claimants
+                )
+                raise ToolError(
+                    f"Message-ID {view.message_id} names {len(view.claimants)} messages "
+                    "(different files claim it). Call get_message with one of these "
+                    f"claimant IDs: {listed}"
+                )
             thread = view.thread
             thread_text = None
 
             lines = [
-                f"Message-ID: {message_id}",
+                f"Message-ID: {view.record.message_id}",
+                f"Claimant ID: {view.record.claimant_id}",
+            ]
+            if view.other_claimants:
+                lines.append(
+                    "Other messages with this Message-ID (different files claim it): "
+                    + ", ".join(view.other_claimants)
+                )
+            lines += [
                 *_header_lines(view.record, full=True),
                 f"Thread: {thread.subject}",
                 f"Thread ID: {thread.thread_id}",
@@ -394,6 +419,7 @@ def register_retrieval_tools(server, db):
 
             output = GetMessageOutput(
                 message=listed_message(view.record, full=True),
+                other_claimants=view.other_claimants,
                 thread_subject=thread.subject,
                 body=view.body.text if view.body else None,
                 indexed_thread_text=thread_text,
@@ -626,7 +652,7 @@ def register_retrieval_tools(server, db):
                     lines.append(
                         f"   {label}: {clip(_format_participants(people), HEADER_CHAR_LIMIT)}"
                     )
-            lines.append(f"   Message-ID: {m.message_id}")
+            lines.append(f"   Message-ID: {m.message_id} | Claimant ID: {m.claimant_id}")
             lines.append(f"   Thread ID: {m.thread_id}")
             lines.append("")
 

@@ -458,7 +458,7 @@ class TestReap:
             paths.append(p)
         for p in paths:
             entry = db.find_message_entry_by_filepath(str(p))
-            db.add_pending_deletion(str(p), entry["message_id"], entry["thread_id"])
+            db.add_pending_deletion(str(p), entry["claimant_id"], entry["thread_id"])
             p.unlink()
 
         listed: list[Path] = []
@@ -486,9 +486,9 @@ class TestReap:
         thread_id = _index(path, db, threader)
         entry = db.find_message_entry_by_filepath(str(path))
         db._conn.execute(
-            "INSERT INTO pending_deletions (filepath, message_id, thread_id, marked_at) "
+            "INSERT INTO pending_deletions (filepath, claimant_id, thread_id, marked_at) "
             "VALUES (?, ?, ?, '2000-01-01T00:00:00+00:00')",
-            (str(maildir / "1700000000.M1.host:2,ST"), entry["message_id"], thread_id),
+            (str(maildir / "1700000000.M1.host:2,ST"), entry["claimant_id"], thread_id),
         )
         db._conn.commit()
 
@@ -1454,6 +1454,11 @@ class TestReap:
             date=datetime(2024, 2, 1, 12, 0, tzinfo=UTC),
         )
         _index(reply_path, db, threader)
+        from src.parser import parse_email
+
+        orig_msg, reply_msg = parse_email(orig_path), parse_email(reply_path)
+        assert orig_msg is not None and reply_msg is not None
+        co1, co2 = orig_msg.claimant_id, reply_msg.claimant_id
 
         orig_chunk = MessageChunk(
             chunk_id="orig-chunk".ljust(64, "0"),
@@ -1473,14 +1478,14 @@ class TestReap:
         )
         db.replace_message_chunks(
             message_date="2024-01-01T00:00:00+00:00",
-            message_id="co1@example.com",
+            claimant_id=co1,
             thread_id=thread_id,
             chunks=[orig_chunk],
             embeddings_by_chunk_id={orig_chunk.chunk_id: [0.1] * EMBEDDING_DIM},
         )
         db.replace_message_chunks(
             message_date="2024-01-01T00:00:00+00:00",
-            message_id="co2@example.com",
+            claimant_id=co2,
             thread_id=thread_id,
             chunks=[reply_chunk],
             embeddings_by_chunk_id={reply_chunk.chunk_id: [0.2] * EMBEDDING_DIM},
@@ -1496,14 +1501,14 @@ class TestReap:
         assert result["threads_rebuilt"] == 1
 
         # Reaped message's chunk is gone from all three indexes.
-        assert db.get_chunk_ids_for_message("co1@example.com") == set()
+        assert db.get_chunk_ids_for_message(co1) == set()
         orig_vec = db._conn.execute(
             "SELECT COUNT(*) FROM message_chunks_vec WHERE chunk_id = ?", (orig_chunk.chunk_id,)
         ).fetchone()[0]
         assert orig_vec == 0
 
         # Survivor's chunk is preserved.
-        assert db.get_chunk_ids_for_message("co2@example.com") == {reply_chunk.chunk_id}
+        assert db.get_chunk_ids_for_message(co2) == {reply_chunk.chunk_id}
 
         # Embedder was NOT called for the rebuilt thread vector — the
         # survivor had a chunk embedding to mean over, so the reap path
@@ -1581,9 +1586,9 @@ class TestMassDeleteBrake:
         for p in paths[:11]:
             entry = db.find_message_entry_by_filepath(str(p))
             db._conn.execute(
-                "INSERT INTO pending_deletions (filepath, message_id, thread_id, marked_at) "
+                "INSERT INTO pending_deletions (filepath, claimant_id, thread_id, marked_at) "
                 "VALUES (?, ?, ?, '2000-01-01T00:00:00+00:00')",
-                (str(p) + "T", entry["message_id"], entry["thread_id"]),
+                (str(p) + "T", entry["claimant_id"], entry["thread_id"]),
             )
         db._conn.commit()
         trashed = paths[11].with_name(paths[11].name + "T")
