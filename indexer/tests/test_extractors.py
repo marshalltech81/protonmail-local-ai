@@ -624,7 +624,26 @@ class TestXlsxSharedStringBudget:
         text, _ = xlsx.extract(payload)
 
         assert "tail" not in text
-        assert rows[0] == 4
+        # Three full blank values, a fourth sliced to the budget's last
+        # characters, and a fifth with no room left: 100,000 characters
+        # scanned in all.
+        assert rows[0] == 5
+
+    @pytest.mark.parametrize(
+        ("room", "expected"),
+        [(4, "abc"), (6, "abcde"), (7, "abcdef"), (8, "abcdef"), (1, None)],
+    )
+    def test_value_crossing_the_budget_keeps_its_prefix(self, monkeypatch, room, expected):
+        """The separator is reserved before slicing, so a value that
+        crosses the limit is emitted up to it rather than dropped."""
+        from src.extractors import xlsx
+
+        header = "[Sheet: Sheet]"
+        monkeypatch.setattr(xlsx, "_MAX_TEXT_CHARS", len(header) + 2 + room)
+        text, _ = xlsx.extract(_xlsx_bytes([["abcdef"], ["next"]]))
+        # A sheet with nothing but its header line is skipped.
+        assert text == ("" if expected is None else f"{header}\n{expected}")
+        assert len(text) <= xlsx._MAX_TEXT_CHARS
 
     def test_default_budget_bounds_a_large_expansion(self):
         import time
@@ -853,36 +872,11 @@ class TestXlsxExtractor:
         assert (result.text or "").split("\n")[1:] == ["first", "\t" * 16_383 + "last"]
         assert rows[0] == 2
 
-    def test_rows_past_the_cell_budget_fail_promptly(self, monkeypatch):
-        """Rows missing between two parsed rows still cost a visit each,
-        and the row number is the producer's claim: one far past the
-        sheet's last row asks for unbounded visits. The cell budget turns
-        it into a ``failed`` attachment."""
-        import time
-
+    @staticmethod
+    def _count_yielded_rows(monkeypatch) -> list[int]:
+        """Count every row read-only iteration yields, missing ones too."""
         from openpyxl.worksheet._read_only import ReadOnlyWorksheet
-        from src.extractors import extract, xlsx
 
-        payload = _rewrite_sheet_xml(
-            _xlsx_bytes([["first"], ["far"]]),
-            lambda xml: xml.replace('<row r="2"', '<row r="50000000"').replace(
-                'r="A2"', 'r="A50000000"'
-            ),
-        )
-
-        started = time.monotonic()
-        result = extract(
-            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            filename="far.xlsx",
-            payload=payload,
-        )
-        assert time.monotonic() - started < 5.0
-        assert result.status == STATUS_FAILED
-        # The budget's ValueError is recorded by type only (#257).
-        assert result.error == "ValueError"
-
-        # The walk stops at the budget rather than reaching row 50,000,000.
-        monkeypatch.setattr(xlsx, "_MAX_EXPANDED_CELLS", 1_000)
         yielded = [0]
         original = ReadOnlyWorksheet._cells_by_row
 
@@ -892,9 +886,68 @@ class TestXlsxExtractor:
                 yield row
 
         monkeypatch.setattr(ReadOnlyWorksheet, "_cells_by_row", counting)
-        with pytest.raises(ValueError):
-            xlsx.extract(payload)
-        assert yielded[0] == 1_001
+        return yielded
+
+    def test_rows_past_the_cell_budget_fail_promptly(self, monkeypatch):
+        """Rows missing between two parsed rows still cost a visit each,
+        and the row number is the producer's claim: one far past the
+        sheet's last row asks for unbounded visits. The cell budget,
+        which charges a missing row at its measured cost of several
+        cells, turns it into a ``failed`` attachment."""
+        import time
+
+        from src.extractors import extract, xlsx
+
+        payload = _rewrite_sheet_xml(
+            _xlsx_bytes([["first"], ["far"]]),
+            lambda xml: xml.replace('<row r="2"', '<row r="900000000"').replace(
+                'r="A2"', 'r="A900000000"'
+            ),
+        )
+        yielded = self._count_yielded_rows(monkeypatch)
+
+        started = time.monotonic()
+        result = extract(
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            filename="far.xlsx",
+            payload=payload,
+        )
+        assert time.monotonic() - started < 1.0
+        assert result.status == STATUS_FAILED
+        # The budget's ValueError is recorded by type only (#257).
+        assert result.error == "ValueError"
+        # Row 1, then missing rows until the budget runs out.
+        missing_rows = xlsx._MAX_EXPANDED_CELLS // xlsx._MISSING_ROW_COST
+        assert yielded[0] == 1 + missing_rows
+
+    def test_present_but_empty_cells_fail_promptly(self, monkeypatch):
+        """Styled cells with no value widen their rows without reaching
+        the text budget; the cell budget stops them."""
+        import io
+        import time
+
+        import openpyxl
+        from openpyxl.styles import Font
+        from src.extractors import extract, xlsx
+
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        for r in range(1, 1_001):
+            ws.cell(row=r, column=16_384).font = Font(bold=True)
+        buf = io.BytesIO()
+        wb.save(buf)
+        wb.close()
+        rows = _count_parsed_rows(monkeypatch)
+
+        started = time.monotonic()
+        result = extract(
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            filename="styled.xlsx",
+            payload=buf.getvalue(),
+        )
+        assert time.monotonic() - started < 1.0
+        assert result.status == STATUS_FAILED
+        assert rows[0] == xlsx._MAX_EXPANDED_CELLS // 16_384 + 1
 
 
 class TestPdfDigitalExtractor:

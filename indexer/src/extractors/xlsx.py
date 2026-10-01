@@ -34,10 +34,15 @@ import io
 
 import openpyxl
 
-# Cells visited, empty padding included, across every sheet. Far above
-# any workbook that fits the attachment byte cap with real data; a few
-# tenths of a second at worst.
-_MAX_EXPANDED_CELLS = 20_000_000
+# Cells visited, empty padding included, across every sheet. A missing
+# row between two parsed ones costs ``_MISSING_ROW_COST`` cells: plainly
+# timed, openpyxl yields one in about four times the time it takes to
+# pad a cell. Either worst case (missing rows, or rows of styled empty
+# cells) then stops in under a tenth of a second. A sheet of values
+# reaches the text budget first, since each value costs at least two
+# characters with its separator.
+_MAX_EXPANDED_CELLS = 5_000_000
+_MISSING_ROW_COST = 4
 
 # Characters read from cell values and sheet titles across the
 # workbook, plus each separator emitted, so it also bounds the returned
@@ -84,7 +89,7 @@ def _serialize(workbook: openpyxl.Workbook) -> str:
         chars_left -= len(header) + 2  # and the blank line before it
         sheet_lines = [header]
         for row in sheet.iter_rows(values_only=True):
-            expanded_cells += max(len(row), 1)
+            expanded_cells += len(row) or _MISSING_ROW_COST
             if expanded_cells > _MAX_EXPANDED_CELLS:
                 raise ValueError(f"workbook exceeds the {_MAX_EXPANDED_CELLS}-cell budget")
             cells: list[str] = []
@@ -95,21 +100,23 @@ def _serialize(workbook: openpyxl.Workbook) -> str:
                 if value is None:
                     blanks += 1
                     continue
-                # Slice before stripping so no value costs more work
-                # than the budget has left.
-                text = str(value)[:chars_left]
+                # The empty cells before a value become empty fields, so
+                # their tabs are charged with it, as is its own tab or
+                # newline; trailing empty cells are dropped and cost only
+                # the cell budget. Reserve those separators, then slice
+                # before stripping so no value costs more work than the
+                # budget has left and one crossing it keeps its prefix.
+                room = chars_left - (blanks + 1)
+                if room <= 0:
+                    chars_left = 0
+                    break
+                text = str(value)[:room]
                 chars_left -= len(text)
                 text = text.translate(_CELL_SEPARATORS).strip()
                 if not text:
                     blanks += 1
                     continue
-                # The empty cells before a value become empty fields, so
-                # their tabs are charged now; trailing ones are dropped
-                # and cost only the cell budget.
-                if blanks + 1 > chars_left:
-                    chars_left = 0
-                    break
-                chars_left -= blanks + 1  # and the value's tab or newline
+                chars_left -= blanks + 1
                 cells.extend([""] * blanks)
                 cells.append(text)
                 blanks = 0
