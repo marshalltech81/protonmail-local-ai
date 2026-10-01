@@ -1370,6 +1370,53 @@ class TestReapRewritesThreadRow:
     """The reap's thread rewrite regenerates the row from the survivors
     rather than merging into the stored row as ``upsert_thread`` does."""
 
+    def test_reap_rewrites_reply_subjects_in_fts(self, db, threader):
+        """#303: a changed reply subject is keyword-searchable through
+        the ``threads_fts`` subject column; the reap rewrite keeps the
+        survivors' and drops the reaped message's."""
+        from src.threader import Thread
+
+        original = make_message(message_id="s1@x", subject="Hello world", filepath="/s/1")
+        kept = make_message(
+            message_id="s2@x",
+            subject="Re: Hello world KEPTZX1",
+            in_reply_to="s1@x",
+            filepath="/s/2",
+            date=datetime(2024, 2, 1, tzinfo=UTC),
+        )
+        reaped = make_message(
+            message_id="s3@x",
+            subject="Re: Hello world GONEZX2",
+            in_reply_to="s1@x",
+            filepath="/s/3",
+            date=datetime(2024, 3, 1, tzinfo=UTC),
+        )
+        t1 = threader.assign_thread(original)
+        db.upsert_thread(t1, FAKE_EMBEDDING)
+        for msg in (kept, reaped):
+            db.upsert_thread(threader.assign_thread(msg), FAKE_EMBEDDING)
+
+        def hits(term):
+            return db._conn.execute(
+                "SELECT COUNT(*) FROM threads_fts WHERE threads_fts MATCH ?", (f"subject:{term}",)
+            ).fetchone()[0]
+
+        assert (hits("keptzx1"), hits("gonezx2")) == (1, 1)
+
+        rebuilt = Thread(
+            thread_id=t1.thread_id,
+            subject=t1.subject,
+            participants=["only@x"],
+            messages=[original, kept],
+            folder="INBOX",
+            date_first=original.date,
+            date_last=kept.date,
+        )
+        db.add_pending_deletion("/s/3", "s3@x", t1.thread_id)
+        assert db.reap_thread_messages(rebuilt, FAKE_EMBEDDING, ["s3@x"]) == ["/s/3"]
+        assert (hits("keptzx1"), hits("gonezx2")) == (1, 0)
+        assert db.get_thread(t1.thread_id).subject == "hello world"
+
     def test_reap_replaces_body_text_instead_of_appending(self, db, threader):
         original = make_message(message_id="r1@x", body_text="First message body.", filepath="/r/1")
         reply = make_message(
@@ -1525,8 +1572,8 @@ class TestReapRewritesThreadRow:
 
         # Reap the reply and rewrite with a different subject. The
         # survivor carries that subject too: a survivor whose own subject
-        # differs from the thread's is listed in the body (#303), which
-        # would keep "hello" searchable for a real reason.
+        # differs from the thread's is indexed in the FTS subject column
+        # (#303), which would keep "hello" searchable for a real reason.
         from dataclasses import replace
 
         from src.threader import Thread

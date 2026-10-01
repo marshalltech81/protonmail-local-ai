@@ -25,7 +25,7 @@ from .threader import (
     THREAD_BODY_TEXT_MAX_TOKENS,
     Thread,
     canonical_addr,
-    reply_subject_line,
+    fts_subject_text,
 )
 
 log = logging.getLogger("indexer.database")
@@ -610,19 +610,9 @@ class Database:
                 # so a thread that arrived as one message gets the same FTS
                 # body coverage as a thread that arrived as a sequence of
                 # replies.
-                # A reply's changed subject rides with its entry, as in
-                # ``Thread.text_for_embedding`` (#303).
                 new_content = "\n".join(
-                    "\n".join(
-                        line
-                        for line in (
-                            f"From: {m.from_addr}",
-                            f"Date: {m.date.isoformat()}",
-                            reply_subject_line(m, thread.subject),
-                            m.body_text[:PER_MESSAGE_BODY_CAP_CHARS],
-                        )
-                        if line is not None
-                    )
+                    f"From: {m.from_addr}\nDate: {m.date.isoformat()}\n"
+                    f"{m.body_text[:PER_MESSAGE_BODY_CAP_CHARS]}"
                     for m in new_messages
                 )
                 return truncate_to_tokens(
@@ -834,7 +824,24 @@ class Database:
             # Update FTS5 index. threads_fts is contentless_delete=1 so DELETE
             # requires a specific rowid — read the existing fts_rowid and then
             # record the new rowid after INSERT.
-            self._replace_fts_row(cur, thread.thread_id, thread.subject, participants_json, body)
+            # The FTS subject column also carries the thread's changed
+            # reply subjects (#303). ``thread.messages`` holds only the
+            # new arrival here, so read every stored subject; the rows
+            # for this arrival were written just above.
+            stored_subjects = [
+                r["subject"]
+                for r in cur.execute(
+                    "SELECT subject FROM messages WHERE thread_id = ? ORDER BY sent_at",
+                    (thread.thread_id,),
+                )
+            ]
+            self._replace_fts_row(
+                cur,
+                thread.thread_id,
+                fts_subject_text(thread.subject, stored_subjects),
+                participants_json,
+                body,
+            )
 
             # Update vector index — vec0 virtual tables do not support
             # INSERT OR REPLACE conflict resolution; use DELETE + INSERT instead.
@@ -2423,7 +2430,12 @@ class Database:
             ),
         )
 
-        self._replace_fts_row(cur, thread.thread_id, thread.subject, participants_json, body)
+        # Survivors only: the reaped messages' rows are removed after
+        # this rewrite, in the same transaction (#303).
+        fts_subject = fts_subject_text(
+            thread.subject, [m.subject for m in sorted(thread.messages, key=lambda m: m.date)]
+        )
+        self._replace_fts_row(cur, thread.thread_id, fts_subject, participants_json, body)
 
         cur.execute("DELETE FROM threads_vec WHERE thread_id = ?", (thread.thread_id,))
         cur.execute(

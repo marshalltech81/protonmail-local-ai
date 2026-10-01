@@ -796,15 +796,9 @@ def _phase2a_collect_chunks(
     msg = state.msg
     t0 = time.perf_counter()
     try:
-        # A reply that changed the subject leads its chunk text with
-        # that subject (the thread body's ``Subject:`` line shape), so
-        # the subject is in its chunk FTS row and embedding input (#303).
-        chunk_source = strip_for_embedding(msg.body_text or "")
-        if subject_line := reply_subject_line(msg, state.thread.subject):
-            chunk_source = f"{subject_line}\n\n{chunk_source}"
         body_chunks = chunk_message(
             message_pk=msg.message_id,
-            body_text=chunk_source,
+            body_text=strip_for_embedding(msg.body_text or ""),
             target_tokens=CHUNK_TARGET_TOKENS,
             max_tokens=CHUNK_MAX_TOKENS,
             overlap_tokens=CHUNK_OVERLAP_TOKENS,
@@ -818,9 +812,18 @@ def _phase2a_collect_chunks(
         # chunks, so the fallback below is reserved for that case too.
         clears_chunks = bool(stored_ids) and not body_chunks
         new_body_offsets: list[int] = []
+        # A reply that changed the subject carries it into the embedding
+        # input of its first body chunk only (#303). The stored chunk
+        # text, offsets and ID stay body-only, since chunks are the
+        # authoritative body store; keyword search gets the subject from
+        # the thread's FTS subject column instead.
+        subject_line = reply_subject_line(msg, state.thread.subject)
         for c in new_body:
             new_body_offsets.append(len(all_texts))
-            all_texts.append(c.text)
+            if subject_line and c.chunk_index == 0:
+                all_texts.append(f"{subject_line}\n\n{c.text}")
+            else:
+                all_texts.append(c.text)
 
         attach_plans: list[AttachmentWritePlan] = []
         attach_new_chunks: list[list[MessageChunk]] = []
