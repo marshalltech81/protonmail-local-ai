@@ -2107,6 +2107,83 @@ class TestRRFChunkLifting:
         assert beta.score == pytest.approx(1.0 / 64, rel=1e-6)
 
 
+class TestRRFChunkOnlyMaterialization:
+    """#334: threads found only by the chunk lane are loaded in batched
+    lookups over one connection, not one connection per candidate."""
+
+    @staticmethod
+    def _chunks(thread_ids: list[str]):
+        from src.lib.sqlite import ChunkResult
+
+        return [
+            ChunkResult(
+                chunk_id=f"c{i}",
+                message_id=tid,
+                thread_id=tid,
+                chunk_index=0,
+                text="x",
+                char_start=0,
+                char_end=1,
+            )
+            for i, tid in enumerate(thread_ids)
+        ]
+
+    def test_one_connection_and_bounded_lookups(self, seeded_db: Database, monkeypatch):
+        import src.lib.sqlite as sqlite_mod
+
+        # A batch of two forces the three found threads plus a missing
+        # one across two IN-list lookups.
+        monkeypatch.setattr(sqlite_mod, "_IN_CLAUSE_BATCH_SIZE", 2)
+        connect = seeded_db._connect
+        connections = 0
+        lookups: list[str] = []
+
+        def counting_connect():
+            nonlocal connections
+            connections += 1
+            conn = connect()
+            conn.set_trace_callback(
+                lambda sql: lookups.append(sql) if "FROM threads" in sql else None
+            )
+            return conn
+
+        monkeypatch.setattr(seeded_db, "_connect", counting_connect)
+        order = ["t-gamma", "does-not-exist", "t-alpha", "t-beta"]
+        fused = seeded_db._reciprocal_rank_fusion([], [], self._chunks(order))
+
+        assert connections == 1
+        assert len(lookups) == 2
+        # Missing rows are skipped; the others keep chunk-lane order and
+        # the same rows and scores a per-thread fetch gives.
+        assert [r.thread_id for r in fused] == ["t-gamma", "t-alpha", "t-beta"]
+        assert [r.score for r in fused] == pytest.approx([1 / 61, 1 / 63, 1 / 64])
+        for r in fused:
+            expected = Database(seeded_db.path).get_thread(r.thread_id)
+            assert expected is not None
+            assert (r.subject, r.message_ids, r.body_text) == (
+                expected.subject,
+                expected.message_ids,
+                expected.body_text,
+            )
+            assert r.lane_ranks == {"chunk_vec": order.index(r.thread_id)}
+
+    def test_threads_already_in_a_lane_are_not_fetched(self, seeded_db: Database, monkeypatch):
+        bm25 = [seeded_db.get_thread("t-alpha")]
+        assert bm25[0] is not None
+        connections = 0
+        connect = seeded_db._connect
+
+        def counting_connect():
+            nonlocal connections
+            connections += 1
+            return connect()
+
+        monkeypatch.setattr(seeded_db, "_connect", counting_connect)
+        fused = seeded_db._reciprocal_rank_fusion(bm25, [], self._chunks(["t-alpha"]))
+        assert connections == 0
+        assert [r.thread_id for r in fused] == ["t-alpha"]
+
+
 class TestFindContact:
     """The find_contact aggregator powers the LLM's name → email lookup
     so a borderline model can resolve a display-name fragment before

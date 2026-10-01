@@ -8,6 +8,7 @@ helper used by the Makefile.
 
 import asyncio
 import sqlite3
+import threading
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -100,3 +101,35 @@ class TestGetMailboxStatus:
         assert "privatemarkerq7z" not in caplog.text
         assert "OperationalError" in str(exc.value)
         assert "OperationalError" in caplog.text
+
+
+class TestEventLoopResponsiveness:
+    """#320: the handler's SQLite work runs in a worker thread, so a slow
+    status query cannot stall every other request on the shared loop."""
+
+    def test_status_query_does_not_block_the_event_loop(self, fake_server, seeded_db):
+        entered = threading.Event()
+        release = threading.Event()
+        released_by_loop: list[bool] = []
+        real = seeded_db.get_mailbox_status
+
+        def gated():
+            entered.set()
+            # Only the event loop sets ``release``. Run on the loop, this
+            # wait cannot be answered and times out.
+            released_by_loop.append(release.wait(timeout=2))
+            return real()
+
+        seeded_db.get_mailbox_status = gated  # type: ignore[method-assign]
+
+        async def scenario():
+            task = asyncio.create_task(_handler(fake_server, seeded_db)())
+            while not entered.is_set() and not task.done():
+                await asyncio.sleep(0.001)
+            # The loop runs this while the query is still in progress.
+            release.set()
+            return await task
+
+        out = asyncio.run(scenario())
+        assert released_by_loop == [True]
+        assert out.structuredContent["total_threads"] == 3

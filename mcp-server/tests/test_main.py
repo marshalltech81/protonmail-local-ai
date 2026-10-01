@@ -16,6 +16,7 @@ here:
 
 import asyncio
 import logging
+import threading
 
 import pytest
 from src.main import (
@@ -449,59 +450,66 @@ class TestRequireEnv:
 
 
 class TestHealthEndpoint:
-    """The /health route is not registered against a real Starlette app
-    in unit tests — instead, we re-register the same handler against the
-    FakeMCPServer and call it directly.
+    """The /health route delegates to ``_health_response``, which the
+    tests call directly with a stub DB.
 
     This mirrors how the docker healthcheck calls it (one HTTP GET) and
     catches regressions in the 200/503 split that would otherwise only
     show up when the container goes unhealthy in production.
     """
 
-    def _build_main_with_db_stub(self, db_stub, fake_server, monkeypatch):
-        """Drive the relevant slice of ``main.main()`` against a stub DB.
+    def test_health_returns_ok_when_db_reachable(self):
+        from src.main import _health_response
 
-        The function does much more (LLM clients, tool registration,
-        ``server.run``); we only want the health route, so the test
-        re-implements the registration step using the fake server.
-        """
-        # Re-export the local closure that ``main.main()`` constructs.
-        from starlette.requests import Request
-        from starlette.responses import JSONResponse
-
-        @fake_server.custom_route("/health", methods=["GET"], include_in_schema=False)
-        async def health(_: Request) -> JSONResponse:
-            try:
-                db_stub.ping()
-            except Exception:
-                return JSONResponse({"status": "unhealthy"}, status_code=503)
-            return JSONResponse({"status": "ok"})
-
-        return fake_server.custom_routes["/health"]
-
-    def test_health_returns_ok_when_db_reachable(self, fake_server, monkeypatch):
         class OkDB:
             def ping(self):
                 return None
 
-        handler = self._build_main_with_db_stub(OkDB(), fake_server, monkeypatch)
-        response = asyncio.run(handler(None))
+        response = asyncio.run(_health_response(OkDB()))
         assert response.status_code == 200
         assert b'"ok"' in response.body
 
-    def test_health_returns_503_when_db_raises(self, fake_server, monkeypatch):
+    def test_health_returns_503_when_db_raises(self):
+        from src.main import _health_response
+
         class BadDB:
             def ping(self):
                 raise RuntimeError("db unreachable")
 
-        handler = self._build_main_with_db_stub(BadDB(), fake_server, monkeypatch)
-        response = asyncio.run(handler(None))
+        response = asyncio.run(_health_response(BadDB()))
         assert response.status_code == 503
         assert b'"unhealthy"' in response.body
         # The error string itself must NOT leak into the response body.
         # The handler is documented to keep it generic so the endpoint
         # cannot be used to probe DB paths or schema details.
         assert b"db unreachable" not in response.body
+
+    def test_ping_does_not_block_the_event_loop(self):
+        """#320: the probe runs in a worker thread, so a slow SQLite open
+        cannot stall MCP requests sharing the loop."""
+        from src.main import _health_response
+
+        entered = threading.Event()
+        release = threading.Event()
+        released_by_loop: list[bool] = []
+
+        class SlowDB:
+            def ping(self):
+                entered.set()
+                # Only the event loop sets ``release``; run on the loop,
+                # this wait cannot be answered and times out.
+                released_by_loop.append(release.wait(timeout=2))
+
+        async def scenario():
+            task = asyncio.create_task(_health_response(SlowDB()))
+            while not entered.is_set() and not task.done():
+                await asyncio.sleep(0.001)
+            release.set()
+            return await task
+
+        response = asyncio.run(scenario())
+        assert released_by_loop == [True]
+        assert response.status_code == 200
 
 
 class TestSilenceClientDisconnect:
