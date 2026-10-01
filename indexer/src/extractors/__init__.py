@@ -121,7 +121,9 @@ class ExtractionResult:
 # (#226, #228).
 # image 2: OCRs every page of a multipage TIFF (#231).
 # text 2: decodes UTF-16 / UTF-32 by BOM and BOM-less UTF-16 (#234).
-EXTRACTOR_VERSIONS: dict[str, int] = {"docx": 2, "image": 2, "text": 2}
+# xlsx 2: stops at a text budget instead of expanding every shared-string
+# reference (#294).
+EXTRACTOR_VERSIONS: dict[str, int] = {"docx": 2, "image": 2, "text": 2, "xlsx": 2}
 
 
 def _stamp_extractor(module_name: str, extractor_name: str) -> str:

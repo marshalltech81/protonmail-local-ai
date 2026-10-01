@@ -160,6 +160,25 @@ def test_cache_row_from_an_older_extractor_version_is_re_extracted(tmp_path, mon
         assert row["extracted_text"] == "fresh text"
 
 
+def test_cache_row_from_the_unversioned_xlsx_extractor_is_re_extracted(tmp_path, monkeypatch):
+    """Rows written before ``xlsx`` was versioned hold the unbounded
+    shared-string expansion (#294); the bump makes them a cache miss
+    that re-runs the XLSX extractor."""
+    db = _seed_thread_for_cache_test(tmp_path)
+    extractor, row = _process_with_cached_extractor(
+        db,
+        "xlsx",
+        STATUS_SUCCESS,
+        "old text",
+        monkeypatch,
+        filename="book.xlsx",
+        content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+    extractor.assert_called_once()
+    assert extractor.call_args.kwargs["module_override"] == "xlsx"
+    assert row["extracted_text"] == "fresh text"
+
+
 def test_stale_ocr_row_is_served_while_ocr_is_off(tmp_path, monkeypatch):
     """Review round 1 on #262: a refresh with OCR off would replace the
     row's OCR text with "OCR disabled" and clear the indexed chunks."""

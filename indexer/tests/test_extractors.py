@@ -493,6 +493,154 @@ class TestDocxExtractor:
         assert "override text" in (result.text or "")
 
 
+def _xlsx_bytes(rows: list[list[object]]) -> bytes:
+    """A synthetic one-sheet workbook. openpyxl writes string cells as
+    inline strings; see ``_shared_string_xlsx`` for shared ones."""
+    import io
+
+    import openpyxl
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    for row in rows:
+        ws.append(row)
+    buf = io.BytesIO()
+    wb.save(buf)
+    wb.close()
+    return buf.getvalue()
+
+
+def _shared_string_xlsx(shared: str, refs: int, *, tail: str | None = None) -> bytes:
+    """A synthetic workbook whose cells A1..A<refs> all reference one
+    shared string, stored once in ``xl/sharedStrings.xml``, followed by
+    an optional inline-string ``tail`` row. openpyxl never writes
+    shared strings, so its output is rewritten into that shape."""
+    import io
+    import zipfile
+    from xml.sax.saxutils import escape
+
+    rows = [f'<row r="{r}"><c r="A{r}" t="s"><v>0</v></c></row>' for r in range(1, refs + 1)]
+    if tail is not None:
+        rows.append(
+            f'<row r="{refs + 1}"><c r="A{refs + 1}" t="inlineStr"><is><t>{escape(tail)}</t>'
+            "</is></c></row>"
+        )
+    sheet_data = "<sheetData>" + "".join(rows) + "</sheetData>"
+    sst = (
+        '<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
+        f'count="{refs}" uniqueCount="1"><si><t xml:space="preserve">{escape(shared)}</t></si></sst>'
+    )
+    base = zipfile.ZipFile(io.BytesIO(_xlsx_bytes([["placeholder"]])))
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as rebuilt:
+        for info in base.infolist():
+            data = base.read(info).decode()
+            if info.filename == "xl/worksheets/sheet1.xml":
+                start, end = data.index("<sheetData>"), data.index("</sheetData>")
+                data = data[:start] + sheet_data + data[end + len("</sheetData>") :]
+                data = data.replace(
+                    '<dimension ref="A1:A1"/>', f'<dimension ref="A1:A{refs + 1}"/>'
+                )
+            elif info.filename == "[Content_Types].xml":
+                data = data.replace(
+                    "</Types>",
+                    '<Override PartName="/xl/sharedStrings.xml" ContentType="application/'
+                    'vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml"/></Types>',
+                )
+            elif info.filename == "xl/_rels/workbook.xml.rels":
+                data = data.replace(
+                    "</Relationships>",
+                    '<Relationship Type="http://schemas.openxmlformats.org/officeDocument/2006/'
+                    'relationships/sharedStrings" Target="sharedStrings.xml" Id="rIdSst"/>'
+                    "</Relationships>",
+                )
+            rebuilt.writestr(info.filename, data)
+        rebuilt.writestr("xl/sharedStrings.xml", sst)
+    return out.getvalue()
+
+
+def _count_parsed_rows(monkeypatch) -> list[int]:
+    """Count the worksheet rows openpyxl's read-only parser hands back."""
+    from openpyxl.worksheet._read_only import ReadOnlyWorksheet
+
+    calls = [0]
+    original = ReadOnlyWorksheet._get_row
+
+    def counting(self, *args, **kwargs):
+        calls[0] += 1
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(ReadOnlyWorksheet, "_get_row", counting)
+    return calls
+
+
+class TestXlsxSharedStringBudget:
+    """#294: one long shared string referenced by many cells expands a
+    small workbook into an unbounded string. The text budget stops the
+    traversal, not just the returned length."""
+
+    def test_repeated_shared_string_stops_at_the_text_budget(self, monkeypatch):
+        from src.extractors import xlsx
+
+        monkeypatch.setattr(xlsx, "_MAX_TEXT_CHARS", 100_000)
+        payload = _shared_string_xlsx("S" * 32_767, 256)
+        assert len(payload) < 20_000
+        rows = _count_parsed_rows(monkeypatch)
+
+        text, _ = xlsx.extract(payload)
+
+        assert len(text) <= 100_000
+        assert text.startswith("[Sheet: Sheet]\nSSS")
+        # 256 rows would expand to ~8.4M characters; the walk stops on
+        # the fourth row, where the budget runs out.
+        assert rows[0] == 4
+
+    def test_whitespace_shared_string_is_charged_before_stripping(self, monkeypatch):
+        """Stripping scans the whole value; charging only what survives
+        the strip would let blank cells cost unbounded work."""
+        from src.extractors import xlsx
+
+        monkeypatch.setattr(xlsx, "_MAX_TEXT_CHARS", 100_000)
+        payload = _shared_string_xlsx(" " * 32_767, 256, tail="tail")
+        rows = _count_parsed_rows(monkeypatch)
+
+        text, _ = xlsx.extract(payload)
+
+        assert "tail" not in text
+        assert rows[0] == 4
+
+    def test_default_budget_bounds_a_large_expansion(self):
+        import time
+
+        from src.extractors import xlsx
+
+        # ~65M characters if every reference were expanded.
+        payload = _shared_string_xlsx("S" * 32_767, 2_000)
+        started = time.perf_counter()
+        text, _ = xlsx.extract(payload)
+        assert time.perf_counter() - started < 5.0
+        assert len(text) <= xlsx._MAX_TEXT_CHARS
+
+    def test_workbook_under_the_budget_is_unchanged(self):
+        from src.extractors import xlsx
+
+        payload = _shared_string_xlsx("S" * 32_767, 3, tail="tail")
+        text, _ = xlsx.extract(payload)
+        assert text == "[Sheet: Sheet]\n" + "\n".join(["S" * 32_767] * 3 + ["tail"])
+
+    def test_dispatcher_stamps_the_xlsx_version(self):
+        from src import extractors
+
+        result = extract(
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            filename="book.xlsx",
+            payload=_xlsx_bytes([["versioned"]]),
+        )
+        assert result.extractor == "xlsx@2"
+        assert extractors.stale_extractor_module("xlsx") == "xlsx"
+        assert extractors.stale_extractor_module("xlsx@2") is None
+
+
 class TestXlsxExtractor:
     def test_serializes_each_sheet_with_header_marker(self):
         import io
