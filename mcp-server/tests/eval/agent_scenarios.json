@@ -1,0 +1,69 @@
+{
+  "_comment": "Agent-level scenarios on the synthetic baseline mailbox (indexer/tests/baseline/corpus.py). Each names the tools an agent should reach for first (expected_tools, alternatives), a call budget (max_calls) and one golden question in tests/baseline/golden.json: golden_search inherits that question's required_evidence and filters (as expected arguments), golden_enumerate its args and expected messages. Scored by tests/agent_metrics.py; tests/test_agent_eval.py checks the reference traces in agent_reference_traces.json against them. Synthetic data only.",
+  "scenarios": [
+    {
+      "id": "roof-estimate-total",
+      "category": "exact_fact",
+      "question": "What is the total on the roof repair estimate?",
+      "golden_search": "roof-estimate",
+      "expected_tools": ["search_emails", "get_evidence", "ask_mailbox", "search_attachments"],
+      "max_calls": 2
+    },
+    {
+      "id": "renewal-rent",
+      "category": "attachment_only",
+      "question": "What will the new monthly rent be after the lease renewal?",
+      "golden_search": "attach-only-rent",
+      "expected_tools": ["get_evidence", "ask_mailbox", "search_attachments", "search_emails"],
+      "max_calls": 2
+    },
+    {
+      "id": "archived-pool-bids",
+      "category": "narrow_filter",
+      "question": "Find the pool resurfacing thread I archived.",
+      "golden_search": "filter-folder",
+      "expected_tools": ["search_emails"],
+      "max_calls": 1
+    },
+    {
+      "id": "frontdesk-appointment",
+      "category": "narrow_filter",
+      "question": "Which appointment thread was frontdesk@brightsmile.example on, in any role?",
+      "golden_search": "filter-participant",
+      "expected_tools": ["search_emails"],
+      "max_calls": 1
+    },
+    {
+      "id": "kayak-total-cost",
+      "category": "multiple_sources",
+      "question": "How much will the tandem kayaks cost for everyone coming on the kayak day?",
+      "golden_search": "multi-kayak",
+      "expected_tools": ["search_emails", "get_evidence", "ask_mailbox"],
+      "max_calls": 3
+    },
+    {
+      "id": "cabin-address",
+      "category": "alternative_sources",
+      "question": "What is the street address of the cabin on Hemlock Ridge?",
+      "golden_search": "alt-cabin-address",
+      "expected_tools": ["search_emails", "get_evidence", "ask_mailbox"],
+      "max_calls": 2
+    },
+    {
+      "id": "sent-folder-count",
+      "category": "exhaustive",
+      "question": "How many messages are in my Sent folder? List every one.",
+      "golden_enumerate": "folder-sent",
+      "expected_tools": ["query_messages"],
+      "max_calls": 3
+    },
+    {
+      "id": "adjuster-messages",
+      "category": "exhaustive",
+      "question": "List every message the insurance adjuster at adjuster@keystoneins.example sent me.",
+      "golden_enumerate": "sender",
+      "expected_tools": ["query_messages"],
+      "max_calls": 1
+    }
+  ]
+}

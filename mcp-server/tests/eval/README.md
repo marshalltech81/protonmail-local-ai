@@ -99,6 +99,45 @@ required groups found. To compare
 A change that improves an aggregate score but regresses any individual
 query is suspicious — chase the regression before celebrating.
 
+## Agent-level scoring (synthetic mailbox, in CI)
+
+The harness above scores search. `tests/agent_metrics.py` scores what
+an agent does with the tools, from a trace of its calls, and runs in
+the default suite because it needs no mailbox or provider.
+
+- `agent_scenarios.json` holds questions about the synthetic baseline
+  mailbox (`indexer/tests/baseline/corpus.py`). Each names the tools an
+  agent should reach for first, a call budget, and one golden question
+  in `tests/baseline/golden.json` whose evidence, filters or
+  enumeration answer it inherits; `make baseline` checks those answers
+  against a real index.
+- `agent_reference_traces.json` holds one scripted trace per scenario:
+  the calls a good agent makes, each call's `structuredContent`
+  (trimmed to the ID and paging fields), and the IDs its answer cites.
+  `tests/test_agent_eval.py` requires each to score with no failures,
+  and checks that scenario tools, expected arguments and trace
+  arguments exist in the real tool signatures and that the fields the
+  scorers read exist in the output models.
+
+Per trace it reports tool selection (the first call used an expected
+tool), argument accuracy (one call to an expected tool carried every
+expected argument), evidence recall (required evidence groups with a
+thread in any tool result), citation validity (cited IDs some tool
+returned, including passage `chunk_id`s), citation recall (required
+groups cited; a cited message or passage covers its thread), enumeration completeness (expected messages
+listed by one `query_messages` cursor chain over exactly the expected
+filters, any page size, and whether that chain's last page said
+`has_more: false`), and calls over budget or repeated. `summarize`
+prints the aggregates and the failing scenarios by category. Failure
+cases for each scorer are in `tests/test_agent_metrics.py`.
+
+These checks are deterministic and do not grade the answer: a valid
+citation shows the agent saw the source, not that the source supports
+the statement. Answer quality stays a manual grade (your
+`eval-queries.md`, which `.gitignore` keeps out of the repository). No
+recorder for a live client's trace exists yet, so the reference traces
+are the only traces scored today.
+
 ## What this harness does NOT do
 
 - It does not run `ask_mailbox` end-to-end or grade LLM answers.
