@@ -13,7 +13,7 @@ import re
 import sqlite3
 from contextlib import closing
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, time
 from email.utils import parseaddr
 from pathlib import Path
 from urllib.parse import quote
@@ -2567,13 +2567,13 @@ def _parse_filter_date(
     """Parse a user-supplied date filter into a tz-aware UTC ``datetime``.
 
     Accepts:
-    - date-only values (``"2024-12-31"``): promoted to ``00:00:00`` when
-      used as a lower bound, ``23:59:59.999999`` when used as an upper
-      bound, both in UTC — so the filter includes the full day the user
-      named.
-    - trailing ``Z`` (``"2024-12-31T00:00:00Z"``): normalized to the
-      ``+00:00`` offset form that ``datetime.fromisoformat`` accepts.
-    - any other ISO 8601 datetime string: passed through.
+    - date-only values, meaning any form ``date.fromisoformat`` accepts
+      (``"2024-12-31"``, ``"20241231"``, ``"2025-W01-2"``, ...), with or
+      without a trailing ``Z``: promoted to ``00:00:00`` when used as a
+      lower bound, ``23:59:59.999999`` when used as an upper bound, both
+      in UTC — so the filter includes the full day the user named (#330).
+    - any ISO 8601 datetime ``datetime.fromisoformat`` accepts, including
+      a trailing ``Z``: the instant it names, for either bound.
 
     Naive datetimes are assumed to be UTC. Offset-aware values are
     converted to UTC before being returned, so callers that feed the
@@ -2581,20 +2581,19 @@ def _parse_filter_date(
     UTC timestamps compare the same instant rather than two offset-shifted
     strings that happen to sort differently.
     """
-    normalized = value[:-1] + "+00:00" if value.endswith("Z") else value
-
-    # Date-only: ``"YYYY-MM-DD"`` is exactly 10 chars of [digits/hyphens].
-    if len(normalized) == 10 and normalized[4] == "-" and normalized[7] == "-":
-        try:
-            base = datetime.fromisoformat(normalized + "T00:00:00+00:00")
-        except ValueError as exc:
-            raise InvalidFilterError(_field_name, f"{_field_name}: invalid date {value!r}") from exc
-        if end_of_day:
-            return base.replace(hour=23, minute=59, second=59, microsecond=999999)
-        return base
+    # Date-only is whatever the date parser accepts, not a string shape:
+    # a length check missed the basic and week-date forms (#330). The
+    # ``Z`` is dropped because the date parser rejects it and it only
+    # restates the UTC the day is already read in.
+    try:
+        day = date.fromisoformat(value.removesuffix("Z"))
+    except ValueError:
+        day = None
+    if day is not None:
+        return datetime.combine(day, time.max if end_of_day else time.min, tzinfo=UTC)
 
     try:
-        dt = datetime.fromisoformat(normalized)
+        dt = datetime.fromisoformat(value)
     except ValueError as exc:
         raise InvalidFilterError(_field_name, f"{_field_name}: invalid datetime {value!r}") from exc
     if dt.tzinfo is None:

@@ -106,9 +106,13 @@ drive an unbounded query against the index.
   than ``limit * 2`` so deeper-ranked matches still qualify after
   filtering.
 - Date bounds accept either a full ISO 8601 timestamp or a date-only
-  value (``"2024-12-31"``); date-only values are promoted to start/end
-  of day in UTC before being pushed into SQL so the filter matches
-  the full day the user named.
+  value. Every date-only form Python's `date.fromisoformat` accepts
+  counts (`"2024-12-31"`, `"20241231"`, the week date `"2025-W01-2"`),
+  with or without a trailing `Z`; date-only values are promoted to
+  start/end of day in UTC before being pushed into SQL so the filter
+  matches the full day the user named. A timestamp, including an
+  explicit midnight, bounds at that instant; naive timestamps are read
+  as UTC.
 - A `date_from` later than `date_to` names an empty interval and is
   rejected with an error naming both fields, the same way by every tool
   that takes both bounds. The bounds are compared after UTC

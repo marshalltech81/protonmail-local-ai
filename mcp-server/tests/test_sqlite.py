@@ -1174,6 +1174,105 @@ class TestFilterDateUtcNormalization:
         assert normalized.startswith("2024-06-01T12:00:00")
 
 
+class TestDateFilterFormCatalogue:
+    """#330: every ISO 8601 form the date filters accept, and what each
+    bound becomes. The upper bound used to get end-of-day promotion only
+    when the string was exactly ``YYYY-MM-DD``, so other date-only forms
+    (``20240101``, week dates) cut off all but the first instant of the
+    day they name. Date-only is now decided by what the parser accepts.
+
+    Invariant: a value ``date.fromisoformat`` accepts (with or without a
+    trailing ``Z``) names a whole UTC day; any other accepted value names
+    one instant, the same for both bounds."""
+
+    _START = "2024-01-01T00:00:00+00:00"
+    _END_OF_DAY = "2024-01-01T23:59:59.999999+00:00"
+    _NOON = "2024-01-01T12:00:00+00:00"
+
+    # Every form names 2024-01-01 (a Monday, so ISO week 2024-W01-1).
+    DATE_ONLY = [
+        "2024-01-01",  # extended calendar date
+        "20240101",  # basic calendar date
+        "2024-W01-1",  # extended week date
+        "2024W011",  # basic week date
+        "2024-W01",  # week without a weekday: the parser reads its Monday
+        "2024W01",
+        "2024-01-01Z",  # a date with the UTC designator: still the whole day
+        "20240101Z",
+        "2024-W01-1Z",
+    ]
+    DATETIME = {
+        "2024-01-01T12:00:00": _NOON,  # naive: read as UTC
+        "2024-01-01T12:00": _NOON,
+        "2024-01-01T12": _NOON,
+        "2024-01-01 12:00:00": _NOON,  # space separator
+        "20240101T120000": _NOON,  # basic format
+        "2024-W01-1T12:00": _NOON,  # week date with a time
+        "2024-01-01T12:00:00Z": _NOON,
+        "2024-01-01T12:00:00.000000Z": _NOON,
+        "2024-01-01T12:00:00+00:00": _NOON,
+        "2024-01-01T07:00:00-05:00": _NOON,  # offset converted to UTC
+        "2024-01-01T21:00:00+09:00": _NOON,
+        # An explicit midnight is an instant, not a day, even as date_to.
+        "2024-01-01T00:00:00": _START,
+        "2024-01-01T00:00:00Z": _START,
+    }
+    REJECTED = ["2024-001", "2024-01", "2024", "2024-1-1", "2024-13-01", "2024-01-01T25:00"]
+
+    @pytest.mark.parametrize("value", DATE_ONLY)
+    def test_date_only_form_names_the_whole_day(self, value):
+        from src.lib.sqlite import _parse_filter_date
+
+        assert _parse_filter_date(value, end_of_day=False).isoformat() == self._START
+        assert _parse_filter_date(value, end_of_day=True).isoformat() == self._END_OF_DAY
+
+    @pytest.mark.parametrize(("value", "instant"), sorted(DATETIME.items()))
+    def test_datetime_form_names_one_instant(self, value, instant):
+        from src.lib.sqlite import _parse_filter_date
+
+        assert _parse_filter_date(value, end_of_day=False).isoformat() == instant
+        assert _parse_filter_date(value, end_of_day=True).isoformat() == instant
+
+    @pytest.mark.parametrize("value", REJECTED)
+    def test_unaccepted_form_is_rejected(self, value):
+        from src.lib.sqlite import InvalidFilterError, _parse_filter_date
+
+        with pytest.raises(InvalidFilterError):
+            _parse_filter_date(value, end_of_day=True, _field_name="date_to")
+
+    @pytest.mark.parametrize("value", DATE_ONLY)
+    def test_date_only_bound_includes_the_named_day_end_to_end(self, tmp_path, make_result, value):
+        """The reproduction from #330, through ``query_messages`` (SQL
+        pushdown) and the post-fusion thread filter: a message at noon
+        on the named day is inside either bound."""
+        from datetime import UTC, datetime
+
+        from tests.conftest import _insert_message
+
+        conn, path = _open_built_db_conn(tmp_path, "date-forms.db")
+        _insert_message(
+            conn,
+            message_id="m-noon",
+            thread_id="t-noon",
+            sent_at=self._NOON,
+            subject="quarterly report",
+        )
+        conn.execute(
+            "UPDATE threads SET date_first = ?, date_last = ? WHERE thread_id = 't-noon'",
+            (self._NOON, self._NOON),
+        )
+        conn.commit()
+        conn.close()
+        db = Database(str(path))
+        assert db.query_messages(date_to=value).total_matches == 1
+        assert db.query_messages(date_from=value).total_matches == 1
+
+        at_noon = make_result("at-noon")
+        at_noon.date_first = at_noon.date_last = datetime(2024, 1, 1, 12, tzinfo=UTC)
+        assert db._apply_filters([at_noon], date_to=value) == [at_noon]
+        assert db._apply_filters([at_noon], date_from=value) == [at_noon]
+
+
 class TestInvertedDateRange:
     """#312: ``date_from`` after ``date_to`` names an empty interval. The
     thread overlap predicates (``date_last >= from AND date_first <= to``)
