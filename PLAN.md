@@ -592,8 +592,8 @@ How the first batch was worked, and what to repeat:
   reindex also repairs databases already damaged by #204, #205, #230
   and #232.
 - **#208 chunk overlap exceeds `max_tokens`** — harmless at default
-  settings; land it with Phase 2 item 4 (chunk `kind` tags), which
-  rewrites the chunker and changes chunk IDs anyway.
+  settings; it changes chunk IDs, so it lands in the Phase 2 reindex
+  bundle (see Phase 2), not on its own.
 - ~~**#209 single-part MIME attachment decoded as body**~~ (done with
   #230 in item 8 below), ~~**#210 stale
   unsupported-extraction cache entry**~~ (done in item 10 below) — low frequency, about 10 and 5
@@ -606,26 +606,53 @@ Triaged against `d30e500` by four parallel agents; every issue is real
 and most reproduced with synthetic input. PRs in the order to land
 them (one test-first commit per issue, `Fixes #N` per issue):
 
-**Status 2026-09-30 (late) — next session starts here.** Second batch
+**Status 2026-10-01 — next session starts here.** Second batch
 items 1–12 are merged; 13–14 and #217 are decided (below and in
-Resolved decisions). The deprecation cleanup is finished: slice 1 in
-#343 (the owner declined its review round's request to keep rejecting
-old env names), slice 2 in #345, slice 3 in #346 (baseline is now v21),
-slice 4 in #348. Third batch merged so far: #293 (#335), the privacy
-trio #311/#325/#326 (#337), #327/#328 (#341), #301 (#336), #278/#267
-(#342), #339/#340 (#347), #304 batch-1 half (#349), #297 first half
-(#350), #306 (#351).
+Resolved decisions). The deprecation cleanup is finished (#343, #345,
+#346, #348; baseline is v21). Third batch merged so far: #293 (#335),
+the privacy trio #311/#325/#326 (#337), #327/#328 (#341), #301 (#336),
+#278/#267 (#342), #339/#340 (#347), #304 batch-1 half (#349), #297
+first half (#350), #306 (#351), #302 (#352, schema v22), #319 (#353),
+#332 (#356), #321 (#357), #318 (#358), #310/#329/#315 (#359), #314
+(#360), and #257 slices 1–3: the parser (#364), `last_error` keeping
+the type name only, with errno text for `OSError` (#363), and
+attachment filenames and extractor errors out of logs and
+`extraction_error` (#401). Next-list item 1 below is done.
 
 In review, merge when Codex is clean on the head (the owner merges):
 
-- **#352** — #302 `message_thread_map` indexes as migration `0022`
-  (schema v22).
-- **#353** — #319 intelligence-tool failures raised as `ToolError`
-  (`isError=true`).
+- **#402** — this status update (C1 below).
+- **#403** — cleanup C2, MCP tool docs.
+- **#404** — cleanup C3, ops docs.
 
-Both strike their own entries in the third-batch list below, so
-whichever merges second will conflict in this file: merge `main` into
-its branch (force-push is blocked) and keep both strikes.
+Cleanup batch, triaged 2026-10-01: the 36 issues #365–#400 came from a
+whole-repository stale-text review. Every claim held on `2454d0e`, and
+nothing was closable as already fixed. All but #395 are docs, comments,
+dead code or test text. They come first because they are cheap and
+remove misleading guidance; one PR per file group so none conflict:
+
+- C1 PLAN fixes: #372 (#402).
+- C2 MCP tool docs: #391, #392, #393, #390, #322 (#403).
+- C3 ops docs: #394, #323, #396, #397, #381 (#404).
+- C4 MCP config and comments: #370, #375, #380, #389, #398, #399, #400,
+  #373 (owner: remove `RERANK_TOP_N`; the only caller passes `top_n`).
+- C5 eval harness: #383, #384, #382 (owner: drop the unused `question`
+  and `expected_substrings` fields), #387 (owner: print the fallback
+  notice).
+- C6 indexer: #365, #366, #368, #369, #371, #385,
+  #388.
+- C7 indexer `main.py` and architecture docs: #367, #374, #378, #379, and the #295 limitation note
+  that Resolved decision 7 asks for (still undocumented).
+- C8 attachment and PDF docs: #376, #377, #386.
+- #395 is a real fix (reconciliation reads only the first survivor's
+  subject, so a deleted message's subject can be embedded): its own
+  test-first PR after the cleanup PRs.
+
+Also filed 2026-10-01 from the #257 parser slice: #361 (8-bit `Date`
+header raises `AttributeError`) and #362 (`idna` RFC 2231 filename
+raises `UnicodeError`), both P3 crashes that dead-letter a message
+without leaking content; batch-1 guards, #362 needs a fallback-filename
+decision first.
 
 Open owner decision: **#267** one-shot rotation. #342 shipped the
 documented limitation (recreate with `BRIDGE_CERT_PIN_ROTATE=false`);
@@ -640,22 +667,28 @@ at v20 must be rebuilt from Maildir; v21 opens and migrates to v22.
 Next, in order (each item is a batch-1 guard unless noted; reproduce
 first, one test-first commit per issue, keep three PRs in flight):
 
-1. Rest of the MCP "errors reported as success" cluster: #318, #321,
-   #332, then #310 + #329 + #315 together (all in
-   `extract_from_emails`), then #314 (narrow the fallback, do not
-   parse IDs).
-2. Indexer #257 sweep (classify parse-stage and provider exceptions at
-   their boundary, `caplog` marker tests). The largest batch-1 item;
-   consider splitting by boundary.
-3. MCP: name matching (#313, #324, #331) with #316; date filters (#312,
-   #330); #333; event-loop hygiene (#320, #317, #334); #308; #309;
-   docs (#322, #323).
-4. mbsync: #271, #280, #269 with #268's minimal fix.
-5. Bridge, needing Docker for `make bridge-upgrade-check` and the
+1. ~~Rest of the MCP "errors reported as success" cluster: #318,
+   #321, #332, then #310 + #329 + #315 together, then #314~~ (done:
+   #356–#360).
+2. The cleanup batch above (C1–C8, then #395), three PRs in flight.
+3. #257 sweep, split by boundary: slices 1–3 merged (parser #364,
+   `last_error` #363, attachments #401); slice 4
+   MCP provider handlers (owner: a dedicated error class for our
+   fixed-message errors, and the caller gets the same classified text
+   as the log), slice 5 MCP SQLite fallback logs (also
+   `retrieval.py` `query_messages`, not yet in #257). A closing docs
+   PR updates AGENTS.md's known-gaps bullet.
+4. MCP: name matching (#313, #324, #331) with #316; date filters (#312,
+   #330); #333; event-loop hygiene (#320, #317, #334); #308; #309.
+   (#322 and #323 moved to the cleanup batch.)
+5. mbsync: #271, #280. Parser: #361, #362.
+6. Bridge, needing Docker for `make bridge-upgrade-check` and the
    first Bridge shell test harness: the entrypoint PR (#242, #266,
-   #270) and the updater-gate PR (#245). Land both before the eval
-   slice: existing vaults make unpinned update fetches until #245.
-6. Then third-batch items 2–4 below (extractor bumps, mbsync design,
+   #270), the smoke-test fix (#269 with #268's minimal fix, both in
+   `scripts/bridge-smoke.sh`), and the updater-gate PR (#245). Land
+   them before the eval slice: existing vaults make unpinned update
+   fetches until #245.
+7. Then third-batch items 2–4 below (extractor bumps, mbsync design,
    the Phase 2 reindex bundle), the Phase 1.5/#283 eval slice, and
    Phase 2.
 
@@ -800,10 +833,10 @@ Order of work, chosen to minimise reindexes:
    ~~the empty pin re-TOFU (#278)~~ (done: only an absent pin is a
    first boot) and ~~the rotation flag surviving restarts (#267,
    docs)~~ (done: documented recreate-with-false; one-shot
-   authorization not built), the unbounded connect probe (#271), signal
-   forwarding to the sync child (#280), and the smoke-test one-liner
-   (#269) with #268's minimal fix. Bridge, both decided as items 13–14
-   above and needing the first Bridge shell test harness: the
+   authorization not built), the unbounded connect probe (#271), and
+   signal forwarding to the sync child (#280). Bridge, both decided as
+   items 13–14 above and needing the first Bridge shell test harness:
+   the smoke-test one-liner (#269) with #268's minimal fix, the
    entrypoint PR (#242 `BRIDGE_FORCE_CLI`, #266 bootstrap order, #270
    the impossible `su` shortcut) and the updater-gate PR (#245, with
    its enabled-vault test) — before the eval slice, since existing
@@ -1039,7 +1072,9 @@ do not ship persisted claims without them.
 6. **#292 mixed digital/scanned PDFs (2026-09-30):** page-level OCR
    selection with a `pdf` extractor version bump, together with #300.
 7. **#295 sequential inline text parts (2026-09-30):** document the
-   limitation now; revisit with the Phase 2 reindex bundle.
+   limitation now (queued as cleanup batch C7, since the note belongs
+   in `docs/architecture.md`); revisit with the Phase 2 reindex
+   bundle.
 8. **#297 undated mail (2026-09-30):** keep the first persisted date on
    reprocess now; with the Phase 2 reindex, a deterministic chain —
    top `Received:`, else the Maildir filename timestamp, else the
