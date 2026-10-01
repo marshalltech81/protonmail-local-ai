@@ -4526,11 +4526,13 @@ def _scoped_recall_db(tmp_path, *, long_thread: bool = False) -> Database:
     ``long_thread`` puts all the noise chunks in one out-of-scope thread
     (a mailbox dominated by one long conversation); otherwise each noise
     thread owns one chunk and one thread vector. The target has no
-    lexical overlap with the query text the tests use.
+    lexical overlap with the query text the tests use. The target's
+    sender is the only one classified (``counsel``); every noise sender
+    stays ``unclassified``.
     """
     import sqlite_vec
 
-    from tests.conftest import _build_schema, _insert_chunk, _insert_thread
+    from tests.conftest import _build_schema, _insert_chunk, _insert_thread, set_authority
 
     db_path = tmp_path / "scoped.db"
     conn = sqlite3.connect(str(db_path))
@@ -4588,6 +4590,7 @@ def _scoped_recall_db(tmp_path, *, long_thread: bool = False) -> Database:
         embedding=[0.6, 0.8, 0.0, 0.0],
     )
     conn.close()
+    set_authority(db_path, "rowan@scope.example", "counsel", "address:rowan@scope.example")
     return Database(str(db_path))
 
 
@@ -4600,6 +4603,13 @@ _SCOPES = [
     pytest.param(
         {"folders": ["Projects"], "from_addr": "rowan@scope.example", "date_to": "2025-12-31"},
         id="combined",
+    ),
+    pytest.param({"authority_class": "counsel"}, id="authority"),
+    # Every noise thread passes the folder filter, so the window counts
+    # as satisfied unless the authority filter takes part (#469).
+    pytest.param(
+        {"folders": ["INBOX", "Projects"], "authority_class": "counsel"},
+        id="authority-folder",
     ),
 ]
 

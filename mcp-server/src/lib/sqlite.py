@@ -1125,6 +1125,7 @@ class Database:
             date_to=date_to,
             has_attachments=has_attachments,
             participant=participant,
+            authority_class=authority_class,
         )
         vec_results = vec_results or []
         chunk_hits = chunk_hits or []
@@ -1364,6 +1365,7 @@ class Database:
             date_to=date_to,
             has_attachments=has_attachments,
             participant=participant,
+            authority_class=authority_class,
         )
         timings.count("thread_vec", len(vec_results or []))
         timings.count("chunk_vec", len(chunk_hits or []))
