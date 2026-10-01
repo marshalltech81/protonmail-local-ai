@@ -14,7 +14,7 @@ synthetic mailbox) and a trace of the calls an agent made, score
 - **citation validity**: the fraction of IDs the answer cites that some
   tool result returned (an ID no tool returned is fabricated);
 - **citation recall**: the fraction of required evidence groups the
-  answer cites (a cited message covers its thread);
+  answer cites (a cited message or passage covers its thread);
 - **enumeration completeness**: for an exhaustive question, the
   fraction of expected messages listed by one ``query_messages``
   cursor chain over exactly the expected filters (any page size), and
@@ -46,8 +46,9 @@ from typing import Any
 from tests.retrieval_metrics import evidence_recall
 
 # Result fields holding an ID an answer can cite. ``thread_id`` names a
-# thread; the other two name a message within the thread named beside it.
-ID_FIELDS = ("thread_id", "message_id", "claimant_id")
+# thread; the others name a message, or a passage (``chunk_id``, the ID
+# ask_mailbox citations name), within the nearest enclosing thread.
+ID_FIELDS = ("thread_id", "message_id", "claimant_id", "chunk_id")
 # ``query_messages`` fields that say whether an enumeration is complete.
 PAGING_FIELDS = ("has_more", "next_cursor", "messages")
 ENUMERATING_TOOL = "query_messages"
@@ -166,12 +167,14 @@ def _enumeration_chains(calls: Sequence[dict], predicates: dict[str, Any]) -> li
 
     Only calls whose filters are exactly the expected predicates count
     (blank filters are ignored, as the tool ignores them). A call with no
-    cursor starts a chain; one whose cursor is the previous page's
-    ``next_cursor`` continues it; any other cursor breaks the chain, and
-    its page joins none.
+    cursor starts a chain; one whose cursor is the ``next_cursor`` of the
+    last page of any chain so far continues that chain, so starting a
+    second chain does not orphan the first; a page with any other cursor
+    joins no chain.
     """
     chains: list[list[dict]] = []
-    current: list[dict] | None = None
+    # Open chains by the cursor that continues them.
+    waiting: dict[str, list[dict]] = {}
     for call in calls:
         if call["tool"] != ENUMERATING_TOOL:
             continue
@@ -183,12 +186,16 @@ def _enumeration_chains(calls: Sequence[dict], predicates: dict[str, Any]) -> li
             continue
         cursor = arguments.get("cursor")
         if not cursor:
-            current = [call["result"]]
-            chains.append(current)
-        elif current is not None and cursor == current[-1].get("next_cursor"):
-            current.append(call["result"])
+            chain: list[dict] = []
+            chains.append(chain)
+        elif cursor in waiting:
+            chain = waiting.pop(cursor)
         else:
-            current = None
+            continue
+        chain.append(call["result"])
+        next_cursor = call["result"].get("next_cursor")
+        if next_cursor:
+            waiting[next_cursor] = chain
     return chains
 
 

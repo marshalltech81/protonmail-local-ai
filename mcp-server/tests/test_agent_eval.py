@@ -109,7 +109,9 @@ def test_scorers_read_fields_the_output_models_publish() -> None:
     }
     assert set(ID_FIELDS) <= published
     assert set(PAGING_FIELDS) <= set(outputs.QueryMessagesOutput.model_fields)
-    assert set(ID_FIELDS) <= set(outputs.ListedMessage.model_fields)
+    assert {"thread_id", "message_id", "claimant_id"} <= set(outputs.ListedMessage.model_fields)
+    assert {"chunk_id", "thread_id"} <= set(outputs.Citation.model_fields)
+    assert "chunk_id" in outputs.EvidenceChunk.model_fields
 
 
 class TestLoadScenarios:

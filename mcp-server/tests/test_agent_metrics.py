@@ -194,6 +194,25 @@ class TestCitations:
         assert score.citation_validity == 1.0
         assert score.citation_recall == 1.0
 
+    def test_a_cited_chunk_id_is_valid_and_covers_its_thread(self) -> None:
+        # EvidenceChunk.chunk_id is the passage ID ask_mailbox citations name.
+        call = {
+            "tool": "get_evidence",
+            "arguments": {"query": "q"},
+            "result": {
+                "threads": [
+                    {
+                        "thread_id": "a.1@x.example",
+                        "chunks": [{"chunk_id": "c-1", "message_id": "a.1@x.example"}],
+                    }
+                ]
+            },
+        }
+        trace = _trace([call], cited=["c-1"])
+        score = score_trace(_scenario(expected_tools=["get_evidence"]), trace)
+        assert score.citation_validity == 1.0
+        assert score.citation_recall == 1.0
+
     def test_retrieved_but_uncited_evidence_lowers_citation_recall(self) -> None:
         scenario = _scenario(required_evidence=[["a.1@x.example"], ["b.1@x.example"]])
         trace = _trace([_search(["a.1@x.example", "b.1@x.example"])], cited=["a.1@x.example"])
@@ -267,6 +286,25 @@ class TestEnumeration:
         score = score_trace(self._scenario(), trace)
         assert score.exhausted is False
         assert score.enumeration_recall == pytest.approx(2 / 3)
+
+    def test_a_restart_does_not_orphan_an_earlier_chain(self) -> None:
+        # The first chain resumes after a second one started; its cursor
+        # still continues it.
+        trace = _trace(
+            [
+                _page(["m1@x.example", "m2@x.example"], has_more=True, next_cursor="c1"),
+                _page(
+                    ["m1@x.example"],
+                    has_more=True,
+                    next_cursor="r1",
+                    filters={"folder": "Sent", "limit": 1},
+                ),
+                _page(["m3@x.example"], has_more=False, cursor="c1"),
+            ]
+        )
+        score = score_trace(self._scenario(), trace)
+        assert score.enumeration_recall == 1.0
+        assert score.exhausted is True
 
     def test_three_chained_pages_are_complete(self) -> None:
         trace = _trace(

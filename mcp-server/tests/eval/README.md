@@ -123,8 +123,8 @@ Per trace it reports tool selection (the first call used an expected
 tool), argument accuracy (one call to an expected tool carried every
 expected argument), evidence recall (required evidence groups with a
 thread in any tool result), citation validity (cited IDs some tool
-returned), citation recall (required groups cited; a cited message
-covers its thread), enumeration completeness (expected messages
+returned, including passage `chunk_id`s), citation recall (required
+groups cited; a cited message or passage covers its thread), enumeration completeness (expected messages
 listed by one `query_messages` cursor chain over exactly the expected
 filters, any page size, and whether that chain's last page said
 `has_more: false`), and calls over budget or repeated. `summarize`
