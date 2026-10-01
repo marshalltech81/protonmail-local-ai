@@ -249,10 +249,12 @@ INITIAL_INDEX_BATCH_SIZE = _int_env("INITIAL_INDEX_BATCH_SIZE", 50)
 STEADY_STATE_BATCH_SIZE = _int_env("INDEXER_STEADY_STATE_BATCH_SIZE", 8)
 
 # How often (seconds) the main loop calls ``Database.wal_checkpoint_truncate``.
-# The single shared sqlite3 connection used by ``Database`` keeps a WAL
-# read snapshot open for the duration of the indexer process; without an
-# explicit truncate-checkpoint the WAL file grows monotonically. 10 min
-# keeps the file size bounded without churning IO.
+# An open connection does not pin the WAL; only an open read transaction
+# does. SQLite's automatic checkpoint lets the WAL be reused from the
+# start once its frames are checkpointed, but it never shrinks the file,
+# so the WAL stays at its high-water size after a burst of writes. The
+# explicit truncate-checkpoint reclaims that space. 10 min keeps the file
+# size bounded without churning IO.
 WAL_CHECKPOINT_INTERVAL_SECS = _int_env("INDEXER_WAL_CHECKPOINT_INTERVAL_SECS", 600, minimum=60)
 
 # How often (seconds) the main loop runs ``_recover_zero_vector_threads``.
@@ -2021,12 +2023,12 @@ def main():
                 last_recovery_sweep = now
 
             # WAL checkpoint: keep the WAL file size bounded over a
-            # long-running container. The indexer holds a single
-            # writer connection for the life of the process; that
-            # connection's read snapshot prevents SQLite's automatic
-            # checkpoint thresholds from truncating the WAL, so an
-            # explicit periodic ``wal_checkpoint(TRUNCATE)`` is what
-            # reclaims space on the writer side.
+            # long-running container. SQLite's automatic checkpoint
+            # lets the WAL be reused once checkpointed but never
+            # shrinks the file, so an explicit periodic
+            # ``wal_checkpoint(TRUNCATE)`` is what reclaims space. It
+            # can only complete when no reader holds an open read
+            # transaction on the WAL (``busy`` below).
             if now - last_wal_checkpoint >= WAL_CHECKPOINT_INTERVAL_SECS:
                 try:
                     busy, _log_pages, ckpt_pages = db.wal_checkpoint_truncate()
