@@ -80,6 +80,36 @@ Arguments are checked against each tool's input schema before the tool
 runs: a wrong type or an argument the tool does not declare is an error
 result naming the problem.
 
+## Stage timings in the server log
+
+`search_emails`, `get_evidence`, `search_attachments` and the three
+intelligence tools log one line per call at `INFO` on the `mcp.timings`
+logger, on success and on failure:
+
+```text
+tool=search_emails outcome=ok total_ms=41.7 stages_ms={'query_embedding': 22.4, 'thread_fts': 3.1, 'chunk_fts': 2.0, 'attachment_fts': 0.9, 'thread_vec': 4.6, 'chunk_vec': 6.2, 'fusion': 0.8} counts={'thread_fts': 4, 'chunk_fts': 9, 'attachment_fts': 0, 'thread_vec': 100, 'chunk_vec': 812, 'filtered': 57, 'results': 10} config={'rerank': 'none'}
+```
+
+- `stages_ms` holds only the stages that ran, so a keyword-mode search
+  has no `query_embedding` or vector lanes. Stages: `query_embedding`,
+  `contact_lookup` (the `from_name` resolution), the keyword lanes
+  `thread_fts` / `chunk_fts` / `attachment_fts`, the vector lanes
+  `thread_vec` / `chunk_vec` (each covering every widening step of a
+  filtered search), `fusion` (RRF plus post-fusion filters),
+  `evidence_fetch`, `rerank`, `attachment_search` and `inference`
+  (summed over every completion the call made).
+- `counts` holds candidates per lane, `filtered` (after fusion and
+  filters), `results`, `evidence_chunks`, `rerank_candidates`,
+  `inference_calls` and, on a filtered vector search,
+  `thread_vec_expansions` / `chunk_vec_expansions` (re-queries with a
+  wider window).
+- `config` names the rerank and inference modes.
+
+The line carries names fixed in the code, numbers and mode names only:
+never the query, other arguments, subjects, addresses, bodies or
+provider responses. `total_ms` minus the stage sum is the time spent
+outside the timed stages (validation, row conversion, prompt building).
+
 ## Group 1 — Search
 
 ### `search_emails`

@@ -91,6 +91,9 @@ class CohereReranker:
     proxies, gateways, or EU region overrides.
     """
 
+    # ``RERANK_MODE`` value, reported on the per-call timing line.
+    mode = "cohere"
+
     def __init__(self, config: RerankConfig):
         import cohere
 

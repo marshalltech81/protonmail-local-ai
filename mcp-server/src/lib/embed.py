@@ -14,6 +14,7 @@ pointing the SDK at them via ``base_url`` is the supported path.
 import logging
 import math
 
+from . import timings
 from .security import ProviderResponseError, same_origin_request_hook
 
 log = logging.getLogger("mcp.embed")
@@ -153,7 +154,8 @@ async def embed_query(client, text: str, expected_dim: int | None) -> list[float
     operator-controllable knobs (``EMBED_BASE_URL`` / ``EMBED_MODEL``)
     so the fix path is obvious from the log line.
     """
-    vector = await client.embed(text)
+    with timings.stage("query_embedding"):
+        vector = await client.embed(text)
     if expected_dim is not None and len(vector) != expected_dim:
         raise ProviderResponseError(
             f"Embedding dimension mismatch: provider returned {len(vector)}, "
