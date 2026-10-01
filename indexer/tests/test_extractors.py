@@ -559,6 +559,23 @@ def _shared_string_xlsx(shared: str, refs: int, *, tail: str | None = None) -> b
     return out.getvalue()
 
 
+def _rewrite_sheet_xml(payload: bytes, edit) -> bytes:
+    """Apply ``edit`` to the first worksheet's XML, to give a synthetic
+    workbook metadata openpyxl would not write itself."""
+    import io
+    import zipfile
+
+    base = zipfile.ZipFile(io.BytesIO(payload))
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as rebuilt:
+        for info in base.infolist():
+            data = base.read(info)
+            if info.filename == "xl/worksheets/sheet1.xml":
+                data = edit(data.decode()).encode()
+            rebuilt.writestr(info.filename, data)
+    return out.getvalue()
+
+
 def _count_parsed_rows(monkeypatch) -> list[int]:
     """Count the worksheet rows openpyxl's read-only parser hands back."""
     from openpyxl.worksheet._read_only import ReadOnlyWorksheet
@@ -698,6 +715,88 @@ class TestXlsxColumnPositions:
         assert "y" not in text
 
 
+class TestXlsxStaleDimensions:
+    """#305: read-only iteration trusted the worksheet's declared
+    dimension, so cells outside a stale, undersized one were dropped
+    and the extraction still reported success."""
+
+    @staticmethod
+    def _declare(payload: bytes, ref: str) -> bytes:
+        def edit(xml: str) -> str:
+            start = xml.index("<dimension ref=")
+            end = xml.index("/>", start) + 2
+            return xml[:start] + f'<dimension ref="{ref}"/>' + xml[end:]
+
+        return _rewrite_sheet_xml(payload, edit)
+
+    _ROWS: list[list[object]] = [
+        ["Invoice"],
+        ["PAYMENTZX829", 1250],
+        [],
+        [None, None, None, "late"],
+    ]
+
+    def test_undersized_dimension_keeps_later_rows_and_columns(self):
+        from src.extractors import xlsx
+
+        text, _ = xlsx.extract(self._declare(_xlsx_bytes(self._ROWS), "A1:A1"))
+        assert text.split("\n")[1:] == ["Invoice", "PAYMENTZX829\t1250", "\t\t\tlate"]
+
+    def test_dispatcher_reports_the_recovered_cells(self):
+        from src.extractors import extract
+
+        result = extract(
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            filename="stale.xlsx",
+            payload=self._declare(_xlsx_bytes(self._ROWS), "A1:A1"),
+        )
+        assert result.status == STATUS_SUCCESS
+        assert "PAYMENTZX829\t1250" in (result.text or "")
+        assert "late" in (result.text or "")
+
+    def test_offset_dimension_keeps_cells_before_it(self):
+        from src.extractors import xlsx
+
+        text, _ = xlsx.extract(self._declare(_xlsx_bytes(self._ROWS), "B2:B2"))
+        assert text.split("\n")[1:] == ["Invoice", "PAYMENTZX829\t1250", "\t\t\tlate"]
+
+    def test_correct_and_oversized_dimensions_read_the_same(self):
+        from src.extractors import xlsx
+
+        payload = _xlsx_bytes(self._ROWS)
+        expected, _ = xlsx.extract(payload)
+        oversized, _ = xlsx.extract(self._declare(payload, "A1:Z500"))
+        assert oversized == expected
+
+    def test_rows_spanning_every_column_stop_at_the_text_budget(self, monkeypatch):
+        """Without the declared width, a row is padded to its own last
+        cell, so many rows reaching column XFD still expand; the empty
+        fields between their values are charged to the text budget."""
+        import io
+
+        import openpyxl
+        from src.extractors import xlsx
+
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        for r in range(1, 2_001):
+            ws.cell(row=r, column=1, value="a")
+            ws.cell(row=r, column=16_384, value="z")
+        buf = io.BytesIO()
+        wb.save(buf)
+        wb.close()
+        monkeypatch.setattr(xlsx, "_MAX_TEXT_CHARS", 100_000)
+        rows = _count_parsed_rows(monkeypatch)
+
+        text, _ = xlsx.extract(self._declare(buf.getvalue(), "A1:A1"))
+
+        assert len(text) <= 100_000
+        # Each full row costs 16,385 characters: six fit, the seventh
+        # stops the walk.
+        assert rows[0] == 7
+        assert text.split("\n")[1] == "a" + "\t" * 16_383 + "z"
+
+
 class TestXlsxExtractor:
     def test_serializes_each_sheet_with_header_marker(self):
         import io
@@ -721,17 +820,17 @@ class TestXlsxExtractor:
         assert "Item\tPrice" in text
         assert "Widget\t25" in text
 
-    def test_sparse_sheet_at_worksheet_bounds_fails_promptly(self):
-        """Regression (#202): read-only ``iter_rows`` pads every row out
-        to the sheet's full width, so a 5 KB workbook with cells at A1
-        and XFD1048576 asked for ~17 billion cell visits and stalled the
-        indexing worker. A cell budget turns it into a ``failed``
-        attachment instead."""
+    def test_sparse_sheet_at_worksheet_bounds_is_read_promptly(self, monkeypatch):
+        """Regression (#202): a 5 KB workbook with cells at A1 and
+        XFD1048576 declares a 16,384 x 1,048,576 grid, and padding every
+        row to that width stalled the indexing worker. With the declared
+        dimension ignored (#305) only the parsed rows are padded, each
+        to its own last cell."""
         import io
         import time
 
         import openpyxl
-        from src.extractors import STATUS_FAILED, extract
+        from src.extractors import extract
 
         wb = openpyxl.Workbook()
         ws = wb.active
@@ -740,17 +839,62 @@ class TestXlsxExtractor:
         buf = io.BytesIO()
         wb.save(buf)
         wb.close()
+        payload = buf.getvalue()
+        rows = _count_parsed_rows(monkeypatch)
 
         started = time.monotonic()
         result = extract(
             content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             filename="sparse.xlsx",
-            payload=buf.getvalue(),
+            payload=payload,
+        )
+        assert time.monotonic() - started < 5.0
+        assert result.status == STATUS_SUCCESS
+        assert (result.text or "").split("\n")[1:] == ["first", "\t" * 16_383 + "last"]
+        assert rows[0] == 2
+
+    def test_rows_past_the_cell_budget_fail_promptly(self, monkeypatch):
+        """Rows missing between two parsed rows still cost a visit each,
+        and the row number is the producer's claim: one far past the
+        sheet's last row asks for unbounded visits. The cell budget turns
+        it into a ``failed`` attachment."""
+        import time
+
+        from openpyxl.worksheet._read_only import ReadOnlyWorksheet
+        from src.extractors import extract, xlsx
+
+        payload = _rewrite_sheet_xml(
+            _xlsx_bytes([["first"], ["far"]]),
+            lambda xml: xml.replace('<row r="2"', '<row r="50000000"').replace(
+                'r="A2"', 'r="A50000000"'
+            ),
+        )
+
+        started = time.monotonic()
+        result = extract(
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            filename="far.xlsx",
+            payload=payload,
         )
         assert time.monotonic() - started < 5.0
         assert result.status == STATUS_FAILED
         # The budget's ValueError is recorded by type only (#257).
         assert result.error == "ValueError"
+
+        # The walk stops at the budget rather than reaching row 50,000,000.
+        monkeypatch.setattr(xlsx, "_MAX_EXPANDED_CELLS", 1_000)
+        yielded = [0]
+        original = ReadOnlyWorksheet._cells_by_row
+
+        def counting(self, *args, **kwargs):
+            for row in original(self, *args, **kwargs):
+                yielded[0] += 1
+                yield row
+
+        monkeypatch.setattr(ReadOnlyWorksheet, "_cells_by_row", counting)
+        with pytest.raises(ValueError):
+            xlsx.extract(payload)
+        assert yielded[0] == 1_001
 
 
 class TestPdfDigitalExtractor:

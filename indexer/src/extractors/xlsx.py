@@ -14,10 +14,12 @@ Massive spreadsheets are bounded by the dispatcher's
 ``INDEXER_ATTACHMENT_MAX_BYTES`` cap, but byte size does not bound the
 work, along two dimensions:
 
-* cells visited: read-only ``iter_rows`` pads every row to the sheet's
-  full width, empty cells included, so a few KB of sparse cells can
-  declare a 16,384 x 1,048,576 grid. ``_MAX_EXPANDED_CELLS`` bounds
-  the cells visited across the whole workbook and fails the extraction.
+* cells visited: the declared worksheet dimension is ignored, since a
+  stale one would silently hide cells outside it (#305), so each parsed
+  row is padded to its own last cell and every missing row between two
+  parsed ones still costs a visit; the row and column numbers are the
+  producer's claim. ``_MAX_EXPANDED_CELLS`` bounds the cells visited
+  across the whole workbook and fails the extraction.
 * characters copied: a shared string is stored once and referenced by
   any number of cells, so a few KB of workbook can expand into
   gigabytes of text (#294). ``_MAX_TEXT_CHARS`` bounds the characters
@@ -76,6 +78,8 @@ def _serialize(workbook: openpyxl.Workbook) -> str:
     expanded_cells = 0
     chars_left = _MAX_TEXT_CHARS
     for sheet in workbook.worksheets:
+        # Read-only mode trusts the dimension record and stops at it.
+        sheet.reset_dimensions()
         header = f"[Sheet: {sheet.title}]"
         chars_left -= len(header) + 2  # and the blank line before it
         sheet_lines = [header]
