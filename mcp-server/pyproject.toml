@@ -11,7 +11,7 @@ dependencies = [
     # directly, so pin the version fastmcp 4.0.10 resolves.
     "mcp==2.2.0",
     "uvicorn==0.54.0",
-    "starlette==1.3.1",
+    "starlette==1.7.0",
     "sqlite-vec==0.1.9",
     # Inference, embed, and rerank SDKs. ``openai`` covers both
     # ``INFERENCE_MODE=openai`` (chat completions) and ``EMBED_MODE=openai``
@@ -20,9 +20,9 @@ dependencies = [
     # OpenRouter — already speaks). The embed client is a thin wrapper
     # around ``AsyncOpenAI`` so the project does not maintain its own
     # HTTP/retry plumbing for a wire format the SDK already handles.
-    "openai==3.19.2",
-    "anthropic==1.8.0",
-    "cohere==7.0.0",
+    "openai==3.22.1",
+    "anthropic==1.11.0",
+    "cohere==7.2.0",
     # Output models for structured tool results (``src/tools/outputs.py``).
     # Pinned to a version ``fastmcp`` and ``mcp`` accept; declared
     # because the tool code imports it directly.
@@ -34,8 +34,8 @@ package = false
 
 [dependency-groups]
 dev = [
-    "mypy==2.3.1",
-    "pytest==9.0.3",
+    "mypy==2.4.0",
+    "pytest==9.1.1",
     "pytest-cov==7.1.0",
 ]
 

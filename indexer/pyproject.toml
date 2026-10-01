@@ -12,7 +12,7 @@ dependencies = [
     # (LM Studio / vLLM / mlx_lm.server / TEI / DeepInfra / OpenRouter)
     # target the SDK as their reference client by design, so pointing
     # the SDK at them via ``base_url`` is the supported path.
-    "openai==3.19.2",
+    "openai==3.22.1",
     # Real BPE tokenizer for chunk-size estimation. Counting chunk tokens
     # with a char-count heuristic undercounts CJK / URL / Base64 / code
     # text by 4-6×, producing chunks that blow past the embed model's
@@ -39,7 +39,7 @@ dev = [
     # httpx2 is only imported by tests (transport stubs for the openai
     # SDK); the runtime gets it transitively via openai.
     "httpx2==2.13.1",
-    "mypy==2.3.1",
+    "mypy==2.4.0",
     "pytest==9.1.1",
     "pytest-cov==7.1.0",
 ]
