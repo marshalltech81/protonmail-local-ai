@@ -5356,3 +5356,50 @@ class TestReplySubjectSearchable:
         assert estimate_tokens(body) >= THREAD_BODY_TEXT_MAX_TOKENS - 50
         assert "Body of changed@example.com." not in body
         assert self._thread_fts_hits(db, self.TOKEN) == {"root@example.com"}
+
+    def test_embed_input_stays_within_the_chunk_ceiling(self, tmp_path):
+        """Review round 2: the subject prefix must not push a chunk's
+        embedding input past ``CHUNK_MAX_TOKENS``. A 50,000-character
+        subject is cut to fit; the stored chunk stays body-only."""
+        from src.chunker import estimate_tokens
+
+        huge = "Re: Budget review " + " ".join(f"s{i}" for i in range(10_000))
+        assert len(huge) > 50_000
+        paths = self._write_thread(tmp_path)
+        _write_eml(
+            paths[1],
+            "changed@example.com",
+            huge,
+            in_reply_to="root@example.com",
+            references=["root@example.com"],
+            date="Mon, 01 Jan 2024 13:00:00 +0000",
+        )
+        db = Database(tmp_path / "mail.db")
+        embedder = make_mock_embedder(_UNIT_VECTOR)
+        threader = Threader(db)
+        for path in paths:
+            assert _index_one(path, db, embedder, threader)[0]
+        inputs = [t for call in embedder.embed_batch.call_args_list for t in call.args[0]]
+        assert all(estimate_tokens(t) <= main.CHUNK_MAX_TOKENS for t in inputs)
+        first = next(t for t in inputs if t.endswith("Body of changed@example.com."))
+        assert first.startswith("Subject: Re: Budget review s0 s1")
+        stored = db._conn.execute(
+            "SELECT text FROM message_chunks WHERE message_id = ?", ("changed@example.com",)
+        ).fetchone()[0]
+        assert stored == "Body of changed@example.com."
+
+    def test_prefix_is_cut_or_dropped_near_the_ceiling(self, monkeypatch):
+        from src.chunker import estimate_tokens, truncate_to_tokens
+
+        monkeypatch.setattr(main, "CHUNK_MAX_TOKENS", 120)
+        subject_line = "Subject: " + " ".join(f"s{i}" for i in range(20_000))
+        near = " ".join(f"w{i}" for i in range(40))
+        assert 100 < estimate_tokens(near) < 115
+        text = main._chunk_embed_input(subject_line, near)
+        assert text.startswith("Subject: s0") and text.endswith("\n\n" + near)
+        assert estimate_tokens(text) <= 120
+
+        full = " ".join(f"w{i}" for i in range(80))
+        full = truncate_to_tokens(full, 120)
+        assert estimate_tokens(full) == 120
+        assert main._chunk_embed_input(subject_line, full) == full

@@ -10,6 +10,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from email.utils import parseaddr
+from itertools import islice
 
 from .parser import Message
 
@@ -370,6 +371,14 @@ def _normalize_subject(subject: str) -> str:
 # distinct subjects, and this many characters across them.
 FTS_REPLY_SUBJECTS_MAX = 20
 FTS_REPLY_SUBJECTS_MAX_CHARS = 2000
+# Work bound on building that column, applied on every thread rewrite:
+# at most this many stored subjects are examined (oldest first), each
+# cut to this many characters before normalization. The insert/update
+# path applies both in SQL so the rows and bytes it reads are bounded
+# too. Without them each upsert re-read and re-normalized every stored
+# subject, quadratic over a long thread of long subjects (#439).
+FTS_SUBJECT_SCAN_ROWS = 200
+FTS_SUBJECT_SCAN_CHARS = 500
 
 
 def fts_subject_text(thread_subject: str, subjects: Iterable[str]) -> str:
@@ -382,17 +391,19 @@ def fts_subject_text(thread_subject: str, subjects: Iterable[str]) -> str:
     subject for display and grouping; this column is what keeps the
     reply's words keyword-searchable (#303). Writing them here rather
     than into ``body_text`` means a body already at its token cap
-    cannot drop them. Bounded by ``FTS_REPLY_SUBJECTS_MAX`` subjects
-    and ``FTS_REPLY_SUBJECTS_MAX_CHARS`` characters; each subject is
-    normalized once, in linear time.
+    cannot drop them. Output is bounded by ``FTS_REPLY_SUBJECTS_MAX``
+    subjects and ``FTS_REPLY_SUBJECTS_MAX_CHARS`` characters; work by
+    ``FTS_SUBJECT_SCAN_ROWS`` inputs of ``FTS_SUBJECT_SCAN_CHARS``
+    characters each. A changed subject first seen past the scanned rows,
+    or differing only past the scanned characters, is not added.
     """
-    seen = {_normalize_subject(thread_subject)}
+    seen = {_normalize_subject(thread_subject[:FTS_SUBJECT_SCAN_CHARS])}
     parts = [thread_subject]
     used = 0
-    for subject in subjects:
+    for subject in islice(subjects, FTS_SUBJECT_SCAN_ROWS):
         if len(parts) > FTS_REPLY_SUBJECTS_MAX:
             break
-        normalized = _normalize_subject(subject)
+        normalized = _normalize_subject(subject[:FTS_SUBJECT_SCAN_CHARS])
         if not normalized or normalized in seen:
             continue
         if used + len(normalized) > FTS_REPLY_SUBJECTS_MAX_CHARS:

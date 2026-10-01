@@ -21,6 +21,8 @@ import sqlite_vec
 from .chunker import l2_normalize, truncate_to_tokens
 from .extractors import OCR_DISABLED_ERROR, SCANNED_PDF_OCR_DISABLED_ERROR
 from .threader import (
+    FTS_SUBJECT_SCAN_CHARS,
+    FTS_SUBJECT_SCAN_ROWS,
     PER_MESSAGE_BODY_CAP_CHARS,
     THREAD_BODY_TEXT_MAX_TOKENS,
     Thread,
@@ -826,13 +828,16 @@ class Database:
             # record the new rowid after INSERT.
             # The FTS subject column also carries the thread's changed
             # reply subjects (#303). ``thread.messages`` holds only the
-            # new arrival here, so read every stored subject; the rows
-            # for this arrival were written just above.
+            # new arrival here, so read the stored subjects; the rows
+            # for this arrival were written just above. Rows and
+            # characters read are capped (``FTS_SUBJECT_SCAN_*``) so a
+            # long thread does not make every upsert re-read it all.
             stored_subjects = [
-                r["subject"]
+                r[0]
                 for r in cur.execute(
-                    "SELECT subject FROM messages WHERE thread_id = ? ORDER BY sent_at",
-                    (thread.thread_id,),
+                    "SELECT substr(subject, 1, ?) FROM messages WHERE thread_id = ? "
+                    "ORDER BY sent_at LIMIT ?",
+                    (FTS_SUBJECT_SCAN_CHARS, thread.thread_id, FTS_SUBJECT_SCAN_ROWS),
                 )
             ]
             self._replace_fts_row(
@@ -2431,9 +2436,11 @@ class Database:
         )
 
         # Survivors only: the reaped messages' rows are removed after
-        # this rewrite, in the same transaction (#303).
+        # this rewrite, in the same transaction (#303). Oldest first,
+        # as the upsert path reads them; ``fts_subject_text`` caps the
+        # rows and characters it examines.
         fts_subject = fts_subject_text(
-            thread.subject, [m.subject for m in sorted(thread.messages, key=lambda m: m.date)]
+            thread.subject, (m.subject for m in sorted(thread.messages, key=lambda m: m.date))
         )
         self._replace_fts_row(cur, thread.thread_id, fts_subject, participants_json, body)
 
