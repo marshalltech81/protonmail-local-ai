@@ -3525,6 +3525,83 @@ class TestSearchAttachments:
         with pytest.raises(ValueError):
             attachments_db.search_attachments(date_from="not-a-date")
 
+    def _duplicate_content_db(self, tmp_path):
+        """One message carrying the same bytes twice: occurrence ``occ-a``
+        as copy.bin (octet-stream) and ``occ-b`` as copy.pdf (PDF). The
+        query term is only in the extracted text, so the filename lane
+        cannot supply the match."""
+        from tests.conftest import (
+            _insert_attachment,
+            _insert_chunk,
+            _insert_extraction,
+            _insert_thread,
+        )
+
+        conn, path = _open_built_db_conn(tmp_path, "dupe-mime.db")
+        _insert_thread(
+            conn,
+            thread_id="t-dup",
+            subject="copies",
+            participants=["alice@example.com"],
+            senders=["alice@example.com"],
+            date_first="2024-03-10T09:00:00+00:00",
+            date_last="2024-03-10T09:00:00+00:00",
+            has_attachments=True,
+        )
+        for occ, name, mime in (
+            ("occ-a", "copy.bin", "application/octet-stream"),
+            ("occ-b", "copy.pdf", "application/pdf"),
+        ):
+            _insert_attachment(
+                conn,
+                message_id="t-dup",
+                thread_id="t-dup",
+                attachment_id="hash-dup",
+                filename=name,
+                content_type=mime,
+                occurrence_id=occ,
+            )
+        _insert_extraction(
+            conn, attachment_id="hash-dup", extracted_text="uniquemarker payable 100"
+        )
+        _insert_chunk(
+            conn,
+            chunk_id="dup-att-c1",
+            message_id="t-dup",
+            thread_id="t-dup",
+            text="uniquemarker payable 100",
+            embedding=[0.0, 0.0, 0.0, 1.0],
+            attachment_id="hash-dup",
+        )
+        conn.close()
+        return Database(str(path))
+
+    @pytest.mark.parametrize(
+        ("filters", "expected"),
+        [
+            ({}, ["copy.bin"]),
+            ({"content_type": "application/octet-stream"}, ["copy.bin"]),
+            ({"content_type": "application/pdf"}, ["copy.pdf"]),
+            (
+                {
+                    "content_type": "application/pdf",
+                    "extracted_only": True,
+                    "date_from": "2024-03-01",
+                    "date_to": "2024-03-31",
+                },
+                ["copy.pdf"],
+            ),
+            ({"content_type": "image/png"}, []),
+        ],
+    )
+    def test_text_lane_filters_before_choosing_occurrence(self, tmp_path, filters, expected):
+        """Regression (#309): the text lane picked the lowest occurrence of
+        a duplicated attachment before applying the filters, so a MIME
+        filter matching only another occurrence dropped the hit."""
+        db = self._duplicate_content_db(tmp_path)
+        results = db.search_attachments(query="uniquemarker", **filters)
+        assert [r.filename for r in results] == expected
+
     def test_lanes_degrade_when_attachments_table_missing(self, tmp_path):
         # Every lane JOINs/scans ``attachments``; dropping it exercises the
         # OperationalError branch in all three lanes — the search degrades

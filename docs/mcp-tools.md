@@ -190,7 +190,10 @@ three returns the whole document.
 Two FTS lanes run when `query` is set — the attachment filename/MIME
 index and the extracted-text index — with filename matches listed
 first. Each result reports the parent thread so a follow-up
-`get_thread` / `get_evidence` call can round-trip.
+`get_thread` / `get_evidence` call can round-trip. When one message
+carries the same file more than once (under different names or MIME
+types), an extracted-text match is reported once, as the first copy
+that passes `content_type`.
 
 ---
 

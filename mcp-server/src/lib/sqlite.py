@@ -1221,7 +1221,7 @@ class Database:
             )
             seen = {(r.attachment_id, r.message_id, r.filename) for r in results}
             for r in self._attachment_text_lane(
-                fts_query, extra_clauses, extra_params, fetch_limit
+                fts_query, content_type, extra_clauses, extra_params, fetch_limit
             ):
                 key = (r.attachment_id, r.message_id, r.filename)
                 if key not in seen:
@@ -1310,6 +1310,7 @@ class Database:
     def _attachment_text_lane(
         self,
         fts_query: str,
+        content_type: str | None,
         extra_clauses: list[str],
         extra_params: list,
         limit: int,
@@ -1322,7 +1323,10 @@ class Database:
         single message; the JOIN anchors on the lowest
         ``attachment_occurrence_id`` for the pair so the row count is
         deterministic (see ``_chunk_vector_search`` for the full
-        rationale).
+        rationale). The anchor is chosen among the occurrences that pass
+        ``content_type``, the one filter that can differ between them
+        (thread and extraction are shared by the pair): choosing first
+        dropped the match when only another occurrence passed (#309).
 
         Many chunks can match one attachment, so each attachment is ranked
         by its best chunk *before* the LIMIT: limiting chunk rows first
@@ -1334,7 +1338,7 @@ class Database:
         chunk in the mailbox.
         """
         where = ["c.attachment_id IS NOT NULL", *extra_clauses]
-        params = [fts_query, *extra_params, limit]
+        params = [fts_query, content_type, content_type, *extra_params, limit]
         sql = (
             "WITH hits AS MATERIALIZED ( "
             "    SELECT rowid AS fts_rowid, bm25(message_chunks_fts) AS score "
@@ -1345,7 +1349,8 @@ class Database:
             "    JOIN attachments a ON a.attachment_occurrence_id = ( "
             "        SELECT MIN(a2.attachment_occurrence_id) FROM attachments a2 "
             "        WHERE a2.attachment_id = c.attachment_id "
-            "          AND a2.message_id = c.message_id ) "
+            "          AND a2.message_id = c.message_id "
+            "          AND (? IS NULL OR a2.content_type = ?) ) "
             "    JOIN threads t ON a.thread_id = t.thread_id "
             "    LEFT JOIN attachment_extractions e ON e.attachment_id = a.attachment_id "
             "    WHERE " + " AND ".join(where) + " "  # nosec B608
