@@ -1625,8 +1625,7 @@ class TestDecodeHeader:
     def test_utf8_encoded_header(self):
         # RFC 2047 encoded: "Héllo"
         encoded = "=?utf-8?q?H=C3=A9llo?="
-        result = _decode_header(encoded)
-        assert "Héllo" in result or "H" in result  # decoded, not raw
+        assert _decode_header(encoded) == "Héllo"
 
     def test_empty_string(self):
         assert _decode_header("") == ""
