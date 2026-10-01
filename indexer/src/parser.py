@@ -606,11 +606,13 @@ class _BodyNode:
 
     ``text`` is a leaf's stripped text; ``has_plain`` / ``has_text`` say
     whether the part (with its subtree, once assembled) contributes
-    non-blank plain text / any non-blank text. An alternative records its
-    children in document order and which one it contributes."""
+    non-blank plain text / any non-blank text. An alternative or related
+    container records its children in document order and which one it
+    contributes."""
 
     parent: int
     alternative: bool
+    related: bool = False
     text: str = ""
     has_plain: bool = False
     has_text: bool = False
@@ -618,33 +620,45 @@ class _BodyNode:
     chosen: int = -1
 
 
+def _selects(node: _BodyNode) -> bool:
+    """Whether ``node`` contributes one chosen child rather than all."""
+    return node.alternative or node.related
+
+
 def _assemble_body(nodes: list[_BodyNode]) -> str:
     """The body: every non-blank inline text part in document order,
     separated by a blank line, where a ``multipart/alternative``
     contributes one child, the first carrying plain text, else the first
     carrying any text (the parts of an alternative are renderings of one
-    body; those of any other container are sequential content, #295).
+    body), and a ``multipart/related`` contributes only its root, taken
+    to be its first child (RFC 2387's default; a ``start`` parameter
+    naming another root is not read): its other parts are resources the
+    root refers to. The parts of any other container are sequential
+    content (#295).
 
     ``nodes`` is in walk (pre-)order, so a child always follows its
-    parent: one backward pass settles each alternative's choice, one
-    forward pass keeps the parts every alternative above them chose."""
+    parent: one backward pass settles each alternative's and related's
+    choice, one forward pass keeps the parts every such container above
+    them chose."""
     for i in range(len(nodes) - 1, -1, -1):
         node = nodes[i]
         if node.alternative:
             with_plain = (c for c in node.children if nodes[c].has_plain)
             with_text = (c for c in node.children if nodes[c].has_text)
             node.chosen = next(with_plain, next(with_text, -1))
-            if node.chosen >= 0:
-                node.has_plain = nodes[node.chosen].has_plain
-                node.has_text = True
-        if node.parent >= 0 and not nodes[node.parent].alternative:
+        elif node.related:
+            node.chosen = node.children[0] if node.children else -1
+        if node.chosen >= 0:
+            node.has_plain = nodes[node.chosen].has_plain
+            node.has_text = nodes[node.chosen].has_text
+        if node.parent >= 0 and not _selects(nodes[node.parent]):
             nodes[node.parent].has_plain |= node.has_plain
             nodes[node.parent].has_text |= node.has_text
     kept = [False] * len(nodes)
     for i, node in enumerate(nodes):
         parent = node.parent
         kept[i] = parent < 0 or (
-            kept[parent] and (not nodes[parent].alternative or nodes[parent].chosen == i)
+            kept[parent] and (not _selects(nodes[parent]) or nodes[parent].chosen == i)
         )
     return "\n\n".join(node.text for i, node in enumerate(nodes) if kept[i] and node.text)
 
@@ -694,9 +708,13 @@ def _extract_body_and_attachments(
         inside = in_attachment or is_attachment
         node: _BodyNode | None = None
         if not inside and not no_body:
-            node = _BodyNode(parent, alternative=ct == "multipart/alternative")
+            node = _BodyNode(
+                parent,
+                alternative=ct == "multipart/alternative",
+                related=ct == "multipart/related",
+            )
             nodes.append(node)
-            if parent >= 0 and nodes[parent].alternative:
+            if parent >= 0 and _selects(nodes[parent]):
                 nodes[parent].children.append(len(nodes) - 1)
         if part.is_multipart():
             # A decoded container stands in for its transport form; its

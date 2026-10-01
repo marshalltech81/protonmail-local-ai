@@ -305,8 +305,12 @@ non-blank inline `text/plain` and `text/html` part outside attachments
 The parts of a `multipart/alternative` are renderings of one body, so
 it contributes a single child: the first carrying non-blank plain text,
 else the first carrying any text. A whitespace-only plain alternative
-therefore gives way to the HTML one. The parts of any other container
-(`multipart/mixed`, `related`, an inline `message/rfc822`) are
+therefore gives way to the HTML one. A `multipart/related` contributes
+only its root, taken to be its first part (RFC 2387's default), since
+its other parts are resources the root refers to; a `start` parameter
+naming a different root is not read, so such a message gets its first
+part's text instead. The parts of any other container
+(`multipart/mixed`, an inline `message/rfc822`) are
 sequential content, so text, an attachment, then more text keeps both
 texts. Nothing inside an attachment, such as a forwarded email attached
 as a file, is body text. Neither is an inline `message/*` part sent

@@ -2015,6 +2015,28 @@ _BODY_SHAPES = {
         _multi("alternative", _plain("P1"), _multi("related", _html("H1"), _IMG)),
         "P1",
     ),
+    # A multipart/related contributes only its root, the first child;
+    # later parts are resources it references (review round 2 on #444).
+    "related-html-root-html-resource": (
+        _multi("related", _html("H1"), _html("RESOURCE")),
+        "H1",
+    ),
+    "related-html-root-plain-resource": (
+        _multi("related", _html("H1"), _plain("RESOURCE")),
+        "H1",
+    ),
+    "related-alt-root-image": (
+        _multi("related", _multi("alternative", _plain("P1"), _html("H1")), _IMG),
+        "P1",
+    ),
+    "related-blank-root-html-resource": (
+        _multi("related", _html(""), _html("RESOURCE")),
+        "",
+    ),
+    "mixed-related-then-plain": (
+        _multi("mixed", _multi("related", _html("H1"), _html("RESOURCE")), _plain("P2")),
+        "H1\n\nP2",
+    ),
     "mixed-labelled-text-attachments": (
         _multi(
             "mixed",
