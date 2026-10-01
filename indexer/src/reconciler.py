@@ -469,8 +469,8 @@ class Reconciler:
             if survivor_chunks:
                 embedding = mean_vector(survivor_chunks)
             else:
-                # Fallback priority: oldest SURVIVOR's original-case
-                # subject first; only fall back to the thread's stored
+                # Fallback priority: the oldest SURVIVOR with a non-empty
+                # original-case subject first; only fall back to the thread's stored
                 # ``display_subject`` if every survivor's subject is
                 # empty. ``display_subject`` is maintained as the
                 # oldest message's subject across the lifetime of the
@@ -486,7 +486,10 @@ class Reconciler:
                 # secondary source covers the edge case where every
                 # survivor has an empty subject line; the sentinel
                 # ``(empty thread)`` covers the final NULL case.
-                fallback = (survivors[0].subject or "").strip()
+                fallback = next(
+                    (s for m in survivors if (s := (m.subject or "").strip())),
+                    "",
+                )
                 if not fallback:
                     stored_display = self.db.get_thread_display_subject(thread_id)
                     fallback = (stored_display or "").strip()
