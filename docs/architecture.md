@@ -394,13 +394,22 @@ the indexer at startup.
 ### OCR
 
 PDFs and images route through Tesseract when `INDEXER_OCR_ENABLED=true`
-(default). The PDF extractor first tries the digital text layer via
-`pypdf`; if the result is below a small minimum-character threshold,
-it falls through to rendering each page via Poppler (`pdf2image`) and
-OCR'ing via `pytesseract`. A multipage TIFF (a scanned invoice or fax)
-is OCR'd page by page; other image formats' extra frames are animation
-and only the first is read. `INDEXER_OCR_MAX_PAGES` (default 20) caps
-the cost on long scanned documents of either kind.
+(default). The PDF extractor first reads the digital text layer via
+`pypdf`, page by page; each page whose text is below a small
+minimum-character threshold is rendered via Poppler (`pdf2image`) and
+OCR'd via `pytesseract`, so a PDF mixing digital and scanned pages
+OCRs only the scanned ones. If OCR fails on a PDF that has usable
+digital text, that text is kept; with no usable digital text the
+extraction is recorded as `failed`. A multipage TIFF (a scanned
+invoice or fax) is OCR'd page by page; other image formats' extra
+frames are animation and only the first is read.
+`INDEXER_OCR_MAX_PAGES` (default 20) caps the pages OCR'd per
+document of either kind.
+
+With OCR off, a PDF whose whole text layer is below the threshold is
+recorded as "OCR disabled" and re-run once OCR is on; a PDF with
+usable digital text is indexed from it, and its scanned pages are not
+re-read when OCR is turned on later.
 
 ### Cost bounds
 
