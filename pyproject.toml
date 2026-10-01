@@ -21,10 +21,6 @@ ignore = [
     "E501",  # line too long — handled by formatter
 ]
 
-[tool.ruff.lint.per-file-ignores]
-# Tool registration functions use broad except for user-facing error handling
-"mcp-server/src/tools/*.py" = ["F841"]
-
 [tool.ruff.format]
 quote-style = "double"
 indent-style = "space"

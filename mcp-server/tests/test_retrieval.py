@@ -8,8 +8,8 @@ read-only Database, so the tests focus on:
 - the body_text vs snippet fallback used when the indexer has not yet
   populated body_text on legacy threads;
 - the attachment-metadata gating;
-- not-found paths returning the documented sentinel message rather than
-  raising;
+- not-found and invalid-input paths raising ``ToolError``, which the
+  client receives as an ``isError`` result;
 - limit/offset clamping on list_threads (an LLM-supplied ``limit=99999``
   must not turn into an unbounded scan);
 - formatting contract that downstream tools depend on (Thread ID line,
@@ -75,7 +75,7 @@ class TestGetThread:
         # live Bridge retrieval happened.
         assert "local SQLite index only" in text
 
-    def test_unknown_thread_returns_not_found_sentinel(self, fake_server, seeded_db):
+    def test_unknown_thread_raises_not_found_error(self, fake_server, seeded_db):
         handler = _handlers(fake_server, seeded_db)["get_thread"]
         assert "Thread not found" in _error(handler(thread_id="t-does-not-exist"))
 
@@ -341,7 +341,7 @@ class TestGetMessage:
         assert "r11@example.com" in text
         assert "more)" not in text
 
-    def test_unknown_message_returns_not_found_sentinel(self, fake_server, seeded_db):
+    def test_unknown_message_raises_not_found_error(self, fake_server, seeded_db):
         handler = _handlers(fake_server, seeded_db)["get_message"]
         assert "Message not found" in _error(handler(message_id="never-existed"))
 
@@ -501,9 +501,9 @@ class TestFindContact:
         out = asyncio.run(handler(query="zzznosuchname"))
         assert "No contacts found" in _text(out)
 
-    def test_empty_query_returns_guidance_message(self, fake_server, seeded_db):
+    def test_empty_query_raises_guidance_error(self, fake_server, seeded_db):
         # An empty string would otherwise hit the DB as a no-op aggregation;
-        # the tool must short-circuit with a guidance message so the LLM
+        # the tool must short-circuit with a guidance error so the LLM
         # gets a clear signal rather than an empty list.
         handler = _handlers(fake_server, seeded_db)["find_contact"]
         assert "Provide a name" in _error(handler(query=""))

@@ -1547,17 +1547,6 @@ class Database:
             params.append(1 if has_attachments else 0)
 
     @staticmethod
-    def _dedupe_ranked_results(results: list[ThreadResult]) -> list[ThreadResult]:
-        seen: set[str] = set()
-        deduped: list[ThreadResult] = []
-        for result in results:
-            if result.thread_id in seen:
-                continue
-            seen.add(result.thread_id)
-            deduped.append(result)
-        return deduped
-
-    @staticmethod
     def _best_per_thread(results: list[ThreadResult]) -> list[ThreadResult]:
         """Collapse to one row per ``thread_id``, keeping the best score.
 
@@ -1565,9 +1554,9 @@ class Database:
         same thread (one row per matching chunk). Take the row with the
         lowest BM25 score (lower = better in FTS5) per thread, then
         return the surviving rows in the original BM25 order so the
-        caller's ``LIMIT`` slice picks the strongest threads. Compared
-        to ``_dedupe_ranked_results`` (first-seen-wins), this guarantees
-        the kept row carries the thread's best chunk score.
+        caller's ``LIMIT`` slice picks the strongest threads. Unlike a
+        first-seen-wins dedupe, this guarantees the kept row carries the
+        thread's best chunk score.
         """
         best_score: dict[str, float] = {}
         best_idx: dict[str, int] = {}
