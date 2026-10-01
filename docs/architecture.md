@@ -323,18 +323,25 @@ A renamed reply with no body text (for example attachment-only) has no
 body chunk to carry the prefix, so its subject is keyword-searchable
 only, with no semantic representation.
 
-**Known limitation (#295):** a message's body text is the first
-`text/plain` part outside attachments, or failing that the first
-`text/html` part. A plain part that holds only whitespace counts as
-empty, so the HTML text is used instead (#298). Otherwise "first" means
-first, not first non-empty: a later plain part is never read after a
-leading whitespace-only one. That suits `multipart/alternative`,
-where the parts are alternative renderings of one body, but a
-`multipart/mixed` message with several sequential inline text parts
-(for example text, an attachment, then more text) keeps only the first
-plain and first HTML part; later inline text parts are neither stored
-nor searchable. Fixing it changes stored bodies, so it is revisited
-with the Phase 2 reindex bundle.
+**Message body assembly (#295, #298):** a message's body text is every
+non-blank inline `text/plain` and `text/html` part outside attachments
+(HTML through html2text), in document order, separated by a blank line.
+The parts of a `multipart/alternative` are renderings of one body, so
+it contributes a single child: the first carrying non-blank plain text,
+else the first carrying any text. A whitespace-only plain alternative
+therefore gives way to the HTML one. A `multipart/related` contributes
+only its root, taken to be its first part (RFC 2387's default), since
+its other parts are resources the root refers to; a `start` parameter
+naming a different root is not read, so such a message gets its first
+part's text instead. The parts of any other container
+(`multipart/mixed`, an inline `message/rfc822`) are
+sequential content, so text, an attachment, then more text keeps both
+texts. Nothing inside an attachment, such as a forwarded email attached
+as a file, is body text. Neither is an inline `message/*` part sent
+in a transfer encoding (base64 or quoted-printable, which RFC 2046
+forbids for it): the parser exposes it as its encoded transport text,
+so it adds nothing to the body. At most 200 text parts per message
+(`MAX_BODY_TEXT_PARTS`) are decoded; later ones are left out.
 
 A query like "what did my landlord say about the heating?" returns the
 full landlord thread (via the coarse lanes) and surfaces the specific
