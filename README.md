@@ -148,9 +148,10 @@ Once connected, ask Claude Desktop:
 
 Email storage, sync, and indexing always stay on your machine. Whether
 embeddings, inference, and your *conversations* leave the host depends
-on three independent choices: which embedder URL you wire up, which
-`INFERENCE_MODE` you select, and which MCP client you connect. Be
-deliberate about all three layers.
+on four independent choices: which embedder URL you wire up, which
+`INFERENCE_MODE` you select, whether you enable reranking with
+`RERANK_MODE`, and which MCP client you connect. Be deliberate about
+all four layers.
 
 ### 1. Storage and indexing layer — always local
 
@@ -164,7 +165,7 @@ deliberate about all three layers.
 The MCP server itself binds to `127.0.0.1:3000` only — nothing else on your
 network can reach it.
 
-### 2. Project-internal LLM layer — controlled by `INFERENCE_MODE`
+### 2. Project-internal model layers — controlled by `INFERENCE_MODE` and `RERANK_MODE`
 
 The MCP server's intelligence tools (`ask_mailbox`, `summarize_thread`,
 `extract_from_emails`) need an LLM for generation. Where that runs depends on
@@ -175,8 +176,16 @@ The MCP server's intelligence tools (`ask_mailbox`, `summarize_thread`,
 | `anthropic` (default) | Sent to the Anthropic-compatible Messages API at `INFERENCE_BASE_URL`. Requires `.secrets/inference_api_key.txt`. |
 | `openai` | Sent to the OpenAI-compatible chat-completions endpoint at `INFERENCE_BASE_URL`. If that endpoint is a host-side server you install yourself (LM Studio, vLLM, `mlx_lm.server`), retrieved chunks stay on your machine; if it's a remote provider, they ship to that provider. |
 
-This setting only governs what the MCP server does *internally* during a tool
-call. It does not govern what your MCP *client* does with the result.
+Reranking is a separate, opt-in stage of hybrid search, controlled by
+`RERANK_MODE`:
+
+| Mode | What happens to retrieved email content |
+|---|---|
+| `none` (default) | No reranking; nothing is sent anywhere for this stage. |
+| `cohere` | The search query and each candidate thread's subject plus its best-matching passage (or snippet) are sent to the Cohere rerank API, or to `RERANK_BASE_URL` if set. Requires `RERANK_MODEL` and `.secrets/rerank_api_key.txt`. |
+
+These settings only govern what the MCP server does *internally* during a tool
+call. They do not govern what your MCP *client* does with the result.
 
 ### 3. MCP client layer — Claude Desktop is a cloud product
 

@@ -328,7 +328,8 @@ a single env change away. Examples:
 
 ```bash
 # Host-side server (mlx_lm.server, LM Studio, vLLM, TEI, etc.) —
-# privacy-preserving default; mail content never leaves the host.
+# the privacy-preserving option; mail content never leaves the host.
+# (An empty EMBED_BASE_URL is the default and selects OpenAI proper.)
 EMBED_BASE_URL=http://host.docker.internal:8001/v1
 EMBED_MODEL=mlx-community/Qwen3-Embedding-8B-mxfp8
 # put any placeholder string (e.g. `unauthenticated`) in
