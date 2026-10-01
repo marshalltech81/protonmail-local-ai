@@ -26,8 +26,9 @@ docker compose logs protonmail-bridge
 
 When `vault.enc` exists, the entrypoint checks the credential chain before
 starting Bridge: the `ProtonBridge` GPG private key is present, the pass
-store's `.gpg-id` names that key, and every pass entry decrypts. If any check
-fails it exits with `ERROR: vault.enc exists but ...` and changes nothing; it
+store's `.gpg-id` names that key, and Bridge's vault key entry
+(`docker-credential-helpers/.../bridge-vault-key.gpg` under `/data/pass`)
+exists and decrypts. If any check fails it exits with `ERROR: vault.enc exists but ...` and changes nothing; it
 never generates a replacement key or re-initializes pass over an existing
 vault, because Bridge's vault key is stored in that pass store. Key generation
 and `pass init` run only when there is no vault yet.

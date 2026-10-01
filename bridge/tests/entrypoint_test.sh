@@ -58,6 +58,15 @@ check() {
 TEST_FPR="$(printf 'A%.0s' {1..40})"
 readonly TEST_FPR
 
+# Where Bridge v3 keeps its vault key in the pass store, derived here
+# independently of the entrypoint from the pinned upstream source: secret
+# "bridge-vault-key" (internal/vault/helper.go) under the keychain URL
+# "protonmail/bridge-v3/users" (pkg/keychain/keychain_default.go), stored by
+# docker-credential-helpers' pass helper as
+# docker-credential-helpers/<base64url(URL/secret)>/<secret>.gpg.
+TEST_VAULT_KEY_ENTRY="docker-credential-helpers/$(printf '%s' 'protonmail/bridge-v3/users/bridge-vault-key' | base64 | tr '+/' '-_')/bridge-vault-key.gpg"
+readonly TEST_VAULT_KEY_ENTRY
+
 # --- harness ----------------------------------------------------------------
 
 # Points the entrypoint's state paths at a fresh directory and installs the
@@ -80,12 +89,13 @@ setup() {
     # scripts/bridge-smoke.sh), and stores the vault key in the pass store,
     # so the mock does both. It then records how it was launched and exits,
     # as the CLI does on EOF.
-    export CALLS VAULT PASSWORD_STORE_DIR
+    VAULT_KEY_ENTRY="$TEST_VAULT_KEY_ENTRY"
+    export CALLS VAULT PASSWORD_STORE_DIR TEST_VAULT_KEY_ENTRY
     cat >"$BIN/bridge" <<'MOCK'
 #!/bin/bash
 : >>"$VAULT"
-mkdir -p "$PASSWORD_STORE_DIR/protonmail"
-: >>"$PASSWORD_STORE_DIR/protonmail/vault-key.gpg"
+mkdir -p "$(dirname "$PASSWORD_STORE_DIR/$TEST_VAULT_KEY_ENTRY")"
+: >>"$PASSWORD_STORE_DIR/$TEST_VAULT_KEY_ENTRY"
 printf 'bridge %s\n' "$*" >>"$CALLS"
 MOCK
     chmod 755 "$BIN/bridge"
@@ -132,7 +142,9 @@ gpg() {
             [[ -e "$GPG_STATE/public" ]] || return 2
             ;;
         *--decrypt*)
-            [[ -e "$GPG_STATE/secret" && ! -e "$GPG_STATE/undecryptable" ]] || return 2
+            # The file is the last argument; one holding "undecryptable"
+            # stands for an entry the private key cannot open.
+            [[ -e "$GPG_STATE/secret" && "$(cat "${!#}")" != "undecryptable" ]] || return 2
             ;;
         *)
             printf 'unexpected gpg call: %s\n' "$*" >&2
@@ -164,8 +176,8 @@ existing_install() {
     : >"$GPG_STATE/public"
     : >"$GPG_STATE/secret"
     printf '%s\n' "$TEST_FPR" >"$PASS_STORE_ID_FILE"
-    mkdir -p "$PASSWORD_STORE_DIR/protonmail"
-    : >"$PASSWORD_STORE_DIR/protonmail/vault-key.gpg"
+    mkdir -p "$(dirname "$PASSWORD_STORE_DIR/$TEST_VAULT_KEY_ENTRY")"
+    : >"$PASSWORD_STORE_DIR/$TEST_VAULT_KEY_ENTRY"
     : >"$VAULT"
 }
 
@@ -288,7 +300,7 @@ intact_existing_state_starts_without_rebuilding() {
         echo "intact credential state was rebuilt"
         return 1
     fi
-    called '--decrypt .*vault-key.gpg'
+    called "--decrypt $PASSWORD_STORE_DIR/$TEST_VAULT_KEY_ENTRY\$"
     launched_with --noninteractive
 }
 
@@ -325,22 +337,38 @@ pass_metadata_for_another_key_is_refused() {
     refused_without_changes "pass store"
 }
 
-undecryptable_pass_entry_is_refused() {
+# With a vault, Bridge needs the one pass entry that holds its vault key:
+# it must exist and decrypt, whatever else the store holds.
+
+undecryptable_vault_key_entry_is_refused() {
     setup undecryptable
     existing_install
-    : >"$GPG_STATE/undecryptable"
+    printf 'undecryptable' >"$PASSWORD_STORE_DIR/$TEST_VAULT_KEY_ENTRY"
     run_main
-    refused_without_changes "cannot be decrypted"
+    refused_without_changes "vault key entry cannot be decrypted"
 }
 
-# With a vault, Bridge's vault key is a pass entry, so a store with no
-# entries cannot open the vault even when the key and .gpg-id are intact.
 empty_pass_store_is_refused() {
     setup empty-store
     existing_install
-    rm "$PASSWORD_STORE_DIR/protonmail/vault-key.gpg"
+    rm "$PASSWORD_STORE_DIR/$TEST_VAULT_KEY_ENTRY"
     run_main
-    refused_without_changes "pass store has no entries"
+    refused_without_changes "no Bridge vault key entry"
+}
+
+# A partial restore that lost the vault key but kept another entry.
+missing_vault_key_beside_another_entry_is_refused() {
+    setup other-entry
+    existing_install
+    rm "$PASSWORD_STORE_DIR/$TEST_VAULT_KEY_ENTRY"
+    mkdir -p "$PASSWORD_STORE_DIR/other"
+    : >"$PASSWORD_STORE_DIR/other/decryptable.gpg"
+    run_main
+    refused_without_changes "no Bridge vault key entry"
+}
+
+entrypoint_names_the_upstream_vault_key_entry() {
+    grep -qxF "readonly VAULT_KEY_ENTRY=\"$TEST_VAULT_KEY_ENTRY\"" "$ENTRYPOINT"
 }
 
 forced_cli_does_not_bypass_the_check() {
@@ -412,8 +440,12 @@ check "a public-only keyring with a vault is refused (#266)" public_only_keyring
 check "a missing key with a vault is refused" missing_key_is_refused
 check "missing pass metadata with a vault is refused" missing_pass_metadata_is_refused
 check "pass metadata for another key is refused" pass_metadata_for_another_key_is_refused
-check "an undecryptable pass entry is refused" undecryptable_pass_entry_is_refused
+check "an undecryptable vault key entry is refused" undecryptable_vault_key_entry_is_refused
 check "an empty pass store with a vault is refused" empty_pass_store_is_refused
+check "a missing vault key entry beside another entry is refused" \
+    missing_vault_key_beside_another_entry_is_refused
+check "the entrypoint names the upstream vault key entry" \
+    entrypoint_names_the_upstream_vault_key_entry
 check "BRIDGE_FORCE_CLI does not bypass the check" forced_cli_does_not_bypass_the_check
 check "a fresh install repairs missing pass metadata" fresh_install_repairs_missing_pass_metadata
 check "a fresh install refuses a public-only keyring" \

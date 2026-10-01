@@ -15,6 +15,12 @@ export PASSWORD_STORE_DIR="/data/pass"
 
 readonly VAULT="$XDG_CONFIG_HOME/protonmail/bridge-v3/vault.enc"
 readonly PASS_STORE_ID_FILE="$PASSWORD_STORE_DIR/.gpg-id"
+# Bridge's vault key in the pass store, relative to PASSWORD_STORE_DIR. Fixed
+# by the pinned upstream source: secret "bridge-vault-key"
+# (internal/vault/helper.go) under keychain URL "protonmail/bridge-v3/users"
+# (pkg/keychain/keychain_default.go), which docker-credential-helpers' pass
+# helper stores as docker-credential-helpers/<base64url(URL/secret)>/<secret>.
+readonly VAULT_KEY_ENTRY="docker-credential-helpers/cHJvdG9ubWFpbC9icmlkZ2UtdjMvdXNlcnMvYnJpZGdlLXZhdWx0LWtleQ==/bridge-vault-key.gpg"
 readonly BOOTSTRAP_TIMEOUT_SECONDS=30
 
 run_with_timeout() {
@@ -97,7 +103,7 @@ bootstrap_credentials() {
 # hide the damage, so check the chain and fail closed, changing nothing.
 # =============================================================================
 verify_existing_credentials() {
-    local fpr entries entry
+    local fpr
 
     have_bridge_secret_key \
         || refuse_damaged_state "the GPG private key 'ProtonBridge' is missing"
@@ -110,19 +116,13 @@ verify_existing_credentials() {
     [[ "$(pass_store_id)" == "$fpr" ]] \
         || refuse_damaged_state "the pass store is not initialized for the 'ProtonBridge' key"
 
-    # Decrypt every entry to /dev/null: proves the private key opens them
-    # without the plaintext leaving gpg.
-    entries="$(find "$PASSWORD_STORE_DIR" -type f -name '*.gpg')" \
-        || refuse_damaged_state "the pass store cannot be listed"
-    # Bridge keeps its vault key in the store, so a vault with no entry
-    # beside it cannot be opened.
-    [[ -n "$entries" ]] \
-        || refuse_damaged_state "the pass store has no entries"
-    while IFS= read -r entry; do
-        [[ -n "$entry" ]] || continue
-        timeout "${BOOTSTRAP_TIMEOUT_SECONDS}s" gpg --batch --quiet --decrypt "$entry" >/dev/null \
-            || refuse_damaged_state "a pass store entry cannot be decrypted"
-    done <<<"$entries"
+    # The vault key entry must exist and decrypt; decrypting to /dev/null
+    # proves the private key opens it without the plaintext leaving gpg.
+    [[ -f "$PASSWORD_STORE_DIR/$VAULT_KEY_ENTRY" ]] \
+        || refuse_damaged_state "the pass store has no Bridge vault key entry"
+    timeout "${BOOTSTRAP_TIMEOUT_SECONDS}s" \
+        gpg --batch --quiet --decrypt "$PASSWORD_STORE_DIR/$VAULT_KEY_ENTRY" >/dev/null \
+        || refuse_damaged_state "the Bridge vault key entry cannot be decrypted"
 }
 
 main() {
