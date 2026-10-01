@@ -32,6 +32,10 @@ docker volume rm protonmail-local-ai_bridge-data
 make first-run
 ```
 
+This is a full re-authentication: finish with the remaining steps in
+[Bridge credentials expired / need to re-authenticate](#bridge-credentials-expired--need-to-re-authenticate),
+including the mbsync cert pin rotation.
+
 ## Bridge starts but shows "No Proton account found" every time
 
 The account detection looks for `vault.enc` in the bridge-data volume.
@@ -421,6 +425,17 @@ make up
 
 Your email index is in a separate volume (`sqlite-volume`) and is not affected.
 
+The new vault comes with a new Bridge TLS cert, but the `mbsync-state`
+volume still holds the pin for the old one, so `mbsync` now refuses to
+sync with `Bridge cert fingerprint does not match pinned value`. That
+is the pin working as intended. Once `make logs` confirms the mismatch
+is the one this re-authentication caused, accept the new cert with the
+two-step rotation in
+[mbsync refuses to sync — Bridge cert pin mismatch](#mbsync-refuses-to-sync--bridge-cert-pin-mismatch):
+recreate `mbsync` once with `BRIDGE_CERT_PIN_ROTATE=true`, check the
+`rotating pin` warning, then recreate it with
+`BRIDGE_CERT_PIN_ROTATE=false` to re-enable pin enforcement.
+
 ## mbsync refuses to sync — Bridge cert pin mismatch
 
 On first boot `mbsync` extracts Bridge's TLS cert, computes its SHA-256
@@ -538,4 +553,8 @@ make up
 ```
 
 Deleting `vault.enc` is a full re-authentication path, not a lightweight cert
-refresh. Plan on logging into Bridge again.
+refresh. Plan on logging into Bridge again, updating `BRIDGE_USER` and
+`.secrets/bridge_pass.txt` before `make up`, and rotating the mbsync cert
+pin afterwards: the new cert does not match the pin in `mbsync-state`, so
+`mbsync` refuses to sync until you complete the two-step rotation in
+[mbsync refuses to sync — Bridge cert pin mismatch](#mbsync-refuses-to-sync--bridge-cert-pin-mismatch).

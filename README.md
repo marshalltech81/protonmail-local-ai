@@ -239,6 +239,13 @@ make up
 
 Your email index is preserved in a separate volume — only Bridge credentials are reset.
 
+The new Bridge vault comes with a new TLS cert, so `mbsync` then refuses
+to sync because the cert no longer matches its saved pin. Accept the new
+cert with the two-step rotation in
+[docs/troubleshooting.md](docs/troubleshooting.md#mbsync-refuses-to-sync--bridge-cert-pin-mismatch):
+recreate `mbsync` once with `BRIDGE_CERT_PIN_ROTATE=true`, then again
+with `BRIDGE_CERT_PIN_ROTATE=false` so pin enforcement is back on.
+
 ## Commands
 
 ```bash
