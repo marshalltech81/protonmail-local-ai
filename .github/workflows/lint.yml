@@ -56,11 +56,11 @@ jobs:
         with:
           python-version: "3.14"
 
-      - uses: astral-sh/ruff-action@v3
+      - uses: astral-sh/ruff-action@v4.1.0
         with:
           args: "check ."
 
-      - uses: astral-sh/ruff-action@v3
+      - uses: astral-sh/ruff-action@v4.1.0
         with:
           args: "format --check ."
 
