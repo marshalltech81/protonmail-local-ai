@@ -403,8 +403,8 @@ on #307):
 answers real knowledge questions, and identify why failures occur.
 
 **Status of Phases 3–5 (2026-10-01).** No phase is complete. Done:
-Phase 3 items 4, 6 and 7, Phase 4 items 1 and 2. Partly done: Phase 3
-items 1, 2, 3 and 8, Phase 4 item 4, Phase 5 item 2. Not started:
+Phase 3 items 4 and 7, Phase 4 items 1 and 2. Partly done: Phase 3
+items 1, 2, 3, 6 and 8, Phase 4 item 4, Phase 5 item 2. Not started:
 Phase 3 item 5, Phase 4 item 3, Phase 5 items 1, 3 and 4. Most of
 what remains needs the real mailbox and providers (the go-live
 checklist) or an owner decision.
@@ -416,7 +416,7 @@ checklist) or an owner decision.
 | 3.3 `brief_issue` | Built, experimental | #466 | accuracy/abstention scoring (#291), hardening (#471) |
 | 3.4 Injection suite | Done | #448 | gap filed as #442 |
 | 3.5 Thread weighting, rerank | Not started | — | needs real embedder/reranker (#288, #289) |
-| 3.6 Prompt evidence budget | Done | #445 | token-based count, small-model profile (#285) |
+| 3.6 Prompt evidence budget | Partly done | #445 (shared character budget, dedup, coverage note) | the token-based whole-prompt budget and small-model profile (#285) |
 | 3.7 Filtered semantic recall | Done | #440, #470 | — |
 | 3.8 Citation contract | Partly done | #457 | statement-level and quote checks (#284) |
 | 4.1 Entities | Done | #459 | orphan cleanup (#464) |
@@ -489,7 +489,7 @@ checklist) or an owner decision.
    whole-prompt token budget, an evidence-selection policy, dedup,
    and a statement of what was left out. Nothing in the plan covered
    this; #214/#215 fixed only `summarize_thread`'s tail and
-   attachment identity. **Status: done (#445).** One shared budget,
+   attachment identity. **Status: partly done (#445).** One shared budget,
    per-thread dedup of long quoted passages, and a counts-only
    coverage note; a token-based count and a small-model profile stay
    on #285.
@@ -698,9 +698,10 @@ citation contract (#457), Phase 4 entities and source authority
 experimental `brief_issue` (#466) and `check_conclusion` (#467) tools.
 Edge cases from their reviews are filed as #446, #447, #449, #450,
 #454, #455, #456, #460, #461, #464, #465, #468, #469 (fixed in #470)
-and #471. Owner decisions still open from the run: #441 (should mail
-moved to Trash leave search under mirror?) and #463 (sender
-authentication for source authority).
+and #471. The two owner decisions from the run are settled
+(2026-10-01): #441 hides Trash from default search (#475), and #463's
+first step keeps Spam mail out of authority filters (#474), with
+verdict-header gating decided after go-live.
 
 Still open from Phases 3–5, all waiting on a real mailbox or the
 owner: the #283 agent-level and answer-quality evals and #291's
