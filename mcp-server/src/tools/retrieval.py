@@ -422,9 +422,10 @@ def register_retrieval_tools(server, db):
         For ANY filtered request — by topic, keyword, sender (name OR
         address), date range, or attachment status — use
         ``search_emails`` instead, which exposes all of those filters.
-        In particular, "5 most recent from <person>" is a
-        ``search_emails(from_name=..., limit=5)`` call, not a
-        ``list_threads`` call. For exhaustive listing or counting of
+        Exception: "5 most recent from <person>" is a
+        ``query_messages(sender=..., limit=5)`` call (newest first),
+        not a ``list_threads`` call; ``search_emails`` ranks by
+        relevance, not date. For exhaustive listing or counting of
         messages by exact criteria ("every message from X", "how many
         in Archive since March"), use ``query_messages``.
 
