@@ -665,7 +665,11 @@ non-zero `threads_vec` rows.
 Each job carries `attempts`, `last_stage`, `last_error`, `last_error_class`
 (`retryable` / `permanent_source_failure` / `operator_action_required`), and a
 `next_attempt_at` scheduled via exponential backoff
-(`base_backoff_seconds × 2^(attempts - 1)`, capped at 6 hours). When
+(`base_backoff_seconds × 2^(attempts - 1)`, capped at 6 hours). `last_error` holds
+the exception type name alone, since parser, codec and library messages
+can quote the mail being indexed; only path- and size-only errors
+(`OSError`, `OversizedMessageError`) and the embedder's fixed-text
+`EmbedResponseError` keep their message. When
 `attempts` reaches `INDEXER_MAX_ATTEMPTS` (default 5), the row
 transitions to `status = 'dead'` — it stays in the table for operator
 visibility and stops being claimed. Watchdog rename / create events
