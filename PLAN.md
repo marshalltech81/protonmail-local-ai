@@ -628,22 +628,31 @@ under the two-round cap in AGENTS.md:
 Go-live checklist (do these before more hardening):
 
 1. Merge #424, #429, #430.
-2. Choose providers and fill `.env` / `.secrets`: `EMBED_MODEL`,
-   `EMBED_BASE_URL` (empty = OpenAI), `.secrets/embed_api_key.txt`;
-   `INFERENCE_MODE` and its key; leave `RERANK_MODE=none` to start.
-   `make validate-env` checks the wiring.
+2. Choose providers and fill `.env` / `.secrets` (see
+   `docs/setup.md`). The embedder must return 4096-dim vectors (the
+   schema is fixed at 4096); OpenAI's public models return 3072 or
+   1536, so an empty `EMBED_BASE_URL` (OpenAI proper) fails the
+   indexer's startup probe. Use a 4096-dim model such as the
+   Qwen3-Embedding-8B family on a host-side server: `EMBED_BASE_URL`,
+   `EMBED_MODEL`, `.secrets/embed_api_key.txt`. For inference set
+   `INFERENCE_MODE`, `INFERENCE_MODEL` (the default is an Anthropic
+   model id), `INFERENCE_BASE_URL` for a non-default provider, and
+   `.secrets/inference_api_key.txt`. Leave `RERANK_MODE=none` to start.
 3. `make build`, then `make first-run` and log in to Proton in the
    Bridge CLI (`login`, then `info` for `BRIDGE_USER` and the bridge
    password into `.secrets/bridge_pass.txt`), `exit`.
-4. `make up`; watch `make logs` for the mbsync initial sync and the
+4. `make up` (it runs `make validate-env` first, which needs the Bridge
+   credentials from step 3); watch `make logs` for the mbsync initial sync and the
    indexer's progress; `make status` until the index is current.
    Record how long the initial sync takes: it is the measurement the
    mbsync supervision design (#277, #282) is waiting for.
-5. Point an MCP client at `http://localhost:3000/sse` and try real
-   questions by hand; `mcp-server/tests/eval/README.md` covers turning
+5. Point an MCP client at `http://localhost:${MCP_PORT}` plus `/sse`
+   (the default `MCP_TRANSPORT=sse`) or `/mcp` (`streamable-http`;
+   `dual` serves both), and try real questions by hand; `mcp-server/tests/eval/README.md` covers turning
    the good ones into a retrieval eval.
-6. Let what breaks set the next priorities; then the Phase 2 reindex
-   bundle and the #283 eval slice.
+6. Let what breaks set the next priorities; then the #283 eval slice,
+   which must precede the first Phase 2 generation as its validation
+   gate, then the Phase 2 reindex bundle.
 
 Deferred as issues: #362 (owner chose: fall back to the raw filename
 parameter when `get_filename()` raises), #428 (xlsx parts openpyxl
@@ -676,16 +685,11 @@ first, one test-first commit per issue, keep three PRs in flight):
    4.0.10 migration with an explicit session idle timeout); #316's
    remainder needs the Phase 2 reindex.
 5. ~~mbsync #271, #280~~ (done: #419). Parser: ~~#361~~ (done: #414);
-   #362 needs a fallback-filename decision first.
-6. Bridge, needing Docker for `make bridge-upgrade-check` and the
-   first Bridge shell test harness: the entrypoint PR (#242, #266,
-   #270), the smoke-test fix (#269 with #268's minimal fix, both in
-   `scripts/bridge-smoke.sh`), and the updater-gate PR (#245). Land
-   them before the eval slice: existing vaults make unpinned update
-   fetches until #245.
-7. Then third-batch items 2–4 below (extractor bumps, mbsync design,
-   the Phase 2 reindex bundle), the Phase 1.5/#283 eval slice, and
-   Phase 2.
+   #362 is decided (fall back to the raw filename parameter) and filed.
+6. ~~Bridge entrypoint (#242, #266, #270) and smoke check (#268,
+   #269)~~ (done: #423, #422); the updater gate (#245) is #429.
+7. Then the go-live checklist above, the Phase 1.5/#283 eval slice,
+   the mbsync design work, and Phase 2.
 
 How this session worked, worth repeating: fixes were prepared by
 background agents, one per issue in its own `git worktree` off
@@ -833,20 +837,19 @@ Order of work, chosen to minimise reindexes:
    first boot) and ~~the rotation flag surviving restarts (#267,
    docs)~~ (done: documented recreate-with-false; one-shot
    authorization not built), ~~the unbounded connect probe (#271), and
-   signal forwarding to the sync child (#280)~~ (done: #419). Bridge, both decided as
-   items 13–14 above and needing the first Bridge shell test harness:
-   the smoke-test one-liner (#269) with #268's minimal fix, the
-   entrypoint PR (#242 `BRIDGE_FORCE_CLI`, #266 bootstrap order, #270
-   the impossible `su` shortcut) and the updater-gate PR (#245, with
-   its enabled-vault test) — before the eval slice, since existing
-   vaults make unpinned update requests until #245 lands.
+   signal forwarding to the sync child (#280)~~ (done: #419). Bridge:
+   ~~the smoke-test one-liner (#269) with #268's minimal fix, the
+   entrypoint PR (#242, #266, #270)~~ (done: #422, #423), and the
+   updater-gate PR (#245, with its enabled-vault test; #429) — before
+   the eval slice, since existing vaults make unpinned update requests
+   until #245 lands.
 2. **Extractor version bumps, one PR per module** so each cache
    refresh happens once: `xlsx` (#294's shared-string budget — a
    behaviour change for the same bytes, so it lands with the bump
    rather than as a guard, or cached rows would keep the old result —
    #296 empty cells, #305 stale dimensions; add `xlsx` to
    `EXTRACTOR_VERSIONS`),
-   `docx` 2→3 (#299 first-page and even-page headers), `pdf`
+   ~~`docx` 2→3 (#299 first-page and even-page headers)~~ (done: #426), `pdf`
    (#292 page-level OCR selection — add `pdf`), with #300 (enabling
    OCR re-queues skipped images) alongside since it shares the
    OCR-disabled sentinel.
