@@ -31,10 +31,17 @@ load() {
     done
 }
 
+# Runs each case in a subshell outside any condition, so errexit stays on
+# inside it and every assertion counts, not only the last one. A case that
+# exercises a function the way its caller does (as a condition) says so.
 check() {
-    local description="$1"
+    local description="$1" rc=0
     shift
-    if ("$@") >"$WORK/output" 2>&1; then
+    set +e
+    (set -e; "$@") >"$WORK/output" 2>&1
+    rc=$?
+    set -e
+    if ((rc == 0)); then
         printf 'ok   %s\n' "$description"
     else
         printf 'FAIL %s\n' "$description"
@@ -267,57 +274,61 @@ sync_setup() {
     FIND_CALLS="$WORK/find-calls-$1"
     mkdir -p "$MAILDIR_PATH"
     : >"$FIND_CALLS"
-    load relax_new_maildir_perms run_sync
+    load run_child relax_new_maildir_perms run_sync
 }
 
+# run_sync is called as `run_sync || rc=$?`, a condition like the
+# entrypoint's `if run_sync`, so errexit is off inside it there too.
+
 mbsync_ok() { return 0; }
-mbsync_fails() { return 1; }
+mbsync_fails() { return 3; }
 
 # shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
 sync_succeeds_when_mbsync_and_repair_succeed() {
+    local rc=0
     sync_setup ok
     mbsync() { mbsync_ok; }
     find() { printf 'find\n' >>"$FIND_CALLS"; }
-    run_sync
+    run_sync || rc=$?
+    ((rc == 0))
     [[ "$(wc -l <"$FIND_CALLS")" -eq 2 ]]
 }
 
 # shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
 failed_directory_repair_fails_the_sync() {
+    local rc=0
     sync_setup dir-fail
     mbsync() { mbsync_ok; }
     find() {
         printf 'find\n' >>"$FIND_CALLS"
         [[ "$3" != "d" ]]
     }
-    if run_sync; then
-        echo "sync reported success although the directory repair failed"
-        return 1
-    fi
+    run_sync || rc=$?
+    ((rc == 1))
 }
 
 # shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
 failed_file_repair_fails_the_sync() {
+    local rc=0
     sync_setup file-fail
     mbsync() { mbsync_ok; }
     find() {
         printf 'find\n' >>"$FIND_CALLS"
         [[ "$3" != "f" ]]
     }
-    if run_sync; then
-        echo "sync reported success although the file repair failed"
-        return 1
-    fi
+    run_sync || rc=$?
+    ((rc == 1))
 }
 
 # shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
 repair_still_runs_after_a_failed_mbsync() {
+    local rc=0
     sync_setup mbsync-fail
     mbsync() { mbsync_fails; }
     find() { printf 'find\n' >>"$FIND_CALLS"; }
-    if run_sync; then
-        return 1
-    fi
+    # mbsync's own status, not the repair's, is what the sync reports.
+    run_sync || rc=$?
+    ((rc == 3))
     [[ "$(wc -l <"$FIND_CALLS")" -eq 2 ]]
 }
 
