@@ -34,9 +34,11 @@ import sqlite_vec
 from fastmcp.exceptions import ToolError
 from src.lib.sqlite import Database
 from src.tools.intelligence import (
+    _LABELLED_HEADER_MAX_CHARS,
     ASK_SYSTEM,
     EXTRACT_SYSTEM,
     SUMMARIZE_SYSTEM,
+    _short,
     register_intelligence_tools,
 )
 from src.tools.outputs import HEADER_CHAR_LIMIT, clip
@@ -394,10 +396,15 @@ class TestAskMailbox:
         huge = MAILBOX[-1]
         assert f"Subject: {clip(huge['subject'], HEADER_CHAR_LIMIT)}\n" in user
         attachment = huge["attachment"]
-        assert (
-            f"attachment {clip(attachment['filename'], HEADER_CHAR_LIMIT)} "
-            f"({clip(attachment['mime'], HEADER_CHAR_LIMIT)})"
-        ) in user
+        # A labelled header that would pass _LABELLED_HEADER_MAX_CHARS is
+        # rebuilt with each value cut shorter (#284, review round 1).
+        header = next(
+            line
+            for line in user.splitlines()
+            if f"attachment {_short(attachment['filename'])} " in line
+        )
+        assert f"({_short(attachment['mime'])})" in header
+        assert len(header) <= _LABELLED_HEADER_MAX_CHARS
 
 
 class TestSummarizeThread:

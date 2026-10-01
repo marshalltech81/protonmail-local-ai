@@ -19,8 +19,9 @@ from pathlib import Path
 import pytest
 import sqlite_vec
 from fastmcp import Client, FastMCP
-from src.lib.sqlite import ChunkResult, Database, ThreadResult
+from src.lib.sqlite import _SENDER_FETCH_CHARS, ChunkResult, Database, ThreadResult
 from src.tools.intelligence import (
+    _LABELLED_HEADER_MAX_CHARS,
     ASK_SYSTEM,
     EvidenceRef,
     _build_evidence,
@@ -315,6 +316,77 @@ class TestHostileImitation:
         # The echoed label exists only in the mail, not in the evidence map.
         problems = out.structured_content["citation_problems"]
         assert problems == [{"kind": "unknown_labels", "labels": ["E42"]}]
+
+
+class TestReviewRound1:
+    """Codex round 1 on #457: sender-controlled header values are bounded
+    where they are fetched, and a labelled header cannot crowd its
+    passage out of a single thread's share."""
+
+    def test_sender_is_bounded_when_fetched(self, tmp_path):
+        db_path = tmp_path / "long-sender.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.enable_load_extension(True)
+        sqlite_vec.load(conn)
+        conn.enable_load_extension(False)
+        _build_schema(conn)
+        long_name = "N" * 100_000
+        long_local = "a" * 100_000
+        _insert_message(
+            conn,
+            message_id="long@example.com",
+            thread_id="t-long",
+            sent_at="2024-05-01T08:00:00+00:00",
+            from_=[f"{long_name} <{long_local}@example.com>"],
+            body="Pay 900 units.",
+        )
+        conn.close()
+        db = Database(str(db_path))
+        [chunk] = db.get_evidence_chunks_for_threads(["t-long"], [1.0, 0.0, 0.0, 0.0])["t-long"]
+        assert chunk.message_sender is not None
+        assert chunk.message_sender.startswith("NNN")
+        # The row itself is bounded: name and address each cut in SQL.
+        assert len(chunk.message_sender) <= 2 * _SENDER_FETCH_CHARS + 3
+
+    def test_long_attribution_still_leaves_passage_text(self):
+        claimant = "x" * 5_000 + "@example.com#1a2b3c4d"
+        chunk = ChunkResult(
+            chunk_id="c-long",
+            message_id=claimant.split("#")[0],
+            claimant_id=claimant,
+            thread_id="t",
+            chunk_index=0,
+            text="Signed total: 700 units. " * 100,
+            char_start=0,
+            char_end=2500,
+            attachment_id="att",
+            attachment_filename="f" * 100_000,
+            attachment_mime="m" * 10_000,
+            message_sender="S" * 100_000,
+            message_date="2024-03-04T10:30:00+00:00",
+        )
+        thread = ThreadResult(
+            thread_id="t",
+            subject="s",
+            participants=[],
+            folder="INBOX",
+            date_first=datetime(2024, 1, 1, tzinfo=UTC),
+            date_last=datetime(2024, 1, 1, tzinfo=UTC),
+            message_ids=[],
+            snippet="",
+            has_attachments=True,
+            evidence_chunks=[chunk],
+        )
+        evidence_map: dict[str, EvidenceRef] = {}
+        [rendered], _ = _build_evidence([thread], 2000, evidence_map=evidence_map)
+        assert list(evidence_map) == ["E1"]
+        header, _, text = rendered.partition("\n")
+        assert header.startswith("[E1 | message ")
+        assert len(header) <= _LABELLED_HEADER_MAX_CHARS
+        # The claimant suffix that tells claimants of one Message-ID apart survives.
+        assert claimant[-9:] in header
+        assert text.startswith("Signed total: 700 units.")
+        assert len(text) >= 2000 - _LABELLED_HEADER_MAX_CHARS - 1
 
 
 class TestPrivacy:

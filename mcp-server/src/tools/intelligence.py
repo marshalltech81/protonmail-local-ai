@@ -719,13 +719,54 @@ class EvidenceRef:
     char_end: int | None
 
 
-def _attribution(chunk: ChunkResult) -> str:
-    """The cited message's identity, sender and own sent date, for a
-    labelled header. Every value is sender-controlled, so each is cut
-    (#243), and the header stays inside the untrusted block."""
-    sender = clip(chunk.message_sender or "unknown sender", HEADER_CHAR_LIMIT)
-    sent = (chunk.message_date or "unknown date")[:16]
-    return f"message {clip(chunk.claimant_id, HEADER_CHAR_LIMIT)} | from {sender} | sent {sent}"
+# Upper bound on a labelled passage header (#284). A header whose values
+# (claimant ID, sender, attachment filename and MIME type, each already
+# cut at ``HEADER_CHAR_LIMIT``) would be longer is rebuilt with each of
+# them cut to ``_LABELLED_FIELD_CHARS``, so with one thread's
+# 2,000-character share a header can never crowd out its passage text.
+_LABELLED_HEADER_MAX_CHARS = 512
+_LABELLED_FIELD_CHARS = 96
+
+
+def _short(value: str) -> str:
+    """``value`` cut to ``_LABELLED_FIELD_CHARS`` characters."""
+    limit = _LABELLED_FIELD_CHARS
+    return value if len(value) <= limit else value[: limit - 1] + "…"
+
+
+def _short_id(claimant_id: str) -> str:
+    """A claimant ID cut to ``_LABELLED_FIELD_CHARS`` characters, keeping
+    its ``#`` suffix, which tells claimants of one Message-ID apart."""
+    limit = _LABELLED_FIELD_CHARS
+    if len(claimant_id) <= limit:
+        return claimant_id
+    return claimant_id[: limit - 10] + "…" + claimant_id[-9:]
+
+
+def _render_chunk_header(chunk: ChunkResult, char_end: int, label: str | None, short: bool) -> str:
+    """``_chunk_header`` with its sender-controlled values cut by
+    ``HEADER_CHAR_LIMIT`` (#243) or, when ``short``, by
+    ``_LABELLED_FIELD_CHARS``."""
+
+    def cut(value: str) -> str:
+        return _short(value) if short else clip(value, HEADER_CHAR_LIMIT)
+
+    prefix = ""
+    if label:
+        claimant = (
+            _short_id(chunk.claimant_id) if short else clip(chunk.claimant_id, HEADER_CHAR_LIMIT)
+        )
+        sender = cut(chunk.message_sender or "unknown sender")
+        sent = (chunk.message_date or "unknown date")[:16]
+        prefix = f"{label} | message {claimant} | from {sender} | sent {sent} | "
+    if chunk.attachment_id is not None:
+        fname = cut(chunk.attachment_filename or "attachment")
+        mime = cut(chunk.attachment_mime or "unknown")
+        return (
+            f"[{prefix}chunk {chunk.chunk_index} — attachment {fname} ({mime}), "
+            f"chars {chunk.char_start}-{char_end}]"
+        )
+    return f"[{prefix}chunk {chunk.chunk_index} chars {chunk.char_start}-{char_end}]"
 
 
 def _chunk_header(chunk: ChunkResult, char_end: int, label: str | None = None) -> str:
@@ -739,17 +780,17 @@ def _chunk_header(chunk: ChunkResult, char_end: int, label: str | None = None) -
     With a ``label`` (ask_mailbox's citation contract, #284) the header
     starts with it and names the passage's own message: claimant ID,
     sender and sent date, so passages of different messages with the
-    same chunk index stay distinct.
+    same chunk index stay distinct. The header stays inside the
+    untrusted block, and the full values are in the structured
+    citation. A labelled header is at most ``_LABELLED_HEADER_MAX_CHARS``
+    long: which cut applies is decided on the full-range header, so a
+    header for a cut passage is never longer than the one budgeted.
     """
-    prefix = f"{label} | {_attribution(chunk)} | " if label else ""
-    if chunk.attachment_id is not None:
-        fname = clip(chunk.attachment_filename or "attachment", HEADER_CHAR_LIMIT)
-        mime = clip(chunk.attachment_mime or "unknown", HEADER_CHAR_LIMIT)
-        return (
-            f"[{prefix}chunk {chunk.chunk_index} — attachment {fname} ({mime}), "
-            f"chars {chunk.char_start}-{char_end}]"
-        )
-    return f"[{prefix}chunk {chunk.chunk_index} chars {chunk.char_start}-{char_end}]"
+    short = bool(label) and (
+        len(_render_chunk_header(chunk, chunk.char_end, label, short=False))
+        > _LABELLED_HEADER_MAX_CHARS
+    )
+    return _render_chunk_header(chunk, char_end, label, short)
 
 
 def _piece_header(chunk: ChunkResult | None, char_end: int, label: str | None) -> str:

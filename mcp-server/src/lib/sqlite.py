@@ -225,6 +225,13 @@ _SOURCE_COLUMNS = (
 )
 
 
+# Characters of a sender's display name and of its address fetched with
+# each evidence chunk. Both are sender-controlled and repeat on every
+# chunk row of the message, so they are cut in SQL; the cap is above
+# every clip applied to them later (``HEADER_CHAR_LIMIT``).
+_SENDER_FETCH_CHARS = 1000
+
+
 def _row_to_source(r) -> SourceFile | None:
     """The ``_SOURCE_COLUMNS`` of ``r``; ``None`` when the row has none or
     no ``messages`` row joined."""
@@ -2037,8 +2044,12 @@ class Database:
                 f"{_SOURCE_COLUMNS}, "
                 # The message's own first From entry, for per-passage
                 # attribution in prompts (#284).
+                # Name and address are cut to ``_SENDER_FETCH_CHARS`` here
+                # so a huge display name is not copied onto every row.
                 "(SELECT CASE WHEN p.name IS NOT NULL AND p.name != '' "
-                "  THEN p.name || ' <' || p.address || '>' ELSE p.address END "
+                f"  THEN substr(p.name, 1, {_SENDER_FETCH_CHARS}) || ' <' "
+                f"    || substr(p.address, 1, {_SENDER_FETCH_CHARS}) || '>' "
+                f"  ELSE substr(p.address, 1, {_SENDER_FETCH_CHARS}) END "
                 "  FROM message_participants p "
                 "  WHERE p.claimant_id = c.claimant_id AND p.role = 'from' "
                 "  ORDER BY p.address LIMIT 1) AS message_sender, "

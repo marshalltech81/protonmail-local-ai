@@ -472,7 +472,12 @@ passage order, before the prompt budget is spent, so the same
 retrieval gives the same labels; a passage left out for budget leaves
 its number unused. The headers, like every other mail-derived value,
 sit inside the `<untrusted_email>` blocks; the instruction to cite
-labels is in the system prompt.
+labels is in the system prompt. A header is at most 512 characters: one
+that would be longer is rebuilt with its claimant ID (keeping its `#`
+suffix), sender, filename and MIME type each cut to 96 characters, so
+a header never crowds its passage out of a thread's share. The sender
+is read from the index with its display name and address each cut to
+1,000 characters; the structured citation's `sender` is cut at 500.
 
 The model is asked to cite the label of the passage supporting each
 statement inline (`[E2]`, `[E1, E3]`), to mark unsupported statements
