@@ -4,6 +4,7 @@ Covers pure fusion/filter logic against synthetic ThreadResult lists and
 real read queries against an in-memory-style database seeded via conftest.
 """
 
+import json
 import sqlite3
 from contextlib import closing
 
@@ -2516,6 +2517,87 @@ class TestFindContactSendersOnly:
         # alice still resolves under both modes.
         assert db.find_contact("alice")[0]["email"] == "alice@example.com"
         assert db.find_contact("alice", senders_only=True)[0]["email"] == "alice@example.com"
+
+    @staticmethod
+    def _keep_first_sender_per_address(conn, thread_id: str) -> None:
+        # The indexer dedupes ``threads.senders`` by canonical address,
+        # keeping the first display string; the fixture helper dedupes by
+        # exact string, so collapse the later duplicates here.
+        senders = json.loads(
+            conn.execute(
+                "SELECT senders FROM threads WHERE thread_id = ?", (thread_id,)
+            ).fetchone()[0]
+        )
+        kept: dict[str, str] = {}
+        for entry in senders:
+            kept.setdefault(canonical_addr(entry), entry)
+        conn.execute(
+            "UPDATE threads SET senders = ? WHERE thread_id = ?",
+            (json.dumps(list(kept.values())), thread_id),
+        )
+
+    @pytest.mark.parametrize(
+        "first_from",
+        ["Old Name <person@example.test>", "person@example.test"],
+        ids=["renamed", "bare-then-named"],
+    )
+    def test_senders_only_matches_a_later_display_name(self, tmp_path, first_from):
+        # threads.senders keeps one display string per address, so a
+        # name first used on a later reply is only in that message's
+        # From participant row.
+        from tests.conftest import _insert_message
+
+        conn, path = _open_built_db_conn(tmp_path, "later-name.db")
+        _insert_message(
+            conn,
+            message_id="m1",
+            thread_id="t1",
+            sent_at="2024-01-01T00:00:00+00:00",
+            from_=[first_from],
+        )
+        _insert_message(
+            conn,
+            message_id="m2",
+            thread_id="t1",
+            sent_at="2024-01-02T00:00:00+00:00",
+            from_=["New Name <person@example.test>"],
+        )
+        self._keep_first_sender_per_address(conn, "t1")
+        conn.commit()
+        conn.close()
+        db = Database(str(path))
+        contacts = db.find_contact("new name", senders_only=True)
+        assert [(c["email"], c["thread_count"]) for c in contacts] == [("person@example.test", 1)]
+        assert "New Name" in contacts[0]["names"]
+
+    def test_senders_only_ignores_a_name_used_only_as_secondary_author(self, tmp_path):
+        # person is a primary sender in t1, but "Alias" only names them
+        # as the second author of a t2 message: that thread is not one
+        # the sender filter matches, so the alias must not resolve.
+        from tests.conftest import _insert_message
+
+        conn, path = _open_built_db_conn(tmp_path, "secondary-alias.db")
+        _insert_message(
+            conn,
+            message_id="m1",
+            thread_id="t1",
+            sent_at="2024-01-01T00:00:00+00:00",
+            from_=["Person <person@example.test>"],
+        )
+        _insert_message(
+            conn,
+            message_id="m2",
+            thread_id="t2",
+            sent_at="2024-01-02T00:00:00+00:00",
+            from_=["Lead <lead@example.test>", "Alias <person@example.test>"],
+        )
+        conn.close()
+        db = Database(str(path))
+        assert db.find_contact("alias", senders_only=True) == []
+        # The primary sender's own name still resolves, counting t1 only.
+        assert [
+            (c["email"], c["thread_count"]) for c in db.find_contact("person", senders_only=True)
+        ] == [("person@example.test", 1)]
 
     def test_senders_only_default_is_false_for_back_compat(self, seeded_db: Database):
         # The standalone find_contact MCP tool relies on the broader

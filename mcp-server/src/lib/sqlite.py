@@ -2307,7 +2307,9 @@ class Database:
         were written with. Same-thread duplicates do not double-count.
 
         ``senders_only`` instead aggregates ``threads.senders`` — each
-        message's primary From author as the thread records it. That is
+        message's primary From author as the thread records it — with
+        the display names that author's From rows carry on those same
+        threads (``threads.senders`` keeps only one per address). That is
         exactly the set ``search_emails(from_addr=...)`` filters on, so a
         resolved address always matches that filter; ranking over the
         participant table's From rows could promote a secondary author
@@ -2358,8 +2360,32 @@ class Database:
                         # recursion) must cost that entry, not the lookup.
                         continue
                     addr = addr.strip().lower()
-                    if "@" in addr and needle in f"{name} {addr}".lower():
+                    if "@" in addr:
                         add(addr, name, row["thread_id"])
+            # ``threads.senders`` keeps one display string per address, so
+            # a name first used on a later message survives only in that
+            # message's From row. Collect those names for (address,
+            # thread) pairs already eligible above; a secondary author's
+            # row on a thread they never primarily sent stays out.
+            from_rows = self._fetchall(
+                """
+                SELECT DISTINCT p.address, p.name, m.thread_id
+                FROM message_participants p
+                JOIN messages m ON m.message_id = p.message_id
+                WHERE p.role = 'from' AND p.name IS NOT NULL
+                """
+            )
+            for row in from_rows:
+                bucket = by_email.get(row["address"])
+                if bucket is not None and row["thread_id"] in bucket["threads"]:
+                    add(row["address"], row["name"], row["thread_id"])
+            # Keep the addresses the query selects; each keeps its whole
+            # sent history, as in the participants branch below.
+            by_email = {
+                addr: bucket
+                for addr, bucket in by_email.items()
+                if needle in addr or any(needle in n.lower() for n in bucket["names"])
+            }
         else:
             # The query selects addresses; every row of a selected address
             # then aggregates, so a name match reports the contact's other
