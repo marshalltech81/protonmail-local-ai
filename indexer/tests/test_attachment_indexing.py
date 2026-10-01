@@ -171,6 +171,25 @@ def test_cache_row_from_docx_version_2_is_re_extracted(tmp_path, monkeypatch):
         assert row["extracted_text"] == "fresh text"
 
 
+def test_pre_bump_pdf_row_is_re_extracted_by_the_pdf_extractor(tmp_path, monkeypatch):
+    """#292: rows the PDF extractor wrote before page-level OCR selection
+    (unversioned ``pdf-digital``) skipped a mixed PDF's scanned pages, so
+    they are a cache miss that re-runs the PDF extractor."""
+    db = _seed_thread_for_cache_test(tmp_path)
+    extractor, row = _process_with_cached_extractor(
+        db,
+        "pdf-digital",
+        STATUS_SUCCESS,
+        "digital page only",
+        monkeypatch,
+        filename="statement.pdf",
+        content_type="application/pdf",
+    )
+    extractor.assert_called_once()
+    assert extractor.call_args.kwargs["module_override"] == "pdf"
+    assert row["extracted_text"] == "fresh text"
+
+
 def test_stale_ocr_row_is_served_while_ocr_is_off(tmp_path, monkeypatch):
     """Review round 1 on #262: a refresh with OCR off would replace the
     row's OCR text with "OCR disabled" and clear the indexed chunks."""

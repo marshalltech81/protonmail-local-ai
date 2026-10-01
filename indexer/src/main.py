@@ -42,6 +42,7 @@ from .attachment_indexing import (
     AttachmentWritePlan,
     apply_attachment_writes,
     prepare_attachment_writes,
+    reruns_once_ocr_is_on,
 )
 from .chunker import MessageChunk, chunk_message, mean_vector
 from .database import EMBEDDING_DIM, Database
@@ -1606,14 +1607,20 @@ def _recover_zero_vector_threads(
 
 def _requeue_stale_extractions(db: Database, queue: IndexingQueue) -> int:
     """Re-queue messages whose cached attachment extraction came from an
-    older version of an extractor (see ``extractors.EXTRACTOR_VERSIONS``).
+    older version of an extractor (see ``extractors.EXTRACTOR_VERSIONS``),
+    and, while OCR is on, messages carrying an attachment cached as "OCR
+    disabled" (an image, or a PDF without a digital text layer, skipped
+    while OCR was off) whose reprocess would run OCR on it (#300).
 
     Reprocessing re-runs that extractor (a stale row is refreshed from
     any occurrence of its bytes) and replaces the attachment's chunks,
     and the row is rewritten with the current version, so each message
     is re-queued once. Every message carrying the bytes is included, not
     only those whose filename or MIME type resolves to the extractor:
-    they all indexed the shared stale text. Like the zero-vector
+    they all indexed the shared stale text. An "OCR disabled" row has no
+    extractor to refresh it from another occurrence, so only messages
+    whose own occurrence re-runs extraction are re-queued; the re-run
+    replaces the row, which keeps that once-only too. Like the zero-vector
     recovery sweep, files already queued or dead-lettered are left
     alone. Skipped entirely when attachment extraction is disabled,
     since the drain would not re-stamp the rows. Returns the number of
@@ -1626,8 +1633,15 @@ def _requeue_stale_extractions(db: Database, queue: IndexingQueue) -> int:
         for name in db.get_extractor_names()
         if is_stale_extractor(name, ocr_enabled=INDEXER_OCR_ENABLED)
     ]
+    filepaths = set(db.find_filepaths_with_extractors(stale))
+    if INDEXER_OCR_ENABLED:
+        filepaths.update(
+            row["filepath"]
+            for row in db.find_ocr_disabled_attachments()
+            if reruns_once_ocr_is_on(row["extraction_error"], row["content_type"], row["filename"])
+        )
     re_enqueued = 0
-    for filepath in db.find_filepaths_with_extractors(stale):
+    for filepath in sorted(filepaths):
         if queue.has_pending_row(filepath) or queue.is_dead(filepath):
             continue
         queue.enqueue(filepath, REASON_REEXTRACT)
@@ -1635,9 +1649,9 @@ def _requeue_stale_extractions(db: Database, queue: IndexingQueue) -> int:
     if re_enqueued:
         log.info(
             "re-queued %d message(s) whose attachments were extracted by an older "
-            "extractor version (%s).",
+            "extractor version (%s) or skipped while OCR was off.",
             re_enqueued,
-            ", ".join(sorted(stale)),
+            ", ".join(sorted(stale)) or "none",
         )
     return re_enqueued
 
