@@ -879,15 +879,16 @@ class TestDrainQueueRetryAndDeadLetter:
 
 
 class TestValidateEmbedConfig:
-    """``_validate_embed_config`` enforces the per-layer startup contract:
-    every operator-supplied env var the embedder needs must be present
-    and non-empty before the indexer constructs the embedder client.
+    """``_validate_embed_config`` enforces the per-layer startup contract
+    before the indexer constructs the embedder client: ``EMBED_MODEL``
+    and ``EMBED_API_KEY`` must be non-empty, while an empty
+    ``EMBED_BASE_URL`` is allowed and selects the SDK default.
 
     Pre-tightening, ``EMBED_API_KEY`` could be empty and the indexer
     would happily start, only failing at the first embed call against
     a remote provider with a 401. Now empty keys fail closed at startup
     so a missing secret surfaces in the same place as a missing
-    ``EMBED_BASE_URL`` or ``EMBED_MODEL``.
+    ``EMBED_MODEL``.
     """
 
     def test_complete_config_passes_silently(self, monkeypatch):
