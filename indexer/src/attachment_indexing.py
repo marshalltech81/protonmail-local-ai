@@ -69,9 +69,11 @@ def attachment_occurrence_id(
     Same payload appearing twice on the same message (e.g. inline + as
     a regular attachment) gets two distinct rows differentiated by
     ``occurrence_index``. The hash inputs and order are part of the
-    on-disk identity and must not change without a schema bump — both
-    the indexer write path and ``Database.upsert_attachment`` derive ids
-    from this function so they cannot drift.
+    on-disk identity and must not change without a schema bump. This
+    function is the only place the id is derived: callers derive it here
+    (``prepare_attachment_writes`` stores it on the plan) and
+    ``Database.upsert_attachment`` persists the id it is given without
+    computing it.
     """
     return hashlib.sha256(
         f"{message_id}\0{content_hash}\0{filename}\0{occurrence_index}".encode()
