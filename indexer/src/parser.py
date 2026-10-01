@@ -658,10 +658,14 @@ def _extract_body_and_attachments(
 
 
 def _safe_decode(payload: bytes, charset: str) -> str:
-    """Decode payload bytes, falling back to utf-8 on unknown charsets."""
+    """Decode payload bytes, falling back to utf-8 on unknown charsets.
+
+    ``UnicodeError`` covers codecs that reject ``errors="replace"``
+    (``idna`` raises ``UnicodeError("Unsupported error handling")``).
+    """
     try:
         return payload.decode(charset, errors="replace")
-    except LookupError:
+    except LookupError, UnicodeError:
         return payload.decode("utf-8", errors="replace")
 
 
@@ -693,9 +697,11 @@ def _decode_header_parts(parts: list[tuple[bytes | str, str | None]]) -> str:
         if isinstance(part, bytes):
             # ``charset`` is whatever the sender claimed in the MIME header;
             # obscure or invalid labels ("x-mac-romanian", typos, historical
-            # aliases) raise LookupError. Handle that locally with a utf-8
-            # fallback and ``errors="replace"`` so a single bad header does
-            # not affect the rest of the message. Anything we DON'T catch
+            # aliases) raise LookupError, and a codec that rejects
+            # ``errors="replace"`` (``idna``) raises UnicodeError. Handle
+            # both locally with a utf-8 fallback and ``errors="replace"``
+            # so a single bad header does not affect the rest of the
+            # message. Anything we DON'T catch
             # here propagates out of ``parse_email``: the function does
             # not have a blanket ``except Exception`` precisely so
             # unanticipated parser failures route through the durable
@@ -704,7 +710,7 @@ def _decode_header_parts(parts: list[tuple[bytes | str, str | None]]) -> str:
             encoding = charset or "utf-8"
             try:
                 decoded.append(part.decode(encoding, errors="replace"))
-            except LookupError:
+            except LookupError, UnicodeError:
                 decoded.append(part.decode("utf-8", errors="replace"))
         else:
             decoded.append(part)
@@ -976,9 +982,10 @@ def _parse_date(value: str) -> datetime | None:
 
     Unparseable headers return ``None``; ``parse_email`` then falls back
     to the current UTC time so threading doesn't crash, but that
-    fabricates a date — log at WARNING with the offending value so an
-    operator notices a corrupt mailbox before the fabricated dates
-    dominate "recent" sorts.
+    fabricates a date — log at WARNING so an operator notices a corrupt
+    mailbox before the fabricated dates dominate "recent" sorts. The
+    header value itself is attacker-controlled mail content and is never
+    logged (#257).
     """
     try:
         from email.utils import parsedate_to_datetime
@@ -987,16 +994,16 @@ def _parse_date(value: str) -> datetime | None:
     except TypeError:
         # Older Python releases occasionally raise TypeError on malformed
         # dates; ``parsedate_to_datetime`` proper raises ValueError below.
-        log.warning("date header type error, using now(): %r", value)
+        log.warning("Date header raised TypeError on parse; using now()")
         return None
     except ValueError:
         # ``parsedate_to_datetime`` raises ValueError on unparseable headers
         # (empty string, single-token gibberish, malformed timezone);
         # ``parse_email`` substitutes current UTC so threader doesn't crash.
-        log.warning("date header unparseable, using now(): %r", value)
+        log.warning("unparseable Date header; using now()")
         return None
     if dt is None:
-        log.warning("date header parsed to None, using now(): %r", value)
+        log.warning("Date header parsed to None; using now()")
         return None
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=UTC)

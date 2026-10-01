@@ -5,7 +5,9 @@ Covers: plain text, HTML, multipart, attachments, inline Content-Disposition,
 encoded headers, address parsing, date fallback, and folder derivation.
 """
 
+import email.utils
 import hashlib
+import logging
 import textwrap
 from datetime import datetime
 from email.message import EmailMessage
@@ -162,6 +164,37 @@ class TestParseEmail:
         msg = parse_email(path)
         assert msg is not None
         assert msg.date_is_fallback is fallback
+
+    @pytest.mark.parametrize(
+        "branch",
+        ["unparseable", "type_error", "parsed_none"],
+    )
+    def test_fallback_date_value_not_logged(self, tmp_path, monkeypatch, caplog, branch):
+        """#257: the Date header is attacker-controlled mail content, so no
+        fallback branch may log it. ``parsedate_to_datetime`` on 3.14
+        raises only ``ValueError`` for a ``str``; the other two branches
+        are reached by stubbing it."""
+        marker = "SYNTHETIC-DATE-MARKER-257"
+        if branch == "type_error":
+
+            def _raise_type_error(_value):
+                raise TypeError(marker)
+
+            monkeypatch.setattr(email.utils, "parsedate_to_datetime", _raise_type_error)
+        elif branch == "parsed_none":
+            monkeypatch.setattr(email.utils, "parsedate_to_datetime", lambda _value: None)
+        path = tmp_path / "INBOX" / "cur" / "marker.eml"
+        path.parent.mkdir(parents=True)
+        path.write_bytes(
+            b"From: alice@example.com\nSubject: s\nMessage-ID: <marker@example.com>\n"
+            + f"Date: {marker}\n\nBody.\n".encode()
+        )
+        with caplog.at_level(logging.DEBUG):
+            msg = parse_email(path)
+        assert msg is not None
+        assert msg.date_is_fallback is True
+        assert any("date header" in r.getMessage().lower() for r in caplog.records)
+        assert marker not in caplog.text
 
     def test_date_minus_zero_normalized_to_aware_utc(self, tmp_path):
         """RFC 2822 ``-0000`` means "local time, offset unknown".
@@ -1631,6 +1664,27 @@ class TestDecodeHeader:
         msg = parse_email(path)
         assert msg is not None
         assert "Weird" in msg.subject
+
+    def test_codec_rejecting_replace_falls_back_to_utf8(self, tmp_path):
+        """#257: a sender charset whose codec rejects ``errors="replace"``
+        (``idna`` raises ``UnicodeError``, not ``LookupError``) must take
+        the same utf-8 fallback as an unknown label instead of escaping
+        ``parse_email``."""
+        path = tmp_path / "INBOX" / "cur" / "idna.eml"
+        path.parent.mkdir(parents=True)
+        path.write_bytes(
+            b"From: alice@example.com\r\n"
+            b"Subject: =?idna?q?Caf=C3=A9?=\r\n"
+            b"Message-ID: <idna@example.com>\r\n"
+            b"Date: Mon, 01 Jan 2024 12:00:00 +0000\r\n"
+            b"Content-Type: text/plain; charset=idna\r\n"
+            b"\r\n"
+            b"Caf\xc3\xa9 body.\r\n"
+        )
+        msg = parse_email(path)
+        assert msg is not None
+        assert msg.subject == "Café"
+        assert msg.body_text == "Café body."
 
     def test_mixed_plain_and_encoded_text(self):
         assert _decode_header("Re: =?utf-8?q?H=C3=A9llo?= world") == "Re: Héllo world"
