@@ -980,7 +980,8 @@ class TestReap:
             reconciler.reap()
         escalation_lines = [r for r in caplog.records if "no longer a transient retry" in r.message]
         assert len(escalation_lines) == 1
-        assert thread_id in escalation_lines[0].message
+        # The thread ID is the root Message-ID (sender domain); not logged (#257).
+        assert thread_id not in escalation_lines[0].message
         assert thread_id in reconciler._escalated_threads
 
     def test_escalation_latch_resets_after_successful_reap(
@@ -1135,6 +1136,9 @@ class TestReap:
         with caplog.at_level(logging.DEBUG):
             assert reconciler.reap()["threads_rebuilt"] == 0
         assert "SYNTHETIC_REAP_MARKER" not in caplog.text
+        # The thread ID is the root Message-ID, which carries the
+        # sender's domain: reaper lines name the survivor file instead.
+        assert "rp1@example.com" not in caplog.text
         assert type(exc).__name__ in caplog.text
         assert all(r.exc_info is None for r in caplog.records)
 

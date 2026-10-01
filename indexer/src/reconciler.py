@@ -299,7 +299,7 @@ class Reconciler:
             log.warning(
                 "reconciler reap: %d thread(s) blocked from reaping "
                 "(corrupt survivor / embed outage / parser regression); "
-                "see prior log lines for affected thread_ids",
+                "see prior reaper lines for the affected survivor files",
                 blocked_count,
             )
         return {
@@ -327,12 +327,12 @@ class Reconciler:
         self._blocked_thread_attempts[thread_id] = attempts
         if attempts >= _BLOCKED_ESCALATION_THRESHOLD and thread_id not in self._escalated_threads:
             log.warning(
-                "reconciler: thread %s has been blocked from reaping for "
+                "reconciler: a thread has been blocked from reaping for "
                 "%d consecutive passes; this is no longer a transient retry. "
                 "Check embedder availability, parser errors, or stuck "
-                "survivor files. Sweeps will continue, but this message "
-                "will not repeat until the thread reaps cleanly.",
-                thread_id,
+                "survivor files (named in earlier reaper lines). Sweeps will "
+                "continue, but this message will not repeat until the thread "
+                "reaps cleanly.",
                 attempts,
             )
             self._escalated_threads.add(thread_id)
@@ -365,14 +365,13 @@ class Reconciler:
             # Whole thread gone. Drop everything, then optionally unlink files.
             if not self.db.delete_thread_completely(thread_id, grace_cutoff=cutoff):
                 log.info(
-                    "reaper: thread %s changed since its tombstones were read; retrying next pass",
-                    thread_id,
+                    "reaper: a thread changed since its tombstones were read; retrying next pass",
                 )
                 return False, False
             if self.config.unlink_on_reap:
                 for fp in dead_filepaths:
                     self._safe_unlink(fp)
-            log.info("reaped thread %s (%d messages)", thread_id, len(tombs))
+            log.info("reaped a thread (%d messages)", len(tombs))
             self._clear_blocked(thread_id)
             return True, False
 
@@ -390,10 +389,9 @@ class Reconciler:
                 # is typically transient or operator-actionable).
                 attempts = self._record_blocked(thread_id)
                 log.warning(
-                    "reaper: could not read survivor %s in thread %s "
+                    "reaper: could not read survivor %s "
                     "(%s); skipping this reap pass (blocked attempts=%d)",
                     row["filepath"],
-                    thread_id,
                     # Type only: the message can quote mail (#257).
                     type(e).__name__,
                     attempts,
@@ -416,11 +414,10 @@ class Reconciler:
                 # buried log lines.
                 attempts = self._record_blocked(thread_id)
                 log.error(
-                    "reaper: parse_email raised %s on survivor %s in thread %s; "
+                    "reaper: parse_email raised %s on survivor %s; "
                     "skipping this reap pass (blocked attempts=%d)",
                     type(e).__name__,
                     row["filepath"],
-                    thread_id,
                     attempts,
                 )
                 return False, False
@@ -429,10 +426,9 @@ class Reconciler:
                 # delete the DB row. A later sweep can pick it up again.
                 attempts = self._record_blocked(thread_id)
                 log.warning(
-                    "reaper: could not re-parse survivor %s in thread %s; "
+                    "reaper: could not re-parse survivor %s; "
                     "skipping this reap pass (blocked attempts=%d)",
                     row["filepath"],
-                    thread_id,
                     attempts,
                 )
                 return False, False
@@ -489,9 +485,8 @@ class Reconciler:
             # and retry on the next sweep rather than committing partial work.
             attempts = self._record_blocked(thread_id)
             log.warning(
-                "reaper: embedding failed for thread %s (%s); will retry next pass "
+                "reaper: embedding failed for a thread (%s); will retry next pass "
                 "(blocked attempts=%d)",
-                thread_id,
                 # A provider status error can echo the input (a subject).
                 scrub_embed_error(e),
                 attempts,
@@ -511,17 +506,15 @@ class Reconciler:
         )
         if removed_filepaths is None:
             log.info(
-                "reaper: a message in thread %s was restored since its tombstones "
+                "reaper: a message in a thread was restored since its tombstones "
                 "were read; retrying next pass",
-                thread_id,
             )
             return False, False
         if self.config.unlink_on_reap:
             for fp in removed_filepaths:
                 self._safe_unlink(fp)
         log.info(
-            "rebuilt thread %s: removed %d message(s), %d survive",
-            thread_id,
+            "rebuilt a thread: removed %d message(s), %d survive",
             len(tombs),
             len(survivors),
         )
