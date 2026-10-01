@@ -15,6 +15,7 @@ import pytest
 from src.attachment_indexing import attachment_occurrence_id
 from src.database import (
     EMBEDDING_DIM,  # noqa: F401  -- via reuse
+    SCHEMA_APPLICATION_ID,
     SCHEMA_VERSION,
     Database,
 )
@@ -126,6 +127,26 @@ class TestSchema:
         conn = sqlite3.connect(str(db_path))
         try:
             conn.execute("UPDATE schema_version SET version = 22")
+            conn.commit()
+        finally:
+            conn.close()
+        with pytest.raises(RuntimeError, match="wipe the sqlite-volume"):
+            Database(db_path)
+
+    def test_fresh_install_carries_the_application_id(self, db):
+        assert db._conn.execute("PRAGMA application_id").fetchone()[0] == SCHEMA_APPLICATION_ID
+
+    def test_old_numbering_database_at_a_reused_version_fails_closed(self, tmp_path):
+        """Once the new sequence reaches a number the old one used, the
+        version alone cannot tell the two apart. An old database has no
+        ``application_id`` stamp and must fail closed, not read as ready."""
+        db_path = tmp_path / "old-v0.db"
+        Database(db_path).close()
+        import sqlite3
+
+        conn = sqlite3.connect(str(db_path))
+        try:
+            conn.execute("PRAGMA application_id = 0")
             conn.commit()
         finally:
             conn.close()

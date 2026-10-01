@@ -666,8 +666,9 @@ a consumed marker in `/state`.
 
 Before `make up`: the operator's `.env` and `.secrets` use current
 names, but the embedding provider (`EMBED_MODEL`, `EMBED_BASE_URL`,
-`.secrets/embed_api_key.txt`) still needs configuring. A dev database
-from before the v0 renumber (v20-v22) must be rebuilt from Maildir.
+`.secrets/embed_api_key.txt`) still needs configuring. Any index
+volume from before the v0 renumber must be rebuilt from Maildir (see
+`docs/troubleshooting.md`, "Indexer refuses to start").
 
 Next, in order (each item is a batch-1 guard unless noted; reproduce
 first, one test-first commit per issue, keep three PRs in flight):

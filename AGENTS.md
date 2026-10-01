@@ -179,8 +179,9 @@ Do not make any of the following changes unless the repository owner explicitly 
   version) both fail closed at startup with actionable error messages.
   The initial schema is version 0: earlier history was squashed into
   `_apply_initial_schema` and renumbered, so the first new migration is
-  `0001`. A database from the old numbering (v21/v22) reads as a
-  downgrade and fails closed with rebuild instructions.
+  `0001`. The initial schema stamps `SCHEMA_APPLICATION_ID` into the
+  SQLite header; a database without it predates the renumbering and
+  fails closed with rebuild instructions whatever its version.
 - Do not change embedding dimensions or model assumptions without verifying schema and context-window implications.
 - Do not change chunk ID derivation away from the deterministic
   `sha256(message_pk || index || text)` shape — re-runs depend on identical
