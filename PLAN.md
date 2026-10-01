@@ -470,9 +470,9 @@ answers real knowledge questions, and identify why failures occur.
 
 ### Phase 4 — Deterministic knowledge scaffolding
 
-Items 1 and 2 were built before go-live (#459), so their tables are in
-the v0 schema. Any Phase 4 schema change after the first deployment
-needs a numbered migration like any other.
+Items 1 and 2 are being built before go-live (#459, in review), so
+their tables fold into the v0 schema. Any Phase 4 schema change after
+the first deployment needs a numbered migration like any other.
 
 1. **Entity resolution, phase 1 (deterministic):** address
    canonicalization, display-name clustering, domain→organization
