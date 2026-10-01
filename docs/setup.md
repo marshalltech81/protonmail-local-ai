@@ -299,13 +299,26 @@ volume.
 
 ### Reranker toggle
 
-`RERANK_MODE` is a clean runtime toggle. The reranker is a post-RRF
-stage with no schema dependency, so flipping it on or off takes
-effect on the next request without touching indexing or embeddings.
+`RERANK_MODE` can be switched without a reindex. The reranker is a
+post-RRF stage with no schema dependency, so turning it on or off
+leaves indexing and embeddings untouched.
 The default is `none`; to use it, set `RERANK_MODE=cohere`, set
 `RERANK_MODEL` (e.g. `rerank-v4.0-pro`), and write the API key to
 `.secrets/rerank_api_key.txt`. `RERANK_BASE_URL` is optional —
 leave empty for the Cohere SDK default.
+
+The MCP server reads the rerank settings once at startup, so a change
+takes effect only when the `mcp-server` container is recreated. After
+editing `.env`, run `make up`: Compose recreates every container whose
+configuration changed. `docker compose restart` is not enough, because
+a restarted container keeps the environment it was created with. If
+the stack was started with an overlay (such as
+`docker-compose.hardened.yml`), run `docker compose up -d` with the
+same `-f` files instead, or the recreated container drops the overlay.
+A change to `.secrets/rerank_api_key.txt` alone does not change the
+container's configuration, so recreate it explicitly with
+`docker compose up -d --force-recreate mcp-server` (again with the
+same `-f` files).
 
 ### Pointing at a different embedder provider
 
