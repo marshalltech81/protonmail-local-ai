@@ -10,6 +10,7 @@ tests do not require a live embedding service.
 
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime
 from email.message import EmailMessage
 from pathlib import Path
@@ -794,6 +795,10 @@ class TestReap:
         assert "reaper: embedding failed" in caplog.text
         assert "SYNTHETIC_PRIVATE_SUBJECT" not in caplog.text
         assert "status=400" in caplog.text
+        # The operator can tell which thread is stuck from the survivor's
+        # mbsync path, without the thread ID (#257).
+        assert str(reply_path) in caplog.text
+        assert "e1@example.com" not in caplog.text
 
     def test_flag_rename_during_reap_does_not_revive_the_deleted_message(
         self, db, threader, embedder, reconciler, maildir, monkeypatch
@@ -979,7 +984,10 @@ class TestReap:
             reconciler.reap()
         escalation_lines = [r for r in caplog.records if "no longer a transient retry" in r.message]
         assert len(escalation_lines) == 1
-        assert thread_id in escalation_lines[0].message
+        # The thread ID is the root Message-ID (sender domain); not logged
+        # (#257). A survivor's mbsync path identifies the thread instead.
+        assert thread_id not in escalation_lines[0].message
+        assert str(reply_path) in escalation_lines[0].message
         assert thread_id in reconciler._escalated_threads
 
     def test_escalation_latch_resets_after_successful_reap(
@@ -1102,6 +1110,43 @@ class TestReap:
         assert result["threads_rebuilt"] == 0
         assert db.get_thread(thread_id) is not None
         assert db.has_pending_deletion(str(trashed))
+
+    @pytest.mark.parametrize(
+        "exc", [ValueError("SYNTHETIC_REAP_MARKER"), OSError("SYNTHETIC_REAP_MARKER")]
+    )
+    def test_reap_parse_failure_log_keeps_mail_out(
+        self, db, threader, reconciler, maildir, monkeypatch, caplog, exc
+    ):
+        """#257: a parser exception can quote the header or body it
+        rejected, so the reaper logs its type, never its text or a
+        traceback."""
+        orig_path = maildir / "1700000000.M1.host:2,S"
+        _write_eml(orig_path, "rp1@example.com")
+        _index(orig_path, db, threader)
+        reply_path = maildir / "1700000001.M2.host:2,S"
+        _write_eml(
+            reply_path,
+            "rp2@example.com",
+            in_reply_to="rp1@example.com",
+            subject="Re: Test message",
+            date=datetime(2024, 2, 1, tzinfo=UTC),
+        )
+        _index(reply_path, db, threader)
+        orig_path.rename(maildir / "1700000000.M1.host:2,ST")
+        reconciler.sweep()
+
+        def _raise(path, maildir_root=None):
+            raise exc
+
+        monkeypatch.setattr("src.reconciler.parse_email", _raise)
+        with caplog.at_level(logging.DEBUG):
+            assert reconciler.reap()["threads_rebuilt"] == 0
+        assert "SYNTHETIC_REAP_MARKER" not in caplog.text
+        # The thread ID is the root Message-ID, which carries the
+        # sender's domain: reaper lines name the survivor file instead.
+        assert "rp1@example.com" not in caplog.text
+        assert type(exc).__name__ in caplog.text
+        assert all(r.exc_info is None for r in caplog.records)
 
     def test_unlinks_files_when_unlink_on_reap_enabled(self, db, threader, embedder, maildir):
         cfg = _default_config(unlink_on_reap=True)

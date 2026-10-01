@@ -321,9 +321,11 @@ content is as private as a credential.
   (response parsing, validation, conversion) as its type alone, since
   those errors quote the values they reject and a provider's response
   can echo the text sent to it. `scrub_embed_error` and the reranker
-  follow this. `safe_provider_exception_text` reduces only status
-  errors and otherwise keeps the (secret-redacted) message, so it does
-  not satisfy this on its own.
+  follow this. In the MCP server, `safe_provider_exception_text`
+  applies this rule for both the log line and the caller's
+  `ToolError`; raise `ProviderResponseError` (both in
+  `mcp-server/src/lib/security.py`) for a new fixed-message provider
+  failure so its text is kept.
 - Exceptions from the standard library's email parser and generator
   and from the codecs quote their input: `email.errors.HeaderWriteError`
   embeds the header it refused, `UnicodeEncodeError` its data, and a
@@ -336,12 +338,20 @@ content is as private as a credential.
   site) `LookupError` at the boundary that produced them and degrade
   with a fixed message or a utf-8 fallback; never let them reach
   `indexing_jobs.last_error` through `_stage_error`.
-- Known gaps are tracked in #257, which holds the full list. Examples:
-  the parser logs a malformed `Date` header verbatim, the attachment
-  pipeline and extractors log filenames and raw parser/OCR exceptions,
-  and the search and intelligence tool handlers log non-status provider
-  exceptions through `safe_provider_exception_text`. Do not add to
-  them, and add any new one you find to #257.
+- Every value written to `indexing_jobs.last_error` must be fixed
+  text (with paths, sizes or counts at most), an exception type name,
+  or the output of a formatter that enforces this: `scrub_embed_error`
+  (`indexer/src/embedder.py`) for the embed stage and `_stage_error`
+  (`indexer/src/main.py`, a short fixed-text allowlist, `OSError` from
+  its errno, everything else by type) for the other stages. Some paths
+  write fixed strings directly (for example the oversized and no
+  `Message-ID` dead letters, the trashed-file defer and the queue's
+  interruption marker); any direct write, existing or new, must follow
+  the same rule. A
+  query-path failure in the MCP server (an SQLite or conversion error)
+  is logged and returned as its type name alone. Rows written before
+  these rules (2026-10-01, #257) may still hold old text; nothing
+  rewrites them. File any new leak you find as its own issue.
 - Messages built from provider responses use fixed text and counts,
   never the returned values.
 - A validation error quoting a tool argument may be returned to the
