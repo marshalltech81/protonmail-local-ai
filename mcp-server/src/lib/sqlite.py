@@ -11,10 +11,12 @@ import logging
 import math
 import re
 import sqlite3
+import unicodedata
 from contextlib import closing
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, time
 from email.utils import parseaddr
+from itertools import groupby
 from pathlib import Path
 from urllib.parse import quote
 
@@ -119,8 +121,9 @@ def _addr_matches(haystack: list[str], query_lower: str) -> bool:
       equality so that case variation in the stored display string
       (``Bob@Example.com``, ``Bob Smith <bob@example.com>``) still matches.
     * A bare name (``bob``) or domain fragment (``@example.com``,
-      ``example.com``) keeps substring behavior against the lowercased
-      display string, since those shapes cannot canonicalize.
+      ``example.com``) keeps substring behavior against the display
+      string, both sides casefolded (Unicode caseless: ``STRASSE``
+      matches ``Straße``), since those shapes cannot canonicalize.
     """
     canonical_query = canonical_addr(query_lower)
     # A canonicalizable full address requires a non-empty local part.
@@ -131,7 +134,8 @@ def _addr_matches(haystack: list[str], query_lower: str) -> bool:
     # domain filter.
     if canonical_query and not canonical_query.startswith("@"):
         return any(canonical_addr(s) == canonical_query for s in haystack)
-    return any(query_lower in s.lower() for s in haystack)
+    query_folded = query_lower.casefold()
+    return any(query_folded in s.casefold() for s in haystack)
 
 
 def _matches_sender(result, from_addr_lower: str) -> bool:
@@ -154,6 +158,15 @@ def _matches_participant(result, participant_lower: str) -> bool:
     return _addr_matches(result.participants, participant_lower)
 
 
+def _is_fts_query_token_char(ch: str) -> bool:
+    """Whether ``ch`` belongs inside a sanitized query token: a regex word
+    character (alphanumeric or ``_``), one of ``@ . -``, or a combining
+    mark. The regex word class excludes marks, but unicode61 keeps them in
+    the word, so splitting there turned a decomposed ``résumé`` (``e``
+    followed by U+0301) into the unrelated terms ``re`` and ``sume``."""
+    return ch.isalnum() or ch in "_@.-" or unicodedata.category(ch).startswith("M")
+
+
 def _sanitize_fts_query(query: str) -> str:
     """Build a safe FTS5 MATCH expression from arbitrary user input.
 
@@ -165,11 +178,17 @@ def _sanitize_fts_query(query: str) -> str:
     like their query "doesn't match anything."
 
     The sanitizer extracts word-like tokens (keeping ``@ . -`` so email
-    addresses and hostnames survive), quotes each one as an FTS phrase, and
+    addresses and hostnames survive, and combining marks so a decomposed
+    accent stays in its word), quotes each one as an FTS phrase, and
     joins with ``OR`` so any-term match is preserved — the typical
-    search-box expectation.
+    search-box expectation. One pass over the characters, so the work is
+    linear in the query length.
     """
-    tokens = re.findall(r"[\w@.\-]+", query or "")
+    tokens = [
+        "".join(chars)
+        for is_token, chars in groupby(query or "", key=_is_fts_query_token_char)
+        if is_token
+    ]
     if not tokens:
         return ""
     return " OR ".join(f'"{t}"' for t in tokens)
@@ -579,10 +598,12 @@ _MAX_TEXT_TERMS = 16
 _INVALID_CURSOR = "invalid cursor; restart the query without a cursor"
 
 
-def _sql_lower(value):
-    """Unicode-aware ``lower`` for SQL. SQLite's built-in folds ASCII only,
-    so ``JOSÉ`` would never match ``josé``."""
-    return value.lower() if isinstance(value, str) else value
+def _sql_casefold(value):
+    """Unicode caseless folding for SQL. SQLite's built-in ``lower`` folds
+    ASCII only, so ``JOSÉ`` would never match ``josé``; ``casefold`` also
+    expands ``ß`` so ``STRASSE`` matches ``Straße``. Compare against a
+    needle folded the same way."""
+    return value.casefold() if isinstance(value, str) else value
 
 
 def _text_terms(text: str) -> list[str]:
@@ -631,12 +652,12 @@ def _participant_clause(value: str, roles: tuple[str, ...], params: list) -> str
             "m.message_id IN (SELECT message_id FROM message_participants "  # nosec B608
             f"WHERE address = ? AND role IN ({role_sql}))"
         )
-    needle = value.strip().lower()
-    params.extend([*roles, needle, needle])
+    # Addresses are stored lowercased; names fold with ``mcp_casefold``.
+    params.extend([*roles, value.strip().lower(), value.strip().casefold()])
     return (
         "m.message_id IN (SELECT message_id FROM message_participants "  # nosec B608
         f"WHERE role IN ({role_sql}) "
-        "AND (instr(address, ?) > 0 OR instr(mcp_lower(name), ?) > 0))"
+        "AND (instr(address, ?) > 0 OR instr(mcp_casefold(name), ?) > 0))"
     )
 
 
@@ -674,6 +695,128 @@ def _decode_cursor(cursor: str, digest: str) -> tuple[str, str, int]:
             "as the call that returned it, or restart without a cursor",
         )
     return data["s"], data["m"], data["o"]
+
+
+def _add_contact(by_email: dict[str, dict], address: str, name: str | None, thread_id: str) -> None:
+    """Record ``address`` on ``thread_id`` under display ``name`` in a
+    ``find_contact`` aggregation (canonical email -> names, threads)."""
+    bucket = by_email.setdefault(address, {"names": set(), "threads": set()})
+    if name and name.strip():
+        bucket["names"].add(name.strip())
+    bucket["threads"].add(thread_id)
+
+
+def _aggregate_participants(
+    conn: sqlite3.Connection, needle: str, name_needle: str
+) -> dict[str, dict]:
+    """``find_contact``'s default aggregation, on ``conn``.
+
+    The query selects addresses; every row of a selected address then
+    aggregates, so a name match reports the contact's other names and
+    threads too. Addresses are stored canonical (lowercased); names
+    need the Unicode-aware ``mcp_casefold``.
+    """
+    by_email: dict[str, dict] = {}
+    rows = conn.execute(
+        """
+        SELECT DISTINCT p.address, p.name, m.thread_id
+        FROM message_participants p
+        JOIN messages m ON m.message_id = p.message_id
+        WHERE p.address IN (
+            SELECT address FROM message_participants
+            WHERE instr(address, ?) > 0 OR instr(mcp_casefold(name), ?) > 0
+        )
+        """,
+        (needle, name_needle),
+    ).fetchall()
+    for row in rows:
+        _add_contact(by_email, row["address"], row["name"], row["thread_id"])
+    return by_email
+
+
+def _thread_primaries(conn: sqlite3.Connection, thread_ids: list[str]) -> dict[str, dict[str, str]]:
+    """``thread_id -> {canonical address: display name}`` from each listed
+    thread's ``senders`` (every message's primary author)."""
+    primaries: dict[str, dict[str, str]] = {}
+    rows = conn.execute(
+        "SELECT thread_id, senders FROM threads WHERE thread_id IN (SELECT value FROM json_each(?))",
+        (json.dumps(thread_ids),),
+    )
+    for row in rows:
+        senders: dict[str, str] = {}
+        try:
+            entries = json.loads(row["senders"])
+        except json.JSONDecodeError, TypeError:
+            entries = []
+        for entry in entries if isinstance(entries, list) else []:
+            if not isinstance(entry, str):
+                continue
+            try:
+                name, addr = parseaddr(entry)
+            except Exception:
+                # Sender strings come from indexed mail; an entry that
+                # blows up parseaddr (nested-comment recursion) must cost
+                # that entry, not the lookup.
+                continue
+            addr = addr.strip().lower()
+            if "@" in addr:
+                senders.setdefault(addr, name)
+        primaries[row["thread_id"]] = senders
+    return primaries
+
+
+def _aggregate_senders(conn: sqlite3.Connection, needle: str, name_needle: str) -> dict[str, dict]:
+    """``find_contact(senders_only=True)``'s aggregation, on ``conn``.
+
+    An address counts on a thread whose ``senders`` (each message's
+    primary author, one display string per address) lists it. Its
+    names are that senders entry plus its From rows on those threads,
+    so a name first used on a later message still matches. The index
+    records no author order within a message, so a name written for
+    the address as a secondary author on a thread it primarily sent
+    counts too.
+
+    Work follows the query, not the mailbox: candidate addresses come
+    from the From rows the query matches, and only the threads those
+    candidates appear on have their ``senders`` parsed.
+    """
+    candidates = [
+        row["address"]
+        for row in conn.execute(
+            """
+            SELECT DISTINCT address FROM message_participants
+            WHERE role = 'from'
+              AND (instr(address, ?) > 0 OR instr(mcp_casefold(name), ?) > 0)
+            """,
+            (needle, name_needle),
+        )
+    ]
+    if not candidates:
+        return {}
+    rows = conn.execute(
+        """
+        SELECT DISTINCT p.address, p.name, m.thread_id
+        FROM message_participants p
+        JOIN messages m ON m.message_id = p.message_id
+        WHERE p.role = 'from' AND p.address IN (SELECT value FROM json_each(?))
+        """,
+        (json.dumps(candidates),),
+    ).fetchall()
+    primaries = _thread_primaries(conn, sorted({row["thread_id"] for row in rows}))
+    by_email: dict[str, dict] = {}
+    for row in rows:
+        senders = primaries.get(row["thread_id"], {})
+        if row["address"] in senders:
+            _add_contact(by_email, row["address"], senders[row["address"]], row["thread_id"])
+            _add_contact(by_email, row["address"], row["name"], row["thread_id"])
+    # A candidate matched on some From row; keep it only if the match
+    # holds on a thread it primarily sent. Each kept address keeps its
+    # whole sent history.
+    return {
+        addr: bucket
+        for addr, bucket in by_email.items()
+        if needle in addr or any(name_needle in n.casefold() for n in bucket["names"])
+    }
 
 
 class Database:
@@ -748,7 +891,7 @@ class Database:
         conn.enable_load_extension(True)
         sqlite_vec.load(conn)
         conn.enable_load_extension(False)
-        conn.create_function("mcp_lower", 1, _sql_lower, deterministic=True)
+        conn.create_function("mcp_casefold", 1, _sql_casefold, deterministic=True)
         conn.execute("PRAGMA query_only = ON")
         return conn
 
@@ -2295,16 +2438,20 @@ class Database:
     ) -> list[dict]:
         """Resolve a name / address / domain fragment to indexed contacts.
 
-        Matches the lowercased query against each indexed
-        ``message_participants`` row's address or display name and
-        aggregates by canonical email, so the same contact across many
-        threads collapses to one row, with ``thread_count`` reflecting
-        how many threads they appeared on and ``names`` every display
-        name they were written with. Same-thread duplicates do not
-        double-count.
+        Matches the query against each indexed ``message_participants``
+        row's address (lowercased) or display name (Unicode caseless,
+        both sides casefolded), then
+        aggregates every row of each matched canonical email (not only
+        the matching rows), so the same contact across many threads
+        collapses to one row, with ``thread_count`` reflecting how many
+        threads they appeared on and ``names`` every display name they
+        were written with. Same-thread duplicates do not double-count.
 
         ``senders_only`` instead aggregates ``threads.senders`` — each
-        message's primary From author as the thread records it. That is
+        message's primary From author as the thread records it — with
+        the display names that author's From rows carry on those same
+        threads (``threads.senders`` keeps only one per address; see
+        ``_aggregate_senders`` for the thread-level limit). That is
         exactly the set ``search_emails(from_addr=...)`` filters on, so a
         resolved address always matches that filter; ranking over the
         participant table's From rows could promote a secondary author
@@ -2327,50 +2474,20 @@ class Database:
         """
         if not query or not query.strip():
             return []
+        # Addresses are stored lowercased; names compare casefolded
+        # (Unicode caseless, so ``STRASSE`` matches ``Straße``).
         needle = query.strip().lower()
+        name_needle = query.strip().casefold()
 
-        # canonical email -> {"names": set[str], "threads": set[str]}
-        by_email: dict[str, dict] = {}
-
-        def add(address: str, name: str | None, thread_id: str) -> None:
-            bucket = by_email.setdefault(address, {"names": set(), "threads": set()})
-            if name and name.strip():
-                bucket["names"].add(name.strip())
-            bucket["threads"].add(thread_id)
-
-        if senders_only:
-            for row in self._fetchall("SELECT thread_id, senders FROM threads"):
-                try:
-                    entries = json.loads(row["senders"])
-                except json.JSONDecodeError, TypeError:
-                    continue
-                for entry in entries:
-                    if not isinstance(entry, str):
-                        continue
-                    try:
-                        name, addr = parseaddr(entry)
-                    except Exception:
-                        # Sender strings come from indexed mail; an entry
-                        # that blows up parseaddr (nested-comment
-                        # recursion) must cost that entry, not the lookup.
-                        continue
-                    addr = addr.strip().lower()
-                    if "@" in addr and needle in f"{name} {addr}".lower():
-                        add(addr, name, row["thread_id"])
-        else:
-            # Addresses are stored canonical (lowercased); names need the
-            # Unicode-aware ``mcp_lower``.
-            rows = self._fetchall(
-                """
-                SELECT DISTINCT p.address, p.name, m.thread_id
-                FROM message_participants p
-                JOIN messages m ON m.message_id = p.message_id
-                WHERE instr(p.address, ?) > 0 OR instr(mcp_lower(p.name), ?) > 0
-                """,
-                (needle, needle),
-            )
-            for row in rows:
-                add(row["address"], row["name"], row["thread_id"])
+        with closing(self._connect()) as conn:
+            # One read transaction: every query below sees the same
+            # snapshot even while the indexer commits.
+            conn.execute("BEGIN")
+            if senders_only:
+                by_email = _aggregate_senders(conn, needle, name_needle)
+            else:
+                by_email = _aggregate_participants(conn, needle, name_needle)
+            conn.rollback()
 
         # Most-active contact first; tiebreak on email so the order is
         # stable across runs (important for both eval reproducibility
@@ -2410,8 +2527,8 @@ class Database:
 
         - ``sender`` (From), ``recipient`` (To or Cc), ``participant``
           (any role): see ``address_match_mode``.
-        - ``subject``: case-insensitive substring of the message's own
-          subject.
+        - ``subject``: Unicode caseless (casefolded) substring of the
+          message's own subject.
         - ``text``: every word must occur in the message's indexed body
           (FTS word match with stemming, any chunk; attachment text and
           stripped quoted replies are not searched).
@@ -2440,8 +2557,8 @@ class Database:
             if value:
                 where.append(_participant_clause(value, roles, params))
         if subject:
-            where.append("instr(mcp_lower(m.subject), ?) > 0")
-            params.append(subject.lower())
+            where.append("instr(mcp_casefold(m.subject), ?) > 0")
+            params.append(subject.casefold())
         if text:
             terms = _text_terms(text)
             if not terms:

@@ -77,7 +77,7 @@ contents of a returned thread, follow up with `get_thread` or
 | `mode` | string | `hybrid` | `hybrid`, `semantic`, or `keyword` |
 | `folders` | list | all | Scope to specific folders |
 | `from_addr` | string | none | Filter by canonical sender address (or domain like `@example.com`); substring fallback when the value can't canonicalize |
-| `from_name` | string | none | Filter by sender name; resolved through `find_contact` to a canonical address before applying. Use when the user names a person but not their email. `from_addr` wins if both are given. |
+| `from_name` | string | none | Filter by sender name; resolved through `find_contact` to a canonical address before applying, matching any display name the address carries in a From header on a thread it primarily sent (the index keeps no author order within one message, so a name written for it as a second author on such a thread also matches). Use when the user names a person but not their email. `from_addr` wins if both are given. |
 | `date_from` | string | none | ISO 8601 date lower bound |
 | `date_to` | string | none | ISO 8601 date upper bound |
 | `has_attachments` | bool | none | Filter by attachment presence |
@@ -102,7 +102,14 @@ drive an unbounded query against the index.
   colons, and unbalanced quotes are stripped so natural search strings
   (``"Who sent the invoice?"``) run a valid ``MATCH`` instead of
   silently returning no results. Email addresses and hostnames are
-  preserved as single tokens.
+  preserved as single tokens, and combining marks stay inside their
+  word, so a decomposed accent (`e` + U+0301) matches like the
+  precomposed letter. Known gap: the indexes tokenize with unicode61
+  `remove_diacritics=1`, which does not fold a precomposed letter
+  carrying two diacritics (Vietnamese `ệ`) and does not relate composed
+  and decomposed spellings of scripts it does not fold (Hangul), so
+  those spellings match only the form the mail was indexed in until an
+  index-side normalization and reindex.
 - If FTS5 still rejects a sanitized query, search falls back to a
   ``LIKE`` scan over subject / body / participants so recall is
   preserved. The scan matches the query as a literal substring: `%`,
@@ -262,11 +269,16 @@ you need a different matching contact than that one (then pass it as
 | `limit` | int | `10` | Maximum contacts to return; clamped to `[1, 50]` |
 
 The aggregator matches the query against each `message_participants`
-row's canonical address or display name (Unicode case-insensitive),
-groups by canonical email (so the same contact across many threads
-collapses to one row), and ranks results by `thread_count` descending
-with email as the tiebreaker. Every display name the contact was
-written with is reported. Same-thread duplicates do not double-count.
+row's canonical address or display name (Unicode caseless: both sides
+are casefolded, so `STRASSE` matches `Straße`),
+then aggregates every row of each matched canonical email (so the same
+contact across many threads collapses to one row, and a match on one
+display name still reports the contact's other names and threads), and
+ranks results by `thread_count` descending with email as the
+tiebreaker. `thread_count` counts every thread; `names` lists at most
+10 of the display names the contact was written with, each cut at 500
+characters, and `name_count` gives the full number. Same-thread
+duplicates do not double-count.
 
 ### `query_messages`
 Enumerate **every** message matching exact criteria, with an exact
@@ -281,7 +293,7 @@ questions.
 | `sender` | string | none | From address (see address matching below) |
 | `recipient` | string | none | To or Cc address |
 | `participant` | string | none | Any role: From, To, or Cc |
-| `subject` | string | none | Case-insensitive substring of the message's own subject |
+| `subject` | string | none | Unicode caseless substring of the message's own subject (casefolded, so `STRASSE` matches `Straße`) |
 | `text` | string | none | Every word must appear in the message's indexed body (FTS word match with stemming; words may be in different chunks). Attachment text and stripped quoted replies are not searched; at most 16 words |
 | `folder` | string | none | Exact folder name |
 | `date_from` | string | none | Inclusive ISO 8601 lower bound on the send date |
@@ -298,7 +310,8 @@ none every indexed message is enumerated. A `date_from` later than
 (`jane@example.com`, `Jane <jane@example.com>`) matches by canonical
 equality through the `message_participants(address, role)` index.
 Anything else (`@example.com`, `Jane`) is a case-insensitive substring
-of the address or display name. The response names the mode used for
+of the address or display name; the display name compares casefolded
+(Unicode caseless). The response names the mode used for
 each filter.
 
 **Response contract.** The response states the filter interpretation,
