@@ -11,7 +11,7 @@ from mcp.server.fastmcp.exceptions import ToolError
 from mcp.types import CallToolResult
 
 from ..lib.embed import embed_query
-from ..lib.security import log_tool_call, safe_exception_text, safe_provider_exception_text
+from ..lib.security import log_tool_call, safe_provider_exception_text
 from ..lib.sqlite import InvalidFilterError, VectorLanesUnavailableError
 from ..lib.validation import clamp_int
 from .outputs import (
@@ -217,7 +217,9 @@ def register_search_tools(
             try:
                 contacts = await asyncio.to_thread(db.find_contact, from_name, 1, senders_only=True)
             except Exception as e:
-                safe_error = safe_exception_text(e, secrets)
+                # Local-DB work, but a conversion error can quote stored
+                # mail: the same classification as provider failures (#257).
+                safe_error = safe_provider_exception_text(e, secrets)
                 log.error("search_emails: find_contact lookup failed: %s", safe_error)
                 raise ToolError(f"Search error: {safe_error}") from e
             if not contacts:
@@ -653,11 +655,11 @@ def register_search_tools(
             log.warning("search_attachments rejected invalid %s", e.field_name)
             raise ToolError(f"Attachment search error: {e}") from e
         except Exception as e:
-            # search_attachments is pure local-DB work (FTS + joins); the
-            # only expected failure is a bad date filter (ValueError) or
-            # a DB error. No provider call, so the standard secret-aware
-            # formatter is enough.
-            safe_error = safe_exception_text(e, secrets)
+            # search_attachments is local-DB work (FTS + joins), but an
+            # SQLite or row-conversion error can quote the query or stored
+            # mail, so it is classified like a provider failure: type only
+            # (#257).
+            safe_error = safe_provider_exception_text(e, secrets)
             log.error("search_attachments error: %s", safe_error)
             raise ToolError(f"Attachment search error: {safe_error}") from e
 
