@@ -296,10 +296,10 @@ stripped result would be empty.
 
 **Known limitation (#295):** a message's body text is the first
 `text/plain` part outside attachments, or failing that the first
-`text/html` part. "First" means first, not first non-empty: a leading
-plain part that holds only whitespace still wins, so a later plain part
-is never read and the HTML fallback is suppressed, leaving an empty
-body (#298). That suits `multipart/alternative`,
+`text/html` part. A plain part that holds only whitespace counts as
+empty, so the HTML text is used instead (#298). Otherwise "first" means
+first, not first non-empty: a later plain part is never read after a
+leading whitespace-only one. That suits `multipart/alternative`,
 where the parts are alternative renderings of one body, but a
 `multipart/mixed` message with several sequential inline text parts
 (for example text, an attachment, then more text) keeps only the first

@@ -662,9 +662,10 @@ def _extract_body_and_attachments(
     # Prefer ``text/plain`` over ``text/html`` regardless of the order parts
     # appear in the message — otherwise a multipart where the HTML part
     # comes first wins, and the LLM gets html2text-converted output even
-    # when the sender provided a clean plain-text body.
-    body_text = plain_text or html_text
-    return body_text.strip(), attachments
+    # when the sender provided a clean plain-text body. A whitespace-only
+    # plain part has no content to prefer, so the HTML text is used.
+    plain_text = plain_text.strip()
+    return plain_text or html_text.strip(), attachments
 
 
 def _safe_decode(payload: bytes, charset: str) -> str:
