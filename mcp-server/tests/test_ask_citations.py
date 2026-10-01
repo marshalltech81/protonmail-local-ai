@@ -13,11 +13,13 @@ import asyncio
 import logging
 import re
 import sqlite3
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 import sqlite_vec
+import src.tools.intelligence as intelligence
 from fastmcp import Client, FastMCP
 from src.lib.sqlite import _SENDER_FETCH_CHARS, ChunkResult, Database, ThreadResult
 from src.tools.intelligence import (
@@ -25,6 +27,7 @@ from src.tools.intelligence import (
     ASK_SYSTEM,
     EvidenceRef,
     _build_evidence,
+    _check_answer,
     _check_citations,
     register_intelligence_tools,
 )
@@ -228,7 +231,9 @@ class TestValidation:
         data = out.structured_content
         assert data["repair_attempted"] is True
         assert data["answer"] == "Still 700 [E42]."
-        assert data["citation_problems"] == [{"kind": "unknown_labels", "labels": ["E42"]}]
+        assert data["citation_problems"] == [
+            {"kind": "unknown_labels", "labels": ["E42"], "statements": [], "quotes": []}
+        ]
         assert data["citations"] == []
         assert "E42" in out.content[0].text
 
@@ -237,7 +242,9 @@ class TestValidation:
         out = _ask(cite_db, llm)
         assert len(llm.complete_calls) == 2  # never more than one repair
         data = out.structured_content
-        assert data["citation_problems"] == [{"kind": "no_citations", "labels": []}]
+        assert data["citation_problems"] == [
+            {"kind": "no_citations", "labels": [], "statements": [], "quotes": []}
+        ]
         assert "cites no evidence" in out.content[0].text
 
     def test_repair_uses_a_fixed_instruction_outside_the_mail(self, cite_db):
@@ -315,7 +322,9 @@ class TestHostileImitation:
         assert "[E42]" not in outside
         # The echoed label exists only in the mail, not in the evidence map.
         problems = out.structured_content["citation_problems"]
-        assert problems == [{"kind": "unknown_labels", "labels": ["E42"]}]
+        assert problems == [
+            {"kind": "unknown_labels", "labels": ["E42"], "statements": [], "quotes": []}
+        ]
 
 
 class TestReviewRound1:
@@ -444,3 +453,417 @@ class TestAuditPath:
         result = asyncio.run(run())
         assert not result.is_error
         assert result.structured_content["citations"][0]["label"] == "E1"
+
+
+# --- statement coverage and quote checks (#284, second slice) -----------
+
+
+def _ref(
+    label: str,
+    text: str,
+    *,
+    message: str,
+    sender: str,
+    attachment: str | None = None,
+) -> EvidenceRef:
+    """A supplied passage as ask_mailbox records it: label, chunk and the
+    text shown to the model. Every chunk here has chunk index 0."""
+    chunk = ChunkResult(
+        chunk_id=f"{message}-{attachment or 'body'}",
+        message_id=message,
+        claimant_id=f"{message}#00000000",
+        thread_id="t",
+        chunk_index=0,
+        text=text,
+        char_start=0,
+        char_end=len(text),
+        attachment_id=f"{message}-{attachment}" if attachment else None,
+        attachment_filename=attachment,
+        message_sender=sender,
+        message_date="2024-03-01T09:00:00+00:00",
+    )
+    return EvidenceRef(label, "t", chunk, len(text), text)
+
+
+# Two senders, each with a body chunk at index 0, and two attachments
+# with the same filename on different messages.
+_EVIDENCE = {
+    "E1": _ref(
+        "E1",
+        "We will ship the order on Friday morning.",
+        message="a1@example.com",
+        sender="alice@example.com",
+    ),
+    "E2": _ref(
+        "E2",
+        "The shipment moves to Monday after the inspection.",
+        message="b1@example.com",
+        sender="bob@example.com",
+    ),
+    "E3": _ref(
+        "E3",
+        "Invoice total: 500 units, due in thirty days.",
+        message="a1@example.com",
+        sender="alice@example.com",
+        attachment="invoice.pdf",
+    ),
+    "E4": _ref(
+        "E4",
+        "Invoice total: 700 units, due on receipt.",
+        message="b1@example.com",
+        sender="bob@example.com",
+        attachment="invoice.pdf",
+    ),
+}
+
+
+def _statuses(check) -> list[str]:
+    return [s.status for s in check.statements]
+
+
+class TestStatementCoverage:
+    def test_each_statement_is_split_and_classified(self):
+        answer = (
+            "Alice planned to ship on Friday [E1]. Bob later moved it to Monday. [E2] "
+            "The carrier may be late [uncertain]. The buyer agreed to the change [unsupported]. "
+            "The invoice was paid in full."
+        )
+        check = _check_answer(answer, _EVIDENCE)
+        assert _statuses(check) == ["cited", "cited", "uncertain", "unsupported", "uncited"]
+        # A label written after the full stop belongs to the statement before it.
+        assert check.statements[1].labels == ["E2"]
+        assert check.statements[1].text == "Bob later moved it to Monday. [E2]"
+        assert [p.kind for p in check.problems] == ["uncited_statements"]
+        assert check.problems[0].statements == [4]
+
+    def test_a_statement_citing_only_unknown_labels_is_invalid_not_uncited(self):
+        check = _check_answer("Shipping was on Friday [E1]. It moved again [E9].", _EVIDENCE)
+        assert _statuses(check) == ["cited", "invalid"]
+        assert [p.kind for p in check.problems] == ["unknown_labels"]
+
+    def test_headings_list_intros_and_fragments_are_not_checked(self):
+        answer = (
+            "## Shipping dates by sender\n"
+            "The dates changed as follows:\n"
+            "- Friday came first [E1]\n"
+            "- Monday came next [E2]\n"
+            "All good."
+        )
+        check = _check_answer(answer, _EVIDENCE)
+        assert _statuses(check) == ["not_checked", "not_checked", "cited", "cited", "not_checked"]
+        assert check.problems == []
+
+    def test_lines_and_bullets_are_statements(self):
+        check = _check_answer(
+            "- Friday was the first date [E1]\n- Monday was the next date", _EVIDENCE
+        )
+        assert _statuses(check) == ["cited", "uncited"]
+
+    def test_a_not_found_answer_has_no_coverage_requirement(self):
+        answer = (
+            "Not found in the provided emails. The passages discuss shipping dates only. "
+            "Nothing mentions the price of freight."
+        )
+        check = _check_answer(answer, _EVIDENCE)
+        assert set(_statuses(check)) == {"not_checked"}
+        assert check.problems == []
+
+    def test_an_uncited_answer_reports_no_citations_once(self):
+        check = _check_answer("It shipped on Friday. Then it moved to Monday.", _EVIDENCE)
+        assert [p.kind for p in check.problems] == ["no_citations"]
+
+    def test_a_full_stop_inside_a_quote_does_not_split_the_statement(self):
+        answer = 'Bob wrote "after the inspection. The shipment moves" in that order [E2].'
+        check = _check_answer(answer, _EVIDENCE)
+        assert len(check.statements) == 1
+        answer = 'Alice said "We will ship the order on Friday morning." [E1] Bob disagreed [E2].'
+        check = _check_answer(answer, _EVIDENCE)
+        assert [s.labels for s in check.statements] == [["E1"], ["E2"]]
+        assert [q.status for q in check.quotes] == ["verified"]
+
+
+class TestQuoteChecks:
+    def test_an_exact_quote_is_verified(self):
+        check = _check_answer('Alice wrote "ship the order on Friday" [E1].', _EVIDENCE)
+        [quote] = check.quotes
+        assert quote.status == "verified"
+        assert quote.found_in == ["E1"]
+        assert quote.statement == 0
+        assert check.problems == []
+
+    def test_whitespace_quote_marks_and_ellipsis_are_tolerated(self):
+        answer = "Bob wrote “The  shipment moves … the inspection.” [E2]"
+        check = _check_answer(answer, _EVIDENCE)
+        assert [q.status for q in check.quotes] == ["verified"]
+
+    def test_an_altered_quote_is_unmatched(self):
+        check = _check_answer('Alice wrote "ship the order on Saturday" [E1].', _EVIDENCE)
+        [quote] = check.quotes
+        assert quote.status == "unmatched"
+        assert quote.found_in == []
+        [problem] = check.problems
+        assert problem.kind == "unmatched_quotes"
+        assert problem.quotes == [0]
+
+    def test_case_changes_are_not_verbatim(self):
+        check = _check_answer('Alice wrote "SHIP THE ORDER ON FRIDAY" [E1].', _EVIDENCE)
+        assert check.quotes[0].status == "unmatched"
+
+    def test_a_quote_cited_to_the_wrong_sender_is_misattributed(self):
+        # Both bodies are chunk 0; the quote is Bob's but cites Alice's.
+        check = _check_answer('Alice wrote "moves to Monday after the inspection" [E1].', _EVIDENCE)
+        [quote] = check.quotes
+        assert quote.status == "misattributed"
+        assert quote.found_in == ["E2"]
+        [problem] = check.problems
+        assert problem.kind == "misattributed_quotes"
+        assert problem.labels == ["E2"]
+        assert problem.quotes == [0]
+
+    def test_a_quote_from_the_other_same_named_attachment_is_misattributed(self):
+        check = _check_answer('invoice.pdf says "700 units, due on receipt" [E3].', _EVIDENCE)
+        assert check.quotes[0].status == "misattributed"
+        assert check.quotes[0].found_in == ["E4"]
+        check = _check_answer('invoice.pdf says "700 units, due on receipt" [E4].', _EVIDENCE)
+        assert check.quotes[0].status == "verified"
+
+    def test_a_quote_is_checked_against_any_label_of_its_statement(self):
+        check = _check_answer('The plans were "ship the order on Friday" [E2, E1].', _EVIDENCE)
+        assert check.quotes[0].status == "verified"
+        assert check.quotes[0].found_in == ["E1"]
+
+    def test_a_quote_in_an_uncited_statement_is_uncited(self):
+        check = _check_answer(
+            'Alice wrote "ship the order on Friday" [unsupported]. Shipping slipped [E2].',
+            _EVIDENCE,
+        )
+        assert check.quotes[0].status == "uncited"
+        assert check.problems == []
+
+    def test_short_scare_quotes_are_not_quotes(self):
+        check = _check_answer('The "final" date was Monday [E2].', _EVIDENCE)
+        assert check.quotes == []
+
+    def test_only_the_text_shown_to_the_model_can_verify_a_quote(self):
+        text = (
+            "Opening line of the message. " + "filler words here. " * 60 + "Hidden closing words."
+        )
+        chunk = ChunkResult(
+            chunk_id="c",
+            message_id="m@example.com",
+            claimant_id="m@example.com#00000000",
+            thread_id="t",
+            chunk_index=0,
+            text=text,
+            char_start=0,
+            char_end=len(text),
+        )
+        thread = ThreadResult(
+            thread_id="t",
+            subject="s",
+            participants=[],
+            folder="INBOX",
+            date_first=datetime(2024, 1, 1, tzinfo=UTC),
+            date_last=datetime(2024, 1, 1, tzinfo=UTC),
+            message_ids=[],
+            snippet="",
+            has_attachments=False,
+            evidence_chunks=[chunk],
+        )
+        evidence_map: dict[str, EvidenceRef] = {}
+        _build_evidence([thread], 300, evidence_map=evidence_map)
+        assert evidence_map["E1"].char_end < len(text)  # the passage was cut
+        check = _check_answer(
+            'It opens "Opening line of the message" [E1] and ends "Hidden closing words" [E1].',
+            evidence_map,
+        )
+        assert [q.status for q in check.quotes] == ["verified", "unmatched"]
+
+    def test_a_thread_text_passage_can_verify_a_quote(self, seeded_db):
+        # seeded_db threads have no chunks, so each is shown by its text.
+        probe = FakeInferenceClient(response="x [E1].")
+        _ask(seeded_db, probe)
+        shown = probe.complete_calls[0][1].split("[E1 | thread text]\n", 1)[1]
+        words = " ".join(shown.split()[:4])
+        assert len(words.split()) == 4
+        out = _ask(seeded_db, FakeInferenceClient(response=f'It says "{words}" [E1].'))
+        assert out.structured_content["quotes"][0]["status"] == "verified"
+
+
+class TestBounds:
+    def test_quotes_and_quote_length_are_capped(self, monkeypatch):
+        calls = 0
+        real = intelligence._quote_in
+
+        def counting(fragments, text):
+            nonlocal calls
+            calls += 1
+            return real(fragments, text)
+
+        monkeypatch.setattr(intelligence, "_quote_in", counting)
+        many = " ".join(f'Quote {i} "ship the order on Friday" [E1].' for i in range(50))
+        long_quote = "word " * (intelligence._MAX_QUOTE_CHARS // 5 + 10)
+        check = _check_answer(f'{many} Long "{long_quote}" [E1].', _EVIDENCE)
+        cap = intelligence._MAX_CHECKED_QUOTES
+        statuses = [q.status for q in check.quotes]
+        assert len(statuses) == 51
+        assert statuses[:cap] == ["verified"] * cap
+        assert set(statuses[cap:]) == {"not_checked"}
+        assert all(len(q.text) <= intelligence._MAX_QUOTE_CHARS + 1 for q in check.quotes)
+        # The work done: one search per checked quote and cited passage.
+        assert calls == cap
+
+    def test_an_unmatched_quote_searches_each_passage_once(self, monkeypatch):
+        calls = 0
+        real = intelligence._quote_in
+
+        def counting(fragments, text):
+            nonlocal calls
+            calls += 1
+            return real(fragments, text)
+
+        monkeypatch.setattr(intelligence, "_quote_in", counting)
+        _check_answer('Alice wrote "nothing like this anywhere" [E1].', _EVIDENCE)
+        assert calls == len(_EVIDENCE)  # E1, then the three others
+
+    @pytest.mark.parametrize(
+        "answer",
+        [
+            ". " * 100_000,
+            '"' * 200_000,
+            '"a b c ' * 40_000,
+            "[E1] " * 40_000,
+            ".[" + "x" * 200_000,
+            ("word " * 30 + ". [E1]\n") * 2_000,
+            "… " * 100_000,
+            '"a b c" [E1] ' * 40_000,
+        ],
+        ids=[
+            "terminators",
+            "quote-marks",
+            "short-quotes",
+            "citations",
+            "open-bracket",
+            "cited-lines",
+            "ellipses",
+            "cited-quotes",
+        ],
+    )
+    def test_hostile_answers_are_checked_in_linear_time(self, answer, monkeypatch):
+        calls = 0
+        real = intelligence._quote_in
+
+        def counting(fragments, text):
+            nonlocal calls
+            calls += 1
+            return real(fragments, text)
+
+        monkeypatch.setattr(intelligence, "_quote_in", counting)
+        start = time.perf_counter()
+        check = _check_answer(answer, _EVIDENCE)
+        assert time.perf_counter() - start < 5.0
+        searched = sum(q.status in {"verified", "misattributed", "unmatched"} for q in check.quotes)
+        assert searched <= intelligence._MAX_CHECKED_QUOTES
+        assert calls <= intelligence._MAX_CHECKED_QUOTES * len(_EVIDENCE)
+
+
+class TestHandlerStatementsAndQuotes:
+    @staticmethod
+    def _labels(user_prompt: str) -> dict[str, str]:
+        """m1 / m2 / m2-att -> label, from the rendered headers."""
+        out = {}
+        for label, header in _headers(user_prompt).items():
+            who = "m1" if claimant_of("m1@example.com") in header else "m2"
+            out[who + ("-att" if "attachment" in header else "")] = label
+        return out
+
+    def _probe(self, cite_db) -> dict[str, str]:
+        probe = FakeInferenceClient(response="x [E1].")
+        _ask(cite_db, probe)
+        return self._labels(probe.complete_calls[0][1])
+
+    def test_uncited_statement_gets_exactly_one_repair(self, cite_db):
+        labels = self._probe(cite_db)
+        good = f"The budget was 500 units [{labels['m1']}]. It became 700 units [{labels['m2']}]."
+        bad = f"The budget was 500 units [{labels['m1']}]. It became 700 units later on."
+        llm = FakeInferenceClient(complete_responses=[bad, good, bad])
+        out = _ask(cite_db, llm)
+        assert len(llm.complete_calls) == 2
+        data = out.structured_content
+        assert data["repair_attempted"] is True
+        assert data["citation_problems"] == []
+        assert [s["status"] for s in data["statements"]] == ["cited", "cited"]
+        corrective = llm.complete_calls[1][1][len(llm.complete_calls[0][1]) :]
+        assert "1 statement" in corrective
+        assert "later on" not in corrective  # the rejected answer is not replayed
+
+    def test_a_persisting_quote_problem_is_reported_after_one_repair(self, cite_db):
+        labels = self._probe(cite_db)
+        # Quotes Bob's correction but cites Alice's message, every time.
+        wrong = f'Alice wrote "the budget is 700 units" [{labels["m1"]}].'
+        llm = FakeInferenceClient(complete_responses=[wrong, wrong, wrong])
+        out = _ask(cite_db, llm)
+        assert len(llm.complete_calls) == 2
+        data = out.structured_content
+        [quote] = data["quotes"]
+        assert quote["status"] == "misattributed"
+        assert quote["found_in"] == [labels["m2"]]
+        assert [p["kind"] for p in data["citation_problems"]] == ["misattributed_quotes"]
+        assert "Citation check: 1 quote(s) match only" in out.content[0].text
+
+    def test_verified_quotes_are_reported_as_indexed_text(self, cite_db):
+        labels = self._probe(cite_db)
+        answer = f'The signed copy says "Signed budget: 700 units" [{labels["m2-att"]}].'
+        out = _ask(cite_db, FakeInferenceClient(response=answer))
+        assert out.structured_content["quotes"][0]["status"] == "verified"
+        assert out.structured_content["statements"][0]["status"] == "cited"
+        assert "indexed text" in out.content[0].text
+
+    def test_output_with_statements_and_quotes_satisfies_the_schema(self, cite_db):
+        server = FastMCP("ask-statements-wire")
+        answer = 'It says "the budget is 700 units" [E1]. Something else entirely.'
+        register_intelligence_tools(
+            server, cite_db, FakeEmbedClient(), FakeInferenceClient(response=answer)
+        )
+
+        async def run():
+            async with Client(server) as client:
+                return await client.call_tool_mcp("ask_mailbox", {"question": _QUESTION})
+
+        result = asyncio.run(run())
+        assert not result.is_error
+        assert result.structured_content["quotes"]
+        assert result.structured_content["statements"]
+        assert result.structured_content["citation_problems"]
+
+    def test_no_marker_from_mail_or_model_reaches_logs_or_check_text(self, tmp_path, caplog):
+        db_path = tmp_path / "marker-quote.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.enable_load_extension(True)
+        sqlite_vec.load(conn)
+        conn.enable_load_extension(False)
+        _build_schema(conn)
+        _insert_message(
+            conn,
+            message_id="q1@example.com",
+            thread_id="t-q",
+            subject="subject",
+            sent_at="2024-05-01T08:00:00+00:00",
+            from_=["sender@example.com"],
+            body=f"The code word is {_MARKER} for this week.",
+        )
+        conn.close()
+        answer = (
+            f'It says "the code word is {_MARKER} for next week" [E1]. '
+            f'Also "{_MARKER} appears elsewhere too" [E1]. {_MARKER} is uncited here.'
+        )
+        llm = FakeInferenceClient(complete_responses=[answer, answer])
+        with caplog.at_level(logging.DEBUG):
+            out = _ask(Database(str(db_path)), llm)
+        assert len(llm.complete_calls) == 2
+        assert _MARKER not in caplog.text
+        corrective = llm.complete_calls[1][1][len(llm.complete_calls[0][1]) :]
+        assert _MARKER not in corrective
+        report = out.content[0].text[len(answer) :]
+        assert "Citation check" in report
+        assert _MARKER not in report

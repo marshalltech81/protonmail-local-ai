@@ -468,11 +468,58 @@ class Citation(_Output):
 
 
 class CitationProblem(_Output):
-    kind: Literal["unknown_labels", "no_citations"] = Field(
+    kind: Literal[
+        "unknown_labels",
+        "no_citations",
+        "uncited_statements",
+        "unmatched_quotes",
+        "misattributed_quotes",
+    ] = Field(
         description="unknown_labels: the answer cites labels no supplied passage has. "
-        "no_citations: the answer cites nothing and does not say the evidence lacks an answer."
+        "no_citations: the answer cites nothing and does not say the evidence lacks an answer. "
+        "uncited_statements: statements that cite no supplied passage and are not marked "
+        "[unsupported] or [uncertain]. unmatched_quotes: quotes found in no supplied passage. "
+        "misattributed_quotes: quotes found in a supplied passage other than the ones cited."
     )
-    labels: list[str] = Field(description="The unknown labels; empty for no_citations.")
+    labels: list[str] = Field(
+        description="The unknown labels; for misattributed_quotes, the labels of the passages "
+        "the quotes were found in. Empty otherwise."
+    )
+    statements: list[int] = Field(
+        default=[], description="uncited_statements: 0-based indexes into statements."
+    )
+    quotes: list[int] = Field(
+        default=[], description="The quote problems: 0-based indexes into quotes."
+    )
+
+
+class AnswerStatement(_Output):
+    text: str = Field(description="One statement of the answer, with its inline labels.")
+    labels: list[str] = Field(description="The supplied passages it cites, in cited order.")
+    status: Literal["cited", "unsupported", "uncertain", "uncited", "invalid", "not_checked"] = (
+        Field(
+            description="cited: it cites a supplied passage. unsupported / uncertain: it is "
+            "marked so and cites none. uncited: it cites nothing and is not marked. invalid: it "
+            "cites only unknown labels. not_checked: a heading, a list introduction, a "
+            "fragment under three words, or a statement of a not-found answer."
+        )
+    )
+
+
+class QuoteCheck(_Output):
+    text: str = Field(description="The quoted words as the answer gives them, cut for length.")
+    statement: int = Field(description="0-based index of the statement holding the quote.")
+    status: Literal["verified", "misattributed", "unmatched", "uncited", "not_checked"] = Field(
+        description="verified: found in the indexed text shown for a passage its statement "
+        "cites. misattributed: found only in other supplied passages. unmatched: found in no "
+        "supplied passage. uncited: its statement cites no supplied passage. not_checked: over "
+        "the per-answer quote cap or the quote length cap. The comparison ignores whitespace "
+        "and quote-mark style and allows an ellipsis to skip text; indexed text is extracted "
+        "and normalized, so a verified quote is not proof of the raw message bytes."
+    )
+    found_in: list[str] = Field(
+        description="Labels of the supplied passages the quote was found in."
+    )
 
 
 class AskMailboxOutput(_Output):
@@ -480,9 +527,17 @@ class AskMailboxOutput(_Output):
     citations: list[Citation] = Field(
         description="Each cited label that names a supplied passage, in first-cited order."
     )
+    statements: list[AnswerStatement] = Field(
+        default=[], description="The answer split into statements, each with its labels."
+    )
+    quotes: list[QuoteCheck] = Field(
+        default=[],
+        description="Each quotation of three or more words, checked against the "
+        "passages its statement cites.",
+    )
     citation_problems: list[CitationProblem] = Field(
-        description="Empty when the citation check passed. It checks labels only: a "
-        "valid label does not prove the passage supports the claim."
+        description="Empty when the citation check passed. Labels and quotes are checked: a "
+        "valid label or a verified quote does not prove the passage supports the claim."
     )
     repair_attempted: bool = Field(
         description="True when the first answer failed the check and the model was asked once more."
