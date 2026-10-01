@@ -779,8 +779,9 @@ Order of work, chosen to minimise reindexes:
    half of Phase 1 item 2; `docs/mcp-tools.md` already promises
    otherwise)~~ (done: failures and unknown threads are raised as
    `ToolError`), semantic search on missing vec tables (#318),
-   malformed provider content rendered as a summary (#321), future
-   timestamps marking the index current (#332), schema-violating
+   malformed provider content rendered as a summary (#321), ~~future
+   timestamps marking the index current (#332)~~ (done: a stamp over
+   2 minutes ahead is a not-current reason), schema-violating
    extraction records (#310), overwritten `_date`/`_source_thread`
    fields (#329), the missing search instruction in extraction
    prompts (#315), and typo'd thread IDs summarizing an unrelated

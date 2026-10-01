@@ -14,7 +14,7 @@ exercise it with stub collaborators rather than booting a live indexer.
 
 import json
 import sqlite3
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -2498,10 +2498,23 @@ class TestIngestionStateRecorder:
         assert row["sync_interval_secs"] == 60
 
     def test_acknowledgement_never_moves_backwards(self, tmp_path, db):
+        """While the acknowledged stamp is not ahead of the clock."""
         recorder = main._IngestionStateRecorder(db, tmp_path)
         recorder.acknowledge(STAMP)
         recorder.acknowledge(SyncStamp("2026-09-28T11:00:00+00:00", 60))
         recorder.acknowledge(None)
+        recorder.maybe_record(now=100.0)
+
+        assert self._state(db)["sync_completed_at"] == STAMP.completed_at
+
+    def test_a_future_acknowledged_stamp_yields_to_a_new_sync(self, tmp_path, db):
+        """After a clock rollback the acknowledged stamp is ahead of the
+        clock and every later sync sorts earlier; without yielding, the
+        status stays not current until the clock catches up (#332)."""
+        recorder = main._IngestionStateRecorder(db, tmp_path)
+        future = (datetime.now(UTC) + timedelta(days=1)).isoformat()
+        recorder.acknowledge(SyncStamp(future, 60))
+        recorder.acknowledge(STAMP)
         recorder.maybe_record(now=100.0)
 
         assert self._state(db)["sync_completed_at"] == STAMP.completed_at
