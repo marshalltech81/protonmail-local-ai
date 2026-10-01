@@ -26,6 +26,12 @@ work, along two dimensions:
   read from cell values across the whole workbook; when it runs out the
   walk stops and the text collected so far is returned, as the
   dispatcher's own ``max_extracted_chars`` truncation would.
+
+Known limitation (#428): these budgets apply during the walk. Parts
+openpyxl loads whole before it (the shared-string table,
+``[Content_Types].xml``, ``xl/workbook.xml``) are bounded only by the
+dispatcher's per-member zip cap, so a small, highly compressible
+attachment can still cost seconds and hundreds of MB.
 """
 
 from __future__ import annotations
