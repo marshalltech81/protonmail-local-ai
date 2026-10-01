@@ -140,6 +140,29 @@ class TestParseEmail:
         # Fallback uses timezone.utc
         assert msg.date.tzinfo is not None
 
+    @pytest.mark.parametrize(
+        ("date_header", "fallback"),
+        [
+            ("", True),
+            ("Date: not-a-date\n", True),
+            ("Date: Mon, 01 Jan 2024 12:00:00 +0000\n", False),
+        ],
+        ids=["missing", "malformed", "valid"],
+    )
+    def test_fallback_date_is_flagged(self, tmp_path, date_header, fallback):
+        """#297: callers keep an already-persisted date only when the
+        parser fabricated this one, so the fallback must be visible."""
+        path = tmp_path / "INBOX" / "cur" / "flag.eml"
+        path.parent.mkdir(parents=True)
+        path.write_text(
+            "From: alice@example.com\nSubject: s\nMessage-ID: <flag@example.com>\n"
+            f"{date_header}\nBody.\n",
+            encoding="utf-8",
+        )
+        msg = parse_email(path)
+        assert msg is not None
+        assert msg.date_is_fallback is fallback
+
     def test_date_minus_zero_normalized_to_aware_utc(self, tmp_path):
         """RFC 2822 ``-0000`` means "local time, offset unknown".
         ``parsedate_to_datetime`` returns a naive datetime for that case,

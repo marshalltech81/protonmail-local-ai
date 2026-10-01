@@ -311,7 +311,9 @@ chunk IDs are distinct from body chunks for the same message.
 
 Threads are the retrieval unit; `messages` is the authoritative
 per-message record. Each indexed message gets one row — its own
-subject, `sent_at` (`Date:` header), folder, `in_reply_to` /
+subject, `sent_at` (`Date:` header; a missing or unparseable header is
+dated at first index and that date is kept when the message is
+reprocessed or its thread rebuilt), folder, `in_reply_to` /
 references, attachment flag, and its source: `filepath` (the Maildir
 locator, kept current across flag renames; when a rename crosses
 folders the new `folder` is written in the same transaction, so a failed

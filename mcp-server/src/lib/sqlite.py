@@ -679,25 +679,11 @@ class Database:
 
     def __init__(self, path: str):
         self.path = path
-        self._closed = False
         # Fail fast at startup with the same checks ``_connect`` runs
         # on every access. Catches a missing volume / typo'd
         # SQLITE_PATH / unhealthy indexer at process start instead of
         # waiting for the first tool call.
         self._validate_path()
-
-    def close(self) -> None:
-        # No-op kept for API compatibility — per-access connections
-        # are opened and closed inside each read helper, so there is
-        # no persistent resource to release.
-        # Existing test fixtures that call ``db.close()`` continue
-        # to work.
-        self._closed = True
-
-    @property
-    def _conn(self) -> sqlite3.Connection:
-        """Compatibility escape hatch; caller owns closing this connection."""
-        return self._connect()
 
     def _validate_path(self) -> None:
         # MCP is a read-only consumer of the indexer's output; the indexer
@@ -2212,8 +2198,7 @@ class Database:
 
     def get_mailbox_status(self) -> dict:
         """Index counts, queue depth, and the indexer's ``ingestion_state``
-        row (``None`` until the indexer first reports, or before it has
-        migrated to schema v21), read in one
+        row (``None`` until the indexer first reports), read in one
         snapshot so the counts and the queue agree.
 
         Queue rows are ``pending`` (not yet failed), ``retrying``
@@ -2243,19 +2228,9 @@ class Database:
                 """
             ).fetchone()
             stats["queue"] = {"pending": queue[0], "retrying": queue[1], "dead": queue[2]}
-            # mcp-server can start on a new build before the indexer has
-            # run migration 0021; report "not yet" rather than failing.
-            has_state_table = conn.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='ingestion_state'"
+            state = conn.execute(
+                "SELECT sync_completed_at, sync_interval_secs, indexer_seen_at FROM ingestion_state"
             ).fetchone()
-            state = (
-                conn.execute(
-                    "SELECT sync_completed_at, sync_interval_secs, indexer_seen_at "
-                    "FROM ingestion_state"
-                ).fetchone()
-                if has_state_table
-                else None
-            )
             stats["ingestion"] = dict(state) if state is not None else None
             conn.execute("COMMIT")
         return stats

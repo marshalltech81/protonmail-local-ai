@@ -18,12 +18,12 @@ class TestReadOnlyConnection:
         """The MCP reader opens SQLite via ``?mode=ro`` URI — any attempt
         to mutate the shared index must fail at the SQLite API level, not
         rely only on ``PRAGMA query_only`` being honored."""
-        with closing(seeded_db._conn) as conn:
+        with closing(seeded_db._connect()) as conn:
             with pytest.raises(sqlite3.OperationalError, match="readonly|read-only"):
                 conn.execute("UPDATE threads SET subject = 'hijacked' WHERE thread_id = 't-alpha'")
 
     def test_reads_still_work(self, seeded_db: Database):
-        with closing(seeded_db._conn) as conn:
+        with closing(seeded_db._connect()) as conn:
             row = conn.execute(
                 "SELECT subject FROM threads WHERE thread_id = ?", ("t-alpha",)
             ).fetchone()
@@ -63,23 +63,6 @@ class TestUriSpecialCharactersInPath:
 class TestPing:
     def test_ping_succeeds_on_healthy_db(self, seeded_db: Database):
         # Returns None on success; no exception is the signal.
-        assert seeded_db.ping() is None
-
-    def test_close_is_idempotent_noop_under_per_access_connections(self, seeded_db: Database):
-        """Database opens and closes short-lived sqlite3 connections per read
-        helper (the WAL-pinning fix), so ``close()`` no longer disables the
-        handle — there is no persistent connection to close. The method is
-        preserved as a no-op for API compatibility with test fixtures and
-        main-shutdown paths that still call it; subsequent operations on the
-        same Database continue to work, and calling ``close()`` twice is
-        harmless.
-        """
-        seeded_db.close()
-        # Subsequent reads keep working — each call opens its own
-        # short-lived connection.
-        assert seeded_db.ping() is None
-        # Idempotent.
-        seeded_db.close()
         assert seeded_db.ping() is None
 
 
@@ -129,10 +112,7 @@ class TestGetEmbeddingDim:
         # schema migrations.
         sqlite3.connect(str(db_path)).close()
         db = Database(str(db_path))
-        try:
-            assert db.get_embedding_dim() is None
-        finally:
-            db.close()
+        assert db.get_embedding_dim() is None
 
 
 class TestReciprocalRankFusion:
@@ -592,10 +572,7 @@ class TestSemanticSearch:
         )
         conn.close()
         db = Database(str(db_path))
-        try:
-            results = db.semantic_search([1.0, 0.0, 0.0, 0.0], limit=5)
-        finally:
-            db.close()
+        results = db.semantic_search([1.0, 0.0, 0.0, 0.0], limit=5)
         ids = [r.thread_id for r in results]
         # Both threads surface: chunk lane lifts t-target, thread-vec
         # lane lifts t-decoy-vec. Without chunk-vec fusion only the
@@ -983,12 +960,9 @@ class TestDisplaySubjectFallback:
         conn.close()
 
         db = Database(db_path)
-        try:
-            result = db.get_thread("t-display")
-            assert result is not None
-            assert result.subject == "Today's Meeting"
-        finally:
-            db.close()
+        result = db.get_thread("t-display")
+        assert result is not None
+        assert result.subject == "Today's Meeting"
 
     def test_falls_back_to_normalized_subject_when_display_is_null(self, tmp_path):
         import sqlite3
@@ -1015,12 +989,9 @@ class TestDisplaySubjectFallback:
         conn.close()
 
         db = Database(db_path)
-        try:
-            result = db.get_thread("t-legacy")
-            assert result is not None
-            assert result.subject == "legacy lowercased subject"
-        finally:
-            db.close()
+        result = db.get_thread("t-legacy")
+        assert result is not None
+        assert result.subject == "legacy lowercased subject"
 
     def test_keyword_search_returns_display_subject(self, tmp_path):
         """Regression: the explicit column projection in
@@ -1054,12 +1025,9 @@ class TestDisplaySubjectFallback:
         conn.close()
 
         db = Database(db_path)
-        try:
-            results = db.keyword_search("agenda")
-            assert len(results) == 1
-            assert results[0].subject == "Today's Meeting"
-        finally:
-            db.close()
+        results = db.keyword_search("agenda")
+        assert len(results) == 1
+        assert results[0].subject == "Today's Meeting"
 
     def test_semantic_search_returns_display_subject(self, tmp_path):
         """Same regression coverage for the semantic lane."""
@@ -1088,12 +1056,9 @@ class TestDisplaySubjectFallback:
         conn.close()
 
         db = Database(db_path)
-        try:
-            results = db.semantic_search([1.0, 0.0, 0.0, 0.0])
-            assert len(results) == 1
-            assert results[0].subject == "Today's Meeting"
-        finally:
-            db.close()
+        results = db.semantic_search([1.0, 0.0, 0.0, 0.0])
+        assert len(results) == 1
+        assert results[0].subject == "Today's Meeting"
 
     def test_hybrid_search_returns_display_subject(self, tmp_path):
         """Same regression coverage for hybrid (the actual user-facing
@@ -1123,15 +1088,12 @@ class TestDisplaySubjectFallback:
         conn.close()
 
         db = Database(db_path)
-        try:
-            results = db.hybrid_search(
-                query_text="agenda",
-                query_embedding=[1.0, 0.0, 0.0, 0.0],
-            )
-            assert len(results) == 1
-            assert results[0].subject == "Today's Meeting"
-        finally:
-            db.close()
+        results = db.hybrid_search(
+            query_text="agenda",
+            query_embedding=[1.0, 0.0, 0.0, 0.0],
+        )
+        assert len(results) == 1
+        assert results[0].subject == "Today's Meeting"
 
 
 class TestStatsAndFolders:
@@ -1162,16 +1124,6 @@ class TestStatsAndFolders:
             "sync_interval_secs": 60,
             "indexer_seen_at": "2026-09-28T12:00:10+00:00",
         }
-
-    def test_get_mailbox_status_before_the_indexer_migrates(self, empty_db: Database):
-        """mcp-server can restart on a new build before the indexer has
-        run migration 0021; the counts must still be reported."""
-        with closing(sqlite3.connect(empty_db.path)) as conn:
-            conn.execute("DROP TABLE ingestion_state")
-            conn.commit()
-        stats = empty_db.get_mailbox_status()
-        assert stats["total_threads"] == 0
-        assert stats["ingestion"] is None
 
     def test_get_mailbox_status_before_the_indexer_reports(self, empty_db: Database):
         stats = empty_db.get_mailbox_status()
@@ -1521,16 +1473,13 @@ class TestEvidenceChunksHelper:
         conn.close()
 
         db = Database(str(db_path))
-        try:
-            # Ask for evidence on the carrier specifically — what
-            # ``hybrid_search(with_evidence=True)`` does after the
-            # carrier wins via thread-vec / BM25 / metadata.
-            evidence = db.get_evidence_chunks_for_threads(
-                thread_ids=["t-carrier"],
-                embedding=[1.0, 0.0, 0.0, 0.0],
-            )
-        finally:
-            db.close()
+        # Ask for evidence on the carrier specifically — what
+        # ``hybrid_search(with_evidence=True)`` does after the
+        # carrier wins via thread-vec / BM25 / metadata.
+        evidence = db.get_evidence_chunks_for_threads(
+            thread_ids=["t-carrier"],
+            embedding=[1.0, 0.0, 0.0, 0.0],
+        )
 
         # The carrier's chunk MUST come back even though it's deep
         # inside the global similarity ordering — the helper scans
@@ -1622,14 +1571,11 @@ class TestEvidenceAttachmentProvenance:
 
     def test_chunk_result_carries_attachment_provenance(self, tmp_path):
         db = self._build_attachment_carrier_db(tmp_path)
-        try:
-            evidence = db.get_evidence_chunks_for_threads(
-                thread_ids=["t-quote"],
-                embedding=[0.0, 0.0, 0.0, 1.0],
-                per_thread_limit=5,
-            )
-        finally:
-            db.close()
+        evidence = db.get_evidence_chunks_for_threads(
+            thread_ids=["t-quote"],
+            embedding=[0.0, 0.0, 0.0, 1.0],
+            per_thread_limit=5,
+        )
         chunks = evidence["t-quote"]
         att_chunk = next(c for c in chunks if c.attachment_id is not None)
         assert att_chunk.attachment_filename == "proposal-quote.pdf"
@@ -1643,22 +1589,19 @@ class TestEvidenceAttachmentProvenance:
         attachment chunks float to the front of the per-thread evidence
         slice even though the body chunk dense-scored higher."""
         db = self._build_attachment_carrier_db(tmp_path)
-        try:
-            # Query embedding is aligned with the BODY chunk — pure
-            # dense ranking would surface body first.
-            evidence_bias = db.get_evidence_chunks_for_threads(
-                thread_ids=["t-quote"],
-                embedding=[1.0, 0.0, 0.0, 0.0],
-                per_thread_limit=1,
-                matched_attachments={"t-quote": ["att-quote"]},
-            )
-            evidence_no_bias = db.get_evidence_chunks_for_threads(
-                thread_ids=["t-quote"],
-                embedding=[1.0, 0.0, 0.0, 0.0],
-                per_thread_limit=1,
-            )
-        finally:
-            db.close()
+        # Query embedding is aligned with the BODY chunk — pure
+        # dense ranking would surface body first.
+        evidence_bias = db.get_evidence_chunks_for_threads(
+            thread_ids=["t-quote"],
+            embedding=[1.0, 0.0, 0.0, 0.0],
+            per_thread_limit=1,
+            matched_attachments={"t-quote": ["att-quote"]},
+        )
+        evidence_no_bias = db.get_evidence_chunks_for_threads(
+            thread_ids=["t-quote"],
+            embedding=[1.0, 0.0, 0.0, 0.0],
+            per_thread_limit=1,
+        )
         # With the attachment-won bias, slot-0 is the attachment chunk.
         assert evidence_bias["t-quote"][0].attachment_id == "att-quote"
         # Without the bias, slot-0 is the body chunk (regression guard).
@@ -1699,29 +1642,23 @@ class TestEvidenceAttachmentProvenance:
         unrelated exhibits instead of the document the filename matched."""
         db = self._build_attachment_carrier_db(tmp_path)
         self._add_competing_attachments(db)
-        try:
-            evidence = db.get_evidence_chunks_for_threads(
-                thread_ids=["t-quote"],
-                embedding=[1.0, 0.0, 0.0, 0.0],
-                per_thread_limit=3,
-                matched_attachments={"t-quote": ["att-quote"]},
-            )
-        finally:
-            db.close()
+        evidence = db.get_evidence_chunks_for_threads(
+            thread_ids=["t-quote"],
+            embedding=[1.0, 0.0, 0.0, 0.0],
+            per_thread_limit=3,
+            matched_attachments={"t-quote": ["att-quote"]},
+        )
         assert evidence["t-quote"][0].attachment_id == "att-quote"
 
     def test_filename_hit_contributes_evidence_end_to_end(self, tmp_path):
         db = self._build_attachment_carrier_db(tmp_path)
         self._add_competing_attachments(db)
-        try:
-            results = db.hybrid_search(
-                query_text="proposal-quote",
-                query_embedding=[1.0, 0.0, 0.0, 0.0],
-                limit=5,
-                with_evidence=True,
-            )
-        finally:
-            db.close()
+        results = db.hybrid_search(
+            query_text="proposal-quote",
+            query_embedding=[1.0, 0.0, 0.0, 0.0],
+            limit=5,
+            with_evidence=True,
+        )
         quote = next(r for r in results if r.thread_id == "t-quote")
         assert "18450" in quote.evidence_chunks[0].text
 
@@ -1731,15 +1668,12 @@ class TestEvidenceAttachmentProvenance:
         PDF in the thread; the named file must still lead."""
         db = self._build_attachment_carrier_db(tmp_path)
         self._add_competing_attachments(db)
-        try:
-            results = db.hybrid_search(
-                query_text="proposal-quote pdf",
-                query_embedding=[1.0, 0.0, 0.0, 0.0],
-                limit=5,
-                with_evidence=True,
-            )
-        finally:
-            db.close()
+        results = db.hybrid_search(
+            query_text="proposal-quote pdf",
+            query_embedding=[1.0, 0.0, 0.0, 0.0],
+            limit=5,
+            with_evidence=True,
+        )
         quote = next(r for r in results if r.thread_id == "t-quote")
         assert "18450" in quote.evidence_chunks[0].text
 
@@ -1747,16 +1681,13 @@ class TestEvidenceAttachmentProvenance:
         """End-to-end: a query whose tokens hit the attachment-FTS lane
         must produce evidence chunks with the attachment chunk first."""
         db = self._build_attachment_carrier_db(tmp_path)
-        try:
-            # ``proposal-quote`` matches the attachment filename FTS.
-            results = db.hybrid_search(
-                query_text="proposal-quote",
-                query_embedding=[1.0, 0.0, 0.0, 0.0],
-                limit=5,
-                with_evidence=True,
-            )
-        finally:
-            db.close()
+        # ``proposal-quote`` matches the attachment filename FTS.
+        results = db.hybrid_search(
+            query_text="proposal-quote",
+            query_embedding=[1.0, 0.0, 0.0, 0.0],
+            limit=5,
+            with_evidence=True,
+        )
         assert results
         top = next(r for r in results if r.thread_id == "t-quote")
         assert top.evidence_chunks
@@ -1829,20 +1760,14 @@ class TestGetRecentChunksForThread:
 
     def test_returns_latest_chunks_in_chronological_order(self, tmp_path):
         db = self._build_chunked_db_with_timeline(tmp_path)
-        try:
-            chunks = db.get_recent_chunks_for_thread("t-tl", limit=2)
-        finally:
-            db.close()
+        chunks = db.get_recent_chunks_for_thread("t-tl", limit=2)
         # Selection picked the two newest by ``chunked_at DESC``;
         # output reverses so the prompt reads oldest-first.
         assert [c.chunk_id for c in chunks] == ["c-mid", "c-new"]
 
     def test_limit_zero_returns_empty(self, tmp_path):
         db = self._build_chunked_db_with_timeline(tmp_path)
-        try:
-            assert db.get_recent_chunks_for_thread("t-tl", limit=0) == []
-        finally:
-            db.close()
+        assert db.get_recent_chunks_for_thread("t-tl", limit=0) == []
 
     def test_thread_without_chunks_returns_empty(self, chunked_db: Database):
         # ``t-gamma`` has no chunks in chunked_db.
@@ -1914,10 +1839,7 @@ class TestGetRecentChunksForThread:
         conn.close()
 
         db = Database(str(db_path))
-        try:
-            chunks = db.get_recent_chunks_for_thread("t-rebuild", limit=2)
-        finally:
-            db.close()
+        chunks = db.get_recent_chunks_for_thread("t-rebuild", limit=2)
 
         # Both chunks selected; ordering must reflect MESSAGE date, not
         # insert date. Oldest-first in display order (the function
@@ -1993,10 +1915,7 @@ class TestGetRecentChunksForThread:
         conn.close()
 
         db = Database(str(db_path))
-        try:
-            chunks = db.get_recent_chunks_for_thread("t-mixed", limit=10)
-        finally:
-            db.close()
+        chunks = db.get_recent_chunks_for_thread("t-mixed", limit=10)
 
         assert [c.chunk_id for c in chunks] == ["c-body"], (
             "get_recent_chunks_for_thread must exclude attachment chunks; "
@@ -2083,10 +2002,7 @@ class TestAttachmentProvenanceJoin:
         # ``_chunk_vector_search`` is the dense-retrieval lane for the
         # chunk fusion path. The same MIN-occurrence anchor applies.
         db = self._build_duplicate_attachment_db(tmp_path)
-        try:
-            chunks = db._chunk_vector_search([1.0, 0.0, 0.0, 0.0], limit=10)
-        finally:
-            db.close()
+        chunks = db._chunk_vector_search([1.0, 0.0, 0.0, 0.0], limit=10)
         assert len(chunks) == 1, (
             f"vector-search chunk row must not multiply by attachment-"
             f"occurrence count; got {len(chunks)} rows for one chunk"
@@ -2097,14 +2013,11 @@ class TestAttachmentProvenanceJoin:
         # ``get_evidence_chunks_for_threads`` is the with_evidence=True
         # path the chunk fusion uses. Same MIN-occurrence anchor.
         db = self._build_duplicate_attachment_db(tmp_path)
-        try:
-            evidence = db.get_evidence_chunks_for_threads(
-                ["t-dupe"],
-                [1.0, 0.0, 0.0, 0.0],
-                per_thread_limit=10,
-            )
-        finally:
-            db.close()
+        evidence = db.get_evidence_chunks_for_threads(
+            ["t-dupe"],
+            [1.0, 0.0, 0.0, 0.0],
+            per_thread_limit=10,
+        )
         chunks = evidence.get("t-dupe", [])
         assert len(chunks) == 1, (
             f"per-thread evidence chunk row must not multiply by "
@@ -2258,13 +2171,10 @@ class TestFindContact:
         )
         conn.close()
         db = Database(str(path))
-        try:
-            results = db.find_contact("jane")
-            assert len(results) == 1
-            assert results[0]["email"] == "jsmith@example.com"
-            assert "Jane Smith (Acct)" in results[0]["names"]
-        finally:
-            db.close()
+        results = db.find_contact("jane")
+        assert len(results) == 1
+        assert results[0]["email"] == "jsmith@example.com"
+        assert "Jane Smith (Acct)" in results[0]["names"]
 
     def test_results_sorted_by_thread_count_desc(self, seeded_db: Database):
         # alice appears in 2 threads; bob, carol, dave in 1 each.
@@ -2300,12 +2210,9 @@ class TestFindContact:
         )
         conn.close()
         db = Database(str(path))
-        try:
-            results = db.find_contact("alice")
-            assert len(results) == 1
-            assert results[0]["thread_count"] == 1
-        finally:
-            db.close()
+        results = db.find_contact("alice")
+        assert len(results) == 1
+        assert results[0]["thread_count"] == 1
 
     def test_no_match_returns_empty_list(self, seeded_db: Database):
         assert seeded_db.find_contact("nobodywiththisname") == []
@@ -2350,13 +2257,10 @@ class TestFindContact:
         )
         conn.close()
         db = Database(str(path))
-        try:
-            results = db.find_contact("jane")
-            assert results == [
-                {"email": "jane@example.com", "names": ["J. Doe", "Jane Doe"], "thread_count": 1}
-            ]
-        finally:
-            db.close()
+        results = db.find_contact("jane")
+        assert results == [
+            {"email": "jane@example.com", "names": ["J. Doe", "Jane Doe"], "thread_count": 1}
+        ]
 
     def test_non_ascii_name_matches_case_insensitively(self, tmp_path):
         # SQLite's own lower() folds ASCII only; the match must fold
@@ -2373,10 +2277,7 @@ class TestFindContact:
         )
         conn.close()
         db = Database(str(path))
-        try:
-            assert [c["email"] for c in db.find_contact("JOSÉ ÁLVAREZ")] == ["jose@example.com"]
-        finally:
-            db.close()
+        assert [c["email"] for c in db.find_contact("JOSÉ ÁLVAREZ")] == ["jose@example.com"]
 
 
 class TestFindContactSendersOnly:
@@ -2413,14 +2314,11 @@ class TestFindContactSendersOnly:
             )
         conn.close()
         db = Database(str(path))
-        try:
-            assert [c["email"] for c in db.find_contact("pat", senders_only=True)] == [
-                "solo@example.com"
-            ]
-            # Without senders_only every role counts, secondary authors too.
-            assert db.find_contact("pat")[0]["email"] == "joint@example.com"
-        finally:
-            db.close()
+        assert [c["email"] for c in db.find_contact("pat", senders_only=True)] == [
+            "solo@example.com"
+        ]
+        # Without senders_only every role counts, secondary authors too.
+        assert db.find_contact("pat")[0]["email"] == "joint@example.com"
 
     def test_senders_only_skips_author_behind_an_unparseable_primary(self, tmp_path):
         # ``From: invalid, Pat Joint <joint@...>``: the primary author is
@@ -2448,12 +2346,9 @@ class TestFindContactSendersOnly:
             )
         conn.close()
         db = Database(str(path))
-        try:
-            assert [c["email"] for c in db.find_contact("pat", senders_only=True)] == [
-                "solo@example.com"
-            ]
-        finally:
-            db.close()
+        assert [c["email"] for c in db.find_contact("pat", senders_only=True)] == [
+            "solo@example.com"
+        ]
 
     def test_senders_only_excludes_recipient_only_contact(self, tmp_path):
         # Build a small DB where one contact is ONLY a recipient,
@@ -2485,18 +2380,15 @@ class TestFindContactSendersOnly:
         )
         conn.close()
         db = Database(str(path))
-        try:
-            # Default behavior: smith shows up because they're a
-            # participant on a thread.
-            assert db.find_contact("smith")[0]["email"] == "smith@example.com"
-            # senders_only=True: smith disappears because they were
-            # never a From-line address.
-            assert db.find_contact("smith", senders_only=True) == []
-            # alice still resolves under both modes.
-            assert db.find_contact("alice")[0]["email"] == "alice@example.com"
-            assert db.find_contact("alice", senders_only=True)[0]["email"] == "alice@example.com"
-        finally:
-            db.close()
+        # Default behavior: smith shows up because they're a
+        # participant on a thread.
+        assert db.find_contact("smith")[0]["email"] == "smith@example.com"
+        # senders_only=True: smith disappears because they were
+        # never a From-line address.
+        assert db.find_contact("smith", senders_only=True) == []
+        # alice still resolves under both modes.
+        assert db.find_contact("alice")[0]["email"] == "alice@example.com"
+        assert db.find_contact("alice", senders_only=True)[0]["email"] == "alice@example.com"
 
     def test_senders_only_default_is_false_for_back_compat(self, seeded_db: Database):
         # The standalone find_contact MCP tool relies on the broader
@@ -2551,15 +2443,12 @@ class TestFindContactSendersOnly:
         )
         conn.close()
         db = Database(str(path))
-        try:
-            full = db.find_contact("alice", senders_only=False)
-            sent = db.find_contact("alice", senders_only=True)
-            # Default: alice on 3 threads (participant count).
-            assert full[0]["thread_count"] == 3
-            # senders_only: alice sent 2 of those 3.
-            assert sent[0]["thread_count"] == 2
-        finally:
-            db.close()
+        full = db.find_contact("alice", senders_only=False)
+        sent = db.find_contact("alice", senders_only=True)
+        # Default: alice on 3 threads (participant count).
+        assert full[0]["thread_count"] == 3
+        # senders_only: alice sent 2 of those 3.
+        assert sent[0]["thread_count"] == 2
 
 
 def _open_built_db_conn(tmp_path, name="lib-test.db"):
@@ -2755,11 +2644,8 @@ class TestMessageDateOnChunks:
         )
         conn.close()
         db = Database(str(path))
-        try:
-            grouped = db.get_evidence_chunks_for_threads(["t1"], [1.0, 0.0, 0.0, 0.0])
-            assert grouped["t1"][0].message_date == "2024-05-09T08:00:00+00:00"
-        finally:
-            db.close()
+        grouped = db.get_evidence_chunks_for_threads(["t1"], [1.0, 0.0, 0.0, 0.0])
+        assert grouped["t1"][0].message_date == "2024-05-09T08:00:00+00:00"
 
 
 class TestSearchAttachments:
@@ -2913,11 +2799,8 @@ class TestSearchAttachments:
         conn.commit()
         conn.close()
         db = Database(str(path))
-        try:
-            assert db.search_attachments(query="acme") == []
-            assert db.search_attachments() == []
-        finally:
-            db.close()
+        assert db.search_attachments(query="acme") == []
+        assert db.search_attachments() == []
 
 
 class TestFindContactHostileParticipants:
@@ -2939,11 +2822,8 @@ class TestFindContactHostileParticipants:
         )
         conn.close()
         db = Database(str(path))
-        try:
-            contacts = db.find_contact("bob")
-            assert [c["email"] for c in contacts] == ["bob@example.com"]
-        finally:
-            db.close()
+        contacts = db.find_contact("bob")
+        assert [c["email"] for c in contacts] == ["bob@example.com"]
 
 
 _NESTED_COMMENT_SENDER = "(" * 1200 + "nested" + ")" * 1200 + " mallory@example.com"
@@ -2985,7 +2865,6 @@ class TestAddressFilterHostileSenders:
         conn.close()
         db = Database(str(path))
         yield db
-        db.close()
 
     def test_keyword_search_sender_filter(self, hostile_db):
         results = hostile_db.keyword_search("invoice", from_addr="alice@example.com")
@@ -3090,10 +2969,7 @@ class TestQueryMessages:
             )
         conn.close()
         db = Database(str(path))
-        try:
-            assert _ids(db.query_messages(text="budget_approved")) == ["m2", "m1"]
-        finally:
-            db.close()
+        assert _ids(db.query_messages(text="budget_approved")) == ["m2", "m1"]
 
     def test_text_private_use_character_stays_inside_the_word(self, tmp_path):
         # FTS treats private-use characters (category Co) as word
@@ -3117,10 +2993,7 @@ class TestQueryMessages:
         )
         conn.close()
         db = Database(str(path))
-        try:
-            assert _ids(db.query_messages(text="alphabeta")) == ["m1"]
-        finally:
-            db.close()
+        assert _ids(db.query_messages(text="alphabeta")) == ["m1"]
 
     def test_folder_is_exact(self, messages_db):
         assert _ids(messages_db.query_messages(folder="Archive")) == ["m3"]
@@ -3190,10 +3063,7 @@ class TestQueryMessagesUnicodeText:
         )
         conn.close()
         db = Database(str(path))
-        try:
-            assert db.query_messages(text=query).total_matches == 1
-        finally:
-            db.close()
+        assert db.query_messages(text=query).total_matches == 1
 
     def test_bare_combining_mark_is_not_a_term(self, messages_db):
         with pytest.raises(ValueError, match="text"):
@@ -3261,11 +3131,8 @@ class TestFindContactSendersOnlyHostileEntries:
         conn.commit()
         conn.close()
         db = Database(str(path))
-        try:
-            contacts = db.find_contact("bob", senders_only=True)
-            assert [c["email"] for c in contacts] == ["bob@example.com"]
-        finally:
-            db.close()
+        contacts = db.find_contact("bob", senders_only=True)
+        assert [c["email"] for c in contacts] == ["bob@example.com"]
 
 
 class TestThreadPage:
@@ -3361,7 +3228,6 @@ class TestThreadPage:
             assert [m.message_id for m in page.messages] == ["a"]
             assert page.total_messages == 1
         finally:
-            db.close()
             writer.close()
 
 
@@ -3412,7 +3278,6 @@ class TestMessageView:
             assert view is not None
             assert view.thread.subject == "s"
         finally:
-            db.close()
             writer.close()
 
 

@@ -21,7 +21,8 @@ from src.tools.retrieval import register_retrieval_tools
 from src.tools.search import register_search_tools
 
 from tests.conftest import (
-    FakeLocalLLM,
+    FakeEmbedClient,
+    FakeInferenceClient,
     _build_schema,
     _insert_attachment,
     _insert_chunk,
@@ -90,7 +91,6 @@ def huge_db(tmp_path):
     conn.close()
     db = Database(str(path))
     yield db
-    db.close()
 
 
 def _size(result) -> int:
@@ -101,27 +101,26 @@ def _size(result) -> int:
 
 class TestToolResponses:
     def test_search_emails(self, fake_server, huge_db):
-        llm = FakeLocalLLM()
-        register_search_tools(fake_server, huge_db, llm)
+        register_search_tools(fake_server, huge_db, FakeEmbedClient())
         for mode in ("keyword", "hybrid"):
             out = asyncio.run(fake_server.tools["search_emails"](query="invoice", mode=mode))
             assert out.structuredContent["results"], mode
             assert _size(out) < MAX_RESULT_CHARS, mode
 
     def test_get_evidence_by_thread(self, fake_server, huge_db):
-        register_search_tools(fake_server, huge_db, FakeLocalLLM())
+        register_search_tools(fake_server, huge_db, FakeEmbedClient())
         out = asyncio.run(fake_server.tools["get_evidence"](query="invoice", thread_id="t"))
         assert out.structuredContent["chunk_count"] == 2
         assert _size(out) < MAX_RESULT_CHARS
 
     def test_get_evidence_by_search(self, fake_server, huge_db):
-        register_search_tools(fake_server, huge_db, FakeLocalLLM())
+        register_search_tools(fake_server, huge_db, FakeEmbedClient())
         out = asyncio.run(fake_server.tools["get_evidence"](query="invoice"))
         assert out.structuredContent["chunk_count"] == 2
         assert _size(out) < MAX_RESULT_CHARS
 
     def test_search_attachments(self, fake_server, huge_db):
-        register_search_tools(fake_server, huge_db, FakeLocalLLM())
+        register_search_tools(fake_server, huge_db, FakeEmbedClient())
         out = asyncio.run(fake_server.tools["search_attachments"](query="invoice"))
         assert out.structuredContent["results"]
         assert _size(out) < MAX_RESULT_CHARS
@@ -134,7 +133,7 @@ class TestToolResponses:
 
     def test_ids_stay_whole(self, fake_server, huge_db):
         # Cutting applies to header text only; IDs chain to the next call.
-        register_search_tools(fake_server, huge_db, FakeLocalLLM())
+        register_search_tools(fake_server, huge_db, FakeEmbedClient())
         out = asyncio.run(fake_server.tools["search_attachments"](query="invoice"))
         hit = out.structuredContent["results"][0]
         assert (hit["attachment_id"], hit["message_id"], hit["thread_id"]) == ("a", "m", "t")
@@ -142,7 +141,7 @@ class TestToolResponses:
 
 class TestInferencePrompts:
     def _tools(self, fake_server, db, llm):
-        register_intelligence_tools(fake_server, db, llm.embed_client, llm.inference_client)
+        register_intelligence_tools(fake_server, db, FakeEmbedClient(), llm)
         return fake_server.tools
 
     def _assert_bounded(self, llm, out):
@@ -152,19 +151,19 @@ class TestInferencePrompts:
         assert sum(len(c.text) for c in out) < MAX_RESULT_CHARS
 
     def test_ask_mailbox(self, fake_server, huge_db):
-        llm = FakeLocalLLM()
+        llm = FakeInferenceClient()
         out = asyncio.run(
             self._tools(fake_server, huge_db, llm)["ask_mailbox"](question="invoice", max_threads=1)
         )
         self._assert_bounded(llm, out)
 
     def test_summarize_thread(self, fake_server, huge_db):
-        llm = FakeLocalLLM()
+        llm = FakeInferenceClient()
         out = asyncio.run(self._tools(fake_server, huge_db, llm)["summarize_thread"](thread_id="t"))
         self._assert_bounded(llm, out)
 
     def test_extract_from_emails(self, fake_server, huge_db):
-        llm = FakeLocalLLM(response='{"total": 1}')
+        llm = FakeInferenceClient(response='{"total": 1}')
         out = asyncio.run(
             self._tools(fake_server, huge_db, llm)["extract_from_emails"](
                 query="invoice", schema={"total": "number"}, limit=1

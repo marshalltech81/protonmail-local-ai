@@ -56,8 +56,8 @@ The stack runs four containers:
   sync, TOFU cert pinning with explicit rotation flag.
 - **indexer** — Docker, parses Maildir, threads, embeds via any
   OpenAI-compatible `/v1/embeddings` provider (operator-supplied),
-  writes SQLite. Schema v21 (v20 squashed baseline plus
-  `ingestion_state`): 4096-dim L2-unit-norm
+  writes SQLite. Schema v21 (squashed baseline; the first new
+  migration is `0022`): 4096-dim L2-unit-norm
   vectors, `NOT NULL` `message_chunks.message_date`,
   `indexing_jobs.last_error_class`, per-message `messages` +
   `message_participants`. Initial scan and steady-state both
@@ -629,10 +629,10 @@ has never been deployed): slice 1 (validate-env rename shims) done in
 old names; ~~slice 2 — drop `get_message`'s ignored
 `folder`/`body_format` parameters, the dead pre-v13 `display_subject`
 `try/except` in mcp-server `_row_to_result`, the write-tool sketch in
-`docs/mcp-tools.md`, and "legacy" wording on live code~~ (done); slice 3 — fold
+`docs/mcp-tools.md`, and "legacy" wording on live code~~ (done); ~~slice 3 — fold
 migration `0021` into the baseline (baseline becomes v21, drop the
 mcp-server `ingestion_state` existence guard, update AGENTS.md's
-migration paragraph; the dev database needs a rebuild); slice 4, test
+migration paragraph; the dev database needs a rebuild)~~ (done); slice 4, test
 only — migrate `FakeLocalLLM` users to the split fakes, drop the
 indexer `_index_one_file`/`drain_queue` wrappers and mcp-server
 `Database.close()`/`_conn`. Keep the migration runner, the `_read_secret`
@@ -731,14 +731,16 @@ and a decision whose finding fails to reproduce is void, not binding.
 Order of work, chosen to minimise reindexes:
 
 1. **No-reindex guards, small PRs by area.** Indexer: ~~the quadratic
-   subject normalizer (#293)~~ (done: offset scan, one slice); the first half of #297 (keep the first
+   subject normalizer (#293)~~ (done: offset scan, one slice); ~~the first half of #297 (keep the first
    persisted date on reprocess, so an undated message is never
-   re-dated before the Phase 2 rebuild); ~~the all-zero embedding guard (#304, fixed
+   re-dated before the Phase 2 rebuild)~~ (done: a fallback date
+   defers to the stored `sent_at` on reprocess and reap rebuild); ~~the all-zero embedding guard (#304, fixed
    message, no values logged)~~ (done: rejected at the indexer embedder
    and the MCP query embed); ~~tombstone revalidation on restore
    (#301)~~ (done: a tombstone is refused for a path the message no
    longer maps to); `message_thread_map` lookup indexes as migration `0022`
-   (#302, index-only); the unbounded recovery parameter list (#306);
+   (#302, index-only); ~~the unbounded recovery parameter list
+   (#306)~~ (done: recovery lookups bind IDs in batches of 500);
    and the #257 sweep (classify parse-stage and provider exceptions
    at their boundary, `caplog` marker tests). MCP: ~~the two quadratic
    regexes (#327, #328)~~ (done: one way to match each whitespace run);

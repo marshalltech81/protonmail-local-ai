@@ -4,7 +4,7 @@ Tests for the registered handlers in src/tools/intelligence.py.
 ``test_intelligence.py`` already covers ``_thread_context``. This file
 covers the three @server.tool() handlers (``ask_mailbox``,
 ``summarize_thread``, ``extract_from_emails``) end-to-end against the
-seeded DB and the FakeLocalLLM stub. Coverage targets:
+seeded DB and the FakeEmbedClient / FakeInferenceClient stubs. Coverage targets:
 
 - prompt construction wraps every retrieved thread in
   ``<untrusted_email>`` tags and keeps the user task outside them
@@ -24,15 +24,15 @@ import pytest
 from src.lib.inference import InferenceTruncatedError
 from src.tools.intelligence import register_intelligence_tools
 
-from tests.conftest import FakeLocalLLM
+from tests.conftest import FakeEmbedClient, FakeInferenceClient
 
 
-def _handlers(fake_server, db, llm):
+def _handlers(fake_server, db, embed, inference):
     register_intelligence_tools(
         fake_server,
         db,
-        llm.embed_client,
-        llm.inference_client,
+        embed,
+        inference,
     )
     return fake_server.tools
 
@@ -47,25 +47,29 @@ def _all_text(result) -> str:
 
 
 class TestAskMailbox:
-    def test_returns_no_results_when_search_is_empty(self, fake_server, seeded_db, fake_llm):
-        # FakeLocalLLM returns a fixed embedding that vector-matches a
+    def test_returns_no_results_when_search_is_empty(
+        self, fake_server, seeded_db, fake_embed, fake_inference
+    ):
+        # FakeEmbedClient returns a fixed embedding that vector-matches a
         # seeded thread, so hybrid_search would never return zero rows
         # against ``seeded_db``. Force the empty-result path explicitly
         # so the no-results sentinel branch is exercised.
         seeded_db.hybrid_search = lambda **_kw: []  # type: ignore[assignment]
-        handler = _handlers(fake_server, seeded_db, fake_llm)["ask_mailbox"]
+        handler = _handlers(fake_server, seeded_db, fake_embed, fake_inference)["ask_mailbox"]
         out = asyncio.run(handler(question="zxq nothing matches"))
         assert "No relevant emails" in _text(out)
         # The completion call must NOT have happened — there was nothing
         # to ground an answer in.
-        assert fake_llm.complete_calls == []
+        assert fake_inference.complete_calls == []
 
-    def test_wraps_each_thread_in_untrusted_tags(self, fake_server, seeded_db, fake_llm):
-        handler = _handlers(fake_server, seeded_db, fake_llm)["ask_mailbox"]
+    def test_wraps_each_thread_in_untrusted_tags(
+        self, fake_server, seeded_db, fake_embed, fake_inference
+    ):
+        handler = _handlers(fake_server, seeded_db, fake_embed, fake_inference)["ask_mailbox"]
         asyncio.run(handler(question="invoice"))
         # The user prompt is the second element of the (system, user) tuple.
-        assert fake_llm.complete_calls
-        _system, user = fake_llm.complete_calls[0]
+        assert fake_inference.complete_calls
+        _system, user = fake_inference.complete_calls[0]
         assert "<untrusted_email" in user
         assert "</untrusted_email>" in user
         # User's question must be OUTSIDE the tags so the model's only
@@ -73,13 +77,15 @@ class TestAskMailbox:
         post_tag = user.split("</untrusted_email>")[-1]
         assert "User's question" in post_tag
 
-    def test_includes_sources_block_in_response(self, fake_server, seeded_db, fake_llm):
-        handler = _handlers(fake_server, seeded_db, fake_llm)["ask_mailbox"]
+    def test_includes_sources_block_in_response(
+        self, fake_server, seeded_db, fake_embed, fake_inference
+    ):
+        handler = _handlers(fake_server, seeded_db, fake_embed, fake_inference)["ask_mailbox"]
         out = asyncio.run(handler(question="invoice"))
         text = _text(out)
         assert "Sources searched" in text
 
-    def test_max_threads_is_clamped(self, fake_server, seeded_db, fake_llm):
+    def test_max_threads_is_clamped(self, fake_server, seeded_db, fake_embed, fake_inference):
         seen: dict = {}
         original = seeded_db.hybrid_search
 
@@ -88,20 +94,24 @@ class TestAskMailbox:
             return original(**kwargs)
 
         seeded_db.hybrid_search = spy  # type: ignore[assignment]
-        handler = _handlers(fake_server, seeded_db, fake_llm)["ask_mailbox"]
+        handler = _handlers(fake_server, seeded_db, fake_embed, fake_inference)["ask_mailbox"]
         asyncio.run(handler(question="invoice", max_threads=10_000))
         assert seen["limit"] == 10  # _MAX_ASK_THREADS
 
-    def test_db_exception_returns_error_text(self, fake_server, seeded_db, fake_llm):
+    def test_db_exception_returns_error_text(
+        self, fake_server, seeded_db, fake_embed, fake_inference
+    ):
         def boom(**_kwargs):
             raise RuntimeError("simulated db failure")
 
         seeded_db.hybrid_search = boom  # type: ignore[assignment]
-        handler = _handlers(fake_server, seeded_db, fake_llm)["ask_mailbox"]
+        handler = _handlers(fake_server, seeded_db, fake_embed, fake_inference)["ask_mailbox"]
         out = asyncio.run(handler(question="anything"))
         assert "Error" in _text(out)
 
-    def test_secret_values_are_scrubbed_from_exception_text(self, fake_server, seeded_db, fake_llm):
+    def test_secret_values_are_scrubbed_from_exception_text(
+        self, fake_server, seeded_db, fake_embed, fake_inference
+    ):
         # Pin the main.py wiring of secret_values into the intelligence
         # registrar — a provider SDK exception that quotes the operator's
         # API key (e.g. an auth-header echo in the error body) must not
@@ -115,8 +125,8 @@ class TestAskMailbox:
         register_intelligence_tools(
             fake_server,
             seeded_db,
-            fake_llm.embed_client,
-            fake_llm.inference_client,
+            fake_embed,
+            fake_inference,
             secret_values=[leaked_key],
         )
         handler = fake_server.tools["ask_mailbox"]
@@ -127,32 +137,36 @@ class TestAskMailbox:
 
 
 class TestSummarizeThread:
-    def test_known_thread_calls_llm_with_untrusted_wrapper(self, fake_server, seeded_db, fake_llm):
-        handler = _handlers(fake_server, seeded_db, fake_llm)["summarize_thread"]
+    def test_known_thread_calls_llm_with_untrusted_wrapper(
+        self, fake_server, seeded_db, fake_embed, fake_inference
+    ):
+        handler = _handlers(fake_server, seeded_db, fake_embed, fake_inference)["summarize_thread"]
         out = asyncio.run(handler(thread_id="t-alpha", style="brief"))
         assert "Summary (brief)" in _text(out)
-        _system, user = fake_llm.complete_calls[0]
+        _system, user = fake_inference.complete_calls[0]
         assert "<untrusted_email>" in user
         assert "</untrusted_email>" in user
 
     def test_known_opaque_id_does_not_trigger_fallback_search(
-        self, fake_server, seeded_db, fake_llm
+        self, fake_server, seeded_db, fake_embed, fake_inference
     ):
         # A direct hit on ``get_thread`` must not call ``embed`` —
         # otherwise the fallback path would run on every successful
         # lookup, doubling latency. Embedding is only done when the
         # opaque lookup misses.
-        handler = _handlers(fake_server, seeded_db, fake_llm)["summarize_thread"]
+        handler = _handlers(fake_server, seeded_db, fake_embed, fake_inference)["summarize_thread"]
         asyncio.run(handler(thread_id="t-alpha"))
-        assert fake_llm.embed_calls == []
+        assert fake_embed.embed_calls == []
 
-    def test_unknown_id_falls_back_to_phrase_search(self, fake_server, seeded_db, fake_llm):
+    def test_unknown_id_falls_back_to_phrase_search(
+        self, fake_server, seeded_db, fake_embed, fake_inference
+    ):
         # The fallback rescues calls where the model passed a phrase
         # rather than an opaque ID. The fake llm returns the canned
         # embedding ``[1, 0, 0, 0]`` which aligns with t-alpha's
         # vector, so hybrid_search resolves to t-alpha and the summary
         # is produced for that thread instead of "Thread not found".
-        handler = _handlers(fake_server, seeded_db, fake_llm)["summarize_thread"]
+        handler = _handlers(fake_server, seeded_db, fake_embed, fake_inference)["summarize_thread"]
         out = asyncio.run(handler(thread_id="invoice for march"))
         text = _text(out)
         assert "Thread not found" not in text
@@ -160,12 +174,12 @@ class TestSummarizeThread:
         # sees which thread the fallback resolved to.
         assert "invoice for march" in text
         # The phrase was embedded once for the fallback search.
-        assert fake_llm.embed_calls == ["invoice for march"]
+        assert fake_embed.embed_calls == ["invoice for march"]
 
     def test_phrase_fallback_prefers_subject_overlap_over_vector_rank(
-        self, fake_server, seeded_db, fake_llm
+        self, fake_server, seeded_db, fake_embed, fake_inference
     ):
-        # ``fake_llm`` returns a fixed [1, 0, 0, 0] embedding which
+        # ``fake_embed`` returns a fixed [1, 0, 0, 0] embedding which
         # vector-aligns with t-alpha (subject "invoice for march"). For
         # the phrase "lunch plans", the keyword lane surfaces t-beta
         # (its actual subject) but the vector lane keeps pulling t-alpha
@@ -173,7 +187,7 @@ class TestSummarizeThread:
         # fallback resolves to t-alpha and produces a summary about the
         # wrong thread; with the tiebreaker, t-beta wins on the two
         # subject-token overlaps.
-        handler = _handlers(fake_server, seeded_db, fake_llm)["summarize_thread"]
+        handler = _handlers(fake_server, seeded_db, fake_embed, fake_inference)["summarize_thread"]
         out = asyncio.run(handler(thread_id="lunch plans"))
         text = _text(out)
         # Must resolve to the lunch thread, not the invoice thread.
@@ -181,7 +195,7 @@ class TestSummarizeThread:
         assert "invoice for march" not in text
 
     def test_phrase_fallback_with_no_subject_overlap_returns_not_found(
-        self, fake_server, seeded_db, fake_llm
+        self, fake_server, seeded_db, fake_embed, fake_inference
     ):
         # The fallback gate refuses to resolve when no candidate's
         # subject shares a token with the query. seeded_db contains
@@ -191,52 +205,60 @@ class TestSummarizeThread:
         # the canned [1,0,0,0] embedding) and the summary would land
         # on the invoice thread — silently wrong. Now we surface
         # "Thread not found" instead.
-        handler = _handlers(fake_server, seeded_db, fake_llm)["summarize_thread"]
+        handler = _handlers(fake_server, seeded_db, fake_embed, fake_inference)["summarize_thread"]
         out = asyncio.run(handler(thread_id="zzznosuchsubject"))
         text = _text(out)
         assert "Thread not found" in text
         # And critically: no LLM was invoked, because we never
         # resolved a thread to summarize.
-        assert fake_llm.complete_calls == []
+        assert fake_inference.complete_calls == []
 
-    def test_phrase_with_empty_corpus_returns_not_found(self, fake_server, empty_db, fake_llm):
+    def test_phrase_with_empty_corpus_returns_not_found(
+        self, fake_server, empty_db, fake_embed, fake_inference
+    ):
         # If the index is empty, the fallback hybrid_search returns no
         # hits — return the original sentinel rather than fabricating a
         # summary. ``empty_db`` carries the schema but no rows, so this
         # exercises the fallback's miss branch cleanly.
-        handler = _handlers(fake_server, empty_db, fake_llm)["summarize_thread"]
+        handler = _handlers(fake_server, empty_db, fake_embed, fake_inference)["summarize_thread"]
         out = asyncio.run(handler(thread_id="anything"))
         assert "Thread not found" in _text(out)
         # No LLM completion call when the fallback finds nothing.
-        assert fake_llm.complete_calls == []
+        assert fake_inference.complete_calls == []
 
-    def test_unknown_style_falls_back_to_brief(self, fake_server, seeded_db, fake_llm):
-        handler = _handlers(fake_server, seeded_db, fake_llm)["summarize_thread"]
+    def test_unknown_style_falls_back_to_brief(
+        self, fake_server, seeded_db, fake_embed, fake_inference
+    ):
+        handler = _handlers(fake_server, seeded_db, fake_embed, fake_inference)["summarize_thread"]
         asyncio.run(handler(thread_id="t-alpha", style="completely-made-up-style"))
-        _system, user = fake_llm.complete_calls[0]
+        _system, user = fake_inference.complete_calls[0]
         # ``brief`` instruction should be embedded in the user prompt.
         assert "2-3 sentences" in user
 
-    def test_db_exception_returns_error_text(self, fake_server, seeded_db, fake_llm):
+    def test_db_exception_returns_error_text(
+        self, fake_server, seeded_db, fake_embed, fake_inference
+    ):
         def boom(_thread_id):
             raise RuntimeError("simulated read failure")
 
         seeded_db.get_thread = boom  # type: ignore[assignment]
-        handler = _handlers(fake_server, seeded_db, fake_llm)["summarize_thread"]
+        handler = _handlers(fake_server, seeded_db, fake_embed, fake_inference)["summarize_thread"]
         out = asyncio.run(handler(thread_id="t-alpha"))
         assert "Error" in _text(out)
 
-    def test_recent_chunks_supplement_body_text(self, fake_server, chunked_db, fake_llm):
+    def test_recent_chunks_supplement_body_text(
+        self, fake_server, chunked_db, fake_embed, fake_inference
+    ):
         """Codex P1: the recent-chunk tail is *appended* to ``body_text``,
         not substituted for it. ``body_text`` is front-preserved, so a
         ``"detailed"`` summary must see BOTH the start of the thread
         (body) AND its latest activity (chunk tail). ``chunked_db.t-alpha``
         has a chunk whose text is NOT in its ``body_text`` — both must
         reach the prompt."""
-        handler = _handlers(fake_server, chunked_db, fake_llm)["summarize_thread"]
+        handler = _handlers(fake_server, chunked_db, fake_embed, fake_inference)["summarize_thread"]
         asyncio.run(handler(thread_id="t-alpha", style="detailed"))
-        assert fake_llm.complete_calls
-        _system, user = fake_llm.complete_calls[0]
+        assert fake_inference.complete_calls
+        _system, user = fake_inference.complete_calls[0]
         # Earlier body context is preserved...
         assert "please find the invoice attached for march" in user
         # ...and the recent-chunk tail (text only in message_chunks) is
@@ -245,14 +267,16 @@ class TestSummarizeThread:
         assert "--- recent messages ---" in user
         assert "[chunk " in user
 
-    def test_chunkless_thread_still_uses_body_text(self, fake_server, chunked_db, fake_llm):
+    def test_chunkless_thread_still_uses_body_text(
+        self, fake_server, chunked_db, fake_embed, fake_inference
+    ):
         """Regression guard: a thread with NO chunks (t-gamma) must
         continue to fall back to body_text so the summarize path works
         for empty-body or extraction-failure threads."""
-        handler = _handlers(fake_server, chunked_db, fake_llm)["summarize_thread"]
+        handler = _handlers(fake_server, chunked_db, fake_embed, fake_inference)["summarize_thread"]
         asyncio.run(handler(thread_id="t-gamma"))
-        assert fake_llm.complete_calls
-        _system, user = fake_llm.complete_calls[0]
+        assert fake_inference.complete_calls
+        _system, user = fake_inference.complete_calls[0]
         # The thread's body_text reaches the prompt because there are
         # no chunks to override it.
         assert "notes from the planning meeting" in user
@@ -263,36 +287,44 @@ class TestTruncatedProse:
     marker; it now says so."""
 
     def test_ask_mailbox_marks_a_truncated_answer(self, fake_server, seeded_db):
-        llm = FakeLocalLLM(complete_responses=[InferenceTruncatedError(partial="The budget was")])
-        handler = _handlers(fake_server, seeded_db, llm)["ask_mailbox"]
+        llm = FakeInferenceClient(
+            complete_responses=[InferenceTruncatedError(partial="The budget was")]
+        )
+        handler = _handlers(fake_server, seeded_db, FakeEmbedClient(), llm)["ask_mailbox"]
         text = _text(asyncio.run(handler(question="What was the budget?")))
         assert text.startswith("The budget was")
         assert "cut off" in text
 
     def test_summarize_thread_marks_a_truncated_summary(self, fake_server, seeded_db):
-        llm = FakeLocalLLM(complete_responses=[InferenceTruncatedError(partial="- first point")])
-        handler = _handlers(fake_server, seeded_db, llm)["summarize_thread"]
+        llm = FakeInferenceClient(
+            complete_responses=[InferenceTruncatedError(partial="- first point")]
+        )
+        handler = _handlers(fake_server, seeded_db, FakeEmbedClient(), llm)["summarize_thread"]
         text = _text(asyncio.run(handler(thread_id="t-alpha")))
         assert "- first point" in text
         assert "cut off" in text
 
     def test_truncated_with_no_text_is_an_error(self, fake_server, seeded_db):
-        llm = FakeLocalLLM(complete_responses=[InferenceTruncatedError(partial="")])
-        handler = _handlers(fake_server, seeded_db, llm)["ask_mailbox"]
+        llm = FakeInferenceClient(complete_responses=[InferenceTruncatedError(partial="")])
+        handler = _handlers(fake_server, seeded_db, FakeEmbedClient(), llm)["ask_mailbox"]
         text = _text(asyncio.run(handler(question="What was the budget?")))
         assert text.startswith("Error:")
 
 
 class TestExtractFromEmails:
-    def test_returns_no_match_message_when_search_is_empty(self, fake_server, seeded_db, fake_llm):
+    def test_returns_no_match_message_when_search_is_empty(
+        self, fake_server, seeded_db, fake_embed, fake_inference
+    ):
         # See the equivalent ask_mailbox test — fixed-embedding fakes
         # always vector-match, so the empty path is forced explicitly.
         seeded_db.hybrid_search = lambda **_kw: []  # type: ignore[assignment]
-        handler = _handlers(fake_server, seeded_db, fake_llm)["extract_from_emails"]
+        handler = _handlers(fake_server, seeded_db, fake_embed, fake_inference)[
+            "extract_from_emails"
+        ]
         out = asyncio.run(handler(query="zxq nothing matches", schema={"vendor": "string"}))
         assert "No matching emails" in _text(out)
 
-    def test_limit_is_clamped(self, fake_server, seeded_db, fake_llm):
+    def test_limit_is_clamped(self, fake_server, seeded_db, fake_embed, fake_inference):
         seen: dict = {}
         original = seeded_db.hybrid_search
 
@@ -301,7 +333,9 @@ class TestExtractFromEmails:
             return original(**kwargs)
 
         seeded_db.hybrid_search = spy  # type: ignore[assignment]
-        handler = _handlers(fake_server, seeded_db, fake_llm)["extract_from_emails"]
+        handler = _handlers(fake_server, seeded_db, fake_embed, fake_inference)[
+            "extract_from_emails"
+        ]
         asyncio.run(handler(query="invoice", schema={"vendor": "string"}, limit=10_000))
         assert seen["limit"] == 50  # _MAX_EXTRACT_LIMIT
 
@@ -309,8 +343,8 @@ class TestExtractFromEmails:
         """#222: output that is not JSON says nothing about whether the
         thread holds matching data, so it must not become a claim that
         none was found."""
-        llm = FakeLocalLLM(complete_responses=["not json", "still not json", "nope"])
-        handler = _handlers(fake_server, seeded_db, llm)["extract_from_emails"]
+        llm = FakeInferenceClient(complete_responses=["not json", "still not json", "nope"])
+        handler = _handlers(fake_server, seeded_db, FakeEmbedClient(), llm)["extract_from_emails"]
         out = asyncio.run(handler(query="invoice OR lunch OR meeting", schema={"vendor": "string"}))
         text = _all_text(out)
         assert "No structured data matching" not in text
@@ -320,8 +354,8 @@ class TestExtractFromEmails:
     def test_json_of_an_unusable_shape_is_a_failure(self, fake_server, seeded_db):
         """Review round 1: valid JSON that is neither an object, a list of
         objects, nor null says nothing about the thread's data."""
-        llm = FakeLocalLLM(complete_responses=['"Acme"', "42", '["a", "b"]'])
-        handler = _handlers(fake_server, seeded_db, llm)["extract_from_emails"]
+        llm = FakeInferenceClient(complete_responses=['"Acme"', "42", '["a", "b"]'])
+        handler = _handlers(fake_server, seeded_db, FakeEmbedClient(), llm)["extract_from_emails"]
         out = asyncio.run(handler(query="invoice OR lunch OR meeting", schema={"vendor": "string"}))
         text = _all_text(out)
         assert "No structured data matching" not in text
@@ -330,28 +364,30 @@ class TestExtractFromEmails:
     def test_mixed_array_keeps_its_records_and_reports_the_rest(self, fake_server, seeded_db):
         """Review round 2: non-object entries in an array were dropped
         silently, so the thread looked fully extracted."""
-        llm = FakeLocalLLM(complete_responses=['[{"vendor": "Acme"}, "Beta"]', "null", "null"])
-        handler = _handlers(fake_server, seeded_db, llm)["extract_from_emails"]
+        llm = FakeInferenceClient(
+            complete_responses=['[{"vendor": "Acme"}, "Beta"]', "null", "null"]
+        )
+        handler = _handlers(fake_server, seeded_db, FakeEmbedClient(), llm)["extract_from_emails"]
         out = asyncio.run(handler(query="invoice OR lunch OR meeting", schema={"vendor": "string"}))
 
         assert [r["vendor"] for r in json.loads(out[0].text)] == ["Acme"]
         assert "1 of 3 threads could not be extracted" in _all_text(out[1:])
 
     def test_empty_list_still_means_no_data(self, fake_server, seeded_db):
-        llm = FakeLocalLLM(complete_responses=["[]", "null", "[]"])
-        handler = _handlers(fake_server, seeded_db, llm)["extract_from_emails"]
+        llm = FakeInferenceClient(complete_responses=["[]", "null", "[]"])
+        handler = _handlers(fake_server, seeded_db, FakeEmbedClient(), llm)["extract_from_emails"]
         out = asyncio.run(handler(query="invoice OR lunch OR meeting", schema={"vendor": "string"}))
         assert "No structured data matching the schema found" in _text(out)
 
     def test_truncated_output_is_reported_alongside_the_records(self, fake_server, seeded_db):
-        llm = FakeLocalLLM(
+        llm = FakeInferenceClient(
             complete_responses=[
                 '{"vendor": "Acme"}',
                 InferenceTruncatedError(partial='{"vendor": '),
                 "null",
             ]
         )
-        handler = _handlers(fake_server, seeded_db, llm)["extract_from_emails"]
+        handler = _handlers(fake_server, seeded_db, FakeEmbedClient(), llm)["extract_from_emails"]
         out = asyncio.run(handler(query="invoice OR lunch OR meeting", schema={"vendor": "string"}))
 
         records = json.loads(out[0].text)
@@ -361,14 +397,14 @@ class TestExtractFromEmails:
         assert "INFERENCE_MAX_TOKENS" in notice
 
     def test_valid_null_for_every_thread_still_means_no_data(self, fake_server, seeded_db):
-        llm = FakeLocalLLM(complete_responses=["null"] * 3)
-        handler = _handlers(fake_server, seeded_db, llm)["extract_from_emails"]
+        llm = FakeInferenceClient(complete_responses=["null"] * 3)
+        handler = _handlers(fake_server, seeded_db, FakeEmbedClient(), llm)["extract_from_emails"]
         out = asyncio.run(handler(query="invoice OR lunch OR meeting", schema={"vendor": "string"}))
         assert "No structured data matching the schema found" in _text(out)
 
     def test_accepts_object_response_and_annotates_with_source(self, fake_server, seeded_db):
-        llm = FakeLocalLLM(complete_responses=['{"vendor": "Acme"}'] * 3)
-        handler = _handlers(fake_server, seeded_db, llm)["extract_from_emails"]
+        llm = FakeInferenceClient(complete_responses=['{"vendor": "Acme"}'] * 3)
+        handler = _handlers(fake_server, seeded_db, FakeEmbedClient(), llm)["extract_from_emails"]
         out = asyncio.run(
             handler(
                 query="invoice OR lunch OR meeting",
@@ -387,14 +423,14 @@ class TestExtractFromEmails:
         # Same prompt, but the model returned an array — the previous
         # behavior aborted with TypeError. Now each item should be
         # accepted and annotated independently.
-        llm = FakeLocalLLM(
+        llm = FakeInferenceClient(
             complete_responses=[
                 '[{"vendor": "Acme"}, {"vendor": "Beta"}]',
                 "null",
                 "null",
             ]
         )
-        handler = _handlers(fake_server, seeded_db, llm)["extract_from_emails"]
+        handler = _handlers(fake_server, seeded_db, FakeEmbedClient(), llm)["extract_from_emails"]
         out = asyncio.run(
             handler(
                 query="invoice OR lunch OR meeting",
@@ -409,38 +445,44 @@ class TestExtractFromEmails:
         # Models routinely wrap JSON in ```json fences despite the
         # "ONLY valid JSON" instruction; json.loads rejects the fence,
         # so each such thread used to be skipped silently.
-        llm = FakeLocalLLM(
+        llm = FakeInferenceClient(
             complete_responses=[
                 '```json\n{"vendor": "Acme"}\n```',
                 '```\n[{"vendor": "Beta"}]\n```',
                 "  ```JSON\nnull\n```  ",
             ]
         )
-        handler = _handlers(fake_server, seeded_db, llm)["extract_from_emails"]
+        handler = _handlers(fake_server, seeded_db, FakeEmbedClient(), llm)["extract_from_emails"]
         out = asyncio.run(handler(query="invoice OR lunch OR meeting", schema={"vendor": "string"}))
         text = _text(out)
         assert "Acme" in text
         assert "Beta" in text
 
-    def test_db_exception_returns_error_text(self, fake_server, seeded_db, fake_llm):
+    def test_db_exception_returns_error_text(
+        self, fake_server, seeded_db, fake_embed, fake_inference
+    ):
         def boom(**_kwargs):
             raise RuntimeError("simulated read failure")
 
         seeded_db.hybrid_search = boom  # type: ignore[assignment]
-        handler = _handlers(fake_server, seeded_db, fake_llm)["extract_from_emails"]
+        handler = _handlers(fake_server, seeded_db, fake_embed, fake_inference)[
+            "extract_from_emails"
+        ]
         out = asyncio.run(handler(query="invoice", schema={"x": "string"}))
         assert "Error" in _text(out)
 
 
 class TestInferenceDispatch:
-    def test_inference_client_is_invoked_for_ask_mailbox(self, fake_server, seeded_db, fake_llm):
+    def test_inference_client_is_invoked_for_ask_mailbox(
+        self, fake_server, seeded_db, fake_embed, fake_inference
+    ):
         # Intelligence tools delegate to the inference client without
         # branching by mode — the client itself encapsulates the
         # protocol/SDK choice. Validation that a misconfigured mode
         # surfaces at startup (no fallback) lives in test_main.py.
-        handler = _handlers(fake_server, seeded_db, fake_llm)["ask_mailbox"]
+        handler = _handlers(fake_server, seeded_db, fake_embed, fake_inference)["ask_mailbox"]
         asyncio.run(handler(question="invoice"))
-        assert fake_llm.complete_calls
+        assert fake_inference.complete_calls
 
 
 # --- Untrusted-content serialization -------------------------------------
@@ -501,27 +543,33 @@ class TestUntrustedSerialization:
         assert block.startswith('<untrusted_email index="1">\n')
         assert block.endswith("\n</untrusted_email>")
 
-    def test_ask_mailbox_prompt_stays_fenced(self, fake_server, seeded_db, fake_llm):
+    def test_ask_mailbox_prompt_stays_fenced(
+        self, fake_server, seeded_db, fake_embed, fake_inference
+    ):
         seeded_db.hybrid_search = lambda **_kw: [_hostile_thread()]  # type: ignore[assignment]
-        handler = _handlers(fake_server, seeded_db, fake_llm)["ask_mailbox"]
+        handler = _handlers(fake_server, seeded_db, fake_embed, fake_inference)["ask_mailbox"]
         asyncio.run(handler(question="what do I owe?"))
-        _system, user = fake_llm.complete_calls[0]
+        _system, user = fake_inference.complete_calls[0]
         _assert_fenced(user)
         assert user.rstrip().endswith("User's question: what do I owe?")
 
-    def test_summarize_thread_prompt_stays_fenced(self, fake_server, seeded_db, fake_llm):
+    def test_summarize_thread_prompt_stays_fenced(
+        self, fake_server, seeded_db, fake_embed, fake_inference
+    ):
         seeded_db.get_thread = lambda _tid: _hostile_thread()  # type: ignore[assignment]
         seeded_db.get_recent_chunks_for_thread = lambda *_a, **_k: []  # type: ignore[assignment]
-        handler = _handlers(fake_server, seeded_db, fake_llm)["summarize_thread"]
+        handler = _handlers(fake_server, seeded_db, fake_embed, fake_inference)["summarize_thread"]
         asyncio.run(handler(thread_id="t-hostile"))
-        _system, user = fake_llm.complete_calls[0]
+        _system, user = fake_inference.complete_calls[0]
         _assert_fenced(user)
 
-    def test_extract_prompt_stays_fenced(self, fake_server, seeded_db, fake_llm):
+    def test_extract_prompt_stays_fenced(self, fake_server, seeded_db, fake_embed, fake_inference):
         seeded_db.hybrid_search = lambda **_kw: [_hostile_thread()]  # type: ignore[assignment]
-        handler = _handlers(fake_server, seeded_db, fake_llm)["extract_from_emails"]
+        handler = _handlers(fake_server, seeded_db, fake_embed, fake_inference)[
+            "extract_from_emails"
+        ]
         asyncio.run(handler(query="invoice", schema={"amount": "number"}))
-        _system, user = fake_llm.complete_calls[0]
+        _system, user = fake_inference.complete_calls[0]
         _assert_fenced(user)
 
 
@@ -533,7 +581,7 @@ class TestInvalidDateLogging:
         # other withheld tool input, never written to the log (#238).
         import logging
 
-        handlers = _handlers(fake_server, seeded_db, FakeLocalLLM())
+        handlers = _handlers(fake_server, seeded_db, FakeEmbedClient(), FakeInferenceClient())
         if tool == "ask_mailbox":
             kwargs = {"question": "any invoices?"}
         else:

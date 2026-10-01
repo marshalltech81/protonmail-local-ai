@@ -20,8 +20,8 @@ from mcp.server.fastmcp.exceptions import ToolError
 from src.tools.search import register_search_tools
 
 
-def _handler(fake_server, fake_llm, db):
-    register_search_tools(fake_server, db, fake_llm)
+def _handler(fake_server, fake_embed, db):
+    register_search_tools(fake_server, db, fake_embed)
     return fake_server.tools["search_emails"]
 
 
@@ -40,15 +40,15 @@ def _error(coro) -> str:
 
 
 class TestModeValidation:
-    def test_invalid_mode_returns_validation_message(self, fake_server, fake_llm, seeded_db):
-        handler = _handler(fake_server, fake_llm, seeded_db)
+    def test_invalid_mode_returns_validation_message(self, fake_server, fake_embed, seeded_db):
+        handler = _handler(fake_server, fake_embed, seeded_db)
         assert "Invalid mode" in _error(handler(query="anything", mode="fuzzy"))
         # A rejected mode must not have issued any embed or DB work.
-        assert fake_llm.embed_calls == []
+        assert fake_embed.embed_calls == []
 
     @pytest.mark.parametrize("mode", ["hybrid", "semantic", "keyword"])
-    def test_all_valid_modes_are_accepted(self, fake_server, fake_llm, seeded_db, mode):
-        handler = _handler(fake_server, fake_llm, seeded_db)
+    def test_all_valid_modes_are_accepted(self, fake_server, fake_embed, seeded_db, mode):
+        handler = _handler(fake_server, fake_embed, seeded_db)
         # ``invoice`` appears only in t-alpha's subject/body; any mode that
         # forwards filters correctly should either return results or a
         # no-results message — not the validation message.
@@ -57,7 +57,7 @@ class TestModeValidation:
 
 
 class TestLimitClamping:
-    def test_above_ceiling_is_clamped(self, fake_server, fake_llm, seeded_db):
+    def test_above_ceiling_is_clamped(self, fake_server, fake_embed, seeded_db):
         # Record the limit actually forwarded to the db layer by wrapping
         # hybrid_search. Clamping to 50 is the contract documented at
         # _MAX_SEARCH_LIMIT — anything higher would let an LLM drive a
@@ -70,11 +70,11 @@ class TestLimitClamping:
             return original(**kwargs)
 
         seeded_db.hybrid_search = spy  # type: ignore[assignment]
-        handler = _handler(fake_server, fake_llm, seeded_db)
+        handler = _handler(fake_server, fake_embed, seeded_db)
         asyncio.run(handler(query="invoice", mode="hybrid", limit=10_000))
         assert seen["limit"] == 50
 
-    def test_below_floor_is_clamped(self, fake_server, fake_llm, seeded_db):
+    def test_below_floor_is_clamped(self, fake_server, fake_embed, seeded_db):
         seen: dict[str, int] = {}
         original = seeded_db.hybrid_search
 
@@ -83,31 +83,31 @@ class TestLimitClamping:
             return original(**kwargs)
 
         seeded_db.hybrid_search = spy  # type: ignore[assignment]
-        handler = _handler(fake_server, fake_llm, seeded_db)
+        handler = _handler(fake_server, fake_embed, seeded_db)
         asyncio.run(handler(query="invoice", mode="hybrid", limit=-99))
         assert seen["limit"] == 1
 
 
 class TestModeRouting:
-    def test_keyword_mode_skips_embed_call(self, fake_server, fake_llm, seeded_db):
-        handler = _handler(fake_server, fake_llm, seeded_db)
+    def test_keyword_mode_skips_embed_call(self, fake_server, fake_embed, seeded_db):
+        handler = _handler(fake_server, fake_embed, seeded_db)
         asyncio.run(handler(query="invoice", mode="keyword"))
         # keyword mode must not pay for an embedding the db would ignore.
-        assert fake_llm.embed_calls == []
+        assert fake_embed.embed_calls == []
 
-    def test_semantic_mode_embeds_once(self, fake_server, fake_llm, seeded_db):
-        handler = _handler(fake_server, fake_llm, seeded_db)
+    def test_semantic_mode_embeds_once(self, fake_server, fake_embed, seeded_db):
+        handler = _handler(fake_server, fake_embed, seeded_db)
         asyncio.run(handler(query="lunch", mode="semantic"))
-        assert fake_llm.embed_calls == ["lunch"]
+        assert fake_embed.embed_calls == ["lunch"]
 
-    def test_hybrid_mode_embeds_once(self, fake_server, fake_llm, seeded_db):
-        handler = _handler(fake_server, fake_llm, seeded_db)
+    def test_hybrid_mode_embeds_once(self, fake_server, fake_embed, seeded_db):
+        handler = _handler(fake_server, fake_embed, seeded_db)
         asyncio.run(handler(query="meeting", mode="hybrid"))
-        assert fake_llm.embed_calls == ["meeting"]
+        assert fake_embed.embed_calls == ["meeting"]
 
 
 class TestFilterForwarding:
-    def test_keyword_mode_forwards_all_filters(self, fake_server, fake_llm, seeded_db):
+    def test_keyword_mode_forwards_all_filters(self, fake_server, fake_embed, seeded_db):
         """Keyword mode previously dropped every filter except ``folders``.
 
         This test guards against a regression — the handler must pass
@@ -122,7 +122,7 @@ class TestFilterForwarding:
             return original(**kwargs)
 
         seeded_db.keyword_search = spy  # type: ignore[assignment]
-        handler = _handler(fake_server, fake_llm, seeded_db)
+        handler = _handler(fake_server, fake_embed, seeded_db)
         asyncio.run(
             handler(
                 query="invoice",
@@ -169,7 +169,9 @@ class TestRerankerEvidence:
             self.seen_docs.append(list(documents))
             return [(i, float(len(documents) - i)) for i in range(len(documents))]
 
-    def test_hybrid_with_reranker_sets_with_evidence_true(self, fake_server, fake_llm, chunked_db):
+    def test_hybrid_with_reranker_sets_with_evidence_true(
+        self, fake_server, fake_embed, chunked_db
+    ):
         captured: dict = {}
         original = chunked_db.hybrid_search
 
@@ -179,7 +181,7 @@ class TestRerankerEvidence:
 
         chunked_db.hybrid_search = spy  # type: ignore[assignment]
         reranker = self._CaptureReranker()
-        register_search_tools(fake_server, chunked_db, fake_llm, reranker=reranker)
+        register_search_tools(fake_server, chunked_db, fake_embed, reranker=reranker)
         handler = fake_server.tools["search_emails"]
 
         asyncio.run(handler(query="invoice", mode="hybrid"))
@@ -191,7 +193,7 @@ class TestRerankerEvidence:
         )
 
     def test_hybrid_without_reranker_keeps_with_evidence_false(
-        self, fake_server, fake_llm, seeded_db
+        self, fake_server, fake_embed, seeded_db
     ):
         captured: dict = {}
         original = seeded_db.hybrid_search
@@ -201,7 +203,7 @@ class TestRerankerEvidence:
             return original(**kwargs)
 
         seeded_db.hybrid_search = spy  # type: ignore[assignment]
-        handler = _handler(fake_server, fake_llm, seeded_db)
+        handler = _handler(fake_server, fake_embed, seeded_db)
 
         asyncio.run(handler(query="invoice", mode="hybrid"))
 
@@ -210,7 +212,7 @@ class TestRerankerEvidence:
         # batch pipeline doesn't inherit a True from a stale default.
         assert captured.get("with_evidence") is False
 
-    def test_reranker_sees_chunk_text_not_just_snippet(self, fake_server, fake_llm, chunked_db):
+    def test_reranker_sees_chunk_text_not_just_snippet(self, fake_server, fake_embed, chunked_db):
         # End-to-end: with the fix, the reranker's ``documents``
         # argument carries chunk text. ``alpha-c1`` (in the chunked_db
         # fixture) has text "invoice number 12345 due march 31"; the
@@ -219,7 +221,7 @@ class TestRerankerEvidence:
         # attached"), so finding it in the reranker's documents proves
         # the chunk was attached and forwarded.
         reranker = self._CaptureReranker()
-        register_search_tools(fake_server, chunked_db, fake_llm, reranker=reranker)
+        register_search_tools(fake_server, chunked_db, fake_embed, reranker=reranker)
         handler = fake_server.tools["search_emails"]
 
         asyncio.run(handler(query="invoice", mode="hybrid"))
@@ -236,13 +238,13 @@ class TestRerankerEvidence:
 
 
 class TestResultFormatting:
-    def test_empty_results_returns_no_results_message(self, fake_server, fake_llm, seeded_db):
-        handler = _handler(fake_server, fake_llm, seeded_db)
+    def test_empty_results_returns_no_results_message(self, fake_server, fake_embed, seeded_db):
+        handler = _handler(fake_server, fake_embed, seeded_db)
         out = asyncio.run(handler(query="zxqwzxqw", mode="keyword"))
         assert "No results found" in _text(out)
 
-    def test_formatted_result_includes_key_fields(self, fake_server, fake_llm, seeded_db):
-        handler = _handler(fake_server, fake_llm, seeded_db)
+    def test_formatted_result_includes_key_fields(self, fake_server, fake_embed, seeded_db):
+        handler = _handler(fake_server, fake_embed, seeded_db)
         out = asyncio.run(handler(query="invoice", mode="keyword"))
         text = _text(out)
         assert "invoice for march" in text
@@ -254,8 +256,8 @@ class TestResultFormatting:
         # Attachment marker must appear for threads that carry one.
         assert "📎" in text
 
-    def test_result_count_header_matches_results(self, fake_server, fake_llm, seeded_db):
-        handler = _handler(fake_server, fake_llm, seeded_db)
+    def test_result_count_header_matches_results(self, fake_server, fake_embed, seeded_db):
+        handler = _handler(fake_server, fake_embed, seeded_db)
         out = asyncio.run(handler(query="invoice OR lunch OR meeting", mode="keyword", limit=10))
         text = _text(out)
         # Header format: "Found N thread(s) for: '...'"
@@ -265,15 +267,17 @@ class TestResultFormatting:
 
 
 class TestErrorPath:
-    def test_db_exception_returns_error_text(self, fake_server, fake_llm, seeded_db):
+    def test_db_exception_returns_error_text(self, fake_server, fake_embed, seeded_db):
         def boom(**_kwargs):
             raise RuntimeError("simulated index error")
 
         seeded_db.hybrid_search = boom  # type: ignore[assignment]
-        handler = _handler(fake_server, fake_llm, seeded_db)
+        handler = _handler(fake_server, fake_embed, seeded_db)
         assert "Search error" in _error(handler(query="anything", mode="hybrid"))
 
-    def test_secret_values_are_scrubbed_from_exception_text(self, fake_server, fake_llm, seeded_db):
+    def test_secret_values_are_scrubbed_from_exception_text(
+        self, fake_server, fake_embed, seeded_db
+    ):
         # A provider SDK exception that quotes the operator's API key
         # (e.g. an auth-header echo in the error body) must not leak
         # to the caller. Pinning this here covers the main.py wiring
@@ -284,14 +288,14 @@ class TestErrorPath:
             raise RuntimeError(f"upstream auth: Bearer {leaked_key}")
 
         seeded_db.hybrid_search = boom  # type: ignore[assignment]
-        register_search_tools(fake_server, seeded_db, fake_llm, secret_values=[leaked_key])
+        register_search_tools(fake_server, seeded_db, fake_embed, secret_values=[leaked_key])
         handler = fake_server.tools["search_emails"]
         text = _error(handler(query="anything", mode="hybrid"))
         assert leaked_key not in text
         assert "[REDACTED]" in text
 
     def test_provider_status_error_is_reduced_to_type_and_status(
-        self, fake_server, fake_llm, seeded_db
+        self, fake_server, fake_embed, seeded_db
     ):
         # Provider SDK status errors (openai/anthropic/cohere) carry a
         # ``status_code`` attribute and stringify with the response
@@ -311,7 +315,7 @@ class TestErrorPath:
             raise FakeAPIStatusError()
 
         seeded_db.hybrid_search = boom  # type: ignore[assignment]
-        handler = _handler(fake_server, fake_llm, seeded_db)
+        handler = _handler(fake_server, fake_embed, seeded_db)
         text = _error(handler(query=sensitive_query, mode="hybrid"))
         assert sensitive_query not in text
         assert "FakeAPIStatusError" in text
@@ -394,7 +398,7 @@ class TestFromNameResolution:
     one path doesn't corrupt the others silently.
     """
 
-    def test_from_name_resolves_to_top_contact_address(self, fake_server, fake_llm, seeded_db):
+    def test_from_name_resolves_to_top_contact_address(self, fake_server, fake_embed, seeded_db):
         # ``alice`` matches alice@example.com (2 threads) — the top
         # contact in find_contact's ranking. The handler should pass
         # that address as ``from_addr`` to hybrid_search.
@@ -406,22 +410,22 @@ class TestFromNameResolution:
             return original(**kwargs)
 
         seeded_db.hybrid_search = spy  # type: ignore[assignment]
-        handler = _handler(fake_server, fake_llm, seeded_db)
+        handler = _handler(fake_server, fake_embed, seeded_db)
         asyncio.run(handler(query="invoice", from_name="alice"))
         assert captured.get("from_addr") == "alice@example.com"
 
-    def test_from_name_no_match_returns_honest_empty(self, fake_server, fake_llm, seeded_db):
+    def test_from_name_no_match_returns_honest_empty(self, fake_server, fake_embed, seeded_db):
         # When find_contact returns nothing the handler must NOT silently
         # drop the filter and run the search with no sender constraint —
         # that would surface unrelated threads. Return a clear empty
         # signal that names the unresolved query.
-        handler = _handler(fake_server, fake_llm, seeded_db)
+        handler = _handler(fake_server, fake_embed, seeded_db)
         out = asyncio.run(handler(query="anything", from_name="zzznosuchcontact"))
         text = _text(out)
         assert "No results found" in text
         assert "zzznosuchcontact" in text
 
-    def test_explicit_from_addr_wins_over_from_name(self, fake_server, fake_llm, seeded_db):
+    def test_explicit_from_addr_wins_over_from_name(self, fake_server, fake_embed, seeded_db):
         # When the caller supplied both, ``from_addr`` is the explicit
         # constraint and ``from_name`` is just a hint — explicit wins.
         # Verify by spying on hybrid_search and confirming the explicit
@@ -434,7 +438,7 @@ class TestFromNameResolution:
             return original(**kwargs)
 
         seeded_db.hybrid_search = spy  # type: ignore[assignment]
-        handler = _handler(fake_server, fake_llm, seeded_db)
+        handler = _handler(fake_server, fake_embed, seeded_db)
         asyncio.run(
             handler(
                 query="invoice",
@@ -444,7 +448,7 @@ class TestFromNameResolution:
         )
         assert captured.get("from_addr") == "explicit@example.com"
 
-    def test_from_name_skipped_when_only_query_passed(self, fake_server, fake_llm, seeded_db):
+    def test_from_name_skipped_when_only_query_passed(self, fake_server, fake_embed, seeded_db):
         # No from_name -> no find_contact call -> no extra DB work. The
         # spy on find_contact must not see any invocation when the
         # caller doesn't pass from_name.
@@ -456,11 +460,11 @@ class TestFromNameResolution:
             return original(query, limit, senders_only=senders_only)
 
         seeded_db.find_contact = spy  # type: ignore[assignment]
-        handler = _handler(fake_server, fake_llm, seeded_db)
+        handler = _handler(fake_server, fake_embed, seeded_db)
         asyncio.run(handler(query="invoice"))
         assert called == []
 
-    def test_from_name_resolution_uses_senders_only(self, fake_server, fake_llm, seeded_db):
+    def test_from_name_resolution_uses_senders_only(self, fake_server, fake_embed, seeded_db):
         # The from_name -> from_addr resolution must restrict the
         # find_contact aggregation to From-line addresses. Otherwise
         # a frequent recipient/CC contact could outrank the actual
@@ -475,18 +479,18 @@ class TestFromNameResolution:
             return original(query, limit, senders_only=senders_only)
 
         seeded_db.find_contact = spy  # type: ignore[assignment]
-        handler = _handler(fake_server, fake_llm, seeded_db)
+        handler = _handler(fake_server, fake_embed, seeded_db)
         asyncio.run(handler(query="invoice", from_name="alice"))
         assert captured_kwargs.get("senders_only") is True
 
     def test_from_name_lookup_error_surfaces_as_search_error(
-        self, fake_server, fake_llm, seeded_db
+        self, fake_server, fake_embed, seeded_db
     ):
         def boom(_query, _limit, *, senders_only=False):
             raise RuntimeError("simulated find_contact failure")
 
         seeded_db.find_contact = boom  # type: ignore[assignment]
-        handler = _handler(fake_server, fake_llm, seeded_db)
+        handler = _handler(fake_server, fake_embed, seeded_db)
         assert "Search error" in _error(handler(query="anything", from_name="alice"))
 
 
@@ -506,21 +510,21 @@ class TestParticipantParam:
         setattr(db, attr, spy)
         return captured
 
-    def test_participant_forwarded_to_hybrid(self, fake_server, fake_llm, seeded_db):
+    def test_participant_forwarded_to_hybrid(self, fake_server, fake_embed, seeded_db):
         captured = self._spy(seeded_db, "hybrid_search")
-        handler = _handler(fake_server, fake_llm, seeded_db)
+        handler = _handler(fake_server, fake_embed, seeded_db)
         asyncio.run(handler(query="invoice", participant="bob@example.com"))
         assert captured.get("participant") == "bob@example.com"
 
-    def test_participant_forwarded_to_keyword(self, fake_server, fake_llm, seeded_db):
+    def test_participant_forwarded_to_keyword(self, fake_server, fake_embed, seeded_db):
         captured = self._spy(seeded_db, "keyword_search")
-        handler = _handler(fake_server, fake_llm, seeded_db)
+        handler = _handler(fake_server, fake_embed, seeded_db)
         asyncio.run(handler(query="invoice", mode="keyword", participant="bob@example.com"))
         assert captured.get("participant") == "bob@example.com"
 
-    def test_participant_forwarded_to_semantic(self, fake_server, fake_llm, seeded_db):
+    def test_participant_forwarded_to_semantic(self, fake_server, fake_embed, seeded_db):
         captured = self._spy(seeded_db, "semantic_search")
-        handler = _handler(fake_server, fake_llm, seeded_db)
+        handler = _handler(fake_server, fake_embed, seeded_db)
         asyncio.run(handler(query="invoice", mode="semantic", participant="bob@example.com"))
         assert captured.get("participant") == "bob@example.com"
 
@@ -529,16 +533,16 @@ class TestGetEvidence:
     """``get_evidence`` returns the retrieved source passages with full
     provenance and no LLM synthesis."""
 
-    def _handler(self, fake_server, fake_llm, db):
-        register_search_tools(fake_server, db, fake_llm)
+    def _handler(self, fake_server, fake_embed, db):
+        register_search_tools(fake_server, db, fake_embed)
         return fake_server.tools["get_evidence"]
 
-    def test_tool_is_registered(self, fake_server, fake_llm, seeded_db):
-        register_search_tools(fake_server, seeded_db, fake_llm)
+    def test_tool_is_registered(self, fake_server, fake_embed, seeded_db):
+        register_search_tools(fake_server, seeded_db, fake_embed)
         assert "get_evidence" in fake_server.tools
 
-    def test_mailbox_wide_returns_evidence_chunks(self, fake_server, fake_llm, chunked_db):
-        handler = self._handler(fake_server, fake_llm, chunked_db)
+    def test_mailbox_wide_returns_evidence_chunks(self, fake_server, fake_embed, chunked_db):
+        handler = self._handler(fake_server, fake_embed, chunked_db)
         out = asyncio.run(handler(query="invoice"))
         text = _text(out)
         assert "Evidence for:" in text
@@ -547,8 +551,8 @@ class TestGetEvidence:
         assert "12345" in text
         assert "t-alpha" in text
 
-    def test_thread_scoped_returns_that_threads_chunks(self, fake_server, fake_llm, chunked_db):
-        handler = self._handler(fake_server, fake_llm, chunked_db)
+    def test_thread_scoped_returns_that_threads_chunks(self, fake_server, fake_embed, chunked_db):
+        handler = self._handler(fake_server, fake_embed, chunked_db)
         out = asyncio.run(handler(query="invoice", thread_id="t-alpha"))
         assert "12345" in _text(out)
 
@@ -564,46 +568,48 @@ class TestGetEvidence:
         ],
     )
     def test_thread_scoped_rejects_retrieval_filters(
-        self, fake_server, fake_llm, chunked_db, filters
+        self, fake_server, fake_embed, chunked_db, filters
     ):
         """Regression (#219): with thread_id, the filters were accepted
         and silently ignored, so the passages returned looked like they
         satisfied constraints they did not."""
-        handler = self._handler(fake_server, fake_llm, chunked_db)
+        handler = self._handler(fake_server, fake_embed, chunked_db)
         message = _error(handler(query="invoice", thread_id="t-alpha", **filters))
         assert "cannot be combined with thread_id" in message
         assert next(iter(filters)) in message
 
-    def test_thread_scoped_treats_blank_filters_as_absent(self, fake_server, fake_llm, chunked_db):
+    def test_thread_scoped_treats_blank_filters_as_absent(
+        self, fake_server, fake_embed, chunked_db
+    ):
         """Review round 1: clients often send unset optionals as blank
         strings; the mailbox-wide path already ignores them."""
-        handler = self._handler(fake_server, fake_llm, chunked_db)
+        handler = self._handler(fake_server, fake_embed, chunked_db)
         out = asyncio.run(
             handler(query="invoice", thread_id="t-alpha", from_addr="", date_from=" ", folders=[])
         )
         assert "12345" in _text(out)
 
-    def test_thread_scoped_unknown_thread(self, fake_server, fake_llm, chunked_db):
-        handler = self._handler(fake_server, fake_llm, chunked_db)
+    def test_thread_scoped_unknown_thread(self, fake_server, fake_embed, chunked_db):
+        handler = self._handler(fake_server, fake_embed, chunked_db)
         assert "Thread not found" in _error(handler(query="invoice", thread_id="no-such-thread"))
 
-    def test_blank_query_returns_guidance(self, fake_server, fake_llm, chunked_db):
-        handler = self._handler(fake_server, fake_llm, chunked_db)
+    def test_blank_query_returns_guidance(self, fake_server, fake_embed, chunked_db):
+        handler = self._handler(fake_server, fake_embed, chunked_db)
         assert "Provide a query" in _error(handler(query="   "))
 
-    def test_no_evidence_message(self, fake_server, fake_llm, empty_db):
-        handler = self._handler(fake_server, fake_llm, empty_db)
+    def test_no_evidence_message(self, fake_server, fake_embed, empty_db):
+        handler = self._handler(fake_server, fake_embed, empty_db)
         out = asyncio.run(handler(query="anything"))
         assert "No evidence found" in _text(out)
 
-    def test_thread_scoped_no_chunks_reports_no_evidence(self, fake_server, fake_llm, chunked_db):
+    def test_thread_scoped_no_chunks_reports_no_evidence(self, fake_server, fake_embed, chunked_db):
         # t-gamma exists but carries no chunks — the scoped path must
         # report no evidence rather than rendering an empty thread group.
-        handler = self._handler(fake_server, fake_llm, chunked_db)
+        handler = self._handler(fake_server, fake_embed, chunked_db)
         out = asyncio.run(handler(query="anything", thread_id="t-gamma"))
         assert "No evidence found" in _text(out)
 
-    def test_long_chunk_text_is_truncated(self, fake_server, fake_llm, tmp_path):
+    def test_long_chunk_text_is_truncated(self, fake_server, fake_embed, tmp_path):
         import sqlite3
 
         import sqlite_vec
@@ -635,42 +641,39 @@ class TestGetEvidence:
         )
         conn.close()
         db = Database(str(path))
-        try:
-            register_search_tools(fake_server, db, fake_llm)
-            handler = fake_server.tools["get_evidence"]
-            out = asyncio.run(handler(query="anything", thread_id="t1"))
-            assert "[truncated]" in _text(out)
-        finally:
-            db.close()
+        register_search_tools(fake_server, db, fake_embed)
+        handler = fake_server.tools["get_evidence"]
+        out = asyncio.run(handler(query="anything", thread_id="t1"))
+        assert "[truncated]" in _text(out)
 
-    def test_include_scores_shows_lanes_and_distance(self, fake_server, fake_llm, chunked_db):
-        handler = self._handler(fake_server, fake_llm, chunked_db)
+    def test_include_scores_shows_lanes_and_distance(self, fake_server, fake_embed, chunked_db):
+        handler = self._handler(fake_server, fake_embed, chunked_db)
         out = asyncio.run(handler(query="invoice", include_scores=True))
         text = _text(out)
         assert "Lanes:" in text
         assert "vector distance" in text
 
-    def test_default_omits_scores(self, fake_server, fake_llm, chunked_db):
-        handler = self._handler(fake_server, fake_llm, chunked_db)
+    def test_default_omits_scores(self, fake_server, fake_embed, chunked_db):
+        handler = self._handler(fake_server, fake_embed, chunked_db)
         text = _text(asyncio.run(handler(query="invoice")))
         assert "Lanes:" not in text
         assert "vector distance" not in text
 
-    def test_thread_scoped_include_scores_omits_lanes(self, fake_server, fake_llm, chunked_db):
+    def test_thread_scoped_include_scores_omits_lanes(self, fake_server, fake_embed, chunked_db):
         # The thread-scoped path bypasses RRF fusion, so there is no lane
         # provenance — but the per-chunk vector distance is still shown.
-        handler = self._handler(fake_server, fake_llm, chunked_db)
+        handler = self._handler(fake_server, fake_embed, chunked_db)
         out = asyncio.run(handler(query="invoice", thread_id="t-alpha", include_scores=True))
         text = _text(out)
         assert "Lanes:" not in text
         assert "vector distance" in text
 
-    def test_attachment_provenance_rendered(self, fake_server, fake_llm, attachments_db):
-        handler = self._handler(fake_server, fake_llm, attachments_db)
+    def test_attachment_provenance_rendered(self, fake_server, fake_embed, attachments_db):
+        handler = self._handler(fake_server, fake_embed, attachments_db)
         out = asyncio.run(handler(query="acme", thread_id="t-quote"))
         assert 'Source: attachment "acme-quote.pdf"' in _text(out)
 
-    def test_limit_clamped_at_tool_boundary(self, fake_server, fake_llm, chunked_db):
+    def test_limit_clamped_at_tool_boundary(self, fake_server, fake_embed, chunked_db):
         captured: dict = {}
         original = chunked_db.hybrid_search
 
@@ -679,16 +682,16 @@ class TestGetEvidence:
             return original(**kwargs)
 
         chunked_db.hybrid_search = spy  # type: ignore[assignment]
-        handler = self._handler(fake_server, fake_llm, chunked_db)
+        handler = self._handler(fake_server, fake_embed, chunked_db)
         asyncio.run(handler(query="invoice", limit=9999))
         assert captured["limit"] == 50
 
-    def test_db_error_returns_evidence_error(self, fake_server, fake_llm, chunked_db):
+    def test_db_error_returns_evidence_error(self, fake_server, fake_embed, chunked_db):
         def boom(**_kwargs):
             raise RuntimeError("simulated index error")
 
         chunked_db.hybrid_search = boom  # type: ignore[assignment]
-        handler = self._handler(fake_server, fake_llm, chunked_db)
+        handler = self._handler(fake_server, fake_embed, chunked_db)
         assert "Evidence error" in _error(handler(query="invoice"))
 
 
@@ -696,42 +699,42 @@ class TestSearchAttachmentsTool:
     """``search_attachments`` locates attachments by filename, MIME, and
     extracted text and reports each one's parent thread."""
 
-    def _handler(self, fake_server, fake_llm, db):
-        register_search_tools(fake_server, db, fake_llm)
+    def _handler(self, fake_server, fake_embed, db):
+        register_search_tools(fake_server, db, fake_embed)
         return fake_server.tools["search_attachments"]
 
-    def test_tool_is_registered(self, fake_server, fake_llm, seeded_db):
-        register_search_tools(fake_server, seeded_db, fake_llm)
+    def test_tool_is_registered(self, fake_server, fake_embed, seeded_db):
+        register_search_tools(fake_server, seeded_db, fake_embed)
         assert "search_attachments" in fake_server.tools
 
-    def test_query_match_renders_attachment(self, fake_server, fake_llm, attachments_db):
-        handler = self._handler(fake_server, fake_llm, attachments_db)
+    def test_query_match_renders_attachment(self, fake_server, fake_embed, attachments_db):
+        handler = self._handler(fake_server, fake_embed, attachments_db)
         text = _text(asyncio.run(handler(query="budget")))
         assert "annual-budget.xlsx" in text
         assert "t-budget" in text
 
-    def test_no_query_lists_all_attachments(self, fake_server, fake_llm, attachments_db):
-        handler = self._handler(fake_server, fake_llm, attachments_db)
+    def test_no_query_lists_all_attachments(self, fake_server, fake_embed, attachments_db):
+        handler = self._handler(fake_server, fake_embed, attachments_db)
         text = _text(asyncio.run(handler()))
         assert "Found 3 attachment(s)" in text
         assert "acme-quote.pdf" in text
 
-    def test_no_results_message(self, fake_server, fake_llm, attachments_db):
-        handler = self._handler(fake_server, fake_llm, attachments_db)
+    def test_no_results_message(self, fake_server, fake_embed, attachments_db):
+        handler = self._handler(fake_server, fake_embed, attachments_db)
         out = asyncio.run(handler(query="zzznosuchterm"))
         assert "No attachments found" in _text(out)
 
-    def test_extraction_status_and_snippet_rendered(self, fake_server, fake_llm, attachments_db):
-        handler = self._handler(fake_server, fake_llm, attachments_db)
+    def test_extraction_status_and_snippet_rendered(self, fake_server, fake_embed, attachments_db):
+        handler = self._handler(fake_server, fake_embed, attachments_db)
         text = _text(asyncio.run(handler(query="acme")))
         assert "Text extraction: success" in text
         assert "Acme Corporation" in text
 
-    def test_bad_date_returns_error(self, fake_server, fake_llm, attachments_db):
-        handler = self._handler(fake_server, fake_llm, attachments_db)
+    def test_bad_date_returns_error(self, fake_server, fake_embed, attachments_db):
+        handler = self._handler(fake_server, fake_embed, attachments_db)
         assert "Attachment search error" in _error(handler(date_from="not-a-date"))
 
-    def test_limit_clamped_at_tool_boundary(self, fake_server, fake_llm, attachments_db):
+    def test_limit_clamped_at_tool_boundary(self, fake_server, fake_embed, attachments_db):
         captured: dict = {}
         original = attachments_db.search_attachments
 
@@ -740,7 +743,7 @@ class TestSearchAttachmentsTool:
             return original(**kwargs)
 
         attachments_db.search_attachments = spy  # type: ignore[assignment]
-        handler = self._handler(fake_server, fake_llm, attachments_db)
+        handler = self._handler(fake_server, fake_embed, attachments_db)
         asyncio.run(handler(limit=9999))
         assert captured["limit"] == 50
 
@@ -749,13 +752,13 @@ class TestLoggingPrivacy:
     @pytest.mark.parametrize("tool", ["search_emails", "get_evidence", "search_attachments"])
     @pytest.mark.parametrize("field", ["date_from", "date_to"])
     def test_invalid_date_value_is_not_logged(
-        self, fake_server, fake_llm, seeded_db, caplog, tool, field
+        self, fake_server, fake_embed, seeded_db, caplog, tool, field
     ):
         # log_tool_call withholds a non-ISO date; the validation error
         # quoting it must not put it back in the log (#238).
         import logging
 
-        register_search_tools(fake_server, seeded_db, fake_llm)
+        register_search_tools(fake_server, seeded_db, fake_embed)
         handler = fake_server.tools[tool]
         kwargs = {"query": "invoice", field: "private-sentinel-value"}
         with caplog.at_level(logging.DEBUG):
@@ -764,10 +767,10 @@ class TestLoggingPrivacy:
         assert "private-sentinel-value" not in caplog.text
         assert field in caplog.text
 
-    def test_search_query_never_reaches_logs(self, fake_server, fake_llm, seeded_db, caplog):
+    def test_search_query_never_reaches_logs(self, fake_server, fake_embed, seeded_db, caplog):
         import logging
 
-        handler = _handler(fake_server, fake_llm, seeded_db)
+        handler = _handler(fake_server, fake_embed, seeded_db)
         with caplog.at_level(logging.DEBUG):
             asyncio.run(handler(query="zq-private-medical-diagnosis", from_addr="dr@example.com"))
 
