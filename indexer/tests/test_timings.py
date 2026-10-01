@@ -2,10 +2,10 @@
 Tests for src/timings.py.
 
 Covers the pure percentile math, ``StageTimings`` arithmetic, the
-ring-buffer aggregator's window/reset/snapshot semantics, and the
-log-line formatter. Concurrency is exercised with a small thread pool
-since the aggregator is fed from both the watchdog thread and the main
-drain loop in production.
+ring-buffer aggregator's window bound and summary, and the log-line
+formatter. Concurrency is exercised with a small thread pool to check
+that the aggregator's lock keeps concurrent ``record`` calls from losing
+entries.
 """
 
 import threading
@@ -129,8 +129,8 @@ class TestTimingAggregator:
         assert summary["_meta"]["sample_count"] == 7.0
 
     def test_concurrent_record_does_not_lose_entries(self):
-        # The watchdog thread and the main drain loop both write into the
-        # same aggregator; verify the lock is doing its job.
+        # Several threads record into one aggregator; verify the lock
+        # keeps every append.
         agg = TimingAggregator(window=1000)
 
         def writer():

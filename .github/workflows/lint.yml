@@ -67,10 +67,10 @@ jobs:
   compileall:
     name: compileall
     runs-on: ubuntu-latest
-    # Belt-and-braces around ruff: exercises the full Python import-time
-    # path (__init__.py, relative imports, from-imports) which ruff's
-    # parser doesn't fully simulate. Catches broken imports or accidental
-    # use of a symbol that ruff's static check lets through.
+    # Belt-and-braces around ruff: byte-compiles every source file with
+    # CPython 3.14 itself, so syntax that the interpreter rejects fails
+    # here even if ruff's parser accepts it. It does not import the
+    # modules, so it does not catch broken imports or unresolved names.
     steps:
       - uses: actions/checkout@v7
 

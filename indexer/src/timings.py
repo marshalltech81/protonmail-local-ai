@@ -82,16 +82,16 @@ def percentile(values: list[float], p: float) -> float:
 class TimingAggregator:
     """Bounded ring of recent ``StageTimings`` with on-demand p50/p95.
 
-    Thread-safe so the watchdog callback thread and the main drain loop
-    can both feed the same aggregator without coordinating. The lock is
-    only held for the deque mutation; percentile computation works on a
-    snapshot copy.
+    The drain pipeline records one entry per committed message. The
+    ``deque(maxlen=window)`` bounds the ring and drops the oldest entry
+    once full. A lock guards the deque so ``record`` and ``summary`` are
+    safe to call from different threads; it is held only to append or
+    copy, and percentile computation works on the copy.
     """
 
     def __init__(self, window: int = 200):
         if window <= 0:
             raise ValueError(f"window must be > 0, got {window}")
-        self._window = window
         self._timings: deque[StageTimings] = deque(maxlen=window)
         self._lock = Lock()
 

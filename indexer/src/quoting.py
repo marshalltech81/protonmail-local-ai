@@ -1,12 +1,13 @@
 """
 Quoted-reply and signature stripping for embedding input.
 
-Thread-level embeddings accumulate every reply's quoted history, so by the
-tenth message the vector is dominated by whatever text got quoted most —
-often a boilerplate contract, signature, or the original question — and
-drifts away from the actual content of the latest replies. Stripping
-quotes and signatures before the text reaches ``Embedder.embed`` keeps
-the vector aligned with the substantive content of each message.
+Each reply carries the quoted history before it, so by the tenth message
+a thread's chunks — and the thread vector averaged from them — are
+dominated by whatever text got quoted most (often a boilerplate
+contract, signature, or the original question) and drift away from the
+actual content of the latest replies. Stripping quotes and signatures
+before a message body is chunked and embedded keeps each chunk vector
+aligned with the substantive content of its message.
 
 The stored ``body_text`` (FTS index input) is left alone: users
 legitimately search quoted text and signatures, so this transform only

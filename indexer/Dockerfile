@@ -30,7 +30,6 @@ COPY src/ ./src/
 FROM python:3.14-slim-trixie@sha256:7a500125bc50693f2214e842a621440a1b1b9cbb2188f74ab045d29ed2ea5856
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    inotify-tools \
     # Attachment text extraction (schema v10). Tesseract supplies the OCR
     # path used by image attachments and the scanned-PDF fallback in
     # src/extractors/{image,pdf}.py; Poppler's pdftoppm is what pdf2image
