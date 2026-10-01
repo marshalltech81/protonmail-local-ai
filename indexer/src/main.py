@@ -50,6 +50,7 @@ from .embedder import (
     EMBED_FAILURE_REJECTED_INPUT,
     EMBED_FAILURE_UNCERTAIN,
     EmbeddingBackend,
+    EmbedResponseError,
     OpenAIEmbedder,
     classify_embed_failure,
     scrub_embed_error,
@@ -530,14 +531,45 @@ def _iter_maildir_messages(root: Path):
             yield filepath
 
 
-def _stage_error(exc: BaseException) -> str:
-    """Render a pipeline-stage exception for ``indexing_jobs.last_error``.
+# Exception types whose text cannot carry mail content, so
+# ``_stage_error`` keeps it. Kept deliberately small: every other type
+# (email parser/generator errors, codec and charset-lookup errors,
+# ``ValueError``, ``sqlite3.Error``, library errors) is reduced to its
+# name, which costs debuggability but cannot leak a message.
+# ``OSError`` is not listed: any library can raise it with free text,
+# so ``_stage_error`` renders it from its errno alone.
+_STAGE_ERROR_KEEP_TEXT: tuple[type[BaseException], ...] = (
+    # Path and byte sizes only (parser.py).
+    OversizedMessageError,
+    # Fixed text plus counts by contract (embedder.py).
+    EmbedResponseError,
+)
 
-    Uses ``str()``, never ``repr()``: some exceptions carry their input
-    as an attribute that only ``repr()`` shows — a ``UnicodeDecodeError``
-    embeds the entire byte buffer it was decoding, i.e. email content.
+
+def _stage_error(exc: BaseException) -> str:
+    """Render a pipeline-stage exception for ``indexing_jobs.last_error``
+    and the queue's retry / dead-letter log lines.
+
+    Only types in ``_STAGE_ERROR_KEEP_TEXT`` keep their message; the
+    rest are rendered as the type name alone, because their text can
+    quote the message being indexed (``HeaderWriteError`` embeds the
+    refused header, a codec error its data, a charset ``LookupError``
+    the sender's label, and an FTS5 ``sqlite3.OperationalError`` its
+    query term). Uses ``str()``, never ``repr()``: some exceptions carry
+    their input as an attribute that only ``repr()`` shows.
     """
-    return f"{type(exc).__name__}: {exc}"
+    if isinstance(exc, _STAGE_ERROR_KEEP_TEXT):
+        return f"{type(exc).__name__}: {exc}"
+    if isinstance(exc, OSError) and isinstance(exc.errno, int):
+        # The errno's fixed ``os.strerror`` text, never the exception's
+        # own message or filename; the job row already holds the path.
+        # ``os.strerror`` raises outside the C int range.
+        try:
+            reason = os.strerror(exc.errno)
+        except OverflowError, ValueError:
+            return type(exc).__name__
+        return f"{type(exc).__name__}: [Errno {exc.errno}] {reason}"
+    return type(exc).__name__
 
 
 @dataclass
@@ -1947,7 +1979,7 @@ def main():
                         )
                     drained_since_log = 0
             except Exception as e:
-                log.error("queue drain failed: %s", e)
+                log.error("queue drain failed: %s", _stage_error(e))
 
             now = time.monotonic()
             if reconciler is not None:

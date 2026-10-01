@@ -12,7 +12,10 @@ schema-reserved vector dimension.
 exercise it with stub collaborators rather than booting a live indexer.
 """
 
+import email.errors
 import json
+import logging
+import os
 import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -722,7 +725,7 @@ class TestDrainQueueRetryAndDeadLetter:
             (str(dest),),
         ).fetchone()
         assert row["last_stage"] == "parse"
-        assert "simulated html2text runaway" in row["last_error"]
+        assert row["last_error"] == "RuntimeError"
 
     def test_persistent_embed_failure_is_deferred_never_dead(self, tmp_path):
         """An embedder that fails every call — including the health
@@ -3063,7 +3066,7 @@ class TestMainStartupAndLoop:
     never enqueued), and the main loop must periodically re-walk the
     Maildir so a missed event cannot cause a permanent omission."""
 
-    def _run_main(self, tmp_path, monkeypatch, *, sweep_due: bool):
+    def _run_main(self, tmp_path, monkeypatch, *, sweep_due: bool, drain=None):
         events: list[str] = []
         db = Database(tmp_path / "mail.db")
         self._db = db
@@ -3096,6 +3099,8 @@ class TestMainStartupAndLoop:
                 and 0
             ),
         )
+        if drain is not None:
+            monkeypatch.setattr(main, "_drain_queue_batched", drain)
         monkeypatch.setattr(main, "_recover_zero_vector_threads", lambda *a, **kw: 0)
         monkeypatch.setattr(
             main,
@@ -3180,6 +3185,18 @@ class TestMainStartupAndLoop:
         main._ingestion_state.maybe_record(now=10**9)
         row = self._db._conn.execute("SELECT sync_completed_at FROM ingestion_state").fetchone()
         assert row["sync_completed_at"] == STAMP.completed_at
+
+    def test_drain_failure_log_keeps_mail_out(self, tmp_path, monkeypatch, caplog):
+        """The main loop's drain backstop logs through the same
+        classification as ``last_error`` (#257)."""
+
+        def drain(*_a, **_kw):
+            raise ValueError(SYNTHETIC_MARKER)
+
+        self._run_main(tmp_path, monkeypatch, sweep_due=False, drain=drain)
+
+        assert "queue drain failed: ValueError" in caplog.text
+        assert SYNTHETIC_MARKER not in caplog.text
 
     def test_main_loop_periodically_rewalks_the_maildir(self, tmp_path, monkeypatch):
         events = self._run_main(tmp_path, monkeypatch, sweep_due=True)
@@ -3882,9 +3899,137 @@ def test_stage_errors_never_persist_the_decoded_payload(tmp_path, monkeypatch):
         "SELECT last_stage, last_error FROM indexing_jobs WHERE filepath = ?", (str(dest),)
     ).fetchone()
     assert row["last_stage"] == "parse"
-    assert "UnicodeDecodeError" in row["last_error"]
-    assert "invalid start byte" in row["last_error"]
+    assert row["last_error"] == "UnicodeDecodeError"
     assert "PRIVATE-BODY-TEXT" not in row["last_error"]
+
+
+SYNTHETIC_MARKER = "SYNTHETIC_MARKER_257"
+
+# Exceptions whose text can quote the message they were raised on: the
+# email generator quotes the header it refused, a parser defect its
+# line, a codec its data and a charset lookup the sender's label.
+_CONTENT_QUOTING_ERRORS = [
+    pytest.param(
+        lambda: email.errors.HeaderWriteError(
+            f"folded header contains newline: 'X-Note: {SYNTHETIC_MARKER}'"
+        ),
+        "HeaderWriteError",
+        id="header-write",
+    ),
+    pytest.param(
+        lambda: email.errors.MessageDefect(f" {SYNTHETIC_MARKER}"),
+        "MessageDefect",
+        id="message-defect",
+    ),
+    pytest.param(
+        lambda: UnicodeEncodeError("ascii", f"{SYNTHETIC_MARKER}\u00e9", 0, 1, SYNTHETIC_MARKER),
+        "UnicodeEncodeError",
+        id="unicode-encode",
+    ),
+    pytest.param(
+        lambda: LookupError(f"unknown encoding: {SYNTHETIC_MARKER}"),
+        "LookupError",
+        id="lookup",
+    ),
+    pytest.param(lambda: ValueError(SYNTHETIC_MARKER), "ValueError", id="value"),
+]
+
+
+class TestStageErrorsKeepMailOutOfLastError:
+    """``_stage_error`` keeps exception text only for types that cannot
+    carry mail data; anything else is persisted, and logged by the
+    queue, as its type name alone (#257)."""
+
+    def _drain_one(self, tmp_path, monkeypatch, caplog, target: str, exc: BaseException):
+        dest = tmp_path / "INBOX" / "cur" / "msg.eml"
+        _write_eml(dest, "stage@example.com")
+        db = Database(tmp_path / "mail.db")
+        queue = _make_queue(db)
+        queue.enqueue(str(dest), REASON_INITIAL_SCAN)
+
+        def boom(*_a, **_kw):
+            raise exc
+
+        monkeypatch.setattr(main, target, boom)
+        caplog.set_level(logging.DEBUG)
+        _drain(queue, db, make_mock_embedder(_UNIT_VECTOR), Threader(db))
+        return db._conn.execute(
+            "SELECT last_stage, last_error FROM indexing_jobs WHERE filepath = ?", (str(dest),)
+        ).fetchone()
+
+    @pytest.mark.parametrize(("make_exc", "type_name"), _CONTENT_QUOTING_ERRORS)
+    def test_parse_failure_persists_type_only(
+        self, tmp_path, monkeypatch, caplog, make_exc, type_name
+    ):
+        row = self._drain_one(tmp_path, monkeypatch, caplog, "parse_email", make_exc())
+
+        assert row["last_stage"] == "parse"
+        assert row["last_error"] == type_name
+        assert SYNTHETIC_MARKER not in caplog.text
+        assert f"error={type_name}" in caplog.text
+
+    @pytest.mark.parametrize(("make_exc", "type_name"), _CONTENT_QUOTING_ERRORS)
+    def test_chunk_failure_persists_type_only(
+        self, tmp_path, monkeypatch, caplog, make_exc, type_name
+    ):
+        row = self._drain_one(tmp_path, monkeypatch, caplog, "chunk_message", make_exc())
+
+        assert row["last_stage"] == "chunk"
+        assert row["last_error"] == type_name
+        assert SYNTHETIC_MARKER not in caplog.text
+        assert f"error={type_name}" in caplog.text
+
+    def test_os_error_keeps_errno_text_only(self, tmp_path, monkeypatch, caplog):
+        """An ``OSError`` keeps its errno and the fixed ``os.strerror``
+        text, which operators need to diagnose a file fault. Its message
+        and filename are not kept: any library can raise ``OSError`` with
+        arbitrary text, and the job row already records the path."""
+        row = self._drain_one(
+            tmp_path,
+            monkeypatch,
+            caplog,
+            "chunk_message",
+            PermissionError(13, f"{SYNTHETIC_MARKER} denied", f"/x/{SYNTHETIC_MARKER}"),
+        )
+
+        assert row["last_stage"] == "chunk"
+        assert row["last_error"] == f"PermissionError: [Errno 13] {os.strerror(13)}"
+        assert SYNTHETIC_MARKER not in caplog.text
+
+    @pytest.mark.parametrize(
+        "exc",
+        [
+            OSError(SYNTHETIC_MARKER),
+            OSError("not-an-errno", SYNTHETIC_MARKER),
+        ],
+    )
+    def test_os_error_without_an_errno_is_type_only(self, exc):
+        """Library code raises ``OSError`` with free text (no errno);
+        that text can quote the attachment being read."""
+        assert main._stage_error(exc) == "OSError"
+
+    @pytest.mark.parametrize("errno", [2**31, -(2**31) - 1, 2**70])
+    def test_os_error_with_errno_outside_c_int_is_type_only(self, errno):
+        """``os.strerror`` raises ``OverflowError`` outside the C int
+        range; that must not escape the stage handlers and stop the
+        drain."""
+        assert main._stage_error(OSError(errno, SYNTHETIC_MARKER)) == "OSError"
+
+    def test_oversized_message_error_keeps_its_text(self):
+        exc = parser.OversizedMessageError(Path("/maildir/INBOX/cur/x"), 20, 10)
+
+        assert main._stage_error(exc) == f"OversizedMessageError: {exc}"
+
+    def test_sqlite_error_is_type_only(self):
+        """FTS5 query errors quote the bound query string ("no such
+        column: <term>"), so sqlite text is not kept."""
+        conn = sqlite3.connect(":memory:")
+        conn.execute("CREATE VIRTUAL TABLE f USING fts5(x)")
+        with pytest.raises(sqlite3.OperationalError) as info:
+            conn.execute("SELECT * FROM f WHERE f MATCH ?", (f"{SYNTHETIC_MARKER}: y",))
+        assert SYNTHETIC_MARKER in str(info.value)
+
+        assert main._stage_error(info.value) == "OperationalError"
 
 
 class TestMessageRecordsEndToEnd:

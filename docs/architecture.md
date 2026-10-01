@@ -665,7 +665,15 @@ non-zero `threads_vec` rows.
 Each job carries `attempts`, `last_stage`, `last_error`, `last_error_class`
 (`retryable` / `permanent_source_failure` / `operator_action_required`), and a
 `next_attempt_at` scheduled via exponential backoff
-(`base_backoff_seconds × 2^(attempts - 1)`, capped at 6 hours). When
+(`base_backoff_seconds × 2^(attempts - 1)`, capped at 6 hours). Outside
+the embed stage, `last_error` holds the exception type name alone, since
+parser, codec and library messages can quote the mail being indexed. An
+`OSError` with an errno keeps the errno and its fixed `os.strerror` text
+(not its message or filename), and only `OversizedMessageError` (path
+and sizes) and the embedder's fixed-text `EmbedResponseError` keep their
+message. The embed stage records `scrub_embed_error` instead: an SDK
+status error as its type and status code, a connection or timeout error
+and `EmbedResponseError` in full, and anything else as its type name. When
 `attempts` reaches `INDEXER_MAX_ATTEMPTS` (default 5), the row
 transitions to `status = 'dead'` — it stays in the table for operator
 visibility and stops being claimed. Watchdog rename / create events
