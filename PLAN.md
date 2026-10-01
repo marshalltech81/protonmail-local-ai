@@ -402,6 +402,32 @@ on #307):
 **Exit criterion:** we can objectively measure whether the system
 answers real knowledge questions, and identify why failures occur.
 
+**Status of Phases 3–5 (2026-10-01).** No phase is complete. Done:
+Phase 3 items 4, 6 and 7, Phase 4 items 1 and 2. Partly done: Phase 3
+items 1, 2, 3 and 8, Phase 4 item 4, Phase 5 item 2. Not started:
+Phase 3 item 5, Phase 4 item 3, Phase 5 items 1, 3 and 4. Most of
+what remains needs the real mailbox and providers (the go-live
+checklist) or an owner decision.
+
+| Item | Status | Landed in | Remaining |
+|---|---|---|---|
+| 3.1 Evals | Partly done | #452 (evidence recall vs hit rate) | agent-level and answer-quality evals (#283) |
+| 3.2 Latency | Partly done | #458 (stage timings) | benchmarks, budgets, cancellation (#287); needs real mail |
+| 3.3 `brief_issue` | Built, experimental | #466 | accuracy/abstention scoring (#291), hardening (#471) |
+| 3.4 Injection suite | Done | #448 | gap filed as #442 |
+| 3.5 Thread weighting, rerank | Not started | — | needs real embedder/reranker (#288, #289) |
+| 3.6 Prompt evidence budget | Done | #445 | token-based count, small-model profile (#285) |
+| 3.7 Filtered semantic recall | Done | #440, #470 | — |
+| 3.8 Citation contract | Partly done | #457 | statement-level and quote checks (#284) |
+| 4.1 Entities | Done | #459 | orphan cleanup (#464) |
+| 4.2 Source authority | Done | #459 | Spam guard in progress; verdict gating after go-live (#463) |
+| 4.3 Temporal retrieval | Not started | — | — |
+| 4.4 Retention | Mostly done | #451 (mirror default) | Trash hidden from search in progress (#441); user-controlled retention; reaped-citation behaviour |
+| 5.1 Hardened `brief_issue` | Not started | — | needs Phase 3 usage on real mail |
+| 5.2 Support/contradict | Built, experimental | #467 (`check_conclusion`) | quote/support verification |
+| 5.3 Position as of date | Not started | — | — |
+| 5.4 Persisted claims | Not started (by design) | — | only after 5.1–5.3 |
+
 1. **Agent-level evals** on the synthetic mailbox: tool-selection
    accuracy, argument accuracy, retrieval recall, citation accuracy,
    pagination completeness, unnecessary-call counts. Extends the
@@ -411,7 +437,10 @@ answers real knowledge questions, and identify why failures occur.
    Tracked by **#283**, whose substantive addition is separating
    jointly-required-evidence recall from any-hit rate (today's
    "Recall@10" is the latter); its first slice precedes Phase 2 (see
-   Phase 2, Sequencing).
+   Phase 2, Sequencing). **Status: partly done.** The first slice
+   landed in #452 (required-evidence groups, evidence recall@10
+   reported apart from hit@10 and MRR); agent-level and
+   answer-quality evals remain.
 2. **Latency instrumentation before performance redesign.** Stage
    timers through the query path (query_embedding / per-lane FTS+KNN /
    fusion / rerank / evidence_fetch / inference / total). `ask_mailbox`
@@ -422,9 +451,9 @@ answers real knowledge questions, and identify why failures occur.
    deadlines. (Project history endorses this: the 400s search hang
    was three wrong theories until the query plan was measured.)
    Tracked by **#287** (adds content-safe telemetry, cold/warm
-   benchmarks, cancellation of thread-offloaded work). Stage timings
-   landed in #458; benchmarks, budgets and cancellation wait on a
-   real mailbox.
+   benchmarks, cancellation of thread-offloaded work). **Status:
+   partly done.** Stage timings landed in #458; benchmarks, budgets
+   and cancellation wait on a real mailbox.
 3. **Experimental ephemeral `brief_issue`.** Chronology, actors,
    positions, decisions, open questions, conflicting evidence — every
    assertion cited, **nothing persisted**. This is the proving ground
@@ -433,11 +462,12 @@ answers real knowledge questions, and identify why failures occur.
    corrections, contradictions, "as of" questions; "newest is not
    authoritative"). An experimental MCP tool, registered only when
    `MCP_EXPERIMENTAL_TOOLS=true` (off by default; Resolved
-   decisions 12). Built in #466; #291's accuracy and abstention
-   scoring still open.
+   decisions 12). **Status: built (experimental) in #466.** #291's
+   accuracy and abstention scoring and the #471 hardening remain.
 4. **Adversarial injection suite** (hostile fixtures in the synthetic
    mailbox, asserting the Phase 0 serialization holds under real
-   tool flows). Done in #448; the one gap it found is #442.
+   tool flows). **Status: done (#448).** The one gap it found is
+   #442.
 5. Unparked by the eval harness:
    - **Thread-vector weighting** — attachment chunks currently
      dominate the thread-vector mean (a 50-chunk PDF on a 5-chunk
@@ -452,26 +482,33 @@ answers real knowledge questions, and identify why failures occur.
    Tracked by **#288** (thread-vector policy, with versioning and a
    recompute spec) and **#289** (rerank, including candidate-text
    representation; recommendation only, default stays off).
+   **Status: not started;** both need a real embedder and reranker.
 6. **Prompt context budget with coverage disclosure** (#286 is
    item 7; this is **#285**): replace the fixed 2,000-character
    per-thread fill and 3-chunks-per-candidate slice with a
    whole-prompt token budget, an evidence-selection policy, dedup,
    and a statement of what was left out. Nothing in the plan covered
    this; #214/#215 fixed only `summarize_thread`'s tail and
-   attachment identity.
+   attachment identity. **Status: done (#445).** One shared budget,
+   per-thread dedup of long quoted passages, and a counts-only
+   coverage note; a token-based count and a small-model profile stay
+   on #285.
 7. **Semantic recall under selective filters** (**#286**): the vector
    lanes run unfiltered and sender/date/folder filters apply
    afterwards, so a selective filter can empty the candidate window.
    Measure the loss, then choose a bounded remedy (eligible-subset
-   scoring, filter pushdown, or candidate expansion).
+   scoring, filter pushdown, or candidate expansion). **Status: done
+   (#440, #470)** with candidate expansion; eligible-subset scoring
+   is the next step if the evals still show loss.
 8. **A validated citation contract for today's answers** (**#284**):
    stable evidence IDs and per-message identity in `ask_mailbox`
    prompts, a structured claim→citation map checked against the
    evidence, bounded repair. The plan verified quotes only for
    Phase 5's persisted claims; ephemeral answers need it first.
    Depends on #217's identity decision (landed in #453). First slice
-   in #457 (labelled evidence, label validation, one repair);
-   statement-level coverage and quote checks remain.
+   in #457 (labelled evidence, label validation, one repair).
+   **Status: partly done;** statement-level coverage and quote checks
+   remain.
 
 ### Phase 4 — Deterministic knowledge scaffolding
 
@@ -484,7 +521,8 @@ the first deployment needs a numbered migration like any other.
    mapping; `entities` / `entity_aliases` relational tables.
    Deterministic only (Resolved decisions 12): two addresses are never
    merged by display name, and no model-suggested merges or
-   confirmation flow are built.
+   confirmation flow are built. **Status: done (#459);** orphaned
+   entities are not cleaned up yet (#464).
 2. **Source authority metadata:** `source_type` / `authority_class`
    as explicit, filterable metadata with provenance, assigned only
    from an operator rules file (domain/address → class; Resolved
@@ -492,29 +530,37 @@ the first deployment needs a numbered migration like any other.
    to the inference provider from the indexer. **Never silently
    folded into ranking weights** — authority is contextual; reasoning distinguishes "a
    vendor represented X" from "the executed agreement states X".
+   **Status: done (#459).** The From address is unauthenticated: the
+   Spam guard is in progress and gating on Proton's verdict header is
+   decided after go-live (#463).
 3. **Richer temporal retrieval:** capture and expose
    occurred_at/sent_at consistently; bitemporal claim modeling waits
-   for Phase 5.
+   for Phase 5. **Status: not started.**
 4. **Deletion/retention semantics.** Mirror is the default
    (upstream delete → index delete after the grace window; #451),
    archive (`INDEXER_DELETION_ENABLED=false`) is the opt-in, and
-   whether Trash copies leave search is open (#441). Still to define:
-   user-controlled retention. Provenance must define behavior when a
-   citation's source is reaped (evidence row retained, source marked
-   unavailable, chain never silently broken).
+   Trash stays indexed but is hidden from default search (decided
+   2026-10-01, #441). Still to define: user-controlled retention.
+   Provenance must define behavior when a citation's source is reaped
+   (evidence row retained, source marked unavailable, chain never
+   silently broken). **Status: mostly done** (#451; the Trash change
+   is in progress).
 
 ### Phase 5 — Knowledge reasoning
 
-1. Hardened `brief_issue` (informed by Phase 3 usage).
+1. Hardened `brief_issue` (informed by Phase 3 usage). **Status: not
+   started;** needs Phase 3 usage on real mail.
 2. Support / contradict / qualify / supersede analysis as a
    query-time tool ("here is a conclusion for the Board packet —
    find evidence that supports, contradicts, qualifies, or
    supersedes it"). Experimental, behind `MCP_EXPERIMENTAL_TOOLS`
-   like `brief_issue`. Built as `check_conclusion` (#467).
+   like `brief_issue`. **Status: built (experimental) as
+   `check_conclusion` (#467);** quote and support verification
+   remain.
 3. Temporal position/change reasoning ("position as of date X" vs
-   "current position").
+   "current position"). **Status: not started.**
 4. **Only then** evaluate persisted claims/events — and only under
-   these rules:
+   these rules (**Status: not started, by design**):
    - every cited span is **verbatim-verified against chunk text at
      write time**; fabricated quotes are rejected mechanically
    - derived claims are **never re-indexed as retrieval content**
