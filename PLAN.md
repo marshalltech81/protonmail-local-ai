@@ -616,18 +616,20 @@ Focus has moved from hardening to running the stack for real
 smoke check #268/#269 (#422), mbsync #271/#280 (#419) and its Bash 3.2
 harness fix #425 (#427), #361 (#414), and docx@3 #299 (#426).
 
-Open at handoff, each Codex-reviewed or awaiting review; finish them
-under the two-round cap in AGENTS.md:
+The PRs open at that handoff (#424, #429, #430) have merged.
 
-- #424 xlsx@2 (#294, #296, #305); round 1 done, pre-walk load
-  documented as #428.
-- #429 Bridge updater gate (#245).
-- #430 pdf@2 page-level OCR (#292) and OCR-on requeue (#300). #424 and
-  #430 both add to `EXTRACTOR_VERSIONS`; the second to merge rebases.
+**Result quality first (owner, 2026-10-01, later the same day).** Work
+now targets the quality of returned results, without edge cases or
+P3s. No live index exists yet, so the reindex bundle's body and text
+fixes land directly rather than waiting for the Phase 2 rebuild:
+#298, #295 and #303. Alongside them: filtered semantic recall (#286),
+the first #283 evidence-recall slice, and the `ask_mailbox` evidence
+budget (#285). #208, #297 and #304 stay in the bundle; each needs an
+unusual setting, undated mail or a faulty provider to show up.
 
 Go-live checklist (do these before more hardening):
 
-1. Merge #424, #429, #430.
+1. ~~Merge #424, #429, #430.~~ (done)
 2. Choose providers and fill `.env` / `.secrets` (see
    `docs/setup.md`). The embedder must return 4096-dim vectors (the
    schema is fixed at 4096); OpenAI's public models return 3072 or
