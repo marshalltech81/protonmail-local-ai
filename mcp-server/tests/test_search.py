@@ -322,6 +322,65 @@ class TestErrorPath:
         assert "status=400" in text
 
 
+def _drop_tables(db, *tables: str) -> None:
+    """Drop vec tables from a fixture DB to simulate an unavailable lane."""
+    import sqlite3
+
+    import sqlite_vec
+
+    conn = sqlite3.connect(db.path)
+    conn.enable_load_extension(True)
+    sqlite_vec.load(conn)
+    conn.enable_load_extension(False)
+    for table in tables:
+        conn.execute(f"DROP TABLE {table}")
+    conn.commit()
+    conn.close()
+
+
+class TestSemanticVectorLaneFailure:
+    """#318: both vector helpers turn SQLite errors into empty lists, so a
+    semantic search with no working vector lane answered "No results"
+    instead of reporting the broken index."""
+
+    def test_no_vector_lane_is_an_error_not_empty(self, fake_server, fake_embed, seeded_db):
+        _drop_tables(seeded_db, "threads_vec", "message_chunks_vec")
+        handler = _handler(fake_server, fake_embed, seeded_db)
+        text = _error(handler(query="invoice", mode="semantic"))
+        assert "Search error" in text
+        assert "vector" in text
+        # Fixed text: neither the query nor SQLite's message is quoted.
+        assert "invoice" not in text
+        assert "no such table" not in text
+
+    def test_one_lane_missing_still_returns_results(self, fake_server, fake_embed, chunked_db):
+        _drop_tables(chunked_db, "message_chunks_vec")
+        handler = _handler(fake_server, fake_embed, chunked_db)
+        out = asyncio.run(handler(query="invoice", mode="semantic"))
+        assert out.structuredContent["results"]
+
+    def test_chunk_lane_alone_still_returns_results(self, fake_server, fake_embed, chunked_db):
+        _drop_tables(chunked_db, "threads_vec")
+        handler = _handler(fake_server, fake_embed, chunked_db)
+        out = asyncio.run(handler(query="invoice", mode="semantic"))
+        assert out.structuredContent["results"]
+
+    def test_valid_empty_index_is_empty_success(self, fake_server, fake_embed, empty_db):
+        handler = _handler(fake_server, fake_embed, empty_db)
+        out = asyncio.run(handler(query="invoice", mode="semantic"))
+        assert not out.isError
+        assert out.structuredContent["results"] == []
+        assert "No results found" in _text(out)
+
+    def test_hybrid_unchanged_when_vector_lanes_missing(self, fake_server, fake_embed, seeded_db):
+        # Hybrid degraded-lane disclosure is #333; the keyword lane still
+        # answers here, so hybrid keeps returning results.
+        _drop_tables(seeded_db, "threads_vec", "message_chunks_vec")
+        handler = _handler(fake_server, fake_embed, seeded_db)
+        out = asyncio.run(handler(query="invoice", mode="hybrid"))
+        assert out.structuredContent["results"]
+
+
 class TestWrongDimEmbedSurfaces:
     """Wrong-dim query vectors used to silently degrade to keyword-only
     results because sqlite-vec's MATCH error was swallowed by the broad

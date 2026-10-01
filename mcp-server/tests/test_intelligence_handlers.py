@@ -215,6 +215,22 @@ class TestSummarizeThread:
         # resolved a thread to summarize.
         assert fake_inference.complete_calls == []
 
+    def test_missing_address_shaped_id_does_not_resolve_via_its_tokens(
+        self, fake_server, seeded_db, fake_embed, fake_inference
+    ):
+        # #314: a missed opaque ID shaped like a Message-ID must not
+        # resolve through tokens of its own domain or local part. The
+        # domain "invoice" overlaps t-alpha's subject "invoice for
+        # march", which the fixed [1, 0, 0, 0] embedding also ranks
+        # first, so before the fix this summarized t-alpha.
+        handler = _handlers(fake_server, seeded_db, fake_embed, fake_inference)["summarize_thread"]
+        with pytest.raises(ToolError, match="Thread not found"):
+            asyncio.run(handler(thread_id="<not-present@invoice.com>"))
+        assert fake_inference.complete_calls == []
+        # Decided before any provider work, so an embedder outage cannot
+        # turn a missing ID into a provider error.
+        assert fake_embed.embed_calls == []
+
     def test_phrase_with_empty_corpus_returns_not_found(
         self, fake_server, empty_db, fake_embed, fake_inference
     ):
@@ -458,6 +474,66 @@ class TestExtractFromEmails:
         assert "Acme" in text
         assert "Beta" in text
 
+    @pytest.mark.parametrize(
+        "schema",
+        [
+            {"_date": "string", "_source_thread": "string"},
+            {"amount": "number", "_date": "string"},
+            {"type": "object", "properties": {"_source_thread": {"type": "string"}}},
+            {"type": "object", "properties": {"amount": {}}, "required": ["_date"]},
+        ],
+    )
+    def test_schema_declaring_a_provenance_field_is_rejected_before_inference(
+        self, fake_server, seeded_db, fake_embed, schema
+    ):
+        """#329: provenance is written to ``_source_thread`` and ``_date``,
+        so a requested field of either name would be silently replaced
+        by thread metadata. The schema is rejected before any provider
+        work instead."""
+        llm = FakeInferenceClient(
+            complete_responses=['{"_date": "2020-02-03", "_source_thread": "requested-value"}']
+        )
+        handler = _handlers(fake_server, seeded_db, fake_embed, llm)["extract_from_emails"]
+        with pytest.raises(ToolError, match="reserved"):
+            asyncio.run(handler(query="invoice", schema=schema))
+        assert llm.complete_calls == []
+
+    def test_provenance_overrides_an_undeclared_field_of_the_same_name(
+        self, fake_server, seeded_db, fake_embed
+    ):
+        """A ``_date`` the schema never asked for is not requested data,
+        so provenance still fills it for ordinary schemas."""
+        seeded_db.hybrid_search = lambda **_kw: [_hostile_thread()]  # type: ignore[assignment]
+        llm = FakeInferenceClient(complete_responses=['{"amount": 5, "_date": "2020-02-03"}'])
+        handler = _handlers(fake_server, seeded_db, fake_embed, llm)["extract_from_emails"]
+        out = asyncio.run(handler(query="invoice", schema={"amount": "number"}))
+        [record] = json.loads(_text(out))
+        assert record["amount"] == 5
+        assert record["_date"] == "2024-01-02"
+        assert record["_source_thread"].startswith("Invoice")
+
+    def test_query_reaches_the_prompt_outside_the_untrusted_block(
+        self, fake_server, seeded_db, fake_embed, fake_inference
+    ):
+        """#315: two queries that retrieve the same mixed passage must
+        produce different prompts, or the model cannot tell which subset
+        of the records the user asked for. The query is the user's task,
+        so it sits outside the untrusted mail block."""
+        seeded_db.hybrid_search = lambda **_kw: [_hostile_thread()]  # type: ignore[assignment]
+        handler = _handlers(fake_server, seeded_db, fake_embed, fake_inference)[
+            "extract_from_emails"
+        ]
+        for query in ("unpaid invoices", "paid invoices"):
+            asyncio.run(handler(query=query, schema={"amount": "number"}, limit=1))
+
+        (_s1, unpaid), (_s2, paid) = fake_inference.complete_calls
+        assert unpaid != paid
+        for user, query in ((unpaid, "unpaid invoices"), (paid, "paid invoices")):
+            _assert_fenced(user)
+            before, _, rest = user.partition("<untrusted_email>")
+            _inside, _, after = rest.rpartition("</untrusted_email>")
+            assert f"Request: {query}\n" in before + after
+
     def test_db_exception_returns_error(self, fake_server, seeded_db, fake_embed, fake_inference):
         def boom(**_kwargs):
             raise RuntimeError("simulated read failure")
@@ -468,6 +544,109 @@ class TestExtractFromEmails:
         ]
         with pytest.raises(ToolError, match="simulated read failure"):
             asyncio.run(handler(query="invoice", schema={"x": "string"}))
+
+
+_EXTRACT_MARKER = "private-extract-marker"
+_AMOUNT_SCHEMA = {
+    "type": "object",
+    "properties": {"amount": {"type": "number"}},
+    "required": ["amount"],
+}
+
+
+class TestExtractSchemaConformance:
+    """#310: records the model returns are checked against the requested
+    schema's declared fields and basic JSON types. A record that fails is
+    dropped and its thread counted as incompletely extracted, so
+    schema-invalid output is never reported as a success, nor as a valid
+    "no data" answer. Nothing from the rejected record is logged."""
+
+    def _run(self, fake_server, seeded_db, responses, schema, caplog):
+        import logging
+
+        llm = FakeInferenceClient(complete_responses=responses)
+        handler = _handlers(fake_server, seeded_db, FakeEmbedClient(), llm)["extract_from_emails"]
+        with caplog.at_level(logging.DEBUG):
+            out = asyncio.run(handler(query="invoice OR lunch OR meeting", schema=schema))
+        assert len(llm.complete_calls) == 3
+        assert _EXTRACT_MARKER not in caplog.text
+        return out
+
+    @pytest.mark.parametrize(
+        ("schema", "record"),
+        [
+            # The issue's reproduction: wrong type for a required number.
+            (_AMOUNT_SCHEMA, {"amount": f"{_EXTRACT_MARKER} not a number"}),
+            # Missing required field.
+            (_AMOUNT_SCHEMA, {"vendor": _EXTRACT_MARKER}),
+            # A boolean is not a number in JSON Schema.
+            (_AMOUNT_SCHEMA, {"amount": True, "vendor": _EXTRACT_MARKER}),
+            # null only where the type allows it.
+            (_AMOUNT_SCHEMA, {"amount": None, "vendor": _EXTRACT_MARKER}),
+            # The documented shorthand: a present field must have its type.
+            ({"vendor": "string", "amount": "number"}, {"vendor": 7, "note": _EXTRACT_MARKER}),
+            ({"count": "integer"}, {"count": 1.5, "note": _EXTRACT_MARKER}),
+        ],
+    )
+    def test_violating_record_is_dropped_and_reported(
+        self, fake_server, seeded_db, caplog, schema, record
+    ):
+        out = self._run(
+            fake_server, seeded_db, [json.dumps(record), "null", "null"], schema, caplog
+        )
+        text = _all_text(out)
+        assert _EXTRACT_MARKER not in text
+        assert "No structured data matching" not in text
+        assert text.startswith("No records extracted.")
+        assert "1 of 3 threads could not be extracted" in text
+        assert "did not match the schema" in text
+
+    @pytest.mark.parametrize(
+        ("schema", "record"),
+        [
+            (_AMOUNT_SCHEMA, {"amount": 12.5}),
+            (_AMOUNT_SCHEMA, {"amount": 12, "extra": "kept"}),
+            (
+                {"type": "object", "properties": {"amount": {"type": ["number", "null"]}}},
+                {"amount": None},
+            ),
+            ({"type": "object", "properties": {"n": {"type": "integer"}}}, {"n": 3.0}),
+            # Shorthand fields are optional and may be null.
+            ({"vendor": "string", "amount": "number"}, {"vendor": "Acme", "amount": None}),
+            ({"vendor": "string", "amount": "number"}, {"vendor": "Acme"}),
+            # Type names outside the JSON types are not checked.
+            ({"due": "date", "vendor": "the company name"}, {"due": 5, "vendor": ["x"]}),
+            (
+                {"type": "object", "properties": {"due": {"type": "string", "format": "date"}}},
+                {"due": "not a date"},
+            ),
+            (
+                {"flag": "boolean", "tags": "array", "meta": "object", "gone": "null"},
+                {"flag": False, "tags": [], "meta": {}, "gone": None},
+            ),
+        ],
+    )
+    def test_conforming_record_is_returned(self, fake_server, seeded_db, caplog, schema, record):
+        out = self._run(
+            fake_server, seeded_db, [json.dumps(record), "null", "null"], schema, caplog
+        )
+        [returned] = json.loads(_text(out))
+        assert {k: v for k, v in returned.items() if not k.startswith("_")} == record
+
+    def test_mixed_batch_keeps_valid_records_and_reports_the_thread(
+        self, fake_server, seeded_db, caplog
+    ):
+        responses = [
+            json.dumps([{"amount": 1}, {"amount": _EXTRACT_MARKER}]),
+            json.dumps({"amount": 2}),
+            "null",
+        ]
+        out = self._run(fake_server, seeded_db, responses, _AMOUNT_SCHEMA, caplog)
+        assert [r["amount"] for r in json.loads(out[0].text)] == [1, 2]
+        notice = _all_text(out[1:])
+        assert "1 of 3 threads could not be extracted" in notice
+        assert "did not match the schema" in notice
+        assert _EXTRACT_MARKER not in _all_text(out)
 
 
 class TestInferenceDispatch:
