@@ -290,8 +290,11 @@ searchable through FTS and falls back to the original body when the
 stripped result would be empty.
 
 **Known limitation (#295):** a message's body text is the first
-non-empty `text/plain` part outside attachments, or failing that the
-first non-empty `text/html` part. That suits `multipart/alternative`,
+`text/plain` part outside attachments, or failing that the first
+`text/html` part. "First" means first, not first non-empty: a leading
+plain part that holds only whitespace still wins, so a later plain part
+is never read and the HTML fallback is suppressed, leaving an empty
+body (#298). That suits `multipart/alternative`,
 where the parts are alternative renderings of one body, but a
 `multipart/mixed` message with several sequential inline text parts
 (for example text, an attachment, then more text) keeps only the first

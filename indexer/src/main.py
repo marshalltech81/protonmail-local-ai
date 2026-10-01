@@ -268,8 +268,8 @@ WAL_CHECKPOINT_INTERVAL_SECS = _int_env("INDEXER_WAL_CHECKPOINT_INTERVAL_SECS", 
 # (``_enqueue_unindexed_messages``).
 RECOVERY_SWEEP_INTERVAL_SECS = _int_env("INDEXER_RECOVERY_SWEEP_INTERVAL_SECS", 1800, minimum=60)
 
-# Phase 1 seed for genuinely new threads (the only branch that uses
-# this constant). Phase 1's seed-selection runs a three-case priority
+# Phase 1 seed for new threads and already-zero chunkless ones (the
+# only branch that uses this constant). Phase 1's seed-selection runs a three-case priority
 # chain:
 #   1. Thread has chunk vectors → mean(chunks).
 #   2. No chunks but a prior threads_vec row carries a non-zero
@@ -582,8 +582,9 @@ class _BatchedMsg:
     priority chain: ``mean(existing chunk vectors)`` when the thread
     is already indexed with content; the prior ``threads_vec`` row
     when the thread is chunkless but has a non-zero embedding (covers
-    subject-fallback threads); placeholder zero only for genuinely
-    new threads. Phase 2a populates the chunk + attachment-plan
+    subject-fallback threads); otherwise placeholder zero (a new
+    thread, or a chunkless one whose stored vector is still zero after
+    a crash between phases). Phase 2a populates the chunk + attachment-plan
     fields and the offsets that point each new chunk into the batch's
     flat embed-input list. Phase 2c reads the bulk-embedded vectors
     back through those offsets and applies the per-message DB writes,
@@ -641,7 +642,9 @@ def _phase1_commit_thread(
     a three-case priority chain: ``mean`` of the thread's existing
     chunk vectors when it has any; the prior non-zero ``threads_vec``
     row when the thread is chunkless (subject-fallback threads);
-    placeholder zero only for genuinely new threads. Returns a populated ``_BatchedMsg`` on success. On any
+    otherwise the placeholder zero, for a new thread or a chunkless one
+    whose stored vector is still zero (a retry after a crash between
+    phases). Returns a populated ``_BatchedMsg`` on success. On any
     failure, marks the queue row appropriately and returns ``None`` so
     the caller skips the message without aborting the whole batch.
     """
