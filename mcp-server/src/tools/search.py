@@ -12,7 +12,7 @@ from mcp.types import CallToolResult
 
 from ..lib.embed import embed_query
 from ..lib.security import log_tool_call, safe_exception_text, safe_provider_exception_text
-from ..lib.sqlite import InvalidFilterError
+from ..lib.sqlite import InvalidFilterError, VectorLanesUnavailableError
 from ..lib.validation import clamp_int
 from .outputs import (
     HEADER_CHAR_LIMIT,
@@ -321,17 +321,16 @@ def register_search_tools(
             # withheld. Return it to the caller; log only the field name.
             log.warning("search_emails rejected invalid %s", e.field_name)
             raise ToolError(f"Search error: {e}") from e
+        except VectorLanesUnavailableError as e:
+            # Fixed text naming the fix; it quotes nothing.
+            log.error("search_emails error: %s", e)
+            raise ToolError(f"Search error: {e}") from e
         except Exception as e:
-            # Provider-SDK status errors (embed call, reranker call) can
-            # echo request/response body fragments — for search that
-            # would leak the user's query string into logs and the MCP
-            # response. ``safe_provider_exception_text`` reduces SDK
-            # status errors to ``type + status`` only and falls through
-            # to the standard secret-redacting formatter for non-provider
-            # exceptions (DB errors, validation errors), so DB diagnostics
-            # keep their detail. The inner ``find_contact`` except above
-            # stays on ``safe_exception_text`` because that path is pure
-            # local DB work.
+            # A provider error (the embed call) can echo the query, and a
+            # parse or database error quotes the values it rejects.
+            # ``safe_provider_exception_text`` keeps a status error's
+            # status, the text of connection, timeout and our own
+            # fixed-message errors, and only the type of anything else.
             safe_error = safe_provider_exception_text(e, secrets)
             log.error("search_emails error: %s", safe_error)
             raise ToolError(f"Search error: {safe_error}") from e
@@ -497,9 +496,8 @@ def register_search_tools(
             log.warning("get_evidence rejected invalid %s", e.field_name)
             raise ToolError(f"Evidence error: {e}") from e
         except Exception as e:
-            # Mirror search_emails: provider-SDK status errors (the embed
-            # call) can echo the query back, so reduce them to type +
-            # status and redact any quoted secret.
+            # Mirror search_emails: classify before logging or returning,
+            # since the embed call's errors can echo the query back.
             safe_error = safe_provider_exception_text(e, secrets)
             log.error("get_evidence error: %s", safe_error)
             raise ToolError(f"Evidence error: {safe_error}") from e

@@ -284,7 +284,7 @@ class TestErrorPath:
         leaked_key = "sk-leakedABC123"  # pragma: allowlist secret
 
         def boom(**_kwargs):
-            raise RuntimeError(f"upstream auth: Bearer {leaked_key}")
+            raise ConnectionError(f"upstream auth: Bearer {leaked_key}")
 
         seeded_db.hybrid_search = boom  # type: ignore[assignment]
         register_search_tools(fake_server, seeded_db, fake_embed, secret_values=[leaked_key])
