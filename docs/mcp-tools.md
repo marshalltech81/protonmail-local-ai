@@ -75,7 +75,7 @@ contents of a returned thread, follow up with `get_thread` or
 |---|---|---|---|
 | `query` | string | required | Natural language or keyword query |
 | `mode` | string | `hybrid` | `hybrid`, `semantic`, or `keyword` |
-| `folders` | list | all | Scope to specific folders |
+| `folders` | list | all | Scope to threads with a message in any of these folders (the membership `list_threads` uses) |
 | `from_addr` | string | none | Filter by canonical sender address (or domain like `@example.com`); substring fallback when the value can't canonicalize |
 | `from_name` | string | none | Filter by sender name; resolved through `find_contact` to a canonical address before applying, matching any display name the address carries in a From header on a thread it primarily sent (the index keeps no author order within one message, so a name written for it as a second author on such a thread also matches). Use when the user names a person but not their email. `from_addr` wins if both are given. |
 | `date_from` | string | none | ISO 8601 date lower bound |
@@ -114,6 +114,11 @@ drive an unbounded query against the index.
   ``LIKE`` scan over subject / body / participants so recall is
   preserved. The scan matches the query as a literal substring: `%`,
   `_` and `\` in the query match only themselves.
+- A folder filter keeps a thread when any of its messages is filed in
+  one of the named folders, the same membership `list_threads` and
+  `list_folders` use, so a thread started in INBOX with a reply in Sent
+  matches `folders=["Sent"]`. The thread's reported `folder` stays its
+  representative folder.
 - When any filter (folder, sender, date range, attachment flag) is
   applied, search oversamples raw candidates by ``limit * 4`` rather
   than ``limit * 2`` so deeper-ranked matches still qualify after
@@ -150,7 +155,7 @@ chunks (extracted PDF / OCR / document text) are included — unlike
 |---|---|---|---|
 | `query` | string | required | The question or topic to gather evidence for |
 | `thread_id` | string | none | Scope evidence to one thread; omit to search the whole mailbox. Rejected in combination with `folders`, `from_addr`, `date_from`, `date_to` or `has_attachments`, which select threads |
-| `folders` | list | all | Scope to specific folders |
+| `folders` | list | all | Scope to threads with a message in any of these folders (the membership `list_threads` uses) |
 | `from_addr` | string | none | Filter by sender address or domain |
 | `date_from` | string | none | ISO 8601 date lower bound |
 | `date_to` | string | none | ISO 8601 date upper bound |
@@ -180,7 +185,7 @@ three returns the whole document.
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `query` | string | none | Match against filename, MIME type, and extracted text; omit to list by filter alone |
-| `content_type` | string | none | Exact MIME-type filter, e.g. `application/pdf` |
+| `content_type` | string | none | Exact MIME-type filter, e.g. `application/pdf`; blank means no filter |
 | `from_addr` | string | none | Restrict to attachments on threads sent by this address or domain |
 | `date_from` | string | none | ISO 8601 date lower bound (parent thread activity) |
 | `date_to` | string | none | ISO 8601 date upper bound |
@@ -190,7 +195,10 @@ three returns the whole document.
 Two FTS lanes run when `query` is set — the attachment filename/MIME
 index and the extracted-text index — with filename matches listed
 first. Each result reports the parent thread so a follow-up
-`get_thread` / `get_evidence` call can round-trip.
+`get_thread` / `get_evidence` call can round-trip. When one message
+carries the same file more than once (under different names or MIME
+types), an extracted-text match is reported once, as the first copy
+that passes `content_type`.
 
 ---
 
@@ -239,7 +247,12 @@ source file's path, size, and SHA-256.
 | `message_id` | string | required | Message-ID header value |
 
 ### `list_threads`
-Browse threads in a folder.
+Browse threads in a folder: every thread with at least one message
+filed in it, newest activity first. A thread's `folder` field is its
+representative folder: where the message that started it was filed
+when the thread was first indexed (not updated when messages move). A
+thread listed under `Sent` because of one sent reply can still report
+`INBOX`.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
@@ -249,7 +262,11 @@ Browse threads in a folder.
 | `offset` | int | `0` | Pagination offset |
 
 ### `list_folders`
-List all folders and thread counts.
+List every folder holding at least one indexed message, with its
+thread count: the number of distinct threads with a message in that
+folder, the same threads `list_threads(folder=...)` pages through. A
+thread with messages in several folders counts once in each, so the
+counts can sum to more than the total thread count.
 
 ### `find_contact`
 Resolve a name / address / domain fragment to canonical email
@@ -388,7 +405,7 @@ Retrieves relevant threads and synthesizes an answer.
 | `from_addr` | string | none | Scope to a specific sender |
 | `date_from` | string | none | Date lower bound |
 | `date_to` | string | none | Date upper bound |
-| `folders` | list | all | Scope to specific folders |
+| `folders` | list | all | Scope to threads with a message in any of these folders (the membership `list_threads` uses) |
 | `max_threads` | int | `5` | Context threads to use |
 
 `max_threads` is clamped to `[1, 10]` at the tool boundary so an
@@ -427,7 +444,7 @@ extracted.
 |---|---|---|---|
 | `query` | string | required | What to search for; also sent to the model as the request, so it can pick which records in a passage are wanted |
 | `schema` | dict | required | JSON schema for extraction |
-| `folders` | list | all | Scope to specific folders |
+| `folders` | list | all | Scope to threads with a message in any of these folders (the membership `list_threads` uses) |
 | `date_from` | string | none | Date lower bound |
 | `date_to` | string | none | Date upper bound |
 | `limit` | int | `20` | Max threads to search |

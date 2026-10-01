@@ -172,13 +172,36 @@ class TestBestPerThread:
 
 class TestApplyFilters:
     def test_folder_filter(self, seeded_db: Database, make_result):
+        # Membership comes from the indexed messages (t-alpha and t-beta
+        # in INBOX, t-gamma in Archive), not the result's ``folder``
+        # field, which is deliberately set wrong here (#415).
         results = [
-            make_result("a", folder="INBOX"),
-            make_result("b", folder="Archive"),
-            make_result("c", folder="INBOX"),
+            make_result("t-alpha", folder="Archive"),
+            make_result("t-gamma", folder="INBOX"),
+            make_result("t-beta", folder="Archive"),
         ]
         filtered = seeded_db._apply_filters(results, folders=["INBOX"])
-        assert [r.thread_id for r in filtered] == ["a", "c"]
+        assert [r.thread_id for r in filtered] == ["t-alpha", "t-beta"]
+
+    def test_folder_lookup_batches_over_one_connection(
+        self, seeded_db: Database, make_result, monkeypatch
+    ):
+        from src.lib import sqlite as sqlite_mod
+
+        monkeypatch.setattr(sqlite_mod, "_IN_CLAUSE_BATCH_SIZE", 2)
+        opened: list[object] = []
+        real_connect = seeded_db._connect
+
+        def counting_connect():
+            conn = real_connect()
+            opened.append(conn)
+            return conn
+
+        monkeypatch.setattr(seeded_db, "_connect", counting_connect)
+        ids = ["t-alpha", "x1", "t-gamma", "x2", "t-beta"]
+        filtered = seeded_db._apply_filters([make_result(i) for i in ids], folders=["INBOX"])
+        assert [r.thread_id for r in filtered] == ["t-alpha", "t-beta"]
+        assert len(opened) == 1
 
     def test_from_addr_substring_match_case_insensitive(self, seeded_db: Database, make_result):
         a = make_result("a")
@@ -1125,6 +1148,64 @@ class TestStatsAndFolders:
         names = [f["name"] for f in folders]
         assert names[0] == "INBOX"
         assert {"name": "Archive", "thread_count": 1} in folders
+
+
+class TestFolderMembershipFromMessages:
+    """Regression (#308): a thread's ``folder`` is the folder of the
+    message that started it, so grouping and filtering on it hid a
+    folder whose messages are all replies to threads rooted elsewhere.
+    A folder's threads are now the threads with a message in it."""
+
+    def _build(self, tmp_path):
+        from tests.conftest import _insert_message
+
+        conn, path = _open_built_db_conn(tmp_path, "folders.db")
+        # Root in INBOX, a reply filed in Sent.
+        _insert_message(conn, message_id="r1", thread_id="t1", sent_at="2024-01-01T09:00:00+00:00")
+        _insert_message(
+            conn,
+            message_id="r1-reply",
+            thread_id="t1",
+            sent_at="2024-01-02T09:00:00+00:00",
+            folder="Sent",
+            in_reply_to="r1",
+        )
+        # A newer INBOX thread with two INBOX messages: counted once.
+        _insert_message(conn, message_id="r2", thread_id="t2", sent_at="2024-02-01T09:00:00+00:00")
+        _insert_message(
+            conn, message_id="r2-b", thread_id="t2", sent_at="2024-02-02T09:00:00+00:00"
+        )
+        conn.execute(
+            "UPDATE threads SET date_last = '2024-01-02T09:00:00+00:00' WHERE thread_id = 't1'"
+        )
+        conn.execute(
+            "UPDATE threads SET date_last = '2024-02-02T09:00:00+00:00' WHERE thread_id = 't2'"
+        )
+        conn.commit()
+        conn.close()
+        return Database(str(path))
+
+    def test_reply_only_folder_is_listed(self, tmp_path):
+        db = self._build(tmp_path)
+        assert db.query_messages(folder="Sent").total_matches == 1
+        assert db.list_folders() == [
+            {"name": "INBOX", "thread_count": 2},
+            {"name": "Sent", "thread_count": 1},
+        ]
+
+    def test_reply_only_folder_is_browsable(self, tmp_path):
+        db = self._build(tmp_path)
+        sent = db.list_threads(folder="Sent")
+        assert [t.thread_id for t in sent] == ["t1"]
+        # The thread keeps its representative (root) folder.
+        assert sent[0].folder == "INBOX"
+        assert [t.thread_id for t in db.list_threads(folder="INBOX")] == ["t2", "t1"]
+
+    def test_counts_match_browsing(self, tmp_path):
+        db = self._build(tmp_path)
+        for f in db.list_folders():
+            listed = db.list_threads(folder=f["name"], limit=100)
+            assert len(listed) == f["thread_count"]
 
 
 class TestFilterDateUtcNormalization:
@@ -3467,6 +3548,97 @@ class TestSearchAttachments:
         with pytest.raises(ValueError):
             attachments_db.search_attachments(date_from="not-a-date")
 
+    def _duplicate_content_db(self, tmp_path):
+        """One message carrying the same bytes twice: occurrence ``occ-a``
+        as copy.bin (octet-stream) and ``occ-b`` as copy.pdf (PDF). The
+        query term is only in the extracted text, so the filename lane
+        cannot supply the match."""
+        from tests.conftest import (
+            _insert_attachment,
+            _insert_chunk,
+            _insert_extraction,
+            _insert_thread,
+        )
+
+        conn, path = _open_built_db_conn(tmp_path, "dupe-mime.db")
+        _insert_thread(
+            conn,
+            thread_id="t-dup",
+            subject="copies",
+            participants=["alice@example.com"],
+            senders=["alice@example.com"],
+            date_first="2024-03-10T09:00:00+00:00",
+            date_last="2024-03-10T09:00:00+00:00",
+            has_attachments=True,
+        )
+        for occ, name, mime in (
+            ("occ-a", "copy.bin", "application/octet-stream"),
+            ("occ-b", "copy.pdf", "application/pdf"),
+        ):
+            _insert_attachment(
+                conn,
+                message_id="t-dup",
+                thread_id="t-dup",
+                attachment_id="hash-dup",
+                filename=name,
+                content_type=mime,
+                occurrence_id=occ,
+            )
+        _insert_extraction(
+            conn, attachment_id="hash-dup", extracted_text="uniquemarker payable 100"
+        )
+        _insert_chunk(
+            conn,
+            chunk_id="dup-att-c1",
+            message_id="t-dup",
+            thread_id="t-dup",
+            text="uniquemarker payable 100",
+            embedding=[0.0, 0.0, 0.0, 1.0],
+            attachment_id="hash-dup",
+        )
+        conn.close()
+        return Database(str(path))
+
+    @pytest.mark.parametrize(
+        ("filters", "expected"),
+        [
+            ({}, ["copy.bin"]),
+            ({"content_type": "application/octet-stream"}, ["copy.bin"]),
+            ({"content_type": "application/pdf"}, ["copy.pdf"]),
+            (
+                {
+                    "content_type": "application/pdf",
+                    "extracted_only": True,
+                    "date_from": "2024-03-01",
+                    "date_to": "2024-03-31",
+                },
+                ["copy.pdf"],
+            ),
+            ({"content_type": "image/png"}, []),
+        ],
+    )
+    def test_text_lane_filters_before_choosing_occurrence(self, tmp_path, filters, expected):
+        """Regression (#309): the text lane picked the lowest occurrence of
+        a duplicated attachment before applying the filters, so a MIME
+        filter matching only another occurrence dropped the hit."""
+        db = self._duplicate_content_db(tmp_path)
+        results = db.search_attachments(query="uniquemarker", **filters)
+        assert [r.filename for r in results] == expected
+
+    @pytest.mark.parametrize("content_type", [None, "", "  "])
+    @pytest.mark.parametrize("query", ["uniquemarker", "acme", "wage", None])
+    def test_blank_content_type_is_no_filter(self, tmp_path, attachments_db, content_type, query):
+        """Review round 1: the text lane's occurrence anchor matched
+        ``content_type=""`` exactly while the shared filter clauses
+        treated it as absent, so every extracted-text hit disappeared.
+        A blank filter is no filter in every lane."""
+        for db in (self._duplicate_content_db(tmp_path), attachments_db):
+            unfiltered = db.search_attachments(query=query)
+            filtered = db.search_attachments(query=query, content_type=content_type)
+            assert [(r.attachment_id, r.filename) for r in filtered] == [
+                (r.attachment_id, r.filename) for r in unfiltered
+            ]
+
     def test_lanes_degrade_when_attachments_table_missing(self, tmp_path):
         # Every lane JOINs/scans ``attachments``; dropping it exercises the
         # OperationalError branch in all three lanes — the search degrades
@@ -4141,7 +4313,9 @@ class TestFallbackErrorTextWithheld:
             pytest.param(
                 lambda db: db._attachment_filename_lane("x", [], [], 5), [], id="att-name"
             ),
-            pytest.param(lambda db: db._attachment_text_lane("x", [], [], 5), [], id="att-text"),
+            pytest.param(
+                lambda db: db._attachment_text_lane("x", None, [], [], 5), [], id="att-text"
+            ),
             pytest.param(lambda db: db._attachment_scan([], [], 5), [], id="att-scan"),
             pytest.param(lambda db: db._thread_keyword_search("x", 5), [], id="thread-fts"),
             pytest.param(lambda db: db._chunk_keyword_search("x", 5), [], id="chunk-fts"),

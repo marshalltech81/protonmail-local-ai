@@ -101,7 +101,10 @@ class ThreadSummary(_Output):
         description="Opaque thread ID; pass it to get_thread, get_evidence, or summarize_thread."
     )
     subject: str
-    folder: str
+    folder: str = Field(
+        description="Representative folder: where the message that started the thread "
+        "was filed when first indexed. list_threads lists every folder holding one of its messages."
+    )
     participants: list[str] = Field(
         description=f"Thread participants, at most {MAX_LISTED}; see participant_count."
     )
@@ -353,7 +356,10 @@ class FindContactOutput(_Output):
 
 class Folder(_Output):
     name: str
-    thread_count: int
+    thread_count: int = Field(
+        description="Threads with at least one message in this folder; "
+        "a thread spanning folders counts in each."
+    )
 
 
 class ListFoldersOutput(_Output):

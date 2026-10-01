@@ -141,7 +141,8 @@ def register_search_tools(
                   hybrid = BM25 + vector merged via RRF (best for most queries)
                   semantic = vector similarity only (best for conceptual queries)
                   keyword = BM25 only (best for exact names, numbers, dates)
-            folders: Filter to specific folders e.g. ["INBOX", "Sent"]
+            folders: Filter to threads with a message in these folders,
+                     e.g. ["INBOX", "Sent"]
             from_addr: Filter by canonical sender ADDRESS — only use when
                        the user gave an email address or domain
                        ("jane@example.com", "@example.com"). For names
@@ -382,7 +383,8 @@ def register_search_tools(
                        list_threads — never invent it from a subject.
                        Cannot be combined with folders, from_addr,
                        date_from, date_to or has_attachments.
-            folders: Restrict to specific folders, e.g. ["INBOX", "Sent"].
+            folders: Restrict to threads with a message in these folders,
+                     e.g. ["INBOX", "Sent"].
             from_addr: Restrict to a sender ADDRESS or domain
                        ("jane@example.com", "@example.com"). For a
                        person's name, resolve it via find_contact first.

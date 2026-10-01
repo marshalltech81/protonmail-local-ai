@@ -440,7 +440,10 @@ def register_retrieval_tools(server, db):
             offset: Pagination offset (default: 0)
 
         Returns:
-            List of threads sorted by most recent activity.
+            Threads with at least one message in the folder, sorted by
+            most recent activity. Each thread's ``folder`` is its
+            representative folder (where the message that started it
+            was filed when first indexed).
         """
         log_tool_call(
             log,
@@ -709,7 +712,9 @@ def register_retrieval_tools(server, db):
         already understands folder filters when the user names them.
 
         Returns:
-            All folders with thread counts from the local index.
+            All folders with thread counts from the local index. A
+            folder's count is the threads with a message in it, so a
+            thread spanning folders counts in each.
         """
         log.info("tool=list_folders")
         try:
