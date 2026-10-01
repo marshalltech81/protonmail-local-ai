@@ -86,7 +86,10 @@ MOCK
     chmod 755 "$BIN/bridge"
     PATH="$BIN:$PATH"
 
-    load run_with_timeout have_bridge_key bridge_fingerprint main
+    # Every function the entrypoint defines, so a new helper needs no edit here.
+    local functions
+    mapfile -t functions < <(awk '/^[a-z_]+\(\) \{$/ {sub(/\(\) \{$/, ""); print}' "$ENTRYPOINT")
+    load "${functions[@]}"
 }
 
 # timeout(1) can only run executables; this stand-in runs the mocks below.
@@ -156,6 +159,23 @@ existing_install() {
     mkdir -p "$PASSWORD_STORE_DIR/protonmail"
     : >"$PASSWORD_STORE_DIR/protonmail/vault-key.gpg"
     : >"$VAULT"
+}
+
+called() {
+    grep -q -- "$1" "$CALLS"
+}
+
+# No key generated, no pass store re-initialized, nothing launched: the
+# damaged state is reported, not repaired or started.
+refused_without_changes() {
+    ((RC != 0))
+    if called 'quick-gen-key' || called '^pass init' || called '^bridge '; then
+        printf 'damaged state was changed or launched:\n%s\n' "$(cat "$CALLS")"
+        return 1
+    fi
+    [[ "$OUT" == *"$1"* ]]
+    [[ "$OUT" == *"bridge-data"* ]]
+    [[ -f "$VAULT" ]]
 }
 
 launched_with() {
@@ -233,6 +253,113 @@ first_run_overlay_forces_the_cli() {
     grep -Eq '^ +BRIDGE_FORCE_CLI: "true"$' "$FIRST_RUN_OVERLAY"
 }
 
+# --- existing credential state is checked, never rebuilt (#266) --------------
+#
+# With a vault, the key and the pass store hold the vault key Bridge needs,
+# so generating a key or re-initializing pass would only hide the damage.
+# Each damaged state fails closed and leaves the files in place, also under
+# BRIDGE_FORCE_CLI. Without a vault there is nothing to lose, so a fresh
+# install generates the key and initializes pass as before.
+
+fresh_install_generates_the_key_and_initializes_pass() {
+    setup fresh-bootstrap
+    run_main
+    ((RC == 0))
+    called 'quick-gen-key'
+    called "^pass init $TEST_FPR\$"
+    [[ "$(cat "$PASS_STORE_ID_FILE")" == "$TEST_FPR" ]]
+    launched_with --cli
+}
+
+intact_existing_state_starts_without_rebuilding() {
+    setup intact
+    existing_install
+    run_main
+    ((RC == 0))
+    if called 'quick-gen-key' || called '^pass init'; then
+        echo "intact credential state was rebuilt"
+        return 1
+    fi
+    called '--decrypt .*vault-key.gpg'
+    launched_with --noninteractive
+}
+
+public_only_keyring_is_refused() {
+    setup public-only
+    existing_install
+    rm "$GPG_STATE/secret"
+    run_main
+    refused_without_changes "private key"
+}
+
+missing_key_is_refused() {
+    setup missing-key
+    existing_install
+    rm "$GPG_STATE/public" "$GPG_STATE/secret"
+    run_main
+    refused_without_changes "private key"
+}
+
+missing_pass_metadata_is_refused() {
+    setup missing-gpg-id
+    existing_install
+    rm "$PASS_STORE_ID_FILE"
+    run_main
+    refused_without_changes "pass store"
+    [[ ! -e "$PASS_STORE_ID_FILE" ]]
+}
+
+pass_metadata_for_another_key_is_refused() {
+    setup other-gpg-id
+    existing_install
+    printf '%s\n' "$(printf 'B%.0s' {1..40})" >"$PASS_STORE_ID_FILE"
+    run_main
+    refused_without_changes "pass store"
+}
+
+undecryptable_pass_entry_is_refused() {
+    setup undecryptable
+    existing_install
+    : >"$GPG_STATE/undecryptable"
+    run_main
+    refused_without_changes "cannot be decrypted"
+}
+
+forced_cli_does_not_bypass_the_check() {
+    setup forced-damaged
+    existing_install
+    rm "$GPG_STATE/secret"
+    export BRIDGE_FORCE_CLI=true
+    run_main
+    refused_without_changes "private key"
+}
+
+fresh_install_repairs_missing_pass_metadata() {
+    setup fresh-repair
+    : >"$GPG_STATE/public"
+    : >"$GPG_STATE/secret"
+    run_main
+    ((RC == 0))
+    if called 'quick-gen-key'; then
+        echo "a second key was generated over a usable one"
+        return 1
+    fi
+    called "^pass init $TEST_FPR\$"
+    launched_with --cli
+}
+
+fresh_install_refuses_a_public_only_keyring() {
+    setup fresh-public-only
+    : >"$GPG_STATE/public"
+    run_main
+    ((RC != 0))
+    if called 'quick-gen-key' || called '^pass init' || called '^bridge '; then
+        printf 'public-only keyring was changed or launched:\n%s\n' "$(cat "$CALLS")"
+        return 1
+    fi
+    [[ "$OUT" == *"private key"* ]]
+}
+
 check "a fresh install opens the CLI" fresh_install_opens_the_cli
 check "a retried first run opens the CLI again (#242)" retried_first_run_opens_the_cli_again
 check "BRIDGE_FORCE_CLI opens the CLI over an existing account" \
@@ -242,6 +369,19 @@ check "an existing vault starts noninteractive by default" \
 check "BRIDGE_FORCE_CLI=false keeps the default" forced_cli_false_keeps_the_default
 check "an invalid BRIDGE_FORCE_CLI fails closed" invalid_force_cli_value_fails_closed
 check "the first-run overlay sets BRIDGE_FORCE_CLI=true" first_run_overlay_forces_the_cli
+check "a fresh install generates the key and initializes pass" \
+    fresh_install_generates_the_key_and_initializes_pass
+check "intact existing state starts without rebuilding it" \
+    intact_existing_state_starts_without_rebuilding
+check "a public-only keyring with a vault is refused (#266)" public_only_keyring_is_refused
+check "a missing key with a vault is refused" missing_key_is_refused
+check "missing pass metadata with a vault is refused" missing_pass_metadata_is_refused
+check "pass metadata for another key is refused" pass_metadata_for_another_key_is_refused
+check "an undecryptable pass entry is refused" undecryptable_pass_entry_is_refused
+check "BRIDGE_FORCE_CLI does not bypass the check" forced_cli_does_not_bypass_the_check
+check "a fresh install repairs missing pass metadata" fresh_install_repairs_missing_pass_metadata
+check "a fresh install refuses a public-only keyring" \
+    fresh_install_refuses_a_public_only_keyring
 
 if ((FAILURES > 0)); then
     printf '%d test(s) failed\n' "$FAILURES" >&2

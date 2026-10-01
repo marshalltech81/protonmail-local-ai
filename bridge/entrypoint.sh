@@ -31,9 +31,94 @@ have_bridge_key() {
     timeout "${BOOTSTRAP_TIMEOUT_SECONDS}s" gpg --list-keys "ProtonBridge" >/dev/null 2>&1
 }
 
+# The public key alone cannot decrypt the pass store, so readiness needs the
+# private key.
+have_bridge_secret_key() {
+    timeout "${BOOTSTRAP_TIMEOUT_SECONDS}s" gpg --list-secret-keys "ProtonBridge" >/dev/null 2>&1
+}
+
 bridge_fingerprint() {
-    timeout "${BOOTSTRAP_TIMEOUT_SECONDS}s" gpg --list-keys --with-colons "ProtonBridge" \
+    timeout "${BOOTSTRAP_TIMEOUT_SECONDS}s" gpg --list-secret-keys --with-colons "ProtonBridge" \
         | awk -F: '/^fpr/{print $10; exit}'
+}
+
+# The key the pass store encrypts to, or nothing when .gpg-id is missing.
+pass_store_id() {
+    if [[ -f "$PASS_STORE_ID_FILE" ]]; then
+        cat "$PASS_STORE_ID_FILE"
+    fi
+}
+
+refuse_damaged_state() {
+    echo "ERROR: vault.enc exists but $1." >&2
+    echo "       Bridge's vault key is stored in the GPG-backed pass store, so the vault" >&2
+    echo "       cannot be opened. Nothing was changed. Restore the bridge-data volume" >&2
+    echo "       from a backup, or remove it and run: make first-run" >&2
+    exit 1
+}
+
+# =============================================================================
+# Fresh install: no vault yet, so nothing depends on the existing key or pass
+# store. Generate the key when there is none and point pass at it.
+# The empty GPG passphrase is intentional: Bridge must restart unattended, so
+# the design relies on Docker volume isolation, restrictive permissions, and
+# host-level disk encryption rather than an interactive key-unlock step.
+# =============================================================================
+bootstrap_credentials() {
+    local fpr
+
+    if ! have_bridge_secret_key; then
+        if have_bridge_key; then
+            echo "ERROR: the GPG keyring holds the 'ProtonBridge' public key without its private key." >&2
+            echo "       Remove the bridge-data volume and run: make first-run" >&2
+            exit 1
+        fi
+        echo ">>> First run: generating the GPG key for the pass store..."
+        run_with_timeout \
+            "GPG key generation" \
+            gpg --batch --passphrase '' --quick-gen-key \
+            "ProtonBridge" default default never
+    fi
+
+    fpr="$(bridge_fingerprint)"
+    [[ -n "$fpr" ]] \
+        || { echo "ERROR: Failed to extract the GPG fingerprint." >&2; exit 1; }
+
+    if [[ "$(pass_store_id)" != "$fpr" ]]; then
+        echo ">>> Initializing the pass store..."
+        run_with_timeout "pass store initialization" pass init "$fpr"
+        echo ">>> GPG + pass initialized (fingerprint: $fpr)"
+    fi
+}
+
+# =============================================================================
+# Existing vault: its key lives in the pass store, encrypted to the
+# ProtonBridge key. Generating a key or re-initializing pass here would only
+# hide the damage, so check the chain and fail closed, changing nothing.
+# =============================================================================
+verify_existing_credentials() {
+    local fpr entries entry
+
+    have_bridge_secret_key \
+        || refuse_damaged_state "the GPG private key 'ProtonBridge' is missing"
+
+    fpr="$(bridge_fingerprint)" \
+        || refuse_damaged_state "the GPG private key 'ProtonBridge' cannot be read"
+    [[ -n "$fpr" ]] \
+        || refuse_damaged_state "the GPG private key 'ProtonBridge' cannot be read"
+
+    [[ "$(pass_store_id)" == "$fpr" ]] \
+        || refuse_damaged_state "the pass store is not initialized for the 'ProtonBridge' key"
+
+    # Decrypt every entry to /dev/null: proves the private key opens them
+    # without the plaintext leaving gpg.
+    entries="$(find "$PASSWORD_STORE_DIR" -type f -name '*.gpg')" \
+        || refuse_damaged_state "the pass store cannot be listed"
+    while IFS= read -r entry; do
+        [[ -n "$entry" ]] || continue
+        timeout "${BOOTSTRAP_TIMEOUT_SECONDS}s" gpg --batch --quiet --decrypt "$entry" >/dev/null \
+            || refuse_damaged_state "a pass store entry cannot be decrypted"
+    done <<<"$entries"
 }
 
 main() {
@@ -47,52 +132,15 @@ main() {
         exit 1
     fi
 
-    # =========================================================================
-    # Bootstrap GPG and pass on first run
-    # Only runs once and persists in the bridge-data volume.
-    # The empty GPG passphrase is intentional: Bridge must restart unattended,
-    # so the design relies on Docker volume isolation, restrictive
-    # permissions, and host-level disk encryption rather than an interactive
-    # key-unlock step.
-    # =========================================================================
-    if ! have_bridge_key; then
-        echo ">>> First run: initializing GPG key and pass store..."
-
-        run_with_timeout \
-            "GPG key generation" \
-            gpg --batch --passphrase '' --quick-gen-key \
-            "ProtonBridge" default default never
-
-        FPR="$(bridge_fingerprint)"
-        [[ -n "$FPR" ]] \
-            || { echo "ERROR: Failed to extract GPG fingerprint after key creation." >&2; exit 1; }
-
-        run_with_timeout "pass store initialization" pass init "$FPR"
-
-        echo ">>> GPG + pass initialized (fingerprint: $FPR)"
-    fi
-
-    if [[ ! -f "$PASS_STORE_ID_FILE" ]]; then
-        echo ">>> Pass store metadata missing. Re-initializing pass store..."
-        FPR="$(bridge_fingerprint)"
-        [[ -n "$FPR" ]] \
-            || { echo "ERROR: Failed to extract GPG fingerprint for pass store repair." >&2; exit 1; }
-        run_with_timeout "pass store initialization" pass init "$FPR"
-    fi
-
-    # =========================================================================
-    # Detect whether Bridge has a vault. A vault is not proof of a logged-in
-    # account: Bridge creates it before any login.
-    # =========================================================================
+    # The vault decides first: an existing vault is checked, never rebuilt;
+    # without one, the key and pass store are bootstrapped. A vault is not
+    # proof of a logged-in account: Bridge creates it before any login.
     local have_vault=false
     if [[ -f "$VAULT" ]]; then
-        if have_bridge_key; then
-            have_vault=true
-        else
-            echo "ERROR: vault.enc exists but GPG key 'ProtonBridge' is missing." >&2
-            echo "       The vault cannot be decrypted. Remove the bridge-data volume and run: make first-run" >&2
-            exit 1
-        fi
+        verify_existing_credentials
+        have_vault=true
+    else
+        bootstrap_credentials
     fi
 
     # =========================================================================
