@@ -44,7 +44,13 @@ from tests.conftest import (
     _insert_thread,
     claimant_of,
 )
-from tests.test_brief_issue import ScriptedInference, _build, _labels, _outside_blocks
+from tests.test_brief_issue import (
+    ScriptedInference,
+    _build,
+    _chunkless_db,
+    _labels,
+    _outside_blocks,
+)
 
 _CONCLUSION = "The vendor contract renews automatically each year."
 _MARKER = "SYNTHETIC_CONCLUSION_MARKER_4417"
@@ -356,6 +362,36 @@ class TestEvidenceGuards:
         data = out.structured_content
         assert data["insufficient_evidence"] is True
         assert [t["thread_id"] for t in data["threads"]] == ["t-nochunks"]
+
+    def test_chunkless_threads_ranked_first_do_not_take_the_evidence_slots(
+        self, tmp_path, monkeypatch
+    ):
+        """#471, as in brief_issue: a chunkless thread's slot goes to the
+        next chunk-backed thread, from one search of a fixed multiple."""
+        support = dict(list(_MAILBOX.items())[:1])
+        db = _chunkless_db(tmp_path / "refill.db", support, chunkless=2, query=_CONCLUSION)
+        search = db.hybrid_search
+        [top] = search(
+            query_text=_CONCLUSION,
+            query_embedding=[1.0, 0.0, 0.0, 0.0],
+            limit=1,
+            with_evidence=True,
+        )
+        assert top.thread_id.startswith("t-nochunks") and not top.evidence_chunks
+        limits: list[int] = []
+
+        def spy(**kwargs):
+            limits.append(kwargs["limit"])
+            return search(**kwargs)
+
+        monkeypatch.setattr(db, "hybrid_search", spy)
+        llm = ScriptedInference(lambda _u: _check(insufficient_evidence=True))
+        out = _run(db, llm, max_threads=1)
+        [(_system, user)] = llm.complete_calls
+        assert claimant_of("support@example.com") in user
+        threads = [t["thread_id"] for t in out.structured_content["threads"]]
+        assert threads[0] == top.thread_id and threads[-1] == "t-support"
+        assert limits == [3]
 
 
 def _connect(path: Path) -> sqlite3.Connection:

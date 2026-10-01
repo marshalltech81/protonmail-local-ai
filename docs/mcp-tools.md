@@ -721,8 +721,12 @@ coverage note when passages were left out. Only message-level passages
 are offered: a retrieved thread with no matching chunks, which
 `ask_mailbox` would show by its thread text, has no message, sender or
 sent date to cite, so it is left out of the prompt (it still appears in
-`threads`). When no retrieved thread has a message passage, no model
-call is made and the brief is empty with `insufficient_evidence: true`.
+`threads`). The search asks for three times `max_threads` threads so
+that the slot of a thread left out this way (for example one not yet
+chunked during indexing) goes to the next thread with a message
+passage; at most `max_threads` threads are offered. When no retrieved
+thread has a message passage, no model call is made and the brief is
+empty with `insufficient_evidence: true`.
 The topic and a fixed task line follow the blocks. The system prompt asks for one JSON object of
 a fixed shape and says that every entry must cite the labels of the
 passages that state it; that the newest message is not authoritative
@@ -735,7 +739,9 @@ true`.
 The reply is cut at 100,000 characters (an oversized reply is not
 parsed), unwrapped from a code fence, parsed with `json.loads`, and
 validated against the brief shape: every section must be present with
-the right types. The server then sorts `chronology` oldest first by
+the right types, and a chronology `date` must be `YYYY-MM-DD` (ASCII
+digits) or `null`, so a date such as `2024-2-01` fails the shape and
+gets the repair call. The server then sorts `chronology` oldest first by
 `date` (a stable sort; undated entries go last in the model's order),
 whatever order the model used. Each entry's labels are then checked against the
 passages supplied: a label no passage has is `unknown_labels`, an entry
@@ -743,7 +749,9 @@ with no label is `no_citations`, and a conflict citing fewer than two
 supplied passages is `too_few_labels`. A brief that sets
 `insufficient_evidence: true` but has entries in any section is
 contradictory and reported once as `insufficient_but_populated`
-(`section: "brief"`, `item: 0`). A reply that is not a brief, or
+(`section: "brief"`, `item: 0`); so is the converse, a brief with every
+section empty and `insufficient_evidence: false`, as
+`empty_but_sufficient`. A reply that is not a brief, or
 that has any problem, gets exactly one repair call: the same prompt
 plus a fixed instruction after the task (the rejected reply is not
 replayed). The repaired brief is used when it parses; otherwise the
@@ -764,9 +772,9 @@ Structured output:
 | `raw_text` | The unparsed reply when `status` is not `ok`, else `null` |
 | `as_of` | Latest sent date (`YYYY-MM-DD`) among the passages supplied; the brief describes the evidence up to then |
 | `citations` | Each valid cited label, first-cited order, in the `ask_mailbox` citation shape (claimant, sender, own sent date, chunk) |
-| `citation_problems` | Entries `{section, item, kind, labels}`, `kind` one of `unknown_labels`, `no_citations`, `too_few_labels`, `insufficient_but_populated` (the last with `section: "brief"`); `[]` when every check passed |
+| `citation_problems` | Entries `{section, item, kind, labels}`, `kind` one of `unknown_labels`, `no_citations`, `too_few_labels`, `insufficient_but_populated`, `empty_but_sufficient` (the last two with `section: "brief"`); `[]` when every check passed |
 | `repair_attempted` | Whether the one repair call was made |
-| `threads` | The threads searched, best match first |
+| `threads` | The threads searched, best match first: the top `max_threads`, and further down to the last thread whose passages were offered |
 
 The prose in `content` opens with an EXPERIMENTAL notice and the
 "Evidence as of" date, then the brief's sections, the `Citations:`
@@ -846,7 +854,7 @@ Structured output:
 | `as_of` | Latest sent date (`YYYY-MM-DD`) among the passages supplied |
 | `citation_problems` | Entries `{item, kind, labels}` (`item` null for a problem of the check as a whole); `[]` when the check passed |
 | `repair_attempted` | Whether the one repair call was made |
-| `threads` | The threads searched, best match first |
+| `threads` | The threads searched, best match first, as in `brief_issue` |
 
 The prose in `content` opens with an EXPERIMENTAL notice and the
 "Evidence as of" date, then the verdict, each finding (relation in
