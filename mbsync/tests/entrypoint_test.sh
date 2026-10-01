@@ -384,6 +384,100 @@ refused_probes_fail_after_the_attempts_with_nc_stderr() {
     [[ "$err" == *"synthetic-refused"* ]]
 }
 
+# --- shutdown signals reach the active child (#280) -------------------------
+#
+# The entrypoint is the only process Tini signals, so it must pass a stop on
+# to the sync (or the sleep between syncs) and exit once that child ends.
+# Each case runs the entrypoint's handlers in a background subshell that
+# stands in for the entrypoint, signals it, and checks the child got TERM.
+
+# shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
+stop_setup() {
+    MAILDIR_PATH="$WORK/maildir-stop-$1"
+    CONFIG_FILE="$WORK/mbsyncrc"
+    CHILD_LOG="$WORK/child-$1"
+    mkdir -p "$MAILDIR_PATH" "$WORK/bin-stop-$1"
+    : >"$CHILD_LOG"
+    # A long-running child that records its start and any TERM it gets.
+    # Background commands ignore INT, so TERM is what must reach it.
+    export CHILD_LOG
+    cat >"$WORK/bin-stop-$1/mbsync" <<'MOCK'
+#!/bin/bash
+trap 'echo term >>"$CHILD_LOG"; kill "$sleeper"; exit 143' TERM
+echo started >>"$CHILD_LOG"
+sleep 30 &
+sleeper=$!
+wait
+MOCK
+    chmod 755 "$WORK/bin-stop-$1/mbsync"
+    PATH="$WORK/bin-stop-$1:$PATH"
+    load run_child stop_on_signal install_signal_handlers relax_new_maildir_perms run_sync
+}
+
+# Signals the stand-in entrypoint once its child has started and waits for
+# it; sets STOP_RC to its exit status and STOP_SECONDS to how long it took.
+# Runs in the shell that started the stand-in, since only it can wait.
+signal_once_started() {
+    local entrypoint="$1" signal="$2" start i
+    for ((i = 0; i < 50; i++)); do
+        grep -q started "$CHILD_LOG" && break
+        sleep 0.1
+    done
+    grep -q started "$CHILD_LOG"
+    start=$SECONDS
+    kill "-$signal" "$entrypoint"
+    STOP_RC=0
+    wait "$entrypoint" || STOP_RC=$?
+    STOP_SECONDS=$((SECONDS - start))
+}
+
+term_during_a_sync_stops_mbsync_and_exits() {
+    stop_setup sync-term
+    (install_signal_handlers && run_sync) &
+    signal_once_started "$!" TERM
+    ((STOP_RC == 143 && STOP_SECONDS < 5))
+    grep -qx term "$CHILD_LOG"
+}
+
+int_during_a_sync_stops_mbsync_and_exits() {
+    stop_setup sync-int
+    (install_signal_handlers && run_sync) &
+    signal_once_started "$!" INT
+    ((STOP_RC == 130 && STOP_SECONDS < 5))
+    grep -qx term "$CHILD_LOG"
+}
+
+term_during_the_sleep_between_syncs_exits_promptly() {
+    stop_setup sleep-term
+    # The loop's sleep goes through run_child like the sync; the mock
+    # stands in for a long sleep.
+    (install_signal_handlers && run_child mbsync) &
+    signal_once_started "$!" TERM
+    ((STOP_RC == 143 && STOP_SECONDS < 5))
+    grep -qx term "$CHILD_LOG"
+}
+
+the_sleep_between_syncs_runs_through_run_child() {
+    grep -qxF "    run_child sleep \"\$SYNC_INTERVAL\"" "$ENTRYPOINT"
+}
+
+# shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
+run_child_returns_the_child_status() {
+    load run_child
+    run_child true
+    if run_child false; then
+        return 1
+    fi
+    [[ -z "$child_pid" ]]
+}
+
+check "TERM during a sync stops mbsync and exits 143" term_during_a_sync_stops_mbsync_and_exits
+check "INT during a sync stops mbsync and exits 130" int_during_a_sync_stops_mbsync_and_exits
+check "TERM during the sleep between syncs exits promptly" \
+    term_during_the_sleep_between_syncs_exits_promptly
+check "the sleep between syncs runs through run_child" \
+    the_sleep_between_syncs_runs_through_run_child
+check "run_child returns the child's status" run_child_returns_the_child_status
 check "hung probes are cut off by the per-attempt bound" \
     hung_probes_are_cut_off_by_the_per_attempt_bound
 check "a reachable Bridge returns after one probe" reachable_bridge_returns_after_one_probe

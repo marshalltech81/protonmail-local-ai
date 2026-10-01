@@ -242,12 +242,45 @@ relax_new_maildir_perms() {
     find "$MAILDIR_PATH" -type f \! -perm -044 -exec chmod go+r {} + || return 1
 }
 
+# PID of the child run_child is waiting on, if any.
+child_pid=""
+
+run_child() {
+    # Run a command in the background and wait for it, so a stop signal
+    # interrupts the wait and stop_on_signal can pass it on. Returns the
+    # command's status.
+    local rc=0
+    "$@" &
+    child_pid=$!
+    wait "$child_pid" || rc=$?
+    child_pid=""
+    return "$rc"
+}
+
+stop_on_signal() {
+    # Tini signals only this shell. Pass the stop to the active child as
+    # TERM (background commands ignore INT), wait for it to end, then exit
+    # with the conventional 128 + signal number status.
+    local signal="$1" status="$2"
+    if [[ -n "${child_pid:-}" ]]; then
+        kill -TERM "$child_pid" 2>/dev/null || true
+        wait "$child_pid" || true
+    fi
+    echo ">>> Received SIG${signal} — stopping." >&2
+    exit "$status"
+}
+
+install_signal_handlers() {
+    trap 'stop_on_signal TERM 143' TERM
+    trap 'stop_on_signal INT 130' INT
+}
+
 run_sync() {
     # Fails when mbsync or the permission repair fails: a sync whose mail
     # the indexer cannot read must not be recorded as successful. The
     # repair runs even after a failed mbsync, for what it did deliver.
     local rc=0
-    mbsync -c "$CONFIG_FILE" -a 2>&1 || rc=$?
+    run_child mbsync -c "$CONFIG_FILE" -a 2>&1 || rc=$?
     if ! relax_new_maildir_perms; then
         echo ">>> ERROR: could not make new Maildir entries readable to the indexer." >&2
         return 1
@@ -279,6 +312,7 @@ record_successful_sync() {
 # BRIDGE_PASS is NOT passed as an env var — mbsyncrc uses PassCmd to read
 # it directly from the Docker secret at /run/secrets/bridge_pass.
 # =============================================================================
+install_signal_handlers
 require_prerequisites
 
 # BRIDGE_CERT_PIN_ROTATE is an opt-in for accepting one legitimate
@@ -339,7 +373,8 @@ fi
 # =============================================================================
 echo ">>> Starting sync loop (interval: ${SYNC_INTERVAL}s)..."
 while true; do
-    sleep "$SYNC_INTERVAL"
+    # Through run_child so a stop during the interval exits at once.
+    run_child sleep "$SYNC_INTERVAL"
     echo ">>> Syncing..."
     if run_sync; then
         consecutive_sync_failures=0
