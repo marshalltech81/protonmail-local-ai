@@ -311,13 +311,17 @@ docker compose logs mbsync
 mbsync must connect to Bridge and complete at least one sync before the indexer
 has emails to process.
 
-## Enabling deletion reconciliation
+## Deletion reconciliation (mirror vs archive)
 
-By default the local index is append-only: messages you delete on ProtonMail
-are still kept locally. To propagate deletions, set
-`INDEXER_DELETION_ENABLED=true` in `.env` and recreate the indexer. See the
-`Indexer — deletion reconciliation` block in `.env.example` for all knobs
-(grace window, sweep interval, mass-delete brake, unlink-on-reap).
+By default the indexer mirrors upstream deletions: a message you delete on
+ProtonMail is removed from the local index after a grace window
+(`INDEXER_DELETION_GRACE_DAYS`, default 7 days). To keep deleted mail
+searchable locally instead (archive mode, an append-only index), set
+`INDEXER_DELETION_ENABLED=false` in `.env` and recreate the indexer. Any
+value other than true/false (or 1/0, yes/no, on/off) stops the indexer at
+startup. See the `Indexer — deletion reconciliation` block in
+`.env.example` for all knobs (grace window, sweep interval, mass-delete
+brake, unlink-on-reap).
 
 The indexer reads these settings once at startup, so a change takes
 effect only when the `indexer` container is recreated. After editing
@@ -334,7 +338,7 @@ docker compose exec indexer env | grep '^INDEXER_DELETION_'
 ```
 
 Defaults — 7-day grace window, 5% mass-delete brake, no file unlink — are
-the safe starting point. Quick checks after enabling:
+the safe starting point. Quick checks in mirror mode:
 
 ```bash
 docker compose logs indexer | grep reconciler

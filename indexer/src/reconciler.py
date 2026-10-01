@@ -6,7 +6,8 @@ deleted on ProtonMail is never physically removed from the local Maildir.
 Instead, mbsync renames the file to add the IMAP ``\\Deleted`` / Maildir ``T``
 flag. Without reconciliation the local index keeps the message forever.
 
-The reconciler provides a two-phase, opt-in path:
+The reconciler provides a two-phase path. It runs by default (mirror
+mode); ``INDEXER_DELETION_ENABLED=false`` opts out (archive mode):
 
 1. **Tombstone**: a startup sweep plus live ``on_moved`` detection record every
    ``T``-flagged file into the ``pending_deletions`` table. No primary data is
@@ -544,8 +545,7 @@ def sweep_paths(db: Database) -> dict:
     ``SR``, or a ``new`` → ``cur`` promotion). Intended to be safe to
     run on every indexer startup — unlike ``Reconciler.sweep()`` it does
     NOT tombstone missing files and does NOT touch ``pending_deletions``,
-    so it preserves the current opt-in posture of deletion reconciliation
-    while still healing path drift that accumulated while the indexer
+    so it is safe under archive mode too, while still healing path drift that accumulated while the indexer
     was offline.
 
     Returns a summary dict so the caller can log how much drift there
@@ -584,15 +584,35 @@ def sweep_paths(db: Database) -> dict:
 def load_config_from_env(env: Mapping[str, str]) -> ReconcilerConfig:
     """Parse reconciler knobs from environment variables.
 
-    All settings are opt-in: with defaults, ``enabled`` is ``False`` and no
-    tombstoning or reaping occurs.
+    ``INDEXER_DELETION_ENABLED`` selects the retention mode. Unset or
+    empty means mirror (``enabled`` is ``True``): mail deleted upstream
+    is tombstoned and reaped from the local index after the grace
+    window. ``false`` selects archive: the index is append-only and
+    keeps upstream-deleted mail. Any other value raises ``ValueError``
+    so a typo fails startup instead of silently picking a mode.
     """
+
+    _truthy = {"1", "true", "yes", "on"}
+    _falsy = {"0", "false", "no", "off"}
+
+    def _mode(name: str, default: bool) -> bool:
+        raw = (env.get(name) or "").strip().lower()
+        if not raw:
+            return default
+        if raw in _truthy:
+            return True
+        if raw in _falsy:
+            return False
+        raise ValueError(
+            f"{name}={raw!r} is not recognized; use true (mirror: reap mail "
+            "deleted upstream) or false (archive: keep it locally)"
+        )
 
     def _bool(name: str, default: bool) -> bool:
         raw = env.get(name)
         if raw is None:
             return default
-        return raw.strip().lower() in {"1", "true", "yes", "on"}
+        return raw.strip().lower() in _truthy
 
     def _int(name: str, default: int, minimum: int = 0) -> int:
         raw = env.get(name)
@@ -621,7 +641,7 @@ def load_config_from_env(env: Mapping[str, str]) -> ReconcilerConfig:
         return value
 
     return ReconcilerConfig(
-        enabled=_bool("INDEXER_DELETION_ENABLED", False),
+        enabled=_mode("INDEXER_DELETION_ENABLED", True),
         grace_days=_int("INDEXER_DELETION_GRACE_DAYS", 7, minimum=0),
         sweep_interval_secs=_int("INDEXER_DELETION_SWEEP_INTERVAL_SECS", 3600, minimum=60),
         max_batch_pct=_pct("INDEXER_DELETION_MAX_BATCH_PCT", 0.05),

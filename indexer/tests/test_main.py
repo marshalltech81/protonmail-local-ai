@@ -3396,8 +3396,8 @@ class TestMainStartupAndLoop:
     ):
         """With reconciliation on, a T-flagged file means "deleted
         upstream" — every Maildir walk must skip it or reaped messages
-        come back. With it off (append-only default), behavior is
-        unchanged."""
+        come back. With it off (archive opt-out), the index is
+        append-only and T-flagged files are indexed like any other."""
         monkeypatch.setenv("INDEXER_DELETION_ENABLED", "true")
         events = self._run_main(tmp_path, monkeypatch, sweep_due=True)
         assert "initial_index:skip_trashed=True" in events
@@ -3407,6 +3407,15 @@ class TestMainStartupAndLoop:
         events = self._run_main(tmp_path / "off", monkeypatch, sweep_due=True)
         assert "initial_index:skip_trashed=False" in events
         assert f"walk:{main.REASON_RESCAN}:skip_trashed=False" in events
+
+    def test_mirror_is_the_default_when_unset(self, tmp_path, monkeypatch):
+        """Mirror is the shipped default: with no variable set the
+        indexer starts the reconciler and its walks skip T-flagged
+        files."""
+        monkeypatch.delenv("INDEXER_DELETION_ENABLED", raising=False)
+        events = self._run_main(tmp_path, monkeypatch, sweep_due=True)
+        assert "initial_index:skip_trashed=True" in events
+        assert f"walk:{main.REASON_RESCAN}:skip_trashed=True" in events
 
 
 class TestReapedMessagesStayDeleted:
