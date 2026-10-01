@@ -614,15 +614,16 @@ the privacy trio #311/#325/#326 (#337), #327/#328 (#341), #301 (#336),
 #278/#267 (#342), #339/#340 (#347), #304 batch-1 half (#349), #297
 first half (#350), #306 (#351), #302 (#352, schema v22), #319 (#353),
 #332 (#356), #321 (#357), #318 (#358), #310/#329/#315 (#359), #314
-(#360), and #257 slice 1, the parser (#364). Next-list item 1 below is
-done.
+(#360), and #257 slices 1–3: the parser (#364), `last_error` keeping
+the type name only, with errno text for `OSError` (#363), and
+attachment filenames and extractor errors out of logs and
+`extraction_error` (#401). Next-list item 1 below is done.
 
 In review, merge when Codex is clean on the head (the owner merges):
 
-- **#363** — #257 slice 2: `last_error` keeps the type name only
-  (errno text for `OSError`).
-- **#401** — #257 slice 3: attachment filenames and extractor errors
-  out of logs and `extraction_error`.
+- **#402** — this status update (C1 below).
+- **#403** — cleanup C2, MCP tool docs.
+- **#404** — cleanup C3, ops docs.
 
 Cleanup batch, triaged 2026-10-01: the 36 issues #365–#400 came from a
 whole-repository stale-text review. Every claim held on `2454d0e`, and
@@ -630,19 +631,19 @@ nothing was closable as already fixed. All but #395 are docs, comments,
 dead code or test text. They come first because they are cheap and
 remove misleading guidance; one PR per file group so none conflict:
 
-- C1 PLAN fixes: #372 (this rewrite).
-- C2 MCP tool docs: #391, #392, #393, #390, #322.
-- C3 ops docs: #394, #323, #396, #397, #381.
+- C1 PLAN fixes: #372 (#402).
+- C2 MCP tool docs: #391, #392, #393, #390, #322 (#403).
+- C3 ops docs: #394, #323, #396, #397, #381 (#404).
 - C4 MCP config and comments: #370, #375, #380, #389, #398, #399, #400,
   #373 (owner: remove `RERANK_TOP_N`; the only caller passes `top_n`).
 - C5 eval harness: #383, #384, #382 (owner: drop the unused `question`
   and `expected_substrings` fields), #387 (owner: print the fallback
   notice).
-- C6 indexer, no open-PR overlap: #365, #366, #368, #369, #371, #385,
+- C6 indexer: #365, #366, #368, #369, #371, #385,
   #388.
-- C7 after #363: #367, #374, #378, #379, and the #295 limitation note
+- C7 indexer `main.py` and architecture docs: #367, #374, #378, #379, and the #295 limitation note
   that Resolved decision 7 asks for (still undocumented).
-- C8 after #401: #376, #377, #386.
+- C8 attachment and PDF docs: #376, #377, #386.
 - #395 is a real fix (reconciliation reads only the first survivor's
   subject, so a deleted message's subject can be embedded): its own
   test-first PR after the cleanup PRs.
@@ -670,8 +671,8 @@ first, one test-first commit per issue, keep three PRs in flight):
    #321, #332, then #310 + #329 + #315 together, then #314~~ (done:
    #356–#360).
 2. The cleanup batch above (C1–C8, then #395), three PRs in flight.
-3. #257 sweep, split by boundary: slice 1 parser (#364, merged),
-   slice 2 `last_error` (#363), slice 3 attachments (#401), slice 4
+3. #257 sweep, split by boundary: slices 1–3 merged (parser #364,
+   `last_error` #363, attachments #401); slice 4
    MCP provider handlers (owner: a dedicated error class for our
    fixed-message errors, and the caller gets the same classified text
    as the log), slice 5 MCP SQLite fallback logs (also
