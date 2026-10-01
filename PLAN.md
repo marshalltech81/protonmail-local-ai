@@ -670,14 +670,11 @@ first, one test-first commit per issue, keep three PRs in flight):
 1. ~~Rest of the MCP "errors reported as success" cluster: #318,
    #321, #332, then #310 + #329 + #315 together, then #314~~ (done:
    #356–#360).
-2. The cleanup batch above (C1–C8, then #395), three PRs in flight.
-3. #257 sweep, split by boundary: slices 1–3 merged (parser #364,
-   `last_error` #363, attachments #401); slice 4
-   MCP provider handlers (owner: a dedicated error class for our
-   fixed-message errors, and the caller gets the same classified text
-   as the log), slice 5 MCP SQLite fallback logs (also
-   `retrieval.py` `query_messages`, not yet in #257). A closing docs
-   PR updates AGENTS.md's known-gaps bullet.
+2. ~~The cleanup batch above (C1–C8, then #395)~~ (done: #402–#410).
+3. ~~#257 sweep, split by boundary~~ (done: parser #364, `last_error`
+   #363, attachments #401, MCP provider errors #412 with a dedicated
+   `ProviderResponseError` and caller text classified like the log,
+   MCP SQLite logs #411; AGENTS.md updated in this closing PR).
 4. MCP: name matching (#313, #324, #331) with #316; date filters (#312,
    #330); #333; event-loop hygiene (#320, #317, #334); #308; #309.
    (#322 and #323 moved to the cleanup batch.)
