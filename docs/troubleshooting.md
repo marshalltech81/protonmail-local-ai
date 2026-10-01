@@ -32,6 +32,10 @@ docker volume rm protonmail-local-ai_bridge-data
 make first-run
 ```
 
+This is a full re-authentication: finish with the remaining steps in
+[Bridge credentials expired / need to re-authenticate](#bridge-credentials-expired--need-to-re-authenticate),
+including the mbsync cert pin rotation.
+
 ## Bridge starts but shows "No Proton account found" every time
 
 The account detection looks for `vault.enc` in the bridge-data volume.
@@ -295,9 +299,23 @@ has emails to process.
 
 By default the local index is append-only: messages you delete on ProtonMail
 are still kept locally. To propagate deletions, set
-`INDEXER_DELETION_ENABLED=true` in `.env` and restart the indexer. See the
+`INDEXER_DELETION_ENABLED=true` in `.env` and recreate the indexer. See the
 `Indexer — deletion reconciliation` block in `.env.example` for all knobs
 (grace window, sweep interval, mass-delete brake, unlink-on-reap).
+
+The indexer reads these settings once at startup, so a change takes
+effect only when the `indexer` container is recreated. After editing
+`.env`, run `make up`: Compose recreates every container whose
+configuration changed. `docker compose restart` is not enough, because
+a restarted container keeps the environment it was created with. If
+the stack was started with an overlay (such as
+`docker-compose.hardened.yml`), run `docker compose up -d` with the
+same `-f` files instead, or the recreated container drops the overlay.
+To confirm the new value reached the container:
+
+```bash
+docker compose exec indexer env | grep '^INDEXER_DELETION_'
+```
 
 Defaults — 7-day grace window, 5% mass-delete brake, no file unlink — are
 the safe starting point. Quick checks after enabling:
@@ -322,7 +340,8 @@ docker run --rm -v protonmail-local-ai_sqlite-volume:/data:ro \
 
 The reaper sweeps `pending_deletions` on startup and once per
 `INDEXER_DELETION_SWEEP_INTERVAL_SECS`. If you want a deletion to land
-immediately for testing, drop the grace window to `0` and restart.
+immediately for testing, drop the grace window to `0` and recreate the
+indexer as described above.
 
 ## Tuning indexing retries
 
@@ -405,6 +424,17 @@ make up
 ```
 
 Your email index is in a separate volume (`sqlite-volume`) and is not affected.
+
+The new vault comes with a new Bridge TLS cert, but the `mbsync-state`
+volume still holds the pin for the old one, so `mbsync` now refuses to
+sync with `Bridge cert fingerprint does not match pinned value`. That
+is the pin working as intended. Once `make logs` confirms the mismatch
+is the one this re-authentication caused, accept the new cert with the
+two-step rotation in
+[mbsync refuses to sync — Bridge cert pin mismatch](#mbsync-refuses-to-sync--bridge-cert-pin-mismatch):
+recreate `mbsync` once with `BRIDGE_CERT_PIN_ROTATE=true`, check the
+`rotating pin` warning, then recreate it with
+`BRIDGE_CERT_PIN_ROTATE=false` to re-enable pin enforcement.
 
 ## mbsync refuses to sync — Bridge cert pin mismatch
 
@@ -523,4 +553,8 @@ make up
 ```
 
 Deleting `vault.enc` is a full re-authentication path, not a lightweight cert
-refresh. Plan on logging into Bridge again.
+refresh. Plan on logging into Bridge again, updating `BRIDGE_USER` and
+`.secrets/bridge_pass.txt` before `make up`, and rotating the mbsync cert
+pin afterwards: the new cert does not match the pin in `mbsync-state`, so
+`mbsync` refuses to sync until you complete the two-step rotation in
+[mbsync refuses to sync — Bridge cert pin mismatch](#mbsync-refuses-to-sync--bridge-cert-pin-mismatch).
