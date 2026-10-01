@@ -1,6 +1,7 @@
 """
 Structured output for the search, retrieval, evidence, and status tools,
-and for ask_mailbox's checked citations and the experimental brief_issue.
+and for ask_mailbox's checked citations and the experimental brief_issue
+and check_conclusion.
 
 Each tool declares one of these models as its ``outputSchema`` (via
 ``@server.tool(output_schema=Model.model_json_schema())``; FastMCP does
@@ -592,6 +593,93 @@ class BriefIssueOutput(_Output):
     citation_problems: list[BriefCitationProblem] = Field(
         description="Empty when every entry passed the label check. Labels only: a valid "
         "label does not prove the passage supports the entry, and quotes are not verified."
+    )
+    repair_attempted: bool = Field(
+        description="True when the first reply failed the check and the model was asked once more."
+    )
+    threads: list[ThreadSummary] = Field(description="The threads searched, best match first.")
+
+
+# check_conclusion (MCP_EXPERIMENTAL_TOOLS=true only). ConclusionFinding
+# and ConclusionCheck are the JSON shape the model is asked for; the
+# output adds the server's attribution and excerpt of each cited passage.
+
+# Findings a reply may hold. A reply with more is not a check (it gets
+# the one repair call), which bounds the sources attached to findings.
+MAX_CONCLUSION_FINDINGS = 20
+
+
+class ConclusionFinding(_Output):
+    # A plain string, so one bad relation is a problem of that finding
+    # rather than a reply that does not parse at all.
+    relation: str = Field(
+        description="supports, contradicts, qualifies or supersedes, as the model gave it; "
+        "any other value is reported as an invalid_relation problem."
+    )
+    explanation: str
+    labels: list[str] = Field(description=_LABELS_DESCRIPTION)
+
+
+class ConclusionCheck(_Output):
+    verdict_summary: str
+    findings: list[ConclusionFinding] = Field(max_length=MAX_CONCLUSION_FINDINGS)
+    insufficient_evidence: bool = Field(
+        description="True when the model found nothing about the conclusion in the passages."
+    )
+
+
+class FindingSource(Citation):
+    excerpt: str = Field(
+        description="The start of the cited passage, verbatim from the indexed text the "
+        "model was shown, cut for length. Supplied by the server, not the model."
+    )
+
+
+class CheckedFinding(ConclusionFinding):
+    sources: list[FindingSource] = Field(
+        description="Each cited label that names a supplied passage: its message, sender, "
+        "sent date and excerpt. Unknown labels have no source."
+    )
+
+
+class ConclusionCitationProblem(_Output):
+    item: int = Field(description="0-based index of the finding.")
+    kind: Literal["unknown_labels", "no_citations", "invalid_relation"] = Field(
+        description="unknown_labels: the finding cites labels no supplied passage has. "
+        "no_citations: it cites none. invalid_relation: its relation is not supports, "
+        "contradicts, qualifies or supersedes."
+    )
+    labels: list[str] = Field(description="The unknown labels; empty for the other kinds.")
+
+
+class CheckConclusionOutput(_Output):
+    experimental: Literal[True] = Field(
+        description="Always true: check_conclusion is experimental and this format may change."
+    )
+    status: Literal["ok", "invalid_json", "truncated"] = Field(
+        description="ok: the reply parsed as a check. invalid_json: it did not, even after "
+        "one repair; raw_text holds it. truncated: the reply was cut off at "
+        "INFERENCE_MAX_TOKENS; raw_text holds the part produced."
+    )
+    verdict_summary: str | None = Field(
+        description="The model's short overall verdict, cut for length; null unless ok."
+    )
+    findings: list[CheckedFinding] = Field(
+        description="The findings with their sources; empty unless status is ok."
+    )
+    insufficient_evidence: bool | None = Field(
+        description="The model's abstention flag; null unless status is ok."
+    )
+    raw_text: str | None = Field(
+        description="The model's unparsed reply when status is not ok; null otherwise."
+    )
+    as_of: str | None = Field(
+        description="Latest sent date (YYYY-MM-DD) among the passages supplied to the "
+        "model. Null when none is dated."
+    )
+    citation_problems: list[ConclusionCitationProblem] = Field(
+        description="Empty when every finding passed the check. Labels only: a valid label "
+        "does not prove the passage supports the finding."
     )
     repair_attempted: bool = Field(
         description="True when the first reply failed the check and the model was asked once more."

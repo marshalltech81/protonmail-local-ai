@@ -77,9 +77,9 @@ Of the intelligence tools (Group 3), `ask_mailbox` publishes an
 [`ask_mailbox`](#ask_mailbox)). `summarize_thread` and
 `extract_from_emails` have no typed output model; their answer is the
 prose in `content`, with no `outputSchema` and no `structuredContent`.
-The opt-in experimental `brief_issue` also publishes an `outputSchema`
-(see [Experimental tools](#experimental-tools)); unlike the others, its
-format may change.
+The opt-in experimental `brief_issue` and `check_conclusion` also
+publish an `outputSchema` (see [Experimental tools](#experimental-tools));
+unlike the others, their format may change.
 
 Arguments are checked against each tool's input schema before the tool
 runs: a wrong type or an argument the tool does not declare is an error
@@ -88,8 +88,9 @@ result naming the problem.
 ## Stage timings in the server log
 
 `search_emails`, `get_evidence`, `search_attachments`, the three
-intelligence tools and the experimental `brief_issue` log one line per
-call at `INFO` on the `mcp.timings` logger, on success and on failure:
+intelligence tools and the experimental `brief_issue` and
+`check_conclusion` log one line per call at `INFO` on the `mcp.timings`
+logger, on success and on failure:
 
 ```text
 tool=search_emails outcome=ok total_ms=41.7 stages_ms={'query_embedding': 22.4, 'thread_fts': 3.1, 'chunk_fts': 2.0, 'attachment_fts': 0.9, 'thread_vec': 4.6, 'chunk_vec': 6.2, 'fusion': 0.8} counts={'thread_fts': 4, 'chunk_fts': 9, 'attachment_fts': 0, 'thread_vec': 100, 'chunk_vec': 812, 'filtered': 57, 'results': 10} config={'rerank': 'none'}
@@ -466,8 +467,8 @@ inject instructions into the user's inbox that an LLM might treat as
 commands. The intelligence tools mitigate this two ways:
 
 1. **System-prompt framing.** Every `ask_mailbox`, `summarize_thread`,
-   and `extract_from_emails` call (and the experimental `brief_issue`)
-   prepends a security notice telling the
+   and `extract_from_emails` call (and the experimental `brief_issue`
+   and `check_conclusion`) prepends a security notice telling the
    model that email content is untrusted data, must not be followed as
    instructions, and that the model must not reveal the system prompt or
    act on URLs/addresses/phone numbers found inside email bodies.
@@ -733,6 +734,82 @@ entry, and an entry's `actor` and `date` are the model's reading. The
 date in a passage header is the message's own sent date; the receiving
 date is not indexed. `as_of` is computed by the server from the
 passages, not by the model.
+
+### `check_conclusion`
+Checks a caller-supplied conclusion against the mailbox (PLAN.md Phase
+5 item 2): finds passages that support, contradict, qualify or
+supersede it. A query-time tool: nothing it produces is persisted or
+indexed, so a finding can never come back as evidence, and every
+finding is returned with the source passages it rests on.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `conclusion` | string | required | The statement to check, 1–2000 characters (empty or longer is an error before any provider call) |
+| `folders` | list | all | Scope to threads with a message in any of these folders |
+| `from_addr` | string | none | Scope to a specific sender |
+| `date_from` | string | none | Date lower bound |
+| `date_to` | string | none | Date upper bound |
+| `max_threads` | int | `5` | Context threads to use, clamped to `[1, 10]` |
+
+Retrieval, evidence labels, the prompt budget and the coverage note are
+those of `brief_issue`, with the conclusion as the search query; as
+there, only message passages are offered (a thread with no matching
+chunks is listed in `threads` but its thread text is not shown, since
+it has no message, sender or date to quote), and with none the model is
+not called. The conclusion is caller text, so it is framed rather than trusted: it goes
+after the `<untrusted_email>` blocks inside its own
+`<conclusion>…</conclusion>` block (any `conclusion` or
+`untrusted_email` tag inside it is escaped, so it cannot close its block
+or open a mail block), followed by a fixed task line, and never enters
+the system prompt. The system prompt says the conclusion is a claim to
+test, not instructions or evidence; asks for one JSON object
+(`verdict_summary`, `findings` of `{relation, explanation, labels}`, at
+most 20, and `insufficient_evidence`); defines the four relations; and
+says the newest message is not authoritative because it is newest, so
+`supersedes` is used only when a passage states the change.
+
+The reply is capped, parsed and validated as for `brief_issue`. Each
+finding's labels are rewritten to the canonical `E<n>` form (`"[E1]"`
+becomes `E1`, repeats dropped) so they join to its `sources[].label`,
+and the finding is checked: a relation other than the four is
+`invalid_relation`, a label no supplied passage has is
+`unknown_labels`, and a finding with no label is `no_citations`. Any
+failure gets exactly one repair call with fixed text; a reply that is
+still not a check comes back raw with `status: "invalid_json"`, and a
+reply cut off at `INFERENCE_MAX_TOKENS` comes back with `status:
+"truncated"` and no repair. Only counts are logged.
+
+The server attaches a `sources` entry to each finding for every valid
+label it cites: the `ask_mailbox` citation fields (claimant, sender,
+own sent date, chunk) plus `excerpt`, the first 300 characters of the
+passage text the model was shown, verbatim from the index (longer text
+is cut with a marker). The excerpt is the server's, not the model's.
+
+Structured output:
+
+| Field | Description |
+|---|---|
+| `experimental` | Always `true` |
+| `status` | `ok`, `invalid_json` or `truncated` |
+| `verdict_summary` | The model's short overall verdict (cut at 1000 characters); `null` unless `ok` |
+| `findings` | `{relation, explanation, labels, sources}`; `[]` unless `ok` |
+| `insufficient_evidence` | The model's abstention flag; `null` unless `ok` |
+| `raw_text` | The unparsed reply when `status` is not `ok`, else `null` |
+| `as_of` | Latest sent date (`YYYY-MM-DD`) among the passages supplied |
+| `citation_problems` | Entries `{item, kind, labels}`; `[]` when every finding passed |
+| `repair_attempted` | Whether the one repair call was made |
+| `threads` | The threads searched, best match first |
+
+The prose in `content` opens with an EXPERIMENTAL notice and the
+"Evidence as of" date, then the verdict, each finding (relation in
+capitals, explanation, labels) followed by its sources' sender, date and
+quoted excerpt, any citation-check lines and `Sources searched:`.
+
+Limits: the check is about labels and relations only. A valid label
+does not prove the passage says what the finding claims, and the
+excerpt is the start of the passage, which may not contain the sentence
+the finding rests on. Whether a later message really supersedes an
+earlier one is the model's reading of a passage that states the change.
 
 ---
 

@@ -450,7 +450,7 @@ class TestRequireEnv:
 
 class TestExperimentalToolsFlag:
     """``MCP_EXPERIMENTAL_TOOLS`` gates experimental tools (``brief_issue``,
-    PLAN.md Resolved decisions 12): off unless exactly ``true``, an
+    ``check_conclusion``; PLAN.md Resolved decisions 12): off unless exactly ``true``, an
     unrecognized value fails startup, and the tools need inference."""
 
     class _FakeDatabase:
@@ -514,18 +514,20 @@ class TestExperimentalToolsFlag:
 
         return asyncio.run(names())
 
-    def test_brief_issue_is_not_registered_by_default(self, monkeypatch):
+    _EXPERIMENTAL = {"brief_issue", "check_conclusion"}
+
+    def test_experimental_tools_are_not_registered_by_default(self, monkeypatch):
         names = self._tool_names(monkeypatch, experimental=False)
         assert "ask_mailbox" in names
-        assert "brief_issue" not in names
+        assert not names & self._EXPERIMENTAL
 
-    def test_brief_issue_is_registered_when_enabled(self, monkeypatch):
-        assert "brief_issue" in self._tool_names(monkeypatch, experimental=True)
+    def test_experimental_tools_are_registered_when_enabled(self, monkeypatch):
+        assert self._EXPERIMENTAL <= self._tool_names(monkeypatch, experimental=True)
 
-    def test_brief_issue_needs_inference(self, monkeypatch, caplog):
+    def test_experimental_tools_need_inference(self, monkeypatch, caplog):
         caplog.set_level(logging.INFO)
         names = self._tool_names(monkeypatch, experimental=True, inference_mode="none")
-        assert "brief_issue" not in names
+        assert not names & self._EXPERIMENTAL
         assert "Experimental tools not registered" in caplog.text
 
 
