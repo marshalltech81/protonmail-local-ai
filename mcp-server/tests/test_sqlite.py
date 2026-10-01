@@ -1127,6 +1127,64 @@ class TestStatsAndFolders:
         assert {"name": "Archive", "thread_count": 1} in folders
 
 
+class TestFolderMembershipFromMessages:
+    """Regression (#308): a thread's ``folder`` is the folder of the
+    message that started it, so grouping and filtering on it hid a
+    folder whose messages are all replies to threads rooted elsewhere.
+    A folder's threads are now the threads with a message in it."""
+
+    def _build(self, tmp_path):
+        from tests.conftest import _insert_message
+
+        conn, path = _open_built_db_conn(tmp_path, "folders.db")
+        # Root in INBOX, a reply filed in Sent.
+        _insert_message(conn, message_id="r1", thread_id="t1", sent_at="2024-01-01T09:00:00+00:00")
+        _insert_message(
+            conn,
+            message_id="r1-reply",
+            thread_id="t1",
+            sent_at="2024-01-02T09:00:00+00:00",
+            folder="Sent",
+            in_reply_to="r1",
+        )
+        # A newer INBOX thread with two INBOX messages: counted once.
+        _insert_message(conn, message_id="r2", thread_id="t2", sent_at="2024-02-01T09:00:00+00:00")
+        _insert_message(
+            conn, message_id="r2-b", thread_id="t2", sent_at="2024-02-02T09:00:00+00:00"
+        )
+        conn.execute(
+            "UPDATE threads SET date_last = '2024-01-02T09:00:00+00:00' WHERE thread_id = 't1'"
+        )
+        conn.execute(
+            "UPDATE threads SET date_last = '2024-02-02T09:00:00+00:00' WHERE thread_id = 't2'"
+        )
+        conn.commit()
+        conn.close()
+        return Database(str(path))
+
+    def test_reply_only_folder_is_listed(self, tmp_path):
+        db = self._build(tmp_path)
+        assert db.query_messages(folder="Sent").total_matches == 1
+        assert db.list_folders() == [
+            {"name": "INBOX", "thread_count": 2},
+            {"name": "Sent", "thread_count": 1},
+        ]
+
+    def test_reply_only_folder_is_browsable(self, tmp_path):
+        db = self._build(tmp_path)
+        sent = db.list_threads(folder="Sent")
+        assert [t.thread_id for t in sent] == ["t1"]
+        # The thread keeps its representative (root) folder.
+        assert sent[0].folder == "INBOX"
+        assert [t.thread_id for t in db.list_threads(folder="INBOX")] == ["t2", "t1"]
+
+    def test_counts_match_browsing(self, tmp_path):
+        db = self._build(tmp_path)
+        for f in db.list_folders():
+            listed = db.list_threads(folder=f["name"], limit=100)
+            assert len(listed) == f["thread_count"]
+
+
 class TestFilterDateUtcNormalization:
     """Stored ``date_last`` / ``date_first`` values are UTC-normalized by
     the indexer parser and serialized with a ``+00:00`` offset. Filter

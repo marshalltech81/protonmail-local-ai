@@ -239,7 +239,12 @@ source file's path, size, and SHA-256.
 | `message_id` | string | required | Message-ID header value |
 
 ### `list_threads`
-Browse threads in a folder.
+Browse threads in a folder: every thread with at least one message
+filed in it, newest activity first. A thread's `folder` field is its
+representative folder: where the message that started it was filed
+when the thread was first indexed (not updated when messages move). A
+thread listed under `Sent` because of one sent reply can still report
+`INBOX`.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
@@ -249,7 +254,11 @@ Browse threads in a folder.
 | `offset` | int | `0` | Pagination offset |
 
 ### `list_folders`
-List all folders and thread counts.
+List every folder holding at least one indexed message, with its
+thread count: the number of distinct threads with a message in that
+folder, the same threads `list_threads(folder=...)` pages through. A
+thread with messages in several folders counts once in each, so the
+counts can sum to more than the total thread count.
 
 ### `find_contact`
 Resolve a name / address / domain fragment to canonical email

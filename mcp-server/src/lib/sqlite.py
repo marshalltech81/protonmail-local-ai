@@ -2334,12 +2334,21 @@ class Database:
         limit: int = 20,
         offset: int = 0,
     ) -> list[ThreadResult]:
+        """Threads with at least one message in ``folder``, newest first.
+
+        Membership comes from each message's own folder (``messages``),
+        not ``threads.folder``: that is the folder of the message that
+        started the thread, so a folder holding only replies to threads
+        started elsewhere would never list (#308). The returned
+        ``folder`` stays the thread's representative folder, set when
+        the thread was first indexed.
+        """
         if filter_type != "all":
             raise ValueError("filter_type must be 'all'; unread/flagged state is not indexed")
         rows = self._fetchall(
             """
             SELECT * FROM threads
-            WHERE folder = ?
+            WHERE thread_id IN (SELECT thread_id FROM messages WHERE folder = ?)
             ORDER BY date_last DESC
             LIMIT ? OFFSET ?
         """,
@@ -2425,11 +2434,16 @@ class Database:
         return stats
 
     def list_folders(self) -> list[dict]:
+        """Folders holding at least one indexed message, with the number
+        of distinct threads that have a message in each — the same set
+        ``list_threads(folder=...)`` pages through. A thread with
+        messages in several folders counts once in each of them.
+        """
         rows = self._fetchall("""
-            SELECT folder, COUNT(*) as thread_count
-            FROM threads
+            SELECT folder, COUNT(DISTINCT thread_id) AS thread_count
+            FROM messages
             GROUP BY folder
-            ORDER BY thread_count DESC
+            ORDER BY thread_count DESC, folder
         """)
         return [{"name": r["folder"], "thread_count": r["thread_count"]} for r in rows]
 
