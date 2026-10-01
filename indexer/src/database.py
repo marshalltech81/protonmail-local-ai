@@ -19,6 +19,7 @@ from pathlib import Path
 import sqlite_vec
 
 from .chunker import l2_normalize, truncate_to_tokens
+from .extractors import OCR_DISABLED_ERROR, SCANNED_PDF_OCR_DISABLED_ERROR
 from .threader import (
     PER_MESSAGE_BODY_CAP_CHARS,
     THREAD_BODY_TEXT_MAX_TOKENS,
@@ -1130,6 +1131,24 @@ class Database:
             extractors,
         ).fetchall()
         return [r["filepath"] for r in rows]
+
+    @_synchronized
+    def find_ocr_disabled_attachments(self) -> list[sqlite3.Row]:
+        """Every attachment occurrence whose cached extraction is an "OCR
+        disabled" result, with its message's Maildir filepath, filename,
+        MIME type and the cached error."""
+        return self._conn.execute(
+            """
+            SELECT m.filepath, a.filename, a.content_type, e.extraction_error
+            FROM attachment_extractions e
+            JOIN attachments a ON a.attachment_id = e.attachment_id
+            JOIN message_thread_map m ON m.message_id = a.message_id
+            WHERE e.extraction_status = 'unsupported'
+              AND e.extraction_error IN (?, ?)
+            ORDER BY m.filepath
+            """,
+            (OCR_DISABLED_ERROR, SCANNED_PDF_OCR_DISABLED_ERROR),
+        ).fetchall()
 
     @_synchronized
     def get_attachment_extraction(self, attachment_id: str) -> sqlite3.Row | None:
