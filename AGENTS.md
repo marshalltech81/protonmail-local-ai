@@ -338,10 +338,13 @@ content is as private as a credential.
   site) `LookupError` at the boundary that produced them and degrade
   with a fixed message or a utf-8 fallback; never let them reach
   `indexing_jobs.last_error` through `_stage_error`.
-- Pipeline-stage errors persisted to `indexing_jobs.last_error` go
-  through `_stage_error` (`indexer/src/main.py`), which keeps the
-  message only for a short allowlist of fixed-text types and renders
-  an `OSError` from its errno; everything else is its type name. A
+- Errors persisted to `indexing_jobs.last_error` go through one of two
+  formatters. The embed stage uses `scrub_embed_error`
+  (`indexer/src/embedder.py`, the provider-boundary rule above). Every
+  other stage uses `_stage_error` (`indexer/src/main.py`), which keeps
+  the message only for a short allowlist of fixed-text types and
+  renders an `OSError` from its errno; everything else is its type
+  name. A
   query-path failure in the MCP server (an SQLite or conversion error)
   is logged and returned as its type name alone. Rows written before
   these rules (2026-10-01, #257) may still hold old text; nothing
