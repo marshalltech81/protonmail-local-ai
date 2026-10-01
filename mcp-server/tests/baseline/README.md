@@ -59,6 +59,10 @@ harness in `tests/eval/` (`tests/retrieval_metrics.py`).
 - **Vector-only questions** need a query that porter stemming does not
   map back to a corpus word. "maintenence" does not qualify, because
   it stems to the same form as "maintenance".
+- **Agent scenarios** in `tests/eval/agent_scenarios.json` name golden
+  questions by `id` and inherit their evidence, filters and enumeration
+  answers. Renaming or removing a golden question fails
+  `tests/test_agent_eval.py` until the scenario is updated.
 - **After changing the corpus or golden set**, run `make baseline
   UPDATE=1` and commit the regenerated `snapshot.json` together with
   the change.
