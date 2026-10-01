@@ -1270,7 +1270,8 @@ def _drain_queue_batched(
     Phase 1 commits thread membership per-message with a seed thread
     vector — ``mean(existing chunk vectors)`` for threads with chunks,
     the prior non-zero ``threads_vec`` row for chunkless ones,
-    placeholder zero for new ones — so (a) the next message
+    placeholder zero for new ones and for chunkless ones whose stored
+    vector is still zero after a crash — so (a) the next message
     in the batch's threader can see this message's thread, and (b) a
     Phase 2 failure cannot regress an already-good thread vector to
     zero.

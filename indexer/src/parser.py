@@ -222,7 +222,8 @@ def parse_email(path: Path, maildir_root: Path | None = None) -> Message | None:
         if cap > 0 and stat is not None and stat.st_size > cap:
             log.warning(
                 "Not parsing oversized email %s (%d bytes > %d cap); raise "
-                "INDEXER_PARSE_MAX_BYTES (or 0 to disable) and recreate the indexer to ingest.",
+                "INDEXER_PARSE_MAX_BYTES (or 0 to disable), recreate the indexer, "
+                "then run make requeue-dead if it was dead-lettered.",
                 path,
                 stat.st_size,
                 cap,
@@ -247,7 +248,8 @@ def parse_email(path: Path, maildir_root: Path | None = None) -> Message | None:
                 actual = max(stat.st_size, len(raw)) if stat is not None else len(raw)
                 log.warning(
                     "Not parsing oversized email %s (>%d cap, detected during read); raise "
-                    "INDEXER_PARSE_MAX_BYTES (or 0 to disable) and recreate the indexer to ingest.",
+                    "INDEXER_PARSE_MAX_BYTES (or 0 to disable), recreate the indexer, "
+                    "then run make requeue-dead if it was dead-lettered.",
                     path,
                     cap,
                 )
