@@ -95,20 +95,21 @@ def canonical_addr(value: str) -> str:
 # match; otherwise start a new thread.
 SUBJECT_FALLBACK_WINDOW = timedelta(days=60)
 
-# Cap for the stored / embedded thread body text. Used by both the fresh
-# insert path (``Thread.text_for_embedding``) and the accumulation path
-# in ``Database._compute_body``. Defining a single constant keeps brand-
-# new threads and later-updated threads on the same footing: without it,
-# a reply that arrives after the initial insert could expand the stored
-# body well past what the insert path would have kept, and the FTS /
-# embedding input would drift between the two code paths.
+# Cap for the stored thread body text (the thread-level FTS input; the
+# thread vector is the mean of its chunk vectors, not an embedding of
+# this text). Used by both the fresh insert path
+# (``Thread.text_for_embedding``, a historical name) and the
+# accumulation path in ``Database._compute_body``. Defining a single
+# constant keeps brand-new threads and later-updated threads on the
+# same footing: without it, a reply that arrives after the initial
+# insert could expand the stored body well past what the insert path
+# would have kept, and the FTS input would drift between the two code
+# paths.
 #
 # Token-based, not char-based: a char cap under-counts CJK / URL /
 # Base64 / dense code text by 4-6× and forces unnecessarily aggressive
-# truncation in ASCII-heavy threads. ``Qwen3-Embedding-8B`` (the
-# default embedder) accepts up to 32K tokens; 4000 leaves wide
-# headroom while still bounding the FTS / vector-input size on
-# pathological threads.
+# truncation in ASCII-heavy threads. 4000 tokens still bounds the
+# stored body and its FTS row on pathological threads.
 THREAD_BODY_TEXT_MAX_TOKENS = 4000
 
 # Per-message char cap applied when packing message bodies into the
@@ -139,12 +140,14 @@ class Thread:
 
     def text_for_embedding(self) -> str:
         """
-        Build a single text representation of the thread for embedding.
-        Includes subject, participants, and all message bodies.
-        Trimmed to ``THREAD_BODY_TEXT_MAX_TOKENS`` real BPE tokens to
-        stay within the embedding model context, matching the cap the
-        accumulation path in ``Database._compute_body`` applies on
-        update.
+        Build the thread's stored ``body_text`` (its FTS input).
+
+        The name is historical: thread vectors are now the mean of the
+        thread's chunk vectors, so this text is no longer embedded.
+        Includes subject, participants, and all message bodies, trimmed
+        to ``THREAD_BODY_TEXT_MAX_TOKENS`` real BPE tokens to match the
+        cap the accumulation path in ``Database._compute_body`` applies
+        on update.
         """
         from .chunker import truncate_to_tokens
 

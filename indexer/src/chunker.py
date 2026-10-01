@@ -1,14 +1,12 @@
 """
 Chunker for per-message retrieval units.
 
-The thread-level embedding path truncates each message's contribution to 2000
-chars and packs multiple messages into one vector. That is fine for coarse
-thread discovery but loses the ability to retrieve the exact passage that
-answers a question when the relevant text falls outside that window or is
-diluted by unrelated replies in the same thread.
-
 This module splits a single message body into paragraph-packed chunks that
-can be stored, FTS-indexed, and embedded individually. Output is a pure
+can be stored, FTS-indexed, and embedded individually, so retrieval can
+reach the exact passage that answers a question. The chunk vectors also
+feed coarse thread discovery: a thread's vector is the mean of its chunk
+vectors (``mean_vector``), with a subject-only embedding as the fallback
+for a thread that has no chunks. Output is a pure
 function of the input: same body, same ``message_pk`` → byte-identical
 ``MessageChunk`` list across runs. That determinism is what makes an
 idempotent "replace chunks for this message" write cheap — the caller
