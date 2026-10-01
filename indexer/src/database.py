@@ -1445,13 +1445,13 @@ class Database:
         does not exist or its ``display_subject`` is not set.
 
         Used by the chunkless-thread subject-fallback path in the
-        indexer's Phase 2a and the reconciler's reap rebuild so both
-        paths embed the SAME stable subject text for the same thread.
-        Without this shared source, the indexer's fallback used the
-        newly-arrived message's subject (overwriting prior fallbacks
-        on every chunkless reply, producing order-dependent thread
-        vectors) and the reaper used the threader's normalized
-        grouping key (silent vector drift between the two paths).
+        indexer's Phase 2a so it embeds a stable subject text for the
+        thread. Without it, the fallback used the newly-arrived
+        message's subject (overwriting prior fallbacks on every
+        chunkless reply, producing order-dependent thread vectors).
+        The reconciler's reap rebuild does not read it: the stored
+        value can still hold a reaped message's subject, so the
+        rebuild embeds from survivors only.
         """
         row = self._conn.execute(
             "SELECT display_subject FROM threads WHERE thread_id = ?",
@@ -2344,17 +2344,19 @@ class Database:
         date_last = thread.date_last.isoformat()
         has_attachments = int(any(m.has_attachments for m in thread.messages))
         body = thread.text_for_embedding()
-        # display_subject: derive from the surviving messages the same way
-        # ``upsert_thread`` derives it (oldest message's original subject).
+        # display_subject: derive from the surviving messages — the
+        # first original subject, in date order, that is non-empty, so a
+        # blank oldest survivor does not drop the label.
         # Without this rewrite, reaping the original root of a thread
         # leaves the dead message's subject as the user-facing label —
         # search results would render with text from a message that no
-        # longer exists in the index. None when the thread has no
-        # messages (the deletion-reconciler then drops the thread row
+        # longer exists in the index. None when no survivor has a
+        # subject, or when the thread has no messages (the deletion-reconciler then drops the thread row
         # entirely a few lines below; the value never reaches storage).
-        display_subject: str | None = None
-        if thread.messages:
-            display_subject = min(thread.messages, key=lambda m: m.date).subject or None
+        display_subject = next(
+            (m.subject for m in sorted(thread.messages, key=lambda m: m.date) if m.subject),
+            None,
+        )
 
         cur.execute(
             """
