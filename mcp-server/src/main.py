@@ -178,10 +178,12 @@ SQLITE_PATH = os.environ.get("SQLITE_PATH", "/data/mail.db")
 # trust an empty base URL as "I want the SDK default" rather than
 # "I forgot to configure."
 def _float_env(name: str, default: float, minimum: float = 0.0) -> float:
-    """Read a positive float from the environment with a fallback.
+    """Read a finite float of at least ``minimum`` from the environment.
 
-    Used for per-call HTTP deadlines so a typo or empty string falls back
-    to the library default rather than raising at startup.
+    Used for per-call HTTP deadlines. An unset or empty variable returns
+    ``default``; a value that does not parse as a number, is non-finite,
+    or is below ``minimum`` raises ``ValueError`` so the misconfiguration
+    fails startup instead of being silently replaced.
     """
     raw = os.environ.get(name, "").strip()
     if not raw:
