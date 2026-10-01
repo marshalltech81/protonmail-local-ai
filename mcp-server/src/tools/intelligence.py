@@ -309,10 +309,17 @@ def _pick_resolution_candidate(query: str, candidates: list[ThreadResult]) -> Th
     neighbor in any non-empty mailbox. The strictness is the gate: if
     the user wants a body-only match, they should call
     ``search_emails`` first and pass the resulting opaque ID.
+
+    Whitespace-delimited words containing ``@`` are dropped before
+    tokenizing. Thread IDs are root Message-IDs (``local@domain``), so
+    a missed ID would otherwise match a subject on its own domain or
+    local-part tokens (``<x@gmail.com>`` against "Gmail invoice"). A
+    phrase that includes an address still matches on its other words.
     """
     if not candidates:
         raise ValueError("candidates must be non-empty")
-    raw_tokens = re.findall(r"\w+", query)
+    phrase_words = [w for w in query.split() if "@" not in w]
+    raw_tokens = re.findall(r"\w+", " ".join(phrase_words))
     query_tokens = {t.lower() for t in raw_tokens if _is_meaningful_query_token(t)}
     if not query_tokens:
         return None

@@ -347,6 +347,15 @@ Summarize a thread in different styles.
 | `thread_id` | string | required | Thread ID to summarize |
 | `style` | string | `brief` | `brief`, `detailed`, `action-items`, `timeline` |
 
+When `thread_id` matches no thread, the tool treats it as a subject
+phrase: it runs a hybrid search and summarizes the top candidate whose
+subject shares a meaningful word with the phrase, or returns `Thread
+not found` when none does. Words containing `@` are ignored for that
+match, so a missing or mistyped thread ID (a Message-ID such as
+`<abc@example.com>`) is not found rather than matching a subject on
+its domain or local part. For a match that is only in message bodies,
+call `search_emails` first and pass the returned `Thread ID`.
+
 ### `extract_from_emails`
 Extract structured data from emails matching a query. Attachment text
 (digital and OCR'd PDFs, images) that ranks for the query is included in
