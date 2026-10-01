@@ -663,8 +663,13 @@ Retrieval and evidence are those of `ask_mailbox`: hybrid search with
 evidence chunks, one shared prompt budget, and the same labelled
 passage headers (`[E3 | message <claimant ID> | from <sender> | sent
 <date> | ...]`) inside the `<untrusted_email>` blocks, with the
-coverage note when passages were left out. The topic and a fixed task
-line follow the blocks. The system prompt asks for one JSON object of
+coverage note when passages were left out. Only message-level passages
+are offered: a retrieved thread with no matching chunks, which
+`ask_mailbox` would show by its thread text, has no message, sender or
+sent date to cite, so it is left out of the prompt (it still appears in
+`threads`). When no retrieved thread has a message passage, no model
+call is made and the brief is empty with `insufficient_evidence: true`.
+The topic and a fixed task line follow the blocks. The system prompt asks for one JSON object of
 a fixed shape and says that every entry must cite the labels of the
 passages that state it; that the newest message is not authoritative
 because it is newest, so a correction, cancellation or supersession is
@@ -676,10 +681,15 @@ true`.
 The reply is cut at 100,000 characters (an oversized reply is not
 parsed), unwrapped from a code fence, parsed with `json.loads`, and
 validated against the brief shape: every section must be present with
-the right types. Each entry's labels are then checked against the
+the right types. The server then sorts `chronology` oldest first by
+`date` (a stable sort; undated entries go last in the model's order),
+whatever order the model used. Each entry's labels are then checked against the
 passages supplied: a label no passage has is `unknown_labels`, an entry
 with no label is `no_citations`, and a conflict citing fewer than two
-supplied passages is `too_few_labels`. A reply that is not a brief, or
+supplied passages is `too_few_labels`. A brief that sets
+`insufficient_evidence: true` but has entries in any section is
+contradictory and reported once as `insufficient_but_populated`
+(`section: "brief"`, `item: 0`). A reply that is not a brief, or
 that has any problem, gets exactly one repair call: the same prompt
 plus a fixed instruction after the task (the rejected reply is not
 replayed). The repaired brief is used when it parses; otherwise the
@@ -696,11 +706,11 @@ Structured output:
 |---|---|
 | `experimental` | Always `true` |
 | `status` | `ok`, `invalid_json` or `truncated` |
-| `brief` | When `ok`: `chronology` (`date`, `date_source`: `sent` / `mentioned` / `unknown`, `actor`, `event`, `labels`; oldest first), `positions` (`actor`, `position`, `labels`), `decisions` (`decision`, `labels`), `open_questions` (`question`, `labels`), `conflicts` (`description`, `labels`), `insufficient_evidence`; else `null` |
+| `brief` | When `ok`: `chronology` (`date`, `date_source`: `sent` / `mentioned` / `unknown`, `actor`, `event`, `labels`; sorted oldest first, undated last), `positions` (`actor`, `position`, `labels`), `decisions` (`decision`, `labels`), `open_questions` (`question`, `labels`), `conflicts` (`description`, `labels`), `insufficient_evidence`; else `null` |
 | `raw_text` | The unparsed reply when `status` is not `ok`, else `null` |
 | `as_of` | Latest sent date (`YYYY-MM-DD`) among the passages supplied; the brief describes the evidence up to then |
 | `citations` | Each valid cited label, first-cited order, in the `ask_mailbox` citation shape (claimant, sender, own sent date, chunk) |
-| `citation_problems` | Entries `{section, item, kind, labels}`; `[]` when every entry passed |
+| `citation_problems` | Entries `{section, item, kind, labels}`, `kind` one of `unknown_labels`, `no_citations`, `too_few_labels`, `insufficient_but_populated` (the last with `section: "brief"`); `[]` when every check passed |
 | `repair_attempted` | Whether the one repair call was made |
 | `threads` | The threads searched, best match first |
 

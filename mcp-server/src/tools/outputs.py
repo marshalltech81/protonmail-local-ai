@@ -519,7 +519,10 @@ class BriefConflict(_Output):
 
 
 class Brief(_Output):
-    chronology: list[BriefEvent] = Field(description="Dated events, oldest first.")
+    chronology: list[BriefEvent] = Field(
+        description="Events sorted oldest first by date by the server; undated entries "
+        "last, in the model's order."
+    )
     positions: list[BriefPosition] = Field(description="Actors and the positions they state.")
     decisions: list[BriefDecision]
     open_questions: list[BriefQuestion]
@@ -527,7 +530,8 @@ class Brief(_Output):
         description="Passages that disagree where none states which is right."
     )
     insufficient_evidence: bool = Field(
-        description="True when the model found nothing about the topic in the passages."
+        description="True when the model found nothing about the topic in the passages; "
+        "true with any entries is reported as insufficient_but_populated."
     )
 
 
@@ -535,12 +539,19 @@ BriefSection = Literal["chronology", "positions", "decisions", "open_questions",
 
 
 class BriefCitationProblem(_Output):
-    section: BriefSection
-    item: int = Field(description="0-based index of the entry within its section.")
-    kind: Literal["unknown_labels", "no_citations", "too_few_labels"] = Field(
+    section: BriefSection | Literal["brief"] = Field(
+        description="The entry's section, or brief for a problem with the brief as a whole."
+    )
+    item: int = Field(
+        description="0-based index of the entry within its section; 0 for section brief."
+    )
+    kind: Literal[
+        "unknown_labels", "no_citations", "too_few_labels", "insufficient_but_populated"
+    ] = Field(
         description="unknown_labels: the entry cites labels no supplied passage has. "
         "no_citations: it cites none. too_few_labels: a conflict cites fewer than two "
-        "supplied passages."
+        "supplied passages. insufficient_but_populated (section brief): "
+        "insufficient_evidence is true but a section has entries."
     )
     labels: list[str] = Field(description="The unknown labels; empty for the other kinds.")
 

@@ -131,9 +131,14 @@ def _parse_brief(text: str) -> Brief | None:
     if not isinstance(data, dict):
         return None
     try:
-        return Brief.model_validate(data)
+        brief = Brief.model_validate(data)
     except ValidationError:
         return None
+    # The contract is oldest first whatever order the model used. A
+    # stable sort on the ISO date string; undated entries go last and
+    # keep their relative order.
+    brief.chronology.sort(key=lambda e: (e.date is None, e.date or ""))
+    return brief
 
 
 def _check_brief(
@@ -141,7 +146,9 @@ def _check_brief(
 ) -> tuple[list[str], list[BriefCitationProblem]]:
     """Every label the brief cites that names a supplied passage, in
     first-cited order, and each entry's problems: unknown labels, no
-    label at all, or a conflict citing fewer than two supplied passages.
+    label at all, or a conflict citing fewer than two supplied passages;
+    plus one ``insufficient_but_populated`` problem when the brief both
+    claims insufficient evidence and has entries.
     Labels are read with ask_mailbox's label pattern, so ``"[E1]"`` and
     ``"E1"`` are the same label; each entry's labels are rewritten to
     that canonical form."""
@@ -173,6 +180,12 @@ def _check_brief(
                         section=section, item=index, kind="too_few_labels", labels=[]
                     )
                 )
+    if brief.insufficient_evidence and any(getattr(brief, s) for s in _SECTIONS):
+        problems.append(
+            BriefCitationProblem(
+                section="brief", item=0, kind="insufficient_but_populated", labels=[]
+            )
+        )
     return cited, problems
 
 
@@ -188,6 +201,8 @@ def _repair_reason(brief: Brief | None, problems: list[BriefCitationProblem]) ->
         reasons.append("had entries that cite no evidence label")
     if "too_few_labels" in kinds:
         reasons.append("had conflicts that cite fewer than two passages")
+    if "insufficient_but_populated" in kinds:
+        reasons.append("set insufficient_evidence to true but also listed entries")
     return "; ".join(reasons)
 
 
@@ -330,7 +345,11 @@ def register_experimental_tools(
                 evidence_per_thread=PROMPT_EVIDENCE_CHUNKS_PER_THREAD,
             )
             count("results", len(results))
-            if not results:
+            # Message-level evidence only: a thread with no matching
+            # chunks would be shown by its thread text, which has no
+            # claimant, sender or sent date to cite, so it is not offered.
+            evidenced = [r for r in results if r.evidence_chunks]
+            if not evidenced:
                 empty = Brief(
                     chronology=[],
                     positions=[],
@@ -340,7 +359,7 @@ def register_experimental_tools(
                     insufficient_evidence=True,
                 )
                 return tool_result(
-                    "EXPERIMENTAL brief: no relevant emails found for this topic.",
+                    "EXPERIMENTAL brief: no relevant message passages found for this topic.",
                     BriefIssueOutput(
                         experimental=True,
                         status="ok",
@@ -350,17 +369,17 @@ def register_experimental_tools(
                         citations=[],
                         citation_problems=[],
                         repair_attempted=False,
-                        threads=[],
+                        threads=[thread_summary(r) for r in results],
                     ),
                 )
 
             # The same labelled evidence and shared budget as ask_mailbox.
             evidence_map: dict[str, EvidenceRef] = {}
             evidence, coverage = _build_evidence(
-                results, PER_THREAD_CHAR_BUDGET * len(results), evidence_map=evidence_map
+                evidenced, PER_THREAD_CHAR_BUDGET * len(evidenced), evidence_map=evidence_map
             )
             user_prompt = (
-                _evidence_prompt(results, evidence, coverage) + f"Issue topic: {topic}\n\n{_TASK}"
+                _evidence_prompt(evidenced, evidence, coverage) + f"Issue topic: {topic}\n\n{_TASK}"
             )
             dates = [
                 ref.chunk.message_date

@@ -38,6 +38,7 @@ from tests.conftest import (
     FakeMCPServer,
     _build_schema,
     _insert_message,
+    _insert_thread,
     claimant_of,
 )
 
@@ -394,6 +395,93 @@ class TestBrief:
         data = out.structured_content
         assert data["brief"]["insufficient_evidence"] is True
         assert data["as_of"] is None
+
+
+class TestReviewRound2:
+    def test_chronology_is_returned_oldest_first_with_undated_last(self, brief_db):
+        def reversed_reply(user: str) -> str:
+            good = json.loads(_good_brief(user))
+            undated = {**good["chronology"][0], "date": None, "date_source": "unknown"}
+            # Newest first, an undated entry in the middle.
+            good["chronology"] = [
+                good["chronology"][2],
+                undated,
+                good["chronology"][1],
+                good["chronology"][0],
+            ]
+            return json.dumps(good)
+
+        out = _run(brief_db, ScriptedInference(reversed_reply))
+        dates = [e["date"] for e in out.structured_content["brief"]["chronology"]]
+        assert dates == ["2024-04-01", "2024-04-05", "2024-04-20", None]
+        text = out.content[0].text
+        chronology = text[text.index("Chronology:") :]
+        assert (
+            chronology.index("2024-04-01 (")
+            < chronology.index("2024-04-20 (")
+            < chronology.index("undated (")
+        )
+
+    def test_insufficient_evidence_with_entries_is_a_problem_and_repaired(self, brief_db):
+        def contradictory(user: str) -> str:
+            return json.dumps({**json.loads(_good_brief(user)), "insufficient_evidence": True})
+
+        llm = ScriptedInference(contradictory, contradictory)
+        out = _run(brief_db, llm)
+        assert len(llm.complete_calls) == 2
+        assert "insufficient" in llm.complete_calls[1][1][len(llm.complete_calls[0][1]) :]
+        assert out.structured_content["citation_problems"] == [
+            {"section": "brief", "item": 0, "kind": "insufficient_but_populated", "labels": []}
+        ]
+
+    def test_thread_text_without_message_provenance_is_not_offered(self, tmp_path):
+        db_path = tmp_path / "mixed.db"
+        # One message with chunks, plus a thread that has only its text.
+        _build(db_path, dict(list(_MAILBOX.items())[:1]))
+        conn = sqlite3.connect(str(db_path))
+        conn.enable_load_extension(True)
+        sqlite_vec.load(conn)
+        conn.enable_load_extension(False)
+        _insert_thread(
+            conn,
+            thread_id="t-nochunks",
+            subject="offsite venue booking",
+            participants=["frank@example.com"],
+            body_text=f"offsite venue booking {_MARKER}",
+            embedding=[1.0, 0.0, 0.0, 0.0],
+        )
+        conn.commit()
+        conn.close()
+        llm = ScriptedInference(lambda _u: _brief(insufficient_evidence=True))
+        out = _run(Database(str(db_path)), llm)
+        [(_system, user)] = llm.complete_calls
+        assert _MARKER not in user
+        assert "thread text]" not in user
+        assert claimant_of("proposal@example.com") in user
+        assert all(c["source"] != "thread" for c in out.structured_content["citations"])
+
+    def test_only_chunkless_threads_means_no_model_call(self, tmp_path):
+        db_path = tmp_path / "chunkless.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.enable_load_extension(True)
+        sqlite_vec.load(conn)
+        conn.enable_load_extension(False)
+        _build_schema(conn)
+        _insert_thread(
+            conn,
+            thread_id="t-nochunks",
+            subject="offsite venue booking",
+            participants=["frank@example.com"],
+            body_text="offsite venue booking",
+            embedding=[1.0, 0.0, 0.0, 0.0],
+        )
+        conn.close()
+        llm = ScriptedInference()
+        out = _run(Database(str(db_path)), llm)
+        assert llm.complete_calls == []
+        data = out.structured_content
+        assert data["brief"]["insufficient_evidence"] is True
+        assert [t["thread_id"] for t in data["threads"]] == ["t-nochunks"]
 
 
 class TestHostileMail:
