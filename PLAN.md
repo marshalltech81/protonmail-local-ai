@@ -422,7 +422,9 @@ answers real knowledge questions, and identify why failures occur.
    deadlines. (Project history endorses this: the 400s search hang
    was three wrong theories until the query plan was measured.)
    Tracked by **#287** (adds content-safe telemetry, cold/warm
-   benchmarks, cancellation of thread-offloaded work).
+   benchmarks, cancellation of thread-offloaded work). Stage timings
+   landed in #458; benchmarks, budgets and cancellation wait on a
+   real mailbox.
 3. **Experimental ephemeral `brief_issue`.** Chronology, actors,
    positions, decisions, open questions, conflicting evidence — every
    assertion cited, **nothing persisted**. This is the proving ground
@@ -431,10 +433,11 @@ answers real knowledge questions, and identify why failures occur.
    corrections, contradictions, "as of" questions; "newest is not
    authoritative"). An experimental MCP tool, registered only when
    `MCP_EXPERIMENTAL_TOOLS=true` (off by default; Resolved
-   decisions 12).
+   decisions 12). Built in #466; #291's accuracy and abstention
+   scoring still open.
 4. **Adversarial injection suite** (hostile fixtures in the synthetic
    mailbox, asserting the Phase 0 serialization holds under real
-   tool flows).
+   tool flows). Done in #448; the one gap it found is #442.
 5. Unparked by the eval harness:
    - **Thread-vector weighting** — attachment chunks currently
      dominate the thread-vector mean (a 50-chunk PDF on a 5-chunk
@@ -466,12 +469,14 @@ answers real knowledge questions, and identify why failures occur.
    prompts, a structured claim→citation map checked against the
    evidence, bounded repair. The plan verified quotes only for
    Phase 5's persisted claims; ephemeral answers need it first.
-   Depends on #217's identity decision (landed in #453).
+   Depends on #217's identity decision (landed in #453). First slice
+   in #457 (labelled evidence, label validation, one repair);
+   statement-level coverage and quote checks remain.
 
 ### Phase 4 — Deterministic knowledge scaffolding
 
-Items 1 and 2 are being built before go-live (#459, in review), so
-their tables fold into the v0 schema. Any Phase 4 schema change after
+Items 1 and 2 were built before go-live (#459), so their tables are
+in the v0 schema. Any Phase 4 schema change after
 the first deployment needs a numbered migration like any other.
 
 1. **Entity resolution, phase 1 (deterministic):** address
@@ -505,7 +510,7 @@ the first deployment needs a numbered migration like any other.
    query-time tool ("here is a conclusion for the Board packet —
    find evidence that supports, contradicts, qualifies, or
    supersedes it"). Experimental, behind `MCP_EXPERIMENTAL_TOOLS`
-   like `brief_issue`.
+   like `brief_issue`. Built as `check_conclusion` (#467).
 3. Temporal position/change reasoning ("position as of date X" vs
    "current position").
 4. **Only then** evaluate persisted claims/events — and only under
@@ -641,8 +646,21 @@ too (see Resolved decisions 12 and the bundle paragraph).
 Landed the same day: #298 (#438), #303 (#439), #286 (#440), #295
 (#444), #285 (#445), the adversarial injection suite (#448), the
 first #283 slice (#452), #217 (#453), mirror retention (#451) and
-#287's stage timings (#458). Edge cases from their reviews are filed
-as #446, #447, #449, #450, #454, #455, #456, #460 and #461.
+#287's stage timings (#458). Then the Phase 3–5 work: the #284
+citation contract (#457), Phase 4 entities and source authority
+(#459), authority in the filtered-search widening (#470), and the
+experimental `brief_issue` (#466) and `check_conclusion` (#467) tools.
+Edge cases from their reviews are filed as #446, #447, #449, #450,
+#454, #455, #456, #460, #461, #464, #465, #468, #469 (fixed in #470)
+and #471. Owner decisions still open from the run: #441 (should mail
+moved to Trash leave search under mirror?) and #463 (sender
+authentication for source authority).
+
+Still open from Phases 3–5, all waiting on a real mailbox or the
+owner: the #283 agent-level and answer-quality evals and #291's
+accuracy scoring; #287's budgets and benchmarks; #288 and #289,
+which need a real embedder and reranker; #284's statement-level and
+quote checks; and Phase 4 item 3 and Phase 5 items 3–4.
 
 Go-live checklist (do these before more hardening):
 
