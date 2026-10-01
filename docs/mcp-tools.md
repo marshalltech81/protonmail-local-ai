@@ -369,7 +369,11 @@ extracted.
 
 The extractor accepts either a single JSON object matching the schema
 or a JSON array of such objects (useful when a thread contains
-multiple invoices, receipts, etc.). `limit` is clamped to `[1, 50]`
+multiple invoices, receipts, etc.). Every returned record carries
+`_source_thread` (the thread subject) and `_date` (the thread's last
+message date), so these two names are reserved: a schema that declares
+either one, as a shorthand key or in JSON Schema `properties` or
+`required`, is rejected before any model call. `limit` is clamped to `[1, 50]`
 at the tool boundary. Each retrieved thread drives one LLM call, so
 inflated values fan out into that many model calls.
 

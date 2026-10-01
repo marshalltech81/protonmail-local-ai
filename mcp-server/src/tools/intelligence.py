@@ -420,6 +420,30 @@ def _untrusted_email_block(content: str, *, index: int | None = None) -> str:
 _CODE_FENCE_RE = re.compile(r"^```[A-Za-z]*+[^\S\n]*+\n(.*?)\n?```$", re.DOTALL)
 
 
+# Fields extract_from_emails writes on every record to say where it came
+# from. A schema may not request fields of these names (#329).
+_PROVENANCE_FIELDS = ("_source_thread", "_date")
+
+
+def _is_json_schema(schema: dict) -> bool:
+    """Whether ``schema`` is a JSON Schema object rather than the
+    ``{"field": "type"}`` shorthand."""
+    return schema.get("type") == "object" or isinstance(schema.get("properties"), dict)
+
+
+def _declared_fields(schema: dict) -> set[str]:
+    """Field names a schema requests: its keys in the shorthand form,
+    or ``properties`` plus ``required`` in the JSON Schema form."""
+    if not _is_json_schema(schema):
+        return set(schema)
+    properties = schema.get("properties")
+    required = schema.get("required")
+    fields = set(properties) if isinstance(properties, dict) else set()
+    if isinstance(required, list):
+        fields.update(name for name in required if isinstance(name, str))
+    return fields
+
+
 # Appended to a prose answer the model stopped writing at max_tokens.
 _TRUNCATED_NOTICE = (
     "\n\n[Answer cut off at the INFERENCE_MAX_TOKENS limit; raise it for a complete answer.]"
@@ -942,6 +966,8 @@ def register_intelligence_tools(
             query: What to search for e.g. "invoices", "meeting confirmations"
             schema: JSON schema describing what to extract e.g.
                     {"vendor": "string", "amount": "number", "date": "string"}
+                    Must not declare _source_thread or _date: every
+                    record carries those as its source thread and date.
             folders: Optionally scope to specific folders
             date_from: Optional date lower bound (ISO 8601)
             date_to: Optional date upper bound (ISO 8601)
@@ -967,6 +993,15 @@ def register_intelligence_tools(
         # ``limit`` would otherwise fan out into that many model calls
         # or raise before the try/except below.
         limit = clamp_int(limit, default=20, minimum=1, maximum=_MAX_EXTRACT_LIMIT)
+        # Provenance would overwrite a requested field of the same name,
+        # so such a schema is refused before any provider work (#329).
+        # The message names only the fixed reserved names.
+        reserved = [f for f in _PROVENANCE_FIELDS if f in _declared_fields(schema)]
+        if reserved:
+            raise ToolError(
+                f"Error: schema declares {', '.join(reserved)}, which are reserved for "
+                "each record's source thread subject and date; rename the field."
+            )
 
         try:
             embedding = await embed_query(embed_client, query, expected_embed_dim)

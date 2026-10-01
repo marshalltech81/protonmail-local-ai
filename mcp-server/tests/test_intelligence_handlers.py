@@ -458,6 +458,44 @@ class TestExtractFromEmails:
         assert "Acme" in text
         assert "Beta" in text
 
+    @pytest.mark.parametrize(
+        "schema",
+        [
+            {"_date": "string", "_source_thread": "string"},
+            {"amount": "number", "_date": "string"},
+            {"type": "object", "properties": {"_source_thread": {"type": "string"}}},
+            {"type": "object", "properties": {"amount": {}}, "required": ["_date"]},
+        ],
+    )
+    def test_schema_declaring_a_provenance_field_is_rejected_before_inference(
+        self, fake_server, seeded_db, fake_embed, schema
+    ):
+        """#329: provenance is written to ``_source_thread`` and ``_date``,
+        so a requested field of either name would be silently replaced
+        by thread metadata. The schema is rejected before any provider
+        work instead."""
+        llm = FakeInferenceClient(
+            complete_responses=['{"_date": "2020-02-03", "_source_thread": "requested-value"}']
+        )
+        handler = _handlers(fake_server, seeded_db, fake_embed, llm)["extract_from_emails"]
+        with pytest.raises(ToolError, match="reserved"):
+            asyncio.run(handler(query="invoice", schema=schema))
+        assert llm.complete_calls == []
+
+    def test_provenance_overrides_an_undeclared_field_of_the_same_name(
+        self, fake_server, seeded_db, fake_embed
+    ):
+        """A ``_date`` the schema never asked for is not requested data,
+        so provenance still fills it for ordinary schemas."""
+        seeded_db.hybrid_search = lambda **_kw: [_hostile_thread()]  # type: ignore[assignment]
+        llm = FakeInferenceClient(complete_responses=['{"amount": 5, "_date": "2020-02-03"}'])
+        handler = _handlers(fake_server, seeded_db, fake_embed, llm)["extract_from_emails"]
+        out = asyncio.run(handler(query="invoice", schema={"amount": "number"}))
+        [record] = json.loads(_text(out))
+        assert record["amount"] == 5
+        assert record["_date"] == "2024-01-02"
+        assert record["_source_thread"].startswith("Invoice")
+
     def test_query_reaches_the_prompt_outside_the_untrusted_block(
         self, fake_server, seeded_db, fake_embed, fake_inference
     ):
