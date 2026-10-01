@@ -18,6 +18,7 @@ from ..lib.sqlite import (
     validate_authority_class,
     validate_date_range,
 )
+from ..lib.timings import count, rerank_mode, stage, timed_tool
 from ..lib.validation import clamp_int
 from .outputs import (
     HEADER_CHAR_LIMIT,
@@ -83,8 +84,11 @@ def register_search_tools(
     search. ``None`` skips the check (fresh install pre-indexer-run).
     """
     secrets = list(secret_values or ())
+    # Config identifier for the per-call timing line.
+    timing_config = {"rerank": rerank_mode(reranker)}
 
     @server.tool(output_schema=SearchEmailsOutput.model_json_schema())
+    @timed_tool("search_emails", **timing_config)
     async def search_emails(
         query: str,
         mode: str = "hybrid",
@@ -237,7 +241,10 @@ def register_search_tools(
         resolved_from_addr = None
         if from_name and not from_addr:
             try:
-                contacts = await asyncio.to_thread(db.find_contact, from_name, 1, senders_only=True)
+                with stage("contact_lookup"):
+                    contacts = await asyncio.to_thread(
+                        db.find_contact, from_name, 1, senders_only=True
+                    )
             except Exception as e:
                 # Local-DB work, but a conversion error can quote stored
                 # mail: the same classification as provider failures (#257).
@@ -319,6 +326,7 @@ def register_search_tools(
                     authority_class=authority_class,
                 )
 
+            count("results", len(results))
             output = SearchEmailsOutput(
                 mode=mode,
                 resolved_from_addr=resolved_from_addr,
@@ -363,6 +371,7 @@ def register_search_tools(
             raise ToolError(f"Search error: {safe_error}") from e
 
     @server.tool(output_schema=EvidenceOutput.model_json_schema())
+    @timed_tool("get_evidence", **timing_config)
     async def get_evidence(
         query: str,
         thread_id: str | None = None,
@@ -490,10 +499,12 @@ def register_search_tools(
                 if not thread:
                     raise ToolError(f"Thread not found: {thread_id}")
                 embedding = await embed_query(embed_client, query, expected_embed_dim)
-                grouped = await asyncio.to_thread(
-                    db.get_evidence_chunks_for_threads, [thread_id], embedding, limit
-                )
+                with stage("evidence_fetch"):
+                    grouped = await asyncio.to_thread(
+                        db.get_evidence_chunks_for_threads, [thread_id], embedding, limit
+                    )
                 chunks = grouped.get(thread_id, [])
+                count("evidence_chunks", len(chunks))
                 if chunks:
                     groups.append(
                         (clip(thread.subject, HEADER_CHAR_LIMIT), thread_id, None, None, chunks)
@@ -516,6 +527,7 @@ def register_search_tools(
                     # the chunks its prompt draws on.
                     evidence_per_thread=PROMPT_EVIDENCE_CHUNKS_PER_THREAD,
                 )
+                count("results", len(results))
                 # Flatten thread-ranked evidence into a flat chunk budget:
                 # ``limit`` counts chunks, threads are already ranked, and
                 # chunks within a thread are ranked by similarity. Once the
@@ -613,6 +625,7 @@ def register_search_tools(
         return tool_result("\n".join(lines).rstrip(), output)
 
     @server.tool(output_schema=SearchAttachmentsOutput.model_json_schema())
+    @timed_tool("search_attachments")
     async def search_attachments(
         query: str | None = None,
         content_type: str | None = None,
@@ -684,16 +697,18 @@ def register_search_tools(
             log.warning("search_attachments rejected invalid %s", e.field_name)
             raise ToolError(f"Attachment search error: {e}") from e
         try:
-            results = await asyncio.to_thread(
-                db.search_attachments,
-                query=query,
-                content_type=content_type,
-                from_addr=from_addr,
-                date_from=date_from,
-                date_to=date_to,
-                extracted_only=extracted_only,
-                limit=limit,
-            )
+            with stage("attachment_search"):
+                results = await asyncio.to_thread(
+                    db.search_attachments,
+                    query=query,
+                    content_type=content_type,
+                    from_addr=from_addr,
+                    date_from=date_from,
+                    date_to=date_to,
+                    extracted_only=extracted_only,
+                    limit=limit,
+                )
+            count("results", len(results))
         except InvalidFilterError as e:
             # The message quotes the rejected value, which log_tool_call
             # withheld. Return it to the caller; log only the field name.
