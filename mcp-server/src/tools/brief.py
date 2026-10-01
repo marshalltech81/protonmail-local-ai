@@ -27,7 +27,7 @@ from mcp.types import CallToolResult
 from pydantic import BaseModel, ValidationError
 
 from ..lib.embed import embed_query
-from ..lib.inference import InferenceTruncatedError
+from ..lib.inference import InferenceTruncatedError, PromptBudget
 from ..lib.security import log_tool_call, safe_provider_exception_text
 from ..lib.sqlite import PROMPT_EVIDENCE_CHUNKS_PER_THREAD, InvalidFilterError, validate_date_range
 from ..lib.timings import count, rerank_mode, stage, timed_tool
@@ -35,12 +35,12 @@ from ..lib.validation import clamp_int
 from .intelligence import (
     _LABEL_RE,
     _MAX_ASK_THREADS,
-    PER_THREAD_CHAR_BUDGET,
     UNTRUSTED_CONTENT_NOTICE,
     EvidenceRef,
     _build_evidence,
     _citation,
     _citation_lines,
+    _evidence_budget,
     _evidence_prompt,
     _sort_labels,
     _sources_searched,
@@ -448,11 +448,13 @@ def register_experimental_tools(
     reranker=None,
     secret_values=None,
     expected_embed_dim: int | None = None,
+    prompt_budget: PromptBudget | None = None,
 ):
     """Register the experimental tools. ``main.py`` calls this only when
     ``MCP_EXPERIMENTAL_TOOLS=true`` and an inference client is configured;
     the arguments are those of ``register_intelligence_tools``."""
     secret_values = list(secret_values or ())
+    prompt_budget = prompt_budget or PromptBudget()
 
     async def complete(user_prompt: str, system: str = BRIEF_SYSTEM) -> tuple[str, bool]:
         """The model's reply and whether it was cut off at max_tokens."""
@@ -576,14 +578,16 @@ def register_experimental_tools(
                     ),
                 )
 
-            # The same labelled evidence and shared budget as ask_mailbox.
+            # The same labelled evidence and shared budget as ask_mailbox,
+            # sized so the complete prompt fits the model window (#285).
+            task = f"Issue topic: {topic}\n\n{_TASK}"
             evidence_map: dict[str, EvidenceRef] = {}
             evidence, coverage = _build_evidence(
-                evidenced, PER_THREAD_CHAR_BUDGET * len(evidenced), evidence_map=evidence_map
+                evidenced,
+                _evidence_budget(prompt_budget, BRIEF_SYSTEM, evidenced, task),
+                evidence_map=evidence_map,
             )
-            user_prompt = (
-                _evidence_prompt(evidenced, evidence, coverage) + f"Issue topic: {topic}\n\n{_TASK}"
-            )
+            user_prompt = _evidence_prompt(evidenced, evidence, coverage) + task
             dates = [
                 ref.chunk.message_date
                 for ref in evidence_map.values()
@@ -668,6 +672,8 @@ def register_experimental_tools(
         except InvalidFilterError as e:
             log.warning("brief_issue rejected invalid %s", e.field_name)
             raise ToolError(f"Error: {e}") from e
+        except ToolError:
+            raise
         except Exception as e:
             safe_error = safe_provider_exception_text(e, secret_values)
             log.error("brief_issue error: %s", safe_error)
@@ -780,18 +786,18 @@ def register_experimental_tools(
                     ),
                 )
 
-            # ask_mailbox's labelled evidence and shared budget. The
+            # ask_mailbox's labelled evidence and shared budget, sized
+            # so the complete prompt fits the model window (#285). The
             # conclusion follows the mail blocks in its own escaped
             # block, then the fixed task line.
+            task = _conclusion_block(conclusion) + _CHECK_TASK
             evidence_map: dict[str, EvidenceRef] = {}
             evidence, coverage = _build_evidence(
-                evidenced, PER_THREAD_CHAR_BUDGET * len(evidenced), evidence_map=evidence_map
+                evidenced,
+                _evidence_budget(prompt_budget, CHECK_SYSTEM, evidenced, task),
+                evidence_map=evidence_map,
             )
-            user_prompt = (
-                _evidence_prompt(evidenced, evidence, coverage)
-                + _conclusion_block(conclusion)
-                + _CHECK_TASK
-            )
+            user_prompt = _evidence_prompt(evidenced, evidence, coverage) + task
             dates = [
                 ref.chunk.message_date
                 for ref in evidence_map.values()
@@ -896,6 +902,8 @@ def register_experimental_tools(
         except InvalidFilterError as e:
             log.warning("check_conclusion rejected invalid %s", e.field_name)
             raise ToolError(f"Error: {e}") from e
+        except ToolError:
+            raise
         except Exception as e:
             safe_error = safe_provider_exception_text(e, secret_values)
             log.error("check_conclusion error: %s", safe_error)

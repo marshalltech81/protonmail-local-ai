@@ -197,6 +197,7 @@ INFERENCE_BASE_URL="$(get_env_value INFERENCE_BASE_URL)"
 INFERENCE_MODEL="$(get_env_value INFERENCE_MODEL)"
 INFERENCE_TIMEOUT_SECS="$(get_env_value INFERENCE_TIMEOUT_SECS)"
 INFERENCE_MAX_TOKENS="$(get_env_value INFERENCE_MAX_TOKENS)"
+INFERENCE_CONTEXT_TOKENS="$(get_env_value INFERENCE_CONTEXT_TOKENS)"
 EMBED_MODE="$(get_env_value EMBED_MODE)"
 EMBED_BASE_URL="$(get_env_value EMBED_BASE_URL)"
 EMBED_MODEL="$(get_env_value EMBED_MODEL)"
@@ -266,6 +267,14 @@ if [[ "$INFERENCE_MODE" != "none" ]]; then
     fi
     if [[ -n "$INFERENCE_MAX_TOKENS" ]]; then
         require_integer_min "INFERENCE_MAX_TOKENS" "$INFERENCE_MAX_TOKENS" 1
+    fi
+    # ``INFERENCE_CONTEXT_TOKENS`` must leave at least 1088 tokens (a
+    # 1024-token prompt plus the 64-token chat-template reserve) after
+    # the reply; mirrors ``PromptBudget`` in mcp-server/src/lib/inference.py.
+    if [[ -n "$INFERENCE_CONTEXT_TOKENS" ]]; then
+        require_integer_min "INFERENCE_CONTEXT_TOKENS" "$INFERENCE_CONTEXT_TOKENS" 1
+        require_integer_min "INFERENCE_CONTEXT_TOKENS" "$INFERENCE_CONTEXT_TOKENS" \
+            "$(( ${INFERENCE_MAX_TOKENS:-1024} + 1088 ))"
     fi
     if [[ -n "$INFERENCE_BASE_URL" ]]; then
         [[ "$INFERENCE_BASE_URL" =~ ^https?:// ]] || {

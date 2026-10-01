@@ -28,6 +28,7 @@ import-time issue in an SDK the operator isn't using.
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from typing import Protocol
 
 from .security import ProviderResponseError, same_origin_request_hook
@@ -50,6 +51,71 @@ DEFAULT_COMPLETE_TIMEOUT_SECS = 300.0
 # extraction; raise for detailed summaries on long threads. Operator
 # overrides via ``INFERENCE_MAX_TOKENS``.
 DEFAULT_MAX_TOKENS = 1024
+
+# Default model context window in tokens: the prompt and the reply
+# together must fit in it (#285). 32,768 is the native window of the
+# smaller current open models; hosted models have more. At this default
+# the per-tool character caps, not the window, bound every prompt, so
+# prompts are what they were before the window was counted. An operator
+# running a small local model sets ``INFERENCE_CONTEXT_TOKENS`` to its
+# window (the small-model profile), and evidence is cut to fit.
+DEFAULT_CONTEXT_TOKENS = 32768
+
+# Characters per token assumed when counting a prompt. mcp-server ships
+# no tokenizer, so a prompt's length is estimated from its characters.
+# English prose averages about four characters per token on current
+# BPE tokenizers; three over-counts it by about a third, the safety
+# margin. Text that tokenizes more densely (CJK scripts, long digit or
+# base64 runs) can still exceed the estimate; the provider then stops
+# the reply or rejects the prompt, as it does without this count.
+CHARS_PER_TOKEN = 3
+
+# Tokens set aside for the chat template around the system and user
+# messages (role markers, separators), which the character count of the
+# two messages does not see.
+TEMPLATE_RESERVE_TOKENS = 64
+
+# Fewest prompt tokens a configuration may leave after the reply and
+# template reserves. The longest system prompt (brief_issue's) alone is
+# about 940 estimated tokens, so a smaller allowance is a misconfiguration.
+MIN_PROMPT_TOKENS = 1024
+
+
+@dataclass(frozen=True)
+class PromptBudget:
+    """How much prompt text one inference call may carry.
+
+    ``context_tokens`` is the model's window (``INFERENCE_CONTEXT_TOKENS``)
+    and ``max_output_tokens`` the reply reserve (``INFERENCE_MAX_TOKENS``).
+    What remains after them and ``TEMPLATE_RESERVE_TOKENS`` is the prompt
+    allowance, counted in characters at ``CHARS_PER_TOKEN``: a prompt of
+    at most ``prompt_chars`` characters is estimated at no more than
+    ``prompt_tokens`` tokens.
+    """
+
+    context_tokens: int = DEFAULT_CONTEXT_TOKENS
+    max_output_tokens: int = DEFAULT_MAX_TOKENS
+
+    def __post_init__(self) -> None:
+        if self.prompt_tokens < MIN_PROMPT_TOKENS:
+            raise ValueError(
+                f"INFERENCE_CONTEXT_TOKENS ({self.context_tokens}) must exceed "
+                f"INFERENCE_MAX_TOKENS ({self.max_output_tokens}) by at least "
+                f"{MIN_PROMPT_TOKENS + TEMPLATE_RESERVE_TOKENS} tokens so a prompt fits"
+            )
+
+    @property
+    def prompt_tokens(self) -> int:
+        return self.context_tokens - self.max_output_tokens - TEMPLATE_RESERVE_TOKENS
+
+    @property
+    def prompt_chars(self) -> int:
+        return self.prompt_tokens * CHARS_PER_TOKEN
+
+
+def estimate_tokens(text: str) -> int:
+    """Estimated tokens in ``text`` at ``CHARS_PER_TOKEN``, rounded up."""
+    return -(-len(text) // CHARS_PER_TOKEN)
 
 
 class InferenceTruncatedError(ProviderResponseError):

@@ -26,8 +26,10 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 from .lib.embed import DEFAULT_EMBED_TIMEOUT_SECS, EmbedClient
 from .lib.inference import (
     DEFAULT_COMPLETE_TIMEOUT_SECS,
+    DEFAULT_CONTEXT_TOKENS,
     DEFAULT_MAX_TOKENS,
     InferenceClient,
+    PromptBudget,
 )
 from .lib.reranker import DEFAULT_RERANK_TIMEOUT_SECS, CohereReranker, RerankConfig
 from .lib.sqlite import Database
@@ -264,6 +266,11 @@ INFERENCE_TIMEOUT_SECS = _float_env(
     "INFERENCE_TIMEOUT_SECS", DEFAULT_COMPLETE_TIMEOUT_SECS, minimum=1.0
 )
 INFERENCE_MAX_TOKENS = _int_env("INFERENCE_MAX_TOKENS", DEFAULT_MAX_TOKENS, minimum=1)
+# The model's context window in tokens; every intelligence prompt plus
+# INFERENCE_MAX_TOKENS of reply is fitted into it (#285). Set it to a
+# small local model's window; ``PromptBudget`` rejects a window with too
+# little room left for a prompt at startup.
+INFERENCE_CONTEXT_TOKENS = _int_env("INFERENCE_CONTEXT_TOKENS", DEFAULT_CONTEXT_TOKENS, minimum=1)
 
 EMBED_MODE = _normalize_mode("EMBED_MODE", os.environ.get("EMBED_MODE", "openai"), _EMBED_MODES)
 EMBED_BASE_URL = _reject_url_userinfo("EMBED_BASE_URL", os.environ.get("EMBED_BASE_URL", ""))
@@ -521,9 +528,13 @@ def main():
     _reject_url_userinfo("EMBED_BASE_URL (or the SDK's OPENAI_BASE_URL)", embed_client.base_url)
 
     inference_client: InferenceClient | None = None
+    prompt_budget: PromptBudget | None = None
     if INFERENCE_MODE in {"openai", "anthropic"}:
         _require_env("INFERENCE_MODE", INFERENCE_MODE, "INFERENCE_MODEL", INFERENCE_MODEL)
         _require_env("INFERENCE_MODE", INFERENCE_MODE, "INFERENCE_API_KEY", INFERENCE_API_KEY)
+        prompt_budget = PromptBudget(
+            context_tokens=INFERENCE_CONTEXT_TOKENS, max_output_tokens=INFERENCE_MAX_TOKENS
+        )
         inference_client = InferenceClient.create(
             mode=INFERENCE_MODE,
             base_url=INFERENCE_BASE_URL,
@@ -614,6 +625,7 @@ def main():
             reranker=reranker,
             secret_values=secret_values,
             expected_embed_dim=expected_embed_dim,
+            prompt_budget=prompt_budget,
         )
     else:
         log.info("Intelligence tools not registered (INFERENCE_MODE=none).")
@@ -627,6 +639,7 @@ def main():
             reranker=reranker,
             secret_values=secret_values,
             expected_embed_dim=expected_embed_dim,
+            prompt_budget=prompt_budget,
         )
         log.info(
             "Experimental tools registered (MCP_EXPERIMENTAL_TOOLS=true): "
