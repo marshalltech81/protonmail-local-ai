@@ -11,7 +11,12 @@ from mcp.types import CallToolResult
 
 from ..lib.embed import embed_query
 from ..lib.security import log_tool_call, safe_provider_exception_text
-from ..lib.sqlite import InvalidFilterError, VectorLanesUnavailableError, validate_date_range
+from ..lib.sqlite import (
+    PROMPT_EVIDENCE_CHUNKS_PER_THREAD,
+    InvalidFilterError,
+    VectorLanesUnavailableError,
+    validate_date_range,
+)
 from ..lib.timings import count, rerank_mode, stage, timed_tool
 from ..lib.validation import clamp_int
 from .outputs import (
@@ -504,6 +509,9 @@ def register_search_tools(
                     limit=limit,
                     with_evidence=True,
                     reranker=reranker,
+                    # The same per-thread cap as ask_mailbox, so these are
+                    # the chunks its prompt draws on.
+                    evidence_per_thread=PROMPT_EVIDENCE_CHUNKS_PER_THREAD,
                 )
                 count("results", len(results))
                 # Flatten thread-ranked evidence into a flat chunk budget:

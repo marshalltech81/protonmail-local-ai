@@ -21,6 +21,45 @@ from tests.conftest import make_message, make_thread
 # ---------------------------------------------------------------------------
 
 
+class TestFtsSubjectText:
+    """#303: the ``threads_fts`` subject column carries the thread
+    subject plus each distinct changed reply subject, bounded."""
+
+    def test_adds_only_distinct_changed_subjects(self):
+        from src.threader import fts_subject_text
+
+        text = fts_subject_text(
+            "budget review",
+            [
+                "Budget review",
+                "Re: FWD: budget  review",
+                "Re: Budget review ZX731",
+                "RE: budget review zx731",
+                "",
+            ],
+        )
+        assert text == "budget review\nbudget review zx731"
+
+    def test_unchanged_thread_keeps_its_subject_verbatim(self):
+        from src.threader import fts_subject_text
+
+        assert fts_subject_text("budget review", ["Re: budget review"]) == "budget review"
+
+    def test_bounded_by_count_and_chars(self):
+        from src.threader import (
+            FTS_REPLY_SUBJECTS_MAX,
+            FTS_REPLY_SUBJECTS_MAX_CHARS,
+            fts_subject_text,
+        )
+
+        many = [f"Re: topic {i}" for i in range(FTS_REPLY_SUBJECTS_MAX * 3)]
+        lines = fts_subject_text("topic", many).split("\n")
+        assert len(lines) == 1 + FTS_REPLY_SUBJECTS_MAX
+        long = ["a" * (FTS_REPLY_SUBJECTS_MAX_CHARS // 2 + 1) + str(i) for i in range(3)]
+        text = fts_subject_text("topic", long)
+        assert len(text) - len("topic") <= FTS_REPLY_SUBJECTS_MAX_CHARS + 2
+
+
 class TestTextForEmbedding:
     def test_includes_subject_and_participants(self):
         thread = make_thread(subject="project update")

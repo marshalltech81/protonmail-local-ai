@@ -29,6 +29,7 @@ from tests.conftest import (
     _insert_chunk,
     _insert_thread,
 )
+from tests.test_sqlite import _scoped_recall_db, _search, _spy_vector_k
 
 _LINE = re.compile(
     r"^tool=(?P<tool>\w+) outcome=(?P<outcome>\w+) total_ms=(?P<total>[\d.]+) "
@@ -235,6 +236,42 @@ class TestSearchEmailsTimings:
         line = _one_line(caplog)
         assert line["outcome"] == "error"
         assert set(line["stages"]) == {"query_embedding"}
+
+
+class TestVectorLaneExpansion:
+    """#286 widens a filtered search's vector windows step by step. Each
+    lane's stage covers all of its steps and ``*_expansions`` counts the
+    re-queries."""
+
+    @pytest.mark.parametrize("mode", ["semantic", "hybrid"])
+    def test_expansion_steps_are_counted_per_lane(self, tmp_path, monkeypatch, caplog, mode):
+        caplog.set_level(logging.INFO)
+        db = _scoped_recall_db(tmp_path)
+        ks = _spy_vector_k(db, monkeypatch)
+
+        @timed_tool("probe")
+        async def probe():
+            _search(db, mode, folders=["Nowhere"])
+
+        asyncio.run(probe())
+        line = _one_line(caplog)
+        assert line["counts"]["thread_vec_expansions"] == len(ks["thread"]) - 1 > 0
+        assert line["counts"]["chunk_vec_expansions"] == len(ks["chunk"]) - 1 > 0
+        assert _VECTOR_LANES <= set(line["stages"])
+
+    @pytest.mark.parametrize("mode", ["semantic", "hybrid"])
+    def test_unfiltered_search_reports_no_expansion(self, tmp_path, caplog, mode):
+        caplog.set_level(logging.INFO)
+        db = _scoped_recall_db(tmp_path)
+
+        @timed_tool("probe")
+        async def probe():
+            _search(db, mode)
+
+        asyncio.run(probe())
+        counts = _one_line(caplog)["counts"]
+        assert "thread_vec_expansions" not in counts
+        assert "chunk_vec_expansions" not in counts
 
 
 class TestOtherSearchTools:

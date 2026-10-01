@@ -16,5 +16,11 @@
     "search_query": "meeting confirmed",
     "expected_thread_ids": ["REPLACE_WITH_REAL_THREAD_ID"],
     "notes": "Tests semantic retrieval where the search_query wording differs from the email subject."
+  },
+  {
+    "id": "trip-flight-and-hotel",
+    "search_query": "trip flight and hotel booking",
+    "required_evidence": [["REPLACE_WITH_FLIGHT_THREAD_ID"], ["REPLACE_WITH_HOTEL_THREAD_ID", "REPLACE_WITH_OTHER_HOTEL_THREAD_ID"]],
+    "notes": "A question that needs several sources. Use required_evidence instead of expected_thread_ids: every inner list is required, and any one thread id inside a list satisfies it. Here the flight thread is needed, plus either of two threads that both carry the hotel booking. Evidence recall counts how many of the lists are found."
   }
 ]

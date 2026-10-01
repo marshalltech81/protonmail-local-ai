@@ -177,10 +177,11 @@ Do not make any of the following changes unless the repository owner explicitly 
   next startup retries from the failing migration onward. Downgrades
   (stored version > code) and gaps (no migration file for an intermediate
   version) both fail closed at startup with actionable error messages.
-  History through v21 is squashed into `_apply_initial_schema`
-  (`SCHEMA_BASELINE_VERSION`); the first new migration is `0022`, and a
-  database older than the baseline fails closed with rebuild
-  instructions.
+  The initial schema is version 0: earlier history was squashed into
+  `_apply_initial_schema` and renumbered, so the first new migration is
+  `0001`. The initial schema stamps `SCHEMA_APPLICATION_ID` into the
+  SQLite header; a database without it predates the renumbering and
+  fails closed with rebuild instructions whatever its version.
 - Do not change embedding dimensions or model assumptions without verifying schema and context-window implications.
 - Do not change chunk ID derivation away from the deterministic
   `sha256(message_pk || index || text)` shape — re-runs depend on identical

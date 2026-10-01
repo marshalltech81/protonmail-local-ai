@@ -311,6 +311,31 @@ docker compose logs mbsync
 mbsync must connect to Bridge and complete at least one sync before the indexer
 has emails to process.
 
+## Indexer refuses to start — "wipe the sqlite-volume"
+
+The indexer fails closed when the database was written by an
+incompatible schema: one from before the v0 schema renumbering, or one
+newer than the running image. The index is derived data, so the fix is
+to rebuild it from Maildir. Remove only the index volume; `make clean`
+also deletes the Bridge vault and credentials.
+
+Run these from the checkout, with the same project name (`-p` or
+`COMPOSE_PROJECT_NAME`) the stack runs under; Compose prefixes volume
+names with it, so the volume name is read from the resolved config
+rather than assumed:
+
+```bash
+volume=$(docker compose config --format json \
+  | python3 -c 'import json, sys; print(json.load(sys.stdin)["volumes"]["sqlite-volume"]["name"])')
+docker compose down
+docker volume rm "$volume"
+make up
+```
+
+Maildir and Bridge state are untouched. The indexer re-parses and
+re-embeds every message, so the rebuild takes as long as an initial
+index and calls the embedding provider for the whole mailbox.
+
 ## Enabling deletion reconciliation
 
 By default the local index is append-only: messages you delete on ProtonMail

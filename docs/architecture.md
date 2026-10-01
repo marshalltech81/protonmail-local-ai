@@ -220,7 +220,12 @@ Folder, date, and attachment-flag filters are pushed into the FTS
 lanes' SQL so deep-ranked matches are not truncated before they could
 qualify; sqlite-vec has no equivalent pushdown, so the vector lanes
 run unfiltered and the post-fusion filter applies every filter
-uniformly.
+uniformly. When a filter is active, each vector lane doubles its KNN
+`k` and re-queries until its window holds enough eligible threads for
+the request (`max(limit, RERANK_CANDIDATES)` for hybrid), the table is
+exhausted, or `k` reaches sqlite-vec's 4096 cap. The query is embedded
+once. This is ranked search, not enumeration: an eligible thread
+outside a lane's 4096 nearest rows is still missed by that lane.
 
 Threads with no chunk rows — empty bodies, or chunks whose embedding
 has not landed yet — never appear in the chunk lanes and rank on the
@@ -294,18 +299,49 @@ history. Stripping is intentionally conservative: quoted text is still
 searchable through FTS and falls back to the original body when the
 stripped result would be empty.
 
-**Known limitation (#295):** a message's body text is the first
-`text/plain` part outside attachments, or failing that the first
-`text/html` part. A plain part that holds only whitespace counts as
-empty, so the HTML text is used instead (#298). Otherwise "first" means
-first, not first non-empty: a later plain part is never read after a
-leading whitespace-only one. That suits `multipart/alternative`,
-where the parts are alternative renderings of one body, but a
-`multipart/mixed` message with several sequential inline text parts
-(for example text, an attachment, then more text) keeps only the first
-plain and first HTML part; later inline text parts are neither stored
-nor searchable. Fixing it changes stored bodies, so it is revisited
-with the Phase 2 reindex bundle.
+A reply can rename the conversation and still join it through
+References / In-Reply-To. Its subject, when it differs from the
+thread's after `Re:`/`Fwd:` normalization, is kept searchable (#303):
+
+- Keyword: the `subject` column of the thread's `threads_fts` row holds
+  the thread subject plus each distinct changed reply subject
+  (normalized, at most `FTS_REPLY_SUBJECTS_MAX` subjects and
+  `FTS_REPLY_SUBJECTS_MAX_CHARS` characters), so a body already at its
+  token cap cannot drop them; `threads.subject` stays the thread
+  subject. Each rewrite of the row examines at most the oldest
+  `FTS_SUBJECT_SCAN_ROWS` subjects of the thread, each cut to
+  `FTS_SUBJECT_SCAN_CHARS` characters, so a change first seen past
+  those bounds is not added.
+- Semantic: the embedding input of the reply's first body chunk is
+  prefixed with `Subject: <its subject>`, cut so the input stays within
+  `INDEXER_CHUNK_MAX_TOKENS` and dropped when the chunk alone is at that
+  ceiling. The stored chunk text, offsets and chunk ID stay body-only,
+  since chunks are the authoritative body store (`get_message`,
+  `query_messages(text=...)`).
+
+A renamed reply with no body text (for example attachment-only) has no
+body chunk to carry the prefix, so its subject is keyword-searchable
+only, with no semantic representation.
+
+**Message body assembly (#295, #298):** a message's body text is every
+non-blank inline `text/plain` and `text/html` part outside attachments
+(HTML through html2text), in document order, separated by a blank line.
+The parts of a `multipart/alternative` are renderings of one body, so
+it contributes a single child: the first carrying non-blank plain text,
+else the first carrying any text. A whitespace-only plain alternative
+therefore gives way to the HTML one. A `multipart/related` contributes
+only its root, taken to be its first part (RFC 2387's default), since
+its other parts are resources the root refers to; a `start` parameter
+naming a different root is not read, so such a message gets its first
+part's text instead. The parts of any other container
+(`multipart/mixed`, an inline `message/rfc822`) are
+sequential content, so text, an attachment, then more text keeps both
+texts. Nothing inside an attachment, such as a forwarded email attached
+as a file, is body text. Neither is an inline `message/*` part sent
+in a transfer encoding (base64 or quoted-printable, which RFC 2046
+forbids for it): the parser exposes it as its encoded transport text,
+so it adds nothing to the body. At most 200 text parts per message
+(`MAX_BODY_TEXT_PARTS`) are decoded; later ones are left out.
 
 A query like "what did my landlord say about the heating?" returns the
 full landlord thread (via the coarse lanes) and surfaces the specific
@@ -838,7 +874,7 @@ is queued:
 Acknowledgements only move forward. With every health heartbeat
 (per message and per embed batch, at most every 30 s), the indexer
 upserts the latest acknowledged sync and its own timestamp into the
-one-row `ingestion_state` table (schema v21). A missed stamp event
+one-row `ingestion_state` table. A missed stamp event
 reads as a stale sync until the next rescan; a missed delivery event
 stays invisible to `current` until the rescan queues it.
 

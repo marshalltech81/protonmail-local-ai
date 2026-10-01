@@ -81,12 +81,15 @@ tool=search_emails outcome=ok total_ms=41.7 stages_ms={'query_embedding': 22.4, 
   has no `query_embedding` or vector lanes. Stages: `query_embedding`,
   `contact_lookup` (the `from_name` resolution), the keyword lanes
   `thread_fts` / `chunk_fts` / `attachment_fts`, the vector lanes
-  `thread_vec` / `chunk_vec`, `fusion` (RRF plus post-fusion filters),
+  `thread_vec` / `chunk_vec` (each covering every widening step of a
+  filtered search), `fusion` (RRF plus post-fusion filters),
   `evidence_fetch`, `rerank`, `attachment_search` and `inference`
   (summed over every completion the call made).
 - `counts` holds candidates per lane, `filtered` (after fusion and
-  filters), `results`, `evidence_chunks`, `rerank_candidates` and
-  `inference_calls`.
+  filters), `results`, `evidence_chunks`, `rerank_candidates`,
+  `inference_calls` and, on a filtered vector search,
+  `thread_vec_expansions` / `chunk_vec_expansions` (re-queries with a
+  wider window).
 - `config` names the rerank and inference modes.
 
 The line carries names fixed in the code, numbers and mode names only:
@@ -154,7 +157,11 @@ drive an unbounded query against the index.
 - When any filter (folder, sender, date range, attachment flag) is
   applied, search oversamples raw candidates by ``limit * 4`` rather
   than ``limit * 2`` so deeper-ranked matches still qualify after
-  filtering.
+  filtering. The vector lanes then widen their KNN window (doubling,
+  up to sqlite-vec's cap of 4096 rows per lane) until it holds enough
+  threads that pass the filters, so a narrow filter still finds its
+  best semantic match when many closer out-of-scope threads exist.
+  Results remain a ranking, not an exhaustive list of every match.
 - Date bounds accept either a full ISO 8601 timestamp or a date-only
   value. Every date-only form Python's `date.fromisoformat` accepts
   counts (`"2024-12-31"`, `"20241231"`, the week date `"2025-W01-2"`),
@@ -195,8 +202,9 @@ chunks (extracted PDF / OCR / document text) are included — unlike
 | `limit` | int | `12` | Max evidence chunks to return; clamped to `[1, 50]` |
 | `include_scores` | bool | `false` | Annotate each thread with the retrieval lanes that matched (`thread_fts` / `chunk_fts` / `attachment_fts` / `thread_vec` / `chunk_vec` / `rerank`) and each chunk with its vector distance |
 
-The mailbox-wide path runs the same hybrid retrieval as `ask_mailbox`
-and flattens the per-thread evidence into a flat `limit`-chunk budget.
+The mailbox-wide path runs the same hybrid retrieval as `ask_mailbox`,
+with the same cap of six chunks per thread, and flattens the
+per-thread evidence into a flat `limit`-chunk budget.
 The `thread_id`-scoped path returns that thread's chunks ranked
 against the query; it bypasses RRF fusion, so `include_scores` shows
 per-chunk vector distance but no lane provenance.
@@ -389,11 +397,25 @@ it stays within local-LLM context windows. The bounds differ by tool:
 
 - **`ask_mailbox` and `extract_from_emails`** build the prompt from the
   most relevant indexed chunks (message bodies and attachment text)
-  returned by hybrid search, bounded by a fixed per-thread character
-  budget (``2000``). `ask_mailbox` puts several threads in one prompt;
-  `extract_from_emails` sends one prompt per thread. If a thread has
-  no matching chunks, the tool falls back to the indexed thread body
-  and finally to the 200-character ``snippet``.
+  returned by hybrid search. If a thread has no matching chunks, the
+  tool falls back to the indexed thread body and finally to the
+  200-character ``snippet``. A body chunk of at least 200 characters
+  whose text repeats an earlier body chunk of the same thread (ignoring
+  `>` quote markers, spacing and case, as with a quoted reply) is
+  dropped before it uses any space. Shorter passages ("Approved."),
+  attachment chunks and copies in different threads are all kept.
+  `extract_from_emails` sends one prompt per thread, with up to ``2000``
+  characters of evidence (three chunks at most). `ask_mailbox` puts up
+  to ``max_threads`` threads in one prompt, with up to six chunks per
+  thread and one evidence budget of ``2000`` characters per thread
+  retrieved, shared across them: a thread that needs less leaves the
+  rest to the others, so a long top-ranked passage is not cut at 2000
+  characters while shorter threads below it leave room unused. Within
+  a thread, the best-matching chunk is spent first; a chunk cut to fit
+  says which characters it kept. When passages are left out or cut,
+  `ask_mailbox` adds a fixed-text note after the email blocks giving
+  the counts (never any content) and asks the model to say its answer
+  may be incomplete.
 - **`summarize_thread`** works on a single thread and does not use the
   per-chunk path. Its context is the thread's accumulated indexed body
   (or the ``snippet`` when the body is empty), up to ``8000``
