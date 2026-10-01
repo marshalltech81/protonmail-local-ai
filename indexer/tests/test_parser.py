@@ -201,6 +201,8 @@ class TestParseEmail:
         [
             (b"Mon, 1 Jan 2024 10:00:00 +0000 \xe9", False),
             (b"Mon, 1 Jan 2024 10:00:00 +0000\xe9", False),
+            (b"Mon, 1 Jan 2024 15:00:00 +0500\xe9", False),
+            (b"Mon, 1 Jan 2024 07:00:00 -0300\xe9\xe9", False),
             (b"\xe9\xe9 not a date", True),
         ],
     )

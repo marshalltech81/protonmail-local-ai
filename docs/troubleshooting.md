@@ -399,6 +399,11 @@ make requeue-dead                    # every dead row
 make requeue-dead CLASS=retryable    # only exhausted retries
 ```
 
+The same applies after an upgrade that fixes a parser crash: the
+startup scan and periodic recovery skip dead rows, so mail that
+dead-lettered on the old version (for example an 8-bit `Date` header
+before #361) stays unindexed until you requeue it.
+
 ## Claude Desktop doesn't see the tools
 
 1. Verify the MCP server is running: `docker compose ps`

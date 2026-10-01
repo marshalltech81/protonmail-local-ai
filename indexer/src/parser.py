@@ -276,9 +276,12 @@ def parse_email(path: Path, maildir_root: Path | None = None) -> Message | None:
     to_addrs = _parse_addrs(msg.get("To", ""))
     cc_addrs = _parse_addrs(msg.get("Cc", ""))
     # A raw 8-bit Date header comes back as an ``email.header.Header``,
-    # which ``parsedate_to_datetime`` cannot split (#361); its ``str``
-    # is the header text.
-    parsed_date = _parse_date(str(msg.get("Date", "")))
+    # which ``parsedate_to_datetime`` cannot split (#361). A Date header
+    # is ASCII by RFC 5322, so drop anything else from its text: a
+    # stray byte glued to the zone ("+0500\xe9") would otherwise hide
+    # the offset and the time would be read as UTC.
+    date_text = str(msg.get("Date", "")).encode("ascii", "ignore").decode("ascii")
+    parsed_date = _parse_date(date_text)
     date = parsed_date if parsed_date is not None else datetime.now(UTC)
 
     body_text, attachments = _extract_body_and_attachments(msg)
