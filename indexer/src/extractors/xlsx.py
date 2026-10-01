@@ -18,14 +18,18 @@ work, along two dimensions:
   stale one would silently hide cells outside it (#305), so each parsed
   row is padded to its own last cell and every missing row between two
   parsed ones still costs a visit; the row and column numbers are the
-  producer's claim. ``_MAX_EXPANDED_CELLS`` bounds the cells visited
-  across the whole workbook and fails the extraction.
+  producer's claim. Each row, parsed or missing, also costs a fixed
+  charge. ``_MAX_EXPANDED_CELLS`` bounds the cells visited plus those
+  row charges across the whole workbook.
 * characters copied: a shared string is stored once and referenced by
   any number of cells, so a few KB of workbook can expand into
   gigabytes of text (#294). ``_MAX_TEXT_CHARS`` bounds the characters
-  read from cell values across the whole workbook; when it runs out the
-  walk stops and the text collected so far is returned, as the
-  dispatcher's own ``max_extracted_chars`` truncation would.
+  read from cell values across the whole workbook.
+
+When either budget runs out the walk stops and the text collected so
+far is returned, as the dispatcher's own ``max_extracted_chars``
+truncation would: a hostile workbook is truncated, and a long
+legitimate one still yields its first rows rather than nothing.
 
 Known limitation (#428): these budgets apply during the walk. Parts
 openpyxl loads whole before it (the shared-string table,
@@ -40,15 +44,17 @@ import io
 
 import openpyxl
 
-# Cells visited, empty padding included, across every sheet. A missing
-# row between two parsed ones costs ``_MISSING_ROW_COST`` cells: plainly
-# timed, openpyxl yields one in about four times the time it takes to
-# pad a cell. Either worst case (missing rows, or rows of styled empty
-# cells) then stops in under a tenth of a second. A sheet of values
-# reaches the text budget first, since each value costs at least two
-# characters with its separator.
+# Cells visited, empty padding included, across every sheet, plus
+# ``_ROW_COST`` per row. Plainly timed, openpyxl parses a row in about a
+# microsecond however few cells it holds (about three with one value),
+# against about 16 ns to pad a cell, so a row costs 64 cells; a missing
+# row between two parsed ones, which cannot be told apart from a
+# parsed row with no cells, is charged the same. The worst cases (one-
+# cell rows, rows with no cells, missing rows, rows of styled empty
+# cells) then stop in about a quarter of a second at most; a sheet
+# longer than about 75,000 rows is truncated there.
 _MAX_EXPANDED_CELLS = 5_000_000
-_MISSING_ROW_COST = 4
+_ROW_COST = 64
 
 # Characters read from cell values and sheet titles across the
 # workbook, plus each separator emitted, so it also bounds the returned
@@ -95,9 +101,9 @@ def _serialize(workbook: openpyxl.Workbook) -> str:
         chars_left -= len(header) + 2  # and the blank line before it
         sheet_lines = [header]
         for row in sheet.iter_rows(values_only=True):
-            expanded_cells += len(row) or _MISSING_ROW_COST
+            expanded_cells += len(row) + _ROW_COST
             if expanded_cells > _MAX_EXPANDED_CELLS:
-                raise ValueError(f"workbook exceeds the {_MAX_EXPANDED_CELLS}-cell budget")
+                break
             cells: list[str] = []
             blanks = 0  # empty cells since the last value
             for value in row:
@@ -134,6 +140,6 @@ def _serialize(workbook: openpyxl.Workbook) -> str:
         # the LLM can do with the title alone.
         if len(sheet_lines) > 1:
             parts.append("\n".join(sheet_lines))
-        if chars_left <= 0:
+        if chars_left <= 0 or expanded_cells > _MAX_EXPANDED_CELLS:
             break
     return "\n\n".join(parts)
