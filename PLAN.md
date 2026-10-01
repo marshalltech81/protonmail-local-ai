@@ -56,8 +56,8 @@ The stack runs four containers:
   sync, TOFU cert pinning with explicit rotation flag.
 - **indexer** — Docker, parses Maildir, threads, embeds via any
   OpenAI-compatible `/v1/embeddings` provider (operator-supplied),
-  writes SQLite. Schema v21 (squashed baseline; the first new
-  migration is `0022`): 4096-dim L2-unit-norm
+  writes SQLite. Schema v22 (v21 squashed baseline plus migration
+  `0022`, the `message_thread_map` lookup indexes): 4096-dim L2-unit-norm
   vectors, `NOT NULL` `message_chunks.message_date`,
   `indexing_jobs.last_error_class`, per-message `messages` +
   `message_participants`. Initial scan and steady-state both
@@ -738,8 +738,8 @@ Order of work, chosen to minimise reindexes:
    message, no values logged)~~ (done: rejected at the indexer embedder
    and the MCP query embed); ~~tombstone revalidation on restore
    (#301)~~ (done: a tombstone is refused for a path the message no
-   longer maps to); `message_thread_map` lookup indexes as migration `0022`
-   (#302, index-only); ~~the unbounded recovery parameter list
+   longer maps to); ~~`message_thread_map` lookup indexes as migration `0022`
+   (#302, index-only)~~ (done: filepath and thread_id indexes); ~~the unbounded recovery parameter list
    (#306)~~ (done: recovery lookups bind IDs in batches of 500);
    and the #257 sweep (classify parse-stage and provider exceptions
    at their boundary, `caplog` marker tests). MCP: ~~the two quadratic

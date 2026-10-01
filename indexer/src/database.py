@@ -68,7 +68,7 @@ def _dedupe_by_canonical(addrs: list[str]) -> list[str]:
 # current version; existing installs run the migration runner to catch
 # up. See ``src/migrations/runner.py`` for the file layout and
 # transactional guarantees.
-SCHEMA_VERSION = 21
+SCHEMA_VERSION = 22
 SCHEMA_BASELINE_VERSION = 21
 
 # The schema uses FTS5 ``contentless_delete=1``, which SQLite added in 3.43.
@@ -486,6 +486,10 @@ class Database:
                 filepath   TEXT NOT NULL,
                 FOREIGN KEY (thread_id) REFERENCES threads(thread_id)
             );
+            -- Flag renames match rows by filepath; thread rebuilds and
+            -- removals match them by thread_id.
+            CREATE INDEX idx_message_thread_map_filepath ON message_thread_map(filepath);
+            CREATE INDEX idx_message_thread_map_thread ON message_thread_map(thread_id);
 
             -- One row per indexed message: the authoritative per-message
             -- record (own headers, send time, folder, source locator and
