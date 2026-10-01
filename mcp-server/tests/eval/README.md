@@ -27,8 +27,10 @@ arguments.
    cp tests/eval/queries.example.json tests/eval/queries.json
    ```
 
-2. Find real `thread_id` values via `make status` or by calling
-   `get_mailbox_status` / `search_emails` against your running MCP server.
+2. Find real `thread_id` values by calling `search_emails` (each result
+   lists its `Thread ID`) or `list_threads` (each row lists its `ID`)
+   through your MCP client against the running server. `make status`
+   and `get_mailbox_status` report index health only, not thread ids.
 
 3. Edit `queries.json` — each entry needs an `id`, the `search_query`
    to run, and `expected_thread_ids` from your actual index. Other keys

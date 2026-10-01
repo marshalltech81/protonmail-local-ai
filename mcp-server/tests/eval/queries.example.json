@@ -3,7 +3,7 @@
     "id": "landlord-deposit",
     "search_query": "landlord deposit",
     "expected_thread_ids": ["REPLACE_WITH_REAL_THREAD_ID"],
-    "notes": "Replace expected_thread_ids with one or more real thread_ids from your indexed mailbox. Run `make status` or call get_mailbox_status to discover thread ids."
+    "notes": "Replace expected_thread_ids with one or more real thread_ids from your indexed mailbox. Call search_emails or list_threads through your MCP client to discover thread ids."
   },
   {
     "id": "invoice-march",
