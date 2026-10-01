@@ -9,13 +9,13 @@ and stats.
 import json
 import sqlite3
 import threading
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from src.attachment_indexing import attachment_occurrence_id
 from src.database import (
     EMBEDDING_DIM,  # noqa: F401  -- via reuse
-    SCHEMA_BASELINE_VERSION,
+    SCHEMA_APPLICATION_ID,
     SCHEMA_VERSION,
     Database,
 )
@@ -110,22 +110,47 @@ class TestSchema:
         second = Database(db_path)  # second open must not raise
         second.close()
 
-    def test_opening_pre_baseline_database_fails_with_rebuild_instructions(self, tmp_path):
-        """Migration history before ``SCHEMA_BASELINE_VERSION`` was
-        squashed into ``_apply_initial_schema``, so an older database
-        cannot be upgraded. It must fail closed with the recovery step,
-        not a generic runner error."""
-        db_path = tmp_path / "ancient.db"
+    def test_fresh_install_is_stamped_version_zero(self, db):
+        """The initial schema is version 0; the first migration will be
+        ``0001``."""
+        assert SCHEMA_VERSION == 0
+        assert db._conn.execute("SELECT version FROM schema_version").fetchone()[0] == 0
+
+    def test_database_from_the_old_numbering_fails_with_rebuild_instructions(self, tmp_path):
+        """Before the renumber the baseline was v21 and the latest v22.
+        Such a database now reads as newer than the code and must fail
+        closed with the volume-wipe step."""
+        db_path = tmp_path / "v22.db"
         Database(db_path).close()
         import sqlite3
 
         conn = sqlite3.connect(str(db_path))
         try:
-            conn.execute("UPDATE schema_version SET version = ?", (SCHEMA_BASELINE_VERSION - 1,))
+            conn.execute("UPDATE schema_version SET version = 22")
             conn.commit()
         finally:
             conn.close()
-        with pytest.raises(RuntimeError, match="Wipe the sqlite-volume"):
+        with pytest.raises(RuntimeError, match="wipe the sqlite-volume"):
+            Database(db_path)
+
+    def test_fresh_install_carries_the_application_id(self, db):
+        assert db._conn.execute("PRAGMA application_id").fetchone()[0] == SCHEMA_APPLICATION_ID
+
+    def test_old_numbering_database_at_a_reused_version_fails_closed(self, tmp_path):
+        """Once the new sequence reaches a number the old one used, the
+        version alone cannot tell the two apart. An old database has no
+        ``application_id`` stamp and must fail closed, not read as ready."""
+        db_path = tmp_path / "old-v0.db"
+        Database(db_path).close()
+        import sqlite3
+
+        conn = sqlite3.connect(str(db_path))
+        try:
+            conn.execute("PRAGMA application_id = 0")
+            conn.commit()
+        finally:
+            conn.close()
+        with pytest.raises(RuntimeError, match="wipe the sqlite-volume"):
             Database(db_path)
 
     def test_opening_with_higher_stored_version_raises_downgrade_error(self, tmp_path):
@@ -1370,6 +1395,53 @@ class TestReapRewritesThreadRow:
     """The reap's thread rewrite regenerates the row from the survivors
     rather than merging into the stored row as ``upsert_thread`` does."""
 
+    def test_reap_rewrites_reply_subjects_in_fts(self, db, threader):
+        """#303: a changed reply subject is keyword-searchable through
+        the ``threads_fts`` subject column; the reap rewrite keeps the
+        survivors' and drops the reaped message's."""
+        from src.threader import Thread
+
+        original = make_message(message_id="s1@x", subject="Hello world", filepath="/s/1")
+        kept = make_message(
+            message_id="s2@x",
+            subject="Re: Hello world KEPTZX1",
+            in_reply_to="s1@x",
+            filepath="/s/2",
+            date=datetime(2024, 2, 1, tzinfo=UTC),
+        )
+        reaped = make_message(
+            message_id="s3@x",
+            subject="Re: Hello world GONEZX2",
+            in_reply_to="s1@x",
+            filepath="/s/3",
+            date=datetime(2024, 3, 1, tzinfo=UTC),
+        )
+        t1 = threader.assign_thread(original)
+        db.upsert_thread(t1, FAKE_EMBEDDING)
+        for msg in (kept, reaped):
+            db.upsert_thread(threader.assign_thread(msg), FAKE_EMBEDDING)
+
+        def hits(term):
+            return db._conn.execute(
+                "SELECT COUNT(*) FROM threads_fts WHERE threads_fts MATCH ?", (f"subject:{term}",)
+            ).fetchone()[0]
+
+        assert (hits("keptzx1"), hits("gonezx2")) == (1, 1)
+
+        rebuilt = Thread(
+            thread_id=t1.thread_id,
+            subject=t1.subject,
+            participants=["only@x"],
+            messages=[original, kept],
+            folder="INBOX",
+            date_first=original.date,
+            date_last=kept.date,
+        )
+        db.add_pending_deletion("/s/3", "s3@x", t1.thread_id)
+        assert db.reap_thread_messages(rebuilt, FAKE_EMBEDDING, ["s3@x"]) == ["/s/3"]
+        assert (hits("keptzx1"), hits("gonezx2")) == (1, 0)
+        assert db.get_thread(t1.thread_id).subject == "hello world"
+
     def test_reap_replaces_body_text_instead_of_appending(self, db, threader):
         original = make_message(message_id="r1@x", body_text="First message body.", filepath="/r/1")
         reply = make_message(
@@ -1523,14 +1595,19 @@ class TestReapRewritesThreadRow:
         db.upsert_thread(t1, FAKE_EMBEDDING)
         db.upsert_thread(threader.assign_thread(reply), FAKE_EMBEDDING)
 
-        # Reap the reply and rewrite with a different subject
+        # Reap the reply and rewrite with a different subject. The
+        # survivor carries that subject too: a survivor whose own subject
+        # differs from the thread's is indexed in the FTS subject column
+        # (#303), which would keep "hello" searchable for a real reason.
+        from dataclasses import replace
+
         from src.threader import Thread
 
         rebuilt = Thread(
             thread_id=t1.thread_id,
             subject="brand new subject",
             participants=["only@x"],
-            messages=[original],
+            messages=[replace(original, subject="Brand new subject")],
             folder="INBOX",
             date_first=original.date,
             date_last=original.date,
@@ -2645,26 +2722,6 @@ class TestMessageMapLookupIndexes:
     def test_fresh_install_creates_the_indexes(self, db):
         assert _message_map_indexes(db._conn) >= MESSAGE_MAP_INDEXES
 
-    def test_v21_database_migrates_to_add_the_indexes(self, tmp_path):
-        db_path = tmp_path / "v21.db"
-        Database(db_path).close()
-        conn = sqlite3.connect(str(db_path))
-        try:
-            for name in MESSAGE_MAP_INDEXES:
-                conn.execute(f"DROP INDEX {name}")
-            conn.execute("UPDATE schema_version SET version = 21")
-            conn.commit()
-        finally:
-            conn.close()
-
-        database = Database(db_path)
-        try:
-            version = database._conn.execute("SELECT version FROM schema_version").fetchone()
-            assert version["version"] == SCHEMA_VERSION == 22
-            assert _message_map_indexes(database._conn) >= MESSAGE_MAP_INDEXES
-        finally:
-            database.close()
-
     @pytest.mark.parametrize(
         ("sql", "params", "index"),
         [
@@ -2815,3 +2872,68 @@ class TestZeroVectorRecoveryBatching:
         map_lookups = [s for s in statements if "FROM message_thread_map WHERE thread_id IN" in s]
         assert len(vec_lookups) == 4  # ceil(40 / 10)
         assert len(map_lookups) == 2  # ceil(14 / 10)
+
+
+class TestFtsSubjectScanBound:
+    """#439 review round 2: rebuilding the ``threads_fts`` subject read
+    and normalized every stored subject of the thread on each upsert,
+    quadratic in a long thread of long subjects. Rows and characters
+    examined per rewrite are now capped."""
+
+    def test_long_thread_of_long_subjects_is_bounded(self, db, monkeypatch):
+        import time
+
+        from src import threader as threader_mod
+
+        subject = "Re: " + "x" * 10_000
+        calls: list[int] = []
+        real = threader_mod._normalize_subject
+
+        def counting(s):
+            calls.append(len(s))
+            return real(s)
+
+        monkeypatch.setattr(threader_mod, "_normalize_subject", counting)
+        start = time.perf_counter()
+        per_upsert: list[int] = []
+        messages = []
+        for i in range(300):
+            msg = make_message(
+                message_id=f"long{i}@x",
+                subject=subject,
+                filepath=f"/long/{i}",
+                date=datetime(2024, 1, 1, tzinfo=UTC) + timedelta(minutes=i),
+            )
+            messages.append(msg)
+            before = len(calls)
+            db.upsert_thread(
+                make_thread(messages=[msg], thread_id="long0@x", subject="x" * 10_000),
+                FAKE_EMBEDDING,
+            )
+            per_upsert.append(len(calls) - before)
+        elapsed = time.perf_counter() - start
+
+        assert max(per_upsert) <= 1 + threader_mod.FTS_SUBJECT_SCAN_ROWS
+        assert max(calls) <= threader_mod.FTS_SUBJECT_SCAN_CHARS
+        assert elapsed < 60, f"300 upserts took {elapsed:.1f}s"
+        row = db._conn.execute("SELECT message_ids FROM threads").fetchone()
+        assert len(json.loads(row["message_ids"])) == 300
+
+        # The reap rewrite builds the same column from its survivors.
+        from src.threader import Thread
+
+        survivors = messages[1:]
+        rebuilt = Thread(
+            thread_id="long0@x",
+            subject="x" * 10_000,
+            participants=["alice@example.com"],
+            messages=survivors,
+            folder="INBOX",
+            date_first=survivors[0].date,
+            date_last=survivors[-1].date,
+        )
+        db.add_pending_deletion("/long/0", "long0@x", "long0@x")
+        before = len(calls)
+        assert db.reap_thread_messages(rebuilt, FAKE_EMBEDDING, ["long0@x"]) == ["/long/0"]
+        assert len(calls) - before <= 1 + threader_mod.FTS_SUBJECT_SCAN_ROWS
+        assert max(calls[before:]) <= threader_mod.FTS_SUBJECT_SCAN_CHARS

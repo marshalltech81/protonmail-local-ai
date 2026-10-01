@@ -45,7 +45,13 @@ from .attachment_indexing import (
     prepare_attachment_writes,
     reruns_once_ocr_is_on,
 )
-from .chunker import MessageChunk, chunk_message, mean_vector
+from .chunker import (
+    MessageChunk,
+    chunk_message,
+    estimate_tokens,
+    mean_vector,
+    truncate_to_tokens,
+)
 from .database import EMBEDDING_DIM, Database
 from .embedder import (
     EMBED_FAILURE_CONFIGURATION,
@@ -82,7 +88,7 @@ from .queue import load_config_from_env as load_queue_config_from_env
 from .quoting import strip_for_embedding
 from .reconciler import Reconciler, ReconcilerConfig, load_config_from_env, sweep_paths
 from .stall_guard import StallGuard
-from .threader import Thread, Threader
+from .threader import Thread, Threader, reply_subject_line
 from .timings import StageTimings, TimingAggregator, format_summary
 
 logging.basicConfig(
@@ -759,6 +765,31 @@ def _phase1_commit_thread(
     )
 
 
+def _chunk_embed_input(subject_line: str, chunk_text: str) -> str:
+    """Embedding input for a reply's first body chunk: ``subject_line``
+    then the chunk text, within ``CHUNK_MAX_TOKENS`` (#439).
+
+    The subject is attacker-controlled and unbounded, so it is cut to
+    the tokens the chunk leaves free. When the chunk is already at the
+    ceiling the prefix is dropped and the chunk is embedded as stored.
+    The subject is first cut to 16 characters per budget token, so a
+    huge subject is never tokenized whole; real tokens are shorter than
+    that, so the cut does not shorten what fits.
+    """
+    # Two tokens of slack for the "\n\n" separator and any merge at
+    # the join; the final count below is the actual guard.
+    budget = CHUNK_MAX_TOKENS - estimate_tokens(chunk_text) - 2
+    if budget <= 0:
+        return chunk_text
+    prefix = truncate_to_tokens(subject_line[: budget * 16], budget)
+    if not prefix.strip():
+        return chunk_text
+    combined = f"{prefix}\n\n{chunk_text}"
+    if estimate_tokens(combined) > CHUNK_MAX_TOKENS:
+        return chunk_text
+    return combined
+
+
 def _phase2a_collect_chunks(
     state: _BatchedMsg,
     db: Database,
@@ -813,9 +844,18 @@ def _phase2a_collect_chunks(
         # chunks, so the fallback below is reserved for that case too.
         clears_chunks = bool(stored_ids) and not body_chunks
         new_body_offsets: list[int] = []
+        # A reply that changed the subject carries it into the embedding
+        # input of its first body chunk only (#303). The stored chunk
+        # text, offsets and ID stay body-only, since chunks are the
+        # authoritative body store; keyword search gets the subject from
+        # the thread's FTS subject column instead.
+        subject_line = reply_subject_line(msg, state.thread.subject)
         for c in new_body:
             new_body_offsets.append(len(all_texts))
-            all_texts.append(c.text)
+            if subject_line and c.chunk_index == 0:
+                all_texts.append(_chunk_embed_input(subject_line, c.text))
+            else:
+                all_texts.append(c.text)
 
         attach_plans: list[AttachmentWritePlan] = []
         attach_new_chunks: list[list[MessageChunk]] = []

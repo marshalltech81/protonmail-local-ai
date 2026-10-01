@@ -21,10 +21,13 @@ import sqlite_vec
 from .chunker import l2_normalize, truncate_to_tokens
 from .extractors import OCR_DISABLED_ERROR, SCANNED_PDF_OCR_DISABLED_ERROR
 from .threader import (
+    FTS_SUBJECT_SCAN_CHARS,
+    FTS_SUBJECT_SCAN_ROWS,
     PER_MESSAGE_BODY_CAP_CHARS,
     THREAD_BODY_TEXT_MAX_TOKENS,
     Thread,
     canonical_addr,
+    fts_subject_text,
 )
 
 log = logging.getLogger("indexer.database")
@@ -58,10 +61,13 @@ def _dedupe_by_canonical(addrs: list[str]) -> list[str]:
     return result
 
 
-# ``_apply_initial_schema`` builds the complete current schema.
-# Migration history up to v21 was squashed into it while no deployed
-# database existed; databases older than ``SCHEMA_BASELINE_VERSION``
-# cannot be upgraded and must be rebuilt from Maildir.
+# ``_apply_initial_schema`` builds the complete current schema, stamped
+# version 0. Earlier history (v1-v22) was squashed into it and
+# renumbered while no deployed database existed; a database from that
+# numbering must be rebuilt from Maildir. Its version numbers will
+# collide with the new sequence, so the initial schema also stamps
+# ``SCHEMA_APPLICATION_ID`` into the SQLite header and a database
+# without it is refused whatever its version.
 #
 # Bumping ``SCHEMA_VERSION`` requires shipping a forward migration file
 # at ``src/migrations/<NNNN>_<slug>.sql`` covering the new version.
@@ -69,8 +75,8 @@ def _dedupe_by_canonical(addrs: list[str]) -> list[str]:
 # current version; existing installs run the migration runner to catch
 # up. See ``src/migrations/runner.py`` for the file layout and
 # transactional guarantees.
-SCHEMA_VERSION = 22
-SCHEMA_BASELINE_VERSION = 21
+SCHEMA_VERSION = 0
+SCHEMA_APPLICATION_ID = 0x504D4149  # "PMAI"
 
 # The schema uses FTS5 ``contentless_delete=1``, which SQLite added in 3.43.
 # Validate the runtime version at Database init and fail fast with a clear
@@ -268,6 +274,13 @@ class Database:
             log.info(f"Database initialized at {self.path} (schema v{SCHEMA_VERSION})")
             return
 
+        if cur.execute("PRAGMA application_id").fetchone()[0] != SCHEMA_APPLICATION_ID:
+            raise RuntimeError(
+                "Database predates the v0 schema renumbering and cannot be "
+                "migrated. Stop the stack, wipe the sqlite-volume and let the "
+                "indexer rebuild the index from Maildir."
+            )
+
         stored = row["version"]
         if stored == SCHEMA_VERSION:
             log.info(f"Database ready at {self.path} (schema v{SCHEMA_VERSION})")
@@ -279,13 +292,6 @@ class Database:
                 f"v{SCHEMA_VERSION}. Downgrade migrations are not supported; "
                 "either upgrade the indexer image or wipe the sqlite-volume "
                 "and let the indexer rebuild from Maildir."
-            )
-
-        if stored < SCHEMA_BASELINE_VERSION:
-            raise RuntimeError(
-                f"Schema version v{stored} predates the v{SCHEMA_BASELINE_VERSION} "
-                "baseline and cannot be migrated. Wipe the sqlite-volume and let "
-                "the indexer rebuild the index from Maildir."
             )
 
         migration_dir = Path(__file__).parent / "migrations"
@@ -341,6 +347,7 @@ class Database:
         try:
             self._run_initial_schema_script(cur)
             cur.execute("INSERT INTO schema_version VALUES (?)", (SCHEMA_VERSION,))
+            cur.execute(f"PRAGMA application_id = {SCHEMA_APPLICATION_ID}")
             self._conn.commit()
         except BaseException:
             if self._conn.in_transaction:
@@ -823,7 +830,27 @@ class Database:
             # Update FTS5 index. threads_fts is contentless_delete=1 so DELETE
             # requires a specific rowid — read the existing fts_rowid and then
             # record the new rowid after INSERT.
-            self._replace_fts_row(cur, thread.thread_id, thread.subject, participants_json, body)
+            # The FTS subject column also carries the thread's changed
+            # reply subjects (#303). ``thread.messages`` holds only the
+            # new arrival here, so read the stored subjects; the rows
+            # for this arrival were written just above. Rows and
+            # characters read are capped (``FTS_SUBJECT_SCAN_*``) so a
+            # long thread does not make every upsert re-read it all.
+            stored_subjects = [
+                r[0]
+                for r in cur.execute(
+                    "SELECT substr(subject, 1, ?) FROM messages WHERE thread_id = ? "
+                    "ORDER BY sent_at LIMIT ?",
+                    (FTS_SUBJECT_SCAN_CHARS, thread.thread_id, FTS_SUBJECT_SCAN_ROWS),
+                )
+            ]
+            self._replace_fts_row(
+                cur,
+                thread.thread_id,
+                fts_subject_text(thread.subject, stored_subjects),
+                participants_json,
+                body,
+            )
 
             # Update vector index — vec0 virtual tables do not support
             # INSERT OR REPLACE conflict resolution; use DELETE + INSERT instead.
@@ -2412,7 +2439,14 @@ class Database:
             ),
         )
 
-        self._replace_fts_row(cur, thread.thread_id, thread.subject, participants_json, body)
+        # Survivors only: the reaped messages' rows are removed after
+        # this rewrite, in the same transaction (#303). Oldest first,
+        # as the upsert path reads them; ``fts_subject_text`` caps the
+        # rows and characters it examines.
+        fts_subject = fts_subject_text(
+            thread.subject, (m.subject for m in sorted(thread.messages, key=lambda m: m.date))
+        )
+        self._replace_fts_row(cur, thread.thread_id, fts_subject, participants_json, body)
 
         cur.execute("DELETE FROM threads_vec WHERE thread_id = ?", (thread.thread_id,))
         cur.execute(

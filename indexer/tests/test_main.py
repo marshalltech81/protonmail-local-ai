@@ -121,8 +121,10 @@ def _write_eml(
     date: str | None = "Mon, 01 Jan 2024 12:00:00 +0000",
     from_addr: str = "alice@example.com",
     to_addr: str = "bob@example.com",
+    body: str | None = None,
 ) -> None:
-    """``date=None`` omits the Date header entirely."""
+    """``date=None`` omits the Date header entirely; ``body`` defaults
+    to ``Body of <message_id>.``."""
     path.parent.mkdir(parents=True, exist_ok=True)
     headers = [
         f"From: {from_addr}",
@@ -138,7 +140,7 @@ def _write_eml(
     if references:
         headers.append("References: " + " ".join(f"<{r}>" for r in references))
     path.write_text(
-        "\r\n".join(headers) + f"\r\n\r\nBody of {message_id}.\r\n",
+        "\r\n".join(headers) + f"\r\n\r\n{body or f'Body of {message_id}.'}\r\n",
         encoding="utf-8",
     )
 
@@ -5192,3 +5194,221 @@ class TestTrashedFilesWithReconciliation:
         assert main._recover_zero_vector_threads(db, queue, skip_trashed=True) == 1
         assert not queue.has_pending_row(trashed)
         assert queue.has_pending_row(live)
+
+
+class TestReplySubjectSearchable:
+    """#303: a reply whose subject differs from the thread's (after
+    Re:/Fwd: normalization) must be findable by keyword and semantic
+    search. Review round 1: stored chunks stay body-only (they are the
+    authoritative body store), and the keyword path must survive a
+    thread body already at its token cap."""
+
+    TOKEN = "APPROVALZX731"
+    CHANGED_SUBJECT = f"Re: Budget review {TOKEN}"
+
+    def _write_thread(self, tmp_path, *, root_body=None, changed_body=None):
+        root = tmp_path / "INBOX" / "cur" / "root.eml"
+        changed = tmp_path / "INBOX" / "cur" / "changed.eml"
+        same = tmp_path / "INBOX" / "cur" / "same.eml"
+        _write_eml(root, "root@example.com", "Budget review", body=root_body)
+        _write_eml(
+            changed,
+            "changed@example.com",
+            self.CHANGED_SUBJECT,
+            in_reply_to="root@example.com",
+            references=["root@example.com"],
+            date="Mon, 01 Jan 2024 13:00:00 +0000",
+            body=changed_body,
+        )
+        _write_eml(
+            same,
+            "same@example.com",
+            "RE: Fwd: budget  review",
+            in_reply_to="changed@example.com",
+            references=["root@example.com", "changed@example.com"],
+            date="Mon, 01 Jan 2024 14:00:00 +0000",
+        )
+        return root, changed, same
+
+    def _index_thread(self, tmp_path, **bodies):
+        paths = self._write_thread(tmp_path, **bodies)
+        db = Database(tmp_path / "mail.db")
+        embedder = make_mock_embedder(_UNIT_VECTOR)
+        threader = Threader(db)
+        for path in paths:
+            assert _index_one(path, db, embedder, threader)[0]
+        inputs = [t for call in embedder.embed_batch.call_args_list for t in call.args[0]]
+        return db, embedder, threader, paths, inputs
+
+    @staticmethod
+    def _thread_fts_hits(db, term):
+        return {
+            r[0]
+            for r in db._conn.execute(
+                "SELECT t.thread_id FROM threads_fts f JOIN threads t "
+                "ON t.fts_rowid = f.rowid WHERE threads_fts MATCH ?",
+                (term,),
+            )
+        }
+
+    @staticmethod
+    def _chunk_fts_hits(db, term):
+        return {
+            r[0]
+            for r in db._conn.execute(
+                "SELECT c.message_id FROM message_chunks_fts f JOIN message_chunks c "
+                "ON c.fts_rowid = f.rowid WHERE message_chunks_fts MATCH ?",
+                (term,),
+            )
+        }
+
+    def test_reply_subject_matches_thread_fts_only(self, tmp_path):
+        db, *_ = self._index_thread(tmp_path)
+        assert self._thread_fts_hits(db, self.TOKEN) == {"root@example.com"}
+        # Chunk FTS backs the body-only ``query_messages(text=...)``.
+        assert self._chunk_fts_hits(db, self.TOKEN) == set()
+        row = db._conn.execute(
+            "SELECT subject, body_text FROM threads WHERE thread_id = ?", ("root@example.com",)
+        ).fetchone()
+        assert row["subject"] == "budget review"
+        assert self.TOKEN not in row["body_text"]
+
+    def test_stored_chunks_stay_body_only(self, tmp_path):
+        from src.chunker import chunk_message
+
+        db, *_ = self._index_thread(tmp_path)
+        rows = db._conn.execute(
+            "SELECT chunk_id, text, char_start FROM message_chunks WHERE message_id = ?",
+            ("changed@example.com",),
+        ).fetchall()
+        expected = chunk_message(
+            message_pk="changed@example.com",
+            body_text="Body of changed@example.com.",
+            target_tokens=main.CHUNK_TARGET_TOKENS,
+            max_tokens=main.CHUNK_MAX_TOKENS,
+            overlap_tokens=main.CHUNK_OVERLAP_TOKENS,
+        )
+        assert [(r["chunk_id"], r["text"], r["char_start"]) for r in rows] == [
+            (c.chunk_id, c.text, c.char_start) for c in expected
+        ]
+        assert not any("Subject:" in r["text"] for r in rows)
+
+    def test_first_chunk_embed_input_carries_the_subject(self, tmp_path):
+        paragraph = " ".join(f"word{i}" for i in range(300))
+        changed_body = "\n\n".join([paragraph] * 3)
+        db, *_, inputs = self._index_thread(tmp_path, changed_body=changed_body)
+        texts = [
+            r[0]
+            for r in db._conn.execute(
+                "SELECT text FROM message_chunks WHERE message_id = ? ORDER BY chunk_index",
+                ("changed@example.com",),
+            )
+        ]
+        assert len(texts) > 1
+        prefix = f"Subject: {self.CHANGED_SUBJECT}\n\n"
+        assert prefix + texts[0] in inputs
+        for text in texts[1:]:
+            assert text in inputs
+        assert [t for t in inputs if self.TOKEN in t] == [prefix + texts[0]]
+        # Unchanged subjects add nothing.
+        assert "Body of root@example.com." in inputs
+        assert "Body of same@example.com." in inputs
+
+    def test_reindexing_the_reply_embeds_nothing_new(self, tmp_path):
+        db, embedder, threader, (_root, changed, _same), _ = self._index_thread(tmp_path)
+        before = embedder.embed_batch.call_count
+        assert _index_one(changed, db, embedder, threader)[0]
+        new_inputs = [
+            t for call in embedder.embed_batch.call_args_list[before:] for t in call.args[0]
+        ]
+        assert new_inputs == []
+        assert self._thread_fts_hits(db, self.TOKEN) == {"root@example.com"}
+
+    def test_reply_subject_matches_when_body_is_at_the_cap(self, tmp_path):
+        """The thread body is prefix-preserving and token-capped, so a
+        reply arriving after it is full adds nothing to ``body_text``;
+        its changed subject must still reach ``threads_fts``."""
+        from src.chunker import estimate_tokens
+        from src.threader import THREAD_BODY_TEXT_MAX_TOKENS
+
+        filler = " ".join(f"f{i}" for i in range(600))
+        paths = [tmp_path / "INBOX" / "cur" / "root.eml"]
+        _write_eml(paths[0], "root@example.com", "Budget review", body=filler)
+        for n in range(12):
+            paths.append(tmp_path / "INBOX" / "cur" / f"fill{n}.eml")
+            _write_eml(
+                paths[-1],
+                f"fill{n}@example.com",
+                "Re: Budget review",
+                in_reply_to="root@example.com",
+                references=["root@example.com"],
+                date=f"Mon, 01 Jan 2024 12:{n + 10}:00 +0000",
+                body=filler,
+            )
+        paths.append(tmp_path / "INBOX" / "cur" / "changed.eml")
+        _write_eml(
+            paths[-1],
+            "changed@example.com",
+            self.CHANGED_SUBJECT,
+            in_reply_to="root@example.com",
+            references=["root@example.com"],
+            date="Mon, 01 Jan 2024 13:00:00 +0000",
+        )
+        db = Database(tmp_path / "mail.db")
+        embedder = make_mock_embedder(_UNIT_VECTOR)
+        threader = Threader(db)
+        for path in paths:
+            assert _index_one(path, db, embedder, threader)[0]
+        body = db._conn.execute(
+            "SELECT body_text FROM threads WHERE thread_id = ?", ("root@example.com",)
+        ).fetchone()[0]
+        assert estimate_tokens(body) >= THREAD_BODY_TEXT_MAX_TOKENS - 50
+        assert "Body of changed@example.com." not in body
+        assert self._thread_fts_hits(db, self.TOKEN) == {"root@example.com"}
+
+    def test_embed_input_stays_within_the_chunk_ceiling(self, tmp_path):
+        """Review round 2: the subject prefix must not push a chunk's
+        embedding input past ``CHUNK_MAX_TOKENS``. A 50,000-character
+        subject is cut to fit; the stored chunk stays body-only."""
+        from src.chunker import estimate_tokens
+
+        huge = "Re: Budget review " + " ".join(f"s{i}" for i in range(10_000))
+        assert len(huge) > 50_000
+        paths = self._write_thread(tmp_path)
+        _write_eml(
+            paths[1],
+            "changed@example.com",
+            huge,
+            in_reply_to="root@example.com",
+            references=["root@example.com"],
+            date="Mon, 01 Jan 2024 13:00:00 +0000",
+        )
+        db = Database(tmp_path / "mail.db")
+        embedder = make_mock_embedder(_UNIT_VECTOR)
+        threader = Threader(db)
+        for path in paths:
+            assert _index_one(path, db, embedder, threader)[0]
+        inputs = [t for call in embedder.embed_batch.call_args_list for t in call.args[0]]
+        assert all(estimate_tokens(t) <= main.CHUNK_MAX_TOKENS for t in inputs)
+        first = next(t for t in inputs if t.endswith("Body of changed@example.com."))
+        assert first.startswith("Subject: Re: Budget review s0 s1")
+        stored = db._conn.execute(
+            "SELECT text FROM message_chunks WHERE message_id = ?", ("changed@example.com",)
+        ).fetchone()[0]
+        assert stored == "Body of changed@example.com."
+
+    def test_prefix_is_cut_or_dropped_near_the_ceiling(self, monkeypatch):
+        from src.chunker import estimate_tokens, truncate_to_tokens
+
+        monkeypatch.setattr(main, "CHUNK_MAX_TOKENS", 120)
+        subject_line = "Subject: " + " ".join(f"s{i}" for i in range(20_000))
+        near = " ".join(f"w{i}" for i in range(40))
+        assert 100 < estimate_tokens(near) < 115
+        text = main._chunk_embed_input(subject_line, near)
+        assert text.startswith("Subject: s0") and text.endswith("\n\n" + near)
+        assert estimate_tokens(text) <= 120
+
+        full = " ".join(f"w{i}" for i in range(80))
+        full = truncate_to_tokens(full, 120)
+        assert estimate_tokens(full) == 120
+        assert main._chunk_embed_input(subject_line, full) == full

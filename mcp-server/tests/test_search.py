@@ -731,6 +731,55 @@ class TestGetEvidence:
         out = asyncio.run(handler(query="acme", thread_id="t-quote"))
         assert 'Source: attachment "acme-quote.pdf"' in _text(out)
 
+    def test_mailbox_wide_returns_the_chunks_ask_mailbox_uses(
+        self, fake_server, fake_embed, chunked_db
+    ):
+        """Review round 2 on #445: get_evidence is documented as the same
+        chunks ask_mailbox feeds its model, so it must ask for the same
+        per-thread cap rather than hybrid_search's default of three."""
+        from datetime import UTC, datetime
+
+        from src.lib.sqlite import ChunkResult, ThreadResult
+
+        chunks = [
+            ChunkResult(
+                chunk_id=f"c{i}",
+                message_id=f"m{i}",
+                thread_id="t-six",
+                chunk_index=0,
+                text=f"PASSAGE_MARKER_{i}",
+                char_start=0,
+                char_end=17,
+            )
+            for i in range(1, 7)
+        ]
+
+        def fake_search(**kwargs):
+            per_thread = kwargs.get("evidence_per_thread", 3)
+            return [
+                ThreadResult(
+                    thread_id="t-six",
+                    subject="Six passages",
+                    participants=[],
+                    folder="INBOX",
+                    date_first=datetime(2024, 1, 1, tzinfo=UTC),
+                    date_last=datetime(2024, 1, 1, tzinfo=UTC),
+                    message_ids=[],
+                    snippet="",
+                    has_attachments=False,
+                    evidence_chunks=chunks[:per_thread],
+                )
+            ]
+
+        chunked_db.hybrid_search = fake_search  # type: ignore[assignment]
+        handler = self._handler(fake_server, fake_embed, chunked_db)
+        text = _text(asyncio.run(handler(query="invoice")))
+        assert "PASSAGE_MARKER_6" in text
+        # The flat ``limit`` still caps the total.
+        text = _text(asyncio.run(handler(query="invoice", limit=4)))
+        assert "PASSAGE_MARKER_4" in text
+        assert "PASSAGE_MARKER_5" not in text
+
     def test_limit_clamped_at_tool_boundary(self, fake_server, fake_embed, chunked_db):
         captured: dict = {}
         original = chunked_db.hybrid_search
