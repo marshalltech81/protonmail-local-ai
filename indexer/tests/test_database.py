@@ -2917,7 +2917,10 @@ class TestFtsSubjectScanBound:
 
         assert max(per_upsert) <= 1 + threader_mod.FTS_SUBJECT_SCAN_ROWS
         assert max(calls) <= threader_mod.FTS_SUBJECT_SCAN_CHARS
-        assert elapsed < 60, f"300 upserts took {elapsed:.1f}s"
+        # The work bound above is the real check. The wall-clock bound only
+        # catches a gross regression: ~8 s locally, but one CI runner took
+        # 69 s on unchanged code (#474), so it is set well clear of that.
+        assert elapsed < 300, f"300 upserts took {elapsed:.1f}s"
         row = db._conn.execute("SELECT message_ids FROM threads").fetchone()
         assert len(json.loads(row["message_ids"])) == 300
 
