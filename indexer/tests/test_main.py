@@ -4008,6 +4008,13 @@ class TestStageErrorsKeepMailOutOfLastError:
         that text can quote the attachment being read."""
         assert main._stage_error(exc) == "OSError"
 
+    @pytest.mark.parametrize("errno", [2**31, -(2**31) - 1, 2**70])
+    def test_os_error_with_errno_outside_c_int_is_type_only(self, errno):
+        """``os.strerror`` raises ``OverflowError`` outside the C int
+        range; that must not escape the stage handlers and stop the
+        drain."""
+        assert main._stage_error(OSError(errno, SYNTHETIC_MARKER)) == "OSError"
+
     def test_oversized_message_error_keeps_its_text(self):
         exc = parser.OversizedMessageError(Path("/maildir/INBOX/cur/x"), 20, 10)
 

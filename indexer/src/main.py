@@ -563,7 +563,12 @@ def _stage_error(exc: BaseException) -> str:
     if isinstance(exc, OSError) and isinstance(exc.errno, int):
         # The errno's fixed ``os.strerror`` text, never the exception's
         # own message or filename; the job row already holds the path.
-        return f"{type(exc).__name__}: [Errno {exc.errno}] {os.strerror(exc.errno)}"
+        # ``os.strerror`` raises outside the C int range.
+        try:
+            reason = os.strerror(exc.errno)
+        except OverflowError, ValueError:
+            return type(exc).__name__
+        return f"{type(exc).__name__}: [Errno {exc.errno}] {reason}"
     return type(exc).__name__
 
 
