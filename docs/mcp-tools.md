@@ -10,10 +10,23 @@ The search, retrieval, and system tools (Groups 1, 2, and 4) publish an
 - `content` — the readable prose described below, unchanged.
 - `structuredContent` — typed JSON matching the tool's `outputSchema`.
   IDs chain from typed fields: `search_emails` → `results[].thread_id` →
-  `get_thread` → `messages[].message_id` → `get_message`, and
+  `get_thread` → `messages[].claimant_id` → `get_message`, and
   `get_evidence` / `search_attachments` carry `attachment_id`. Paging
   state is typed as well (`get_thread.next_offset`,
   `query_messages.next_cursor` / `has_more` / `total_matches`).
+
+**Message-ID and claimant ID.** The sender sets a message's Message-ID,
+so two different indexed files can carry the same one (a reused or
+forged ID). The index keeps both rather than letting one overwrite the
+other, and names each by its claimant ID: the Message-ID plus `#` and
+the first eight hex digits of the raw file's SHA-256, for example
+`<id@x.example>` stored as `id@x.example#3f9a2c1b`. It stays the same
+across flag renames and folder moves, since those do not change the
+file's bytes. Every message row, evidence chunk, and attachment hit
+carries both `message_id` (the header value) and `claimant_id`.
+`get_message` accepts either; a bare Message-ID that several messages
+claim returns an error listing their claimant IDs instead of choosing
+one. Both claimants sit in the thread their Message-ID resolves to.
 
 Every message row (`get_thread`, `get_message`, `query_messages`),
 evidence chunk (`get_evidence`), and attachment hit
@@ -154,7 +167,7 @@ question — the same chunks `ask_mailbox` feeds its model, but with
 **no LLM synthesis**. Use it to audit or cite an answer, or as the
 fast synthesis-free path when only the source text is needed.
 
-Each chunk carries its parent thread + Message-ID, the source
+Each chunk carries its parent thread, Message-ID and claimant ID, the source
 (message body, or an attachment with filename + MIME type), the
 message date, and the passage's character offsets. Attachment-derived
 chunks (extracted PDF / OCR / document text) are included — unlike
@@ -216,7 +229,7 @@ that passes `content_type`.
 
 ### `get_thread`
 Read a thread by ID as its messages, oldest first. Each message shows
-its own headers (Message-ID, subject, From / To / Cc, send date in UTC,
+its own headers (Message-ID, claimant ID, subject, From / To / Cc, send date in UTC,
 folder, In-Reply-To, attachment flag; recipient lists past 10 are
 summarized as a count) and its indexed body after quoted-reply
 stripping. Attachment text is not included. When no message body is
@@ -252,9 +265,16 @@ indexed for the message. Attachment text is not included — use
 `get_evidence` for that. The prose ends its header block with the raw
 source file's path, size, and SHA-256.
 
+`message_id` takes a claimant ID, which names one message, or a bare
+Message-ID, which works while one indexed message carries it. When
+several do, the call fails with an error listing each claimant ID with
+its send date and folder; call again with one of them. A successful
+response lists, in `other_claimants`, any other messages sharing the
+Message-ID.
+
 | Parameter | Type | Default | Description |
 |---|---|---|---|
-| `message_id` | string | required | Message-ID header value |
+| `message_id` | string | required | Claimant ID, or the Message-ID header value |
 
 ### `list_threads`
 Browse threads in a folder: every thread with at least one message
@@ -311,7 +331,7 @@ duplicates do not double-count.
 Enumerate **every** message matching exact criteria, with an exact
 total. Unlike `search_emails`, which ranks threads by relevance and
 returns the top `limit`, this returns the complete matching set of
-individual messages, newest send date first (Message-ID breaks ties),
+individual messages, newest send date first (claimant ID breaks ties),
 and pages through it with a cursor. Use it for "all" and "how many"
 questions.
 
@@ -346,13 +366,13 @@ each filter.
 and `has_more`; when more remain it includes `next_cursor`. Each
 message carries its send date, folder, attachment flag, subject,
 From / To / Cc (at most 10 per role, with a count of the rest),
-Message-ID, and Thread ID; the structured output adds In-Reply-To and
+Message-ID, claimant ID, and Thread ID; the structured output adds In-Reply-To and
 up to 10 References. Header values are sender-controlled, so any past
 500 characters is cut with a marker — `get_message` returns full
 headers. The count, the page, and its participants are read in one
 snapshot.
 
-**Paging.** Keyset pagination on `(sent_at, message_id)`: messages
+**Paging.** Keyset pagination on `(sent_at, claimant_id)`: messages
 indexed while a caller pages never shift or duplicate later pages. A
 cursor is bound to the filters it was issued for; a cursor from
 another query, or a malformed one, is rejected with an error rather

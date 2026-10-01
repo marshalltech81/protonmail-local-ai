@@ -579,6 +579,68 @@ class TestFileIdentity:
         assert msg_seen.size == msg_seen_replied.size
 
 
+class TestClaimantId:
+    """#217: the per-message key is the Message-ID plus the first eight
+    hex digits of the SHA-256 of the file's raw bytes, so two files
+    claiming one Message-ID with different content get distinct keys,
+    while the same file keeps its key across reparses, flag renames and
+    folder moves (none of which change its bytes)."""
+
+    _RAW = (
+        b"From: alice@example.com\r\n"
+        b"To: bob@example.com\r\n"
+        b"Subject: Claimant\r\n"
+        b"Message-ID: <claimant@example.com>\r\n"
+        b"Date: Mon, 01 Jan 2024 12:00:00 +0000\r\n"
+        b"\r\n"
+        b"Body.\r\n"
+    )
+
+    def _parse(self, tmp_path, rel: str, raw: bytes):
+        path = tmp_path / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(raw)
+        msg = parse_email(path, maildir_root=tmp_path)
+        assert msg is not None
+        return msg
+
+    def test_is_message_id_plus_raw_bytes_hash_prefix(self, tmp_path):
+        msg = self._parse(tmp_path, "INBOX/cur/a:2,S", self._RAW)
+        digest = hashlib.sha256(self._RAW).hexdigest()
+        assert msg.claimant_id == f"claimant@example.com#{digest[:8]}"
+
+    def test_independent_of_flags_filename_and_folder(self, tmp_path):
+        first = self._parse(tmp_path, "INBOX/cur/a:2,S", self._RAW)
+        renamed = self._parse(tmp_path, "Archive/cur/b:2,RS", self._RAW)
+        assert renamed.claimant_id == first.claimant_id
+
+    def test_differs_for_different_content(self, tmp_path):
+        first = self._parse(tmp_path, "INBOX/cur/a:2,S", self._RAW)
+        other = self._parse(tmp_path, "INBOX/cur/b:2,S", self._RAW.replace(b"Body.", b"Other."))
+        assert other.message_id == first.message_id
+        assert other.claimant_id != first.claimant_id
+
+    def test_hand_built_message_without_hash_keys_on_message_id(self):
+        """Messages built in tests without file identity fall back to
+        the bare Message-ID."""
+        from src.parser import Message
+
+        msg = Message(
+            message_id="bare@example.com",
+            in_reply_to=None,
+            references=[],
+            subject="",
+            from_addr="",
+            to_addrs=[],
+            cc_addrs=[],
+            date=datetime(2024, 1, 1, tzinfo=UTC),
+            body_text="",
+            folder="INBOX",
+            filepath="/x",
+        )
+        assert msg.claimant_id == "bare@example.com"
+
+
 # ---------------------------------------------------------------------------
 # parse_email — body extraction
 # ---------------------------------------------------------------------------

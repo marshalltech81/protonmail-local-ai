@@ -745,6 +745,7 @@ class TestGetEvidence:
             ChunkResult(
                 chunk_id=f"c{i}",
                 message_id=f"m{i}",
+                claimant_id=f"m{i}#00000000",
                 thread_id="t-six",
                 chunk_index=0,
                 text=f"PASSAGE_MARKER_{i}",

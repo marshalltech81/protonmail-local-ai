@@ -53,7 +53,7 @@ def _prepare_and_apply(
     with db.transaction():
         return apply_attachment_writes(
             plan=plan,
-            message_id=prepare_kwargs["message_id"],
+            claimant_id=prepare_kwargs["claimant_id"],
             thread_id=thread_id,
             db=db,
             message_date=message_date,
@@ -85,7 +85,7 @@ def test_successful_cached_extraction_is_reused(tmp_path, monkeypatch):
     summary = _prepare_and_apply(
         message_date="2024-01-01T00:00:00+00:00",
         attachment=attachment,
-        message_id="message@example.com",
+        claimant_id="message@example.com",
         thread_id="thread-1",
         db=db,
         embedder=embedder,
@@ -134,7 +134,7 @@ def _process_with_cached_extractor(
     _prepare_and_apply(
         message_date="2024-01-01T00:00:00+00:00",
         attachment=attachment,
-        message_id="message@example.com",
+        claimant_id="message@example.com",
         thread_id="thread-1",
         db=db,
         embedder=embedder,
@@ -225,7 +225,7 @@ def test_stale_ocr_row_is_served_while_ocr_is_off(tmp_path, monkeypatch):
     plan = prepare_attachment_writes(
         db=db,
         embedder=None,
-        **_kwargs(attachment, message_id="message@example.com", ocr_enabled=False),
+        **_kwargs(attachment, claimant_id="message@example.com", ocr_enabled=False),
     )
     extractor.assert_not_called()
     assert plan.status == STATUS_SUCCESS and plan.chunks
@@ -296,7 +296,7 @@ def test_reused_terminal_row_clears_the_stale_chunks(tmp_path, monkeypatch):
     _prepare_and_apply(
         message_date="2024-01-01T00:00:00+00:00",
         attachment=_attachment(b"docx bytes", filename="c.docx", content_type="application/msword"),
-        message_id="message@example.com",
+        claimant_id="message@example.com",
         thread_id="thread-1",
         db=db,
         embedder=make_mock_embedder([0.1] * EMBEDDING_DIM),
@@ -331,7 +331,7 @@ def test_re_extraction_without_text_clears_the_stale_chunks(tmp_path, monkeypatc
     _prepare_and_apply(
         message_date="2024-01-01T00:00:00+00:00",
         attachment=_attachment(b"docx bytes", filename="c.docx", content_type="application/msword"),
-        message_id="message@example.com",
+        claimant_id="message@example.com",
         thread_id="thread-1",
         db=db,
         embedder=make_mock_embedder([0.1] * EMBEDDING_DIM),
@@ -375,7 +375,7 @@ def _run_process_with_cached_status(
     summary = _prepare_and_apply(
         message_date="2024-01-01T00:00:00+00:00",
         attachment=attachment,
-        message_id="message@example.com",
+        claimant_id="message@example.com",
         thread_id="thread-1",
         db=db,
         embedder=embedder,
@@ -455,7 +455,7 @@ def test_cached_unsupported_is_re_run_for_an_occurrence_with_an_extractor(tmp_pa
     summary = _prepare_and_apply(
         message_date="2024-01-01T00:00:00+00:00",
         attachment=attachment,
-        message_id="message@example.com",
+        claimant_id="message@example.com",
         thread_id="thread-1",
         db=db,
         embedder=make_mock_embedder([0.2] * EMBEDDING_DIM),
@@ -515,7 +515,7 @@ def test_image_ocr_disabled_row_does_not_block_a_pdf_occurrence(tmp_path, monkey
     _prepare_and_apply(
         message_date="2024-01-01T00:00:00+00:00",
         attachment=attachment,
-        message_id="message@example.com",
+        claimant_id="message@example.com",
         thread_id="thread-1",
         db=db,
         embedder=make_mock_embedder([0.2] * EMBEDDING_DIM),
@@ -561,7 +561,7 @@ def test_recent_failed_cached_extraction_is_honored(tmp_path, monkeypatch):
     summary = _prepare_and_apply(
         message_date="2024-01-01T00:00:00+00:00",
         attachment=attachment,
-        message_id="message@example.com",
+        claimant_id="message@example.com",
         thread_id="thread-1",
         db=db,
         embedder=embedder,
@@ -626,7 +626,7 @@ def test_stale_failed_cached_extraction_is_retried(tmp_path, monkeypatch):
     summary = _prepare_and_apply(
         message_date="2024-01-01T00:00:00+00:00",
         attachment=attachment,
-        message_id="message@example.com",
+        claimant_id="message@example.com",
         thread_id="thread-1",
         db=db,
         embedder=embedder,
@@ -683,7 +683,7 @@ def test_ocr_disabled_unsupported_is_re_run_when_ocr_re_enabled(tmp_path, monkey
     summary = _prepare_and_apply(
         message_date="2024-01-01T00:00:00+00:00",
         attachment=attachment,
-        message_id="message@example.com",
+        claimant_id="message@example.com",
         thread_id="thread-1",
         db=db,
         embedder=embedder,
@@ -736,7 +736,7 @@ def test_ocr_disabled_pdf_cache_is_re_run_when_ocr_re_enabled(tmp_path, monkeypa
     summary = _prepare_and_apply(
         message_date="2024-01-01T00:00:00+00:00",
         attachment=attachment,
-        message_id="message@example.com",
+        claimant_id="message@example.com",
         thread_id="thread-1",
         db=db,
         embedder=embedder,
@@ -770,7 +770,7 @@ def _setup_db_for_attachment(tmp_path, message_id="msg@x", thread_id="thread-x")
 def _kwargs(attachment, **overrides):
     base = dict(
         attachment=attachment,
-        message_id="msg@x",
+        claimant_id="msg@x",
         chunk_target_tokens=350,
         chunk_max_tokens=500,
         chunk_overlap_tokens=60,
@@ -829,7 +829,7 @@ class TestPrepareApplyBoundary:
         apply_attachment_writes(
             message_date="2024-01-01T00:00:00+00:00",
             plan=plan,
-            message_id="msg@x",
+            claimant_id="msg@x",
             thread_id="thread-x",
             db=db,
         )
@@ -1082,7 +1082,7 @@ def test_ocr_disabled_row_does_not_block_a_non_ocr_occurrence(tmp_path, monkeypa
     _prepare_and_apply(
         message_date="2024-01-01T00:00:00+00:00",
         attachment=attachment,
-        message_id="message@example.com",
+        claimant_id="message@example.com",
         thread_id="thread-1",
         db=db,
         embedder=make_mock_embedder([0.2] * EMBEDDING_DIM),
@@ -1137,7 +1137,7 @@ def test_unsupported_attachment_log_omits_filename_and_mime(tmp_path, caplog):
     with db.transaction():
         apply_attachment_writes(
             plan=plan,
-            message_id="msg@x",
+            claimant_id="msg@x",
             thread_id="thread-x",
             db=db,
             message_date="2024-01-01T00:00:00+00:00",
@@ -1168,7 +1168,7 @@ def test_failed_extraction_persists_no_filename_or_parser_text(tmp_path, monkeyp
     with db.transaction():
         apply_attachment_writes(
             plan=plan,
-            message_id="msg@x",
+            claimant_id="msg@x",
             thread_id="thread-x",
             db=db,
             message_date="2024-01-01T00:00:00+00:00",

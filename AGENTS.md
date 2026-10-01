@@ -182,12 +182,25 @@ Do not make any of the following changes unless the repository owner explicitly 
   `0001`. The initial schema stamps `SCHEMA_APPLICATION_ID` into the
   SQLite header; a database without it predates the renumbering and
   fails closed with rebuild instructions whatever its version.
+  Until the first deployment, schema changes fold into the v0
+  `_apply_initial_schema` with no migration file and no
+  `SCHEMA_VERSION` bump (owner, 2026-10-01); a database built before
+  such a change is rebuilt from Maildir.
 - Do not change embedding dimensions or model assumptions without verifying schema and context-window implications.
 - Do not change chunk ID derivation away from the deterministic
   `sha256(message_pk || index || text)` shape — re-runs depend on identical
   inputs producing identical IDs so the diff-write path skips already-
-  embedded chunks. Attachment chunks use
-  `message_pk = f"{message_id}::{attachment_id}"`.
+  embedded chunks. Body chunks use the message's claimant ID as
+  `message_pk`; attachment chunks use
+  `message_pk = f"{claimant_id}::{attachment_id}"`.
+- Every per-message row (`messages`, `message_thread_map`,
+  `message_participants`, `message_chunks`, `attachments`,
+  `pending_deletions`) is keyed by the claimant ID — the Message-ID plus
+  `#` and the first eight hex digits of the SHA-256 of the file's raw
+  bytes (`indexer/src/parser.py` `claimant_id`) — never by the bare,
+  sender-controlled Message-ID, so two files claiming one Message-ID
+  cannot overwrite or delete each other's rows (#217). Thread
+  membership still resolves by Message-ID.
 - Do not store raw attachment payload bytes in SQLite. The current schema
   keeps bytes only in the `.eml` on disk. ``attachment_extractions`` caches
   the extracted *text* per content hash so OCR / parse cost runs at most

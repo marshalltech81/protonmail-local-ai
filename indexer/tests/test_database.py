@@ -34,7 +34,7 @@ def _tombstone_thread(db, thread_id: str) -> None:
     """Tombstone every message in ``thread_id``, as the reconciler does
     before ``delete_thread_completely``, which refuses otherwise."""
     for row in db.get_thread_messages(thread_id):
-        db.add_pending_deletion(row["filepath"], row["message_id"], thread_id)
+        db.add_pending_deletion(row["filepath"], row["claimant_id"], thread_id)
 
 
 def _reap_message(db, thread, message_id: str) -> list[str] | None:
@@ -98,7 +98,7 @@ class TestSchema:
         cols = {
             row[1] for row in db._conn.execute("PRAGMA table_info(pending_deletions)").fetchall()
         }
-        assert cols == {"filepath", "message_id", "thread_id", "marked_at"}
+        assert cols == {"filepath", "claimant_id", "thread_id", "marked_at"}
 
     def test_reopening_initialized_database_does_not_error(self, tmp_path):
         """A fresh database created on first open is reopened cleanly on
@@ -271,7 +271,7 @@ class TestThreadVectorUnitNormInvariant:
         thread = make_thread(messages=[msg], thread_id="t-reap")
         db.upsert_thread(thread, [0.0] * EMBEDDING_DIM)
         scaled = [3.0 / (EMBEDDING_DIM**0.5)] * EMBEDDING_DIM  # norm 3.0
-        db.reap_thread_messages(thread, scaled, reaped_message_ids=[])
+        db.reap_thread_messages(thread, scaled, reaped_claimant_ids=[])
         stored = self._read_thread_vec(db, "t-reap")
         assert self._norm(stored) == pytest.approx(1.0, abs=1e-6)
 
@@ -1681,14 +1681,14 @@ class TestChunkTables:
                 "SELECT name FROM sqlite_master WHERE type='index'"
             ).fetchall()
         }
-        assert "idx_message_chunks_message" in indexes
+        assert "idx_message_chunks_claimant" in indexes
         assert "idx_message_chunks_thread" in indexes
 
     def test_chunk_columns_complete(self, db):
         cols = {row[1] for row in db._conn.execute("PRAGMA table_info(message_chunks)").fetchall()}
         for required in (
             "chunk_id",
-            "message_id",
+            "claimant_id",
             "thread_id",
             "chunk_index",
             "text",
@@ -1719,7 +1719,7 @@ class TestReplaceMessageChunks:
         with pytest.raises(sqlite3.IntegrityError, match="FOREIGN KEY"):
             db.replace_message_chunks(
                 message_date="2024-01-01T00:00:00+00:00",
-                message_id="missing@x",
+                claimant_id="missing@x",
                 thread_id="missing-thread",
                 chunks=[chunk],
                 embeddings_by_chunk_id={chunk.chunk_id: [0.1] * EMBEDDING_DIM},
@@ -1735,7 +1735,7 @@ class TestReplaceMessageChunks:
 
         result = db.replace_message_chunks(
             message_date="2024-01-01T00:00:00+00:00",
-            message_id="m1@x",
+            claimant_id="m1@x",
             thread_id="t1",
             chunks=chunks,
             embeddings_by_chunk_id=embeds,
@@ -1745,7 +1745,7 @@ class TestReplaceMessageChunks:
         # Each chunk landed in all three indexes.
         assert (
             db._conn.execute(
-                "SELECT COUNT(*) FROM message_chunks WHERE message_id = ?", ("m1@x",)
+                "SELECT COUNT(*) FROM message_chunks WHERE claimant_id = ?", ("m1@x",)
             ).fetchone()[0]
             == 2
         )
@@ -1758,7 +1758,7 @@ class TestReplaceMessageChunks:
         )
         # FTS row was created and recorded back into chunk row.
         rows = db._conn.execute(
-            "SELECT fts_rowid FROM message_chunks WHERE message_id = ?", ("m1@x",)
+            "SELECT fts_rowid FROM message_chunks WHERE claimant_id = ?", ("m1@x",)
         ).fetchall()
         assert all(r["fts_rowid"] is not None for r in rows)
 
@@ -1773,7 +1773,7 @@ class TestReplaceMessageChunks:
 
         first = db.replace_message_chunks(
             message_date="2024-01-01T00:00:00+00:00",
-            message_id="m2@x",
+            claimant_id="m2@x",
             thread_id="t2",
             chunks=chunks,
             embeddings_by_chunk_id=embeds,
@@ -1784,7 +1784,7 @@ class TestReplaceMessageChunks:
         # to insert anything.
         second = db.replace_message_chunks(
             message_date="2024-01-01T00:00:00+00:00",
-            message_id="m2@x",
+            claimant_id="m2@x",
             thread_id="t2",
             chunks=chunks,
             embeddings_by_chunk_id={},
@@ -1800,7 +1800,7 @@ class TestReplaceMessageChunks:
         # Round 1: keep + drop.
         db.replace_message_chunks(
             message_date="2024-01-01T00:00:00+00:00",
-            message_id="m3@x",
+            claimant_id="m3@x",
             thread_id="t3",
             chunks=[keep, drop],
             embeddings_by_chunk_id={
@@ -1812,7 +1812,7 @@ class TestReplaceMessageChunks:
         # Round 2: keep + new (drop should be deleted; keep should be kept).
         result = db.replace_message_chunks(
             message_date="2024-01-01T00:00:00+00:00",
-            message_id="m3@x",
+            claimant_id="m3@x",
             thread_id="t3",
             chunks=[keep, new],
             embeddings_by_chunk_id={new.chunk_id: [0.3] * EMBEDDING_DIM},
@@ -1822,7 +1822,7 @@ class TestReplaceMessageChunks:
         stored = {
             row[0]
             for row in db._conn.execute(
-                "SELECT chunk_id FROM message_chunks WHERE message_id = ?", ("m3@x",)
+                "SELECT chunk_id FROM message_chunks WHERE claimant_id = ?", ("m3@x",)
             ).fetchall()
         }
         assert stored == {keep.chunk_id, new.chunk_id}
@@ -1837,7 +1837,7 @@ class TestReplaceMessageChunks:
         with pytest.raises(ValueError, match="missing embedding"):
             db.replace_message_chunks(
                 message_date="2024-01-01T00:00:00+00:00",
-                message_id="m4@x",
+                claimant_id="m4@x",
                 thread_id="t4",
                 chunks=[chunk],
                 embeddings_by_chunk_id={},
@@ -1865,7 +1865,7 @@ class TestReplaceMessageChunks:
 
         db.replace_message_chunks(
             message_date="2024-01-01T00:00:00+00:00",
-            message_id="m-norm@x",
+            claimant_id="m-norm@x",
             thread_id="t-norm",
             chunks=[chunk],
             embeddings_by_chunk_id={chunk.chunk_id: scaled},
@@ -1890,7 +1890,7 @@ class TestReplaceMessageChunks:
         with pytest.raises(ValueError, match="EMBEDDING_DIM|reserves 4096"):
             db.replace_message_chunks(
                 message_date="2024-01-01T00:00:00+00:00",
-                message_id="m5@x",
+                claimant_id="m5@x",
                 thread_id="t5",
                 chunks=[chunk],
                 embeddings_by_chunk_id={chunk.chunk_id: [0.1] * 100},
@@ -1924,7 +1924,7 @@ class TestMessageDateOnChunks:
         _seed_thread_for_message(db, "m-md1@x", "t-md1")
         chunk = _make_chunk("md1".ljust(64, "0"), 0, "body")
         db.replace_message_chunks(
-            message_id="m-md1@x",
+            claimant_id="m-md1@x",
             thread_id="t-md1",
             chunks=[chunk],
             embeddings_by_chunk_id={chunk.chunk_id: _one_hot(0)},
@@ -1944,7 +1944,7 @@ class TestMessageDateOnChunks:
         _seed_thread_for_message(db, "m-md2@x", "t-md2")
         with pytest.raises(sqlite3.IntegrityError, match="message_date"):
             db._conn.execute(
-                "INSERT INTO message_chunks (chunk_id, message_id, thread_id, "
+                "INSERT INTO message_chunks (chunk_id, claimant_id, thread_id, "
                 "chunk_index, text, char_start, char_end, token_est, chunked_at) "
                 "VALUES ('c-null', 'm-md2@x', 't-md2', 0, 'body', 0, 4, 1, '2026-01-01')"
             )
@@ -1963,7 +1963,7 @@ class TestThreadChunkAggregation:
             chunk = _make_chunk(f"x{mid}".ljust(64, "0"), 0, f"body of {mid}")
             db.replace_message_chunks(
                 message_date="2024-01-01T00:00:00+00:00",
-                message_id=mid,
+                claimant_id=mid,
                 thread_id="t6",
                 chunks=[chunk],
                 embeddings_by_chunk_id={chunk.chunk_id: _one_hot(slot)},
@@ -1982,7 +1982,7 @@ class TestThreadChunkAggregation:
             chunk = _make_chunk(f"y{mid}".ljust(64, "0"), 0, f"body of {mid}")
             db.replace_message_chunks(
                 message_date="2024-01-01T00:00:00+00:00",
-                message_id=mid,
+                claimant_id=mid,
                 thread_id="t7",
                 chunks=[chunk],
                 embeddings_by_chunk_id={chunk.chunk_id: _one_hot(slot)},
@@ -2011,7 +2011,7 @@ class TestThreadChunkAggregation:
         chunk = _make_chunk("zhas".ljust(64, "0"), 0, "some body")
         db.replace_message_chunks(
             message_date="2024-01-01T00:00:00+00:00",
-            message_id="th@x",
+            claimant_id="th@x",
             thread_id="t_has",
             chunks=[chunk],
             embeddings_by_chunk_id={chunk.chunk_id: _one_hot(0)},
@@ -2030,7 +2030,7 @@ class TestAtomicIndexTransaction:
                 db.upsert_thread(thread, FAKE_EMBEDDING)
                 db.replace_message_chunks(
                     message_date="2024-01-01T00:00:00+00:00",
-                    message_id=msg.message_id,
+                    claimant_id=msg.message_id,
                     thread_id=thread.thread_id,
                     chunks=[chunk],
                     embeddings_by_chunk_id={chunk.chunk_id: [0.2] * EMBEDDING_DIM},
@@ -2052,7 +2052,7 @@ class TestChunkCascadeOnMessageRemoval:
         chunk = _make_chunk("z" * 64, 0, "to be removed")
         db.replace_message_chunks(
             message_date="2024-01-01T00:00:00+00:00",
-            message_id="m8@x",
+            claimant_id="m8@x",
             thread_id=thread.thread_id,
             chunks=[chunk],
             embeddings_by_chunk_id={chunk.chunk_id: [0.4] * EMBEDDING_DIM},
@@ -2077,7 +2077,7 @@ class TestChunkCascadeOnMessageRemoval:
             chunk = _make_chunk(f"q{mid}".ljust(64, "0"), 0, "doomed")
             db.replace_message_chunks(
                 message_date="2024-01-01T00:00:00+00:00",
-                message_id=mid,
+                claimant_id=mid,
                 thread_id=t.thread_id,
                 chunks=[chunk],
                 embeddings_by_chunk_id={chunk.chunk_id: [0.5] * EMBEDDING_DIM},
@@ -2128,14 +2128,14 @@ class TestUpsertAttachment:
         db.upsert_thread(thread, FAKE_EMBEDDING)
 
         inserted = db.upsert_attachment(
-            message_id="att1@x",
+            claimant_id="att1@x",
             thread_id=thread.thread_id,
             attachment_id="hash-a" * 8,
             filename="invoice.pdf",
             content_type="application/pdf",
             size_bytes=1234,
             occurrence_id=attachment_occurrence_id(
-                message_id="att1@x",
+                claimant_id="att1@x",
                 content_hash="hash-a" * 8,
                 filename="invoice.pdf",
                 occurrence_index=0,
@@ -2145,7 +2145,7 @@ class TestUpsertAttachment:
 
         row = db._conn.execute(
             "SELECT filename, content_type, size_bytes, fts_rowid "
-            "FROM attachments WHERE message_id = ? AND attachment_id = ?",
+            "FROM attachments WHERE claimant_id = ? AND attachment_id = ?",
             ("att1@x", "hash-a" * 8),
         ).fetchone()
         assert row["filename"] == "invoice.pdf"
@@ -2159,7 +2159,7 @@ class TestUpsertAttachment:
         db.upsert_thread(thread, FAKE_EMBEDDING)
 
         kwargs = dict(
-            message_id="att2@x",
+            claimant_id="att2@x",
             thread_id=thread.thread_id,
             attachment_id="hash-b" * 8,
             filename="contract.docx",
@@ -2168,7 +2168,7 @@ class TestUpsertAttachment:
             ),
             size_bytes=5678,
             occurrence_id=attachment_occurrence_id(
-                message_id="att2@x",
+                claimant_id="att2@x",
                 content_hash="hash-b" * 8,
                 filename="contract.docx",
                 occurrence_index=0,
@@ -2179,7 +2179,7 @@ class TestUpsertAttachment:
 
         # Exactly one attachments row + one FTS row.
         cnt = db._conn.execute(
-            "SELECT COUNT(*) FROM attachments WHERE message_id = ?", ("att2@x",)
+            "SELECT COUNT(*) FROM attachments WHERE claimant_id = ?", ("att2@x",)
         ).fetchone()[0]
         assert cnt == 1
 
@@ -2190,7 +2190,7 @@ class TestUpsertAttachment:
 
         shared_hash = "hash-dupe" * 8
         assert db.upsert_attachment(
-            message_id="att-dupe@x",
+            claimant_id="att-dupe@x",
             thread_id=thread.thread_id,
             attachment_id=shared_hash,
             filename="invoice-a.pdf",
@@ -2199,7 +2199,7 @@ class TestUpsertAttachment:
             occurrence_id="occ-a",
         )
         assert db.upsert_attachment(
-            message_id="att-dupe@x",
+            claimant_id="att-dupe@x",
             thread_id=thread.thread_id,
             attachment_id=shared_hash,
             filename="invoice-b.pdf",
@@ -2209,7 +2209,7 @@ class TestUpsertAttachment:
         )
 
         rows = db._conn.execute(
-            "SELECT filename FROM attachments WHERE message_id = ? ORDER BY filename",
+            "SELECT filename FROM attachments WHERE claimant_id = ? ORDER BY filename",
             ("att-dupe@x",),
         ).fetchall()
         assert [r["filename"] for r in rows] == ["invoice-a.pdf", "invoice-b.pdf"]
@@ -2219,14 +2219,14 @@ class TestUpsertAttachment:
         thread = threader.assign_thread(msg)
         db.upsert_thread(thread, FAKE_EMBEDDING)
         db.upsert_attachment(
-            message_id="att3@x",
+            claimant_id="att3@x",
             thread_id=thread.thread_id,
             attachment_id="hash-c" * 8,
             filename="march-statement.pdf",
             content_type="application/pdf",
             size_bytes=10,
             occurrence_id=attachment_occurrence_id(
-                message_id="att3@x",
+                claimant_id="att3@x",
                 content_hash="hash-c" * 8,
                 filename="march-statement.pdf",
                 occurrence_index=0,
@@ -2296,14 +2296,14 @@ class TestAttachmentChunkSlicing:
 
         db.replace_message_chunks(
             message_date="2024-01-01T00:00:00+00:00",
-            message_id="slice1@x",
+            claimant_id="slice1@x",
             thread_id=thread.thread_id,
             chunks=[body_chunk],
             embeddings_by_chunk_id={body_chunk.chunk_id: [0.1] * EMBEDDING_DIM},
         )
         db.replace_message_chunks(
             message_date="2024-01-01T00:00:00+00:00",
-            message_id="slice1@x",
+            claimant_id="slice1@x",
             thread_id=thread.thread_id,
             chunks=[att_chunk],
             embeddings_by_chunk_id={att_chunk.chunk_id: [0.2] * EMBEDDING_DIM},
@@ -2314,7 +2314,7 @@ class TestAttachmentChunkSlicing:
         all_ids = {
             row[0]
             for row in db._conn.execute(
-                "SELECT chunk_id FROM message_chunks WHERE message_id = ?",
+                "SELECT chunk_id FROM message_chunks WHERE claimant_id = ?",
                 ("slice1@x",),
             ).fetchall()
         }
@@ -2337,14 +2337,14 @@ class TestAttachmentChunkSlicing:
 
         db.replace_message_chunks(
             message_date="2024-01-01T00:00:00+00:00",
-            message_id="slice2@x",
+            claimant_id="slice2@x",
             thread_id=thread.thread_id,
             chunks=[body],
             embeddings_by_chunk_id={body.chunk_id: [0.1] * EMBEDDING_DIM},
         )
         db.replace_message_chunks(
             message_date="2024-01-01T00:00:00+00:00",
-            message_id="slice2@x",
+            claimant_id="slice2@x",
             thread_id=thread.thread_id,
             chunks=[att],
             embeddings_by_chunk_id={att.chunk_id: [0.2] * EMBEDDING_DIM},
@@ -2355,7 +2355,7 @@ class TestAttachmentChunkSlicing:
         body2 = _make_chunk("body2-new".ljust(64, "0"), 0, "new body")
         db.replace_message_chunks(
             message_date="2024-01-01T00:00:00+00:00",
-            message_id="slice2@x",
+            claimant_id="slice2@x",
             thread_id=thread.thread_id,
             chunks=[body2],
             embeddings_by_chunk_id={body2.chunk_id: [0.3] * EMBEDDING_DIM},
@@ -2373,14 +2373,14 @@ class TestAttachmentCascadeOnMessageRemoval:
         db.upsert_thread(thread, FAKE_EMBEDDING)
 
         db.upsert_attachment(
-            message_id="cas1@x",
+            claimant_id="cas1@x",
             thread_id=thread.thread_id,
             attachment_id="cascade-hash" * 4,
             filename="doomed.pdf",
             content_type="application/pdf",
             size_bytes=1,
             occurrence_id=attachment_occurrence_id(
-                message_id="cas1@x",
+                claimant_id="cas1@x",
                 content_hash="cascade-hash" * 4,
                 filename="doomed.pdf",
                 occurrence_index=0,
@@ -2388,14 +2388,14 @@ class TestAttachmentCascadeOnMessageRemoval:
         )
         # Make sure it landed.
         before = db._conn.execute(
-            "SELECT COUNT(*) FROM attachments WHERE message_id = ?", ("cas1@x",)
+            "SELECT COUNT(*) FROM attachments WHERE claimant_id = ?", ("cas1@x",)
         ).fetchone()[0]
         assert before == 1
 
         _reap_message(db, thread, "cas1@x")
 
         after = db._conn.execute(
-            "SELECT COUNT(*) FROM attachments WHERE message_id = ?", ("cas1@x",)
+            "SELECT COUNT(*) FROM attachments WHERE claimant_id = ?", ("cas1@x",)
         ).fetchone()[0]
         assert after == 0
 
@@ -2410,14 +2410,14 @@ class TestAttachmentCascadeOnMessageRemoval:
 
         attachment_id = "preserve-hash" * 4
         db.upsert_attachment(
-            message_id="cas2@x",
+            claimant_id="cas2@x",
             thread_id=thread.thread_id,
             attachment_id=attachment_id,
             filename="preserved.pdf",
             content_type="application/pdf",
             size_bytes=1,
             occurrence_id=attachment_occurrence_id(
-                message_id="cas2@x",
+                claimant_id="cas2@x",
                 content_hash=attachment_id,
                 filename="preserved.pdf",
                 occurrence_index=0,
@@ -2447,14 +2447,14 @@ class TestAttachmentCascadeOnMessageRemoval:
         for mid in ("cas3a@x", "cas3b@x"):
             attachment_id = f"thread-cascade-{mid}".ljust(64, "0")
             db.upsert_attachment(
-                message_id=mid,
+                claimant_id=mid,
                 thread_id=t.thread_id,
                 attachment_id=attachment_id,
                 filename=f"{mid}.pdf",
                 content_type="application/pdf",
                 size_bytes=1,
                 occurrence_id=attachment_occurrence_id(
-                    message_id=mid,
+                    claimant_id=mid,
                     content_hash=attachment_id,
                     filename=f"{mid}.pdf",
                     occurrence_index=0,
@@ -2522,18 +2522,19 @@ class TestMessagesTable:
     thread. They back exact enumeration (every message from/to X), the
     authoritative per-message view, and source provenance."""
 
-    def _participants(self, db, message_id):
+    def _participants(self, db, claimant_id):
         return {
             (r["role"], r["address"], r["name"])
             for r in db._conn.execute(
-                "SELECT role, address, name FROM message_participants WHERE message_id = ?",
-                (message_id,),
+                "SELECT role, address, name FROM message_participants WHERE claimant_id = ?",
+                (claimant_id,),
             )
         }
 
     def test_schema_contract(self, db):
         cols = {r["name"] for r in db._conn.execute("PRAGMA table_info(messages)")}
         assert cols == {
+            "claimant_id",
             "message_id",
             "thread_id",
             "filepath",
@@ -2548,7 +2549,7 @@ class TestMessagesTable:
             "indexed_at",
         }
         cols = {r["name"] for r in db._conn.execute("PRAGMA table_info(message_participants)")}
-        assert cols == {"message_id", "role", "address", "name"}
+        assert cols == {"claimant_id", "role", "address", "name"}
         index_cols = [
             r["name"]
             for r in db._conn.execute("PRAGMA index_info(idx_message_participants_address)")
@@ -2574,6 +2575,7 @@ class TestMessagesTable:
         row = db._conn.execute(
             "SELECT * FROM messages WHERE message_id = 'm1@example.com'"
         ).fetchone()
+        assert row["claimant_id"] == "m1@example.com#aaaaaaaa"
         assert row["thread_id"] == "t1"
         assert row["filepath"] == "/maildir/INBOX/cur/m1"
         assert row["folder"] == "INBOX"
@@ -2586,7 +2588,7 @@ class TestMessagesTable:
         assert row["content_hash"] == "a" * 64
         assert row["indexed_at"]
 
-        assert self._participants(db, "m1@example.com") == {
+        assert self._participants(db, msg.claimant_id) == {
             ("from", "alice@example.com", "Alice Example"),
             ("to", "bob@example.com", "Bob"),
             ("to", "carol@example.com", None),
@@ -2726,7 +2728,7 @@ class TestMessageMapLookupIndexes:
         ("sql", "params", "index"),
         [
             (
-                "SELECT message_id, thread_id, filepath FROM message_thread_map WHERE filepath = ?",
+                "SELECT claimant_id, thread_id, filepath FROM message_thread_map WHERE filepath = ?",
                 ("/md/cur/7:2,S",),
                 "idx_message_thread_map_filepath",
             ),
@@ -2736,7 +2738,7 @@ class TestMessageMapLookupIndexes:
                 "idx_message_thread_map_filepath",
             ),
             (
-                "SELECT message_id, filepath FROM message_thread_map WHERE thread_id = ?",
+                "SELECT claimant_id, filepath FROM message_thread_map WHERE thread_id = ?",
                 ("t1",),
                 "idx_message_thread_map_thread",
             ),
@@ -2757,8 +2759,8 @@ class TestMessageMapLookupIndexes:
         # empty-table artefact.
         db._conn.execute("PRAGMA foreign_keys = OFF")
         db._conn.executemany(
-            "INSERT INTO message_thread_map VALUES (?, ?, ?)",
-            ((f"<m{i}@x>", f"t{i // 4}", f"/md/cur/{i}:2,S") for i in range(2000)),
+            "INSERT INTO message_thread_map VALUES (?, ?, ?, ?)",
+            ((f"<m{i}@x>#0", f"<m{i}@x>", f"t{i // 4}", f"/md/cur/{i}:2,S") for i in range(2000)),
         )
         db._conn.commit()
         db._conn.execute("ANALYZE")

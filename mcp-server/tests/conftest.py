@@ -47,15 +47,19 @@ def _build_schema(conn: sqlite3.Connection) -> None:
             display_subject TEXT
         );
 
+        -- Per-message rows are keyed by claimant ID (Message-ID plus a
+        -- short hash of the file's bytes); see ``claimant_of``.
         CREATE TABLE message_thread_map (
-            message_id TEXT PRIMARY KEY,
-            thread_id  TEXT NOT NULL,
-            filepath   TEXT NOT NULL
+            claimant_id TEXT PRIMARY KEY,
+            message_id  TEXT NOT NULL,
+            thread_id   TEXT NOT NULL,
+            filepath    TEXT NOT NULL
         );
 
         -- Per-message records behind query_messages and find_contact.
         CREATE TABLE messages (
-            message_id      TEXT PRIMARY KEY,
+            claimant_id     TEXT PRIMARY KEY,
+            message_id      TEXT NOT NULL,
             thread_id       TEXT NOT NULL,
             filepath        TEXT NOT NULL,
             folder          TEXT NOT NULL,
@@ -69,12 +73,14 @@ def _build_schema(conn: sqlite3.Connection) -> None:
             indexed_at      TEXT NOT NULL
         );
 
+        CREATE INDEX idx_messages_message ON messages(message_id);
+
         CREATE TABLE message_participants (
-            message_id TEXT NOT NULL,
-            role       TEXT NOT NULL CHECK (role IN ('from', 'to', 'cc')),
-            address    TEXT NOT NULL,
-            name       TEXT,
-            PRIMARY KEY (message_id, role, address)
+            claimant_id TEXT NOT NULL,
+            role        TEXT NOT NULL CHECK (role IN ('from', 'to', 'cc')),
+            address     TEXT NOT NULL,
+            name        TEXT,
+            PRIMARY KEY (claimant_id, role, address)
         );
         CREATE INDEX idx_message_participants_address
             ON message_participants(address, role);
@@ -99,7 +105,7 @@ def _build_schema(conn: sqlite3.Connection) -> None:
         -- the ordering key for ``get_recent_chunks_for_thread``.
         CREATE TABLE message_chunks (
             chunk_id        TEXT PRIMARY KEY,
-            message_id      TEXT NOT NULL,
+            claimant_id     TEXT NOT NULL,
             thread_id       TEXT NOT NULL,
             chunk_index     INTEGER NOT NULL,
             text            TEXT NOT NULL,
@@ -126,7 +132,7 @@ def _build_schema(conn: sqlite3.Connection) -> None:
 
         CREATE TABLE attachments (
             attachment_occurrence_id TEXT PRIMARY KEY,
-            message_id                TEXT NOT NULL,
+            claimant_id               TEXT NOT NULL,
             attachment_id             TEXT NOT NULL,
             thread_id                 TEXT NOT NULL,
             filename                  TEXT NOT NULL,
@@ -220,6 +226,7 @@ def _insert_chunk(
     attachment_id: str | None = None,
     message_date: str | None = None,
     char_start: int = 0,
+    variant: str = "",
 ) -> None:
     """Insert one ``message_chunks`` + matching FTS + vec row.
 
@@ -231,7 +238,8 @@ def _insert_chunk(
     ``message_date`` defaults to ``chunked_at``, so tests that only
     care about insert order get a matching message order. ``char_start``
     is the chunk's offset in its message body; a message's later chunks
-    must set it, since bodies are reconstructed by offset.
+    must set it, since bodies are reconstructed by offset. The chunk
+    belongs to the claimant ``claimant_of(message_id, variant)``.
     """
     if message_date is None:
         message_date = chunked_at
@@ -245,14 +253,14 @@ def _insert_chunk(
     cur.execute(
         """
         INSERT INTO message_chunks
-            (chunk_id, message_id, thread_id, chunk_index, text,
+            (chunk_id, claimant_id, thread_id, chunk_index, text,
              char_start, char_end, token_est,
              chunked_at, fts_rowid, attachment_id, message_date)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             chunk_id,
-            message_id,
+            claimant_of(message_id, variant),
             thread_id,
             chunk_index,
             text,
@@ -278,8 +286,10 @@ def _insert_attachment(
     content_type: str = "application/pdf",
     size_bytes: int = 1234,
     occurrence_id: str | None = None,
+    variant: str = "",
 ) -> None:
-    occurrence_id = occurrence_id or f"{message_id}:{attachment_id}:{filename}"
+    claimant = claimant_of(message_id, variant)
+    occurrence_id = occurrence_id or f"{claimant}:{attachment_id}:{filename}"
     cur = conn.cursor()
     cur.execute(
         "INSERT INTO attachments_fts (filename, content_type) VALUES (?, ?)",
@@ -289,13 +299,13 @@ def _insert_attachment(
     cur.execute(
         """
         INSERT INTO attachments
-            (attachment_occurrence_id, message_id, attachment_id, thread_id, filename,
+            (attachment_occurrence_id, claimant_id, attachment_id, thread_id, filename,
              content_type, size_bytes, seen_at, fts_rowid)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             occurrence_id,
-            message_id,
+            claimant,
             attachment_id,
             thread_id,
             filename,
@@ -352,9 +362,19 @@ def _split_address(value: str) -> tuple[str, str]:
     return name, address.lower()
 
 
-def source_sha256(message_id: str) -> str:
-    """The raw-file SHA-256 the fixtures record for ``message_id``."""
-    return hashlib.sha256(message_id.encode()).hexdigest()
+def source_sha256(message_id: str, variant: str = "") -> str:
+    """The raw-file SHA-256 the fixtures record for ``message_id``.
+
+    ``variant`` stands for a different file claiming the same
+    Message-ID (#217): it changes the bytes, so the hash."""
+    return hashlib.sha256((message_id + variant).encode()).hexdigest()
+
+
+def claimant_of(message_id: str, variant: str = "") -> str:
+    """The claimant ID the indexer gives the fixture file for
+    ``message_id``: the Message-ID plus the first eight hex digits of
+    the file hash (``indexer/src/parser.py`` ``claimant_id``)."""
+    return f"{message_id}#{source_sha256(message_id, variant)[:8]}"
 
 
 def _insert_message_record(
@@ -369,6 +389,7 @@ def _insert_message_record(
     participants: list[tuple[str, str]],
     in_reply_to: str | None = None,
     references: list[str] | None = None,
+    variant: str = "",
 ) -> None:
     """Insert one ``messages`` row and its ``message_participants``.
 
@@ -378,22 +399,23 @@ def _insert_message_record(
     cur.execute(
         """
         INSERT INTO messages
-            (message_id, thread_id, filepath, folder, subject, sent_at,
+            (claimant_id, message_id, thread_id, filepath, folder, subject, sent_at,
              in_reply_to, references_json, has_attachments, size_bytes,
              content_hash, indexed_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 100, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 100, ?, ?)
         """,
         (
+            claimant_of(message_id, variant),
             message_id,
             thread_id,
-            f"/maildir/{folder}/cur/{message_id}",
+            f"/maildir/{folder}/cur/{message_id}{variant}",
             folder,
             subject,
             sent_at,
             in_reply_to,
             json.dumps(references or []),
             1 if has_attachments else 0,
-            source_sha256(message_id),
+            source_sha256(message_id, variant),
             "2024-01-01T00:00:00+00:00",
         ),
     )
@@ -403,7 +425,7 @@ def _insert_message_record(
             continue
         cur.execute(
             "INSERT OR IGNORE INTO message_participants VALUES (?, ?, ?, ?)",
-            (message_id, role, address, name or None),
+            (claimant_of(message_id, variant), role, address, name or None),
         )
 
 
@@ -423,13 +445,15 @@ def _insert_message(
     attachment_text: str | None = None,
     in_reply_to: str | None = None,
     references: list[str] | None = None,
+    variant: str = "",
 ) -> None:
     """Insert one message with full per-message control.
 
     For ``query_messages`` tests, which need several messages per thread
     with distinct senders, dates, and bodies. Creates the parent thread
     row on first use; ``body`` / ``attachment_text`` become a body chunk
-    and an attachment chunk respectively.
+    and an attachment chunk respectively. A non-empty ``variant`` makes
+    it another claimant of an already inserted ``message_id`` (#217).
     """
     cur = conn.cursor()
     cur.execute(
@@ -452,9 +476,15 @@ def _insert_message(
                 "UPDATE threads SET senders = ? WHERE thread_id = ?",
                 (json.dumps([*senders, from_[0]]), thread_id),
             )
+    claimant = claimant_of(message_id, variant)
+    row = cur.execute("SELECT message_ids FROM threads WHERE thread_id = ?", (thread_id,))
     cur.execute(
-        "INSERT INTO message_thread_map VALUES (?, ?, ?)",
-        (message_id, thread_id, f"/maildir/{folder}/cur/{message_id}"),
+        "UPDATE threads SET message_ids = ? WHERE thread_id = ?",
+        (json.dumps([*json.loads(row.fetchone()[0]), claimant]), thread_id),
+    )
+    cur.execute(
+        "INSERT INTO message_thread_map VALUES (?, ?, ?, ?)",
+        (claimant, message_id, thread_id, f"/maildir/{folder}/cur/{message_id}{variant}"),
     )
     participants = (
         [("from", v) for v in from_ or []]
@@ -472,13 +502,15 @@ def _insert_message(
         participants=participants,
         in_reply_to=in_reply_to,
         references=references,
+        variant=variant,
     )
     conn.commit()
     if body is not None:
         _insert_chunk(
             conn,
-            chunk_id=f"{message_id}-body",
+            chunk_id=f"{message_id}{variant}-body",
             message_id=message_id,
+            variant=variant,
             thread_id=thread_id,
             text=body,
             embedding=[1.0, 0.0, 0.0, 0.0],
@@ -487,8 +519,9 @@ def _insert_message(
     if attachment_text is not None:
         _insert_chunk(
             conn,
-            chunk_id=f"{message_id}-att",
+            chunk_id=f"{message_id}{variant}-att",
             message_id=message_id,
+            variant=variant,
             thread_id=thread_id,
             text=attachment_text,
             embedding=[1.0, 0.0, 0.0, 0.0],
@@ -539,7 +572,7 @@ def _insert_thread(
             folder,
             date_first,
             date_last,
-            json.dumps(message_ids or [thread_id]),
+            json.dumps([claimant_of(mid) for mid in message_ids or [thread_id]]),
             snippet,
             1 if has_attachments else 0,
             body_text,
@@ -554,8 +587,8 @@ def _insert_thread(
     roles = [("from" if _split_address(p)[1] in sender_keys else "to", p) for p in participants]
     for i, mid in enumerate(message_ids or [thread_id]):
         cur.execute(
-            "INSERT INTO message_thread_map VALUES (?, ?, ?)",
-            (mid, thread_id, f"/maildir/{folder}/cur/{mid}"),
+            "INSERT INTO message_thread_map VALUES (?, ?, ?, ?)",
+            (claimant_of(mid), mid, thread_id, f"/maildir/{folder}/cur/{mid}"),
         )
         _insert_message_record(
             cur,
