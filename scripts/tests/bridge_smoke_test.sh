@@ -82,16 +82,45 @@ fails_with() {
     fi
 }
 
+# The status lines the in-container step prints after the Bridge log.
+CLEAN_EXIT=$'SMOKE_ENTRYPOINT_EXIT=0\nSMOKE_HARNESS_SIGNAL=none'
+readonly CLEAN_EXIT
+
 # Bridge sees EOF on stdin and exits 0 on its own after the marker.
 marker_then_clean_exit_passes() {
-    run_smoke "$MARKER"$'\nSMOKE_ENTRYPOINT_EXIT=0' 0
+    run_smoke "$MARKER"$'\n'"$CLEAN_EXIT" 0
     passes
 }
 
 # Bridge is still running at the marker and the check stops it.
 marker_then_intended_stop_passes() {
-    run_smoke "$MARKER"$'\nSMOKE_ENTRYPOINT_EXIT=stopped' 0
+    run_smoke "$MARKER"$'\nSMOKE_ENTRYPOINT_EXIT=143\nSMOKE_HARNESS_SIGNAL=sent' 0
     passes
+}
+
+marker_then_intended_kill_passes() {
+    run_smoke "$MARKER"$'\nSMOKE_ENTRYPOINT_EXIT=137\nSMOKE_HARNESS_SIGNAL=sent' 0
+    passes
+}
+
+# A signal status the check did not send (OOM, an external kill) is a
+# failure, not the intended stop.
+marker_then_external_kill_fails() {
+    run_smoke "$MARKER"$'\nSMOKE_ENTRYPOINT_EXIT=143\nSMOKE_HARNESS_SIGNAL=none' 0
+    fails_with 'Bridge did not exit cleanly'
+}
+
+# A panic written only to the entrypoint stream is shown even when the
+# Bridge log alone exceeds the head limit.
+marker_then_entrypoint_panic_is_printed() {
+    local log
+    log="$MARKER"$'\n'"$(printf 'time="2026-01-01 00:00:00.001" level="debug" msg="filler %s"\n' {1..70})"
+    run_smoke "$log"$'\nSMOKE_ENTRYPOINT_EXIT=2\nSMOKE_HARNESS_SIGNAL=none\n--- entrypoint output ---\npanic: SYNTHETIC_PANIC' 0
+    fails_with 'Bridge did not exit cleanly'
+    grep -F 'panic: SYNTHETIC_PANIC' "$WORK/stderr"
+    if grep -F 'filler 61' "$WORK/stderr"; then
+        return 1
+    fi
 }
 
 # #268: the issue's reproduction, a marker followed by a failed invocation.
@@ -101,12 +130,12 @@ marker_then_failed_invocation_fails() {
 }
 
 marker_then_entrypoint_failure_fails() {
-    run_smoke "$MARKER"$'\nSMOKE_ENTRYPOINT_EXIT=1' 0
+    run_smoke "$MARKER"$'\nSMOKE_ENTRYPOINT_EXIT=1\nSMOKE_HARNESS_SIGNAL=none' 0
     fails_with 'Bridge did not exit cleanly'
 }
 
 marker_then_fatal_log_line_fails() {
-    run_smoke "$MARKER"$'\ntime="2026-01-01 00:00:00.001" level="fatal" msg="SYNTHETIC"\nSMOKE_ENTRYPOINT_EXIT=stopped' 0
+    run_smoke "$MARKER"$'\ntime="2026-01-01 00:00:00.001" level="fatal" msg="SYNTHETIC"\n'"$CLEAN_EXIT" 0
     fails_with 'fatal or panic'
 }
 
@@ -131,6 +160,9 @@ missing_marker_fails_and_prints_the_captured_output() {
 
 check "the marker then a clean Bridge exit passes" marker_then_clean_exit_passes
 check "the marker then the intended stop passes" marker_then_intended_stop_passes
+check "the marker then the intended kill passes" marker_then_intended_kill_passes
+check "the marker then an external kill fails" marker_then_external_kill_fails
+check "a panic in the entrypoint output is printed" marker_then_entrypoint_panic_is_printed
 check "the marker then a failed invocation fails" marker_then_failed_invocation_fails
 check "the marker then a failed entrypoint fails" marker_then_entrypoint_failure_fails
 check "the marker then a fatal log line fails" marker_then_fatal_log_line_fails
