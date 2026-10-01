@@ -489,6 +489,9 @@ class TestPickResolutionCandidate:
             "not-present@gmail.com",
             "invoice.123@gmail.com",
             "PH3PPF8675309xyz@outlook.com",
+            # A quoted local part keeps its space, so splitting on
+            # whitespace would leave "invoice" from inside the ID.
+            '<"invoice team"@gmail.com>',
         ],
     )
     def test_address_shaped_id_does_not_match_on_its_tokens(self, query):
@@ -503,19 +506,17 @@ class TestPickResolutionCandidate:
         ]
         assert _pick_resolution_candidate(query, candidates) is None
 
-    def test_phrase_containing_an_address_matches_on_its_other_words(self):
+    def test_any_input_containing_an_address_does_not_resolve(self):
         from src.tools.intelligence import _pick_resolution_candidate
 
-        # Only the "@"-bearing word is dropped; the rest of a subject
-        # phrase still resolves.
+        # Telling an ID's words from a phrase's around an "@" would mean
+        # parsing Message-IDs, so an input containing one is never a
+        # phrase; search_emails is the path for an address.
         candidates = [
             _candidate("c1", "lunch"),
             _candidate("c2", "Gmail invoice"),
         ]
-        assert (
-            _pick_resolution_candidate("invoice from billing@gmail.com", candidates).thread_id
-            == "c2"
-        )
+        assert _pick_resolution_candidate("invoice from billing@gmail.com", candidates) is None
 
     def test_raises_on_empty_candidates(self):
         import pytest

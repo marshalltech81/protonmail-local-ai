@@ -287,6 +287,22 @@ def _is_meaningful_query_token(token: str) -> bool:
     return True
 
 
+def _phrase_tokens(query: str) -> set[str]:
+    """Meaningful lowercase tokens of a summarize_thread phrase, or an
+    empty set when ``query`` cannot be a phrase.
+
+    Thread IDs are root Message-IDs (``local@domain``), so an input
+    containing ``@`` is treated as a missed ID, never a phrase: its
+    domain or local-part tokens would otherwise match an unrelated
+    subject (``<x@gmail.com>`` against "Gmail invoice", #314). Telling
+    an ID's words from a phrase's would mean parsing Message-IDs (a
+    quoted local part can hold spaces), so the whole input is refused.
+    """
+    if "@" in query:
+        return set()
+    return {t.lower() for t in re.findall(r"\w+", query) if _is_meaningful_query_token(t)}
+
+
 def _pick_resolution_candidate(query: str, candidates: list[ThreadResult]) -> ThreadResult | None:
     """Choose the best candidate for the summarize_thread phrase fallback.
 
@@ -310,17 +326,12 @@ def _pick_resolution_candidate(query: str, candidates: list[ThreadResult]) -> Th
     the user wants a body-only match, they should call
     ``search_emails`` first and pass the resulting opaque ID.
 
-    Whitespace-delimited words containing ``@`` are dropped before
-    tokenizing. Thread IDs are root Message-IDs (``local@domain``), so
-    a missed ID would otherwise match a subject on its own domain or
-    local-part tokens (``<x@gmail.com>`` against "Gmail invoice"). A
-    phrase that includes an address still matches on its other words.
+    The query's tokens come from ``_phrase_tokens``, so an input
+    containing ``@`` never resolves.
     """
     if not candidates:
         raise ValueError("candidates must be non-empty")
-    phrase_words = [w for w in query.split() if "@" not in w]
-    raw_tokens = re.findall(r"\w+", " ".join(phrase_words))
-    query_tokens = {t.lower() for t in raw_tokens if _is_meaningful_query_token(t)}
+    query_tokens = _phrase_tokens(query)
     if not query_tokens:
         return None
     best: ThreadResult | None = None
@@ -843,6 +854,12 @@ def register_intelligence_tools(
             # path returns at most one thread so there's no ambiguity
             # at the summarize step.
             if not thread:
+                # A phrase with no usable tokens can never pass the
+                # subject gate below, so refuse it before any provider
+                # work: an embedder outage must not turn a missing ID
+                # into a provider error.
+                if not _phrase_tokens(thread_id):
+                    raise ToolError(f"Thread not found: {thread_id}")
                 embedding = await embed_query(embed_client, thread_id, expected_embed_dim)
                 resolved = await asyncio.to_thread(
                     db.hybrid_search,

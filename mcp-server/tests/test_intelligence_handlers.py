@@ -227,6 +227,9 @@ class TestSummarizeThread:
         with pytest.raises(ToolError, match="Thread not found"):
             asyncio.run(handler(thread_id="<not-present@invoice.com>"))
         assert fake_inference.complete_calls == []
+        # Decided before any provider work, so an embedder outage cannot
+        # turn a missing ID into a provider error.
+        assert fake_embed.embed_calls == []
 
     def test_phrase_with_empty_corpus_returns_not_found(
         self, fake_server, empty_db, fake_embed, fake_inference

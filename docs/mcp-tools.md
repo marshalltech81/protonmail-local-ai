@@ -350,11 +350,12 @@ Summarize a thread in different styles.
 When `thread_id` matches no thread, the tool treats it as a subject
 phrase: it runs a hybrid search and summarizes the top candidate whose
 subject shares a meaningful word with the phrase, or returns `Thread
-not found` when none does. Words containing `@` are ignored for that
-match, so a missing or mistyped thread ID (a Message-ID such as
-`<abc@example.com>`) is not found rather than matching a subject on
-its domain or local part. For a match that is only in message bodies,
-call `search_emails` first and pass the returned `Thread ID`.
+not found` when none does. An input containing `@` is never treated
+as a phrase, so a missing or mistyped thread ID (a Message-ID such as
+`<abc@example.com>`) returns `Thread not found` without calling the
+embedder, rather than matching a subject on its domain or local part.
+To find a thread by address, or by a match that is only in message
+bodies, call `search_emails` first and pass the returned `Thread ID`.
 
 ### `extract_from_emails`
 Extract structured data from emails matching a query. Attachment text
