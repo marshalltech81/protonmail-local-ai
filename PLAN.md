@@ -785,9 +785,10 @@ Order of work, chosen to minimise reindexes:
    2 minutes ahead is a not-current reason), schema-violating
    extraction records (#310), overwritten `_date`/`_source_thread`
    fields (#329), the missing search instruction in extraction
-   prompts (#315), and typo'd thread IDs summarizing an unrelated
+   prompts (#315), and ~~typo'd thread IDs summarizing an unrelated
    thread by domain-token overlap (#314: narrow the fallback rather
-   than parse IDs); the name-matching cluster (#313, #324, #331) and
+   than parse IDs)~~ (done: words containing `@` are ignored by the
+   subject fallback); the name-matching cluster (#313, #324, #331) and
    its FTS analogue (#316); date filters (#312, #330); degraded-lane
    honesty (#333); event-loop hygiene (#320, #317, #334); folder
    discovery hiding reply-only folders (#308); the attachment-lane
