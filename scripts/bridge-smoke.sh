@@ -103,10 +103,14 @@ docker run --rm \
         # whether this harness sent a signal: the host accepts a TERM/KILL
         # status (143/137) only then, not from an OOM or external kill.
         HARNESS_SIGNAL=none
+        # Record the strongest signal this check actually delivered, so a
+        # 143 or 137 from anyone else is not mistaken for our stop.
         if kill -TERM "$ENTRY_PID" 2>/dev/null; then
-            HARNESS_SIGNAL=sent
+            HARNESS_SIGNAL=term
             sleep 1
-            kill -KILL "$ENTRY_PID" 2>/dev/null || true
+            if kill -KILL "$ENTRY_PID" 2>/dev/null; then
+                HARNESS_SIGNAL=kill
+            fi
         fi
         ENTRY_EXIT=0
         wait "$ENTRY_PID" || ENTRY_EXIT=$?
@@ -146,8 +150,14 @@ smoke_fail() {
 # Bridge ended as intended: it exited 0, or this check stopped it.
 entrypoint_ended_cleanly() {
     grep -Fx 'SMOKE_ENTRYPOINT_EXIT=0' "$SMOKE_OUT" >/dev/null && return 0
-    grep -Ex 'SMOKE_ENTRYPOINT_EXIT=(137|143)' "$SMOKE_OUT" >/dev/null &&
-        grep -Fx 'SMOKE_HARNESS_SIGNAL=sent' "$SMOKE_OUT" >/dev/null
+    # 143 (TERM) only after the check's TERM landed; 137 (KILL) only
+    # after the check's own KILL landed.
+    if grep -Fx 'SMOKE_ENTRYPOINT_EXIT=143' "$SMOKE_OUT" >/dev/null; then
+        grep -Ex 'SMOKE_HARNESS_SIGNAL=(term|kill)' "$SMOKE_OUT" >/dev/null
+        return
+    fi
+    grep -Fx 'SMOKE_ENTRYPOINT_EXIT=137' "$SMOKE_OUT" >/dev/null &&
+        grep -Fx 'SMOKE_HARNESS_SIGNAL=kill' "$SMOKE_OUT" >/dev/null
 }
 
 # The marker alone is not enough: the run must also have ended the way

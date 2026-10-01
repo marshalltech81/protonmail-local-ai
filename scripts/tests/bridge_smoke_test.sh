@@ -94,13 +94,20 @@ marker_then_clean_exit_passes() {
 
 # Bridge is still running at the marker and the check stops it.
 marker_then_intended_stop_passes() {
-    run_smoke "$MARKER"$'\nSMOKE_ENTRYPOINT_EXIT=143\nSMOKE_HARNESS_SIGNAL=sent' 0
+    run_smoke "$MARKER"$'\nSMOKE_ENTRYPOINT_EXIT=143\nSMOKE_HARNESS_SIGNAL=term' 0  # pragma: allowlist secret
     passes
 }
 
 marker_then_intended_kill_passes() {
-    run_smoke "$MARKER"$'\nSMOKE_ENTRYPOINT_EXIT=137\nSMOKE_HARNESS_SIGNAL=sent' 0
+    run_smoke "$MARKER"$'\nSMOKE_ENTRYPOINT_EXIT=137\nSMOKE_HARNESS_SIGNAL=kill' 0
     passes
+}
+
+# The check's TERM landed but its KILL did not: a 137 then came from
+# someone else (OOM, an external kill) during the grace period.
+marker_then_external_kill_after_term_fails() {
+    run_smoke "$MARKER"$'\nSMOKE_ENTRYPOINT_EXIT=137\nSMOKE_HARNESS_SIGNAL=term' 0  # pragma: allowlist secret
+    fails_with 'Bridge did not exit cleanly'
 }
 
 # A signal status the check did not send (OOM, an external kill) is a
@@ -162,6 +169,7 @@ check "the marker then a clean Bridge exit passes" marker_then_clean_exit_passes
 check "the marker then the intended stop passes" marker_then_intended_stop_passes
 check "the marker then the intended kill passes" marker_then_intended_kill_passes
 check "the marker then an external kill fails" marker_then_external_kill_fails
+check "an external kill after the check's TERM fails" marker_then_external_kill_after_term_fails
 check "a panic in the entrypoint output is printed" marker_then_entrypoint_panic_is_printed
 check "the marker then a failed invocation fails" marker_then_failed_invocation_fails
 check "the marker then a failed entrypoint fails" marker_then_entrypoint_failure_fails
