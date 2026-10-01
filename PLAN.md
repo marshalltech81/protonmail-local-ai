@@ -623,11 +623,10 @@ the eval's unused query fields dropped, its fallback notice printed).
 In review or queued (three PRs in flight; Codex-clean PRs are merged
 without waiting, per the owner):
 
-- #416 date filters (#312, #330, #333); #418 name matching (#313,
-  #324, #331; #316 partly, the rest needs the Phase 2 reindex).
-- Queued: #308/#309 (folders that hold only replies; MIME filter
-  before choosing the attachment occurrence), mbsync #271/#280, and
-  the `fastmcp` 4.0.10 migration (owner's choice over `mcp` 1.30.0;
+- Merged since: #416 date filters (#312, #330, #333) and #418 name
+  matching (#313, #324, #331; #316 query side).
+- In review: #419 mbsync #271/#280, #420 #308/#309. Queued: the
+  `fastmcp` 4.0.10 migration (owner's choice over `mcp` 1.30.0;
   closes #317 with an explicit session idle timeout and keeps
   Host/Origin checks on both transports).
 
@@ -656,12 +655,12 @@ first, one test-first commit per issue, keep three PRs in flight):
    #363, attachments #401, MCP provider errors #412 with a dedicated
    `ProviderResponseError` and caller text classified like the log,
    MCP SQLite logs #411; AGENTS.md updated in this closing PR).
-4. MCP: ~~event-loop hygiene #320, #334~~ (done: #417). In review:
-   date filters #312/#330/#333 (#416); name matching #313/#324/#331
-   with #316's query-side half (#418; the rest needs the Phase 2
-   reindex). Queued: #308/#309, then #317 through the `fastmcp`
-   4.0.10 migration, then #415 (search `folders` filters).
-5. mbsync: #271, #280 (queued). Parser: ~~#361~~ (done: #414); #362
+4. MCP: ~~event-loop hygiene #320, #334~~ (done: #417), ~~date
+   filters #312/#330/#333~~ (done: #416), ~~name matching
+   #313/#324/#331~~ (done: #418; #316's remainder needs the Phase 2
+   reindex). In review: #308/#309 (#420). Queued: #317 through the
+   `fastmcp` 4.0.10 migration, then #415 (search `folders` filters).
+5. mbsync: #271, #280 (in review, #419). Parser: ~~#361~~ (done: #414); #362
    needs a fallback-filename decision first.
 6. Bridge, needing Docker for `make bridge-upgrade-check` and the
    first Bridge shell test harness: the entrypoint PR (#242, #266,
@@ -780,8 +779,9 @@ Order of work, chosen to minimise reindexes:
    longer maps to); ~~`message_thread_map` lookup indexes as migration `0022`
    (#302, index-only)~~ (done: filepath and thread_id indexes); ~~the unbounded recovery parameter list
    (#306)~~ (done: recovery lookups bind IDs in batches of 500);
-   and the #257 sweep (classify parse-stage and provider exceptions
-   at their boundary, `caplog` marker tests). MCP: ~~the two quadratic
+   and ~~the #257 sweep (classify parse-stage and provider exceptions
+   at their boundary, `caplog` marker tests)~~ (done: #364, #363, #401,
+   #412, #411, #413). MCP: ~~the two quadratic
    regexes (#327, #328)~~ (done: one way to match each whitespace run);
    ~~the privacy trio — redirects that would
    forward prompts and API keys (#325), inherited endpoint userinfo
@@ -806,11 +806,14 @@ Order of work, chosen to minimise reindexes:
    request), and ~~typo'd thread IDs summarizing an unrelated
    thread by domain-token overlap (#314: narrow the fallback rather
    than parse IDs)~~ (done: an input containing `@` never reaches
-   the subject fallback); the name-matching cluster (#313, #324, #331) and
-   its FTS analogue (#316); date filters (#312, #330); degraded-lane
-   honesty (#333); event-loop hygiene (#320, #317, #334); folder
-   discovery hiding reply-only folders (#308); the attachment-lane
-   duplicate before MIME filters (#309); docs (#322, #323). mbsync:
+   the subject fallback); ~~the name-matching cluster (#313, #324,
+   #331)~~ (done: #418) and its FTS analogue (#316, query side done in
+   #418; the rest needs the Phase 2 reindex); ~~date filters (#312,
+   #330); degraded-lane honesty (#333)~~ (done: #416); event-loop
+   hygiene (~~#320, #334~~ done in #417; #317 via the `fastmcp`
+   migration); folder discovery hiding reply-only folders (#308); the
+   attachment-lane duplicate before MIME filters (#309); ~~docs (#322,
+   #323)~~ (done: #403, #404). mbsync:
    ~~the empty pin re-TOFU (#278)~~ (done: only an absent pin is a
    first boot) and ~~the rotation flag surviving restarts (#267,
    docs)~~ (done: documented recreate-with-false; one-shot
