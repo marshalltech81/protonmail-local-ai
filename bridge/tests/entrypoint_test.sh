@@ -35,7 +35,9 @@ load() {
 }
 
 # Runs each case in a subshell outside any condition, so errexit stays on
-# inside it and every assertion counts, not only the last one.
+# inside it. Bash 3.2 (macOS /bin/bash) does not apply errexit to a failed
+# [[ ]] or (( )), so every such assertion ends in `|| return 1`; otherwise
+# only a case's last line would count there.
 check() {
     local description="$1" rc=0
     shift
@@ -75,21 +77,27 @@ setup() {
     : >"$CALLS"
 
     # Bridge creates vault.enc at startup, before any login (see
-    # scripts/bridge-smoke.sh), so the mock does too. It then records how
-    # it was launched and exits, as the CLI does on EOF.
-    export CALLS VAULT
+    # scripts/bridge-smoke.sh), and stores the vault key in the pass store,
+    # so the mock does both. It then records how it was launched and exits,
+    # as the CLI does on EOF.
+    export CALLS VAULT PASSWORD_STORE_DIR
     cat >"$BIN/bridge" <<'MOCK'
 #!/bin/bash
 : >>"$VAULT"
+mkdir -p "$PASSWORD_STORE_DIR/protonmail"
+: >>"$PASSWORD_STORE_DIR/protonmail/vault-key.gpg"
 printf 'bridge %s\n' "$*" >>"$CALLS"
 MOCK
     chmod 755 "$BIN/bridge"
     PATH="$BIN:$PATH"
 
-    # Every function the entrypoint defines, so a new helper needs no edit here.
-    local functions
-    mapfile -t functions < <(awk '/^[a-z_]+\(\) \{$/ {sub(/\(\) \{$/, ""); print}' "$ENTRYPOINT")
-    load "${functions[@]}"
+    # Every function the entrypoint defines, so a new helper needs no edit
+    # here. A read loop rather than mapfile: macOS ships Bash 3.2.
+    local names name
+    names="$(awk '/^[a-z_]+\(\) \{$/ {sub(/\(\) \{$/, ""); print}' "$ENTRYPOINT")"
+    while IFS= read -r name; do
+        load "$name"
+    done <<<"$names"
 }
 
 # timeout(1) can only run executables; this stand-in runs the mocks below.
@@ -168,14 +176,14 @@ called() {
 # No key generated, no pass store re-initialized, nothing launched: the
 # damaged state is reported, not repaired or started.
 refused_without_changes() {
-    ((RC != 0))
+    ((RC != 0)) || return 1
     if called 'quick-gen-key' || called '^pass init' || called '^bridge '; then
         printf 'damaged state was changed or launched:\n%s\n' "$(cat "$CALLS")"
         return 1
     fi
-    [[ "$OUT" == *"$1"* ]]
-    [[ "$OUT" == *"bridge-data"* ]]
-    [[ -f "$VAULT" ]]
+    [[ "$OUT" == *"$1"* ]] || return 1
+    [[ "$OUT" == *"bridge-data"* ]] || return 1
+    [[ -f "$VAULT" ]] || return 1
 }
 
 launched_with() {
@@ -196,7 +204,7 @@ launched_with() {
 fresh_install_opens_the_cli() {
     setup fresh
     run_main
-    ((RC == 0))
+    ((RC == 0)) || return 1
     launched_with --cli
 }
 
@@ -205,11 +213,11 @@ retried_first_run_opens_the_cli_again() {
     export BRIDGE_FORCE_CLI=true
     # The first attempt exits before login; the mock leaves a vault behind.
     run_main
-    ((RC == 0))
-    [[ -f "$VAULT" ]]
+    ((RC == 0)) || return 1
+    [[ -f "$VAULT" ]] || return 1
     launched_with --cli
     run_main
-    ((RC == 0))
+    ((RC == 0)) || return 1
     launched_with --cli
 }
 
@@ -218,7 +226,7 @@ forced_cli_opens_the_cli_over_an_existing_account() {
     existing_install
     export BRIDGE_FORCE_CLI=true
     run_main
-    ((RC == 0))
+    ((RC == 0)) || return 1
     launched_with --cli
 }
 
@@ -226,7 +234,7 @@ existing_vault_starts_noninteractive_by_default() {
     setup existing
     existing_install
     run_main
-    ((RC == 0))
+    ((RC == 0)) || return 1
     launched_with --noninteractive
 }
 
@@ -235,7 +243,7 @@ forced_cli_false_keeps_the_default() {
     existing_install
     export BRIDGE_FORCE_CLI=false
     run_main
-    ((RC == 0))
+    ((RC == 0)) || return 1
     launched_with --noninteractive
 }
 
@@ -244,9 +252,9 @@ invalid_force_cli_value_fails_closed() {
     existing_install
     export BRIDGE_FORCE_CLI=yes
     run_main
-    ((RC != 0))
-    [[ "$OUT" == *"BRIDGE_FORCE_CLI must be"* ]]
-    [[ "$(grep -c '^bridge ' "$CALLS")" == 0 ]]
+    ((RC != 0)) || return 1
+    [[ "$OUT" == *"BRIDGE_FORCE_CLI must be"* ]] || return 1
+    [[ "$(grep -c '^bridge ' "$CALLS")" == 0 ]] || return 1
 }
 
 first_run_overlay_forces_the_cli() {
@@ -264,10 +272,10 @@ first_run_overlay_forces_the_cli() {
 fresh_install_generates_the_key_and_initializes_pass() {
     setup fresh-bootstrap
     run_main
-    ((RC == 0))
+    ((RC == 0)) || return 1
     called 'quick-gen-key'
     called "^pass init $TEST_FPR\$"
-    [[ "$(cat "$PASS_STORE_ID_FILE")" == "$TEST_FPR" ]]
+    [[ "$(cat "$PASS_STORE_ID_FILE")" == "$TEST_FPR" ]] || return 1
     launched_with --cli
 }
 
@@ -275,7 +283,7 @@ intact_existing_state_starts_without_rebuilding() {
     setup intact
     existing_install
     run_main
-    ((RC == 0))
+    ((RC == 0)) || return 1
     if called 'quick-gen-key' || called '^pass init'; then
         echo "intact credential state was rebuilt"
         return 1
@@ -306,7 +314,7 @@ missing_pass_metadata_is_refused() {
     rm "$PASS_STORE_ID_FILE"
     run_main
     refused_without_changes "pass store"
-    [[ ! -e "$PASS_STORE_ID_FILE" ]]
+    [[ ! -e "$PASS_STORE_ID_FILE" ]] || return 1
 }
 
 pass_metadata_for_another_key_is_refused() {
@@ -325,6 +333,16 @@ undecryptable_pass_entry_is_refused() {
     refused_without_changes "cannot be decrypted"
 }
 
+# With a vault, Bridge's vault key is a pass entry, so a store with no
+# entries cannot open the vault even when the key and .gpg-id are intact.
+empty_pass_store_is_refused() {
+    setup empty-store
+    existing_install
+    rm "$PASSWORD_STORE_DIR/protonmail/vault-key.gpg"
+    run_main
+    refused_without_changes "pass store has no entries"
+}
+
 forced_cli_does_not_bypass_the_check() {
     setup forced-damaged
     existing_install
@@ -339,7 +357,7 @@ fresh_install_repairs_missing_pass_metadata() {
     : >"$GPG_STATE/public"
     : >"$GPG_STATE/secret"
     run_main
-    ((RC == 0))
+    ((RC == 0)) || return 1
     if called 'quick-gen-key'; then
         echo "a second key was generated over a usable one"
         return 1
@@ -352,12 +370,12 @@ fresh_install_refuses_a_public_only_keyring() {
     setup fresh-public-only
     : >"$GPG_STATE/public"
     run_main
-    ((RC != 0))
+    ((RC != 0)) || return 1
     if called 'quick-gen-key' || called '^pass init' || called '^bridge '; then
         printf 'public-only keyring was changed or launched:\n%s\n' "$(cat "$CALLS")"
         return 1
     fi
-    [[ "$OUT" == *"private key"* ]]
+    [[ "$OUT" == *"private key"* ]] || return 1
 }
 
 # --- a command is refused, not ignored (#270) ---------------------------------
@@ -371,10 +389,10 @@ command_arguments_are_refused() {
     setup arguments
     existing_install
     run_main su -s /bin/bash bridge -c 'bridge info'
-    ((RC != 0))
-    [[ "$OUT" == *"make first-run"* ]]
+    ((RC != 0)) || return 1
+    [[ "$OUT" == *"make first-run"* ]] || return 1
     # Refused before any check or bootstrap runs, so nothing is called.
-    [[ ! -s "$CALLS" ]]
+    [[ ! -s "$CALLS" ]] || return 1
 }
 
 check "a fresh install opens the CLI" fresh_install_opens_the_cli
@@ -395,6 +413,7 @@ check "a missing key with a vault is refused" missing_key_is_refused
 check "missing pass metadata with a vault is refused" missing_pass_metadata_is_refused
 check "pass metadata for another key is refused" pass_metadata_for_another_key_is_refused
 check "an undecryptable pass entry is refused" undecryptable_pass_entry_is_refused
+check "an empty pass store with a vault is refused" empty_pass_store_is_refused
 check "BRIDGE_FORCE_CLI does not bypass the check" forced_cli_does_not_bypass_the_check
 check "a fresh install repairs missing pass metadata" fresh_install_repairs_missing_pass_metadata
 check "a fresh install refuses a public-only keyring" \

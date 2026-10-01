@@ -114,6 +114,10 @@ verify_existing_credentials() {
     # without the plaintext leaving gpg.
     entries="$(find "$PASSWORD_STORE_DIR" -type f -name '*.gpg')" \
         || refuse_damaged_state "the pass store cannot be listed"
+    # Bridge keeps its vault key in the store, so a vault with no entry
+    # beside it cannot be opened.
+    [[ -n "$entries" ]] \
+        || refuse_damaged_state "the pass store has no entries"
     while IFS= read -r entry; do
         [[ -n "$entry" ]] || continue
         timeout "${BOOTSTRAP_TIMEOUT_SECONDS}s" gpg --batch --quiet --decrypt "$entry" >/dev/null \
