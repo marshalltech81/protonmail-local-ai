@@ -140,9 +140,11 @@ from Acme", "which emails had W-2 attachments?"). With no `query` it
 lists attachments by the structured filters alone, newest thread
 activity first.
 
-To read the full text inside an attachment, use `ask_mailbox` or
-`get_evidence` — this tool locates attachments and previews their
-extracted text; it does not return the whole document.
+To read what an attachment says, use `get_evidence` (the matching
+passages of its extracted text, each capped at 1600 characters) or
+`ask_mailbox` (an answer synthesized from those passages). This tool
+locates attachments and previews their extracted text; none of the
+three returns the whole document.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
