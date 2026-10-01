@@ -303,9 +303,7 @@ reindex each. One rebuild, not one PR: each fix is its own reviewed PR
 per the review rules, and a fix that would change bodies or IDs for
 newly ingested mail before the rebuild is gated behind the pipeline
 configuration so the live index stays internally consistent until the
-single staged rebuild picks all of them up. The fixes: reply subjects in the embedding input and thread body (#303);
-chunk overlap past `max_tokens` (#208); Message-ID conflicts kept as
-both claimants (#217); a deterministic date source for undated mail
+single staged rebuild picks all of them up. The fixes: chunk overlap past `max_tokens` (#208); a deterministic date source for undated mail
 (#297's second half, the deferred received-date item: the top
 `Received:` header, then — since sent mail and stripped messages have
 none — the Maildir filename's delivery timestamp, which is sync time
@@ -313,12 +311,12 @@ but stable for the life of the file, then the previously persisted
 date carried forward by the rebuild; `now()` only for a message with
 none of the three, on first sight, and persisted once; the first half
 — keep the first persisted date on reprocess — is a batch-1 guard);
-the whitespace-only plain alternative that suppresses a non-empty HTML
-body (#298: one line, but a body change, so it rebuilds with the
-bundle); sequential inline text parts in `multipart/mixed` (#295,
-decided 2026-09-30 to document for now and revisit when this bundle is
-assembled, since the reparse is free then); and repair of chunks
-committed with all-zero vectors (#304).
+and repair of chunks committed with all-zero vectors (#304). Reply
+subjects (#303), the whitespace-only plain alternative (#298) and
+sequential inline text parts (#295) left the bundle on 2026-10-01:
+with no live index yet they land directly (see "Result quality
+first"). So did Message-ID conflicts (#217), folded into the v0 schema
+rather than shipped as a migration.
 
 **Sequencing (decided 2026-09-30, per #283).** Phase 2's blue/green
 lifecycle validates a new generation against the old, which needs a
@@ -588,9 +586,9 @@ How the first batch was worked, and what to repeat:
   or reaping one claimant overwrites or deletes the other's evidence.
   #260's serialized-form attachment hash gives the "compare full
   attachment metadata" finding a deterministic identity. A schema
-  change, so it lands with the Phase 2 migration and reindex. That
-  reindex also repairs databases already damaged by #204, #205, #230
-  and #232.
+  change: decided 2026-10-01 to fold it into the v0 schema now, since
+  no index is deployed (identifier: Message-ID plus a short
+  content-hash suffix).
 - **#208 chunk overlap exceeds `max_tokens`** — harmless at default
   settings; it changes chunk IDs, so it lands in the Phase 2 reindex
   bundle (see Phase 2), not on its own.
@@ -616,18 +614,21 @@ Focus has moved from hardening to running the stack for real
 smoke check #268/#269 (#422), mbsync #271/#280 (#419) and its Bash 3.2
 harness fix #425 (#427), #361 (#414), and docx@3 #299 (#426).
 
-Open at handoff, each Codex-reviewed or awaiting review; finish them
-under the two-round cap in AGENTS.md:
+The PRs open at that handoff (#424, #429, #430) have merged.
 
-- #424 xlsx@2 (#294, #296, #305); round 1 done, pre-walk load
-  documented as #428.
-- #429 Bridge updater gate (#245).
-- #430 pdf@2 page-level OCR (#292) and OCR-on requeue (#300). #424 and
-  #430 both add to `EXTRACTOR_VERSIONS`; the second to merge rebases.
+**Result quality first (owner, 2026-10-01, later the same day).** Work
+now targets the quality of returned results, without edge cases or
+P3s. No live index exists yet, so the reindex bundle's body and text
+fixes land directly rather than waiting for the Phase 2 rebuild:
+#298, #295 and #303. Alongside them: filtered semantic recall (#286),
+the first #283 evidence-recall slice, and the `ask_mailbox` evidence
+budget (#285). #208, #297 and #304 stay in the bundle; each needs an
+unusual setting, undated mail or a faulty provider to show up. #217
+leaves it too (see Resolved decisions 12).
 
 Go-live checklist (do these before more hardening):
 
-1. Merge #424, #429, #430.
+1. ~~Merge #424, #429, #430.~~ (done)
 2. Choose providers and fill `.env` / `.secrets` (see
    `docs/setup.md`). The embedder must return 4096-dim vectors (the
    schema is fixed at 4096); OpenAI's public models return 3072 or
@@ -841,9 +842,9 @@ Order of work, chosen to minimise reindexes:
    signal forwarding to the sync child (#280)~~ (done: #419). Bridge:
    ~~the smoke-test one-liner (#269) with #268's minimal fix, the
    entrypoint PR (#242, #266, #270)~~ (done: #422, #423), and the
-   updater-gate PR (#245, with its enabled-vault test; #429) — before
+   ~~updater-gate PR (#245, with its enabled-vault test; #429) — before
    the eval slice, since existing vaults make unpinned update requests
-   until #245 lands.
+   until #245 lands~~ (done: #429).
 2. **Extractor version bumps, one PR per module** so each cache
    refresh happens once: ~~`xlsx` (#294's shared-string budget — a
    behaviour change for the same bytes, so it lands with the bump
@@ -851,21 +852,19 @@ Order of work, chosen to minimise reindexes:
    #296 empty cells, #305 stale dimensions; add `xlsx` to
    `EXTRACTOR_VERSIONS`)~~ (done: `xlsx@2` with a 10M-character text
    budget, column-preserving rows and `reset_dimensions()`),
-   ~~`docx` 2→3 (#299 first-page and even-page headers)~~ (done: #426), `pdf`
+   ~~`docx` 2→3 (#299 first-page and even-page headers)~~ (done: #426), ~~`pdf`
    (#292 page-level OCR selection — add `pdf`), with #300 (enabling
    OCR re-queues skipped images) alongside since it shares the
-   OCR-disabled sentinel.
+   OCR-disabled sentinel~~ (done: #430).
 3. **Design work before code**, both mbsync: the retained near-side
    state family (#275, #276, #279, #281) and the sync-supervision
    pair (#277, #282; their small siblings #271 and #280 are batch-1
    guards above and are not repeated here); see Resolved decisions 9
    and 10 for the chosen direction and the one measurement still
    needed.
-4. **The Phase 2 reindex bundle** (see Phase 2): #303, #208, #217,
-   #297's second half, #298 (a one-line selection fix, but it changes
-   persisted bodies, so it lands with a rebuild rather than making
-   results depend on processing history), #295 if revisited, and the
-   zero-chunk repair from #304.
+4. **The Phase 2 reindex bundle** (see Phase 2): #208, #297's second
+   half, and the zero-chunk repair from #304. #303, #298, #295 and
+   #217 land directly instead (2026-10-01, no live index yet).
 
 Follow-ups filed 2026-09-30 from the privacy trio, both batch-1 guards
 (done, both reproduced): #339 (indexer logs an SDK-inherited embed URL
@@ -1072,13 +1071,15 @@ do not ship persisted claims without them.
 5. **#217 Message-ID conflicts (2026-09-30):** keep both claimants;
    expose, do not resolve by arrival order; a stable claimant
    identifier goes through the MCP contract first. Phase 2 reindex
-   bundle.
+   bundle. Superseded 2026-10-01: lands directly in the v0 schema; the
+   identifier is the Message-ID plus a short content-hash suffix.
 6. **#292 mixed digital/scanned PDFs (2026-09-30):** page-level OCR
    selection with a `pdf` extractor version bump, together with #300.
 7. **#295 sequential inline text parts (2026-09-30):** document the
    limitation now (queued as cleanup batch C7, since the note belongs
    in `docs/architecture.md`); revisit with the Phase 2 reindex
-   bundle.
+   bundle. Superseded 2026-10-01: to be fixed directly while no live
+   index exists (in progress).
 8. **#297 undated mail (2026-09-30):** keep the first persisted date on
    reprocess now; with the Phase 2 reindex, a deterministic chain —
    top `Received:`, else the Maildir filename timestamp, else the
@@ -1099,13 +1100,31 @@ do not ship persisted claims without them.
     (distinguish the intentional post-marker kill from a fatal exit)
     with #269; the requested IMAP/STARTTLS/SAN/restart checks are the
     live-Bridge lane declined in Not doing.
+12. **Owner decisions for result quality and Phases 3–5 (2026-10-01):**
+    - Until the first deployment, schema changes fold into the v0
+      initial schema (#436) with no migration: the Phase 4 tables and
+      #217.
+    - Retention ships as **mirror** (an upstream delete removes the
+      message from the index); archive is the opt-in. Was open
+      decision 1.
+    - `brief_issue` debuts as an **experimental MCP tool**.
+      Experimental tools, including Phase 5's query-time
+      support/contradict analysis, are off unless
+      `MCP_EXPERIMENTAL_TOOLS=true`. Was open decision 2.
+    - #217's claimant identifier is the Message-ID plus a short
+      content-hash suffix; the bare Message-ID keeps working when
+      only one message claims it.
+    - Source authority comes from an operator rules file only (a
+      gitignored domain/address → class map); there is no model
+      classifier in the indexer, which would send mail to the
+      inference provider.
+    - Entity resolution is deterministic only, so model-suggested
+      merges and a confirmation flow are not built.
 
 ## Open decisions
 
-1. Default deletion/retention mode when Phase 4 lands (mirror vs
-   archive as the shipped default).
-2. Whether `brief_issue` debuts as an MCP tool or a host-side script
-   during its Phase 3 experimental period.
+1. ~~Default deletion/retention mode~~ and 2. ~~`brief_issue` as an
+   MCP tool or a script~~: resolved 2026-10-01 (Resolved decisions 12).
 3. MCP endpoint auth (Phase 1 item 5, pinned 2026-09-28). The design
    follows the deployment target:
    - local only, deployable outside this repo → static bearer token
