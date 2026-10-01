@@ -360,6 +360,23 @@ fresh_install_refuses_a_public_only_keyring() {
     [[ "$OUT" == *"private key"* ]]
 }
 
+# --- a command is refused, not ignored (#270) ---------------------------------
+#
+# `docker compose run protonmail-bridge <command>` passes the command to the
+# entrypoint. It used to be ignored, so the old documented credential
+# shortcut started a second, noninteractive Bridge on the same volume. The
+# entrypoint takes no arguments; credentials are shown through make first-run.
+
+command_arguments_are_refused() {
+    setup arguments
+    existing_install
+    run_main su -s /bin/bash bridge -c 'bridge info'
+    ((RC != 0))
+    [[ "$OUT" == *"make first-run"* ]]
+    # Refused before any check or bootstrap runs, so nothing is called.
+    [[ ! -s "$CALLS" ]]
+}
+
 check "a fresh install opens the CLI" fresh_install_opens_the_cli
 check "a retried first run opens the CLI again (#242)" retried_first_run_opens_the_cli_again
 check "BRIDGE_FORCE_CLI opens the CLI over an existing account" \
@@ -382,6 +399,7 @@ check "BRIDGE_FORCE_CLI does not bypass the check" forced_cli_does_not_bypass_th
 check "a fresh install repairs missing pass metadata" fresh_install_repairs_missing_pass_metadata
 check "a fresh install refuses a public-only keyring" \
     fresh_install_refuses_a_public_only_keyring
+check "command arguments are refused (#270)" command_arguments_are_refused
 
 if ((FAILURES > 0)); then
     printf '%d test(s) failed\n' "$FAILURES" >&2

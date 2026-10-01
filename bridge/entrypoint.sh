@@ -122,6 +122,16 @@ verify_existing_credentials() {
 }
 
 main() {
+    # The entrypoint runs no commands of its own: a command given to
+    # `docker compose run protonmail-bridge ...` would otherwise be ignored
+    # and start a second Bridge on the same volume. To see the Bridge
+    # credentials, stop the stack and use make first-run (see docs/setup.md).
+    if (($# > 0)); then
+        echo "ERROR: the Bridge entrypoint takes no arguments." >&2
+        echo "       To show the Bridge credentials: make down, make first-run, then 'info' in the CLI." >&2
+        exit 1
+    fi
+
     # make first-run sets BRIDGE_FORCE_CLI=true (docker-compose.first-run.yml).
     # Bridge writes vault.enc at startup, before any login, so a vault does
     # not show that an account is logged in: a retried, unfinished first run
@@ -174,4 +184,4 @@ EOF
     exec bridge --cli
 }
 
-main
+main "$@"

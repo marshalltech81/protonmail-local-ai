@@ -119,18 +119,26 @@ sha256 key derivation). This is intentionally avoided for two reasons:
    framing, cipher parameters, or key derivation in any release without notice.
    External decryption code would break silently or produce garbage.
 
-2. **Unnecessary.** The Bridge CLI (`bridge-v3 info`) already reads the vault
+2. **Unnecessary.** The Bridge CLI's `info` command already reads the vault
    through the supported code path and prints the Bridge credentials. The
    manual copy from that output is a one-time, human-in-the-loop step that
    is appropriate for a first-run flow requiring interactive login anyway.
 
-If you want a shortcut, run this after the `login` / `info` steps above to
-print the password directly:
+To see the credentials again later, reopen the CLI the same way. Stop the
+stack first so only one Bridge uses the `bridge-data` volume:
 
 ```bash
-docker compose run --rm protonmail-bridge \
-  su -s /bin/bash bridge -c 'bridge-v3 info'
+make down
+make first-run   # opens the CLI even though you are logged in
+# >>> info       # copy the Username and Password, then
+# >>> exit
+make up
 ```
+
+`make first-run` disables Docker logging for the session, so the credentials
+`info` prints stay out of the Docker log files. The Bridge entrypoint takes no
+command: `docker compose run --rm protonmail-bridge <command>` exits with an
+error instead of running it.
 
 ### 5. Configure your embedder and inference providers
 
