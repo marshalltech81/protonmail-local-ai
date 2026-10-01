@@ -16,7 +16,8 @@ This harness fills that gap with a tiny, JSON-driven loop the operator
 extends with real-mailbox queries. It does NOT ship with meaningful seed
 queries — it can't, because no two mailboxes have the same ground truth.
 ``queries.example.json`` is a template; copy to ``queries.json`` and
-fill in real ``expected_thread_ids`` from your index.
+fill in real thread ids from your index, as ``expected_thread_ids``
+(alternatives) or ``required_evidence`` (groups that are all needed).
 
 Run:
 
@@ -30,15 +31,18 @@ plain ``pytest -m eval`` selects no tests.
 Without ``MCP_EVAL_DB`` set, every eval test skips, so the harness
 cannot regress the regular CI suite.
 
-Metrics emitted per query:
-- ``hit@K``: did at least one expected_thread_id appear in the top-K
-  search results?
-- ``rank``: 1-indexed rank of the first expected_thread_id, or ``None``
-  if missed (used to compute mean reciprocal rank).
+Metrics emitted per query (definitions in ``tests/retrieval_metrics.py``):
+- ``rank``: 1-indexed rank of the first expected thread from any
+  evidence group, or ``None`` if missed. Hit@K and mean reciprocal
+  rank come from it.
+- ``groups``: how many of the query's required evidence groups have a
+  thread in the top K. Evidence recall@K averages that fraction; it
+  differs from Hit@K only for questions that need several sources.
 
-``test_eval_summary`` prints aggregate Recall@K and MRR across the
-loaded query set (``-s`` keeps pytest from capturing it) so two runs (e.g.
-before/after a change to RRF fusion) can be compared directly.
+``test_eval_summary`` prints aggregate Hit@K, MRR and evidence recall@K
+across the loaded query set (``-s`` keeps pytest from capturing it) so
+two runs (e.g. before/after a change to RRF fusion) can be compared
+directly.
 """
 
 from __future__ import annotations
@@ -52,6 +56,8 @@ from pathlib import Path
 import pytest
 from src.lib.embed import EmbedClient, embed_query
 from src.lib.sqlite import Database
+
+from tests.retrieval_metrics import first_hit_rank, group_ranks
 
 # Module-level marker so ``-m eval`` selects only this directory; the
 # regular suite never collects it (``addopts`` ignores ``tests/eval``). Defined in
@@ -68,16 +74,17 @@ EXAMPLE_QUERY_FILE = EVAL_DIR / "queries.example.json"
 class EvalQuery:
     """One row of the eval set.
 
-    ``expected_thread_ids`` is treated as a disjunction: the query is
-    considered a hit if ANY listed id appears in the top-K results.
-    Most queries in practice have one expected id, but allowing a list
-    accommodates the case where the same conversation was indexed under
-    multiple message-id-derived thread ids.
+    ``evidence_groups`` lists the evidence the query needs: every group
+    is required, and any one thread id inside a group satisfies it. The
+    JSON row gives either ``required_evidence`` (the groups themselves)
+    or the older ``expected_thread_ids``, a list of alternatives that
+    becomes one group (for example the same conversation indexed under
+    several message-id-derived thread ids).
     """
 
     id: str
     search_query: str
-    expected_thread_ids: list[str]
+    evidence_groups: list[list[str]]
 
 
 def _using_example_queries() -> bool:
@@ -94,20 +101,42 @@ def _load_queries() -> list[EvalQuery]:
     every query will report a miss — this is intentional and
     ``test_eval_summary`` prints a notice so the operator notices.
 
-    Keys other than ``id``, ``search_query`` and ``expected_thread_ids``
-    (``notes``, or the retired ``question`` / ``expected_substrings``)
-    are ignored.
+    Keys other than ``id``, ``search_query``, ``expected_thread_ids``
+    and ``required_evidence`` (``notes``, or the retired ``question`` /
+    ``expected_substrings``) are ignored.
     """
     path = EXAMPLE_QUERY_FILE if _using_example_queries() else DEFAULT_QUERY_FILE
     raw = json.loads(path.read_text())
     return [
-        EvalQuery(
-            id=q["id"],
-            search_query=q["search_query"],
-            expected_thread_ids=list(q.get("expected_thread_ids", [])),
-        )
+        EvalQuery(id=q["id"], search_query=q["search_query"], evidence_groups=_evidence_groups(q))
         for q in raw
     ]
+
+
+def _evidence_groups(row: dict) -> list[list[str]]:
+    """Read a row's evidence as groups (see ``EvalQuery``)."""
+    if "required_evidence" in row:
+        if "expected_thread_ids" in row:
+            raise ValueError(
+                f"{row['id']}: give required_evidence or expected_thread_ids, not both"
+            )
+        raw_groups = row["required_evidence"]
+        # Each group must itself be a list of thread IDs: a flat list of
+        # IDs would otherwise split each ID into characters and pass.
+        if not isinstance(raw_groups, list) or not all(
+            isinstance(group, list) and all(isinstance(t, str) and t for t in group)
+            for group in raw_groups
+        ):
+            raise ValueError(
+                f"{row['id']}: required_evidence must be a list of lists of thread IDs"
+            )
+        if not raw_groups:
+            raise ValueError(f"{row['id']}: required_evidence has no groups")
+        if not all(raw_groups):
+            raise ValueError(f"{row['id']}: required_evidence has an empty group")
+        return [list(group) for group in raw_groups]
+    expected = list(row.get("expected_thread_ids", []))
+    return [expected] if expected else []
 
 
 @pytest.fixture(scope="session")
@@ -167,12 +196,10 @@ def eval_embedder(eval_db: Database):
     return _embed
 
 
-def _rank_of_first_match(results: list, expected_ids: set[str]) -> int | None:
-    """Return the 1-indexed rank of the first expected id, or ``None``."""
-    for rank, r in enumerate(results, start=1):
-        if r.thread_id in expected_ids:
-            return rank
-    return None
+def _missing_groups(results: list, groups: list[list[str]]) -> list[list[str]]:
+    """Evidence groups with no thread anywhere in ``results``."""
+    ranked = [r.thread_id for r in results]
+    return [g for g, rank in zip(groups, group_ranks(ranked, groups), strict=True) if rank is None]
 
 
 # Pull eval queries at collection time so each query becomes its own
@@ -197,13 +224,14 @@ def pytest_generate_tests(metafunc):
 
 
 def test_keyword_search_finds_expected_thread(eval_db: Database, eval_query: EvalQuery) -> None:
-    """Keyword (BM25) retrieval must surface the expected thread in top 10."""
-    if not eval_query.expected_thread_ids:
-        pytest.skip(f"{eval_query.id}: no expected_thread_ids — skip.")
+    """Keyword (BM25) retrieval must surface every required evidence
+    group in the top 10."""
+    if not eval_query.evidence_groups:
+        pytest.skip(f"{eval_query.id}: no expected evidence — skip.")
     results = eval_db.keyword_search(query_text=eval_query.search_query, limit=10)
-    rank = _rank_of_first_match(results, set(eval_query.expected_thread_ids))
-    assert rank is not None, (
-        f"{eval_query.id}: expected one of {eval_query.expected_thread_ids} "
+    missing = _missing_groups(results, eval_query.evidence_groups)
+    assert not missing, (
+        f"{eval_query.id}: no thread from groups {missing} "
         f"in top 10 keyword results for query "
         f"{eval_query.search_query!r}, got {[r.thread_id for r in results]}"
     )
@@ -215,33 +243,36 @@ def test_hybrid_search_finds_expected_thread(
     """Hybrid (BM25 + vector via RRF) is the default search mode the LLM
     sees through ``search_emails`` / ``ask_mailbox``. If it loses the
     expected thread, downstream answers will be wrong even if the LLM
-    is perfect — this is the most important assertion in the file."""
-    if not eval_query.expected_thread_ids:
-        pytest.skip(f"{eval_query.id}: no expected_thread_ids — skip.")
+    is perfect — this is the most important assertion in the file. Every
+    required evidence group must be in the top 10."""
+    if not eval_query.evidence_groups:
+        pytest.skip(f"{eval_query.id}: no expected evidence — skip.")
     embedding = eval_embedder(eval_query.search_query)
     results = eval_db.hybrid_search(
         query_text=eval_query.search_query,
         query_embedding=embedding,
         limit=10,
     )
-    rank = _rank_of_first_match(results, set(eval_query.expected_thread_ids))
-    assert rank is not None, (
-        f"{eval_query.id}: expected one of {eval_query.expected_thread_ids} "
+    missing = _missing_groups(results, eval_query.evidence_groups)
+    assert not missing, (
+        f"{eval_query.id}: no thread from groups {missing} "
         f"in top 10 hybrid results, got {[r.thread_id for r in results]}"
     )
 
 
 def test_eval_summary(eval_db: Database, eval_embedder, eval_queries: list[EvalQuery]) -> None:
-    """Aggregate Recall@10 and MRR across the loaded query set.
+    """Aggregate Hit@10, MRR and evidence recall@10 across the loaded
+    query set.
 
     Always passes — this is a reporting test, not an assertion, so the
     summary appears in the run output regardless of how the per-query
     tests above did. To compare two configurations (e.g. before/after a
     knob change), capture the printed summary block from each run.
     """
-    rank_records: list[tuple[str, int | None]] = []
+    # (query id, first-hit rank, groups found in top 10, groups required)
+    records: list[tuple[str, int | None, int, int]] = []
     for q in eval_queries:
-        if not q.expected_thread_ids:
+        if not q.evidence_groups:
             continue
         embedding = eval_embedder(q.search_query)
         results = eval_db.hybrid_search(
@@ -249,28 +280,33 @@ def test_eval_summary(eval_db: Database, eval_embedder, eval_queries: list[EvalQ
             query_embedding=embedding,
             limit=10,
         )
-        rank = _rank_of_first_match(results, set(q.expected_thread_ids))
-        rank_records.append((q.id, rank))
+        ranked = [r.thread_id for r in results]
+        found = sum(1 for r in group_ranks(ranked, q.evidence_groups) if r is not None)
+        records.append(
+            (q.id, first_hit_rank(ranked, q.evidence_groups), found, len(q.evidence_groups))
+        )
 
-    if not rank_records:
-        pytest.skip("No queries had expected_thread_ids — nothing to summarize.")
+    if not records:
+        pytest.skip("No queries had expected evidence — nothing to summarize.")
 
-    hits = sum(1 for _, r in rank_records if r is not None)
-    total = len(rank_records)
-    recall = hits / total
-    mrr = sum(1.0 / r for _, r in rank_records if r is not None) / total
+    total = len(records)
+    hits = sum(1 for _, r, _, _ in records if r is not None)
+    mrr = sum(1.0 / r for _, r, _, _ in records if r is not None) / total
+    recall = sum(found / groups for _, _, found, groups in records) / total
+    multi = sum(1 for *_, groups in records if groups > 1)
 
     lines = [
         "",
         "=" * 60,
         "Retrieval eval summary (hybrid mode, top 10):",
-        f"  Queries with expected ids: {total}",
-        f"  Recall@10: {recall:.2%} ({hits}/{total})",
-        f"  MRR:       {mrr:.3f}",
-        "  Per-query rank (None = missed):",
+        f"  Queries with expected evidence: {total} ({multi} need several sources)",
+        f"  Hit@10:          {hits / total:.2%} ({hits}/{total})",
+        f"  MRR:             {mrr:.3f}",
+        f"  Evidence recall@10: {recall:.2%}",
+        "  Per-query first-hit rank (None = missed), required groups found:",
     ]
-    for qid, rank in rank_records:
-        lines.append(f"    {qid:<30s} rank={rank}")
+    for qid, rank, found, groups in records:
+        lines.append(f"    {qid:<30s} rank={rank} groups={found}/{groups}")
     if _using_example_queries():
         lines.append(
             f"  NOTE: no {DEFAULT_QUERY_FILE.name} found; ran the placeholder "
