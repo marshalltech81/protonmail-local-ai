@@ -299,6 +299,10 @@ services:
       INFERENCE_MAX_TOKENS: ${INFERENCE_MAX_TOKENS:-1024}
       MCP_PORT: ${MCP_PORT:-3000}
       MCP_TRANSPORT: ${MCP_TRANSPORT:-sse}
+      # Seconds a Streamable HTTP session (MCP_TRANSPORT=streamable-http
+      # or dual) may sit idle before the server ends it, so a session a
+      # client abandons does not hold a server task until restart.
+      MCP_SESSION_IDLE_TIMEOUT_SECS: ${MCP_SESSION_IDLE_TIMEOUT_SECS:-1800}
       # OpenAI-compatible embedder for query-time embedding via the
       # openai SDK. Must point at the same provider + model as the
       # indexer; otherwise query and indexed vectors are produced by

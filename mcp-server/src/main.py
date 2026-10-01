@@ -15,11 +15,13 @@ from pathlib import Path
 from typing import Literal
 
 import uvicorn
-from mcp.server.fastmcp import FastMCP
-from mcp.server.transport_security import TransportSecuritySettings
+from fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecurityMiddleware, TransportSecuritySettings
 from starlette.applications import Starlette
+from starlette.middleware import Middleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 from .lib.embed import DEFAULT_EMBED_TIMEOUT_SECS, EmbedClient
 from .lib.inference import (
@@ -40,6 +42,14 @@ logging.basicConfig(
 )
 log = logging.getLogger("mcp-server")
 
+# ``import fastmcp`` gives its ``fastmcp`` logger a Rich handler of its own
+# and stops it propagating. Route it through the root handler instead, so
+# its records share this service's format and pass the filters below.
+_fastmcp_logger = logging.getLogger("fastmcp")
+for _handler in list(_fastmcp_logger.handlers):
+    _fastmcp_logger.removeHandler(_handler)
+_fastmcp_logger.propagate = True
+
 
 class _SilenceClientDisconnect(logging.Filter):
     """Drop benign ``ClientDisconnect`` noise from the MCP SDK's logs.
@@ -49,57 +59,47 @@ class _SilenceClientDisconnect(logging.Filter):
     retries a different request shape, or the previous call already returned
     what it needed. The MCP SDK catches the resulting
     ``starlette.requests.ClientDisconnect`` cleanly and the connection ends
-    without harm, but the SDK logs it at ERROR level on two loggers in two
-    different shapes:
+    without harm, but ``mcp.server.streamable_http`` logs it at ERROR as
+    ``"Error handling POST request"`` with the ``ClientDisconnect``
+    traceback in ``exc_info``. Filter by exception class.
 
-    - ``mcp.server.streamable_http`` emits ``"Error handling POST request"``
-      with ``exc_info`` set to the ``ClientDisconnect`` traceback. Filter
-      by exception class.
-    - ``mcp.server.lowlevel.server`` emits ``"Received exception from
-      stream:"`` (with NO ``exc_info`` — the SDK catches the exception
-      upstream and writes the formatted repr into the message). The
-      same prefix is also used for genuinely-different exceptions
-      caught off the stream, so we cannot suppress the prefix
-      unconditionally — that would hide real failures like
-      ``RuntimeError("boom")``. Drop only the two recognizable
-      disconnect forms: an empty trailing message (the bare
-      ``ClientDisconnect`` signature) or a trailing message that
-      explicitly names the class.
-
-    Records that don't match either shape still propagate unchanged so a
-    real bug surfaces normally.
+    Records with any other exception still propagate unchanged so a real
+    bug surfaces normally.
     """
-
-    _STREAM_PREFIX = "Received exception from stream:"
 
     def filter(self, record: logging.LogRecord) -> bool:
         if record.exc_info:
             exc_type = record.exc_info[0]
             if exc_type is not None and exc_type.__name__ == "ClientDisconnect":
                 return False
-        # ``getMessage`` resolves the format string + args the same way
-        # the formatter would; checking ``record.msg`` alone would miss
-        # any record built with logging-format args.
-        message = record.getMessage()
-        if message.startswith(self._STREAM_PREFIX):
-            trailing = message[len(self._STREAM_PREFIX) :].strip()
-            # Empty trailing == the ClientDisconnect bare signature
-            # observed during eval ("Received exception from stream: ").
-            # ClientDisconnect-bearing trailing == any wording that
-            # explicitly names the class. Anything else (real exceptions
-            # the SDK chose to surface) falls through and propagates.
-            if not trailing or "ClientDisconnect" in trailing:
-                return False
         return True
 
 
-# Attach the filter to the two MCP SDK loggers known to surface
+# Attach the filter to the MCP SDK logger known to surface
 # ``ClientDisconnect`` tracebacks. Limited scope on purpose: filtering at
 # the root logger would risk swallowing a future, genuinely-different
 # ``ClientDisconnect`` somewhere in the stack.
-_disconnect_filter = _SilenceClientDisconnect()
-for _logger_name in ("mcp.server.streamable_http", "mcp.server.lowlevel.server"):
-    logging.getLogger(_logger_name).addFilter(_disconnect_filter)
+logging.getLogger("mcp.server.streamable_http").addFilter(_SilenceClientDisconnect())
+
+
+class _DropToolErrorDetail(logging.Filter):
+    """Keep tool failure text out of fastmcp's ``Error calling tool`` log.
+
+    fastmcp logs every failed tool call at ERROR, and an exception other
+    than ``ToolError`` with its traceback, whose message can quote mail
+    content or a provider response. The record keeps the tool name; the
+    traceback (and the exception text in it) is dropped. The caller still
+    receives the error result.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.getMessage().startswith("Error calling tool"):
+            record.exc_info = None
+            record.exc_text = None
+        return True
+
+
+logging.getLogger("fastmcp.server.server").addFilter(_DropToolErrorDetail())
 
 
 _INFERENCE_MODES = frozenset({"anthropic", "openai", "none"})
@@ -267,6 +267,47 @@ RERANK_TIMEOUT_SECS = _float_env("RERANK_TIMEOUT_SECS", DEFAULT_RERANK_TIMEOUT_S
 
 MCP_PORT = int(os.environ.get("MCP_PORT", "3000"))
 MCP_TRANSPORT = os.environ.get("MCP_TRANSPORT", "sse")
+# Seconds a Streamable HTTP session may sit idle before the server ends
+# it (#317). fastmcp's default is no limit, so a session a client
+# abandons without a DELETE would hold its server task until shutdown.
+# A client whose session expires gets 404 on its next request and starts
+# a new one.
+MCP_SESSION_IDLE_TIMEOUT_SECS = _float_env("MCP_SESSION_IDLE_TIMEOUT_SECS", 1800.0, minimum=1.0)
+
+# Paths the transports are served on; fastmcp's defaults, pinned here so
+# the dual-transport dispatch and the docs cannot drift from them.
+_STREAMABLE_HTTP_PATH = "/mcp"
+_SSE_PATH = "/sse"
+
+# Host/Origin allowlist applied to every HTTP request before it reaches a
+# transport, so a malicious local browser page cannot DNS-rebind to this
+# listener even though the Docker port mapping keeps the host-facing
+# endpoint loopback-only. An entry ending ``:*`` matches that host with
+# any port; any other entry matches exactly. A request without an Origin
+# header passes the Origin check.
+_TRANSPORT_SECURITY = TransportSecuritySettings(
+    enable_dns_rebinding_protection=True,
+    allowed_hosts=[
+        "localhost",
+        "localhost:*",
+        "127.0.0.1",
+        "127.0.0.1:*",
+        "[::1]",
+        "[::1]:*",
+        "mcp-server",
+        "mcp-server:*",
+    ],
+    allowed_origins=[
+        "http://localhost",
+        "http://localhost:*",
+        "http://127.0.0.1",
+        "http://127.0.0.1:*",
+        "http://[::1]",
+        "http://[::1]:*",
+        "http://mcp-server",
+        "http://mcp-server:*",
+    ],
+)
 
 
 _Transport = Literal["sse", "streamable-http", "dual"]
@@ -283,27 +324,83 @@ def _normalize_transport(raw: str) -> _Transport:
     raise ValueError("MCP_TRANSPORT must be one of: sse, streamable-http, dual")
 
 
-async def _run_dual_transport_async(server: FastMCP) -> None:
+class _HostOriginGuard:
+    """ASGI middleware: reject a request whose Host (421) or Origin (403)
+    is not in ``_TRANSPORT_SECURITY`` before it reaches any route.
+
+    The check is the MCP SDK's own validator, so the allowlist means what
+    it meant before the move to fastmcp. fastmcp's
+    ``HostOriginGuardMiddleware`` is not used: it also accepts the
+    server's own socket address as a Host and any loopback Origin on any
+    scheme, which this allowlist does not. It runs ahead of the Streamable
+    HTTP session manager, so a rejected request creates no session.
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+        self._validator = TransportSecurityMiddleware(_TRANSPORT_SECURITY)
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] == "http":
+            # ``is_post=False``: the transports check a POST's
+            # Content-Type themselves.
+            error = await self._validator.validate_request(Request(scope), is_post=False)
+            if error is not None:
+                await error(scope, receive, send)
+                return
+        await self.app(scope, receive, send)
+
+
+def _build_app(server: FastMCP, transport: _Transport, *, session_idle_timeout: float) -> ASGIApp:
+    """The ASGI app serving ``server`` on ``transport``.
+
+    Every transport app carries ``_HostOriginGuard``; fastmcp's SSE app
+    has no Host/Origin check of its own and its Streamable HTTP check is
+    off by default. Custom routes (``/health``) are served by each app.
+    Streamable HTTP sessions end after ``session_idle_timeout`` seconds
+    without a request; it is required because fastmcp's default never
+    ends them.
+    """
+    guard = [Middleware(_HostOriginGuard)]
+    if transport == "sse":
+        return server.http_app(path=_SSE_PATH, transport="sse", middleware=guard)
+    if transport == "streamable-http":
+        return server.http_app(
+            path=_STREAMABLE_HTTP_PATH,
+            transport="streamable-http",
+            middleware=guard,
+            session_idle_timeout=session_idle_timeout,
+        )
+    return _build_dual_app(server, guard, session_idle_timeout)
+
+
+def _build_dual_app(
+    server: FastMCP, guard: list[Middleware], session_idle_timeout: float
+) -> ASGIApp:
     """Serve SSE and Streamable HTTP routes from one FastMCP instance.
 
     Each transport app is invoked as a complete ASGI app rather than
     having its routes flattened into a fresh Starlette — that
     preserves whatever middleware and per-request context plumbing
-    the SDK attaches to ``streamable_http_app()`` / ``sse_app()`` (the
-    Streamable HTTP transport in particular relies on session-manager
-    context that lives on the inner app, not on individual routes).
+    fastmcp attaches to each ``http_app()`` (the Streamable HTTP
+    transport in particular relies on session-manager context that
+    lives on the inner app, not on individual routes).
 
     Lifespan is run on a tiny outer Starlette whose only job is to
     enter both inner apps' ``lifespan_context`` — ``session_manager``
-    starts here for Streamable HTTP, and SSE gets to register its
-    startup/shutdown hooks too even though the current SDK sse_app
-    doesn't ship any. HTTP/WebSocket scopes go straight to the right
-    transport app via prefix dispatch.
+    starts here for Streamable HTTP, and both enter the server's own
+    lifespan, which fastmcp reference-counts. HTTP/WebSocket scopes go
+    straight to the right transport app via prefix dispatch.
     """
-    sse_app = server.sse_app()
-    streamable_http_app = server.streamable_http_app()
+    sse_app = server.http_app(path=_SSE_PATH, transport="sse", middleware=guard)
+    streamable_http_app = server.http_app(
+        path=_STREAMABLE_HTTP_PATH,
+        transport="streamable-http",
+        middleware=guard,
+        session_idle_timeout=session_idle_timeout,
+    )
 
-    streamable_path = server.settings.streamable_http_path
+    streamable_path = _STREAMABLE_HTTP_PATH
     # Pre-compute the prefix used to recognize trailing-slash and
     # sub-path requests (``/mcp/`` or ``/mcp/foo``) without also
     # matching unrelated paths like ``/mcpfoo`` or ``/mcp-debug``.
@@ -317,7 +414,7 @@ async def _run_dual_transport_async(server: FastMCP) -> None:
             yield
 
     # Outer Starlette owns lifespan only — it has no routes of its own.
-    lifespan_owner = Starlette(debug=server.settings.debug, lifespan=combined_lifespan)
+    lifespan_owner = Starlette(lifespan=combined_lifespan)
 
     async def app(scope, receive, send):
         if scope["type"] == "lifespan":
@@ -325,8 +422,8 @@ async def _run_dual_transport_async(server: FastMCP) -> None:
             return
         path = scope.get("path", "/")
         # Streamable HTTP claims exactly the configured streamable path
-        # (``/mcp`` by default) and any sub-path under it. Everything
-        # else — ``/sse``, ``/messages/``, the ``/health`` custom route
+        # (``/mcp``) and any sub-path under it. Everything else —
+        # ``/sse``, ``/messages/``, the ``/health`` custom route
         # registered on the FastMCP server, and any future ``/mcp-*``
         # custom route — is served by the SSE app (which inherits the
         # FastMCP custom routes). Using a startswith check on a
@@ -338,13 +435,7 @@ async def _run_dual_transport_async(server: FastMCP) -> None:
             target = sse_app
         await target(scope, receive, send)
 
-    config = uvicorn.Config(
-        app,
-        host=server.settings.host,
-        port=server.settings.port,
-        log_level=server.settings.log_level.lower(),
-    )
-    await uvicorn.Server(config).serve()
+    return app
 
 
 async def _health_response(db: Database) -> JSONResponse:
@@ -359,21 +450,25 @@ async def _health_response(db: Database) -> JSONResponse:
 
 
 def _run_server(server: FastMCP, transport: _Transport) -> None:
-    """Run ``server`` on ``transport``.
+    """Serve ``server`` on ``transport`` with uvicorn.
+
+    The app is built here and handed to uvicorn directly rather than
+    through ``FastMCP.run``, which would print fastmcp's banner and check
+    PyPI for a newer release. ``host="0.0.0.0"`` is required so the
+    in-container bind is reachable through the Docker port-forward; the
+    host-side mapping in ``docker-compose.yml`` keeps the port
+    loopback-only (``127.0.0.1:${MCP_PORT}:${MCP_PORT}``).
 
     The ``_Transport`` Literal type forces every caller — production
     or test — to pass a value already returned by ``_normalize_transport``.
-    mypy catches a raw-string call site, so the runtime never re-does
-    work the caller already did.
     """
-    if transport == "dual":
-        import anyio
-
-        anyio.run(lambda: _run_dual_transport_async(server))
-        return
-    # Type narrowing on the Literal handles the dispatch; transport is
-    # provably "sse" | "streamable-http" here, no cast needed.
-    server.run(transport=transport)
+    config = uvicorn.Config(
+        _build_app(server, transport, session_idle_timeout=MCP_SESSION_IDLE_TIMEOUT_SECS),
+        host="0.0.0.0",  # nosec B104 — see docstring
+        port=MCP_PORT,
+        log_level="info",
+    )
+    uvicorn.Server(config).run()
 
 
 def main():
@@ -458,47 +553,9 @@ def main():
     expected_embed_dim = db.get_embedding_dim()
 
     # FastMCP server — provides the @server.tool() decorator and the
-    # SSE / Streamable HTTP apps mounted below per MCP_TRANSPORT.
-    # ``host="0.0.0.0"`` is required so the in-container bind is reachable
-    # through the Docker port-forward; the host-side mapping in
-    # ``docker-compose.yml`` keeps the port loopback-only
-    # (``127.0.0.1:${MCP_PORT}:${MCP_PORT}``). nosec B104.
-    #
-    # FastMCP only auto-enables DNS-rebinding protection when ``host`` is
-    # one of ``127.0.0.1``/``localhost``/``::1``; binding to ``0.0.0.0``
-    # silently disables it. We re-enable Host/Origin allow-listing
-    # explicitly so a malicious local browser page cannot DNS-rebind to
-    # this listener, even though the Docker port mapping keeps the
-    # host-facing endpoint loopback-only.
-    transport_security = TransportSecuritySettings(
-        enable_dns_rebinding_protection=True,
-        allowed_hosts=[
-            "localhost",
-            "localhost:*",
-            "127.0.0.1",
-            "127.0.0.1:*",
-            "[::1]",
-            "[::1]:*",
-            "mcp-server",
-            "mcp-server:*",
-        ],
-        allowed_origins=[
-            "http://localhost",
-            "http://localhost:*",
-            "http://127.0.0.1",
-            "http://127.0.0.1:*",
-            "http://[::1]",
-            "http://[::1]:*",
-            "http://mcp-server",
-            "http://mcp-server:*",
-        ],
-    )
-    server = FastMCP(
-        "protonmail-local-ai",
-        host="0.0.0.0",  # nosec B104 — see comment above
-        port=MCP_PORT,
-        transport_security=transport_security,
-    )
+    # SSE / Streamable HTTP apps ``_run_server`` serves per MCP_TRANSPORT,
+    # each behind the ``_TRANSPORT_SECURITY`` Host/Origin allowlist.
+    server = FastMCP("protonmail-local-ai")
 
     # Plain HTTP health endpoint used by the container healthcheck. Sits
     # outside the MCP protocol so `docker healthcheck` and operator scripts
@@ -574,6 +631,8 @@ def main():
             f"(model={RERANK_MODEL}, candidates={RERANK_CANDIDATES})"
         )
     log.info(f"  Transport: {transport}")
+    if transport != "sse":
+        log.info(f"  Session idle timeout: {MCP_SESSION_IDLE_TIMEOUT_SECS:g}s")
     log.info("  Retrieval: local SQLite index only")
 
     _run_server(server, transport)

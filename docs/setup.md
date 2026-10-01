@@ -490,6 +490,21 @@ Restart Claude Desktop.
 In a new conversation, you should see the ProtonMail tools available.
 Test with: *"What is the status of my email index?"*
 
+Other MCP clients connect the same way. The server speaks SSE at `/sse`
+by default; set `MCP_TRANSPORT=streamable-http` to serve Streamable HTTP
+at `/mcp` instead, or `dual` for both on the same port. Whatever the
+transport, the server answers only requests addressed to `localhost`,
+`127.0.0.1` or `[::1]` (any port): a request with another `Host` header
+gets `421 Misdirected Request`, and a browser `Origin` other than those
+names over `http` gets `403`.
+
+A Streamable HTTP session that sees no request for
+`MCP_SESSION_IDLE_TIMEOUT_SECS` seconds (default 1800) is ended, so a
+session a client abandons without closing it does not hold server
+resources until a restart. A client that comes back after that gets
+`404` for the old session ID and starts a new session; raise the value
+in `.env` if a client of yours does not reconnect on its own.
+
 ## Troubleshooting
 
 See [`troubleshooting.md`](troubleshooting.md) for Bridge, mbsync,

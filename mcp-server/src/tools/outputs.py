@@ -1,8 +1,9 @@
 """
 Structured output for the search, retrieval, evidence, and status tools.
 
-Each tool declares one of these models as its ``outputSchema`` (via an
-``Annotated[CallToolResult, Model]`` return annotation) and returns it as
+Each tool declares one of these models as its ``outputSchema`` (via
+``@server.tool(output_schema=Model.model_json_schema())``; FastMCP does
+not derive a schema from a ``CallToolResult`` return) and returns it as
 ``structuredContent`` next to the unchanged prose in ``content``. A client
 chains IDs (thread_id -> message_id -> attachment_id) from typed fields
 instead of scraping text.
@@ -46,7 +47,7 @@ def tool_result(text: str, output: _Output) -> CallToolResult:
     """The prose as ``content`` plus ``output`` as ``structuredContent``."""
     return CallToolResult(
         content=[TextContent(type="text", text=text)],
-        structuredContent=output.model_dump(mode="json", by_alias=True),
+        structured_content=output.model_dump(mode="json", by_alias=True),
     )
 
 

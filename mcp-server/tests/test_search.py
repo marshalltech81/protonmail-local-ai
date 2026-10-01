@@ -16,7 +16,7 @@ otherwise-sync test functions, matching the other handler tests.
 import asyncio
 
 import pytest
-from mcp.server.fastmcp.exceptions import ToolError
+from fastmcp.exceptions import ToolError
 from src.tools.search import register_search_tools
 
 
@@ -356,19 +356,19 @@ class TestSemanticVectorLaneFailure:
         _drop_tables(chunked_db, "message_chunks_vec")
         handler = _handler(fake_server, fake_embed, chunked_db)
         out = asyncio.run(handler(query="invoice", mode="semantic"))
-        assert out.structuredContent["results"]
+        assert out.structured_content["results"]
 
     def test_chunk_lane_alone_still_returns_results(self, fake_server, fake_embed, chunked_db):
         _drop_tables(chunked_db, "threads_vec")
         handler = _handler(fake_server, fake_embed, chunked_db)
         out = asyncio.run(handler(query="invoice", mode="semantic"))
-        assert out.structuredContent["results"]
+        assert out.structured_content["results"]
 
     def test_valid_empty_index_is_empty_success(self, fake_server, fake_embed, empty_db):
         handler = _handler(fake_server, fake_embed, empty_db)
         out = asyncio.run(handler(query="invoice", mode="semantic"))
-        assert not out.isError
-        assert out.structuredContent["results"] == []
+        assert not out.is_error
+        assert out.structured_content["results"] == []
         assert "No results found" in _text(out)
 
     def test_hybrid_unchanged_when_vector_lanes_missing(self, fake_server, fake_embed, seeded_db):
@@ -377,7 +377,7 @@ class TestSemanticVectorLaneFailure:
         _drop_tables(seeded_db, "threads_vec", "message_chunks_vec")
         handler = _handler(fake_server, fake_embed, seeded_db)
         out = asyncio.run(handler(query="invoice", mode="hybrid"))
-        assert out.structuredContent["results"]
+        assert out.structured_content["results"]
 
 
 class TestWrongDimEmbedSurfaces:

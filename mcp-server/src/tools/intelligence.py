@@ -8,7 +8,7 @@ import json
 import logging
 import re
 
-from mcp.server.fastmcp.exceptions import ToolError
+from fastmcp.exceptions import ToolError
 from mcp.types import TextContent
 
 from ..lib.embed import embed_query

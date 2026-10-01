@@ -60,7 +60,12 @@ response) in full with secrets redacted, and anything else as its
 exception type name alone.
 
 The intelligence tools (Group 3) have no typed output model; their
-answer is the prose in `content`.
+answer is the prose in `content`, with no `outputSchema` and no
+`structuredContent`.
+
+Arguments are checked against each tool's input schema before the tool
+runs: a wrong type or an argument the tool does not declare is an error
+result naming the problem.
 
 ## Group 1 — Search
 

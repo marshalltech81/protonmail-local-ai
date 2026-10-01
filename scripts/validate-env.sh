@@ -214,6 +214,7 @@ INDEXER_MESSAGE_TIMEOUT_SECONDS="$(get_env_value INDEXER_MESSAGE_TIMEOUT_SECONDS
 SYNC_INTERVAL="$(get_env_value SYNC_INTERVAL)"
 MCP_PORT="$(get_env_value MCP_PORT)"
 MCP_TRANSPORT="$(get_env_value MCP_TRANSPORT)"
+MCP_SESSION_IDLE_TIMEOUT_SECS="$(get_env_value MCP_SESSION_IDLE_TIMEOUT_SECS)"
 
 [[ -n "$BRIDGE_USER" && "$BRIDGE_USER" != "your@proton.me" ]] || {
     echo "ERROR: BRIDGE_USER in .env must be set to the Bridge username from 'bridge --cli info'." >&2
@@ -409,6 +410,13 @@ MCP_TRANSPORT="${MCP_TRANSPORT:-sse}"
     echo "ERROR: MCP_TRANSPORT must be 'sse', 'streamable-http', or 'dual'." >&2
     exit 1
 }
+
+# Optional Streamable HTTP session idle timeout. Must be >= 1 so a
+# session a client abandons is ended; validated only when set so the
+# mcp-server/src/main.py default (1800) stays authoritative otherwise.
+if [[ -n "$MCP_SESSION_IDLE_TIMEOUT_SECS" ]]; then
+    require_integer_min "MCP_SESSION_IDLE_TIMEOUT_SECS" "$MCP_SESSION_IDLE_TIMEOUT_SECS" 1
+fi
 
 require_nonempty_file "$BRIDGE_PASS_FILE" "Bridge password secret"
 require_mode_600 "$BRIDGE_PASS_FILE"

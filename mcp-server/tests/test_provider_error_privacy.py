@@ -16,7 +16,7 @@ import httpx2
 import openai
 import pydantic
 import pytest
-from mcp.server.fastmcp.exceptions import ToolError
+from fastmcp.exceptions import ToolError
 from src.lib.security import ProviderResponseError
 from src.tools.intelligence import register_intelligence_tools
 from src.tools.search import register_search_tools
