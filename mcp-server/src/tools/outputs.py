@@ -21,11 +21,11 @@ responses bound lists and cut long values (``MAX_LISTED``,
 default; only get_message asks for full headers.
 """
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import Literal
 
 from mcp.types import CallToolResult, TextContent
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from ..lib.sqlite import MessageRecord, SourceFile, ThreadResult
 from ..lib.sqlite import Participant as ParticipantRecord
@@ -501,7 +501,13 @@ _LABELS_DESCRIPTION = "Evidence labels (E1, ...) the model cited for this entry.
 
 
 class BriefEvent(_Output):
-    date: str | None = Field(description="YYYY-MM-DD as the model gave it; null when undated.")
+    # ASCII digits only and a real calendar date: the chronology sorts
+    # on this string, so any other value fails validation and gets the
+    # repair call.
+    date: str | None = Field(
+        pattern=r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
+        description="YYYY-MM-DD as the model gave it; null when undated.",
+    )
     date_source: Literal["sent", "mentioned", "unknown"] = Field(
         description="sent: the cited message's own sent date. mentioned: a date the "
         "passage states for the event. unknown: neither."
@@ -509,6 +515,16 @@ class BriefEvent(_Output):
     actor: str
     event: str
     labels: list[str] = Field(description=_LABELS_DESCRIPTION)
+
+    @field_validator("date")
+    @classmethod
+    def _calendar_date(cls, value: str | None) -> str | None:
+        """Reject a well-shaped impossible date such as 2023-02-29; the
+        pattern has already fixed the shape, so this parses ten ASCII
+        characters. The string is kept as given."""
+        if value is not None:
+            date.fromisoformat(value)
+        return value
 
 
 class BriefPosition(_Output):
@@ -547,7 +563,8 @@ class Brief(_Output):
     )
     insufficient_evidence: bool = Field(
         description="True when the model found nothing about the topic in the passages; "
-        "true with any entries is reported as insufficient_but_populated."
+        "true with any entries is reported as insufficient_but_populated, false with "
+        "none as empty_but_sufficient."
     )
 
 
@@ -562,12 +579,17 @@ class BriefCitationProblem(_Output):
         description="0-based index of the entry within its section; 0 for section brief."
     )
     kind: Literal[
-        "unknown_labels", "no_citations", "too_few_labels", "insufficient_but_populated"
+        "unknown_labels",
+        "no_citations",
+        "too_few_labels",
+        "insufficient_but_populated",
+        "empty_but_sufficient",
     ] = Field(
         description="unknown_labels: the entry cites labels no supplied passage has. "
         "no_citations: it cites none. too_few_labels: a conflict cites fewer than two "
         "supplied passages. insufficient_but_populated (section brief): "
-        "insufficient_evidence is true but a section has entries."
+        "insufficient_evidence is true but a section has entries. empty_but_sufficient "
+        "(section brief): insufficient_evidence is false but every section is empty."
     )
     labels: list[str] = Field(description="The unknown labels; empty for the other kinds.")
 

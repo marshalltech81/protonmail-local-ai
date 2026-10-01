@@ -29,7 +29,12 @@ from pydantic import BaseModel, ValidationError
 from ..lib.embed import embed_query
 from ..lib.inference import InferenceTruncatedError
 from ..lib.security import log_tool_call, safe_provider_exception_text
-from ..lib.sqlite import PROMPT_EVIDENCE_CHUNKS_PER_THREAD, InvalidFilterError, validate_date_range
+from ..lib.sqlite import (
+    PROMPT_EVIDENCE_CHUNKS_PER_THREAD,
+    InvalidFilterError,
+    ThreadResult,
+    validate_date_range,
+)
 from ..lib.timings import count, rerank_mode, stage, timed_tool
 from ..lib.validation import clamp_int
 from .intelligence import (
@@ -68,6 +73,12 @@ log = logging.getLogger("mcp.tools.experimental")
 # bounded by INFERENCE_MAX_TOKENS; this caps the work json.loads and
 # validation do whatever that is set to, and the raw text returned.
 _MAX_BRIEF_RESPONSE_CHARS = 100_000
+
+# Both tools search this many times ``max_threads`` threads, so a
+# chunkless thread (not chunked yet during partial indexing) dropped from
+# the evidence leaves its slot to a lower-ranked chunk-backed one. A
+# fixed multiple keeps the search and evidence fetch bounded.
+_EVIDENCE_OVERFETCH = 3
 
 BRIEF_SYSTEM = (
     """You are an email analyst preparing an issue brief from excerpts of a
@@ -168,8 +179,9 @@ def _check_brief(
     """Every label the brief cites that names a supplied passage, in
     first-cited order, and each entry's problems: unknown labels, no
     label at all, or a conflict citing fewer than two supplied passages;
-    plus one ``insufficient_but_populated`` problem when the brief both
-    claims insufficient evidence and has entries.
+    plus one problem for the brief as a whole when ``insufficient_evidence``
+    disagrees with the entries: ``insufficient_but_populated`` when it is
+    true with entries, ``empty_but_sufficient`` when it is false with none.
     Labels are read with ask_mailbox's label pattern, so ``"[E1]"`` and
     ``"E1"`` are the same label; each entry's labels are rewritten to
     that canonical form."""
@@ -201,11 +213,16 @@ def _check_brief(
                         section=section, item=index, kind="too_few_labels", labels=[]
                     )
                 )
-    if brief.insufficient_evidence and any(getattr(brief, s) for s in _SECTIONS):
+    populated = any(getattr(brief, s) for s in _SECTIONS)
+    if brief.insufficient_evidence and populated:
         problems.append(
             BriefCitationProblem(
                 section="brief", item=0, kind="insufficient_but_populated", labels=[]
             )
+        )
+    elif not brief.insufficient_evidence and not populated:
+        problems.append(
+            BriefCitationProblem(section="brief", item=0, kind="empty_but_sufficient", labels=[])
         )
     return cited, problems
 
@@ -224,7 +241,34 @@ def _repair_reason(brief: Brief | None, problems: list[BriefCitationProblem]) ->
         reasons.append("had conflicts that cite fewer than two passages")
     if "insufficient_but_populated" in kinds:
         reasons.append("set insufficient_evidence to true but also listed entries")
+    if "empty_but_sufficient" in kinds:
+        reasons.append(
+            "listed no entries but set insufficient_evidence to false; list the entries "
+            "or set it to true"
+        )
     return "; ".join(reasons)
+
+
+def _evidenced(
+    fetched: list[ThreadResult], max_threads: int
+) -> tuple[list[ThreadResult], list[ThreadResult]]:
+    """The first ``max_threads`` threads with message passages, and the
+    threads searched: the top ``max_threads`` and down to the last one
+    used, best match first.
+
+    Message-level evidence only: a thread with no matching chunks would
+    be shown by its thread text, which has no claimant, sender or sent
+    date to cite, so it is not offered and the next chunk-backed thread
+    takes its slot."""
+    evidenced: list[ThreadResult] = []
+    end = 0  # one past the last thread used
+    for i, result in enumerate(fetched):
+        if len(evidenced) == max_threads:
+            break
+        if result.evidence_chunks:
+            evidenced.append(result)
+            end = i + 1
+    return evidenced, fetched[: max(end, max_threads)]
 
 
 def _brief_lines(brief: Brief) -> list[str]:
@@ -534,7 +578,7 @@ def register_experimental_tools(
 
         try:
             embedding = await embed_query(embed_client, topic, expected_embed_dim)
-            results = await asyncio.to_thread(
+            fetched = await asyncio.to_thread(
                 db.hybrid_search,
                 query_text=topic,
                 query_embedding=embedding,
@@ -542,16 +586,13 @@ def register_experimental_tools(
                 from_addr=from_addr,
                 date_from=date_from,
                 date_to=date_to,
-                limit=max_threads,
+                limit=max_threads * _EVIDENCE_OVERFETCH,
                 with_evidence=True,
                 reranker=reranker,
                 evidence_per_thread=PROMPT_EVIDENCE_CHUNKS_PER_THREAD,
             )
+            evidenced, results = _evidenced(fetched, max_threads)
             count("results", len(results))
-            # Message-level evidence only: a thread with no matching
-            # chunks would be shown by its thread text, which has no
-            # claimant, sender or sent date to cite, so it is not offered.
-            evidenced = [r for r in results if r.evidence_chunks]
             if not evidenced:
                 empty = Brief(
                     chronology=[],
@@ -745,7 +786,7 @@ def register_experimental_tools(
 
         try:
             embedding = await embed_query(embed_client, conclusion, expected_embed_dim)
-            results = await asyncio.to_thread(
+            fetched = await asyncio.to_thread(
                 db.hybrid_search,
                 query_text=conclusion,
                 query_embedding=embedding,
@@ -753,15 +794,15 @@ def register_experimental_tools(
                 from_addr=from_addr,
                 date_from=date_from,
                 date_to=date_to,
-                limit=max_threads,
+                limit=max_threads * _EVIDENCE_OVERFETCH,
                 with_evidence=True,
                 reranker=reranker,
                 evidence_per_thread=PROMPT_EVIDENCE_CHUNKS_PER_THREAD,
             )
-            count("results", len(results))
             # Message-level evidence only, as in brief_issue: thread text
             # has no claimant, sender or sent date to quote as a source.
-            evidenced = [r for r in results if r.evidence_chunks]
+            evidenced, results = _evidenced(fetched, max_threads)
+            count("results", len(results))
             if not evidenced:
                 return tool_result(
                     "EXPERIMENTAL conclusion check: no relevant message passages found for "
