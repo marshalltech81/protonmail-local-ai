@@ -585,13 +585,19 @@ class TestIssue471:
             "\u0662\u0660\u0662\u0664-\u0660\u0662-\u0660\u0661",  # Arabic-Indic digits
             "",
             "April 2024",
+            # Review round 1: the right shape but not a calendar date.
+            "2024-13-40",
+            "2023-02-29",
+            "2024-00-10",
+            "2024-04-31",
+            "0000-01-01",
         ],
     )
     def test_non_canonical_date_is_not_a_brief(self, date):
         event = {"date": date, "date_source": "sent", "actor": "a", "event": "e", "labels": []}
         assert _parse_brief(_brief(chronology=[event])) is None
 
-    @pytest.mark.parametrize("date", ["2024-02-01", None])
+    @pytest.mark.parametrize("date", ["2024-02-01", "2024-02-29", None])
     def test_canonical_or_null_date_is_a_brief(self, date):
         event = {"date": date, "date_source": "sent", "actor": "a", "event": "e", "labels": []}
         brief = _parse_brief(_brief(chronology=[event]))

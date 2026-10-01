@@ -739,9 +739,9 @@ true`.
 The reply is cut at 100,000 characters (an oversized reply is not
 parsed), unwrapped from a code fence, parsed with `json.loads`, and
 validated against the brief shape: every section must be present with
-the right types, and a chronology `date` must be `YYYY-MM-DD` (ASCII
-digits) or `null`, so a date such as `2024-2-01` fails the shape and
-gets the repair call. The server then sorts `chronology` oldest first by
+the right types, and a chronology `date` must be a real calendar date
+as `YYYY-MM-DD` (ASCII digits) or `null`, so a date such as `2024-2-01`
+or `2023-02-29` fails the shape and gets the repair call. The server then sorts `chronology` oldest first by
 `date` (a stable sort; undated entries go last in the model's order),
 whatever order the model used. Each entry's labels are then checked against the
 passages supplied: a label no passage has is `unknown_labels`, an entry

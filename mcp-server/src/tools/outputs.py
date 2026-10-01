@@ -21,11 +21,11 @@ responses bound lists and cut long values (``MAX_LISTED``,
 default; only get_message asks for full headers.
 """
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import Literal
 
 from mcp.types import CallToolResult, TextContent
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from ..lib.sqlite import MessageRecord, SourceFile, ThreadResult
 from ..lib.sqlite import Participant as ParticipantRecord
@@ -501,8 +501,9 @@ _LABELS_DESCRIPTION = "Evidence labels (E1, ...) the model cited for this entry.
 
 
 class BriefEvent(_Output):
-    # ASCII digits only: the chronology sorts on this string, so a
-    # non-canonical date fails validation and gets the repair call.
+    # ASCII digits only and a real calendar date: the chronology sorts
+    # on this string, so any other value fails validation and gets the
+    # repair call.
     date: str | None = Field(
         pattern=r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
         description="YYYY-MM-DD as the model gave it; null when undated.",
@@ -514,6 +515,16 @@ class BriefEvent(_Output):
     actor: str
     event: str
     labels: list[str] = Field(description=_LABELS_DESCRIPTION)
+
+    @field_validator("date")
+    @classmethod
+    def _calendar_date(cls, value: str | None) -> str | None:
+        """Reject a well-shaped impossible date such as 2023-02-29; the
+        pattern has already fixed the shape, so this parses ten ASCII
+        characters. The string is kept as given."""
+        if value is not None:
+            date.fromisoformat(value)
+        return value
 
 
 class BriefPosition(_Output):
