@@ -237,6 +237,9 @@ def register_search_tools(
         # mailing-list reply but never a sender) and leave the
         # search returning zero matches. Ranking by sender count
         # picks the right Smith for the "messages from Smith" intent.
+        # Senders are counted over the search's folder scope (``folders``,
+        # else the default Trash exclusion), so the lookup cannot pick a
+        # sender whose threads the search would then filter out.
         # When the lookup yields nothing, short-circuit with an
         # honest empty result rather than silently dropping the
         # filter and returning unrelated threads.
@@ -245,7 +248,7 @@ def register_search_tools(
             try:
                 with stage("contact_lookup"):
                     contacts = await asyncio.to_thread(
-                        db.find_contact, from_name, 1, senders_only=True
+                        db.find_contact, from_name, 1, senders_only=True, folders=folders
                     )
             except Exception as e:
                 # Local-DB work, but a conversion error can quote stored

@@ -532,9 +532,9 @@ class TestFromNameResolution:
         captured_kwargs: dict = {}
         original = seeded_db.find_contact
 
-        def spy(query, limit, *, senders_only=False):
+        def spy(query, limit, *, senders_only=False, folders=None):
             captured_kwargs["senders_only"] = senders_only
-            return original(query, limit, senders_only=senders_only)
+            return original(query, limit, senders_only=senders_only, folders=folders)
 
         seeded_db.find_contact = spy  # type: ignore[assignment]
         handler = _handler(fake_server, fake_embed, seeded_db)
@@ -544,7 +544,7 @@ class TestFromNameResolution:
     def test_from_name_lookup_error_surfaces_as_search_error(
         self, fake_server, fake_embed, seeded_db
     ):
-        def boom(_query, _limit, *, senders_only=False):
+        def boom(_query, _limit, *, senders_only=False, folders=None):
             raise RuntimeError("simulated find_contact failure")
 
         seeded_db.find_contact = boom  # type: ignore[assignment]

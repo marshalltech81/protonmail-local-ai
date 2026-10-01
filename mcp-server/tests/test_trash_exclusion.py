@@ -75,6 +75,57 @@ class TestSearchTools:
         out = asyncio.run(tools["search_attachments"](query="invoice"))
         assert [a["filename"] for a in out.structured_content["results"]] == ["invoice-t-kept.pdf"]
 
+    @staticmethod
+    def _two_jordans(tmp_path) -> Database:
+        """Two senders matching "Jordan": one with a thread in INBOX and
+        one who sent more threads, all in Trash."""
+        import sqlite3
+
+        import sqlite_vec
+
+        from tests.conftest import _build_schema, _insert_thread
+
+        db_path = tmp_path / "jordans.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.enable_load_extension(True)
+        sqlite_vec.load(conn)
+        conn.enable_load_extension(False)
+        _build_schema(conn)
+        for tid, sender, folder in (
+            ("t-vale", "Jordan Vale <vale@inbox.example>", "INBOX"),
+            ("t-reed-1", "Jordan Reed <reed@trash.example>", "Trash"),
+            ("t-reed-2", "Jordan Reed <reed@trash.example>", "Trash"),
+        ):
+            _insert_thread(
+                conn,
+                thread_id=tid,
+                subject=f"invoice {tid}",
+                participants=[sender, "lee@home.example"],
+                senders=[sender],
+                folder=folder,
+                body_text="the invoice for may",
+                embedding=[1.0, 0.0, 0.0, 0.0],
+            )
+        conn.close()
+        return Database(str(db_path))
+
+    def test_from_name_resolves_within_the_folder_scope(self, tmp_path):
+        """The sender is resolved among in-scope threads: a Trash-only
+        sender with more threads must not win the lookup and then be
+        filtered away by the default scope (review round 1 on #475)."""
+        tools = _tools(self._two_jordans(tmp_path))
+        out = asyncio.run(tools["search_emails"](query="invoice", from_name="Jordan"))
+        assert out.structured_content["resolved_from_addr"] == "vale@inbox.example"
+        assert [r["thread_id"] for r in out.structured_content["results"]] == ["t-vale"]
+        out = asyncio.run(
+            tools["search_emails"](query="invoice", from_name="Jordan", folders=["Trash"])
+        )
+        assert out.structured_content["resolved_from_addr"] == "reed@trash.example"
+        assert {r["thread_id"] for r in out.structured_content["results"]} == {
+            "t-reed-1",
+            "t-reed-2",
+        }
+
 
 class TestRetrievalTools:
     def test_query_messages(self, tmp_path):

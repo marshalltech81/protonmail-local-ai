@@ -873,7 +873,9 @@ def _thread_primaries(conn: sqlite3.Connection, thread_ids: list[str]) -> dict[s
     return primaries
 
 
-def _aggregate_senders(conn: sqlite3.Connection, needle: str, name_needle: str) -> dict[str, dict]:
+def _aggregate_senders(
+    conn: sqlite3.Connection, needle: str, name_needle: str, folders: list[str] | None = None
+) -> dict[str, dict]:
     """``find_contact(senders_only=True)``'s aggregation, on ``conn``.
 
     An address counts on a thread whose ``senders`` (each message's
@@ -887,6 +889,10 @@ def _aggregate_senders(conn: sqlite3.Connection, needle: str, name_needle: str) 
     Work follows the query, not the mailbox: candidate addresses come
     from the From rows the query matches, and only the threads those
     candidates appear on have their ``senders`` parsed.
+
+    ``folders`` keeps only threads with a message in one of them (the
+    ``folders`` filter's membership), so names and counts come from the
+    threads a search over that scope can return.
     """
     candidates = [
         row["address"]
@@ -901,14 +907,16 @@ def _aggregate_senders(conn: sqlite3.Connection, needle: str, name_needle: str) 
     ]
     if not candidates:
         return {}
+    where = ["p.role = 'from'", "p.address IN (SELECT value FROM json_each(?))"]
+    params: list = [json.dumps(candidates)]
+    if folders:
+        _append_folder_membership_sql(where, params, "m.thread_id", folders)
     rows = conn.execute(
-        """
-        SELECT DISTINCT p.address, p.name, m.thread_id
-        FROM message_participants p
-        JOIN messages m ON m.claimant_id = p.claimant_id
-        WHERE p.role = 'from' AND p.address IN (SELECT value FROM json_each(?))
-        """,
-        (json.dumps(candidates),),
+        "SELECT DISTINCT p.address, p.name, m.thread_id "
+        "FROM message_participants p "
+        "JOIN messages m ON m.claimant_id = p.claimant_id "
+        "WHERE " + " AND ".join(where),  # nosec B608
+        params,
     ).fetchall()
     primaries = _thread_primaries(conn, sorted({row["thread_id"] for row in rows}))
     by_email: dict[str, dict] = {}
@@ -1048,7 +1056,9 @@ class Database:
         with closing(self._connect()) as conn:
             return conn.execute(sql, params).fetchone()
 
-    def _default_folder_scope(self, folders: list[str] | None) -> list[str] | None:
+    def _default_folder_scope(
+        self, folders: list[str] | None, conn: sqlite3.Connection | None = None
+    ) -> list[str] | None:
         """The ``folders`` filter a mailbox-wide thread search applies.
 
         A caller's non-empty ``folders`` is kept as given, so naming a
@@ -1059,10 +1069,13 @@ class Database:
         keyword SQL, applied post-fusion, and counted as a filter that
         widens the vector windows (#286). A mailbox with no excluded
         mail gets ``None``, the unfiltered search exactly as before.
+        ``conn`` runs the folder lookup inside a caller's snapshot.
         """
         if folders:
             return folders
-        present = [r["folder"] for r in self._fetchall("SELECT DISTINCT folder FROM messages")]
+        sql = "SELECT DISTINCT folder FROM messages"
+        rows = conn.execute(sql).fetchall() if conn is not None else self._fetchall(sql)
+        present = [r["folder"] for r in rows]
         if not any(f in DEFAULT_EXCLUDED_FOLDERS for f in present):
             return None
         return [f for f in present if f not in DEFAULT_EXCLUDED_FOLDERS]
@@ -2874,7 +2887,12 @@ class Database:
         return [{"name": r["folder"], "thread_count": r["thread_count"]} for r in rows]
 
     def find_contact(
-        self, query: str, limit: int = 10, *, senders_only: bool = False
+        self,
+        query: str,
+        limit: int = 10,
+        *,
+        senders_only: bool = False,
+        folders: list[str] | None = None,
     ) -> list[dict]:
         """Resolve a name / address / domain fragment to indexed contacts.
 
@@ -2905,6 +2923,13 @@ class Database:
         is also used for general "find this person's email" lookups
         where recipient-only matches are still useful.
 
+        With ``senders_only``, only threads in the search scope count:
+        ``folders`` when given, else the default exclusion
+        (``_default_folder_scope``). Otherwise a sender whose threads
+        are all in Trash could win the lookup and then be filtered out
+        of the search it feeds (#441). ``folders`` is ignored without
+        ``senders_only``.
+
         Exists so callers (the LLM via the MCP tool) can map a
         display-name fragment (``"Jane Smith"``) to a canonical
         address (``"jsmith@example.com"``) before invoking
@@ -2924,7 +2949,10 @@ class Database:
             # snapshot even while the indexer commits.
             conn.execute("BEGIN")
             if senders_only:
-                by_email = _aggregate_senders(conn, needle, name_needle)
+                scope = self._default_folder_scope(folders, conn)
+                by_email = (
+                    {} if scope == [] else _aggregate_senders(conn, needle, name_needle, scope)
+                )
             else:
                 by_email = _aggregate_participants(conn, needle, name_needle)
             # Most-active contact first; tiebreak on email so the order is

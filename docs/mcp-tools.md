@@ -133,7 +133,9 @@ before.
   thread with one message in Trash and a reply in INBOX stays, and its
   Trash message's passages can still appear as evidence. Passing
   `folders` replaces the default, so `folders=["Trash"]` searches
-  Trash and `folders=["INBOX", "Trash"]` both.
+  Trash and `folders=["INBOX", "Trash"]` both. `search_emails`
+  resolves `from_name` over the same scope, so a sender whose mail is
+  all in Trash is not chosen for a default search.
 - Message tools leave out the messages filed in Trash: `query_messages`
   without `folder` (pass `folder="Trash"` to list them) and
   `search_attachments`, which has no folder filter.
