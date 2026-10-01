@@ -178,7 +178,10 @@ def _extract_ocr(
 
     Each run of consecutive pages is one Poppler call, so no page outside
     ``pages`` is rendered. The render timeout is one budget shared by
-    the runs, so the whole render stays bounded as when it was one call.
+    the runs, counting only time spent in Poppler, so the whole render
+    stays bounded as when it was one call; Tesseract time is bounded per
+    page by its own timeout. Each run is OCR'd before the next is
+    rendered, so at most one run's page images are held at once.
 
     Uses ``pdf2image`` (Poppler) for rendering and ``pytesseract`` for
     OCR. Both are imported lazily so a missing system dep surfaces here
@@ -210,8 +213,8 @@ def _extract_ocr(
             runs[-1].append(index)
         else:
             runs.append([index])
-    deadline = (
-        time.monotonic() + ocr_timeout_seconds
+    render_budget = (
+        float(ocr_timeout_seconds)
         if ocr_timeout_seconds is not None and ocr_timeout_seconds > 0
         else None
     )
@@ -235,15 +238,17 @@ def _extract_ocr(
                 "last_page": run[-1] + 1,
                 "output_folder": tmpdir,
             }
-            if deadline is not None:
+            if render_budget is not None:
                 # The same budget bounds the whole Poppler render, so a
                 # hung render cannot block the worker. (pdf2image does not
                 # pass it to its page-count ``pdfinfo`` call.)
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
+                if render_budget <= 0:
                     raise TimeoutError("PDF OCR render budget exhausted")
-                convert_kwargs["timeout"] = remaining
+                convert_kwargs["timeout"] = render_budget
+            started = time.monotonic()
             images = convert_from_bytes(payload, **convert_kwargs)  # type: ignore[arg-type]
+            if render_budget is not None:
+                render_budget -= time.monotonic() - started
             for index, image in zip(run, images, strict=False):
                 text = pytesseract.image_to_string(image, **tesseract_kwargs)
                 texts[index] = (text or "").strip()

@@ -1242,6 +1242,35 @@ class TestPdfPageLevelOcr:
             pdf._extract_ocr(payload, pages=[0, 2, 4], ocr_timeout_seconds=30)
         assert work["renders"] == [(1, 1), (3, 3)]
 
+    def test_ocr_time_does_not_count_against_the_render_budget(self, monkeypatch, tmp_path):
+        """Review round 1: the render deadline was wall-clock, so a slow
+        Tesseract page between two fast renders spent it and the next
+        render was refused. Only Poppler time counts."""
+        from src.extractors import pdf
+
+        work = self._fake_ocr(monkeypatch, tmp_path)
+        clock = {"now": 0.0}
+        real_convert = __import__("pdf2image").convert_from_bytes
+        real_tesseract = __import__("pytesseract").image_to_string
+
+        def fast_convert(payload, **kwargs):
+            clock["now"] += 1.0
+            return real_convert(payload, **kwargs)
+
+        def slow_tesseract(image, **kwargs):
+            clock["now"] += 50.0
+            return real_tesseract(image, **kwargs)
+
+        monkeypatch.setattr("pdf2image.convert_from_bytes", fast_convert)
+        monkeypatch.setattr("pytesseract.image_to_string", slow_tesseract)
+        monkeypatch.setattr(pdf.time, "monotonic", lambda: clock["now"])
+
+        texts = pdf._extract_ocr(self._pdf("sdsds"), pages=[0, 2, 4], ocr_timeout_seconds=45)
+        assert len(texts) == 3
+        assert work["renders"] == [(1, 1), (3, 3), (5, 5)]
+        assert work["ocr_calls"] == 3
+        assert work["timeouts"] == [45, 44, 43]
+
     def test_dpi_is_sized_from_the_pages_rendered(self, monkeypatch, tmp_path):
         """An oversized digital page that is never rendered must not lower
         the DPI of the scanned pages."""
