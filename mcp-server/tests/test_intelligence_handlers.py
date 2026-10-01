@@ -23,9 +23,8 @@ import asyncio
 import json
 
 import pytest
-from mcp.server.fastmcp import FastMCP
-from mcp.server.fastmcp.exceptions import ToolError
-from mcp.shared.memory import create_connected_server_and_client_session
+from fastmcp import Client, FastMCP
+from fastmcp.exceptions import ToolError
 from mcp.types import CallToolResult
 from src.lib.inference import InferenceTruncatedError
 from src.lib.security import ProviderResponseError
@@ -791,14 +790,14 @@ _MARKER = "synthetic-mail-marker-7f3a"
 
 
 def _wire_call(db, inference, name: str, args: dict, embed=None) -> CallToolResult:
-    """Call ``name`` through a real MCP ClientSession over the SDK's
-    in-memory transport, so the result is what a client receives."""
+    """Call ``name`` through FastMCP's in-memory client, so the result is
+    the raw MCP result a client receives."""
     server = FastMCP("intelligence-wire-test")
     register_intelligence_tools(server, db, embed or FakeEmbedClient(), inference)
 
     async def run() -> CallToolResult:
-        async with create_connected_server_and_client_session(server) as client:
-            return await client.call_tool(name, args)
+        async with Client(server) as client:
+            return await client.call_tool_mcp(name, args)
 
     return asyncio.run(run())
 
@@ -820,7 +819,7 @@ class TestFailuresAreErrorResults:
             complete_responses=[ProviderResponseError("synthetic provider failure")]
         )
         result = _wire_call(seeded_db, llm, tool, _TOOL_ARGS[tool])
-        assert result.isError
+        assert result.is_error
         assert "synthetic provider failure" in result.content[0].text
 
     @pytest.mark.parametrize("tool", sorted(_TOOL_ARGS))
@@ -831,18 +830,18 @@ class TestFailuresAreErrorResults:
         seeded_db.hybrid_search = boom  # type: ignore[assignment]
         seeded_db.get_thread = boom  # type: ignore[assignment]
         result = _wire_call(seeded_db, FakeInferenceClient(), tool, _TOOL_ARGS[tool])
-        assert result.isError
+        assert result.is_error
 
     def test_truncated_answer_with_no_text_is_an_error_result(self, seeded_db):
         llm = FakeInferenceClient(complete_responses=[InferenceTruncatedError(partial="")])
         result = _wire_call(seeded_db, llm, "summarize_thread", {"thread_id": "t-alpha"})
-        assert result.isError
+        assert result.is_error
 
     @pytest.mark.parametrize("thread_id", ["zzznosuchsubject", "t-missing"])
     def test_unknown_thread_is_an_error_result(self, seeded_db, thread_id):
         llm = FakeInferenceClient()
         result = _wire_call(seeded_db, llm, "summarize_thread", {"thread_id": thread_id})
-        assert result.isError
+        assert result.is_error
         assert "Thread not found" in result.content[0].text
         assert llm.complete_calls == []
 
@@ -850,7 +849,7 @@ class TestFailuresAreErrorResults:
         result = _wire_call(
             empty_db, FakeInferenceClient(), "summarize_thread", {"thread_id": "anything"}
         )
-        assert result.isError
+        assert result.is_error
         assert "Thread not found" in result.content[0].text
 
     def test_resolved_thread_that_vanishes_is_an_error_result(self, seeded_db):
@@ -867,14 +866,14 @@ class TestFailuresAreErrorResults:
         result = _wire_call(
             seeded_db, FakeInferenceClient(), "summarize_thread", {"thread_id": "invoice"}
         )
-        assert result.isError
+        assert result.is_error
         assert "Thread not found" in result.content[0].text
 
     @pytest.mark.parametrize("tool", ["ask_mailbox", "extract_from_emails"])
     def test_invalid_filter_is_an_error_result(self, seeded_db, tool):
         args = {**_TOOL_ARGS[tool], "date_from": "not-a-date"}
         result = _wire_call(seeded_db, FakeInferenceClient(), tool, args)
-        assert result.isError
+        assert result.is_error
         assert "date_from" in result.content[0].text
 
     @pytest.mark.parametrize("tool", ["ask_mailbox", "extract_from_emails"])
@@ -896,7 +895,7 @@ class TestFailuresAreErrorResults:
         )
         with caplog.at_level(logging.DEBUG):
             result = _wire_call(seeded_db, llm, tool, _TOOL_ARGS[tool])
-        assert result.isError
+        assert result.is_error
         text = result.content[0].text
         assert "status=502" in text
         assert _MARKER not in text
@@ -905,8 +904,8 @@ class TestFailuresAreErrorResults:
     def test_answers_and_empty_matches_stay_successful(self, seeded_db):
         for tool, args in _TOOL_ARGS.items():
             llm = FakeInferenceClient(response='{"vendor": "Acme"}')
-            assert not _wire_call(seeded_db, llm, tool, args).isError
+            assert not _wire_call(seeded_db, llm, tool, args).is_error
         seeded_db.hybrid_search = lambda **_kw: []  # type: ignore[assignment]
         for tool in ("ask_mailbox", "extract_from_emails"):
             result = _wire_call(seeded_db, FakeInferenceClient(), tool, _TOOL_ARGS[tool])
-            assert not result.isError
+            assert not result.is_error

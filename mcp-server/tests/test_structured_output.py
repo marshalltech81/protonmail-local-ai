@@ -5,10 +5,10 @@ status tools (PLAN.md Phase 1 item 2).
 The handler tests drive tool functions through ``FakeMCPServer``, which
 skips FastMCP entirely — so nothing there proves a tool publishes an
 ``outputSchema`` or that what it returns satisfies it. These tests go
-through a real ``FastMCP`` instance: ``list_tools`` for the published
-schemas and ``call_tool`` for results, then validate each
-``structuredContent`` against its tool's schema with jsonschema, the same
-check the MCP low-level server applies before a result is sent.
+through a real ``FastMCP`` instance and its in-memory client:
+``list_tools`` for the published schemas and ``call_tool_mcp`` for the
+results a client receives, then validate each ``structuredContent``
+against its tool's schema with jsonschema.
 """
 
 import asyncio
@@ -16,9 +16,8 @@ import json
 
 import jsonschema
 import pytest
-from mcp.server.fastmcp import FastMCP
-from mcp.server.fastmcp.exceptions import ToolError
-from mcp.types import CallToolResult
+from fastmcp import Client, FastMCP
+from mcp.types import CallToolResult, Tool
 from src.tools.retrieval import register_retrieval_tools
 from src.tools.search import register_search_tools
 from src.tools.system import register_system_tools
@@ -58,23 +57,43 @@ def _server(db) -> FastMCP:
     return server
 
 
+def _tools(server: FastMCP) -> dict[str, Tool]:
+    """The tools a client lists, keyed by name."""
+
+    async def run() -> list[Tool]:
+        async with Client(server) as client:
+            return await client.list_tools()
+
+    return {t.name: t for t in asyncio.run(run())}
+
+
+def _wire(server: FastMCP, name: str, args: dict) -> CallToolResult:
+    """Call ``name`` through FastMCP's in-memory client and return the
+    raw MCP result a client receives."""
+
+    async def run() -> CallToolResult:
+        async with Client(server) as client:
+            return await client.call_tool_mcp(name, args)
+
+    return asyncio.run(run())
+
+
 def _call(server: FastMCP, name: str, **args) -> dict:
     """Call ``name`` through FastMCP and return its validated structured
     content. The prose ``content`` must still be present alongside it."""
-    schemas = {t.name: t.outputSchema for t in asyncio.run(server.list_tools())}
-    result = asyncio.run(server.call_tool(name, args))
-    assert isinstance(result, CallToolResult)
-    assert not result.isError
+    schemas = {n: t.output_schema for n, t in _tools(server).items()}
+    result = _wire(server, name, args)
+    assert not result.is_error
     assert result.content and result.content[0].text.strip()
-    assert result.structuredContent is not None
-    jsonschema.validate(result.structuredContent, schemas[name])
-    return result.structuredContent
+    assert result.structured_content is not None
+    jsonschema.validate(result.structured_content, schemas[name])
+    return result.structured_content
 
 
 def test_every_listed_tool_publishes_a_typed_output_schema(messages_db):
-    tools = {t.name: t for t in asyncio.run(_server(messages_db).list_tools())}
+    tools = _tools(_server(messages_db))
     for name, key in STRUCTURED_TOOLS.items():
-        schema = tools[name].outputSchema
+        schema = tools[name].output_schema
         assert schema is not None, name
         assert key in schema["properties"], name
         assert "result" not in schema["properties"], name
@@ -208,8 +227,10 @@ def test_failures_are_error_results(messages_db, name, args, text):
     """A failure is raised, so the client receives ``isError: true`` —
     never a success result whose structured content an agent would
     trust."""
-    with pytest.raises(ToolError, match=text):
-        asyncio.run(_server(messages_db).call_tool(name, args))
+    result = _wire(_server(messages_db), name, args)
+    assert result.is_error
+    assert result.structured_content is None
+    assert text in result.content[0].text
 
 
 def test_sender_controlled_headers_stay_bounded(tmp_path):
@@ -272,13 +293,13 @@ def test_query_messages_cuts_each_long_header_value(tmp_path):
         )
         conn.close()
         server = _server(db)
-        result = asyncio.run(server.call_tool("query_messages", {"limit": 1}))
+        result = _wire(server, "query_messages", {"limit": 1})
         full = _call(server, "get_message", message_id="a")
 
     assert isinstance(result, CallToolResult)
     assert len(result.content[0].text) < 3000
-    assert len(json.dumps(result.structuredContent)) < 5000
-    m = result.structuredContent["messages"][0]
+    assert len(json.dumps(result.structured_content)) < 5000
+    m = result.structured_content["messages"][0]
     for value in (m["subject"], m["in_reply_to"], m["references"][0], m["from"][0]["name"]):
         assert value.endswith("[99,500 more characters]")
     assert m["from"][0]["address"] == "jane@example.com"
@@ -374,7 +395,7 @@ class TestSourceProvenance:
         assert [m["source_file"] for m in page["messages"]] == [_expected_source("m3", "Archive")]
 
     def test_get_message_prose_names_the_source(self, messages_db):
-        result = asyncio.run(_server(messages_db).call_tool("get_message", {"message_id": "m3"}))
+        result = _wire(_server(messages_db), "get_message", {"message_id": "m3"})
         assert isinstance(result, CallToolResult)
         text = result.content[0].text
         assert "/maildir/Archive/cur/m3" in text

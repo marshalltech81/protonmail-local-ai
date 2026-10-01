@@ -22,7 +22,7 @@ from contextlib import contextmanager
 
 import pytest
 import sqlite_vec
-from mcp.server.fastmcp.exceptions import ToolError
+from fastmcp.exceptions import ToolError
 from src.lib.sqlite import Database
 from src.tools.retrieval import register_retrieval_tools
 

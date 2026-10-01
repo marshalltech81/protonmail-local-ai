@@ -21,6 +21,7 @@ import threading
 import pytest
 from src.main import (
     _INFERENCE_MODES,
+    _build_app,
     _float_env,
     _normalize_mode,
     _normalize_transport,
@@ -92,128 +93,89 @@ class TestMcpTransport:
         with pytest.raises(ValueError, match="MCP_TRANSPORT"):
             _normalize_transport("websocket")
 
-    def test_sse_and_streamable_delegate_to_fastmcp_run(self):
-        class FakeServer:
-            def __init__(self):
-                self.transports = []
+    @pytest.mark.parametrize("transport", ["sse", "streamable-http", "dual"])
+    def test_run_server_serves_the_built_app_with_uvicorn(self, monkeypatch, transport):
+        """``FastMCP.run`` is bypassed (it prints a banner and checks PyPI
+        for updates); uvicorn serves ``_build_app``'s app on 0.0.0.0 at
+        ``MCP_PORT``."""
+        import src.main as main_mod
 
-            def run(self, transport):
-                self.transports.append(transport)
-
-        fake = FakeServer()
-        _run_server(fake, "sse")
-        _run_server(fake, "streamable-http")
-        assert fake.transports == ["sse", "streamable-http"]
-
-    def test_dual_transport_dispatches_paths_correctly(self):
-        """Verifies that the in-process ASGI app routes ``/mcp`` and
-        sub-paths to the streamable HTTP app, and ``/sse``, ``/messages/``,
-        ``/health``, and ``/mcp-debug`` (a name that *starts with* ``/mcp``
-        but is not ``/mcp`` or a sub-path) to the SSE app. Pre-fix this
-        last case incorrectly went to the streamable HTTP app.
-        """
-        import asyncio
-
-        # Lazy capture of the ``app`` closure that
-        # ``_run_dual_transport_async`` builds. We never actually call
-        # uvicorn — we replace the server with a stub and capture the
-        # ``app`` argument for direct invocation.
         captured: dict = {}
 
         class _StubUvicorn:
             class Config:
-                def __init__(self, app, **_):
+                def __init__(self, app, **kwargs):
                     captured["app"] = app
+                    captured.update(kwargs)
 
             class Server:
-                def __init__(self, _config):
+                def __init__(self, config):
                     pass
 
-                async def serve(self):  # pragma: no cover — never reached
-                    return None
+                def run(self):
+                    captured["ran"] = True
 
-        # FastMCP-shaped fake exposing only what
-        # ``_run_dual_transport_async`` reads: an ``settings`` object with
-        # ``debug``, ``log_level``, ``host``, ``port``, ``streamable_http_path``;
-        # plus ``sse_app`` / ``streamable_http_app`` factories returning
-        # tagged async-callable shims.
-        class _SettingsStub:
-            debug = False
-            log_level = "INFO"
-            host = "127.0.0.1"
-            port = 0
-            streamable_http_path = "/mcp"
+        class _Server:
+            def run(self, *_args, **_kwargs):  # pragma: no cover — must not be called
+                raise AssertionError("FastMCP.run must not be used")
+
+        app = object()
+        monkeypatch.setattr(main_mod, "uvicorn", _StubUvicorn)
+        monkeypatch.setattr(
+            main_mod, "_build_app", lambda server, t: app if t == transport else None
+        )
+        monkeypatch.setattr(main_mod, "MCP_PORT", 3000)
+        _run_server(_Server(), transport)  # type: ignore[arg-type]
+        assert captured == {
+            "app": app,
+            "host": "0.0.0.0",  # nosec B104
+            "port": 3000,
+            "log_level": "info",
+            "ran": True,
+        }
+
+    def test_dual_transport_dispatches_paths_correctly(self):
+        """Verifies that the dual ASGI app routes ``/mcp`` and sub-paths to
+        the streamable HTTP app, and ``/sse``, ``/messages/``, ``/health``,
+        and ``/mcp-debug`` (a name that *starts with* ``/mcp`` but is not
+        ``/mcp`` or a sub-path) to the SSE app.
+        """
 
         class _AppShim:
-            def __init__(self, tag):
-                self.tag = tag
+            def __init__(self):
                 self.calls: list[str] = []
-
-                class _Router:
-                    @staticmethod
-                    def lifespan_context(_app):
-                        from contextlib import asynccontextmanager
-
-                        @asynccontextmanager
-                        async def _ctx():
-                            yield
-
-                        return _ctx()
-
-                self.router = _Router()
 
             async def __call__(self, scope, receive, send):
                 self.calls.append(scope["path"])
 
-        sse = _AppShim("sse")
-        http = _AppShim("http")
+        sse = _AppShim()
+        http = _AppShim()
 
         class _ServerStub:
-            settings = _SettingsStub()
+            """Only what ``_build_dual_app`` reads: ``http_app``."""
 
-            def sse_app(self):
-                return sse
+            def http_app(self, *, path, transport, middleware):
+                assert middleware
+                return {"sse": sse, "streamable-http": http}[transport]
 
-            def streamable_http_app(self):
-                return http
-
-        import src.main as main_mod
-
-        original_uvicorn = main_mod.uvicorn
-        main_mod.uvicorn = _StubUvicorn  # type: ignore[assignment]
-        try:
-            asyncio.run(self._capture_app(_ServerStub()))
-        except SystemExit:
-            pass
-        finally:
-            main_mod.uvicorn = original_uvicorn
-
-        # Drive the captured ASGI app for each path of interest.
-        app = captured["app"]
+        app = _build_app(_ServerStub(), "dual")  # type: ignore[arg-type]
 
         async def _dispatch(path):
             await app({"type": "http", "path": path}, lambda: None, lambda *_: None)
 
-        asyncio.run(_dispatch("/mcp"))
-        asyncio.run(_dispatch("/mcp/messages/abc"))
-        asyncio.run(_dispatch("/sse"))
-        asyncio.run(_dispatch("/messages/x"))
-        asyncio.run(_dispatch("/health"))
-        # ``/mcp-debug`` and ``/mcpfoo`` start with ``/mcp`` textually but
-        # are not the streamable path nor sub-paths under it. Pre-fix
-        # they incorrectly routed to the streamable HTTP app.
-        asyncio.run(_dispatch("/mcp-debug"))
-        asyncio.run(_dispatch("/mcpfoo"))
+        for path in (
+            "/mcp",
+            "/mcp/messages/abc",
+            "/sse",
+            "/messages/x",
+            "/health",
+            "/mcp-debug",
+            "/mcpfoo",
+        ):
+            asyncio.run(_dispatch(path))
 
         assert http.calls == ["/mcp", "/mcp/messages/abc"]
         assert sse.calls == ["/sse", "/messages/x", "/health", "/mcp-debug", "/mcpfoo"]
-
-    async def _capture_app(self, server_stub):
-        from src.main import _run_dual_transport_async
-
-        # The stubbed uvicorn raises SystemExit-equivalent so serve()
-        # never actually starts a listener — just enough to capture.
-        await _run_dual_transport_async(server_stub)
 
 
 class TestFloatEnv:
@@ -515,18 +477,11 @@ class TestHealthEndpoint:
 class TestSilenceClientDisconnect:
     """The log filter that drops ``ClientDisconnect`` traceback noise.
 
-    The MCP SDK surfaces the same disconnect event in two shapes:
-
-    1. ``mcp.server.streamable_http`` logs ``"Error handling POST
-       request"`` with the ``ClientDisconnect`` traceback in
-       ``exc_info``. Filter by exception class.
-    2. ``mcp.server.lowlevel.server`` logs ``"Received exception from
-       stream: "`` with NO ``exc_info`` (the SDK catches the
-       exception upstream and writes the formatted repr into the
-       message). Filter by literal message prefix.
-
-    Records that don't match either shape must propagate unchanged so
-    a real bug still surfaces normally.
+    ``mcp.server.streamable_http`` logs ``"Error handling POST
+    request"`` with the ``ClientDisconnect`` traceback in ``exc_info``.
+    Filter by exception class; records with any other exception, or
+    none, must propagate unchanged so a real bug still surfaces
+    normally.
     """
 
     @staticmethod
@@ -558,56 +513,6 @@ class TestSilenceClientDisconnect:
         record = self._record(exc_info=(type(exc), exc, exc.__traceback__))
         assert _SilenceClientDisconnect().filter(record) is False
 
-    def test_drops_record_with_received_exception_from_stream_message(self):
-        # The lowlevel.server logger path: bare error log with the
-        # specific prefix, no exc_info attached. Without this branch
-        # the filter only caught half the disconnect events and
-        # operators saw bursts of these records during Streamable
-        # HTTP client session churn.
-        from src.main import _SilenceClientDisconnect
-
-        record = self._record(
-            msg="Received exception from stream: ",
-            name="mcp.server.lowlevel.server",
-        )
-        assert _SilenceClientDisconnect().filter(record) is False
-
-    def test_drops_received_exception_from_stream_with_clientdisconnect_repr(self):
-        # The SDK sometimes formats the caught exception into the
-        # message itself (so the log line carries the repr after the
-        # prefix). Match by trailing-text content so the filter
-        # still drops the explicit ClientDisconnect form, but does
-        # NOT also silence other exception classes (see next test).
-        from src.main import _SilenceClientDisconnect
-
-        record = self._record(
-            msg="Received exception from stream: ClientDisconnect()",
-            name="mcp.server.lowlevel.server",
-        )
-        assert _SilenceClientDisconnect().filter(record) is False
-
-    def test_lets_through_received_exception_from_stream_with_other_exception(self):
-        # Codex round-3 P2: the SDK uses the same prefix for ANY
-        # exception caught off the stream, so an unconditional
-        # prefix match would also hide RuntimeError("boom") and
-        # other genuine bugs. The filter must propagate those.
-        from src.main import _SilenceClientDisconnect
-
-        record = self._record(
-            msg="Received exception from stream: RuntimeError('boom')",
-            name="mcp.server.lowlevel.server",
-        )
-        assert _SilenceClientDisconnect().filter(record) is True
-
-    def test_lets_through_received_exception_from_stream_with_value_error(self):
-        from src.main import _SilenceClientDisconnect
-
-        record = self._record(
-            msg="Received exception from stream: ValueError: bad input",
-            name="mcp.server.lowlevel.server",
-        )
-        assert _SilenceClientDisconnect().filter(record) is True
-
     def test_lets_through_record_with_other_exception(self):
         from src.main import _SilenceClientDisconnect
 
@@ -616,18 +521,9 @@ class TestSilenceClientDisconnect:
         assert _SilenceClientDisconnect().filter(record) is True
 
     def test_lets_through_record_with_no_exc_info_and_other_message(self):
-        # No exc_info AND not the suppressed message prefix — ordinary
-        # log record on the same logger, must propagate.
+        # No exc_info — ordinary log record on the same logger, must
+        # propagate.
         from src.main import _SilenceClientDisconnect
 
         record = self._record(msg="Some other event the SDK might log")
-        assert _SilenceClientDisconnect().filter(record) is True
-
-    def test_lets_through_unrelated_message_starting_with_received(self):
-        # Guard against the message-prefix matcher being too greedy.
-        # A future SDK log like "Received request from peer X" must
-        # not be silenced by accident.
-        from src.main import _SilenceClientDisconnect
-
-        record = self._record(msg="Received request from peer 1.2.3.4")
         assert _SilenceClientDisconnect().filter(record) is True

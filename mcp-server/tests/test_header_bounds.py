@@ -96,7 +96,7 @@ def huge_db(tmp_path):
 def _size(result) -> int:
     """Characters in a ``CallToolResult``'s prose plus its structured output."""
     prose = sum(len(c.text) for c in result.content)
-    return prose + len(json.dumps(result.structuredContent))
+    return prose + len(json.dumps(result.structured_content))
 
 
 class TestToolResponses:
@@ -104,38 +104,38 @@ class TestToolResponses:
         register_search_tools(fake_server, huge_db, FakeEmbedClient())
         for mode in ("keyword", "hybrid"):
             out = asyncio.run(fake_server.tools["search_emails"](query="invoice", mode=mode))
-            assert out.structuredContent["results"], mode
+            assert out.structured_content["results"], mode
             assert _size(out) < MAX_RESULT_CHARS, mode
 
     def test_get_evidence_by_thread(self, fake_server, huge_db):
         register_search_tools(fake_server, huge_db, FakeEmbedClient())
         out = asyncio.run(fake_server.tools["get_evidence"](query="invoice", thread_id="t"))
-        assert out.structuredContent["chunk_count"] == 2
+        assert out.structured_content["chunk_count"] == 2
         assert _size(out) < MAX_RESULT_CHARS
 
     def test_get_evidence_by_search(self, fake_server, huge_db):
         register_search_tools(fake_server, huge_db, FakeEmbedClient())
         out = asyncio.run(fake_server.tools["get_evidence"](query="invoice"))
-        assert out.structuredContent["chunk_count"] == 2
+        assert out.structured_content["chunk_count"] == 2
         assert _size(out) < MAX_RESULT_CHARS
 
     def test_search_attachments(self, fake_server, huge_db):
         register_search_tools(fake_server, huge_db, FakeEmbedClient())
         out = asyncio.run(fake_server.tools["search_attachments"](query="invoice"))
-        assert out.structuredContent["results"]
+        assert out.structured_content["results"]
         assert _size(out) < MAX_RESULT_CHARS
 
     def test_list_threads(self, fake_server, huge_db):
         register_retrieval_tools(fake_server, huge_db)
         out = asyncio.run(fake_server.tools["list_threads"](limit=1))
-        assert out.structuredContent["threads"]
+        assert out.structured_content["threads"]
         assert _size(out) < MAX_RESULT_CHARS
 
     def test_ids_stay_whole(self, fake_server, huge_db):
         # Cutting applies to header text only; IDs chain to the next call.
         register_search_tools(fake_server, huge_db, FakeEmbedClient())
         out = asyncio.run(fake_server.tools["search_attachments"](query="invoice"))
-        hit = out.structuredContent["results"][0]
+        hit = out.structured_content["results"][0]
         assert (hit["attachment_id"], hit["message_id"], hit["thread_id"]) == ("a", "m", "t")
 
 

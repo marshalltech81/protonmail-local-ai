@@ -71,7 +71,12 @@ inference (operator-supplied)
         │  reads sqlite-volume (connection opened read-only)
         ▼
 mcp-server container
-  - Exposes MCP tools via HTTP/SSE on port 3000
+  - Exposes MCP tools via HTTP/SSE on port 3000, built on the
+    standalone `fastmcp` package
+  - Rejects any HTTP request whose Host is not localhost, 127.0.0.1,
+    [::1] or mcp-server (any port) with 421, and a browser Origin
+    outside the same names over http with 403, before it reaches a
+    transport (DNS-rebinding defense)
   - Serves GET /health for the container healthcheck (200 when the
     read-only SQLite connection answers, 503 otherwise)
   - Hybrid search: three FTS5 lanes + two vector lanes → RRF merge
@@ -906,7 +911,8 @@ both be set deliberately if "fully local conversations" is a goal.
 The MCP server defaults to SSE for existing Claude Desktop compatibility.
 Set `MCP_TRANSPORT=streamable-http` for clients that only speak Streamable
 HTTP, or `MCP_TRANSPORT=dual` to serve both `/sse` and `/mcp` on the same
-localhost-bound port.
+localhost-bound port. Every transport, and `/health`, sits behind the same
+Host/Origin allowlist.
 
 ## Inference Mode Toggle
 
