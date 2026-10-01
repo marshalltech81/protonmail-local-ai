@@ -36,10 +36,12 @@ This is a full re-authentication: finish with the remaining steps in
 [Bridge credentials expired / need to re-authenticate](#bridge-credentials-expired--need-to-re-authenticate),
 including the mbsync cert pin rotation.
 
-## Bridge starts but shows "No Proton account found" every time
+## Bridge drops to the interactive CLI on every `make up`
 
-The account detection looks for `vault.enc` in the bridge-data volume.
-If it keeps dropping to the interactive CLI, the volume may not be persisting correctly:
+`make first-run` always opens the interactive CLI. Under `make up`, the
+entrypoint starts Bridge noninteractively when the bridge-data volume holds
+`vault.enc`, and opens the CLI otherwise. If `make up` keeps dropping to the
+interactive CLI, the volume may not be persisting correctly:
 
 ```bash
 docker volume inspect protonmail-local-ai_bridge-data

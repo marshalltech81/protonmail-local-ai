@@ -36,76 +36,94 @@ bridge_fingerprint() {
         | awk -F: '/^fpr/{print $10; exit}'
 }
 
-# =============================================================================
-# Bootstrap GPG and pass on first run
-# Only runs once and persists in the bridge-data volume.
-# The empty GPG passphrase is intentional: Bridge must restart unattended, so
-# the design relies on Docker volume isolation, restrictive permissions, and
-# host-level disk encryption rather than an interactive key-unlock step.
-# =============================================================================
-if ! have_bridge_key; then
-    echo ">>> First run: initializing GPG key and pass store..."
-
-    run_with_timeout \
-        "GPG key generation" \
-        gpg --batch --passphrase '' --quick-gen-key \
-        "ProtonBridge" default default never
-
-    FPR="$(bridge_fingerprint)"
-    [[ -n "$FPR" ]] \
-        || { echo "ERROR: Failed to extract GPG fingerprint after key creation." >&2; exit 1; }
-
-    run_with_timeout "pass store initialization" pass init "$FPR"
-
-    echo ">>> GPG + pass initialized (fingerprint: $FPR)"
-fi
-
-if [[ ! -f "$PASS_STORE_ID_FILE" ]]; then
-    echo ">>> Pass store metadata missing. Re-initializing pass store..."
-    FPR="$(bridge_fingerprint)"
-    [[ -n "$FPR" ]] \
-        || { echo "ERROR: Failed to extract GPG fingerprint for pass store repair." >&2; exit 1; }
-    run_with_timeout "pass store initialization" pass init "$FPR"
-fi
-
-# =============================================================================
-# Detect whether a Proton account is already authenticated
-# =============================================================================
-LOGGED_IN=false
-if [[ -f "$VAULT" ]]; then
-    if have_bridge_key; then
-        LOGGED_IN=true
-    else
-        echo "ERROR: vault.enc exists but GPG key 'ProtonBridge' is missing." >&2
-        echo "       The vault cannot be decrypted. Remove the bridge-data volume and run: make first-run" >&2
+main() {
+    # make first-run sets BRIDGE_FORCE_CLI=true (docker-compose.first-run.yml).
+    # Bridge writes vault.enc at startup, before any login, so a vault does
+    # not show that an account is logged in: a retried, unfinished first run
+    # must still get the CLI. Checked before anything touches the volume.
+    local force_cli="${BRIDGE_FORCE_CLI:-false}"
+    if [[ "$force_cli" != "true" && "$force_cli" != "false" ]]; then
+        echo "ERROR: BRIDGE_FORCE_CLI must be 'true' or 'false'." >&2
         exit 1
     fi
-fi
 
-# =============================================================================
-# Launch
-# =============================================================================
-if [ "$LOGGED_IN" = false ]; then
+    # =========================================================================
+    # Bootstrap GPG and pass on first run
+    # Only runs once and persists in the bridge-data volume.
+    # The empty GPG passphrase is intentional: Bridge must restart unattended,
+    # so the design relies on Docker volume isolation, restrictive
+    # permissions, and host-level disk encryption rather than an interactive
+    # key-unlock step.
+    # =========================================================================
+    if ! have_bridge_key; then
+        echo ">>> First run: initializing GPG key and pass store..."
+
+        run_with_timeout \
+            "GPG key generation" \
+            gpg --batch --passphrase '' --quick-gen-key \
+            "ProtonBridge" default default never
+
+        FPR="$(bridge_fingerprint)"
+        [[ -n "$FPR" ]] \
+            || { echo "ERROR: Failed to extract GPG fingerprint after key creation." >&2; exit 1; }
+
+        run_with_timeout "pass store initialization" pass init "$FPR"
+
+        echo ">>> GPG + pass initialized (fingerprint: $FPR)"
+    fi
+
+    if [[ ! -f "$PASS_STORE_ID_FILE" ]]; then
+        echo ">>> Pass store metadata missing. Re-initializing pass store..."
+        FPR="$(bridge_fingerprint)"
+        [[ -n "$FPR" ]] \
+            || { echo "ERROR: Failed to extract GPG fingerprint for pass store repair." >&2; exit 1; }
+        run_with_timeout "pass store initialization" pass init "$FPR"
+    fi
+
+    # =========================================================================
+    # Detect whether Bridge has a vault. A vault is not proof of a logged-in
+    # account: Bridge creates it before any login.
+    # =========================================================================
+    local have_vault=false
+    if [[ -f "$VAULT" ]]; then
+        if have_bridge_key; then
+            have_vault=true
+        else
+            echo "ERROR: vault.enc exists but GPG key 'ProtonBridge' is missing." >&2
+            echo "       The vault cannot be decrypted. Remove the bridge-data volume and run: make first-run" >&2
+            exit 1
+        fi
+    fi
+
+    # =========================================================================
+    # Launch
+    # =========================================================================
+    if [[ "$have_vault" == true && "$force_cli" == false ]]; then
+        echo ">>> Vault found. Starting Bridge as user '$(whoami)'..."
+
+        # exec replaces this shell with the bridge process — Docker tracks
+        # bridge directly and SIGTERM from docker stop reaches it without a
+        # wrapper.
+        exec bridge --noninteractive
+    fi
+
     cat <<'EOF'
 
 ┌──────────────────────────────────────────────────────────────┐
-│  No Proton account found. Dropping to Bridge interactive CLI │
+│  Bridge interactive CLI                                      │
 │                                                              │
 │  Steps:                                                      │
 │    login    → enter your Proton email, password, and 2FA     │
+│               (skip if `info` already lists your account)    │
 │    info     → copy bridge username + password into secrets   │
 │    exit                                                      │
 │                                                              │
-│  Then: docker compose up -d                                  │
+│  Then: make up                                               │
 └──────────────────────────────────────────────────────────────┘
 
 EOF
 
     exec bridge --cli
-else
-    echo ">>> Account found. Starting Bridge as user '$(whoami)'..."
+}
 
-    # exec replaces this shell with the bridge process — Docker tracks bridge
-    # directly and SIGTERM from docker stop reaches it without a wrapper.
-    exec bridge --noninteractive
-fi
+main

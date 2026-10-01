@@ -69,8 +69,9 @@ Subsequent builds use Docker layer cache and are much faster.
 
 ### 4. First-time Bridge login
 
-This step only ever runs once. Your credentials persist in the `bridge-data`
-Docker volume.
+Your credentials persist in the `bridge-data` Docker volume, so this step
+normally runs once. `make first-run` always opens the interactive CLI, so if
+a login is interrupted, run it again and finish the `login` step.
 
 ```bash
 make first-run
