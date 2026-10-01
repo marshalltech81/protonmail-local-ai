@@ -15,7 +15,6 @@ import pytest
 from src.attachment_indexing import attachment_occurrence_id
 from src.database import (
     EMBEDDING_DIM,  # noqa: F401  -- via reuse
-    SCHEMA_BASELINE_VERSION,
     SCHEMA_VERSION,
     Database,
 )
@@ -110,22 +109,27 @@ class TestSchema:
         second = Database(db_path)  # second open must not raise
         second.close()
 
-    def test_opening_pre_baseline_database_fails_with_rebuild_instructions(self, tmp_path):
-        """Migration history before ``SCHEMA_BASELINE_VERSION`` was
-        squashed into ``_apply_initial_schema``, so an older database
-        cannot be upgraded. It must fail closed with the recovery step,
-        not a generic runner error."""
-        db_path = tmp_path / "ancient.db"
+    def test_fresh_install_is_stamped_version_zero(self, db):
+        """The initial schema is version 0; the first migration will be
+        ``0001``."""
+        assert SCHEMA_VERSION == 0
+        assert db._conn.execute("SELECT version FROM schema_version").fetchone()[0] == 0
+
+    def test_database_from_the_old_numbering_fails_with_rebuild_instructions(self, tmp_path):
+        """Before the renumber the baseline was v21 and the latest v22.
+        Such a database now reads as newer than the code and must fail
+        closed with the volume-wipe step."""
+        db_path = tmp_path / "v22.db"
         Database(db_path).close()
         import sqlite3
 
         conn = sqlite3.connect(str(db_path))
         try:
-            conn.execute("UPDATE schema_version SET version = ?", (SCHEMA_BASELINE_VERSION - 1,))
+            conn.execute("UPDATE schema_version SET version = 22")
             conn.commit()
         finally:
             conn.close()
-        with pytest.raises(RuntimeError, match="Wipe the sqlite-volume"):
+        with pytest.raises(RuntimeError, match="wipe the sqlite-volume"):
             Database(db_path)
 
     def test_opening_with_higher_stored_version_raises_downgrade_error(self, tmp_path):
@@ -2644,26 +2648,6 @@ class TestMessageMapLookupIndexes:
 
     def test_fresh_install_creates_the_indexes(self, db):
         assert _message_map_indexes(db._conn) >= MESSAGE_MAP_INDEXES
-
-    def test_v21_database_migrates_to_add_the_indexes(self, tmp_path):
-        db_path = tmp_path / "v21.db"
-        Database(db_path).close()
-        conn = sqlite3.connect(str(db_path))
-        try:
-            for name in MESSAGE_MAP_INDEXES:
-                conn.execute(f"DROP INDEX {name}")
-            conn.execute("UPDATE schema_version SET version = 21")
-            conn.commit()
-        finally:
-            conn.close()
-
-        database = Database(db_path)
-        try:
-            version = database._conn.execute("SELECT version FROM schema_version").fetchone()
-            assert version["version"] == SCHEMA_VERSION == 22
-            assert _message_map_indexes(database._conn) >= MESSAGE_MAP_INDEXES
-        finally:
-            database.close()
 
     @pytest.mark.parametrize(
         ("sql", "params", "index"),
