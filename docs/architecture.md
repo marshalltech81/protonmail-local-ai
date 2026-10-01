@@ -111,7 +111,7 @@ Claude Desktop (host machine)
 
 | Volume | Contents | Back up? |
 |---|---|---|
-| `bridge-data` | Bridge credentials and TLS cert (`vault.enc` under `/data/config`), GPG key (`/data/gnupg`), pass store (`/data/pass`), Gluon IMAP cache and logs (`/data/local`), cache (`/data/cache`) | Yes — back up `/data/config`, `/data/gnupg`, and `/data/pass` together: `vault.enc` cannot be decrypted without the GPG key, so a backup missing `gnupg/` is silently useless. `/data/local` and `/data/cache` can be omitted — Bridge rebuilds them from Proton — but rebuilding the Gluon cache re-downloads the whole mailbox, which can take hours. Losing the whole volume means re-login plus that full re-download. |
+| `bridge-data` | Bridge credentials and TLS cert (`vault.enc` under `/data/config`), GPG key (`/data/gnupg`), pass store (`/data/pass`), Gluon IMAP cache and logs (`/data/local`), cache (`/data/cache`) | Yes — back up `/data/config`, `/data/gnupg`, and `/data/pass` together: `vault.enc` cannot be decrypted without the GPG key, so a backup missing `gnupg/` is useless, and the Bridge entrypoint refuses to start over it. `/data/local` and `/data/cache` can be omitted — Bridge rebuilds them from Proton — but rebuilding the Gluon cache re-downloads the whole mailbox, which can take hours. Losing the whole volume means re-login plus that full re-download. |
 | `maildir-volume` | Raw email in Maildir format | Optional — mbsync can re-sync |
 | `sqlite-volume` | SQLite index (FTS5 + vectors) | Optional — indexer can rebuild |
 
