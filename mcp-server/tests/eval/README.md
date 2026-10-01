@@ -30,8 +30,9 @@ arguments.
 2. Find real `thread_id` values via `make status` or by calling
    `get_mailbox_status` / `search_emails` against your running MCP server.
 
-3. Edit `queries.json` — each entry needs `expected_thread_ids` from
-   your actual index. Keep the file in `.gitignore` if your queries or
+3. Edit `queries.json` — each entry needs an `id`, the `search_query`
+   to run, and `expected_thread_ids` from your actual index. Other keys
+   (such as `notes`) are ignored. Keep the file in `.gitignore` if your queries or
    thread ids are sensitive (the example file is tracked, your real
    queries file is not).
 

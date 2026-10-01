@@ -73,10 +73,8 @@ class EvalQuery:
     """
 
     id: str
-    question: str
     search_query: str
     expected_thread_ids: list[str]
-    expected_substrings: list[str]
 
 
 def _load_queries() -> list[EvalQuery]:
@@ -87,16 +85,18 @@ def _load_queries() -> list[EvalQuery]:
     expected_thread_ids will not match anything in a real index, and
     every query will report a miss — this is intentional and the
     summary line points it out so the operator notices.
+
+    Keys other than ``id``, ``search_query`` and ``expected_thread_ids``
+    (``notes``, or the retired ``question`` / ``expected_substrings``)
+    are ignored.
     """
     path = DEFAULT_QUERY_FILE if DEFAULT_QUERY_FILE.exists() else EXAMPLE_QUERY_FILE
     raw = json.loads(path.read_text())
     return [
         EvalQuery(
             id=q["id"],
-            question=q["question"],
             search_query=q["search_query"],
             expected_thread_ids=list(q.get("expected_thread_ids", [])),
-            expected_substrings=list(q.get("expected_substrings", [])),
         )
         for q in raw
     ]
