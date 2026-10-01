@@ -222,10 +222,15 @@ List all folders and thread counts.
 
 ### `find_contact`
 Resolve a name / address / domain fragment to canonical email
-addresses found in the index. Use this **before** `search_emails`
-when the user names a person but not their address (e.g. "emails
-from Jane Smith"); pass the chosen result's email to
-`search_emails(from_addr=<email>)` for sender-filtered results.
+addresses found in the index. Use it when the user asks **about** a
+person ("do I have Jane Smith's email?", "show me everyone at
+example.com"). For "emails from Jane Smith", call
+`search_emails(from_name=...)` directly instead: it resolves the name
+internally to the most-active matching sender and reports the address
+it used in `resolved_from_addr`. Resolve a name here first only when
+you need a different matching contact than that one (then pass it as
+`from_addr`), or for a tool that filters by address alone, such as
+`get_evidence` or `search_attachments`.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
