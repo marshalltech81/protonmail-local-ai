@@ -15,6 +15,7 @@ from ..lib.embed import embed_query
 from ..lib.inference import InferenceTruncatedError
 from ..lib.security import log_tool_call, safe_provider_exception_text
 from ..lib.sqlite import ChunkResult, InvalidFilterError, ThreadResult, validate_date_range
+from ..lib.timings import count, rerank_mode, stage, timed_tool
 from ..lib.validation import clamp_int
 from .outputs import HEADER_CHAR_LIMIT, MAX_LISTED, clip
 
@@ -719,7 +720,9 @@ def register_intelligence_tools(
     secret_values = list(secret_values or ())
 
     async def llm_complete(system: str, user: str) -> str:
-        return await inference_client.complete(system, user)
+        count("inference_calls", 1)
+        with stage("inference"):
+            return await inference_client.complete(system, user)
 
     async def llm_complete_prose(system: str, user: str) -> str:
         """``llm_complete`` for prose answers: a reply cut off at
@@ -731,7 +734,11 @@ def register_intelligence_tools(
                 raise
             return e.partial + _TRUNCATED_NOTICE
 
+    # Config identifiers for the per-call timing line.
+    timing_config = {"rerank": rerank_mode(reranker), "inference": inference_client.mode}
+
     @server.tool()
+    @timed_tool("ask_mailbox", **timing_config)
     async def ask_mailbox(
         question: str,
         from_addr: str | None = None,
@@ -838,6 +845,7 @@ def register_intelligence_tools(
                 with_evidence=True,
                 reranker=reranker,
             )
+            count("results", len(results))
 
             if not results:
                 return [
@@ -893,6 +901,7 @@ def register_intelligence_tools(
             raise ToolError(f"Error: {safe_error}") from e
 
     @server.tool()
+    @timed_tool("summarize_thread", **timing_config)
     async def summarize_thread(
         thread_id: str,
         style: str = "brief",
@@ -1026,6 +1035,7 @@ def register_intelligence_tools(
             raise ToolError(f"Error: {safe_error}") from e
 
     @server.tool()
+    @timed_tool("extract_from_emails", **timing_config)
     async def extract_from_emails(
         query: str,
         schema: dict,
@@ -1117,6 +1127,7 @@ def register_intelligence_tools(
                 with_evidence=True,
                 reranker=reranker,
             )
+            count("results", len(results))
 
             if not results:
                 return [TextContent(type="text", text="No matching emails found.")]
