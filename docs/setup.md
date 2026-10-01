@@ -348,7 +348,9 @@ docker compose restart indexer
 
 `config/authority.toml` is gitignored: it holds real addresses and
 domains, so never commit it. The `config/` directory is mounted
-read-only into the indexer at `/config`. The indexer reads the file at
+read-only into the indexer at `/config`, and the path
+`/config/authority.toml` is fixed (there is no environment setting for
+it). The indexer reads the file at
 startup and reclassifies every known sender, so restart it after an
 edit (the mount is unchanged, so `restart` is enough). Without the
 file every sender is `unclassified`. A malformed file (invalid TOML,

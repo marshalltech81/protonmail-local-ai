@@ -2144,9 +2144,11 @@ class Database:
         authors = msg.from_addrs or [msg.from_addr]
         roles = [("from", authors), ("to", msg.to_addrs), ("cc", msg.cc_addrs)]
         # Entity writes are bounded per message (a crafted header can list
-        # thousands of recipients); authors come first, so the sender keeps
-        # its entity. Participant rows are written for everyone.
-        entity_budget = MAX_ENTITY_PARTICIPANTS_PER_MESSAGE
+        # thousands of recipients) by distinct address, so a repeated
+        # address cannot spend the budget; authors come first, so the
+        # senders keep their entities. Participant rows are written for
+        # everyone.
+        entity_addresses: set[str] = set()
         for role, values in roles:
             for value in values:
                 address = canonical_addr(value or "")
@@ -2158,8 +2160,11 @@ class Database:
                     "(claimant_id, role, address, name) VALUES (?, ?, ?, ?)",
                     (msg.claimant_id, role, address, name),
                 )
-                if entity_budget > 0:
-                    entity_budget -= 1
+                if (
+                    address not in entity_addresses
+                    and len(entity_addresses) < MAX_ENTITY_PARTICIPANTS_PER_MESSAGE
+                ):
+                    entity_addresses.add(address)
                     self._write_entity(cur, address, name)
 
     def _write_entity(self, cur: sqlite3.Cursor, address: str, name: str | None) -> None:

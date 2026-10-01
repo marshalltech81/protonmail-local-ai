@@ -57,13 +57,19 @@ AUTHORITY_CLASSES = (
 )
 
 
-def validate_authority_class(value: str | None) -> None:
-    """Reject an ``authority_class`` filter outside ``AUTHORITY_CLASSES``."""
-    if value is not None and value not in AUTHORITY_CLASSES:
+def normalize_authority_class(value: str | None) -> str | None:
+    """The ``authority_class`` filter to apply: ``None`` for a missing or
+    blank value (ignored, like every blank string filter), otherwise the
+    stripped value, which must be one of ``AUTHORITY_CLASSES``."""
+    if value is None or not value.strip():
+        return None
+    value = value.strip()
+    if value not in AUTHORITY_CLASSES:
         raise InvalidFilterError(
             "authority_class",
             f"authority_class must be one of {', '.join(AUTHORITY_CLASSES)}",
         )
+    return value
 
 
 # Claimants (per-message keys) whose From sender's person entity carries
@@ -1038,7 +1044,7 @@ class Database:
         evidence_per_thread: int = 3,
         authority_class: str | None = None,
     ) -> list[ThreadResult]:
-        validate_authority_class(authority_class)
+        authority_class = normalize_authority_class(authority_class)
         oversample = (
             _FILTERED_OVERSAMPLE
             if self._has_post_fusion_filter(
@@ -1250,7 +1256,7 @@ class Database:
         limit: int = 10,
         authority_class: str | None = None,
     ) -> list[ThreadResult]:
-        validate_authority_class(authority_class)
+        authority_class = normalize_authority_class(authority_class)
         # Previously dropped every filter except ``folders`` on the floor, so
         # a keyword search with a date or sender filter returned unfiltered
         # results. All four filters now flow through, matching hybrid_search.
@@ -1315,7 +1321,7 @@ class Database:
         broken index is not reported as "no matches". One failed lane
         still answers from the other.
         """
-        validate_authority_class(authority_class)
+        authority_class = normalize_authority_class(authority_class)
         oversample = (
             _FILTERED_OVERSAMPLE
             if self._has_post_fusion_filter(
@@ -2921,7 +2927,7 @@ class Database:
             for v in (sender, recipient, participant, subject, text, folder)
         )
         date_from_iso, date_to_iso = _normalize_date_range(date_from, date_to)
-        validate_authority_class(authority_class)
+        authority_class = normalize_authority_class(authority_class)
 
         where: list[str] = []
         params: list = []

@@ -17,7 +17,7 @@ Entity IDs are deterministic (``person:<address>``,
 ``org:<domain>``), so reprocessing a message rewrites the same rows.
 
 **Source authority** comes only from an operator-written rules file
-(TOML, ``INDEXER_AUTHORITY_RULES_PATH``), mapping addresses and
+(TOML, ``config/authority.toml`` mounted at ``/config``), mapping addresses and
 domains to an ``authority_class``. It is recorded on each entity with
 the rule that matched (provenance) and is never a ranking weight. No
 model classifies anything.

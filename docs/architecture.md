@@ -442,8 +442,10 @@ transaction:
 
 IDs are derived from the address and domain, so reprocessing a message
 rewrites the same rows. Entity and alias writes are capped at
-`MAX_ENTITY_PARTICIPANTS_PER_MESSAGE` (200) participants per message,
-authors first, so a crafted header listing thousands of recipients
+`MAX_ENTITY_PARTICIPANTS_PER_MESSAGE` (200) distinct addresses per
+message, authors first (a repeated address is written once, with the
+first display name it carries in that message, and does not count
+again), so a crafted header listing thousands of recipients
 cannot drive unbounded writes; later participants still get their
 `message_participants` rows, just no new entity. The MCP server's
 `find_contact` reports each contact's organization.

@@ -100,11 +100,10 @@ log = logging.getLogger("indexer")
 
 MAILDIR_PATH = Path(os.environ.get("MAILDIR_PATH", "/maildir"))
 SQLITE_PATH = Path(os.environ.get("SQLITE_PATH", "/data/mail.db"))
-# Operator source-authority rules (``config/authority.toml.example``).
+# Operator source-authority rules (``config/authority.toml.example``),
+# at the fixed path where compose mounts ``./config`` read-only.
 # Absent: every entity is unclassified. Malformed: startup fails.
-AUTHORITY_RULES_PATH = Path(
-    os.environ.get("INDEXER_AUTHORITY_RULES_PATH", "/config/authority.toml")
-)
+AUTHORITY_RULES_PATH = Path("/config/authority.toml")
 
 # OpenAI-compatible embedder configuration. The operator supplies the
 # provider. Set ``EMBED_MODEL`` to a model id served at the chosen

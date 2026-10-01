@@ -227,6 +227,41 @@ class TestStartup:
         assert "lawfirm" not in caplog.text
 
 
+class TestReviewRound2:
+    """Codex round 2 on #459."""
+
+    def test_repeated_addresses_do_not_spend_the_entity_budget(self, db):
+        from src.database import MAX_ENTITY_PARTICIPANTS_PER_MESSAGE
+
+        msg = make_message(message_id="m1@example.com", from_addr="dup@sender.example")
+        msg.from_addrs = ["dup@sender.example"] * (MAX_ENTITY_PARTICIPANTS_PER_MESSAGE + 50) + [
+            "Second Author <second@author.example>"
+        ]
+        db.upsert_thread(make_thread(messages=[msg], thread_id="t1"), _vec())
+
+        people = {
+            r[0] for r in db._conn.execute("SELECT entity_id FROM entities WHERE kind = 'person'")
+        }
+        assert "person:dup@sender.example" in people
+        assert "person:second@author.example" in people
+
+    def test_the_cap_counts_distinct_addresses(self, db):
+        from src.database import MAX_ENTITY_PARTICIPANTS_PER_MESSAGE
+
+        distinct = [f"r{n}@d.example" for n in range(MAX_ENTITY_PARTICIPANTS_PER_MESSAGE + 10)]
+        msg = make_message(
+            message_id="m1@example.com",
+            from_addr="s@sender.example",
+            to_addrs=distinct,
+            cc_addrs=distinct,
+        )
+        db.upsert_thread(make_thread(messages=[msg], thread_id="t1"), _vec())
+        people = db._conn.execute("SELECT COUNT(*) FROM entities WHERE kind = 'person'").fetchone()[
+            0
+        ]
+        assert people == MAX_ENTITY_PARTICIPANTS_PER_MESSAGE
+
+
 class _CountingDict(dict):
     """A rules table that counts membership lookups."""
 

@@ -15,7 +15,7 @@ from ..lib.sqlite import (
     PROMPT_EVIDENCE_CHUNKS_PER_THREAD,
     InvalidFilterError,
     VectorLanesUnavailableError,
-    validate_authority_class,
+    normalize_authority_class,
     validate_date_range,
 )
 from ..lib.timings import count, rerank_mode, stage, timed_tool
@@ -219,7 +219,7 @@ def register_search_tools(
         # Reject a bad date range before any provider or retrieval work.
         try:
             validate_date_range(date_from, date_to)
-            validate_authority_class(authority_class)
+            authority_class = normalize_authority_class(authority_class)
         except InvalidFilterError as e:
             log.warning("search_emails rejected invalid %s", e.field_name)
             raise ToolError(f"Search error: {e}") from e

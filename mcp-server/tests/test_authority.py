@@ -178,3 +178,47 @@ class TestLogging:
             "other",
             "unclassified",
         )
+
+
+class TestReviewRound2Blank:
+    """Codex round 2 on #459: a blank ``authority_class`` is ignored, like
+    every other blank string filter, at every entry point."""
+
+    @pytest.mark.parametrize("blank", ["", "  "])
+    def test_query_messages_ignores_blank(self, counsel_messages_db, blank):
+        page = counsel_messages_db.query_messages(authority_class=blank)
+        assert page.total_matches == 5
+        # Same filters as no class at all, so the cursor carries over.
+        first = counsel_messages_db.query_messages(authority_class=blank, limit=2)
+        nxt = counsel_messages_db.query_messages(limit=2, cursor=first.next_cursor)
+        assert _ids(nxt) == ["m3", "m2"]
+
+    @pytest.mark.parametrize("blank", ["", "  "])
+    def test_searches_ignore_blank(self, counsel_seeded_db, blank):
+        everything = [r.thread_id for r in counsel_seeded_db.keyword_search("lunch")]
+        assert everything
+        assert [
+            r.thread_id for r in counsel_seeded_db.keyword_search("lunch", authority_class=blank)
+        ] == everything
+        assert counsel_seeded_db.hybrid_search(
+            query_text="lunch",
+            query_embedding=[0.0, 1.0, 0.0, 0.0],
+            authority_class=blank,
+        )
+        assert counsel_seeded_db.semantic_search(
+            query_embedding=[0.0, 1.0, 0.0, 0.0], authority_class=blank
+        )
+
+    @pytest.mark.parametrize("blank", ["", "  "])
+    def test_tools_ignore_blank(self, fake_server, counsel_seeded_db, blank):
+        handlers = TestTools()._handlers(fake_server, counsel_seeded_db)
+        out = asyncio.run(
+            handlers["search_emails"](query="lunch", mode="keyword", authority_class=blank)
+        )
+        assert out.structured_content["results"]
+        out = asyncio.run(handlers["query_messages"](authority_class=blank))
+        assert out.structured_content["filters"] == []
+
+    def test_surrounding_whitespace_is_stripped(self, counsel_messages_db):
+        page = counsel_messages_db.query_messages(authority_class=" counsel ")
+        assert _ids(page) == ["m5", "m3", "m1"]
