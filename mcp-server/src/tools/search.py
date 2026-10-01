@@ -5,9 +5,8 @@ Semantic, keyword, and hybrid search over the SQLite index.
 
 import asyncio
 import logging
-from typing import Annotated
 
-from mcp.server.fastmcp.exceptions import ToolError
+from fastmcp.exceptions import ToolError
 from mcp.types import CallToolResult
 
 from ..lib.embed import embed_query
@@ -79,7 +78,7 @@ def register_search_tools(
     """
     secrets = list(secret_values or ())
 
-    @server.tool()
+    @server.tool(output_schema=SearchEmailsOutput.model_json_schema())
     async def search_emails(
         query: str,
         mode: str = "hybrid",
@@ -91,7 +90,7 @@ def register_search_tools(
         has_attachments: bool | None = None,
         participant: str | None = None,
         limit: int = 10,
-    ) -> Annotated[CallToolResult, SearchEmailsOutput]:
+    ) -> CallToolResult:
         """
         Search the mailbox and return matching THREADS (conversations),
         not individual messages.
@@ -344,7 +343,7 @@ def register_search_tools(
             log.error("search_emails error: %s", safe_error)
             raise ToolError(f"Search error: {safe_error}") from e
 
-    @server.tool()
+    @server.tool(output_schema=EvidenceOutput.model_json_schema())
     async def get_evidence(
         query: str,
         thread_id: str | None = None,
@@ -355,7 +354,7 @@ def register_search_tools(
         has_attachments: bool | None = None,
         limit: int = 12,
         include_scores: bool = False,
-    ) -> Annotated[CallToolResult, EvidenceOutput]:
+    ) -> CallToolResult:
         """
         Return the exact indexed passages (evidence chunks) that back a
         question — no LLM synthesis, just the retrieved source text.
@@ -590,7 +589,7 @@ def register_search_tools(
 
         return tool_result("\n".join(lines).rstrip(), output)
 
-    @server.tool()
+    @server.tool(output_schema=SearchAttachmentsOutput.model_json_schema())
     async def search_attachments(
         query: str | None = None,
         content_type: str | None = None,
@@ -599,7 +598,7 @@ def register_search_tools(
         date_to: str | None = None,
         extracted_only: bool = False,
         limit: int = 20,
-    ) -> Annotated[CallToolResult, SearchAttachmentsOutput]:
+    ) -> CallToolResult:
         """
         Search indexed email attachments by filename, MIME type, and
         extracted text.

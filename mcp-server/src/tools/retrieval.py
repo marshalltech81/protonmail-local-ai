@@ -5,9 +5,8 @@ Fetch thread and message context from the local SQLite index.
 
 import asyncio
 import logging
-from typing import Annotated
 
-from mcp.server.fastmcp.exceptions import ToolError
+from fastmcp.exceptions import ToolError
 from mcp.types import CallToolResult
 
 from ..lib.security import log_tool_call
@@ -155,13 +154,13 @@ def register_retrieval_tools(server, db):
         "This response is based on the local SQLite index only."
     )
 
-    @server.tool()
+    @server.tool(output_schema=GetThreadOutput.model_json_schema())
     async def get_thread(
         thread_id: str,
         include_attachments_metadata: bool = True,
         offset: int = 0,
         limit: int = _DEFAULT_THREAD_PAGE,
-    ) -> Annotated[CallToolResult, GetThreadOutput]:
+    ) -> CallToolResult:
         """
         Get one thread's messages by thread ID, oldest first — each
         message's own headers and body; no attachment content.
@@ -313,10 +312,10 @@ def register_retrieval_tools(server, db):
             log.error("get_thread error: %s", type(e).__name__)
             raise ToolError(f"Error: {type(e).__name__}") from e
 
-    @server.tool()
+    @server.tool(output_schema=GetMessageOutput.model_json_schema())
     async def get_message(
         message_id: str,
-    ) -> Annotated[CallToolResult, GetMessageOutput]:
+    ) -> CallToolResult:
         """
         Get one message's own headers and indexed body.
 
@@ -407,13 +406,13 @@ def register_retrieval_tools(server, db):
             log.error("get_message error: %s", type(e).__name__)
             raise ToolError(f"Error: {type(e).__name__}") from e
 
-    @server.tool()
+    @server.tool(output_schema=ListThreadsOutput.model_json_schema())
     async def list_threads(
         folder: str = "INBOX",
         filter_type: str = "all",
         limit: int = 20,
         offset: int = 0,
-    ) -> Annotated[CallToolResult, ListThreadsOutput]:
+    ) -> CallToolResult:
         """
         List email threads in a folder from the local index.
 
@@ -498,7 +497,7 @@ def register_retrieval_tools(server, db):
             log.error("list_threads error: %s", type(e).__name__)
             raise ToolError(f"Error: {type(e).__name__}") from e
 
-    @server.tool()
+    @server.tool(output_schema=QueryMessagesOutput.model_json_schema())
     async def query_messages(
         sender: str | None = None,
         recipient: str | None = None,
@@ -511,7 +510,7 @@ def register_retrieval_tools(server, db):
         has_attachments: bool | None = None,
         limit: int = 25,
         cursor: str | None = None,
-    ) -> Annotated[CallToolResult, QueryMessagesOutput]:
+    ) -> CallToolResult:
         """
         Enumerate EVERY message matching exact criteria, with an exact
         total count. Not ranked, not fuzzy: the complete matching set,
@@ -633,11 +632,11 @@ def register_retrieval_tools(server, db):
 
         return tool_result("\n".join(lines), output)
 
-    @server.tool()
+    @server.tool(output_schema=FindContactOutput.model_json_schema())
     async def find_contact(
         query: str,
         limit: int = 10,
-    ) -> Annotated[CallToolResult, FindContactOutput]:
+    ) -> CallToolResult:
         """
         Resolve a name / address / domain fragment to indexed contacts.
 
@@ -700,8 +699,8 @@ def register_retrieval_tools(server, db):
             lines.append(f"{i}. {c.email}\n   Name(s): {names}\n   Threads: {c.thread_count}\n")
         return tool_result("\n".join(lines), output)
 
-    @server.tool()
-    async def list_folders() -> Annotated[CallToolResult, ListFoldersOutput]:
+    @server.tool(output_schema=ListFoldersOutput.model_json_schema())
+    async def list_folders() -> CallToolResult:
         """
         List all available email folders and their thread counts.
 

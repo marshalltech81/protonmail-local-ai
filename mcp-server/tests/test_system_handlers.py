@@ -12,7 +12,7 @@ import threading
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from mcp.server.fastmcp.exceptions import ToolError
+from fastmcp.exceptions import ToolError
 from src.tools.system import register_system_tools
 
 from tests.conftest import write_ingestion
@@ -43,8 +43,8 @@ class TestGetMailboxStatus:
         )
         out = asyncio.run(_handler(fake_server, seeded_db)())
         text = _text(out)
-        assert out.structuredContent["current"] is True
-        assert out.structuredContent["not_current_reasons"] == []
+        assert out.structured_content["current"] is True
+        assert out.structured_content["not_current_reasons"] == []
         assert "Current:        yes" in text
         # seeded_db has 3 threads and 3 messages.
         assert "Total threads:  3" in text
@@ -61,8 +61,8 @@ class TestGetMailboxStatus:
         )
         out = asyncio.run(_handler(fake_server, seeded_db)())
         text = _text(out)
-        reasons = out.structuredContent["not_current_reasons"]
-        assert out.structuredContent["current"] is False
+        reasons = out.structured_content["not_current_reasons"]
+        assert out.structured_content["current"] is False
         assert len(reasons) == 2
         assert "Current:        no" in text
         for reason in reasons:
@@ -73,8 +73,8 @@ class TestGetMailboxStatus:
     def test_empty_index_before_any_sync(self, fake_server, empty_db):
         out = asyncio.run(_handler(fake_server, empty_db)())
         text = _text(out)
-        assert out.structuredContent["current"] is False
-        assert out.structuredContent["last_sync_at"] is None
+        assert out.structured_content["current"] is False
+        assert out.structured_content["last_sync_at"] is None
         assert "Last mail sync: never" in text
         assert "Indexer seen:   never" in text
         assert "Total threads:  0" in text

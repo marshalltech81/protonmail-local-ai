@@ -7,9 +7,8 @@ Claude should call get_mailbox_status before making claims about email content.
 import asyncio
 import logging
 from datetime import UTC, datetime
-from typing import Annotated
 
-from mcp.server.fastmcp.exceptions import ToolError
+from fastmcp.exceptions import ToolError
 from mcp.types import CallToolResult
 
 from .outputs import MailboxStatusOutput, QueueCounts, tool_result
@@ -162,8 +161,8 @@ def _render(out: MailboxStatusOutput) -> str:
 
 
 def register_system_tools(server, db):
-    @server.tool()
-    async def get_mailbox_status() -> Annotated[CallToolResult, MailboxStatusOutput]:
+    @server.tool(output_schema=MailboxStatusOutput.model_json_schema())
+    async def get_mailbox_status() -> CallToolResult:
         """
         Report whether the local email index is current, and what it holds.
         Call this before answering questions about email content.

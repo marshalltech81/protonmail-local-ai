@@ -3,7 +3,13 @@ name = "protonmail-local-ai-mcp-server"
 version = "0.0.0"
 requires-python = ">=3.14"
 dependencies = [
-    "mcp==1.28.1",
+    # Standalone FastMCP (jlowin/Prefect): the server framework and its
+    # Streamable HTTP / SSE apps.
+    "fastmcp==4.0.10",
+    # ``fastmcp`` accepts any ``mcp`` 2.x. The tool code imports
+    # ``mcp.types`` and ``main.py`` the SDK's Host/Origin validator
+    # directly, so pin the version fastmcp 4.0.10 resolves.
+    "mcp==2.2.0",
     "uvicorn==0.54.0",
     "starlette==1.3.1",
     "sqlite-vec==0.1.9",
@@ -18,8 +24,8 @@ dependencies = [
     "anthropic==1.8.0",
     "cohere==7.0.0",
     # Output models for structured tool results (``src/tools/outputs.py``).
-    # Pinned to the version ``mcp`` already resolves; declared because the
-    # tool code imports it directly.
+    # Pinned to a version ``fastmcp`` and ``mcp`` accept; declared
+    # because the tool code imports it directly.
     "pydantic==2.13.5",
 ]
 
@@ -69,10 +75,10 @@ branch = true
 # against a FakeMCPServer stub (see ``tests/conftest.py::FakeMCPServer``)
 # so handler logic is exercised without standing up the real FastMCP
 # transport. ``src/main.py`` is excluded as a whole: it is the service
-# bootstrap (env wiring, tool registration, ``server.run``), covered by
-# docker-compose integration. Its helpers (``_read_secret``,
-# ``_float_env``, the ``/health`` route) are unit-tested directly but
-# do not count toward the figure.
+# bootstrap (env wiring, tool registration, serving with uvicorn),
+# covered by docker-compose integration. Its helpers (``_read_secret``,
+# ``_float_env``, ``_build_app``, the ``/health`` route) are unit-tested
+# directly but do not count toward the figure.
 source = ["src"]
 omit = [
     "tests/*",

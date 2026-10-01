@@ -628,7 +628,16 @@ Purpose:
 
 Notes:
 
-- keep FastMCP-based implementation unless there is a strong reason to change it
+- the server is built on the standalone `fastmcp` package (pinned in
+  `mcp-server/pyproject.toml`), not the official SDK's former built-in
+  `mcp.server.fastmcp`; keep it unless there is a strong reason to change it
+- every HTTP route sits behind `_HostOriginGuard` in `src/main.py`, which
+  applies the MCP SDK's Host/Origin validator to the `_TRANSPORT_SECURITY`
+  allowlist; do not remove it or swap in fastmcp's own guard, which
+  accepts more Hosts and Origins
+- Streamable HTTP apps must be built with an explicit
+  `session_idle_timeout` (`MCP_SESSION_IDLE_TIMEOUT_SECS`); fastmcp's
+  default never ends an idle session
 - keep the server read-only: do not add mail-changing tools (send, move,
   flag, draft) without explicit owner approval
 - do not give it any access to Bridge
