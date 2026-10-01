@@ -4518,7 +4518,9 @@ _TARGET = "t-scoped-target"
 _NOISE_ROWS = 60
 
 
-def _scoped_recall_db(tmp_path, *, long_thread: bool = False) -> Database:
+def _scoped_recall_db(
+    tmp_path, *, long_thread: bool = False, noise_folder: str = "INBOX"
+) -> Database:
     """A mailbox where every out-of-scope record is closer to
     ``_SCOPE_QUERY`` than the one in-scope target, and there are more of
     them than either vector lane's first window (#286).
@@ -4528,7 +4530,8 @@ def _scoped_recall_db(tmp_path, *, long_thread: bool = False) -> Database:
     thread owns one chunk and one thread vector. The target has no
     lexical overlap with the query text the tests use. The target's
     sender is the only one classified (``counsel``); every noise sender
-    stays ``unclassified``.
+    stays ``unclassified``. ``noise_folder`` files every noise thread;
+    ``"Trash"`` makes the default Trash exclusion the only filter (#441).
     """
     import sqlite_vec
 
@@ -4552,7 +4555,7 @@ def _scoped_recall_db(tmp_path, *, long_thread: bool = False) -> Database:
             subject="weekly digest",
             participants=["digest@noise.example", "reader@noise.example"],
             senders=["digest@noise.example"],
-            folder="INBOX",
+            folder=noise_folder,
             date_first="2024-01-01T10:00:00+00:00",
             date_last="2024-01-01T10:00:00+00:00",
             body_text="weekly digest",
@@ -4695,3 +4698,158 @@ class TestScopedSemanticRecall:
         ks = _spy_vector_k(db, monkeypatch)
         _search(db, mode)
         assert len(ks["thread"]) == 1 and len(ks["chunk"]) == 1
+
+    @pytest.mark.parametrize("mode", ["semantic", "hybrid"])
+    def test_default_trash_exclusion_widens_the_windows(self, tmp_path, mode):
+        """#441: with no filter given, the default Trash exclusion is the
+        filter. A mailbox whose nearest records are all in Trash must
+        still reach the in-scope target in both lanes."""
+        db = _scoped_recall_db(tmp_path, noise_folder="Trash")
+        results = _search(db, mode)
+        assert [r.thread_id for r in results] == [_TARGET]
+        assert {"thread_vec", "chunk_vec"} <= results[0].lane_ranks.keys()
+
+
+_TRASH_QUERY = [1.0, 0.0, 0.0, 0.0]
+
+
+def _trash_db(tmp_path, *, only_trash: bool = False) -> Database:
+    """Three threads that all match "invoice" (#441): ``t-kept`` in
+    INBOX, ``t-trashed`` wholly in Trash, and ``t-mixed`` whose root
+    message is in Trash and whose reply is in INBOX. Each has one body
+    chunk and one attachment, on its root message. ``only_trash`` keeps
+    just ``t-trashed``."""
+    import sqlite_vec
+
+    from tests.conftest import _build_schema, _insert_attachment, _insert_chunk, _insert_thread
+
+    db_path = tmp_path / "trash.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.enable_load_extension(True)
+    sqlite_vec.load(conn)
+    conn.enable_load_extension(False)
+    _build_schema(conn)
+    threads = [
+        ("t-trashed", "Trash", ["m-trashed"], [1.0, 0.0, 0.0, 0.0]),
+        ("t-kept", "INBOX", ["m-kept"], [0.9, 0.1, 0.0, 0.0]),
+        ("t-mixed", "Trash", ["m-mixed-root", "m-mixed-reply"], [0.8, 0.2, 0.0, 0.0]),
+    ]
+    if only_trash:
+        threads = threads[:1]
+    for tid, folder, mids, vec in threads:
+        _insert_thread(
+            conn,
+            thread_id=tid,
+            subject=f"invoice {tid}",
+            participants=["ana@vendor.example", "lee@home.example"],
+            senders=["ana@vendor.example"],
+            folder=folder,
+            date_first="2024-05-01T10:00:00+00:00",
+            date_last="2024-05-02T10:00:00+00:00",
+            message_ids=mids,
+            has_attachments=True,
+            body_text="the invoice for may",
+            embedding=vec,
+        )
+        _insert_chunk(
+            conn,
+            chunk_id=f"c-{tid}",
+            message_id=mids[0],
+            thread_id=tid,
+            text="the invoice for may",
+            embedding=vec,
+        )
+        _insert_attachment(
+            conn,
+            message_id=mids[0],
+            thread_id=tid,
+            attachment_id=f"att-{tid}",
+            filename=f"invoice-{tid}.pdf",
+        )
+    # The mixed thread's reply was filed in INBOX.
+    conn.execute("UPDATE messages SET folder = 'INBOX' WHERE message_id = 'm-mixed-reply'")
+    conn.commit()
+    conn.close()
+    return Database(str(db_path))
+
+
+def _search_ids(db: Database, mode: str, **filters) -> set[str]:
+    if mode == "keyword":
+        results = db.keyword_search("invoice", limit=10, **filters)
+    elif mode == "semantic":
+        results = db.semantic_search(_TRASH_QUERY, limit=10, **filters)
+    else:
+        results = db.hybrid_search("invoice", _TRASH_QUERY, limit=10, **filters)
+    return {r.thread_id for r in results}
+
+
+class TestDefaultTrashExclusion:
+    """#441: mail filed in Trash stays indexed but leaves default
+    search. A thread is left out only when every message of it is in
+    Trash, the per-message membership the ``folders`` filter uses: a
+    thread with a message filed anywhere else stays. Naming Trash in
+    ``folders`` (or ``folder``) brings it back, and thread-scoped
+    lookups are unaffected."""
+
+    @pytest.mark.parametrize("mode", ["keyword", "semantic", "hybrid"])
+    def test_trash_only_thread_is_left_out_by_default(self, tmp_path, mode):
+        db = _trash_db(tmp_path)
+        assert _search_ids(db, mode) == {"t-kept", "t-mixed"}
+        assert _search_ids(db, mode, folders=[]) == {"t-kept", "t-mixed"}
+
+    @pytest.mark.parametrize("mode", ["keyword", "semantic", "hybrid"])
+    def test_naming_trash_includes_it(self, tmp_path, mode):
+        db = _trash_db(tmp_path)
+        assert _search_ids(db, mode, folders=["Trash"]) == {"t-trashed", "t-mixed"}
+        assert _search_ids(db, mode, folders=["INBOX", "Trash"]) == {
+            "t-kept",
+            "t-trashed",
+            "t-mixed",
+        }
+        assert _search_ids(db, mode, folders=["INBOX"]) == {"t-kept", "t-mixed"}
+
+    @pytest.mark.parametrize("mode", ["keyword", "semantic", "hybrid"])
+    def test_mailbox_holding_only_trash_finds_nothing_by_default(self, tmp_path, mode):
+        db = _trash_db(tmp_path, only_trash=True)
+        assert _search_ids(db, mode) == set()
+        assert _search_ids(db, mode, folders=["Trash"]) == {"t-trashed"}
+
+    def test_evidence_search_leaves_out_trash(self, tmp_path):
+        db = _trash_db(tmp_path)
+        results = db.hybrid_search("invoice", _TRASH_QUERY, limit=10, with_evidence=True)
+        assert {r.thread_id for r in results} == {"t-kept", "t-mixed"}
+
+    def test_thread_scoped_access_is_unaffected(self, tmp_path):
+        db = _trash_db(tmp_path)
+        thread = db.get_thread("t-trashed")
+        assert thread is not None and thread.folder == "Trash"
+        grouped = db.get_evidence_chunks_for_threads(["t-trashed"], _TRASH_QUERY)
+        assert [c.chunk_id for c in grouped["t-trashed"]] == ["c-t-trashed"]
+        assert db.get_message_view("m-trashed") is not None
+
+    def test_query_messages_leaves_out_trash_messages(self, tmp_path):
+        db = _trash_db(tmp_path)
+        page = db.query_messages(subject="invoice")
+        assert {m.message_id for m in page.messages} == {"m-kept", "m-mixed-reply"}
+        assert page.total_matches == 2
+        trash = db.query_messages(subject="invoice", folder="Trash")
+        assert {m.message_id for m in trash.messages} == {"m-trashed", "m-mixed-root"}
+
+    @pytest.mark.parametrize("query", ["invoice", None])
+    def test_search_attachments_leaves_out_trash_messages(self, tmp_path, query):
+        db = _trash_db(tmp_path)
+        found = {a.filename for a in db.search_attachments(query=query)}
+        # The mixed thread's attachment is on its root message, in Trash.
+        assert found == {"invoice-t-kept.pdf"}
+
+    def test_mailbox_without_trash_adds_no_filter(self, seeded_db, monkeypatch):
+        """No Trash mail: the search stays the unfiltered one, so each
+        vector lane runs once at its unfiltered window and nothing is
+        post-filtered by folder."""
+        ks = _spy_vector_k(seeded_db, monkeypatch)
+        calls: list = []
+        monkeypatch.setattr(seeded_db, "_threads_in_folders", lambda *a: calls.append(a) or set())
+        seeded_db.hybrid_search("invoice", _TRASH_QUERY, limit=5)
+        seeded_db.semantic_search(_TRASH_QUERY, limit=5)
+        assert ks["thread"] == [10, 10] and len(ks["chunk"]) == 2
+        assert calls == []

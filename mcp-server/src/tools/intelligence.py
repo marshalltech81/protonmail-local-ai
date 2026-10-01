@@ -1223,7 +1223,9 @@ def register_intelligence_tools(
                        have a name)
             date_from: Optionally scope to emails after this date (ISO 8601)
             date_to: Optionally scope to emails before this date (ISO 8601)
-            folders: Optionally scope to specific folders
+            folders: Optionally scope to specific folders. Without it,
+                     threads filed only in Trash are left out; name
+                     "Trash" to include them.
             max_threads: Maximum threads to use as context (default: 5)
 
         Returns:
@@ -1546,7 +1548,9 @@ def register_intelligence_tools(
                     is dropped and reported as an incomplete thread.
                     Must not declare _source_thread or _date: every
                     record carries those as its source thread and date.
-            folders: Optionally scope to specific folders
+            folders: Optionally scope to specific folders. Without it,
+                     threads filed only in Trash are left out; name
+                     "Trash" to include them.
             date_from: Optional date lower bound (ISO 8601)
             date_to: Optional date upper bound (ISO 8601)
             limit: Max threads to search through (default: 20)

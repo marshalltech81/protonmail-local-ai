@@ -273,6 +273,28 @@ class TestVectorLaneExpansion:
         assert "thread_vec_expansions" not in counts
         assert "chunk_vec_expansions" not in counts
 
+    @pytest.mark.parametrize("mode", ["semantic", "hybrid"])
+    def test_default_trash_exclusion_counts_its_expansions(
+        self, tmp_path, monkeypatch, caplog, mode
+    ):
+        """#441: with the nearest records all in Trash, the default
+        exclusion widens the windows, and the steps are counted like
+        any filter's."""
+        caplog.set_level(logging.INFO)
+        db = _scoped_recall_db(tmp_path, noise_folder="Trash")
+        ks = _spy_vector_k(db, monkeypatch)
+
+        @timed_tool("probe")
+        async def probe():
+            _search(db, mode)
+
+        asyncio.run(probe())
+        line = _one_line(caplog)
+        assert line["counts"]["thread_vec_expansions"] == len(ks["thread"]) - 1 > 0
+        assert line["counts"]["chunk_vec_expansions"] == len(ks["chunk"]) - 1 > 0
+        assert line["counts"]["filtered"] == 1
+        assert _VECTOR_LANES <= set(line["stages"])
+
 
 class TestOtherSearchTools:
     def test_get_evidence_mailbox_wide(self, caplog, fake_server, fake_embed, chunked_db):

@@ -138,6 +138,16 @@ def canonical_addr(value: str) -> str:
 _UNFILTERED_OVERSAMPLE = 2
 _FILTERED_OVERSAMPLE = 4
 
+# Folders whose mail stays synced and indexed but is left out of
+# mailbox-wide retrieval unless the caller names them (#441). Under
+# mirror retention a deleted message lives on as its Trash copy until
+# it is purged from Trash. Matched exactly, as ``folders`` filters are.
+# Thread searches leave out a thread only when every message of it is
+# in one of these folders (the per-message membership the ``folders``
+# filter uses); message and attachment lookups leave out the messages
+# filed there. Lookups of one named thread or message are unaffected.
+DEFAULT_EXCLUDED_FOLDERS = ("Trash",)
+
 # Oversample factor for the chunk and attachment FTS lanes, where one
 # thread can legitimately own many matching rows (a long thread, a
 # popular term). Without enough oversample, those threads absorb every
@@ -874,7 +884,9 @@ def _thread_primaries(conn: sqlite3.Connection, thread_ids: list[str]) -> dict[s
     return primaries
 
 
-def _aggregate_senders(conn: sqlite3.Connection, needle: str, name_needle: str) -> dict[str, dict]:
+def _aggregate_senders(
+    conn: sqlite3.Connection, needle: str, name_needle: str, folders: list[str] | None = None
+) -> dict[str, dict]:
     """``find_contact(senders_only=True)``'s aggregation, on ``conn``.
 
     An address counts on a thread whose ``senders`` (each message's
@@ -888,6 +900,10 @@ def _aggregate_senders(conn: sqlite3.Connection, needle: str, name_needle: str) 
     Work follows the query, not the mailbox: candidate addresses come
     from the From rows the query matches, and only the threads those
     candidates appear on have their ``senders`` parsed.
+
+    ``folders`` keeps only threads with a message in one of them (the
+    ``folders`` filter's membership), so names and counts come from the
+    threads a search over that scope can return.
     """
     candidates = [
         row["address"]
@@ -902,14 +918,16 @@ def _aggregate_senders(conn: sqlite3.Connection, needle: str, name_needle: str) 
     ]
     if not candidates:
         return {}
+    where = ["p.role = 'from'", "p.address IN (SELECT value FROM json_each(?))"]
+    params: list = [json.dumps(candidates)]
+    if folders:
+        _append_folder_membership_sql(where, params, "m.thread_id", folders)
     rows = conn.execute(
-        """
-        SELECT DISTINCT p.address, p.name, m.thread_id
-        FROM message_participants p
-        JOIN messages m ON m.claimant_id = p.claimant_id
-        WHERE p.role = 'from' AND p.address IN (SELECT value FROM json_each(?))
-        """,
-        (json.dumps(candidates),),
+        "SELECT DISTINCT p.address, p.name, m.thread_id "
+        "FROM message_participants p "
+        "JOIN messages m ON m.claimant_id = p.claimant_id "
+        "WHERE " + " AND ".join(where),  # nosec B608
+        params,
     ).fetchall()
     primaries = _thread_primaries(conn, sorted({row["thread_id"] for row in rows}))
     by_email: dict[str, dict] = {}
@@ -1049,6 +1067,30 @@ class Database:
         with closing(self._connect()) as conn:
             return conn.execute(sql, params).fetchone()
 
+    def _default_folder_scope(
+        self, folders: list[str] | None, conn: sqlite3.Connection | None = None
+    ) -> list[str] | None:
+        """The ``folders`` filter a mailbox-wide thread search applies.
+
+        A caller's non-empty ``folders`` is kept as given, so naming a
+        ``DEFAULT_EXCLUDED_FOLDERS`` folder includes it. Otherwise, when
+        the mailbox holds mail in an excluded folder, the scope is every
+        other folder holding mail (``[]`` when there is none), so the
+        exclusion runs through the ``folders`` path: pushed into the
+        keyword SQL, applied post-fusion, and counted as a filter that
+        widens the vector windows (#286). A mailbox with no excluded
+        mail gets ``None``, the unfiltered search exactly as before.
+        ``conn`` runs the folder lookup inside a caller's snapshot.
+        """
+        if folders:
+            return folders
+        sql = "SELECT DISTINCT folder FROM messages"
+        rows = conn.execute(sql).fetchall() if conn is not None else self._fetchall(sql)
+        present = [r["folder"] for r in rows]
+        if not any(f in DEFAULT_EXCLUDED_FOLDERS for f in present):
+            return None
+        return [f for f in present if f not in DEFAULT_EXCLUDED_FOLDERS]
+
     # -------------------------------------------------------------------------
     # Hybrid search — BM25 + vector, merged via Reciprocal Rank Fusion
     # -------------------------------------------------------------------------
@@ -1070,6 +1112,9 @@ class Database:
         authority_class: str | None = None,
     ) -> list[ThreadResult]:
         authority_class = normalize_authority_class(authority_class)
+        folders = self._default_folder_scope(folders)
+        if folders == []:
+            return []
         oversample = (
             _FILTERED_OVERSAMPLE
             if self._has_post_fusion_filter(
@@ -1283,6 +1328,9 @@ class Database:
         authority_class: str | None = None,
     ) -> list[ThreadResult]:
         authority_class = normalize_authority_class(authority_class)
+        folders = self._default_folder_scope(folders)
+        if folders == []:
+            return []
         # Previously dropped every filter except ``folders`` on the floor, so
         # a keyword search with a date or sender filter returned unfiltered
         # results. All four filters now flow through, matching hybrid_search.
@@ -1348,6 +1396,9 @@ class Database:
         still answers from the other.
         """
         authority_class = normalize_authority_class(authority_class)
+        folders = self._default_folder_scope(folders)
+        if folders == []:
+            return []
         oversample = (
             _FILTERED_OVERSAMPLE
             if self._has_post_fusion_filter(
@@ -1485,8 +1536,14 @@ class Database:
         same way the thread-search lanes normalize them so a bare
         ``"2024-12-31"`` includes the full day it names.
         """
-        clauses: list[str] = []
-        params: list = []
+        # Attachments on messages filed in an excluded folder are left
+        # out (#441); the tool has no folder filter to name them.
+        excluded = ",".join("?" * len(DEFAULT_EXCLUDED_FOLDERS))
+        clauses: list[str] = [
+            "a.claimant_id NOT IN (SELECT claimant_id FROM messages "  # nosec B608
+            f"WHERE folder IN ({excluded}))"
+        ]
+        params: list = [*DEFAULT_EXCLUDED_FOLDERS]
         if content_type:
             clauses.append("a.content_type = ?")
             params.append(content_type)
@@ -2841,7 +2898,12 @@ class Database:
         return [{"name": r["folder"], "thread_count": r["thread_count"]} for r in rows]
 
     def find_contact(
-        self, query: str, limit: int = 10, *, senders_only: bool = False
+        self,
+        query: str,
+        limit: int = 10,
+        *,
+        senders_only: bool = False,
+        folders: list[str] | None = None,
     ) -> list[dict]:
         """Resolve a name / address / domain fragment to indexed contacts.
 
@@ -2872,6 +2934,13 @@ class Database:
         is also used for general "find this person's email" lookups
         where recipient-only matches are still useful.
 
+        With ``senders_only``, only threads in the search scope count:
+        ``folders`` when given, else the default exclusion
+        (``_default_folder_scope``). Otherwise a sender whose threads
+        are all in Trash could win the lookup and then be filtered out
+        of the search it feeds (#441). ``folders`` is ignored without
+        ``senders_only``.
+
         Exists so callers (the LLM via the MCP tool) can map a
         display-name fragment (``"Jane Smith"``) to a canonical
         address (``"jsmith@example.com"``) before invoking
@@ -2891,7 +2960,10 @@ class Database:
             # snapshot even while the indexer commits.
             conn.execute("BEGIN")
             if senders_only:
-                by_email = _aggregate_senders(conn, needle, name_needle)
+                scope = self._default_folder_scope(folders, conn)
+                by_email = (
+                    {} if scope == [] else _aggregate_senders(conn, needle, name_needle, scope)
+                )
             else:
                 by_email = _aggregate_participants(conn, needle, name_needle)
             # Most-active contact first; tiebreak on email so the order is
@@ -2949,7 +3021,8 @@ class Database:
         - ``text``: every word must occur in the message's indexed body
           (FTS word match with stemming, any chunk; attachment text and
           stripped quoted replies are not searched).
-        - ``folder``: exact folder name.
+        - ``folder``: exact folder name. Without it, messages filed in a
+          ``DEFAULT_EXCLUDED_FOLDERS`` folder are left out.
         - ``date_from`` / ``date_to``: inclusive ``sent_at`` bounds;
           date-only values cover the whole UTC day.
         - ``has_attachments``: the message's own attachment flag.
@@ -3000,6 +3073,12 @@ class Database:
         if folder:
             where.append("m.folder = ?")
             params.append(folder)
+        else:
+            # Without a folder, messages filed in an excluded folder are
+            # left out (#441); ``folder="Trash"`` lists them.
+            marks = ",".join("?" * len(DEFAULT_EXCLUDED_FOLDERS))
+            where.append(f"m.folder NOT IN ({marks})")
+            params.extend(DEFAULT_EXCLUDED_FOLDERS)
         if date_from_iso is not None:
             where.append("m.sent_at >= ?")
             params.append(date_from_iso)

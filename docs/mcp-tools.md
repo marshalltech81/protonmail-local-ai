@@ -116,6 +116,42 @@ never the query, other arguments, subjects, addresses, bodies or
 provider responses. `total_ms` minus the stage sum is the time spent
 outside the timed stages (validation, row conversion, prompt building).
 
+## Trash is left out by default
+
+Mail in the `Trash` folder stays synced and indexed, but mailbox-wide
+tools leave it out unless the call names it (#441). Under mirror
+retention a message deleted in Proton lives on as its Trash copy until
+it is purged from Trash, so without this a deleted message kept
+turning up in search. Spam and every other folder are searched as
+before.
+
+- Thread tools (`search_emails`, `get_evidence` without `thread_id`,
+  `ask_mailbox`, `extract_from_emails`, `brief_issue`,
+  `check_conclusion`, and `summarize_thread`'s subject-phrase fallback)
+  leave out a thread only when **every** message of it is in Trash.
+  This is the per-message membership the `folders` filter uses: a
+  thread with one message in Trash and a reply in INBOX stays, and its
+  Trash message's passages can still appear as evidence. Passing
+  `folders` replaces the default, so `folders=["Trash"]` searches
+  Trash and `folders=["INBOX", "Trash"]` both. `search_emails`
+  resolves `from_name` over the same scope, so a sender whose mail is
+  all in Trash is not chosen for a default search.
+- Message tools leave out the messages filed in Trash: `query_messages`
+  without `folder` (pass `folder="Trash"` to list them) and
+  `search_attachments`, which has no folder filter.
+- Tools that read one named thread or message (`get_thread`,
+  `get_message`, `get_evidence` with `thread_id`, `summarize_thread`
+  with a thread ID) and the folder browsers (`list_threads`,
+  `list_folders`) are unaffected.
+- The exclusion counts as a filter for the vector lanes' window
+  widening, so a mailbox whose closest matches are in Trash still finds
+  its best match elsewhere. A mailbox with no Trash mail runs the same
+  unfiltered search as before.
+
+The excluded folder list is `DEFAULT_EXCLUDED_FOLDERS` in
+`mcp-server/src/lib/sqlite.py`, matched exactly as `folders` values
+are.
+
 ## Group 1 — Search
 
 ### `search_emails`
@@ -129,7 +165,7 @@ contents of a returned thread, follow up with `get_thread` or
 |---|---|---|---|
 | `query` | string | required | Natural language or keyword query |
 | `mode` | string | `hybrid` | `hybrid`, `semantic`, or `keyword` |
-| `folders` | list | all | Scope to threads with a message in any of these folders (the membership `list_threads` uses) |
+| `folders` | list | all but Trash | Scope to threads with a message in any of these folders (the membership `list_threads` uses). Without it, threads filed only in Trash are left out; name `"Trash"` to include them ([Trash](#trash-is-left-out-by-default)) |
 | `from_addr` | string | none | Filter by canonical sender address (or domain like `@example.com`); substring fallback when the value can't canonicalize |
 | `from_name` | string | none | Filter by sender name; resolved through `find_contact` to a canonical address before applying, matching any display name the address carries in a From header on a thread it primarily sent (the index keeps no author order within one message, so a name written for it as a second author on such a thread also matches). Use when the user names a person but not their email. `from_addr` wins if both are given. |
 | `date_from` | string | none | ISO 8601 date lower bound |
@@ -215,7 +251,7 @@ chunks (extracted PDF / OCR / document text) are included — unlike
 |---|---|---|---|
 | `query` | string | required | The question or topic to gather evidence for |
 | `thread_id` | string | none | Scope evidence to one thread; omit to search the whole mailbox. Rejected in combination with `folders`, `from_addr`, `date_from`, `date_to` or `has_attachments`, which select threads |
-| `folders` | list | all | Scope to threads with a message in any of these folders (the membership `list_threads` uses) |
+| `folders` | list | all but Trash | Scope to threads with a message in any of these folders (the membership `list_threads` uses). Without it, threads filed only in Trash are left out; name `"Trash"` to include them ([Trash](#trash-is-left-out-by-default)) |
 | `from_addr` | string | none | Filter by sender address or domain |
 | `date_from` | string | none | ISO 8601 date lower bound |
 | `date_to` | string | none | ISO 8601 date upper bound |
@@ -259,7 +295,10 @@ first. Each result reports the parent thread so a follow-up
 `get_thread` / `get_evidence` call can round-trip. When one message
 carries the same file more than once (under different names or MIME
 types), an extracted-text match is reported once, as the first copy
-that passes `content_type`.
+that passes `content_type`. Attachments on messages filed in Trash are
+left out; the tool has no folder filter, so reach them through
+`search_emails(folders=["Trash"])` or `get_evidence` on the thread
+([Trash](#trash-is-left-out-by-default)).
 
 ---
 
@@ -390,7 +429,7 @@ questions.
 | `participant` | string | none | Any role: From, To, or Cc |
 | `subject` | string | none | Unicode caseless substring of the message's own subject (casefolded, so `STRASSE` matches `Straße`) |
 | `text` | string | none | Every word must appear in the message's indexed body (FTS word match with stemming; words may be in different chunks). Attachment text and stripped quoted replies are not searched; at most 16 words |
-| `folder` | string | none | Exact folder name |
+| `folder` | string | none | Exact folder name. Without it, messages filed in Trash are left out; pass `"Trash"` to list them ([Trash](#trash-is-left-out-by-default)) |
 | `date_from` | string | none | Inclusive ISO 8601 lower bound on the send date |
 | `date_to` | string | none | Inclusive upper bound; a date-only value covers the whole UTC day |
 | `has_attachments` | bool | none | The message's own attachment flag, either way |
@@ -398,8 +437,10 @@ questions.
 | `limit` | int | `25` | Messages per page; clamped to `[1, 100]` |
 | `cursor` | string | none | `next_cursor` from the previous page of the same query |
 
-All given filters must match; blank filters are ignored, and with
-none every indexed message is enumerated. A `date_from` later than
+All given filters must match; blank filters are ignored. With none,
+every indexed message outside Trash is enumerated, so a count from an
+unfiltered query is not a mailbox-wide total: Trash takes a separate
+`folder="Trash"` query. A `date_from` later than
 `date_to` is rejected, as in `search_emails`.
 
 **Address matching.** A value that is a full address
@@ -499,7 +540,7 @@ Retrieves relevant threads and synthesizes an answer.
 | `from_addr` | string | none | Scope to a specific sender |
 | `date_from` | string | none | Date lower bound |
 | `date_to` | string | none | Date upper bound |
-| `folders` | list | all | Scope to threads with a message in any of these folders (the membership `list_threads` uses) |
+| `folders` | list | all but Trash | Scope to threads with a message in any of these folders (the membership `list_threads` uses). Without it, threads filed only in Trash are left out; name `"Trash"` to include them ([Trash](#trash-is-left-out-by-default)) |
 | `max_threads` | int | `5` | Context threads to use |
 
 `max_threads` is clamped to `[1, 10]` at the tool boundary so an
@@ -595,7 +636,7 @@ extracted.
 |---|---|---|---|
 | `query` | string | required | What to search for; also sent to the model as the request, so it can pick which records in a passage are wanted |
 | `schema` | dict | required | JSON schema for extraction |
-| `folders` | list | all | Scope to threads with a message in any of these folders (the membership `list_threads` uses) |
+| `folders` | list | all but Trash | Scope to threads with a message in any of these folders (the membership `list_threads` uses). Without it, threads filed only in Trash are left out; name `"Trash"` to include them ([Trash](#trash-is-left-out-by-default)) |
 | `date_from` | string | none | Date lower bound |
 | `date_to` | string | none | Date upper bound |
 | `limit` | int | `20` | Max threads to search |
@@ -666,7 +707,7 @@ indexed, so a brief can never come back as evidence.
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `topic` | string | required | The issue to brief, as the user phrased it |
-| `folders` | list | all | Scope to threads with a message in any of these folders |
+| `folders` | list | all but Trash | Scope to threads with a message in any of these folders; name `"Trash"` to include Trash ([Trash](#trash-is-left-out-by-default)) |
 | `from_addr` | string | none | Scope to a specific sender |
 | `date_from` | string | none | Date lower bound |
 | `date_to` | string | none | Date upper bound |
@@ -748,7 +789,7 @@ finding is returned with the source passages it rests on.
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `conclusion` | string | required | The statement to check, 1–2000 characters (empty or longer is an error before any provider call) |
-| `folders` | list | all | Scope to threads with a message in any of these folders |
+| `folders` | list | all but Trash | Scope to threads with a message in any of these folders; name `"Trash"` to include Trash ([Trash](#trash-is-left-out-by-default)) |
 | `from_addr` | string | none | Scope to a specific sender |
 | `date_from` | string | none | Date lower bound |
 | `date_to` | string | none | Date upper bound |

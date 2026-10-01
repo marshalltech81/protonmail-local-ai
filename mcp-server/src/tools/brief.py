@@ -497,7 +497,9 @@ def register_experimental_tools(
 
         Args:
             topic: The issue to brief, as the user phrased it
-            folders: Optionally scope to specific folders
+            folders: Optionally scope to specific folders. Without it,
+                     threads filed only in Trash are left out; name
+                     "Trash" to include them.
             from_addr: Optionally scope to a specific sender (canonical
                        email; resolve via find_contact if you only have
                        a name)
@@ -701,7 +703,9 @@ def register_experimental_tools(
 
         Args:
             conclusion: The statement to check, at most 2000 characters
-            folders: Optionally scope to specific folders
+            folders: Optionally scope to specific folders. Without it,
+                     threads filed only in Trash are left out; name
+                     "Trash" to include them.
             from_addr: Optionally scope to a specific sender (canonical
                        email; resolve via find_contact if you only have
                        a name)

@@ -152,7 +152,9 @@ def register_search_tools(
                   semantic = vector similarity only (best for conceptual queries)
                   keyword = BM25 only (best for exact names, numbers, dates)
             folders: Filter to threads with a message in these folders,
-                     e.g. ["INBOX", "Sent"]
+                     e.g. ["INBOX", "Sent"]. Without it, threads filed
+                     only in Trash are left out; name "Trash" to
+                     include them.
             from_addr: Filter by canonical sender ADDRESS — only use when
                        the user gave an email address or domain
                        ("jane@example.com", "@example.com"). For names
@@ -236,6 +238,9 @@ def register_search_tools(
         # mailing-list reply but never a sender) and leave the
         # search returning zero matches. Ranking by sender count
         # picks the right Smith for the "messages from Smith" intent.
+        # Senders are counted over the search's folder scope (``folders``,
+        # else the default Trash exclusion), so the lookup cannot pick a
+        # sender whose threads the search would then filter out.
         # When the lookup yields nothing, short-circuit with an
         # honest empty result rather than silently dropping the
         # filter and returning unrelated threads.
@@ -244,7 +249,7 @@ def register_search_tools(
             try:
                 with stage("contact_lookup"):
                     contacts = await asyncio.to_thread(
-                        db.find_contact, from_name, 1, senders_only=True
+                        db.find_contact, from_name, 1, senders_only=True, folders=folders
                     )
             except Exception as e:
                 # Local-DB work, but a conversion error can quote stored
@@ -412,7 +417,9 @@ def register_search_tools(
                        Cannot be combined with folders, from_addr,
                        date_from, date_to or has_attachments.
             folders: Restrict to threads with a message in these folders,
-                     e.g. ["INBOX", "Sent"].
+                     e.g. ["INBOX", "Sent"]. Without it, threads filed
+                     only in Trash are left out; name "Trash" to
+                     include them.
             from_addr: Restrict to a sender ADDRESS or domain
                        ("jane@example.com", "@example.com"). For a
                        person's name, resolve it via find_contact first.
@@ -650,7 +657,7 @@ def register_search_tools(
 
         With no query it lists attachments by the structured filters
         alone (content_type / date / sender), newest thread activity
-        first.
+        first. Attachments on messages filed in Trash are left out.
 
         To read what an attachment says, use get_evidence (the matching
         passages of its extracted text, each capped at 1600 characters)
