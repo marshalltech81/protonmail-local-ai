@@ -453,6 +453,24 @@ class TestListThreads:
         assert "Error" in text
         assert "filter_type" in text
 
+    def test_value_error_after_validation_is_type_only(
+        self, fake_server, seeded_db, monkeypatch, caplog
+    ):
+        """Only the filter_type check returns its message; any other
+        ValueError (row conversion, output validation) can quote stored
+        mail, so it reaches the caller and the log as its type (#257)."""
+
+        def boom(*_args, **_kwargs):
+            raise ValueError(f"bad date {_ERROR_MARKER}")
+
+        monkeypatch.setattr(seeded_db, "list_threads", boom)
+        handler = _handlers(fake_server, seeded_db)["list_threads"]
+        with caplog.at_level("DEBUG"):
+            text = _error(handler(folder="INBOX"))
+        assert _ERROR_MARKER not in text
+        assert _ERROR_MARKER not in caplog.text
+        assert "ValueError" in text
+
 
 class TestListFolders:
     def test_lists_each_folder_with_count(self, fake_server, seeded_db):

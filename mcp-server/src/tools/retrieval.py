@@ -450,6 +450,11 @@ def register_retrieval_tools(server, db):
         # interactive use of list_threads.
         limit = clamp_int(limit, default=20, minimum=1, maximum=100)
         offset = clamp_int(offset, default=0, minimum=0, maximum=1_000_000)
+        # Validated here so its fixed message is the only text returned;
+        # every other failure below is reported by type (#257).
+        if filter_type != "all":
+            log.warning("list_threads rejected invalid input (filter_type)")
+            raise ToolError("Error: filter_type must be 'all'; unread/flagged state is not indexed")
 
         try:
             threads = await asyncio.to_thread(
@@ -481,11 +486,6 @@ def register_retrieval_tools(server, db):
 
             return tool_result("\n".join(lines), output)
 
-        except ValueError as e:
-            # The only ValueError is the fixed filter_type message, which
-            # the caller needs; log only that the input was rejected.
-            log.warning("list_threads rejected invalid input (filter_type)")
-            raise ToolError(f"Error: {e}") from e
         except Exception as e:
             # Type only, here and in the other handlers: an SQLite error
             # can quote query text or stored mail (#257).
