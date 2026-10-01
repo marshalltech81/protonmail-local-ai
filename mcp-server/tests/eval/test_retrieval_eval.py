@@ -80,20 +80,25 @@ class EvalQuery:
     expected_thread_ids: list[str]
 
 
+def _using_example_queries() -> bool:
+    """True when no operator ``queries.json`` exists and the example is used."""
+    return not DEFAULT_QUERY_FILE.exists()
+
+
 def _load_queries() -> list[EvalQuery]:
     """Load the operator's ``queries.json``, falling back to the example.
 
     The example file is shipped with placeholder thread ids and exists
     only as a template. If a test runs against the example file, the
     expected_thread_ids will not match anything in a real index, and
-    every query will report a miss — this is intentional and the
-    summary line points it out so the operator notices.
+    every query will report a miss — this is intentional and
+    ``test_eval_summary`` prints a notice so the operator notices.
 
     Keys other than ``id``, ``search_query`` and ``expected_thread_ids``
     (``notes``, or the retired ``question`` / ``expected_substrings``)
     are ignored.
     """
-    path = DEFAULT_QUERY_FILE if DEFAULT_QUERY_FILE.exists() else EXAMPLE_QUERY_FILE
+    path = EXAMPLE_QUERY_FILE if _using_example_queries() else DEFAULT_QUERY_FILE
     raw = json.loads(path.read_text())
     return [
         EvalQuery(
@@ -266,6 +271,11 @@ def test_eval_summary(eval_db: Database, eval_embedder, eval_queries: list[EvalQ
     ]
     for qid, rank in rank_records:
         lines.append(f"    {qid:<30s} rank={rank}")
+    if _using_example_queries():
+        lines.append(
+            f"  NOTE: no {DEFAULT_QUERY_FILE.name} found; ran the placeholder "
+            f"queries in {EXAMPLE_QUERY_FILE.name}, so every miss above is expected."
+        )
     lines.append("=" * 60)
     # Use ``pytest -s`` to see this; otherwise pytest captures stdout.
     print("\n".join(lines))
