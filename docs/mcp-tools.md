@@ -252,7 +252,8 @@ you need a different matching contact than that one (then pass it as
 | `limit` | int | `10` | Maximum contacts to return; clamped to `[1, 50]` |
 
 The aggregator matches the query against each `message_participants`
-row's canonical address or display name (Unicode case-insensitive),
+row's canonical address or display name (Unicode caseless: both sides
+are casefolded, so `STRASSE` matches `Straße`),
 then aggregates every row of each matched canonical email (so the same
 contact across many threads collapses to one row, and a match on one
 display name still reports the contact's other names and threads), and
@@ -273,7 +274,7 @@ questions.
 | `sender` | string | none | From address (see address matching below) |
 | `recipient` | string | none | To or Cc address |
 | `participant` | string | none | Any role: From, To, or Cc |
-| `subject` | string | none | Case-insensitive substring of the message's own subject |
+| `subject` | string | none | Unicode caseless substring of the message's own subject (casefolded, so `STRASSE` matches `Straße`) |
 | `text` | string | none | Every word must appear in the message's indexed body (FTS word match with stemming; words may be in different chunks). Attachment text and stripped quoted replies are not searched; at most 16 words |
 | `folder` | string | none | Exact folder name |
 | `date_from` | string | none | Inclusive ISO 8601 lower bound on the send date |
@@ -289,7 +290,8 @@ none every indexed message is enumerated.
 (`jane@example.com`, `Jane <jane@example.com>`) matches by canonical
 equality through the `message_participants(address, role)` index.
 Anything else (`@example.com`, `Jane`) is a case-insensitive substring
-of the address or display name. The response names the mode used for
+of the address or display name; the display name compares casefolded
+(Unicode caseless). The response names the mode used for
 each filter.
 
 **Response contract.** The response states the filter interpretation,

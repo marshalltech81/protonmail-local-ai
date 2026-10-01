@@ -118,8 +118,9 @@ def _addr_matches(haystack: list[str], query_lower: str) -> bool:
       equality so that case variation in the stored display string
       (``Bob@Example.com``, ``Bob Smith <bob@example.com>``) still matches.
     * A bare name (``bob``) or domain fragment (``@example.com``,
-      ``example.com``) keeps substring behavior against the lowercased
-      display string, since those shapes cannot canonicalize.
+      ``example.com``) keeps substring behavior against the display
+      string, both sides casefolded (Unicode caseless: ``STRASSE``
+      matches ``Straße``), since those shapes cannot canonicalize.
     """
     canonical_query = canonical_addr(query_lower)
     # A canonicalizable full address requires a non-empty local part.
@@ -130,7 +131,8 @@ def _addr_matches(haystack: list[str], query_lower: str) -> bool:
     # domain filter.
     if canonical_query and not canonical_query.startswith("@"):
         return any(canonical_addr(s) == canonical_query for s in haystack)
-    return any(query_lower in s.lower() for s in haystack)
+    query_folded = query_lower.casefold()
+    return any(query_folded in s.casefold() for s in haystack)
 
 
 def _matches_sender(result, from_addr_lower: str) -> bool:
@@ -578,10 +580,12 @@ _MAX_TEXT_TERMS = 16
 _INVALID_CURSOR = "invalid cursor; restart the query without a cursor"
 
 
-def _sql_lower(value):
-    """Unicode-aware ``lower`` for SQL. SQLite's built-in folds ASCII only,
-    so ``JOSÉ`` would never match ``josé``."""
-    return value.lower() if isinstance(value, str) else value
+def _sql_casefold(value):
+    """Unicode caseless folding for SQL. SQLite's built-in ``lower`` folds
+    ASCII only, so ``JOSÉ`` would never match ``josé``; ``casefold`` also
+    expands ``ß`` so ``STRASSE`` matches ``Straße``. Compare against a
+    needle folded the same way."""
+    return value.casefold() if isinstance(value, str) else value
 
 
 def _text_terms(text: str) -> list[str]:
@@ -630,12 +634,12 @@ def _participant_clause(value: str, roles: tuple[str, ...], params: list) -> str
             "m.message_id IN (SELECT message_id FROM message_participants "  # nosec B608
             f"WHERE address = ? AND role IN ({role_sql}))"
         )
-    needle = value.strip().lower()
-    params.extend([*roles, needle, needle])
+    # Addresses are stored lowercased; names fold with ``mcp_casefold``.
+    params.extend([*roles, value.strip().lower(), value.strip().casefold()])
     return (
         "m.message_id IN (SELECT message_id FROM message_participants "  # nosec B608
         f"WHERE role IN ({role_sql}) "
-        "AND (instr(address, ?) > 0 OR instr(mcp_lower(name), ?) > 0))"
+        "AND (instr(address, ?) > 0 OR instr(mcp_casefold(name), ?) > 0))"
     )
 
 
@@ -747,7 +751,7 @@ class Database:
         conn.enable_load_extension(True)
         sqlite_vec.load(conn)
         conn.enable_load_extension(False)
-        conn.create_function("mcp_lower", 1, _sql_lower, deterministic=True)
+        conn.create_function("mcp_casefold", 1, _sql_casefold, deterministic=True)
         conn.execute("PRAGMA query_only = ON")
         return conn
 
@@ -2298,8 +2302,9 @@ class Database:
     ) -> list[dict]:
         """Resolve a name / address / domain fragment to indexed contacts.
 
-        Matches the lowercased query against each indexed
-        ``message_participants`` row's address or display name, then
+        Matches the query against each indexed ``message_participants``
+        row's address (lowercased) or display name (Unicode caseless,
+        both sides casefolded), then
         aggregates every row of each matched canonical email (not only
         the matching rows), so the same contact across many threads
         collapses to one row, with ``thread_count`` reflecting how many
@@ -2332,7 +2337,10 @@ class Database:
         """
         if not query or not query.strip():
             return []
+        # Addresses are stored lowercased; names compare casefolded
+        # (Unicode caseless, so ``STRASSE`` matches ``Straße``).
         needle = query.strip().lower()
+        name_needle = query.strip().casefold()
 
         # canonical email -> {"names": set[str], "threads": set[str]}
         by_email: dict[str, dict] = {}
@@ -2384,13 +2392,13 @@ class Database:
             by_email = {
                 addr: bucket
                 for addr, bucket in by_email.items()
-                if needle in addr or any(needle in n.lower() for n in bucket["names"])
+                if needle in addr or any(name_needle in n.casefold() for n in bucket["names"])
             }
         else:
             # The query selects addresses; every row of a selected address
             # then aggregates, so a name match reports the contact's other
             # names and threads too. Addresses are stored canonical
-            # (lowercased); names need the Unicode-aware ``mcp_lower``.
+            # (lowercased); names need the Unicode-aware ``mcp_casefold``.
             rows = self._fetchall(
                 """
                 SELECT DISTINCT p.address, p.name, m.thread_id
@@ -2398,10 +2406,10 @@ class Database:
                 JOIN messages m ON m.message_id = p.message_id
                 WHERE p.address IN (
                     SELECT address FROM message_participants
-                    WHERE instr(address, ?) > 0 OR instr(mcp_lower(name), ?) > 0
+                    WHERE instr(address, ?) > 0 OR instr(mcp_casefold(name), ?) > 0
                 )
                 """,
-                (needle, needle),
+                (needle, name_needle),
             )
             for row in rows:
                 add(row["address"], row["name"], row["thread_id"])
@@ -2444,8 +2452,8 @@ class Database:
 
         - ``sender`` (From), ``recipient`` (To or Cc), ``participant``
           (any role): see ``address_match_mode``.
-        - ``subject``: case-insensitive substring of the message's own
-          subject.
+        - ``subject``: Unicode caseless (casefolded) substring of the
+          message's own subject.
         - ``text``: every word must occur in the message's indexed body
           (FTS word match with stemming, any chunk; attachment text and
           stripped quoted replies are not searched).
@@ -2475,8 +2483,8 @@ class Database:
             if value:
                 where.append(_participant_clause(value, roles, params))
         if subject:
-            where.append("instr(mcp_lower(m.subject), ?) > 0")
-            params.append(subject.lower())
+            where.append("instr(mcp_casefold(m.subject), ?) > 0")
+            params.append(subject.casefold())
         if text:
             terms = _text_terms(text)
             if not terms:

@@ -3278,6 +3278,88 @@ class TestQueryMessagesUnicodeText:
             messages_db.query_messages(text="\u0301")
 
 
+# (stored header text, query) pairs that are equal under Unicode caseless
+# matching. ``lower()`` misses the expansions (\u00df -> ss, the \ufb01 ligature).
+_CASELESS_PAIRS = [
+    ("Jane", "JANE"),
+    ("Jos\u00e9", "JOS\u00c9"),
+    ("Stra\u00dfe", "STRASSE"),
+    ("STRASSE", "stra\u00dfe"),
+    ("\u038c\u03c3\u03bf\u03c2", "\u038c\u03a3\u039f\u03a3"),
+    ("\ufb01le", "FILE"),
+]
+
+
+class TestUnicodeCaselessMatching:
+    """Every case-insensitive name and subject match folds both sides the
+    same way, with ``casefold``. One fixture per pair, checked through
+    each matching site, so a site left on ``lower`` shows up here."""
+
+    @pytest.fixture(params=_CASELESS_PAIRS, ids=lambda p: ascii(p[1]))
+    def case(self, request, tmp_path):
+        from tests.conftest import _insert_message
+
+        stored, query = request.param
+        conn, path = _open_built_db_conn(tmp_path, "caseless.db")
+        _insert_message(
+            conn,
+            message_id="m1",
+            thread_id="t1",
+            sent_at="2024-01-01T00:00:00+00:00",
+            subject=f"re {stored} notes",
+            from_=[f"{stored} Person <person@example.test>"],
+            to=[f"{stored} Recipient <recipient@example.test>"],
+        )
+        conn.close()
+        return Database(str(path)), stored, query
+
+    def test_find_contact(self, case):
+        db, _, query = case
+        assert [c["email"] for c in db.find_contact(query)] == [
+            "person@example.test",
+            "recipient@example.test",
+        ]
+
+    def test_find_contact_senders_only(self, case):
+        db, _, query = case
+        emails = [c["email"] for c in db.find_contact(query, senders_only=True)]
+        assert emails == ["person@example.test"]
+
+    def test_query_messages_subject(self, case):
+        db, _, query = case
+        assert db.query_messages(subject=query).total_matches == 1
+
+    @pytest.mark.parametrize("field", ["sender", "recipient", "participant"])
+    def test_query_messages_name_fragment(self, case, field):
+        db, _, query = case
+        assert db.query_messages(**{field: query}).total_matches == 1
+
+    def test_thread_filter_name_fragment(self, case):
+        from src.lib.sqlite import _addr_matches
+
+        _, stored, query = case
+        # Callers lowercase the filter value before matching.
+        assert _addr_matches([f"{stored} Person <person@example.test>"], query.lower())
+
+    def test_address_needle_keeps_matching_stored_addresses(self, tmp_path):
+        # Addresses are stored lowercased; a fragment of one must still
+        # match after the name side moved to casefold.
+        from tests.conftest import _insert_message
+
+        conn, path = _open_built_db_conn(tmp_path, "addr.db")
+        _insert_message(
+            conn,
+            message_id="m1",
+            thread_id="t1",
+            sent_at="2024-01-01T00:00:00+00:00",
+            from_=["stra\u00dfe@example.test"],
+        )
+        conn.close()
+        db = Database(str(path))
+        assert [c["email"] for c in db.find_contact("STRA\u00dfE@")] == ["stra\u00dfe@example.test"]
+        assert db.query_messages(sender="STRA\u00dfE@").total_matches == 1
+
+
 class TestQueryMessagesPaging:
     def test_cursor_walks_every_match_exactly_once(self, messages_db):
         seen: list[str] = []
