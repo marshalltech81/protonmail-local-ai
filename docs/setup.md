@@ -262,8 +262,10 @@ make logs
 ```
 
 You should see:
-- `protonmail-bridge` — "Starting Bridge in noninteractive mode"
-- `mbsync` — "Bridge IMAP is ready" then "Syncing..."
+- `protonmail-bridge` — "Account found. Starting Bridge as user 'bridge'..."
+- `mbsync` — "Bridge IMAP port is reachable.", then "Bridge cert
+  fingerprint matches the pinned value." (or "First boot — pinned Bridge
+  cert fingerprint ..." on the first start), then "Running initial sync..."
 - `indexer` — "Running initial index scan..."
 - `mcp-server` — "MCP server starting on port 3000"
 
