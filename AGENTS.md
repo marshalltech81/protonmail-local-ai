@@ -653,7 +653,7 @@ Notes:
 ### Coverage expectations
 
 - both `indexer` and `mcp-server` enforce a 90% coverage floor via `--cov-fail-under=90` in each service's `pyproject.toml`; a PR that drops coverage below 90% will fail CI
-- for `indexer`, coverage scope is `src/` with `src/main.py` omitted (service bootstrap is covered by docker-compose integration, not unit tests); for `mcp-server`, coverage scope is `src/` with `src/main.py` omitted — tool handlers run against the `FakeMCPServer` stub in `tests/conftest.py`, and `main.py`'s testable helpers are unit-tested directly
+- for `indexer`, coverage scope is `src/` with `src/main.py` omitted (it holds service bootstrap and the two-phase indexing pipeline; `tests/test_main.py` exercises the pipeline, but it does not count toward the figure); for `mcp-server`, coverage scope is `src/` with `src/main.py` omitted — tool handlers run against the `FakeMCPServer` stub in `tests/conftest.py`, and `main.py`'s testable helpers are unit-tested directly
 - when coverage drops, add tests rather than lowering the threshold or widening `omit`
 - CI runs `pytest --cov` in `.github/workflows/tests.yml` and uploads `coverage.xml` as an artifact per service
 

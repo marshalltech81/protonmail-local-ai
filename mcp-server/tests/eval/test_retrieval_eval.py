@@ -18,7 +18,11 @@ fill in real ``expected_thread_ids`` from your index.
 Run:
 
     cd mcp-server
-    MCP_EVAL_DB=/path/to/mail.db uv run pytest -m eval
+    MCP_EVAL_DB=/path/to/mail.db uv run pytest -o addopts= -m eval tests/eval -s
+
+``-o addopts=`` drops the default options, which exclude this directory
+(``--ignore=tests/eval``) and enforce the coverage floor; with them, a
+plain ``pytest -m eval`` selects no tests.
 
 Without ``MCP_EVAL_DB`` set, every eval test skips, so the harness
 cannot regress the regular CI suite.
@@ -29,8 +33,8 @@ Metrics emitted per query:
 - ``rank``: 1-indexed rank of the first expected_thread_id, or ``None``
   if missed (used to compute mean reciprocal rank).
 
-A ``--print-summary`` invocation surfaces aggregate Recall@K and MRR
-across the loaded query set so two runs (e.g. before/after raising
+``test_eval_summary`` prints aggregate Recall@K and MRR across the
+loaded query set (``-s`` keeps pytest from capturing it) so two runs (e.g. before/after raising
 ``PER_THREAD_CHAR_BUDGET``) can be compared directly.
 """
 
@@ -46,8 +50,8 @@ import pytest
 from src.lib.embed import EmbedClient, embed_query
 from src.lib.sqlite import Database
 
-# Module-level marker so ``pytest -m eval`` runs only this directory and
-# the regular suite (``pytest`` with no marker) skips it. Defined in
+# Module-level marker so ``-m eval`` selects only this directory; the
+# regular suite never collects it (``addopts`` ignores ``tests/eval``). Defined in
 # pyproject.toml under tool.pytest.ini_options.markers.
 pytestmark = pytest.mark.eval
 
@@ -105,7 +109,7 @@ def eval_db() -> Database:
     if not db_path:
         pytest.skip(
             "MCP_EVAL_DB not set — eval suite is opt-in. "
-            "Run with `MCP_EVAL_DB=/path/to/mail.db uv run pytest -m eval`."
+            "Run with `MCP_EVAL_DB=/path/to/mail.db uv run pytest -o addopts= -m eval tests/eval -s`."
         )
     if not Path(db_path).exists():
         pytest.skip(f"MCP_EVAL_DB={db_path} does not exist.")

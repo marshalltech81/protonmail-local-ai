@@ -405,7 +405,7 @@ answers real knowledge questions, and identify why failures occur.
    accuracy, argument accuracy, retrieval recall, citation accuracy,
    pagination completeness, unnecessary-call counts. Extends the
    retrieval-only harness in `mcp-server/tests/eval/` (Recall@10 /
-   MRR, opt-in `pytest -m eval`) to the agent level; the old
+   MRR, opt-in; see its README for the invocation) to the agent level; the old
    `scripts/eval_run.py` batch runner was removed with Open WebUI.
    Tracked by **#283**, whose substantive addition is separating
    jointly-required-evidence recall from any-hit rate (today's
@@ -861,8 +861,8 @@ linked from the Phase 3 items they track.
   bound, so one huge message (a pasted log, 12,000 References) is one
   huge response; decide on body continuation (offset paging) or a
   documented cap — fits alongside Phase 1 item 2's structured output
-- mcp-server: remove the dead `Database.get_thread_message_ids` (no
-  callers outside its tests)
+- ~~mcp-server: remove the dead `Database.get_thread_message_ids`~~
+  (done: already gone from the code)
 - IDs are unbounded: a root Message-ID becomes the thread ID with no
   length check, and IDs cannot be cut in responses without breaking
   chaining. Decide on a parse-time length limit (Message-IDs are
@@ -982,9 +982,10 @@ can be revisited with an explicit owner decision.
 - deletion reconciliation is opt-in and not yet validated under
   long-running real-world conditions; `INDEXER_UNLINK_ON_REAP=true`
   only removes the `.eml` when Maildir is mounted read-write
-- coverage scope: `indexer/src` omits `src/main.py` (which has grown
-  to hold the whole two-phase pipeline — re-scope when touching it);
-  `mcp-server` coverage is `src/lib` only
+- coverage scope: both services measure `src/` with `src/main.py`
+  omitted. The indexer's `main.py` has grown to hold the whole
+  two-phase pipeline, which `tests/test_main.py` exercises but the
+  coverage figure does not count — re-scope when touching it
 
 ## Blockers and Risks
 

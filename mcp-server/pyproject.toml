@@ -37,7 +37,7 @@ dev = [
 # ``tests/eval`` is the opt-in retrieval-quality harness — it requires a
 # real indexed mailbox via ``MCP_EVAL_DB`` and is excluded from the
 # default collection so the regular suite stays self-contained. Run it
-# explicitly with ``pytest -m eval``.
+# with ``pytest -o addopts= -m eval tests/eval -s`` (see its README).
 testpaths = ["tests"]
 pythonpath = ["."]
 python_files = ["test_*.py"]
@@ -45,7 +45,7 @@ python_classes = ["Test*"]
 python_functions = ["test_*"]
 addopts = "-v --tb=short --cov=src --cov-branch --cov-report=term-missing --cov-fail-under=90 --ignore=tests/eval"
 markers = [
-    "eval: opt-in retrieval-quality eval against a real mailbox (skipped by default; run with `pytest -m eval --override-ini='addopts='`)",
+    "eval: opt-in retrieval-quality eval against a real mailbox (skipped by default; run with `pytest -o addopts= -m eval tests/eval -s`)",
     "baseline: retrieval regression baseline over the synthetic mailbox (skipped unless BASELINE_DIR is set; run with `make baseline`)",
 ]
 
@@ -68,10 +68,11 @@ branch = true
 # Coverage scope is the full mcp-server package. Tool handlers run
 # against a FakeMCPServer stub (see ``tests/conftest.py::FakeMCPServer``)
 # so handler logic is exercised without standing up the real FastMCP
-# transport. ``main.main()`` itself is excluded because it is a service
-# bootstrap (env wiring, tool registration, ``server.run``) covered by
-# docker-compose integration; its testable helpers (``_env_bool``,
-# ``_read_secret``, the ``/health`` route) are unit-tested directly.
+# transport. ``src/main.py`` is excluded as a whole: it is the service
+# bootstrap (env wiring, tool registration, ``server.run``), covered by
+# docker-compose integration. Its helpers (``_env_bool``,
+# ``_read_secret``, the ``/health`` route) are unit-tested directly but
+# do not count toward the figure.
 source = ["src"]
 omit = [
     "tests/*",
