@@ -101,6 +101,7 @@ contents of a returned thread, follow up with `get_thread` or
 | `has_attachments` | bool | none | Filter by attachment presence |
 | `participant` | string | none | Filter to threads where this person appears in **any** role — From, To, or Cc. Distinct from `from_addr`/`from_name`, which are sender-only. Accepts an address, a domain (`@example.com`), or a name fragment |
 | `limit` | int | `10` | Max threads to return |
+| `authority_class` | string | none | Keep threads with a message whose From sender carries this source-authority class: `counsel`, `management`, `vendor`, `government`, `personal`, `other`, or `unclassified`. Assigned by the operator's rules file (`docs/setup.md`); a filter only, never a ranking weight. Any other value is an error |
 
 **When to use which mode:**
 - `hybrid` — best for most queries (default)
@@ -137,7 +138,7 @@ drive an unbounded query against the index.
   `list_folders` use, so a thread started in INBOX with a reply in Sent
   matches `folders=["Sent"]`. The thread's reported `folder` stays its
   representative folder.
-- When any filter (folder, sender, date range, attachment flag) is
+- When any filter (folder, sender, date range, attachment flag, authority class) is
   applied, search oversamples raw candidates by ``limit * 4`` rather
   than ``limit * 2`` so deeper-ranked matches still qualify after
   filtering. The vector lanes then widen their KNN window (doubling,
@@ -328,7 +329,11 @@ characters, and `name_count` gives the full number. Same-thread
 duplicates do not double-count. `organization` is the contact's
 exact address domain from the indexer's deterministic entities, or
 null for a free-mail provider (see `docs/architecture.md`, Entities);
-it is never inferred from display names.
+it is never inferred from display names. `authority_class` is the
+contact's source-authority class from the operator's rules file
+(`unclassified` when no rule matched) and `authority_rule` the rule
+that set it (`address:<pattern>` or `domain:<pattern>`, null when
+unclassified).
 
 ### `query_messages`
 Enumerate **every** message matching exact criteria, with an exact
@@ -349,6 +354,7 @@ questions.
 | `date_from` | string | none | Inclusive ISO 8601 lower bound on the send date |
 | `date_to` | string | none | Inclusive upper bound; a date-only value covers the whole UTC day |
 | `has_attachments` | bool | none | The message's own attachment flag, either way |
+| `authority_class` | string | none | The source-authority class of the message's From sender (any author, for a multi-author From): `counsel`, `management`, `vendor`, `government`, `personal`, `other`, or `unclassified`; any other value is an error |
 | `limit` | int | `25` | Messages per page; clamped to `[1, 100]` |
 | `cursor` | string | none | `next_cursor` from the previous page of the same query |
 

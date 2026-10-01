@@ -1,0 +1,35 @@
+# Source authority rules (optional).
+#
+# Copy to config/authority.toml (gitignored: it holds real addresses)
+# and restart the indexer. Each table names one authority class:
+#   counsel, management, vendor, government, personal, other
+# Every sender with no matching rule is "unclassified"; without this
+# file, every sender is.
+#
+#   addresses — bare addresses, matched exactly (case-insensitive)
+#   domains   — bare domains, matching the domain and its subdomains
+#
+# An address rule beats a domain rule, and the closest listed parent
+# domain wins. A pattern may appear only once in the whole file. A
+# malformed file stops the indexer at startup with an error naming the
+# offending entry's position.
+#
+# The class is recorded on each entity with the rule that matched it.
+# It is filterable metadata (search_emails / query_messages
+# authority_class, find_contact), never a ranking weight.
+
+[counsel]
+domains = ["lawfirm.example"]
+addresses = ["outside.counsel@mail.example"]
+
+[management]
+domains = ["management-co.example"]
+
+[vendor]
+domains = ["contractor.example", "billing.utility.example"]
+
+[government]
+domains = ["city.example"]
+
+[personal]
+addresses = ["a.friend@mail.example"]

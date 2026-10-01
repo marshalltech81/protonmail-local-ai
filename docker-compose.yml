@@ -240,6 +240,12 @@ services:
       # correctly, the files just stay on disk.
       - maildir-volume:/maildir:ro
       - sqlite-volume:/data
+      # Operator config, read-only. The indexer reads the optional
+      # source-authority rules at /config/authority.toml
+      # (INDEXER_AUTHORITY_RULES_PATH); see config/authority.toml.example.
+      # The directory is mounted rather than the file, so an absent file
+      # stays absent instead of Docker creating a directory in its place.
+      - ./config:/config:ro
     networks:
       - app-net
 

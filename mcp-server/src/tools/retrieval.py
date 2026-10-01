@@ -534,6 +534,7 @@ def register_retrieval_tools(server, db):
         date_from: str | None = None,
         date_to: str | None = None,
         has_attachments: bool | None = None,
+        authority_class: str | None = None,
         limit: int = 25,
         cursor: str | None = None,
     ) -> CallToolResult:
@@ -576,6 +577,11 @@ def register_retrieval_tools(server, db):
                      covers the whole day (UTC).
             has_attachments: True for messages with attachments, False
                              for messages without.
+            authority_class: Messages whose sender the operator's rules
+                             file classes as this: "counsel",
+                             "management", "vendor", "government",
+                             "personal", "other", or "unclassified"
+                             (no rule matched).
             limit: Messages per page (default 25, clamped to [1, 100]).
             cursor: ``next_cursor`` from the previous page of the same query.
 
@@ -594,6 +600,7 @@ def register_retrieval_tools(server, db):
             "date_from": date_from,
             "date_to": date_to,
             "has_attachments": has_attachments,
+            "authority_class": authority_class,
         }
         log_tool_call(log, "query_messages", {**args, "limit": limit, "cursor": cursor})
         limit = clamp_int(limit, default=25, minimum=1, maximum=_MAX_QUERY_LIMIT)
@@ -711,6 +718,8 @@ def register_retrieval_tools(server, db):
                     name_count=len(c["names"]),
                     thread_count=c["thread_count"],
                     organization=c["organization"],
+                    authority_class=c["authority_class"],
+                    authority_rule=c["authority_rule"],
                 )
                 for c in contacts
             ]
@@ -726,6 +735,8 @@ def register_retrieval_tools(server, db):
             lines.append(
                 f"{i}. {c.email}\n   Name(s): {names}\n"
                 f"   Organization: {c.organization or '(none)'}\n"
+                f"   Authority: {c.authority_class}"
+                f"{f' (rule {c.authority_rule})' if c.authority_rule else ''}\n"
                 f"   Threads: {c.thread_count}\n"
             )
         return tool_result("\n".join(lines), output)

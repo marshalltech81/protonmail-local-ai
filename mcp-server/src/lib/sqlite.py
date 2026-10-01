@@ -42,6 +42,40 @@ class InvalidFilterError(ValueError):
         self.field_name = field_name
 
 
+# Source-authority classes the indexer assigns from the operator rules
+# file (``indexer/src/entities.py`` ``AUTHORITY_CLASSES``) plus
+# ``unclassified`` for senders no rule matched.
+AUTHORITY_CLASSES = (
+    "counsel",
+    "management",
+    "vendor",
+    "government",
+    "personal",
+    "other",
+    "unclassified",
+)
+
+
+def validate_authority_class(value: str | None) -> None:
+    """Reject an ``authority_class`` filter outside ``AUTHORITY_CLASSES``."""
+    if value is not None and value not in AUTHORITY_CLASSES:
+        raise InvalidFilterError(
+            "authority_class",
+            f"authority_class must be one of {', '.join(AUTHORITY_CLASSES)}",
+        )
+
+
+# Claimants (per-message keys) whose From sender's person entity carries
+# the bound class.
+# Driven from ``idx_entities_authority`` into the participant address
+# index.
+_SENDER_CLASS_MESSAGES = (
+    "SELECT p.claimant_id FROM entities e "
+    "JOIN message_participants p ON p.address = e.canonical_key AND p.role = 'from' "
+    "WHERE e.kind = 'person' AND e.authority_class = ?"
+)
+
+
 class VectorLanesUnavailableError(RuntimeError):
     """Neither vector lane could be queried, so semantic search has no
     retrieval path left. Carries fixed text only: the underlying SQLite
@@ -862,20 +896,22 @@ def _aggregate_senders(conn: sqlite3.Connection, needle: str, name_needle: str) 
     }
 
 
-def _contact_entities(conn: sqlite3.Connection, addresses: list[str]) -> dict[str, str | None]:
-    """``address -> organization domain`` from the indexer's person
-    entities (``person:<address>``); ``None`` when the person has no
-    organization (a free-mail address)."""
+def _contact_entities(conn: sqlite3.Connection, addresses: list[str]) -> dict[str, sqlite3.Row]:
+    """``address -> entity row`` from the indexer's person entities
+    (``person:<address>``): ``organization`` (the organization domain,
+    ``None`` for a free-mail address), ``authority_class`` and
+    ``authority_rule``."""
     rows = conn.execute(
         """
-        SELECT p.canonical_key AS address, o.canonical_key AS organization
+        SELECT p.canonical_key AS address, o.canonical_key AS organization,
+               p.authority_class, p.authority_rule
         FROM entities p
         LEFT JOIN entities o ON o.entity_id = p.organization_id
         WHERE p.entity_id IN (SELECT 'person:' || value FROM json_each(?))
         """,
         (json.dumps(addresses),),
     ).fetchall()
-    return {row["address"]: row["organization"] for row in rows}
+    return {row["address"]: row for row in rows}
 
 
 def _append_folder_membership_sql(
@@ -999,11 +1035,19 @@ class Database:
         with_evidence: bool = False,
         reranker: RerankerBackend | None = None,
         evidence_per_thread: int = 3,
+        authority_class: str | None = None,
     ) -> list[ThreadResult]:
+        validate_authority_class(authority_class)
         oversample = (
             _FILTERED_OVERSAMPLE
             if self._has_post_fusion_filter(
-                folders, from_addr, date_from, date_to, has_attachments, participant
+                folders,
+                from_addr,
+                date_from,
+                date_to,
+                has_attachments,
+                participant,
+                authority_class,
             )
             else _UNFILTERED_OVERSAMPLE
         )
@@ -1065,7 +1109,14 @@ class Database:
         chunk_hits = chunk_hits or []
         fused = self._reciprocal_rank_fusion(bm25_results, vec_results, chunk_hits)
         filtered = self._apply_filters(
-            fused, folders, from_addr, date_from, date_to, has_attachments, participant
+            fused,
+            folders,
+            from_addr,
+            date_from,
+            date_to,
+            has_attachments,
+            participant,
+            authority_class,
         )
 
         # Decide how many candidates to keep before any rerank. The
@@ -1188,14 +1239,22 @@ class Database:
         has_attachments: bool | None = None,
         participant: str | None = None,
         limit: int = 10,
+        authority_class: str | None = None,
     ) -> list[ThreadResult]:
+        validate_authority_class(authority_class)
         # Previously dropped every filter except ``folders`` on the floor, so
         # a keyword search with a date or sender filter returned unfiltered
         # results. All four filters now flow through, matching hybrid_search.
         oversample = (
             _FILTERED_OVERSAMPLE
             if self._has_post_fusion_filter(
-                folders, from_addr, date_from, date_to, has_attachments, participant
+                folders,
+                from_addr,
+                date_from,
+                date_to,
+                has_attachments,
+                participant,
+                authority_class,
             )
             else _UNFILTERED_OVERSAMPLE
         )
@@ -1208,7 +1267,14 @@ class Database:
             has_attachments=has_attachments,
         )
         filtered = self._apply_filters(
-            results, folders, from_addr, date_from, date_to, has_attachments, participant
+            results,
+            folders,
+            from_addr,
+            date_from,
+            date_to,
+            has_attachments,
+            participant,
+            authority_class,
         )
         return filtered[:limit]
 
@@ -1222,6 +1288,7 @@ class Database:
         has_attachments: bool | None = None,
         participant: str | None = None,
         limit: int = 10,
+        authority_class: str | None = None,
     ) -> list[ThreadResult]:
         """Vector retrieval over both thread- and chunk-level lanes.
 
@@ -1237,10 +1304,17 @@ class Database:
         broken index is not reported as "no matches". One failed lane
         still answers from the other.
         """
+        validate_authority_class(authority_class)
         oversample = (
             _FILTERED_OVERSAMPLE
             if self._has_post_fusion_filter(
-                folders, from_addr, date_from, date_to, has_attachments, participant
+                folders,
+                from_addr,
+                date_from,
+                date_to,
+                has_attachments,
+                participant,
+                authority_class,
             )
             else _UNFILTERED_OVERSAMPLE
         )
@@ -1266,7 +1340,14 @@ class Database:
             bm25=[], vec=vec_results or [], chunks=chunk_hits or []
         )
         filtered = self._apply_filters(
-            fused, folders, from_addr, date_from, date_to, has_attachments, participant
+            fused,
+            folders,
+            from_addr,
+            date_from,
+            date_to,
+            has_attachments,
+            participant,
+            authority_class,
         )
         return filtered[:limit]
 
@@ -1528,6 +1609,7 @@ class Database:
         date_to: str | None = None,
         has_attachments: bool | None = None,
         participant: str | None = None,
+        authority_class: str | None = None,
     ) -> bool:
         return bool(
             folders
@@ -1536,6 +1618,7 @@ class Database:
             or date_to
             or has_attachments is not None
             or participant
+            or authority_class
         )
 
     def _keyword_search(
@@ -2377,6 +2460,7 @@ class Database:
         date_to: str | None = None,
         has_attachments: bool | None = None,
         participant: str | None = None,
+        authority_class: str | None = None,
     ) -> list[ThreadResult]:
         date_from_dt, date_to_dt = _parse_date_range(date_from, date_to)
 
@@ -2410,7 +2494,29 @@ class Database:
             # in-memory filters.
             members = self._threads_in_folders([r.thread_id for r in filtered], folders)
             filtered = [r for r in filtered if r.thread_id in members]
+        if authority_class and filtered:
+            # A pure filter: survivors keep their fused order and score.
+            sent = self._threads_sent_by_class([r.thread_id for r in filtered], authority_class)
+            filtered = [r for r in filtered if r.thread_id in sent]
         return filtered
+
+    def _threads_sent_by_class(self, thread_ids: list[str], authority_class: str) -> set[str]:
+        """The subset of ``thread_ids`` with a message whose From sender
+        the indexer classified as ``authority_class``. Batched like
+        ``_threads_in_folders``."""
+        found: set[str] = set()
+        with closing(self._connect()) as conn:
+            for start in range(0, len(thread_ids), _IN_CLAUSE_BATCH_SIZE):
+                batch = thread_ids[start : start + _IN_CLAUSE_BATCH_SIZE]
+                id_marks = ",".join("?" * len(batch))
+                rows = conn.execute(
+                    "SELECT DISTINCT thread_id FROM messages "  # nosec B608
+                    f"WHERE thread_id IN ({id_marks}) "
+                    f"AND claimant_id IN ({_SENDER_CLASS_MESSAGES})",
+                    [*batch, authority_class],
+                ).fetchall()
+                found.update(r["thread_id"] for r in rows)
+        return found
 
     def _threads_in_folders(self, thread_ids: list[str], folders: list[str]) -> set[str]:
         """The subset of ``thread_ids`` with a message filed in one of
@@ -2719,15 +2825,20 @@ class Database:
             entities = _contact_entities(conn, [addr for addr, _ in ranked])
             conn.rollback()
 
-        return [
-            {
-                "email": addr,
-                "names": sorted(bucket["names"]),
-                "thread_count": len(bucket["threads"]),
-                "organization": entities.get(addr),
-            }
-            for addr, bucket in ranked
-        ]
+        contacts = []
+        for addr, bucket in ranked:
+            entity = entities.get(addr)
+            contacts.append(
+                {
+                    "email": addr,
+                    "names": sorted(bucket["names"]),
+                    "thread_count": len(bucket["threads"]),
+                    "organization": entity["organization"] if entity else None,
+                    "authority_class": entity["authority_class"] if entity else "unclassified",
+                    "authority_rule": entity["authority_rule"] if entity else None,
+                }
+            )
+        return contacts
 
     def query_messages(
         self,
@@ -2741,6 +2852,7 @@ class Database:
         date_from: str | None = None,
         date_to: str | None = None,
         has_attachments: bool | None = None,
+        authority_class: str | None = None,
         limit: int = 25,
         cursor: str | None = None,
     ) -> MessagePage:
@@ -2763,6 +2875,8 @@ class Database:
         - ``date_from`` / ``date_to``: inclusive ``sent_at`` bounds;
           date-only values cover the whole UTC day.
         - ``has_attachments``: the message's own attachment flag.
+        - ``authority_class``: the class the indexer gave the message's
+          From sender (``AUTHORITY_CLASSES``).
 
         Raises ``ValueError`` for an invalid date, a ``text`` with no
         words or more than ``_MAX_TEXT_TERMS``, or a malformed / foreign
@@ -2773,6 +2887,7 @@ class Database:
             for v in (sender, recipient, participant, subject, text, folder)
         )
         date_from_iso, date_to_iso = _normalize_date_range(date_from, date_to)
+        validate_authority_class(authority_class)
 
         where: list[str] = []
         params: list = []
@@ -2815,13 +2930,16 @@ class Database:
         if has_attachments is not None:
             where.append("m.has_attachments = ?")
             params.append(1 if has_attachments else 0)
+        if authority_class:
+            where.append(f"m.claimant_id IN ({_SENDER_CLASS_MESSAGES})")
+            params.append(authority_class)
 
         # A cursor is only meaningful for the predicates it was issued
         # under; bind it to a digest of them.
         digest = hashlib.sha256(
             json.dumps(
                 [sender, recipient, participant, subject, text, folder]
-                + [date_from_iso, date_to_iso, has_attachments]
+                + [date_from_iso, date_to_iso, has_attachments, authority_class]
             ).encode()
         ).hexdigest()[:16]
         page_where = list(where)

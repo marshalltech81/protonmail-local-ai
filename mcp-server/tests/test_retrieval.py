@@ -647,6 +647,8 @@ class TestFindContact:
                     "names": names,
                     "thread_count": 30,
                     "organization": "example.test",
+                    "authority_class": "unclassified",
+                    "authority_rule": None,
                 }
             ]
 

@@ -62,6 +62,7 @@ from .embedder import (
     classify_embed_failure,
     scrub_embed_error,
 )
+from .entities import AuthorityRules, AuthorityRulesError, load_authority_rules
 from .extractors import ExtractionResult, is_stale_extractor
 from .maildir import (
     SYNC_STAMP_NAME,
@@ -98,6 +99,11 @@ log = logging.getLogger("indexer")
 
 MAILDIR_PATH = Path(os.environ.get("MAILDIR_PATH", "/maildir"))
 SQLITE_PATH = Path(os.environ.get("SQLITE_PATH", "/data/mail.db"))
+# Operator source-authority rules (``config/authority.toml.example``).
+# Absent: every entity is unclassified. Malformed: startup fails.
+AUTHORITY_RULES_PATH = Path(
+    os.environ.get("INDEXER_AUTHORITY_RULES_PATH", "/config/authority.toml")
+)
 
 # OpenAI-compatible embedder configuration. The operator supplies the
 # provider. Set ``EMBED_MODEL`` to a model id served at the chosen
@@ -1859,6 +1865,28 @@ def _validate_embedding_dim(embedder: EmbeddingBackend) -> None:
         )
 
 
+def _load_authority_rules(path: Path) -> AuthorityRules:
+    """Load the operator rules file, failing closed on a malformed one.
+
+    The error names the file position, never a pattern (the file holds
+    addresses), so it is safe to log.
+    """
+    try:
+        rules = load_authority_rules(path)
+    except AuthorityRulesError as exc:
+        raise SystemExit(f"Invalid source-authority rules: {exc}") from None
+    if rules.pattern_count:
+        log.info(
+            "Authority rules: %d address and %d domain pattern(s) from %s",
+            len(rules.addresses),
+            len(rules.domains),
+            path,
+        )
+    else:
+        log.info("Authority rules: none at %s; every entity is unclassified", path)
+    return rules
+
+
 def _log_reconciler_config(cfg: ReconcilerConfig) -> None:
     if not cfg.enabled:
         log.info("Deletion reconciliation: disabled (set INDEXER_DELETION_ENABLED=true to enable)")
@@ -1880,7 +1908,12 @@ def main():
     log.info("  Maildir: %s", MAILDIR_PATH)
     log.info("  SQLite:  %s", SQLITE_PATH)
 
+    # Before opening the database, so a malformed file fails fast.
+    authority_rules = _load_authority_rules(AUTHORITY_RULES_PATH)
     db = Database(SQLITE_PATH)
+    reclassified = db.set_authority_rules(authority_rules)
+    if reclassified:
+        log.info("Authority rules: reclassified %d existing entities", reclassified)
     embedder = OpenAIEmbedder(
         base_url=EMBED_BASE_URL,
         model=EMBED_MODEL,

@@ -2885,6 +2885,8 @@ class TestFindContact:
                 "names": ["J. Doe", "Jane Doe"],
                 "thread_count": 1,
                 "organization": "example.com",
+                "authority_class": "unclassified",
+                "authority_rule": None,
             }
         ]
 
@@ -2917,6 +2919,8 @@ class TestFindContact:
             "names": ["J. Smith", "Jane Smith", "Janet Doe"],
             "thread_count": 3,
             "organization": "example.test",
+            "authority_class": "unclassified",
+            "authority_rule": None,
         }
         assert db.find_contact("Jane Smith") == [whole]
         assert db.find_contact("person@example.test") == [whole]

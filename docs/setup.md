@@ -329,6 +329,38 @@ container's configuration, so recreate it explicitly with
 `docker compose up -d --force-recreate mcp-server` (again with the
 same `-f` files).
 
+### Source-authority rules (optional)
+
+You can tag senders with a source-authority class (`counsel`,
+`management`, `vendor`, `government`, `personal`, `other`) from a
+rules file you write. The classes become filterable metadata
+(`authority_class` on `search_emails` and `query_messages`, and the
+class plus the rule that set it on `find_contact`); they never change
+ranking. Nothing is classified by a model.
+
+```bash
+cp config/authority.toml.example config/authority.toml
+# edit: one table per class, with `addresses` (exact) and/or
+# `domains` (the domain and its subdomains)
+chmod 644 config/authority.toml   # the indexer runs as UID 1002
+docker compose restart indexer
+```
+
+`config/authority.toml` is gitignored: it holds real addresses and
+domains, so never commit it. The `config/` directory is mounted
+read-only into the indexer at `/config`. The indexer reads the file at
+startup and reclassifies every known sender, so restart it after an
+edit (the mount is unchanged, so `restart` is enough). Without the
+file every sender is `unclassified`. A malformed file (invalid TOML,
+an unknown class or key, a pattern that is not a bare address or
+domain, a pattern listed twice, more than 10,000 patterns or more than
+1 MiB) stops the indexer at startup with an error naming the entry's
+position; check `docker compose logs indexer`.
+
+An address rule beats a domain rule, and the closest listed parent
+domain wins (`domains = ["example.com"]` covers `mail.example.com`
+unless `mail.example.com` has its own rule).
+
 ### Pointing at a different embedder provider
 
 The embedder client (indexer + mcp-server query path) speaks the

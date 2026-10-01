@@ -445,6 +445,30 @@ rewrites the same rows. Entities are not pruned when messages are
 removed; every read joins through `message_participants`, which is.
 The MCP server's `find_contact` reports each contact's organization.
 
+### Source authority
+
+`entities.authority_class` comes only from an operator-written rules
+file, `config/authority.toml` (mounted read-only at `/config`; see
+`docs/setup.md`), mapping exact addresses and domains (with their
+subdomains) to `counsel`, `management`, `vendor`, `government`,
+`personal` or `other`. `authority_rule` records the rule that matched
+(`address:<pattern>` or `domain:<pattern>`) as provenance; an entity no
+rule matches is `unclassified` with no rule. An address rule beats a
+domain rule, and the closest listed parent domain wins. No model
+classifies anything.
+
+The indexer loads the file once at startup, before opening the
+database, and fails closed on a malformed one; an absent file
+classifies nothing. Loading is bounded (1 MiB, 10,000 patterns), and
+every existing entity is reclassified under the loaded rules in one
+transaction, so an edit takes effect at the next start.
+
+Authority is metadata, never a ranking weight. The MCP server exposes it
+as an `authority_class` filter on `search_emails` and `query_messages`
+(a message matches when one of its From senders carries the class; a
+thread when one of its messages does) and on `find_contact` results.
+Filtering removes results without reordering or rescoring the rest.
+
 ## Attachment Indexing
 
 Email attachments flow through the same chunker and embedder pipeline
