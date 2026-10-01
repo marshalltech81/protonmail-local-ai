@@ -14,6 +14,7 @@ from src.attachment_indexing import (
 )
 from src.database import EMBEDDING_DIM, Database
 from src.extractors import (
+    NO_EXTRACTOR_ERROR,
     STATUS_EMPTY,
     STATUS_FAILED,
     STATUS_SUCCESS,
@@ -378,7 +379,7 @@ def test_cached_unsupported_for_unknown_mime_is_honored(tmp_path, monkeypatch):
         _attachment(filename="data.foo", content_type="application/x-foo"),
         STATUS_UNSUPPORTED,
         monkeypatch,
-        error="no extractor for content_type='application/x-foo'",
+        error=NO_EXTRACTOR_ERROR,
     )
     assert summary["extractions_reused"] == 1
     extractor.assert_not_called()
@@ -395,7 +396,7 @@ def test_cached_unsupported_is_re_run_for_an_occurrence_with_an_extractor(tmp_pa
         extraction_status=STATUS_UNSUPPORTED,
         extractor=None,
         extracted_text=None,
-        extraction_error="no extractor for content_type='application/octet-stream'",
+        extraction_error=NO_EXTRACTOR_ERROR,
     )
     extractor = MagicMock(
         return_value=ExtractionResult(
@@ -1072,3 +1073,62 @@ def test_batch_ocr_disabled_result_does_not_block_a_non_ocr_occurrence(tmp_path,
         )
     assert calls == ["scan.png", "doc.txt"]
     assert plan.status == STATUS_SUCCESS
+
+
+def test_unsupported_attachment_log_omits_filename_and_mime(tmp_path, caplog):
+    """#257: the sender-supplied filename and MIME type stay out of the
+    logs and the persisted ``extraction_error``."""
+    caplog.set_level("DEBUG")
+    db = _setup_db_for_attachment(tmp_path)
+    attachment = _attachment(
+        filename="SYNTHETIC_FILENAME_MARKER.bin",
+        content_type="application/x-SYNTHETIC_MIME_MARKER",
+    )
+
+    plan = prepare_attachment_writes(db=db, embedder=None, **_kwargs(attachment))
+    with db.transaction():
+        apply_attachment_writes(
+            plan=plan,
+            message_id="msg@x",
+            thread_id="thread-x",
+            db=db,
+            message_date="2024-01-01T00:00:00+00:00",
+        )
+
+    assert plan.status == STATUS_UNSUPPORTED
+    cached = db.get_attachment_extraction(attachment.content_hash)
+    assert cached is not None
+    for marker in ("SYNTHETIC_FILENAME_MARKER", "SYNTHETIC_MIME_MARKER"):
+        assert marker not in caplog.text
+        assert marker not in (cached["extraction_error"] or "")
+
+
+def test_failed_extraction_persists_no_filename_or_parser_text(tmp_path, monkeypatch, caplog):
+    """#257: a raising extractor records only the exception type."""
+    from src import extractors
+
+    caplog.set_level("DEBUG")
+
+    def boom(payload, **opts):
+        raise ValueError("SYNTHETIC_EXC_MARKER")
+
+    monkeypatch.setattr(extractors, "_safe_import", lambda module_name: boom)
+    db = _setup_db_for_attachment(tmp_path)
+    attachment = _attachment(filename="SYNTHETIC_FILENAME_MARKER.pdf", content_type="")
+
+    plan = prepare_attachment_writes(db=db, embedder=None, **_kwargs(attachment))
+    with db.transaction():
+        apply_attachment_writes(
+            plan=plan,
+            message_id="msg@x",
+            thread_id="thread-x",
+            db=db,
+            message_date="2024-01-01T00:00:00+00:00",
+        )
+
+    assert plan.status == STATUS_FAILED
+    cached = db.get_attachment_extraction(attachment.content_hash)
+    assert cached is not None
+    assert cached["extraction_error"] == "ValueError"
+    for marker in ("SYNTHETIC_FILENAME_MARKER", "SYNTHETIC_EXC_MARKER"):
+        assert marker not in caplog.text

@@ -93,10 +93,11 @@ class ExtractionResult:
     * ``"unsupported"`` — no extractor registered for this MIME type
       *or* the format's optional dependency is missing in this image.
     * ``"too_large"`` — payload exceeded ``max_bytes``.
-    * ``"failed"`` — extractor raised; ``error`` captures a short repr
-      of the exception. Indexer treats this as terminal for the
-      attachment (won't keep retrying), but a future re-extraction
-      sweep can re-run after a library upgrade.
+    * ``"failed"`` — extractor raised; ``error`` records the exception
+      type only, since its message can quote the document. Indexer
+      treats this as terminal for the attachment (won't keep
+      retrying), but a future re-extraction sweep can re-run after a
+      library upgrade.
     """
 
     status: str
@@ -185,6 +186,11 @@ STATUS_FAILED = "failed"
 # none.
 OCR_DISABLED_ERROR = "OCR disabled (INDEXER_OCR_ENABLED=false)"
 SCANNED_PDF_OCR_DISABLED_ERROR = f"{OCR_DISABLED_ERROR}; scanned PDF"
+
+# ``unsupported`` error when neither the MIME type nor the filename
+# extension selects an extractor. Both are sender-supplied, so the
+# persisted text names neither (#257).
+NO_EXTRACTOR_ERROR = "no extractor for this content type or filename extension"
 
 
 # Maps normalized MIME -> per-format extractor module name (under
@@ -296,7 +302,7 @@ def extract(
             status=STATUS_UNSUPPORTED,
             extractor=None,
             text=None,
-            error=f"no extractor for content_type={content_type!r} filename={filename!r}",
+            error=NO_EXTRACTOR_ERROR,
         )
 
     extractor_fn = _safe_import(module_name)
@@ -344,18 +350,19 @@ def extract(
         # ``failed`` rows so a single bad attachment cannot dead-letter
         # the parent message. ``MemoryError`` / ``RecursionError`` are
         # excluded above precisely because they are not per-payload.
+        # Parser exceptions quote the document (text, member names), so
+        # only the type is logged and persisted (#257).
         log.debug(
-            "extractor %s failed on %s (dispatch_via=%s): %s",
+            "extractor %s failed (dispatch_via=%s): %s",
             module_name,
-            filename,
             dispatch_via,
-            exc,
+            type(exc).__name__,
         )
         return ExtractionResult(
             status=STATUS_FAILED,
             extractor=_stamp_extractor(module_name, module_name),
             text=None,
-            error=f"{type(exc).__name__}: {exc}",
+            error=type(exc).__name__,
         )
 
     if extractor_name == "pdf-ocr-disabled":
@@ -377,11 +384,10 @@ def extract(
         )
     if max_extracted_chars is not None and len(cleaned) > max_extracted_chars:
         log.info(
-            "extractor %s output truncated from %d to %d chars (filename=%r)",
+            "extractor %s output truncated from %d to %d chars",
             extractor_name,
             len(cleaned),
             max_extracted_chars,
-            filename,
         )
         cleaned = cleaned[:max_extracted_chars]
     return ExtractionResult(
@@ -444,10 +450,10 @@ def _validate_zip_payload(payload: bytes) -> str | None:
             total = 0
             for info in zf.infolist():
                 if info.file_size > ZIP_MAX_UNCOMPRESSED_BYTES:
+                    # The member name is attacker-chosen; report sizes only.
                     return (
-                        f"zip member {info.filename!r} declares "
-                        f"{info.file_size} uncompressed bytes (cap "
-                        f"{ZIP_MAX_UNCOMPRESSED_BYTES})"
+                        f"zip member declares {info.file_size} uncompressed "
+                        f"bytes (cap {ZIP_MAX_UNCOMPRESSED_BYTES})"
                     )
                 total += info.file_size
                 if total > ZIP_MAX_UNCOMPRESSED_BYTES:

@@ -180,7 +180,8 @@ class TestSafetyGates:
             payload=b"hi",
         )
         assert result.status == STATUS_FAILED
-        assert "simulated extractor crash" in result.error
+        # Only the exception type is persisted (#257).
+        assert result.error == "RuntimeError"
         assert result.extractor == "text@2"
 
 
@@ -543,7 +544,8 @@ class TestXlsxExtractor:
         )
         assert time.monotonic() - started < 5.0
         assert result.status == STATUS_FAILED
-        assert "cell budget" in (result.error or "")
+        # The budget's ValueError is recorded by type only (#257).
+        assert result.error == "ValueError"
 
 
 class TestPdfDigitalExtractor:
@@ -661,7 +663,7 @@ class TestPdfDigitalExtractor:
         assert result.status == STATUS_FAILED
         assert result.extractor == "pdf"
         assert result.text is None
-        assert "poppler missing" in (result.error or "")
+        assert result.error == "RuntimeError"
 
     def test_ocr_disabled_returns_digital_text_only(self, monkeypatch):
         from src.extractors import pdf
@@ -1197,3 +1199,125 @@ class TestDispatcherTextCap:
         assert result.status == STATUS_SUCCESS
         assert result.text is not None
         assert len(result.text) == len(payload)
+
+
+class TestMailContentStaysOutOfLogsAndErrors:
+    """#257: attachment filenames, MIME types, zip member names and raw
+    library exception text are sender-controlled. None of them may reach
+    the logs or the ``error`` persisted to
+    ``attachment_extractions.extraction_error``."""
+
+    FILENAME = "SYNTHETIC_FILENAME_MARKER.pdf"
+
+    @staticmethod
+    def _assert_absent(marker, caplog, result):
+        assert marker not in caplog.text
+        assert marker not in (result.error or "")
+
+    def _install_failing_extractor(self, monkeypatch, exc):
+        def fake_safe_import(module_name):
+            def boom(payload, **opts):
+                raise exc
+
+            return boom
+
+        monkeypatch.setattr("src.extractors._safe_import", fake_safe_import)
+        monkeypatch.setattr("src.extractors._IMPORT_CACHE", {})
+
+    def test_extractor_exception_logs_and_persists_type_only(self, monkeypatch, caplog):
+        caplog.set_level("DEBUG")
+        self._install_failing_extractor(monkeypatch, ValueError("SYNTHETIC_EXC_MARKER"))
+
+        result = extract(content_type="application/pdf", filename=self.FILENAME, payload=b"x")
+
+        assert result.status == STATUS_FAILED
+        assert result.error == "ValueError"
+        assert "ValueError" in caplog.text
+        self._assert_absent("SYNTHETIC_EXC_MARKER", caplog, result)
+        self._assert_absent("SYNTHETIC_FILENAME_MARKER", caplog, result)
+
+    def test_no_extractor_error_omits_filename_and_mime(self, caplog):
+        caplog.set_level("DEBUG")
+        result = extract(
+            content_type="application/x-SYNTHETIC_MIME_MARKER",
+            filename="SYNTHETIC_FILENAME_MARKER.bin",
+            payload=b"x",
+        )
+
+        assert result.status == STATUS_UNSUPPORTED
+        assert result.error
+        self._assert_absent("SYNTHETIC_FILENAME_MARKER", caplog, result)
+        self._assert_absent("SYNTHETIC_MIME_MARKER", caplog, result)
+
+    def test_truncation_log_omits_filename(self, caplog):
+        caplog.set_level("DEBUG")
+        result = extract(
+            content_type="text/plain",
+            filename="SYNTHETIC_FILENAME_MARKER.txt",
+            payload=b"abcdefghij" * 20,
+            max_extracted_chars=16,
+        )
+
+        assert result.status == STATUS_SUCCESS
+        assert "truncated" in caplog.text
+        self._assert_absent("SYNTHETIC_FILENAME_MARKER", caplog, result)
+
+    def test_zip_member_name_is_not_quoted(self, monkeypatch, caplog):
+        import io
+        import zipfile
+
+        caplog.set_level("DEBUG")
+        monkeypatch.setattr("src.extractors.ZIP_MAX_UNCOMPRESSED_BYTES", 4)
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as zf:
+            zf.writestr("SYNTHETIC_MEMBER_MARKER", b"<root>" * 50)
+
+        result = extract(
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            filename="SYNTHETIC_FILENAME_MARKER.xlsx",
+            payload=buf.getvalue(),
+        )
+
+        assert result.status == STATUS_FAILED
+        assert "uncompressed" in (result.error or "")
+        assert "300" in (result.error or "")
+        self._assert_absent("SYNTHETIC_MEMBER_MARKER", caplog, result)
+        self._assert_absent("SYNTHETIC_FILENAME_MARKER", caplog, result)
+
+    def test_pypdf_page_failure_logs_type_only(self, monkeypatch, caplog):
+        from src.extractors import pdf
+
+        caplog.set_level("DEBUG")
+
+        class BadPage:
+            def extract_text(self):
+                raise ValueError("SYNTHETIC_PYPDF_MARKER")
+
+        class FakeReader:
+            def __init__(self, stream):
+                self.pages = [BadPage()]
+
+        monkeypatch.setattr(pdf.pypdf, "PdfReader", FakeReader)
+
+        assert pdf._extract_digital(b"%PDF-1.7") == ""
+        assert "ValueError" in caplog.text
+        assert "SYNTHETIC_PYPDF_MARKER" not in caplog.text
+
+    def test_ocr_fallback_failure_logs_and_persists_type_only(self, monkeypatch, caplog):
+        from src.extractors import pdf
+
+        caplog.set_level("DEBUG")
+        monkeypatch.setattr(pdf, "_extract_digital", lambda payload, **_: "")
+
+        def fail_ocr(payload, **_):
+            raise RuntimeError("SYNTHETIC_OCR_MARKER")
+
+        monkeypatch.setattr(pdf, "_extract_ocr", fail_ocr)
+
+        result = extract(content_type="application/pdf", filename=self.FILENAME, payload=b"x")
+
+        assert result.status == STATUS_FAILED
+        assert result.error == "RuntimeError"
+        assert "PDF OCR fallback failed" in caplog.text
+        self._assert_absent("SYNTHETIC_OCR_MARKER", caplog, result)
+        self._assert_absent("SYNTHETIC_FILENAME_MARKER", caplog, result)

@@ -90,9 +90,10 @@ def extract(
         # threshold, so swallowing OCR failures would cache the
         # attachment as empty / partial and make the job look
         # successful. Let the dispatcher record a failed extraction
-        # with the OCR error so operators can fix Poppler/Tesseract and
-        # re-run extraction.
-        log.warning("PDF OCR fallback failed: %s", exc)
+        # with the OCR error type so operators can fix Poppler/Tesseract
+        # and re-run extraction. The message can quote the document, so
+        # only the type is logged (#257).
+        log.warning("PDF OCR fallback failed: %s", type(exc).__name__)
         raise
 
     # Concatenate digital + OCR — digital is fast and may have caught a
@@ -126,7 +127,7 @@ def _extract_digital(payload: bytes, *, max_pdf_pages: int | None = None) -> str
         except Exception as exc:  # noqa: BLE001
             # Per-page failures (broken cross-ref tables, cipher
             # entries pypdf chokes on) shouldn't abort the whole doc.
-            log.debug("pypdf page extract failed: %s", exc)
+            log.debug("pypdf page extract failed: %s", type(exc).__name__)
             continue
         if text.strip():
             pages.append(text.strip())

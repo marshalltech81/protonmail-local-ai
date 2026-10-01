@@ -319,12 +319,7 @@ def prepare_attachment_writes(
         # via the FTS row written in apply. ``unsupported`` and ``too_large``
         # log at debug because they are common (zip files, huge backups).
         if status in {STATUS_UNSUPPORTED, STATUS_TOO_LARGE}:
-            log.debug(
-                "attachment %s status=%s (%s) — no chunks",
-                attachment.filename,
-                status,
-                attachment.content_type,
-            )
+            log.debug("attachment status=%s — no chunks", status)
         return AttachmentWritePlan(
             attachment=attachment,
             occurrence_id=occurrence_id,
