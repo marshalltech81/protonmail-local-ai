@@ -143,14 +143,17 @@ def _check_brief(
     first-cited order, and each entry's problems: unknown labels, no
     label at all, or a conflict citing fewer than two supplied passages.
     Labels are read with ask_mailbox's label pattern, so ``"[E1]"`` and
-    ``"E1"`` are the same label."""
+    ``"E1"`` are the same label; each entry's labels are rewritten to
+    that canonical form."""
     cited: list[str] = []
     problems: list[BriefCitationProblem] = []
     for section in _SECTIONS:
         for index, entry in enumerate(getattr(brief, section)):
-            used, unknown = _sort_labels(
-                (label for raw in entry.labels for label in _LABEL_RE.findall(raw)), known
-            )
+            # Canonical labels in first-seen order, written back so each
+            # entry joins to ``citations[].label`` ("[E1]" becomes "E1").
+            found = [label for raw in entry.labels for label in _LABEL_RE.findall(raw)]
+            entry.labels = list(dict.fromkeys(found))
+            used, unknown = _sort_labels(entry.labels, known)
             cited += [label for label in used if label not in cited]
             if unknown:
                 problems.append(

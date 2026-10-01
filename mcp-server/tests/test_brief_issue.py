@@ -256,6 +256,24 @@ class TestBrief:
         assert "Evidence as of 2024-04-20" in text
         assert "cancelled the booking" in text
 
+    def test_accepted_label_forms_are_normalized_to_the_citation_label(self, brief_db):
+        """``"[E1]"`` and a label inside other text are read as ``E1``; the
+        entry must carry ``E1`` so it joins to ``citations[].label``."""
+
+        def bracketed(user: str) -> str:
+            data = json.loads(_good_brief(user))
+            first = data["chronology"][0]["labels"][0]
+            data["chronology"][0]["labels"] = [f"[{first}]", f"see {first} above"]
+            return json.dumps(data)
+
+        out = _run(brief_db, ScriptedInference(bracketed))
+        data = out.structured_content
+        assert data["citation_problems"] == []
+        labels = data["brief"]["chronology"][0]["labels"]
+        assert labels == [labels[0]] and re.fullmatch(r"E\d+", labels[0])
+        assert labels[0] in {c["label"] for c in data["citations"]}
+        assert "[[" not in out.content[0].text
+
     def test_unknown_label_is_flagged_after_one_repair(self, brief_db):
         def bad(user: str) -> str:
             return _brief(
