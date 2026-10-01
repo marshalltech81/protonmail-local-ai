@@ -420,9 +420,9 @@ checklist) or an owner decision.
 | 3.7 Filtered semantic recall | Done | #440, #470 | — |
 | 3.8 Citation contract | Partly done | #457 | statement-level and quote checks (#284) |
 | 4.1 Entities | Done | #459 | orphan cleanup (#464) |
-| 4.2 Source authority | Done | #459 | Spam guard in progress; verdict gating after go-live (#463) |
+| 4.2 Source authority | Done | #459, #474 (Spam guard) | verdict-header gating after go-live (#463) |
 | 4.3 Temporal retrieval | Not started | — | — |
-| 4.4 Retention | Mostly done | #451 (mirror default) | Trash hidden from search in progress (#441); user-controlled retention; reaped-citation behaviour |
+| 4.4 Retention | Mostly done | #451 (mirror default), #475 (Trash hidden from default search) | user-controlled retention; reaped-citation behaviour |
 | 5.1 Hardened `brief_issue` | Not started | — | needs Phase 3 usage on real mail |
 | 5.2 Support/contradict | Built, experimental | #467 (`check_conclusion`) | quote/support verification |
 | 5.3 Position as of date | Not started | — | — |
@@ -531,7 +531,7 @@ the first deployment needs a numbered migration like any other.
    folded into ranking weights** — authority is contextual; reasoning distinguishes "a
    vendor represented X" from "the executed agreement states X".
    **Status: done (#459).** The From address is unauthenticated: the
-   Spam guard is in progress and gating on Proton's verdict header is
+   Spam guard landed in #474 and gating on Proton's verdict header is
    decided after go-live (#463).
 3. **Richer temporal retrieval:** capture and expose
    occurred_at/sent_at consistently; bitemporal claim modeling waits
@@ -543,8 +543,8 @@ the first deployment needs a numbered migration like any other.
    2026-10-01, #441). Still to define: user-controlled retention.
    Provenance must define behavior when a citation's source is reaped
    (evidence row retained, source marked unavailable, chain never
-   silently broken). **Status: mostly done** (#451; the Trash change
-   is in progress).
+   silently broken). **Status: mostly done** (#451 mirror default,
+   #475 Trash hidden from default search).
 
 ### Phase 5 — Knowledge reasoning
 
@@ -667,7 +667,33 @@ Triaged against `d30e500` by four parallel agents; every issue is real
 and most reproduced with synthetic input. PRs in the order to land
 them (one test-first commit per issue, `Fixes #N` per issue):
 
-**Status 2026-10-01 (end of session) — next session starts here.**
+**Handoff 2026-10-01, end of the second session — start here.**
+Every PR from the session is merged (#436–#479); no PR is open and
+`main` is green. Beyond the result-quality and Phase 3–5 work listed
+below, the session also hid Trash from default search (#475), kept
+Spam out of authority filters (#474), and updated every dependency to
+its latest stable release (#479; Bridge stays on v3.27.0 because
+v3.27.1 is a pre-release). The Phase 3–5 status table under Phase 3
+is current.
+
+Next session, in order:
+1. **Go live** with the checklist below. For embeddings, DeepInfra
+   direct (`EMBED_BASE_URL=https://api.deepinfra.com/v1/openai`,
+   `EMBED_MODEL=Qwen/Qwen3-Embedding-8B`, about $0.01 per million
+   tokens) or a host-side server; avoid routers that may switch the
+   deployment behind the model name, since index and query vectors
+   must come from one deployment. Set `MCP_EXPERIMENTAL_TOOLS=true` to
+   try `brief_issue` and `check_conclusion`.
+2. **After the first sync:** check one real message for Proton's
+   topmost `Authentication-Results` header, the input to #463 step 2.
+3. **Then** let real questions drive the eval work (#283, #291) and
+   the measurements waiting on real data (#287 budgets, #288, #289).
+
+Backlog filed from review (P3 or edge cases, not scheduled): #442,
+#446, #447, #449, #450, #454, #455, #456, #460, #461, #464, #465,
+#468, #471, #477, #478.
+
+**Status 2026-10-01 (end of the first session).**
 Focus has moved from hardening to running the stack for real
 (owner, 2026-10-01). Merged this session: the cleanup batch
 #365–#400 (#402–#410), the whole #257 sweep (#364, #363, #401, #412,
@@ -1162,8 +1188,8 @@ do not ship persisted claims without them.
 7. **#295 sequential inline text parts (2026-09-30):** document the
    limitation now (queued as cleanup batch C7, since the note belongs
    in `docs/architecture.md`); revisit with the Phase 2 reindex
-   bundle. Superseded 2026-10-01: to be fixed directly while no live
-   index exists (in progress).
+   bundle. Superseded 2026-10-01: fixed directly while no live index
+   exists (#444).
 8. **#297 undated mail (2026-09-30):** keep the first persisted date on
    reprocess now; with the Phase 2 reindex, a deterministic chain —
    top `Received:`, else the Maildir filename timestamp, else the
