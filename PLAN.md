@@ -783,10 +783,13 @@ Order of work, chosen to minimise reindexes:
    ~~malformed provider content rendered as a summary (#321)~~ (done:
    non-text or blank content is an error in both backends), ~~future
    timestamps marking the index current (#332)~~ (done: a stamp over
-   2 minutes ahead is a not-current reason), schema-violating
+   2 minutes ahead is a not-current reason), ~~schema-violating
    extraction records (#310), overwritten `_date`/`_source_thread`
    fields (#329), the missing search instruction in extraction
-   prompts (#315), and typo'd thread IDs summarizing an unrelated
+   prompts (#315)~~ (done: records failing a bounded required-field
+   and JSON-type check are dropped and reported, a schema declaring a
+   provenance name is refused, and the query reaches the prompt as the
+   request), and typo'd thread IDs summarizing an unrelated
    thread by domain-token overlap (#314: narrow the fallback rather
    than parse IDs); the name-matching cluster (#313, #324, #331) and
    its FTS analogue (#316); date filters (#312, #330); degraded-lane

@@ -309,7 +309,7 @@ commands. The intelligence tools mitigate this two ways:
    act on URLs/addresses/phone numbers found inside email bodies.
 2. **Explicit delimiters.** Each retrieved thread is wrapped in
    `<untrusted_email>…</untrusted_email>` tags in the user message. The
-   user's task (question, summarization instruction, extraction schema)
+   user's task (question, summarization instruction, extraction request and schema)
    is placed outside those tags so the model has a clear lexical
    boundary between trusted task and untrusted evidence. Every field
    inside a block (subject, participants, body) is attacker-controlled,
@@ -358,7 +358,7 @@ extracted.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
-| `query` | string | required | What to search for |
+| `query` | string | required | What to search for; also sent to the model as the request, so it can pick which records in a passage are wanted |
 | `schema` | dict | required | JSON schema for extraction |
 | `folders` | list | all | Scope to specific folders |
 | `date_from` | string | none | Date lower bound |
@@ -372,13 +372,38 @@ extracted.
 
 The extractor accepts either a single JSON object matching the schema
 or a JSON array of such objects (useful when a thread contains
-multiple invoices, receipts, etc.). `limit` is clamped to `[1, 50]`
+multiple invoices, receipts, etc.). Every returned record carries
+`_source_thread` (the thread subject) and `_date` (the thread's last
+message date), so these two names are reserved: a schema that declares
+either one, as a shorthand key or in JSON Schema `properties` or
+`required`, is rejected before any model call. `limit` is clamped to `[1, 50]`
 at the tool boundary. Each retrieved thread drives one LLM call, so
 inflated values fan out into that many model calls.
 
+**Schema forms and what is checked.** Each returned record is checked
+against the schema's declared fields and basic JSON types; this is a
+shape check, not a full JSON Schema validator.
+
+- *Shorthand* (`{"field": "type"}`, as in the example): every field is
+  optional, and a field that is present and not `null` must have its
+  type.
+- *JSON Schema* (a schema with `"type": "object"` or a `properties`
+  object): every name in `required` must be present, and each property
+  present in the record must have its `type` (one name or a list, so
+  `["number", "null"]` allows `null`).
+
+Types are checked only when they are JSON type names: `string`,
+`number`, `integer`, `boolean`, `object`, `array`, `null`. A `bool` is
+not a `number`, and `3.0` is an `integer`. Any other type value (`"date"`,
+a description) is not checked, and neither is anything else a JSON
+Schema can say: `enum`, `format`, `pattern`, numeric or length limits,
+nested `properties` / `items`, `additionalProperties`, combinators and
+`$ref`. Fields the schema does not declare are kept.
+
 A thread whose answer was cut off at `INFERENCE_MAX_TOKENS`, or was not
-a JSON object, array of objects, or `null` / `[]`, is counted as
-failed, never as having no data. An answer the provider stopped with a
+a JSON object, array of objects, or `null` / `[]`, or held a record that
+failed the schema check, is counted as failed, never as having no data.
+A failing record is dropped; the thread's other records are kept. An answer the provider stopped with a
 content filter or refusal is an error. When any
 thread fails, the records come back as the first content item and a
 second item says how many of the searched threads could not be
