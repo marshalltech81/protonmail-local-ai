@@ -661,19 +661,25 @@ def _check_citations(answer: str, known: Container[str]) -> tuple[list[str], lis
 _MARK_RE = re.compile(r"\[(unsupported|uncertain)\]", re.IGNORECASE)
 
 # Where a statement ends: a line break, or a run of sentence terminators
-# (with any closing quote or parenthesis, and any short bracketed
-# citations written after it, as in "Moved. [E2]") followed by
-# whitespace. The look-behind starts a match only at the first
-# terminator of a run and each bracket group is at most 40 characters,
-# so every attempt is bounded and the scan stays linear.
+# (with any closing quote, parenthesis or Markdown emphasis or code
+# delimiter, and any short bracketed citations written after it, as in
+# "Moved. [E2]") followed by whitespace. The look-behind starts a match
+# only at the first terminator of a run and each bracket group is at
+# most 40 characters, so every attempt is bounded and the scan stays
+# linear.
 _STATEMENT_END_RE = re.compile(
-    r"\n|(?<![.!?])[.!?]++[\"”')]*+(?:[ \t]*+\[[^\[\]\n]{1,40}+\])*+(?=\s)"
+    r"\n|(?<![.!?])[.!?]++[\"”')*_`]*+(?:[ \t]*+\[[^\[\]\n]{1,40}+\])*+(?=\s)"
 )
 
-# A quotation: straight or curly double quotes on one line, paired left
-# to right. The body cannot contain a quote mark, so each match attempt
-# stops at the next one.
+# Paired double quotes: straight or curly, on one line, paired left to
+# right. The body cannot contain a quote mark, so each match attempt
+# stops at the next one. A pair is a quotation only when its body does
+# not start or end with whitespace (``_is_quotation``): a pair that
+# does is the outer side of a nested quotation or a stray mark (27"),
+# and is neither checked as a quote nor treated as quoted text.
 _QUOTE_RE = re.compile('["“]([^"“”\n]*+)["”]')
+# A Markdown heading line: one to six "#" and a space.
+_HEADING_RE = re.compile(r"#{1,6}\s")
 _WORD_RE = re.compile(r"\w+")
 _ELLIPSIS_RE = re.compile(r"\.\.\.|…")
 _QUOTE_FOLD = str.maketrans({"‘": "'", "’": "'", "“": '"', "”": '"'})
@@ -751,6 +757,28 @@ def _statement_spans(body: str, quote_spans: list[tuple[int, int]]) -> list[tupl
     return merged
 
 
+def _is_quotation(match: re.Match[str]) -> bool:
+    """Whether a ``_QUOTE_RE`` pair is a quotation (see ``_QUOTE_RE``)."""
+    body = match.group(1)
+    return bool(body) and not body[0].isspace() and not body[-1].isspace()
+
+
+def _outside(
+    matches: Iterable[re.Match[str]], quoted: list[tuple[int, int]]
+) -> list[re.Match[str]]:
+    """``matches`` (in position order) that start outside every span in
+    ``quoted`` (in position order). One pointer walk."""
+    kept: list[re.Match[str]] = []
+    q = 0
+    for match in matches:
+        while q < len(quoted) and quoted[q][1] <= match.start():
+            q += 1
+        if q < len(quoted) and quoted[q][0] < match.start():
+            continue
+        kept.append(match)
+    return kept
+
+
 def _word_count(text: str) -> int:
     """Words of ``text`` outside citations and marks."""
     return len(_WORD_RE.findall(_MARK_RE.sub("", _CITATION_RE.sub("", text))))
@@ -769,7 +797,7 @@ def _statement_status(
     stripped = text.strip()
     if (
         not_found
-        or stripped.startswith("#")
+        or _HEADING_RE.match(stripped)
         or stripped.endswith(":")
         or _word_count(stripped) < _MIN_CHECKED_WORDS
     ):
@@ -806,7 +834,9 @@ def _check_quotes(
             continue
         text = raw if len(raw) <= _MAX_QUOTE_CHARS else raw[:_MAX_QUOTE_CHARS] + "…"
         cited = statements[statement].labels
-        fragments = _quote_fragments(raw) if len(raw) <= _MAX_QUOTE_CHARS else []
+        fragments = (
+            _quote_fragments(raw) if len(raw) <= _MAX_QUOTE_CHARS and _is_quotation(match) else []
+        )
         if not fragments or checked >= _MAX_CHECKED_QUOTES:
             quotes.append(
                 QuoteCheck(text=text, statement=statement, status="not_checked", found_in=[])
@@ -834,7 +864,7 @@ def _check_answer(answer: str, evidence_map: Mapping[str, EvidenceRef]) -> Answe
 
     1. Labels: every cited label must name a supplied passage, and an
        answer must cite something unless it opens with the not-found
-       phrase (``_check_citations``).
+       phrase. Labels and marks inside a quotation are quoted text.
     2. Statements: the answer is cut into statements (sentences and
        lines); each must cite a supplied passage or be marked
        [unsupported] / [uncertain]. Headings, list introductions,
@@ -848,10 +878,19 @@ def _check_answer(answer: str, evidence_map: Mapping[str, EvidenceRef]) -> Answe
     """
     body = answer.removesuffix(_TRUNCATED_NOTICE)
     not_found = body.lstrip().startswith(_NOT_FOUND_PREFIX)
-    used, unknown = _check_citations(body, evidence_map)
 
     quote_matches = list(_QUOTE_RE.finditer(body))
-    spans = _statement_spans(body, [(m.start(), m.end()) for m in quote_matches])
+    quoted = [(m.start(), m.end()) for m in quote_matches if _is_quotation(m)]
+    spans = _statement_spans(body, quoted)
+
+    # A label or mark inside a quotation is quoted mail text, not a
+    # citation or a mark the model made.
+    citation_matches = _outside(_CITATION_RE.finditer(body), quoted)
+    mark_matches = _outside(_MARK_RE.finditer(body), quoted)
+    used, unknown = _sort_labels(
+        (label for m in citation_matches for label in _LABEL_RE.findall(m.group(1))),
+        evidence_map,
+    )
 
     # Assign citations, marks and quotes to statements by position; each
     # list is in position order, so one pointer walk per list.
@@ -864,8 +903,6 @@ def _check_answer(answer: str, evidence_map: Mapping[str, EvidenceRef]) -> Answe
             owners.append(i)
         return owners
 
-    citation_matches = list(_CITATION_RE.finditer(body))
-    mark_matches = list(_MARK_RE.finditer(body))
     labels: list[list[str]] = [[] for _ in spans]
     invalid = [False] * len(spans)
     marks: list[str | None] = [None] * len(spans)

@@ -867,3 +867,57 @@ class TestHandlerStatementsAndQuotes:
         report = out.content[0].text[len(answer) :]
         assert "Citation check" in report
         assert _MARKER not in report
+
+
+class TestReviewRound1Statements:
+    """Codex round 1 on #495: checker syntax inside quotations, Markdown
+    emphasis closers, nested quotations and '#' that is not a heading."""
+
+    def test_labels_and_marks_inside_a_quotation_are_quoted_text(self):
+        # Mail text can hold "[E99]" or "[unsupported]"; quoting it exactly
+        # must neither cite nor mark anything.
+        check = _check_answer('Bob wrote "see the note [E99] on Monday" [E2].', _EVIDENCE)
+        assert check.unknown == []
+        assert check.statements[0].labels == ["E2"]
+        assert check.problems == [] or [p.kind for p in check.problems] == ["unmatched_quotes"]
+        check = _check_answer(
+            'The note reads "this claim is [unsupported] here" in full. '
+            'Another note cites "per the [E1] header notes" in full. '
+            "Shipping moved to Monday [E2].",
+            _EVIDENCE,
+        )
+        assert _statuses(check)[:2] == ["uncited", "uncited"]
+        assert check.used == ["E2"]
+        assert "uncited_statements" in [p.kind for p in check.problems]
+
+    @pytest.mark.parametrize("closer", ["**", "*", "_", "`", "__"])
+    def test_markdown_closers_end_a_statement(self, closer):
+        answer = f"{closer}Alice approved the plan.{closer} Bob rejected it later [E1]."
+        check = _check_answer(answer, _EVIDENCE)
+        assert _statuses(check) == ["uncited", "cited"]
+
+    def test_a_nested_quotation_is_not_verified_by_its_outer_fragments(self):
+        answer = 'The email says "We will ship "approved without conditions" the order" [E1].'
+        check = _check_answer(answer, _EVIDENCE)
+        assert "verified" not in [q.status for q in check.quotes]
+        outer = [q for q in check.quotes if q.text.startswith("We will ship")]
+        assert [q.status for q in outer] == ["not_checked"]
+        mixed = 'The email says “We will ship "approved without conditions" the order” [E1].'
+        check = _check_answer(mixed, _EVIDENCE)
+        assert "verified" not in [q.status for q in check.quotes]
+
+    def test_a_stray_quote_mark_does_not_swallow_citations(self):
+        check = _check_answer(
+            'The 27" monitor ships Friday [E1]. The "final" date moved to Monday [E2].',
+            _EVIDENCE,
+        )
+        assert check.used == ["E1", "E2"]
+        assert check.problems == []
+
+    def test_only_a_markdown_heading_is_exempt(self):
+        check = _check_answer(
+            "#1 priority is fixing the leak. Shipping moved to Monday [E2].", _EVIDENCE
+        )
+        assert _statuses(check) == ["uncited", "cited"]
+        check = _check_answer("## Shipping plan for the week\nIt moved to Monday [E2].", _EVIDENCE)
+        assert _statuses(check) == ["not_checked", "cited"]
