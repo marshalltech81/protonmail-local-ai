@@ -28,6 +28,17 @@ class TestTextForEmbedding:
         assert "Subject: project update" in text
         assert "Participants:" in text
 
+    def test_reply_subject_listed_only_when_it_differs(self):
+        # #303: a reply that changes the subject keeps its words
+        # searchable; a plain "Re:" of the thread subject is not repeated.
+        root = make_message(message_id="r@example.com", subject="Budget review")
+        same = make_message(message_id="s@example.com", subject="Re: FWD: budget  review")
+        changed = make_message(message_id="c@example.com", subject="Re: Budget review ZX731")
+        thread = make_thread(messages=[root, same, changed], subject="budget review")
+        text = thread.text_for_embedding()
+        assert text.count("Subject:") == 2
+        assert "Subject: Re: Budget review ZX731" in text
+
     def test_includes_message_body(self):
         msg = make_message(body_text="This is the body content.")
         thread = make_thread(messages=[msg])

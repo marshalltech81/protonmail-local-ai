@@ -25,6 +25,7 @@ from .threader import (
     THREAD_BODY_TEXT_MAX_TOKENS,
     Thread,
     canonical_addr,
+    reply_subject_line,
 )
 
 log = logging.getLogger("indexer.database")
@@ -609,9 +610,19 @@ class Database:
                 # so a thread that arrived as one message gets the same FTS
                 # body coverage as a thread that arrived as a sequence of
                 # replies.
+                # A reply's changed subject rides with its entry, as in
+                # ``Thread.text_for_embedding`` (#303).
                 new_content = "\n".join(
-                    f"From: {m.from_addr}\nDate: {m.date.isoformat()}\n"
-                    f"{m.body_text[:PER_MESSAGE_BODY_CAP_CHARS]}"
+                    "\n".join(
+                        line
+                        for line in (
+                            f"From: {m.from_addr}",
+                            f"Date: {m.date.isoformat()}",
+                            reply_subject_line(m, thread.subject),
+                            m.body_text[:PER_MESSAGE_BODY_CAP_CHARS],
+                        )
+                        if line is not None
+                    )
                     for m in new_messages
                 )
                 return truncate_to_tokens(

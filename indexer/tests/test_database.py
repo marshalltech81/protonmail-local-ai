@@ -1523,14 +1523,19 @@ class TestReapRewritesThreadRow:
         db.upsert_thread(t1, FAKE_EMBEDDING)
         db.upsert_thread(threader.assign_thread(reply), FAKE_EMBEDDING)
 
-        # Reap the reply and rewrite with a different subject
+        # Reap the reply and rewrite with a different subject. The
+        # survivor carries that subject too: a survivor whose own subject
+        # differs from the thread's is listed in the body (#303), which
+        # would keep "hello" searchable for a real reason.
+        from dataclasses import replace
+
         from src.threader import Thread
 
         rebuilt = Thread(
             thread_id=t1.thread_id,
             subject="brand new subject",
             participants=["only@x"],
-            messages=[original],
+            messages=[replace(original, subject="Brand new subject")],
             folder="INBOX",
             date_first=original.date,
             date_last=original.date,

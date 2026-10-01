@@ -5183,3 +5183,77 @@ class TestTrashedFilesWithReconciliation:
         assert main._recover_zero_vector_threads(db, queue, skip_trashed=True) == 1
         assert not queue.has_pending_row(trashed)
         assert queue.has_pending_row(live)
+
+
+class TestReplySubjectSearchable:
+    """#303: a reply whose subject differs from the thread's (after
+    Re:/Fwd: normalization) must be findable by keyword and semantic
+    search, without repeating a subject that matches the thread's."""
+
+    TOKEN = "APPROVALZX731"
+
+    def _index_thread(self, tmp_path):
+        root = tmp_path / "INBOX" / "cur" / "root.eml"
+        changed = tmp_path / "INBOX" / "cur" / "changed.eml"
+        same = tmp_path / "INBOX" / "cur" / "same.eml"
+        _write_eml(root, "root@example.com", "Budget review")
+        _write_eml(
+            changed,
+            "changed@example.com",
+            f"Re: Budget review {self.TOKEN}",
+            in_reply_to="root@example.com",
+            references=["root@example.com"],
+            date="Mon, 01 Jan 2024 13:00:00 +0000",
+        )
+        _write_eml(
+            same,
+            "same@example.com",
+            "RE: Fwd: budget  review",
+            in_reply_to="changed@example.com",
+            references=["root@example.com", "changed@example.com"],
+            date="Mon, 01 Jan 2024 14:00:00 +0000",
+        )
+        db = Database(tmp_path / "mail.db")
+        embedder = make_mock_embedder(_UNIT_VECTOR)
+        threader = Threader(db)
+        for path in (root, changed, same):
+            assert _index_one(path, db, embedder, threader)[0]
+        inputs = [t for call in embedder.embed_batch.call_args_list for t in call.args[0]]
+        return db, inputs
+
+    def test_reply_subject_reaches_fts_and_embedding_input(self, tmp_path):
+        db, inputs = self._index_thread(tmp_path)
+        thread_ids = {
+            r[0]
+            for r in db._conn.execute(
+                "SELECT t.thread_id FROM threads_fts f JOIN threads t "
+                "ON t.fts_rowid = f.rowid WHERE threads_fts MATCH ?",
+                (self.TOKEN,),
+            )
+        }
+        assert thread_ids == {"root@example.com"}
+        chunk_messages = {
+            r[0]
+            for r in db._conn.execute(
+                "SELECT c.message_id FROM message_chunks_fts f JOIN message_chunks c "
+                "ON c.fts_rowid = f.rowid WHERE message_chunks_fts MATCH ?",
+                (self.TOKEN,),
+            )
+        }
+        assert chunk_messages == {"changed@example.com"}
+        assert [t for t in inputs if self.TOKEN in t] == [
+            f"Subject: Re: Budget review {self.TOKEN}\n\nBody of changed@example.com."
+        ]
+
+    def test_unchanged_subject_is_not_repeated(self, tmp_path):
+        db, inputs = self._index_thread(tmp_path)
+        body = db._conn.execute(
+            "SELECT body_text FROM threads WHERE thread_id = ?", ("root@example.com",)
+        ).fetchone()[0]
+        # The thread's own subject line plus the one changed reply.
+        assert body.count("Subject:") == 2
+        assert f"Subject: Re: Budget review {self.TOKEN}" in body
+        chunk_texts = [r[0] for r in db._conn.execute("SELECT text FROM message_chunks")]
+        assert sum("Subject:" in t for t in chunk_texts) == 1
+        assert "Body of root@example.com." in inputs
+        assert "Body of same@example.com." in inputs

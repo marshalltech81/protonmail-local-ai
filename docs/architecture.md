@@ -294,6 +294,14 @@ history. Stripping is intentionally conservative: quoted text is still
 searchable through FTS and falls back to the original body when the
 stripped result would be empty.
 
+A reply whose subject differs from the thread's after `Re:`/`Fwd:`
+normalization (a reply that renamed the conversation but still joined
+it through References / In-Reply-To) contributes a
+`Subject: <its subject>` line to its entry in `body_text` and as the
+first paragraph of its chunk text, so the new subject is in thread FTS,
+chunk FTS and that message's embedding input (#303). A subject that
+normalizes to the thread's is not repeated.
+
 **Known limitation (#295):** a message's body text is the first
 `text/plain` part outside attachments, or failing that the first
 `text/html` part. A plain part that holds only whitespace counts as

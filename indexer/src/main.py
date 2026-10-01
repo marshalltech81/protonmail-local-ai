@@ -81,7 +81,7 @@ from .queue import load_config_from_env as load_queue_config_from_env
 from .quoting import strip_for_embedding
 from .reconciler import Reconciler, ReconcilerConfig, load_config_from_env, sweep_paths
 from .stall_guard import StallGuard
-from .threader import Thread, Threader
+from .threader import Thread, Threader, reply_subject_line
 from .timings import StageTimings, TimingAggregator, format_summary
 
 logging.basicConfig(
@@ -796,9 +796,15 @@ def _phase2a_collect_chunks(
     msg = state.msg
     t0 = time.perf_counter()
     try:
+        # A reply that changed the subject leads its chunk text with
+        # that subject (the thread body's ``Subject:`` line shape), so
+        # the subject is in its chunk FTS row and embedding input (#303).
+        chunk_source = strip_for_embedding(msg.body_text or "")
+        if subject_line := reply_subject_line(msg, state.thread.subject):
+            chunk_source = f"{subject_line}\n\n{chunk_source}"
         body_chunks = chunk_message(
             message_pk=msg.message_id,
-            body_text=strip_for_embedding(msg.body_text or ""),
+            body_text=chunk_source,
             target_tokens=CHUNK_TARGET_TOKENS,
             max_tokens=CHUNK_MAX_TOKENS,
             overlap_tokens=CHUNK_OVERLAP_TOKENS,

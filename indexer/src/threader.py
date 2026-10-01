@@ -159,6 +159,8 @@ class Thread:
         for msg in self.messages:
             parts.append(f"From: {msg.from_addr}")
             parts.append(f"Date: {msg.date.isoformat()}")
+            if subject_line := reply_subject_line(msg, self.subject):
+                parts.append(subject_line)
             # Cap per-message body so the joined string stays bounded
             # before the thread-level truncation below. Shared with
             # ``Database._compute_body`` via ``PER_MESSAGE_BODY_CAP_CHARS``
@@ -362,3 +364,20 @@ def _normalize_subject(subject: str) -> str:
         while pos < len(s) and s[pos].isspace():
             pos += 1
     return _SUBJECT_WHITESPACE_RE.sub(" ", s[pos:]).strip()
+
+
+def reply_subject_line(msg: Message, thread_subject: str) -> str | None:
+    """``Subject: <msg.subject>`` when the message's subject differs
+    from the thread's after normalization, else ``None``.
+
+    A reply can change the subject and still join the thread through
+    References / In-Reply-To. Its subject is then searchable only if it
+    is written into the thread body (FTS) and the message's chunk text
+    (embedding). A subject that normalizes to the thread's is already
+    covered by the thread's own ``Subject:`` line and is not repeated
+    (#303).
+    """
+    normalized = _normalize_subject(msg.subject)
+    if not normalized or normalized == _normalize_subject(thread_subject):
+        return None
+    return f"Subject: {msg.subject}"
