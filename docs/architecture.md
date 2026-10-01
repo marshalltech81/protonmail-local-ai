@@ -912,7 +912,9 @@ The MCP server defaults to SSE for existing Claude Desktop compatibility.
 Set `MCP_TRANSPORT=streamable-http` for clients that only speak Streamable
 HTTP, or `MCP_TRANSPORT=dual` to serve both `/sse` and `/mcp` on the same
 localhost-bound port. Every transport, and `/health`, sits behind the same
-Host/Origin allowlist.
+Host/Origin allowlist. A Streamable HTTP session idle for
+`MCP_SESSION_IDLE_TIMEOUT_SECS` (default 1800 s) is ended, so abandoned
+sessions do not accumulate.
 
 ## Inference Mode Toggle
 

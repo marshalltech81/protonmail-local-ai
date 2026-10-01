@@ -39,6 +39,10 @@ _CONTAINER_ADDR = ("172.18.0.5", 3000)
 _MARKER = "synthetic-mail-marker-c41d"
 
 
+def _app(transport, server: FastMCP | None = None, session_idle_timeout: float = 1800.0):
+    return _build_app(server or _server(), transport, session_idle_timeout=session_idle_timeout)
+
+
 def _server() -> FastMCP:
     server = FastMCP("http-transport-test")
 
@@ -223,25 +227,25 @@ _REJECTED_ORIGINS = [
 class TestHostAllowlist:
     @pytest.mark.parametrize("host", _ALLOWED_HOSTS)
     def test_sse_accepts_allowed_host(self, host):
-        assert _sse_status(_build_app(_server(), "sse"), host=host) == 200
+        assert _sse_status(_app("sse"), host=host) == 200
 
     @pytest.mark.parametrize("host", _REJECTED_HOSTS)
     def test_sse_rejects_other_host(self, host):
-        assert _sse_status(_build_app(_server(), "sse"), host=host) == 421
+        assert _sse_status(_app("sse"), host=host) == 421
 
     def test_sse_rejects_missing_host(self):
-        assert _sse_status(_build_app(_server(), "sse"), host=None) == 421
+        assert _sse_status(_app("sse"), host=None) == 421
 
     @pytest.mark.parametrize("host", _ALLOWED_HOSTS)
     def test_streamable_http_accepts_allowed_host(self, host):
-        assert _mcp_status(_build_app(_server(), "streamable-http"), host=host) == 200
+        assert _mcp_status(_app("streamable-http"), host=host) == 200
 
     @pytest.mark.parametrize("host", _REJECTED_HOSTS)
     def test_streamable_http_rejects_other_host(self, host):
-        assert _mcp_status(_build_app(_server(), "streamable-http"), host=host) == 421
+        assert _mcp_status(_app("streamable-http"), host=host) == 421
 
     def test_sse_message_post_rejects_other_host(self):
-        app = _build_app(_server(), "sse")
+        app = _app("sse")
         status = _with_lifespan(
             app,
             lambda: _status(
@@ -256,7 +260,7 @@ class TestHostAllowlist:
         assert status == 421
 
     def test_health_rejects_other_host(self):
-        app = _build_app(_server(), "sse")
+        app = _app("sse")
         assert _with_lifespan(app, lambda: _status(app, "GET", "/health")) == 200
         assert (
             _with_lifespan(app, lambda: _status(app, "GET", "/health", host="evil.example")) == 421
@@ -266,24 +270,24 @@ class TestHostAllowlist:
 class TestOriginAllowlist:
     @pytest.mark.parametrize("origin", _ALLOWED_ORIGINS)
     def test_sse_accepts_allowed_origin(self, origin):
-        assert _sse_status(_build_app(_server(), "sse"), origin=origin) == 200
+        assert _sse_status(_app("sse"), origin=origin) == 200
 
     @pytest.mark.parametrize("origin", _REJECTED_ORIGINS)
     def test_sse_rejects_other_origin(self, origin):
-        assert _sse_status(_build_app(_server(), "sse"), origin=origin) == 403
+        assert _sse_status(_app("sse"), origin=origin) == 403
 
     @pytest.mark.parametrize("origin", _ALLOWED_ORIGINS)
     def test_streamable_http_accepts_allowed_origin(self, origin):
-        assert _mcp_status(_build_app(_server(), "streamable-http"), origin=origin) == 200
+        assert _mcp_status(_app("streamable-http"), origin=origin) == 200
 
     @pytest.mark.parametrize("origin", _REJECTED_ORIGINS)
     def test_streamable_http_rejects_other_origin(self, origin):
-        assert _mcp_status(_build_app(_server(), "streamable-http"), origin=origin) == 403
+        assert _mcp_status(_app("streamable-http"), origin=origin) == 403
 
 
 class TestDualTransport:
     def test_both_transports_and_health_are_served(self):
-        app = _build_app(_server(), "dual")
+        app = _app("dual")
 
         async def probe():
             import json
@@ -299,7 +303,7 @@ class TestDualTransport:
         assert _dual_with_lifespan(app, probe) == (200, 200, 200)
 
     def test_bad_host_is_rejected_on_both_transports(self):
-        app = _build_app(_server(), "dual")
+        app = _app("dual")
 
         async def probe():
             import json
@@ -361,7 +365,7 @@ def _http_session_calls(app, calls: list[tuple[str, dict]]) -> list[str]:
 class TestToolFailures:
     def test_tool_error_is_an_error_result_over_http(self):
         ok, failed = _http_session_calls(
-            _build_app(_server(), "streamable-http"),
+            _app("streamable-http"),
             [("ping", {}), ("fails_cleanly", {"q": "x"})],
         )
         assert '"isError":false' in ok
@@ -385,3 +389,66 @@ class TestToolFailures:
         assert any(tool in r.getMessage() for r in records)
         assert _MARKER not in caplog.text
         assert not any(r.exc_info for r in records)
+
+
+def _session_manager(app):
+    """The Streamable HTTP session manager behind ``app``'s ``/mcp`` route."""
+    route = next(r for r in app.routes if getattr(r, "path", "") == "/mcp")
+    return route.endpoint.session_manager
+
+
+class TestSessionBound:
+    """#317: Streamable HTTP sessions a client abandons without a DELETE
+    end after the idle timeout, and a request the Host allowlist rejects
+    leaves no session behind."""
+
+    def test_abandoned_sessions_expire_after_the_idle_timeout(self):
+        app = _app("streamable-http", session_idle_timeout=0.5)
+
+        async def run():
+            manager = _session_manager(app)
+            assert manager.session_idle_timeout == 0.5
+            for _ in range(5):
+                transport = httpx2.ASGITransport(app=app)
+                async with httpx2.AsyncClient(
+                    transport=transport, base_url="http://localhost"
+                ) as c:
+                    r = await c.post("/mcp", json=_INIT, headers=_POST_HEADERS)
+                    assert r.status_code == 200
+            retained = len(manager._server_instances)
+            await anyio.sleep(1.5)
+            return retained, len(manager._server_instances)
+
+        assert _with_lifespan(app, run) == (5, 0)
+
+    def test_rejected_host_leaves_no_session(self):
+        app = _app("streamable-http")
+
+        async def run():
+            statuses = []
+            for _ in range(3):
+                transport = httpx2.ASGITransport(app=app)
+                async with httpx2.AsyncClient(
+                    transport=transport, base_url="http://evil.example"
+                ) as c:
+                    r = await c.post("/mcp", json=_INIT, headers=_POST_HEADERS)
+                    statuses.append(r.status_code)
+            return statuses, len(_session_manager(app)._server_instances)
+
+        assert _with_lifespan(app, run) == ([421, 421, 421], 0)
+
+    @pytest.mark.parametrize("transport", ["streamable-http", "dual"])
+    def test_idle_timeout_reaches_every_streamable_http_app(self, transport):
+        server = _server()
+        calls = []
+        http_app = server.http_app
+
+        def recording_http_app(**kwargs):
+            calls.append(kwargs)
+            return http_app(**kwargs)
+
+        server.http_app = recording_http_app  # type: ignore[method-assign]
+        _app(transport, server=server, session_idle_timeout=42.0)
+        streamable = [c for c in calls if c["transport"] == "streamable-http"]
+        assert len(streamable) == 1
+        assert streamable[0]["session_idle_timeout"] == 42.0

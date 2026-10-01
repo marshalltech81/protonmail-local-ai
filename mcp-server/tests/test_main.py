@@ -122,9 +122,14 @@ class TestMcpTransport:
         app = object()
         monkeypatch.setattr(main_mod, "uvicorn", _StubUvicorn)
         monkeypatch.setattr(
-            main_mod, "_build_app", lambda server, t: app if t == transport else None
+            main_mod,
+            "_build_app",
+            lambda server, t, session_idle_timeout: (
+                app if (t, session_idle_timeout) == (transport, 900.0) else None
+            ),
         )
         monkeypatch.setattr(main_mod, "MCP_PORT", 3000)
+        monkeypatch.setattr(main_mod, "MCP_SESSION_IDLE_TIMEOUT_SECS", 900.0)
         _run_server(_Server(), transport)  # type: ignore[arg-type]
         assert captured == {
             "app": app,
@@ -154,11 +159,11 @@ class TestMcpTransport:
         class _ServerStub:
             """Only what ``_build_dual_app`` reads: ``http_app``."""
 
-            def http_app(self, *, path, transport, middleware):
+            def http_app(self, *, path, transport, middleware, **_kwargs):
                 assert middleware
                 return {"sse": sse, "streamable-http": http}[transport]
 
-        app = _build_app(_ServerStub(), "dual")  # type: ignore[arg-type]
+        app = _build_app(_ServerStub(), "dual", session_idle_timeout=1800.0)  # type: ignore[arg-type]
 
         async def _dispatch(path):
             await app({"type": "http", "path": path}, lambda: None, lambda *_: None)
@@ -176,6 +181,38 @@ class TestMcpTransport:
 
         assert http.calls == ["/mcp", "/mcp/messages/abc"]
         assert sse.calls == ["/sse", "/messages/x", "/health", "/mcp-debug", "/mcpfoo"]
+
+
+class TestSessionIdleTimeout:
+    """#317: ``MCP_SESSION_IDLE_TIMEOUT_SECS`` bounds Streamable HTTP
+    sessions; it defaults to 1800 s and a value that is not a finite
+    number of at least one second fails startup."""
+
+    def _load(self, monkeypatch, value):
+        import importlib
+
+        import src.main as main_mod
+
+        if value is None:
+            monkeypatch.delenv("MCP_SESSION_IDLE_TIMEOUT_SECS", raising=False)
+        else:
+            monkeypatch.setenv("MCP_SESSION_IDLE_TIMEOUT_SECS", value)
+        try:
+            return importlib.reload(main_mod).MCP_SESSION_IDLE_TIMEOUT_SECS
+        finally:
+            monkeypatch.delenv("MCP_SESSION_IDLE_TIMEOUT_SECS", raising=False)
+            importlib.reload(main_mod)
+
+    def test_defaults_to_thirty_minutes(self, monkeypatch):
+        assert self._load(monkeypatch, None) == 1800.0
+
+    def test_operator_value_is_used(self, monkeypatch):
+        assert self._load(monkeypatch, "600") == 600.0
+
+    @pytest.mark.parametrize("value", ["0", "0.5", "-1", "nan", "inf", "soon"])
+    def test_invalid_value_fails_startup(self, monkeypatch, value):
+        with pytest.raises(ValueError, match="MCP_SESSION_IDLE_TIMEOUT_SECS"):
+            self._load(monkeypatch, value)
 
 
 class TestFloatEnv:

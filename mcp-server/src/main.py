@@ -267,6 +267,12 @@ RERANK_TIMEOUT_SECS = _float_env("RERANK_TIMEOUT_SECS", DEFAULT_RERANK_TIMEOUT_S
 
 MCP_PORT = int(os.environ.get("MCP_PORT", "3000"))
 MCP_TRANSPORT = os.environ.get("MCP_TRANSPORT", "sse")
+# Seconds a Streamable HTTP session may sit idle before the server ends
+# it (#317). fastmcp's default is no limit, so a session a client
+# abandons without a DELETE would hold its server task until shutdown.
+# A client whose session expires gets 404 on its next request and starts
+# a new one.
+MCP_SESSION_IDLE_TIMEOUT_SECS = _float_env("MCP_SESSION_IDLE_TIMEOUT_SECS", 1800.0, minimum=1.0)
 
 # Paths the transports are served on; fastmcp's defaults, pinned here so
 # the dual-transport dispatch and the docs cannot drift from them.
@@ -345,24 +351,32 @@ class _HostOriginGuard:
         await self.app(scope, receive, send)
 
 
-def _build_app(server: FastMCP, transport: _Transport) -> ASGIApp:
+def _build_app(server: FastMCP, transport: _Transport, *, session_idle_timeout: float) -> ASGIApp:
     """The ASGI app serving ``server`` on ``transport``.
 
     Every transport app carries ``_HostOriginGuard``; fastmcp's SSE app
     has no Host/Origin check of its own and its Streamable HTTP check is
     off by default. Custom routes (``/health``) are served by each app.
+    Streamable HTTP sessions end after ``session_idle_timeout`` seconds
+    without a request; it is required because fastmcp's default never
+    ends them.
     """
     guard = [Middleware(_HostOriginGuard)]
     if transport == "sse":
         return server.http_app(path=_SSE_PATH, transport="sse", middleware=guard)
     if transport == "streamable-http":
         return server.http_app(
-            path=_STREAMABLE_HTTP_PATH, transport="streamable-http", middleware=guard
+            path=_STREAMABLE_HTTP_PATH,
+            transport="streamable-http",
+            middleware=guard,
+            session_idle_timeout=session_idle_timeout,
         )
-    return _build_dual_app(server, guard)
+    return _build_dual_app(server, guard, session_idle_timeout)
 
 
-def _build_dual_app(server: FastMCP, guard: list[Middleware]) -> ASGIApp:
+def _build_dual_app(
+    server: FastMCP, guard: list[Middleware], session_idle_timeout: float
+) -> ASGIApp:
     """Serve SSE and Streamable HTTP routes from one FastMCP instance.
 
     Each transport app is invoked as a complete ASGI app rather than
@@ -380,7 +394,10 @@ def _build_dual_app(server: FastMCP, guard: list[Middleware]) -> ASGIApp:
     """
     sse_app = server.http_app(path=_SSE_PATH, transport="sse", middleware=guard)
     streamable_http_app = server.http_app(
-        path=_STREAMABLE_HTTP_PATH, transport="streamable-http", middleware=guard
+        path=_STREAMABLE_HTTP_PATH,
+        transport="streamable-http",
+        middleware=guard,
+        session_idle_timeout=session_idle_timeout,
     )
 
     streamable_path = _STREAMABLE_HTTP_PATH
@@ -446,7 +463,7 @@ def _run_server(server: FastMCP, transport: _Transport) -> None:
     or test — to pass a value already returned by ``_normalize_transport``.
     """
     config = uvicorn.Config(
-        _build_app(server, transport),
+        _build_app(server, transport, session_idle_timeout=MCP_SESSION_IDLE_TIMEOUT_SECS),
         host="0.0.0.0",  # nosec B104 — see docstring
         port=MCP_PORT,
         log_level="info",
@@ -614,6 +631,8 @@ def main():
             f"(model={RERANK_MODEL}, candidates={RERANK_CANDIDATES})"
         )
     log.info(f"  Transport: {transport}")
+    if transport != "sse":
+        log.info(f"  Session idle timeout: {MCP_SESSION_IDLE_TIMEOUT_SECS:g}s")
     log.info("  Retrieval: local SQLite index only")
 
     _run_server(server, transport)
