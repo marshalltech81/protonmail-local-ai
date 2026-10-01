@@ -11,6 +11,7 @@ import time
 from collections.abc import Callable
 from datetime import UTC, datetime
 
+import pytest
 from src.lib.sqlite import ChunkResult, ThreadResult
 from src.tools.intelligence import (
     _SUMMARIZE_BODY_CHAR_BUDGET,
@@ -480,6 +481,42 @@ class TestPickResolutionCandidate:
             _candidate("c2", "beta"),
         ]
         assert _pick_resolution_candidate("   ", candidates) is None
+
+    @pytest.mark.parametrize(
+        "query",
+        [
+            "<not-present@gmail.com>",
+            "not-present@gmail.com",
+            "invoice.123@gmail.com",
+            "PH3PPF8675309xyz@outlook.com",
+            # A quoted local part keeps its space, so splitting on
+            # whitespace would leave "invoice" from inside the ID.
+            '<"invoice team"@gmail.com>',
+        ],
+    )
+    def test_address_shaped_id_does_not_match_on_its_tokens(self, query):
+        from src.tools.intelligence import _pick_resolution_candidate
+
+        # A missed opaque ID (thread IDs are root Message-IDs) is not a
+        # phrase: its domain ("gmail") or local part ("invoice") must
+        # not satisfy the gate against an unrelated subject (#314).
+        candidates = [
+            _candidate("c1", "Gmail invoice"),
+            _candidate("c2", "Outlook PH3PPF8675309xyz"),
+        ]
+        assert _pick_resolution_candidate(query, candidates) is None
+
+    def test_any_input_containing_an_address_does_not_resolve(self):
+        from src.tools.intelligence import _pick_resolution_candidate
+
+        # Telling an ID's words from a phrase's around an "@" would mean
+        # parsing Message-IDs, so an input containing one is never a
+        # phrase; search_emails is the path for an address.
+        candidates = [
+            _candidate("c1", "lunch"),
+            _candidate("c2", "Gmail invoice"),
+        ]
+        assert _pick_resolution_candidate("invoice from billing@gmail.com", candidates) is None
 
     def test_raises_on_empty_candidates(self):
         import pytest

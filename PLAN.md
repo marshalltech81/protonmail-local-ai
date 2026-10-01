@@ -789,9 +789,10 @@ Order of work, chosen to minimise reindexes:
    prompts (#315)~~ (done: records failing a bounded required-field
    and JSON-type check are dropped and reported, a schema declaring a
    provenance name is refused, and the query reaches the prompt as the
-   request), and typo'd thread IDs summarizing an unrelated
+   request), and ~~typo'd thread IDs summarizing an unrelated
    thread by domain-token overlap (#314: narrow the fallback rather
-   than parse IDs); the name-matching cluster (#313, #324, #331) and
+   than parse IDs)~~ (done: an input containing `@` never reaches
+   the subject fallback); the name-matching cluster (#313, #324, #331) and
    its FTS analogue (#316); date filters (#312, #330); degraded-lane
    honesty (#333); event-loop hygiene (#320, #317, #334); folder
    discovery hiding reply-only folders (#308); the attachment-lane

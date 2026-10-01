@@ -215,6 +215,22 @@ class TestSummarizeThread:
         # resolved a thread to summarize.
         assert fake_inference.complete_calls == []
 
+    def test_missing_address_shaped_id_does_not_resolve_via_its_tokens(
+        self, fake_server, seeded_db, fake_embed, fake_inference
+    ):
+        # #314: a missed opaque ID shaped like a Message-ID must not
+        # resolve through tokens of its own domain or local part. The
+        # domain "invoice" overlaps t-alpha's subject "invoice for
+        # march", which the fixed [1, 0, 0, 0] embedding also ranks
+        # first, so before the fix this summarized t-alpha.
+        handler = _handlers(fake_server, seeded_db, fake_embed, fake_inference)["summarize_thread"]
+        with pytest.raises(ToolError, match="Thread not found"):
+            asyncio.run(handler(thread_id="<not-present@invoice.com>"))
+        assert fake_inference.complete_calls == []
+        # Decided before any provider work, so an embedder outage cannot
+        # turn a missing ID into a provider error.
+        assert fake_embed.embed_calls == []
+
     def test_phrase_with_empty_corpus_returns_not_found(
         self, fake_server, empty_db, fake_embed, fake_inference
     ):
