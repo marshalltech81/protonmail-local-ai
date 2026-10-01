@@ -7,11 +7,15 @@ writes ``mail.db`` plus the golden questions' query vectors into
 read path (``hybrid_search`` with no reranker, ``query_messages``) and
 checks two layers:
 
-1. Golden assertions — correctness. Each question's expected thread
-   must rank within its ``max_rank``; evidence and vector-only
-   questions add their own checks; MRR must stay above the floor in
-   ``golden.json``. Enumeration questions must return the exact
-   message set.
+1. Golden assertions — correctness. Each question lists its
+   ``required_evidence`` as groups (every group required, any thread in
+   a group satisfies it; see ``tests/retrieval_metrics.py``). The first
+   hit from any group must rank within the question's ``max_rank``;
+   evidence and vector-only questions add their own checks. MRR and
+   evidence recall@10 (the fraction of groups found, which is where a
+   multi-source question can fall short of a hit) must stay above the
+   floors in ``golden.json``. Enumeration questions must return the
+   exact message set.
 2. Rank snapshot — unchanged behaviour. The top-10 order of every
    search question must equal ``snapshot.json``. After an intended
    ranking change, regenerate it with ``--update-baseline`` and review
@@ -26,6 +30,8 @@ from pathlib import Path
 
 import pytest
 from src.lib.sqlite import Database, ThreadResult
+
+from tests.retrieval_metrics import evidence_recall, first_hit_rank, group_ranks
 
 pytestmark = pytest.mark.baseline
 
@@ -79,37 +85,63 @@ def results(baseline_dir: Path, baseline_db: Database) -> dict[str, list[ThreadR
     return out
 
 
-def _rank(hits: list[ThreadResult], ref: str) -> int | None:
-    refs = [_thread_ref(r.thread_id) for r in hits]
-    return refs.index(ref) + 1 if ref in refs else None
+def _refs(hits: list[ThreadResult]) -> list[str]:
+    return [_thread_ref(r.thread_id) for r in hits]
 
 
 @pytest.mark.parametrize("q", GOLDEN["search"], ids=lambda q: q["id"])
 def test_search_golden(results: dict[str, list[ThreadResult]], q: dict) -> None:
     hits = results[q["id"]]
-    rank = _rank(hits, q["expect"])
+    groups = q["required_evidence"]
+    rank = first_hit_rank(_refs(hits), groups)
     assert rank is not None and rank <= q["max_rank"], (
-        f"{q['expect']} at rank {rank}, want <= {q['max_rank']}; "
-        f"got {[_thread_ref(r.thread_id) for r in hits]}"
+        f"{groups}: first hit at rank {rank}, want <= {q['max_rank']}; got {_refs(hits)}"
     )
-    hit = hits[rank - 1]
+    # The best-ranked thread of each group found answers for that group;
+    # groups missing from the top 10 count against evidence recall.
+    ranks = group_ranks(_refs(hits), groups)
+    answering = [hits[r - 1] for r in ranks if r is not None]
     if "evidence" in q:
-        texts = [c.text for c in hit.evidence_chunks]
+        texts = [c.text for hit in answering for c in hit.evidence_chunks]
         assert any(q["evidence"] in t for t in texts), f"{q['evidence']!r} not in {texts}"
     if q.get("vector_only"):
         # Proves the vector lanes are wired in: keyword search alone
         # cannot find this thread, so a broken vector lane fails here.
-        keyword_lanes = {lane for lane in hit.lane_ranks if lane.endswith("_fts")}
-        assert not keyword_lanes, f"expected vector lanes only, got {hit.lane_ranks}"
+        for hit in answering:
+            keyword_lanes = {lane for lane in hit.lane_ranks if lane.endswith("_fts")}
+            assert not keyword_lanes, f"expected vector lanes only, got {hit.lane_ranks}"
 
 
 def test_mrr_floor(results: dict[str, list[ThreadResult]]) -> None:
     reciprocal = [
-        1 / rank if (rank := _rank(results[q["id"]], q["expect"])) else 0.0
+        1 / rank
+        if (rank := first_hit_rank(_refs(results[q["id"]]), q["required_evidence"]))
+        else 0.0
         for q in GOLDEN["search"]
     ]
     mrr = sum(reciprocal) / len(reciprocal)
     assert mrr >= GOLDEN["floors"]["mrr"], f"MRR {mrr:.3f} below floor"
+
+
+def test_evidence_recall_floors(results: dict[str, list[ThreadResult]]) -> None:
+    """Evidence recall@10, over every question and over the multi-source ones.
+
+    A wiring check: with the hashed embedder these floors catch a lane or
+    fusion change that drops one source of a multi-source answer, not
+    semantic quality.
+    """
+    floors = GOLDEN["floors"]
+    multi = [q for q in GOLDEN["search"] if len(q["required_evidence"]) > 1]
+    for name, questions in (
+        ("evidence_recall_at_10", GOLDEN["search"]),
+        ("multi_source_evidence_recall_at_10", multi),
+    ):
+        recalls = [
+            evidence_recall(_refs(results[q["id"]]), q["required_evidence"], k=10)
+            for q in questions
+        ]
+        recall = sum(recalls) / len(recalls)
+        assert recall >= floors[name], f"{name} {recall:.3f} below floor {floors[name]}"
 
 
 @pytest.mark.parametrize("e", GOLDEN["enumerate"], ids=lambda e: e["id"])
@@ -123,7 +155,7 @@ def test_enumerate_golden(baseline_db: Database, e: dict) -> None:
 def test_rank_snapshot(
     results: dict[str, list[ThreadResult]], request: pytest.FixtureRequest
 ) -> None:
-    current = {qid: [_thread_ref(r.thread_id) for r in hits] for qid, hits in results.items()}
+    current = {qid: _refs(hits) for qid, hits in results.items()}
     if request.config.getoption("--update-baseline"):
         SNAPSHOT_PATH.write_text(json.dumps(current, indent=2) + "\n", encoding="utf-8")
         return

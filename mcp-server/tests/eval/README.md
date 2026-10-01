@@ -1,7 +1,7 @@
 # Retrieval eval harness
 
 A tiny opt-in test set that runs real queries against your real index
-and reports Recall@10 and MRR. The intent is to settle "is this knob
+and reports Hit@10, MRR and evidence recall@10. The intent is to settle "is this knob
 change actually helping?" arguments with measurements instead of
 arguments.
 
@@ -33,10 +33,35 @@ arguments.
    and `get_mailbox_status` report index health only, not thread ids.
 
 3. Edit `queries.json` — each entry needs an `id`, the `search_query`
-   to run, and `expected_thread_ids` from your actual index. Other keys
-   (such as `notes`) are ignored. Keep the file in `.gitignore` if your queries or
+   to run, and its expected evidence from your actual index, in one of
+   two forms:
+   - `expected_thread_ids`: a list of alternatives, any one of which
+     answers the question (usually a single thread id).
+   - `required_evidence`: a list of groups for a question that needs
+     several sources. Every group is required; any one thread id inside
+     a group satisfies it. `[["A"], ["B", "C"]]` needs thread A plus
+     either B or C. `expected_thread_ids: ["A", "B"]` is the same as
+     `required_evidence: [["A", "B"]]`.
+
+   Give one form per entry, not both. Other keys (such as `notes`) are
+   ignored. Keep the file in `.gitignore` if your queries or
    thread ids are sensitive (the example file is tracked, your real
    queries file is not).
+
+## Metrics
+
+- **Hit@10** — the fraction of queries with at least one expected
+  thread (from any group) in the top 10. Earlier versions of this
+  harness printed it as "Recall@10".
+- **MRR** — mean reciprocal rank of that first expected thread.
+- **Evidence recall@10** — for each query, the fraction of its required
+  groups with a thread in the top 10, averaged over queries. It equals
+  Hit@10 when every query has one group; for a multi-source question a
+  hit can still leave evidence missing, and only this number shows it.
+
+The definitions live in `tests/retrieval_metrics.py`, shared with the
+deterministic baseline in `tests/baseline/`. The per-query keyword and
+hybrid tests pass only when every required group is in the top 10.
 
 ## Run
 
@@ -53,7 +78,8 @@ Without `MCP_EVAL_DB`, every test skips.
 
 ## Comparing two configurations
 
-The summary block ends with a per-query rank table. To compare
+The summary block ends with a per-query table of first-hit rank and
+required groups found. To compare
 "current" vs "after changing the RRF fusion in `hybrid_search`":
 
 1. Run the eval, save the summary.
@@ -63,12 +89,14 @@ The summary block ends with a per-query rank table. To compare
    `THREAD_BODY_TEXT_MAX_TOKENS`, the embedding model) need a re-index
    first, and the eval run must use the same embedder as the index.
 3. Diff the two summaries. Look at:
-   - Aggregate Recall@10 — did it move at all?
+   - Aggregate Hit@10 — did it move at all?
    - MRR — did the right answer move closer to rank 1?
+   - Evidence recall@10 — did multi-source questions gain or lose a
+     source?
    - Per-query — did anything regress (rank got worse) while
      averages improved?
 
-A change that improves aggregate Recall but regresses any individual
+A change that improves an aggregate score but regresses any individual
 query is suspicious — chase the regression before celebrating.
 
 ## What this harness does NOT do
@@ -84,6 +112,6 @@ query is suspicious — chase the regression before celebrating.
   for *you* to curate questions you have actually asked or expect
   to ask, with known correct answers.
 - It does not enforce a passing threshold. Per-query tests pass when
-  the expected thread is in top-10 and fail otherwise; the aggregate
-  summary always passes. CI does not enforce a Recall@10 floor
-  because the right floor is mailbox-dependent.
+  every required group is in the top 10 and fail otherwise; the
+  aggregate summary always passes. CI does not enforce a floor on any
+  of the three scores because the right floor is mailbox-dependent.
