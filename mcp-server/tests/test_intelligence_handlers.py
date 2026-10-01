@@ -530,6 +530,109 @@ class TestExtractFromEmails:
             asyncio.run(handler(query="invoice", schema={"x": "string"}))
 
 
+_EXTRACT_MARKER = "private-extract-marker"
+_AMOUNT_SCHEMA = {
+    "type": "object",
+    "properties": {"amount": {"type": "number"}},
+    "required": ["amount"],
+}
+
+
+class TestExtractSchemaConformance:
+    """#310: records the model returns are checked against the requested
+    schema's declared fields and basic JSON types. A record that fails is
+    dropped and its thread counted as incompletely extracted, so
+    schema-invalid output is never reported as a success, nor as a valid
+    "no data" answer. Nothing from the rejected record is logged."""
+
+    def _run(self, fake_server, seeded_db, responses, schema, caplog):
+        import logging
+
+        llm = FakeInferenceClient(complete_responses=responses)
+        handler = _handlers(fake_server, seeded_db, FakeEmbedClient(), llm)["extract_from_emails"]
+        with caplog.at_level(logging.DEBUG):
+            out = asyncio.run(handler(query="invoice OR lunch OR meeting", schema=schema))
+        assert len(llm.complete_calls) == 3
+        assert _EXTRACT_MARKER not in caplog.text
+        return out
+
+    @pytest.mark.parametrize(
+        ("schema", "record"),
+        [
+            # The issue's reproduction: wrong type for a required number.
+            (_AMOUNT_SCHEMA, {"amount": f"{_EXTRACT_MARKER} not a number"}),
+            # Missing required field.
+            (_AMOUNT_SCHEMA, {"vendor": _EXTRACT_MARKER}),
+            # A boolean is not a number in JSON Schema.
+            (_AMOUNT_SCHEMA, {"amount": True, "vendor": _EXTRACT_MARKER}),
+            # null only where the type allows it.
+            (_AMOUNT_SCHEMA, {"amount": None, "vendor": _EXTRACT_MARKER}),
+            # The documented shorthand: a present field must have its type.
+            ({"vendor": "string", "amount": "number"}, {"vendor": 7, "note": _EXTRACT_MARKER}),
+            ({"count": "integer"}, {"count": 1.5, "note": _EXTRACT_MARKER}),
+        ],
+    )
+    def test_violating_record_is_dropped_and_reported(
+        self, fake_server, seeded_db, caplog, schema, record
+    ):
+        out = self._run(
+            fake_server, seeded_db, [json.dumps(record), "null", "null"], schema, caplog
+        )
+        text = _all_text(out)
+        assert _EXTRACT_MARKER not in text
+        assert "No structured data matching" not in text
+        assert text.startswith("No records extracted.")
+        assert "1 of 3 threads could not be extracted" in text
+        assert "did not match the schema" in text
+
+    @pytest.mark.parametrize(
+        ("schema", "record"),
+        [
+            (_AMOUNT_SCHEMA, {"amount": 12.5}),
+            (_AMOUNT_SCHEMA, {"amount": 12, "extra": "kept"}),
+            (
+                {"type": "object", "properties": {"amount": {"type": ["number", "null"]}}},
+                {"amount": None},
+            ),
+            ({"type": "object", "properties": {"n": {"type": "integer"}}}, {"n": 3.0}),
+            # Shorthand fields are optional and may be null.
+            ({"vendor": "string", "amount": "number"}, {"vendor": "Acme", "amount": None}),
+            ({"vendor": "string", "amount": "number"}, {"vendor": "Acme"}),
+            # Type names outside the JSON types are not checked.
+            ({"due": "date", "vendor": "the company name"}, {"due": 5, "vendor": ["x"]}),
+            (
+                {"type": "object", "properties": {"due": {"type": "string", "format": "date"}}},
+                {"due": "not a date"},
+            ),
+            (
+                {"flag": "boolean", "tags": "array", "meta": "object", "gone": "null"},
+                {"flag": False, "tags": [], "meta": {}, "gone": None},
+            ),
+        ],
+    )
+    def test_conforming_record_is_returned(self, fake_server, seeded_db, caplog, schema, record):
+        out = self._run(
+            fake_server, seeded_db, [json.dumps(record), "null", "null"], schema, caplog
+        )
+        [returned] = json.loads(_text(out))
+        assert {k: v for k, v in returned.items() if not k.startswith("_")} == record
+
+    def test_mixed_batch_keeps_valid_records_and_reports_the_thread(
+        self, fake_server, seeded_db, caplog
+    ):
+        responses = [
+            json.dumps([{"amount": 1}, {"amount": _EXTRACT_MARKER}]),
+            json.dumps({"amount": 2}),
+            "null",
+        ]
+        out = self._run(fake_server, seeded_db, responses, _AMOUNT_SCHEMA, caplog)
+        assert [r["amount"] for r in json.loads(out[0].text)] == [1, 2]
+        notice = _all_text(out[1:])
+        assert "1 of 3 threads could not be extracted" in notice
+        assert "did not match the schema" in notice
+        assert _EXTRACT_MARKER not in _all_text(out)
+
+
 class TestInferenceDispatch:
     def test_inference_client_is_invoked_for_ask_mailbox(
         self, fake_server, seeded_db, fake_embed, fake_inference
