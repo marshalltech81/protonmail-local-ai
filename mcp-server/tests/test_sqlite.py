@@ -672,9 +672,8 @@ class _IndexScoringReranker:
     without test-time imports of reranker.py.
     """
 
-    def __init__(self, scores_by_index: dict[int, float], candidates: int = 50, top_n: int = 5):
+    def __init__(self, scores_by_index: dict[int, float], candidates: int = 50):
         self.candidates = candidates
-        self.top_n = top_n
         self._scores = scores_by_index
         self._last_query: str | None = None
         self._last_docs: list[str] | None = None
@@ -684,15 +683,14 @@ class _IndexScoringReranker:
         self,
         query: str,
         documents: list[str],
-        top_n: int | None = None,
+        top_n: int,
     ) -> list[tuple[int, float]]:
         self._last_query = query
         self._last_docs = list(documents)
         self._last_top_n = top_n
-        effective_top_n = top_n if top_n is not None else self.top_n
         scored = [(i, self._scores.get(i, 0.0)) for i in range(len(documents))]
         scored.sort(key=lambda x: -x[1])
-        return scored[:effective_top_n]
+        return scored[:top_n]
 
 
 class _BrokenReranker:
@@ -700,13 +698,12 @@ class _BrokenReranker:
     fallback path keeps results from disappearing."""
 
     candidates = 50
-    top_n = 5
 
     def rerank(
         self,
         query: str,
         documents: list[str],
-        top_n: int | None = None,
+        top_n: int,
     ) -> list[tuple[int, float]]:
         return []
 
@@ -742,7 +739,6 @@ class TestRerankInHybridSearch:
         scripted = _IndexScoringReranker(
             scores_by_index={last_idx: 9.99, 0: 0.01},
             candidates=10,
-            top_n=2,
         )
         reranked = seeded_db.hybrid_search(
             query_text="meeting",
@@ -755,7 +751,7 @@ class TestRerankInHybridSearch:
         assert len(reranked) == 2
 
     def test_reranker_receives_subject_prefixed_doc_text(self, seeded_db: Database):
-        scripted = _IndexScoringReranker(scores_by_index={}, candidates=10, top_n=5)
+        scripted = _IndexScoringReranker(scores_by_index={}, candidates=10)
         seeded_db.hybrid_search(
             query_text="invoice",
             query_embedding=[1.0, 0.0, 0.0, 0.0],
@@ -766,18 +762,14 @@ class TestRerankInHybridSearch:
         assert scripted._last_docs is not None
         assert all(d.startswith("Subject: ") for d in scripted._last_docs)
 
-    def test_caller_limit_overrides_reranker_default_top_n(self, seeded_db: Database):
-        # The reranker's ``top_n`` is a *default*, not a hard cap. A
-        # caller asking for ``limit=3`` against a reranker whose
-        # default ``top_n`` is 1 must still receive 3 results — the
-        # rerank stage gets ``top_n=3`` for this call so it doesn't
-        # silently undercut the caller. This guards against the
-        # ``extract_from_emails(limit=20)`` regression Codex flagged
-        # where a default top_n=10 truncated the caller's request.
+    def test_caller_limit_is_passed_to_reranker_as_top_n(self, seeded_db: Database):
+        # The rerank stage's cutoff is the caller's ``limit``: a caller
+        # asking for ``limit=3`` gets ``top_n=3`` on the rerank call, so
+        # the reranker never undercuts the caller's requested result
+        # set (e.g. ``extract_from_emails(limit=20)``).
         scripted = _IndexScoringReranker(
             scores_by_index={0: 0.9, 1: 0.5, 2: 0.1},
             candidates=10,
-            top_n=1,  # default cap that MUST NOT win over limit=3
         )
         results = seeded_db.hybrid_search(
             query_text="invoice",
@@ -800,7 +792,6 @@ class TestRerankInHybridSearch:
         scripted = _IndexScoringReranker(
             scores_by_index={0: 0.9, 1: 0.5, 2: 0.1},
             candidates=1,  # tiny funnel that MUST NOT win over limit=3
-            top_n=10,
         )
         results = seeded_db.hybrid_search(
             query_text="invoice",
@@ -870,7 +861,6 @@ class TestRerankInHybridSearch:
                 model="rerank-v4.0-pro",
                 api_key="ck-test",  # pragma: allowlist secret
                 candidates=50,
-                top_n=5,
             )
         )
         item = SimpleNamespace(index=0, relevance_score=0.9)
@@ -891,7 +881,6 @@ class _ScriptedReranker:
     """Stub returning a fixed ``[(index, score), ...]`` regardless of input."""
 
     candidates = 50
-    top_n = 5
 
     def __init__(self, scored: list[tuple[int, float]]):
         self._scored = scored
@@ -900,7 +889,7 @@ class _ScriptedReranker:
         self,
         query: str,
         documents: list[str],
-        top_n: int | None = None,
+        top_n: int,
     ) -> list[tuple[int, float]]:
         return list(self._scored)
 
@@ -2608,9 +2597,8 @@ class TestLaneProvenance:
     def test_rerank_lane_recorded(self, seeded_db: Database):
         class _StubReranker:
             candidates = 10
-            top_n = 5
 
-            def rerank(self, query, documents, top_n=None):
+            def rerank(self, query, documents, top_n):
                 # Identity order, descending score.
                 return [(i, float(len(documents) - i)) for i in range(len(documents))]
 
@@ -3341,10 +3329,9 @@ class TestVectorLaneKLimit:
 
         class _PassThroughReranker:
             candidates = 200
-            top_n = 5
 
-            def rerank(self, query, documents, top_n=None):
-                return [(i, 1.0 - i / 1000) for i in range(len(documents))][: top_n or 5]
+            def rerank(self, query, documents, top_n):
+                return [(i, 1.0 - i / 1000) for i in range(len(documents))][:top_n]
 
         calls: list[int] = []
         real = chunked_db._chunk_vector_search

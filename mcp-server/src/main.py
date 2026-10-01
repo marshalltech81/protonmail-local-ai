@@ -262,7 +262,6 @@ RERANK_BASE_URL = _reject_url_userinfo("RERANK_BASE_URL", os.environ.get("RERANK
 RERANK_MODEL = os.environ.get("RERANK_MODEL", "")
 RERANK_API_KEY = _read_secret("rerank_api_key", "RERANK_API_KEY")
 RERANK_CANDIDATES = _int_env("RERANK_CANDIDATES", 20, minimum=1)
-RERANK_TOP_N = _int_env("RERANK_TOP_N", 10, minimum=1)
 RERANK_TIMEOUT_SECS = _float_env("RERANK_TIMEOUT_SECS", DEFAULT_RERANK_TIMEOUT_SECS, minimum=1.0)
 
 MCP_PORT = int(os.environ.get("MCP_PORT", "3000"))
@@ -430,7 +429,6 @@ def main():
                 model=RERANK_MODEL,
                 api_key=RERANK_API_KEY,
                 candidates=RERANK_CANDIDATES,
-                top_n=RERANK_TOP_N,
                 timeout_secs=RERANK_TIMEOUT_SECS,
             )
         )
@@ -566,7 +564,7 @@ def main():
     if reranker is not None:
         log.info(
             f"  Rerank:         {RERANK_BASE_URL or '(SDK default)'} "
-            f"(model={RERANK_MODEL}, candidates={RERANK_CANDIDATES}, top_n={RERANK_TOP_N})"
+            f"(model={RERANK_MODEL}, candidates={RERANK_CANDIDATES})"
         )
     log.info(f"  Transport: {transport}")
     log.info("  Retrieval: local SQLite index only")

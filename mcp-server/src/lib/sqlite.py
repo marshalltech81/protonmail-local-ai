@@ -906,11 +906,10 @@ class Database:
     ) -> list[ThreadResult]:
         """Reorder ``candidates`` via the reranker and truncate to ``limit``.
 
-        ``top_n`` is passed through to the reranker as the caller's
-        ``limit`` so a caller asking for 20 results doesn't get
-        silently capped at the reranker's default ``top_n=10``. The
-        outer ``[:limit]`` is then redundant for the success path but
-        kept for the rerank-failure fallback below.
+        The caller's ``limit`` is passed to the reranker as ``top_n``,
+        so the rerank stage returns up to ``limit`` results. The outer
+        ``[:limit]`` is then redundant for the success path but kept
+        for the rerank-failure fallback below.
 
         On reranker failure (returns empty list), the candidates fall
         back to RRF order — so a rerank outage degrades quality without

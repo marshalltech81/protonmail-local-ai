@@ -160,12 +160,11 @@ class TestRerankerEvidence:
         """
 
         candidates = 10
-        top_n = 5
 
         def __init__(self) -> None:
             self.seen_docs: list[list[str]] = []
 
-        def rerank(self, query, documents, top_n=None):
+        def rerank(self, query, documents, top_n):
             self.seen_docs.append(list(documents))
             return [(i, float(len(documents) - i)) for i in range(len(documents))]
 

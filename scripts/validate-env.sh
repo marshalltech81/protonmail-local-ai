@@ -206,7 +206,6 @@ RERANK_MODE="$(get_env_value RERANK_MODE)"
 RERANK_BASE_URL="$(get_env_value RERANK_BASE_URL)"
 RERANK_MODEL="$(get_env_value RERANK_MODEL)"
 RERANK_CANDIDATES="$(get_env_value RERANK_CANDIDATES)"
-RERANK_TOP_N="$(get_env_value RERANK_TOP_N)"
 RERANK_TIMEOUT_SECS="$(get_env_value RERANK_TIMEOUT_SECS)"
 INDEXER_PARSE_MAX_BYTES="$(get_env_value INDEXER_PARSE_MAX_BYTES)"
 INDEXER_MAX_ATTEMPTS="$(get_env_value INDEXER_MAX_ATTEMPTS)"
@@ -356,16 +355,13 @@ fi
 
 # Optional rerank tuning knobs. Validate only when set so the
 # defaults in mcp-server/src/main.py remain authoritative when the
-# operator leaves the value blank. ``RERANK_CANDIDATES`` and
-# ``RERANK_TOP_N`` must be >= 1 — zero or negative values would feed
-# the rerank stage an empty candidate set or ask for an empty top-K.
+# operator leaves the value blank. ``RERANK_CANDIDATES`` must be >= 1
+# — zero or negative values would feed the rerank stage an empty
+# candidate set.
 # ``RERANK_TIMEOUT_SECS`` must be >= 1 to bound a stalled rerank
 # call without rejecting routine sub-second failures.
 if [[ -n "$RERANK_CANDIDATES" ]]; then
     require_integer_min "RERANK_CANDIDATES" "$RERANK_CANDIDATES" 1
-fi
-if [[ -n "$RERANK_TOP_N" ]]; then
-    require_integer_min "RERANK_TOP_N" "$RERANK_TOP_N" 1
 fi
 if [[ -n "$RERANK_TIMEOUT_SECS" ]]; then
     require_integer_min "RERANK_TIMEOUT_SECS" "$RERANK_TIMEOUT_SECS" 1

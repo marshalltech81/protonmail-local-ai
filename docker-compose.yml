@@ -316,13 +316,11 @@ services:
       # enables Cohere's rerank API via the official cohere SDK;
       # ``RERANK_MODE=none`` (default) returns RRF order directly.
       # RERANK_CANDIDATES governs how many RRF results are fed to the
-      # cross-encoder before truncation to the caller's ``limit``
-      # (defaulting to RERANK_TOP_N when the caller doesn't specify).
+      # cross-encoder before truncation to the caller's ``limit``.
       RERANK_MODE: ${RERANK_MODE:-none}
       RERANK_BASE_URL: ${RERANK_BASE_URL}
       RERANK_MODEL: ${RERANK_MODEL}
       RERANK_CANDIDATES: ${RERANK_CANDIDATES:-20}
-      RERANK_TOP_N: ${RERANK_TOP_N:-10}
       # Per-call deadline for the Cohere rerank API (seconds). Default
       # 60 s is shorter than the SDK's 300 s default so a stalled
       # rerank call doesn't pin a hybrid_search worker thread for five
