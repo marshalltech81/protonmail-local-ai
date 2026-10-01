@@ -652,8 +652,9 @@ first, one test-first commit per issue, keep three PRs in flight):
    `ProviderResponseError` and caller text classified like the log,
    MCP SQLite logs #411; AGENTS.md updated in this closing PR).
 4. MCP: ~~#320, #334, #312, #330, #333, #313, #324, #331, #308,
-   #309, #415~~ (done: #416–#420); #316's remainder needs the Phase 2
-   reindex; #317 through the `fastmcp` 4.0.10 migration.
+   #309, #415~~ (done: #416–#420); ~~#317~~ (done: #421, the `fastmcp`
+   4.0.10 migration with an explicit session idle timeout); #316's
+   remainder needs the Phase 2 reindex.
 5. ~~mbsync #271, #280~~ (done: #419). Parser: ~~#361~~ (done: #414);
    #362 needs a fallback-filename decision first.
 6. Bridge, needing Docker for `make bridge-upgrade-check` and the
@@ -804,8 +805,8 @@ Order of work, chosen to minimise reindexes:
    #331)~~ (done: #418) and its FTS analogue (#316, query side done in
    #418; the rest needs the Phase 2 reindex); ~~date filters (#312,
    #330); degraded-lane honesty (#333)~~ (done: #416); event-loop
-   hygiene (~~#320, #334~~ done in #417; #317 via the `fastmcp`
-   migration); ~~folder discovery hiding reply-only folders (#308); the
+   hygiene (~~#320, #334~~ done in #417; ~~#317~~ done in #421, the
+   `fastmcp` migration); ~~folder discovery hiding reply-only folders (#308); the
    attachment-lane duplicate before MIME filters (#309)~~ (done: #420); ~~docs (#322,
    #323)~~ (done: #403, #404). mbsync:
    ~~the empty pin re-TOFU (#278)~~ (done: only an absent pin is a
