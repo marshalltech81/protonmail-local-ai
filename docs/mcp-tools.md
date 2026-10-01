@@ -253,10 +253,12 @@ you need a different matching contact than that one (then pass it as
 
 The aggregator matches the query against each `message_participants`
 row's canonical address or display name (Unicode case-insensitive),
-groups by canonical email (so the same contact across many threads
-collapses to one row), and ranks results by `thread_count` descending
-with email as the tiebreaker. Every display name the contact was
-written with is reported. Same-thread duplicates do not double-count.
+then aggregates every row of each matched canonical email (so the same
+contact across many threads collapses to one row, and a match on one
+display name still reports the contact's other names and threads), and
+ranks results by `thread_count` descending with email as the
+tiebreaker. Every display name the contact was written with is
+reported. Same-thread duplicates do not double-count.
 
 ### `query_messages`
 Enumerate **every** message matching exact criteria, with an exact

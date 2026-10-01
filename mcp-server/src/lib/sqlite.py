@@ -2299,12 +2299,12 @@ class Database:
         """Resolve a name / address / domain fragment to indexed contacts.
 
         Matches the lowercased query against each indexed
-        ``message_participants`` row's address or display name and
-        aggregates by canonical email, so the same contact across many
-        threads collapses to one row, with ``thread_count`` reflecting
-        how many threads they appeared on and ``names`` every display
-        name they were written with. Same-thread duplicates do not
-        double-count.
+        ``message_participants`` row's address or display name, then
+        aggregates every row of each matched canonical email (not only
+        the matching rows), so the same contact across many threads
+        collapses to one row, with ``thread_count`` reflecting how many
+        threads they appeared on and ``names`` every display name they
+        were written with. Same-thread duplicates do not double-count.
 
         ``senders_only`` instead aggregates ``threads.senders`` — each
         message's primary From author as the thread records it. That is
@@ -2361,14 +2361,19 @@ class Database:
                     if "@" in addr and needle in f"{name} {addr}".lower():
                         add(addr, name, row["thread_id"])
         else:
-            # Addresses are stored canonical (lowercased); names need the
-            # Unicode-aware ``mcp_lower``.
+            # The query selects addresses; every row of a selected address
+            # then aggregates, so a name match reports the contact's other
+            # names and threads too. Addresses are stored canonical
+            # (lowercased); names need the Unicode-aware ``mcp_lower``.
             rows = self._fetchall(
                 """
                 SELECT DISTINCT p.address, p.name, m.thread_id
                 FROM message_participants p
                 JOIN messages m ON m.message_id = p.message_id
-                WHERE instr(p.address, ?) > 0 OR instr(mcp_lower(p.name), ?) > 0
+                WHERE p.address IN (
+                    SELECT address FROM message_participants
+                    WHERE instr(address, ?) > 0 OR instr(mcp_lower(name), ?) > 0
+                )
                 """,
                 (needle, needle),
             )

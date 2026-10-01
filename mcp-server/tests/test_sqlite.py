@@ -2328,6 +2328,67 @@ class TestFindContact:
             {"email": "jane@example.com", "names": ["J. Doe", "Jane Doe"], "thread_count": 1}
         ]
 
+    def test_name_match_reports_the_whole_contact(self, tmp_path):
+        # The name selects the address; names and thread_count then
+        # describe every row for that address, not just the rows whose
+        # name matched. A repeat within one thread still counts once.
+        from tests.conftest import _insert_message
+
+        conn, path = _open_built_db_conn(tmp_path, "aliases.db")
+        for n, name in enumerate(["Jane Smith", "J. Smith", "Janet Doe"]):
+            _insert_message(
+                conn,
+                message_id=f"m{n}",
+                thread_id=f"t{n}",
+                sent_at="2024-01-01T00:00:00+00:00",
+                from_=[f"{name} <person@example.test>"],
+            )
+        _insert_message(
+            conn,
+            message_id="m3",
+            thread_id="t0",
+            sent_at="2024-01-02T00:00:00+00:00",
+            to=["Jane Smith <person@example.test>"],
+        )
+        conn.close()
+        db = Database(str(path))
+        whole = {
+            "email": "person@example.test",
+            "names": ["J. Smith", "Jane Smith", "Janet Doe"],
+            "thread_count": 3,
+        }
+        assert db.find_contact("Jane Smith") == [whole]
+        assert db.find_contact("person@example.test") == [whole]
+
+    def test_ranking_counts_unmatched_aliases(self, tmp_path):
+        # alpha matched as "Pat" on one thread but appears on three; beta
+        # matched on two. Ranking on matching rows alone put pat-b first.
+        from tests.conftest import _insert_message
+
+        conn, path = _open_built_db_conn(tmp_path, "ranking.db")
+        for n, name in enumerate(["Pat Alpha", "A. Alpha", "Alpha"]):
+            _insert_message(
+                conn,
+                message_id=f"a{n}",
+                thread_id=f"ta{n}",
+                sent_at="2024-01-01T00:00:00+00:00",
+                from_=[f"{name} <alpha@example.test>"],
+            )
+        for n in range(2):
+            _insert_message(
+                conn,
+                message_id=f"b{n}",
+                thread_id=f"tb{n}",
+                sent_at="2024-01-01T00:00:00+00:00",
+                from_=["Pat Beta <beta@example.test>"],
+            )
+        conn.close()
+        db = Database(str(path))
+        assert [(c["email"], c["thread_count"]) for c in db.find_contact("pat")] == [
+            ("alpha@example.test", 3),
+            ("beta@example.test", 2),
+        ]
+
     def test_non_ascii_name_matches_case_insensitively(self, tmp_path):
         # SQLite's own lower() folds ASCII only; the match must fold
         # "JOSÉ" to "josé" the way Python does.
