@@ -6,9 +6,11 @@ Indexes at the thread level — the unit Claude reasons about.
 
 import logging
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from email.utils import parseaddr
+from itertools import islice
 
 from .parser import Message
 
@@ -362,3 +364,67 @@ def _normalize_subject(subject: str) -> str:
         while pos < len(s) and s[pos].isspace():
             pos += 1
     return _SUBJECT_WHITESPACE_RE.sub(" ", s[pos:]).strip()
+
+
+# Bounds on the changed reply subjects ``fts_subject_text`` adds to a
+# thread's ``threads_fts`` subject column (#303): at most this many
+# distinct subjects, and this many characters across them.
+FTS_REPLY_SUBJECTS_MAX = 20
+FTS_REPLY_SUBJECTS_MAX_CHARS = 2000
+# Work bound on building that column, applied on every thread rewrite:
+# at most this many stored subjects are examined (oldest first), each
+# cut to this many characters before normalization. The insert/update
+# path applies both in SQL so the rows and bytes it reads are bounded
+# too. Without them each upsert re-read and re-normalized every stored
+# subject, quadratic over a long thread of long subjects (#439).
+FTS_SUBJECT_SCAN_ROWS = 200
+FTS_SUBJECT_SCAN_CHARS = 500
+
+
+def fts_subject_text(thread_subject: str, subjects: Iterable[str]) -> str:
+    """Text for the ``threads_fts`` subject column: the thread subject,
+    then each message subject that differs from it after normalization
+    (deduplicated, normalized form, in input order).
+
+    A reply can change the subject and still join the thread through
+    References / In-Reply-To. ``threads.subject`` keeps the thread's
+    subject for display and grouping; this column is what keeps the
+    reply's words keyword-searchable (#303). Writing them here rather
+    than into ``body_text`` means a body already at its token cap
+    cannot drop them. Output is bounded by ``FTS_REPLY_SUBJECTS_MAX``
+    subjects and ``FTS_REPLY_SUBJECTS_MAX_CHARS`` characters; work by
+    ``FTS_SUBJECT_SCAN_ROWS`` inputs of ``FTS_SUBJECT_SCAN_CHARS``
+    characters each. A changed subject first seen past the scanned rows,
+    or differing only past the scanned characters, is not added.
+    """
+    seen = {_normalize_subject(thread_subject[:FTS_SUBJECT_SCAN_CHARS])}
+    parts = [thread_subject]
+    used = 0
+    for subject in islice(subjects, FTS_SUBJECT_SCAN_ROWS):
+        if len(parts) > FTS_REPLY_SUBJECTS_MAX:
+            break
+        normalized = _normalize_subject(subject[:FTS_SUBJECT_SCAN_CHARS])
+        if not normalized or normalized in seen:
+            continue
+        if used + len(normalized) > FTS_REPLY_SUBJECTS_MAX_CHARS:
+            break
+        seen.add(normalized)
+        parts.append(normalized)
+        used += len(normalized)
+    return "\n".join(parts)
+
+
+def reply_subject_line(msg: Message, thread_subject: str) -> str | None:
+    """``Subject: <msg.subject>`` when the message's subject differs
+    from the thread's after normalization, else ``None``.
+
+    The indexer puts it in front of the message's first body chunk in
+    the embedding input only, so a reply that changed the subject
+    carries it into its chunk vector (#303). The stored chunk text,
+    its offsets and its ID stay body-only: chunks are the authoritative
+    body store. A subject that normalizes to the thread's adds nothing.
+    """
+    normalized = _normalize_subject(msg.subject)
+    if not normalized or normalized == _normalize_subject(thread_subject):
+        return None
+    return f"Subject: {msg.subject}"
