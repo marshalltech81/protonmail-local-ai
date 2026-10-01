@@ -63,11 +63,57 @@ show() {
     cat "$WORK/stderr"
 }
 
-marker_present_passes() {
-    run_smoke 'level=info msg="Vault loaded" autoUpdate="false"' 0
+# A real Bridge log line carrying the marker.
+readonly MARKER='time="2026-01-01 00:00:00.000" level="info" msg="Vault loaded" autoUpdate="false"'
+
+passes() {
     show
     [[ "$SMOKE_STATUS" -eq 0 ]]
     grep -F 'Proton Bridge smoke checks passed.' "$WORK/stdout"
+}
+
+fails_with() {
+    show
+    [[ "$SMOKE_STATUS" -eq 1 ]]
+    grep -F "$1" "$WORK/stderr"
+    grep -F -- '--- captured output (first 60 lines) ---' "$WORK/stderr"
+    if grep -F 'smoke checks passed' "$WORK/stdout"; then
+        return 1
+    fi
+}
+
+# Bridge sees EOF on stdin and exits 0 on its own after the marker.
+marker_then_clean_exit_passes() {
+    run_smoke "$MARKER"$'\nSMOKE_ENTRYPOINT_EXIT=0' 0
+    passes
+}
+
+# Bridge is still running at the marker and the check stops it.
+marker_then_intended_stop_passes() {
+    run_smoke "$MARKER"$'\nSMOKE_ENTRYPOINT_EXIT=stopped' 0
+    passes
+}
+
+# #268: the issue's reproduction, a marker followed by a failed invocation.
+marker_then_failed_invocation_fails() {
+    run_smoke "$MARKER"$'\nSYNTHETIC_FATAL_AFTER_VAULT' 42
+    fails_with 'exited with status 42'
+}
+
+marker_then_entrypoint_failure_fails() {
+    run_smoke "$MARKER"$'\nSMOKE_ENTRYPOINT_EXIT=1' 0
+    fails_with 'Bridge did not exit cleanly'
+}
+
+marker_then_fatal_log_line_fails() {
+    run_smoke "$MARKER"$'\ntime="2026-01-01 00:00:00.001" level="fatal" msg="SYNTHETIC"\nSMOKE_ENTRYPOINT_EXIT=stopped' 0
+    fails_with 'fatal or panic'
+}
+
+# Without the status line the in-container check did not finish.
+marker_without_entrypoint_status_fails() {
+    run_smoke "$MARKER" 0
+    fails_with 'Bridge did not exit cleanly'
 }
 
 # #269: the diagnostics header must not be parsed as a printf option.
@@ -83,7 +129,12 @@ missing_marker_fails_and_prints_the_captured_output() {
     fi
 }
 
-check "the marker with a clean run passes" marker_present_passes
+check "the marker then a clean Bridge exit passes" marker_then_clean_exit_passes
+check "the marker then the intended stop passes" marker_then_intended_stop_passes
+check "the marker then a failed invocation fails" marker_then_failed_invocation_fails
+check "the marker then a failed entrypoint fails" marker_then_entrypoint_failure_fails
+check "the marker then a fatal log line fails" marker_then_fatal_log_line_fails
+check "the marker without an entrypoint status fails" marker_without_entrypoint_status_fails
 check "a missing marker fails and prints the captured output" \
     missing_marker_fails_and_prints_the_captured_output
 
