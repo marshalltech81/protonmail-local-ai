@@ -1698,30 +1698,12 @@ class Database:
         self._conn.commit()
 
     @_synchronized
-    def queue_claim_next(self, status: str, now_iso: str) -> sqlite3.Row | None:
-        """Return the oldest ``status`` row whose ``next_attempt_at`` is due."""
-        return self._conn.execute(
-            """
-            SELECT filepath, reason, status, attempts,
-                   last_error, last_stage,
-                   created_at, updated_at, next_attempt_at
-            FROM indexing_jobs
-            WHERE status = ? AND next_attempt_at <= ?
-            ORDER BY next_attempt_at ASC
-            LIMIT 1
-            """,
-            (status, now_iso),
-        ).fetchone()
-
-    @_synchronized
     def queue_fetch_due_batch(self, status: str, now_iso: str, limit: int) -> list[sqlite3.Row]:
         """Return up to ``limit`` due ``status`` rows ordered by oldest-due first.
 
-        Like ``queue_claim_next`` but in one SELECT, so the batched
-        indexer's gather phase can pick up N distinct rows without
-        repeatedly calling ``claim_next`` (which has no in-flight
-        tracking and would return the same row N times until the caller
-        marks it).
+        One SELECT, so the batched indexer's gather phase picks up N
+        distinct rows at once; the claim has no in-flight tracking, so
+        rows stay due until the caller marks them.
         """
         return self._conn.execute(
             """

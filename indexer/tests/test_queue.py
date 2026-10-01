@@ -1,7 +1,7 @@
 """Tests for src/queue.py — durable indexing queue (schema v8).
 
 Covers the retry / backoff / dead-letter state machine, re-enqueue
-semantics for previously-failed rows, and the ``claim_next`` ordering
+semantics for previously-failed rows, and the ``claim_batch`` ordering
 against the ``next_attempt_at`` backoff column.
 """
 
@@ -45,20 +45,19 @@ class TestEnqueueClaim:
         assert row["reason"] == REASON_ON_CREATED
         assert row["attempts"] == 0
 
-    def test_claim_next_returns_the_due_row(self, db: Database):
+    def test_claim_batch_returns_the_due_row(self, db: Database):
         q = _queue(db)
         q.enqueue("/maildir/INBOX/cur/a", REASON_ON_CREATED)
-        row = q.claim_next()
-        assert row is not None
+        (row,) = q.claim_batch(1)
         assert row["filepath"] == "/maildir/INBOX/cur/a"
 
-    def test_claim_next_returns_none_on_empty_queue(self, db: Database):
+    def test_claim_batch_returns_empty_on_empty_queue(self, db: Database):
         q = _queue(db)
-        assert q.claim_next() is None
+        assert q.claim_batch(1) == []
 
-    def test_claim_next_returns_none_when_only_dead_rows_remain(self, db: Database):
+    def test_claim_batch_returns_empty_when_only_dead_rows_remain(self, db: Database):
         """``dead`` is a visible-but-ignored state. The worker must not
-        re-attempt dead rows; ``claim_next`` filters on
+        re-attempt dead rows; ``claim_batch`` filters on
         ``status = 'queued'``."""
         q = _queue(db, max_attempts=1)
         q.enqueue("/m/dead", REASON_ON_CREATED)
@@ -67,9 +66,9 @@ class TestEnqueueClaim:
             "SELECT status FROM indexing_jobs WHERE filepath = '/m/dead'"
         ).fetchone()
         assert row["status"] == STATUS_DEAD
-        assert q.claim_next() is None
+        assert q.claim_batch(1) == []
 
-    def test_claim_next_skips_rows_with_future_next_attempt(self, db: Database):
+    def test_claim_batch_skips_rows_with_future_next_attempt(self, db: Database):
         """A ``queued`` row whose ``next_attempt_at`` is in the future
         is in backoff and must not be claimed yet, even though it is
         the only row in the table."""
@@ -80,12 +79,12 @@ class TestEnqueueClaim:
         row = db._conn.execute(
             "SELECT next_attempt_at FROM indexing_jobs WHERE filepath = '/m/backoff'"
         ).fetchone()
-        # next_attempt_at is in the future — claim_next must return None
+        # next_attempt_at is in the future — claim_batch must return nothing
         # even though the row is still status='queued'.
         assert datetime.fromisoformat(row["next_attempt_at"]) > datetime.now(UTC)
-        assert q.claim_next() is None
+        assert q.claim_batch(1) == []
 
-    def test_claim_next_returns_oldest_due_row_first(self, db: Database):
+    def test_claim_batch_returns_oldest_due_row_first(self, db: Database):
         q = _queue(db)
         # Insert two rows with an explicit next_attempt_at delta so we
         # can verify ordering regardless of the exact timestamp enqueue
@@ -99,8 +98,8 @@ class TestEnqueueClaim:
         db._conn.commit()
         q.enqueue("/m/newer", REASON_INITIAL_SCAN)
 
-        first = q.claim_next()
-        assert first["filepath"] == "/m/later"
+        rows = q.claim_batch(2)
+        assert [r["filepath"] for r in rows] == ["/m/later", "/m/newer"]
 
 
 class TestMarkSucceededAndFailed:
@@ -108,7 +107,7 @@ class TestMarkSucceededAndFailed:
         q = _queue(db)
         q.enqueue("/m/ok", REASON_ON_CREATED)
         q.mark_succeeded("/m/ok")
-        assert q.claim_next() is None
+        assert q.claim_batch(1) == []
         row = db._conn.execute("SELECT 1 FROM indexing_jobs WHERE filepath = '/m/ok'").fetchone()
         assert row is None
 
@@ -118,7 +117,7 @@ class TestMarkSucceededAndFailed:
         raise."""
         q = _queue(db)
         q.mark_succeeded("/m/never_enqueued")  # no raise
-        assert q.claim_next() is None
+        assert q.claim_batch(1) == []
 
     def test_mark_failed_increments_attempts_and_schedules_backoff(self, db: Database):
         q = _queue(db, max_attempts=5, base_backoff_seconds=60)
@@ -157,7 +156,7 @@ class TestMarkSucceededAndFailed:
         somebody else cleaned the row. Must not raise."""
         q = _queue(db)
         q.mark_failed("/m/never_enqueued", stage="parse", error="x")
-        assert q.claim_next() is None
+        assert q.claim_batch(1) == []
 
 
 class TestIsDead:
@@ -203,7 +202,7 @@ class TestMarkSkipped:
         q = _queue(db)
         q.enqueue("/m/gone", REASON_ON_CREATED)
         q.mark_skipped("/m/gone", reason="file_missing")
-        assert q.claim_next() is None
+        assert q.claim_batch(1) == []
         row = db._conn.execute("SELECT 1 FROM indexing_jobs WHERE filepath = '/m/gone'").fetchone()
         assert row is None
 
@@ -221,7 +220,7 @@ class TestMarkSkipped:
         q.mark_skipped("/m/once", reason="file_missing")
         # Row is gone; attempts on the (now-deleted) row are not
         # what the queue cares about — visibility is via the log line.
-        assert q.claim_next() is None
+        assert q.claim_batch(1) == []
 
     def test_mark_skipped_is_noop_for_missing_row(self, db: Database):
         # Mirror the mark_succeeded / mark_failed contract: silent
@@ -229,7 +228,7 @@ class TestMarkSkipped:
         # cleanup path). Must not raise.
         q = _queue(db)
         q.mark_skipped("/m/never_enqueued", reason="file_missing")
-        assert q.claim_next() is None
+        assert q.claim_batch(1) == []
 
 
 class TestMarkDeadTerminal:
@@ -264,14 +263,14 @@ class TestMarkDeadTerminal:
         # prevents the retry storm the fix targets.
         assert q.is_dead("/m/huge") is True
 
-    def test_claim_next_skips_dead_terminal_rows(self, db: Database):
+    def test_claim_batch_skips_dead_terminal_rows(self, db: Database):
         # Dead rows are visible-but-ignored: the worker must not
         # re-attempt them, otherwise the terminal designation is
         # meaningless.
         q = _queue(db)
         q.enqueue("/m/huge", REASON_ON_CREATED)
         q.mark_dead_terminal("/m/huge", stage="parse", error="oversized")
-        assert q.claim_next() is None
+        assert q.claim_batch(1) == []
 
     def test_dead_terminal_row_appears_in_stats(self, db: Database):
         q = _queue(db)
@@ -289,12 +288,11 @@ class TestReEnqueueResetsState:
         q.enqueue("/m/reset", REASON_ON_CREATED)
         q.mark_failed("/m/reset", stage="embed", error="embedding service")
         # After failure the row is backoff'd for an hour.
-        assert q.claim_next() is None
+        assert q.claim_batch(1) == []
 
         q.enqueue("/m/reset", REASON_ON_CREATED)
         # Re-enqueue resets attempts and schedules immediately.
-        row = q.claim_next()
-        assert row is not None
+        (row,) = q.claim_batch(1)
         assert row["filepath"] == "/m/reset"
         assert row["attempts"] == 0
 
@@ -306,11 +304,10 @@ class TestReEnqueueResetsState:
         q.enqueue("/m/zombie", REASON_ON_CREATED)
         q.mark_failed("/m/zombie", stage="parse", error="bad")
         # Row is dead.
-        assert q.claim_next() is None
+        assert q.claim_batch(1) == []
 
         q.enqueue("/m/zombie", REASON_ON_CREATED)
-        row = q.claim_next()
-        assert row is not None
+        (row,) = q.claim_batch(1)
         assert row["filepath"] == "/m/zombie"
         assert row["attempts"] == 0
 
@@ -360,7 +357,7 @@ class TestLoadConfigFromEnv:
 
     def test_zero_base_backoff_falls_back_to_default(self):
         # base_backoff_seconds <= 0 schedules next_attempt_at at "now"
-        # (zero seconds added) or in the past (negative), so claim_next
+        # (zero seconds added) or in the past (negative), so claim_batch
         # immediately re-claims the failing row and the retry budget
         # burns in a tight loop. Clamp to the documented default.
         cfg = load_config_from_env({"INDEXER_RETRY_BASE_SECONDS": "0"})
@@ -473,7 +470,7 @@ class TestDefer:
         assert row["last_stage"] == "embed"
         assert row["last_error_class"] == ERROR_CLASS_RETRYABLE
         assert datetime.fromisoformat(row["next_attempt_at"]) >= before + timedelta(seconds=60)
-        assert q.claim_next() is None
+        assert q.claim_batch(1) == []
 
     def test_defer_records_operator_action_class(self, tmp_path):
         db = Database(tmp_path / "q.db")
