@@ -295,9 +295,23 @@ has emails to process.
 
 By default the local index is append-only: messages you delete on ProtonMail
 are still kept locally. To propagate deletions, set
-`INDEXER_DELETION_ENABLED=true` in `.env` and restart the indexer. See the
+`INDEXER_DELETION_ENABLED=true` in `.env` and recreate the indexer. See the
 `Indexer — deletion reconciliation` block in `.env.example` for all knobs
 (grace window, sweep interval, mass-delete brake, unlink-on-reap).
+
+The indexer reads these settings once at startup, so a change takes
+effect only when the `indexer` container is recreated. After editing
+`.env`, run `make up`: Compose recreates every container whose
+configuration changed. `docker compose restart` is not enough, because
+a restarted container keeps the environment it was created with. If
+the stack was started with an overlay (such as
+`docker-compose.hardened.yml`), run `docker compose up -d` with the
+same `-f` files instead, or the recreated container drops the overlay.
+To confirm the new value reached the container:
+
+```bash
+docker compose exec indexer env | grep '^INDEXER_DELETION_'
+```
 
 Defaults — 7-day grace window, 5% mass-delete brake, no file unlink — are
 the safe starting point. Quick checks after enabling:
@@ -322,7 +336,8 @@ docker run --rm -v protonmail-local-ai_sqlite-volume:/data:ro \
 
 The reaper sweeps `pending_deletions` on startup and once per
 `INDEXER_DELETION_SWEEP_INTERVAL_SECS`. If you want a deletion to land
-immediately for testing, drop the grace window to `0` and restart.
+immediately for testing, drop the grace window to `0` and recreate the
+indexer as described above.
 
 ## Tuning indexing retries
 
