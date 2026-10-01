@@ -523,8 +523,12 @@ At the default window the character caps above bind first, so prompts
 are what they were before the window was counted. For a small local
 model, set `INFERENCE_CONTEXT_TOKENS` to its window (for example 8192
 or 4096): the evidence budget shrinks to what fits, and the coverage
-note reports what was left out or cut. `summarize_thread` shrinks its
-body and recent-message sections in proportion. When the request
+note reports what was left out or cut. `summarize_thread` keeps at
+least a 2:1 share for its body and recent-message sections and gives
+room one does not need to the other. `extract_from_emails` adds a
+counts-only evidence note when the window cut passages from any
+thread, so a `null` answer from such a thread is not read as a genuine
+absence. When the request
 itself (a very long question or schema, with the instructions and
 thread headers) cannot fit, the tool returns an error naming the two
 settings before any model call. A window that leaves fewer than 1024

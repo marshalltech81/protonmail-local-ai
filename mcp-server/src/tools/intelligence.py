@@ -1162,19 +1162,31 @@ def _summarize_context(
     ``[chunk N chars X-Y]`` header.
 
     The result is at most ``budget`` characters. Below
-    ``_SUMMARIZE_CONTEXT_CHARS`` (a small model window, #285) both
-    sections shrink in proportion, so the start of the thread and its
-    newest reply are both still shown.
+    ``_SUMMARIZE_CONTEXT_CHARS`` (a small model window, #285) each
+    section is guaranteed its 2:1 share, so the start of the thread and
+    its newest reply are both still shown, and room one section does not
+    need goes to the other. Neither ever exceeds its own cap above.
     """
-    sections = max(budget - len(_RECENT_SEPARATOR), 0)
-    body_budget = min(
-        _SUMMARIZE_BODY_CHAR_BUDGET,
+    full_body = thread.body_text or thread.snippet or ""
+    # The most the tail could use: every recent chunk with its header,
+    # newline and join (the accounting of the loop below).
+    tail_demand = sum(
+        len(f"[chunk {c.chunk_index} chars {c.char_start}-{c.char_end}]") + len(c.text) + 3
+        for c in recent_chunks
+    )
+    sections = budget if not recent_chunks else max(budget - len(_RECENT_SEPARATOR), 0)
+    body_share = (
         sections
         * _SUMMARIZE_BODY_CHAR_BUDGET
-        // (_SUMMARIZE_BODY_CHAR_BUDGET + _SUMMARIZE_TAIL_CHAR_BUDGET),
+        // (_SUMMARIZE_BODY_CHAR_BUDGET + _SUMMARIZE_TAIL_CHAR_BUDGET)
+    )
+    body_budget = min(
+        _SUMMARIZE_BODY_CHAR_BUDGET,
+        len(full_body),
+        max(body_share, sections - min(_SUMMARIZE_TAIL_CHAR_BUDGET, tail_demand)),
     )
     tail_budget = min(_SUMMARIZE_TAIL_CHAR_BUDGET, sections - body_budget)
-    body = (thread.body_text or thread.snippet or "")[:body_budget]
+    body = full_body[:body_budget]
     # The tail budget is spent on messages newest-first — the latest
     # reply is what the tail exists for, and one ordinary chunk can fill
     # the whole budget — and within a message from its first chunk, where
@@ -1756,6 +1768,10 @@ def register_intelligence_tools(
             truncated = 0
             unparseable = 0
             nonconforming = 0
+            # Threads whose passages were left out or cut short because the
+            # model window, not the usual per-thread cap, set the budget
+            # (#285): a null answer from one is not a genuine absence.
+            window_cut = 0
 
             def render(thread: ThreadResult, body: str) -> str:
                 # The query is the user's task: it says which of the
@@ -1794,7 +1810,11 @@ def register_intelligence_tools(
                 subject = clip(thread.subject, HEADER_CHAR_LIMIT)
                 # One thread per prompt, so the whole budget is its own.
                 # No coverage note here: the model must answer in JSON only.
-                [body], _coverage = _build_evidence([thread], evidence_chars)
+                [body], coverage = _build_evidence([thread], evidence_chars)
+                if evidence_chars < PER_THREAD_CHAR_BUDGET and (
+                    coverage.omitted or coverage.truncated
+                ):
+                    window_cut += 1
                 user_prompt = render(thread, body)
 
                 try:
@@ -1839,6 +1859,14 @@ def register_intelligence_tools(
                     extracted_records.append(item)
 
             failed = truncated + unparseable + nonconforming
+            # Fixed text and counts only.
+            window_note = (
+                f"Evidence note: in {window_cut} of {len(results)} threads, matched passages "
+                "were left out or cut short to fit INFERENCE_CONTEXT_TOKENS, so data in "
+                "them may be missing."
+                if window_cut
+                else ""
+            )
             if failed:
                 reasons = []
                 if truncated:
@@ -1857,6 +1885,8 @@ def register_intelligence_tools(
                     f"Incomplete: {failed} of {len(results)} threads could not be extracted "
                     f"({'; '.join(reasons)}), so any matching data in them is missing."
                 )
+                if window_note:
+                    notice += f" {window_note}"
                 if not extracted_records:
                     return [TextContent(type="text", text=f"No records extracted. {notice}")]
                 return [
@@ -1865,14 +1895,17 @@ def register_intelligence_tools(
                 ]
 
             if not extracted_records:
-                return [
-                    TextContent(
-                        type="text",
-                        text=f"No structured data matching the schema found in {len(results)} threads.",
-                    )
-                ]
+                none_found = (
+                    f"No structured data matching the schema found in {len(results)} threads."
+                )
+                if window_note:
+                    none_found += f" {window_note}"
+                return [TextContent(type="text", text=none_found)]
 
-            return [TextContent(type="text", text=json.dumps(extracted_records, indent=2))]
+            records_text = TextContent(type="text", text=json.dumps(extracted_records, indent=2))
+            if window_note:
+                return [records_text, TextContent(type="text", text=window_note)]
+            return [records_text]
 
         except InvalidFilterError as e:
             # The message quotes the rejected value, which log_tool_call

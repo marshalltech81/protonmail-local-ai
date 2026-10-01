@@ -322,6 +322,30 @@ class TestSummarizeBudget:
         assert 3500 <= len(body) <= 4000
         assert 1500 <= len(tail) <= 2000
 
+    def test_body_takes_room_the_tail_does_not_need(self):
+        """Review round 1: with no recent chunks the body had only its
+        2:1 share of a small budget and left the rest unused."""
+        thread, _recent = self._thread_and_tail()
+        context = _summarize_context(thread, [], 6000)
+        assert len(context) == 6000
+
+    def test_tail_takes_room_a_short_body_does_not_need(self):
+        _thread_long, recent = self._thread_and_tail()
+        short = _thread("t2", [], body="short body")
+        context = _summarize_context(short, recent, 6000)
+        assert context.startswith("short body")
+        assert len(context) > 4000  # the tail got more than its 1/3 share
+        assert len(context) <= 6000
+
+    def test_short_tail_leaves_the_rest_to_the_body(self):
+        thread, _recent = self._thread_and_tail()
+        tiny = [_chunk("r9", "latest reply", index=0)]
+        context = _summarize_context(thread, tiny, 6000)
+        assert len(context) <= 6000
+        assert context.endswith("latest reply")
+        body = context.partition("\n\n--- recent messages ---\n")[0]
+        assert len(body) > 4500
+
 
 class TestExtractBudget:
     def test_small_window_prompt_never_exceeds_the_budget(self):
@@ -334,6 +358,45 @@ class TestExtractBudget:
             )
         )
         assert _prompt_chars(llm.complete_calls[0]) <= small.prompt_chars
+
+    def test_window_cut_evidence_is_reported_with_no_records(self):
+        """Review round 1: a null answer from a thread whose passages the
+        window cut must not read as a genuine absence."""
+        threads = [_thread("t1", [_chunk("c1", f"{_MARKER} " + "x" * 9000)])]
+        small = PromptBudget(context_tokens=2200, max_output_tokens=1024)
+        llm = FakeInferenceClient(response="null")
+        out = asyncio.run(
+            _tools(_StubDb(threads), llm, small)["extract_from_emails"](
+                query="invoices", schema={"amount": "number"}
+            )
+        )
+        text = "\n".join(c.text for c in out)
+        assert "1 of 1 threads" in text
+        assert "INFERENCE_CONTEXT_TOKENS" in text
+        assert _MARKER not in text
+
+    def test_window_cut_evidence_is_reported_beside_records(self):
+        threads = [_thread("t1", [_chunk("c1", "x" * 9000)])]
+        small = PromptBudget(context_tokens=2200, max_output_tokens=1024)
+        llm = FakeInferenceClient(response='{"amount": 5}')
+        out = asyncio.run(
+            _tools(_StubDb(threads), llm, small)["extract_from_emails"](
+                query="invoices", schema={"amount": "number"}
+            )
+        )
+        assert '"amount": 5' in out[0].text
+        assert "INFERENCE_CONTEXT_TOKENS" in out[-1].text
+
+    def test_default_window_adds_no_note(self):
+        threads = [_thread("t1", [_chunk("c1", "x" * 9000)])]
+        llm = FakeInferenceClient(response="null")
+        out = asyncio.run(
+            _tools(_StubDb(threads), llm)["extract_from_emails"](
+                query="invoices", schema={"amount": "number"}
+            )
+        )
+        assert len(out) == 1
+        assert "INFERENCE_CONTEXT_TOKENS" not in out[0].text
 
     def test_schema_too_large_for_the_window_fails_before_inference(self):
         threads = [_thread("t1", [_chunk("c1", "text")])]
