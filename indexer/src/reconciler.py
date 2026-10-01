@@ -469,32 +469,19 @@ class Reconciler:
             if survivor_chunks:
                 embedding = mean_vector(survivor_chunks)
             else:
-                # Fallback priority: the oldest SURVIVOR with a non-empty
-                # original-case subject first; only fall back to the thread's stored
-                # ``display_subject`` if every survivor's subject is
-                # empty. ``display_subject`` is maintained as the
-                # oldest message's subject across the lifetime of the
-                # thread INCLUDING reaped messages — so using it as
-                # the primary source means a post-reap rebuild can
-                # embed text from the message we just deleted, which
-                # is the opposite of what an embed-from-survivors
-                # rebuild should do. Survivors' subjects are still
-                # original-case (``Re:``/``Fwd:`` intact) — they
-                # differ from ``rebuilt_thread.subject`` only by case
-                # / prefix-stripping, both of which are noise for
-                # retrieval. Falling back to ``display_subject`` as a
-                # secondary source covers the edge case where every
-                # survivor has an empty subject line; the sentinel
-                # ``(empty thread)`` covers the final NULL case.
+                # Fallback: the oldest SURVIVOR with a non-empty
+                # original-case subject (``Re:``/``Fwd:`` intact, which
+                # differs from ``rebuilt_thread.subject`` only by case /
+                # prefix-stripping, both noise for retrieval); the
+                # sentinel ``(empty thread)`` when no survivor has one.
+                # The stored ``display_subject`` is deliberately not
+                # consulted: it can still hold a reaped message's
+                # subject, and when every survivor's subject is empty a
+                # non-empty stored value can only have come from one.
                 fallback = next(
                     (s for m in survivors if (s := (m.subject or "").strip())),
-                    "",
+                    "(empty thread)",
                 )
-                if not fallback:
-                    stored_display = self.db.get_thread_display_subject(thread_id)
-                    fallback = (stored_display or "").strip()
-                if not fallback:
-                    fallback = "(empty thread)"
                 embedding = self.embedder.embed(fallback)
         except Exception as e:
             # Embedding service unavailable or embedding failed — leave state untouched

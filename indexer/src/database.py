@@ -1445,13 +1445,13 @@ class Database:
         does not exist or its ``display_subject`` is not set.
 
         Used by the chunkless-thread subject-fallback path in the
-        indexer's Phase 2a and the reconciler's reap rebuild so both
-        paths embed the SAME stable subject text for the same thread.
-        Without this shared source, the indexer's fallback used the
-        newly-arrived message's subject (overwriting prior fallbacks
-        on every chunkless reply, producing order-dependent thread
-        vectors) and the reaper used the threader's normalized
-        grouping key (silent vector drift between the two paths).
+        indexer's Phase 2a so it embeds a stable subject text for the
+        thread. Without it, the fallback used the newly-arrived
+        message's subject (overwriting prior fallbacks on every
+        chunkless reply, producing order-dependent thread vectors).
+        The reconciler's reap rebuild does not read it: the stored
+        value can still hold a reaped message's subject, so the
+        rebuild embeds from survivors only.
         """
         row = self._conn.execute(
             "SELECT display_subject FROM threads WHERE thread_id = ?",
