@@ -623,12 +623,10 @@ def register_experimental_tools(
             # sized so the complete prompt fits the model window (#285).
             task = f"Issue topic: {topic}\n\n{_TASK}"
             evidence_map: dict[str, EvidenceRef] = {}
-            evidence, coverage = _build_evidence(
-                evidenced,
-                _evidence_budget(prompt_budget, BRIEF_SYSTEM, evidenced, task),
-                evidence_map=evidence_map,
-            )
-            user_prompt = _evidence_prompt(evidenced, evidence, coverage) + task
+            shown, evidence_chars = _evidence_budget(prompt_budget, BRIEF_SYSTEM, evidenced, task)
+            evidence, coverage = _build_evidence(shown, evidence_chars, evidence_map=evidence_map)
+            coverage.threads_dropped = len(evidenced) - len(shown)
+            user_prompt = _evidence_prompt(shown, evidence, coverage) + task
             dates = [
                 ref.chunk.message_date
                 for ref in evidence_map.values()
@@ -833,12 +831,10 @@ def register_experimental_tools(
             # block, then the fixed task line.
             task = _conclusion_block(conclusion) + _CHECK_TASK
             evidence_map: dict[str, EvidenceRef] = {}
-            evidence, coverage = _build_evidence(
-                evidenced,
-                _evidence_budget(prompt_budget, CHECK_SYSTEM, evidenced, task),
-                evidence_map=evidence_map,
-            )
-            user_prompt = _evidence_prompt(evidenced, evidence, coverage) + task
+            shown, evidence_chars = _evidence_budget(prompt_budget, CHECK_SYSTEM, evidenced, task)
+            evidence, coverage = _build_evidence(shown, evidence_chars, evidence_map=evidence_map)
+            coverage.threads_dropped = len(evidenced) - len(shown)
+            user_prompt = _evidence_prompt(shown, evidence, coverage) + task
             dates = [
                 ref.chunk.message_date
                 for ref in evidence_map.values()

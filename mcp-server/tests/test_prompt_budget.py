@@ -275,6 +275,47 @@ class TestAskMailboxBudget:
             "attachment",
         }
 
+    def test_crafted_long_headers_drop_lower_ranked_threads_not_the_call(self):
+        """Review round 2: senders can give threads 500-character subjects
+        and participants. At a small window those headers alone used to
+        exceed the allowance and fail the call; lower-ranked threads are
+        now left out, and the note says so."""
+        long_header = "h" * 600  # clipped to HEADER_CHAR_LIMIT
+        threads = _long_threads(n=5, chunks=1, size=300)
+        for t in threads:
+            t.subject = f"{_MARKER} {long_header}"
+            t.participants = [f"{_MARKER} {long_header}"] * 3
+        llm = FakeInferenceClient(response="no labels here")  # forces the repair call
+        asyncio.run(_tools(_StubDb(threads), llm, _SMALL)["ask_mailbox"](question="q?"))
+        assert len(llm.complete_calls) == 2
+        for call in llm.complete_calls:
+            assert _prompt_chars(call) <= _SMALL.prompt_chars
+        user = llm.complete_calls[0][1]
+        assert '<untrusted_email index="1">' in user  # the top-ranked thread is kept
+        assert '<untrusted_email index="5">' not in user
+        after_mail = user.rpartition("</untrusted_email>")[2]
+        assert "lower-ranked retrieved thread(s) were left out" in after_mail
+        assert _MARKER not in after_mail
+
+    @pytest.mark.parametrize(
+        ("tool", "args"),
+        [
+            ("brief_issue", {"topic": "the budget"}),
+            ("check_conclusion", {"conclusion": "The budget is 700 units."}),
+        ],
+    )
+    def test_crafted_long_headers_do_not_fail_experimental_tools(self, tool, args):
+        long_header = "h" * 600
+        threads = _long_threads(n=5, chunks=1, size=300)
+        for t in threads:
+            t.subject = long_header
+            t.participants = [long_header] * 3
+        llm = FakeInferenceClient(response="not json")
+        asyncio.run(_tools(_StubDb(threads), llm, _SMALL, experimental=True)[tool](**args))
+        assert llm.complete_calls
+        for call in llm.complete_calls:
+            assert _prompt_chars(call) <= _SMALL.prompt_chars
+
     def test_question_too_long_for_the_window_fails_before_inference(self):
         llm = FakeInferenceClient()
         with pytest.raises(ToolError, match="INFERENCE_CONTEXT_TOKENS"):

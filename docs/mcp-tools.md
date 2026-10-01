@@ -528,9 +528,12 @@ least a 2:1 share for its body and recent-message sections and gives
 room one does not need to the other. `extract_from_emails` adds a
 counts-only evidence note when the window cut passages from any
 thread, so a `null` answer from such a thread is not read as a genuine
-absence. When the request
-itself (a very long question or schema, with the instructions and
-thread headers) cannot fit, the tool returns an error naming the two
+absence. Thread subjects and participants are sender-controlled and can
+be long, so when the thread blocks of `ask_mailbox`, `brief_issue` or
+`check_conclusion` alone do not fit, lower-ranked threads are left out
+whole and the coverage note counts them. When the request itself (a
+very long question or schema, with the instructions and the top
+thread's headers) cannot fit, the tool returns an error naming the two
 settings before any model call. A window that leaves fewer than 1024
 prompt tokens after `INFERENCE_MAX_TOKENS` fails startup.
 

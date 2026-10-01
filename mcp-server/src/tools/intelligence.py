@@ -1095,6 +1095,7 @@ class EvidenceCoverage:
     truncated: int = 0  # passages cut short to fit
     duplicates: int = 0  # passages dropped as repeats of one shown in full
     threads_without_evidence: int = 0  # threads whose every passage was left out
+    threads_dropped: int = 0  # lower-ranked threads left out whole to fit the window
 
 
 # Shortest normalized body passage treated as a quote of an earlier one
@@ -1375,7 +1376,7 @@ def _coverage_note(coverage: EvidenceCoverage) -> str:
     Sits outside the untrusted blocks so the model can say its answer
     may be incomplete. Removed duplicates are no loss and not reported.
     """
-    if not (coverage.omitted or coverage.truncated):
+    if not (coverage.omitted or coverage.truncated or coverage.threads_dropped):
         return ""
     note = (
         f"Evidence note: to fit the prompt budget, {coverage.omitted} retrieved passages "
@@ -1384,6 +1385,10 @@ def _coverage_note(coverage: EvidenceCoverage) -> str:
     if coverage.threads_without_evidence:
         note += (
             f"; {coverage.threads_without_evidence} retrieved thread(s) are shown with headers only"
+        )
+    if coverage.threads_dropped:
+        note += (
+            f"; {coverage.threads_dropped} lower-ranked retrieved thread(s) were left out entirely"
         )
     return note + (
         ". If the answer could depend on evidence that is not shown, say that it may be incomplete."
@@ -1479,27 +1484,44 @@ def _evidence_texts(threads: list[ThreadResult]) -> Iterator[str]:
 
 def _evidence_budget(
     budget: PromptBudget, system: str, threads: list[ThreadResult], task: str
-) -> int:
-    """The evidence budget for a prompt built as ``_evidence_prompt`` +
-    ``task`` under ``system``, with room for a repair instruction.
+) -> tuple[list[ThreadResult], int]:
+    """The threads that fit, and their evidence budget, for a prompt
+    built as ``_evidence_prompt`` + ``task`` under ``system``, with room
+    for a repair instruction.
 
     The fixed part is that prompt rendered with no evidence and the
-    longest coverage note it could carry (every passage left out), so
-    the real prompt is never longer. ``PER_THREAD_CHAR_BUDGET`` per
-    thread stays the cap.
+    longest coverage note it could carry (every passage left out and
+    every dropped thread counted), so the real prompt is never longer.
+    ``PER_THREAD_CHAR_BUDGET`` per thread stays the cap.
+
+    Each thread block's subject and participants are sender-controlled
+    and can be long, so at a small window the blocks alone can exceed
+    it. Lower-ranked threads are then left out whole, one at a time
+    (at most ``len(threads)`` renders, each of clipped headers only),
+    until the rest fit; the caller records how many in
+    ``EvidenceCoverage.threads_dropped``. Only when the top thread
+    alone does not fit does the request fail.
     """
-    passages = sum(max(len(t.evidence_chunks), 1) for t in threads)
-    worst = EvidenceCoverage(
-        omitted=passages, truncated=passages, threads_without_evidence=len(threads)
-    )
-    fixed = (
-        len(system)
-        + len(_evidence_prompt(threads, [""] * len(threads), worst))
-        + len(task)
-        + REPAIR_RESERVE_CHARS
-    )
-    return _text_budget(
-        budget, fixed, PER_THREAD_CHAR_BUDGET * len(threads), _evidence_texts(threads)
+    kept = list(threads)
+    while True:
+        passages = sum(max(len(t.evidence_chunks), 1) for t in kept)
+        worst = EvidenceCoverage(
+            omitted=passages,
+            truncated=passages,
+            threads_without_evidence=len(kept),
+            threads_dropped=len(threads) - len(kept),
+        )
+        fixed = (
+            len(system)
+            + len(_evidence_prompt(kept, [""] * len(kept), worst))
+            + len(task)
+            + REPAIR_RESERVE_CHARS
+        )
+        if fixed <= budget.prompt_chars or len(kept) == 1:
+            break
+        kept.pop()
+    return kept, _text_budget(
+        budget, fixed, PER_THREAD_CHAR_BUDGET * len(kept), _evidence_texts(kept)
     )
 
 
@@ -1819,20 +1841,23 @@ def register_intelligence_tools(
             # the model window (#285). Counts of what did not fit are
             # disclosed to the model below and logged; never the text.
             task = f"User's question: {question}"
-            evidence_chars = _evidence_budget(prompt_budget, ASK_SYSTEM, results, task)
+            shown, evidence_chars = _evidence_budget(prompt_budget, ASK_SYSTEM, results, task)
             evidence_map: dict[str, EvidenceRef] = {}
-            evidence, coverage = _build_evidence(results, evidence_chars, evidence_map=evidence_map)
+            evidence, coverage = _build_evidence(shown, evidence_chars, evidence_map=evidence_map)
+            coverage.threads_dropped = len(results) - len(shown)
 
             # Build context from retrieved threads. Each thread is wrapped
             # in <untrusted_email> tags so the model can't confuse email
             # body text with instructions from the user. The question is
             # placed *outside* the tags so it remains the only trusted
             # task in the user message.
-            user_prompt = _evidence_prompt(results, evidence, coverage) + task
+            user_prompt = _evidence_prompt(shown, evidence, coverage) + task
             log.debug(
-                "ask_mailbox evidence: %d threads, evidence budget %d chars, %d passages "
-                "omitted, %d truncated, %d duplicates dropped; prompt ~%d of %d tokens",
+                "ask_mailbox evidence: %d threads, %d dropped, evidence budget %d chars, "
+                "%d passages omitted, %d truncated, %d duplicates dropped; prompt ~%d of %d "
+                "tokens",
                 len(results),
+                coverage.threads_dropped,
                 evidence_chars,
                 coverage.omitted,
                 coverage.truncated,
