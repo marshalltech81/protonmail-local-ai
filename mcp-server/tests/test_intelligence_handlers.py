@@ -10,9 +10,11 @@ seeded DB and the FakeEmbedClient / FakeInferenceClient stubs. Coverage targets:
   ``<untrusted_email>`` tags and keeps the user task outside them
   (the prompt-injection defense the security notice depends on);
 - max_threads / limit clamping forwards a sane bound to the db layer;
-- the no-results path returns a sentinel rather than calling the LLM;
-- exceptions on db, embed, or completion paths, and an unknown thread,
-  are raised as ``ToolError`` so the client receives ``isError: true``;
+- an empty search in ``ask_mailbox`` / ``extract_from_emails``
+  returns a "no matching emails" message rather than calling the LLM;
+- exceptions on db, embed, or completion paths, and an unknown
+  ``summarize_thread`` thread, are raised as ``ToolError`` so the
+  client receives ``isError: true`` and no LLM call is made;
 - ``extract_from_emails`` tolerates both single-object and array LLM
   responses and skips invalid JSON without aborting the loop.
 """
@@ -235,9 +237,9 @@ class TestSummarizeThread:
         self, fake_server, empty_db, fake_embed, fake_inference
     ):
         # If the index is empty, the fallback hybrid_search returns no
-        # hits — return the original sentinel rather than fabricating a
-        # summary. ``empty_db`` carries the schema but no rows, so this
-        # exercises the fallback's miss branch cleanly.
+        # hits — raise ``ToolError("Thread not found")`` rather than
+        # fabricating a summary. ``empty_db`` carries the schema but no
+        # rows, so this exercises the fallback's miss branch cleanly.
         handler = _handlers(fake_server, empty_db, fake_embed, fake_inference)["summarize_thread"]
         with pytest.raises(ToolError, match="Thread not found"):
             asyncio.run(handler(thread_id="anything"))

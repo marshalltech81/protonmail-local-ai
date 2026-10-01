@@ -16,14 +16,13 @@ from src.lib.reranker import (
 )
 
 
-def _make_reranker(top_n: int = 5, candidates: int = 50) -> CohereReranker:
+def _make_reranker(candidates: int = 50) -> CohereReranker:
     return CohereReranker(
         RerankConfig(
             base_url="",
             model="rerank-v4.0-pro",
             api_key="ck-test",  # pragma: allowlist secret
             candidates=candidates,
-            top_n=top_n,
         )
     )
 
@@ -46,13 +45,10 @@ class TestRerank:
             )
 
         r.client.rerank = fake_rerank  # type: ignore[assignment]
-        # Five documents so the default ``top_n=5`` flows through
-        # unclamped — the clamp behavior has its own dedicated test.
-        out = r.rerank("q", ["a", "b", "c", "d", "e"])
+        # Five documents so ``top_n=5`` flows through unclamped — the
+        # clamp behavior has its own dedicated test.
+        out = r.rerank("q", ["a", "b", "c", "d", "e"], top_n=5)
         assert out == [(2, 0.9), (0, 0.4), (1, 0.1)]
-        # Caller-supplied ``top_n`` defaults to ``self.top_n`` when not
-        # provided — the reranker must never silently cap below the
-        # caller's requested limit when the candidate set supports it.
         assert captured["top_n"] == 5
         assert captured["query"] == "q"
         assert captured["documents"] == ["a", "b", "c", "d", "e"]
@@ -63,7 +59,7 @@ class TestRerank:
         # silently degrade to RRF. The reranker clamps before the call
         # so the caller's "give me up to N" intent is honored against
         # smaller candidate sets.
-        r = _make_reranker(top_n=20)
+        r = _make_reranker()
         captured: dict = {}
 
         def fake_rerank(**kwargs):
@@ -71,16 +67,11 @@ class TestRerank:
             return SimpleNamespace(results=[_result(0, 0.5), _result(1, 0.3)])
 
         r.client.rerank = fake_rerank  # type: ignore[assignment]
-        r.rerank("q", ["a", "b"])
-        assert captured["top_n"] == 2
-
-        # Same clamp applies when the caller explicitly overrides top_n.
-        captured.clear()
         r.rerank("q", ["a", "b"], top_n=50)
         assert captured["top_n"] == 2
 
-    def test_caller_top_n_overrides_default(self):
-        r = _make_reranker(top_n=5)
+    def test_caller_top_n_is_forwarded(self):
+        r = _make_reranker()
         captured: dict = {}
 
         def fake_rerank(**kwargs):
@@ -89,7 +80,7 @@ class TestRerank:
 
         # Provide enough documents that ``top_n=20`` survives the
         # ``min(top_n, len(documents))`` clamp — this test is about
-        # the caller-override path, not the clamp.
+        # the caller's cutoff reaching the SDK, not the clamp.
         documents = [f"doc-{i}" for i in range(20)]
         r.client.rerank = fake_rerank  # type: ignore[assignment]
         r.rerank("q", documents, top_n=20)
@@ -104,7 +95,7 @@ class TestRerank:
             return SimpleNamespace(results=[])
 
         r.client.rerank = fake_rerank  # type: ignore[assignment]
-        assert r.rerank("q", []) == []
+        assert r.rerank("q", [], top_n=5) == []
         assert called["n"] == 0
 
     def test_sdk_exception_returns_empty_for_graceful_degradation(self):
@@ -117,7 +108,7 @@ class TestRerank:
             raise RuntimeError("simulated cohere outage")
 
         r.client.rerank = fake_rerank  # type: ignore[assignment]
-        assert r.rerank("q", ["a", "b"]) == []
+        assert r.rerank("q", ["a", "b"], top_n=5) == []
 
     def test_empty_base_url_omits_kwarg_so_sdk_default_applies(self):
         # ``RERANK_BASE_URL=""`` means "use the SDK default"
@@ -139,7 +130,6 @@ class TestRerank:
                     model="rerank-v4.0-pro",
                     api_key="ck-test",  # pragma: allowlist secret
                     candidates=20,
-                    top_n=5,
                     timeout_secs=42.5,
                 )
             )
@@ -159,7 +149,6 @@ class TestRerank:
                     model="rerank-v4.0-pro",
                     api_key="ck-test",  # pragma: allowlist secret
                     candidates=20,
-                    top_n=5,
                     timeout_secs=42.5,
                 )
             )
@@ -173,7 +162,6 @@ class TestRerank:
                     model="rerank-v4.0-pro",
                     api_key="ck-test",  # pragma: allowlist secret
                     candidates=20,
-                    top_n=5,
                     timeout_secs=15.0,
                 )
             )
@@ -200,7 +188,7 @@ class TestRerank:
             )
 
         r.client.rerank = fake_rerank  # type: ignore[assignment]
-        assert r.rerank("q", ["a"]) == []
+        assert r.rerank("q", ["a"], top_n=5) == []
 
     def test_malformed_fields_never_reach_logs(self, caplog):
         # A 200 response whose fields echo a submitted passage must not
@@ -219,7 +207,7 @@ class TestRerank:
 
             r.client.rerank = fake_rerank  # type: ignore[assignment]
             with caplog.at_level(logging.DEBUG):
-                assert r.rerank("q", [marker]) == []
+                assert r.rerank("q", [marker], top_n=5) == []
         assert "rerank failed" in caplog.text
         assert marker not in caplog.text
 
@@ -235,6 +223,6 @@ class TestRerank:
 
         r.client.rerank = fake_rerank  # type: ignore[assignment]
         with caplog.at_level(logging.DEBUG):
-            assert r.rerank("q", ["a"]) == []
+            assert r.rerank("q", ["a"], top_n=5) == []
         assert "ValueError" in caplog.text
         assert "SYNTHETIC_PRIVATE_MAIL" not in caplog.text

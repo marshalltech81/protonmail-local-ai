@@ -178,10 +178,12 @@ SQLITE_PATH = os.environ.get("SQLITE_PATH", "/data/mail.db")
 # trust an empty base URL as "I want the SDK default" rather than
 # "I forgot to configure."
 def _float_env(name: str, default: float, minimum: float = 0.0) -> float:
-    """Read a positive float from the environment with a fallback.
+    """Read a finite float of at least ``minimum`` from the environment.
 
-    Used for per-call HTTP deadlines so a typo or empty string falls back
-    to the library default rather than raising at startup.
+    Used for per-call HTTP deadlines. An unset or empty variable returns
+    ``default``; a value that does not parse as a number, is non-finite,
+    or is below ``minimum`` raises ``ValueError`` so the misconfiguration
+    fails startup instead of being silently replaced.
     """
     raw = os.environ.get(name, "").strip()
     if not raw:
@@ -260,7 +262,6 @@ RERANK_BASE_URL = _reject_url_userinfo("RERANK_BASE_URL", os.environ.get("RERANK
 RERANK_MODEL = os.environ.get("RERANK_MODEL", "")
 RERANK_API_KEY = _read_secret("rerank_api_key", "RERANK_API_KEY")
 RERANK_CANDIDATES = _int_env("RERANK_CANDIDATES", 20, minimum=1)
-RERANK_TOP_N = _int_env("RERANK_TOP_N", 10, minimum=1)
 RERANK_TIMEOUT_SECS = _float_env("RERANK_TIMEOUT_SECS", DEFAULT_RERANK_TIMEOUT_SECS, minimum=1.0)
 
 MCP_PORT = int(os.environ.get("MCP_PORT", "3000"))
@@ -428,7 +429,6 @@ def main():
                 model=RERANK_MODEL,
                 api_key=RERANK_API_KEY,
                 candidates=RERANK_CANDIDATES,
-                top_n=RERANK_TOP_N,
                 timeout_secs=RERANK_TIMEOUT_SECS,
             )
         )
@@ -564,7 +564,7 @@ def main():
     if reranker is not None:
         log.info(
             f"  Rerank:         {RERANK_BASE_URL or '(SDK default)'} "
-            f"(model={RERANK_MODEL}, candidates={RERANK_CANDIDATES}, top_n={RERANK_TOP_N})"
+            f"(model={RERANK_MODEL}, candidates={RERANK_CANDIDATES})"
         )
     log.info(f"  Transport: {transport}")
     log.info("  Retrieval: local SQLite index only")

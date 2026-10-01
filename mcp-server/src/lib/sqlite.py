@@ -213,10 +213,11 @@ class ChunkResult:
 
     ``attachment_id`` / ``attachment_filename`` / ``attachment_mime`` are
     populated for chunks derived from an attachment's extracted text and
-    left ``None`` for body chunks. ``ask_mailbox``'s "reads attachment
-    content" promise depends on these fields reaching the LLM context —
-    without filename/MIME provenance the model sees opaque text and
-    cannot cite the source attachment.
+    left ``None`` for body chunks. The tools that surface attachment
+    text (``ask_mailbox``, ``get_evidence``, ``extract_from_emails``)
+    depend on these fields reaching the caller or LLM context — without
+    filename/MIME provenance the text is opaque and the source
+    attachment cannot be cited.
 
     ``message_date`` is the source message's ``Date:`` header, carried
     so ``get_evidence`` can show *when* a cited passage arrived. Left
@@ -848,9 +849,10 @@ class Database:
             # and its specific chunks may not rank anywhere in the
             # global chunk-vec top-K. The prior pool-reuse shape left
             # those threads with empty ``evidence_chunks``, silently
-            # breaking ``ask_mailbox``'s "reads attachment content"
-            # promise whenever the carrier email won by metadata but
-            # the attachment chunks didn't enter the chunk-vec pool.
+            # dropping the attachment evidence that ``ask_mailbox``,
+            # ``get_evidence`` and ``extract_from_emails`` read whenever
+            # the carrier email won by metadata but the attachment
+            # chunks didn't enter the chunk-vec pool.
             wanted = [r.thread_id for r in candidates]
             # Recompute attachment-FTS hits standalone so we know which
             # candidates won via filename match. The keyword lane's RRF
@@ -904,11 +906,10 @@ class Database:
     ) -> list[ThreadResult]:
         """Reorder ``candidates`` via the reranker and truncate to ``limit``.
 
-        ``top_n`` is passed through to the reranker as the caller's
-        ``limit`` so a caller asking for 20 results doesn't get
-        silently capped at the reranker's default ``top_n=10``. The
-        outer ``[:limit]`` is then redundant for the success path but
-        kept for the rerank-failure fallback below.
+        The caller's ``limit`` is passed to the reranker as ``top_n``,
+        so the rerank stage returns up to ``limit`` results. The outer
+        ``[:limit]`` is then redundant for the success path but kept
+        for the rerank-failure fallback below.
 
         On reranker failure (returns empty list), the candidates fall
         back to RRF order — so a rerank outage degrades quality without
@@ -1734,10 +1735,10 @@ class Database:
         top-K — meaning a thread won via BM25, thread-vector,
         sender/date filter, or attachment filename FTS could end up
         with empty ``evidence_chunks`` whenever its specific chunks
-        didn't make the global pool. ``ask_mailbox``'s docstring
-        promises that "this is the ONLY mailbox tool that reads
-        attachment content"; the pool-reuse shape silently broke that
-        promise for any non-chunk-vec retrieval lane.
+        didn't make the global pool. ``ask_mailbox``, ``get_evidence``
+        and ``extract_from_emails`` read attachment text through these
+        evidence chunks; the pool-reuse shape silently dropped it for
+        any non-chunk-vec retrieval lane.
 
         Implementation reads only chunks belonging to the surfaced
         ``thread_ids`` and computes ``vec_distance_l2`` against each.
@@ -1840,36 +1841,40 @@ class Database:
         thread_id: str,
         limit: int = 6,
     ) -> list[ChunkResult]:
-        """Return the most-recently-indexed BODY chunks for ``thread_id``.
+        """Return the BODY chunks of ``thread_id``'s latest-dated messages.
 
         Used by ``summarize_thread`` / timeline-style intelligence tools
         that need "what does the thread say lately" — NOT "what matches
         a query." The stored ``body_text`` is front-preserving and
         token-capped, so a long thread that crosses ``THREAD_BODY_TEXT_MAX_TOKENS``
         silently drops its newest replies. The chunk store carries every
-        message in full, so reading the tail of ``chunked_at`` recovers
-        the missing context.
+        message in full, so reading the chunks of the latest-dated
+        messages recovers the missing context.
 
         Attachment chunks (rows with a non-NULL ``attachment_id``) are
-        deliberately excluded via ``c.attachment_id IS NULL``. The tool
-        contract reserves attachment-text retrieval to ``ask_mailbox``
-        alone; ``summarize_thread`` is a body summary, so surfacing
-        attachment extracts here would silently broaden which indexed
-        content can leave the host for a remote inference endpoint.
+        deliberately excluded via ``c.attachment_id IS NULL``.
+        ``summarize_thread`` is a body summary that never reads
+        attachment text (the attachment-reading tools are
+        ``ask_mailbox``, ``get_evidence``, ``search_attachments`` and
+        ``extract_from_emails``), so surfacing attachment extracts here
+        would silently broaden which indexed content can leave the host
+        for a remote inference endpoint.
 
-        Returned chunks are in chronological (oldest-first within the
-        selected tail) order so the LLM prompt reads naturally as a
+        Returned chunks are in chronological (oldest-first by message
+        date within the selected tail) order so the LLM prompt reads naturally as a
         timeline. Caller can render them via ``_thread_context``.
 
         Ordering: ``c.message_date DESC, c.chunk_index DESC``.
-        ``message_date`` is the message's ``Date:`` header captured at
-        chunk-write — the authoritative "when did this message arrive"
-        signal, correct across reindex, reap-rebuild, dead-letter
-        retry, and recovery-sweep paths (unlike ``chunked_at``, the
-        chunker's wall-clock at insert). ``chunk_index DESC`` tiebreaks
-        chunks of the same message so the last chunk emitted by the
-        chunker comes first in selection.
-        Selection picks the latest ``limit`` chunks, then the result
+        ``message_date`` is the indexed message date stored at
+        chunk-write: the sender-supplied ``Date:`` header, or the
+        indexer's ingest time when that header is missing or
+        unparseable. It is not an IMAP delivery timestamp, but it is
+        stable across reindex, reap-rebuild, dead-letter retry, and
+        recovery-sweep paths (unlike ``chunked_at``, the chunker's
+        wall-clock at insert, which this query does not use).
+        ``chunk_index DESC`` tiebreaks chunks of the same message so the
+        last chunk emitted by the chunker comes first in selection.
+        Selection picks the latest-dated ``limit`` chunks, then the result
         is reversed in Python for ascending display order.
 
         Body-only filter: because attachment chunks are excluded, no

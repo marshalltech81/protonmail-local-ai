@@ -3,10 +3,9 @@
 The hybrid_search RRF stage produces a candidate set ordered by lane
 fusion. The reranker re-scores those candidates against the query
 using a cross-encoder-style relevance score and returns a sharper
-top-K. The cutoff is the caller's ``limit`` (passed through
-``rerank(..., top_n=limit)``); ``RERANK_TOP_N`` is only the default
-applied when a caller doesn't specify one. The candidate count fed
-in is ``RERANK_CANDIDATES``.
+top-K. The cutoff is the caller's ``limit``, passed through
+``rerank(..., top_n=limit)``. The candidate count fed in is
+``RERANK_CANDIDATES``.
 
 ``RERANK_MODE`` selects the provider:
 
@@ -52,7 +51,6 @@ class RerankConfig:
     model: str
     api_key: str
     candidates: int
-    top_n: int
     timeout_secs: float = DEFAULT_RERANK_TIMEOUT_SECS
 
 
@@ -60,24 +58,21 @@ class RerankerBackend(Protocol):
     """Minimal contract every reranker implementation satisfies.
 
     ``candidates`` is the number of RRF results to feed into the
-    reranker. ``top_n`` is the *default* cutoff used when a caller
-    doesn't specify one; callers that already know how many results
-    they need (e.g. ``hybrid_search(limit=20)``) override it via
-    ``rerank(..., top_n=20)`` so the reranker never silently caps
-    below the caller's request.
+    reranker. The caller passes the cutoff as ``top_n`` on every call
+    (``hybrid_search`` passes its ``limit``), so the reranker never
+    caps below the caller's request.
     """
 
     candidates: int
-    top_n: int
 
     def rerank(
         self,
         query: str,
         documents: list[str],
-        top_n: int | None = None,
+        top_n: int,
     ) -> list[tuple[int, float]]:
         """Return ``[(orig_index, score), ...]`` sorted descending by
-        score, truncated to ``top_n`` (or ``self.top_n`` when omitted).
+        score, truncated to ``top_n``.
         Empty list signals failure — caller falls back to the original
         document order, as it does for an out-of-range or repeated
         index."""
@@ -101,7 +96,6 @@ class CohereReranker:
 
         self.config = config
         self.candidates = config.candidates
-        self.top_n = config.top_n
         # Pass ``base_url`` only when explicitly set — passing an empty
         # string would override the SDK default with a malformed URL.
         # ``timeout`` is always passed: the SDK default (300s) is longer
@@ -132,17 +126,16 @@ class CohereReranker:
         self,
         query: str,
         documents: list[str],
-        top_n: int | None = None,
+        top_n: int,
     ) -> list[tuple[int, float]]:
         if not documents:
             return []
-        effective_top_n = top_n if top_n is not None else self.top_n
         # Clamp to the candidate count: Cohere rejects top_n > len(documents)
         # with a 400, which would otherwise propagate as a generic rerank
         # failure and silently degrade to RRF. The caller's intent is
-        # "give me up to ``effective_top_n``" — when fewer candidates are
+        # "give me up to ``top_n``" — when fewer candidates are
         # available, return what we have.
-        effective_top_n = min(effective_top_n, len(documents))
+        effective_top_n = min(top_n, len(documents))
         try:
             resp = self.client.rerank(
                 model=self.config.model,
