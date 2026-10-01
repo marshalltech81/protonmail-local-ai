@@ -448,6 +448,87 @@ class TestRequireEnv:
         assert "openai" in msg
 
 
+class TestExperimentalToolsFlag:
+    """``MCP_EXPERIMENTAL_TOOLS`` gates experimental tools (``brief_issue``,
+    PLAN.md Resolved decisions 12): off unless exactly ``true``, an
+    unrecognized value fails startup, and the tools need inference."""
+
+    class _FakeDatabase:
+        def __init__(self, _path):
+            pass
+
+        def get_embedding_dim(self):
+            return 4
+
+    def _load(self, monkeypatch, value):
+        import importlib
+
+        import src.main as main_mod
+
+        if value is None:
+            monkeypatch.delenv("MCP_EXPERIMENTAL_TOOLS", raising=False)
+        else:
+            monkeypatch.setenv("MCP_EXPERIMENTAL_TOOLS", value)
+        try:
+            return importlib.reload(main_mod).MCP_EXPERIMENTAL_TOOLS
+        finally:
+            monkeypatch.delenv("MCP_EXPERIMENTAL_TOOLS", raising=False)
+            importlib.reload(main_mod)
+
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [(None, False), ("", False), ("false", False), ("FALSE", False), ("true", True)],
+    )
+    def test_flag_parses_strictly(self, monkeypatch, value, expected):
+        assert self._load(monkeypatch, value) is expected
+
+    @pytest.mark.parametrize("value", ["1", "yes", "on", "ture", "true!"])
+    def test_unrecognized_value_fails_startup(self, monkeypatch, value):
+        with pytest.raises(ValueError, match="MCP_EXPERIMENTAL_TOOLS"):
+            self._load(monkeypatch, value)
+
+    def _tool_names(self, monkeypatch, *, experimental, inference_mode="anthropic"):
+        import src.main as main_mod
+        from fastmcp import Client
+
+        for name, value in {
+            "EMBED_BASE_URL": "http://host.docker.internal:8001/v1",
+            "EMBED_MODEL": "synthetic",
+            "EMBED_API_KEY": _PLACEHOLDER_KEY,
+            "INFERENCE_MODE": inference_mode,
+            "INFERENCE_BASE_URL": "http://host.docker.internal:8002",
+            "INFERENCE_MODEL": "synthetic",
+            "INFERENCE_API_KEY": _PLACEHOLDER_KEY,
+            "RERANK_MODE": "none",
+            "MCP_EXPERIMENTAL_TOOLS": experimental,
+        }.items():
+            monkeypatch.setattr(main_mod, name, value)
+        monkeypatch.setattr(main_mod, "Database", self._FakeDatabase)
+        servers = []
+        monkeypatch.setattr(main_mod, "_run_server", lambda server, _t: servers.append(server))
+        main_mod.main()
+
+        async def names():
+            async with Client(servers[0]) as client:
+                return {t.name for t in await client.list_tools()}
+
+        return asyncio.run(names())
+
+    def test_brief_issue_is_not_registered_by_default(self, monkeypatch):
+        names = self._tool_names(monkeypatch, experimental=False)
+        assert "ask_mailbox" in names
+        assert "brief_issue" not in names
+
+    def test_brief_issue_is_registered_when_enabled(self, monkeypatch):
+        assert "brief_issue" in self._tool_names(monkeypatch, experimental=True)
+
+    def test_brief_issue_needs_inference(self, monkeypatch, caplog):
+        caplog.set_level(logging.INFO)
+        names = self._tool_names(monkeypatch, experimental=True, inference_mode="none")
+        assert "brief_issue" not in names
+        assert "Experimental tools not registered" in caplog.text
+
+
 class TestHealthEndpoint:
     """The /health route delegates to ``_health_response``, which the
     tests call directly with a stub DB.

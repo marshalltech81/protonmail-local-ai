@@ -215,6 +215,7 @@ SYNC_INTERVAL="$(get_env_value SYNC_INTERVAL)"
 MCP_PORT="$(get_env_value MCP_PORT)"
 MCP_TRANSPORT="$(get_env_value MCP_TRANSPORT)"
 MCP_SESSION_IDLE_TIMEOUT_SECS="$(get_env_value MCP_SESSION_IDLE_TIMEOUT_SECS)"
+MCP_EXPERIMENTAL_TOOLS="$(get_env_value MCP_EXPERIMENTAL_TOOLS)"
 
 [[ -n "$BRIDGE_USER" && "$BRIDGE_USER" != "your@proton.me" ]] || {
     echo "ERROR: BRIDGE_USER in .env must be set to the Bridge username from 'bridge --cli info'." >&2
@@ -417,6 +418,14 @@ MCP_TRANSPORT="${MCP_TRANSPORT:-sse}"
 if [[ -n "$MCP_SESSION_IDLE_TIMEOUT_SECS" ]]; then
     require_integer_min "MCP_SESSION_IDLE_TIMEOUT_SECS" "$MCP_SESSION_IDLE_TIMEOUT_SECS" 1
 fi
+
+# Experimental tools flag; mcp-server/src/main.py accepts the same
+# values case-insensitively and fails startup on anything else.
+MCP_EXPERIMENTAL_TOOLS_LC="$(printf '%s' "$MCP_EXPERIMENTAL_TOOLS" | tr '[:upper:]' '[:lower:]')"
+[[ "$MCP_EXPERIMENTAL_TOOLS_LC" =~ ^(true|false)?$ ]] || {
+    echo "ERROR: MCP_EXPERIMENTAL_TOOLS must be 'true' or 'false'." >&2
+    exit 1
+}
 
 require_nonempty_file "$BRIDGE_PASS_FILE" "Bridge password secret"
 require_mode_600 "$BRIDGE_PASS_FILE"

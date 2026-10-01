@@ -168,7 +168,8 @@ network can reach it.
 ### 2. Project-internal model layers — controlled by `INFERENCE_MODE` and `RERANK_MODE`
 
 The MCP server's intelligence tools (`ask_mailbox`, `summarize_thread`,
-`extract_from_emails`) need an LLM for generation. Where that runs depends on
+`extract_from_emails`, and the opt-in experimental `brief_issue` enabled by
+`MCP_EXPERIMENTAL_TOOLS=true`) need an LLM for generation. Where that runs depends on
 `INFERENCE_MODE` in `.env`:
 
 | Mode | What happens to retrieved email content |

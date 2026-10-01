@@ -31,6 +31,7 @@ from .lib.inference import (
 )
 from .lib.reranker import DEFAULT_RERANK_TIMEOUT_SECS, CohereReranker, RerankConfig
 from .lib.sqlite import Database
+from .tools.brief import register_experimental_tools
 from .tools.intelligence import register_intelligence_tools
 from .tools.retrieval import register_retrieval_tools
 from .tools.search import register_search_tools
@@ -217,6 +218,18 @@ def _int_env(name: str, default: int, minimum: int = 1) -> int:
     return value
 
 
+def _flag_env(name: str) -> bool:
+    """Read an on/off flag: unset, empty or ``false`` is off, ``true`` is
+    on (case-insensitive). Anything else raises ``ValueError`` so a typo
+    fails startup instead of silently leaving the flag off or on."""
+    raw = os.environ.get(name, "").strip().lower()
+    if raw in {"", "false"}:
+        return False
+    if raw == "true":
+        return True
+    raise ValueError(f"{name} must be 'true' or 'false'")
+
+
 def _reject_url_userinfo(name: str, value: str) -> str:
     """Reject URLs that embed a ``user:pass@host`` userinfo authority.
 
@@ -273,6 +286,9 @@ MCP_TRANSPORT = os.environ.get("MCP_TRANSPORT", "sse")
 # A client whose session expires gets 404 on its next request and starts
 # a new one.
 MCP_SESSION_IDLE_TIMEOUT_SECS = _float_env("MCP_SESSION_IDLE_TIMEOUT_SECS", 1800.0, minimum=1.0)
+# Experimental tools (brief_issue) are registered only when this is
+# ``true``; their output format may change (PLAN.md Resolved decisions 12).
+MCP_EXPERIMENTAL_TOOLS = _flag_env("MCP_EXPERIMENTAL_TOOLS")
 
 # Paths the transports are served on; fastmcp's defaults, pinned here so
 # the dual-transport dispatch and the docs cannot drift from them.
@@ -600,6 +616,20 @@ def main():
         )
     else:
         log.info("Intelligence tools not registered (INFERENCE_MODE=none).")
+    # Experimental tools are opt-in, and the current ones need inference.
+    if MCP_EXPERIMENTAL_TOOLS and inference_client is not None:
+        register_experimental_tools(
+            server,
+            db,
+            embed_client,
+            inference_client,
+            reranker=reranker,
+            secret_values=secret_values,
+            expected_embed_dim=expected_embed_dim,
+        )
+        log.info("Experimental tools registered (MCP_EXPERIMENTAL_TOOLS=true): brief_issue.")
+    elif MCP_EXPERIMENTAL_TOOLS:
+        log.info("Experimental tools not registered: they need inference (INFERENCE_MODE=none).")
     register_system_tools(server, db)
 
     transport = _normalize_transport(MCP_TRANSPORT)

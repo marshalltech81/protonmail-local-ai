@@ -159,6 +159,10 @@ official `anthropic` SDK against the Messages API; leave
 `INFERENCE_MODE=openai` uses the official `openai` SDK against any
 OpenAI-compatible chat-completions endpoint at `INFERENCE_BASE_URL`.
 `INFERENCE_MODE=none` skips registration of the intelligence tools.
+Experimental tools (currently `brief_issue`) are registered only when
+`MCP_EXPERIMENTAL_TOOLS=true` and inference is enabled; they send the
+same kind of retrieved excerpts to the inference endpoint and store
+nothing (see `docs/mcp-tools.md`, Experimental tools).
 
 Reranking is opt-in via `RERANK_MODE`. `RERANK_MODE=cohere` uses
 the official `cohere` SDK against the Cohere rerank API; leave
