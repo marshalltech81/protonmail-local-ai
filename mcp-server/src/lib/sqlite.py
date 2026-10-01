@@ -819,6 +819,25 @@ def _aggregate_senders(conn: sqlite3.Connection, needle: str, name_needle: str) 
     }
 
 
+def _append_folder_membership_sql(
+    where_clauses: list[str], params: list, thread_id_column: str, folders: list[str]
+) -> None:
+    """Keep rows whose thread has a message filed in one of ``folders``.
+
+    Membership is per message (``messages.folder``), the rule
+    ``list_threads`` and ``list_folders`` use, not ``threads.folder``,
+    which only records where the thread's first message was filed
+    (#308, #415). ``thread_id_column`` is a fixed literal from the
+    caller; folder names are ``?``-bound.
+    """
+    placeholders = ",".join("?" * len(folders))
+    where_clauses.append(
+        f"{thread_id_column} IN (SELECT thread_id FROM messages "  # nosec B608
+        f"WHERE folder IN ({placeholders}))"
+    )
+    params.extend(folders)
+
+
 class Database:
     """Read-only handle to the indexer's SQLite output.
 
@@ -1202,8 +1221,12 @@ class Database:
         includes the whole day); ``extracted_only`` keeps only
         attachments whose text extraction succeeded; ``from_addr`` keeps
         only attachments on threads the address sent on (matched against
-        the thread's From-line senders, post-query in Python).
+        the thread's From-line senders, post-query in Python). A blank
+        ``content_type`` is no filter, normalized here once so every lane
+        applies the same rule.
         """
+        if content_type is not None and not content_type.strip():
+            content_type = None
         extra_clauses, extra_params = self._attachment_filter_clauses(
             content_type, date_from, date_to, extracted_only
         )
@@ -1221,7 +1244,7 @@ class Database:
             )
             seen = {(r.attachment_id, r.message_id, r.filename) for r in results}
             for r in self._attachment_text_lane(
-                fts_query, extra_clauses, extra_params, fetch_limit
+                fts_query, content_type, extra_clauses, extra_params, fetch_limit
             ):
                 key = (r.attachment_id, r.message_id, r.filename)
                 if key not in seen:
@@ -1310,6 +1333,7 @@ class Database:
     def _attachment_text_lane(
         self,
         fts_query: str,
+        content_type: str | None,
         extra_clauses: list[str],
         extra_params: list,
         limit: int,
@@ -1322,7 +1346,10 @@ class Database:
         single message; the JOIN anchors on the lowest
         ``attachment_occurrence_id`` for the pair so the row count is
         deterministic (see ``_chunk_vector_search`` for the full
-        rationale).
+        rationale). The anchor is chosen among the occurrences that pass
+        ``content_type``, the one filter that can differ between them
+        (thread and extraction are shared by the pair): choosing first
+        dropped the match when only another occurrence passed (#309).
 
         Many chunks can match one attachment, so each attachment is ranked
         by its best chunk *before* the LIMIT: limiting chunk rows first
@@ -1334,7 +1361,7 @@ class Database:
         chunk in the mailbox.
         """
         where = ["c.attachment_id IS NOT NULL", *extra_clauses]
-        params = [fts_query, *extra_params, limit]
+        params = [fts_query, content_type, content_type, *extra_params, limit]
         sql = (
             "WITH hits AS MATERIALIZED ( "
             "    SELECT rowid AS fts_rowid, bm25(message_chunks_fts) AS score "
@@ -1345,7 +1372,8 @@ class Database:
             "    JOIN attachments a ON a.attachment_occurrence_id = ( "
             "        SELECT MIN(a2.attachment_occurrence_id) FROM attachments a2 "
             "        WHERE a2.attachment_id = c.attachment_id "
-            "          AND a2.message_id = c.message_id ) "
+            "          AND a2.message_id = c.message_id "
+            "          AND (? IS NULL OR a2.content_type = ?) ) "
             "    JOIN threads t ON a.thread_id = t.thread_id "
             "    LEFT JOIN attachment_extractions e ON e.attachment_id = a.attachment_id "
             "    WHERE " + " AND ".join(where) + " "  # nosec B608
@@ -1500,9 +1528,7 @@ class Database:
         where_clauses = ["threads_fts MATCH ?"]
         params: list = [fts_query]
         if folders:
-            placeholders = ",".join(["?"] * len(folders))
-            where_clauses.append(f"t.folder IN ({placeholders})")
-            params.extend(folders)
+            _append_folder_membership_sql(where_clauses, params, "t.thread_id", folders)
         # Normalize before SQL pushdown. Stored dates are full ISO timestamps
         # (``"2024-12-31T10:00:00+00:00"``); a bare user filter ``"2024-12-31"``
         # would lexicographically sort *below* any same-day stored timestamp
@@ -1704,9 +1730,7 @@ class Database:
         has_attachments: bool | None = None,
     ) -> None:
         if folders:
-            placeholders = ",".join(["?"] * len(folders))
-            where_clauses.append(f"t.folder IN ({placeholders})")
-            params.extend(folders)
+            _append_folder_membership_sql(where_clauses, params, "t.thread_id", folders)
         date_from_iso, date_to_iso = _normalize_date_range(date_from, date_to)
         if date_from_iso is not None:
             where_clauses.append("t.date_last >= ?")
@@ -1770,9 +1794,7 @@ class Database:
         ]
         params: list = [pattern, pattern, pattern]
         if folders:
-            placeholders = ",".join(["?"] * len(folders))
-            where_clauses.append(f"folder IN ({placeholders})")
-            params.extend(folders)
+            _append_folder_membership_sql(where_clauses, params, "thread_id", folders)
         # See ``_keyword_search`` for why date bounds are normalized before
         # being pushed into SQL.
         date_from_iso, date_to_iso = _normalize_date_range(date_from, date_to)
@@ -2216,8 +2238,6 @@ class Database:
         date_from_dt, date_to_dt = _parse_date_range(date_from, date_to)
 
         filtered = results
-        if folders:
-            filtered = [r for r in filtered if r.folder in folders]
         if from_addr:
             fa = from_addr.lower()
             # Filter by sender (the From-only subset, not all participants).
@@ -2242,7 +2262,31 @@ class Database:
             filtered = [r for r in filtered if r.date_first <= date_to_dt]
         if has_attachments is not None:
             filtered = [r for r in filtered if r.has_attachments == has_attachments]
+        if folders and filtered:
+            # Last, so the lookup covers only the survivors of the
+            # in-memory filters.
+            members = self._threads_in_folders([r.thread_id for r in filtered], folders)
+            filtered = [r for r in filtered if r.thread_id in members]
         return filtered
+
+    def _threads_in_folders(self, thread_ids: list[str], folders: list[str]) -> set[str]:
+        """The subset of ``thread_ids`` with a message filed in one of
+        ``folders``: the same per-message membership ``list_threads``
+        uses (#415). One connection; the id list is batched under
+        ``_IN_CLAUSE_BATCH_SIZE``."""
+        found: set[str] = set()
+        folder_marks = ",".join("?" * len(folders))
+        with closing(self._connect()) as conn:
+            for start in range(0, len(thread_ids), _IN_CLAUSE_BATCH_SIZE):
+                batch = thread_ids[start : start + _IN_CLAUSE_BATCH_SIZE]
+                id_marks = ",".join("?" * len(batch))
+                rows = conn.execute(
+                    "SELECT DISTINCT thread_id FROM messages "  # nosec B608
+                    f"WHERE thread_id IN ({id_marks}) AND folder IN ({folder_marks})",
+                    [*batch, *folders],
+                ).fetchall()
+                found.update(r["thread_id"] for r in rows)
+        return found
 
     # -------------------------------------------------------------------------
     # Direct lookups
@@ -2334,12 +2378,21 @@ class Database:
         limit: int = 20,
         offset: int = 0,
     ) -> list[ThreadResult]:
+        """Threads with at least one message in ``folder``, newest first.
+
+        Membership comes from each message's own folder (``messages``),
+        not ``threads.folder``: that is the folder of the message that
+        started the thread, so a folder holding only replies to threads
+        started elsewhere would never list (#308). The returned
+        ``folder`` stays the thread's representative folder, set when
+        the thread was first indexed.
+        """
         if filter_type != "all":
             raise ValueError("filter_type must be 'all'; unread/flagged state is not indexed")
         rows = self._fetchall(
             """
             SELECT * FROM threads
-            WHERE folder = ?
+            WHERE thread_id IN (SELECT thread_id FROM messages WHERE folder = ?)
             ORDER BY date_last DESC
             LIMIT ? OFFSET ?
         """,
@@ -2425,11 +2478,16 @@ class Database:
         return stats
 
     def list_folders(self) -> list[dict]:
+        """Folders holding at least one indexed message, with the number
+        of distinct threads that have a message in each — the same set
+        ``list_threads(folder=...)`` pages through. A thread with
+        messages in several folders counts once in each of them.
+        """
         rows = self._fetchall("""
-            SELECT folder, COUNT(*) as thread_count
-            FROM threads
+            SELECT folder, COUNT(DISTINCT thread_id) AS thread_count
+            FROM messages
             GROUP BY folder
-            ORDER BY thread_count DESC
+            ORDER BY thread_count DESC, folder
         """)
         return [{"name": r["folder"], "thread_count": r["thread_count"]} for r in rows]
 

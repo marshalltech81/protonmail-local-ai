@@ -17,6 +17,10 @@ readonly STATE_DIR="/state"
 readonly PIN_FILE="${STATE_DIR}/bridge-cert.fingerprint"
 readonly BRIDGE_WAIT_INTERVAL_SECONDS=2
 readonly BRIDGE_WAIT_MAX_ATTEMPTS=300
+# Per-probe connect timeout (nc -w). timeout(1) allows one second more
+# and bounds the whole probe, name resolution included, so each attempt
+# takes at most BRIDGE_PROBE_TIMEOUT_SECONDS + 1 seconds plus the interval.
+readonly BRIDGE_PROBE_TIMEOUT_SECONDS=2
 readonly CERT_EXTRACT_TIMEOUT_SECONDS=20
 readonly MAX_CONSECUTIVE_SYNC_FAILURES=5
 readonly BRIDGE_CERT_PIN_ROTATE="${BRIDGE_CERT_PIN_ROTATE:-false}"
@@ -59,7 +63,9 @@ wait_for_bridge_imap() {
     nc_err_file="$(mktemp "${RUNTIME_DIR}/nc-check.XXXXXX")"
     echo ">>> Waiting for ProtonBridge IMAP on ${BRIDGE_HOST}:${BRIDGE_IMAP_PORT}..."
     for ((attempt = 1; attempt <= BRIDGE_WAIT_MAX_ATTEMPTS; attempt++)); do
-        if nc -z "$BRIDGE_HOST" "$BRIDGE_IMAP_PORT" 2>"$nc_err_file"; then
+        if timeout "$((BRIDGE_PROBE_TIMEOUT_SECONDS + 1))s" \
+            nc -z -w "$BRIDGE_PROBE_TIMEOUT_SECONDS" "$BRIDGE_HOST" "$BRIDGE_IMAP_PORT" \
+            2>"$nc_err_file"; then
             rm -f "$nc_err_file"
             echo ">>> Bridge IMAP port is reachable."
             return 0
@@ -68,7 +74,7 @@ wait_for_bridge_imap() {
         sleep "$BRIDGE_WAIT_INTERVAL_SECONDS"
     done
 
-    echo ">>> ERROR: Bridge IMAP did not become reachable after $((BRIDGE_WAIT_MAX_ATTEMPTS * BRIDGE_WAIT_INTERVAL_SECONDS)) seconds." >&2
+    echo ">>> ERROR: Bridge IMAP did not become reachable after ${BRIDGE_WAIT_MAX_ATTEMPTS} attempts (at most $((BRIDGE_WAIT_MAX_ATTEMPTS * (BRIDGE_PROBE_TIMEOUT_SECONDS + 1 + BRIDGE_WAIT_INTERVAL_SECONDS))) seconds)." >&2
     if [[ -s "$nc_err_file" ]]; then
         echo ">>> Last nc stderr follows:" >&2
         cat "$nc_err_file" >&2
@@ -236,12 +242,45 @@ relax_new_maildir_perms() {
     find "$MAILDIR_PATH" -type f \! -perm -044 -exec chmod go+r {} + || return 1
 }
 
+# PID of the child run_child is waiting on, if any.
+child_pid=""
+
+run_child() {
+    # Run a command in the background and wait for it, so a stop signal
+    # interrupts the wait and stop_on_signal can pass it on. Returns the
+    # command's status.
+    local rc=0
+    "$@" &
+    child_pid=$!
+    wait "$child_pid" || rc=$?
+    child_pid=""
+    return "$rc"
+}
+
+stop_on_signal() {
+    # Tini signals only this shell. Pass the stop to the active child as
+    # TERM (background commands ignore INT), wait for it to end, then exit
+    # with the conventional 128 + signal number status.
+    local signal="$1" status="$2"
+    if [[ -n "${child_pid:-}" ]]; then
+        kill -TERM "$child_pid" 2>/dev/null || true
+        wait "$child_pid" || true
+    fi
+    echo ">>> Received SIG${signal} — stopping." >&2
+    exit "$status"
+}
+
+install_signal_handlers() {
+    trap 'stop_on_signal TERM 143' TERM
+    trap 'stop_on_signal INT 130' INT
+}
+
 run_sync() {
     # Fails when mbsync or the permission repair fails: a sync whose mail
     # the indexer cannot read must not be recorded as successful. The
     # repair runs even after a failed mbsync, for what it did deliver.
     local rc=0
-    mbsync -c "$CONFIG_FILE" -a 2>&1 || rc=$?
+    run_child mbsync -c "$CONFIG_FILE" -a 2>&1 || rc=$?
     if ! relax_new_maildir_perms; then
         echo ">>> ERROR: could not make new Maildir entries readable to the indexer." >&2
         return 1
@@ -273,6 +312,7 @@ record_successful_sync() {
 # BRIDGE_PASS is NOT passed as an env var — mbsyncrc uses PassCmd to read
 # it directly from the Docker secret at /run/secrets/bridge_pass.
 # =============================================================================
+install_signal_handlers
 require_prerequisites
 
 # BRIDGE_CERT_PIN_ROTATE is an opt-in for accepting one legitimate
@@ -293,8 +333,9 @@ chmod 600 "$CONFIG_FILE" # protect the file because it contains credentials
 # =============================================================================
 # Wait for ProtonBridge IMAP to be available
 # Bridge takes time to start and complete its internal Gluon sync before
-# it will accept IMAP connections. Retry every 2 seconds, then fail so
-# Docker restart policy makes the problem visible instead of hanging forever.
+# it will accept IMAP connections. Probe with a bounded connect, retry
+# every 2 seconds, then fail so Docker restart policy makes the problem
+# visible instead of hanging forever.
 # =============================================================================
 wait_for_bridge_imap
 
@@ -332,7 +373,8 @@ fi
 # =============================================================================
 echo ">>> Starting sync loop (interval: ${SYNC_INTERVAL}s)..."
 while true; do
-    sleep "$SYNC_INTERVAL"
+    # Through run_child so a stop during the interval exits at once.
+    run_child sleep "$SYNC_INTERVAL"
     echo ">>> Syncing..."
     if run_sync; then
         consecutive_sync_failures=0
