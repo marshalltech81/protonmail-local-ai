@@ -45,10 +45,6 @@ class StallGuard:
         self._clock = clock
         self._exit = exit_fn
 
-    def stalled(self) -> str | None:
-        """The in-flight message's path if it has run past the limit."""
-        return self._overdue(self._queue.in_flight())
-
     def check(self) -> bool:
         """Exit the process if stalled; True when it fired.
 

@@ -212,25 +212,16 @@ class IndexingQueue:
             now_iso=now_iso,
         )
 
-    def claim_next(self) -> sqlite3.Row | None:
-        """Return the oldest due ``queued`` job, or ``None`` when the
-        queue is empty or every queued row is still in backoff.
-
-        The row is returned unchanged — the caller holds the
-        "currently processing" state in memory. On worker crash the row
-        stays claimable; only a charge from ``begin_attempt`` counts it.
-        """
-        return self.db.queue_claim_next(STATUS_QUEUED, _now_iso())
-
     def claim_batch(self, limit: int) -> list[sqlite3.Row]:
         """Return up to ``limit`` distinct oldest-due queued rows.
 
-        Like ``claim_next`` but fetches a snapshot of N rows in one
-        query — so the batched initial indexer's gather phase can pick
-        up distinct messages without re-claiming the same row before
-        marking it succeeded. Rows stay in 'queued' state; the caller
-        must mark each one (succeeded / failed / skipped) by the end of
-        the batch or they will be returned again on the next call.
+        Fetches a snapshot of N rows in one query — so the batched
+        initial indexer's gather phase can pick up distinct messages
+        without re-claiming the same row before marking it succeeded.
+        Rows stay in 'queued' state; the caller must mark each one
+        (succeeded / failed / skipped) by the end of the batch or they
+        will be returned again on the next call. Claiming charges no
+        attempt; only ``begin_attempt`` does.
         """
         return self.db.queue_fetch_due_batch(STATUS_QUEUED, _now_iso(), limit)
 
@@ -285,12 +276,6 @@ class IndexingQueue:
         self.db.queue_mark_interrupted(
             filepaths=filepaths, marker_stage=INTERRUPTED_STAGE, marker_error=_INTERRUPTED_ERROR
         )
-
-    def in_flight(self) -> tuple[str, float] | None:
-        """The message whose step is running and its ``time.monotonic()``
-        start, or ``None``."""
-        with self._lock:
-            return self._in_flight
 
     @contextmanager
     def holding_in_flight(self) -> Iterator[tuple[str, float] | None]:

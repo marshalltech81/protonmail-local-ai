@@ -509,10 +509,9 @@ class Reconciler:
 
         # Atomic reap: rewrite the thread row with survivors + tear down
         # each reaped message's message_thread_map / indexed_files /
-        # pending_deletions rows inside a single BEGIN IMMEDIATE. Prior
-        # code used rebuild_thread + a per-message remove_message loop —
-        # separate transactions, so a crash mid-reap could leave the
-        # thread row and the map disagreeing about which messages belong.
+        # pending_deletions rows inside a single BEGIN IMMEDIATE, so a
+        # crash mid-reap cannot leave the thread row and the map
+        # disagreeing about which messages belong.
         removed_filepaths = self.db.reap_thread_messages(
             rebuilt_thread,
             embedding,

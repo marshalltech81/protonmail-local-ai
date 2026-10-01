@@ -20,7 +20,7 @@ from src.database import (
     Database,
 )
 
-from tests.conftest import make_message, make_thread
+from tests.conftest import count_pending_deletions, make_message, make_thread
 
 FAKE_EMBEDDING = [0.1] * EMBEDDING_DIM
 
@@ -35,6 +35,22 @@ def _tombstone_thread(db, thread_id: str) -> None:
     before ``delete_thread_completely``, which refuses otherwise."""
     for row in db.get_thread_messages(thread_id):
         db.add_pending_deletion(row["filepath"], row["message_id"], thread_id)
+
+
+def _reap_message(db, thread, message_id: str) -> list[str] | None:
+    """Remove ``message_id`` from ``thread`` the way the reconciler does:
+    tombstone it, then ``reap_thread_messages`` with a rewrite from the
+    surviving messages. ``thread`` must keep at least one survivor."""
+    reaped = next(m for m in thread.messages if m.message_id == message_id)
+    survivors = [m for m in thread.messages if m.message_id != message_id]
+    db.add_pending_deletion(reaped.filepath, message_id, thread.thread_id)
+    rebuilt = make_thread(
+        messages=survivors,
+        thread_id=thread.thread_id,
+        subject=thread.subject,
+        folder=thread.folder,
+    )
+    return db.reap_thread_messages(rebuilt, FAKE_EMBEDDING, [message_id])
 
 
 class TestSchema:
@@ -171,8 +187,7 @@ class TestThreadVectorUnitNormInvariant:
     the cosine-equals-dot-product assumption holds for downstream
     retrieval. The three thread-vector write boundaries
     (``upsert_thread``, ``replace_thread_vector``, and
-    ``_rewrite_thread_row`` via ``rebuild_thread`` /
-    ``reap_thread_messages``) all normalize at the boundary so callers
+    ``_rewrite_thread_row`` via ``reap_thread_messages``) all normalize at the boundary so callers
     that pass a non-unit ``mean_vector(...)`` cannot bypass the
     invariant. Zero placeholders survive normalization because the
     Phase 1 seed logic depends on them as a sentinel."""
@@ -903,83 +918,6 @@ class TestIndexedFileIdentity:
         assert row["mtime_ns"] == 1_800_000_000_000_000_000
         assert row["content_hash"] == "b" * 64
 
-    def test_find_indexed_paths_by_content_hash_hit(self, db):
-        msg = make_message(filepath="/maildir/INBOX/cur/hashhit")
-        msg.size = 1024
-        msg.content_hash = "c" * 64
-        db.upsert_thread(make_thread(messages=[msg]), FAKE_EMBEDDING)
-        paths = db.find_indexed_paths_by_content_hash("c" * 64)
-        assert paths == ["/maildir/INBOX/cur/hashhit"]
-
-    def test_find_indexed_paths_by_content_hash_returns_multiple(self, db):
-        """Same content at two filepaths (duplicate delivery / same
-        message in two folders) returns both entries."""
-        msg_a = make_message(
-            message_id="dup-a@example.com",
-            filepath="/maildir/INBOX/cur/a",
-        )
-        msg_a.content_hash = "d" * 64
-        msg_b = make_message(
-            message_id="dup-b@example.com",
-            filepath="/maildir/Archive/cur/b",
-            date=datetime(2024, 1, 2, tzinfo=UTC),
-        )
-        msg_b.content_hash = "d" * 64
-        db.upsert_thread(make_thread(messages=[msg_a], thread_id="ta"), FAKE_EMBEDDING)
-        db.upsert_thread(make_thread(messages=[msg_b], thread_id="tb"), FAKE_EMBEDDING)
-        paths = db.find_indexed_paths_by_content_hash("d" * 64)
-        assert set(paths) == {
-            "/maildir/INBOX/cur/a",
-            "/maildir/Archive/cur/b",
-        }
-
-    def test_find_indexed_paths_by_content_hash_miss(self, db):
-        assert db.find_indexed_paths_by_content_hash("e" * 64) == []
-
-    def test_find_indexed_paths_by_content_hash_ignores_null_rows(self, db):
-        """Rows indexed before schema v7 (or when identity capture
-        failed) carry ``content_hash IS NULL``. A lookup must never
-        treat those as matches for any hash string."""
-        msg = make_message(filepath="/maildir/INBOX/cur/nullhash")
-        # size=None, content_hash=None by default
-        db.upsert_thread(make_thread(messages=[msg]), FAKE_EMBEDDING)
-        assert db.find_indexed_paths_by_content_hash("") == []
-        assert db.find_indexed_paths_by_content_hash("f" * 64) == []
-
-
-# ---------------------------------------------------------------------------
-# get_stats
-# ---------------------------------------------------------------------------
-
-
-class TestGetStats:
-    def test_empty_database_stats(self, db):
-        stats = db.get_stats()
-        assert stats["total_threads"] == 0
-        assert stats["total_messages"] == 0
-        assert stats["oldest_message"] is None
-        assert stats["newest_message"] is None
-
-    def test_stats_reflect_indexed_data(self, db):
-        msg1 = make_message(
-            message_id="stats1@example.com",
-            filepath="/maildir/INBOX/cur/stats1",
-            date=datetime(2024, 1, 1, tzinfo=UTC),
-        )
-        msg2 = make_message(
-            message_id="stats2@example.com",
-            filepath="/maildir/INBOX/cur/stats2",
-            date=datetime(2024, 6, 1, tzinfo=UTC),
-        )
-        db.upsert_thread(make_thread(messages=[msg1], thread_id="t1"), FAKE_EMBEDDING)
-        db.upsert_thread(
-            make_thread(messages=[msg2], thread_id="t2", subject="other"), FAKE_EMBEDDING
-        )
-
-        stats = db.get_stats()
-        assert stats["total_threads"] == 2
-        assert stats["total_messages"] == 2
-
 
 # ---------------------------------------------------------------------------
 # FTS behavior — contentless_delete + fts_rowid (schema v3)
@@ -1156,7 +1094,7 @@ class TestPendingDeletions:
         db.add_pending_deletion("/p", "msg@x", "t1")
         # Second call must not update marked_at nor report an insert
         assert db.add_pending_deletion("/p", "msg@x", "t1") is False
-        assert db.count_pending_deletions() == 1
+        assert count_pending_deletions(db) == 1
 
     def test_add_pending_deletion_refuses_a_path_the_message_no_longer_maps_to(self, db):
         """#301: a sweep holding a stale path must not tombstone a message
@@ -1168,7 +1106,7 @@ class TestPendingDeletions:
         db.update_filepath("/cur/moved:2,ST", "/cur/moved:2,S", clear_tombstone=True)
 
         assert db.add_pending_deletion("/cur/moved:2,ST", "moved@x", thread.thread_id) is False
-        assert db.count_pending_deletions() == 0
+        assert count_pending_deletions(db) == 0
         assert db.add_pending_deletion("/cur/moved:2,S", "moved@x", thread.thread_id) is True
 
     def test_add_pending_deletion_writes_iso8601_utc_timestamp(self, db):
@@ -1265,14 +1203,13 @@ class TestReconciliationSupport:
         db.update_filepath("/same", "/same")  # must not raise
         assert db.find_message_entry_by_filepath("/same") is not None
 
-    def test_remove_message_removes_map_indexed_and_tombstone(self, db):
+    def test_reap_removes_map_indexed_and_tombstone(self, db):
         msg1 = make_message(message_id="keep@x", filepath="/keep")
         msg2 = make_message(message_id="drop@x", filepath="/drop")
         thread = make_thread(messages=[msg1, msg2])
         db.upsert_thread(thread, FAKE_EMBEDDING)
-        db.add_pending_deletion("/drop", "drop@x", thread.thread_id)
 
-        db.remove_message("drop@x")
+        assert _reap_message(db, thread, "drop@x") == ["/drop"]
 
         assert db.find_message_entry_by_filepath("/drop") is None
         assert db.is_indexed("/drop") is False
@@ -1281,8 +1218,16 @@ class TestReconciliationSupport:
         assert db.find_message_entry_by_filepath("/keep") is not None
         assert db.get_thread(thread.thread_id) is not None
 
-    def test_remove_message_silently_returns_for_unknown_id(self, db):
-        db.remove_message("ghost@x")  # must not raise
+    def test_reap_skips_unknown_message_id(self, db):
+        """A reaped ID with no ``message_thread_map`` row removes nothing
+        and does not block the rewrite."""
+        thread = make_thread(messages=[make_message(message_id="keep@x", filepath="/keep")])
+        db.upsert_thread(thread, FAKE_EMBEDDING)
+
+        assert db.reap_thread_messages(thread, FAKE_EMBEDDING, ["ghost@x"]) == []
+
+        assert db.find_message_entry_by_filepath("/keep") is not None
+        assert db.get_thread(thread.thread_id) is not None
 
     def test_delete_thread_completely_removes_all_dependent_rows(self, db):
         msg1 = make_message(message_id="d1@x", filepath="/d/1")
@@ -1311,11 +1256,6 @@ class TestReconciliationSupport:
         ).fetchone()[0]
         assert fts_hits == 0
         assert vec == 0
-
-
-# ---------------------------------------------------------------------------
-# rebuild_thread — full rewrite without body accumulation
-# ---------------------------------------------------------------------------
 
 
 class TestConcurrency:
@@ -1358,8 +1298,7 @@ class TestReapThreadMessages:
     """``reap_thread_messages`` fuses the thread rewrite and per-message
     teardown into a single transaction so a crash mid-reap cannot leave
     ``threads`` and ``message_thread_map`` disagreeing about which
-    messages belong to the thread. The prior code used two separate
-    transactions (``rebuild_thread`` then N × ``remove_message``)."""
+    messages belong to the thread."""
 
     def _seed_two_message_thread(self, db, threader):
         original = make_message(message_id="r1@x", filepath="/r/1")
@@ -1427,8 +1366,11 @@ class TestReapThreadMessages:
         )
 
 
-class TestRebuildThread:
-    def test_rebuild_replaces_body_text_instead_of_appending(self, db, threader):
+class TestReapRewritesThreadRow:
+    """The reap's thread rewrite regenerates the row from the survivors
+    rather than merging into the stored row as ``upsert_thread`` does."""
+
+    def test_reap_replaces_body_text_instead_of_appending(self, db, threader):
         original = make_message(message_id="r1@x", body_text="First message body.", filepath="/r/1")
         reply = make_message(
             message_id="r2@x",
@@ -1442,7 +1384,7 @@ class TestRebuildThread:
         t2 = threader.assign_thread(reply)
         db.upsert_thread(t2, FAKE_EMBEDDING)
 
-        # Simulate reaping the original — rebuild from reply only
+        # Reap the original — rebuild from reply only
         from src.threader import Thread
 
         rebuilt = Thread(
@@ -1454,17 +1396,18 @@ class TestRebuildThread:
             date_first=reply.date,
             date_last=reply.date,
         )
-        db.rebuild_thread(rebuilt, FAKE_EMBEDDING)
+        db.add_pending_deletion("/r/1", "r1@x", t1.thread_id)
+        assert db.reap_thread_messages(rebuilt, FAKE_EMBEDDING, ["r1@x"]) == ["/r/1"]
 
         row = db._conn.execute(
             "SELECT body_text FROM threads WHERE thread_id = ?", (t1.thread_id,)
         ).fetchone()
-        # The original's body must no longer be present — rebuild is a
-        # full replacement, not an append.
+        # The original's body must no longer be present — the rewrite is
+        # a full replacement, not an append.
         assert "First message body." not in row["body_text"]
         assert "Second message body." in row["body_text"]
 
-    def test_rebuild_refreshes_display_subject_when_root_message_reaped(self, db, threader):
+    def test_reap_refreshes_display_subject_when_root_message_reaped(self, db, threader):
         """Codex review of main caught that ``_rewrite_thread_row`` did
         not refresh ``display_subject`` — reaping the original root of a
         thread (which contributed the user-facing label via
@@ -1509,7 +1452,8 @@ class TestRebuildThread:
             date_first=reply.date,
             date_last=reply.date,
         )
-        db.rebuild_thread(rebuilt, FAKE_EMBEDDING)
+        db.add_pending_deletion("/ds/1", "ds-original@x", t1.thread_id)
+        assert db.reap_thread_messages(rebuilt, FAKE_EMBEDDING, ["ds-original@x"]) == ["/ds/1"]
 
         # The display label must now reflect the surviving message,
         # not the reaped root.
@@ -1519,12 +1463,19 @@ class TestRebuildThread:
         ).fetchone()
         assert row["display_subject"] == "Re: Original Display Subject"
 
-    def test_rebuild_updates_fts_and_vec_rows(self, db, threader):
+    def test_reap_updates_fts_and_vec_rows(self, db, threader):
         original = make_message(message_id="r3@x", filepath="/r/3")
+        reply = make_message(
+            message_id="r4@x",
+            in_reply_to="r3@x",
+            filepath="/r/4",
+            date=datetime(2024, 2, 1, tzinfo=UTC),
+        )
         t1 = threader.assign_thread(original)
         db.upsert_thread(t1, FAKE_EMBEDDING)
+        db.upsert_thread(threader.assign_thread(reply), FAKE_EMBEDDING)
 
-        # Rebuild with a different subject
+        # Reap the reply and rewrite with a different subject
         from src.threader import Thread
 
         rebuilt = Thread(
@@ -1536,7 +1487,8 @@ class TestRebuildThread:
             date_first=original.date,
             date_last=original.date,
         )
-        db.rebuild_thread(rebuilt, FAKE_EMBEDDING)
+        db.add_pending_deletion("/r/4", "r4@x", t1.thread_id)
+        assert db.reap_thread_messages(rebuilt, FAKE_EMBEDDING, ["r4@x"]) == ["/r/4"]
 
         # Primary thread row reflects the new subject
         thread_row = db._conn.execute(
@@ -1966,9 +1918,10 @@ class TestAtomicIndexTransaction:
 
 
 class TestChunkCascadeOnMessageRemoval:
-    def test_remove_message_drops_its_chunks(self, db, threader):
+    def test_reap_drops_its_chunks(self, db, threader):
         message = make_message(message_id="m8@x", filepath="/m/8")
         thread = threader.assign_thread(message)
+        thread.messages.append(make_message(message_id="m8-keep@x", filepath="/m/8-keep"))
         db.upsert_thread(thread, FAKE_EMBEDDING)
 
         chunk = _make_chunk("z" * 64, 0, "to be removed")
@@ -1980,7 +1933,7 @@ class TestChunkCascadeOnMessageRemoval:
             embeddings_by_chunk_id={chunk.chunk_id: [0.4] * EMBEDDING_DIM},
         )
 
-        db.remove_message("m8@x")
+        _reap_message(db, thread, "m8@x")
 
         assert db.get_chunk_ids_for_message("m8@x") == set()
         vec_count = db._conn.execute(
@@ -2288,9 +2241,10 @@ class TestAttachmentChunkSlicing:
 
 
 class TestAttachmentCascadeOnMessageRemoval:
-    def test_remove_message_drops_its_attachment_rows(self, db, threader):
+    def test_reap_drops_its_attachment_rows(self, db, threader):
         msg = make_message(message_id="cas1@x", filepath="/m/cas1")
         thread = threader.assign_thread(msg)
+        thread.messages.append(make_message(message_id="cas1-keep@x", filepath="/m/cas1-keep"))
         db.upsert_thread(thread, FAKE_EMBEDDING)
 
         db.upsert_attachment(
@@ -2313,7 +2267,7 @@ class TestAttachmentCascadeOnMessageRemoval:
         ).fetchone()[0]
         assert before == 1
 
-        db.remove_message("cas1@x")
+        _reap_message(db, thread, "cas1@x")
 
         after = db._conn.execute(
             "SELECT COUNT(*) FROM attachments WHERE message_id = ?", ("cas1@x",)
@@ -2326,6 +2280,7 @@ class TestAttachmentCascadeOnMessageRemoval:
         extract cost."""
         msg = make_message(message_id="cas2@x", filepath="/m/cas2")
         thread = threader.assign_thread(msg)
+        thread.messages.append(make_message(message_id="cas2-keep@x", filepath="/m/cas2-keep"))
         db.upsert_thread(thread, FAKE_EMBEDDING)
 
         attachment_id = "preserve-hash" * 4
@@ -2351,7 +2306,7 @@ class TestAttachmentCascadeOnMessageRemoval:
             extraction_error=None,
         )
 
-        db.remove_message("cas2@x")
+        _reap_message(db, thread, "cas2@x")
 
         cached = db.get_attachment_extraction(attachment_id)
         assert cached is not None
@@ -2553,9 +2508,10 @@ class TestMessagesTable:
     def test_removing_message_or_thread_cascades(self, db):
         m1 = make_message(message_id="m1@example.com", filepath="/m/1")
         m2 = make_message(message_id="m2@example.com", filepath="/m/2")
-        db.upsert_thread(make_thread(messages=[m1, m2], thread_id="t1"), _one_hot(0))
+        thread = make_thread(messages=[m1, m2], thread_id="t1")
+        db.upsert_thread(thread, _one_hot(0))
 
-        db.remove_message("m1@example.com")
+        _reap_message(db, thread, "m1@example.com")
         assert [r["message_id"] for r in db._conn.execute("SELECT message_id FROM messages")] == [
             "m2@example.com"
         ]

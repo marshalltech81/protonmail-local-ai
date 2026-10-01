@@ -15,8 +15,8 @@ arguments.
 
 ## When NOT to use this
 
-- Inside the regular CI suite. The eval is opt-in via
-  `pytest -m eval`. Default `pytest` runs skip it because there is no
+- Inside the regular CI suite. The eval is opt-in (see Run below).
+  Default `pytest` runs never collect it, because there is no
   plausible mailbox in CI to evaluate against.
 
 ## Setup
@@ -39,11 +39,14 @@ arguments.
 
 ```bash
 cd mcp-server
-MCP_EVAL_DB=/path/to/mail.db uv run pytest -m eval -s
+MCP_EVAL_DB=/path/to/mail.db uv run pytest -o addopts= -m eval tests/eval -s
 ```
 
-`-s` keeps pytest from capturing the summary block printed by
-`test_eval_summary`. Without `MCP_EVAL_DB`, every test skips.
+`-o addopts=` drops the default options from `pyproject.toml`, which
+exclude `tests/eval` (`--ignore=tests/eval`) and enforce the coverage
+floor; with them, a plain `pytest -m eval` selects no tests. `-s` keeps
+pytest from capturing the summary block printed by `test_eval_summary`.
+Without `MCP_EVAL_DB`, every test skips.
 
 ## Comparing two configurations
 

@@ -1673,40 +1673,6 @@ class Database:
         ).fetchone()
         return row is not None
 
-    @_synchronized
-    def find_indexed_paths_by_content_hash(self, content_hash: str) -> list[str]:
-        """Return every indexed filepath whose content_hash matches.
-
-        Enables future reconciler passes to spot "file at path A
-        disappeared, but the same content_hash is indexed at path B" —
-        a rename mbsync performed without emitting an ``on_moved`` event
-        (e.g. across folder moves or restarts) — and to catch genuine
-        duplicate deliveries. Rows whose identity capture failed have
-        ``content_hash IS NULL`` and are excluded from the match.
-        """
-        if not content_hash:
-            return []
-        rows = self._conn.execute(
-            "SELECT filepath FROM indexed_files WHERE content_hash = ?",
-            (content_hash,),
-        ).fetchall()
-        return [row["filepath"] for row in rows]
-
-    @_synchronized
-    def get_stats(self) -> dict:
-        stats = {}
-        stats["total_threads"] = self._conn.execute("SELECT COUNT(*) FROM threads").fetchone()[0]
-        stats["total_messages"] = self._conn.execute(
-            "SELECT COUNT(*) FROM message_thread_map"
-        ).fetchone()[0]
-        stats["oldest_message"] = self._conn.execute(
-            "SELECT MIN(date_first) FROM threads"
-        ).fetchone()[0]
-        stats["newest_message"] = self._conn.execute(
-            "SELECT MAX(date_last) FROM threads"
-        ).fetchone()[0]
-        return stats
-
     # -------------------------------------------------------------------------
     # indexing_jobs — durable retry / dead-letter queue.
     #
@@ -1732,30 +1698,12 @@ class Database:
         self._conn.commit()
 
     @_synchronized
-    def queue_claim_next(self, status: str, now_iso: str) -> sqlite3.Row | None:
-        """Return the oldest ``status`` row whose ``next_attempt_at`` is due."""
-        return self._conn.execute(
-            """
-            SELECT filepath, reason, status, attempts,
-                   last_error, last_stage,
-                   created_at, updated_at, next_attempt_at
-            FROM indexing_jobs
-            WHERE status = ? AND next_attempt_at <= ?
-            ORDER BY next_attempt_at ASC
-            LIMIT 1
-            """,
-            (status, now_iso),
-        ).fetchone()
-
-    @_synchronized
     def queue_fetch_due_batch(self, status: str, now_iso: str, limit: int) -> list[sqlite3.Row]:
         """Return up to ``limit`` due ``status`` rows ordered by oldest-due first.
 
-        Like ``queue_claim_next`` but in one SELECT, so the batched
-        indexer's gather phase can pick up N distinct rows without
-        repeatedly calling ``claim_next`` (which has no in-flight
-        tracking and would return the same row N times until the caller
-        marks it).
+        One SELECT, so the batched indexer's gather phase picks up N
+        distinct rows at once; the claim has no in-flight tracking, so
+        rows stay due until the caller marks them.
         """
         return self._conn.execute(
             """
@@ -2224,11 +2172,6 @@ class Database:
         return row is not None
 
     @_synchronized
-    def count_pending_deletions(self) -> int:
-        row = self._conn.execute("SELECT COUNT(*) FROM pending_deletions").fetchone()
-        return int(row[0]) if row else 0
-
-    @_synchronized
     def list_pending_deletions_older_than(self, cutoff_iso: str) -> list[sqlite3.Row]:
         """Tombstones marked at or before ``cutoff_iso``, each with
         ``mapped_filepath``: the path ``message_thread_map`` holds for the
@@ -2241,24 +2184,6 @@ class Database:
             "WHERE p.marked_at <= ? ORDER BY p.marked_at ASC",
             (cutoff_iso,),
         ).fetchall()
-
-    @_synchronized
-    def remove_message(self, message_id: str) -> None:
-        """Remove a message's map + indexed_files + tombstone rows.
-
-        Does not touch the parent thread row — the caller is responsible for
-        rebuilding or deleting the thread after determining how many messages
-        remain. Prefer ``reap_thread_messages`` when the thread rebuild and
-        the message removals need to land atomically as one transaction.
-        """
-        cur = self._conn.cursor()
-        try:
-            cur.execute("BEGIN IMMEDIATE")
-            self._remove_message_row(cur, message_id)
-            self._conn.commit()
-        except Exception:
-            self._conn.rollback()
-            raise
 
     @_synchronized
     def delete_thread_completely(self, thread_id: str, *, grace_cutoff: str | None = None) -> bool:
@@ -2347,24 +2272,6 @@ class Database:
         return cur.execute(sql + " LIMIT 1", params).fetchone() is not None
 
     @_synchronized
-    def rebuild_thread(self, thread, embedding: list[float]) -> None:
-        """Fully rewrite a thread row after a message has been removed.
-
-        Unlike ``upsert_thread``, this path always regenerates ``body_text``
-        from the supplied messages rather than appending to the stored body.
-        The caller is expected to pass a ``Thread`` whose ``messages`` list
-        reflects the surviving messages only (re-parsed from disk).
-        """
-        cur = self._conn.cursor()
-        try:
-            cur.execute("BEGIN IMMEDIATE")
-            self._rewrite_thread_row(cur, thread, embedding)
-            self._conn.commit()
-        except Exception:
-            self._conn.rollback()
-            raise
-
-    @_synchronized
     def reap_thread_messages(
         self,
         thread,
@@ -2375,16 +2282,11 @@ class Database:
     ) -> list[str] | None:
         """Atomically rewrite a thread and remove reaped messages.
 
-        The reconciler previously called ``rebuild_thread`` and then looped
-        ``remove_message`` — three or more separate transactions. If the
-        process crashed between them, the thread row reflected only
-        survivors while ``message_thread_map`` and ``pending_deletions``
-        still held rows for the reaped messages. The recovery path worked
-        (a second reap pass completed idempotently) but any observer
-        running between the two commits saw inconsistent state.
-
-        All writes now happen inside a single ``BEGIN IMMEDIATE`` / commit
-        so either the whole reap lands or none of it does.
+        All writes happen inside a single ``BEGIN IMMEDIATE`` / commit so
+        either the whole reap lands or none of it does: a crash cannot
+        leave the thread row reflecting only survivors while
+        ``message_thread_map`` and ``pending_deletions`` still hold rows
+        for the reaped messages.
 
         Returns the filepaths that were removed, so the caller can perform
         any on-disk unlink work outside the transaction, or ``None``,
@@ -2415,9 +2317,9 @@ class Database:
     def _rewrite_thread_row(self, cur: sqlite3.Cursor, thread, embedding: list[float]) -> None:
         """Replace a thread row and its FTS/vec entries using ``cur``.
 
-        Shared by ``rebuild_thread`` and ``reap_thread_messages`` so the
-        same rewrite can participate in a larger transaction when needed.
-        The caller owns ``BEGIN`` / ``COMMIT`` / ``ROLLBACK``.
+        Used by ``reap_thread_messages`` so the rewrite participates in
+        its larger transaction. The caller owns ``BEGIN`` / ``COMMIT`` /
+        ``ROLLBACK``.
         """
         if len(embedding) != EMBEDDING_DIM:
             raise ValueError(
@@ -2498,9 +2400,8 @@ class Database:
         """Remove a message's map / indexed_files / tombstone / chunk /
         attachment rows using ``cur``. Returns the message's filepath
         (for optional on-disk cleanup), or ``None`` if no such message
-        was tracked. Shared by ``remove_message`` and
-        ``reap_thread_messages``; the caller owns the enclosing
-        transaction.
+        was tracked. Used by ``reap_thread_messages``; the caller owns
+        the enclosing transaction.
         """
         row = cur.execute(
             "SELECT filepath FROM message_thread_map WHERE message_id = ?",

@@ -613,10 +613,9 @@ Failure isolation is preserved across phases:
 - Phase 2c (DB write) error for one message → marked failed, others
   succeed.
 
-A `claim_batch(N)` queue method (vs. the per-message `claim_next`)
-fetches a snapshot of N distinct due rows in one query so the gather
-phase cannot re-claim the same row repeatedly while Phase 2c is
-deferred.
+The queue's `claim_batch(N)` fetches a snapshot of N distinct due rows
+in one query so the gather phase cannot re-claim the same row
+repeatedly while Phase 2c is deferred.
 
 ### Recovery sweep for chunkless zero-vector threads
 
@@ -823,12 +822,11 @@ The columns exist to let future reconciler passes distinguish a
 flag-only rename from a genuine content change, and to spot a "file
 vanished from path A but the same `content_hash` reappears at path B"
 rename that mbsync performed without emitting an `on_moved` event.
-`find_indexed_paths_by_content_hash` is the lookup that unlocks those
-passes; consumers are deliberately not wired in this revision so the
-schema change lands as a pure extension.
+No code reads them yet: a content-hash lookup and its consumers would
+land together with such a pass.
 
 Rows for which `stat` / hash capture failed at parse time carry NULL
-identity values and are skipped by the content-hash lookup; the
+identity values, which a future content-hash lookup must skip; the
 columns are populated lazily on the next reindex of the file.
 
 ## Privacy Model

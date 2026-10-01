@@ -18,11 +18,9 @@ Two-phase shape:
   block. No network, no extraction, no embedding — every slow operation
   has already happened.
 
-* ``process_attachment`` is a thin convenience wrapper that runs both
-  phases back-to-back. Tests and any caller that doesn't need the
-  split go through this. The indexer pipeline does NOT use it because
-  conflating phases reintroduces the original bug where embedding service
-  latency blocks the SQLite write transaction.
+Keep the phases separate: running them back-to-back inside one
+transaction reintroduces the original bug where embedding service
+latency blocks the SQLite write transaction.
 """
 
 from __future__ import annotations
@@ -464,55 +462,3 @@ def apply_attachment_writes(
     summary["chunks_inserted"] = write_summary["inserted"]
     summary["chunks_kept"] = write_summary["kept"]
     return summary
-
-
-def process_attachment(
-    *,
-    attachment: Attachment,
-    message_id: str,
-    thread_id: str,
-    db: Database,
-    embedder: EmbeddingBackend,
-    chunk_target_tokens: int,
-    chunk_max_tokens: int,
-    chunk_overlap_tokens: int,
-    ocr_enabled: bool,
-    max_bytes: int,
-    max_ocr_pages: int,
-    occurrence_index: int = 0,
-    max_extracted_chars: int | None = None,
-    ocr_timeout_seconds: float | None = None,
-    max_pdf_pages: int | None = None,
-    message_date: str,
-) -> dict[str, int]:
-    """Single-call wrapper: prepare + apply for one attachment occurrence.
-
-    Convenience for tests and any caller that does not need the
-    transaction split. The indexer's main pipeline calls
-    ``prepare_attachment_writes`` outside the transaction and
-    ``apply_attachment_writes`` inside, so ``embedder.embed`` calls do
-    not block the SQLite write lock.
-    """
-    plan = prepare_attachment_writes(
-        attachment=attachment,
-        message_id=message_id,
-        db=db,
-        embedder=embedder,
-        chunk_target_tokens=chunk_target_tokens,
-        chunk_max_tokens=chunk_max_tokens,
-        chunk_overlap_tokens=chunk_overlap_tokens,
-        ocr_enabled=ocr_enabled,
-        max_bytes=max_bytes,
-        max_ocr_pages=max_ocr_pages,
-        occurrence_index=occurrence_index,
-        max_extracted_chars=max_extracted_chars,
-        ocr_timeout_seconds=ocr_timeout_seconds,
-        max_pdf_pages=max_pdf_pages,
-    )
-    return apply_attachment_writes(
-        plan=plan,
-        message_id=message_id,
-        thread_id=thread_id,
-        db=db,
-        message_date=message_date,
-    )

@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import hashlib
 from datetime import UTC, datetime, timedelta
+from typing import Any
 from unittest.mock import MagicMock
 
 from src import attachment_indexing
 from src.attachment_indexing import (
     apply_attachment_writes,
     prepare_attachment_writes,
-    process_attachment,
 )
 from src.database import EMBEDDING_DIM, Database
 from src.extractors import (
@@ -41,6 +41,24 @@ def _attachment(
     )
 
 
+def _prepare_and_apply(
+    *, db: Database, thread_id: str, message_date: str, **prepare_kwargs: Any
+) -> dict[str, int]:
+    """Run one attachment through the indexer's two phases the way
+    ``main.py`` does: ``prepare_attachment_writes`` outside the write
+    transaction, then ``apply_attachment_writes`` inside
+    ``db.transaction()``. Returns the apply summary."""
+    plan = prepare_attachment_writes(db=db, **prepare_kwargs)
+    with db.transaction():
+        return apply_attachment_writes(
+            plan=plan,
+            message_id=prepare_kwargs["message_id"],
+            thread_id=thread_id,
+            db=db,
+            message_date=message_date,
+        )
+
+
 def test_successful_cached_extraction_is_reused(tmp_path, monkeypatch):
     db = Database(tmp_path / "mail.db")
     db.upsert_thread(
@@ -63,7 +81,7 @@ def test_successful_cached_extraction_is_reused(tmp_path, monkeypatch):
     embedder = make_mock_embedder()
     embedder.embed.return_value = [0.1] * EMBEDDING_DIM
 
-    summary = process_attachment(
+    summary = _prepare_and_apply(
         message_date="2024-01-01T00:00:00+00:00",
         attachment=attachment,
         message_id="message@example.com",
@@ -112,7 +130,7 @@ def _process_with_cached_extractor(
     monkeypatch.setattr(attachment_indexing, "extract_attachment", extractor)
     embedder = make_mock_embedder()
     embedder.embed.return_value = [0.1] * EMBEDDING_DIM
-    process_attachment(
+    _prepare_and_apply(
         message_date="2024-01-01T00:00:00+00:00",
         attachment=attachment,
         message_id="message@example.com",
@@ -226,7 +244,7 @@ def test_reused_terminal_row_clears_the_stale_chunks(tmp_path, monkeypatch):
     )
     extractor = MagicMock()
     monkeypatch.setattr(attachment_indexing, "extract_attachment", extractor)
-    process_attachment(
+    _prepare_and_apply(
         message_date="2024-01-01T00:00:00+00:00",
         attachment=_attachment(b"docx bytes", filename="c.docx", content_type="application/msword"),
         message_id="message@example.com",
@@ -261,7 +279,7 @@ def test_re_extraction_without_text_clears_the_stale_chunks(tmp_path, monkeypatc
         )
     )
     monkeypatch.setattr(attachment_indexing, "extract_attachment", extractor)
-    process_attachment(
+    _prepare_and_apply(
         message_date="2024-01-01T00:00:00+00:00",
         attachment=_attachment(b"docx bytes", filename="c.docx", content_type="application/msword"),
         message_id="message@example.com",
@@ -305,7 +323,7 @@ def _run_process_with_cached_status(
     monkeypatch.setattr(attachment_indexing, "extract_attachment", extractor)
     embedder = make_mock_embedder()
     embedder.embed.return_value = [0.2] * EMBEDDING_DIM
-    summary = process_attachment(
+    summary = _prepare_and_apply(
         message_date="2024-01-01T00:00:00+00:00",
         attachment=attachment,
         message_id="message@example.com",
@@ -385,7 +403,7 @@ def test_cached_unsupported_is_re_run_for_an_occurrence_with_an_extractor(tmp_pa
         )
     )
     monkeypatch.setattr(attachment_indexing, "extract_attachment", extractor)
-    summary = process_attachment(
+    summary = _prepare_and_apply(
         message_date="2024-01-01T00:00:00+00:00",
         attachment=attachment,
         message_id="message@example.com",
@@ -445,7 +463,7 @@ def test_image_ocr_disabled_row_does_not_block_a_pdf_occurrence(tmp_path, monkey
         )
     )
     monkeypatch.setattr(attachment_indexing, "extract_attachment", extractor)
-    process_attachment(
+    _prepare_and_apply(
         message_date="2024-01-01T00:00:00+00:00",
         attachment=attachment,
         message_id="message@example.com",
@@ -491,7 +509,7 @@ def test_recent_failed_cached_extraction_is_honored(tmp_path, monkeypatch):
     embedder = make_mock_embedder()
     embedder.embed.return_value = [0.2] * EMBEDDING_DIM
 
-    summary = process_attachment(
+    summary = _prepare_and_apply(
         message_date="2024-01-01T00:00:00+00:00",
         attachment=attachment,
         message_id="message@example.com",
@@ -556,7 +574,7 @@ def test_stale_failed_cached_extraction_is_retried(tmp_path, monkeypatch):
     embedder = make_mock_embedder()
     embedder.embed.return_value = [0.2] * EMBEDDING_DIM
 
-    summary = process_attachment(
+    summary = _prepare_and_apply(
         message_date="2024-01-01T00:00:00+00:00",
         attachment=attachment,
         message_id="message@example.com",
@@ -613,7 +631,7 @@ def test_ocr_disabled_unsupported_is_re_run_when_ocr_re_enabled(tmp_path, monkey
     embedder = make_mock_embedder()
     embedder.embed.return_value = [0.2] * EMBEDDING_DIM
 
-    summary = process_attachment(
+    summary = _prepare_and_apply(
         message_date="2024-01-01T00:00:00+00:00",
         attachment=attachment,
         message_id="message@example.com",
@@ -666,7 +684,7 @@ def test_ocr_disabled_pdf_cache_is_re_run_when_ocr_re_enabled(tmp_path, monkeypa
     embedder = make_mock_embedder()
     embedder.embed.return_value = [0.2] * EMBEDDING_DIM
 
-    summary = process_attachment(
+    summary = _prepare_and_apply(
         message_date="2024-01-01T00:00:00+00:00",
         attachment=attachment,
         message_id="message@example.com",
@@ -806,7 +824,7 @@ class TestMultiOccurrenceDeterminism:
         assert plan_a.occurrence_id == plan_b.occurrence_id
 
     def test_replay_skips_re_embedding_existing_chunks(self, tmp_path):
-        """Running ``process_attachment`` twice on the same input should
+        """Running ``_prepare_and_apply`` twice on the same input should
         embed each chunk exactly once. Deterministic chunk IDs +
         diff-write let the second run skip every existing chunk."""
         db = _setup_db_for_attachment(tmp_path)
@@ -814,7 +832,7 @@ class TestMultiOccurrenceDeterminism:
         embedder = make_mock_embedder()
         embedder.embed.return_value = [0.1] * EMBEDDING_DIM
 
-        process_attachment(
+        _prepare_and_apply(
             message_date="2024-01-01T00:00:00+00:00",
             db=db,
             embedder=embedder,
@@ -823,7 +841,7 @@ class TestMultiOccurrenceDeterminism:
         )
         embed_calls_first_run = embedder.embed.call_count
 
-        process_attachment(
+        _prepare_and_apply(
             message_date="2024-01-01T00:00:00+00:00",
             db=db,
             embedder=embedder,
@@ -859,7 +877,7 @@ class TestNonSuccessPlanPaths:
         embedder = make_mock_embedder()
         embedder.embed.return_value = [0.1] * EMBEDDING_DIM
 
-        summary = process_attachment(
+        summary = _prepare_and_apply(
             message_date="2024-01-01T00:00:00+00:00",
             db=db,
             embedder=embedder,
@@ -892,7 +910,7 @@ class TestNonSuccessPlanPaths:
         )
         embedder = make_mock_embedder()
 
-        summary = process_attachment(
+        summary = _prepare_and_apply(
             message_date="2024-01-01T00:00:00+00:00",
             db=db,
             embedder=embedder,
@@ -919,7 +937,7 @@ class TestExtractedTextCap:
         embedder = make_mock_embedder()
         embedder.embed.return_value = [0.1] * EMBEDDING_DIM
 
-        process_attachment(
+        _prepare_and_apply(
             message_date="2024-01-01T00:00:00+00:00",
             db=db,
             embedder=embedder,
@@ -940,7 +958,7 @@ class TestExtractedTextCap:
         embedder = make_mock_embedder()
         embedder.embed.return_value = [0.1] * EMBEDDING_DIM
 
-        process_attachment(
+        _prepare_and_apply(
             message_date="2024-01-01T00:00:00+00:00",
             db=db,
             embedder=embedder,
@@ -1012,7 +1030,7 @@ def test_ocr_disabled_row_does_not_block_a_non_ocr_occurrence(tmp_path, monkeypa
         )
     )
     monkeypatch.setattr(attachment_indexing, "extract_attachment", extractor)
-    process_attachment(
+    _prepare_and_apply(
         message_date="2024-01-01T00:00:00+00:00",
         attachment=attachment,
         message_id="message@example.com",

@@ -102,14 +102,6 @@ class TestTimingAggregator:
         assert summary["parse"]["max"] == 9.0
         assert summary["parse"]["p50"] == 8.0
 
-    def test_reset_clears_buffer(self):
-        agg = TimingAggregator(window=10)
-        for i in range(5):
-            agg.record(StageTimings(parse_ms=float(i)))
-        agg.reset()
-        assert len(agg) == 0
-        assert agg.summary() == {}
-
     def test_summary_includes_all_stages_and_total(self):
         agg = TimingAggregator(window=10)
         for i in range(1, 6):

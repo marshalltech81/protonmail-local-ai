@@ -88,10 +88,10 @@ branch = true
 source = ["src"]
 omit = [
     "tests/*",
-    # main.py is the service entrypoint: argument parsing, logging setup,
-    # embedding service wait, watchdog registration. It is covered by docker-compose
-    # integration rather than unit tests; excluding it keeps unit-test
-    # coverage numbers honest.
+    # main.py holds the service bootstrap (logging, embedder wait,
+    # watchdog registration) and the two-phase indexing pipeline.
+    # tests/test_main.py exercises the pipeline, but the file is
+    # excluded from the coverage figure.
     "src/main.py",
 ]
 
