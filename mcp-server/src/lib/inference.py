@@ -193,6 +193,12 @@ class _OpenAIBackend:
         if not resp.choices:
             raise RuntimeError("Inference provider returned no choices (mode=openai)")
         content = resp.choices[0].message.content
+        # The SDK does not validate ``content`` on a 200, so a provider
+        # can hand back a JSON object, list or number here (#321). Reject
+        # it before it becomes an answer or a truncated partial; the
+        # message never quotes the value.
+        if not isinstance(content, str | None):
+            raise RuntimeError("Inference provider returned non-text content (mode=openai)")
         finish_reason = getattr(resp.choices[0], "finish_reason", None)
         if finish_reason == "length":
             raise InferenceTruncatedError(content or "")
@@ -202,7 +208,7 @@ class _OpenAIBackend:
             raise RuntimeError(
                 "Inference provider stopped the answer with a content filter (mode=openai)"
             )
-        if not content:
+        if content is None or not content.strip():
             raise RuntimeError("Inference provider returned empty content (mode=openai)")
         return content
 
@@ -305,14 +311,15 @@ class _AnthropicBackend:
             raise InferenceTruncatedError(result)
         if stop_reason == "refusal":
             raise RuntimeError("Inference provider refused to answer (mode=anthropic)")
-        # An empty result means the response contained no text blocks
-        # at all (empty ``content``, or only ``tool_use`` / ``thinking``
-        # blocks). Returning "" would let the caller pass a silent blank
-        # answer to the agent; raise so the failure surfaces with a
-        # clear, sanitized error (no prompt/response content) instead.
+        # A blank result means the response contained no answer text
+        # (empty ``content``, only ``tool_use`` / ``thinking`` blocks, or
+        # whitespace-only text blocks). Returning it would let the caller
+        # pass a silent blank answer to the agent; raise so the failure
+        # surfaces with a clear, sanitized error (no prompt/response
+        # content) instead.
         # Structured callers that expected JSON get a RuntimeError here
         # rather than a JSONDecodeError two layers down.
-        if not result:
+        if not result.strip():
             raise RuntimeError("Inference provider returned no text blocks (mode=anthropic)")
         return result
 

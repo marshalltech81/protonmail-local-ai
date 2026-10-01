@@ -780,7 +780,8 @@ Order of work, chosen to minimise reindexes:
    otherwise)~~ (done: failures and unknown threads are raised as
    `ToolError`), ~~semantic search on missing vec tables (#318)~~
    (done: semantic mode errors when neither vector lane answers),
-   malformed provider content rendered as a summary (#321), ~~future
+   ~~malformed provider content rendered as a summary (#321)~~ (done:
+   non-text or blank content is an error in both backends), ~~future
    timestamps marking the index current (#332)~~ (done: a stamp over
    2 minutes ahead is a not-current reason), schema-violating
    extraction records (#310), overwritten `_date`/`_source_thread`
