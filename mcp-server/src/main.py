@@ -5,6 +5,7 @@ MCP transports. The server is read-only: it has no mail-changing tools and no
 connection to Bridge.
 """
 
+import asyncio
 import contextlib
 import logging
 import math
@@ -346,6 +347,17 @@ async def _run_dual_transport_async(server: FastMCP) -> None:
     await uvicorn.Server(config).serve()
 
 
+async def _health_response(db: Database) -> JSONResponse:
+    """Body of the ``/health`` route. The probe opens SQLite, so it runs
+    in a worker thread rather than on the shared event loop."""
+    try:
+        await asyncio.to_thread(db.ping)
+    except Exception:
+        log.exception("health probe failed")
+        return JSONResponse({"status": "unhealthy"}, status_code=503)
+    return JSONResponse({"status": "ok"})
+
+
 def _run_server(server: FastMCP, transport: _Transport) -> None:
     """Run ``server`` on ``transport``.
 
@@ -498,12 +510,7 @@ def main():
     # can reach localhost:MCP_PORT.
     @server.custom_route("/health", methods=["GET"], include_in_schema=False)
     async def health(_: Request) -> JSONResponse:
-        try:
-            db.ping()
-        except Exception:
-            log.exception("health probe failed")
-            return JSONResponse({"status": "unhealthy"}, status_code=503)
-        return JSONResponse({"status": "ok"})
+        return await _health_response(db)
 
     # All operator-configured API keys, scrubbed from any exception
     # text echoed back to the caller or written to logs. The empty
