@@ -224,6 +224,42 @@ seeded_vault_failed_container_fails() {
     fails_with 'Seeded-vault check container exited with status 3'
 }
 
+# The seeding run's own update check must not stand in for the restart's:
+# only the restart section (before the seeding-run log) counts.
+seed_run_completion_alone_fails() {
+    local seeded
+    seeded=$'time="2026-01-01 00:00:00.000" level="info" msg="Vault loaded" autoUpdate="true"
+SMOKE_SEED_EXIT=0
+SMOKE_STAGED_UPDATES=0
+SMOKE_ENTRYPOINT_EXIT=143
+SMOKE_HARNESS_SIGNAL=term
+--- seeding run log ---
+time="2026-01-01 00:00:00.500" level="debug" msg="Publishing event" event="UpdateNotAvailable"'
+    run_smoke "$MARKER"$'\n'"$CLEAN_EXIT" 0 "$seeded" 0
+    fails_with 'did not finish'
+}
+
+# Proton offered a newer release and the patched gate only announced it.
+seeded_vault_announced_update_passes() {
+    run_smoke "$MARKER"$'\n'"$CLEAN_EXIT" 0 \
+        "${SEEDED_PASS/event=\"UpdateNotAvailable\"/event=\"UpdateAvailable: Version 9.9.9, Compatible: true, Silent: false\"}" 0
+    passes
+}
+
+# A silent available event is the install job, even without a silent= field.
+seeded_vault_silent_available_event_fails() {
+    run_smoke "$MARKER"$'\n'"$CLEAN_EXIT" 0 \
+        "${SEEDED_PASS/event=\"UpdateNotAvailable\"/event=\"UpdateAvailable: Version 9.9.9, Compatible: true, Silent: true\"}" 0
+    fails_with 'queued a silent update install'
+}
+
+# An install during the seeding run is still a failure.
+seeding_run_silent_install_fails() {
+    run_smoke "$MARKER"$'\n'"$CLEAN_EXIT" 0 \
+        "$SEEDED_PASS"$'\n--- seeding run log ---\ntime="2026-01-01 00:00:00.500" level="info" msg="An update is available" silent="true"' 0
+    fails_with 'queued a silent update install'
+}
+
 check "the marker then a clean Bridge exit passes" marker_then_clean_exit_passes
 check "the marker then the intended stop passes" marker_then_intended_stop_passes
 check "the marker then the intended kill passes" marker_then_intended_kill_passes
@@ -242,6 +278,10 @@ check "an enabled vault with an installed update fails" seeded_vault_installed_u
 check "an enabled vault with a staged update fails" seeded_vault_staged_update_fails
 check "a seeded vault that loads as false fails" seeded_vault_not_enabled_fails
 check "a failed seeded-vault container fails" seeded_vault_failed_container_fails
+check "a completion line from the seeding run alone fails" seed_run_completion_alone_fails
+check "an enabled vault with an announced update passes" seeded_vault_announced_update_passes
+check "an enabled vault with a silent available event fails" seeded_vault_silent_available_event_fails
+check "a silent install during the seeding run fails" seeding_run_silent_install_fails
 
 if ((FAILURES > 0)); then
     printf '%d test(s) failed\n' "$FAILURES" >&2

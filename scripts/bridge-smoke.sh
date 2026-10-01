@@ -185,8 +185,9 @@ printf 'AutoUpdate runtime default verified off in built image.\n'
 # Existing-vault check for the update-gate patch (#245). Seed a vault with
 # AutoUpdate=true through the CLI, as vaults created before the default patch
 # hold, then restart on the production --noninteractive path and wait for its
-# startup update check. Assert the stored true value loads and the check ends
-# without the silent install path or anything staged under updates/. Proton's
+# startup update check. Assert the stored true value loads and the restart's
+# check ends (nothing to install, or a release only announced) without the
+# silent install path or anything staged under updates/. Proton's
 # live release feed decides whether an update is offered at all, so this
 # cannot force the gate decision; the go test in patch-source.sh does that.
 # It reuses SMOKE_OUT, smoke_fail and entrypoint_ended_cleanly from above.
@@ -208,6 +209,11 @@ docker run --rm \
         SEED_EXIT=0
         printf "updates autoupdates enable\nyes\n" \
             | timeout 60 /entrypoint.sh >/tmp/seed.out 2>&1 || SEED_EXIT=$?
+        # The seeding run checks for updates too. Move its logs aside so
+        # the poll and the host assertions see only what the restart wrote.
+        if [ -d "$LOGS" ]; then
+            mv "$LOGS" /tmp/seed-logs
+        fi
         # Run 2: the vault now exists, so the entrypoint runs
         # bridge --noninteractive, which checks for updates at startup and
         # keeps running, so this check always stops it.
@@ -216,7 +222,7 @@ docker run --rm \
         DEADLINE=$(( $(date +%s) + 60 ))
         while [ "$(date +%s)" -lt "$DEADLINE" ]; do
             if cat "$LOGS"/*.log 2>/dev/null \
-                | grep -qE "event=\"UpdateNotAvailable\"|auto-update is disabled|silent=\"true\""; then
+                | grep -qE "event=\"UpdateNotAvailable\"|auto-update is disabled|event=\"UpdateAvailable: [^\"]*Silent: false\"|silent=\"true\"|Silent: true"; then
                 break
             fi
             sleep 0.5
@@ -236,21 +242,29 @@ docker run --rm \
         echo "SMOKE_STAGED_UPDATES=$(find /data/local/protonmail/bridge-v3/updates -mindepth 1 2>/dev/null | wc -l)"
         echo "SMOKE_ENTRYPOINT_EXIT=$ENTRY_EXIT"
         echo "SMOKE_HARNESS_SIGNAL=$HARNESS_SIGNAL"
+        echo "--- seeding run log ---"
+        cat /tmp/seed-logs/*.log 2>/dev/null || echo "NO_SEED_LOG_WRITTEN"
         echo "--- entrypoint output ---"
         cat /tmp/seed.out /tmp/run.out 2>/dev/null || true
     ' > "$SMOKE_OUT" 2>&1 || SMOKE_STATUS=$?
+
+# The restart's log and status lines: everything before the seeding-run log.
+restart_section() {
+    sed '/^--- seeding run log ---$/,$d' "$SMOKE_OUT"
+}
 
 if [[ "$SMOKE_STATUS" -ne 0 ]]; then
     smoke_fail "Seeded-vault check container exited with status $SMOKE_STATUS."
 elif ! grep -Fx 'SMOKE_SEED_EXIT=0' "$SMOKE_OUT" >/dev/null; then
     smoke_fail 'Seeding AutoUpdate=true through the Bridge CLI failed.'
-elif ! grep -E 'msg="Vault loaded".*autoUpdate="true"' "$SMOKE_OUT" >/dev/null; then
+elif ! restart_section | grep -E 'msg="Vault loaded".*autoUpdate="true"' >/dev/null; then
     smoke_fail 'Seeded vault did not load with autoUpdate="true".'
-elif grep -E 'silent="true"|The update was installed' "$SMOKE_OUT" >/dev/null; then
+elif grep -E 'silent="true"|Silent: true|The update was installed' "$SMOKE_OUT" >/dev/null; then
     smoke_fail 'Bridge queued a silent update install for a vault with AutoUpdate=true.'
 elif ! grep -Fx 'SMOKE_STAGED_UPDATES=0' "$SMOKE_OUT" >/dev/null; then
     smoke_fail 'Bridge staged an update under bridge-v3/updates.'
-elif ! grep -E 'event="UpdateNotAvailable"|auto-update is disabled' "$SMOKE_OUT" >/dev/null; then
+elif ! restart_section |
+    grep -E 'event="UpdateNotAvailable"|auto-update is disabled|event="UpdateAvailable: [^"]*Silent: false"' >/dev/null; then
     smoke_fail 'Startup update check did not finish for the seeded vault.'
 elif grep -E 'level="?(fatal|panic)' "$SMOKE_OUT" >/dev/null; then
     smoke_fail 'Bridge logged a fatal or panic error during the seeded-vault check.'
