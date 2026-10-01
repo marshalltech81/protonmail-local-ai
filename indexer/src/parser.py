@@ -664,11 +664,14 @@ def _extract_body_and_attachments(
     # too: a message can be one attachment part, or a bundle presented as
     # one, whose text is then not the message's body. Each part outside
     # attachments becomes a ``_BodyNode`` under its parent's index (-1 for
-    # none), and ``_assemble_body`` turns those into the body.
+    # none), and ``_assemble_body`` turns those into the body. ``no_body``
+    # marks parts inside an inline email in a transfer encoding: the
+    # parser exposes such an email as its encoded transport text, not
+    # its content, so none of it is body text.
     budget = _SerializationBudget()
-    stack: list[tuple[email.message.Message, bool, int, int]] = [(msg, False, 0, -1)]
+    stack: list[tuple[email.message.Message, bool, int, int, bool]] = [(msg, False, 0, -1, False)]
     while stack:
-        part, in_attachment, decode_depth, parent = stack.pop()
+        part, in_attachment, decode_depth, parent, no_body = stack.pop()
         ct = part.get_content_type()
         is_attachment = _is_attachment(part)
         decoded: email.message.Message | None = None
@@ -690,7 +693,7 @@ def _extract_body_and_attachments(
             )
         inside = in_attachment or is_attachment
         node: _BodyNode | None = None
-        if not inside:
+        if not inside and not no_body:
             node = _BodyNode(parent, alternative=ct == "multipart/alternative")
             nodes.append(node)
             if parent >= 0 and nodes[parent].alternative:
@@ -704,8 +707,13 @@ def _extract_body_and_attachments(
                 children, depth = part.get_payload(), decode_depth
             if isinstance(children, list):
                 index = -1 if node is None else len(nodes) - 1
+                encoding = str(part.get("Content-Transfer-Encoding", "")).strip().lower()
+                skip = no_body or (
+                    part.get_content_maintype() == "message"
+                    and encoding not in ("", "7bit", "8bit", "binary")
+                )
                 stack.extend(
-                    (c, inside, depth, index)
+                    (c, inside, depth, index, skip)
                     for c in reversed(children)
                     if isinstance(c, email.message.Message)
                 )

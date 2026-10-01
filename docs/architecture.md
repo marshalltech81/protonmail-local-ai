@@ -309,7 +309,10 @@ therefore gives way to the HTML one. The parts of any other container
 (`multipart/mixed`, `related`, an inline `message/rfc822`) are
 sequential content, so text, an attachment, then more text keeps both
 texts. Nothing inside an attachment, such as a forwarded email attached
-as a file, is body text. At most 200 text parts per message
+as a file, is body text. Neither is an inline `message/*` part sent
+in a transfer encoding (base64 or quoted-printable, which RFC 2046
+forbids for it): the parser exposes it as its encoded transport text,
+so it adds nothing to the body. At most 200 text parts per message
 (`MAX_BODY_TEXT_PARTS`) are decoded; later ones are left out.
 
 A query like "what did my landlord say about the heating?" returns the

@@ -5,9 +5,11 @@ Covers: plain text, HTML, multipart, attachments, inline Content-Disposition,
 encoded headers, address parsing, date fallback, and folder derivation.
 """
 
+import base64
 import email.utils
 import hashlib
 import logging
+import quopri
 import textwrap
 from datetime import UTC, datetime
 from email.message import EmailMessage
@@ -1977,10 +1979,16 @@ def _render(node: tuple, counter: list[int]) -> str:
         head += "\r\nContent-Transfer-Encoding: base64"
     head += "".join(f"\r\n{name}: {value}" for name, value in headers.items()) + "\r\n\r\n"
     if ctype == "message/rfc822":
-        return head + (
+        inner = (
             "Message-ID: <inner@example.test>\r\nFrom: other@example.test\r\n"
             f"Content-Type: text/plain\r\n\r\n{content}\r\n"
         )
+        encoding = headers.get("Content-Transfer-Encoding", "").lower()
+        if encoding == "base64":
+            inner = base64.encodebytes(inner.encode()).decode().replace("\n", "\r\n")
+        elif encoding == "quoted-printable":
+            inner = quopri.encodestring(inner.encode()).decode()
+        return head + inner
     if not ctype.startswith("multipart/"):
         return head + content + "\r\n"
     body = "".join(f"--{boundary}\r\n{_render(child, counter)}" for child in content)
@@ -2054,6 +2062,45 @@ _BODY_SHAPES = {
     "mixed-plain-inline-email": (
         _multi("mixed", _plain("P1"), ("message/rfc822", "INLINE_EMAIL", {})),
         "P1\n\nINLINE_EMAIL",
+    ),
+    "mixed-plain-inline-7bit-email": (
+        _multi(
+            "mixed",
+            _plain("P1"),
+            ("message/rfc822", "INLINE_EMAIL", {"Content-Transfer-Encoding": "7bit"}),
+        ),
+        "P1\n\nINLINE_EMAIL",
+    ),
+    # An inline email in a transfer encoding is exposed by the parser as
+    # its encoded transport text, so it contributes nothing (review round
+    # 1 on #444).
+    "mixed-plain-inline-base64-email": (
+        _multi(
+            "mixed",
+            _plain("P1"),
+            ("message/rfc822", "ENCODED_EMAIL_" * 8, {"Content-Transfer-Encoding": "base64"}),
+            _plain("P2"),
+        ),
+        "P1\n\nP2",
+    ),
+    "mixed-plain-inline-qp-email": (
+        _multi(
+            "mixed",
+            _plain("P1"),
+            (
+                "message/rfc822",
+                "ENCODED_EMAIL=",
+                {"Content-Transfer-Encoding": "quoted-printable"},
+            ),
+        ),
+        "P1",
+    ),
+    "inline-base64-email-only": (
+        _multi(
+            "mixed",
+            ("message/rfc822", "ENCODED_EMAIL", {"Content-Transfer-Encoding": "BASE64"}),
+        ),
+        "",
     ),
     "alt-plain-mixed-html": (
         _multi("alternative", _plain("P1"), _multi("mixed", _html("H1"), _IMG, _html("H2"))),
