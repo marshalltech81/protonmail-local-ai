@@ -297,11 +297,23 @@ than silently restarting.
 
 ## Group 3 — Intelligence
 
-The intelligence tools build LLM prompts from the most relevant indexed
-chunks returned by hybrid search, bounded by a fixed per-thread character
-budget (``2000`` by default) so multi-thread contexts stay within local-LLM
-context windows. If a thread has no matching chunks, the tool falls back to
-the indexed thread body and finally to the 200-character ``snippet``.
+The intelligence tools bound the email text they put in each prompt so
+it stays within local-LLM context windows. The bounds differ by tool:
+
+- **`ask_mailbox` and `extract_from_emails`** build the prompt from the
+  most relevant indexed chunks (message bodies and attachment text)
+  returned by hybrid search, bounded by a fixed per-thread character
+  budget (``2000``). `ask_mailbox` puts several threads in one prompt;
+  `extract_from_emails` sends one prompt per thread. If a thread has
+  no matching chunks, the tool falls back to the indexed thread body
+  and finally to the 200-character ``snippet``.
+- **`summarize_thread`** works on a single thread and does not use the
+  per-chunk path. Its context is the thread's accumulated indexed body
+  (or the ``snippet`` when the body is empty), up to ``8000``
+  characters, followed by up to ``4000`` characters of the thread's most
+  recent body chunks, which recovers the newest replies that the
+  indexer's front-preserved body cap drops. It is body-only: attachment
+  text is never included.
 
 ### Prompt-injection hardening
 
