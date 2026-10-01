@@ -22,6 +22,7 @@ from urllib.parse import quote
 
 import sqlite_vec
 
+from . import timings
 from .reranker import RerankerBackend
 
 log = logging.getLogger("mcp.sqlite")
@@ -1061,10 +1062,14 @@ class Database:
         )
         vec_results = vec_results or []
         chunk_hits = chunk_hits or []
-        fused = self._reciprocal_rank_fusion(bm25_results, vec_results, chunk_hits)
-        filtered = self._apply_filters(
-            fused, folders, from_addr, date_from, date_to, has_attachments, participant
-        )
+        timings.count("thread_vec", len(vec_results))
+        timings.count("chunk_vec", len(chunk_hits))
+        with timings.stage("fusion"):
+            fused = self._reciprocal_rank_fusion(bm25_results, vec_results, chunk_hits)
+            filtered = self._apply_filters(
+                fused, folders, from_addr, date_from, date_to, has_attachments, participant
+            )
+        timings.count("filtered", len(filtered))
 
         # Decide how many candidates to keep before any rerank. The
         # reranker's ``candidates`` knob is a *funnel size* — how many
@@ -1103,15 +1108,17 @@ class Database:
             # evidence slice — fixes the "filename match → wrong
             # evidence" gap where the LLM saw body text instead of
             # the attachment the user asked about.
-            matched_attachments = self._matched_attachments(query_text, wanted)
-            grouped = self.get_evidence_chunks_for_threads(
-                wanted,
-                query_embedding,
-                per_thread_limit=evidence_per_thread,
-                matched_attachments=matched_attachments,
-            )
+            with timings.stage("evidence_fetch"):
+                matched_attachments = self._matched_attachments(query_text, wanted)
+                grouped = self.get_evidence_chunks_for_threads(
+                    wanted,
+                    query_embedding,
+                    per_thread_limit=evidence_per_thread,
+                    matched_attachments=matched_attachments,
+                )
             for result in candidates:
                 result.evidence_chunks = grouped.get(result.thread_id, [])
+                timings.count("evidence_chunks", len(result.evidence_chunks))
 
         if reranker is not None and candidates:
             return self._apply_rerank(query_text, candidates, reranker, limit)
@@ -1158,7 +1165,9 @@ class Database:
         duplicate results. It is checked before any candidate is touched.
         """
         docs = [self._candidate_text(c) for c in candidates]
-        scored = reranker.rerank(query, docs, top_n=limit)
+        timings.count("rerank_candidates", len(docs))
+        with timings.stage("rerank"):
+            scored = reranker.rerank(query, docs, top_n=limit)
         if not scored:
             return candidates[:limit]
         indices = [orig_idx for orig_idx, _ in scored]
@@ -1205,9 +1214,11 @@ class Database:
             date_to=date_to,
             has_attachments=has_attachments,
         )
-        filtered = self._apply_filters(
-            results, folders, from_addr, date_from, date_to, has_attachments, participant
-        )
+        with timings.stage("fusion"):
+            filtered = self._apply_filters(
+                results, folders, from_addr, date_from, date_to, has_attachments, participant
+            )
+        timings.count("filtered", len(filtered))
         return filtered[:limit]
 
     def semantic_search(
@@ -1258,14 +1269,18 @@ class Database:
             has_attachments=has_attachments,
             participant=participant,
         )
+        timings.count("thread_vec", len(vec_results or []))
+        timings.count("chunk_vec", len(chunk_hits or []))
         if vec_results is None and chunk_hits is None:
             raise VectorLanesUnavailableError()
-        fused = self._reciprocal_rank_fusion(
-            bm25=[], vec=vec_results or [], chunks=chunk_hits or []
-        )
-        filtered = self._apply_filters(
-            fused, folders, from_addr, date_from, date_to, has_attachments, participant
-        )
+        with timings.stage("fusion"):
+            fused = self._reciprocal_rank_fusion(
+                bm25=[], vec=vec_results or [], chunks=chunk_hits or []
+            )
+            filtered = self._apply_filters(
+                fused, folders, from_addr, date_from, date_to, has_attachments, participant
+            )
+        timings.count("filtered", len(filtered))
         return filtered[:limit]
 
     # -------------------------------------------------------------------------
@@ -1545,30 +1560,36 @@ class Database:
         date_to: str | None = None,
         has_attachments: bool | None = None,
     ) -> list[ThreadResult]:
-        thread_hits = self._thread_keyword_search(
-            query,
-            limit,
-            folders=folders,
-            date_from=date_from,
-            date_to=date_to,
-            has_attachments=has_attachments,
-        )
-        chunk_hits = self._chunk_keyword_search(
-            query,
-            limit,
-            folders=folders,
-            date_from=date_from,
-            date_to=date_to,
-            has_attachments=has_attachments,
-        )
-        attachment_hits = self._attachment_keyword_search(
-            query,
-            limit,
-            folders=folders,
-            date_from=date_from,
-            date_to=date_to,
-            has_attachments=has_attachments,
-        )
+        with timings.stage("thread_fts"):
+            thread_hits = self._thread_keyword_search(
+                query,
+                limit,
+                folders=folders,
+                date_from=date_from,
+                date_to=date_to,
+                has_attachments=has_attachments,
+            )
+        with timings.stage("chunk_fts"):
+            chunk_hits = self._chunk_keyword_search(
+                query,
+                limit,
+                folders=folders,
+                date_from=date_from,
+                date_to=date_to,
+                has_attachments=has_attachments,
+            )
+        with timings.stage("attachment_fts"):
+            attachment_hits = self._attachment_keyword_search(
+                query,
+                limit,
+                folders=folders,
+                date_from=date_from,
+                date_to=date_to,
+                has_attachments=has_attachments,
+            )
+        timings.count("thread_fts", len(thread_hits))
+        timings.count("chunk_fts", len(chunk_hits))
+        timings.count("attachment_fts", len(attachment_hits))
         # Tag each lane's pre-fusion rank so the fusion step can record
         # lane provenance on the surviving thread row (surfaced by
         # ``get_evidence(include_scores=True)``). Pure observability —
@@ -1576,9 +1597,10 @@ class Database:
         _tag_lane_ranks(thread_hits, "thread_fts")
         _tag_lane_ranks(chunk_hits, "chunk_fts")
         _tag_lane_ranks(attachment_hits, "attachment_fts")
-        return self._reciprocal_rank_fusion_threads(thread_hits, chunk_hits, attachment_hits)[
-            :limit
-        ]
+        with timings.stage("fusion"):
+            return self._reciprocal_rank_fusion_threads(thread_hits, chunk_hits, attachment_hits)[
+                :limit
+            ]
 
     def _thread_keyword_search(
         self,
@@ -2207,31 +2229,43 @@ class Database:
         Each query opens its own short-lived connection, and the caller
         embeds once before this runs, so no read transaction spans the
         provider call and the expansion never re-embeds.
+
+        Each lane's timing stage covers its first query and every
+        expansion step, eligibility checks included; the
+        ``*_expansions`` counts give the number of re-queries.
         """
-        vec = self._vector_search(embedding, thread_k)
-        chunks = self._chunk_vector_search(embedding, chunk_k)
+        with timings.stage("thread_vec"):
+            vec = self._vector_search(embedding, thread_k)
+        with timings.stage("chunk_vec"):
+            chunks = self._chunk_vector_search(embedding, chunk_k)
         if not self._has_post_fusion_filter(**filters):
             return vec, chunks
 
+        timings.count("thread_vec_expansions", 0)
         thread_k = min(thread_k, _SQLITE_VEC_MAX_K)
-        while (
-            vec is not None
-            and len(vec) >= thread_k
-            and thread_k < _SQLITE_VEC_MAX_K
-            and len(self._apply_filters(vec, **filters)) < target
-        ):
-            thread_k = min(thread_k * 2, _SQLITE_VEC_MAX_K)
-            vec = self._vector_search(embedding, thread_k)
+        with timings.stage("thread_vec"):
+            while (
+                vec is not None
+                and len(vec) >= thread_k
+                and thread_k < _SQLITE_VEC_MAX_K
+                and len(self._apply_filters(vec, **filters)) < target
+            ):
+                thread_k = min(thread_k * 2, _SQLITE_VEC_MAX_K)
+                vec = self._vector_search(embedding, thread_k)
+                timings.count("thread_vec_expansions", 1)
 
+        timings.count("chunk_vec_expansions", 0)
         chunk_k = min(chunk_k, _SQLITE_VEC_MAX_K)
-        while (
-            chunks is not None
-            and len(chunks) >= chunk_k
-            and chunk_k < _SQLITE_VEC_MAX_K
-            and self._eligible_chunk_threads(chunks, filters) < target
-        ):
-            chunk_k = min(chunk_k * 2, _SQLITE_VEC_MAX_K)
-            chunks = self._chunk_vector_search(embedding, chunk_k)
+        with timings.stage("chunk_vec"):
+            while (
+                chunks is not None
+                and len(chunks) >= chunk_k
+                and chunk_k < _SQLITE_VEC_MAX_K
+                and self._eligible_chunk_threads(chunks, filters) < target
+            ):
+                chunk_k = min(chunk_k * 2, _SQLITE_VEC_MAX_K)
+                chunks = self._chunk_vector_search(embedding, chunk_k)
+                timings.count("chunk_vec_expansions", 1)
         return vec, chunks
 
     def _eligible_chunk_threads(self, chunks: list[ChunkResult], filters: dict) -> int:
