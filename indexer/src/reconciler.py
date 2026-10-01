@@ -590,6 +590,11 @@ def load_config_from_env(env: Mapping[str, str]) -> ReconcilerConfig:
     window. ``false`` selects archive: the index is append-only and
     keeps upstream-deleted mail. Any other value raises ``ValueError``
     so a typo fails startup instead of silently picking a mode.
+
+    The other knobs follow the same rule (#481): unset or empty yields
+    the default, and an unrecognised boolean, a non-integer, an integer
+    below its minimum, or a batch fraction that is not a finite number
+    in [0, 1] raises ``ValueError`` naming the variable.
     """
 
     _truthy = {"1", "true", "yes", "on"}
@@ -609,35 +614,42 @@ def load_config_from_env(env: Mapping[str, str]) -> ReconcilerConfig:
         )
 
     def _bool(name: str, default: bool) -> bool:
-        raw = env.get(name)
-        if raw is None:
+        raw = (env.get(name) or "").strip().lower()
+        if not raw:
             return default
-        return raw.strip().lower() in _truthy
+        if raw in _truthy:
+            return True
+        if raw in _falsy:
+            return False
+        raise ValueError(f"{name}={raw!r} is not recognized; use true or false")
 
     def _int(name: str, default: int, minimum: int = 0) -> int:
-        raw = env.get(name)
-        if raw is None or not raw.strip():
+        raw = (env.get(name) or "").strip()
+        if not raw:
             return default
         try:
             value = int(raw)
         except ValueError:
-            log.warning("invalid %s=%r; falling back to %d", name, raw, default)
-            return default
-        return max(minimum, value)
+            raise ValueError(f"{name}={raw!r} is not an integer") from None
+        if value < minimum:
+            raise ValueError(f"{name}={raw!r} must be >= {minimum}")
+        return value
 
     def _pct(name: str, default: float) -> float:
-        raw = env.get(name)
-        if raw is None or not raw.strip():
+        raw = (env.get(name) or "").strip()
+        if not raw:
             return default
+        message = f"{name}={raw!r} must be a number between 0 and 1"
         try:
             value = float(raw)
         except ValueError:
-            log.warning("invalid %s=%r; falling back to %.2f", name, raw, default)
-            return default
-        if value < 0:
-            return 0.0
-        if value > 1:
-            return 1.0
+            raise ValueError(message) from None
+        # NaN fails every comparison, so test the accepted range rather
+        # than the rejected one: a NaN brake used to make every reap
+        # sweep raise and reaping silently never ran. This also rejects
+        # infinity.
+        if not (0.0 <= value <= 1.0):
+            raise ValueError(message)
         return value
 
     return ReconcilerConfig(

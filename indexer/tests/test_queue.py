@@ -7,6 +7,7 @@ against the ``next_attempt_at`` backoff column.
 
 from datetime import UTC, datetime, timedelta
 
+import pytest
 from src.database import Database
 from src.queue import (
     DEFAULT_BASE_BACKOFF_SECONDS,
@@ -349,37 +350,31 @@ class TestLoadConfigFromEnv:
         assert cfg["max_attempts"] == 10
         assert cfg["base_backoff_seconds"] == 90
 
-    def test_zero_max_attempts_falls_back_to_default(self):
+    @pytest.mark.parametrize("raw", ["0", "-1", "-5"])
+    def test_max_attempts_below_minimum_fails(self, raw):
         # max_attempts <= 0 would dead-letter every row on the first
         # failure (``new_attempts >= self.max_attempts`` matches at
-        # 1 >= 0). Clamp to the documented default so a typo doesn't
-        # silently neutralize the retry contract.
-        cfg = load_config_from_env({"INDEXER_MAX_ATTEMPTS": "0"})
-        assert cfg["max_attempts"] == DEFAULT_MAX_ATTEMPTS
+        # 1 >= 0). Reject it at startup rather than silently swapping
+        # in the default (#481).
+        with pytest.raises(ValueError, match="INDEXER_MAX_ATTEMPTS.*>= 1"):
+            load_config_from_env({"INDEXER_MAX_ATTEMPTS": raw})
 
-    def test_negative_max_attempts_falls_back_to_default(self):
-        cfg = load_config_from_env({"INDEXER_MAX_ATTEMPTS": "-1"})
-        assert cfg["max_attempts"] == DEFAULT_MAX_ATTEMPTS
-
-    def test_zero_base_backoff_falls_back_to_default(self):
+    @pytest.mark.parametrize("raw", ["0", "-30"])
+    def test_base_backoff_below_minimum_fails(self, raw):
         # base_backoff_seconds <= 0 schedules next_attempt_at at "now"
         # (zero seconds added) or in the past (negative), so claim_batch
         # immediately re-claims the failing row and the retry budget
-        # burns in a tight loop. Clamp to the documented default.
-        cfg = load_config_from_env({"INDEXER_RETRY_BASE_SECONDS": "0"})
-        assert cfg["base_backoff_seconds"] == DEFAULT_BASE_BACKOFF_SECONDS
+        # burns in a tight loop.
+        with pytest.raises(ValueError, match="INDEXER_RETRY_BASE_SECONDS.*>= 1"):
+            load_config_from_env({"INDEXER_RETRY_BASE_SECONDS": raw})
 
-    def test_negative_base_backoff_falls_back_to_default(self):
-        cfg = load_config_from_env({"INDEXER_RETRY_BASE_SECONDS": "-30"})
-        assert cfg["base_backoff_seconds"] == DEFAULT_BASE_BACKOFF_SECONDS
+    @pytest.mark.parametrize("raw", ["five", "tru", "nan", "inf", "2.5"])
+    def test_non_integer_fails(self, raw):
+        with pytest.raises(ValueError, match="INDEXER_MAX_ATTEMPTS.*integer"):
+            load_config_from_env({"INDEXER_MAX_ATTEMPTS": raw})
 
-    def test_malformed_int_falls_back_to_default(self):
-        cfg = load_config_from_env(
-            {
-                "INDEXER_MAX_ATTEMPTS": "five",
-                "INDEXER_RETRY_BASE_SECONDS": "thirty",
-            }
-        )
+    def test_empty_values_yield_defaults(self):
+        cfg = load_config_from_env({"INDEXER_MAX_ATTEMPTS": "", "INDEXER_RETRY_BASE_SECONDS": "  "})
         assert cfg["max_attempts"] == DEFAULT_MAX_ATTEMPTS
         assert cfg["base_backoff_seconds"] == DEFAULT_BASE_BACKOFF_SECONDS
 
