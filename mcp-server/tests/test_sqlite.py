@@ -2345,6 +2345,83 @@ class TestRRFChunkLifting:
         assert beta.score == pytest.approx(1.0 / 64, rel=1e-6)
 
 
+class TestRRFChunkOnlyMaterialization:
+    """#334: threads found only by the chunk lane are loaded in batched
+    lookups over one connection, not one connection per candidate."""
+
+    @staticmethod
+    def _chunks(thread_ids: list[str]):
+        from src.lib.sqlite import ChunkResult
+
+        return [
+            ChunkResult(
+                chunk_id=f"c{i}",
+                message_id=tid,
+                thread_id=tid,
+                chunk_index=0,
+                text="x",
+                char_start=0,
+                char_end=1,
+            )
+            for i, tid in enumerate(thread_ids)
+        ]
+
+    def test_one_connection_and_bounded_lookups(self, seeded_db: Database, monkeypatch):
+        import src.lib.sqlite as sqlite_mod
+
+        # A batch of two forces the three found threads plus a missing
+        # one across two IN-list lookups.
+        monkeypatch.setattr(sqlite_mod, "_IN_CLAUSE_BATCH_SIZE", 2)
+        connect = seeded_db._connect
+        connections = 0
+        lookups: list[str] = []
+
+        def counting_connect():
+            nonlocal connections
+            connections += 1
+            conn = connect()
+            conn.set_trace_callback(
+                lambda sql: lookups.append(sql) if "FROM threads" in sql else None
+            )
+            return conn
+
+        monkeypatch.setattr(seeded_db, "_connect", counting_connect)
+        order = ["t-gamma", "does-not-exist", "t-alpha", "t-beta"]
+        fused = seeded_db._reciprocal_rank_fusion([], [], self._chunks(order))
+
+        assert connections == 1
+        assert len(lookups) == 2
+        # Missing rows are skipped; the others keep chunk-lane order and
+        # the same rows and scores a per-thread fetch gives.
+        assert [r.thread_id for r in fused] == ["t-gamma", "t-alpha", "t-beta"]
+        assert [r.score for r in fused] == pytest.approx([1 / 61, 1 / 63, 1 / 64])
+        for r in fused:
+            expected = Database(seeded_db.path).get_thread(r.thread_id)
+            assert expected is not None
+            assert (r.subject, r.message_ids, r.body_text) == (
+                expected.subject,
+                expected.message_ids,
+                expected.body_text,
+            )
+            assert r.lane_ranks == {"chunk_vec": order.index(r.thread_id)}
+
+    def test_threads_already_in_a_lane_are_not_fetched(self, seeded_db: Database, monkeypatch):
+        bm25 = [seeded_db.get_thread("t-alpha")]
+        assert bm25[0] is not None
+        connections = 0
+        connect = seeded_db._connect
+
+        def counting_connect():
+            nonlocal connections
+            connections += 1
+            return connect()
+
+        monkeypatch.setattr(seeded_db, "_connect", counting_connect)
+        fused = seeded_db._reciprocal_rank_fusion(bm25, [], self._chunks(["t-alpha"]))
+        assert connections == 0
+        assert [r.thread_id for r in fused] == ["t-alpha"]
+
+
 class TestFindContact:
     """The find_contact aggregator powers the LLM's name → email lookup
     so a borderline model can resolve a display-name fragment before
@@ -3588,3 +3665,91 @@ class TestVectorLaneKLimit:
             reranker=_PassThroughReranker(),
         )
         assert calls and calls[0] > 0
+
+
+# A synthetic stand-in for query text or mail content. It is a bare word
+# so FTS5 accepts it as a column name and quotes it back in its error.
+_ERROR_MARKER = "privatemarkerq7z"
+_VEC = [0.0, 0.0, 0.0, 0.0]
+
+
+class TestFallbackErrorTextWithheld:
+    """Every read-path fallback logs the exception type, never its text:
+    an SQLite error can quote the query (FTS5 reports ``<term>:foo`` as
+    ``no such column: <term>``), and the query is withheld from the
+    tool-call log (#257)."""
+
+    @pytest.mark.parametrize(
+        ("call", "expected"),
+        [
+            pytest.param(
+                lambda db: db._attachment_filename_lane("x", [], [], 5), [], id="att-name"
+            ),
+            pytest.param(lambda db: db._attachment_text_lane("x", [], [], 5), [], id="att-text"),
+            pytest.param(lambda db: db._attachment_scan([], [], 5), [], id="att-scan"),
+            pytest.param(lambda db: db._thread_keyword_search("x", 5), [], id="thread-fts"),
+            pytest.param(lambda db: db._chunk_keyword_search("x", 5), [], id="chunk-fts"),
+            pytest.param(lambda db: db._attachment_keyword_search("x", 5), [], id="att-fts"),
+            pytest.param(lambda db: db._matched_attachments("x", ["t-alpha"]), {}, id="att-match"),
+            pytest.param(lambda db: db._like_fallback("x", 5), [], id="like"),
+            pytest.param(lambda db: db._chunk_vector_search(_VEC, 5), None, id="chunk-vec"),
+            pytest.param(
+                lambda db: db.get_evidence_chunks_for_threads(["t-alpha"], _VEC),
+                {"t-alpha": []},
+                id="evidence",
+            ),
+            pytest.param(
+                lambda db: db.get_recent_chunks_for_thread("t-alpha"), [], id="recent-chunks"
+            ),
+            pytest.param(lambda db: db._vector_search(_VEC, 5), None, id="thread-vec"),
+        ],
+    )
+    def test_fallback_logs_type_not_text(self, seeded_db, monkeypatch, caplog, call, expected):
+        calls = []
+
+        def boom(*_args, **_kwargs):
+            calls.append(1)
+            raise sqlite3.OperationalError(f"no such column: {_ERROR_MARKER}")
+
+        monkeypatch.setattr(seeded_db, "_fetchall", boom)
+        with caplog.at_level("DEBUG"):
+            assert call(seeded_db) == expected
+        assert calls, "the patched query must have run"
+        assert _ERROR_MARKER not in caplog.text
+        assert "OperationalError" in caplog.text
+
+    def test_recent_chunks_failure_omits_thread_id(self, seeded_db, monkeypatch, caplog):
+        """A thread id is a Message-ID, which the tool-call log withholds."""
+
+        def boom(*_args, **_kwargs):
+            raise sqlite3.OperationalError("disk I/O error")
+
+        monkeypatch.setattr(seeded_db, "_fetchall", boom)
+        with caplog.at_level("DEBUG"):
+            seeded_db.get_recent_chunks_for_thread(f"<{_ERROR_MARKER}@example.com>")
+        assert _ERROR_MARKER not in caplog.text
+
+    def test_real_fts5_error_quotes_term_but_log_does_not(self, seeded_db, monkeypatch, caplog):
+        """An unsanitized ``<term>:foo`` makes FTS5 quote ``<term>``; the
+        keyword lane still falls back to LIKE and logs only the type."""
+        import src.lib.sqlite as sqlite_mod
+
+        query = f"{_ERROR_MARKER}:foo"
+        with pytest.raises(sqlite3.OperationalError, match=_ERROR_MARKER):
+            seeded_db._fetchall("SELECT rowid FROM threads_fts WHERE threads_fts MATCH ?", [query])
+
+        monkeypatch.setattr(sqlite_mod, "_sanitize_fts_query", lambda q: q)
+        sentinel = [object()]
+        seen = []
+
+        def like(q, *_args, **_kwargs):
+            seen.append(q)
+            return sentinel
+
+        monkeypatch.setattr(seeded_db, "_like_fallback", like)
+        with caplog.at_level("DEBUG"):
+            result = seeded_db._thread_keyword_search(query, 5)
+        assert result is sentinel
+        assert seen == [query]
+        assert _ERROR_MARKER not in caplog.text
+        assert "OperationalError" in caplog.text

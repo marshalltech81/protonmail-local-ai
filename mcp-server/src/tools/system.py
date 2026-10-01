@@ -4,6 +4,7 @@ Mailbox status: how current the local index is, and what it holds.
 Claude should call get_mailbox_status before making claims about email content.
 """
 
+import asyncio
 import logging
 from datetime import UTC, datetime
 from typing import Annotated
@@ -182,10 +183,12 @@ def register_system_tools(server, db):
         """
         log.info("tool=get_mailbox_status")
         try:
-            output = _mailbox_status(db)
+            # The status queries scan aggregates; run them in a worker
+            # thread so they do not block the shared event loop.
+            output = await asyncio.to_thread(_mailbox_status, db)
         except Exception as e:
-            log.error(f"get_mailbox_status error: {e}")
-            raise ToolError(f"Mailbox status error: {e}") from e
+            log.error("get_mailbox_status error: %s", type(e).__name__)
+            raise ToolError(f"Mailbox status error: {type(e).__name__}") from e
         return tool_result(_render(output), output)
 
 

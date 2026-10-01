@@ -26,8 +26,9 @@ log = logging.getLogger("mcp.sqlite")
 
 
 class InvalidFilterError(ValueError):
-    """A date filter the caller supplied could not be parsed, or the two
-    bounds name an empty interval.
+    """A filter or query argument the caller supplied was rejected (a
+    date, a cursor, the ``query_messages`` text), or the two date bounds
+    name an empty interval.
 
     The message may quote the rejected value so the caller learns why,
     which means it must never be logged: tool handlers catch this and log
@@ -101,6 +102,12 @@ _SQLITE_VEC_MAX_K = 4096
 # Characters of a candidate's subject sent to the reranker; matches the
 # tools' ``HEADER_CHAR_LIMIT``.
 _RERANK_SUBJECT_CHARS = 500
+
+# Upper bound on the ``?`` placeholders bound into one ``IN (...)``
+# lookup. The connection's ``SQLITE_LIMIT_VARIABLE_NUMBER`` depends on
+# the SQLite build, so lookups over an unbounded ID list batch under it
+# (same bound as the indexer's).
+_IN_CLAUSE_BATCH_SIZE = 500
 
 
 def _addr_matches(haystack: list[str], query_lower: str) -> bool:
@@ -642,14 +649,14 @@ def _encode_cursor(digest: str, last: MessageRecord, offset: int) -> str:
 
 def _decode_cursor(cursor: str, digest: str) -> tuple[str, str, int]:
     """Return ``(sent_at, message_id, offset)`` of the last row already
-    returned. Raises ``ValueError`` on a malformed cursor or one issued
-    for different predicates (keyset positions only mean something within
+    returned. Raises ``InvalidFilterError`` (a ``ValueError``) on a
+    malformed cursor or one issued for different predicates (keyset positions only mean something within
     the same filtered ordering)."""
     try:
         raw = base64.urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4))
         data = json.loads(raw)
     except ValueError as exc:
-        raise ValueError(_INVALID_CURSOR) from exc
+        raise InvalidFilterError("cursor", _INVALID_CURSOR) from exc
     if not (
         isinstance(data, dict)
         and data.get("v") == 1
@@ -659,11 +666,12 @@ def _decode_cursor(cursor: str, digest: str) -> tuple[str, str, int]:
         and isinstance(data.get("o"), int)
         and data["o"] >= 0
     ):
-        raise ValueError(_INVALID_CURSOR)
+        raise InvalidFilterError("cursor", _INVALID_CURSOR)
     if data["q"] != digest:
-        raise ValueError(
+        raise InvalidFilterError(
+            "cursor",
             "cursor was issued for different filters; pass the same filters "
-            "as the call that returned it, or restart without a cursor"
+            "as the call that returned it, or restart without a cursor",
         )
     return data["s"], data["m"], data["o"]
 
@@ -1152,7 +1160,7 @@ class Database:
         try:
             rows = self._fetchall(sql, params)
         except sqlite3.OperationalError as e:
-            log.warning("Attachment filename search unavailable: %s", e)
+            log.warning("Attachment filename search unavailable: %s", type(e).__name__)
             return []
         return [_row_to_attachment_result(r) for r in rows]
 
@@ -1215,7 +1223,7 @@ class Database:
         try:
             rows = self._fetchall(sql, params)
         except sqlite3.OperationalError as e:
-            log.warning("Attachment text search unavailable: %s", e)
+            log.warning("Attachment text search unavailable: %s", type(e).__name__)
             return []
         results: list[AttachmentResult] = []
         seen: set[tuple[str, str, str]] = set()
@@ -1255,7 +1263,7 @@ class Database:
         try:
             rows = self._fetchall(sql, params)
         except sqlite3.OperationalError as e:
-            log.warning("Attachment scan unavailable: %s", e)
+            log.warning("Attachment scan unavailable: %s", type(e).__name__)
             return []
         return [_row_to_attachment_result(r) for r in rows]
 
@@ -1394,7 +1402,7 @@ class Database:
             # Defense-in-depth: if the sanitized query still trips FTS5, fall
             # back to a LIKE scan against subject/body/participants so valid
             # searches still return recall rather than empty.
-            log.warning(f"FTS keyword search error, falling back to LIKE: {e}")
+            log.warning("FTS keyword search error, falling back to LIKE: %s", type(e).__name__)
             return self._like_fallback(query, limit, folders, date_from, date_to, has_attachments)
 
     def _chunk_keyword_search(
@@ -1447,7 +1455,7 @@ class Database:
             # DB is impossible at runtime. Reaching this branch implies
             # corruption or a missing FTS shadow — log at warning so the
             # operator notices precision retrieval has degraded to none.
-            log.warning("Chunk keyword search unavailable: %s", e)
+            log.warning("Chunk keyword search unavailable: %s", type(e).__name__)
             return []
         results = [self._row_to_result(r) for r in rows]
         return self._best_per_thread(results)[:limit]
@@ -1497,7 +1505,7 @@ class Database:
             # DB is impossible at runtime. Reaching this branch implies
             # corruption or a missing FTS shadow — log at warning so the
             # operator notices attachment retrieval has degraded to none.
-            log.warning("Attachment keyword search unavailable: %s", e)
+            log.warning("Attachment keyword search unavailable: %s", type(e).__name__)
             return []
         results = [self._row_to_result(r) for r in rows]
         return self._best_per_thread(results)[:limit]
@@ -1533,7 +1541,7 @@ class Database:
         try:
             rows = self._fetchall(sql, [fts_query, *thread_ids])
         except sqlite3.Error as e:
-            log.warning("Attachment match lookup failed; skipping bias: %s", e)
+            log.warning("Attachment match lookup failed; skipping bias: %s", type(e).__name__)
             return {}
         matched: dict[str, list[str]] = {}
         for r in rows:
@@ -1652,7 +1660,7 @@ class Database:
             rows = self._fetchall(sql, params)
             return [self._row_to_result(r) for r in rows]
         except sqlite3.OperationalError as e:
-            log.warning(f"LIKE fallback search error: {e}")
+            log.warning("LIKE fallback search error: %s", type(e).__name__)
             return []
 
     def _chunk_vector_search(self, embedding: list[float], limit: int) -> list[ChunkResult] | None:
@@ -1716,7 +1724,7 @@ class Database:
             # table) and DatabaseError (corruption); ``ValueError`` is
             # raised by sqlite-vec on malformed embedding payloads. Any
             # other exception type is unexpected and should propagate.
-            log.warning(f"Chunk vector search error: {e}")
+            log.warning("Chunk vector search error: %s", type(e).__name__)
             return None
 
     def get_evidence_chunks_for_threads(
@@ -1807,7 +1815,7 @@ class Database:
             # embedding. Degrade to empty evidence rather than failing
             # the whole hybrid_search call; coarse retrieval still
             # works and the LLM falls back to ``body_text``.
-            log.warning("Per-thread evidence chunk fetch failed: %s", e)
+            log.warning("Per-thread evidence chunk fetch failed: %s", type(e).__name__)
             return {tid: [] for tid in thread_ids}
 
         # First pass: gather ALL chunks per thread (still ordered by
@@ -1906,7 +1914,7 @@ class Database:
                 (thread_id, limit),
             )
         except sqlite3.Error as e:
-            log.warning("Recent-chunks lookup failed for %s: %s", thread_id, e)
+            log.warning("Recent-chunks lookup failed: %s", type(e).__name__)
             return []
         chunks = [_row_to_chunk_result(r) for r in rows]
         # Reverse for chronological display: SELECT picked the newest
@@ -1945,7 +1953,7 @@ class Database:
             # ``sqlite3.Error`` for table/connection issues, ``ValueError``
             # for malformed serialised vectors. Other exception types
             # should propagate so corrupt-state bugs aren't masked.
-            log.warning(f"Vector search error: {e}")
+            log.warning("Vector search error: %s", type(e).__name__)
             return None
 
     def _reciprocal_rank_fusion(
@@ -1989,6 +1997,7 @@ class Database:
 
         if chunks:
             seen_threads: set[str] = set()
+            chunk_only: list[str] = []
             for rank, chunk in enumerate(chunks):
                 tid = chunk.thread_id
                 # Best-rank-only contribution: skip any later (worse-
@@ -2001,14 +2010,12 @@ class Database:
                 scores[tid] = scores.get(tid, 0) + 1.0 / (k + rank + 1)
                 lane_ranks.setdefault(tid, {})["chunk_vec"] = rank
                 if tid not in index:
-                    # Materialize chunk-only threads via a thread fetch.
-                    # Skip silently if the thread row is missing (shouldn't
-                    # happen in steady state — chunk rows live and die
-                    # with their thread — but defensive against stale
-                    # state mid-reap).
-                    fetched = self.get_thread(tid)
-                    if fetched is not None:
-                        index[tid] = fetched
+                    chunk_only.append(tid)
+            # Materialize chunk-only threads in one batched fetch. A
+            # missing thread row is skipped silently (shouldn't happen
+            # in steady state — chunk rows live and die with their
+            # thread — but defensive against stale state mid-reap).
+            index.update(self._get_threads(chunk_only))
 
         ranked = sorted(scores.items(), key=lambda x: x[1], reverse=True)
         results = []
@@ -2101,6 +2108,27 @@ class Database:
     def get_thread(self, thread_id: str) -> ThreadResult | None:
         row = self._fetchone("SELECT * FROM threads WHERE thread_id = ?", (thread_id,))
         return self._row_to_result(row) if row else None
+
+    def _get_threads(self, thread_ids: list[str]) -> dict[str, ThreadResult]:
+        """Thread rows for ``thread_ids`` keyed by id, over one connection.
+
+        The IN list is batched under ``_IN_CLAUSE_BATCH_SIZE``; ids with
+        no row are absent from the result.
+        """
+        found: dict[str, ThreadResult] = {}
+        if not thread_ids:
+            return found
+        with closing(self._connect()) as conn:
+            for start in range(0, len(thread_ids), _IN_CLAUSE_BATCH_SIZE):
+                batch = thread_ids[start : start + _IN_CLAUSE_BATCH_SIZE]
+                placeholders = ",".join("?" * len(batch))
+                rows = conn.execute(
+                    f"SELECT * FROM threads WHERE thread_id IN ({placeholders})",  # nosec B608
+                    batch,
+                ).fetchall()
+                for row in rows:
+                    found[row["thread_id"]] = self._row_to_result(row)
+        return found
 
     def get_thread_page(
         self, thread_id: str, *, offset: int, limit: int, body_char_limit: int
@@ -2417,9 +2445,9 @@ class Database:
         if text:
             terms = _text_terms(text)
             if not terms:
-                raise ValueError("text must contain at least one word")
+                raise InvalidFilterError("text", "text must contain at least one word")
             if len(terms) > _MAX_TEXT_TERMS:
-                raise ValueError(f"text supports at most {_MAX_TEXT_TERMS} words")
+                raise InvalidFilterError("text", f"text supports at most {_MAX_TEXT_TERMS} words")
             # One subquery per word, so the words may fall in different
             # chunks of the same message. Each is a quoted FTS phrase;
             # unicode61 never keeps a quote inside a token, but doubling

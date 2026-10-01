@@ -940,3 +940,34 @@ def test_utc_overflowing_date_bound_is_a_filter_error(fake_server, fake_embed, s
     assert "date_from" in text
     assert "OverflowError" not in caplog.text
     assert fake_embed.embed_calls == []
+
+
+_LOCAL_DB_MARKER = "privatemarkerq7z"
+
+
+class TestLocalDbErrorTextWithheld:
+    """search_attachments and the search_emails from_name lookup are
+    local-DB work, but a conversion error from stored rows can quote mail,
+    so a failure reaches the log and the caller as its type only (#257)."""
+
+    @pytest.mark.parametrize(
+        ("tool", "method", "kwargs"),
+        [
+            ("search_attachments", "search_attachments", {"query": "invoice"}),
+            ("search_emails", "find_contact", {"query": "invoice", "from_name": "alice"}),
+        ],
+    )
+    def test_value_error_text_is_withheld(
+        self, fake_server, fake_embed, seeded_db, monkeypatch, caplog, tool, method, kwargs
+    ):
+        def boom(*_args, **_kwargs):
+            raise ValueError(f"bad stored value {_LOCAL_DB_MARKER}")
+
+        monkeypatch.setattr(seeded_db, method, boom)
+        register_search_tools(fake_server, seeded_db, fake_embed)
+        handler = fake_server.tools[tool]
+        with caplog.at_level("DEBUG"):
+            text = _error(handler(**kwargs))
+        assert _LOCAL_DB_MARKER not in text
+        assert _LOCAL_DB_MARKER not in caplog.text
+        assert "ValueError" in text

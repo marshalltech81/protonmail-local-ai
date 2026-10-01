@@ -41,9 +41,14 @@ would not chain; `get_thread` states the thread ID once rather than on
 every message row. `get_message` returns full headers and the full body.
 
 A failure (unknown thread or message, invalid argument, provider or
-database error) is an MCP error result (`isError: true`) whose text
-states the reason; it carries no structured content. An empty match is
-not a failure: it is a normal result with an empty list.
+database error) is an MCP error result (`isError: true`); it carries no
+structured content. Fixed messages state the reason: an unknown thread
+or message, an invalid argument (naming the field), an unavailable
+vector index. Any other database or conversion error is reported, and
+logged, as its exception type name alone (for example `Error:
+OperationalError`), because an SQLite message can quote the query or
+stored mail; the server log then shows the same type for that call. An
+empty match is not a failure: it is a normal result with an empty list.
 
 In the tools that call the embed or inference provider (`search_emails`,
 `get_evidence` and the intelligence tools), a provider or database

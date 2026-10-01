@@ -453,6 +453,24 @@ class TestListThreads:
         assert "Error" in text
         assert "filter_type" in text
 
+    def test_value_error_after_validation_is_type_only(
+        self, fake_server, seeded_db, monkeypatch, caplog
+    ):
+        """Only the filter_type check returns its message; any other
+        ValueError (row conversion, output validation) can quote stored
+        mail, so it reaches the caller and the log as its type (#257)."""
+
+        def boom(*_args, **_kwargs):
+            raise ValueError(f"bad date {_ERROR_MARKER}")
+
+        monkeypatch.setattr(seeded_db, "list_threads", boom)
+        handler = _handlers(fake_server, seeded_db)["list_threads"]
+        with caplog.at_level("DEBUG"):
+            text = _error(handler(folder="INBOX"))
+        assert _ERROR_MARKER not in text
+        assert _ERROR_MARKER not in caplog.text
+        assert "ValueError" in text
+
 
 class TestListFolders:
     def test_lists_each_folder_with_count(self, fake_server, seeded_db):
@@ -658,3 +676,77 @@ class TestQueryMessages:
         messages_db.query_messages = boom  # type: ignore[assignment]
         handler = _handlers(fake_server, messages_db)["query_messages"]
         assert "Error" in _error(handler())
+
+
+_ERROR_MARKER = "privatemarkerq7z"
+
+
+class TestQueryMessagesValueErrorWithheld:
+    def test_conversion_value_error_is_type_only(
+        self, fake_server, messages_db, monkeypatch, caplog
+    ):
+        """Only argument validation (InvalidFilterError) returns its text;
+        a ValueError from converting stored rows can quote mail (#257)."""
+
+        def boom(*_args, **_kwargs):
+            raise ValueError(f"bad stored value {_ERROR_MARKER}")
+
+        monkeypatch.setattr(messages_db, "query_messages", boom)
+        handler = _handlers(fake_server, messages_db)["query_messages"]
+        with caplog.at_level("DEBUG"):
+            text = _error(handler(text="budget"))
+        assert _ERROR_MARKER not in text
+        assert _ERROR_MARKER not in caplog.text
+        assert "ValueError" in text
+
+    @pytest.mark.parametrize(
+        ("kwargs", "expected"),
+        [
+            ({"text": "!!!"}, "at least one word"),
+            ({"cursor": "not-a-cursor"}, "cursor"),
+            ({"date_from": "yesterday-ish"}, "date_from"),
+        ],
+    )
+    def test_validation_messages_still_reach_the_caller(
+        self, fake_server, messages_db, caplog, kwargs, expected
+    ):
+        handler = _handlers(fake_server, messages_db)["query_messages"]
+        with caplog.at_level("DEBUG"):
+            text = _error(handler(**kwargs))
+        assert expected in text
+        for value in kwargs.values():
+            assert value not in caplog.text
+
+
+class TestHandlerErrorTextWithheld:
+    """A query-path failure reaches the log and the caller as its type
+    only: an SQLite error can quote withheld arguments (an FTS5 error
+    quotes the term) or stored mail (#257)."""
+
+    @pytest.mark.parametrize(
+        ("fixture", "tool", "method", "kwargs"),
+        [
+            ("seeded_db", "get_thread", "get_thread_page", {"thread_id": "t-alpha"}),
+            ("seeded_db", "get_message", "get_message_view", {"message_id": "t-alpha"}),
+            ("seeded_db", "list_threads", "list_threads", {"folder": "INBOX"}),
+            ("messages_db", "query_messages", "query_messages", {"text": "budget"}),
+            ("seeded_db", "find_contact", "find_contact", {"query": "alice"}),
+            ("seeded_db", "list_folders", "list_folders", {}),
+        ],
+    )
+    def test_sqlite_error_text_is_withheld(
+        self, request, fake_server, monkeypatch, caplog, fixture, tool, method, kwargs
+    ):
+        db = request.getfixturevalue(fixture)
+
+        def boom(*_args, **_kwargs):
+            raise sqlite3.OperationalError(f"no such column: {_ERROR_MARKER}")
+
+        monkeypatch.setattr(db, method, boom)
+        handler = _handlers(fake_server, db)[tool]
+        with caplog.at_level("DEBUG"):
+            text = _error(handler(**kwargs))
+        assert _ERROR_MARKER not in text
+        assert _ERROR_MARKER not in caplog.text
+        assert "OperationalError" in text
+        assert "OperationalError" in caplog.text
