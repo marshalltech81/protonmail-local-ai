@@ -1152,7 +1152,7 @@ class TestPdfDigitalExtractor:
 
         from pathlib import Path as _P
 
-        from src.extractors.pdf import _extract_digital
+        from src.extractors.pdf import _extract_digital_pages
 
         fixture = _P(__file__).parent / "fixtures" / "extractors" / "digital.pdf"
         if not fixture.exists():
@@ -1188,10 +1188,10 @@ class TestPdfDigitalExtractor:
                 writer.write(f)
 
         payload = fixture.read_bytes()
-        text = _extract_digital(payload)
+        text = _extract_digital_pages(payload)[0]
         # The fixture's content stream contains a literal "Invoice
         # number 42". Assert the digital path round-trips it so a
-        # regression in the pypdf pin or in ``_extract_digital``
+        # regression in the pypdf pin or in ``_extract_digital_pages``
         # surfaces here rather than silently degrading retrieval.
         assert "Invoice number 42" in text
 
@@ -1200,8 +1200,8 @@ class TestPdfDigitalExtractor:
 
         monkeypatch.setattr(
             pdf,
-            "_extract_digital",
-            lambda payload, **_: "Invoice number 42 with enough digital text to clear threshold.",
+            "_extract_digital_pages",
+            lambda payload, **_: ["Invoice number 42 with enough digital text to clear threshold."],
         )
         monkeypatch.setattr(
             pdf,
@@ -1215,17 +1215,17 @@ class TestPdfDigitalExtractor:
         assert name == "pdf-digital"
 
     def test_ocr_fallback_invoked_when_digital_too_short(self, monkeypatch):
-        """When ``_extract_digital`` returns near-empty text (a scanned
+        """When ``_extract_digital_pages`` returns near-empty text (a scanned
         PDF), the dispatcher must call into the OCR path. Mocked here to
         avoid requiring Tesseract + Poppler at test time.
         """
         from src.extractors import pdf
 
-        monkeypatch.setattr(pdf, "_extract_digital", lambda payload, **_: "")
+        monkeypatch.setattr(pdf, "_extract_digital_pages", lambda payload, **_: ["", ""])
         monkeypatch.setattr(
             pdf,
             "_extract_ocr",
-            lambda payload, **_: "OCR'd page 1\n\nOCR'd page 2",
+            lambda payload, **_: {0: "OCR'd page 1", 1: "OCR'd page 2"},
         )
 
         text, name = pdf.extract(b"%PDF-1.7 (mocked)", ocr_enabled=True, max_ocr_pages=5)
@@ -1240,7 +1240,7 @@ class TestPdfDigitalExtractor:
         """
         from src.extractors import pdf
 
-        monkeypatch.setattr(pdf, "_extract_digital", lambda payload, **_: "")
+        monkeypatch.setattr(pdf, "_extract_digital_pages", lambda payload, **_: [""])
 
         def fail_ocr(payload, **_):
             raise RuntimeError("poppler missing")
@@ -1254,14 +1254,14 @@ class TestPdfDigitalExtractor:
         )
 
         assert result.status == STATUS_FAILED
-        assert result.extractor == "pdf"
+        assert result.extractor == "pdf@2"
         assert result.text is None
         assert result.error == "RuntimeError"
 
     def test_ocr_disabled_returns_digital_text_only(self, monkeypatch):
         from src.extractors import pdf
 
-        monkeypatch.setattr(pdf, "_extract_digital", lambda payload, **_: "tiny")
+        monkeypatch.setattr(pdf, "_extract_digital_pages", lambda payload, **_: ["tiny"])
         # OCR must NOT be called when ocr_enabled=False, even if digital
         # text is too short to satisfy ``_MIN_DIGITAL_CHARS``. The sentinel
         # extractor name lets the dispatcher cache an OCR-disabled row that
@@ -1281,7 +1281,7 @@ class TestPdfDigitalExtractor:
     def test_ocr_disabled_scanned_pdf_dispatches_as_unsupported(self, monkeypatch):
         from src.extractors import pdf
 
-        monkeypatch.setattr(pdf, "_extract_digital", lambda payload, **_: "tiny")
+        monkeypatch.setattr(pdf, "_extract_digital_pages", lambda payload, **_: ["tiny"])
         monkeypatch.setattr(
             pdf,
             "_extract_ocr",
@@ -1328,7 +1328,7 @@ class TestPdfDigitalExtractor:
             return [Image.new("RGB", (4, 4), color="white")]
 
         monkeypatch.setattr("pdf2image.convert_from_bytes", fake_convert)
-        monkeypatch.setattr(pdf, "_ocr_dpi", lambda payload, max_ocr_pages: 200)
+        monkeypatch.setattr(pdf, "_ocr_dpi", lambda payload, pages: 200)
         monkeypatch.setattr(
             "pytesseract.image_to_string",
             lambda image, **_: "ocr text",
@@ -1345,9 +1345,9 @@ class TestPdfDigitalExtractor:
             lambda **kwargs: real_temp_dir(dir=str(tmp_path)),
         )
 
-        text = pdf._extract_ocr(b"%PDF-1.7", max_ocr_pages=1)
+        text = pdf._extract_ocr(b"%PDF-1.7", pages=[0])
 
-        assert text == "ocr text"
+        assert text == {0: "ocr text"}
         assert captured["output_folder"].startswith(str(tmp_path))
         assert not os.path.exists(captured["output_folder"]), (
             "TemporaryDirectory must be removed on success"
@@ -1374,7 +1374,7 @@ class TestPdfDigitalExtractor:
             raise OSError(28, "No space left on device")
 
         monkeypatch.setattr("pdf2image.convert_from_bytes", fake_convert)
-        monkeypatch.setattr(pdf, "_ocr_dpi", lambda payload, max_ocr_pages: 200)
+        monkeypatch.setattr(pdf, "_ocr_dpi", lambda payload, pages: 200)
         real_temp_dir = _tempfile_mod.TemporaryDirectory
         monkeypatch.setattr(
             pdf.tempfile,
@@ -1383,7 +1383,7 @@ class TestPdfDigitalExtractor:
         )
 
         with pytest.raises(OSError):
-            pdf._extract_ocr(b"%PDF-1.7", max_ocr_pages=1)
+            pdf._extract_ocr(b"%PDF-1.7", pages=[0])
 
         assert "output_folder" in captured
         assert not os.path.exists(captured["output_folder"]), (
@@ -1428,7 +1428,7 @@ class TestPdfDigitalExtractor:
         from src.extractors import pdf
 
         captured = self._capture_render(monkeypatch, tmp_path)
-        pdf._extract_ocr(self._blank_pdf(612, 792), max_ocr_pages=5)
+        pdf._extract_ocr(self._blank_pdf(612, 792), pages=[0])
         assert captured["dpi"] == 200
 
     def test_ocr_lowers_dpi_for_oversized_pages(self, monkeypatch, tmp_path):
@@ -1439,7 +1439,7 @@ class TestPdfDigitalExtractor:
         from src.extractors import pdf
 
         captured = self._capture_render(monkeypatch, tmp_path)
-        pdf._extract_ocr(self._blank_pdf(14_400, 14_400), max_ocr_pages=5)
+        pdf._extract_ocr(self._blank_pdf(14_400, 14_400), pages=[0])
         side = 14_400 / 72 * captured["dpi"]
         assert 1 <= captured["dpi"] < 200
         assert side * side <= pdf._MAX_OCR_PAGE_PIXELS
@@ -1460,7 +1460,7 @@ class TestPdfDigitalExtractor:
 
         captured = self._capture_render(monkeypatch, tmp_path)
         with pytest.raises(ValueError, match="too large"):
-            pdf._extract_ocr(buf.getvalue(), max_ocr_pages=5)
+            pdf._extract_ocr(buf.getvalue(), pages=[0])
         assert captured == {}
 
     def test_ocr_budget_counts_rounded_pixel_sides(self, monkeypatch, tmp_path):
@@ -1482,7 +1482,7 @@ class TestPdfDigitalExtractor:
         writer.write(buf)
 
         captured = self._capture_render(monkeypatch, tmp_path)
-        pdf._extract_ocr(buf.getvalue(), max_ocr_pages=5)
+        pdf._extract_ocr(buf.getvalue(), pages=[0])
         dpi = captured["dpi"]
         width_px = math.ceil(0.01 * 1_000 / 72 * dpi)
         height_px = math.ceil(14_400 * 1_000 / 72 * dpi)
@@ -1494,8 +1494,8 @@ class TestPdfDigitalExtractor:
         from src.extractors import pdf
 
         captured = self._capture_render(monkeypatch, tmp_path)
-        pdf._extract_ocr(self._blank_pdf(612, 792), max_ocr_pages=5, ocr_timeout_seconds=45)
-        assert captured["timeout"] == 45
+        pdf._extract_ocr(self._blank_pdf(612, 792), pages=[0], ocr_timeout_seconds=45)
+        assert 40 < captured["timeout"] <= 45
 
     def test_unreadable_page_sizes_fail_before_rendering(self, monkeypatch, tmp_path):
         """If the page sizes cannot be read the raster size is unknown, so
@@ -1504,8 +1504,275 @@ class TestPdfDigitalExtractor:
 
         captured = self._capture_render(monkeypatch, tmp_path)
         with pytest.raises(Exception):  # noqa: B017 — any pypdf parse error
-            pdf._extract_ocr(b"%PDF-1.7 not a real pdf", max_ocr_pages=5)
+            pdf._extract_ocr(b"%PDF-1.7 not a real pdf", pages=[0])
         assert captured == {}
+
+
+class TestPdfPageLevelOcr:
+    """#292: the 40-character floor applied to the whole document, so a
+    PDF with one digital page and one scanned page never OCR'd the
+    scanned one. OCR now runs on each page whose own text layer is
+    under the floor, at most ``max_ocr_pages`` of them per document.
+
+    Poppler and Tesseract are faked: each render call and each OCR call
+    is recorded, so the tests assert the work done, not only the text.
+    """
+
+    DIGITAL = "Quarterly statement for the synthetic account holder, page {n}."
+    SCANNED = "SCANNED_PAGE_WORDS"
+
+    @classmethod
+    def _pdf(cls, layout: str) -> bytes:
+        """One page per character: ``d`` has a digital text layer, ``s``
+        has none (what pypdf sees on a scanned page)."""
+        import io as _io
+
+        from pypdf import PdfWriter
+        from pypdf.generic import ContentStream, DictionaryObject, NameObject
+
+        writer = PdfWriter()
+        font = DictionaryObject(
+            {
+                NameObject("/Type"): NameObject("/Font"),
+                NameObject("/Subtype"): NameObject("/Type1"),
+                NameObject("/BaseFont"): NameObject("/Helvetica"),
+            }
+        )
+        for n, kind in enumerate(layout, start=1):
+            page = writer.add_blank_page(width=612, height=792)
+            if kind == "d":
+                stream = ContentStream(None, writer)
+                text = cls.DIGITAL.format(n=n).encode()
+                stream._data = b"BT /F1 12 Tf 72 720 Td (" + text + b") Tj ET"
+                # Indirect, as Poppler requires of a page content stream.
+                page[NameObject("/Contents")] = writer._add_object(stream)
+                page[NameObject("/Resources")] = DictionaryObject(
+                    {NameObject("/Font"): DictionaryObject({NameObject("/F1"): font})}
+                )
+        buf = _io.BytesIO()
+        writer.write(buf)
+        return buf.getvalue()
+
+    @staticmethod
+    def _fake_ocr(monkeypatch, tmp_path, *, fail: bool = False) -> dict:
+        """Record every render (first, last page) and OCR call."""
+        import tempfile as _tempfile_mod
+
+        from PIL import Image
+        from src.extractors import pdf
+
+        work: dict = {"renders": [], "timeouts": [], "ocr_calls": 0}
+
+        def fake_convert(payload, **kwargs):
+            first, last = kwargs["first_page"], kwargs["last_page"]
+            work["renders"].append((first, last))
+            work["timeouts"].append(kwargs.get("timeout"))
+            return [Image.new("RGB", (4, 4), color="white") for _ in range(first, last + 1)]
+
+        def fake_tesseract(image, **_):
+            work["ocr_calls"] += 1
+            if fail:
+                raise RuntimeError("SYNTHETIC_OCR_MARKER")
+            return f"{TestPdfPageLevelOcr.SCANNED} {work['ocr_calls']}"
+
+        monkeypatch.setattr("pdf2image.convert_from_bytes", fake_convert)
+        monkeypatch.setattr("pytesseract.image_to_string", fake_tesseract)
+        real_temp_dir = _tempfile_mod.TemporaryDirectory
+        monkeypatch.setattr(
+            pdf.tempfile,
+            "TemporaryDirectory",
+            lambda **kwargs: real_temp_dir(dir=str(tmp_path)),
+        )
+        return work
+
+    def _extract(self, layout: str, **kwargs) -> ExtractionResult:
+        return extract(
+            content_type="application/pdf",
+            filename="statement.pdf",
+            payload=self._pdf(layout),
+            **kwargs,
+        )
+
+    def test_mixed_pdf_ocrs_its_scanned_page(self, monkeypatch, tmp_path):
+        work = self._fake_ocr(monkeypatch, tmp_path)
+        result = self._extract("ds")
+        assert result.status == STATUS_SUCCESS
+        assert result.extractor == "pdf-ocr@2"
+        assert result.text is not None
+        assert self.DIGITAL.format(n=1) in result.text
+        assert self.SCANNED in result.text
+        # Only page 2 is rendered and read; the digital page is not.
+        assert work["renders"] == [(2, 2)]
+        assert work["ocr_calls"] == 1
+
+    def test_text_keeps_page_order_and_skips_digital_pages(self, monkeypatch, tmp_path):
+        work = self._fake_ocr(monkeypatch, tmp_path)
+        result = self._extract("dsdss")
+        # One render per run of scanned pages, three pages read in all.
+        assert work["renders"] == [(2, 2), (4, 5)]
+        assert work["ocr_calls"] == 3
+        text = result.text or ""
+        positions = [
+            text.index(self.DIGITAL.format(n=1)),
+            text.index(f"{self.SCANNED} 1"),
+            text.index(self.DIGITAL.format(n=3)),
+            text.index(f"{self.SCANNED} 2"),
+            text.index(f"{self.SCANNED} 3"),
+        ]
+        assert positions == sorted(positions)
+
+    def test_page_cap_bounds_the_scanned_pages_per_document(self, monkeypatch, tmp_path):
+        work = self._fake_ocr(monkeypatch, tmp_path)
+        self._extract("d" + "s" * 30, max_ocr_pages=5)
+        assert work["renders"] == [(2, 6)]
+        assert work["ocr_calls"] == 5
+
+    def test_page_cap_counts_pages_across_runs(self, monkeypatch, tmp_path):
+        work = self._fake_ocr(monkeypatch, tmp_path)
+        self._extract("sd" * 10, max_ocr_pages=3)
+        assert work["renders"] == [(1, 1), (3, 3), (5, 5)]
+        assert work["ocr_calls"] == 3
+
+    def test_digital_pdf_renders_nothing(self, monkeypatch, tmp_path):
+        work = self._fake_ocr(monkeypatch, tmp_path)
+        result = self._extract("dd")
+        assert result.extractor == "pdf-digital@2"
+        assert work["renders"] == [] and work["ocr_calls"] == 0
+
+    def test_scanned_pdf_still_ocrs_every_page_within_the_cap(self, monkeypatch, tmp_path):
+        work = self._fake_ocr(monkeypatch, tmp_path)
+        result = self._extract("sss")
+        assert result.extractor == "pdf-ocr@2"
+        assert work["renders"] == [(1, 3)]
+        assert work["ocr_calls"] == 3
+
+    def test_mixed_pdf_with_ocr_off_keeps_its_digital_text(self, monkeypatch, tmp_path):
+        work = self._fake_ocr(monkeypatch, tmp_path)
+        result = self._extract("ds", ocr_enabled=False)
+        assert result.status == STATUS_SUCCESS
+        assert result.extractor == "pdf-digital@2"
+        assert work["renders"] == [] and work["ocr_calls"] == 0
+
+    def test_ocr_failure_on_a_mixed_pdf_keeps_the_digital_text(self, monkeypatch, tmp_path, caplog):
+        """Before #292 a mixed PDF was indexed from its text layer alone;
+        a page OCR cannot read must not lose that text."""
+        caplog.set_level("DEBUG")
+        self._fake_ocr(monkeypatch, tmp_path, fail=True)
+        result = self._extract("ds")
+        assert result.status == STATUS_SUCCESS
+        assert result.extractor == "pdf-digital@2"
+        assert result.text == self.DIGITAL.format(n=1)
+        assert "RuntimeError" in caplog.text
+        assert "SYNTHETIC_OCR_MARKER" not in caplog.text
+
+    @pytest.mark.parametrize("error", [MemoryError, RecursionError])
+    def test_host_pressure_during_ocr_is_not_swallowed(self, monkeypatch, error):
+        from src.extractors import pdf
+
+        def raise_error(payload, **_):
+            raise error()
+
+        monkeypatch.setattr(pdf, "_extract_ocr", raise_error)
+        with pytest.raises(error):
+            self._extract("ds")
+
+    def test_ocr_failure_on_a_scanned_pdf_is_still_failed(self, monkeypatch, tmp_path):
+        self._fake_ocr(monkeypatch, tmp_path, fail=True)
+        result = self._extract("ss")
+        assert result.status == STATUS_FAILED
+        assert result.error == "RuntimeError"
+
+    def test_render_deadline_is_shared_by_every_run(self, monkeypatch, tmp_path):
+        """The render timeout bounds the whole document, as when it was one
+        Poppler call: each run gets what is left, and none starts once
+        the budget is spent."""
+        from src.extractors import pdf
+
+        work = self._fake_ocr(monkeypatch, tmp_path)
+        clock = {"now": 0.0}
+        real_convert = __import__("pdf2image").convert_from_bytes
+
+        def slow_convert(payload, **kwargs):
+            clock["now"] += 20.0
+            return real_convert(payload, **kwargs)
+
+        monkeypatch.setattr("pdf2image.convert_from_bytes", slow_convert)
+        monkeypatch.setattr(pdf.time, "monotonic", lambda: clock["now"])
+
+        payload = self._pdf("sdsds")
+        assert len(pdf._extract_ocr(payload, pages=[0, 2, 4], ocr_timeout_seconds=45)) == 3
+        assert work["timeouts"] == [45, 25, 5]
+
+        work["renders"].clear()
+        clock["now"] = 0.0
+        with pytest.raises(TimeoutError):
+            pdf._extract_ocr(payload, pages=[0, 2, 4], ocr_timeout_seconds=30)
+        assert work["renders"] == [(1, 1), (3, 3)]
+
+    def test_ocr_time_does_not_count_against_the_render_budget(self, monkeypatch, tmp_path):
+        """Review round 1: the render deadline was wall-clock, so a slow
+        Tesseract page between two fast renders spent it and the next
+        render was refused. Only Poppler time counts."""
+        from src.extractors import pdf
+
+        work = self._fake_ocr(monkeypatch, tmp_path)
+        clock = {"now": 0.0}
+        real_convert = __import__("pdf2image").convert_from_bytes
+        real_tesseract = __import__("pytesseract").image_to_string
+
+        def fast_convert(payload, **kwargs):
+            clock["now"] += 1.0
+            return real_convert(payload, **kwargs)
+
+        def slow_tesseract(image, **kwargs):
+            clock["now"] += 50.0
+            return real_tesseract(image, **kwargs)
+
+        monkeypatch.setattr("pdf2image.convert_from_bytes", fast_convert)
+        monkeypatch.setattr("pytesseract.image_to_string", slow_tesseract)
+        monkeypatch.setattr(pdf.time, "monotonic", lambda: clock["now"])
+
+        texts = pdf._extract_ocr(self._pdf("sdsds"), pages=[0, 2, 4], ocr_timeout_seconds=45)
+        assert len(texts) == 3
+        assert work["renders"] == [(1, 1), (3, 3), (5, 5)]
+        assert work["ocr_calls"] == 3
+        assert work["timeouts"] == [45, 44, 43]
+
+    def test_dpi_is_sized_from_the_pages_rendered(self, monkeypatch, tmp_path):
+        """An oversized digital page that is never rendered must not lower
+        the DPI of the scanned pages."""
+        import io as _io
+
+        from pypdf import PdfReader, PdfWriter
+        from src.extractors import pdf
+
+        mixed = PdfReader(_io.BytesIO(self._pdf("ds")))
+        writer = PdfWriter()
+        writer.add_page(mixed.pages[0])
+        writer.pages[0].mediabox.upper_right = (14_400, 14_400)
+        writer.add_page(mixed.pages[1])
+        buf = _io.BytesIO()
+        writer.write(buf)
+        assert pdf._ocr_dpi(buf.getvalue(), [1]) == 200
+        assert pdf._ocr_dpi(buf.getvalue(), [0, 1]) < 200
+
+
+class TestPdfExtractorVersion:
+    """#292 changes what the PDF extractor returns for the same bytes, so
+    rows it wrote before the fix (unversioned) must be re-extracted."""
+
+    @pytest.mark.parametrize("name", ["pdf-digital", "pdf-ocr", "pdf"])
+    def test_pre_bump_pdf_rows_are_stale(self, name):
+        from src.extractors import EXTRACTOR_VERSIONS, stale_extractor_module
+
+        assert EXTRACTOR_VERSIONS["pdf"] == 2
+        assert stale_extractor_module(name) == "pdf"
+
+    @pytest.mark.parametrize("name", ["pdf-digital@2", "pdf-ocr@2", "pdf@2"])
+    def test_current_pdf_rows_are_not_stale(self, name):
+        from src.extractors import stale_extractor_module
+
+        assert stale_extractor_module(name) is None
 
 
 class TestImageExtractor:
@@ -1892,7 +2159,7 @@ class TestMailContentStaysOutOfLogsAndErrors:
 
         monkeypatch.setattr(pdf.pypdf, "PdfReader", FakeReader)
 
-        assert pdf._extract_digital(b"%PDF-1.7") == ""
+        assert pdf._extract_digital_pages(b"%PDF-1.7") == [""]
         assert "ValueError" in caplog.text
         assert "SYNTHETIC_PYPDF_MARKER" not in caplog.text
 
@@ -1900,7 +2167,7 @@ class TestMailContentStaysOutOfLogsAndErrors:
         from src.extractors import pdf
 
         caplog.set_level("DEBUG")
-        monkeypatch.setattr(pdf, "_extract_digital", lambda payload, **_: "")
+        monkeypatch.setattr(pdf, "_extract_digital_pages", lambda payload, **_: [""])
 
         def fail_ocr(payload, **_):
             raise RuntimeError("SYNTHETIC_OCR_MARKER")

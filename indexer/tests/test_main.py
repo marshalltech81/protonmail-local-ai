@@ -19,12 +19,13 @@ import os
 import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 from src import main, parser
 from src.database import EMBEDDING_DIM, Database
 from src.maildir import SyncStamp
-from src.queue import REASON_INITIAL_SCAN, IndexingQueue
+from src.queue import REASON_INITIAL_SCAN, REASON_REEXTRACT, IndexingQueue
 from src.threader import Threader
 from src.timings import TimingAggregator
 
@@ -2905,6 +2906,173 @@ class TestRequeueStaleExtractions:
             queue.mark_failed(str(path), stage="embed", error="x")
         assert queue.is_dead(str(path))
         assert main._requeue_stale_extractions(db, queue) == 0
+
+
+class TestRequeueOcrDisabledExtractions:
+    """#300: attachments skipped while OCR was off are cached "OCR
+    disabled" (images, and PDFs with no digital text layer). Turning OCR
+    on must re-queue the messages carrying them once, or the skipped
+    attachments are never read."""
+
+    @staticmethod
+    def _write_eml(path: Path, message_id: str, payload: bytes, ctype: str, filename: str):
+        from email.message import EmailMessage
+
+        maintype, subtype = ctype.split("/")
+        msg = EmailMessage()
+        msg["From"] = "alice@example.com"
+        msg["To"] = "bob@example.com"
+        msg["Subject"] = "Scan"
+        msg["Message-ID"] = f"<{message_id}>"
+        msg["Date"] = "Mon, 01 Jan 2024 12:00:00 +0000"
+        msg.set_content("See the attached scan.")
+        msg.add_attachment(payload, maintype=maintype, subtype=subtype, filename=filename)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(bytes(msg))
+
+    @staticmethod
+    def _png() -> bytes:
+        import io
+
+        from PIL import Image
+
+        buf = io.BytesIO()
+        Image.new("RGB", (8, 8), color="white").save(buf, "PNG")
+        return buf.getvalue()
+
+    @staticmethod
+    def _scanned_pdf() -> bytes:
+        import io
+
+        from pypdf import PdfWriter
+
+        writer = PdfWriter()
+        writer.add_blank_page(width=612, height=792)
+        buf = io.BytesIO()
+        writer.write(buf)
+        return buf.getvalue()
+
+    def _drain(self, db, queue):
+        return main._drain_queue_batched(
+            db,
+            make_mock_embedder(_UNIT_VECTOR),
+            Threader(db),
+            queue,
+            batch_size=10,
+            timing_aggregator=main.TimingAggregator(window=4),
+            max_passes=1,
+        )
+
+    def _index_with_ocr_off(self, tmp_path, monkeypatch, messages):
+        """Index ``messages`` (name -> (payload, MIME type, filename)) with
+        OCR off; return the db, queue and paths."""
+        maildir = tmp_path / "maildir"
+        monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
+        db = Database(tmp_path / "mail.db")
+        queue = _make_queue(db)
+        paths = {}
+        for name, (payload, ctype, filename) in messages.items():
+            path = maildir / "INBOX" / "cur" / f"{name}.eml"
+            self._write_eml(path, f"{name}@example.com", payload, ctype, filename)
+            queue.enqueue(str(path), REASON_INITIAL_SCAN)
+            paths[name] = str(path)
+        monkeypatch.setattr(main, "INDEXER_OCR_ENABLED", False)
+        self._drain(db, queue)
+        return db, queue, paths
+
+    @staticmethod
+    def _queued(db) -> dict[str, str]:
+        rows = db._conn.execute(
+            "SELECT filepath, reason FROM indexing_jobs WHERE status = 'queued'"
+        ).fetchall()
+        return {r["filepath"]: r["reason"] for r in rows}
+
+    def test_skipped_images_and_scanned_pdfs_are_requeued_once(self, tmp_path, monkeypatch):
+        from src import attachment_indexing
+        from src.extractors import (
+            OCR_DISABLED_ERROR,
+            SCANNED_PDF_OCR_DISABLED_ERROR,
+            STATUS_SUCCESS,
+            ExtractionResult,
+        )
+
+        db, queue, paths = self._index_with_ocr_off(
+            tmp_path,
+            monkeypatch,
+            {
+                "photo": (self._png(), "image/png", "photo.png"),
+                "scan": (self._scanned_pdf(), "application/pdf", "scan.pdf"),
+            },
+        )
+        rows = db.find_ocr_disabled_attachments()
+        assert sorted((r["filepath"], r["extraction_error"]) for r in rows) == sorted(
+            [
+                (paths["photo"], OCR_DISABLED_ERROR),
+                (paths["scan"], SCANNED_PDF_OCR_DISABLED_ERROR),
+            ]
+        )
+        assert self._queued(db) == {}
+
+        # Still off: nothing to re-run.
+        assert main._requeue_stale_extractions(db, queue) == 0
+        assert self._queued(db) == {}
+
+        monkeypatch.setattr(main, "INDEXER_OCR_ENABLED", True)
+        assert main._requeue_stale_extractions(db, queue) == 2
+        assert self._queued(db) == {
+            paths["photo"]: REASON_REEXTRACT,
+            paths["scan"]: REASON_REEXTRACT,
+        }
+
+        extractor = MagicMock(
+            return_value=ExtractionResult(
+                status=STATUS_SUCCESS, extractor="image-ocr@2", text="scanned words", error=None
+            )
+        )
+        monkeypatch.setattr(attachment_indexing, "extract_attachment", extractor)
+        self._drain(db, queue)
+        assert extractor.call_count == 2
+        assert db.find_ocr_disabled_attachments() == []
+
+        # The next startup finds nothing left to re-run.
+        assert main._requeue_stale_extractions(db, queue) == 0
+        assert self._queued(db) == {}
+
+    def test_occurrence_that_would_not_rerun_is_not_requeued(self, tmp_path, monkeypatch):
+        """Bytes cached "OCR disabled" from an image, carried only as
+        ``.bin`` by a live message: reprocessing that message would serve
+        the row again (no extractor for ``.bin``), so re-queueing it would
+        repeat on every startup."""
+        db, queue, paths = self._index_with_ocr_off(
+            tmp_path,
+            monkeypatch,
+            {
+                "photo": (self._png(), "image/png", "photo.png"),
+                "blob": (self._png(), "application/octet-stream", "blob.bin"),
+            },
+        )
+        assert len(db.find_ocr_disabled_attachments()) == 2
+        queue.enqueue(paths["photo"], REASON_INITIAL_SCAN)
+        for _ in range(queue.max_attempts):
+            queue.mark_failed(paths["photo"], stage="embed", error="x")
+        assert queue.is_dead(paths["photo"])
+
+        monkeypatch.setattr(main, "INDEXER_OCR_ENABLED", True)
+        assert main._requeue_stale_extractions(db, queue) == 0
+        assert main._requeue_stale_extractions(db, queue) == 0
+        assert self._queued(db) == {}
+
+    def test_pending_rows_and_disabled_extraction_are_left_alone(self, tmp_path, monkeypatch):
+        db, queue, paths = self._index_with_ocr_off(
+            tmp_path, monkeypatch, {"photo": (self._png(), "image/png", "photo.png")}
+        )
+        monkeypatch.setattr(main, "INDEXER_OCR_ENABLED", True)
+        monkeypatch.setattr(main, "INDEXER_ATTACHMENT_EXTRACTION_ENABLED", False)
+        assert main._requeue_stale_extractions(db, queue) == 0
+        monkeypatch.setattr(main, "INDEXER_ATTACHMENT_EXTRACTION_ENABLED", True)
+        queue.enqueue(paths["photo"], REASON_INITIAL_SCAN)
+        assert main._requeue_stale_extractions(db, queue) == 0
+        assert self._queued(db) == {paths["photo"]: REASON_INITIAL_SCAN}
 
 
 class TestPeriodicRecoverySkipsDeadLetter:

@@ -110,6 +110,15 @@ def _unsupported_still_holds(error: str | None, attachment: Attachment, ocr_enab
     return module is None
 
 
+def reruns_once_ocr_is_on(error: str | None, content_type: str, filename: str) -> bool:
+    """Whether reprocessing an occurrence (by its MIME type and filename)
+    of bytes cached as an ``unsupported`` result with ``error`` re-runs
+    extraction once OCR is on. The startup sweep re-queues by this, so
+    it shares ``_unsupported_still_holds`` with the cache check."""
+    occurrence = Attachment(filename=filename, content_type=content_type, size=0)
+    return not _unsupported_still_holds(error, occurrence, ocr_enabled=True)
+
+
 def _cache_hit_short_circuits(cached: dict, attachment: Attachment, ocr_enabled: bool) -> bool:
     """Return True when ``cached`` should short-circuit re-extraction.
 

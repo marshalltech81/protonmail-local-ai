@@ -187,6 +187,24 @@ def test_cache_row_from_the_unversioned_xlsx_extractor_is_re_extracted(tmp_path,
     )
     extractor.assert_called_once()
     assert extractor.call_args.kwargs["module_override"] == "xlsx"
+
+
+def test_pre_bump_pdf_row_is_re_extracted_by_the_pdf_extractor(tmp_path, monkeypatch):
+    """#292: rows the PDF extractor wrote before page-level OCR selection
+    (unversioned ``pdf-digital``) skipped a mixed PDF's scanned pages, so
+    they are a cache miss that re-runs the PDF extractor."""
+    db = _seed_thread_for_cache_test(tmp_path)
+    extractor, row = _process_with_cached_extractor(
+        db,
+        "pdf-digital",
+        STATUS_SUCCESS,
+        "digital page only",
+        monkeypatch,
+        filename="statement.pdf",
+        content_type="application/pdf",
+    )
+    extractor.assert_called_once()
+    assert extractor.call_args.kwargs["module_override"] == "pdf"
     assert row["extracted_text"] == "fresh text"
 
 

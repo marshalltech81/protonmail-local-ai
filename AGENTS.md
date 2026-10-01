@@ -213,21 +213,30 @@ Important facts:
   `$XDG_CONFIG_HOME/protonmail/bridge-v3/vault.enc`
 - Bridge binds to `0.0.0.0` via a source patch so mbsync can reach it from another container
 - Bridge TLS SANs are patched so the cert is valid for `protonmail-bridge` and `localhost`
-- Bridge's vault default `AutoUpdate: true` is patched to `false` so the
-  in-process auto-updater stays off. Without this patch Bridge fetches
-  `proton.me/download/bridge/linux/x86/v1/version.json` on every startup,
-  downloads the latest release (the Qt/GUI variant — exactly what
-  `build-nogui` exists to avoid), and stages it under
-  `/data/local/protonmail/bridge-v3/updates/<version>/`. The image ships
-  no launcher, so a staged build is not executed, but the fetch is
-  unpinned network traffic and leaves unpinned code on the data volume.
-  The patch changes only the default for new vaults; vaults created
-  before it keep `AutoUpdate: true` (#245). The patch is verified at
-  three layers: source string-count guards in `bridge/patch-source.sh`,
-  a synthetic `go test` against
-  `internal/vault.newDefaultSettings` run during the build, and an
-  end-to-end `"Vault loaded ... autoUpdate=\"false\""` log assertion in
-  `scripts/bridge-smoke.sh`.
+- Bridge's in-process auto-updater is patched off by two hunks. The vault
+  default `AutoUpdate: true` is patched to `false` for new vaults, and the
+  install gate in `internal/bridge/updates.go` `handleUpdate()` is forced
+  to treat auto-update as disabled, so a vault created before the default
+  patch, which still stores `AutoUpdate: true`, is covered too (#245).
+  Bridge still fetches the signed
+  `proton.me/download/bridge/linux/x86/v1/version.json` at startup and
+  hourly, and announces a newer release, but it no longer downloads one
+  (the Qt/GUI variant — exactly what `build-nogui` exists to avoid) or
+  stages it under `/data/local/protonmail/bridge-v3/updates/<version>/`.
+  The image ships no launcher, so a staged build would not run, but it
+  would be unpinned code on the data volume. The `Vault loaded` log line
+  still reports the stored `autoUpdate` value; on an old vault that is
+  `"true"` even though the gate ignores it. Each hunk is verified at
+  three layers: source string-count guards in `bridge/patch-source.sh`;
+  synthetic `go test`s run during the build, one against
+  `internal/vault.newDefaultSettings` and one that reopens a vault storing
+  `AutoUpdate: true`, offers an eligible release and asserts no silent
+  install is queued; and in `scripts/bridge-smoke.sh`, the
+  `"Vault loaded ... autoUpdate=\"false\""` assertion for a fresh vault
+  plus a CLI-seeded `AutoUpdate: true` vault restarted on the
+  `--noninteractive` path, asserting no silent install and nothing staged
+  (whether the live feed offers a release is up to Proton, so only the
+  `go test` forces the gate decision).
 - Bridge v3 stores credentials and TLS cert material in `vault.enc`
 - the cert is not baked into any image or persisted in a volume — but mbsync's
   entrypoint extracts it from a live connection with `openssl s_client` on
