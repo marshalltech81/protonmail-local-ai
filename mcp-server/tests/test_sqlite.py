@@ -4276,7 +4276,9 @@ class TestFallbackErrorTextWithheld:
             pytest.param(
                 lambda db: db._attachment_filename_lane("x", [], [], 5), [], id="att-name"
             ),
-            pytest.param(lambda db: db._attachment_text_lane("x", [], [], 5), [], id="att-text"),
+            pytest.param(
+                lambda db: db._attachment_text_lane("x", None, [], [], 5), [], id="att-text"
+            ),
             pytest.param(lambda db: db._attachment_scan([], [], 5), [], id="att-scan"),
             pytest.param(lambda db: db._thread_keyword_search("x", 5), [], id="thread-fts"),
             pytest.param(lambda db: db._chunk_keyword_search("x", 5), [], id="chunk-fts"),
