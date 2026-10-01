@@ -438,6 +438,12 @@ Examples:
   "Review round N" section to the PR description.
 - Resolve a thread only once it is fixed or the owner has deferred it;
   merging is blocked while line threads are open.
+- Cap review at two fix rounds per PR (owner, 2026-10-01). A finding
+  raised in round three or later is verified, filed as its own issue,
+  linked from a reply on its thread, and the thread resolved as
+  deferred; the PR then merges once CI is green.
+- File P3 findings as issues rather than fixing them ahead of
+  go-live or P1/P2 work.
 - Merge (squash) only on the owner's explicit go-ahead.
 
 ## Common Commands
