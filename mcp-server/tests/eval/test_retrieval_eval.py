@@ -130,6 +130,8 @@ def _evidence_groups(row: dict) -> list[list[str]]:
             raise ValueError(
                 f"{row['id']}: required_evidence must be a list of lists of thread IDs"
             )
+        if not raw_groups:
+            raise ValueError(f"{row['id']}: required_evidence has no groups")
         if not all(raw_groups):
             raise ValueError(f"{row['id']}: required_evidence has an empty group")
         return [list(group) for group in raw_groups]
