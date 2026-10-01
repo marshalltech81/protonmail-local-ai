@@ -289,6 +289,16 @@ history. Stripping is intentionally conservative: quoted text is still
 searchable through FTS and falls back to the original body when the
 stripped result would be empty.
 
+**Known limitation (#295):** a message's body text is the first
+non-empty `text/plain` part outside attachments, or failing that the
+first non-empty `text/html` part. That suits `multipart/alternative`,
+where the parts are alternative renderings of one body, but a
+`multipart/mixed` message with several sequential inline text parts
+(for example text, an attachment, then more text) keeps only the first
+plain and first HTML part; later inline text parts are neither stored
+nor searchable. Fixing it changes stored bodies, so it is revisited
+with the Phase 2 reindex bundle.
+
 A query like "what did my landlord say about the heating?" returns the
 full landlord thread (via the coarse lanes) and surfaces the specific
 chunk where the heating discussion appears (via the chunk lane). The
