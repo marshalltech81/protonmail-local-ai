@@ -116,6 +116,12 @@ Claude Desktop (host machine)
 | `maildir-volume` | Raw email in Maildir format | Optional — mbsync can re-sync |
 | `sqlite-volume` | SQLite index (FTS5 + vectors) | Optional — indexer can rebuild |
 
+Container logs are not in a volume. Every service uses the `json-file`
+driver capped at three 10 MiB files (the `x-logging` block in
+`docker-compose.yml`), so a long backfill cannot grow a log without
+limit on the host. `make first-run` replaces Bridge's driver with
+`none` so the credentials `info` prints are never written to disk.
+
 ## Networking
 
 The stack uses two isolated bridge networks:
