@@ -421,7 +421,7 @@ checklist) or an owner decision.
 | 3.5 Thread weighting, rerank | Not started | #535 (reply subjects in rerank candidate text, groundwork for #289) | needs real embedder/reranker (#288, #289) |
 | 3.6 Prompt evidence budget | Done | #445 (shared character budget, dedup, coverage note), #496 (whole-prompt token budget, small-model profile) | retune the budgets once measured (#487) |
 | 3.7 Filtered semantic recall | Done | #440, #470 | — |
-| 3.8 Citation contract | Partly done | #457, #495 (`ask_mailbox` statement coverage and quote checks), #519 and #525 (quote and label edge cases), #532 and #545 (`get_evidence` can audit `ask_mailbox`'s evidence) | the same contract for `summarize_thread` and `extract_from_emails`; semantic support (#284) |
+| 3.8 Citation contract | Partly done | #457, #495 (`ask_mailbox` statement coverage and quote checks), #519 and #525 (quote and label edge cases), #532 and #545 (thread-scoped `get_evidence` reproduces `ask_mailbox`'s evidence for that thread) | the same contract for `summarize_thread` and `extract_from_emails`; semantic support (#284); mailbox-wide audit parity (#537) |
 | 4.1 Entities | Done | #459, #527 (orphan pruning, #464) | — |
 | 4.2 Source authority | Done | #459, #474 (Spam guard), #523 and #542 (rules file kept private and validated) | verdict-header gating after go-live (#463) |
 | 4.3 Temporal retrieval | Not started | — | — |
@@ -626,10 +626,12 @@ How the first batch was worked, and what to repeat:
 - ~~**#217 Message-ID conflicts**~~ — **resolved.** Decided
   2026-09-30 to keep every claimant rather than pick a winner by
   arrival order (either order is spoofable). Built in #453: every
-  per-message row, the chunker's `message_pk` and attachment IDs are
-  keyed by a claimant ID (Message-ID plus `#` and eight hex digits of
+  per-message row, the chunker's `message_pk`, and attachment
+  occurrence and chunk IDs are keyed by a claimant ID (Message-ID plus `#` and eight hex digits of
   the file's SHA-256), threads stay keyed by Message-ID, and
-  `get_message` accepts a claimant ID. Conflicts are exposed, not
+  `get_message` accepts a claimant ID. `attachment_id` deliberately
+  stays the payload content hash, so identical payloads share one
+  `attachment_extractions` row. Conflicts are exposed, not
   resolved: #536 and #544 bound `get_message`'s claimant listing, and
   #539 reports conflict counts in `get_mailbox_status`. The earlier
   arrival-order attempt (branch `fix/indexer-message-id-conflicts`)
@@ -1343,8 +1345,12 @@ do not ship persisted claims without them.
    `host.docker.internal`, the container staying the default. Decide go
    or no-go and whether it will be used; switching an existing Maildir
    needs the documented migration (credentials, certificate pin,
-   UIDVALIDITY). Recommendation: go, after the first go-live on the
-   container.
+   UIDVALIDITY). The macOS app's certificate is issued for `localhost`
+   and `127.0.0.1`, not `host.docker.internal`, so the first step is to
+   confirm how the shipped isync treats an explicitly trusted
+   certificate under a hostname mismatch and choose a certificate-valid
+   connection path, never a TLS bypass. Recommendation: go, after the
+   first go-live on the container.
 7. **#537 `get_evidence` thread count.** Add a `max_threads` parameter
    so an audit retrieves exactly the threads `ask_mailbox` used (a tool
    interface change). Recommendation: yes; small and additive.
