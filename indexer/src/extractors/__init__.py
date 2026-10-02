@@ -125,7 +125,9 @@ class ExtractionResult:
 # xlsx 2: stops at a text budget instead of expanding every shared-string
 # reference (#294); keeps empty cells' column positions (#296); reads
 # cells outside a stale worksheet dimension (#305).
-EXTRACTOR_VERSIONS: dict[str, int] = {"docx": 3, "image": 2, "pdf": 2, "text": 2, "xlsx": 2}
+# xlsx 3: cuts worksheets at an XML node budget before openpyxl parses
+# them (#432).
+EXTRACTOR_VERSIONS: dict[str, int] = {"docx": 3, "image": 2, "pdf": 2, "text": 2, "xlsx": 3}
 
 
 def _stamp_extractor(module_name: str, extractor_name: str) -> str:

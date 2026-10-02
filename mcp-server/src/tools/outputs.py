@@ -28,7 +28,13 @@ from typing import Any, Literal
 from mcp.types import CallToolResult, TextContent
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from ..lib.sqlite import MAX_LISTED_CLAIMANTS, MessageRecord, SourceFile, ThreadResult
+from ..lib.sqlite import (
+    MAX_LISTED_CLAIMANTS,
+    REAPED_RECORD_RETENTION_DAYS,
+    MessageRecord,
+    SourceFile,
+    ThreadResult,
+)
 from ..lib.sqlite import Participant as ParticipantRecord
 
 # Entries listed per bounded list (thread participants, senders, one
@@ -322,12 +328,6 @@ class ReapedMessage(_Output):
         description="When the local index reaped it (ISO 8601 UTC), not when it was "
         "deleted upstream."
     )
-
-
-# How long the indexer keeps a reaped message's identifier-only record
-# (``indexer/src/database.py`` ``REAPED_RECORD_RETENTION_DAYS``); after
-# it a lookup of the message or thread reads as not found.
-REAPED_RECORD_RETENTION_DAYS = 30
 
 
 def reaped_source(kind: str, identifier: str, reaped_at: str) -> str:

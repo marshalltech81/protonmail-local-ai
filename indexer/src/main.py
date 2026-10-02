@@ -2029,6 +2029,9 @@ def main():
     reclassified = db.set_authority_rules(authority_rules)
     if reclassified:
         log.info("Authority rules: reclassified %d existing entities", reclassified)
+    # Needs only the database: run before the embedder wait and the
+    # initial index, which can take hours or never finish (#576).
+    _prune_reaped_records(db)
     embedder = OpenAIEmbedder(
         base_url=EMBED_BASE_URL,
         model=EMBED_MODEL,

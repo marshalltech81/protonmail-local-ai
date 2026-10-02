@@ -3072,7 +3072,7 @@ class TestRequeueStaleExtractions:
         assert main._requeue_stale_extractions(db, queue) == 1
 
         with db.transaction():
-            db._conn.execute("UPDATE attachment_extractions SET extractor = 'xlsx@2'")
+            db._conn.execute("UPDATE attachment_extractions SET extractor = 'xlsx@3'")
         self._drain(db, queue)
         assert main._requeue_stale_extractions(db, queue) == 0
 
@@ -6283,3 +6283,31 @@ class TestPruneReapedRecords:
         main._prune_reaped_records(db)
         assert "reaped-record prune failed: OperationalError" in caplog.text
         assert "zqxmarker" not in caplog.text
+
+    def test_startup_prunes_before_the_embedder_wait(self, tmp_path, monkeypatch):
+        """#576: an embedder that never answers holds ``main`` in
+        ``wait_for_ready`` before the initial index, so the startup prune
+        must run first or expired records outlive the retention window."""
+        db = Database(tmp_path / "mail.db")
+        with db.transaction():
+            db._conn.execute(
+                "INSERT INTO reaped_messages VALUES ('a#1', 'a', 't', '2000-01-01T00:00:00+00:00')"
+            )
+
+        class _Unreachable(Exception):
+            pass
+
+        def never_ready():
+            raise _Unreachable
+
+        embedder = make_mock_embedder()
+        embedder.wait_for_ready = never_ready
+        monkeypatch.setattr(main, "_validate_embed_config", lambda: None)
+        monkeypatch.setattr(main, "Database", lambda path: db)
+        monkeypatch.setattr(main, "OpenAIEmbedder", lambda **kw: embedder)
+        monkeypatch.setattr(main, "touch_health_file", lambda: None)
+        monkeypatch.setattr(main, "StallGuard", MagicMock())
+        monkeypatch.setattr(main, "initial_index", lambda *a, **kw: pytest.fail("indexed"))
+        with pytest.raises(_Unreachable):
+            main.main()
+        assert db._conn.execute("SELECT COUNT(*) FROM reaped_messages").fetchone()[0] == 0
