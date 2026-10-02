@@ -257,6 +257,14 @@ falls back to RRF order truncated to the caller's `limit`. A ranking
 with an out-of-range or repeated index falls back the same way. A rerank
 outage degrades quality without failing the whole query.
 
+Each candidate is sent to the reranker as `Subject: <thread subject>`,
+then one `Reply subject: <subject>` line per distinct message subject
+that differs from the thread's after reply-prefix normalization (a
+reply that changed the subject), then its best evidence chunk or, without
+evidence, its snippet. The added subjects are read from `messages`
+(the first 50 per thread, oldest first) and capped at 5 subjects and
+500 characters per candidate. With `RERANK_MODE=none` none of this runs.
+
 ## Thread Indexing
 
 Emails are indexed at the **thread level** as the coarse unit of

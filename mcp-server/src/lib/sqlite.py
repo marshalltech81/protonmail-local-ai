@@ -175,6 +175,66 @@ _SQLITE_VEC_MAX_K = 4096
 # tools' ``HEADER_CHAR_LIMIT``.
 _RERANK_SUBJECT_CHARS = 500
 
+# Changed reply subjects added to a candidate's rerank text (#447): at
+# most this many distinct subjects, and this many characters across
+# them. Work bound: per candidate thread at most
+# ``_RERANK_SUBJECT_SCAN_ROWS`` stored subjects are read (oldest first),
+# each cut to ``_RERANK_SUBJECT_CHARS`` in SQL before normalization. A
+# changed subject first seen past the scanned rows is not added.
+_RERANK_REPLY_SUBJECTS_MAX = 5
+_RERANK_REPLY_SUBJECTS_MAX_CHARS = 500
+_RERANK_SUBJECT_SCAN_ROWS = 50
+
+# Reply / forward prefixes stripped when comparing subjects. Mirrors the
+# indexer's ``threader._SUBJECT_PREFIX_RE`` so a reply subject the
+# indexer treats as the thread's (``Re: budget``) is not sent to the
+# reranker a second time.
+_SUBJECT_PREFIX_RE = re.compile(
+    r"(?:(?:re|fwd|fw|回复|答复)[\s:\[\]]+|(?:aw|ant|sv|tr)[:\[\]]+)",
+    re.IGNORECASE,
+)
+_SUBJECT_WHITESPACE_RE = re.compile(r"\s+")
+
+
+def _normalize_subject(subject: str) -> str:
+    """Lowercase, strip reply/forward prefixes and collapse whitespace.
+
+    Mirrors the indexer's ``threader._normalize_subject``: one pass that
+    advances an offset past each prefix, so the work is linear in the
+    subject length.
+    """
+    s = subject.lower().strip()
+    pos = 0
+    while match := _SUBJECT_PREFIX_RE.match(s, pos):
+        pos = match.end()
+        while pos < len(s) and s[pos].isspace():
+            pos += 1
+    return _SUBJECT_WHITESPACE_RE.sub(" ", s[pos:]).strip()
+
+
+def _changed_reply_subjects(thread_subject: str, subjects: list[str]) -> list[str]:
+    """The distinct ``subjects`` that differ from ``thread_subject`` after
+    normalization, in input order, in normalized form.
+
+    Bounded by ``_RERANK_REPLY_SUBJECTS_MAX`` subjects and
+    ``_RERANK_REPLY_SUBJECTS_MAX_CHARS`` characters across them; a
+    subject that would cross the character cap is cut to what is left.
+    """
+    seen = {_normalize_subject(thread_subject[:_RERANK_SUBJECT_CHARS])}
+    out: list[str] = []
+    room = _RERANK_REPLY_SUBJECTS_MAX_CHARS
+    for subject in subjects[:_RERANK_SUBJECT_SCAN_ROWS]:
+        if len(out) >= _RERANK_REPLY_SUBJECTS_MAX or room <= 0:
+            break
+        normalized = _normalize_subject(subject[:_RERANK_SUBJECT_CHARS])
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        out.append(normalized[:room])
+        room -= len(out[-1])
+    return out
+
+
 # Upper bound on the ``?`` placeholders bound into one ``IN (...)``
 # lookup. The connection's ``SQLITE_LIMIT_VARIABLE_NUMBER`` depends on
 # the SQLite build, so lookups over an unbounded ID list batch under it
@@ -1256,7 +1316,7 @@ class Database:
         return candidates[:limit]
 
     @staticmethod
-    def _candidate_text(result: ThreadResult) -> str:
+    def _candidate_text(result: ThreadResult, message_subjects: list[str] | None = None) -> str:
         """The text fed to the reranker for one candidate.
 
         Prefer the best evidence chunk (richest signal — ~1500 tokens of
@@ -1268,11 +1328,46 @@ class Database:
         boilerplate. The subject is sender-controlled and unbounded, so it
         is cut at ``_RERANK_SUBJECT_CHARS``: every candidate is sent to the
         rerank provider in one request.
+
+        ``message_subjects`` are the thread's stored message subjects,
+        oldest first. Those that differ from the thread subject follow it
+        as ``Reply subject:`` lines (#447), bounded by
+        ``_changed_reply_subjects``: the keyword and chunk lanes match a
+        reply's changed subject, so the reranker needs to see it too.
         """
         subject = result.subject[:_RERANK_SUBJECT_CHARS]
+        header = f"Subject: {subject}"
+        for reply_subject in _changed_reply_subjects(result.subject, message_subjects or []):
+            header += f"\nReply subject: {reply_subject}"
         if result.evidence_chunks:
-            return f"Subject: {subject}\n\n{result.evidence_chunks[0].text}"
-        return f"Subject: {subject}\n\n{result.snippet}"
+            return f"{header}\n\n{result.evidence_chunks[0].text}"
+        return f"{header}\n\n{result.snippet}"
+
+    def _message_subjects_for_threads(self, thread_ids: list[str]) -> dict[str, list[str]]:
+        """Each thread's stored message subjects, oldest first, for the
+        rerank candidate text.
+
+        One indexed ``LIMIT`` query per thread on a single connection, so
+        the rows and characters read are bounded per thread
+        (``_RERANK_SUBJECT_SCAN_ROWS`` × ``_RERANK_SUBJECT_CHARS``) however
+        long the thread is. Rerank is best-effort: on an SQLite error the
+        candidates are reranked without these subjects and only the
+        error's type is logged.
+        """
+        out: dict[str, list[str]] = {}
+        try:
+            with closing(self._connect()) as conn:
+                for thread_id in dict.fromkeys(thread_ids):
+                    rows = conn.execute(
+                        "SELECT substr(subject, 1, ?) AS subject FROM messages "
+                        "WHERE thread_id = ? ORDER BY sent_at, claimant_id LIMIT ?",
+                        (_RERANK_SUBJECT_CHARS, thread_id, _RERANK_SUBJECT_SCAN_ROWS),
+                    ).fetchall()
+                    out[thread_id] = [r["subject"] for r in rows]
+        except sqlite3.Error as e:
+            log.warning("Rerank subject lookup failed; skipping: %s", type(e).__name__)
+            return {}
+        return out
 
     def _apply_rerank(
         self,
@@ -1294,7 +1389,8 @@ class Database:
         repeated index is a failure too: applying it would drop or
         duplicate results. It is checked before any candidate is touched.
         """
-        docs = [self._candidate_text(c) for c in candidates]
+        subjects = self._message_subjects_for_threads([c.thread_id for c in candidates])
+        docs = [self._candidate_text(c, subjects.get(c.thread_id)) for c in candidates]
         timings.count("rerank_candidates", len(docs))
         with timings.stage("rerank"):
             scored = reranker.rerank(query, docs, top_n=limit)
