@@ -66,7 +66,11 @@ with real values only as needed:
   MCP client must send (see [Connect an MCP client](#7-connect-an-mcp-client)).
   `make init-secrets` generates it; to create or replace it yourself,
   run `(umask 077; openssl rand -hex 32 > .secrets/mcp_auth_token.txt)`.
-  Never put it in `.env`.
+  A token you choose yourself must be at least 32 characters from
+  `A-Z a-z 0-9 - . _ ~ + /` with optional trailing `=` (the RFC 6750
+  bearer-token set, which `openssl rand -hex 32` and
+  `openssl rand -base64 32` output both meet); `make validate-env` and
+  mcp-server startup reject anything else. Never put it in `.env`.
 
 ### 3. Build all Docker images
 
@@ -267,7 +271,9 @@ services strip it. It fails fast if:
   `inference_api_key.txt` when `INFERENCE_MODE` is `anthropic` or
   `openai`; `embed_api_key.txt` always (`EMBED_MODE` has no `none`
   mode); `rerank_api_key.txt` when `RERANK_MODE=cohere`;
-  `mcp_auth_token.txt` always (`MCP_AUTH_TOKEN` in `.env` also fails).
+  `mcp_auth_token.txt` always (`MCP_AUTH_TOKEN` in `.env` also fails,
+  and so does a token shorter than 32 characters or outside the RFC 6750
+  set described above).
   For unauthenticated host-side servers, write any non-empty placeholder
   string (e.g. `unauthenticated`). **`{LAYER}_BASE_URL` may be empty
   for any enabled layer — empty means "use the SDK default" (OpenAI

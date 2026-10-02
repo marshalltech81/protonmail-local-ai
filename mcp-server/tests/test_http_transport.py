@@ -38,7 +38,7 @@ _INIT = {
 }
 # A synthetic bearer token; every authenticated request in this file
 # sends it.
-_TOKEN = "synthetic-bearer-token-5e0b"
+_TOKEN = "synthetic-bearer-token-5e0b-xxxxxxxxxxxxxxxx"
 _UNAUTHENTICATED_POST_HEADERS = {
     "accept": "application/json, text/event-stream",
     "content-type": "application/json",
@@ -535,6 +535,17 @@ class TestBearerAuth:
     def test_empty_token_fails_closed(self, token):
         with pytest.raises(ValueError, match="bearer token"):
             _build_app(_server(), session_idle_timeout=1800.0, auth_token=token)
+
+    def test_token_outside_b64token_fails_closed(self):
+        """#589: a token the documented client cannot send is refused
+        when the app is built, without echoing it."""
+        with pytest.raises(ValueError, match="bearer token") as excinfo:
+            _build_app(
+                _server(),
+                session_idle_timeout=1800.0,
+                auth_token="synthetic:marker-7e3f-xxxxxxxxxxxxxxxx",
+            )
+        assert "marker" not in str(excinfo.value)
 
     def test_tokens_stay_out_of_the_log(self, caplog):
         """Neither the configured token nor a presented wrong one is

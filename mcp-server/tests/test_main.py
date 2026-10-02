@@ -158,13 +158,14 @@ class TestMcpTransport:
             "_build_app",
             lambda server, session_idle_timeout, auth_token: (
                 app
-                if (session_idle_timeout, auth_token) == (900.0, "synthetic-mcp-token")
+                if (session_idle_timeout, auth_token)
+                == (900.0, "synthetic-mcp-token-xxxxxxxxxxxxxxxx")
                 else None
             ),
         )
         monkeypatch.setattr(main_mod, "MCP_PORT", 3000)
         monkeypatch.setattr(main_mod, "MCP_SESSION_IDLE_TIMEOUT_SECS", 900.0)
-        monkeypatch.setattr(main_mod, "MCP_AUTH_TOKEN", "synthetic-mcp-token")
+        monkeypatch.setattr(main_mod, "MCP_AUTH_TOKEN", "synthetic-mcp-token-xxxxxxxxxxxxxxxx")
         _run_server(_Server())  # type: ignore[arg-type]
         assert captured == {
             "app": app,
@@ -189,9 +190,11 @@ class TestMcpAuthToken:
 
         import src.main as main_mod
 
-        monkeypatch.setenv("MCP_AUTH_TOKEN", "  synthetic-env-token  ")
+        monkeypatch.setenv("MCP_AUTH_TOKEN", "  synthetic-env-token-xxxxxxxxxxxxxxxx  ")
         try:
-            assert importlib.reload(main_mod).MCP_AUTH_TOKEN == "synthetic-env-token"
+            assert (
+                importlib.reload(main_mod).MCP_AUTH_TOKEN == "synthetic-env-token-xxxxxxxxxxxxxxxx"
+            )
         finally:
             monkeypatch.delenv("MCP_AUTH_TOKEN", raising=False)
             importlib.reload(main_mod)
@@ -208,6 +211,51 @@ class TestMcpAuthToken:
         message = str(excinfo.value)
         assert ".secrets/mcp_auth_token.txt" in message
         assert "openssl rand -hex 32" in message
+
+    # #589: the token must be one scripts/mcp-auth-headers.sh can send
+    # (RFC 6750 b64token) and at least 32 characters long.
+    @pytest.mark.parametrize(
+        "token",
+        [
+            "synthetic marker 5d1a xxxxxxxxxxxxxxxx",  # space
+            "synthetic-marker-5d1a-xxxxxxxxxxxxxxxx:x",  # outside b64token
+            "synthetic-marker-5d1a-xxxxxxxxxxxxxxxx?x",
+            'synthetic-marker-5d1a-xxxxxxxxxxxxxxxx"x',
+            "synthetic-marker-5d1a-xxxxxxxxxxxxxxxx\tx",  # control character
+            "synthetic-marker-5d1a-xxxxxxxxxxxxxxxx\x7fx",
+            "synthetic-marker-5d1a-xxxxxxxxxxxxxxxx\u00e9",  # non-ASCII
+            "synthetic-marker-5d1a=xxxxxxxxxxxxxxxx",  # '=' only as padding
+            "synthetic-marker-5d1a",  # shorter than 32 characters
+            "synthetic-marker-" + "x" * 14,  # 31 characters
+        ],
+    )
+    def test_unusable_token_fails_startup_without_echoing_it(self, monkeypatch, caplog, token):
+        import src.main as main_mod
+
+        monkeypatch.setattr(main_mod, "MCP_AUTH_TOKEN", token)
+        monkeypatch.setattr(main_mod, "Database", self._FakeDatabase)
+        monkeypatch.setattr(main_mod, "_run_server", lambda *_: pytest.fail("server started"))
+        with caplog.at_level(logging.DEBUG), pytest.raises(ValueError) as excinfo:
+            main_mod.main()
+        message = str(excinfo.value)
+        assert "openssl rand -hex 32" in message
+        assert "marker" not in message
+        assert "marker" not in caplog.text
+
+    @pytest.mark.parametrize(
+        "token",
+        [
+            "0123456789abcdef" * 4,  # make init-secrets: openssl rand -hex 32
+            "AZaz09-._~+/" * 3,
+            "SyntheticBase64TokenSyntheticBase64TokenAAA=",  # openssl rand -base64 32
+            "SyntheticBase64TokenSyntheticBase64TokenA==",
+            "x" * 32,
+        ],
+    )
+    def test_b64token_of_32_or_more_characters_is_accepted(self, token):
+        import src.main as main_mod
+
+        assert main_mod._require_auth_token(token) == token
 
 
 class TestSessionIdleTimeout:
@@ -396,7 +444,7 @@ class TestRejectUrlUserinfo:
 
 
 _PLACEHOLDER_KEY = "sk-test-marker"  # pragma: allowlist secret
-_PLACEHOLDER_TOKEN = "synthetic-mcp-token"  # pragma: allowlist secret
+_PLACEHOLDER_TOKEN = "synthetic-mcp-token-xxxxxxxxxxxxxxxx"  # pragma: allowlist secret
 _URL_CREDENTIAL_MARKER = "SYNTHETIC_URL_CREDENTIAL"
 _INHERITED_URL = (
     f"https://user:{_URL_CREDENTIAL_MARKER}@provider.invalid/v1"  # pragma: allowlist secret

@@ -11,6 +11,7 @@ import hmac
 import logging
 import math
 import os
+import re
 import urllib.parse
 from pathlib import Path
 
@@ -408,11 +409,33 @@ _MISSING_AUTH_TOKEN = (
 )
 
 
+# RFC 6750 ``b64token``: the characters a bearer token may carry in an
+# ``Authorization`` header, and the set ``scripts/mcp-auth-headers.sh``
+# sends (#589). The class holds ASCII ranges only, so ``fullmatch``
+# rejects spaces, control characters and non-ASCII alike.
+_AUTH_TOKEN_PATTERN = re.compile(r"[A-Za-z0-9._~+/-]+=*")
+# ``make init-secrets`` writes 64 hex characters (256 bits). 32 is the
+# floor: 128 bits even for a hex token, and it admits
+# ``openssl rand -base64 32`` (44 characters) while refusing a short
+# hand-typed password.
+_AUTH_TOKEN_MIN_LENGTH = 32
+_UNUSABLE_AUTH_TOKEN = (
+    "The MCP bearer token must be at least 32 characters from "
+    "A-Z a-z 0-9 - . _ ~ + / with optional trailing '=' (RFC 6750), the "
+    "set MCP clients can send. Regenerate it with "
+    "'(umask 077; openssl rand -hex 32 > .secrets/mcp_auth_token.txt)'. "
+    "See docs/setup.md."
+)
+
+
 def _require_auth_token(token: str) -> str:
-    """Fail closed when the bearer token is empty. The message never
-    includes the value."""
+    """Fail closed when the bearer token is empty, shorter than 32
+    characters or outside the RFC 6750 character set. The messages never
+    include the value."""
     if not token.strip():
         raise ValueError(_MISSING_AUTH_TOKEN)
+    if len(token) < _AUTH_TOKEN_MIN_LENGTH or not _AUTH_TOKEN_PATTERN.fullmatch(token):
+        raise ValueError(_UNUSABLE_AUTH_TOKEN)
     return token
 
 

@@ -337,7 +337,11 @@ Secrets are a hard boundary.
 - The MCP bearer token is the Docker secret
   `.secrets/mcp_auth_token.txt` (mode 600, always non-empty;
   `make init-secrets` generates it). `validate-env.sh` rejects a missing,
-  empty or non-600 file and an `MCP_AUTH_TOKEN` in `.env`; the
+  empty or non-600 file, a token shorter than 32 characters or outside
+  the RFC 6750 b64token set (mcp-server startup,
+  `scripts/mcp-auth-headers.sh` and the stdio adapter apply the same
+  set), and an
+  `MCP_AUTH_TOKEN` in `.env`; the
   `MCP_AUTH_TOKEN` env fallback is for running the server outside a
   container only, never the Compose path. Never log the token or the
   `Authorization` header, and never document or script a client setup
