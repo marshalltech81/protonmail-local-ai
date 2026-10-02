@@ -29,6 +29,7 @@ import email
 import email.policy
 import json
 import os
+from contextlib import closing
 from pathlib import Path
 
 import pytest
@@ -41,6 +42,7 @@ pytestmark = pytest.mark.baseline
 _HERE = Path(__file__).parent
 GOLDEN = json.loads((_HERE / "golden.json").read_text(encoding="utf-8"))
 SNAPSHOT_PATH = _HERE / "snapshot.json"
+AGENT_SCENARIOS_PATH = _HERE.parent / "eval" / "agent_scenarios.json"
 SNAPSHOT_DEPTH = 10
 _DOMAIN = "@baseline.example"
 
@@ -175,6 +177,21 @@ def test_unanswerable_golden(baseline_dir: Path, u: dict) -> None:
     assert texts, "no messages found in the baseline maildir"
     for term in u["absent_terms"]:
         assert not any(term.casefold() in t for t in texts), f"{u['id']}: {term!r} is in the corpus"
+
+
+def test_agent_required_citations_exist(baseline_db: Database) -> None:
+    # The correction and conflict scenarios in tests/eval/agent_scenarios.json
+    # name messages by ref; each must be an indexed message in its ref's thread.
+    scenarios = json.loads(AGENT_SCENARIOS_PATH.read_text(encoding="utf-8"))["scenarios"]
+    with closing(baseline_db._connect()) as conn:
+        thread_of = {
+            _message_ref(m): _thread_ref(t)
+            for m, t in conn.execute("SELECT message_id, thread_id FROM messages")
+        }
+    refs = [ref for s in scenarios for g in s.get("required_citations", []) for ref in g]
+    assert refs, "no scenario lists required_citations"
+    for ref in refs:
+        assert thread_of.get(ref) == ref.split(".")[0], f"{ref} is not an indexed message"
 
 
 def test_rank_snapshot(

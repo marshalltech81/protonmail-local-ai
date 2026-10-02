@@ -147,7 +147,8 @@ Three categories need more than thread-level scoring:
   answer to cite it: a cited passage (`chunk_id`) or `claimant_id`
   counts as the message the tool result returned it with. Citing only
   the superseded message passes thread-level citation recall but fails
-  here. Citing both is fine.
+  here. Citing both is fine. `make baseline` checks that every
+  `required_citations` ref is an indexed message in its thread.
 - **Conflicting sources** (`conflicting_sources`): two messages
   disagree and neither supersedes the other (`t29.1` and `t30.2` give
   different block-party dates). `required_citations` lists one group per

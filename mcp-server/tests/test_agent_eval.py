@@ -291,6 +291,8 @@ class TestLoadScenarios:
         "overrides",
         [
             {"golden_search": "correction-recital", "required_citations": [["t17.3"]]},
+            {"golden_search": "correction-recital", "required_citations": [["t24"]]},
+            {"golden_search": "correction-recital", "required_citations": [["t24.2x"]]},
             {"golden_unanswerable": "no-such-question", "golden_search": None},
             {"golden_unanswerable": "cabin-wifi"},
             {
@@ -302,6 +304,8 @@ class TestLoadScenarios:
         ],
         ids=[
             "citation-outside-evidence",
+            "citation-thread-ref",
+            "citation-malformed-ref",
             "unknown-unanswerable",
             "search-and-unanswerable",
             "citations-without-search",

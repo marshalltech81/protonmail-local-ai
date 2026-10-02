@@ -49,6 +49,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections import defaultdict
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -85,6 +86,8 @@ _STRIPPED_FILTERS = (
 # golden.json writes thread "t05" for "t05.1@baseline.example" and
 # message "t05.2" for "t05.2@baseline.example".
 _BASELINE_DOMAIN = "@baseline.example"
+# A golden message ref: thread "t24", message 2.
+_MESSAGE_REF = re.compile(r"t[0-9]{2}\.[1-9][0-9]*")
 # One scenario in HELD_OUT_MODULUS is held out, chosen by a hash of its
 # ID so membership is fixed when the scenario is written and never moves
 # when others are added.
@@ -468,6 +471,10 @@ def load_scenarios(path: Path, golden_path: Path) -> list[Scenario]:
             evidence_threads = {t for g in q["required_evidence"] for t in g}
             for group in citation_refs:
                 for ref in group:
+                    # Shape only: ``make baseline`` checks each ref is an
+                    # indexed message (test_agent_required_citations_exist).
+                    if not _MESSAGE_REF.fullmatch(ref):
+                        raise ValueError(f"{sid}: {ref!r} is not a message ref like 't24.2'")
                     if ref.split(".")[0] not in evidence_threads:
                         raise ValueError(
                             f"{sid}: cited message {ref!r} is outside {search_ref!r}'s evidence"
