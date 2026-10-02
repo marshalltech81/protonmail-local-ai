@@ -621,7 +621,8 @@ dialog you have accepted, so start Claude Code in this repository once
 interactively if `claude mcp list` reports that the helper was not run.
 Keep the default `local` scope (or `user`); `--scope project` writes the
 entry to `.mcp.json` in the current directory. The configuration holds
-only the script path, never the token.
+only the script path, never the token. If you use an HTTP proxy, read
+the proxy note under Codex below: it applies to Claude Code too.
 
 **Claude Desktop** has two ways to add an MCP server, and neither
 takes this URL directly:
@@ -712,13 +713,33 @@ speaks Streamable HTTP, so it needs no adapter. Its
 `mcp_servers.<name>.http_headers_helper` setting runs a local command
 that prints a JSON object of headers, which is what
 `scripts/mcp-auth-headers.sh` prints for Claude Code. Add this to
-`~/.codex/config.toml`, with the repository's absolute path:
+`~/.codex/config.toml`, with the repository's absolute path. Codex runs
+the value with `sh -c`, so keep the single quotes around the path; they
+keep a path with spaces in one piece (a path containing a single quote
+needs escaping):
 
 ```toml
 [mcp_servers.protonmail-local-ai]
 url = "http://127.0.0.1:3000/mcp"
-http_headers_helper = "/ABSOLUTE/PATH/TO/protonmail-local-ai/scripts/mcp-auth-headers.sh"
+http_headers_helper = "'/ABSOLUTE/PATH/TO/protonmail-local-ai/scripts/mcp-auth-headers.sh'"
 ```
+
+Codex, like Claude Code, applies `HTTP_PROXY`, `ALL_PROXY` and the
+system (or PAC) proxy settings to its own HTTP connections. If you use a
+proxy, make sure it is bypassed for `127.0.0.1` (for example
+`NO_PROXY=127.0.0.1` and the system proxy's bypass list); otherwise the
+proxy receives the bearer token and every tool call and result. If you
+cannot guarantee that, connect Codex through the stdio adapter instead,
+which ignores proxy settings; Codex starts it like Claude Desktop does:
+
+```toml
+[mcp_servers.protonmail-local-ai]
+command = "/ABSOLUTE/PATH/TO/uv"
+args = ["run", "--directory", "/ABSOLUTE/PATH/TO/protonmail-local-ai/mcp-server", "--frozen", "python", "-m", "src.stdio_adapter"]
+```
+
+(Codex gives stdio servers a reduced environment, so with a changed
+`MCP_PORT` add `env = { MCP_PORT = "<port>" }` to the entry.)
 
 Codex runs the helper when it connects and again once after a `401`,
 so a rotated token is picked up without editing the file. Codex also

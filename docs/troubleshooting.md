@@ -700,7 +700,8 @@ problem.
    no output means the file passed.
 4. Codex: run `scripts/mcp-auth-headers.sh > /dev/null` as for Claude
    Code, and check that `http_headers_helper` in `~/.codex/config.toml`
-   is the script's absolute path. With `bearer_token_env_var` instead,
+   is the script's absolute path in single quotes (Codex runs it with
+   `sh -c`). With `bearer_token_env_var` instead,
    check that the variable is exported in the shell that starts Codex.
 
 The server logs a request with a wrong token as `Auth error returned:
