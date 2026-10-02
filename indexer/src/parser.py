@@ -74,6 +74,16 @@ _DEFAULT_PARSE_MAX_BYTES = 50_000_000
 # and a ``Re:`` reply to a subject longer than the cap does not.
 SUBJECT_MAX_CHARS = 2000
 
+# Longest date text read from the top ``Received:`` header, in
+# characters. ``occurred_at`` is the text after the header's last ``;``
+# (RFC 5321 puts the date there), so only the header's last
+# ``RECEIVED_DATE_MAX_CHARS`` characters are searched for that ``;``:
+# a real date with its zone comment is under 60 characters, and a
+# crafted multi-megabyte header costs one slice instead of a scan.
+# A ``;`` further back means a date text longer than the cap, which is
+# read as unparseable (``None``).
+RECEIVED_DATE_MAX_CHARS = 256
+
 
 def _parse_max_bytes() -> int:
     raw = os.environ.get("INDEXER_PARSE_MAX_BYTES", "").strip()
@@ -205,6 +215,19 @@ class Message:
     # already persisted for the message instead (#297), so an undated
     # message is not re-dated every time it is parsed.
     date_is_fallback: bool = False
+    # Delivery time: the date of the topmost ``Received:`` header, in
+    # UTC (``_parse_received_date``). ``None`` when the header is absent
+    # (sent mail) or its date is unparseable; never taken from ``Date:``.
+    occurred_at: datetime | None = None
+
+    @property
+    def effective_date(self) -> datetime:
+        """The message's effective time: ``occurred_at``, else ``date``.
+
+        Date filters and thread spans use it, matching the
+        ``messages.effective_at`` column.
+        """
+        return self.occurred_at if self.occurred_at is not None else self.date
 
     @property
     def claimant_id(self) -> str:
@@ -329,6 +352,7 @@ def parse_email(path: Path, maildir_root: Path | None = None) -> Message | None:
     date_text = str(msg.get("Date", "")).encode("ascii", "ignore").decode("ascii")
     parsed_date = _parse_date(date_text)
     date = parsed_date if parsed_date is not None else datetime.now(UTC)
+    occurred_at = _parse_received_date(msg)
 
     body_text, attachments = _extract_body_and_attachments(msg)
 
@@ -358,6 +382,7 @@ def parse_email(path: Path, maildir_root: Path | None = None) -> Message | None:
         cc_addrs=cc_addrs,
         date=date,
         date_is_fallback=parsed_date is None,
+        occurred_at=occurred_at,
         body_text=body_text,
         folder=folder,
         filepath=str(path),
@@ -1160,6 +1185,49 @@ def _parse_addrs(value: str | email.header.Header) -> list[str]:
             continue
         addresses.append(formatted)
     return addresses
+
+
+def _parse_received_date(msg: email.message.Message) -> datetime | None:
+    """The delivery time from ``msg``'s topmost ``Received:`` header.
+
+    The date is the text after the header's last ``;``, searched for in
+    the last ``RECEIVED_DATE_MAX_CHARS`` characters only, parsed with
+    ``parsedate_to_datetime`` and converted to UTC (a naive ``-0000``
+    value is taken as UTC). Returns ``None`` when the header is absent,
+    has no ``;`` in that tail, or its date is unparseable; ``Date:`` is
+    never consulted. The header is attacker-influenced, so every error
+    the email package and the codecs can raise on it degrades to
+    ``None`` and its text is never logged.
+    """
+    try:
+        # ``get`` returns the first, i.e. topmost, occurrence. A raw
+        # 8-bit header comes back as an ``email.header.Header``; a date
+        # is ASCII, so anything else is dropped, as for ``Date:``.
+        value = msg.get("Received")
+        if value is None:
+            return None
+        tail = str(value)[-RECEIVED_DATE_MAX_CHARS:]
+        semicolon = tail.rfind(";")
+        if semicolon < 0:
+            return None
+        date_text = tail[semicolon + 1 :].encode("ascii", "ignore").decode("ascii")
+        dt = email.utils.parsedate_to_datetime(date_text)
+    except (
+        email.errors.MessageError,
+        email.errors.MessageDefect,
+        UnicodeError,
+        LookupError,
+        ValueError,
+        TypeError,
+        OverflowError,
+    ) as exc:
+        log.debug("Received header date unreadable (%s)", type(exc).__name__)
+        return None
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    return dt.astimezone(UTC)
 
 
 def _parse_date(value: str) -> datetime | None:

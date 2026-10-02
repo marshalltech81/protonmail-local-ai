@@ -6,11 +6,13 @@ encoded headers, address parsing, date fallback, and folder derivation.
 """
 
 import base64
+import email.errors
 import email.utils
 import hashlib
 import logging
 import quopri
 import textwrap
+import time
 from datetime import UTC, datetime
 from email.message import EmailMessage
 from pathlib import Path
@@ -705,6 +707,238 @@ class TestSubjectCap:
         subject = ("Quarterly report " * 200)[:length].strip() or "Q"
         msg = self._parse(tmp_path, _raw_with_subject(subject.encode()))
         assert msg.subject == subject
+
+
+# ---------------------------------------------------------------------------
+# parse_email — occurred_at (top Received: header)
+# ---------------------------------------------------------------------------
+
+
+def _received_eml(tmp_path: Path, headers: bytes, name: str = "received.eml") -> Path:
+    """A delivered message whose header block starts with ``headers``."""
+    path = tmp_path / "INBOX" / "cur" / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(
+        headers
+        + b"From: alice@example.com\r\n"
+        + b"To: bob@example.com\r\n"
+        + b"Subject: Delivery time\r\n"
+        + b"Message-ID: <received@example.com>\r\n"
+        + b"Date: Mon, 01 Jan 2024 08:00:00 +0000\r\n"
+        + b"Content-Type: text/plain; charset=utf-8\r\n"
+        + b"\r\nBody.\r\n"
+    )
+    return path
+
+
+class TestOccurredAt:
+    """``occurred_at`` is the delivery time from the topmost ``Received:``
+    header: the text after its last ``;``, parsed by the stdlib. It is
+    never taken from ``Date:``, and is ``None`` when it cannot be read."""
+
+    def test_top_received_date_is_parsed_to_utc(self, tmp_path):
+        path = _received_eml(
+            tmp_path,
+            b"Received: from mx.example.net (mx.example.net [192.0.2.1])\r\n"
+            b"\tby mail.example.org with ESMTPS id abc123;\r\n"
+            b"\tTue, 02 Jan 2024 15:30:00 +0500 (PKT)\r\n",
+        )
+        msg = parse_email(path)
+        assert msg is not None
+        assert msg.occurred_at == datetime(2024, 1, 2, 10, 30, tzinfo=UTC)
+        assert msg.occurred_at.tzinfo is UTC
+        # sent_at is unchanged: it stays the Date: header.
+        assert msg.date == datetime(2024, 1, 1, 8, 0, tzinfo=UTC)
+
+    def test_topmost_of_several_received_headers_wins(self, tmp_path):
+        path = _received_eml(
+            tmp_path,
+            b"Received: by mail.example.org; Wed, 03 Jan 2024 09:00:00 +0000\r\n"
+            b"Received: from relay.example.net by mx.example.org;"
+            b" Tue, 02 Jan 2024 09:00:00 +0000\r\n"
+            b"Received: from client.example.com by relay.example.net;"
+            b" Mon, 01 Jan 2024 09:00:00 +0000\r\n",
+        )
+        msg = parse_email(path)
+        assert msg is not None
+        assert msg.occurred_at == datetime(2024, 1, 3, 9, 0, tzinfo=UTC)
+
+    def test_text_after_the_last_semicolon_is_the_date(self, tmp_path):
+        """A ``;`` inside the trace clauses does not hide the date."""
+        path = _received_eml(
+            tmp_path,
+            b"Received: from a.example (helo=x; y) by b.example (z; w);"
+            b" Thu, 04 Jan 2024 11:00:00 -0100\r\n",
+        )
+        msg = parse_email(path)
+        assert msg is not None
+        assert msg.occurred_at == datetime(2024, 1, 4, 12, 0, tzinfo=UTC)
+
+    def test_received_without_semicolon_is_none(self, tmp_path):
+        path = _received_eml(
+            tmp_path,
+            b"Received: from mx.example.net by mail.example.org"
+            b" Tue, 02 Jan 2024 09:00:00 +0000\r\n",
+        )
+        msg = parse_email(path)
+        assert msg is not None
+        assert msg.occurred_at is None
+
+    @pytest.mark.parametrize(
+        "tail",
+        [
+            b"",
+            b" not a date",
+            b" Tue, 99 Foo 2024 25:61:00 +0000",
+            b" 1 Jan 99999 10:00:00 +0000",
+        ],
+        ids=["empty", "gibberish", "out-of-range", "huge-year"],
+    )
+    def test_malformed_received_date_is_none(self, tmp_path, tail):
+        path = _received_eml(tmp_path, b"Received: by mail.example.org;" + tail + b"\r\n")
+        msg = parse_email(path)
+        assert msg is not None
+        assert msg.occurred_at is None
+        # The Date: header is not a fallback for occurred_at.
+        assert msg.date == datetime(2024, 1, 1, 8, 0, tzinfo=UTC)
+
+    def test_absent_received_is_none_and_date_is_not_used(self, tmp_path):
+        """Sent mail carries no Received: header."""
+        path = _received_eml(tmp_path, b"")
+        msg = parse_email(path)
+        assert msg is not None
+        assert msg.occurred_at is None
+        assert msg.date_is_fallback is False
+
+    def test_folded_long_received_header(self, tmp_path):
+        clauses = b"".join(b"\r\n\t(via hop-%d.example.net; id %d)" % (i, i) for i in range(200))
+        path = _received_eml(
+            tmp_path,
+            b"Received: from mx.example.net" + clauses + b"\r\n\tby mail.example.org;\r\n"
+            b"\tFri, 05 Jan 2024 06:07:08 +0000\r\n",
+        )
+        msg = parse_email(path)
+        assert msg is not None
+        assert msg.occurred_at == datetime(2024, 1, 5, 6, 7, 8, tzinfo=UTC)
+
+    @pytest.mark.parametrize(
+        "received",
+        [
+            b"Received: from caf\xc3\xa9.example by mx.example.org;"
+            b" Sat, 06 Jan 2024 10:00:00 +0000",
+            b"Received: from x by mx.example.org; Sat, 06 Jan 2024 10:00:00 +0000\xe9",
+            b"Received: from =?utf-8?q?caf=C3=A9?= by mx.example.org;"
+            b" Sat, 06 Jan 2024 10:00:00 +0000",
+        ],
+        ids=["8bit-clause", "8bit-after-zone", "encoded-word"],
+    )
+    def test_8bit_and_encoded_received_header(self, tmp_path, received):
+        path = _received_eml(tmp_path, received + b"\r\n")
+        msg = parse_email(path)
+        assert msg is not None
+        assert msg.occurred_at == datetime(2024, 1, 6, 10, 0, tzinfo=UTC)
+
+    def test_8bit_only_received_date_is_none(self, tmp_path):
+        path = _received_eml(tmp_path, b"Received: by mx.example.org; \xe9\xe9\xe9\r\n")
+        msg = parse_email(path)
+        assert msg is not None
+        assert msg.occurred_at is None
+
+    @pytest.mark.parametrize(
+        "exc",
+        [
+            ValueError,
+            TypeError,
+            OverflowError,
+            email.errors.HeaderParseError,
+            email.errors.MessageDefect,
+            UnicodeDecodeError("utf-8", b"\xe9", 0, 1, "SYNTHETIC-RECEIVED-MARKER"),
+            LookupError,
+        ],
+    )
+    def test_parse_errors_degrade_to_none_without_logging_the_header(
+        self, tmp_path, monkeypatch, caplog, exc
+    ):
+        """Every error the stdlib can raise on the header degrades to
+        ``None``; the header text is attacker-controlled and never logged."""
+        marker = "SYNTHETIC-RECEIVED-MARKER"
+        real = email.utils.parsedate_to_datetime
+
+        def _raise(value):
+            if marker not in value:
+                return real(value)  # the Date: header
+            raise exc(marker) if isinstance(exc, type) else exc
+
+        monkeypatch.setattr(email.utils, "parsedate_to_datetime", _raise)
+        path = _received_eml(tmp_path, f"Received: by {marker}; {marker}\r\n".encode())
+        with caplog.at_level(logging.DEBUG):
+            msg = parse_email(path)
+        assert msg is not None
+        assert msg.occurred_at is None
+        assert marker not in caplog.text
+
+    def test_naive_received_date_is_utc(self, tmp_path):
+        path = _received_eml(
+            tmp_path, b"Received: by mx.example.org; Sun, 07 Jan 2024 10:00:00 -0000\r\n"
+        )
+        msg = parse_email(path)
+        assert msg is not None
+        assert msg.occurred_at == datetime(2024, 1, 7, 10, 0, tzinfo=UTC)
+        assert msg.occurred_at.tzinfo is UTC
+
+    def test_huge_received_header_is_bounded(self, tmp_path, monkeypatch):
+        """A crafted multi-megabyte top Received header full of ``;``
+        hands the date parser at most ``RECEIVED_DATE_MAX_CHARS``
+        characters, once."""
+        from src.parser import RECEIVED_DATE_MAX_CHARS
+
+        seen: list[int] = []
+        real = email.utils.parsedate_to_datetime
+
+        def _spy(value):
+            seen.append(len(value))
+            return real(value)
+
+        monkeypatch.setattr(email.utils, "parsedate_to_datetime", _spy)
+        filler = b"; x" * 1_000_000
+        path = _received_eml(
+            tmp_path,
+            b"Received: from mx.example.net" + filler + b"; Mon, 08 Jan 2024 10:00:00 +0000\r\n",
+        )
+        started = time.perf_counter()
+        msg = parse_email(path)
+        elapsed = time.perf_counter() - started
+        assert msg is not None
+        assert msg.occurred_at == datetime(2024, 1, 8, 10, 0, tzinfo=UTC)
+        # Two parses: Date: and the Received date, each bounded.
+        assert len(seen) == 2
+        assert max(seen) <= RECEIVED_DATE_MAX_CHARS
+        assert elapsed < 10
+
+    def test_date_longer_than_the_cap_is_none(self, tmp_path, monkeypatch):
+        """No ``;`` within the last ``RECEIVED_DATE_MAX_CHARS`` characters
+        means the date text would be longer than any real one: ``None``,
+        and the date parser is not called for it."""
+        from src.parser import RECEIVED_DATE_MAX_CHARS
+
+        calls: list[str] = []
+        real = email.utils.parsedate_to_datetime
+
+        def _spy(value):
+            calls.append(value)
+            return real(value)
+
+        monkeypatch.setattr(email.utils, "parsedate_to_datetime", _spy)
+        path = _received_eml(
+            tmp_path,
+            b"Received: by mx.example.org; Mon, 08 Jan 2024 10:00:00 +0000 ("
+            + b"x" * RECEIVED_DATE_MAX_CHARS
+            + b")\r\n",
+        )
+        msg = parse_email(path)
+        assert msg is not None
+        assert msg.occurred_at is None
+        assert len(calls) == 1  # the Date: header only
 
 
 # ---------------------------------------------------------------------------
