@@ -682,6 +682,15 @@ class ThreadPage:
 # bounding the rows read (one past the cap, to tell that more exist).
 MAX_LISTED_CLAIMANTS = 20
 
+# Message-ID conflicts for ``get_mailbox_status`` (#455): the number of
+# Message-IDs claimed by more than one file, and the files beyond the
+# first claimant of each. Grouping on ``message_id`` walks the
+# ``idx_messages_message`` index alone (a covering scan), not the table.
+MESSAGE_ID_CONFLICTS_SQL = """
+    SELECT COUNT(*), COALESCE(SUM(n - 1), 0)
+    FROM (SELECT COUNT(*) AS n FROM messages GROUP BY message_id HAVING COUNT(*) > 1)
+"""
+
 
 @dataclass
 class MessageView:
@@ -2892,6 +2901,10 @@ class Database:
         records its failure class, so the class marks it as retrying; a
         dead job requeued by ``make requeue-dead`` clears both and is
         pending again.
+
+        Message-ID conflicts (#455) are counts only: how many Message-IDs
+        more than one file claims, and how many files beyond the first
+        claim them. The IDs themselves stay out of status.
         """
         stats: dict = {}
         with closing(self._connect()) as conn:
@@ -2917,6 +2930,9 @@ class Database:
                 "SELECT sync_completed_at, sync_interval_secs, indexer_seen_at FROM ingestion_state"
             ).fetchone()
             stats["ingestion"] = dict(state) if state is not None else None
+            conflicts = conn.execute(MESSAGE_ID_CONFLICTS_SQL).fetchone()
+            stats["conflicting_message_ids"] = conflicts[0]
+            stats["extra_claimant_files"] = conflicts[1]
             conn.execute("COMMIT")
         return stats
 

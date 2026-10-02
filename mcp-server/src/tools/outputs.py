@@ -439,6 +439,14 @@ class MailboxStatusOutput(_Output):
     total_messages: int
     oldest_message: str | None
     newest_message: str | None
+    conflicting_message_ids: int = Field(
+        description="How many Message-IDs are claimed by more than one indexed file. "
+        "get_message on such a Message-ID lists its claimant IDs; pass one to read "
+        "that file."
+    )
+    extra_claimant_files: int = Field(
+        description="Indexed files beyond the first claimant of each conflicting Message-ID."
+    )
     checked_at: datetime
 
 

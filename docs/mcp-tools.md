@@ -981,6 +981,16 @@ Reports whether the local index is current and what it holds.
 | `indexer_last_seen_at` | When the indexer last reported (at most every 30 s with its health heartbeat, including during the initial index) |
 | `queue` | `pending` (found, not yet failed), `retrying` (failed at least once, including jobs deferred during an embedder outage; will retry), `dead` (failed permanently and incompletely indexed: missing from search, or found only by keyword, until `make requeue-dead`) |
 | `total_threads`, `total_messages`, `oldest_message`, `newest_message` | What the index holds |
+| `conflicting_message_ids` | How many Message-IDs more than one indexed file claims (see "Message-ID and claimant ID" above); 0 when none |
+| `extra_claimant_files` | Files beyond the first claimant of each conflicting Message-ID (two Message-IDs with 2 and 3 claimants give 3) |
+
+Message-ID conflicts are reported as counts only, with a fixed hint
+in the text output (`get_message` on such a Message-ID lists its
+claimant IDs; call it with a claimant ID to read one file). Status never
+lists the Message-IDs themselves, so it stays free of mailbox content
+and small however many conflicts exist. Conflicts do not affect
+`current`. The count groups `messages` on `message_id`, which SQLite
+answers from the `idx_messages_message` index alone.
 
 Dead messages do not make the index non-current: nothing more happens
 to them without an operator, so they are reported rather than waited
