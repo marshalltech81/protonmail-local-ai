@@ -1705,24 +1705,16 @@ class TestReprocessKeepsThreadMembership:
         assert listing_b == [thread_b]
 
 
-def _message_dates(db: Database, message_id: str) -> tuple[str, set[str], tuple[str, str]]:
-    """``(messages.sent_at, chunk message_dates, (date_first, date_last))``."""
+def _message_dates(db: Database, message_id: str) -> tuple[str, tuple[str, str]]:
+    """``(messages.sent_at, (date_first, date_last))``."""
     sent_at = db._conn.execute(
         "SELECT sent_at FROM messages WHERE message_id = ?", (message_id,)
     ).fetchone()["sent_at"]
-    chunk_dates = {
-        r["message_date"]
-        for r in db._conn.execute(
-            "SELECT message_date FROM message_chunks WHERE "
-            "claimant_id IN (SELECT claimant_id FROM message_thread_map WHERE message_id = ?)",
-            (message_id,),
-        )
-    }
     thread = db._conn.execute(
         "SELECT date_first, date_last FROM threads WHERE thread_id = ?",
         (db.find_thread_by_message_id(message_id),),
     ).fetchone()
-    return sent_at, chunk_dates, (thread["date_first"], thread["date_last"])
+    return sent_at, (thread["date_first"], thread["date_last"])
 
 
 class TestReprocessKeepsFirstDate:
@@ -1755,7 +1747,7 @@ class TestReprocessKeepsFirstDate:
         self._index(db, threader, renamed)
 
         header = "2024-01-01T12:00:00+00:00"
-        assert _message_dates(db, "dated@example.com") == (header, {header}, (header, header))
+        assert _message_dates(db, "dated@example.com") == (header, (header, header))
 
     def test_changed_header_date_is_its_own_claimant(self, tmp_path, monkeypatch):
         """Only a fallback date defers to the stored one, and only for the
@@ -1797,7 +1789,7 @@ class TestReprocessKeepsFirstDate:
         self._index(db, threader, renamed)
 
         first = self._FIRST.isoformat()
-        assert _message_dates(db, "undated@example.com") == (first, {first}, (first, first))
+        assert _message_dates(db, "undated@example.com") == (first, (first, first))
 
     def test_reap_rebuild_keeps_undated_survivor_first_date(self, tmp_path, monkeypatch):
         """The reaper re-parses a thread's survivors to rebuild its row;
@@ -1841,7 +1833,7 @@ class TestReprocessKeepsFirstDate:
 
         assert db.find_thread_by_message_id("reply@example.com") is None
         first = self._FIRST.isoformat()
-        assert _message_dates(db, "root@example.com") == (first, {first}, (first, first))
+        assert _message_dates(db, "root@example.com") == (first, (first, first))
 
 
 class TestBatchedInitialIndex:

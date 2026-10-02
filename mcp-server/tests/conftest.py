@@ -108,9 +108,6 @@ def _build_schema(conn: sqlite3.Connection) -> None:
         -- Per-message chunks. Tests use the same toy 4-dim embedding
         -- space as the thread vec table so synthetic vectors like
         -- ``[1, 0, 0, 0]`` work uniformly across both lanes.
-        --
-        -- ``message_date`` mirrors the indexer schema: NOT NULL, and
-        -- the ordering key for ``get_recent_chunks_for_thread``.
         CREATE TABLE message_chunks (
             chunk_id        TEXT PRIMARY KEY,
             claimant_id     TEXT NOT NULL,
@@ -122,8 +119,7 @@ def _build_schema(conn: sqlite3.Connection) -> None:
             token_est       INTEGER NOT NULL,
             chunked_at      TEXT NOT NULL,
             fts_rowid       INTEGER,
-            attachment_id   TEXT,
-            message_date    TEXT NOT NULL
+            attachment_id   TEXT
         );
 
         CREATE VIRTUAL TABLE message_chunks_fts USING fts5(
@@ -261,7 +257,6 @@ def _insert_chunk(
     chunk_index: int = 0,
     chunked_at: str = "2024-01-01T00:00:00+00:00",
     attachment_id: str | None = None,
-    message_date: str | None = None,
     char_start: int = 0,
     variant: str = "",
 ) -> None:
@@ -272,14 +267,12 @@ def _insert_chunk(
     exercise it end-to-end, without requiring a real indexer pipeline
     in the unit-test stack.
 
-    ``message_date`` defaults to ``chunked_at``, so tests that only
-    care about insert order get a matching message order. ``char_start``
-    is the chunk's offset in its message body; a message's later chunks
-    must set it, since bodies are reconstructed by offset. The chunk
+    The chunk has no date of its own: readers take it from the
+    ``messages`` row of its claimant, which ``_insert_message`` writes.
+    ``char_start`` is the chunk's offset in its message body; a
+    message's later chunks must set it, since bodies are reconstructed by offset. The chunk
     belongs to the claimant ``claimant_of(message_id, variant)``.
     """
-    if message_date is None:
-        message_date = chunked_at
     cur = conn.cursor()
     cur.execute("INSERT INTO message_chunks_fts (text) VALUES (?)", (text,))
     fts_rowid = cur.lastrowid
@@ -292,8 +285,8 @@ def _insert_chunk(
         INSERT INTO message_chunks
             (chunk_id, claimant_id, thread_id, chunk_index, text,
              char_start, char_end, token_est,
-             chunked_at, fts_rowid, attachment_id, message_date)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             chunked_at, fts_rowid, attachment_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             chunk_id,
@@ -307,7 +300,6 @@ def _insert_chunk(
             chunked_at,
             fts_rowid,
             attachment_id,
-            message_date,
         ),
     )
     conn.commit()
@@ -609,7 +601,6 @@ def _insert_message(
             thread_id=thread_id,
             text=body,
             embedding=[1.0, 0.0, 0.0, 0.0],
-            message_date=sent_at,
         )
     if attachment_text is not None:
         _insert_chunk(
@@ -621,7 +612,6 @@ def _insert_message(
             text=attachment_text,
             embedding=[1.0, 0.0, 0.0, 0.0],
             attachment_id=f"{message_id}-att",
-            message_date=sent_at,
         )
 
 
@@ -909,7 +899,6 @@ def messages_db(tmp_path):
         char_start=len("lunch friday?\n\n"),
         text="at the noodle place",
         embedding=[1.0, 0.0, 0.0, 0.0],
-        message_date="2024-02-01T08:00:00+00:00",
     )
     _insert_message(
         conn,

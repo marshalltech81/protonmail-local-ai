@@ -412,9 +412,10 @@ class ChunkResult:
     filename/MIME provenance the text is opaque and the source
     attachment cannot be cited.
 
-    ``message_date`` is the source message's ``Date:`` header, carried
-    so ``get_evidence`` can show *when* a cited passage arrived. Left
-    ``None`` only for query paths that do not SELECT it.
+    ``message_date`` is the ``sent_at`` of the chunk's ``messages`` row
+    (chunks store no date of their own, #575), carried so
+    ``get_evidence`` can show *when* a cited passage arrived. Left
+    ``None`` for query paths that do not SELECT it.
 
     ``source_file`` is the raw file of the chunk's message (for an
     attachment chunk, the message that carries the attachment); ``None``
@@ -2484,7 +2485,7 @@ class Database:
             sql = (
                 "SELECT c.chunk_id, COALESCE(m.message_id, c.claimant_id) AS message_id, "
                 "c.claimant_id, c.thread_id, c.chunk_index, "
-                "c.text, c.char_start, c.char_end, c.attachment_id, c.message_date, "
+                "c.text, c.char_start, c.char_end, c.attachment_id, m.sent_at AS message_date, "
                 "a.filename AS attachment_filename, "
                 "a.content_type AS attachment_mime, "
                 f"{_SOURCE_COLUMNS}, "
@@ -2571,14 +2572,16 @@ class Database:
         date within the selected tail) order so the LLM prompt reads naturally as a
         timeline. Caller can render them via ``_summarize_context``.
 
-        Ordering: ``c.message_date DESC, c.chunk_index DESC``.
-        ``message_date`` is the indexed message date stored at
-        chunk-write: the sender-supplied ``Date:`` header, or the
-        indexer's ingest time when that header is missing or
-        unparseable. It is not an IMAP delivery timestamp, but it is
-        stable across reindex, reap-rebuild, dead-letter retry, and
-        recovery-sweep paths (unlike ``chunked_at``, the chunker's
-        wall-clock at insert, which this query does not use).
+        Ordering: ``m.sent_at DESC, c.chunk_index DESC``, the date of
+        each chunk's ``messages`` row (chunks store no date of their
+        own, so a re-dated message whose chunks were not rewritten
+        still sorts by its current date, #575). ``sent_at`` is the
+        sender-supplied ``Date:`` header, or the indexer's ingest time
+        when that header is missing or unparseable. It is not an IMAP
+        delivery timestamp, but it is stable across reindex,
+        reap-rebuild, dead-letter retry, and recovery-sweep paths
+        (unlike ``chunked_at``, the chunker's wall-clock at insert,
+        which this query does not use).
         ``chunk_index DESC`` tiebreaks chunks of the same message so the
         last chunk emitted by the chunker comes first in selection.
         Selection picks the latest-dated ``limit`` chunks, then the result
@@ -2601,14 +2604,14 @@ class Database:
                 "c.text, c.char_start, c.char_end, c.attachment_id, "
                 "NULL AS attachment_filename, "
                 "NULL AS attachment_mime, "
-                "c.message_date, "
+                "m.sent_at AS message_date, "
                 f"{_CHUNK_SENDER_SQL}, "
                 "0.0 AS score "
                 "FROM message_chunks c "
                 "LEFT JOIN messages m ON m.claimant_id = c.claimant_id "
                 "WHERE c.thread_id = ? "
                 "AND c.attachment_id IS NULL "
-                "ORDER BY c.message_date DESC, c.chunk_index DESC "
+                "ORDER BY m.sent_at DESC, c.chunk_index DESC "
                 "LIMIT ?",
                 (thread_id, limit),
             )

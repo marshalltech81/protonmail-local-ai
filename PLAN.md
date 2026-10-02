@@ -64,7 +64,7 @@ The stack runs four containers:
   OpenAI-compatible `/v1/embeddings` provider (operator-supplied),
   writes SQLite. Schema v0 (the squashed, renumbered baseline,
   including the `message_thread_map` lookup indexes): 4096-dim L2-unit-norm
-  vectors, `NOT NULL` `message_chunks.message_date`,
+  vectors, passage dates read from `messages` (#575),
   `indexing_jobs.last_error_class`, per-message `messages` +
   `message_participants`. Initial scan and steady-state both
   drain a durable `indexing_jobs` queue through one two-phase batched
