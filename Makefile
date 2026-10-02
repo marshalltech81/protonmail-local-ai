@@ -1,4 +1,4 @@
-.PHONY: build build-nocache up down logs first-run update status requeue-dead clean sync sync-indexer sync-mcp test test-indexer test-mcp test-mbsync test-bridge test-bridge-smoke test-validate-env baseline typecheck typecheck-indexer typecheck-mcp bridge-patch-check bridge-smoke bridge-upgrade-check init-secrets validate-env help
+.PHONY: build build-nocache up down logs first-run update status requeue-dead clean sync sync-indexer sync-mcp test test-indexer test-mcp test-mbsync test-bridge test-bridge-smoke test-validate-env restart-indexer baseline typecheck typecheck-indexer typecheck-mcp bridge-patch-check bridge-smoke bridge-upgrade-check init-secrets validate-env help
 
 UV_CACHE_DIR ?= /tmp/uv-cache
 export UV_CACHE_DIR
@@ -17,6 +17,7 @@ help:
 	@echo "  build-nocache Rebuild all Docker images from scratch (skips BuildKit cache)"
 	@echo "  up           Start the full stack"
 	@echo "  down         Stop the full stack"
+	@echo "  restart-indexer  Run validate-env, then restart the indexer (after editing config/authority.toml)"
 	@echo "  logs         Tail logs from all containers"
 	@echo "  first-run    One-time interactive Bridge login"
 	@echo "  bridge-patch-check  Verify Bridge source patch points still match upstream"
@@ -105,6 +106,13 @@ validate-env:
 # Start the full stack in detached mode
 up: init-secrets validate-env
 	docker compose up -d
+
+# Restart the indexer after editing config/authority.toml, running the
+# same preflight as `make up` first so a loosened file mode fails here.
+# `restart` keeps each container's existing configuration, so any
+# overlay the stack was started with stays in effect.
+restart-indexer: validate-env
+	docker compose restart indexer
 
 # Stop everything
 down:
