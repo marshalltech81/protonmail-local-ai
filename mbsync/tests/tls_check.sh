@@ -75,7 +75,11 @@ start_stub() {
 start_mbsync() {
     docker rm -f "$MBSYNC" >/dev/null 2>&1 || true
     # Run as the invoking user so the bind-mounted Maildir and state
-    # directories can stay private (700) instead of world-writable.
+    # directories can stay private (700) instead of world-writable. This
+    # assumes container UIDs match host UIDs, as on OrbStack, Docker
+    # Desktop and standard Docker Engine (CI). Rootless Docker and
+    # userns-remap map UIDs differently, so the test is not supported
+    # there.
     docker run -d --name "$MBSYNC" --network "$NETWORK" --init --read-only \
         --user "$(id -u):$(id -g)" \
         --tmpfs /tmp --cap-drop ALL --security-opt no-new-privileges:true \
