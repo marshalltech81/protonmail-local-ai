@@ -226,3 +226,55 @@ class TestRerank:
             assert r.rerank("q", ["a"], top_n=5) == []
         assert "ValueError" in caplog.text
         assert "SYNTHETIC_PRIVATE_MAIL" not in caplog.text
+
+
+class TestRerankNoRetries:
+    def test_503_is_requested_once_and_falls_back(self, caplog):
+        # The SDK retries a 5xx twice by default, so one rerank call
+        # could take three times ``RERANK_TIMEOUT_SECS`` plus backoff
+        # before the RRF fallback (#483). Drive the real SDK request
+        # path against a loopback server so the count proves the SDK
+        # itself did not retry.
+        import logging
+        import threading
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        hits = {"n": 0}
+
+        class _Unavailable(BaseHTTPRequestHandler):
+            def do_POST(self):
+                hits["n"] += 1
+                length = int(self.headers.get("Content-Length", "0"))
+                self.rfile.read(length)
+                body = b'{"message": "SYNTHETIC_PRIVATE_MAIL"}'
+                self.send_response(503)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *_args):
+                pass
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), _Unavailable)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            r = CohereReranker(
+                RerankConfig(
+                    base_url=f"http://127.0.0.1:{server.server_address[1]}",
+                    model="rerank-v4.0-pro",
+                    api_key="ck-test",  # pragma: allowlist secret
+                    candidates=20,
+                    timeout_secs=5.0,
+                )
+            )
+            with caplog.at_level(logging.DEBUG):
+                assert r.rerank("q", ["SYNTHETIC_PRIVATE_MAIL"], top_n=5) == []
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+        assert hits["n"] == 1
+        assert "503" in caplog.text
+        assert "SYNTHETIC_PRIVATE_MAIL" not in caplog.text
