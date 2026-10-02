@@ -246,6 +246,28 @@ CHUNK_TARGET_TOKENS = _int_env("INDEXER_CHUNK_TARGET_TOKENS", 1000)
 CHUNK_MAX_TOKENS = _int_env("INDEXER_CHUNK_MAX_TOKENS", 1500)
 CHUNK_OVERLAP_TOKENS = _int_env("INDEXER_CHUNK_OVERLAP_TOKENS", 150, minimum=0)
 
+
+def _check_chunk_budgets(target: int, max_tokens: int, overlap: int) -> None:
+    """Raise ``ValueError`` unless the chunk budgets fit together.
+
+    ``chunker.chunk_message`` requires ``target <= max`` and
+    ``overlap < target`` (each budget's own minimum is enforced by
+    ``_int_env``). It checks this per message, so a bad combination
+    would start cleanly and then dead-letter every message; check it
+    once here instead (#507).
+    """
+    if target > max_tokens:
+        raise ValueError(
+            f"INDEXER_CHUNK_TARGET_TOKENS={target} must be <= INDEXER_CHUNK_MAX_TOKENS={max_tokens}"
+        )
+    if overlap >= target:
+        raise ValueError(
+            f"INDEXER_CHUNK_OVERLAP_TOKENS={overlap} must be < INDEXER_CHUNK_TARGET_TOKENS={target}"
+        )
+
+
+_check_chunk_budgets(CHUNK_TARGET_TOKENS, CHUNK_MAX_TOKENS, CHUNK_OVERLAP_TOKENS)
+
 # How many messages the initial-scan drainer accumulates before issuing
 # a single batched embed call. Larger batches amortize the embed
 # round-trip across more messages — meaningful when EMBED_BASE_URL

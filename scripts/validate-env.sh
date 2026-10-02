@@ -448,6 +448,25 @@ for spec in \
     fi
 done
 
+# The chunk budgets must also fit together: chunker.chunk_message
+# requires target <= max and overlap < target, and the indexer checks
+# this at startup (#507). An omitted side takes its docker-compose.yml
+# default. Each value already passed require_integer_min above.
+chunk_target="$(get_env_value INDEXER_CHUNK_TARGET_TOKENS)"
+chunk_target="${chunk_target:-1000}"
+chunk_max="$(get_env_value INDEXER_CHUNK_MAX_TOKENS)"
+chunk_max="${chunk_max:-1500}"
+chunk_overlap="$(get_env_value INDEXER_CHUNK_OVERLAP_TOKENS)"
+chunk_overlap="${chunk_overlap:-150}"
+(( 10#$chunk_target <= 10#$chunk_max )) || {
+    printf 'ERROR: INDEXER_CHUNK_TARGET_TOKENS (%s) must be <= INDEXER_CHUNK_MAX_TOKENS (%s).\n' "$chunk_target" "$chunk_max" >&2
+    exit 1
+}
+(( 10#$chunk_overlap < 10#$chunk_target )) || {
+    printf 'ERROR: INDEXER_CHUNK_OVERLAP_TOKENS (%s) must be < INDEXER_CHUNK_TARGET_TOKENS (%s).\n' "$chunk_overlap" "$chunk_target" >&2
+    exit 1
+}
+
 # Indexer booleans: an unrecognised value stops the indexer at startup
 # rather than reading as false (#481). INDEXER_DELETION_ENABLED (the
 # retention mode) uses the same vocabulary.
