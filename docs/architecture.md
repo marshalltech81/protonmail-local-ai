@@ -81,11 +81,11 @@ inference (operator-supplied)
         │  reads sqlite-volume (connection opened read-only)
         ▼
 mcp-server container
-  - Exposes MCP tools via HTTP/SSE on port 3000, built on the
-    standalone `fastmcp` package
+  - Exposes MCP tools over Streamable HTTP at /mcp on port 3000,
+    built on the standalone `fastmcp` package
   - Rejects any HTTP request whose Host is not localhost, 127.0.0.1,
     [::1] or mcp-server (any port) with 421, and a browser Origin
-    outside the same names over http with 403, before it reaches a
+    outside the same names over http with 403, before it reaches the
     transport (DNS-rebinding defense)
   - Serves GET /health for the container healthcheck (200 when the
     read-only SQLite connection answers, 503 otherwise)
@@ -98,9 +98,9 @@ mcp-server container
     injection from attacker-controlled email content
   - Read-only: no mail-changing tools and no connection to Bridge
         │
-        │  HTTP/SSE (localhost:3000)
+        │  Streamable HTTP (localhost:3000/mcp)
         ▼
-Claude Desktop (host machine)
+MCP client (host machine; Claude Desktop via a local stdio bridge)
   - Calls MCP tools via natural language
   - Receives structured responses
 ```
@@ -1172,11 +1172,11 @@ content regardless of `INFERENCE_MODE`.
 `INFERENCE_MODE` and the MCP client choice are independent boundaries and must
 both be set deliberately if "fully local conversations" is a goal.
 
-The MCP server defaults to SSE for existing Claude Desktop compatibility.
-Set `MCP_TRANSPORT=streamable-http` for clients that only speak Streamable
-HTTP, or `MCP_TRANSPORT=dual` to serve both `/sse` and `/mcp` on the same
-localhost-bound port. Every transport, and `/health`, sits behind the same
-Host/Origin allowlist. A Streamable HTTP session idle for
+The MCP server speaks one transport, Streamable HTTP at `/mcp`, on a
+localhost-bound port. The legacy HTTP+SSE transport (`/sse` and
+`/messages/`) was removed (#498); `MCP_TRANSPORT=sse` or `dual` fails
+startup with migration steps. `/mcp` and `/health` sit behind the same
+Host/Origin allowlist, checked before a session is created. A Streamable HTTP session idle for
 `MCP_SESSION_IDLE_TIMEOUT_SECS` (default 1800 s) is ended, so abandoned
 sessions do not accumulate.
 

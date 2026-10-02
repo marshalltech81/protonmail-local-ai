@@ -268,6 +268,31 @@ unknown_inference_mode_fails() {
     fails_with 'INFERENCE_MODE must be one of'
 }
 
+# #498: Streamable HTTP is the only transport. The removed values fail
+# with migration steps; anything else fails closed.
+removed_transport_fails_with_migration_steps() {
+    local value expected
+    for value in sse dual ' Dual '; do
+        expected="$(printf '%s' "$value" | tr -d ' ' | tr '[:upper:]' '[:lower:]')"
+        setup "MCP_TRANSPORT=\"$value\""
+        fails_with "MCP_TRANSPORT=$expected was removed"
+        grep -F '/sse to' "$WORK/output" >/dev/null
+        grep -F '/mcp' "$WORK/output" >/dev/null
+    done
+}
+
+# An exported value wins over .env, so the steps must say to unset it.
+exported_removed_transport_names_the_shell_export() {
+    setup
+    fails_with 'MCP_TRANSPORT=sse was removed' MCP_TRANSPORT=sse
+    grep -F 'unset MCP_TRANSPORT' "$WORK/output" >/dev/null
+}
+
+unknown_transport_fails() {
+    setup 'MCP_TRANSPORT=websocket'
+    fails_with "MCP_TRANSPORT must be 'streamable-http' or unset"
+}
+
 missing_embed_model_fails() {
     setup 'EMBED_MODEL='
     fails_with 'EMBED_MODEL must be set'
@@ -392,7 +417,7 @@ padded_quoted_values_pass() {
 
 padded_and_cased_modes_pass() {
     setup 'INFERENCE_MODE=" OpenAI "' 'INFERENCE_MODEL=placeholder-model' \
-        'EMBED_MODE=" openai "' 'RERANK_MODE=" None "' 'MCP_TRANSPORT=" Dual "'
+        'EMBED_MODE=" openai "' 'RERANK_MODE=" None "' 'MCP_TRANSPORT=" Streamable-HTTP "'
     passes
 }
 
@@ -463,6 +488,9 @@ check "a zero-padded SYNC_INTERVAL fails" zero_padded_sync_interval_fails
 check "an out-of-range MCP_PORT fails" out_of_range_port_fails
 check "a zero-padded MCP_PORT is decimal" zero_padded_port_is_decimal
 check "an unknown INFERENCE_MODE fails" unknown_inference_mode_fails
+check "a removed MCP_TRANSPORT fails with migration steps" removed_transport_fails_with_migration_steps
+check "an exported removed MCP_TRANSPORT names the shell export" exported_removed_transport_names_the_shell_export
+check "an unknown MCP_TRANSPORT fails" unknown_transport_fails
 check "a missing EMBED_MODEL fails" missing_embed_model_fails
 check "an empty embed key fails" empty_embed_key_fails
 check "the placeholder BRIDGE_USER fails" placeholder_bridge_user_fails

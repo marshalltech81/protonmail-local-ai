@@ -264,9 +264,8 @@ services:
   # ---------------------------------------------------------------------------
   # MCP Server
   # Exposes search, Q&A, and agentic tools over MCP transports.
-  # Accessible on the host machine only. Default SSE path:
-  # http://localhost:MCP_PORT/sse. Streamable HTTP path when enabled:
-  # http://localhost:MCP_PORT/mcp.
+  # Accessible on the host machine only. Streamable HTTP is the only
+  # transport: http://localhost:MCP_PORT/mcp.
   # ---------------------------------------------------------------------------
   mcp-server:
     build:
@@ -321,10 +320,13 @@ services:
       # of reply are fitted into it. Set a small local model's window.
       INFERENCE_CONTEXT_TOKENS: ${INFERENCE_CONTEXT_TOKENS:-32768}
       MCP_PORT: ${MCP_PORT:-3000}
-      MCP_TRANSPORT: ${MCP_TRANSPORT:-sse}
-      # Seconds a Streamable HTTP session (MCP_TRANSPORT=streamable-http
-      # or dual) may sit idle before the server ends it, so a session a
-      # client abandons does not hold a server task until restart.
+      # Only "streamable-http" (or empty) is accepted. Still passed through
+      # so an old .env with the removed "sse" or "dual" fails startup with
+      # migration steps instead of being ignored.
+      MCP_TRANSPORT: ${MCP_TRANSPORT:-streamable-http}
+      # Seconds a Streamable HTTP session may sit idle before the server
+      # ends it, so a session a client abandons does not hold a server
+      # task until restart.
       MCP_SESSION_IDLE_TIMEOUT_SECS: ${MCP_SESSION_IDLE_TIMEOUT_SECS:-1800}
       # "true" registers the experimental tools (brief_issue and
       # check_conclusion; both need inference); their output format may

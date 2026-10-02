@@ -1,6 +1,6 @@
 # =============================================================================
-# MCP Server — exposes email search and intelligence tools to Claude Desktop
-# Uses HTTP/SSE transport (required for Docker — stdio only works on host)
+# MCP Server — exposes email search and intelligence tools to MCP clients
+# Uses the Streamable HTTP transport at /mcp (stdio only works on the host)
 # Two-stage: builder installs deps into a uv-managed virtualenv; runtime has none.
 # =============================================================================
 

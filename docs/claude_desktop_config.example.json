@@ -1,7 +1,14 @@
 {
   "mcpServers": {
     "protonmail-local-ai": {
-      "url": "http://localhost:3000/sse"
+      "command": "npx",
+      "args": [
+        "-y",
+        "mcp-remote@0.14.3",
+        "http://localhost:3000/mcp",
+        "--transport",
+        "http-only"
+      ]
     }
   }
 }

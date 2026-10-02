@@ -603,9 +603,20 @@ require_integer "MCP_PORT" "$MCP_PORT"
     exit 1
 }
 
-MCP_TRANSPORT="$(normalize_mode "${MCP_TRANSPORT:-sse}")"
-[[ "$MCP_TRANSPORT" =~ ^(sse|streamable-http|dual)$ ]] || {
-    echo "ERROR: MCP_TRANSPORT must be 'sse', 'streamable-http', or 'dual'." >&2
+# Streamable HTTP at /mcp is the only transport (#498). MCP_TRANSPORT is
+# still read so a value left from a release that served the legacy SSE
+# transport fails with migration steps, as mcp-server/src/main.py does.
+MCP_TRANSPORT="$(normalize_mode "$MCP_TRANSPORT")"
+if [[ "$MCP_TRANSPORT" == "sse" || "$MCP_TRANSPORT" == "dual" ]]; then
+    echo "ERROR: MCP_TRANSPORT=$MCP_TRANSPORT was removed: Streamable HTTP is the only MCP transport." >&2
+    echo "       Remove MCP_TRANSPORT from .env and run 'unset MCP_TRANSPORT' in any shell that" >&2
+    echo "       exports it (an exported value wins over .env), or set it to streamable-http." >&2
+    echo "       Change MCP client URLs from http://localhost:<MCP_PORT>/sse to" >&2
+    echo "       http://localhost:<MCP_PORT>/mcp." >&2
+    exit 1
+fi
+[[ -z "$MCP_TRANSPORT" || "$MCP_TRANSPORT" == "streamable-http" ]] || {
+    echo "ERROR: MCP_TRANSPORT must be 'streamable-http' or unset." >&2
     exit 1
 }
 

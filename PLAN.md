@@ -69,8 +69,8 @@ The stack runs four containers:
   FTS, attachment FTS, thread vec, chunk vec → RRF, optional Cohere
   rerank), exhaustive `query_messages` enumeration, and intelligence
   tools. `INFERENCE_MODE=anthropic` (default,
-  `claude-sonnet-4-6`) or `openai`; SSE / streamable-http / dual
-  transports; localhost:3000 only.
+  `claude-sonnet-4-6`) or `openai`; Streamable HTTP at `/mcp` is the
+  only transport (#498); localhost:3000 only.
 
 Inference and embedding endpoints are operator-supplied — the project
 ships no model-serving components. Host-side servers keep retrieval
@@ -792,9 +792,9 @@ Go-live checklist (do these before more hardening):
    indexer's progress; `make status` until the index is current.
    Record how long the initial sync takes: #282's stall deadline is
    set above it (#277 landed in #515).
-5. Point an MCP client at `http://localhost:${MCP_PORT}` plus `/sse`
-   (the default `MCP_TRANSPORT=sse`) or `/mcp` (`streamable-http`;
-   `dual` serves both), and try real questions by hand; `mcp-server/tests/eval/README.md` covers turning
+5. Point an MCP client at `http://localhost:${MCP_PORT}/mcp` (Claude
+   Desktop through a local stdio bridge; see `docs/setup.md` step 7),
+   and try real questions by hand; `mcp-server/tests/eval/README.md` covers turning
    the good ones into a retrieval eval.
 6. Let what breaks set the next priorities; then the #283 eval slice,
    which must precede the first Phase 2 generation as its validation

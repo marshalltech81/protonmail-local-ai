@@ -272,6 +272,8 @@ services strip it. It fails fast if:
 - `config/authority.toml`, when present, is not a regular file (a symlink
   counts as not one) or is not `600`
 - numeric or enum settings such as `SYNC_INTERVAL`, `MCP_PORT`, `MCP_TRANSPORT`, or `INFERENCE_MODE` are invalid
+  (`MCP_TRANSPORT` accepts only `streamable-http` or unset; the removed `sse`
+  and `dual` fail with migration steps)
 
 Verify everything is running:
 
@@ -563,29 +565,94 @@ Things to expect after an upgrade:
   mbsync treats as a pin mismatch. See "mbsync refuses to sync — Bridge cert
   pin mismatch" in [`troubleshooting.md`](troubleshooting.md).
 
-### 7. Configure Claude Desktop
+### 7. Connect an MCP client
 
-Open or create `~/Library/Application Support/Claude/claude_desktop_config.json`:
+The server speaks one MCP transport, Streamable HTTP, at
+`http://localhost:3000/mcp` (replace `3000` with `MCP_PORT` if you
+changed it). The port is published on the loopback interface only, so
+the client has to run on this machine. Two separate questions decide
+whether a client can connect: whether it speaks Streamable HTTP, and
+whether its connection starts on this machine (and so can reach
+`localhost`).
+
+**Claude Code** connects from this machine and speaks Streamable HTTP:
+
+```bash
+claude mcp add --transport http protonmail-local-ai http://localhost:3000/mcp
+```
+
+**Claude Desktop** has two ways to add an MCP server, and neither
+takes this URL directly:
+
+- `~/Library/Application Support/Claude/claude_desktop_config.json`
+  configures local servers that Claude Desktop starts as a command and
+  talks to over stdio. Anthropic documents no URL-only entry for it.
+- Settings → Connectors adds a remote (custom) connector. That
+  connection is brokered by your Claude account and starts from
+  Anthropic's servers, not from your Mac, so it cannot reach
+  `localhost`. Do not publish or tunnel this port to make it reachable;
+  the server is designed to be local-only.
+
+Connect Claude Desktop through a local stdio-to-Streamable-HTTP bridge
+instead. The npm package `mcp-remote` is one
+(it needs Node.js). Add the `protonmail-local-ai` entry below to the
+`mcpServers` object in `claude_desktop_config.json`, keeping any servers
+already there; use the whole example (also in
+[`claude_desktop_config.example.json`](claude_desktop_config.example.json))
+only when the file does not exist yet:
 
 ```json
 {
   "mcpServers": {
     "protonmail-local-ai": {
-      "url": "http://localhost:3000/sse"
+      "command": "npx",
+      "args": [
+        "-y",
+        "mcp-remote@0.14.3",
+        "http://localhost:3000/mcp",
+        "--transport",
+        "http-only"
+      ]
     }
   }
 }
 ```
 
-Restart Claude Desktop.
+`--transport http-only` stops it falling back to the removed SSE
+transport; `mcp-remote` accepts a plain `http://` URL only for
+`localhost` or `127.0.0.1`. It is third-party code that runs as your
+user and relays every tool call and result, so pin a version you have
+reviewed rather than the latest: the npm package has changed
+maintainers (its repository is now `punkpeye/mcp-remote`, formerly
+`geelen/mcp-remote`).
 
-In a new conversation, you should see the ProtonMail tools available.
-Test with: *"What is the status of my email index?"*
+Restart Claude Desktop. In a new conversation, you should see the
+ProtonMail tools available. Test with: *"What is the status of my email
+index?"* Remember that Claude Desktop sends tool results to Anthropic
+as conversation context (see
+[architecture.md](architecture.md#mcp-client-layer-governed-by-which-client-you-connect) for what each
+client sees).
 
-Other MCP clients connect the same way. The server speaks SSE at `/sse`
-by default; set `MCP_TRANSPORT=streamable-http` to serve Streamable HTTP
-at `/mcp` instead, or `dual` for both on the same port. Whatever the
-transport, the server answers only requests addressed to `localhost`,
+**Cloud-originated connectors** (claude.ai custom connectors, ChatGPT
+developer mode) connect from the provider's servers. They support
+Streamable HTTP but cannot reach a localhost-only server, and this
+project does not support exposing it.
+
+**Other MCP clients** that run on this machine and speak Streamable HTTP
+connect to `http://localhost:3000/mcp` directly.
+
+**Upgrading from a release that served `/sse` (breaking change).** The
+legacy HTTP+SSE transport, its `/sse` and `/messages/` endpoints, and
+the `MCP_TRANSPORT` values `sse` and `dual` were removed. Remove
+`MCP_TRANSPORT` from `.env`, and run `unset MCP_TRANSPORT` in any shell
+that exports it, since an exported value wins over `.env` (or set it to
+`streamable-http`): `sse` or
+`dual` now fails `make validate-env` and mcp-server startup with these
+steps. Change each client from `http://localhost:3000/sse` to
+`http://localhost:3000/mcp`, and for a client that picks its transport,
+choose Streamable HTTP (`http`), not SSE.
+
+The server answers only requests addressed to `localhost`,
 `127.0.0.1` or `[::1]` (any port): a request with another `Host` header
 gets `421 Misdirected Request`, and a browser `Origin` other than those
 names over `http` gets `403`.

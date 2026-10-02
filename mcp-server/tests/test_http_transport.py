@@ -3,11 +3,13 @@ The HTTP apps ``src.main._build_app`` serves, driven over ASGI.
 
 These go through a real ``FastMCP`` instance and the same app the
 container runs, so they pin what a client on the network sees: the
-Host/Origin allowlist on every transport, the transport routes, the
-``/health`` route, and that a tool failure stays out of the logs.
+Host/Origin allowlist on every route, the Streamable HTTP route at
+``/mcp`` (the only transport, #498), the ``/health`` route, and that a
+tool failure stays out of the logs.
 """
 
 import asyncio
+import json
 import logging
 
 import anyio
@@ -16,6 +18,8 @@ import pytest
 from fastmcp import Client, FastMCP
 from fastmcp.exceptions import ToolError
 from src.main import _build_app
+from src.tools.retrieval import register_retrieval_tools
+from src.tools.system import register_system_tools
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
@@ -39,8 +43,8 @@ _CONTAINER_ADDR = ("172.18.0.5", 3000)
 _MARKER = "synthetic-mail-marker-c41d"
 
 
-def _app(transport, server: FastMCP | None = None, session_idle_timeout: float = 1800.0):
-    return _build_app(server or _server(), transport, session_idle_timeout=session_idle_timeout)
+def _app(server: FastMCP | None = None, session_idle_timeout: float = 1800.0):
+    return _build_app(server or _server(), session_idle_timeout=session_idle_timeout)
 
 
 def _server() -> FastMCP:
@@ -76,9 +80,8 @@ async def _status(
 ) -> int | None:
     """Send one request to ``app`` and return the response status.
 
-    Raw ASGI rather than an HTTP client: an accepted ``GET /sse`` opens a
-    stream that never ends, so the request is cancelled once the status
-    line is out.
+    Raw ASGI rather than an HTTP client, so a request can omit the Host
+    header; the request is cancelled once the status line is out.
     """
     raw = [] if host is None else [(b"host", host.encode())]
     if origin is not None:
@@ -136,44 +139,7 @@ def _with_lifespan(app, fn):
     return asyncio.run(run())
 
 
-def _dual_with_lifespan(app, fn):
-    """The dual app is a bare ASGI callable; drive its lifespan by hand."""
-
-    async def run():
-        sent = []
-        startup = anyio.Event()
-        shutdown = anyio.Event()
-        queue = [{"type": "lifespan.startup"}]
-
-        async def receive():
-            if queue:
-                return queue.pop()
-            await shutdown.wait()
-            return {"type": "lifespan.shutdown"}
-
-        async def send(message):
-            sent.append(message["type"])
-            if message["type"] == "lifespan.startup.complete":
-                startup.set()
-
-        async with anyio.create_task_group() as tg:
-            tg.start_soon(app, {"type": "lifespan", "asgi": {"version": "3.0"}}, receive, send)
-            await startup.wait()
-            try:
-                return await fn()
-            finally:
-                shutdown.set()
-
-    return asyncio.run(run())
-
-
-def _sse_status(app, **kw):
-    return _with_lifespan(app, lambda: _status(app, "GET", "/sse", **kw))
-
-
 def _mcp_status(app, **kw):
-    import json
-
     return _with_lifespan(
         app,
         lambda: _status(
@@ -226,106 +192,66 @@ _REJECTED_ORIGINS = [
 
 class TestHostAllowlist:
     @pytest.mark.parametrize("host", _ALLOWED_HOSTS)
-    def test_sse_accepts_allowed_host(self, host):
-        assert _sse_status(_app("sse"), host=host) == 200
-
-    @pytest.mark.parametrize("host", _REJECTED_HOSTS)
-    def test_sse_rejects_other_host(self, host):
-        assert _sse_status(_app("sse"), host=host) == 421
-
-    def test_sse_rejects_missing_host(self):
-        assert _sse_status(_app("sse"), host=None) == 421
-
-    @pytest.mark.parametrize("host", _ALLOWED_HOSTS)
     def test_streamable_http_accepts_allowed_host(self, host):
-        assert _mcp_status(_app("streamable-http"), host=host) == 200
+        assert _mcp_status(_app(), host=host) == 200
 
     @pytest.mark.parametrize("host", _REJECTED_HOSTS)
     def test_streamable_http_rejects_other_host(self, host):
-        assert _mcp_status(_app("streamable-http"), host=host) == 421
+        assert _mcp_status(_app(), host=host) == 421
 
-    def test_sse_message_post_rejects_other_host(self):
-        app = _app("sse")
-        status = _with_lifespan(
-            app,
-            lambda: _status(
-                app,
-                "POST",
-                "/messages/",
-                host="evil.example",
-                body=b"{}",
-                headers=_POST_HEADERS,
-            ),
-        )
-        assert status == 421
+    def test_streamable_http_rejects_missing_host(self):
+        assert _mcp_status(_app(), host=None) == 421
 
     def test_health_rejects_other_host(self):
-        app = _app("sse")
+        app = _app()
         assert _with_lifespan(app, lambda: _status(app, "GET", "/health")) == 200
         assert (
             _with_lifespan(app, lambda: _status(app, "GET", "/health", host="evil.example")) == 421
         )
+        assert _with_lifespan(app, lambda: _status(app, "GET", "/health", host=None)) == 421
+
+
+class TestLegacySseEndpointsAreGone:
+    """#498: the legacy HTTP+SSE transport and its ``/sse`` and
+    ``/messages/`` endpoints are removed; ``/mcp`` is the only MCP
+    endpoint. The Host check still runs first on any path."""
+
+    @pytest.mark.parametrize(
+        ("method", "path"), [("GET", "/sse"), ("POST", "/messages/"), ("POST", "/sse")]
+    )
+    def test_legacy_endpoint_is_not_found(self, method, path):
+        app = _app()
+        status = _with_lifespan(
+            app, lambda: _status(app, method, path, body=b"{}", headers=_POST_HEADERS)
+        )
+        assert status == 404
+
+    @pytest.mark.parametrize(("method", "path"), [("GET", "/sse"), ("POST", "/messages/")])
+    def test_legacy_endpoint_with_other_host_is_rejected_first(self, method, path):
+        app = _app()
+        status = _with_lifespan(
+            app,
+            lambda: _status(
+                app, method, path, host="evil.example", body=b"{}", headers=_POST_HEADERS
+            ),
+        )
+        assert status == 421
 
 
 class TestOriginAllowlist:
     @pytest.mark.parametrize("origin", _ALLOWED_ORIGINS)
-    def test_sse_accepts_allowed_origin(self, origin):
-        assert _sse_status(_app("sse"), origin=origin) == 200
-
-    @pytest.mark.parametrize("origin", _REJECTED_ORIGINS)
-    def test_sse_rejects_other_origin(self, origin):
-        assert _sse_status(_app("sse"), origin=origin) == 403
-
-    @pytest.mark.parametrize("origin", _ALLOWED_ORIGINS)
     def test_streamable_http_accepts_allowed_origin(self, origin):
-        assert _mcp_status(_app("streamable-http"), origin=origin) == 200
+        assert _mcp_status(_app(), origin=origin) == 200
 
     @pytest.mark.parametrize("origin", _REJECTED_ORIGINS)
     def test_streamable_http_rejects_other_origin(self, origin):
-        assert _mcp_status(_app("streamable-http"), origin=origin) == 403
-
-
-class TestDualTransport:
-    def test_both_transports_and_health_are_served(self):
-        app = _app("dual")
-
-        async def probe():
-            import json
-
-            return (
-                await _status(app, "GET", "/sse"),
-                await _status(
-                    app, "POST", "/mcp", body=json.dumps(_INIT).encode(), headers=_POST_HEADERS
-                ),
-                await _status(app, "GET", "/health"),
-            )
-
-        assert _dual_with_lifespan(app, probe) == (200, 200, 200)
-
-    def test_bad_host_is_rejected_on_both_transports(self):
-        app = _app("dual")
-
-        async def probe():
-            import json
-
-            return (
-                await _status(app, "GET", "/sse", host="evil.example"),
-                await _status(
-                    app,
-                    "POST",
-                    "/mcp",
-                    host="evil.example",
-                    body=json.dumps(_INIT).encode(),
-                    headers=_POST_HEADERS,
-                ),
-            )
-
-        assert _dual_with_lifespan(app, probe) == (421, 421)
+        assert _mcp_status(_app(), origin=origin) == 403
 
 
 def _http_session_calls(app, calls: list[tuple[str, dict]]) -> list[str]:
-    """Initialize a Streamable HTTP session on ``app`` and call each tool,
-    returning the raw response bodies."""
+    """Initialize a Streamable HTTP session on ``app`` and send each
+    ``(method, params)`` request, returning the raw response bodies. A
+    method without a ``/`` is a tool name, sent as ``tools/call``."""
 
     async def run():
         transport = httpx2.ASGITransport(app=app)
@@ -346,14 +272,13 @@ def _http_session_calls(app, calls: list[tuple[str, dict]]) -> list[str]:
             )
             bodies = []
             for i, (name, args) in enumerate(calls):
+                if "/" in name:
+                    method, params = name, args
+                else:
+                    method, params = "tools/call", {"name": name, "arguments": args}
                 r = await c.post(
                     "/mcp",
-                    json={
-                        "jsonrpc": "2.0",
-                        "id": 10 + i,
-                        "method": "tools/call",
-                        "params": {"name": name, "arguments": args},
-                    },
+                    json={"jsonrpc": "2.0", "id": 10 + i, "method": method, "params": params},
                     headers=headers,
                 )
                 bodies.append(r.text)
@@ -362,10 +287,39 @@ def _http_session_calls(app, calls: list[tuple[str, dict]]) -> list[str]:
     return _with_lifespan(app, run)
 
 
+class TestReadOnlyClientOverStreamableHttp:
+    """#498: an MCP client initializes, lists the tools and makes a
+    read-only call over ``/mcp`` against the real tool registrations and
+    a synthetic index."""
+
+    def test_initialize_list_tools_and_read_a_thread(self, seeded_db):
+        server = FastMCP("protonmail-local-ai")
+        register_retrieval_tools(server, seeded_db)
+        register_system_tools(server, seeded_db)
+        listed, thread = _http_session_calls(
+            _app(server=server),
+            [("tools/list", {}), ("get_thread", {"thread_id": "t-alpha"})],
+        )
+        names = {t["name"] for t in _sse_json(listed)["result"]["tools"]}
+        assert {"get_thread", "list_threads", "get_mailbox_status"} <= names
+        result = _sse_json(thread)["result"]
+        assert result["isError"] is False
+        assert "invoice for march" in json.dumps(result)
+
+
+def _sse_json(body: str) -> dict:
+    """The JSON-RPC message in a Streamable HTTP response, which arrives
+    as a single ``data:`` line of an SSE stream or as a plain JSON body."""
+    for line in body.splitlines():
+        if line.startswith("data:"):
+            return json.loads(line[len("data:") :])
+    return json.loads(body)
+
+
 class TestToolFailures:
     def test_tool_error_is_an_error_result_over_http(self):
         ok, failed = _http_session_calls(
-            _app("streamable-http"),
+            _app(),
             [("ping", {}), ("fails_cleanly", {"q": "x"})],
         )
         assert '"isError":false' in ok
@@ -403,7 +357,7 @@ class TestSessionBound:
     leaves no session behind."""
 
     def test_abandoned_sessions_expire_after_the_idle_timeout(self):
-        app = _app("streamable-http", session_idle_timeout=0.5)
+        app = _app(session_idle_timeout=0.5)
 
         async def run():
             manager = _session_manager(app)
@@ -422,7 +376,7 @@ class TestSessionBound:
         assert _with_lifespan(app, run) == (5, 0)
 
     def test_rejected_host_leaves_no_session(self):
-        app = _app("streamable-http")
+        app = _app()
 
         async def run():
             statuses = []
@@ -437,8 +391,7 @@ class TestSessionBound:
 
         assert _with_lifespan(app, run) == ([421, 421, 421], 0)
 
-    @pytest.mark.parametrize("transport", ["streamable-http", "dual"])
-    def test_idle_timeout_reaches_every_streamable_http_app(self, transport):
+    def test_idle_timeout_reaches_the_streamable_http_app(self):
         server = _server()
         calls = []
         http_app = server.http_app
@@ -448,7 +401,8 @@ class TestSessionBound:
             return http_app(**kwargs)
 
         server.http_app = recording_http_app  # type: ignore[method-assign]
-        _app(transport, server=server, session_idle_timeout=42.0)
-        streamable = [c for c in calls if c["transport"] == "streamable-http"]
-        assert len(streamable) == 1
-        assert streamable[0]["session_idle_timeout"] == 42.0
+        _app(server=server, session_idle_timeout=42.0)
+        assert len(calls) == 1
+        assert calls[0]["transport"] == "streamable-http"
+        assert calls[0]["path"] == "/mcp"
+        assert calls[0]["session_idle_timeout"] == 42.0

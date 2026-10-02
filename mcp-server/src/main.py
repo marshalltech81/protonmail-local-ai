@@ -1,24 +1,21 @@
 """
 MCP Server entry point.
 Exposes local mailbox search, retrieval, intelligence, and system tools over
-MCP transports. The server is read-only: it has no mail-changing tools and no
+MCP's Streamable HTTP transport at ``/mcp``. The server is read-only: it has no mail-changing tools and no
 connection to Bridge.
 """
 
 import asyncio
-import contextlib
 import logging
 import math
 import os
 import urllib.parse
 from pathlib import Path
-from typing import Literal
 
 import fastmcp
 import uvicorn
 from fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecurityMiddleware, TransportSecuritySettings
-from starlette.applications import Starlette
 from starlette.middleware import Middleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
@@ -294,7 +291,32 @@ RERANK_CANDIDATES = _int_env("RERANK_CANDIDATES", 20, minimum=1)
 RERANK_TIMEOUT_SECS = _float_env("RERANK_TIMEOUT_SECS", DEFAULT_RERANK_TIMEOUT_SECS, minimum=1.0)
 
 MCP_PORT = int(os.environ.get("MCP_PORT", "3000"))
-MCP_TRANSPORT = os.environ.get("MCP_TRANSPORT", "sse")
+
+
+def _check_transport(raw: str) -> None:
+    """Fail startup unless ``MCP_TRANSPORT`` is unset, empty or
+    ``streamable-http``.
+
+    Streamable HTTP at ``/mcp`` is the only transport (#498). The variable
+    is still read so a ``.env`` left over from a release that served the
+    legacy SSE transport fails with migration steps instead of being
+    silently ignored.
+    """
+    transport = raw.strip().lower()
+    if transport in {"", "streamable-http"}:
+        return
+    if transport in {"sse", "dual"}:
+        raise ValueError(
+            f"MCP_TRANSPORT={transport} was removed: Streamable HTTP is the only "
+            "MCP transport. Remove MCP_TRANSPORT from .env and run "
+            "'unset MCP_TRANSPORT' in any shell that exports it (or set it to "
+            "streamable-http), and change MCP client URLs from "
+            "http://localhost:<MCP_PORT>/sse to http://localhost:<MCP_PORT>/mcp."
+        )
+    raise ValueError("MCP_TRANSPORT must be 'streamable-http' or unset")
+
+
+_check_transport(os.environ.get("MCP_TRANSPORT", ""))
 # Seconds a Streamable HTTP session may sit idle before the server ends
 # it (#317). fastmcp's default is no limit, so a session a client
 # abandons without a DELETE would hold its server task until shutdown.
@@ -306,10 +328,9 @@ MCP_SESSION_IDLE_TIMEOUT_SECS = _float_env("MCP_SESSION_IDLE_TIMEOUT_SECS", 1800
 # decisions 12).
 MCP_EXPERIMENTAL_TOOLS = _flag_env("MCP_EXPERIMENTAL_TOOLS")
 
-# Paths the transports are served on; fastmcp's defaults, pinned here so
-# the dual-transport dispatch and the docs cannot drift from them.
+# Path the Streamable HTTP transport is served on; fastmcp's default,
+# pinned here so the docs cannot drift from it.
 _STREAMABLE_HTTP_PATH = "/mcp"
-_SSE_PATH = "/sse"
 
 # Host/Origin allowlist applied to every HTTP request before it reaches a
 # transport, so a malicious local browser page cannot DNS-rebind to this
@@ -342,20 +363,6 @@ _TRANSPORT_SECURITY = TransportSecuritySettings(
 )
 
 
-_Transport = Literal["sse", "streamable-http", "dual"]
-
-
-def _normalize_transport(raw: str) -> _Transport:
-    transport = raw.strip().lower()
-    if transport == "sse":
-        return "sse"
-    if transport == "streamable-http":
-        return "streamable-http"
-    if transport == "dual":
-        return "dual"
-    raise ValueError("MCP_TRANSPORT must be one of: sse, streamable-http, dual")
-
-
 class _HostOriginGuard:
     """ASGI middleware: reject a request whose Host (421) or Origin (403)
     is not in ``_TRANSPORT_SECURITY`` before it reaches any route.
@@ -383,91 +390,21 @@ class _HostOriginGuard:
         await self.app(scope, receive, send)
 
 
-def _build_app(server: FastMCP, transport: _Transport, *, session_idle_timeout: float) -> ASGIApp:
-    """The ASGI app serving ``server`` on ``transport``.
+def _build_app(server: FastMCP, *, session_idle_timeout: float) -> ASGIApp:
+    """The Streamable HTTP ASGI app serving ``server`` at ``/mcp``.
 
-    Every transport app carries ``_HostOriginGuard``; fastmcp's SSE app
-    has no Host/Origin check of its own and its Streamable HTTP check is
-    off by default. Custom routes (``/health``) are served by each app.
-    Streamable HTTP sessions end after ``session_idle_timeout`` seconds
-    without a request; it is required because fastmcp's default never
-    ends them.
+    The app carries ``_HostOriginGuard``; fastmcp's own Streamable HTTP
+    Host/Origin check is off by default. Custom routes (``/health``) are
+    served by the same app. Sessions end after ``session_idle_timeout``
+    seconds without a request; it is required because fastmcp's default
+    never ends them.
     """
-    guard = [Middleware(_HostOriginGuard)]
-    if transport == "sse":
-        return server.http_app(path=_SSE_PATH, transport="sse", middleware=guard)
-    if transport == "streamable-http":
-        return server.http_app(
-            path=_STREAMABLE_HTTP_PATH,
-            transport="streamable-http",
-            middleware=guard,
-            session_idle_timeout=session_idle_timeout,
-        )
-    return _build_dual_app(server, guard, session_idle_timeout)
-
-
-def _build_dual_app(
-    server: FastMCP, guard: list[Middleware], session_idle_timeout: float
-) -> ASGIApp:
-    """Serve SSE and Streamable HTTP routes from one FastMCP instance.
-
-    Each transport app is invoked as a complete ASGI app rather than
-    having its routes flattened into a fresh Starlette — that
-    preserves whatever middleware and per-request context plumbing
-    fastmcp attaches to each ``http_app()`` (the Streamable HTTP
-    transport in particular relies on session-manager context that
-    lives on the inner app, not on individual routes).
-
-    Lifespan is run on a tiny outer Starlette whose only job is to
-    enter both inner apps' ``lifespan_context`` — ``session_manager``
-    starts here for Streamable HTTP, and both enter the server's own
-    lifespan, which fastmcp reference-counts. HTTP/WebSocket scopes go
-    straight to the right transport app via prefix dispatch.
-    """
-    sse_app = server.http_app(path=_SSE_PATH, transport="sse", middleware=guard)
-    streamable_http_app = server.http_app(
+    return server.http_app(
         path=_STREAMABLE_HTTP_PATH,
         transport="streamable-http",
-        middleware=guard,
+        middleware=[Middleware(_HostOriginGuard)],
         session_idle_timeout=session_idle_timeout,
     )
-
-    streamable_path = _STREAMABLE_HTTP_PATH
-    # Pre-compute the prefix used to recognize trailing-slash and
-    # sub-path requests (``/mcp/`` or ``/mcp/foo``) without also
-    # matching unrelated paths like ``/mcpfoo`` or ``/mcp-debug``.
-    streamable_prefix = streamable_path.rstrip("/") + "/"
-
-    @contextlib.asynccontextmanager
-    async def combined_lifespan(scope_app):
-        async with contextlib.AsyncExitStack() as stack:
-            await stack.enter_async_context(streamable_http_app.router.lifespan_context(scope_app))
-            await stack.enter_async_context(sse_app.router.lifespan_context(scope_app))
-            yield
-
-    # Outer Starlette owns lifespan only — it has no routes of its own.
-    lifespan_owner = Starlette(lifespan=combined_lifespan)
-
-    async def app(scope, receive, send):
-        if scope["type"] == "lifespan":
-            await lifespan_owner(scope, receive, send)
-            return
-        path = scope.get("path", "/")
-        # Streamable HTTP claims exactly the configured streamable path
-        # (``/mcp``) and any sub-path under it. Everything else —
-        # ``/sse``, ``/messages/``, the ``/health`` custom route
-        # registered on the FastMCP server, and any future ``/mcp-*``
-        # custom route — is served by the SSE app (which inherits the
-        # FastMCP custom routes). Using a startswith check on a
-        # trailing-slash prefix avoids ``/mcp`` over-matching paths
-        # like ``/mcpfoo``.
-        if path == streamable_path or path.startswith(streamable_prefix):
-            target = streamable_http_app
-        else:
-            target = sse_app
-        await target(scope, receive, send)
-
-    return app
 
 
 async def _health_response(db: Database) -> JSONResponse:
@@ -481,8 +418,8 @@ async def _health_response(db: Database) -> JSONResponse:
     return JSONResponse({"status": "ok"})
 
 
-def _run_server(server: FastMCP, transport: _Transport) -> None:
-    """Serve ``server`` on ``transport`` with uvicorn.
+def _run_server(server: FastMCP) -> None:
+    """Serve ``server`` over Streamable HTTP with uvicorn.
 
     The app is built here and handed to uvicorn directly rather than
     through ``FastMCP.run``, which would print fastmcp's banner and check
@@ -490,12 +427,9 @@ def _run_server(server: FastMCP, transport: _Transport) -> None:
     in-container bind is reachable through the Docker port-forward; the
     host-side mapping in ``docker-compose.yml`` keeps the port
     loopback-only (``127.0.0.1:${MCP_PORT}:${MCP_PORT}``).
-
-    The ``_Transport`` Literal type forces every caller — production
-    or test — to pass a value already returned by ``_normalize_transport``.
     """
     config = uvicorn.Config(
-        _build_app(server, transport, session_idle_timeout=MCP_SESSION_IDLE_TIMEOUT_SECS),
+        _build_app(server, session_idle_timeout=MCP_SESSION_IDLE_TIMEOUT_SECS),
         host="0.0.0.0",  # nosec B104 — see docstring
         port=MCP_PORT,
         log_level="info",
@@ -589,13 +523,13 @@ def main():
     expected_embed_dim = db.get_embedding_dim()
 
     # FastMCP server — provides the @server.tool() decorator and the
-    # SSE / Streamable HTTP apps ``_run_server`` serves per MCP_TRANSPORT,
-    # each behind the ``_TRANSPORT_SECURITY`` Host/Origin allowlist.
+    # Streamable HTTP app ``_run_server`` serves, behind the
+    # ``_TRANSPORT_SECURITY`` Host/Origin allowlist.
     server = FastMCP("protonmail-local-ai")
 
     # Plain HTTP health endpoint used by the container healthcheck. Sits
     # outside the MCP protocol so `docker healthcheck` and operator scripts
-    # can probe liveness without speaking SSE. Returns 200 when the SQLite
+    # can probe liveness without speaking MCP. Returns 200 when the SQLite
     # index is reachable via the read-only connection — enough to catch a
     # missing volume mount or a corrupt DB without exercising any write
     # path. The error string is intentionally generic in the response so
@@ -657,8 +591,6 @@ def main():
         log.info("Experimental tools not registered: they need inference (INFERENCE_MODE=none).")
     register_system_tools(server, db)
 
-    transport = _normalize_transport(MCP_TRANSPORT)
-
     log.info(f"MCP server starting on port {MCP_PORT}")
     log.info(f"  SQLite:   {SQLITE_PATH}")
     log.info(f"  Embed mode:     {EMBED_MODE}")
@@ -685,12 +617,11 @@ def main():
             f"  Rerank:         {RERANK_BASE_URL or '(SDK default)'} "
             f"(model={RERANK_MODEL}, candidates={RERANK_CANDIDATES})"
         )
-    log.info(f"  Transport: {transport}")
-    if transport != "sse":
-        log.info(f"  Session idle timeout: {MCP_SESSION_IDLE_TIMEOUT_SECS:g}s")
+    log.info(f"  Transport: streamable-http at {_STREAMABLE_HTTP_PATH}")
+    log.info(f"  Session idle timeout: {MCP_SESSION_IDLE_TIMEOUT_SECS:g}s")
     log.info("  Retrieval: local SQLite index only")
 
-    _run_server(server, transport)
+    _run_server(server)
 
 
 if __name__ == "__main__":

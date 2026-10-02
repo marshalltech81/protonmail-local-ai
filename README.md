@@ -27,7 +27,7 @@ host-side server you install yourself.
 | Embedder (operator-supplied) | OpenAI-compatible `/v1/embeddings` returning 4096-dim vectors (the schema's fixed width — e.g. Qwen3-Embedding-8B). Point `EMBED_BASE_URL` at a remote provider (DeepInfra, OpenRouter) or a host-side server you install yourself (LM Studio, vLLM, TEI, `mlx_lm.server`) |
 | Inference (operator-supplied) | Anthropic-compatible Messages API by default (`INFERENCE_MODE=anthropic`); switch to `INFERENCE_MODE=openai` for any OpenAI-compatible chat-completions endpoint at `INFERENCE_BASE_URL` |
 | SQLite (FTS5 + sqlite-vec) | Hybrid keyword + vector search index |
-| MCP Server | Exposes tools to Claude Desktop via HTTP/SSE |
+| MCP Server | Exposes tools to MCP clients over Streamable HTTP at `localhost:3000/mcp` |
 
 ## Prerequisites
 
@@ -118,21 +118,33 @@ The MCP server is read-only:
 - there are no mail-changing tools (no send, move, flag, or draft)
 - retrieval is served from the local SQLite index rather than direct IMAP access
 
-### 6. Configure Claude Desktop
+### 6. Connect an MCP client
 
-Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
+The server speaks MCP's Streamable HTTP transport at
+`http://localhost:3000/mcp`, on this machine only. Claude Code connects
+directly:
 
-```json
-{
-  "mcpServers": {
-    "protonmail-local-ai": {
-      "url": "http://localhost:3000/sse"
-    }
-  }
-}
+```bash
+claude mcp add --transport http protonmail-local-ai http://localhost:3000/mcp
 ```
 
-Restart Claude Desktop. You should now see the ProtonMail tools available.
+Claude Desktop's `claude_desktop_config.json` starts local servers as
+commands, and its Connectors settings reach servers from Anthropic's
+cloud, which cannot reach `localhost`. Connect it through a local
+stdio bridge such as `mcp-remote` instead: add the `protonmail-local-ai`
+entry from
+[`docs/claude_desktop_config.example.json`](docs/claude_desktop_config.example.json)
+to the `mcpServers` object in
+`~/Library/Application Support/Claude/claude_desktop_config.json`,
+keeping any servers already there (copy the whole example only when
+the file does not exist yet), and restart Claude Desktop. See
+[Connect an MCP client](docs/setup.md#7-connect-an-mcp-client) for the
+details and caveats.
+
+**Upgrading from a release that served `/sse`:** the legacy SSE
+transport was removed. Change client URLs from `/sse` to `/mcp`, and
+remove `MCP_TRANSPORT=sse` or `MCP_TRANSPORT=dual` from `.env` and from
+any shell that exports it (either now fails startup).
 
 ## Usage Examples
 
@@ -215,8 +227,8 @@ server's providers have to stay local. For the client:
 - Drive the MCP intelligence tools directly via `docker exec mcp-server
   python -c "..."`. Less ergonomic, but no chat client sees the results.
 - Or use another MCP client backed by a local LLM. Keep the client bound to
-  localhost and point it at the MCP server transport it supports (`/sse` by
-  default, or `/mcp` when `MCP_TRANSPORT=streamable-http` or `dual`).
+  localhost and point it at the MCP server's Streamable HTTP endpoint,
+  `http://localhost:3000/mcp`.
 
 Neither option changes where the server itself sends data. The tools
 still send queries and retrieved email content to the embed, inference

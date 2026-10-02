@@ -26,8 +26,8 @@ Core behavior:
 - Bridge is the only path to Proton
 - mbsync pulls mail into Maildir
 - indexer parses and stores thread-level data in SQLite
-- MCP exposes read-only search, retrieval, intelligence, and status tools over SSE and/or
-  Streamable HTTP depending on `MCP_TRANSPORT`
+- MCP exposes read-only search, retrieval, intelligence, and status tools over
+  Streamable HTTP at `/mcp`
 - whether retrieved email content leaves the host depends on which
   embedder + inference endpoint the operator wires up
 
@@ -62,7 +62,7 @@ High-level data flow:
 1. ProtonBridge connects to ProtonMail.
 2. mbsync pulls from Bridge into Maildir.
 3. indexer parses Maildir messages, builds conversation threads, generates embeddings via an OpenAI-compatible `/v1/embeddings` endpoint (operator-supplied), and writes SQLite.
-4. MCP server reads from SQLite and exposes tools over SSE and/or Streamable HTTP.
+4. MCP server reads from SQLite and exposes tools over Streamable HTTP at `/mcp`.
 5. Only the MCP server is exposed to the host on `localhost:3000` by default.
 
 Important architecture facts:
@@ -70,8 +70,9 @@ Important architecture facts:
 - the index is SQLite with FTS5 plus `sqlite-vec`
 - retrieval is hybrid keyword plus vector search with RRF
 - indexing is thread-level, not message-level
-- MCP defaults to SSE transport; `MCP_TRANSPORT=streamable-http` enables
-  Streamable HTTP, and `MCP_TRANSPORT=dual` serves both `/sse` and `/mcp`
+- Streamable HTTP at `/mcp` is the only MCP transport (owner, 2026-10-02,
+  #498); the legacy SSE transport and `dual` mode were removed, and
+  `MCP_TRANSPORT=sse` or `dual` fails startup with migration steps
 - each operator-supplied layer (inference / embed / rerank) follows the
   same env-var shape: `{LAYER}_MODE` selects the SDK/protocol;
   `{LAYER}_BASE_URL` / `{LAYER}_MODEL` / `{LAYER}_API_KEY` configure
@@ -666,7 +667,7 @@ Notes:
 
 Purpose:
 
-- exposes mailbox tools over SSE and/or Streamable HTTP
+- exposes mailbox tools over Streamable HTTP at `/mcp`
 - reads SQLite for retrieval/search
 
 Notes:
@@ -678,15 +679,14 @@ Notes:
   applies the MCP SDK's Host/Origin validator to the `_TRANSPORT_SECURITY`
   allowlist; do not remove it or swap in fastmcp's own guard, which
   accepts more Hosts and Origins
-- Streamable HTTP apps must be built with an explicit
+- the Streamable HTTP app must be built with an explicit
   `session_idle_timeout` (`MCP_SESSION_IDLE_TIMEOUT_SECS`); fastmcp's
   default never ends an idle session
 - keep the server read-only: do not add mail-changing tools (send, move,
   flag, draft) without explicit owner approval
 - do not give it any access to Bridge
-- keep `MCP_TRANSPORT=sse` as the default unless the owner asks to change the
-  default client posture; use `dual` only when a client needs both SSE and
-  Streamable HTTP on the same localhost-bound port.
+- keep Streamable HTTP at `/mcp` as the only transport; do not reintroduce
+  the legacy SSE transport or a dual mode without explicit owner approval.
 
 ## Testing Expectations
 
