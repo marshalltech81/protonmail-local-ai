@@ -20,6 +20,7 @@ import sqlite_vec
 
 from .chunker import l2_normalize, truncate_to_tokens
 from .entities import (
+    PERSON_PREFIX,
     AuthorityRules,
     org_entity_id,
     organization_domain,
@@ -2623,17 +2624,27 @@ class Database:
     def _participant_mentions(
         cur: sqlite3.Cursor, claimant_ids: list[str]
     ) -> set[tuple[str, str | None]]:
-        """The distinct ``(address, display name)`` pairs the given
-        messages' participant rows carry. Read before the rows cascade
-        away, so ``_prune_orphan_entities`` knows which entities and
-        aliases the reap may have orphaned."""
+        """The given messages' participants that own a person entity, as
+        distinct ``(address, alias)`` pairs (``alias`` is ``None`` when
+        the row's display name is not one of the entity's aliases). Read
+        before the rows cascade away, so ``_prune_orphan_entities`` knows
+        which entities and aliases the reap may have orphaned.
+
+        Filtering on the entity and alias in this one query keeps the
+        prune's per-address statements to addresses that own an entity:
+        a crafted header can list thousands of recipients, but only
+        ``MAX_ENTITY_PARTICIPANTS_PER_MESSAGE`` of them get one."""
         mentions: set[tuple[str, str | None]] = set()
         for cid in claimant_ids:
             mentions.update(
-                (r["address"], r["name"])
+                (r["address"], r["alias"])
                 for r in cur.execute(
-                    "SELECT DISTINCT address, name FROM message_participants WHERE claimant_id = ?",
-                    (cid,),
+                    "SELECT DISTINCT p.address, a.alias FROM message_participants p "
+                    "JOIN entities e ON e.entity_id = ? || p.address "
+                    "LEFT JOIN entity_aliases a "
+                    "ON a.entity_id = e.entity_id AND a.alias = p.name "
+                    "WHERE p.claimant_id = ?",
+                    (PERSON_PREFIX, cid),
                 )
             )
         return mentions

@@ -485,8 +485,10 @@ only:
 - an organization of a deleted person once no person belongs to it.
 
 Entities and aliases still mentioned by surviving mail are untouched.
-The sweep examines only the reaped messages' addresses, each with an
-indexed lookup (`idx_message_participants_address_name` serves the
+The sweep examines only the reaped messages' addresses that own an
+entity (so recipients past the per-message entity cap cost nothing
+beyond the one read that filters them out), each with an indexed
+lookup (`idx_message_participants_address_name` serves the
 alias check), so its cost follows those messages, not the size of the
 table. No MCP output changes: every read joins through
 `message_participants`, so a pruned entity could never surface.

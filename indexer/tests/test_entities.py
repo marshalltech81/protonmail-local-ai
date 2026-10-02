@@ -346,3 +346,42 @@ class TestEntityPruningOnReap:
         assert "person:jane@northwind.example" not in _entities(db)
         # Jane and her organization go; nothing else does.
         assert len(_entities(db)) == total - 2
+
+    def test_prune_work_follows_entities_not_recipients(self, db):
+        """Review round 1: a crafted header lists thousands of recipients
+        but only ``MAX_ENTITY_PARTICIPANTS_PER_MESSAGE`` get entities.
+        The prune issues statements only for addresses that own one, so
+        the recipients past the cap cost no per-address work."""
+        from src.database import MAX_ENTITY_PARTICIPANTS_PER_MESSAGE
+
+        recipients = [f"R{i} <r{i}@gmail.com>" for i in range(5000)]
+        kept = make_message(
+            message_id="k@example.com", from_addr="sam@gmail.com", filepath="/maildir/k"
+        )
+        gone = make_message(
+            message_id="g@example.com",
+            from_addr="Jane Roe <jane@northwind.example>",
+            to_addrs=recipients,
+            filepath="/maildir/g",
+        )
+        db.upsert_thread(make_thread(messages=[kept, gone], thread_id="t1"), _vec())
+        assert _participant_rows(db, gone.claimant_id) == 5001
+
+        statements: list[str] = []
+        db._conn.set_trace_callback(statements.append)
+        try:
+            _reap(db, "t1", survivors=[kept], reaped=[gone])
+        finally:
+            db._conn.set_trace_callback(None)
+
+        entity_statements = [s for s in statements if "entit" in s or "message_participants" in s]
+        # A few statements per entity-owning address (existence check,
+        # organization lookup, delete, which the trace reports again for
+        # the alias cascade) plus the organization sweep and the mention
+        # read: not one per recipient (over 15,000 before the filter).
+        assert len(entity_statements) <= 4 * MAX_ENTITY_PARTICIPANTS_PER_MESSAGE + 5
+        assert set(_entities(db)) == {
+            "person:sam@gmail.com",
+            "person:bob@example.com",
+            "org:example.com",
+        }
