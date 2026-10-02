@@ -632,72 +632,113 @@ takes this URL directly:
   `localhost`. Do not publish or tunnel this port to make it reachable;
   the server is designed to be local-only.
 
-Connect Claude Desktop through a local stdio-to-Streamable-HTTP bridge
-instead. The npm package `mcp-remote` is one
-(it needs Node.js). It sends the token from a header file, so the token
-is neither in `claude_desktop_config.json` nor in the bridge's command
-line (which other local users can read from the process list). From the
-repository root, write the header file once, and again whenever the
-token changes:
+Connect Claude Desktop through the stdio adapter in this repository,
+`mcp-server/src/stdio_adapter.py`. It runs on your Mac as a command
+Claude Desktop starts, speaks stdio to Claude Desktop and relays every
+request to `http://localhost:${MCP_PORT:-3000}/mcp` with the bearer
+token. It is built on the `fastmcp` version `mcp-server/uv.lock`
+already pins, so it adds no dependency. It reads the token from
+`.secrets/mcp_auth_token.txt` itself, so the token is neither in
+`claude_desktop_config.json` nor in any command line, and it exits with
+a fixed message, before connecting, if that file is missing, empty or
+not mode 600. It writes nothing else: no log lines, no token, no tool
+arguments or results.
+
+It needs [`uv`](https://docs.astral.sh/uv/) on the Mac. Create the
+adapter's environment once from the repository root, so Claude
+Desktop's first start does not wait for an install:
 
 ```bash
-(umask 077; printf 'Authorization: Bearer %s\n' "$(cat .secrets/mcp_auth_token.txt)" \
-  > .secrets/mcp_client_headers.txt)
+(cd mcp-server && uv sync --frozen)
 ```
 
-(`printf` is a shell builtin and `cat` is given only the path, so the
-token is not in any process's arguments.)
-
-Then add the `protonmail-local-ai` entry below to the
-`mcpServers` object in `claude_desktop_config.json`, keeping any servers
-already there; use the whole example (also in
+Claude Desktop does not use your shell's `PATH`, so the entry needs
+`uv`'s absolute path; `command -v uv` prints it. Add the
+`protonmail-local-ai` entry below to the `mcpServers` object in
+`claude_desktop_config.json`, keeping any servers already there; use the
+whole example (also in
 [`claude_desktop_config.example.json`](claude_desktop_config.example.json))
-only when the file does not exist yet. Replace
-`/ABSOLUTE/PATH/TO/protonmail-local-ai` with the repository's absolute
-path:
+only when the file does not exist yet. Replace `/ABSOLUTE/PATH/TO/uv`
+with that path and `/ABSOLUTE/PATH/TO/protonmail-local-ai` with the
+repository's absolute path:
 
 ```json
 {
   "mcpServers": {
     "protonmail-local-ai": {
-      "command": "npx",
+      "command": "/ABSOLUTE/PATH/TO/uv",
       "args": [
-        "-y",
-        "mcp-remote@0.14.3",
-        "http://localhost:3000/mcp",
-        "--transport",
-        "http-only",
-        "--header-file",
-        "/ABSOLUTE/PATH/TO/protonmail-local-ai/.secrets/mcp_client_headers.txt"
+        "run",
+        "--directory",
+        "/ABSOLUTE/PATH/TO/protonmail-local-ai/mcp-server",
+        "--frozen",
+        "python",
+        "-m",
+        "src.stdio_adapter"
       ]
     }
   }
 }
 ```
 
-`--header-file` reads one `Name: value` header per line and fails if
-the file cannot be read, rather than connecting without the token.
-`mcp-remote` also takes `--header "Authorization:${AUTH_HEADER}"` with
-the value in the entry's `env` object, but that puts the token in the
-JSON file. `--transport http-only` stops it falling back to the removed SSE
-transport; `mcp-remote` accepts a plain `http://` URL only for
-`localhost` or `127.0.0.1`. It is third-party code that runs as your
-user and relays every tool call and result, so pin a version you have
-reviewed rather than the latest: the npm package has changed
-maintainers (its repository is now `punkpeye/mcp-remote`, formerly
-`geelen/mcp-remote`).
+`--frozen` runs the locked versions without re-resolving them. If you
+changed `MCP_PORT`, add `"env": {"MCP_PORT": "<port>"}` to the entry.
+To keep the token file elsewhere, append `"--token-file"` and its
+absolute path to `args`; the file must still be mode 600. Pass a path,
+never the token.
+
+Third-party stdio bridges (such as the npm package `mcp-remote`) are
+not recommended: they are code from outside this repository that runs
+as your user and relays every tool call and result, and their packages
+can change hands.
 
 Restart Claude Desktop. In a new conversation, you should see the
 ProtonMail tools available. Test with: *"What is the status of my email
 index?"* Remember that Claude Desktop sends tool results to Anthropic
 as conversation context (see
 [architecture.md](architecture.md#mcp-client-layer-governed-by-which-client-you-connect) for what each
-client sees).
+client sees). If Claude Desktop shows the server as running but lists
+no ProtonMail tools, the server rejected the token: the adapter then
+offers no tools and refuses every call. See "MCP client gets 401
+Unauthorized" in [`troubleshooting.md`](troubleshooting.md).
+
+**Codex** (the CLI and IDE extension) connects from this machine and
+speaks Streamable HTTP, so it needs no adapter. Its
+`mcp_servers.<name>.http_headers_helper` setting runs a local command
+that prints a JSON object of headers, which is what
+`scripts/mcp-auth-headers.sh` prints for Claude Code. Add this to
+`~/.codex/config.toml`, with the repository's absolute path:
+
+```toml
+[mcp_servers.protonmail-local-ai]
+url = "http://localhost:3000/mcp"
+http_headers_helper = "/ABSOLUTE/PATH/TO/protonmail-local-ai/scripts/mcp-auth-headers.sh"
+```
+
+Codex runs the helper when it connects and again once after a `401`,
+so a rotated token is picked up without editing the file. Codex also
+has `bearer_token_env_var`, which reads the token from an environment
+variable (`codex mcp add protonmail-local-ai --url
+http://localhost:3000/mcp --bearer-token-env-var PROTONMAIL_MCP_TOKEN`
+writes it). The variable then has to be exported in the shell that
+starts Codex, for example from your shell profile:
+
+```bash
+export PROTONMAIL_MCP_TOKEN="$(< /ABSOLUTE/PATH/TO/protonmail-local-ai/.secrets/mcp_auth_token.txt)"
+```
+
+That keeps the token out of command arguments, but every program
+started from that shell inherits it, and anything that records its
+environment (a crash report, a debug dump, a tool that prints `env`)
+can capture it. Prefer `http_headers_helper`. If both are set, Codex
+uses the explicit bearer token.
 
 **Cloud-originated connectors** (claude.ai custom connectors, ChatGPT
 developer mode) connect from the provider's servers. They support
 Streamable HTTP but cannot reach a localhost-only server, and this
-project does not support exposing it.
+project does not support exposing it. ChatGPT's connectors need a
+public HTTPS endpoint, so ChatGPT is not supported yet; it is planned
+after go-live.
 
 **Other MCP clients** that run on this machine and speak Streamable HTTP
 connect to `http://localhost:3000/mcp` directly, sending the
@@ -710,8 +751,10 @@ server with `docker compose restart mcp-server` (the token is read once
 at startup, and `make up` does not recreate a container whose
 configuration is unchanged), then update
 each client. Claude Code's helper reads the file on each connection, so
-reconnect it (`/mcp` in Claude Code); for Claude Desktop, rewrite
-`.secrets/mcp_client_headers.txt` and restart it.
+reconnect it (`/mcp` in Claude Code). Codex reruns its helper after a
+`401`; with `bearer_token_env_var`, re-export the variable and restart
+Codex. The Claude Desktop adapter reads the file when it starts, so
+restart Claude Desktop.
 
 **Upgrading from a release without MCP authentication.** Run
 `make init-secrets` (it creates only the missing token file), then

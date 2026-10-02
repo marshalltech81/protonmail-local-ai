@@ -136,15 +136,18 @@ claude mcp add-json protonmail-local-ai \
 
 Claude Desktop's `claude_desktop_config.json` starts local servers as
 commands, and its Connectors settings reach servers from Anthropic's
-cloud, which cannot reach `localhost`. Connect it through a local
-stdio bridge such as `mcp-remote` instead, which reads the token from a
-header file: write `.secrets/mcp_client_headers.txt` as described in
-setup, add the `protonmail-local-ai` entry from
+cloud, which cannot reach `localhost`. Connect it through this
+repository's stdio adapter (`mcp-server/src/stdio_adapter.py`, run with
+`uv`), which reads the token file itself: run
+`(cd mcp-server && uv sync --frozen)` once, add the
+`protonmail-local-ai` entry from
 [`docs/claude_desktop_config.example.json`](docs/claude_desktop_config.example.json)
 to the `mcpServers` object in
-`~/Library/Application Support/Claude/claude_desktop_config.json`,
-keeping any servers already there (copy the whole example only when
-the file does not exist yet), and restart Claude Desktop. See
+`~/Library/Application Support/Claude/claude_desktop_config.json`
+with your absolute paths, keeping any servers already there (copy the
+whole example only when the file does not exist yet), and restart
+Claude Desktop. Codex connects directly, with
+`scripts/mcp-auth-headers.sh` as its `http_headers_helper`. See
 [Connect an MCP client](docs/setup.md#7-connect-an-mcp-client) for the
 details and caveats.
 

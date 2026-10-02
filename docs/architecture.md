@@ -107,7 +107,7 @@ mcp-server container
         │
         │  Streamable HTTP (localhost:3000/mcp)
         ▼
-MCP client (host machine; Claude Desktop via a local stdio bridge)
+MCP client (host machine; Claude Desktop via the repo's stdio adapter)
   - Calls MCP tools via natural language
   - Receives structured responses
 ```

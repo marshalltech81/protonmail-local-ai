@@ -714,11 +714,10 @@ Operator steps before go-live, in addition to the checklist:
    HTTP only, #563; remove any
    `MCP_TRANSPORT=sse` or `dual` from `.env`) and every request needs
    the bearer header. Claude Code uses `scripts/mcp-auth-headers.sh` as
-   its `headersHelper`. Claude Desktop will use the repo-owned
-   `fastmcp` adapter (Resolved decisions 14); do not set up the
-   `mcp-remote` path the docs still describe until that adapter lands
-   and replaces it. Codex gets its own setup section. Never put the
-   token in a command argument.
+   its `headersHelper` and Codex as its `http_headers_helper`; Claude
+   Desktop uses the repo-owned `fastmcp` adapter,
+   `mcp-server/src/stdio_adapter.py` (Resolved decisions 14;
+   `docs/setup.md` step 7). Never put the token in a command argument.
 4. **macOS Bridge mode (optional):** `make build-macos-bridge` and
    `make up-macos-bridge` replace the checklist's `make build`,
    `make first-run` and `make up` (plain `make build` builds the unused
@@ -743,9 +742,9 @@ roughly this order; each is its own PR:
    fresh Maildir) and #279 (UIDVALIDITY recovery procedure).
 4. #562 (purge extracted text on reap) and ~~#428~~ (done: every xlsx
    part openpyxl loads whole is capped, 8 MiB each, 16 MiB together).
-5. The Claude Desktop `fastmcp` adapter (replacing `mcp-remote` in
-   README, `docs/setup.md`, troubleshooting and the example config)
-   and the Codex setup docs.
+5. ~~The Claude Desktop `fastmcp` adapter and the Codex setup docs~~
+   (done: `mcp-server/src/stdio_adapter.py` replaces `mcp-remote`;
+   Codex uses `scripts/mcp-auth-headers.sh` as `http_headers_helper`).
 6. #489 (`get_message` paging) and the 998-character Message-ID limit.
 7. Small items: #591, #584, #589, #588, the Semgrep gaps (#578,
    #579, #581, #582) and #580/#577 (merged-config hardening check).
@@ -862,8 +861,8 @@ Go-live checklist (do these before more hardening):
    set above it (#277 landed in #515).
 5. Point an MCP client at `http://localhost:${MCP_PORT}/mcp` with the
    bearer token from `.secrets/mcp_auth_token.txt` (Claude Code
-   through `scripts/mcp-auth-headers.sh`; Claude Desktop through the
-   repo-owned adapter once it lands, not `mcp-remote`; see
+   and Codex through `scripts/mcp-auth-headers.sh`; Claude Desktop
+   through `mcp-server/src/stdio_adapter.py`; see
    `docs/setup.md` step 7), and try
    real questions by hand; `mcp-server/tests/eval/README.md` covers turning
    the good ones into a retrieval eval.
