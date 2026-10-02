@@ -303,7 +303,9 @@ reindex each. One rebuild, not one PR: each fix is its own reviewed PR
 per the review rules, and a fix that would change bodies or IDs for
 newly ingested mail before the rebuild is gated behind the pipeline
 configuration so the live index stays internally consistent until the
-single staged rebuild picks all of them up. The fixes: chunk overlap past `max_tokens` (#208); a deterministic date source for undated mail
+single staged rebuild picks all of them up. The fixes: chunk overlap past `max_tokens` (#208) and whitespace
+between split pieces rendered back into a chunk past `max_tokens`
+(#550); a deterministic date source for undated mail
 (#297's second half, the deferred received-date item: the top
 `Received:` header, then — since sent mail and stripped messages have
 none — the Maildir filename's delivery timestamp, which is sync time
@@ -682,9 +684,13 @@ from starting. #277 no longer blocks the first deployment; go live
 with the checklist below, on a host where every local user and process
 is trusted: the MCP endpoint has no authentication yet (Phase 1 item
 5, Open decisions 3), and localhost is not a trust boundary. Rebuild
-any index created before #544 and #547 from Maildir (the volume
-wipe in `docs/troubleshooting.md`, "Indexer refuses to start"): those changes edited the v0 schema and the
-parse-time subject cap, and an existing database keeps neither. Before the overnight run, four Phase 3 slices
+any index created before the overnight changes from Maildir (the
+volume wipe in `docs/troubleshooting.md`, "Indexer refuses to
+start"): #544 edited the v0 schema, and #546, #547 and #548 change
+parsed or chunked text, none of which reaches an existing database.
+Decide #432 (below) before go-live too: until it is fixed, a crafted
+xlsx attachment can exhaust the indexer's memory or hold its only
+worker. Before the overnight run, four Phase 3 slices
 (#493–#496; the status table under Phase 3 is current), eight
 defaults-audit fixes and #510 merged (see Recently Completed).
 Overnight (see Recently Completed): mbsync tolerates far-side folders
@@ -693,10 +699,11 @@ become readable after a sync, so no restart is needed after the first
 sync (#516, #520, #540); `config/authority.toml` must be mode 600,
 checked by `make up` and the new `make restart-indexer` (#523, #542);
 entities orphaned by a reap are pruned (#464, #527); OCR's English-only
-limit is documented (#517, refs #490); stored subjects are capped at
+limit is documented (#517, refs #490); chunk splits keep the tabs that
+open a line (#433, #546); stored subjects are capped at
 2,000 characters (#541, #547); a `multipart/related` never promotes a
 later part into the body (#450, #548); and the P3 fixes listed there.
-In review when this was written: #433 (PR #546).
+No code PR is open.
 
 Needs the owner:
 - **#432** (xlsx duplicate cells): a guard cannot fix it, because
@@ -707,7 +714,9 @@ Needs the owner:
 - **#497** (Bridge on macOS) and **#498** (Streamable HTTP as the only
   transport): owner-filed features, not started because they change the
   architecture and defaults.
-- Follow-ups filed overnight: #524 (folders opened by a failed mbsync
+- Follow-ups filed overnight: #550 (P2, chunks can exceed
+  `max_tokens`; it changes chunk text, so it joins #208 in the Phase 2
+  reindex bundle), #524 (folders opened by a failed mbsync
   attempt are re-watched only at the recovery sweep), #526 (on Linux
   Docker Engine the indexer cannot read a 600 operator-owned
   `authority.toml`), #533 (delimiter escaping misses tag names spelled
@@ -752,7 +761,8 @@ Next session, in order:
 Backlog filed from review (P3 or edge cases, not scheduled): #454,
 and from 2026-10-02 #524, #526, #533 and #537 (#442, #446, #447,
 #449, #450, #455, #456, #460, #461, #464, #465, #468, #471, #477,
-#478, #499, #500, #502 and #541 are fixed).
+#478, #499, #500, #502 and #541 are fixed; #433 too, and #550 joins
+the reindex bundle).
 
 **Status 2026-10-01 (end of the first session).**
 Focus has moved from hardening to running the stack for real
@@ -1037,7 +1047,7 @@ Order of work, chosen to minimise reindexes:
    and 10 for the chosen direction and the one measurement still
    needed. #276 (#521) and #277 (#515) are done; #275 and #281 wait
    for a real report, #282 for the first-sync measurement.
-4. **The Phase 2 reindex bundle** (see Phase 2): #208 and #297's
+4. **The Phase 2 reindex bundle** (see Phase 2): #208, #550 and #297's
    second half. #303, #298, #295 and #217 landed directly instead
    (2026-10-01, no live index yet), and #304's repair is unneeded
    (#349).
@@ -1361,7 +1371,9 @@ sync are watched without a restart (#516, PR #520; #528 and #529, PR
 parameter (#362, PR #522); stored subjects are capped at 2,000
 characters, so the subject scans read bounded rows (#541, PR #547); a
 `multipart/related` whose root is labelled as an attachment no longer
-promotes a later part into the body (#450, PR #548); an xlsx sheet title is charged before it is
+promotes a later part into the body (#450, PR #548); chunk splits keep
+the tabs that open a line, so xlsx columns survive a split (#433, PR
+#546; #550 filed for the Phase 2 bundle); an xlsx sheet title is charged before it is
 copied (#435, PR #543); the subject-scan test asserts the SQL bound
 (#478, PR #531); OCR's English-only limit is documented (#490, PR
 #517). Setup: `config/authority.toml` is kept at mode 600 and checked
