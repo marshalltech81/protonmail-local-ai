@@ -27,6 +27,7 @@ from src.main import (
     _reject_url_userinfo,
     _require_env,
     _run_server,
+    _warn_if_remote_endpoint,
 )
 
 
@@ -503,6 +504,121 @@ class TestInheritedEndpointUserinfo:
         main_mod.main()
         assert ran
         assert "https://api.openai.com/v1" in caplog.text
+
+
+class TestRemoteEndpointWarning:
+    """An enabled provider layer whose endpoint is not host-local sends
+    mail-derived text off the machine. Startup logs one WARNING per such
+    layer naming the mode and the endpoint host only (#622)."""
+
+    @staticmethod
+    def _warnings(caplog):
+        return [r for r in caplog.records if r.levelno == logging.WARNING]
+
+    @pytest.mark.parametrize(
+        ("url", "host"),
+        [
+            ("https://api.anthropic.com", "api.anthropic.com"),
+            ("https://gateway.example:8443/v1?tenant=SYNTHETIC_QUERY#frag", "gateway.example"),
+            ("http://192.0.2.10:1234/v1", "192.0.2.10"),
+        ],
+    )
+    def test_remote_url_warns_once_with_host_only(self, caplog, url, host):
+        caplog.set_level(logging.DEBUG)
+        _warn_if_remote_endpoint("INFERENCE_MODE", "openai", url, "retrieved email excerpts")
+        [record] = self._warnings(caplog)
+        message = record.getMessage()
+        assert "INFERENCE_MODE=openai" in message
+        assert host in message
+        assert "retrieved email excerpts" in message
+        for part in ("/v1", "SYNTHETIC_QUERY", "frag", ":8443", ":1234", "https://"):
+            assert part not in message
+
+    def test_empty_url_warns_about_sdk_default(self, caplog):
+        caplog.set_level(logging.DEBUG)
+        _warn_if_remote_endpoint("RERANK_MODE", "cohere", "", "search queries")
+        [record] = self._warnings(caplog)
+        assert "RERANK_MODE=cohere" in record.getMessage()
+        assert "default endpoint" in record.getMessage()
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "http://127.0.0.1:1234/v1",
+            "http://[::1]:8000/v1",
+            "http://localhost:8001/v1",
+            "http://LOCALHOST/v1",
+            "http://host.docker.internal:8001/v1",
+        ],
+    )
+    def test_host_local_url_is_silent(self, caplog, url):
+        caplog.set_level(logging.DEBUG)
+        _warn_if_remote_endpoint("EMBED_MODE", "openai", url, "search query text")
+        assert self._warnings(caplog) == []
+
+    def _run_main(self, monkeypatch, caplog, **config):
+        import src.main as main_mod
+
+        defaults = {
+            "MCP_AUTH_TOKEN": _PLACEHOLDER_TOKEN,
+            "EMBED_MODEL": "synthetic",
+            "EMBED_API_KEY": _PLACEHOLDER_KEY,
+            "INFERENCE_MODE": "anthropic",
+            "INFERENCE_MODEL": "synthetic",
+            "INFERENCE_API_KEY": _PLACEHOLDER_KEY,
+            "RERANK_MODE": "cohere",
+            "RERANK_MODEL": "synthetic",
+            "RERANK_API_KEY": _PLACEHOLDER_KEY,
+        }
+        for name, value in {**defaults, **config}.items():
+            monkeypatch.setattr(main_mod, name, value)
+        for name in ("OPENAI_BASE_URL", "ANTHROPIC_BASE_URL", "CO_API_URL"):
+            monkeypatch.delenv(name, raising=False)
+        monkeypatch.setattr(main_mod, "Database", TestInheritedEndpointUserinfo._FakeDatabase)
+        monkeypatch.setattr(main_mod, "_run_server", lambda *_: None)
+        caplog.set_level(logging.DEBUG)
+        main_mod.main()
+        assert _PLACEHOLDER_KEY not in caplog.text
+        return [r.getMessage() for r in self._warnings(caplog)]
+
+    def test_main_warns_once_per_remote_layer(self, monkeypatch, caplog):
+        warnings = self._run_main(
+            monkeypatch,
+            caplog,
+            EMBED_BASE_URL="",
+            INFERENCE_BASE_URL="",
+            RERANK_BASE_URL="https://rerank.example/v2",
+        )
+        assert len(warnings) == 3
+        assert sum("EMBED_MODE=openai" in w and "api.openai.com" in w for w in warnings) == 1
+        assert (
+            sum("INFERENCE_MODE=anthropic" in w and "api.anthropic.com" in w for w in warnings) == 1
+        )
+        assert sum("RERANK_MODE=cohere" in w and "rerank.example" in w for w in warnings) == 1
+
+    def test_main_is_silent_for_host_local_layers(self, monkeypatch, caplog):
+        local = "http://host.docker.internal:8001/v1"
+        warnings = self._run_main(
+            monkeypatch,
+            caplog,
+            EMBED_BASE_URL=local,
+            INFERENCE_MODE="openai",
+            INFERENCE_BASE_URL=local,
+            RERANK_BASE_URL="http://127.0.0.1:8002",
+        )
+        assert warnings == []
+
+    def test_main_skips_disabled_layers(self, monkeypatch, caplog):
+        warnings = self._run_main(
+            monkeypatch,
+            caplog,
+            EMBED_BASE_URL="http://localhost:8001/v1",
+            INFERENCE_MODE="none",
+            INFERENCE_BASE_URL="",
+            RERANK_MODE="none",
+            RERANK_BASE_URL="",
+        )
+        assert warnings == []
 
 
 class TestRequireEnv:

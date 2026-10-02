@@ -1415,7 +1415,9 @@ and exporter were present.
 > through the inference and reranker endpoints. This is a deliberate
 > departure from a fully-local posture; choose the provider URLs
 > accordingly. To keep all retrieval traffic on the box, point each
-> URL at a host-side server you install yourself.
+> URL at a host-side server you install yourself. Startup logs one
+> `Privacy:` warning per enabled layer whose endpoint host is not
+> `127.0.0.1`, `::1`, `localhost` or `host.docker.internal`.
 
 ### MCP client layer (governed by which client you connect)
 

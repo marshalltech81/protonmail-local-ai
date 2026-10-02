@@ -177,7 +177,10 @@ embeddings, inference, and your *conversations* leave the host depends
 on four independent choices: which embedder URL you wire up, which
 `INFERENCE_MODE` you select, whether you enable reranking with
 `RERANK_MODE`, and which MCP client you connect. Be deliberate about
-all four layers.
+all four layers. At startup the indexer and the MCP server log one
+`Privacy:` warning per enabled embed, inference or rerank layer whose
+endpoint is not host-local (`127.0.0.1`, `::1`, `localhost`,
+`host.docker.internal`), naming the mode and the endpoint's host.
 
 ### 1. Storage and indexing layer — always local
 
