@@ -1212,6 +1212,13 @@ def _parse_received_date(msg: email.message.Message) -> datetime | None:
             return None
         date_text = tail[semicolon + 1 :].encode("ascii", "ignore").decode("ascii")
         dt = email.utils.parsedate_to_datetime(date_text)
+        if dt is None:
+            return None
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=UTC)
+        # Inside the guard: a date near year 9999 with a negative
+        # offset parses but overflows on conversion to UTC.
+        return dt.astimezone(UTC)
     except (
         email.errors.MessageError,
         email.errors.MessageDefect,
@@ -1223,11 +1230,6 @@ def _parse_received_date(msg: email.message.Message) -> datetime | None:
     ) as exc:
         log.debug("Received header date unreadable (%s)", type(exc).__name__)
         return None
-    if dt is None:
-        return None
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=UTC)
-    return dt.astimezone(UTC)
 
 
 def _parse_date(value: str) -> datetime | None:
@@ -1265,4 +1267,10 @@ def _parse_date(value: str) -> datetime | None:
         return None
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=UTC)
-    return dt.astimezone(UTC)
+    try:
+        return dt.astimezone(UTC)
+    except OverflowError:
+        # A date near year 9999 with a negative offset parses but
+        # passes the largest datetime once converted to UTC.
+        log.warning("Date header outside the UTC range; using now()")
+        return None

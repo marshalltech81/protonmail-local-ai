@@ -228,6 +228,20 @@ class TestParseEmail:
         if not fallback:
             assert msg.date == datetime(2024, 1, 1, 10, 0, tzinfo=UTC)
 
+    def test_date_overflowing_utc_falls_back(self, tmp_path):
+        """Review round 2: a Date header whose UTC conversion passes year
+        9999 is treated as unparseable (fallback date, flagged) instead
+        of failing the parse and dead-lettering the message."""
+        path = tmp_path / "INBOX" / "cur" / "overflow.eml"
+        path.parent.mkdir(parents=True)
+        path.write_bytes(
+            b"From: alice@example.com\nSubject: s\nMessage-ID: <overflow@example.com>\n"
+            b"Date: Fri, 31 Dec 9999 23:59:59 -2359\n\nBody.\n"
+        )
+        msg = parse_email(path)
+        assert msg is not None
+        assert msg.date_is_fallback is True
+
     def test_date_minus_zero_normalized_to_aware_utc(self, tmp_path):
         """RFC 2822 ``-0000`` means "local time, offset unknown".
         ``parsedate_to_datetime`` returns a naive datetime for that case,
@@ -876,6 +890,20 @@ class TestOccurredAt:
         assert msg is not None
         assert msg.occurred_at is None
         assert marker not in caplog.text
+
+    @pytest.mark.parametrize(
+        "tail",
+        [b" Fri, 31 Dec 9999 23:59:59 -2359", b" Fri, 31 Dec 9999 23:59:59 -0100"],
+        ids=["max-offset", "one-hour"],
+    )
+    def test_date_overflowing_utc_is_none(self, tmp_path, tail):
+        """Review round 2: a date that parses but whose UTC conversion
+        passes year 9999 degrades to None instead of failing the parse."""
+        path = _received_eml(tmp_path, b"Received: by mx.example.org;" + tail + b"\r\n")
+        msg = parse_email(path)
+        assert msg is not None
+        assert msg.occurred_at is None
+        assert msg.date == datetime(2024, 1, 1, 8, 0, tzinfo=UTC)
 
     def test_naive_received_date_is_utc(self, tmp_path):
         path = _received_eml(
