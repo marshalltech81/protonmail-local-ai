@@ -29,7 +29,10 @@ make baseline UPDATE=1   # rewrite snapshot.json after an intended ranking chang
      `floors.evidence_recall_at_10` over all questions and
      `floors.multi_source_evidence_recall_at_10` over the questions
      with more than one group. Enumeration questions must return the
-     exact message set.
+     exact message set. Unanswerable questions list `absent_terms`
+     that must occur in no message's subject, body or attachment; the
+     abstention scenarios in `tests/eval/agent_scenarios.json` rest on
+     them.
    - **Rank snapshot, for unchanged behaviour.** The top-10 order of
      every search question must match `snapshot.json`.
 
@@ -53,9 +56,14 @@ harness in `tests/eval/` (`tests/retrieval_metrics.py`).
   Vector-only questions depend on them.
 - **Multi-source questions** (threads 21-28) cover a fact split across
   two threads, the same fact in either of two threads, an answer only
-  in an attachment and a correction in a later reply. Adding a thread
-  can lower a recall floor's measured value; re-measure and explain it
-  rather than lowering the floor silently.
+  in an attachment and a correction in a later reply. Threads 29-30
+  are conflicting sources (two messages give different dates, neither
+  superseding the other). Adding a thread can lower a recall floor's
+  measured value; re-measure and explain it rather than lowering the
+  floor silently.
+- **Unanswerable questions** need terms that appear nowhere in the
+  corpus. A new thread must not use them. They double as the words an
+  abstaining agent must have asked for, so list the common synonyms.
 - **Vector-only questions** need a query that porter stemming does not
   map back to a corpus word. "maintenence" does not qualify, because
   it stems to the same form as "maintenance".

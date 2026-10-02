@@ -15,7 +15,8 @@ checks two layers:
    evidence recall@10 (the fraction of groups found, which is where a
    multi-source question can fall short of a hit) must stay above the
    floors in ``golden.json``. Enumeration questions must return the
-   exact message set.
+   exact message set. Unanswerable questions' terms must occur nowhere
+   in the synthetic Maildir.
 2. Rank snapshot — unchanged behaviour. The top-10 order of every
    search question must equal ``snapshot.json``. After an intended
    ranking change, regenerate it with ``--update-baseline`` and review
@@ -24,8 +25,11 @@ checks two layers:
 Skipped unless ``BASELINE_DIR`` is set; ``make baseline`` runs both steps.
 """
 
+import email
+import email.policy
 import json
 import os
+from contextlib import closing
 from pathlib import Path
 
 import pytest
@@ -38,6 +42,7 @@ pytestmark = pytest.mark.baseline
 _HERE = Path(__file__).parent
 GOLDEN = json.loads((_HERE / "golden.json").read_text(encoding="utf-8"))
 SNAPSHOT_PATH = _HERE / "snapshot.json"
+AGENT_SCENARIOS_PATH = _HERE.parent / "eval" / "agent_scenarios.json"
 SNAPSHOT_DEPTH = 10
 _DOMAIN = "@baseline.example"
 
@@ -150,6 +155,43 @@ def test_enumerate_golden(baseline_db: Database, e: dict) -> None:
     got = sorted(_message_ref(m.message_id) for m in page.messages)
     assert got == sorted(e["expect"])
     assert page.total_matches == len(e["expect"])
+
+
+def _corpus_texts(maildir: Path) -> list[str]:
+    """Every message's subject and text parts (body and attachments), casefolded."""
+    texts = []
+    for path in sorted(maildir.rglob("*.eml")):
+        msg = email.message_from_bytes(path.read_bytes(), policy=email.policy.default)
+        texts.append(str(msg["Subject"] or "").casefold())
+        for part in msg.walk():
+            if part.get_content_maintype() == "text":
+                texts.append(part.get_content().casefold())
+    return texts
+
+
+@pytest.mark.parametrize("u", GOLDEN["unanswerable"], ids=lambda u: u["id"])
+def test_unanswerable_golden(baseline_dir: Path, u: dict) -> None:
+    # The abstention scenarios in tests/eval/agent_scenarios.json rest on
+    # these questions having no answer in the corpus.
+    texts = _corpus_texts(baseline_dir / "maildir")
+    assert texts, "no messages found in the baseline maildir"
+    for term in u["absent_terms"]:
+        assert not any(term.casefold() in t for t in texts), f"{u['id']}: {term!r} is in the corpus"
+
+
+def test_agent_required_citations_exist(baseline_db: Database) -> None:
+    # The correction and conflict scenarios in tests/eval/agent_scenarios.json
+    # name messages by ref; each must be an indexed message in its ref's thread.
+    scenarios = json.loads(AGENT_SCENARIOS_PATH.read_text(encoding="utf-8"))["scenarios"]
+    with closing(baseline_db._connect()) as conn:
+        thread_of = {
+            _message_ref(m): _thread_ref(t)
+            for m, t in conn.execute("SELECT message_id, thread_id FROM messages")
+        }
+    refs = [ref for s in scenarios for g in s.get("required_citations", []) for ref in g]
+    assert refs, "no scenario lists required_citations"
+    for ref in refs:
+        assert thread_of.get(ref) == ref.split(".")[0], f"{ref} is not an indexed message"
 
 
 def test_rank_snapshot(

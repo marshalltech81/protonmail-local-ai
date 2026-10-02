@@ -19,6 +19,12 @@ threads (t21 + t22, t25 + t26), the same fact in either of two threads
 (t27 / t28), an answer only in an attachment (t23) and a correction in
 a later reply (t24).
 
+Threads 29-30 are conflicting sources: t29 dates the block party
+October 5 and the reply t30.2 dates it October 12. Neither message
+mentions the other, so neither supersedes it. Their words avoid every
+golden search query's words so the other questions' keyword ranks are
+undisturbed.
+
 Thread IDs are the root Message-IDs: ``t<NN>.1@baseline.example``.
 """
 
@@ -615,6 +621,37 @@ THREADS: dict[int, list[Msg]] = {
             "Hi Sam,\n\nMap apps sometimes send guests up the old logging road. "
             "The cabin is at 88 Hemlock Ridge Road; turn left at the red mailbox."
             "\n\nHollis",
+        ),
+    ],
+    29: [
+        Msg(
+            "INBOX",
+            "Sat, 07 Sep 2024 10:00:00 +0000",
+            "Marisol Vega <marisol@juniperlane.example>",
+            ME,
+            "Juniper Lane block party",
+            "Hi neighbors,\n\nThe Juniper Lane block party is on Saturday October "
+            "5, noon to 6pm. Bring a side dish and a folding chair.\n\nMarisol Vega",
+        ),
+    ],
+    30: [
+        Msg(
+            "INBOX",
+            "Tue, 03 Sep 2024 19:00:00 +0000",
+            "Owen Pryce <owen@juniperlane.example>",
+            ME,
+            "Grill for the block party",
+            "Hi Sam,\n\nCould I borrow your grill for the Juniper Lane block "
+            "party? I will bring it back the next morning.\n\nOwen",
+        ),
+        Msg(
+            "INBOX",
+            "Wed, 04 Sep 2024 08:30:00 +0000",
+            "Owen Pryce <owen@juniperlane.example>",
+            ME,
+            "Re: Grill for the block party",
+            "One more thing: the road closure is booked for Saturday October 12, "
+            "so that is block party day.\n\nOwen",
         ),
     ],
 }

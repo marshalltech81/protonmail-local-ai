@@ -15,6 +15,17 @@ synthetic mailbox) and a trace of the calls an agent made, score
   tool result returned (an ID no tool returned is fabricated);
 - **citation recall**: the fraction of required evidence groups the
   answer cites (a cited message or passage covers its thread);
+- **message citation recall**: the fraction of required citation groups
+  (message IDs) the answer cites, a cited passage or claimant ID
+  counting as its message. A correction scenario requires the
+  correcting message, which thread-level citation recall cannot tell
+  from the message it corrects; a conflicting-sources scenario requires
+  each side of the disagreement;
+- **abstention**: an unanswerable scenario passes when some call's
+  string argument contains one of its ``abstain_terms`` (the agent
+  looked for the missing fact), the answer sets ``"abstained": true``
+  and it cites nothing; any other scenario passes when the answer does
+  not abstain;
 - **enumeration completeness**: for an exhaustive question, the
   fraction of expected messages listed by one ``query_messages``
   cursor chain over exactly the expected filters (any page size), and
@@ -27,8 +38,10 @@ is graded by hand (``tests/eval/README.md``). A valid citation shows
 the agent saw the source, not that the source supports the statement.
 
 A trace is JSON: ``{"scenario": id, "calls": [{"tool", "arguments",
-"result"}], "answer": {"text", "cited": [ids]}}`` where ``result`` is
-the call's ``structuredContent``. IDs are read from the result fields
+"result"}], "answer": {"text", "cited": [ids], "abstained": bool}}``
+where ``result`` is the call's ``structuredContent`` and ``abstained``
+(optional, false when absent) is the agent's structured statement that
+the mailbox does not answer the question. IDs are read from the result fields
 named in ``ID_FIELDS`` at any depth, so the scorers follow every tool's
 output shape without a per-tool parser; arguments never count as
 retrieved.
@@ -36,7 +49,9 @@ retrieved.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import re
 from collections import defaultdict
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -73,6 +88,23 @@ _STRIPPED_FILTERS = (
 # golden.json writes thread "t05" for "t05.1@baseline.example" and
 # message "t05.2" for "t05.2@baseline.example".
 _BASELINE_DOMAIN = "@baseline.example"
+# A golden message ref: thread "t24", message 2.
+_MESSAGE_REF = re.compile(r"t[0-9]{2}\.[1-9][0-9]*")
+# One scenario in HELD_OUT_MODULUS is held out, chosen by a hash of its
+# ID so membership is fixed when the scenario is written and never moves
+# when others are added.
+HELD_OUT_MODULUS = 4
+
+
+def is_held_out(scenario_id: str) -> bool:
+    """Whether a scenario belongs to the held-out split.
+
+    Held-out scenarios are scored like the rest but must not be used to
+    tune anything (prompts, tool descriptions, thresholds); their score
+    is the check on whatever was tuned against the dev split.
+    """
+    digest = hashlib.sha256(scenario_id.encode("utf-8")).hexdigest()
+    return int(digest, 16) % HELD_OUT_MODULUS == 0
 
 
 @dataclass(frozen=True)
@@ -82,7 +114,11 @@ class Scenario:
     ``required_evidence`` uses the groups of ``retrieval_metrics``: every
     group is required, any thread ID in a group satisfies it.
     ``expected_messages`` lists the message IDs an exhaustive question
-    must enumerate. Either may be empty.
+    must enumerate. Either may be empty. ``required_citations`` groups
+    message IDs the answer must cite the same way (every group, any ID
+    in it). ``unanswerable`` marks a question the mailbox has no answer
+    to, where the agent should abstain after asking for one of the
+    ``abstain_terms``.
     """
 
     id: str
@@ -93,6 +129,10 @@ class Scenario:
     max_calls: int
     required_evidence: list[list[str]] = field(default_factory=list)
     expected_messages: list[str] = field(default_factory=list)
+    required_citations: list[list[str]] = field(default_factory=list)
+    unanswerable: bool = False
+    abstain_terms: list[str] = field(default_factory=list)
+    held_out: bool = False
 
 
 @dataclass(frozen=True)
@@ -106,22 +146,26 @@ class AgentScore:
     evidence_recall: float | None
     citation_validity: float | None
     citation_recall: float | None
+    message_citation_recall: float | None
+    abstention_correct: bool
     enumeration_recall: float | None
     exhausted: bool | None
     extra_calls: int
     repeated_calls: int
+    held_out: bool = False
 
     @property
     def failures(self) -> list[str]:
         """Names of the metrics this trace did not get full marks on."""
         failed = []
-        for name in ("tool_selected", "arguments_correct", "exhausted"):
+        for name in ("tool_selected", "arguments_correct", "abstention_correct", "exhausted"):
             if getattr(self, name) is False:
                 failed.append(name)
         for name in (
             "evidence_recall",
             "citation_validity",
             "citation_recall",
+            "message_citation_recall",
             "enumeration_recall",
         ):
             value = getattr(self, name)
@@ -133,15 +177,18 @@ class AgentScore:
         return failed
 
 
-def _returned_ids(calls: Sequence[dict]) -> tuple[set[str], dict[str, str]]:
-    """IDs the tool results returned, and each message ID's thread.
+def _returned_ids(calls: Sequence[dict]) -> tuple[set[str], dict[str, str], dict[str, str]]:
+    """IDs the tool results returned, each ID's thread, and each ID's message.
 
     A message row carries its thread in a ``thread_id`` beside it or, in
     ``get_thread``, in the ``thread`` summary of the enclosing result, so
-    the nearest enclosing thread ID is the message's thread.
+    the nearest enclosing thread ID is the message's thread. A row with a
+    ``message_id`` names that message by its ``message_id``,
+    ``claimant_id`` or ``chunk_id``; a bare ``thread_id`` names no message.
     """
     seen: set[str] = set()
     thread_of: dict[str, str] = {}
+    message_of: dict[str, str] = {}
 
     def visit(value: Any, thread: str | None) -> None:
         if isinstance(value, list):
@@ -163,12 +210,18 @@ def _returned_ids(calls: Sequence[dict]) -> tuple[set[str], dict[str, str]]:
                 seen.add(item)
                 if name != "thread_id" and thread:
                     thread_of[item] = thread
+        message = value.get("message_id")
+        if isinstance(message, str):
+            for name in ("message_id", "claimant_id", "chunk_id"):
+                item = value.get(name)
+                if isinstance(item, str):
+                    message_of[item] = message
         for child in value.values():
             visit(child, thread)
 
     for call in calls:
         visit(call.get("result"), None)
-    return seen, thread_of
+    return seen, thread_of, message_of
 
 
 def _groups_covered(ids: set[str], groups: list[list[str]]) -> float:
@@ -244,8 +297,10 @@ def score_trace(scenario: Scenario, trace: dict) -> AgentScore:
     if trace.get("scenario") != scenario.id:
         raise ValueError(f"trace for {trace.get('scenario')!r} scored against {scenario.id!r}")
     calls: list[dict] = trace.get("calls", [])
-    cited: list[str] = trace.get("answer", {}).get("cited", [])
-    seen, thread_of = _returned_ids(calls)
+    answer: dict = trace.get("answer", {})
+    cited: list[str] = answer.get("cited", [])
+    abstained = answer.get("abstained") is True
+    seen, thread_of, message_of = _returned_ids(calls)
 
     tool_selected = bool(calls) and calls[0]["tool"] in scenario.expected_tools
 
@@ -266,6 +321,27 @@ def score_trace(scenario: Scenario, trace: dict) -> AgentScore:
         evidence = _groups_covered(seen, scenario.required_evidence)
         covered = set(cited) | {thread_of[c] for c in cited if c in thread_of}
         citation_recall = _groups_covered(covered, scenario.required_evidence)
+
+    message_citation_recall: float | None = None
+    if scenario.required_citations:
+        cited_messages = {message_of[c] for c in cited if c in message_of}
+        message_citation_recall = _groups_covered(cited_messages, scenario.required_citations)
+
+    # Abstaining means answering nothing, so an abstention citing a source
+    # presents that source as support for an answer the mailbox lacks. It
+    # also has to follow a lookup for the missing fact: refusing after an
+    # unrelated search is not evidence that the mailbox lacks the answer.
+    if scenario.unanswerable:
+        looked = any(
+            term.casefold() in value.casefold()
+            for call in calls
+            for value in call["arguments"].values()
+            if isinstance(value, str)
+            for term in scenario.abstain_terms
+        )
+        abstention_correct = abstained and not cited and looked
+    else:
+        abstention_correct = not abstained
 
     citation_validity = sum(1 for c in cited if c in seen) / len(cited) if cited else None
 
@@ -293,10 +369,13 @@ def score_trace(scenario: Scenario, trace: dict) -> AgentScore:
         evidence_recall=evidence,
         citation_validity=citation_validity,
         citation_recall=citation_recall,
+        message_citation_recall=message_citation_recall,
+        abstention_correct=abstention_correct,
         enumeration_recall=enumeration_recall,
         exhausted=exhausted,
         extra_calls=max(0, len(calls) - scenario.max_calls),
         repeated_calls=repeated,
+        held_out=scenario.held_out,
     )
 
 
@@ -312,28 +391,46 @@ def _mean(values: list[float]) -> str:
     return f"{sum(values) / len(values):.2%} (mean over {len(values)})"
 
 
-def summarize(scores: Sequence[AgentScore]) -> str:
-    """Aggregate scores, then the failing scenarios grouped by category."""
-
+def _aggregates(scores: Sequence[AgentScore]) -> list[str]:
     def present(name: str) -> list:
         return [v for s in scores if (v := getattr(s, name)) is not None]
 
-    lines = [
-        f"Agent eval summary ({len(scores)} traces):",
-        f"  Tool selection:      {_rate([s.tool_selected for s in scores])}",
-        f"  Argument accuracy:   {_rate(present('arguments_correct'))}",
-        f"  Evidence recall:     {_mean(present('evidence_recall'))}",
-        f"  Citation validity:   {_mean(present('citation_validity'))}",
-        f"  Citation recall:     {_mean(present('citation_recall'))}",
-        f"  Enumeration recall:  {_mean(present('enumeration_recall'))}",
-        f"  Enumeration exhausted: {_rate(present('exhausted'))}",
-        f"  Extra calls:         {sum(s.extra_calls for s in scores)}",
-        f"  Repeated calls:      {sum(s.repeated_calls for s in scores)}",
+    return [
+        f"Tool selection:      {_rate([s.tool_selected for s in scores])}",
+        f"Argument accuracy:   {_rate(present('arguments_correct'))}",
+        f"Evidence recall:     {_mean(present('evidence_recall'))}",
+        f"Citation validity:   {_mean(present('citation_validity'))}",
+        f"Citation recall:     {_mean(present('citation_recall'))}",
+        f"Message citation recall: {_mean(present('message_citation_recall'))}",
+        f"Abstention correct:  {_rate([s.abstention_correct for s in scores])}",
+        f"Enumeration recall:  {_mean(present('enumeration_recall'))}",
+        f"Enumeration exhausted: {_rate(present('exhausted'))}",
+        f"Extra calls:         {sum(s.extra_calls for s in scores)}",
+        f"Repeated calls:      {sum(s.repeated_calls for s in scores)}",
+        f"Clean:               {_rate([not s.failures for s in scores])}",
     ]
+
+
+def summarize(scores: Sequence[AgentScore]) -> str:
+    """Aggregate scores for each split apart, then the failing scenarios
+    grouped by category (held-out ones tagged).
+
+    Every aggregate is per split, so tuning against the dev block never
+    reads a held-out outcome.
+    """
+    lines = [f"Agent eval summary ({len(scores)} traces):"]
+    for label, held_out in (("Dev", False), ("Held-out", True)):
+        split = [s for s in scores if s.held_out is held_out]
+        if not split:
+            lines.append(f"  {label} split (0 traces): none")
+            continue
+        lines.append(f"  {label} split ({len(split)} traces):")
+        lines.extend(f"    {line}" for line in _aggregates(split))
     by_category: dict[str, list[str]] = defaultdict(list)
     for s in scores:
         if s.failures:
-            by_category[s.category].append(f"{s.scenario_id} ({', '.join(s.failures)})")
+            tag = " [held-out]" if s.held_out else ""
+            by_category[s.category].append(f"{s.scenario_id}{tag} ({', '.join(s.failures)})")
     if not by_category:
         lines.append("  Failures by category: none")
     else:
@@ -346,16 +443,24 @@ def summarize(scores: Sequence[AgentScore]) -> str:
 def load_scenarios(path: Path, golden_path: Path) -> list[Scenario]:
     """Load scenarios, resolving each one's golden question.
 
-    A row names ``golden_search`` (a ``search`` question: its
-    ``required_evidence`` and ``filters`` become the scenario's evidence
-    and expected arguments) or ``golden_enumerate`` (an ``enumerate``
-    question: its ``args`` and ``expect`` become the expected arguments
-    and messages). Inheriting them keeps the scenario on answers
-    ``make baseline`` checks against a real index.
+    A row names exactly one of ``golden_search`` (a ``search`` question:
+    its ``required_evidence`` and ``filters`` become the scenario's
+    evidence and expected arguments), ``golden_enumerate`` (an
+    ``enumerate`` question: its ``args`` and ``expect`` become the
+    expected arguments and messages) or ``golden_unanswerable`` (an
+    ``unanswerable`` question: the scenario expects abstention).
+    Inheriting them keeps the scenario on answers ``make baseline``
+    checks against a real index.
+
+    A ``golden_search`` row may add ``required_citations``, groups of
+    message refs (``"t24.2"``); each message must belong to a thread in
+    the golden question's evidence, so the baseline has shown it can be
+    found. A row's ``held_out`` flag must agree with ``is_held_out``.
     """
     golden = json.loads(golden_path.read_text(encoding="utf-8"))
     searches = {q["id"]: q for q in golden["search"]}
     enumerations = {q["id"]: q for q in golden["enumerate"]}
+    unanswerables = {q["id"]: q for q in golden["unanswerable"]}
     rows = json.loads(path.read_text(encoding="utf-8"))["scenarios"]
 
     scenarios: list[Scenario] = []
@@ -367,22 +472,49 @@ def load_scenarios(path: Path, golden_path: Path) -> list[Scenario]:
         ids.add(sid)
         if not row.get("expected_tools"):
             raise ValueError(f"{sid}: expected_tools is empty")
-        search_ref, enum_ref = row.get("golden_search"), row.get("golden_enumerate")
-        if (search_ref is None) == (enum_ref is None):
-            raise ValueError(f"{sid}: give one of golden_search or golden_enumerate")
+        if row.get("held_out", False) is not is_held_out(sid):
+            raise ValueError(f"{sid}: held_out must be {is_held_out(sid)}")
+        search_ref = row.get("golden_search")
+        enum_ref = row.get("golden_enumerate")
+        unanswerable_ref = row.get("golden_unanswerable")
+        if sum(ref is not None for ref in (search_ref, enum_ref, unanswerable_ref)) != 1:
+            raise ValueError(
+                f"{sid}: give one of golden_search, golden_enumerate or golden_unanswerable"
+            )
+        citation_refs = row.get("required_citations", [])
+        if citation_refs and search_ref is None:
+            raise ValueError(f"{sid}: required_citations needs golden_search")
+        evidence: list[list[str]] = []
+        arguments: dict[str, Any] = {}
+        messages: list[str] = []
+        abstain_terms: list[str] = []
         if search_ref is not None:
             if search_ref not in searches:
                 raise ValueError(f"{sid}: no golden search question {search_ref!r}")
             q = searches[search_ref]
             evidence = [[f"{t}.1{_BASELINE_DOMAIN}" for t in g] for g in q["required_evidence"]]
-            arguments, messages = dict(q.get("filters", {})), []
-        else:
+            arguments = dict(q.get("filters", {}))
+            evidence_threads = {t for g in q["required_evidence"] for t in g}
+            for group in citation_refs:
+                for ref in group:
+                    # Shape only: ``make baseline`` checks each ref is an
+                    # indexed message (test_agent_required_citations_exist).
+                    if not _MESSAGE_REF.fullmatch(ref):
+                        raise ValueError(f"{sid}: {ref!r} is not a message ref like 't24.2'")
+                    if ref.split(".")[0] not in evidence_threads:
+                        raise ValueError(
+                            f"{sid}: cited message {ref!r} is outside {search_ref!r}'s evidence"
+                        )
+        elif enum_ref is not None:
             if enum_ref not in enumerations:
                 raise ValueError(f"{sid}: no golden enumerate question {enum_ref!r}")
             q = enumerations[enum_ref]
-            evidence = []
             arguments = dict(q["args"])
             messages = [f"{m}{_BASELINE_DOMAIN}" for m in q["expect"]]
+        elif unanswerable_ref not in unanswerables:
+            raise ValueError(f"{sid}: no golden unanswerable question {unanswerable_ref!r}")
+        else:
+            abstain_terms = unanswerables[unanswerable_ref]["absent_terms"]
         scenarios.append(
             Scenario(
                 id=sid,
@@ -393,6 +525,12 @@ def load_scenarios(path: Path, golden_path: Path) -> list[Scenario]:
                 max_calls=row["max_calls"],
                 required_evidence=evidence,
                 expected_messages=messages,
+                required_citations=[
+                    [f"{m}{_BASELINE_DOMAIN}" for m in group] for group in citation_refs
+                ],
+                unanswerable=unanswerable_ref is not None,
+                abstain_terms=list(abstain_terms),
+                held_out=is_held_out(sid),
             )
         )
     return scenarios

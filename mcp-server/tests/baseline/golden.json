@@ -1,9 +1,9 @@
 {
-  "_comment": "Golden questions for the synthetic baseline mailbox (indexer/tests/baseline/corpus.py). Thread refs 'tNN' mean 'tNN.1@baseline.example'; message refs 'tNN.M' mean 'tNN.M@baseline.example'. required_evidence is a list of groups: every group is required, and any one thread in a group satisfies it. max_rank (1-based) bounds the first hit from any group; groups missing from the top 10 lower evidence recall instead. The recall floors are the hashed embedder's measured values rounded down: wiring checks, not semantic quality (multi-lisbon-trip finds the flight, not the hotel). vector_only questions must be answerable only by the vector lanes.",
+  "_comment": "Golden questions for the synthetic baseline mailbox (indexer/tests/baseline/corpus.py). Thread refs 'tNN' mean 'tNN.1@baseline.example'; message refs 'tNN.M' mean 'tNN.M@baseline.example'. required_evidence is a list of groups: every group is required, and any one thread in a group satisfies it. max_rank (1-based) bounds the first hit from any group; groups missing from the top 10 lower evidence recall instead. The recall floors are the hashed embedder's measured values rounded down: wiring checks, not semantic quality (multi-lisbon-trip finds the flight, not the hotel). vector_only questions must be answerable only by the vector lanes. unanswerable questions have no answer in the corpus: none of their absent_terms occurs in any message's subject, body or attachment (case-insensitive), and an abstaining agent must have asked for one of them.",
   "floors": {
     "mrr": 0.9,
     "evidence_recall_at_10": 0.98,
-    "multi_source_evidence_recall_at_10": 0.83
+    "multi_source_evidence_recall_at_10": 0.87
   },
   "search": [
     {"id": "roof-estimate", "query": "roof repair estimate", "required_evidence": [["t01"]], "max_rank": 1},
@@ -40,7 +40,8 @@
     {"id": "multi-lisbon-trip", "query": "Lisbon trip flight and hotel dates", "required_evidence": [["t08"], ["t09"]], "max_rank": 2},
     {"id": "alt-cabin-address", "query": "cabin street address Hemlock Ridge", "required_evidence": [["t27", "t28"]], "max_rank": 1},
     {"id": "attach-only-rent", "query": "new monthly rent", "required_evidence": [["t23"]], "max_rank": 3, "evidence": "$2,140"},
-    {"id": "correction-recital", "query": "piano recital moved new date", "required_evidence": [["t24"]], "max_rank": 1, "evidence": "Sunday August 11"}
+    {"id": "correction-recital", "query": "piano recital moved new date", "required_evidence": [["t24"]], "max_rank": 1, "evidence": "Sunday August 11"},
+    {"id": "conflict-block-party", "query": "Juniper Lane block party", "required_evidence": [["t29"], ["t30"]], "max_rank": 1}
   ],
   "enumerate": [
     {"id": "sender", "args": {"sender": "adjuster@keystoneins.example"}, "expect": ["t10.1", "t10.3"]},
@@ -50,5 +51,9 @@
     {"id": "has-attachments", "args": {"has_attachments": true}, "expect": ["t01.1", "t03.1", "t10.2", "t14.1", "t23.1"]},
     {"id": "date-range", "args": {"date_from": "2024-05-01", "date_to": "2024-05-31"}, "expect": ["t08.1", "t09.1", "t13.1", "t13.2", "t17.1", "t17.2", "t17.3"]},
     {"id": "text-stemmed", "args": {"text": "resurfacing"}, "expect": ["t04.1", "t05.1"]}
+  ],
+  "unanswerable": [
+    {"id": "cabin-wifi", "absent_terms": ["wifi", "wi-fi", "wireless", "internet"]},
+    {"id": "electrician-quote", "absent_terms": ["electric", "breaker"]}
   ]
 }
