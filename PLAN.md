@@ -1325,10 +1325,20 @@ do not ship persisted claims without them.
       over-budget row, public APIs only. It changes the extracted
       text, so it bumps the xlsx entry in `EXTRACTOR_VERSIONS`. In
       progress; lands before go-live.
-    - **#498 Streamable HTTP as the only transport:** go. In progress.
-    - **#497 Bridge app on macOS:** go now rather than after go-live,
-      starting with a certificate-valid connection path (never a TLS
-      bypass). In progress.
+    - **#498 Streamable HTTP as the only transport:** go. Breaking:
+      clients move from `/sse` to `/mcp`, and an explicit `sse` or
+      `dual` fails startup with a migration message; it changes the
+      AGENTS.md default-transport rule. Confirm the MCP client
+      connects over `/mcp` first. In progress.
+    - **#497 Bridge app on macOS:** go now rather than after go-live.
+      An optional overlay that skips the Bridge container and points
+      mbsync at `host.docker.internal`; the container stays the
+      default. Switching an existing Maildir needs the documented
+      migration (credentials, certificate pin, UIDVALIDITY). The
+      macOS app's certificate is issued for `localhost` and
+      `127.0.0.1`, not `host.docker.internal`, so the first step is a
+      certificate-valid connection path (never a TLS bypass). In
+      progress.
     - **#537 `get_evidence` thread count:** add `max_threads`. In
       progress.
     - **#533 look-alike letters in delimiter tags:** defer.
