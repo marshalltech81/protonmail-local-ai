@@ -841,10 +841,13 @@ deletion, and the record does not say whether the message was deleted
 upstream or its file went missing locally. The
 identifiers come from the sender's Message-ID, so the records are kept
 short: the indexer deletes rows older than 30 days
-(`REAPED_RECORD_RETENTION_DAYS` in `indexer/src/database.py`) at startup
-and on every reconciliation interval, in archive mode too, so rows
-written before a switch to archive still expire. The table holds at
-most the messages reaped in the last 30 days. Answers are not
+(`REAPED_RECORD_RETENTION_DAYS` in `indexer/src/database.py`) at startup,
+before the embedder wait and the initial index, and on every
+reconciliation interval, in archive mode too, so rows written before a
+switch to archive still expire. mcp-server mirrors the window
+(`src/lib/sqlite.py`) and ignores older rows when it reads them, so a
+row the indexer has not pruned yet is never served past 30 days.
+Answers are not
 persisted, so nothing else refers to a reaped source. The records are
 not carried across a rebuild of the index from Maildir (reaped files
 are not reindexed), so after a rebuild an earlier reap reads as "not

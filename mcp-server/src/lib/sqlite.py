@@ -14,7 +14,7 @@ import sqlite3
 import unicodedata
 from contextlib import closing
 from dataclasses import dataclass, field
-from datetime import UTC, date, datetime, time
+from datetime import UTC, date, datetime, time, timedelta
 from email.utils import parseaddr
 from itertools import groupby
 from pathlib import Path
@@ -768,22 +768,44 @@ class ReapedSource:
     reaped_at: str
 
 
+# How long the indexer keeps a reaped message's identifier-only record
+# (``indexer/src/database.py`` ``REAPED_RECORD_RETENTION_DAYS``); after
+# it a lookup of the message or thread reads as not found. Reads apply
+# it too, so a record the indexer has not pruned yet is never served
+# past the window (#576).
+REAPED_RECORD_RETENTION_DAYS = 30
+
 # Reap-record lookups for a claimant ID, a bare Message-ID and a thread
-# ID. A Message-ID is sender-controlled, so many reaped files can claim
-# one: each lookup walks an index in ``reaped_at`` order and reads one
-# row, whatever the count.
-REAPED_BY_CLAIMANT_SQL = "SELECT reaped_at FROM reaped_messages WHERE claimant_id = ?"
+# ID, each bound to the value and the retention cutoff. A Message-ID is
+# sender-controlled, so many reaped files can claim one: each lookup
+# walks an index in ``reaped_at`` order and reads one row, whatever the
+# count.
+REAPED_BY_CLAIMANT_SQL = (
+    "SELECT reaped_at FROM reaped_messages WHERE claimant_id = ? AND reaped_at >= ?"
+)
 REAPED_BY_MESSAGE_ID_SQL = (
-    "SELECT reaped_at FROM reaped_messages WHERE message_id = ? ORDER BY reaped_at DESC LIMIT 1"
+    "SELECT reaped_at FROM reaped_messages WHERE message_id = ? AND reaped_at >= ? "
+    "ORDER BY reaped_at DESC LIMIT 1"
 )
 REAPED_BY_THREAD_SQL = (
-    "SELECT reaped_at FROM reaped_messages WHERE thread_id = ? ORDER BY reaped_at DESC LIMIT 1"
+    "SELECT reaped_at FROM reaped_messages WHERE thread_id = ? AND reaped_at >= ? "
+    "ORDER BY reaped_at DESC LIMIT 1"
 )
+
+
+def _reap_cutoff() -> str:
+    """The oldest ``reaped_at`` still inside the retention window, in the
+    indexer's ISO 8601 form; its prune deletes records below it."""
+    return (datetime.now(UTC) - timedelta(days=REAPED_RECORD_RETENTION_DAYS)).isoformat()
 
 
 def _reaped_at(conn: sqlite3.Connection, *lookups: tuple[str, str]) -> str | None:
-    """The latest reap time the ``(sql, value)`` lookups find, or ``None``."""
-    found = [row[0] for sql, value in lookups if (row := conn.execute(sql, (value,)).fetchone())]
+    """The latest unexpired reap time the ``(sql, value)`` lookups find,
+    or ``None``."""
+    cutoff = _reap_cutoff()
+    found = [
+        row[0] for sql, value in lookups if (row := conn.execute(sql, (value, cutoff)).fetchone())
+    ]
     return max(found) if found else None
 
 
@@ -3036,10 +3058,10 @@ class Database:
                 ReapedMessage(claimant_id=r["claimant_id"], reaped_at=r["reaped_at"])
                 for r in conn.execute(
                     "SELECT r.claimant_id, r.reaped_at FROM reaped_messages r "
-                    "WHERE r.thread_id = ? AND NOT EXISTS "
+                    "WHERE r.thread_id = ? AND r.reaped_at >= ? AND NOT EXISTS "
                     "(SELECT 1 FROM messages m WHERE m.claimant_id = r.claimant_id) "
                     "ORDER BY r.reaped_at, r.claimant_id LIMIT ?",
-                    (thread_id, MAX_LISTED_CLAIMANTS + 1),
+                    (thread_id, _reap_cutoff(), MAX_LISTED_CLAIMANTS + 1),
                 )
             ]
         return ThreadPage(
