@@ -100,9 +100,21 @@ def set($k): has($k) and .[$k] != null and .[$k] != false and .[$k] != [] and .[
 def list($k): .[$k] // [];
 def bounded_logging:
     . != null and (.driver == "none" or .driver == "local"
-        or ((.options["max-size"] // "") | tostring | test("^[1-9][0-9]*[kmgKMG]?$")));
-$base[0].services as $b
-| .services | to_entries[] | .key as $svc | .value as $s | $b[$svc] as $bs
+        or (.driver == "json-file"
+            and ((.options["max-size"] // "") | tostring | test("^[1-9][0-9]*[kmgKMG]?$"))));
+. as $m
+# Every service and network the base defines is still there; a network
+# keeps its engine name, and no two networks share one, since services
+# join networks by key and the name picks the engine network.
+| ($base[0].services | keys[] | select(. as $k | $m.services | has($k) | not)
+    | "\(.): missing from the merged config"),
+  ($base[0].networks | to_entries[]
+    | select(($m.networks[.key].name) != .value.name or $m.networks[.key].external == true)
+    | "network \(.key): renamed or external"),
+  ([$m.networks // {} | .[] | .name] | group_by(.)[] | select(length > 1)
+    | "networks share the engine network \(.[0])"),
+  ($base[0].services as $b
+| $m.services | to_entries[] | .key as $svc | .value as $s | $b[$svc] as $bs
 | (
     (if $s.read_only != true then "read_only is not true" else empty end),
     (if ($s | list("cap_drop") | index("ALL")) == null then "cap_drop lacks ALL" else empty end),
@@ -149,7 +161,7 @@ $base[0].services as $b
             | "volume at \($t) is no longer read-only")
     end)
   )
-| "\($svc): \(.)"
+| "\($svc): \(.)")
 '
 
 # Renders the given compose files with every profile and fails, listing
@@ -298,6 +310,39 @@ services:
 EOF
 }
 
+merged_hardening_rejects_override_dropping_a_service() {
+    expect_overlay_rejected override-services "indexer: missing from the merged config" <<'EOF'
+services: !override
+  mcp-server:
+    image: example.invalid/mcp:1
+EOF
+}
+
+# max-size bounds only the json-file driver's files.
+merged_hardening_rejects_max_size_on_another_logging_driver() {
+    expect_overlay_rejected logging-driver "mbsync: logging is unbounded" <<'EOF'
+services:
+  mbsync:
+    logging: !override
+      driver: syslog
+      options:
+        max-size: "10m"
+EOF
+}
+
+# Services join networks by key; a network's name picks the engine network.
+merged_hardening_rejects_renamed_networks() {
+    expect_overlay_rejected network-names \
+        "network app-net: renamed or external" "network bridge-net: renamed or external" \
+        "networks share the engine network shared-net" <<'EOF'
+networks:
+  app-net:
+    name: shared-net
+  bridge-net:
+    name: shared-net
+EOF
+}
+
 # docker compose config resolves a top-level include (#577), so the merged
 # check sees the services an included fragment brings in.
 merged_hardening_rejects_an_included_service() {
@@ -423,6 +468,11 @@ check "merged hardening rejects !override of a read-only volume" \
 check "merged hardening rejects !override on ports and networks" \
     merged_hardening_rejects_override_ports_and_networks
 check "merged hardening rejects the forbidden settings" merged_hardening_rejects_forbidden_settings
+check "merged hardening rejects an !override that drops a service" \
+    merged_hardening_rejects_override_dropping_a_service
+check "merged hardening rejects max-size on a driver other than json-file" \
+    merged_hardening_rejects_max_size_on_another_logging_driver
+check "merged hardening rejects renamed or shared networks" merged_hardening_rejects_renamed_networks
 check "merged hardening rejects a service a top-level include brings in" \
     merged_hardening_rejects_an_included_service
 

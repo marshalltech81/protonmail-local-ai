@@ -368,7 +368,15 @@ rules:
       include:
         - "docker-compose*.yml"
         - "docker-compose*.yaml"
-    pattern: "include: $FILES"
+    # Only the root-level key imports anything; a nested `include` (a
+    # label, an x- extension field) is data.
+    patterns:
+      - pattern: "include: $FILES"
+      - pattern-not-inside: |
+          $PARENT:
+            ...
+            include: $FILES
+            ...
 
   - id: compose-bridge-net-member
     languages: [yaml]

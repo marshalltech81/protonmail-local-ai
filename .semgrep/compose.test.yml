@@ -187,6 +187,9 @@ services:
       service: mbsync
 
   sneaky-three:
+    labels:
+      # ok: compose-include
+      include: search-index
     # ruleid: compose-root-user
     user: "0:0"
     # ok: compose-docker-socket
