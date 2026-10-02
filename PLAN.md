@@ -432,7 +432,7 @@ decision (Open decisions).
 | 4.1 Entities | Done | #459, #527 (orphan pruning, #464) | — |
 | 4.2 Source authority | Done | #459, #474 (Spam guard), #523 and #542 (rules file kept private and validated) | verdict-header gating after go-live (#463) |
 | 4.3 Temporal retrieval | Mostly done | #561 (`sent_at` defined and used consistently), #593 (whole-thread evidence under a date range), #597 (#575), `occurred_at` with filters and thread spans on the effective time (#297) | checking against real mail that the top `Received:` is Proton's (go-live); bitemporal claims (Phase 5) |
-| 4.4 Retention | Mostly done | #451 (mirror default), #475 (Trash hidden from default search), #564 and #583 (reaped sources reported for 30 days) | user-controlled retention; restating the reaped-citation invariant and #562's purge (Resolved decisions 14) |
+| 4.4 Retention | Mostly done | #451 (mirror default), #475 (Trash hidden from default search), #564 and #583 (reaped sources reported for 30 days), the invariant restated (#610) | user-controlled retention; #562's purge (Resolved decisions 14) |
 | 5.1 Hardened `brief_issue` | Not started | — | needs Phase 3 usage on real mail |
 | 5.2 Support/contradict | Built, experimental | #467 (`check_conclusion`), #493 (evidence-slot refill), #558 (quote verification, also for `brief_issue`) | semantic support (#284) |
 | 5.3 Position as of date | Not started | — | — |
