@@ -1313,10 +1313,14 @@ do not ship persisted claims without them.
    `issuer_url` even when only a verifier is used.
    **Before go-live (2026-10-02):** decide whether to ship the local
    static-token option now or go live on the stated "every local user
-   and process is trusted" condition. Recommendation: ship it first;
-   the design is pinned and small, and any local process (a malicious
-   package, a browser extension) can otherwise read the mailbox. Check
-   that the MCP client can send a bearer header before building it.
+   and process is trusted" condition. The token stops other local
+   accounts and browser-origin requests that cannot read
+   `.secrets/mcp_auth_token.txt`; it does not stop code running as the
+   operator's own user (a malicious package can read the mode-600
+   file), so it narrows the trust condition to "processes running as
+   the operator are trusted" rather than removing it. Recommendation:
+   ship it first; the design is pinned and small. Check that the MCP
+   client can send a bearer header before building it.
 4. **#432 xlsx duplicate cells (before go-live).** A ~100 KB crafted
    workbook can drive the indexer to ~11 GB or hold its only worker
    for 40 s or more; no guard fixes it because openpyxl builds a whole
@@ -1350,8 +1354,10 @@ do not ship persisted claims without them.
    confusables table. Recommendation: defer.
 9. **#526 `authority.toml` on Linux Docker Engine.** A mode-600
    operator-owned file is unreadable to the indexer there (OrbStack is
-   fine); a safe path needs something like a group-read setup.
-   Recommendation: keep it documented; revisit if Linux is deployed.
+   fine). Any fix must keep the file at mode 600: group-read is ruled
+   out (#523), because container GID 1002 may be an unrelated host
+   account. The mechanism is unspecified. Recommendation: keep it
+   documented; revisit if Linux is deployed.
 10. **#524 folders opened by a failed mbsync attempt** are re-watched
     only at the 30-minute recovery sweep; prompt handling needs a new
     signal from mbsync. Mail is late, never lost. Recommendation: defer.
