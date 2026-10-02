@@ -8,6 +8,7 @@ readonly BRIDGE_PASS_FILE="${ROOT_DIR}/.secrets/bridge_pass.txt"
 readonly INFERENCE_KEY_FILE="${ROOT_DIR}/.secrets/inference_api_key.txt"
 readonly EMBED_KEY_FILE="${ROOT_DIR}/.secrets/embed_api_key.txt"
 readonly RERANK_KEY_FILE="${ROOT_DIR}/.secrets/rerank_api_key.txt"
+readonly AUTHORITY_FILE="${ROOT_DIR}/config/authority.toml"
 
 require_file() {
     local path="$1"
@@ -38,12 +39,13 @@ file_mode() {
     # GNU coreutils (Linux containers) uses -c; BSD (macOS host) uses -f.
     # validate-env runs on the operator's host via `make up`, so both must
     # work — stderr is suppressed on each attempt to avoid surfacing the
-    # format-flag mismatch as a spurious error.
-    if mode=$(stat -c '%a' "$path" 2>/dev/null); then
+    # format-flag mismatch as a spurious error. -L reports a symlink's
+    # target, which is the file a bind mount serves.
+    if mode=$(stat -L -c '%a' "$path" 2>/dev/null); then
         printf '%s\n' "$mode"
         return 0
     fi
-    if mode=$(stat -f '%Lp' "$path" 2>/dev/null); then
+    if mode=$(stat -L -f '%Lp' "$path" 2>/dev/null); then
         printf '%s\n' "$mode"
         return 0
     fi
@@ -58,6 +60,23 @@ require_mode_600() {
     actual_mode="$(file_mode "$path")"
     [[ "$actual_mode" == "600" ]] || {
         printf 'ERROR: %s must have mode 600, found %s.\n' "$path" "$actual_mode" >&2
+        exit 1
+    }
+}
+
+# The optional source-authority rules file holds real addresses and
+# domains. Group read is allowed (a Linux host can grant the indexer's
+# GID 1002 read through the group); any permission for other users is
+# not.
+require_not_world_accessible() {
+    local path="$1"
+    local actual_mode
+
+    [[ -e "$path" ]] || return 0
+    actual_mode="$(file_mode "$path")"
+    [[ "${actual_mode: -1}" == "0" ]] || {
+        printf 'ERROR: %s must not be accessible to other users, found %s. Run: chmod 600 %s\n' \
+            "$path" "$actual_mode" "$path" >&2
         exit 1
     }
 }
@@ -607,6 +626,7 @@ require_mode_600 "$BRIDGE_PASS_FILE"
 require_mode_600 "$INFERENCE_KEY_FILE"
 require_mode_600 "$EMBED_KEY_FILE"
 require_mode_600 "$RERANK_KEY_FILE"
+require_not_world_accessible "$AUTHORITY_FILE"
 
 # Every enabled layer requires a non-empty API key — uniform rule
 # across the three operator-supplied layers. Operators pointing at an

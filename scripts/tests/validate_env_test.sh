@@ -305,6 +305,49 @@ loose_secret_mode_fails() {
     fails_with 'must have mode 600'
 }
 
+# --- Source-authority rules file (#468) -----------------------------------
+# config/authority.toml is optional and holds real addresses, so it must
+# not be readable by other host accounts. Owner-only (600) and group
+# read (640, for a Linux group the indexer's GID shares) both pass.
+
+write_authority() {
+    mkdir -p "$ROOT/config"
+    printf '[counsel]\ndomains = ["lawfirm.example"]\n' >"$ROOT/config/authority.toml"
+    chmod "$1" "$ROOT/config/authority.toml"
+}
+
+absent_authority_file_passes() {
+    setup
+    passes
+}
+
+private_authority_file_passes() {
+    setup
+    write_authority 600
+    passes
+    write_authority 640
+    passes
+}
+
+world_readable_authority_file_fails() {
+    setup
+    write_authority 644
+    fails_with 'config/authority.toml must not be accessible to other users'
+    write_authority 604
+    fails_with 'found 604'
+}
+
+# A symlink is judged by its target, which is what the bind mount serves.
+symlinked_authority_file_checks_the_target() {
+    setup
+    write_authority 644
+    mv "$ROOT/config/authority.toml" "$ROOT/config/rules.toml"
+    ln -s rules.toml "$ROOT/config/authority.toml"
+    fails_with 'found 644'
+    chmod 600 "$ROOT/config/rules.toml"
+    passes
+}
+
 # --- Whitespace the readers strip (#506) ----------------------------------
 # The Python loaders read these values with .strip() (and modes with
 # .lower()), so a quoted value padded with spaces is valid; Compose
@@ -401,6 +444,10 @@ check "a one-sided INFERENCE_MAX_TOKENS fails" one_sided_max_tokens_fails
 check "a zero-padded INFERENCE_MAX_TOKENS is decimal" zero_padded_max_tokens_is_decimal
 check "an API key in .env fails" api_key_in_env_fails
 check "a secret file not 600 fails" loose_secret_mode_fails
+check "an absent authority file passes" absent_authority_file_passes
+check "a private authority file passes" private_authority_file_passes
+check "a world-readable authority file fails" world_readable_authority_file_fails
+check "a symlinked authority file is checked by its target" symlinked_authority_file_checks_the_target
 check "padded quoted values pass" padded_quoted_values_pass
 check "padded and mixed-case modes pass" padded_and_cased_modes_pass
 check "a padded none disables the layer" padded_disabled_mode_disables_the_layer
