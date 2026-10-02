@@ -9,8 +9,9 @@
 # (validate-env.sh, bridge/tests/entrypoint_test.sh, part of
 # mbsync/entrypoint.sh), and a structural rule silently skips what it
 # cannot parse. A regex reads every line. `^[^#\n]*` before each match
-# keeps commented-out lines from counting, and the gap between a command
-# and its flag may cross backslash-continued lines.
+# keeps commented-out lines from counting. In the gap between a command
+# and its flag, `#` counts only where bash would start a comment (at the
+# start of a word), and the gap may cross backslash-continued lines.
 #
 # Tests: .semgrep/shell.sh (run `semgrep test .semgrep`).
 rules:
@@ -27,8 +28,8 @@ rules:
         - ".semgrep/"
     pattern-either:
       # curl -k / --insecure, alone or in a group of short flags.
-      - pattern-regex: (?m)^[^#\n]*\bcurl\b(?:[^#\n]|\\\n)*\s(-[a-zA-Z]*k[a-zA-Z]*|--insecure)(\s|$)
-      - pattern-regex: (?m)^[^#\n]*\bwget\b(?:[^#\n]|\\\n)*\s--no-check-certificate\b
+      - pattern-regex: (?m)^[^#\n]*\bcurl\b(?:[^#\n]|(?<=\S)#|\\\n)*\s(-[a-zA-Z]*k[a-zA-Z]*|--insecure)(\s|$)
+      - pattern-regex: (?m)^[^#\n]*\bwget\b(?:[^#\n]|(?<=\S)#|\\\n)*\s--no-check-certificate\b
       # git -c http.sslVerify=false, git config http.sslVerify false
       - pattern-regex: (?mi)^[^#\n]*\bhttp\.sslverify["']?[\s=]+["']?(false|0|no|off)\b
       # Environment switches that turn verification off for git, Python
@@ -49,7 +50,7 @@ rules:
         - ".semgrep/"
     pattern-either:
       - pattern-regex: (?m)^[^#\n]*\bset\s+(-[a-zA-Z]*x[a-zA-Z]*|-o\s+xtrace)(\s|;|$)
-      - pattern-regex: (?m)^[^#\n]*\b(ba)?sh\s+-[a-zA-Z]*x[a-zA-Z]*(\s|$)
+      - pattern-regex: (?m)^[^#\n]*\b(ba)?sh\s+(-[a-zA-Z]*x[a-zA-Z]*|-o\s+xtrace)(\s|$)
       - pattern-regex: \A#![^\n]*\s-[a-zA-Z]*x
 
   - id: shell-pipe-to-shell
@@ -64,7 +65,7 @@ rules:
       exclude:
         - ".semgrep/"
     pattern-either:
-      - pattern-regex: (?m)^[^#\n]*\b(curl|wget)\b(?:[^#\n|]|\\\n)*\|(?:\s|\\\n)*(sudo\s+)?(\S*/)?(env\s+(-\S+\s+)*)?(\S*/)?(ba|z|da|k)?sh\b
+      - pattern-regex: (?m)^[^#\n]*\b(curl|wget)\b(?:[^#\n|]|(?<=\S)#|\\\n)*\|(?:\s|\\\n)*(sudo\s+)?(\S*/)?(env\s+(-\S+\s+)*)?(\S*/)?(ba|z|da|k)?sh\b
       - pattern-regex: (?m)^[^#\n]*(\b(ba|z|da)?sh|\bsource|\.)\s+<\(\s*(curl|wget)\b
 
   - id: shell-world-writable
@@ -80,4 +81,4 @@ rules:
         - ".semgrep/"
     pattern-either:
       - pattern-regex: (?m)^[^#\n]*\bchmod\s+(-[a-zA-Z]+\s+)*["']?([0-7]?[0-7]{2}[2367]|[ugo]*[ao][ugoa]*[+=][rwxXst]*w[rwxXst]*)["']?(\s|$)
-      - pattern-regex: (?m)^[^#\n]*\b(mkdir|install)\b(?:[^#\n]|\\\n)*\s-m\s*["']?([0-7]?[0-7]{2}[2367]|[ugo]*[ao][ugoa]*[+=][rwxXst]*w[rwxXst]*)["']?(\s|$)
+      - pattern-regex: (?m)^[^#\n]*\b(mkdir|install)\b(?:[^#\n]|(?<=\S)#|\\\n)*\s(-m\s*|--mode[=\s])["']?([0-7]?[0-7]{2}[2367]|[ugo]*[ao][ugoa]*[+=][rwxXst]*w[rwxXst]*)["']?(\s|$)

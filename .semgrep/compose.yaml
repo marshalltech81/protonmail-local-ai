@@ -78,12 +78,14 @@ rules:
     severity: ERROR
     message: >-
       AGENTS.md forbids adding host devices to a container without
-      explicit owner approval.
+      explicit owner approval. `gpus` requests host GPU devices too.
     paths:
       include:
         - "docker-compose*.yml"
         - "docker-compose*.yaml"
-    pattern: "devices: $DEVICES"
+    pattern-either:
+      - pattern: "devices: $DEVICES"
+      - pattern: "gpus: $GPUS"
 
   - id: compose-weakened-security-opt
     languages: [yaml]
@@ -143,44 +145,66 @@ rules:
     severity: ERROR
     message: >-
       This logging configuration does not bound the log size. Use
-      `logging: *default-logging` (json-file with `max-size`), or
-      `driver: none` as docker-compose.first-run.yml does for Bridge.
+      `logging: *default-logging` (json-file with a positive `max-size`),
+      or `driver: none` as docker-compose.first-run.yml does for Bridge.
     paths:
       include:
         - "docker-compose*.yml"
         - "docker-compose*.yaml"
-    patterns:
-      - pattern: "logging: $LOGGING"
-      - pattern-not: |
-          logging:
-            ...
-            options:
-              ...
-              max-size: $SIZE
-              ...
-            ...
-      - pattern-not: |
-          logging:
-            ...
-            driver: none
-            ...
+    pattern-either:
+      # A logging block with no max-size, other than the drivers that keep
+      # no unbounded file: none, and local (which rotates by default).
+      - patterns:
+          - pattern: "logging: $LOGGING"
+          - pattern-not: |
+              logging:
+                ...
+                options:
+                  ...
+                  max-size: $SIZE
+                  ...
+                ...
+          - pattern-not: |
+              logging:
+                ...
+                driver: none
+                ...
+          - pattern-not: |
+              logging:
+                ...
+                driver: local
+                ...
+      # A max-size that is not a positive size (`-1` means unlimited).
+      - patterns:
+          - pattern-inside: "logging: $LOGGING"
+          - pattern: "max-size: $SIZE"
+          - metavariable-regex:
+              metavariable: $SIZE
+              regex: ^(?!["']?[1-9][0-9]*[kmgKMG]?["']?$)
 
   - id: compose-docker-socket
     languages: [yaml]
     severity: ERROR
     message: >-
-      Mounting the Docker socket gives the container control of the host's
-      Docker daemon. AGENTS.md forbids it.
+      Mounting the Docker socket (directly, or through Compose's
+      `use_api_socket`) gives the container control of the host's Docker
+      daemon. AGENTS.md forbids it.
     paths:
       include:
         - "docker-compose*.yml"
         - "docker-compose*.yaml"
-    patterns:
-      - pattern-inside: "volumes: [..., $VOL, ...]"
-      - pattern: $VOL
-      - metavariable-regex:
-          metavariable: $VOL
-          regex: (?s).*docker\.sock
+    pattern-either:
+      - patterns:
+          - pattern-inside: "volumes: [..., $VOL, ...]"
+          - pattern: $VOL
+          - metavariable-regex:
+              metavariable: $VOL
+              regex: (?s).*docker\.sock
+      - patterns:
+          - pattern: "use_api_socket: $VALUE"
+          - metavariable-regex:
+              metavariable: $VALUE
+              regex: ^(?!false$)
 
   - id: compose-writable-host-bind-mount
     languages: [yaml]
@@ -203,6 +227,16 @@ rules:
           - metavariable-regex:
               metavariable: $VOL
               regex: ^["']?(\.{0,2}/|~|\$)(?!.*:([a-z]+,)*ro(,[a-z]+)*["']?$)
+      # A named volume backed by a host directory (local driver with
+      # `o: bind`); its service-side mount looks like a named volume.
+      - patterns:
+          - pattern-inside: |
+              driver_opts:
+                ...
+          - pattern: "o: $OPTS"
+          - metavariable-regex:
+              metavariable: $OPTS
+              regex: (?i).*(\bbind\b|\$)
       # Long syntax: `type: bind` without `read_only: true`.
       - patterns:
           - pattern-inside: "volumes: [..., $VOL, ...]"
@@ -245,9 +279,10 @@ rules:
     languages: [yaml]
     severity: ERROR
     message: >-
-      `$PORT` publishes mcp-server beyond loopback. Bind it as
-      "127.0.0.1:<port>:<port>" (AGENTS.md "Network and exposure
-      constraints"); the long syntax is not accepted here.
+      `$PORT` publishes something other than mcp-server:3000 on loopback.
+      Bind it as "127.0.0.1:${MCP_PORT:-3000}:${MCP_PORT:-3000}" (AGENTS.md
+      "Network and exposure constraints"); the long syntax is not
+      accepted here.
     paths:
       include:
         - "docker-compose*.yml"
@@ -265,7 +300,58 @@ rules:
       - pattern: $PORT
       - metavariable-regex:
           metavariable: $PORT
-          regex: ^(?!["']?127\.0\.0\.1:)
+          regex: ^(?!["']?127\.0\.0\.1:(3000|\$\{MCP_PORT:-3000\}):(3000|\$\{MCP_PORT:-3000\})["']?$)
+
+  - id: compose-interpolated-network
+    languages: [yaml]
+    severity: ERROR
+    message: >-
+      `$NET` is an interpolated network, so its default could be
+      bridge-net. Name service networks literally.
+    paths:
+      include:
+        - "docker-compose*.yml"
+        - "docker-compose*.yaml"
+    patterns:
+      - pattern-inside: |
+          services:
+            ...
+      - pattern-inside: "networks: [..., $NET, ...]"
+      - pattern: $NET
+      - metavariable-regex:
+          metavariable: $NET
+          regex: .*\$
+
+  - id: compose-root-user
+    languages: [yaml]
+    severity: ERROR
+    message: >-
+      `user: $USER` runs the service as root (or, interpolated, could),
+      overriding the image's dedicated non-root account (AGENTS.md
+      "Dockerfile Conventions").
+    paths:
+      include:
+        - "docker-compose*.yml"
+        - "docker-compose*.yaml"
+    patterns:
+      - pattern: "user: $USER"
+      - metavariable-regex:
+          metavariable: $USER
+          regex: ^["']?(root|0)(:|["']?$)|.*\$
+
+  - id: compose-extends
+    languages: [yaml]
+    severity: ERROR
+    message: >-
+      `extends` inherits another service's networks, secrets and mounts
+      without naming them here, so the other rules cannot see what the
+      service gets (extending mbsync would hand over bridge-net and the
+      Bridge password). Define the service in full instead.
+    paths:
+      include:
+        - "docker-compose*.yml"
+        - "docker-compose*.yaml"
+    pattern: "extends: $BASE"
 
   - id: compose-bridge-net-member
     languages: [yaml]

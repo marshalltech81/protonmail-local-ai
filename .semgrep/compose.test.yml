@@ -56,6 +56,12 @@ services:
     ports:
       # ok: compose-port-not-loopback, compose-port-on-other-service
       - "127.0.0.1:${MCP_PORT:-3000}:${MCP_PORT:-3000}"
+      # ok: compose-port-not-loopback
+      - "127.0.0.1:3000:3000"
+      # ruleid: compose-port-not-loopback
+      - "127.0.0.1:8080:8080"
+      # ruleid: compose-port-not-loopback
+      - "127.0.0.1:${MCP_PORT:-3000}:8080"
       # ruleid: compose-port-not-loopback
       - "3000:3000"
       # ruleid: compose-port-not-loopback
@@ -165,3 +171,49 @@ services:
     pids_limit: 0
     # ruleid: compose-logging-unbounded
     logging: {}
+    networks:
+      # ruleid: compose-interpolated-network
+      - ${INDEXER_NETWORK:-bridge-net}
+      # ok: compose-interpolated-network
+      - app-net
+    # ruleid: compose-host-devices
+    gpus: all
+    # ruleid: compose-root-user
+    user: root
+    # ruleid: compose-docker-socket
+    use_api_socket: true
+    # ruleid: compose-extends
+    extends:
+      service: mbsync
+
+  sneaky-three:
+    # ruleid: compose-root-user
+    user: "0:0"
+    # ok: compose-docker-socket
+    use_api_socket: false
+    logging:
+      driver: json-file
+      options:
+        # ruleid: compose-logging-unbounded
+        max-size: "-1"
+
+  sneaky-four:
+    # ruleid: compose-root-user
+    user: ${APP_USER:-0}
+    # ok: compose-logging-unbounded
+    logging:
+      driver: local
+
+  sneaky-five:
+    # ok: compose-root-user
+    user: "1003:1003"
+
+volumes:
+  ok-volume: {}
+  bind-volume:
+    driver: local
+    driver_opts:
+      type: none
+      # ruleid: compose-writable-host-bind-mount
+      o: bind
+      device: /srv/data

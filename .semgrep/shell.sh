@@ -28,6 +28,8 @@ export GIT_SSL_NO_VERIFY=1
 NODE_TLS_REJECT_UNAUTHORIZED=0 node app.js
 # ruleid: shell-tls-verification-disabled
 git config --global http.sslVerify false
+# ruleid: shell-tls-verification-disabled
+curl "https://example.invalid/tool#v1" --insecure -o tool
 # ok: shell-tls-verification-disabled
 # A commented-out line is not a finding: curl -k "$url"
 
@@ -37,6 +39,8 @@ set -x
 set -Eeux
 # ruleid: shell-xtrace-enabled
 set -o xtrace
+# ruleid: shell-xtrace-enabled
+bash -o xtrace ./other.sh
 # ruleid: shell-xtrace-enabled
 bash -x ./other.sh
 # ok: shell-xtrace-enabled
@@ -70,6 +74,10 @@ chmod o+w "$dir"
 chmod a+rwx "$dir"
 # ruleid: shell-world-writable
 mkdir -m 1777 "$dir"
+# ruleid: shell-world-writable
+mkdir --mode=777 "$dir"
+# ruleid: shell-world-writable
+install --mode 666 src "$dir/dst"
 # ok: shell-world-writable
 chmod 600 "$dir"
 # ok: shell-world-writable
