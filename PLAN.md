@@ -669,9 +669,9 @@ How the first batch was worked, and what to repeat:
   arrival-order attempt (branch `fix/indexer-message-id-conflicts`)
   was superseded and deleted 2026-10-02; its two unrelated commits
   had already landed in #246. Open follow-up: #454 (the 32-bit suffix).
-- **#208 chunk overlap exceeds `max_tokens`** — harmless at default
-  settings; it changes chunk IDs, so it lands in the Phase 2 reindex
-  bundle (see Phase 2), not on its own.
+- ~~**#208 chunk overlap exceeds `max_tokens`**~~ — fixed with #550
+  before go-live rather than in the Phase 2 reindex bundle (Resolved
+  decisions 14): every rendered chunk now fits `max_tokens` (#594).
 - ~~**#209 single-part MIME attachment decoded as body**~~ (done with
   #230 in item 8 below), ~~**#210 stale
   unsupported-extraction cache entry**~~ (done in item 10 below) — low frequency, about 10 and 5

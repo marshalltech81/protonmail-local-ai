@@ -349,7 +349,9 @@ def _enforce_max_tokens(spans: list[_Span], source: str, max_tokens: int) -> lis
     """
     result: list[_Span] = []
     for span in spans:
-        if estimate_tokens(span.text) <= max_tokens:
+        # Measure the text the span renders to alone: trimming its edges
+        # can raise the count (`` differ`` is one token, ``differ`` two).
+        if estimate_tokens(_render_group(source, [span])[0]) <= max_tokens:
             result.append(span)
             continue
         result.extend(_split_by_sentence(span, source, max_tokens))
@@ -564,15 +566,18 @@ def _pack_spans(
     # Tokens of the source between each span and the span before it,
     # keyed by span start (spans never share a start).
     gap_tokens: dict[int, int] = {}
+    # True while ``current`` holds only the overlap seed of the last close.
+    seed_only = False
 
     def close() -> list[_Span]:
         """Close ``current``, seed the next group with its overlap tail."""
-        nonlocal current, current_tokens, current_rendered
+        nonlocal current, current_tokens, current_rendered, seed_only
         if not current:
             return []
         groups.append(current)
         overlap = _overlap_tail(current, overlap_tokens)
         current = list(overlap)
+        seed_only = bool(current)
         current_tokens = sum(estimate_tokens(s.text) for s in current)
         current_rendered = current_tokens + sum(gap_tokens[s.start] for s in current[1:])
         return overlap
@@ -583,7 +588,9 @@ def _pack_spans(
         gap = 0 if prev_end is None else estimate_tokens(source[prev_end : span.start])
         gap_tokens[span.start] = gap
         prev_end = span.end
-        if current and current_rendered + gap + span_tokens > max_tokens:
+        # Close only a group with new material: closing a bare overlap
+        # seed would emit a chunk that duplicates the previous one's tail.
+        if current and not seed_only and current_rendered + gap + span_tokens > max_tokens:
             close()
         # The overlap seed ``close()`` leaves behind is not bounded by
         # the overlap budget (a carried span may be larger than it), so
@@ -595,6 +602,7 @@ def _pack_spans(
             current_rendered -= dropped_tokens + (gap_tokens[current[0].start] if current else 0)
         current_rendered += span_tokens + (gap if current else 0)
         current.append(span)
+        seed_only = False
         current_tokens += span_tokens
         if current_tokens >= target_tokens:
             close()

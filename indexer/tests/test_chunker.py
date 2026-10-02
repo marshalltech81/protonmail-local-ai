@@ -834,6 +834,16 @@ MAX_TOKENS_SHAPES: dict[str, tuple[str, int, int]] = {
     "xlsx_rows_short": ("\n".join("\t" * (i % 4) + f"value{i}" for i in range(300)), 40, 60),
     "cjk_without_spaces": ("这是一个测试句子没有空格" * 400, 40, 60),
     "single_over_max_word": ("x" * 5000 + " y", 40, 60),
+    # Review round 1: `` differ`` is one token, ``differ`` two, so trimming
+    # the paragraph's leading space takes it from 1,500 tokens to 1,501.
+    "leading_space_trim_raises_count": (" differ" * 1500, 1000, 1500),
+    # Review round 1: the second paragraph is the overlap seed when a long
+    # whitespace line keeps the third from fitting beside it.
+    "overlap_seed_before_long_gap": (
+        "alpha alpha\n\nbeta beta\n" + "\t" * 5000 + "\ngamma",
+        4,
+        60,
+    ),
 }
 
 # Pinned on main before the #208/#550 fix: these shapes already met the
@@ -906,6 +916,9 @@ class TestRenderedChunkCeiling:
         assert indexes == sorted(set(indexes))
         # No visible text is lost: every non-whitespace char sits in a chunk.
         assert all(covered[i] or ch.isspace() for i, ch in enumerate(normalized))
+        # No chunk is only overlap: each one ends past the chunk before it.
+        for prev, nxt in zip(chunks, chunks[1:], strict=False):
+            assert nxt.char_end > prev.char_end
 
     def test_whitespace_gap_between_sub_spans_is_not_rendered_into_one_chunk(self):
         # #550: the splitters drop the 20,000 tabs between ``a`` and
@@ -989,8 +1002,10 @@ class TestRenderedChunkCeiling:
         assert time.monotonic() - started < 20.0
         assert len(chunks) == 4000
         assert all(c.token_est <= 100 for c in chunks)
-        # One render per chunk plus one for each cut group's first check.
-        assert calls <= 2 * len(chunks)
+        # One render per paragraph (``_enforce_max_tokens`` measures it),
+        # one per packed group (the check that finds it over), and one per
+        # chunk; a 2-span group's cut needs no search.
+        assert calls <= 2000 + 2000 + len(chunks)
 
     def test_long_gaps_are_packed_out_before_the_rendered_check(self, monkeypatch):
         # Paragraphs separated by long whitespace-only lines. The packer
