@@ -424,7 +424,7 @@ checklist) or an owner decision.
 | 3.8 Citation contract | Partly done | #457, #495 (`ask_mailbox` statement coverage and quote checks), #519 and #525 (quote and label edge cases), #532 and #545 (thread-scoped `get_evidence` reproduces `ask_mailbox`'s evidence for that thread) | the same contract for `summarize_thread` and `extract_from_emails`; semantic support (#284); mailbox-wide audit parity (#537) |
 | 4.1 Entities | Done | #459, #527 (orphan pruning, #464) | — |
 | 4.2 Source authority | Done | #459, #474 (Spam guard), #523 and #542 (rules file kept private and validated) | verdict-header gating after go-live (#463) |
-| 4.3 Temporal retrieval | Not started | — | — |
+| 4.3 Temporal retrieval | In progress (2026-10-02) | — | temporal fields |
 | 4.4 Retention | Mostly done | #451 (mirror default), #475 (Trash hidden from default search) | user-controlled retention; reaped-citation behaviour |
 | 5.1 Hardened `brief_issue` | Not started | — | needs Phase 3 usage on real mail |
 | 5.2 Support/contradict | Built, experimental | #467 (`check_conclusion`), #493 (evidence-slot refill) | quote/support verification |
@@ -655,11 +655,12 @@ them (one test-first commit per issue, `Fixes #N` per issue):
 **Handoff 2026-10-02, morning — start here.** **#277 is fixed
 (#515):** mbsync's healthcheck reports liveness rather than a completed
 sync, so a long first sync no longer keeps the indexer and MCP server
-from starting. #277 no longer blocks the first deployment; go live
-with the checklist below, on a host where every local user and process
-is trusted: the MCP endpoint has no authentication yet (Phase 1 item
-5; the local bearer token is decided and follows #498, Resolved
-decisions 13), and localhost is not a trust boundary. Rebuild
+from starting. #277 no longer blocks the first deployment. Go live
+with the checklist below only once #432 and the MCP bearer token land
+(the token is built after #498; Phase 1 item 5, Resolved decisions
+13): the MCP endpoint has no authentication yet, and localhost is not
+a trust boundary. Even with the token, the host must be one where
+processes running as the operator are trusted. Rebuild
 any index created before the overnight changes from Maildir (the
 volume wipe in `docs/troubleshooting.md`, "Indexer refuses to
 start"): #527 and #544 edited the v0 schema, and #546, #547 and #548 change
@@ -718,7 +719,7 @@ Next session, in order:
    the measurements waiting on real data (#287 budgets, #288, #289).
 
 Backlog filed from review (P3 or edge cases, not scheduled): #454,
-and from 2026-10-02 #524, #526, #533 and #537 (#442, #446, #447,
+and from 2026-10-02 #524, #526 and #533 (#537 is in progress; #442, #446, #447,
 #449, #450, #455, #456, #460, #461, #464, #465, #468, #471, #477,
 #478, #499, #500, #502 and #541 are fixed; #433 too, and #550 joins
 the reindex bundle).
@@ -1321,8 +1322,9 @@ do not ship persisted claims without them.
         proxy must expose that well-known route.
     - **#432 xlsx duplicate cells:** option (c), a streaming pre-pass
       that counts raw `<c>` nodes and cuts the sheet before an
-      over-budget row, public APIs only. In progress; lands before
-      go-live.
+      over-budget row, public APIs only. It changes the extracted
+      text, so it bumps the xlsx entry in `EXTRACTOR_VERSIONS`. In
+      progress; lands before go-live.
     - **#498 Streamable HTTP as the only transport:** go. In progress.
     - **#497 Bridge app on macOS:** go now rather than after go-live,
       starting with a certificate-valid connection path (never a TLS
