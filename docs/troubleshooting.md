@@ -328,9 +328,12 @@ already in them (#516). No restart is needed. The same applies to a folder
 created in Proton while the stack runs: its mail is indexed after the sync
 that created it, and its later deliveries in real time.
 
-The check runs in the indexer's main loop. While the indexer's startup
-index is still draining a large backlog, it waits until that finishes; the
-mail is not lost, only indexed later.
+A sync attempt that fails writes no stamp; folders it created are then
+watched at the next successful sync or the next recovery sweep
+(`INDEXER_RECOVERY_SWEEP_INTERVAL_SECS`, default 30 minutes), whichever
+comes first. The check runs in the indexer's main loop. While the
+indexer's startup index is still draining a large backlog, it waits until
+that finishes; the mail is not lost, only indexed later.
 
 ## `make up` fails — mbsync is unhealthy
 

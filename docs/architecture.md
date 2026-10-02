@@ -957,12 +957,16 @@ a folder created during a sync is unwatched when it becomes readable
 (#516). The stamp's rename signals the main loop, which walks the
 folder directories (not `cur`/`new`/`tmp`, so the walk is linear in
 folders) and, when any directory is readable that was not when the
-watch was last scheduled, unschedules and re-schedules the recursive
-watch (`FolderWatchRefresher`, `indexer/src/folder_watch.py`). Events
+watch was last scheduled, or sits at a known path with a new inode
+(deleted and recreated, which drops its watch), unschedules and
+re-schedules the recursive watch (`FolderWatchRefresher`, `indexer/src/folder_watch.py`). Events
 in the gap between the old and new watch are covered by the rename
 sweep (`sweep_paths`) and a Maildir walk, which also queues the mail
 already in the newly watched folders. A sync that opens no new
-directory costs only the folder walk.
+directory costs only the folder walk. The same check also runs with
+the periodic rescan, for a failed sync attempt (whose permission
+repair opens new folders but writes no stamp) and to retry a
+re-schedule that failed.
 
 When deletion reconciliation is enabled, every enqueue path — the
 startup scan, the periodic rescan, the zero-vector recovery sweep, and

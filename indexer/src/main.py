@@ -2224,6 +2224,15 @@ def main():
                     ingestion_state.acknowledge(stamp)
                 except Exception as e:
                     log.error("periodic Maildir rescan failed: %s", e)
+                # Also re-watch here: a failed sync attempt still opens
+                # the folders it created but writes no stamp, and a
+                # failed re-schedule leaves no watch until the next try.
+                try:
+                    _refresh_folder_watches(
+                        folder_watches, db, queue, skip_trashed=reconciler is not None
+                    )
+                except Exception as e:
+                    log.error("Maildir watch refresh failed: %s", type(e).__name__)
                 last_recovery_sweep = now
 
             # WAL checkpoint: keep the WAL file size bounded over a

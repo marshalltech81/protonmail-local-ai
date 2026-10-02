@@ -138,7 +138,7 @@ class TestReadableDirs:
 
         monkeypatch.setattr(folder_watch.os, "scandir", flaky_scandir)
 
-        assert readable_dirs(tmp_path) == {str(tmp_path / "INBOX")}
+        assert set(readable_dirs(tmp_path)) == {str(tmp_path / "INBOX")}
 
 
 class TestFolderWatchRefresher:
@@ -180,7 +180,7 @@ class TestFolderWatchRefresher:
         assert observer.calls == ["schedule", "unschedule", "schedule"]
         assert len(observer.live) == 1
         # Counts only: folder names are mailbox content.
-        assert "4 director(ies) became readable" in caplog.text
+        assert "4 new or newly readable director(ies)" in caplog.text
         assert FOLDER_MARKER not in caplog.text
 
     def test_folder_created_after_start_is_rewatched(self, tmp_path):
@@ -196,7 +196,9 @@ class TestFolderWatchRefresher:
         assert observer.calls == ["schedule", "unschedule", "schedule"]
 
     @needs_unprivileged
-    def test_folder_recreated_unreadable_is_rewatched_once_readable(self, tmp_path, unreadable):
+    def test_folder_briefly_unreadable_keeps_its_watch(self, tmp_path, unreadable):
+        """An inotify watch survives a chmod, so a watched directory that
+        is closed and reopened needs no new watch."""
         folder = _folder(tmp_path, "Box")
         observer = _FakeObserver()
         refresher = FolderWatchRefresher(tmp_path, observer, handler=None)  # type: ignore[arg-type]
@@ -206,7 +208,29 @@ class TestFolderWatchRefresher:
         assert refresher.refresh() is False
         folder.chmod(0o755)
 
+        assert refresher.refresh() is False
+        assert observer.calls == ["schedule"]
+
+    @pytest.mark.parametrize("victim", ["Box", "Box/new"])
+    def test_directory_recreated_at_the_same_path_is_rewatched(self, tmp_path, victim):
+        """Review round 1: deleting a directory drops its watch, and
+        mbsync recreates it 0700, so watchdog cannot add the new one. Same
+        path, new inode: re-watch."""
+        root = tmp_path / "maildir"
+        _folder(root, "Box")
+        observer = _FakeObserver()
+        refresher = FolderWatchRefresher(root, observer, handler=None)  # type: ignore[arg-type]
+        refresher.start()
+        # Moved out of the Maildir rather than deleted, so the filesystem
+        # cannot hand its inode number to the replacement.
+        (root / victim).rename(tmp_path / "gone")
+        if victim == "Box":
+            _folder(root, "Box")
+        else:
+            (root / victim).mkdir()
+
         assert refresher.refresh() is True
+        assert refresher.refresh() is False
         assert observer.calls == ["schedule", "unschedule", "schedule"]
 
     def test_failed_schedule_is_retried_on_the_next_refresh(self, tmp_path):

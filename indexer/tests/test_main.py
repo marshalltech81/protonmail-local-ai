@@ -3821,6 +3821,15 @@ class TestMainStartupAndLoop:
         monkeypatch.setenv("INDEXER_DELETION_ENABLED", "true")
         assert "refresh:True" in self._run_main(tmp_path, monkeypatch, sweep_due=False, synced=True)
 
+    def test_recovery_sweep_also_rewatches_folders(self, tmp_path, monkeypatch):
+        """Review round 1: a failed sync attempt still opens the folders
+        it created but writes no stamp, and a failed re-schedule leaves
+        no watch until the next refresh. The sweep cadence bounds both."""
+        monkeypatch.setenv("INDEXER_DELETION_ENABLED", "true")
+        events = self._run_main(tmp_path, monkeypatch, sweep_due=True)
+
+        assert "refresh:True" in events
+
     def test_main_loop_leaves_the_watch_alone_without_a_sync(self, tmp_path, monkeypatch):
         events = self._run_main(tmp_path, monkeypatch, sweep_due=False)
 

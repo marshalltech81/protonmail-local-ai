@@ -9,10 +9,12 @@ watchdog ignores ``EACCES``, both when the watch is scheduled and when
 the folder's create event arrives, and the later ``chmod`` adds no watch.
 
 ``FolderWatchRefresher`` records which directories were readable when
-the watch was last scheduled. After each completed sync, ``refresh``
-walks the folder directories again and, when any directory is readable
-now but was not then, re-schedules the watch, which walks the tree
-again and adds every watch it can.
+the watch was last scheduled, and their inodes. After each completed
+sync, ``refresh`` walks the folder directories again and, when any
+directory is readable now that was not then, or was replaced by a new
+directory at the same path (deleting a directory drops its watch),
+re-schedules the watch, which walks the tree again and adds every watch
+it can.
 """
 
 import logging
@@ -30,8 +32,9 @@ log = logging.getLogger(__name__)
 MESSAGE_DIRS = frozenset({"cur", "new", "tmp"})
 
 
-def readable_dirs(root: Path) -> set[str]:
-    """Every directory under ``root`` the indexer can list and enter.
+def readable_dirs(root: Path) -> dict[str, int]:
+    """Every directory under ``root`` the indexer can list and enter,
+    mapped to its inode number.
 
     Lists only folder directories, never a ``cur``/``new``/``tmp``
     directory, so the work is linear in the number of folders, not
@@ -41,7 +44,7 @@ def readable_dirs(root: Path) -> set[str]:
     ``new`` or ``tmp`` is not seen; the periodic Maildir rescan still
     indexes its mail.
     """
-    found: set[str] = set()
+    found: dict[str, int] = {}
     pending = [root]
     while pending:
         directory = pending.pop()
@@ -53,7 +56,7 @@ def readable_dirs(root: Path) -> set[str]:
         for entry in children:
             if not os.access(entry.path, os.R_OK | os.X_OK):
                 continue
-            found.add(entry.path)
+            found[entry.path] = entry.inode()
             if entry.name not in MESSAGE_DIRS:
                 pending.append(Path(entry.path))
     return found
@@ -65,9 +68,13 @@ class FolderWatchRefresher:
 
     The readable set is taken before each schedule: permissions only
     widen, so every directory in it is watched. A directory missing from
-    it (created later, or unreadable then) is re-checked on every
-    ``refresh``. Re-scheduling replaces the watch, so there is never
-    more than one.
+    it (created later, or unreadable then), or found at its path with a
+    different inode (deleted and recreated, which drops the watch), is
+    re-checked on every ``refresh``. A watch survives a ``chmod``, so a
+    watched directory closed and reopened needs nothing. Re-scheduling
+    replaces the watch, so there is never more than one. Limitation: a
+    directory recreated with a reused inode number looks unchanged; the
+    periodic Maildir rescan still indexes its mail.
     """
 
     def __init__(self, root: Path, observer: BaseObserver, handler: FileSystemEventHandler):
@@ -75,9 +82,9 @@ class FolderWatchRefresher:
         self._observer = observer
         self._handler = handler
         self._watch: ObservedWatch | None = None
-        self._watched: set[str] = set()
+        self._watched: dict[str, int] = {}
 
-    def _schedule(self, readable: set[str]) -> None:
+    def _schedule(self, readable: dict[str, int]) -> None:
         if self._watch is not None:
             self._observer.unschedule(self._watch)
             self._watch = None
@@ -91,15 +98,13 @@ class FolderWatchRefresher:
         self._schedule(readable_dirs(self.root))
 
     def refresh(self) -> bool:
-        """Re-schedule the watch if a directory became readable since it
-        was last scheduled. Returns whether it did."""
+        """Re-schedule the watch if a directory became readable, or was
+        recreated, since it was last scheduled, or if the last schedule
+        failed. Returns whether it did."""
         current = readable_dirs(self.root)
-        # Forget directories that are gone or unreadable, so one
-        # recreated under the same name is watched once readable again.
-        self._watched &= current
-        added = len(current - self._watched)
+        added = sum(1 for path, inode in current.items() if self._watched.get(path) != inode)
         if not added and self._watch is not None:
             return False
-        log.info("Maildir watch: %d director(ies) became readable; re-watching", added)
+        log.info("Maildir watch: %d new or newly readable director(ies); re-watching", added)
         self._schedule(current)
         return True
