@@ -111,17 +111,24 @@ check_maildir_layout() {
     # next to the copies already there. Refuse to sync until the operator
     # starts the Maildir over. A top-level folder's directory holds only
     # cur, new, tmp and dot entries in this layout, so any other directory
-    # there is the earlier one. The message names no path, because these
-    # paths hold folder names.
-    local state nested
+    # there is the earlier one. The messages name no path, because these
+    # paths hold folder names: find's own diagnostics (a directory it
+    # cannot read, by path) are kept in a file and only counted.
+    local state nested find_err lines
 
-    if ! state="$(find "$MAILDIR_PATH" -mindepth 1 -maxdepth 1 -name '.mbsyncstate*' -print -quit)" \
+    find_err="$(mktemp "${RUNTIME_DIR}/layout-find.XXXXXX")"
+    if ! state="$(find "$MAILDIR_PATH" -mindepth 1 -maxdepth 1 -name '.mbsyncstate*' -print -quit \
+        2>"$find_err")" \
         || ! nested="$(find "$MAILDIR_PATH" -mindepth 2 -maxdepth 2 -type d \
             ! -path "${MAILDIR_PATH}/.*" ! -name '.*' ! -name cur ! -name new ! -name tmp \
-            -print -quit)"; then
+            -print -quit 2>>"$find_err")"; then
+        lines="$(wc -l <"$find_err" | tr -d '[:space:]')"
+        rm -f "$find_err"
         echo ">>> ERROR: could not inspect ${MAILDIR_PATH} for an earlier Maildir layout — refusing to sync." >&2
+        echo ">>> find reported ${lines} error line(s), not logged because they name folders. To see them: docker exec mbsync find ${MAILDIR_PATH} -maxdepth 2 -type d" >&2
         return 1
     fi
+    rm -f "$find_err"
     if [[ -n "$state" || -n "$nested" ]]; then
         echo ">>> ERROR: ${MAILDIR_PATH} was synced with an earlier mbsync layout (sync state at the Maildir root, or subfolders without the leading dot) — refusing to sync." >&2
         echo ">>> Syncing it with this version would download mail again next to the existing copies. Start the Maildir over: see docs/troubleshooting.md, \"mbsync refuses an earlier Maildir layout\"." >&2

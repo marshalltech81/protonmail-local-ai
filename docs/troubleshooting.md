@@ -411,6 +411,11 @@ mail a second time next to the copies already there. mbsync therefore
 refuses to start, before it connects to Bridge, and changes nothing. The
 message names no path, because those paths hold folder names.
 
+If it says instead that it `could not inspect /maildir`, `find` could not
+read part of the Maildir (usually a permission problem); it gives only a
+count of `find`'s errors, for the same reason. Run the `docker exec`
+command it prints to see them in your terminal.
+
 Start the Maildir over. Mail is pulled again from Proton, so nothing is
 lost, but remove the index with it: its rows point at the old files, which
 would otherwise go through

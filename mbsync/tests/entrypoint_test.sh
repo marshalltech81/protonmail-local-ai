@@ -852,6 +852,8 @@ success_stamp_is_written_by_a_completed_sync() {
 
 layout_setup() {
     MAILDIR_PATH="$WORK/maildir-layout-$1"
+    RUNTIME_DIR="$WORK/runtime-layout-$1"
+    mkdir -p "$RUNTIME_DIR"
     load check_maildir_layout
 }
 
@@ -924,6 +926,32 @@ an_uninspectable_maildir_is_refused() {
         return 1
     fi
     grep -q "could not inspect" "$WORK/layout-err"
+}
+
+# find names a directory it cannot read on stderr, and that path holds a
+# folder name, so its diagnostics stay out of the log (review round 1).
+# shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
+unreadable_folders_are_refused_without_naming_them() {
+    local rc=0
+    if ((EUID == 0)); then
+        echo "skipped: root can read a mode-000 directory"
+        return 0
+    fi
+    layout_setup unreadable
+    mkdir -p "$MAILDIR_PATH/INBOX/cur" "$MAILDIR_PATH/MarkerZq9/cur" \
+        "$MAILDIR_PATH/Folders/.MarkerZq9b/cur"
+    chmod 000 "$MAILDIR_PATH/MarkerZq9" "$MAILDIR_PATH/Folders/.MarkerZq9b"
+    check_maildir_layout 2>"$WORK/layout-err" || rc=$?
+    chmod 755 "$MAILDIR_PATH/MarkerZq9" "$MAILDIR_PATH/Folders/.MarkerZq9b"
+    ((rc != 0)) || return 1
+    grep -q "could not inspect" "$WORK/layout-err" || return 1
+    grep -qE "find reported [1-9][0-9]* error line" "$WORK/layout-err" || return 1
+    if grep -q MarkerZq9 "$WORK/layout-err"; then
+        echo "a folder name reached the log"
+        cat "$WORK/layout-err"
+        return 1
+    fi
+    [[ -z "$(find "$RUNTIME_DIR" -type f)" ]] || return 1
 }
 
 the_layout_check_runs_before_any_sync() {
@@ -1591,6 +1619,8 @@ check "sync state at the Maildir root is refused without naming it" \
 check "subfolders in the earlier layout are refused without naming them" \
     earlier_subfolders_are_refused_without_naming_them
 check "a Maildir that cannot be inspected is refused" an_uninspectable_maildir_is_refused
+check "unreadable folders are refused without naming them" \
+    unreadable_folders_are_refused_without_naming_them
 check "the layout check runs before any sync" the_layout_check_runs_before_any_sync
 check "health: a long first sync in progress is healthy" long_first_sync_in_progress_is_healthy
 check "health: a fresh heartbeat between syncs is healthy" fresh_heartbeat_between_syncs_is_healthy
