@@ -19,12 +19,15 @@ from .security import ProviderResponseError, same_origin_request_hook
 
 log = logging.getLogger("mcp.embed")
 
-# Per-call HTTP deadline for embed. A single short string through
-# Qwen3-Embedding-8B runs sub-second steady-state; cold-start (first
-# call after model load) can take a few seconds. 60 s is generous
-# headroom while still bounding a stuck call (per the AGENTS.md rule
-# that outbound async HTTP calls must not rely solely on a client-level
-# default). Operators on slow networks can override via
+# Per-operation HTTP timeout for embed: each connect, read or write
+# must make progress within it. It is not a total-call deadline — a
+# provider that streams a response in small fragments can keep one call
+# alive past it (a total deadline is tracked by #287). A single short
+# string through Qwen3-Embedding-8B runs sub-second steady-state;
+# cold-start (first call after model load) can take a few seconds. 60 s
+# is generous headroom while still catching a stalled call (per the
+# AGENTS.md rule that outbound async HTTP calls must not rely solely on
+# a client-level default). Operators on slow networks can override via
 # ``EMBED_TIMEOUT_SECS``; resolution happens in ``main.py`` so the
 # library code stays env-free for tests.
 DEFAULT_EMBED_TIMEOUT_SECS = 60.0
@@ -68,12 +71,15 @@ class EmbedClient:
         # against an accidental ship-to-OpenAI from a forgotten env
         # var — a typo can't produce a real bearer credential.
         #
-        # ``max_retries=0`` disables SDK-internal retries so
-        # ``timeout_secs`` is the honest wall-clock ceiling for one
-        # ``embed()`` call. Default SDK posture (2 attempts +
-        # exponential backoff) would silently turn ``EMBED_TIMEOUT_SECS``
-        # into a 2-3× longer worst-case — hostile to operators tuning
-        # the ceiling. On a transient 5xx the query tool surfaces a
+        # ``max_retries=0`` disables SDK-internal retries so one
+        # ``embed()`` call makes one request and ``timeout_secs`` is
+        # not multiplied by retries. It is a per-operation HTTP timeout
+        # (each connect, read or write must make progress within it),
+        # not a total-call deadline: a provider that streams a response
+        # in small fragments can keep the call alive past it (#287).
+        # Default SDK posture (2 retries + exponential backoff) would
+        # silently stack two more such timeouts plus backoff on every
+        # failure — hostile to operators tuning ``EMBED_TIMEOUT_SECS``. On a transient 5xx the query tool surfaces a
         # clean error and the agent (or user) can re-invoke. Parity
         # with ``OpenAIEmbedder`` in the indexer, which also pins
         # ``max_retries=0`` (it owns retries above via tenacity;

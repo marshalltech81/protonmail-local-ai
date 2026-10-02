@@ -202,7 +202,9 @@ services:
       # runs this long. 0 disables it.
       INDEXER_MESSAGE_TIMEOUT_SECONDS: ${INDEXER_MESSAGE_TIMEOUT_SECONDS:-3600}
       # Warmup POST timeout for the first embed call after container
-      # start. Default 600s absorbs cold-start latency on host-side
+      # start: a per-operation HTTP timeout (each connect, read or
+      # write must make progress within it), not a total-call
+      # deadline. Default 600s absorbs cold-start latency on host-side
       # providers; lower it on warm caches or fast remote endpoints
       # for faster startup-failure detection.
       EMBED_WARMUP_TIMEOUT_SECS: ${EMBED_WARMUP_TIMEOUT_SECS:-600}
@@ -302,9 +304,11 @@ services:
       INFERENCE_MODE: ${INFERENCE_MODE:-anthropic}
       INFERENCE_BASE_URL: ${INFERENCE_BASE_URL}
       INFERENCE_MODEL: ${INFERENCE_MODEL:-claude-sonnet-4-6}
-      # Per-call deadline for inference completions (seconds). Default
-      # 300 absorbs reasoning-heavy prompts; raise it for slow remote
-      # providers or on-host models in thinking mode.
+      # Per-operation HTTP timeout for inference completions (seconds):
+      # each connect, read or write must make progress within it; it
+      # is not a total-call deadline. Default 300 absorbs
+      # reasoning-heavy prompts; raise it for slow remote providers or
+      # on-host models in thinking mode.
       INFERENCE_TIMEOUT_SECS: ${INFERENCE_TIMEOUT_SECS:-300}
       # Output token cap. Required by the Anthropic Messages API; the
       # OpenAI Chat Completions API accepts it too and most compatible
@@ -333,9 +337,10 @@ services:
       EMBED_MODE: ${EMBED_MODE:-openai}
       EMBED_BASE_URL: ${EMBED_BASE_URL}
       EMBED_MODEL: ${EMBED_MODEL}
-      # Per-call deadline for query-time embed (seconds). Default 60s
-      # is generous headroom over Qwen3-Embedding-8B's sub-second
-      # steady-state. Cold-start in the indexer is governed separately
+      # Per-operation HTTP timeout for query-time embed (seconds): each
+      # connect, read or write must make progress within it; it is not
+      # a total-call deadline. Default 60s is generous headroom over
+      # Qwen3-Embedding-8B's sub-second steady-state. Cold-start in the indexer is governed separately
       # by EMBED_WARMUP_TIMEOUT_SECS — operator overrides reach this
       # var here and the warmup constant in the indexer service block.
       EMBED_TIMEOUT_SECS: ${EMBED_TIMEOUT_SECS:-60}
@@ -348,11 +353,12 @@ services:
       RERANK_BASE_URL: ${RERANK_BASE_URL}
       RERANK_MODEL: ${RERANK_MODEL}
       RERANK_CANDIDATES: ${RERANK_CANDIDATES:-20}
-      # Per-call deadline for the Cohere rerank API (seconds). Default
-      # 60 s is shorter than the SDK's 300 s default so a stalled
-      # rerank call doesn't pin a hybrid_search worker thread for five
-      # minutes; rerank failures fall back to RRF order so a tighter
-      # ceiling is safe.
+      # Per-operation HTTP timeout for the Cohere rerank API (seconds):
+      # each connect, read or write must make progress within it; it
+      # is not a total-call deadline. Default 60 s is shorter than the
+      # SDK's 300 s default so a stalled rerank call doesn't pin a
+      # hybrid_search worker thread for five minutes; rerank failures
+      # fall back to RRF order so a tighter timeout is safe.
       RERANK_TIMEOUT_SECS: ${RERANK_TIMEOUT_SECS:-60}
     volumes:
       # Mounted writable so SQLite can create the WAL ``-shm`` sidecar needed

@@ -293,7 +293,7 @@ class TestFloatEnv:
     ``float("nan")`` and ``float("inf")`` parse without raising, and
     ``nan < minimum`` is always False — so without an explicit
     ``math.isfinite`` check, a typo'd timeout like ``EMBED_TIMEOUT_SECS=inf``
-    or ``=nan`` reaches the SDK client and breaks per-call deadlines in
+    or ``=nan`` reaches the SDK client and breaks its HTTP timeouts in
     surprising ways. Reject non-finite values at parse time.
     """
 

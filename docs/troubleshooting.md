@@ -284,8 +284,10 @@ servers, so the diagnostic depends on where you pointed it:
 
 The first call after a fresh install often triggers a model load on
 host-side servers (or a per-provider warmup on remote endpoints).
-`EMBED_WARMUP_TIMEOUT_SECS` (default 600) bounds how long the indexer
-waits before failing the first warmup POST. Watch the relevant
+`EMBED_WARMUP_TIMEOUT_SECS` (default 600) is the HTTP timeout on the
+first warmup POST: the indexer fails it when the connection, or the
+wait for response data, makes no progress for that long. It is a
+per-operation timeout, not a total deadline for the request. Watch the relevant
 provider's log for download / load progress.
 
 ## sqlite-vec fails with "wrong ELF class: ELFCLASS32" (ARM64 / Apple Silicon)
