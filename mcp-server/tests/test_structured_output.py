@@ -467,3 +467,68 @@ class TestMessageTime:
         hit = _call(server, "search_attachments", query="acme")["results"][0]
         message = _call(server, "get_message", message_id=hit["claimant_id"])["message"]
         assert hit["sent_at"] == message["sent_at"] == "2024-03-10T09:00:00+00:00"
+
+
+class TestOccurredAt:
+    """``occurred_at`` (the delivery time from the top ``Received:``
+    header) sits beside ``sent_at`` wherever a message or passage time is
+    output, null when unknown; ``sent_at`` is unchanged."""
+
+    SENT = "2024-01-31T23:00:00+00:00"
+    DELIVERED = "2024-02-01T01:00:00+00:00"
+
+    @pytest.fixture
+    def server(self, tmp_path):
+        with _open_fixture_db(tmp_path) as (conn, db):
+            _insert_message(
+                conn,
+                message_id="late@example.com",
+                thread_id="t-late",
+                sent_at=self.SENT,
+                occurred_at=self.DELIVERED,
+                from_=["alice@example.com"],
+                has_attachments=True,
+                body="zephyr figures",
+            )
+            _insert_message(
+                conn,
+                message_id="sent@example.com",
+                thread_id="t-late",
+                sent_at="2024-02-02T00:00:00+00:00",
+                from_=["bob@example.com"],
+            )
+            _insert_attachment(
+                conn,
+                message_id="late@example.com",
+                thread_id="t-late",
+                attachment_id="att-z",
+                filename="zephyr.pdf",
+            )
+            conn.close()
+            yield _server(db)
+
+    def test_message_headers_carry_occurred_at(self, server):
+        message = _call(server, "get_message", message_id="late@example.com")["message"]
+        assert (message["sent_at"], message["occurred_at"]) == (self.SENT, self.DELIVERED)
+        thread = _call(server, "get_thread", thread_id="t-late")["messages"]
+        assert [(m["message_id"], m["occurred_at"]) for m in thread] == [
+            ("late@example.com", self.DELIVERED),
+            ("sent@example.com", None),
+        ]
+        listed = _call(server, "query_messages", date_from="2024-02-01", date_to="2024-02-01")
+        assert [(m["message_id"], m["occurred_at"]) for m in listed["messages"]] == [
+            ("late@example.com", self.DELIVERED)
+        ]
+
+    def test_evidence_chunks_and_attachment_hits_carry_occurred_at(self, server):
+        evidence = _call(server, "get_evidence", query="zephyr", thread_id="t-late")
+        chunks = [c for t in evidence["threads"] for c in t["chunks"]]
+        assert {(c["sent_at"], c["occurred_at"]) for c in chunks} == {(self.SENT, self.DELIVERED)}
+        hit = _call(server, "search_attachments", query="zephyr")["results"][0]
+        assert (hit["sent_at"], hit["occurred_at"]) == (self.SENT, self.DELIVERED)
+
+    def test_prose_shows_the_delivery_time(self, server):
+        result = _wire(server, "get_message", {"message_id": "late@example.com"})
+        assert f"Delivered: {self.DELIVERED}" in result.content[0].text
+        result = _wire(server, "get_message", {"message_id": "sent@example.com"})
+        assert "Delivered:" not in result.content[0].text

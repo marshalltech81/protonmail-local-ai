@@ -285,6 +285,31 @@ class TestValidation:
         assert attachment["attachment_id"] == "m2@example.com-att"
         assert attachment["sender"] == "bob@example.com"
 
+    def test_citations_carry_occurred_at(self, cite_db):
+        """A citation names its message's delivery time beside its
+        sent date; null for a message without one."""
+        delivered = "2024-03-04T10:35:00+00:00"
+        conn = sqlite3.connect(cite_db.path)
+        conn.execute(
+            "UPDATE messages SET occurred_at = ? WHERE message_id = 'm2@example.com'",
+            (delivered,),
+        )
+        conn.commit()
+        conn.close()
+        out = _ask(cite_db, FakeInferenceClient(response="700 [E1] [E2] [E3]."))
+        dates = {
+            (c["message_id"], c["sent_at"], c["occurred_at"])
+            for c in out.structured_content["citations"]
+        }
+        assert dates == {
+            ("m1@example.com", "2024-03-01T09:00:00+00:00", None),
+            ("m2@example.com", "2024-03-04T10:30:00+00:00", delivered),
+        }
+        # Review round 1: the prose Citations list shows it too.
+        text = out.content[0].text
+        assert "bob@example.com, 2024-03-04, delivered 2024-03-04" in text
+        assert "alice@example.com>, 2024-03-01 (thread" in text
+
     def test_text_output_lists_citations_and_sources(self, cite_db):
         out = _ask(cite_db, FakeInferenceClient(response="700 [E1]."))
         text = out.content[0].text

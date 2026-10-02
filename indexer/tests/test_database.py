@@ -2503,6 +2503,122 @@ class TestWalCheckpoint:
             db.close()
 
 
+class TestOccurredAt:
+    """``messages.occurred_at`` is the parser's delivery time (top
+    ``Received:``), NULL when unknown. ``effective_at`` is
+    ``COALESCE(occurred_at, sent_at)``; date filters and thread spans
+    use it."""
+
+    _JAN = datetime(2024, 1, 10, 9, 0, tzinfo=UTC)
+    _FEB = datetime(2024, 2, 10, 9, 0, tzinfo=UTC)
+    _MAR = datetime(2024, 3, 10, 9, 0, tzinfo=UTC)
+
+    def _row(self, db, message_id):
+        return db._conn.execute(
+            "SELECT sent_at, occurred_at, effective_at FROM messages WHERE message_id = ?",
+            (message_id,),
+        ).fetchone()
+
+    def _span(self, db, thread_id):
+        row = db._conn.execute(
+            "SELECT date_first, date_last FROM threads WHERE thread_id = ?", (thread_id,)
+        ).fetchone()
+        return row["date_first"], row["date_last"]
+
+    def test_occurred_at_is_stored_and_effective_at_prefers_it(self, db):
+        msg = make_message(message_id="d@x", date=self._JAN, occurred_at=self._FEB)
+        db.upsert_thread(make_thread(messages=[msg], thread_id="t"), FAKE_EMBEDDING)
+        row = self._row(db, "d@x")
+        assert (row["sent_at"], row["occurred_at"], row["effective_at"]) == (
+            self._JAN.isoformat(),
+            self._FEB.isoformat(),
+            self._FEB.isoformat(),
+        )
+
+    def test_missing_occurred_at_is_null_and_effective_at_is_sent_at(self, db):
+        msg = make_message(message_id="s@x", date=self._JAN)
+        db.upsert_thread(make_thread(messages=[msg], thread_id="t"), FAKE_EMBEDDING)
+        row = self._row(db, "s@x")
+        assert row["occurred_at"] is None
+        assert row["effective_at"] == self._JAN.isoformat()
+
+    def test_thread_span_is_the_effective_time_range(self, db):
+        """Sent in January, delivered in March: the thread spans March,
+        not January, so a date filter on the span admits the thread on
+        the same time its message reports."""
+        msg = make_message(message_id="late@x", date=self._JAN, occurred_at=self._MAR)
+        db.upsert_thread(make_thread(messages=[msg], thread_id="t"), FAKE_EMBEDDING)
+        assert self._span(db, "t") == (self._MAR.isoformat(), self._MAR.isoformat())
+
+    def test_thread_span_mixes_delivered_and_sent_messages(self, db):
+        """A sent reply has no Received header, so its effective time is
+        its ``sent_at``; the span covers both messages' effective times."""
+        sent = make_message(message_id="sent@x", filepath="/m/sent", date=self._JAN)
+        got = make_message(
+            message_id="got@x", filepath="/m/got", date=self._MAR, occurred_at=self._FEB
+        )
+        db.upsert_thread(make_thread(messages=[sent], thread_id="t"), FAKE_EMBEDDING)
+        db.upsert_thread(make_thread(messages=[got], thread_id="t"), FAKE_EMBEDDING)
+        assert self._span(db, "t") == (self._JAN.isoformat(), self._FEB.isoformat())
+
+    def test_snippet_tracks_the_effective_newest_message(self, db):
+        """The snippet follows the newest message by effective time: a
+        message sent last but delivered first does not take it over."""
+        newest = make_message(
+            message_id="new@x",
+            filepath="/m/new",
+            date=self._JAN,
+            occurred_at=self._MAR,
+            body_text="newest delivered",
+        )
+        older = make_message(
+            message_id="old@x",
+            filepath="/m/old",
+            date=self._MAR,
+            occurred_at=self._FEB,
+            body_text="delivered earlier",
+        )
+        db.upsert_thread(make_thread(messages=[newest], thread_id="t"), FAKE_EMBEDDING)
+        db.upsert_thread(make_thread(messages=[older], thread_id="t"), FAKE_EMBEDDING)
+        snippet = db._conn.execute("SELECT snippet FROM threads WHERE thread_id = 't'").fetchone()
+        assert snippet[0] == "newest delivered"
+
+    def test_effective_at_is_a_virtual_generated_column(self, db):
+        cols = {r["name"]: r["hidden"] for r in db._conn.execute("PRAGMA table_xinfo(messages)")}
+        assert cols["effective_at"] == 2  # VIRTUAL generated
+        assert cols["occurred_at"] == 0
+
+    def test_effective_time_indexes(self, db):
+        indexes = {
+            r["name"]: [
+                c["name"] for c in db._conn.execute(f"PRAGMA index_xinfo({r['name']})") if c["key"]
+            ]
+            for r in db._conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'messages'"
+                " AND name LIKE 'idx_%'"
+            )
+        }
+        assert indexes["idx_messages_effective"] == ["effective_at"]
+        assert indexes["idx_messages_thread_effective"] == ["thread_id", "effective_at"]
+        assert indexes["idx_messages_folder_effective"] == ["folder", "effective_at"]
+        assert indexes["idx_messages_message_effective"] == [
+            "message_id",
+            "effective_at",
+            "claimant_id",
+        ]
+
+    def test_effective_time_range_filter_uses_the_index(self, db):
+        plan = " ".join(
+            r[3]
+            for r in db._conn.execute(
+                "EXPLAIN QUERY PLAN SELECT claimant_id FROM messages "
+                "WHERE effective_at >= ? AND effective_at <= ?",
+                ("2024-01-01", "2024-02-01"),
+            )
+        )
+        assert "idx_messages_effective" in plan
+
+
 class TestMessagesTable:
     """Per-message records: one ``messages`` row per indexed message plus
     normalized ``message_participants`` rows, written atomically with the
@@ -2528,6 +2644,7 @@ class TestMessagesTable:
             "folder",
             "subject",
             "sent_at",
+            "occurred_at",
             "in_reply_to",
             "references_json",
             "has_attachments",
@@ -2693,7 +2810,7 @@ def test_rename_lookups_use_the_filepath_index(db):
     [
         (
             "SELECT claimant_id FROM messages m WHERE m.message_id = ? "
-            "ORDER BY m.sent_at, m.claimant_id LIMIT 21",
+            "ORDER BY m.effective_at, m.claimant_id LIMIT 21",
             ("a",),
         ),
         (

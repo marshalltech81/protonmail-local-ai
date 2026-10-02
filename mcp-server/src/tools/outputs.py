@@ -154,6 +154,12 @@ class MessageHeaders(_Output):
     )
     subject: str
     sent_at: str = Field(description="Send date (the sender's Date: header) in UTC, ISO 8601.")
+    occurred_at: str | None = Field(
+        description=(
+            "Delivery date of the message (the date of its topmost Received: header) in UTC, ISO 8601; null when the header is absent (sent mail) or unparseable. "
+            "Date filters bound occurred_at, else sent_at."
+        )
+    )
     folder: str
     has_attachments: bool
     in_reply_to: str | None
@@ -195,6 +201,7 @@ def message_headers(m: MessageRecord, *, full: bool = False) -> MessageHeaders:
         claimant_id=m.claimant_id,
         subject=clip(m.subject, chars),
         sent_at=m.sent_at,
+        occurred_at=m.occurred_at,
         folder=m.folder,
         has_attachments=m.has_attachments,
         in_reply_to=None if m.in_reply_to is None else clip(m.in_reply_to, chars),
@@ -247,6 +254,12 @@ class EvidenceChunk(_Output):
         description="Send date of the passage's message (its Date: header) in UTC, ISO 8601; "
         "null when unknown."
     )
+    occurred_at: str | None = Field(
+        description=(
+            "Delivery date of the passage's message (the date of its topmost Received: header) in UTC, ISO 8601; null when the header is absent (sent mail) or unparseable. "
+            "Date filters bound occurred_at, else sent_at."
+        )
+    )
     char_start: int = Field(description="Start offset of the passage in its source text.")
     char_end: int
     text: str
@@ -293,7 +306,12 @@ class AttachmentHit(_Output):
     date_last: datetime = Field(description="Parent thread's latest activity.")
     sent_at: str | None = Field(
         description="Send date of the message carrying the attachment (its Date: header) "
-        "in UTC, ISO 8601; date filters and the no-query order use it. Null when unknown."
+        "in UTC, ISO 8601. Null when unknown."
+    )
+    occurred_at: str | None = Field(
+        description="Delivery date of the message carrying the attachment (the date of its "
+        "topmost Received: header) in UTC, ISO 8601; null when absent or unparseable. "
+        "Date filters and the no-query order use occurred_at, else sent_at."
     )
     senders: list[str] = Field(description=f"Thread senders, at most {MAX_LISTED}.")
     sender_count: int
@@ -514,6 +532,10 @@ class Citation(_Output):
     )
     sent_at: str | None = Field(
         description="That message's own sent date (not the thread's); null when unknown."
+    )
+    occurred_at: str | None = Field(
+        description="That message's own delivery date (its topmost Received: header); "
+        "null when unknown."
     )
     source: Literal["body", "attachment", "thread"]
     attachment_id: str | None
@@ -910,7 +932,7 @@ class FindingSource(Citation):
 class CheckedFinding(ConclusionFinding):
     sources: list[FindingSource] = Field(
         description="Each cited label that names a supplied passage: its message, sender, "
-        "sent date and excerpt. Unknown labels have no source."
+        "sent and delivery dates and excerpt. Unknown labels have no source."
     )
 
 

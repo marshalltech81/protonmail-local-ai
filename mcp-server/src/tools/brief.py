@@ -642,6 +642,7 @@ def _finding_lines(findings: list[CheckedFinding]) -> list[str]:
                 "thread text"
                 if s.source == "thread"
                 else f"{s.sender or 'unknown sender'}, {(s.sent_at or 'unknown date')[:10]}"
+                + (f", delivered {s.occurred_at[:10]}" if s.occurred_at else "")
                 + (f", attachment {s.attachment_filename}" if s.source == "attachment" else "")
             )
             lines.append(f'      [{s.label}] {where}: "{s.excerpt}"')
@@ -716,10 +717,12 @@ def register_experimental_tools(
                        email; resolve via find_contact if you only have
                        a name)
             date_from: Optionally scope to emails after this date (ISO 8601)
-                       A thread qualifies when its span overlaps the
-                       range, and any of its passages may be used;
-                       each citation's sent_at gives that passage's
-                       own date, which can fall outside the range.
+                       A thread qualifies when its span (its
+                       messages' occurred_at, else sent_at) overlaps
+                       the range, and any of its passages may be used;
+                       each citation's occurred_at and sent_at give
+                       that passage's own dates, which can fall
+                       outside the range.
             date_to: Optionally scope to emails before this date (ISO 8601)
             max_threads: Maximum threads to use as evidence (default: 5)
 
@@ -941,10 +944,12 @@ def register_experimental_tools(
                        email; resolve via find_contact if you only have
                        a name)
             date_from: Optionally scope to emails after this date (ISO 8601)
-                       A thread qualifies when its span overlaps the
-                       range, and any of its passages may be used;
-                       each citation's sent_at gives that passage's
-                       own date, which can fall outside the range.
+                       A thread qualifies when its span (its
+                       messages' occurred_at, else sent_at) overlaps
+                       the range, and any of its passages may be used;
+                       each citation's occurred_at and sent_at give
+                       that passage's own dates, which can fall
+                       outside the range.
             date_to: Optionally scope to emails before this date (ISO 8601)
             max_threads: Maximum threads to use as evidence (default: 5)
 

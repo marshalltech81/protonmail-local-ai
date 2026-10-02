@@ -136,9 +136,11 @@ def _write_eml(
     from_addr: str = "alice@example.com",
     to_addr: str = "bob@example.com",
     body: str | None = None,
+    received: str | None = None,
 ) -> None:
     """``date=None`` omits the Date header entirely; ``body`` defaults
-    to ``Body of <message_id>.``."""
+    to ``Body of <message_id>.``; ``received`` adds a top ``Received:``
+    header dated with it."""
     path.parent.mkdir(parents=True, exist_ok=True)
     headers = [
         f"From: {from_addr}",
@@ -153,6 +155,8 @@ def _write_eml(
         headers.append(f"In-Reply-To: <{in_reply_to}>")
     if references:
         headers.append("References: " + " ".join(f"<{r}>" for r in references))
+    if received is not None:
+        headers.insert(0, f"Received: from mx.example.net by mail.example.org; {received}")
     path.write_text(
         "\r\n".join(headers) + f"\r\n\r\n{body or f'Body of {message_id}.'}\r\n",
         encoding="utf-8",
@@ -1791,16 +1795,24 @@ class TestReprocessKeepsFirstDate:
         first = self._FIRST.isoformat()
         assert _message_dates(db, "undated@example.com") == (first, (first, first))
 
-    def test_reap_rebuild_keeps_undated_survivor_first_date(self, tmp_path, monkeypatch):
+    @pytest.mark.parametrize(
+        ("received", "expected_span"),
+        [(None, None), ("Fri, 05 Jan 2024 06:00:00 +0000", "2024-01-05T06:00:00+00:00")],
+        ids=["undated", "delivered"],
+    )
+    def test_reap_rebuild_keeps_undated_survivor_first_date(
+        self, tmp_path, monkeypatch, received, expected_span
+    ):
         """The reaper re-parses a thread's survivors to rebuild its row;
-        an undated survivor must not re-date the thread there either."""
+        an undated survivor must not re-date the thread there either,
+        and a delivered survivor's span is its ``occurred_at``."""
         from src.reconciler import Reconciler, ReconcilerConfig
 
         maildir = tmp_path / "maildir"
         inbox = maildir / "INBOX" / "cur"
         root = inbox / "1700000000.M1.host:2,S"
         reply = inbox / "1700000001.M1.host:2,S"
-        _write_eml(root, "root@example.com", subject="Plan", date=None)
+        _write_eml(root, "root@example.com", subject="Plan", date=None, received=received)
         _write_eml(reply, "reply@example.com", subject="Re: Plan", in_reply_to="root@example.com")
         monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
         db = Database(tmp_path / "mail.db")
@@ -1833,7 +1845,54 @@ class TestReprocessKeepsFirstDate:
 
         assert db.find_thread_by_message_id("reply@example.com") is None
         first = self._FIRST.isoformat()
-        assert _message_dates(db, "root@example.com") == (first, (first, first))
+        span = expected_span or first
+        assert _message_dates(db, "root@example.com") == (first, (span, span))
+
+    @pytest.mark.parametrize("date", [None, "not-a-date"], ids=["missing", "malformed"])
+    def test_undated_delivered_message_dates_agree_on_reprocess(self, tmp_path, monkeypatch, date):
+        """#297 regression: an undated or malformed-date message with a
+        top Received header, indexed and reprocessed under two clocks,
+        keeps one ``sent_at`` and one ``occurred_at``; its thread span
+        is its effective time, and its chunks carry no date of their
+        own (#575), so every passage reads that same message row."""
+        db = Database(tmp_path / "mail.db")
+        threader = Threader(db)
+        path = tmp_path / "INBOX" / "cur" / "r:2,S"
+        _write_eml(
+            path,
+            "delivered@example.com",
+            date=date,
+            received="Fri, 05 Jan 2024 06:00:00 +0000",
+        )
+        _set_parser_clock(monkeypatch, self._FIRST)
+        self._index(db, threader, path)
+
+        renamed = path.with_name("r:2,RS")
+        path.rename(renamed)
+        _set_parser_clock(monkeypatch, self._LATER)
+        self._index(db, threader, renamed)
+
+        occurred = "2024-01-05T06:00:00+00:00"
+        row = db._conn.execute(
+            "SELECT sent_at, occurred_at, effective_at FROM messages WHERE message_id = ?",
+            ("delivered@example.com",),
+        ).fetchone()
+        assert (row["sent_at"], row["occurred_at"], row["effective_at"]) == (
+            self._FIRST.isoformat(),
+            occurred,
+            occurred,
+        )
+        assert _message_dates(db, "delivered@example.com")[1] == (occurred, occurred)
+        chunk_columns = {r["name"] for r in db._conn.execute("PRAGMA table_info(message_chunks)")}
+        assert not {c for c in chunk_columns if "date" in c or c.endswith("_at")} - {"chunked_at"}
+        passage_dates = {
+            r[0]
+            for r in db._conn.execute(
+                "SELECT m.effective_at FROM message_chunks c "
+                "JOIN messages m ON m.claimant_id = c.claimant_id"
+            )
+        }
+        assert passage_dates == {occurred}
 
 
 class TestBatchedInitialIndex:

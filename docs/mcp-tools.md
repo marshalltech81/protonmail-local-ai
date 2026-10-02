@@ -273,16 +273,18 @@ drive an unbounded query against the index.
   that takes both bounds. The bounds are compared after UTC
   normalization and date-only promotion, so `date_from` and `date_to`
   set to the same date select that whole day.
-- Date bounds apply to each message's send date (`sent_at`, its `Date:`
-  header in UTC). A thread matches when its span, from its earliest to
-  its latest `sent_at`, overlaps the range, so a thread with messages
+- Date bounds apply to each message's effective time: its delivery
+  date (`occurred_at`, the date of its topmost `Received:` header, in
+  UTC) when known, else its send date (`sent_at`, its `Date:` header in
+  UTC). A thread matches when its span, from its messages' earliest to
+  latest effective time, overlaps the range, so a thread with messages
   either side of a short range matches it. The tools that hand passages
   to a model (`get_evidence`, `ask_mailbox`, `extract_from_emails`,
   `brief_issue`, `check_conclusion`) retrieve threads the same way, and
   any passage of a matching thread may be shown, including passages
-  from messages sent outside the range. Each passage carries its own
-  message's `sent_at`, so its date stays visible; see
-  [Message time](architecture.md#message-time).
+  from messages outside the range. Each passage carries its own
+  message's `sent_at` and `occurred_at` (null when unknown), so its
+  dates stay visible; see [Message time](architecture.md#message-time).
 
 ---
 
@@ -295,11 +297,12 @@ fast synthesis-free path when only the source text is needed.
 Each chunk carries its `chunk_id` (the ID `ask_mailbox` citations
 name), its parent thread, Message-ID and claimant ID, the source
 (message body, or an attachment with filename + MIME type), its
-message's send date (`sent_at`, the same value and format as that
-message's headers), and the passage's character offsets. With
-`date_from` / `date_to`, threads are selected by span as in
-`search_emails`, and their passages can come from messages sent
-outside the range; check each chunk's `sent_at`. Attachment-derived
+message's send and delivery dates (`sent_at` and `occurred_at`, the
+same values and format as that message's headers), and the passage's
+character offsets. With `date_from` / `date_to`, threads are selected
+by span as in `search_emails`, and their passages can come from
+messages outside the range; check each chunk's `occurred_at` and
+`sent_at`. Attachment-derived
 chunks (extracted PDF / OCR / document text) are included — unlike
 `get_thread`, which is body-only.
 
@@ -354,9 +357,10 @@ Locate indexed attachments by filename, MIME type, and extracted
 text. Use it for attachment-centric questions ("find the quote PDF
 from Acme", "which emails had W-2 attachments?"). With no `query` it
 lists attachments by the structured filters alone, newest message
-first. Each result carries `sent_at`, the send date of the message
-carrying the attachment, which the date filters and the no-query order
-use, beside its thread's `date_last`.
+first. Each result carries `sent_at` and `occurred_at`, the send and
+delivery dates of the message carrying the attachment, beside its
+thread's `date_last`; the date filters and the no-query order use the
+message's effective time (`occurred_at`, else `sent_at`).
 
 To read what an attachment says, use `get_evidence` (the matching
 passages of its extracted text, each capped at 1600 characters) or
@@ -369,7 +373,7 @@ three returns the whole document.
 | `query` | string | none | Match against filename, MIME type, and extracted text; omit to list by filter alone |
 | `content_type` | string | none | Exact MIME-type filter, e.g. `application/pdf`; blank means no filter |
 | `from_addr` | string | none | Restrict to attachments on threads sent by this address or domain |
-| `date_from` | string | none | ISO 8601 date lower bound on the carrying message's send date |
+| `date_from` | string | none | ISO 8601 date lower bound on the carrying message's effective time (`occurred_at`, else `sent_at`) |
 | `date_to` | string | none | ISO 8601 date upper bound |
 | `extracted_only` | bool | `false` | Return only attachments whose text extraction succeeded |
 | `limit` | int | `20` | Max attachments to return; clamped to `[1, 50]` |
@@ -391,7 +395,8 @@ left out; the tool has no folder filter, so reach them through
 
 ### `get_thread`
 Read a thread by ID as its messages, oldest first. Each message shows
-its own headers (Message-ID, claimant ID, subject, From / To / Cc, send date in UTC,
+its own headers (Message-ID, claimant ID, subject, From / To / Cc, send date and,
+when known, delivery date (`occurred_at`) in UTC,
 folder, In-Reply-To, attachment flag; recipient lists past 10 are
 summarized as a count) and its indexed body after quoted-reply
 stripping. Attachment text is not included. When no message body is
@@ -422,7 +427,8 @@ found` ([Reaped sources](#reaped-sources)).
 
 ### `get_message`
 Return one message's own headers — subject, every From / To / Cc
-entry, send date (UTC), folder, In-Reply-To, References, attachment
+entry, send date and, when known, delivery date (`occurred_at`) in
+UTC, folder, In-Reply-To, References, attachment
 flag — with its thread ID and subject, and its full indexed body
 reconstructed from the per-message chunk store (overlap between
 adjacent chunks is removed by character offset). The index keeps no raw
@@ -435,7 +441,7 @@ source file's path, size, and SHA-256.
 `message_id` takes a claimant ID, which names one message, or a bare
 Message-ID, which works while one indexed message carries it. When
 several do, the call fails with an error listing each claimant ID with
-its send date and folder, oldest first; call again with one of them. A
+its send date and folder, oldest (by effective time) first; call again with one of them. A
 successful response lists, in `other_claimants`, any other messages
 sharing the Message-ID, in claimant-ID order. The sender sets the
 Message-ID, so either list is capped at 20 entries: past that the error
@@ -516,7 +522,8 @@ unclassified).
 Enumerate **every** message matching exact criteria, with an exact
 total. Unlike `search_emails`, which ranks threads by relevance and
 returns the top `limit`, this returns the complete matching set of
-individual messages, newest send date first (claimant ID breaks ties),
+individual messages, newest effective time (`occurred_at`, else
+`sent_at`) first (claimant ID breaks ties),
 and pages through it with a cursor. Use it for "all" and "how many"
 questions.
 
@@ -528,7 +535,7 @@ questions.
 | `subject` | string | none | Unicode caseless substring of the message's own subject (casefolded, so `STRASSE` matches `Straße`) |
 | `text` | string | none | Every word must appear in the message's indexed body (FTS word match with stemming; words may be in different chunks). Attachment text and stripped quoted replies are not searched; at most 16 words |
 | `folder` | string | none | Exact folder name. Without it, messages filed in Trash are left out; pass `"Trash"` to list them ([Trash](#trash-is-left-out-by-default)) |
-| `date_from` | string | none | Inclusive ISO 8601 lower bound on the send date |
+| `date_from` | string | none | Inclusive ISO 8601 lower bound on the message's effective time (`occurred_at`, else `sent_at`) |
 | `date_to` | string | none | Inclusive upper bound; a date-only value covers the whole UTC day |
 | `has_attachments` | bool | none | The message's own attachment flag, either way |
 | `authority_class` | string | none | The source-authority class of the message's From sender (any author, for a multi-author From): `counsel`, `management`, `vendor`, `government`, `personal`, `other`, or `unclassified`; a message in Spam never matches; blank is ignored, any other value is an error |
@@ -552,7 +559,7 @@ each filter.
 **Response contract.** The response states the filter interpretation,
 `total_matches` (over the whole set), `returned` with the match range,
 and `has_more`; when more remain it includes `next_cursor`. Each
-message carries its send date, folder, attachment flag, subject,
+message carries its send and delivery dates, folder, attachment flag, subject,
 From / To / Cc (at most 10 per role, with a count of the rest),
 Message-ID, claimant ID, and Thread ID; the structured output adds In-Reply-To and
 up to 10 References. Header values are sender-controlled, so any past
@@ -560,7 +567,7 @@ up to 10 References. Header values are sender-controlled, so any past
 headers. The count, the page, and its participants are read in one
 snapshot.
 
-**Paging.** Keyset pagination on `(sent_at, claimant_id)`: messages
+**Paging.** Keyset pagination on `(effective_at, claimant_id)`: messages
 indexed while a caller pages never shift or duplicate later pages. A
 cursor is bound to the filters it was issued for; a cursor from
 another query, or a malformed one, is rejected with an error rather
@@ -772,7 +779,7 @@ Structured output:
 | Field | Description |
 |---|---|
 | `answer` | The model's answer with its inline labels |
-| `citations` | One entry per valid cited label, in first-cited order: `label`, `chunk_id`, `claimant_id`, `message_id`, `thread_id`, `sender`, `sent_at`, `source` (`body`, `attachment` or `thread`), `attachment_id`, `attachment_filename`, `char_start`, `char_end` (end of the part shown to the model) |
+| `citations` | One entry per valid cited label, in first-cited order: `label`, `chunk_id`, `claimant_id`, `message_id`, `thread_id`, `sender`, `sent_at`, `occurred_at`, `source` (`body`, `attachment` or `thread`), `attachment_id`, `attachment_filename`, `char_start`, `char_end` (end of the part shown to the model) |
 | `statements` | The answer cut into statements: `text`, `labels` (the supplied passages it cites) and `status` (`cited`, `unsupported`, `uncertain`, `uncited`, `invalid` for only unknown labels, or `not_checked`) |
 | `quotes` | Each quotation: `text` (cut at 1,000 characters), `statement` (index into `statements`), `status` (`verified`, `misattributed`, `unmatched`, `uncited`, `not_checked`) and `found_in` (labels of the passages it was found in) |
 | `citation_problems` | `[]` when the check passed, else entries `{kind, labels, statements, quotes}`, `kind` one of `unknown_labels`, `no_citations`, `uncited_statements`, `unmatched_quotes`, `misattributed_quotes`; `statements` and `quotes` are indexes into those lists, and `labels` holds the unknown labels or, for `misattributed_quotes`, the passages the quotes were found in |
@@ -1080,9 +1087,11 @@ Limits: the check is about labels and quoted words only. A valid label
 or a verified quote does not prove the passage supports the entry
 (semantic support needs a model judge and is not built), and an entry's
 `actor` and `date` are the model's reading. The
-date in a passage header is the message's own sent date; the receiving
-date is not indexed. `as_of` is computed by the server from the
-passages, not by the model.
+date in a passage header the model sees is the message's own sent
+date; the delivery date (`occurred_at`, which date filters use when
+known) is returned on each citation and shown in the `Citations:`
+list, but not in the model's passage headers. `as_of` is computed by
+the server from the passages' sent dates, not by the model.
 
 ### `check_conclusion`
 Checks a caller-supplied conclusion against the mailbox (PLAN.md Phase

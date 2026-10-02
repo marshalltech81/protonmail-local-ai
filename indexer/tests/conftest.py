@@ -46,6 +46,7 @@ def make_message(
     in_reply_to: str | None = None,
     references: list[str] | None = None,
     has_attachments: bool = False,
+    occurred_at: datetime | None = None,
 ) -> Message:
     return Message(
         message_id=message_id,
@@ -60,6 +61,7 @@ def make_message(
         folder=folder,
         filepath=filepath,
         has_attachments=has_attachments,
+        occurred_at=occurred_at,
     )
 
 
@@ -77,8 +79,8 @@ def make_thread(
         participants=[msgs[0].from_addr] + msgs[0].to_addrs,
         messages=msgs,
         folder=folder,
-        date_first=msgs[0].date,
-        date_last=msgs[-1].date,
+        date_first=msgs[0].effective_date,
+        date_last=msgs[-1].effective_date,
     )
 
 

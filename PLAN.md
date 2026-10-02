@@ -430,7 +430,7 @@ decision (Open decisions).
 | 3.8 Citation contract | Partly done | #457, #495 (`ask_mailbox` statement coverage and quote checks), #519 and #525 (quote and label edge cases), #532 and #545 (thread-scoped `get_evidence` parity), #559 (mailbox-wide parity, #537), #565 (`summarize_thread`, `extract_from_emails`) | semantic support only (#284) |
 | 4.1 Entities | Done | #459, #527 (orphan pruning, #464) | — |
 | 4.2 Source authority | Done | #459, #474 (Spam guard), #523 and #542 (rules file kept private and validated) | verdict-header gating after go-live (#463) |
-| 4.3 Temporal retrieval | Partly done | #561 (`sent_at` defined and used consistently) | `occurred_at` and filters on it, whole-thread evidence under a date range, #575 (Resolved decisions 14); #574 superseded |
+| 4.3 Temporal retrieval | Mostly done | #561 (`sent_at` defined and used consistently), #593 (whole-thread evidence under a date range), #597 (#575), `occurred_at` with filters and thread spans on the effective time (#297) | checking against real mail that the top `Received:` is Proton's (go-live); bitemporal claims (Phase 5) |
 | 4.4 Retention | Mostly done | #451 (mirror default), #475 (Trash hidden from default search), #564 and #583 (reaped sources reported for 30 days) | user-controlled retention; restating the reaped-citation invariant and #562's purge (Resolved decisions 14) |
 | 5.1 Hardened `brief_issue` | Not started | — | needs Phase 3 usage on real mail |
 | 5.2 Support/contradict | Built, experimental | #467 (`check_conclusion`), #493 (evidence-slot refill), #558 (quote verification, also for `brief_issue`) | semantic support (#284) |
@@ -559,17 +559,17 @@ the first deployment needs a numbered migration like any other.
    decided after go-live (#463).
 3. **Richer temporal retrieval:** capture and expose
    occurred_at/sent_at consistently; bitemporal claim modeling waits
-   for Phase 5. **Status: partly done (#561).** "Message time" is
-   defined in `docs/architecture.md`: `sent_at` (the parsed `Date:`
-   header) is the only message time, every date filter bounds it, a
-   message or attachment qualifies by its own message's `sent_at`, and
-   under a date range the evidence tools show any passage of a thread
-   whose span overlaps it, each with its own `sent_at` (the pre-#561
-   behaviour, restored in #593; #574 is superseded). Decided
-   2026-10-02 (Resolved decisions 14), not built yet: define
-   `occurred_at` from the top `Received:` header, bound date filters
-   and thread spans on `occurred_at` falling back to `sent_at`, and
-   read passage dates from `messages` (#575).
+   for Phase 5. **Status: mostly done.** "Message time" is defined in
+   `docs/architecture.md`: `sent_at` (the parsed `Date:` header),
+   `occurred_at` (the top `Received:` header's date, NULL when absent
+   or unparseable) and the effective time `COALESCE(occurred_at,
+   sent_at)`, which every date filter, thread span and time ordering
+   uses; a message or attachment qualifies by its own message's
+   effective time, and under a date range the evidence tools show any
+   passage of a thread whose span overlaps it, each with its own
+   `sent_at` and `occurred_at` (#593; #574 superseded). Passage dates
+   are read from `messages` (#597, #575). Left: check against real
+   mail that the top `Received:` is Proton's (go-live).
 4. **Deletion/retention semantics.** Mirror is the default
    (upstream delete → index delete after the grace window; #451),
    archive (`INDEXER_DELETION_ENABLED=false`) is the opt-in, and
@@ -836,7 +836,8 @@ thresholds, live trace replay and latency/cost, and #291's accuracy
 scoring; #287's budgets and benchmarks; #487's evidence and output
 budgets; #288 and #289, which need a real embedder and reranker;
 #284's semantic support (for every tool that cites); Phase 4 item 3's
-`occurred_at` and item 4's user-controlled retention; and Phase 5
+real-mail check of the top `Received:` header and item 4's
+user-controlled retention; and Phase 5
 items 1 (needs real-mail use), 2's semantic support, and 3–4.
 
 Go-live checklist (do these before more hardening):

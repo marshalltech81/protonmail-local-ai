@@ -445,7 +445,7 @@ class Reconciler:
         # was checked non-empty above; every parse-failure path in the
         # loop body early-returns, so we cannot exit the loop with an
         # empty list.
-        survivors.sort(key=lambda m: m.date)
+        survivors.sort(key=lambda m: m.effective_date)
         existing = self.db.get_thread(thread_id)
         subject = existing.subject if existing else survivors[0].subject
         folder = existing.folder if existing else survivors[0].folder
@@ -455,8 +455,8 @@ class Reconciler:
             participants=Threader._participants(survivors),
             messages=survivors,
             folder=folder,
-            date_first=survivors[0].date,
-            date_last=survivors[-1].date,
+            date_first=survivors[0].effective_date,
+            date_last=survivors[-1].effective_date,
         )
 
         try:
