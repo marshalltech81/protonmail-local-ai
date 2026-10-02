@@ -807,10 +807,10 @@ class TestXlsxSharedStringBudget:
             filename="book.xlsx",
             payload=_xlsx_bytes([["versioned"]]),
         )
-        assert result.extractor == "xlsx@3"
+        assert result.extractor == "xlsx@4"
         assert extractors.stale_extractor_module("xlsx") == "xlsx"
-        assert extractors.stale_extractor_module("xlsx@2") == "xlsx"
-        assert extractors.stale_extractor_module("xlsx@3") is None
+        assert extractors.stale_extractor_module("xlsx@3") == "xlsx"
+        assert extractors.stale_extractor_module("xlsx@4") is None
 
 
 def _titled_xlsx(sheets: list[tuple[str, list[list[object]]]]) -> bytes:
@@ -1675,6 +1675,590 @@ class TestXlsxRawNodeBudget:
 
         assert text == "[Sheet: Sheet]\n1\n2\n3"
         assert scans[0] == 1
+
+
+_REL_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+_PKG_REL_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
+_MAIN_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+
+
+def _eager_parts(strings_name: str = "xl/sharedStrings.xml") -> dict[str, bytes]:
+    """The members of a synthetic workbook holding every part openpyxl
+    loads whole: a shared-string table stored as ``strings_name``,
+    styles, theme, core and custom properties, a worksheet with
+    relationships, an external link, and a chartsheet whose drawing
+    holds a chart and a picture."""
+    import io
+    import zipfile
+
+    import openpyxl
+    from openpyxl.chart import BarChart, Reference
+    from openpyxl.packaging.custom import StringProperty
+    from PIL import Image
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.append(["placeholder"])
+    ws["A1"].hyperlink = "https://example.com/"
+    wb.custom_doc_props.append(StringProperty(name="k", value="v"))
+    chart = BarChart()
+    chart.add_data(Reference(ws, min_col=1, min_row=1, max_row=1))
+    wb.create_chartsheet("Chart").add_chart(chart)
+    buf = io.BytesIO()
+    wb.save(buf)
+    wb.close()
+    with zipfile.ZipFile(io.BytesIO(buf.getvalue())) as base:
+        parts = {name: base.read(name) for name in base.namelist()}
+
+    def edit(name: str, old: str, new: str) -> None:
+        text = parts[name].decode()
+        assert old in text, (name, old)
+        parts[name] = text.replace(old, new, 1).encode()
+
+    # A shared string referenced from a second row, found by its
+    # manifest content type.
+    edit(
+        "xl/worksheets/sheet1.xml",
+        "</sheetData>",
+        '<row r="2"><c r="A2" t="s"><v>0</v></c></row></sheetData>',
+    )
+    parts[strings_name] = (
+        f'<sst xmlns="{_MAIN_NS}" count="1" uniqueCount="1"><si><t>shared text</t></si></sst>'
+    ).encode()
+    edit(
+        "[Content_Types].xml",
+        "</Types>",
+        f'<Override PartName="/{strings_name}" ContentType="application/vnd.openxmlformats-'
+        'officedocument.spreadsheetml.sharedStrings+xml"/></Types>',
+    )
+    # An external link, which openpyxl reads whole unless keep_links is off.
+    parts["xl/externalLinks/externalLink1.xml"] = (
+        f'<externalLink xmlns="{_MAIN_NS}"><externalBook xmlns:r="{_REL_NS}" r:id="rId1">'
+        '<sheetNames><sheetName val="S"/></sheetNames></externalBook></externalLink>'
+    ).encode()
+    parts["xl/externalLinks/_rels/externalLink1.xml.rels"] = (
+        f'<Relationships xmlns="{_PKG_REL_NS}"><Relationship Id="rId1" '
+        f'Type="{_REL_NS}/externalLinkPath" Target="other.xlsx" TargetMode="External"/>'
+        "</Relationships>"
+    ).encode()
+    edit(
+        "xl/_rels/workbook.xml.rels",
+        "</Relationships>",
+        f'<Relationship Type="{_REL_NS}/externalLink" '
+        'Target="externalLinks/externalLink1.xml" Id="rIdLink"/></Relationships>',
+    )
+    edit(
+        "xl/workbook.xml",
+        "<definedNames/>",
+        f'<externalReferences><externalReference xmlns:r="{_REL_NS}" r:id="rIdLink"/>'
+        "</externalReferences><definedNames/>",
+    )
+    # A picture in the chartsheet's drawing.
+    image = io.BytesIO()
+    Image.new("RGB", (1, 1)).save(image, "PNG")
+    parts["xl/media/image1.png"] = image.getvalue()
+    edit(
+        "xl/drawings/_rels/drawing1.xml.rels",
+        "</Relationships>",
+        f'<Relationship Type="{_REL_NS}/image" Target="/xl/media/image1.png" Id="rIdImg"/>'
+        "</Relationships>",
+    )
+    edit("xl/drawings/drawing1.xml", "</wsDr>", _picture_anchor() + "</wsDr>")
+    return parts
+
+
+def _picture_anchor() -> str:
+    a = "http://schemas.openxmlformats.org/drawingml/2006/main"
+    return (
+        "<oneCellAnchor><from><col>1</col><colOff>0</colOff><row>1</row><rowOff>0</rowOff>"
+        '</from><ext cx="9525" cy="9525"/><pic><nvPicPr><cNvPr id="2" name="P"/><cNvPicPr/>'
+        f'</nvPicPr><blipFill><a:blip xmlns:a="{a}" xmlns:r="{_REL_NS}" r:embed="rIdImg"/>'
+        f'</blipFill><spPr><a:prstGeom xmlns:a="{a}" prst="rect"/></spPr></pic><clientData/>'
+        "</oneCellAnchor>"
+    )
+
+
+def _zip_parts(parts: dict[str, bytes]) -> bytes:
+    import io
+    import zipfile
+
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as archive:
+        for name, data in parts.items():
+            archive.writestr(name, data)
+    return out.getvalue()
+
+
+def _padded(data: bytes, size: int) -> bytes:
+    """``data`` padded to ``size`` bytes with whitespace, which XML allows
+    after the root element."""
+    assert len(data) <= size
+    return data + b" " * (size - len(data))
+
+
+def _add_sheet_refs(parts: dict[str, bytes], count: int, rel_id: str) -> None:
+    """Name the part behind ``rel_id`` from ``count`` more sheets."""
+    sheets = "".join(
+        f'<sheet xmlns:r="{_REL_NS}" name="Extra{i}" sheetId="{i + 10}" r:id="{rel_id}"/>'
+        for i in range(count)
+    )
+    workbook = parts["xl/workbook.xml"].decode()
+    parts["xl/workbook.xml"] = workbook.replace("</sheets>", sheets + "</sheets>", 1).encode()
+
+
+def _chartsheet_rel_id(parts: dict[str, bytes]) -> str:
+    import re
+
+    rels = parts["xl/_rels/workbook.xml.rels"].decode()
+    match = re.search(r'Target="/xl/chartsheets/sheet1.xml" Id="(\w+)"', rels)
+    assert match is not None
+    return match.group(1)
+
+
+class _MemberReads:
+    """Every zip member opened, and the bytes read from each, while
+    installed."""
+
+    def __init__(self, monkeypatch) -> None:
+        import zipfile
+
+        self.opened: list[str] = []
+        self.bytes: dict[str, int] = {}
+        original_open = zipfile.ZipFile.open
+        original_read = zipfile.ZipExtFile.read
+        reads = self
+
+        def counting_open(archive, name, *args, **kwargs):
+            reads.opened.append(name if isinstance(name, str) else name.filename)
+            return original_open(archive, name, *args, **kwargs)
+
+        def counting_read(member, *args, **kwargs):
+            data = original_read(member, *args, **kwargs)
+            reads.bytes[member.name] = reads.bytes.get(member.name, 0) + len(data)
+            return data
+
+        monkeypatch.setattr(zipfile.ZipFile, "open", counting_open)
+        monkeypatch.setattr(zipfile.ZipExtFile, "read", counting_read)
+
+    @property
+    def total(self) -> int:
+        return sum(self.bytes.values())
+
+
+class TestXlsxEagerPartBudget:
+    """#428: openpyxl loads some parts whole rather than streaming them
+    (the shared-string table under any name, the manifest, the workbook,
+    styles, and the rest), so a small, highly compressible workbook cost
+    seconds and hundreds of MB before any budget applied. Each such part
+    is charged its declared size, against a per-part cap and one budget
+    across the workbook, before openpyxl opens it."""
+
+    _XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+    @staticmethod
+    def _openpyxl_calls(monkeypatch) -> tuple[list[int], list[int]]:
+        """Count workbook loads and pre-pass readers."""
+        import openpyxl
+        from src.extractors import xlsx
+
+        return (
+            _count_calls(monkeypatch, openpyxl, "load_workbook"),
+            _count_calls(monkeypatch, xlsx, "ExcelReader"),
+        )
+
+    def _assert_rejected(self, payload: bytes, monkeypatch) -> _MemberReads:
+        from src.extractors import xlsx
+
+        loads, readers = self._openpyxl_calls(monkeypatch)
+        reads = _MemberReads(monkeypatch)
+        result = extract(content_type=self._XLSX, filename="book.xlsx", payload=payload)
+        assert result.status == STATUS_FAILED
+        assert result.error == "XlsxEagerPartBudgetError"
+        assert result.text is None
+        # Rejected before openpyxl, or the pre-pass, opened the workbook,
+        # and with no more read than the budget allows.
+        assert loads[0] == 0
+        assert readers[0] == 0
+        assert reads.total <= xlsx._MAX_EAGER_BYTES
+        return reads
+
+    @pytest.mark.parametrize("strings_name", ["xl/sharedStrings.xml", "xl/custom/table.bin"])
+    def test_every_part_openpyxl_reads_whole_is_charged(self, monkeypatch, strings_name):
+        """The fixture extracts, and every read openpyxl makes of a member
+        while it loads the workbook, worksheets aside, was charged first."""
+        import io
+        from collections import Counter
+
+        import openpyxl
+        from src.extractors import xlsx
+
+        payload = _zip_parts(_eager_parts(strings_name))
+        text, _ = xlsx.extract(payload)
+        assert text == "[Sheet: Sheet]\nplaceholder\nshared text"
+
+        charged: Counter[str] = Counter()
+        original = xlsx._EagerBudget.charge
+
+        def recording(budget, name):
+            present = original(budget, name)
+            if present:
+                charged[name] += 1
+            return present
+
+        monkeypatch.setattr(xlsx._EagerBudget, "charge", recording)
+        xlsx._check_eager_parts(payload)
+
+        reads = _MemberReads(monkeypatch)
+        openpyxl.load_workbook(
+            io.BytesIO(payload), read_only=True, data_only=True, keep_links=False
+        ).close()
+        # Read attempts of absent members fail before reading anything.
+        loaded = Counter(
+            name
+            for name in reads.opened
+            if name in reads.bytes and not name.startswith("xl/worksheets/sheet")
+        )
+        assert strings_name in loaded
+        assert "xl/media/image1.png" in loaded
+        assert "xl/charts/chart1.xml" in loaded
+        assert not loaded - charged
+        # External links are not loaded at all.
+        assert not any("externalLink" in name for name in reads.opened)
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "[Content_Types].xml",
+            "xl/sharedStrings.xml",
+            "xl/custom/table.bin",
+            "xl/styles.xml",
+            "xl/theme/theme1.xml",
+            "docProps/core.xml",
+            "docProps/custom.xml",
+            "xl/workbook.xml",
+            "xl/_rels/workbook.xml.rels",
+            "xl/worksheets/_rels/sheet1.xml.rels",
+            "xl/chartsheets/sheet1.xml",
+            "xl/chartsheets/_rels/sheet1.xml.rels",
+            "xl/drawings/drawing1.xml",
+            "xl/drawings/_rels/drawing1.xml.rels",
+            "xl/charts/chart1.xml",
+            "xl/media/image1.png",
+        ],
+    )
+    def test_a_part_over_its_cap_fails_before_openpyxl_reads_it(self, monkeypatch, name):
+        from src.extractors import xlsx
+
+        monkeypatch.setattr(xlsx, "_MAX_EAGER_PART_BYTES", 64 * 1024)
+        parts = _eager_parts(
+            "xl/custom/table.bin" if name == "xl/custom/table.bin" else "xl/sharedStrings.xml"
+        )
+        parts[name] = _padded(parts[name], 64 * 1024 + 1)
+
+        reads = self._assert_rejected(_zip_parts(parts), monkeypatch)
+
+        assert name not in reads.bytes
+
+    def test_an_external_link_over_the_cap_is_never_read(self, monkeypatch):
+        from src.extractors import xlsx
+
+        monkeypatch.setattr(xlsx, "_MAX_EAGER_PART_BYTES", 64 * 1024)
+        parts = _eager_parts()
+        name = "xl/externalLinks/externalLink1.xml"
+        parts[name] = _padded(parts[name], 1024 * 1024)
+        payload = _zip_parts(parts)
+        reads = _MemberReads(monkeypatch)
+
+        text, _ = xlsx.extract(payload)
+
+        assert text == "[Sheet: Sheet]\nplaceholder\nshared text"
+        assert not any("externalLink" in opened for opened in reads.opened)
+
+    @pytest.mark.parametrize("distinct", [True, False], ids=["distinct", "repeated"])
+    def test_sub_cap_chartsheets_over_the_aggregate_fail(self, monkeypatch, distinct):
+        """Each chartsheet is under the per-part cap; together they cross
+        the workbook budget, whether they are separate parts or one part
+        named by many sheets."""
+        from src.extractors import xlsx
+
+        monkeypatch.setattr(xlsx, "_MAX_EAGER_PART_BYTES", 64 * 1024)
+        monkeypatch.setattr(xlsx, "_MAX_EAGER_BYTES", 1024 * 1024)
+        parts = _eager_parts()
+        chartsheet = _padded(parts["xl/chartsheets/sheet1.xml"], 60 * 1024)
+        parts["xl/chartsheets/sheet1.xml"] = chartsheet
+        count = 40  # 40 x 60 KiB > 1 MiB
+        if distinct:
+            rels = parts["xl/_rels/workbook.xml.rels"].decode()
+            for i in range(2, count + 2):
+                parts[f"xl/chartsheets/sheet{i}.xml"] = chartsheet
+                parts[f"xl/chartsheets/_rels/sheet{i}.xml.rels"] = parts[
+                    "xl/chartsheets/_rels/sheet1.xml.rels"
+                ]
+                rels = rels.replace(
+                    "</Relationships>",
+                    f'<Relationship Type="{_REL_NS}/chartsheet" '
+                    f'Target="/xl/chartsheets/sheet{i}.xml" Id="rIdC{i}"/></Relationships>',
+                )
+                _add_sheet_refs(parts, 1, f"rIdC{i}")
+            parts["xl/_rels/workbook.xml.rels"] = rels.encode()
+        else:
+            _add_sheet_refs(parts, count, _chartsheet_rel_id(parts))
+
+        reads = self._assert_rejected(_zip_parts(parts), monkeypatch)
+
+        # Charged by declared size: no chartsheet itself is read.
+        assert not any(name.startswith("xl/chartsheets/sheet") for name in reads.bytes)
+
+    def test_one_chart_referenced_by_many_anchors_is_charged_per_reference(self, monkeypatch):
+        from src.extractors import xlsx
+
+        monkeypatch.setattr(xlsx, "_MAX_EAGER_PART_BYTES", 64 * 1024)
+        monkeypatch.setattr(xlsx, "_MAX_EAGER_BYTES", 1024 * 1024)
+        parts = _eager_parts()
+        parts["xl/charts/chart1.xml"] = _padded(parts["xl/charts/chart1.xml"], 60 * 1024)
+        drawing = parts["xl/drawings/drawing1.xml"].decode()
+        start, end = drawing.index("<absoluteAnchor>"), drawing.index("</absoluteAnchor>")
+        anchor = drawing[start : end + len("</absoluteAnchor>")]
+        parts["xl/drawings/drawing1.xml"] = drawing.replace(anchor, anchor * 40, 1).encode()
+
+        reads = self._assert_rejected(_zip_parts(parts), monkeypatch)
+
+        assert "xl/charts/chart1.xml" not in reads.bytes
+
+    def test_sheets_over_the_read_budget_fail(self, monkeypatch):
+        from src.extractors import xlsx
+
+        parts = _eager_parts()
+        _add_sheet_refs(parts, xlsx._MAX_EAGER_READS, "rId1")
+
+        self._assert_rejected(_zip_parts(parts), monkeypatch)
+
+    def test_parts_exactly_at_the_aggregate_still_extract(self, monkeypatch):
+        from src.extractors import xlsx
+
+        monkeypatch.setattr(xlsx, "_MAX_EAGER_PART_BYTES", 64 * 1024)
+        monkeypatch.setattr(xlsx, "_MAX_EAGER_BYTES", 64 * 1024)
+        parts = _eager_parts()
+        budget_left: list[int] = []
+        original = xlsx._EagerBudget.charge
+
+        def recording(budget, name):
+            present = original(budget, name)
+            budget_left.append(budget.bytes_left)
+            return present
+
+        monkeypatch.setattr(xlsx._EagerBudget, "charge", recording)
+        xlsx._check_eager_parts(_zip_parts(parts))
+        monkeypatch.setattr(xlsx._EagerBudget, "charge", original)
+        # Spend what is left on the shared strings, charged once.
+        strings = parts["xl/sharedStrings.xml"]
+        parts["xl/sharedStrings.xml"] = _padded(strings, len(strings) + budget_left[-1])
+
+        text, _ = xlsx.extract(_zip_parts(parts))
+        assert text == "[Sheet: Sheet]\nplaceholder\nshared text"
+
+        parts["xl/sharedStrings.xml"] += b" "
+        self._assert_rejected(_zip_parts(parts), monkeypatch)
+
+    def test_a_large_legitimate_shared_string_table_extracts(self):
+        """Real caps: about 7.6 MiB of distinct shared strings."""
+        import time
+
+        from src.extractors import xlsx
+
+        parts = _eager_parts()
+        strings = "".join(f"<si><t>Item {i:07d} description</t></si>" for i in range(200_000))
+        parts["xl/sharedStrings.xml"] = (f'<sst xmlns="{_MAIN_NS}">' + strings + "</sst>").encode()
+        assert len(parts["xl/sharedStrings.xml"]) < xlsx._MAX_EAGER_PART_BYTES
+
+        started = time.monotonic()
+        text, _ = xlsx.extract(_zip_parts(parts))
+        assert time.monotonic() - started < 30.0
+        assert text == "[Sheet: Sheet]\nplaceholder\nItem 0000000 description"
+
+    def test_worst_case_parts_under_the_cap_fail_fast_together(self, monkeypatch):
+        """Real caps: the costliest shapes measured for #428 (empty shared
+        strings, empty fonts in the styles, defined names, manifest
+        defaults), each under the per-part cap, cross the aggregate;
+        they fail in milliseconds rather than seconds, reading only the
+        manifest."""
+        import re
+        import time
+        import tracemalloc
+
+        size = 7 * 1024 * 1024
+        parts = _eager_parts()
+        parts["xl/sharedStrings.xml"] = (
+            f'<sst xmlns="{_MAIN_NS}">' + "<si/>" * (size // 5) + "</sst>"
+        ).encode()
+        styles = parts["xl/styles.xml"].decode()
+        fonts = "<fonts>" + "<font><b/></font>" * (size // 17) + "</fonts>"
+        parts["xl/styles.xml"] = re.sub(r"<fonts.*?</fonts>", fonts, styles, count=1).encode()
+        workbook = parts["xl/workbook.xml"].decode()
+        names = '<definedName name="nm">Sheet!$A$1</definedName>' * (size // 48)
+        parts["xl/workbook.xml"] = workbook.replace(
+            "<definedNames/>", f"<definedNames>{names}</definedNames>"
+        ).encode()
+        manifest = parts["[Content_Types].xml"].decode()
+        defaults = '<Default Extension="e1234" ContentType="application/x"/>' * (512 * 1024 // 55)
+        parts["[Content_Types].xml"] = manifest.replace("</Types>", defaults + "</Types>").encode()
+        payload = _zip_parts(parts)
+        assert len(payload) < 200_000
+
+        tracemalloc.start()
+        started = time.monotonic()
+        try:
+            reads = self._assert_rejected(payload, monkeypatch)
+            peak = tracemalloc.get_traced_memory()[1]
+        finally:
+            tracemalloc.stop()
+        # On main: about 7.5 s and 330 MB. Generous for CI.
+        assert time.monotonic() - started < 5.0
+        assert peak < 64 * 1024 * 1024
+        assert set(reads.bytes) == {"[Content_Types].xml"}
+
+    @staticmethod
+    def _malformed(shape: str) -> bytes:
+        """The fixture workbook broken in one of the ways the walk stops
+        at and leaves to openpyxl."""
+        parts = _eager_parts()
+
+        def edit(name: str, old: str, new: str) -> None:
+            text = parts[name].decode()
+            assert old in text, (shape, old)
+            parts[name] = text.replace(old, new, 1).encode()
+
+        chart_rel = _chartsheet_rel_id(parts)
+        workbook_override = (
+            '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.'
+            'openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
+        )
+        if shape == "not-a-zip":
+            return b"PK\x03\x04 not a zip"
+        if shape == "no-manifest":
+            del parts["[Content_Types].xml"]
+        elif shape == "no-workbook-type":
+            edit("[Content_Types].xml", workbook_override, "")
+        elif shape == "workbook-type-as-default":
+            edit("[Content_Types].xml", workbook_override, "")
+            edit(
+                "[Content_Types].xml",
+                'ContentType="application/xml"',
+                'ContentType="application/vnd.openxmlformats-officedocument.'
+                'spreadsheetml.sheet.main+xml"',
+            )
+        elif shape == "no-workbook":
+            del parts["xl/workbook.xml"]
+        elif shape == "no-workbook-rels":
+            del parts["xl/_rels/workbook.xml.rels"]
+        elif shape == "sheet-without-id":
+            edit("xl/workbook.xml", f'r:id="{chart_rel}"', "")
+        elif shape == "sheet-unknown-id":
+            edit("xl/workbook.xml", f'r:id="{chart_rel}"', 'r:id="rIdMissing"')
+        elif shape == "sheet-target-missing":
+            del parts["xl/chartsheets/sheet1.xml"]
+        elif shape == "chartsheet-without-rels":
+            del parts["xl/chartsheets/_rels/sheet1.xml.rels"]
+        elif shape == "drawing-missing":
+            del parts["xl/drawings/drawing1.xml"]
+        elif shape == "drawing-unreadable":
+            parts["xl/drawings/drawing1.xml"] = (
+                b'<wsDr xmlns="http://schemas.openxmlformats.org/drawingml/2006/'
+                b'spreadsheetDrawing"><absoluteAnchor><pos/></absoluteAnchor></wsDr>'
+            )
+        elif shape == "drawing-without-rels":
+            del parts["xl/drawings/_rels/drawing1.xml.rels"]
+        elif shape == "chart-missing":
+            del parts["xl/charts/chart1.xml"]
+        elif shape == "picture-not-an-image":
+            edit("xl/drawings/_rels/drawing1.xml.rels", f"{_REL_NS}/image", f"{_REL_NS}/oleObject")
+        else:
+            raise AssertionError(shape)
+        return _zip_parts(parts)
+
+    @pytest.mark.parametrize(
+        "shape",
+        [
+            "not-a-zip",
+            "no-manifest",
+            "no-workbook-type",
+            "workbook-type-as-default",
+            "no-workbook",
+            "no-workbook-rels",
+            "sheet-without-id",
+            "sheet-unknown-id",
+            "sheet-target-missing",
+            "chartsheet-without-rels",
+            "drawing-missing",
+            "drawing-unreadable",
+            "drawing-without-rels",
+            "chart-missing",
+            "picture-not-an-image",
+        ],
+    )
+    def test_the_walk_leaves_a_malformed_workbook_to_openpyxl(self, shape):
+        """Under budget, the walk never changes whether a workbook loads:
+        where it stops, openpyxl's own load succeeds, or fails as the
+        walk does or later."""
+        import io
+        import warnings
+
+        import openpyxl
+        from src.extractors import xlsx
+
+        payload = self._malformed(shape)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            try:
+                openpyxl.load_workbook(
+                    io.BytesIO(payload), read_only=True, data_only=True, keep_links=False
+                ).close()
+                expected: type[BaseException] | None = None
+            except Exception as exc:
+                expected = type(exc)
+            try:
+                xlsx._check_eager_parts(payload)
+            except Exception as exc:
+                assert not isinstance(exc, xlsx.XlsxEagerPartBudgetError)
+                assert type(exc) is expected
+            result = extract(content_type=self._XLSX, filename="book.xlsx", payload=payload)
+        assert (result.status == STATUS_FAILED) == (expected is not None)
+
+    def test_a_part_understating_its_size_is_read_no_further(self, monkeypatch):
+        """The charge is the central directory's declared size; zipfile
+        stops reading a member there, so a part declaring less than it
+        holds fails rather than costing more than it was charged."""
+        import struct
+
+        parts = _eager_parts()
+        parts["xl/sharedStrings.xml"] = (
+            f'<sst xmlns="{_MAIN_NS}">' + "<si/>" * 1_000_000 + "</sst>"
+        ).encode()
+        payload = bytearray(_zip_parts(parts))
+        entry = payload.find(b"PK\x01\x02", 0)
+        while payload[entry + 46 : entry + 46 + 20] != b"xl/sharedStrings.xml":
+            entry = payload.find(b"PK\x01\x02", entry + 4)
+        struct.pack_into("<I", payload, entry + 24, 1024)  # uncompressed size
+        reads = _MemberReads(monkeypatch)
+
+        result = extract(content_type=self._XLSX, filename="book.xlsx", payload=bytes(payload))
+
+        assert result.status == STATUS_FAILED
+        assert reads.bytes.get("xl/sharedStrings.xml", 0) <= 1024
+
+    def test_a_shared_string_table_twenty_mb_of_empty_items_fails_fast(self, monkeypatch):
+        """The #428 measurement: 20 MB of ``<si/>`` took 7.4 s and 495 MB."""
+        import time
+
+        parts = _eager_parts()
+        parts["xl/sharedStrings.xml"] = (
+            f'<sst xmlns="{_MAIN_NS}">' + "<si/>" * 4_000_000 + "</sst>"
+        ).encode()
+
+        started = time.monotonic()
+        reads = self._assert_rejected(_zip_parts(parts), monkeypatch)
+        assert time.monotonic() - started < 5.0
+        assert "xl/sharedStrings.xml" not in reads.bytes
 
 
 class TestPdfDigitalExtractor:

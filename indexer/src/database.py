@@ -445,7 +445,6 @@ class Database:
                 chunked_at      TEXT NOT NULL,
                 fts_rowid       INTEGER,
                 attachment_id   TEXT,
-                message_date    TEXT NOT NULL,           -- source message's Date: header; timeline retrieval orders by it
                 FOREIGN KEY (claimant_id) REFERENCES message_thread_map(claimant_id)
                     ON DELETE CASCADE,
                 FOREIGN KEY (thread_id) REFERENCES threads(thread_id)
@@ -1039,7 +1038,6 @@ class Database:
         chunks,
         embeddings_by_chunk_id: dict[str, list[float]],
         attachment_id: str | None = None,
-        message_date: str,
     ) -> dict[str, int]:
         """Idempotently sync the chunk rows for one slice of a message.
 
@@ -1065,16 +1063,10 @@ class Database:
           occurrences (one per parent thread) so any chunk hit can lift
           its parent thread into ranking.
 
-        ``message_date`` is the source message's ``Date:`` header in
-        ISO 8601 form (``msg.date.isoformat()``), stored on every new
-        chunk row and rewritten on the message's other rows (any slice)
-        whose date differs, so each
-        chunk carries its message's ``sent_at`` and timeline-style retrieval
-        (``get_recent_chunks_for_thread`` / ``summarize_thread``) can
-        order by message time instead of the chunker's wall-clock
-        insert time. The parser always yields a date (falling back to
-        ingest time for a missing or unparseable header), so the
-        column is ``NOT NULL`` and readers need no fallback.
+        A chunk stores no copy of its message's date: readers take a
+        passage's date from its ``messages`` row (``sent_at``), so a
+        re-dated message whose chunks were not rewritten never shows a
+        stale date (#575).
 
         All inserts / deletes across ``message_chunks``,
         ``message_chunks_fts`` and ``message_chunks_vec`` happen inside
@@ -1117,19 +1109,6 @@ class Database:
                 cur.execute("DELETE FROM message_chunks_vec WHERE chunk_id = ?", (chunk_id,))
                 cur.execute("DELETE FROM message_chunks WHERE chunk_id = ?", (chunk_id,))
 
-            # Kept chunks take the incoming date too: a re-parse can
-            # date the same bytes differently (a parser fix), and the
-            # chunk must not disagree with ``messages.sent_at``. The date
-            # belongs to the message, so every slice of it is refreshed:
-            # a slice this run does not write (attachment extraction
-            # turned off since it was indexed) keeps its rows but must
-            # not keep a stale date.
-            cur.execute(
-                "UPDATE message_chunks SET message_date = ? "
-                "WHERE claimant_id = ? AND message_date != ?",
-                (message_date, claimant_id, message_date),
-            )
-
             now_iso = datetime.now(UTC).isoformat()
             for chunk in to_insert:
                 embedding = embeddings_by_chunk_id.get(chunk.chunk_id)
@@ -1163,8 +1142,8 @@ class Database:
                     INSERT INTO message_chunks
                         (chunk_id, claimant_id, thread_id, chunk_index, text,
                          char_start, char_end, token_est,
-                         chunked_at, fts_rowid, attachment_id, message_date)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                         chunked_at, fts_rowid, attachment_id)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         chunk.chunk_id,
@@ -1178,7 +1157,6 @@ class Database:
                         now_iso,
                         fts_rowid,
                         attachment_id,
-                        message_date,
                     ),
                 )
 

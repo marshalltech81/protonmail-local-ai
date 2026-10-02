@@ -597,14 +597,18 @@ time; the deterministic source for it (top `Received:` header, then
 the Maildir filename's delivery timestamp, then the previously
 persisted date) is deferred to the Phase 2 reindex bundle (#297).
 
-Copies of `sent_at`, all derived from the same parsed value in one
-indexing pass:
+Where `sent_at` is stored:
 
 | Stored as | What it holds |
 |---|---|
 | `messages.sent_at` | The message's own time (authoritative) |
-| `message_chunks.message_date` | The `sent_at` of the chunk's message, body and attachment chunks alike. A reprocess that keeps a chunk (same chunk ID) rewrites its date when the message's `sent_at` changed, so the two never disagree |
 | `threads.date_first` / `date_last` | The earliest and latest `sent_at` among the thread's messages, recomputed from its `messages` rows on every upsert so a re-dated message moves the range |
+
+A chunk stores no date of its own (#575): a passage's `sent_at`, body
+and attachment chunks alike, is read from its message's `messages` row
+through the claimant ID. A reprocess commits a re-dated `sent_at` in
+Phase 1, before its chunks are rewritten, so a stored chunk copy could
+lag the message whenever Phase 2 failed.
 
 **`occurred_at`** is not defined. The index keeps no delivery or
 receipt time: the `Received:` headers and the Maildir filename's
@@ -649,7 +653,7 @@ Ranking lanes are not date-scoped per passage: a passage outside the
 range can still lift its thread's rank.
 `list_threads` sorts by `date_last`, newest first; `get_thread` lists
 messages by `sent_at`, oldest first; `summarize_thread`'s recent tail
-takes the chunks with the latest `message_date`.
+takes the chunks whose messages have the latest `sent_at`.
 
 ## Entities
 
@@ -819,6 +823,17 @@ scanned pages are not re-read when OCR is turned on later.
 | `INDEXER_OCR_TIMEOUT_SECONDS` | `60` | Per-page Tesseract timeout — bounds runaway OCR on a crafted high-noise image — and the deadline for rendering a scanned PDF's pages with Poppler. Set `0` to disable both. |
 | `INDEXER_PDF_MAX_DIGITAL_PAGES` | `500` | Cap pages walked by the digital pypdf path — protects against text-only PDFs with thousands of pages. Set `0` to disable. |
 | `INDEXER_ATTACHMENT_MAX_EXTRACTED_CHARS` | `2000000` (~500 pages) | Truncate extracted text before persisting in `attachment_extractions`. Bounds SQLite row size for very long OCR'd PDFs. Set to `0` to disable. The XLSX extractor also stops at 10,000,000 characters of its own, whatever this is set to, so shared strings repeated across many cells cannot expand without limit (#294). |
+
+The XLSX extractor has fixed budgets of its own besides these. It cuts
+worksheets at an XML node budget (#432). The parts openpyxl loads whole
+rather than streams (the shared-string table, `[Content_Types].xml`,
+the workbook and its relationships, styles, theme, core and custom
+properties, each worksheet's relationships, and chartsheets with their
+drawings, charts and images) are charged their declared sizes before
+openpyxl opens the workbook: 8 MiB per part, and 16 MiB and 4,096 reads
+across the workbook. A workbook over one of these fails as
+`XlsxEagerPartBudgetError` with no text kept (#428). External links
+are not loaded at all.
 
 ### Cascade on message removal
 

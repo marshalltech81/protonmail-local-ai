@@ -6,6 +6,7 @@ update), threading lookups, file tracking, chunk + attachment writes,
 and stats.
 """
 
+import inspect
 import json
 import sqlite3
 import threading
@@ -1718,7 +1719,6 @@ class TestReplaceMessageChunks:
         chunk = _make_chunk("parent-required".ljust(64, "0"), 0, "orphan")
         with pytest.raises(sqlite3.IntegrityError, match="FOREIGN KEY"):
             db.replace_message_chunks(
-                message_date="2024-01-01T00:00:00+00:00",
                 claimant_id="missing@x",
                 thread_id="missing-thread",
                 chunks=[chunk],
@@ -1734,7 +1734,6 @@ class TestReplaceMessageChunks:
         }
 
         result = db.replace_message_chunks(
-            message_date="2024-01-01T00:00:00+00:00",
             claimant_id="m1@x",
             thread_id="t1",
             chunks=chunks,
@@ -1772,7 +1771,6 @@ class TestReplaceMessageChunks:
         embeds = {chunks[0].chunk_id: [0.3] * EMBEDDING_DIM}
 
         first = db.replace_message_chunks(
-            message_date="2024-01-01T00:00:00+00:00",
             claimant_id="m2@x",
             thread_id="t2",
             chunks=chunks,
@@ -1783,7 +1781,6 @@ class TestReplaceMessageChunks:
         # Replay with no embeddings — would raise if the diff path tried
         # to insert anything.
         second = db.replace_message_chunks(
-            message_date="2024-01-01T00:00:00+00:00",
             claimant_id="m2@x",
             thread_id="t2",
             chunks=chunks,
@@ -1799,7 +1796,6 @@ class TestReplaceMessageChunks:
 
         # Round 1: keep + drop.
         db.replace_message_chunks(
-            message_date="2024-01-01T00:00:00+00:00",
             claimant_id="m3@x",
             thread_id="t3",
             chunks=[keep, drop],
@@ -1811,7 +1807,6 @@ class TestReplaceMessageChunks:
 
         # Round 2: keep + new (drop should be deleted; keep should be kept).
         result = db.replace_message_chunks(
-            message_date="2024-01-01T00:00:00+00:00",
             claimant_id="m3@x",
             thread_id="t3",
             chunks=[keep, new],
@@ -1836,7 +1831,6 @@ class TestReplaceMessageChunks:
         chunk = _make_chunk("e" * 64, 0, "needs embed")
         with pytest.raises(ValueError, match="missing embedding"):
             db.replace_message_chunks(
-                message_date="2024-01-01T00:00:00+00:00",
                 claimant_id="m4@x",
                 thread_id="t4",
                 chunks=[chunk],
@@ -1864,7 +1858,6 @@ class TestReplaceMessageChunks:
         scaled = [2.0 / (EMBEDDING_DIM**0.5)] * EMBEDDING_DIM
 
         db.replace_message_chunks(
-            message_date="2024-01-01T00:00:00+00:00",
             claimant_id="m-norm@x",
             thread_id="t-norm",
             chunks=[chunk],
@@ -1889,7 +1882,6 @@ class TestReplaceMessageChunks:
         chunk = _make_chunk("f" * 64, 0, "bad dim")
         with pytest.raises(ValueError, match="EMBEDDING_DIM|reserves 4096"):
             db.replace_message_chunks(
-                message_date="2024-01-01T00:00:00+00:00",
                 claimant_id="m5@x",
                 thread_id="t5",
                 chunks=[chunk],
@@ -1915,74 +1907,15 @@ def _one_hot(slot: int) -> list[float]:
 
 
 class TestMessageDateOnChunks:
-    """``message_chunks.message_date`` carries the source message's
-    ``Date:`` header on every new chunk row so timeline-style
-    retrieval can order by message time instead of insert time.
+    """A chunk stores no copy of its message's date (#575): readers take
+    a passage's date from its ``messages`` row, so a re-dated message
+    whose chunks were not rewritten cannot disagree with them.
     """
 
-    def test_message_date_kwarg_persists_on_new_chunks(self, db):
-        _seed_thread_for_message(db, "m-md1@x", "t-md1")
-        chunk = _make_chunk("md1".ljust(64, "0"), 0, "body")
-        db.replace_message_chunks(
-            claimant_id="m-md1@x",
-            thread_id="t-md1",
-            chunks=[chunk],
-            embeddings_by_chunk_id={chunk.chunk_id: _one_hot(0)},
-            message_date="2024-06-01T12:00:00+00:00",
-        )
-        row = db._conn.execute(
-            "SELECT message_date FROM message_chunks WHERE chunk_id = ?",
-            (chunk.chunk_id,),
-        ).fetchone()
-        assert row["message_date"] == "2024-06-01T12:00:00+00:00"
-
-    @pytest.mark.parametrize("attachment_id", [None, "att-md3"])
-    def test_kept_chunks_take_the_new_message_date(self, db, attachment_id):
-        """A reprocess that keeps a chunk (same chunk ID) but carries a
-        different message date — a parser change re-reading the same
-        ``Date:`` header — rewrites the kept row's date, so the chunk
-        never disagrees with ``messages.sent_at``. The message's other
-        slice is refreshed too, since a run with attachment extraction
-        off writes only the body (review round 1), and no chunk is
-        re-inserted. Another message's chunks keep their date."""
-        _seed_thread_for_message(db, "m-md3@x", "t-md3")
-        _seed_thread_for_message(db, "m-md4@x", "t-md4")
-        bystander = _make_chunk("md4b".ljust(64, "0"), 0, "another message")
-        db.replace_message_chunks(
-            claimant_id="m-md4@x",
-            thread_id="t-md4",
-            chunks=[bystander],
-            embeddings_by_chunk_id={bystander.chunk_id: _one_hot(0)},
-            message_date="2024-01-01T00:00:00+00:00",
-        )
-        kept = _make_chunk("md3k".ljust(64, "0"), 0, "kept")
-        other = _make_chunk("md3o".ljust(64, "0"), 0, "other slice")
-        other_slice = "att-other" if attachment_id is None else None
-        old, new = "2024-01-01T00:00:00+00:00", "2024-06-01T12:00:00+00:00"
-        for chunk, slice_id in ((kept, attachment_id), (other, other_slice)):
-            db.replace_message_chunks(
-                claimant_id="m-md3@x",
-                thread_id="t-md3",
-                chunks=[chunk],
-                embeddings_by_chunk_id={chunk.chunk_id: _one_hot(0)},
-                attachment_id=slice_id,
-                message_date=old,
-            )
-
-        result = db.replace_message_chunks(
-            claimant_id="m-md3@x",
-            thread_id="t-md3",
-            chunks=[kept],
-            embeddings_by_chunk_id={},
-            attachment_id=attachment_id,
-            message_date=new,
-        )
-
-        assert result == {"inserted": 0, "deleted": 0, "kept": 1}
-        dates = dict(
-            db._conn.execute("SELECT chunk_id, message_date FROM message_chunks").fetchall()
-        )
-        assert dates == {kept.chunk_id: new, other.chunk_id: new, bystander.chunk_id: old}
+    def test_chunks_store_no_message_date(self, db):
+        columns = {r["name"] for r in db._conn.execute("PRAGMA table_info(message_chunks)")}
+        assert "message_date" not in columns
+        assert "message_date" not in inspect.signature(db.replace_message_chunks).parameters
 
     def test_redated_message_moves_the_thread_range(self, db):
         """Review round 2: reprocessing a message with a corrected date
@@ -2014,19 +1947,6 @@ class TestMessageDateOnChunks:
         assert sent_at == jun
         assert (row["date_first"], row["date_last"]) == (jun.isoformat(), jun.isoformat())
 
-    def test_schema_rejects_chunk_without_message_date(self, db):
-        """Timeline retrieval orders by ``message_date`` with no
-        fallback, so the column is ``NOT NULL``: a write path that
-        forgot the date must fail loudly, not store a row that sorts
-        wrong."""
-        _seed_thread_for_message(db, "m-md2@x", "t-md2")
-        with pytest.raises(sqlite3.IntegrityError, match="message_date"):
-            db._conn.execute(
-                "INSERT INTO message_chunks (chunk_id, claimant_id, thread_id, "
-                "chunk_index, text, char_start, char_end, token_est, chunked_at) "
-                "VALUES ('c-null', 'm-md2@x', 't-md2', 0, 'body', 0, 4, 1, '2026-01-01')"
-            )
-
 
 class TestThreadChunkAggregation:
     def test_get_thread_chunk_embeddings_returns_per_message_vectors(self, db):
@@ -2040,7 +1960,6 @@ class TestThreadChunkAggregation:
         for mid, slot in [("m6a@x", 0), ("m6b@x", 1)]:
             chunk = _make_chunk(f"x{mid}".ljust(64, "0"), 0, f"body of {mid}")
             db.replace_message_chunks(
-                message_date="2024-01-01T00:00:00+00:00",
                 claimant_id=mid,
                 thread_id="t6",
                 chunks=[chunk],
@@ -2059,7 +1978,6 @@ class TestThreadChunkAggregation:
         for mid, slot in [("m7a@x", 2), ("m7b@x", 3)]:
             chunk = _make_chunk(f"y{mid}".ljust(64, "0"), 0, f"body of {mid}")
             db.replace_message_chunks(
-                message_date="2024-01-01T00:00:00+00:00",
                 claimant_id=mid,
                 thread_id="t7",
                 chunks=[chunk],
@@ -2088,7 +2006,6 @@ class TestThreadChunkAggregation:
 
         chunk = _make_chunk("zhas".ljust(64, "0"), 0, "some body")
         db.replace_message_chunks(
-            message_date="2024-01-01T00:00:00+00:00",
             claimant_id="th@x",
             thread_id="t_has",
             chunks=[chunk],
@@ -2107,7 +2024,6 @@ class TestAtomicIndexTransaction:
             with db.transaction():
                 db.upsert_thread(thread, FAKE_EMBEDDING)
                 db.replace_message_chunks(
-                    message_date="2024-01-01T00:00:00+00:00",
                     claimant_id=msg.message_id,
                     thread_id=thread.thread_id,
                     chunks=[chunk],
@@ -2129,7 +2045,6 @@ class TestChunkCascadeOnMessageRemoval:
 
         chunk = _make_chunk("z" * 64, 0, "to be removed")
         db.replace_message_chunks(
-            message_date="2024-01-01T00:00:00+00:00",
             claimant_id="m8@x",
             thread_id=thread.thread_id,
             chunks=[chunk],
@@ -2154,7 +2069,6 @@ class TestChunkCascadeOnMessageRemoval:
         for mid in ("m9a@x", "m9b@x"):
             chunk = _make_chunk(f"q{mid}".ljust(64, "0"), 0, "doomed")
             db.replace_message_chunks(
-                message_date="2024-01-01T00:00:00+00:00",
                 claimant_id=mid,
                 thread_id=t.thread_id,
                 chunks=[chunk],
@@ -2373,14 +2287,12 @@ class TestAttachmentChunkSlicing:
         attachment_id = "att-hash" * 8
 
         db.replace_message_chunks(
-            message_date="2024-01-01T00:00:00+00:00",
             claimant_id="slice1@x",
             thread_id=thread.thread_id,
             chunks=[body_chunk],
             embeddings_by_chunk_id={body_chunk.chunk_id: [0.1] * EMBEDDING_DIM},
         )
         db.replace_message_chunks(
-            message_date="2024-01-01T00:00:00+00:00",
             claimant_id="slice1@x",
             thread_id=thread.thread_id,
             chunks=[att_chunk],
@@ -2414,14 +2326,12 @@ class TestAttachmentChunkSlicing:
         att_id = "attID" * 13
 
         db.replace_message_chunks(
-            message_date="2024-01-01T00:00:00+00:00",
             claimant_id="slice2@x",
             thread_id=thread.thread_id,
             chunks=[body],
             embeddings_by_chunk_id={body.chunk_id: [0.1] * EMBEDDING_DIM},
         )
         db.replace_message_chunks(
-            message_date="2024-01-01T00:00:00+00:00",
             claimant_id="slice2@x",
             thread_id=thread.thread_id,
             chunks=[att],
@@ -2432,7 +2342,6 @@ class TestAttachmentChunkSlicing:
         # Re-write body slice with a different chunk — attachment chunk stays.
         body2 = _make_chunk("body2-new".ljust(64, "0"), 0, "new body")
         db.replace_message_chunks(
-            message_date="2024-01-01T00:00:00+00:00",
             claimant_id="slice2@x",
             thread_id=thread.thread_id,
             chunks=[body2],

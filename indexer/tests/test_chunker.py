@@ -799,3 +799,257 @@ class TestLeadingTabsAtSplits:
         for c in a:
             assert normalized[c.char_start : c.char_end] == c.text
             assert c.token_est <= 60
+
+
+def _words(n: int) -> str:
+    """A paragraph of ``n`` real tokens: ``alpha`` then ``n - 1`` × `` alpha``."""
+    return " ".join(["alpha"] * n)
+
+
+# Shape catalogue for the rendered-chunk ceiling (#208, #550). Each entry is
+# (body, target_tokens, max_tokens); every shape runs with overlap 0 and with
+# overlap at a quarter of the target. Synthetic text only.
+MAX_TOKENS_SHAPES: dict[str, tuple[str, int, int]] = {
+    "plain_paragraphs": ("\n\n".join(_words(40) for _ in range(12)), 100, 150),
+    "sentence_split": ("A sentence of moderate length ends here. " * 120, 40, 60),
+    "near_limit_after_multi_span": (
+        "\n\n".join([_words(400), _words(400), _words(1400)]),
+        1000,
+        1500,
+    ),
+    "many_tiny_paragraphs": ("\n\n".join(["alpha"] * 200), 60, 60),
+    "tab_gap_in_paragraph": ("a\n" + "\t" * 20000 + "value\nb", 40, 60),
+    "space_gap_in_paragraph": ("a " + " " * 20000 + "value b", 40, 60),
+    "newline_gap_in_paragraph": ("a\n" + " \n" * 3000 + "value", 40, 60),
+    "tab_line_between_paragraphs": (
+        "\n\n".join(["word"] * 5) + "\n" + "\t" * 5000 + "\n" + "tail",
+        40,
+        60,
+    ),
+    "xlsx_rows_many_empty_cells": (
+        "\n".join("\t" * (300 * (i % 3)) + f"value{i}" for i in range(200)),
+        40,
+        60,
+    ),
+    "xlsx_rows_short": ("\n".join("\t" * (i % 4) + f"value{i}" for i in range(300)), 40, 60),
+    "cjk_without_spaces": ("这是一个测试句子没有空格" * 400, 40, 60),
+    "single_over_max_word": ("x" * 5000 + " y", 40, 60),
+    # Review round 1: `` differ`` is one token, ``differ`` two, so trimming
+    # the paragraph's leading space takes it from 1,500 tokens to 1,501.
+    "leading_space_trim_raises_count": (" differ" * 1500, 1000, 1500),
+    # Review round 1: the second paragraph is the overlap seed when a long
+    # whitespace line keeps the third from fitting beside it.
+    "overlap_seed_before_long_gap": (
+        "alpha alpha\n\nbeta beta\n" + "\t" * 5000 + "\ngamma",
+        4,
+        60,
+    ),
+    # Review round 2: the 97-token sub-span is the overlap seed, and only
+    # the rendered check finds the group over (its 2-token sibling joins
+    # at 102 tokens), so the cut must not emit the seed on its own.
+    "overlap_seed_cut_by_rendered_check": ("alpha\n\n" + "\u8fd9\u662fword  " * 21, 100, 100),
+}
+
+# Pinned on main before the #208/#550 fix: these shapes already met the
+# rendered ceiling there, so their chunk IDs (which bind each chunk's index
+# and text) must not move with the fix.
+MAX_TOKENS_PINNED_CASES: list[tuple[str, int]] = [
+    ("plain_paragraphs", 0),
+    ("plain_paragraphs", 25),
+    ("sentence_split", 0),
+    ("sentence_split", 10),
+    ("near_limit_after_multi_span", 0),
+    # Not ``newline_gap_in_paragraph``: it also fit on main, and its chunk
+    # texts are unchanged (``a`` and ``value``), but its thousands of
+    # whitespace-only lines pack into a different number of groups once
+    # the gaps between them are counted (#550). Those groups render empty
+    # and are skipped, so only the index of ``value``, and with it its ID,
+    # moves.
+    ("xlsx_rows_many_empty_cells", 0),
+    ("xlsx_rows_many_empty_cells", 10),
+    ("xlsx_rows_short", 0),
+    ("xlsx_rows_short", 10),
+    ("cjk_without_spaces", 0),
+    ("cjk_without_spaces", 10),
+    ("single_over_max_word", 0),
+    ("single_over_max_word", 10),
+]
+MAX_TOKENS_PIN_DIGEST = (
+    "a3ae3c0432873b0e43bb11555f3303390f8151e69147c24b3dc887b3fd9d7e85"  # pragma: allowlist secret
+)
+
+
+def _catalogue_cases() -> list[tuple[str, int]]:
+    """Every catalogue shape, once with overlap 0 and once with overlap > 0."""
+    return [
+        (name, overlap)
+        for name, (_, target, _) in MAX_TOKENS_SHAPES.items()
+        for overlap in (0, target // 4)
+    ]
+
+
+def _catalogue_chunks(name: str, overlap: int):
+    body, target, max_tokens = MAX_TOKENS_SHAPES[name]
+    return chunk_message(
+        message_pk="m1",
+        body_text=body,
+        target_tokens=target,
+        max_tokens=max_tokens,
+        overlap_tokens=overlap,
+    )
+
+
+class TestRenderedChunkCeiling:
+    """Every rendered chunk's real token count is <= max_tokens (#208, #550)."""
+
+    @pytest.mark.parametrize(("name", "overlap"), _catalogue_cases())
+    def test_rendered_chunks_fit_max_tokens(self, name, overlap):
+        body, _, max_tokens = MAX_TOKENS_SHAPES[name]
+        chunks = _catalogue_chunks(name, overlap)
+        assert chunks
+        normalized = normalize_body(body)
+        covered = bytearray(len(normalized))
+        for c in chunks:
+            assert estimate_tokens(c.text) <= max_tokens
+            assert c.token_est == estimate_tokens(c.text)
+            assert c.text and c.text == normalized[c.char_start : c.char_end]
+            covered[c.char_start : c.char_end] = b"\x01" * (c.char_end - c.char_start)
+        # Strictly increasing, not contiguous: a group of whitespace-only
+        # paragraphs renders empty and is skipped with its index.
+        indexes = [c.chunk_index for c in chunks]
+        assert indexes == sorted(set(indexes))
+        # No visible text is lost: every non-whitespace char sits in a chunk.
+        assert all(covered[i] or ch.isspace() for i, ch in enumerate(normalized))
+        # No chunk is only overlap: each one ends past the chunk before it.
+        for prev, nxt in zip(chunks, chunks[1:], strict=False):
+            assert nxt.char_end > prev.char_end
+
+    def test_whitespace_gap_between_sub_spans_is_not_rendered_into_one_chunk(self):
+        # #550: the splitters drop the 20,000 tabs between ``a`` and
+        # ``value``; the packer counted only the 3 tokens of ``a``,
+        # ``value`` and ``b``, and rendering the group put the tabs back
+        # (a 1,255-token chunk).
+        chunks = chunk_message(
+            message_pk="m1",
+            body_text="a\n" + "\t" * 20000 + "value\nb",
+            target_tokens=40,
+            max_tokens=60,
+            overlap_tokens=0,
+        )
+        assert [c.text for c in chunks] == ["a", "value\nb"]
+
+    def test_text_that_tokenizes_longer_joined_is_cut_by_its_rendered_count(self):
+        # BPE counts are not additive. Each paragraph word-splits into a
+        # 97-token and a 2-token sub-span with a 1-token gap: 100 counted
+        # apart, which the packer accepts at max 100, but 102 joined. The
+        # rendered count decides, so each such group is cut.
+        unit = "这是word  "
+        paragraph = unit * 21
+        body = "\n\n".join([paragraph] * 50)
+        chunks = chunk_message(
+            message_pk="m1", body_text=body, target_tokens=100, max_tokens=100, overlap_tokens=0
+        )
+        assert max(estimate_tokens(c.text) for c in chunks) <= 100
+        assert sum(c.text.count(unit.strip()) for c in chunks) == 21 * 50
+        assert len(chunks) == 100
+
+    def test_cut_takes_a_fitting_prefix_by_binary_search(self, monkeypatch):
+        # Twenty 20-token paragraphs that ``_fit_rendered`` gets as one
+        # group under a 100-token ceiling: each run must fit, end where
+        # the next span would overflow it, and cost O(log n) renders.
+        import src.chunker as chunker
+
+        source = "\n\n".join(_words(20) for _ in range(20))
+        group = chunker._paragraph_spans(source)
+        calls = 0
+        real_render = chunker._render_group
+
+        def counting_render(src, spans):
+            nonlocal calls
+            calls += 1
+            return real_render(src, spans)
+
+        monkeypatch.setattr(chunker, "_render_group", counting_render)
+        runs = chunker._fit_rendered(source, group, 100)
+        assert [s for run in runs for s in run] == group
+        for run, nxt in zip(runs, runs[1:], strict=False):
+            assert estimate_tokens(real_render(source, run)[0]) <= 100
+            assert estimate_tokens(real_render(source, [*run, nxt[0]])[0]) > 100
+        assert [len(run) for run in runs] == [4, 4, 4, 4, 4]
+        # One full render per cut plus about log2(20) for its search; one
+        # render per span dropped would be over 50.
+        assert calls <= len(runs) * 6
+
+    def test_ceiling_check_work_stays_linear_when_every_group_is_cut(self, monkeypatch):
+        # Worst case for the rendered check on a large body: every packed
+        # group overflows and is cut. Renders stay a small constant per
+        # chunk, and the body chunks well inside the time bound.
+        import time
+
+        import src.chunker as chunker
+
+        calls = 0
+        real_render = chunker._render_group
+
+        def counting_render(source, group):
+            nonlocal calls
+            calls += 1
+            return real_render(source, group)
+
+        monkeypatch.setattr(chunker, "_render_group", counting_render)
+        paragraph = "这是word  " * 21
+        body = "\n\n".join([paragraph] * 2000)
+        started = time.monotonic()
+        chunks = chunk_message(
+            message_pk="m1", body_text=body, target_tokens=100, max_tokens=100, overlap_tokens=0
+        )
+        assert time.monotonic() - started < 20.0
+        assert len(chunks) == 4000
+        assert all(c.token_est <= 100 for c in chunks)
+        # One render per paragraph (``_enforce_max_tokens`` measures it),
+        # one per packed group (the check that finds it over), and one per
+        # chunk; a 2-span group's cut needs no search.
+        assert calls <= 2000 + 2000 + len(chunks)
+
+    def test_long_gaps_are_packed_out_before_the_rendered_check(self, monkeypatch):
+        # Paragraphs separated by long whitespace-only lines. The packer
+        # counts each gap once, so no group holds one and the rendered
+        # check renders each gap at most once. Without that, groups of
+        # dozens of spans and gaps would be rendered and cut repeatedly.
+        import src.chunker as chunker
+
+        rendered_chars = 0
+        real_render = chunker._render_group
+
+        def counting_render(source, group):
+            nonlocal rendered_chars
+            if group:
+                rendered_chars += group[-1].end - group[0].start
+            return real_render(source, group)
+
+        monkeypatch.setattr(chunker, "_render_group", counting_render)
+        body = ("word\n" + "\t" * 5000 + "\n") * 200
+        chunks = chunk_message(
+            message_pk="m1", body_text=body, target_tokens=60, max_tokens=60, overlap_tokens=0
+        )
+        assert [c.text for c in chunks] == ["word"] * 200
+        assert rendered_chars <= 2 * len(body)
+
+    def test_in_budget_shapes_are_unchanged(self):
+        ids = [c.chunk_id for case in MAX_TOKENS_PINNED_CASES for c in _catalogue_chunks(*case)]
+        digest = hashlib.sha256("\n".join(ids).encode()).hexdigest()
+        assert digest == MAX_TOKENS_PIN_DIGEST
+
+    def test_overlap_seed_is_dropped_when_next_span_would_overflow(self):
+        # #208: 400 + 400 tokens, then a 1,400-token paragraph. The overlap
+        # carried from the first chunk (the whole 400-token paragraph) used
+        # to sit in front of the 1,400 tokens, giving a 1,801-token chunk.
+        p1, p2, p3 = _words(400), _words(400), _words(1400)
+        chunks = chunk_message(
+            message_pk="m1",
+            body_text="\n\n".join([p1, p2, p3]),
+            target_tokens=1000,
+            max_tokens=1500,
+            overlap_tokens=150,
+        )
+        assert [c.text for c in chunks] == [p1 + "\n\n" + p2, p3]
