@@ -21,7 +21,7 @@ import pytest
 from fastmcp.exceptions import ToolError
 from src.tools.search import _MAX_EVIDENCE_LIMIT, register_search_tools
 
-from tests.conftest import insert_reaped
+from tests.conftest import RECENT_REAP_AT, RECENT_REAP_DAY, insert_reaped
 
 
 def _handler(fake_server, fake_embed, db):
@@ -665,7 +665,7 @@ class TestGetEvidence:
                 conn,
                 message_id="gone@example.com",
                 thread_id="t-gone",
-                reaped_at="2026-09-30T08:15:00+00:00",
+                reaped_at=RECENT_REAP_AT,
             )
         handler = self._handler(fake_server, fake_embed, chunked_db)
         opened: list[int] = []
@@ -677,7 +677,7 @@ class TestGetEvidence:
 
         monkeypatch.setattr(chunked_db, "_connect", counted)
         message = _error(handler(query="invoice", thread_id="t-gone"))
-        assert "reaped from the index on 2026-09-30 (mirror retention)" in message
+        assert f"reaped from the index on {RECENT_REAP_DAY} (mirror retention)" in message
         # Review round 1: the live miss and the reap record share a snapshot.
         assert len(opened) == 1
 
@@ -697,14 +697,14 @@ class TestGetEvidence:
                     conn,
                     message_id="alpha@example.com",
                     thread_id="t-alpha",
-                    reaped_at="2026-09-30T08:15:00+00:00",
+                    reaped_at=RECENT_REAP_AT,
                 )
             return fetch(*args, **kwargs)
 
         monkeypatch.setattr(chunked_db, "get_query_evidence_chunks", reap_then_fetch)
         handler = self._handler(fake_server, fake_embed, chunked_db)
         message = _error(handler(query="invoice", thread_id="t-alpha"))
-        assert "reaped from the index on 2026-09-30 (mirror retention)" in message
+        assert f"reaped from the index on {RECENT_REAP_DAY} (mirror retention)" in message
 
     def test_blank_query_returns_guidance(self, fake_server, fake_embed, chunked_db):
         handler = self._handler(fake_server, fake_embed, chunked_db)

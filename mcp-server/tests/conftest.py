@@ -4,7 +4,7 @@ import hashlib
 import json
 import sqlite3
 from contextlib import closing
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from email.utils import parseaddr
 from pathlib import Path
 
@@ -412,6 +412,12 @@ def claimant_of(message_id: str, variant: str = "") -> str:
     ``message_id``: the Message-ID plus the first eight hex digits of
     the file hash (``indexer/src/parser.py`` ``claimant_id``)."""
     return f"{message_id}#{source_sha256(message_id, variant)[:8]}"
+
+
+# A reap time inside the read-side retention window, relative to the
+# run so fixtures do not age out of it (#576), and its day.
+RECENT_REAP_AT = (datetime.now(UTC) - timedelta(days=1)).replace(microsecond=0).isoformat()
+RECENT_REAP_DAY = RECENT_REAP_AT[:10]
 
 
 def insert_reaped(
