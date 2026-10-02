@@ -1936,6 +1936,43 @@ class TestMessageDateOnChunks:
         ).fetchone()
         assert row["message_date"] == "2024-06-01T12:00:00+00:00"
 
+    @pytest.mark.parametrize("attachment_id", [None, "att-md3"])
+    def test_kept_chunks_take_the_new_message_date(self, db, attachment_id):
+        """A reprocess that keeps a chunk (same chunk ID) but carries a
+        different message date — a parser change re-reading the same
+        ``Date:`` header — rewrites the kept row's date, so the chunk
+        never disagrees with ``messages.sent_at``. Only the slice being
+        written is touched, and no chunk is re-inserted."""
+        _seed_thread_for_message(db, "m-md3@x", "t-md3")
+        kept = _make_chunk("md3k".ljust(64, "0"), 0, "kept")
+        other = _make_chunk("md3o".ljust(64, "0"), 0, "other slice")
+        other_slice = "att-other" if attachment_id is None else None
+        old, new = "2024-01-01T00:00:00+00:00", "2024-06-01T12:00:00+00:00"
+        for chunk, slice_id in ((kept, attachment_id), (other, other_slice)):
+            db.replace_message_chunks(
+                claimant_id="m-md3@x",
+                thread_id="t-md3",
+                chunks=[chunk],
+                embeddings_by_chunk_id={chunk.chunk_id: _one_hot(0)},
+                attachment_id=slice_id,
+                message_date=old,
+            )
+
+        result = db.replace_message_chunks(
+            claimant_id="m-md3@x",
+            thread_id="t-md3",
+            chunks=[kept],
+            embeddings_by_chunk_id={},
+            attachment_id=attachment_id,
+            message_date=new,
+        )
+
+        assert result == {"inserted": 0, "deleted": 0, "kept": 1}
+        dates = dict(
+            db._conn.execute("SELECT chunk_id, message_date FROM message_chunks").fetchall()
+        )
+        assert dates == {kept.chunk_id: new, other.chunk_id: old}
+
     def test_schema_rejects_chunk_without_message_date(self, db):
         """Timeline retrieval orders by ``message_date`` with no
         fallback, so the column is ``NOT NULL``: a write path that

@@ -1028,7 +1028,8 @@ class Database:
 
         ``message_date`` is the source message's ``Date:`` header in
         ISO 8601 form (``msg.date.isoformat()``), stored on every new
-        chunk row so timeline-style retrieval
+        chunk row and rewritten on kept rows whose date differs, so each
+        chunk carries its message's ``sent_at`` and timeline-style retrieval
         (``get_recent_chunks_for_thread`` / ``summarize_thread``) can
         order by message time instead of the chunker's wall-clock
         insert time. The parser always yields a date (falling back to
@@ -1075,6 +1076,16 @@ class Database:
                     cur.execute("DELETE FROM message_chunks_fts WHERE rowid = ?", (fts_rowid,))
                 cur.execute("DELETE FROM message_chunks_vec WHERE chunk_id = ?", (chunk_id,))
                 cur.execute("DELETE FROM message_chunks WHERE chunk_id = ?", (chunk_id,))
+
+            # Kept chunks take the incoming date too: a re-parse can
+            # date the same bytes differently (a parser fix), and the
+            # chunk must not disagree with ``messages.sent_at``. After the
+            # deletes, the slice's remaining rows are exactly the kept ones.
+            cur.execute(
+                "UPDATE message_chunks SET message_date = ? "
+                "WHERE claimant_id = ? AND attachment_id IS ? AND message_date != ?",
+                (message_date, claimant_id, attachment_id, message_date),
+            )
 
             now_iso = datetime.now(UTC).isoformat()
             for chunk in to_insert:
