@@ -532,6 +532,8 @@ class AttachmentResult:
     subject: str
     folder: str
     date_last: datetime
+    # The carrying message's ``sent_at``; None when it has no messages row.
+    sent_at: str | None = None
     senders: list[str] = field(default_factory=list)
     extraction_status: str | None = None
     text_snippet: str = ""
@@ -561,6 +563,7 @@ def _row_to_attachment_result(r) -> AttachmentResult:
         subject=r["display_subject"] or r["subject"],
         folder=r["folder"],
         date_last=datetime.fromisoformat(r["date_last"]),
+        sent_at=r["sent_at"],
         senders=json.loads(r["senders"]),
         extraction_status=r["extraction_status"],
         text_snippet=r["text_snippet"] or "",
@@ -1340,8 +1343,16 @@ class Database:
             # evidence" gap where the LLM saw body text instead of
             # the attachment the user asked about.
             with timings.stage("evidence_fetch"):
+                # A date range scopes the passages as well as the threads:
+                # a thread qualifies by its span, a passage only by its
+                # own message's ``sent_at``.
                 grouped = self.get_query_evidence_chunks(
-                    query_text, wanted, query_embedding, per_thread_limit=evidence_per_thread
+                    query_text,
+                    wanted,
+                    query_embedding,
+                    per_thread_limit=evidence_per_thread,
+                    date_from=date_from,
+                    date_to=date_to,
                 )
             for result in candidates:
                 result.evidence_chunks = grouped.get(result.thread_id, [])
@@ -1606,10 +1617,10 @@ class Database:
         matches not already surfaced — a finder ("the quote PDF from
         Acme") is better served by the obvious filename hit on top. With
         no ``query`` the index is scanned by the structured filters
-        alone, newest thread activity first.
+        alone, newest carrying message (``sent_at``) first.
 
         Filters: ``content_type`` is an exact MIME match; ``date_from`` /
-        ``date_to`` bound the parent thread's activity (a bare date
+        ``date_to`` bound the carrying message's ``sent_at`` (a bare date
         includes the whole day); ``extracted_only`` keeps only
         attachments whose text extraction succeeded; ``from_addr`` keeps
         only attachments on threads the address sent on (matched against
@@ -1680,13 +1691,16 @@ class Database:
         if content_type:
             clauses.append("a.content_type = ?")
             params.append(content_type)
+        # An attachment is dated by the message carrying it, not by its
+        # thread's span: a January attachment on a thread that ran to
+        # September is not "from" September.
         date_from_iso, date_to_iso = _normalize_date_range(date_from, date_to)
-        if date_from_iso is not None:
-            clauses.append("t.date_last >= ?")
-            params.append(date_from_iso)
-        if date_to_iso is not None:
-            clauses.append("t.date_first <= ?")
-            params.append(date_to_iso)
+        if date_from_iso is not None or date_to_iso is not None:
+            clauses.append(
+                "EXISTS (SELECT 1 FROM messages ms WHERE ms.claimant_id = a.claimant_id "
+                "AND (? IS NULL OR ms.sent_at >= ?) AND (? IS NULL OR ms.sent_at <= ?))"
+            )
+            params += [date_from_iso, date_from_iso, date_to_iso, date_to_iso]
         if extracted_only:
             # ``e`` is LEFT JOINed, so this also drops attachments with no
             # extraction row at all (status reads NULL) — the intent of
@@ -1710,7 +1724,7 @@ class Database:
             "SELECT a.attachment_id, COALESCE(m.message_id, a.claimant_id) AS message_id, "
             "a.claimant_id, a.thread_id, a.filename, "
             "a.content_type, a.size_bytes, t.subject, t.display_subject, "
-            "t.folder, t.date_last, t.senders, e.extraction_status, "
+            "t.folder, t.date_last, m.sent_at, t.senders, e.extraction_status, "
             "substr(e.extracted_text, 1, 240) AS text_snippet, "
             f"{_SOURCE_COLUMNS}, "
             "bm25(attachments_fts) AS score "
@@ -1780,7 +1794,7 @@ class Database:
             "SELECT a.attachment_id, COALESCE(m.message_id, a.claimant_id) AS message_id, "
             "a.claimant_id, a.thread_id, a.filename, "
             "a.content_type, a.size_bytes, t.subject, t.display_subject, "
-            "t.folder, t.date_last, t.senders, e.extraction_status, "
+            "t.folder, t.date_last, m.sent_at, t.senders, e.extraction_status, "
             "substr(e.extracted_text, 1, 240) AS text_snippet, "
             f"{_SOURCE_COLUMNS}, "
             "best.score AS score "
@@ -1821,7 +1835,7 @@ class Database:
             "SELECT a.attachment_id, COALESCE(m.message_id, a.claimant_id) AS message_id, "
             "a.claimant_id, a.thread_id, a.filename, "
             "a.content_type, a.size_bytes, t.subject, t.display_subject, "
-            "t.folder, t.date_last, t.senders, e.extraction_status, "
+            "t.folder, t.date_last, m.sent_at, t.senders, e.extraction_status, "
             "substr(e.extracted_text, 1, 240) AS text_snippet, "
             f"{_SOURCE_COLUMNS}, "
             "0.0 AS score "
@@ -1830,7 +1844,7 @@ class Database:
             "LEFT JOIN attachment_extractions e ON e.attachment_id = a.attachment_id "
             "LEFT JOIN messages m ON m.claimant_id = a.claimant_id "
             "WHERE " + " AND ".join(where) + " "  # nosec B608
-            "ORDER BY t.date_last DESC LIMIT ?"
+            "ORDER BY m.sent_at DESC LIMIT ?"
         )
         try:
             rows = self._fetchall(sql, params)
@@ -2310,6 +2324,8 @@ class Database:
         thread_ids: list[str],
         embedding: list[float],
         per_thread_limit: int,
+        date_from: str | None = None,
+        date_to: str | None = None,
     ) -> dict[str, list[ChunkResult]]:
         """Per-thread evidence for ``query_text``, as ``ask_mailbox`` sees it.
 
@@ -2319,7 +2335,8 @@ class Database:
         thread's slice. ``hybrid_search(with_evidence=True)`` and the
         thread-scoped ``get_evidence`` path both call this, so an audit
         of one thread returns the passages ``ask_mailbox`` was given for
-        it (#461).
+        it (#461). ``date_from`` / ``date_to`` keep only passages whose
+        message's ``sent_at`` is in the range.
         """
         matched_attachments = self._matched_attachments(query_text, thread_ids)
         return self.get_evidence_chunks_for_threads(
@@ -2327,6 +2344,8 @@ class Database:
             embedding,
             per_thread_limit=per_thread_limit,
             matched_attachments=matched_attachments,
+            date_from=date_from,
+            date_to=date_to,
         )
 
     def get_evidence_chunks_for_threads(
@@ -2335,6 +2354,8 @@ class Database:
         embedding: list[float],
         per_thread_limit: int = 3,
         matched_attachments: dict[str, list[str]] | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
     ) -> dict[str, list[ChunkResult]]:
         """Return up to ``per_thread_limit`` best-matching chunks per thread.
 
@@ -2368,9 +2389,15 @@ class Database:
         even when a body chunk, or another attachment's chunk, has
         higher dense similarity. Remembering only the thread let the cap
         keep unrelated attachments and drop the one that matched.
+
+        ``date_from`` / ``date_to`` keep only chunks whose
+        ``message_date`` (their message's ``sent_at``) is in the range,
+        normalized as the thread filters normalize it; a thread with no
+        chunk in range gets an empty list.
         """
         if not thread_ids:
             return {}
+        date_from_iso, date_to_iso = _normalize_date_range(date_from, date_to)
         try:
             serialized = sqlite_vec.serialize_float32(embedding)
             placeholders = ",".join(["?"] * len(thread_ids))
@@ -2420,9 +2447,21 @@ class Database:
                 "         AND a2.claimant_id = c.claimant_id "
                 "  ) "
                 f"WHERE c.thread_id IN ({placeholders}) "  # nosec B608
+                "AND (? IS NULL OR c.message_date >= ?) "
+                "AND (? IS NULL OR c.message_date <= ?) "
                 "ORDER BY score ASC"
             )
-            rows = self._fetchall(sql, [serialized, *thread_ids])
+            rows = self._fetchall(
+                sql,
+                [
+                    serialized,
+                    *thread_ids,
+                    date_from_iso,
+                    date_from_iso,
+                    date_to_iso,
+                    date_to_iso,
+                ],
+            )
         except (sqlite3.Error, ValueError) as e:
             # Same catch surface as ``_chunk_vector_search`` — missing
             # vec extension, corrupt vec row, malformed serialised

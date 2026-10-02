@@ -236,7 +236,10 @@ class EvidenceChunk(_Output):
     )
     attachment_filename: str | None
     attachment_mime: str | None
-    message_date: str | None
+    sent_at: str | None = Field(
+        description="Send date of the passage's message (its Date: header) in UTC, ISO 8601; "
+        "null when unknown."
+    )
     char_start: int = Field(description="Start offset of the passage in its source text.")
     char_end: int
     text: str
@@ -281,6 +284,10 @@ class AttachmentHit(_Output):
     subject: str = Field(description="Parent thread subject.")
     folder: str
     date_last: datetime = Field(description="Parent thread's latest activity.")
+    sent_at: str | None = Field(
+        description="Send date of the message carrying the attachment (its Date: header) "
+        "in UTC, ISO 8601; date filters and the no-query order use it. Null when unknown."
+    )
     senders: list[str] = Field(description=f"Thread senders, at most {MAX_LISTED}.")
     sender_count: int
     extraction_status: str | None = Field(description="Null when no extraction has run.")

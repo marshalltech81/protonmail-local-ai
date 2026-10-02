@@ -593,7 +593,7 @@ def register_search_tools(
                             attachment_id=c.attachment_id,
                             attachment_filename=_clip_optional(c.attachment_filename),
                             attachment_mime=_clip_optional(c.attachment_mime),
-                            message_date=c.message_date,
+                            sent_at=c.message_date,
                             char_start=c.char_start,
                             char_end=c.char_end,
                             text=c.text[:_EVIDENCE_CHUNK_CHARS],
@@ -668,8 +668,8 @@ def register_search_tools(
         so you can follow up with get_thread or get_evidence.
 
         With no query it lists attachments by the structured filters
-        alone (content_type / date / sender), newest thread activity
-        first. Attachments on messages filed in Trash are left out.
+        alone (content_type / date / sender), newest message first.
+        Attachments on messages filed in Trash are left out.
 
         To read what an attachment says, use get_evidence (the matching
         passages of its extracted text, each capped at 1600 characters)
@@ -685,8 +685,9 @@ def register_search_tools(
             from_addr: Restrict to attachments on threads sent by this
                        address or domain ("jane@example.com",
                        "@example.com").
-            date_from: ISO 8601 date lower bound (parent thread activity).
-            date_to: ISO 8601 date upper bound.
+            date_from: ISO 8601 date lower bound on the send date of
+                       the message carrying the attachment.
+            date_to: ISO 8601 date upper bound, likewise.
             extracted_only: True to return only attachments whose text
                             extraction succeeded.
             limit: Maximum attachments to return (default 20, clamped
@@ -757,6 +758,7 @@ def register_search_tools(
                     subject=clip(a.subject, HEADER_CHAR_LIMIT),
                     folder=a.folder,
                     date_last=a.date_last,
+                    sent_at=a.sent_at,
                     senders=[clip(s, HEADER_CHAR_LIMIT) for s in a.senders[:MAX_LISTED]],
                     sender_count=len(a.senders),
                     extraction_status=a.extraction_status,
@@ -780,7 +782,7 @@ def register_search_tools(
                 f"    Thread ID: {a.thread_id} | Message-ID: {a.message_id} "
                 f"| Claimant ID: {a.claimant_id}"
             )
-            lines.append(f"    Date: {a.date_last.strftime('%Y-%m-%d')}")
+            lines.append(f"    Sent: {(a.sent_at or '')[:10] or 'unknown date'}")
             if a.senders:
                 senders = ", ".join(clip(s, HEADER_CHAR_LIMIT) for s in a.senders[:3])
                 lines.append(f"    From: {senders}")

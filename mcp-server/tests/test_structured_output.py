@@ -445,3 +445,25 @@ class TestSourceProvenance:
             conn.close()
             evidence = _call(_server(db), "get_evidence", query="hello", thread_id="t1")
             assert [c["source_file"] for t in evidence["threads"] for c in t["chunks"]] == [None]
+
+
+class TestMessageTime:
+    """Every per-message and per-passage output names its time
+    ``sent_at``, as the message's stored ``sent_at`` string
+    (docs/architecture.md, Message time)."""
+
+    def test_evidence_chunks_carry_their_message_sent_at(self, messages_db):
+        server = _server(messages_db)
+        evidence = _call(server, "get_evidence", query="spreadsheet", thread_id="t1")
+        chunks = [c for t in evidence["threads"] for c in t["chunks"]]
+        assert chunks
+        for chunk in chunks:
+            assert "message_date" not in chunk
+            message = _call(server, "get_message", message_id=chunk["claimant_id"])["message"]
+            assert chunk["sent_at"] == message["sent_at"]
+
+    def test_attachment_hits_carry_the_carrying_message_sent_at(self, attachments_db):
+        server = _server(attachments_db)
+        hit = _call(server, "search_attachments", query="acme")["results"][0]
+        message = _call(server, "get_message", message_id=hit["claimant_id"])["message"]
+        assert hit["sent_at"] == message["sent_at"] == "2024-03-10T09:00:00+00:00"

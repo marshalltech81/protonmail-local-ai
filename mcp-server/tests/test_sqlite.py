@@ -5071,3 +5071,97 @@ class TestDefaultTrashExclusion:
         seeded_db.semantic_search(_TRASH_QUERY, limit=5)
         assert ks["thread"] == [10, 10] and len(ks["chunk"]) == 2
         assert calls == []
+
+
+class TestDateRangeMessageTime:
+    """``date_from`` / ``date_to`` bound ``sent_at`` everywhere; a thread
+    qualifies by its span, an evidence passage and an attachment by their
+    own message's time (docs/architecture.md, Message time).
+
+    Thread ``t-a``: ``a1`` (January, with ``a1-att``) and ``a2``
+    (September), so its span overlaps any 2024 range. Thread ``t-b``:
+    ``b1`` (June, with ``b1-att``).
+    """
+
+    @staticmethod
+    def _db(tmp_path) -> Database:
+        from tests.conftest import _insert_attachment, _insert_extraction, _insert_message
+
+        conn, path = _open_built_db_conn(tmp_path, "message-time.db")
+        rows = (
+            ("a1", "t-a", "2024-01-10T09:00:00+00:00", "report draft january", True),
+            ("a2", "t-a", "2024-09-01T09:00:00+00:00", "report final september", False),
+            ("b1", "t-b", "2024-06-01T09:00:00+00:00", "report notes june", True),
+        )
+        for message_id, thread_id, sent_at, body, attached in rows:
+            _insert_message(
+                conn,
+                message_id=message_id,
+                thread_id=thread_id,
+                sent_at=sent_at,
+                subject="report",
+                has_attachments=attached,
+                body=body,
+                attachment_text=f"report attachment {message_id}" if attached else None,
+            )
+            if attached:
+                _insert_attachment(
+                    conn,
+                    message_id=message_id,
+                    thread_id=thread_id,
+                    attachment_id=f"{message_id}-att",
+                    filename=f"report-{message_id}.pdf",
+                )
+                _insert_extraction(
+                    conn,
+                    attachment_id=f"{message_id}-att",
+                    extracted_text=f"report attachment {message_id}",
+                )
+        # The fixture helper dates a thread by its first message; widen
+        # ``t-a`` to its real span as the indexer would.
+        conn.execute(
+            "UPDATE threads SET date_last = '2024-09-01T09:00:00+00:00' WHERE thread_id = 't-a'"
+        )
+        conn.commit()
+        conn.close()
+        return Database(str(path))
+
+    @pytest.mark.parametrize("query", [None, "report"])
+    def test_attachments_filter_on_the_carrying_message(self, tmp_path, query):
+        db = self._db(tmp_path)
+
+        def ids(**bounds) -> set[str]:
+            return {a.attachment_id for a in db.search_attachments(query=query, **bounds)}
+
+        # t-a's span overlaps both ranges; only the carrying message counts.
+        assert ids(date_from="2024-03-01") == {"b1-att"}
+        assert ids(date_to="2024-03-01") == {"a1-att"}
+        assert ids(date_from="2024-07-01") == set()
+
+    def test_attachment_scan_is_newest_sent_first(self, tmp_path):
+        results = self._db(tmp_path).search_attachments()
+        assert [(a.attachment_id, a.sent_at) for a in results] == [
+            ("b1-att", "2024-06-01T09:00:00+00:00"),
+            ("a1-att", "2024-01-10T09:00:00+00:00"),
+        ]
+
+    def test_evidence_passages_are_scoped_to_the_range(self, tmp_path):
+        db = self._db(tmp_path)
+
+        def evidence(**bounds) -> dict[str, set[str]]:
+            results = db.hybrid_search(
+                "report",
+                [1.0, 0.0, 0.0, 0.0],
+                limit=5,
+                with_evidence=True,
+                evidence_per_thread=6,
+                **bounds,
+            )
+            return {r.thread_id: {c.claimant_id for c in r.evidence_chunks} for r in results}
+
+        a1, a2, b1 = (claimant_of(m) for m in ("a1", "a2", "b1"))
+        assert evidence() == {"t-a": {a1, a2}, "t-b": {b1}}
+        assert evidence(date_from="2024-03-01") == {"t-a": {a2}, "t-b": {b1}}
+        assert evidence(date_to="2024-03-01") == {"t-a": {a1}}
+        # The span overlaps, but no passage is from a message in range.
+        assert evidence(date_from="2024-07-01", date_to="2024-08-01") == {"t-a": set()}
