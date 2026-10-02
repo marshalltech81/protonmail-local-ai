@@ -114,10 +114,10 @@ guessing about semantics, completeness, or identity.
    Completed). Received date deferred (see Deferred).
 4. ~~**Honest `get_mailbox_status`**~~ Done 2026-09-28 (see Recently
    Completed).
-5. **MCP endpoint auth — pinned 2026-09-28** pending the deployment
-   decision (see Open decisions). Localhost topology alone is not a
-   trust boundary against other local processes, but the right design
-   depends on where the server runs.
+5. **MCP endpoint auth — pinned 2026-09-28; decided 2026-10-02:** the
+   local static bearer token ships before go-live, built after #498
+   (see Resolved decisions 13). Localhost topology alone is not a
+   trust boundary against other local processes.
 6. ~~**Delete the dead action/IMAP surface.**~~ Done 2026-09-28 (see
    Recently Completed).
 7. ~~**Source integrity exposure.**~~ Done 2026-09-28 (see Recently
@@ -424,7 +424,7 @@ checklist) or an owner decision.
 | 3.8 Citation contract | Partly done | #457, #495 (`ask_mailbox` statement coverage and quote checks), #519 and #525 (quote and label edge cases), #532 and #545 (thread-scoped `get_evidence` reproduces `ask_mailbox`'s evidence for that thread) | the same contract for `summarize_thread` and `extract_from_emails`; semantic support (#284); mailbox-wide audit parity (#537) |
 | 4.1 Entities | Done | #459, #527 (orphan pruning, #464) | — |
 | 4.2 Source authority | Done | #459, #474 (Spam guard), #523 and #542 (rules file kept private and validated) | verdict-header gating after go-live (#463) |
-| 4.3 Temporal retrieval | Not started | — | — |
+| 4.3 Temporal retrieval | In progress (2026-10-02) | — | temporal fields |
 | 4.4 Retention | Mostly done | #451 (mirror default), #475 (Trash hidden from default search) | user-controlled retention; reaped-citation behaviour |
 | 5.1 Hardened `brief_issue` | Not started | — | needs Phase 3 usage on real mail |
 | 5.2 Support/contradict | Built, experimental | #467 (`check_conclusion`), #493 (evidence-slot refill) | quote/support verification |
@@ -655,17 +655,19 @@ them (one test-first commit per issue, `Fixes #N` per issue):
 **Handoff 2026-10-02, morning — start here.** **#277 is fixed
 (#515):** mbsync's healthcheck reports liveness rather than a completed
 sync, so a long first sync no longer keeps the indexer and MCP server
-from starting. #277 no longer blocks the first deployment; go live
-with the checklist below, on a host where every local user and process
-is trusted: the MCP endpoint has no authentication yet (Phase 1 item
-5, Open decisions 3), and localhost is not a trust boundary. Rebuild
+from starting. #277 no longer blocks the first deployment. Go live
+with the checklist below only once #432 and the MCP bearer token land
+(the token is built after #498; Phase 1 item 5, Resolved decisions
+13): the MCP endpoint has no authentication yet, and localhost is not
+a trust boundary. Even with the token, the host must be one where
+processes running as the operator are trusted. Rebuild
 any index created before the overnight changes from Maildir (the
 volume wipe in `docs/troubleshooting.md`, "Indexer refuses to
 start"): #527 and #544 edited the v0 schema, and #546, #547 and #548 change
 parsed or chunked text, none of which reaches an existing database.
-Decide #432 (below) before go-live too: until it is fixed, a crafted
-xlsx attachment can exhaust the indexer's memory or hold its only
-worker. Before the overnight run, four Phase 3 slices
+Land #432 before go-live too (decided 2026-10-02: a streaming
+pre-pass, in progress): until it is fixed, a crafted xlsx attachment
+can exhaust the indexer's memory or hold its only worker. Before the overnight run, four Phase 3 slices
 (#493–#496; the status table under Phase 3 is current), eight
 defaults-audit fixes and #510 merged (see Recently Completed).
 Overnight (see Recently Completed): mbsync tolerates far-side folders
@@ -680,12 +682,14 @@ open a line (#433, #546); stored subjects are capped at
 later part into the body (#450, #548); and the P3 fixes listed there.
 No code PR is open.
 
-Needs the owner: the decisions listed under **Open decisions**
-(items 3–14), ordered by when they matter and each with options and a
-recommendation. Start the next session by walking through them; record
-each answer under Resolved decisions and strike it there. Items 3 and 4
-gate go-live; 5 and 6 are owner-filed features ready to start on a
-"go"; 7–14 can wait.
+Owner decisions: Open decisions 3–14 were answered on 2026-10-02
+(Resolved decisions 13). In progress from those answers: #498
+(Streamable HTTP only), #432 (xlsx streaming pre-pass), #497 (Bridge
+app on macOS), #537 (`get_evidence` `max_threads`) and #556 (Compose
+and shell scanning), plus the Phase 3–5 slices 3.8, 5.2's quote
+checks, 3.1's scenarios, 4.4's reaped-source lookups and 4.3's
+temporal fields. MCP auth (the local bearer token) follows #498,
+since both touch `mcp-server/src/main.py`.
 
 Waiting on real data: #487 (evidence and output budgets), #488
 (container resource budgets) and #282 (the mbsync stall deadline, set
@@ -715,7 +719,7 @@ Next session, in order:
    the measurements waiting on real data (#287 budgets, #288, #289).
 
 Backlog filed from review (P3 or edge cases, not scheduled): #454,
-and from 2026-10-02 #524, #526, #533 and #537 (#442, #446, #447,
+and from 2026-10-02 #524, #526 and #533 (#537 is in progress; #442, #446, #447,
 #449, #450, #455, #456, #460, #461, #464, #465, #468, #471, #477,
 #478, #499, #500, #502 and #541 are fixed; #433 too, and #550 joins
 the reindex bundle).
@@ -1275,114 +1279,90 @@ do not ship persisted claims without them.
       inference provider.
     - Entity resolution is deterministic only, so model-suggested
       merges and a confirmation flow are not built.
+13. **Owner answers to the 2026-10-02 open decisions:** (were open
+    decisions 3–14)
+    - **MCP endpoint auth (Phase 1 item 5):** ship the local static
+      bearer token before go-live, built after #498 lands, since both
+      touch `mcp-server/src/main.py`. The token stops other local
+      accounts and browser-origin requests that cannot read the
+      secret; it does not stop code running as the operator's own user
+      (a malicious package can read the mode-600 file), so the trust
+      condition narrows to "processes running as the operator are
+      trusted". Check that the MCP client can send a bearer header
+      before building it. Design (decided):
+      - Docker secret `.secrets/mcp_auth_token.txt` (mode 600) read
+        via `_read_secret`; the env-var fallback stays a non-container
+        local-dev convenience only, never the Compose path.
+        Constant-time compare; fail closed on an empty token.
+      - It plugs into the MCP SDK's `TokenVerifier` / `AuthSettings`
+        hooks: `sse_app()` and `streamable_http_app()` add the
+        bearer-auth middleware themselves (so `server.run()` and
+        `dual` both get it), and `custom_route` endpoints such as
+        `/health` stay unauthenticated. `AuthSettings` requires an
+        `issuer_url` even when only a verifier is used.
+      - Not chosen, and each needs its own owner decision and a
+        privacy-posture update in AGENTS.md first, because both send
+        mailbox content off the host (Cloudflare adds a third-party
+        transit hop): own devices over a private network (gate outside
+        the app with Tailscale, a reverse proxy or Cloudflare Access,
+        the static token as defence in depth) and hosted clients
+        (claude.ai / ChatGPT connectors; an OAuth 2.1 resource server
+        validating tokens from an external IdP). Either must add the
+        approved external Host (and HTTPS Origin) to the
+        `TransportSecuritySettings` allowlist in
+        `mcp-server/src/main.py`, which accepts only localhost,
+        loopback and `mcp-server`, so proxied requests fail before
+        they reach auth. Add each approved name narrowly and keep
+        DNS-rebinding protection on. The hosted option must also set
+        `AuthSettings.resource_server_url` to the externally visible
+        MCP URL, because the SDK registers the RFC 9728
+        protected-resource metadata route and the `resource_metadata`
+        challenge parameter only when that URL is set; without them
+        connectors cannot discover the authorization server, and the
+        proxy must expose that well-known route.
+    - **#432 xlsx duplicate cells:** option (c), a streaming pre-pass
+      that counts raw `<c>` nodes and cuts the sheet before an
+      over-budget row, public APIs only. It changes the extracted
+      text, so it bumps the xlsx entry in `EXTRACTOR_VERSIONS`. In
+      progress; lands before go-live.
+    - **#498 Streamable HTTP as the only transport:** go. Breaking:
+      clients move from `/sse` to `/mcp`, and an explicit `sse` or
+      `dual` fails startup with a migration message; it changes the
+      AGENTS.md default-transport rule. Confirm the MCP client
+      connects over `/mcp` first. In progress.
+    - **#497 Bridge app on macOS:** go now rather than after go-live.
+      An optional overlay that skips the Bridge container and points
+      mbsync at `host.docker.internal`; the container stays the
+      default. Switching an existing Maildir needs the documented
+      migration (credentials, certificate pin, UIDVALIDITY). The
+      macOS app's certificate is issued for `localhost` and
+      `127.0.0.1`, not `host.docker.internal`, so the first step is a
+      certificate-valid connection path (never a TLS bypass). In
+      progress.
+    - **#537 `get_evidence` thread count:** add `max_threads`. In
+      progress.
+    - **#533 look-alike letters in delimiter tags:** defer.
+    - **#526 `authority.toml` on Linux Docker Engine:** stays
+      documented; deferred until a Linux deployment.
+    - **#524 folders opened by a failed mbsync attempt:** defer.
+    - **#494 agent-eval scoring:** keep strict argument matching and
+      first-call tool selection; build the live-trace recorder after
+      go-live.
+    - **#496 token counting:** keep the 3-characters-per-token
+      estimate.
+    - **#495 CJK handling:** keep the CJK terminators and word counts.
+    - **Compose and shell scanning (#491/#512):** build it, filed as
+      #556. In progress.
+    - **#287 request cancellation:** waits for real-mail measurements
+      before it is designed or built.
 
 ## Open decisions
 
 1. ~~Default deletion/retention mode~~ and 2. ~~`brief_issue` as an
    MCP tool or a script~~: resolved 2026-10-01 (Resolved decisions 12).
-3. MCP endpoint auth (Phase 1 item 5, pinned 2026-09-28). The design
-   follows the deployment target:
-   - local only, deployable outside this repo → static bearer token
-     stored as a Docker secret (`.secrets/mcp_auth_token.txt`, mode
-     600) and read via `_read_secret`; the env-var fallback stays a
-     non-container local-dev convenience only, never the Compose
-     path. Constant-time compare, fail closed on an empty token
-   - own devices over a private network → gate outside the app
-     (Tailscale, reverse proxy, Cloudflare Access), static token as
-     optional defence in depth
-   - hosted clients (claude.ai / ChatGPT connectors) → OAuth 2.1
-     resource server validating tokens from an external IdP
-   Both non-local options send mailbox content off the host (and
-   Cloudflare adds a third-party transit hop), so either needs an
-   owner decision and a privacy-posture update in AGENTS.md first.
-   Either one also has to add the approved external Host (and HTTPS
-   Origin) to the `TransportSecuritySettings` allowlist in
-   `mcp-server/src/main.py`. The allowlist currently accepts only
-   localhost, loopback and `mcp-server`, so proxied requests fail
-   before they reach auth. Add each approved name narrowly and keep
-   DNS-rebinding protection on. The hosted option must also set
-   `AuthSettings.resource_server_url` to the externally visible MCP
-   URL, because the SDK registers the RFC 9728 protected-resource
-   metadata route and the `resource_metadata` challenge parameter
-   only when that URL is set. Without them connectors cannot discover
-   the authorization server. The proxy must expose that well-known
-   route.
-   Any in-app option plugs into the MCP SDK's `TokenVerifier` /
-   `AuthSettings` hooks: `sse_app()` and `streamable_http_app()` add
-   the bearer-auth middleware themselves (so `server.run()` and
-   `dual` both get it), and `custom_route` endpoints such as
-   `/health` stay unauthenticated. `AuthSettings` requires an
-   `issuer_url` even when only a verifier is used.
-   **Before go-live (2026-10-02):** decide whether to ship the local
-   static-token option now or go live on the stated "every local user
-   and process is trusted" condition. The token stops other local
-   accounts and browser-origin requests that cannot read
-   `.secrets/mcp_auth_token.txt`; it does not stop code running as the
-   operator's own user (a malicious package can read the mode-600
-   file), so it narrows the trust condition to "processes running as
-   the operator are trusted" rather than removing it. Recommendation:
-   ship it first; the design is pinned and small. Check that the MCP
-   client can send a bearer header before building it.
-4. **#432 xlsx duplicate cells (before go-live).** A ~100 KB crafted
-   workbook can drive the indexer to ~11 GB or hold its only worker
-   for 40 s or more; no guard fixes it because openpyxl builds a whole
-   row before our code sees a cell (measurements in the issue comment).
-   Options: (a) document the limitation; (b) own the sheet parse loop
-   with a counting `WorkSheetParser` subclass that stops mid-row,
-   built on openpyxl private attributes; (c) a streaming pre-pass that
-   counts raw cell nodes and cuts the sheet before an over-budget row,
-   public APIs only, about 2× parse time for normal sheets. The cell
-   budget's size is part of the decision: charging parsed cells at
-   their real cost shrinks the ceiling for large legitimate sheets and
-   needs an `EXTRACTOR_VERSIONS` bump. Recommendation: (c).
-5. **#498 Streamable HTTP as the only transport.** Owner-filed;
-   breaking (clients move from `/sse` to `/mcp`; explicit `sse` or
-   `dual` fails startup with a migration message) and it changes the
-   AGENTS.md default-transport rule. Decide go or no-go, and confirm
-   the MCP client connects over `/mcp` first. Recommendation: go.
-6. **#497 Bridge app on macOS.** Owner-filed; an optional overlay that
-   skips the Bridge container and points mbsync at
-   `host.docker.internal`, the container staying the default. Decide go
-   or no-go and whether it will be used; switching an existing Maildir
-   needs the documented migration (credentials, certificate pin,
-   UIDVALIDITY). The macOS app's certificate is issued for `localhost`
-   and `127.0.0.1`, not `host.docker.internal`, so the first step is to
-   confirm how the shipped isync treats an explicitly trusted
-   certificate under a hostname mismatch and choose a certificate-valid
-   connection path, never a TLS bypass. Recommendation: go, after the
-   first go-live on the container.
-7. **#537 `get_evidence` thread count.** Add a `max_threads` parameter
-   so an audit retrieves exactly the threads `ask_mailbox` used (a tool
-   interface change). Recommendation: yes; small and additive.
-8. **#533 look-alike letters in delimiter tags.** Escaping covers the
-   look-alike brackets but not tag names spelled with compatibility or
-   confusable letters; fixing it needs normalized matching or a
-   confusables table. Recommendation: defer.
-9. **#526 `authority.toml` on Linux Docker Engine.** A mode-600
-   operator-owned file is unreadable to the indexer there (OrbStack is
-   fine). Any fix must keep the file at mode 600: group-read is ruled
-   out (#523), because container GID 1002 may be an unrelated host
-   account. The mechanism is unspecified. Recommendation: keep it
-   documented; revisit if Linux is deployed.
-10. **#524 folders opened by a failed mbsync attempt** are re-watched
-    only at the 30-minute recovery sweep; prompt handling needs a new
-    signal from mbsync. Mail is late, never lost. Recommendation: defer.
-11. **#494 agent-eval scoring.** Keep strict argument matching (a
-    `from_addr` call does not count where `participant` is expected)
-    and first-call-only tool selection? Build a recorder to replay a
-    real client's traces? Recommendation: keep strict; add the recorder
-    after go-live from real-client traces.
-12. **#496 token counting.** Keep the 3-characters-per-token estimate
-    (undercounts dense scripts such as CJK) or add a real tokenizer?
-    Recommendation: keep the estimate; the right tokenizer depends on
-    the operator's model.
-13. **#495 CJK handling in statement and quote checks.** Keep the
-    `。！？` terminators and per-character CJK word counts added in
-    review, or exempt CJK text from statement checks? Recommendation:
-    keep.
-14. **Compose scanning (#491/#512).** No security scanner reads Compose
-    files or shell scripts, so the path filters were left unchanged.
-    File an issue to add one? Recommendation: yes, low priority.
+3. ~~Items 3–14~~ (MCP endpoint auth, #432, #498, #497, #537, #533,
+   #526, #524, #494, #496, #495 and Compose scanning): resolved
+   2026-10-02 (Resolved decisions 13).
 
 ## Recently Completed
 
