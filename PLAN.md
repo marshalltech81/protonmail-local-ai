@@ -432,8 +432,8 @@ decision (Open decisions).
 | 3.8 Citation contract | Partly done | #457, #495 (`ask_mailbox` statement coverage and quote checks), #519 and #525 (quote and label edge cases), #532 and #545 (thread-scoped `get_evidence` parity), #559 (mailbox-wide parity, #537), #565 (`summarize_thread`, `extract_from_emails`) | semantic support only (#284) |
 | 4.1 Entities | Done | #459, #527 (orphan pruning, #464) | — |
 | 4.2 Source authority | Done | #459, #474 (Spam guard), #523 and #542 (rules file kept private and validated) | verdict-header gating after go-live (#463) |
-| 4.3 Temporal retrieval | Partly done | #561 (`sent_at` defined and used consistently) | `occurred_at` (owner decision); #574, #575 |
-| 4.4 Retention | Mostly done | #451 (mirror default), #475 (Trash hidden from default search), #564 and #583 (reaped sources reported for 30 days) | user-controlled retention; the reaped-citation invariant (Open decisions 22); #562 |
+| 4.3 Temporal retrieval | Partly done | #561 (`sent_at` defined and used consistently) | `occurred_at` and filters on it, whole-thread evidence under a date range, #575 (Resolved decisions 14); #574 superseded |
+| 4.4 Retention | Mostly done | #451 (mirror default), #475 (Trash hidden from default search), #564 and #583 (reaped sources reported for 30 days) | user-controlled retention; restating the reaped-citation invariant and #562's purge (Resolved decisions 14) |
 | 5.1 Hardened `brief_issue` | Not started | — | needs Phase 3 usage on real mail |
 | 5.2 Support/contradict | Built, experimental | #467 (`check_conclusion`), #493 (evidence-slot refill), #558 (quote verification, also for `brief_issue`) | semantic support (#284) |
 | 5.3 Position as of date | Not started | — | — |
@@ -566,27 +566,29 @@ the first deployment needs a numbered migration like any other.
    header) is the only message time, every date filter bounds it, a
    message, passage or attachment qualifies by its own message's
    `sent_at`, and under a date range the evidence tools show only
-   passages from messages sent inside it. `occurred_at` stays
-   undefined pending an owner decision (Open decisions 15); #574 and
-   #575 are follow-ups.
+   passages from messages sent inside it. Decided 2026-10-02
+   (Resolved decisions 14): define `occurred_at` from the top
+   `Received:` header, bound date filters and thread spans on
+   `occurred_at` falling back to `sent_at`, restore whole-thread
+   evidence under a date range (superseding #574), and read passage
+   dates from `messages` (#575). Not built yet.
 4. **Deletion/retention semantics.** Mirror is the default
    (upstream delete → index delete after the grace window; #451),
    archive (`INDEXER_DELETION_ENABLED=false`) is the opt-in, and
    Trash stays indexed but is hidden from default search (decided
    2026-10-01, #441). Still to define: user-controlled retention.
-   Provenance must define behavior when a citation's source is reaped
-   (evidence row retained, source marked unavailable, chain never
-   silently broken). **Status: mostly done** (#451 mirror default,
+   Provenance defines behavior when a citation's source is reaped:
+   the source reads as removed (not found after the record expires),
+   and its text is never kept (restated 2026-10-02, Resolved
+   decisions 14). **Status: mostly done** (#451 mirror default,
    #475 Trash hidden from default search). Reaped sources are
    reported (#564, #583): looking up a reaped message or thread
    reports "reaped from the index" rather than "not found", and
    `get_thread` lists a surviving thread's reaped messages, from
-   content-free `reaped_messages` records kept 30 days. This does not
-   yet meet the invariant above: no evidence row is retained (the
-   chunks are deleted and the record holds no chunk ID or text), and
-   after 30 days or an index rebuild a reaped ID reads as "not found"
-   again. Remaining: that gap (Open decisions 22), user-controlled
-   retention, and #562 (extracted attachment text outlives a reap).
+   content-free `reaped_messages` records kept 30 days; after that, or
+   an index rebuild, a reaped ID reads as "not found", which the
+   restated invariant accepts. Remaining: user-controlled retention,
+   and #562 (purge extracted attachment text on reap, decided).
 
 ### Phase 5 — Knowledge reasoning
 
@@ -687,8 +689,10 @@ them (one test-first commit per issue, `Fixes #N` per issue):
 **Handoff 2026-10-02, afternoon — start here.** Both go-live
 blockers are done: #432 (xlsx streaming pre-pass, #572) and MCP
 endpoint auth (the static bearer token, #573). #277 was fixed in the
-morning (#515). No code PR is open, and the stack is ready for the
-go-live checklist below. What landed this afternoon is under Recently
+morning (#515). **Superseded the same evening:** Resolved decisions
+14 adds pre-go-live work, so the stack is not ready for go-live
+until the list under "Before go-live (2026-10-02, evening)" below is
+merged. What landed this afternoon is under Recently
 Completed (2026-10-02, afternoon); the Phase 3–5 status table under
 Phase 3 is current.
 
@@ -712,9 +716,11 @@ Operator steps before go-live, in addition to the checklist:
    HTTP only, #563; remove any
    `MCP_TRANSPORT=sse` or `dual` from `.env`) and every request needs
    the bearer header. Claude Code uses `scripts/mcp-auth-headers.sh` as
-   its `headersHelper`; Claude Desktop uses the pinned `mcp-remote`
-   with `--header-file` (`docs/setup.md` step 7). Never put the token
-   in a command argument.
+   its `headersHelper`. Claude Desktop will use the repo-owned
+   `fastmcp` adapter (Resolved decisions 14); do not set up the
+   `mcp-remote` path the docs still describe until that adapter lands
+   and replaces it. Codex gets its own setup section. Never put the
+   token in a command argument.
 4. **macOS Bridge mode (optional):** `make build-macos-bridge` and
    `make up-macos-bridge` replace the checklist's `make build`,
    `make first-run` and `make up` (plain `make build` builds the unused
@@ -724,10 +730,27 @@ Operator steps before go-live, in addition to the checklist:
    test against the real app is still to do (Open decisions 21). #497
    closed when #571 merged.
 
-What still needs the owner: Open decisions 15–22 (`occurred_at`, the
-date-range evidence behaviour, #574/#575, #562, #580, the
-`mcp-remote` pin review, the #497 live test and the reaped-citation
-invariant).
+Open decisions 15–22 were answered on 2026-10-02 (Resolved decisions
+14). The owner runs macOS Bridge mode from a fresh Maildir, so
+go-live is its live test.
+
+**Before go-live (2026-10-02, evening).** Merge these first, in
+roughly this order; each is its own PR:
+
+1. Date-range evidence back to whole overlapping threads (#574
+   superseded); then #575 (drop `message_chunks.message_date`); then
+   `occurred_at` with date filters and thread spans on it.
+2. #208 and #550 (rendered chunks within `max_tokens`).
+3. #275 and #281 (collision-free folder mapping; no migration with a
+   fresh Maildir) and #279 (UIDVALIDITY recovery procedure).
+4. #562 (purge extracted text on reap) and #428 (cap every xlsx part
+   openpyxl loads whole).
+5. The Claude Desktop `fastmcp` adapter (replacing `mcp-remote` in
+   README, `docs/setup.md`, troubleshooting and the example config)
+   and the Codex setup docs.
+6. #489 (`get_message` paging) and the 998-character Message-ID limit.
+7. Small items: #591, #584, #589, #588, the Semgrep gaps (#578,
+   #579, #581, #582) and #580/#577 (merged-config hardening check).
 
 Waiting on real data: #487 (evidence and output budgets), #488
 (container resource budgets) and #282 (the mbsync stall deadline, set
@@ -839,8 +862,9 @@ Go-live checklist (do these before more hardening):
    set above it (#277 landed in #515).
 5. Point an MCP client at `http://localhost:${MCP_PORT}/mcp` with the
    bearer token from `.secrets/mcp_auth_token.txt` (Claude Code
-   through `scripts/mcp-auth-headers.sh`, Claude Desktop through
-   `mcp-remote --header-file`; see `docs/setup.md` step 7), and try
+   through `scripts/mcp-auth-headers.sh`; Claude Desktop through the
+   repo-owned adapter once it lands, not `mcp-remote`; see
+   `docs/setup.md` step 7), and try
    real questions by hand; `mcp-server/tests/eval/README.md` covers turning
    the good ones into a retrieval eval.
 6. Let what breaks set the next priorities; then the #283 eval slice,
@@ -1054,10 +1078,11 @@ Order of work, chosen to minimise reindexes:
    pair (#277, #282; their small siblings #271 and #280 are batch-1
    guards above and are not repeated here); see Resolved decisions 9
    and 10 for the chosen direction and the one measurement still
-   needed. #276 (#521) and #277 (#515) are done; #275 and #281 wait
-   for a real report, #282 for the first-sync measurement.
+   needed. #276 (#521) and #277 (#515) are done; #275, #281 and #279
+   are now pre-go-live work (Resolved decisions 14); #282 waits for the
+   first-sync measurement.
 4. **The Phase 2 reindex bundle** (see Phase 2): #208, #550 and #297's
-   second half. #303, #298, #295 and #217 landed directly instead
+   second half moved to pre-go-live work (Resolved decisions 14). #303, #298, #295 and #217 landed directly instead
    (2026-10-01, no live index yet), and #304's repair is unneeded
    (#349).
 
@@ -1244,13 +1269,12 @@ can be revisited with an explicit owner decision.
   long-running real-world conditions; `INDEXER_UNLINK_ON_REAP=true`
   only removes the `.eml` when Maildir is mounted read-write
 - mirror retention keeps a reaped attachment's extracted text in
-  `attachment_extractions` (#562, Open decisions 18)
-- under a date range the evidence tools can return no passages when
-  span-only threads fill the retrieval lanes (#574), and a chunk's
-  stored date can lag its message's `sent_at` until a failed re-date
-  retries (#575); Open decisions 17
+  `attachment_extractions` until #562's purge lands (decided)
+- a chunk's stored date can lag its message's `sent_at` until a failed
+  re-date retries, until #575 lands (decided); #574 is superseded by
+  the whole-thread evidence revert
 - macOS Bridge mode is tested only against a synthetic STARTTLS server
-  (#571); the live test is Open decisions 21
+  (#571); the owner's go-live is the live test
 - coverage scope: both services measure `src/` with `src/main.py`
   omitted. The indexer's `main.py` has grown to hold the whole
   two-phase pipeline, which `tests/test_main.py` exercises but the
@@ -1448,7 +1472,9 @@ do not ship persisted claims without them.
       Check against real mail that the top `Received:` is Proton's.
       Covers #297's undated-mail chain.
     - **Date filters:** `date_from` / `date_to` bound `occurred_at`,
-      falling back to `sent_at` when it is NULL.
+      falling back to `sent_at` when it is NULL. Thread spans
+      (`threads.date_first` / `date_last`) are derived from the same
+      effective time, so thread admission and passage dates agree.
     - **Date-range evidence (was 16):** restore whole overlapping
       threads: under a date range, any passage of a thread whose span
       overlaps the range may be shown, as before #561. Each passage
@@ -1484,9 +1510,11 @@ do not ship persisted claims without them.
       so a permanent record would be a list of deleted mail's domains
       and dates. Restate the invariant: a reaped source reads as
       removed for 30 days, then not found, and its text is never kept.
-    - **#428:** cap only the xlsx parts openpyxl loads whole
-      (shared strings, workbook, content types, styles); worksheets keep
-      #572's streaming budget.
+    - **#428:** cap every xlsx part openpyxl loads whole rather than
+      streams (shared strings, workbook, content types and styles, and
+      also core/custom properties, theme, external links and
+      chartsheets; the implementation confirms the list from openpyxl's
+      loader); worksheets keep #572's streaming budget.
     - **#275 / #281:** full collision-free folder-mapping redesign,
       before go-live so no state migration is needed (fresh Maildir).
     - **#279:** write and test the UIDVALIDITY recovery procedure before
@@ -1504,7 +1532,8 @@ do not ship persisted claims without them.
     - **#208 / #550:** fix now, before the go-live rebuild, instead of
       waiting for the Phase 2 bundle.
     - **P3 policy:** small P3s with an agreed fix and no new mechanism
-      (e.g. #589, #591) may be fixed before go-live.
+      (e.g. #589, #591) may be fixed before go-live; AGENTS.md's Pull
+      Requests rule carries the exception.
 
 ## Open decisions
 
