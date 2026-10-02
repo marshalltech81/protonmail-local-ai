@@ -6218,7 +6218,15 @@ class TestReapLeavesNoContent:
             body=self._BODY,
             from_addr="Zqxsendermarker <zqxsender@example.com>",
         )
+        monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
+        db = Database(tmp_path / "mail.db")
+        threader = Threader(db)
+        embedder = make_mock_embedder(_UNIT_VECTOR)
+        queue = _make_queue(db)
+        main.initial_index(db, embedder, threader, queue)
         if with_reply:
+            # Indexed after the root, so the walk order (filesystem
+            # dependent) cannot thread the reply on its own.
             _write_eml(
                 inbox / "1700000001.M2.host:2,S",
                 "survivor@example.com",
@@ -6227,11 +6235,8 @@ class TestReapLeavesNoContent:
                 date="Tue, 02 Jan 2024 12:00:00 +0000",
                 body="The surviving reply.",
             )
-        monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
-        db = Database(tmp_path / "mail.db")
-        threader = Threader(db)
-        embedder = make_mock_embedder(_UNIT_VECTOR)
-        main.initial_index(db, embedder, threader, _make_queue(db))
+            main.initial_index(db, embedder, threader, queue)
+            assert db._conn.execute("SELECT COUNT(*) FROM threads").fetchone()[0] == 1
         assert {"threads", "message_chunks"} <= self._tables_holding(db, ["zqxbodymarker"])
         root.rename(inbox / "1700000000.M1.host:2,ST")
         return db, self._reconciler(db, embedder, threader, maildir)
