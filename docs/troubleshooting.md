@@ -645,7 +645,7 @@ before #361) stays unindexed until you requeue it.
 1. Verify the MCP server is running: `docker compose ps`
 2. Check the server is responding: `curl http://localhost:3000/health`
    should print `{"status":"ok"}`
-3. Check the client points at `http://localhost:3000/mcp`. The legacy
+3. Check the client points at `http://127.0.0.1:3000/mcp`. The legacy
    `/sse` endpoint was removed and now returns `404`; see
    [Connect an MCP client](setup.md#7-connect-an-mcp-client) for the
    Claude Desktop adapter setup
@@ -673,7 +673,7 @@ problem.
 
    ```bash
    printf 'Authorization: Bearer %s\n' "$(cat .secrets/mcp_auth_token.txt)" |
-     curl -s -o /dev/null -w '%{http_code}\n' -X POST http://localhost:3000/mcp \
+     curl -s -o /dev/null -w '%{http_code}\n' -X POST http://127.0.0.1:3000/mcp \
      -H @- \
      -H 'Accept: application/json, text/event-stream' \
      -H 'Content-Type: application/json' \

@@ -122,7 +122,7 @@ The MCP server is read-only:
 ### 6. Connect an MCP client
 
 The server speaks MCP's Streamable HTTP transport at
-`http://localhost:3000/mcp`, on this machine only. Every request must
+`http://127.0.0.1:3000/mcp`, on this machine only. Every request must
 send the bearer token from `.secrets/mcp_auth_token.txt` (created by
 `make init-secrets`) as `Authorization: Bearer <token>`; without it the
 server answers `401`. Claude Code connects directly, reading the token
@@ -131,7 +131,7 @@ line (run from the repository root):
 
 ```bash
 claude mcp add-json protonmail-local-ai \
-  "{\"type\":\"http\",\"url\":\"http://localhost:3000/mcp\",\"headersHelper\":\"$PWD/scripts/mcp-auth-headers.sh\"}"
+  "{\"type\":\"http\",\"url\":\"http://127.0.0.1:3000/mcp\",\"headersHelper\":\"$PWD/scripts/mcp-auth-headers.sh\"}"
 ```
 
 Claude Desktop's `claude_desktop_config.json` starts local servers as
@@ -242,7 +242,7 @@ server's providers have to stay local. For the client:
   python -c "..."`. Less ergonomic, but no chat client sees the results.
 - Or use another MCP client backed by a local LLM. Keep the client bound to
   localhost and point it at the MCP server's Streamable HTTP endpoint,
-  `http://localhost:3000/mcp`.
+  `http://127.0.0.1:3000/mcp`.
 
 Neither option changes where the server itself sends data. The tools
 still send queries and retrieved email content to the embed, inference

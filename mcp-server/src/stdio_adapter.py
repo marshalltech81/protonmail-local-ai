@@ -4,7 +4,7 @@ Claude Desktop's ``claude_desktop_config.json`` starts MCP servers as
 commands and talks to them over stdio; it cannot connect to a URL. This
 module runs on the operator's Mac (not in the container), speaks stdio
 to the client and relays every request to the server's Streamable HTTP
-endpoint at ``http://localhost:${MCP_PORT:-3000}/mcp`` with the bearer
+endpoint at ``http://127.0.0.1:${MCP_PORT:-3000}/mcp`` with the bearer
 token, using fastmcp's proxy. See docs/setup.md, "Connect an MCP
 client", for the ``claude_desktop_config.json`` entry.
 
@@ -29,8 +29,10 @@ import stat
 import sys
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Any
 
 import fastmcp
+import httpx2
 from fastmcp.client.transports import StreamableHttpTransport
 from fastmcp.server import create_proxy
 
@@ -77,17 +79,44 @@ def read_token(path: Path) -> str:
 
 
 def server_url(port: str) -> str:
-    """The server's Streamable HTTP URL on this machine's loopback."""
+    """The server's Streamable HTTP URL on this machine's IPv4 loopback.
+
+    Compose publishes the port on ``127.0.0.1`` only. ``localhost`` can
+    resolve to ``::1`` first, where another local account could listen
+    and collect the bearer token, so the address is spelled out.
+    """
     if not port.isdigit() or not 1 <= int(port) <= 65535:
         raise AdapterConfigError("MCP_PORT must be a port number between 1 and 65535.")
-    return f"http://localhost:{int(port)}/mcp"
+    return f"http://127.0.0.1:{int(port)}/mcp"
+
+
+def _loopback_http_client(
+    headers: dict[str, str] | None = None,
+    timeout: httpx2.Timeout | None = None,
+    auth: httpx2.Auth | None = None,
+    **_ignored: Any,
+) -> httpx2.AsyncClient:
+    """The HTTP client for the server connection, ignoring proxy settings.
+
+    ``trust_env=False`` stops ``HTTP_PROXY``, ``ALL_PROXY`` and the macOS
+    system proxy from routing the token and tool traffic through a
+    proxy. Other keywords fastmcp passes (``follow_redirects``) are
+    dropped: as in the MCP SDK's default client, redirects are not
+    followed. Timeouts default to the SDK's (30 s, 300 s read).
+    """
+    return httpx2.AsyncClient(
+        headers=headers,
+        timeout=timeout or httpx2.Timeout(30.0, read=300.0),
+        auth=auth,
+        trust_env=False,
+    )
 
 
 def build_proxy(url: str, token: str) -> fastmcp.FastMCP:
     """A fastmcp proxy relaying to ``url`` with ``Authorization: Bearer``."""
     # A string ``auth`` makes the transport send the token as a bearer
     # header on every request; it is not part of the URL.
-    transport = StreamableHttpTransport(url, auth=token)
+    transport = StreamableHttpTransport(url, auth=token, httpx_client_factory=_loopback_http_client)
     return create_proxy(transport, name="protonmail-local-ai")
 
 

@@ -580,9 +580,12 @@ Things to expect after an upgrade:
 ### 7. Connect an MCP client
 
 The server speaks one MCP transport, Streamable HTTP, at
-`http://localhost:3000/mcp` (replace `3000` with `MCP_PORT` if you
-changed it). The port is published on the loopback interface only, so
-the client has to run on this machine. Two separate questions decide
+`http://127.0.0.1:3000/mcp` (replace `3000` with `MCP_PORT` if you
+changed it). The port is published on the IPv4 loopback interface
+only, so the client has to run on this machine. Configure clients with
+`127.0.0.1`, not `localhost`: `localhost` can resolve to the IPv6
+loopback `::1` first, where another local account could listen on the
+same port and collect the bearer token. Two separate questions decide
 whether a client can connect: whether it speaks Streamable HTTP, and
 whether its connection starts on this machine (and so can reach
 `localhost`).
@@ -610,7 +613,7 @@ records the script's absolute path):
 
 ```bash
 claude mcp add-json protonmail-local-ai \
-  "{\"type\":\"http\",\"url\":\"http://localhost:3000/mcp\",\"headersHelper\":\"$PWD/scripts/mcp-auth-headers.sh\"}"
+  "{\"type\":\"http\",\"url\":\"http://127.0.0.1:3000/mcp\",\"headersHelper\":\"$PWD/scripts/mcp-auth-headers.sh\"}"
 ```
 
 Claude Code runs a `headersHelper` only in a workspace whose trust
@@ -635,14 +638,16 @@ takes this URL directly:
 Connect Claude Desktop through the stdio adapter in this repository,
 `mcp-server/src/stdio_adapter.py`. It runs on your Mac as a command
 Claude Desktop starts, speaks stdio to Claude Desktop and relays every
-request to `http://localhost:${MCP_PORT:-3000}/mcp` with the bearer
+request to `http://127.0.0.1:${MCP_PORT:-3000}/mcp` with the bearer
 token. It is built on the `fastmcp` version `mcp-server/uv.lock`
 already pins, so it adds no dependency. It reads the token from
 `.secrets/mcp_auth_token.txt` itself, so the token is neither in
 `claude_desktop_config.json` nor in any command line, and it exits with
 a fixed message, before connecting, if that file is missing, empty or
-not mode 600. It writes nothing else: no log lines, no token, no tool
-arguments or results.
+not mode 600. It connects directly, ignoring `HTTP_PROXY`, `ALL_PROXY`
+and the system proxy, so the token goes only to the loopback port. It
+writes nothing else: no log lines, no token, no tool arguments or
+results.
 
 It needs [`uv`](https://docs.astral.sh/uv/) on the Mac. Create the
 adapter's environment once from the repository root, so Claude
@@ -711,7 +716,7 @@ that prints a JSON object of headers, which is what
 
 ```toml
 [mcp_servers.protonmail-local-ai]
-url = "http://localhost:3000/mcp"
+url = "http://127.0.0.1:3000/mcp"
 http_headers_helper = "/ABSOLUTE/PATH/TO/protonmail-local-ai/scripts/mcp-auth-headers.sh"
 ```
 
@@ -719,7 +724,7 @@ Codex runs the helper when it connects and again once after a `401`,
 so a rotated token is picked up without editing the file. Codex also
 has `bearer_token_env_var`, which reads the token from an environment
 variable (`codex mcp add protonmail-local-ai --url
-http://localhost:3000/mcp --bearer-token-env-var PROTONMAIL_MCP_TOKEN`
+http://127.0.0.1:3000/mcp --bearer-token-env-var PROTONMAIL_MCP_TOKEN`
 writes it). The variable then has to be exported in the shell that
 starts Codex, for example from your shell profile:
 
@@ -741,7 +746,7 @@ public HTTPS endpoint, so ChatGPT is not supported yet; it is planned
 after go-live.
 
 **Other MCP clients** that run on this machine and speak Streamable HTTP
-connect to `http://localhost:3000/mcp` directly, sending the
+connect to `http://127.0.0.1:3000/mcp` directly, sending the
 `Authorization: Bearer <token>` header. A client that cannot send a
 custom header cannot connect.
 
@@ -769,7 +774,7 @@ that exports it, since an exported value wins over `.env` (or set it to
 `streamable-http`): `sse` or
 `dual` now fails `make validate-env` and mcp-server startup with these
 steps. Change each client from `http://localhost:3000/sse` to
-`http://localhost:3000/mcp`, and for a client that picks its transport,
+`http://127.0.0.1:3000/mcp`, and for a client that picks its transport,
 choose Streamable HTTP (`http`), not SSE.
 
 The server answers only requests addressed to `localhost`,

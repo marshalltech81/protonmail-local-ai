@@ -132,8 +132,11 @@ class TestReadToken:
 
 
 class TestServerUrl:
-    def test_default_port(self):
-        assert adapter.server_url("3000") == "http://localhost:3000/mcp"
+    def test_default_port_on_ipv4_loopback(self):
+        # Review round 1: the server is published on 127.0.0.1 only, and
+        # ``localhost`` can resolve to ::1 first, where another local
+        # account could listen and collect the bearer token.
+        assert adapter.server_url("3000") == "http://127.0.0.1:3000/mcp"
 
     @pytest.mark.parametrize("port", ["", "0", "65536", "30a", "-1", "3000/x"])
     def test_rejects_non_port(self, port):
@@ -176,7 +179,7 @@ class TestMain:
         assert adapter.main(["--token-file", str(_token_file(tmp_path))]) == 0
         assert calls == [
             (
-                "http://localhost:3123/mcp",
+                "http://127.0.0.1:3123/mcp",
                 _TOKEN,
                 {"transport": "stdio", "show_banner": False},
             )
@@ -235,6 +238,61 @@ class TestProxyInProcess:
         assert "echo hi" not in str(result.content)
         assert recorder.seen
         assert set(recorder.seen) == {"Bearer wrong-token"}
+
+
+class TestAmbientProxyIgnored:
+    """Review round 1: proxy settings in the environment must not route
+    the token and tool traffic away from the loopback connection."""
+
+    def test_proxy_environment_is_not_used(self, stub, monkeypatch):
+        port, recorder = stub
+        recorder.seen.clear()
+        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(8)
+        listener.settimeout(0.2)
+        proxy_url = f"http://127.0.0.1:{listener.getsockname()[1]}"
+        accepted: list[bytes] = []
+        stop = threading.Event()
+
+        def accept_loop() -> None:
+            while not stop.is_set():
+                try:
+                    conn, _ = listener.accept()
+                except TimeoutError:
+                    continue
+                with conn:
+                    conn.settimeout(1.0)
+                    try:
+                        accepted.append(conn.recv(65536))
+                    except TimeoutError:
+                        accepted.append(b"")
+
+        thread = threading.Thread(target=accept_loop, daemon=True)
+        thread.start()
+        for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"):
+            monkeypatch.setenv(name, proxy_url)
+            monkeypatch.setenv(name.lower(), proxy_url)
+        monkeypatch.delenv("NO_PROXY", raising=False)
+        monkeypatch.delenv("no_proxy", raising=False)
+        try:
+            proxy = adapter.build_proxy(f"http://127.0.0.1:{port}/mcp", _TOKEN)
+
+            async def run():
+                async with Client(proxy) as client:
+                    names = sorted(t.name for t in await client.list_tools())
+                    result = await client.call_tool("echo", {"text": "hi"})
+                    return names, result.data
+
+            names, data = anyio.run(run)
+        finally:
+            stop.set()
+            thread.join(timeout=5)
+            listener.close()
+        assert accepted == []
+        assert names == ["echo", "fails"]
+        assert data == "echo hi"
+        assert set(recorder.seen) == {f"Bearer {_TOKEN}"}
 
 
 def _stdio_client(port: int, token_file: Path, stderr_path: Path) -> Client:
