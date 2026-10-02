@@ -19,6 +19,10 @@ readonly UPSTREAM_HOST='Host = "127.0.0.1"'
 readonly PATCHED_HOST='Host = "0.0.0.0"'
 readonly UPSTREAM_CERT='IPAddresses:           []net.IP{net.ParseIP("127.0.0.1")},'
 readonly PATCHED_CERT='DNSNames:    []string{"protonmail-bridge", "localhost"},'
+# gofmt indentation of the inserted SAN line. A literal tab, not a `\t` sed
+# escape: `\t` in a replacement is a GNU extension that older BSD/macOS sed,
+# used by local `make bridge-patch-check` runs, turns into a literal `t` (#617).
+readonly SAN_INDENT=$'\t\t'
 # Bridge's vault default has AutoUpdate: true. Patching to false disables the
 # in-process auto-updater (which silently downloads new releases from the
 # Proton CDN — including the Qt/GUI variant — and stages them under
@@ -106,7 +110,7 @@ require_count "$UPDATES_FILE" "$PATCHED_UPDATE_GATE" "0" "patched auto-update ga
 sed_in_place 's/Host = "127.0.0.1"/Host = "0.0.0.0"/' "$CONSTANTS_FILE"
 sed_in_place \
     's|IPAddresses:           \[\]net\.IP{net\.ParseIP("127\.0\.0\.1")},|IPAddresses: []net.IP{net.ParseIP("127.0.0.1")},\
-\t\tDNSNames:    []string{"protonmail-bridge", "localhost"},|' \
+'"$SAN_INDENT"'DNSNames:    []string{"protonmail-bridge", "localhost"},|' \
     "$CERTS_FILE"
 sed_in_place 's/AutoUpdate:        true,/AutoUpdate:        false,/' "$SETTINGS_FILE"
 sed_in_place 's/autoUpdateEnabled := bridge\.vault\.GetAutoUpdate()/autoUpdateEnabled := false/' "$UPDATES_FILE"
@@ -115,6 +119,7 @@ require_count "$CONSTANTS_FILE" "$UPSTREAM_HOST" "0" "upstream host binding afte
 require_count "$CONSTANTS_FILE" "$PATCHED_HOST" "1" "patched host binding"
 require_count "$CERTS_FILE" "$UPSTREAM_CERT" "0" "upstream TLS SAN source line after patch"
 require_count "$CERTS_FILE" "$PATCHED_CERT" "1" "patched TLS SAN line"
+require_count "$CERTS_FILE" "${SAN_INDENT}${PATCHED_CERT}" "1" "tab-indented patched TLS SAN line"
 require_count "$SETTINGS_FILE" "$UPSTREAM_AUTOUPDATE" "0" "upstream AutoUpdate default after patch"
 require_count "$SETTINGS_FILE" "$PATCHED_AUTOUPDATE" "1" "patched AutoUpdate default"
 require_count "$UPDATES_FILE" "$UPSTREAM_UPDATE_GATE" "0" "upstream auto-update gate after patch"

@@ -69,6 +69,9 @@ jobs:
       - name: Run entrypoint tests
         run: bash bridge/tests/entrypoint_test.sh
 
+      - name: Run patch-source tests
+        run: bash bridge/tests/patch_source_test.sh
+
   bridge-smoke-script:
     name: bridge smoke script
     runs-on: ubuntu-latest
