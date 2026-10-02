@@ -177,6 +177,15 @@ def test_failure_traces_are_caught(
     assert failure in score.failures, score
 
 
+@pytest.mark.parametrize("scenario_id", ["cabin-wifi", "electrician-quote"])
+def test_abstaining_after_an_unrelated_lookup_is_caught(scenario_id: str) -> None:
+    trace = copy.deepcopy(TRACE_BY_SCENARIO[scenario_id])
+    for call in trace["calls"]:
+        call["arguments"] = {k: "roof repair" for k in call["arguments"]}
+    score = score_trace(SCENARIOS[scenario_id], trace)
+    assert "abstention_correct" in score.failures, score
+
+
 @pytest.mark.parametrize("trace", TRACES, ids=lambda t: t["scenario"])
 def test_reference_trace_scores_clean(trace: dict) -> None:
     score = score_trace(SCENARIOS[trace["scenario"]], trace)
@@ -280,6 +289,7 @@ class TestLoadScenarios:
         assert s.unanswerable is True
         assert s.required_evidence == []
         assert s.expected_arguments == {}
+        assert s.abstain_terms == ["wifi", "wi-fi", "wireless", "internet"]
 
     def test_required_citations_become_message_ids(self, tmp_path: Path) -> None:
         row = self._row(golden_search="correction-recital", required_citations=[["t24.2"]])

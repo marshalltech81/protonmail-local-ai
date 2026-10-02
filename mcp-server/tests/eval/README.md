@@ -131,9 +131,10 @@ listed by one `query_messages` cursor chain over exactly the expected
 filters as the tool normalizes them (strings stripped, blank ones
 absent, dates as UTC bounds), any page size, and whether that chain's last page said
 `has_more: false`), message citation recall (see below), abstention
-(see below), and calls over budget or repeated. `summarize` prints the
-aggregates, the clean rate of each split, and the failing scenarios by
-category with held-out ones tagged. Failure cases for each scorer are
+(see below), and calls over budget or repeated. `summarize` prints
+every aggregate, and the clean rate, separately for the dev and
+held-out splits, then the failing scenarios by category with held-out
+ones tagged. Failure cases for each scorer are
 in `tests/test_agent_metrics.py`; `tests/test_agent_eval.py` also
 mutates reference traces into the failures the new categories exist
 to catch and checks each is caught.
@@ -156,12 +157,14 @@ Three categories need more than thread-level scoring:
 - **Unanswerable** (`unanswerable`): the mailbox holds no answer. The
   trace's answer marks abstention with `"abstained": true`, a
   structural flag recorded with the trace, not read from the prose. The
-  scenario passes when the answer abstains and cites nothing, since a
-  citation would present a near-miss source as support. Every other
-  scenario fails if its answer abstains. Only a JSON `true` counts.
-
-The agent should still search before abstaining, so tool selection
-applies to unanswerable scenarios as usual.
+  scenario passes when three things hold. Some call's string argument
+  contains one of the golden question's `absent_terms` (the agent
+  asked for the missing fact; refusing after an unrelated search does
+  not count). The answer abstains. It cites nothing, since a citation
+  would present a near-miss source as support. Every other scenario
+  fails if its answer abstains. Only a JSON `true` counts. List
+  synonyms in `absent_terms` (matching is a case-insensitive
+  substring), because a lookup that uses none of them fails.
 
 ### Held-out split
 

@@ -62,7 +62,8 @@ harness in `tests/eval/` (`tests/retrieval_metrics.py`).
   measured value; re-measure and explain it rather than lowering the
   floor silently.
 - **Unanswerable questions** need terms that appear nowhere in the
-  corpus. A new thread must not use them.
+  corpus. A new thread must not use them. They double as the words an
+  abstaining agent must have asked for, so list the common synonyms.
 - **Vector-only questions** need a query that porter stemming does not
   map back to a corpus word. "maintenence" does not qualify, because
   it stems to the same form as "maintenance".

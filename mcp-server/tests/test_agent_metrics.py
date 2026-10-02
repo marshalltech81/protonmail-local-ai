@@ -328,30 +328,65 @@ class TestMessageCitations:
 
 class TestAbstention:
     def _unanswerable(self) -> Scenario:
-        return _scenario(category="unanswerable", required_evidence=[], unanswerable=True)
+        return _scenario(
+            category="unanswerable",
+            required_evidence=[],
+            unanswerable=True,
+            abstain_terms=["wifi", "wireless"],
+        )
 
-    def test_abstaining_without_citations_passes(self) -> None:
-        trace = _trace([_search(["a.1@x.example"])], abstained=True)
+    def _looked(self, query: str = "cabin WiFi network") -> dict:
+        return _search(["a.1@x.example"], query=query)
+
+    def test_abstaining_after_looking_without_citations_passes(self) -> None:
+        trace = _trace([self._looked()], abstained=True)
         score = score_trace(self._unanswerable(), trace)
         assert score.abstention_correct is True
         assert score.failures == []
 
+    def test_any_listed_term_in_any_string_argument_counts_as_looking(self) -> None:
+        call = {
+            "tool": "ask_mailbox",
+            "arguments": {"question": "Is there Wireless at the cabin?"},
+            "result": {"citations": []},
+        }
+        trace = _trace([_search([], query="cabin"), call], abstained=True)
+        assert score_trace(self._unanswerable(), trace).abstention_correct is True
+
+    def test_abstaining_after_an_unrelated_lookup_fails(self) -> None:
+        # Searching for something else and refusing is not an evidence-based
+        # abstention, even with an allowed tool.
+        trace = _trace([self._looked(query="roof")], abstained=True)
+        score = score_trace(self._unanswerable(), trace)
+        assert score.tool_selected is True
+        assert score.abstention_correct is False
+        assert "abstention_correct" in score.failures
+
+    def test_a_term_only_in_a_result_does_not_count_as_looking(self) -> None:
+        call = {
+            "tool": "search_emails",
+            "arguments": {"query": "roof"},
+            "result": {"results": [{"thread_id": "a.1@x.example", "snippet": "wifi"}]},
+        }
+        trace = _trace([call], abstained=True)
+        assert score_trace(self._unanswerable(), trace).abstention_correct is False
+
     def test_answering_an_unanswerable_question_fails(self) -> None:
-        score = score_trace(self._unanswerable(), _trace([_search(["a.1@x.example"])]))
+        score = score_trace(self._unanswerable(), _trace([self._looked()]))
         assert score.abstention_correct is False
         assert "abstention_correct" in score.failures
 
     def test_abstaining_while_citing_unrelated_evidence_fails(self) -> None:
         # The search returned a near-miss thread; citing it presents it as
         # support for an answer the mailbox does not hold.
-        trace = _trace([_search(["a.1@x.example"])], cited=["a.1@x.example"], abstained=True)
+        trace = _trace([self._looked()], cited=["a.1@x.example"], abstained=True)
         score = score_trace(self._unanswerable(), trace)
         assert score.abstention_correct is False
         assert "abstention_correct" in score.failures
 
     def test_only_a_boolean_true_marks_abstention(self) -> None:
         for flag in ("true", 1, "yes"):
-            trace = _trace([_search(["a.1@x.example"])], abstained=flag)
+            trace = _trace([self._looked()], abstained=flag)
             assert score_trace(self._unanswerable(), trace).abstention_correct is False, flag
 
     def test_abstaining_on_an_answerable_question_fails(self) -> None:
@@ -364,10 +399,10 @@ class TestAbstention:
         trace = _trace([_search(["a.1@x.example"])], cited=["a.1@x.example"])
         assert score_trace(_scenario(), trace).abstention_correct is True
 
-    def test_abstaining_without_looking_fails_tool_selection(self) -> None:
+    def test_abstaining_without_looking_fails(self) -> None:
         score = score_trace(self._unanswerable(), _trace([], abstained=True))
-        assert score.abstention_correct is True
-        assert score.failures == ["tool_selected"]
+        assert score.abstention_correct is False
+        assert set(score.failures) == {"tool_selected", "abstention_correct"}
 
 
 class TestHeldOut:
@@ -639,16 +674,27 @@ class TestSummarize:
         assert "narrow_filter: s2 (arguments_correct)" in out
         assert "exact_fact" not in out.split("Failures by category:")[1]
 
-    def test_reports_the_held_out_split_apart(self) -> None:
+    def test_reports_every_aggregate_per_split(self) -> None:
+        # Tuning reads the dev block; held-out outcomes must not leak into it.
         clean = _trace([_search(["a.1@x.example"])], cited=["a.1@x.example"])
         dev = score_trace(_scenario(), clean)
-        held = score_trace(_scenario(held_out=True), _trace([_search([])]))
+        held = score_trace(_scenario(held_out=True), _trace([]))
         out = summarize([dev, held])
-        assert "Held-out clean:      0.00% (0/1)" in out
-        assert "Dev clean:           100.00% (1/1)" in out
+        dev_block = out.split("Dev split (1 traces):")[1].split("Held-out split")[0]
+        held_block = out.split("Held-out split (1 traces):")[1].split("Failures by category")[0]
+        assert "Tool selection:      100.00% (1/1)" in dev_block
+        assert "Citation recall:     100.00% (mean over 1)" in dev_block
+        assert "Clean:               100.00% (1/1)" in dev_block
+        assert "Tool selection:      0.00% (0/1)" in held_block
+        assert "Citation recall:     0.00% (mean over 1)" in held_block
+        assert "Clean:               0.00% (0/1)" in held_block
         assert "exact_fact: s1 [held-out] (" in out
-        assert "Abstention correct:  100.00% (2/2)" in out
-        assert "Message citation recall: n/a" in out
+        assert "Message citation recall: n/a" in dev_block
+
+    def test_an_empty_split_is_reported_as_such(self) -> None:
+        clean = _trace([_search(["a.1@x.example"])], cited=["a.1@x.example"])
+        out = summarize([score_trace(_scenario(), clean)])
+        assert "Held-out split (0 traces): none" in out
 
     def test_no_failures_says_so(self) -> None:
         good = score_trace(

@@ -21,9 +21,11 @@ synthetic mailbox) and a trace of the calls an agent made, score
   correcting message, which thread-level citation recall cannot tell
   from the message it corrects; a conflicting-sources scenario requires
   each side of the disagreement;
-- **abstention**: an unanswerable scenario passes when the answer sets
-  ``"abstained": true`` and cites nothing; any other scenario passes
-  when the answer does not abstain;
+- **abstention**: an unanswerable scenario passes when some call's
+  string argument contains one of its ``abstain_terms`` (the agent
+  looked for the missing fact), the answer sets ``"abstained": true``
+  and it cites nothing; any other scenario passes when the answer does
+  not abstain;
 - **enumeration completeness**: for an exhaustive question, the
   fraction of expected messages listed by one ``query_messages``
   cursor chain over exactly the expected filters (any page size), and
@@ -115,7 +117,8 @@ class Scenario:
     must enumerate. Either may be empty. ``required_citations`` groups
     message IDs the answer must cite the same way (every group, any ID
     in it). ``unanswerable`` marks a question the mailbox has no answer
-    to, where the agent should abstain.
+    to, where the agent should abstain after asking for one of the
+    ``abstain_terms``.
     """
 
     id: str
@@ -128,6 +131,7 @@ class Scenario:
     expected_messages: list[str] = field(default_factory=list)
     required_citations: list[list[str]] = field(default_factory=list)
     unanswerable: bool = False
+    abstain_terms: list[str] = field(default_factory=list)
     held_out: bool = False
 
 
@@ -324,9 +328,18 @@ def score_trace(scenario: Scenario, trace: dict) -> AgentScore:
         message_citation_recall = _groups_covered(cited_messages, scenario.required_citations)
 
     # Abstaining means answering nothing, so an abstention citing a source
-    # presents that source as support for an answer the mailbox lacks.
+    # presents that source as support for an answer the mailbox lacks. It
+    # also has to follow a lookup for the missing fact: refusing after an
+    # unrelated search is not evidence that the mailbox lacks the answer.
     if scenario.unanswerable:
-        abstention_correct = abstained and not cited
+        looked = any(
+            term.casefold() in value.casefold()
+            for call in calls
+            for value in call["arguments"].values()
+            if isinstance(value, str)
+            for term in scenario.abstain_terms
+        )
+        abstention_correct = abstained and not cited and looked
     else:
         abstention_correct = not abstained
 
@@ -378,29 +391,41 @@ def _mean(values: list[float]) -> str:
     return f"{sum(values) / len(values):.2%} (mean over {len(values)})"
 
 
-def summarize(scores: Sequence[AgentScore]) -> str:
-    """Aggregate scores, the clean rate per split, then the failing
-    scenarios grouped by category (held-out ones tagged)."""
-
+def _aggregates(scores: Sequence[AgentScore]) -> list[str]:
     def present(name: str) -> list:
         return [v for s in scores if (v := getattr(s, name)) is not None]
 
-    lines = [
-        f"Agent eval summary ({len(scores)} traces):",
-        f"  Tool selection:      {_rate([s.tool_selected for s in scores])}",
-        f"  Argument accuracy:   {_rate(present('arguments_correct'))}",
-        f"  Evidence recall:     {_mean(present('evidence_recall'))}",
-        f"  Citation validity:   {_mean(present('citation_validity'))}",
-        f"  Citation recall:     {_mean(present('citation_recall'))}",
-        f"  Message citation recall: {_mean(present('message_citation_recall'))}",
-        f"  Abstention correct:  {_rate([s.abstention_correct for s in scores])}",
-        f"  Enumeration recall:  {_mean(present('enumeration_recall'))}",
-        f"  Enumeration exhausted: {_rate(present('exhausted'))}",
-        f"  Extra calls:         {sum(s.extra_calls for s in scores)}",
-        f"  Repeated calls:      {sum(s.repeated_calls for s in scores)}",
-        f"  Dev clean:           {_rate([not s.failures for s in scores if not s.held_out])}",
-        f"  Held-out clean:      {_rate([not s.failures for s in scores if s.held_out])}",
+    return [
+        f"Tool selection:      {_rate([s.tool_selected for s in scores])}",
+        f"Argument accuracy:   {_rate(present('arguments_correct'))}",
+        f"Evidence recall:     {_mean(present('evidence_recall'))}",
+        f"Citation validity:   {_mean(present('citation_validity'))}",
+        f"Citation recall:     {_mean(present('citation_recall'))}",
+        f"Message citation recall: {_mean(present('message_citation_recall'))}",
+        f"Abstention correct:  {_rate([s.abstention_correct for s in scores])}",
+        f"Enumeration recall:  {_mean(present('enumeration_recall'))}",
+        f"Enumeration exhausted: {_rate(present('exhausted'))}",
+        f"Extra calls:         {sum(s.extra_calls for s in scores)}",
+        f"Repeated calls:      {sum(s.repeated_calls for s in scores)}",
+        f"Clean:               {_rate([not s.failures for s in scores])}",
     ]
+
+
+def summarize(scores: Sequence[AgentScore]) -> str:
+    """Aggregate scores for each split apart, then the failing scenarios
+    grouped by category (held-out ones tagged).
+
+    Every aggregate is per split, so tuning against the dev block never
+    reads a held-out outcome.
+    """
+    lines = [f"Agent eval summary ({len(scores)} traces):"]
+    for label, held_out in (("Dev", False), ("Held-out", True)):
+        split = [s for s in scores if s.held_out is held_out]
+        if not split:
+            lines.append(f"  {label} split (0 traces): none")
+            continue
+        lines.append(f"  {label} split ({len(split)} traces):")
+        lines.extend(f"    {line}" for line in _aggregates(split))
     by_category: dict[str, list[str]] = defaultdict(list)
     for s in scores:
         if s.failures:
@@ -462,6 +487,7 @@ def load_scenarios(path: Path, golden_path: Path) -> list[Scenario]:
         evidence: list[list[str]] = []
         arguments: dict[str, Any] = {}
         messages: list[str] = []
+        abstain_terms: list[str] = []
         if search_ref is not None:
             if search_ref not in searches:
                 raise ValueError(f"{sid}: no golden search question {search_ref!r}")
@@ -487,6 +513,8 @@ def load_scenarios(path: Path, golden_path: Path) -> list[Scenario]:
             messages = [f"{m}{_BASELINE_DOMAIN}" for m in q["expect"]]
         elif unanswerable_ref not in unanswerables:
             raise ValueError(f"{sid}: no golden unanswerable question {unanswerable_ref!r}")
+        else:
+            abstain_terms = unanswerables[unanswerable_ref]["absent_terms"]
         scenarios.append(
             Scenario(
                 id=sid,
@@ -501,6 +529,7 @@ def load_scenarios(path: Path, golden_path: Path) -> list[Scenario]:
                     [f"{m}{_BASELINE_DOMAIN}" for m in group] for group in citation_refs
                 ],
                 unanswerable=unanswerable_ref is not None,
+                abstain_terms=list(abstain_terms),
                 held_out=is_held_out(sid),
             )
         )
