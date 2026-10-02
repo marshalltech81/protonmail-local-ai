@@ -641,6 +641,72 @@ class TestClaimantId:
         assert msg.claimant_id == "bare@example.com"
 
 
+def _raw_with_subject(subject: bytes) -> bytes:
+    return (
+        b"From: alice@example.com\r\n"
+        b"To: bob@example.com\r\n"
+        b"Subject: " + subject + b"\r\n"
+        b"Message-ID: <long-subject@example.com>\r\n"
+        b"Date: Mon, 01 Jan 2024 12:00:00 +0000\r\n"
+        b"\r\n"
+        b"Body.\r\n"
+    )
+
+
+class TestSubjectCap:
+    """#541: the stored subject is cut to ``SUBJECT_MAX_CHARS`` at parse
+    time, so every reader of ``messages.subject`` / ``threads.subject``
+    (the ``threads_fts`` subject scan, the rerank reply-subject scan)
+    reads at most that many characters per row, whatever the header."""
+
+    def _parse(self, tmp_path, raw: bytes):
+        path = tmp_path / "INBOX" / "cur" / "long:2,S"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(raw)
+        msg = parse_email(path, maildir_root=tmp_path)
+        assert msg is not None
+        return msg
+
+    def test_cap_is_well_above_a_real_subject(self):
+        from src.parser import SUBJECT_MAX_CHARS
+
+        # RFC 5322 caps a header line at 998 characters; a real subject
+        # is far shorter. The cap leaves room for a folded one.
+        assert SUBJECT_MAX_CHARS == 2000
+
+    def test_multi_megabyte_ascii_subject_is_capped(self, tmp_path):
+        import time
+
+        from src.parser import SUBJECT_MAX_CHARS
+
+        started = time.perf_counter()
+        msg = self._parse(tmp_path, _raw_with_subject(b"A" * 3_000_000))
+        assert time.perf_counter() - started < 10
+        assert msg.subject == "A" * SUBJECT_MAX_CHARS
+
+    def test_multi_megabyte_8bit_subject_is_capped_in_characters(self, tmp_path):
+        """A raw 8-bit header comes back as a ``Header``; the cap counts
+        decoded characters, not bytes."""
+        from src.parser import SUBJECT_MAX_CHARS
+
+        msg = self._parse(tmp_path, _raw_with_subject("é".encode() * 1_500_000))
+        assert len(msg.subject) == SUBJECT_MAX_CHARS
+        assert set(msg.subject) == {"é"}
+
+    def test_long_encoded_word_subject_is_capped_after_decoding(self, tmp_path):
+        from src.parser import SUBJECT_MAX_CHARS
+
+        word = b"=?utf-8?b?" + base64.b64encode(b"x" * 45) + b"?="
+        msg = self._parse(tmp_path, _raw_with_subject(b" ".join([word] * 20_000)))
+        assert msg.subject == "x" * SUBJECT_MAX_CHARS
+
+    @pytest.mark.parametrize("length", [1, 200, 1999, 2000])
+    def test_subject_within_the_cap_is_unchanged(self, tmp_path, length):
+        subject = ("Quarterly report " * 200)[:length].strip() or "Q"
+        msg = self._parse(tmp_path, _raw_with_subject(subject.encode()))
+        assert msg.subject == subject
+
+
 # ---------------------------------------------------------------------------
 # parse_email — body extraction
 # ---------------------------------------------------------------------------

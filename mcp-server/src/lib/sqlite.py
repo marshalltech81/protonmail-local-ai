@@ -181,6 +181,9 @@ _RERANK_SUBJECT_CHARS = 500
 # ``_RERANK_SUBJECT_SCAN_ROWS`` stored subjects are read (oldest first),
 # each cut to ``_RERANK_SUBJECT_CHARS`` in SQL before normalization. A
 # changed subject first seen past the scanned rows is not added.
+# ``substr()`` bounds only the characters returned; the bytes SQLite
+# reads per row are bounded by the indexer storing at most
+# ``SUBJECT_MAX_CHARS`` (2000) characters of a subject (#541).
 _RERANK_REPLY_SUBJECTS_MAX = 5
 _RERANK_REPLY_SUBJECTS_MAX_CHARS = 500
 _RERANK_SUBJECT_SCAN_ROWS = 50
@@ -1386,9 +1389,10 @@ class Database:
         rerank candidate text.
 
         One indexed ``LIMIT`` query per thread on a single connection, so
-        the rows and characters read are bounded per thread
+        the rows and characters returned are bounded per thread
         (``_RERANK_SUBJECT_SCAN_ROWS`` × ``_RERANK_SUBJECT_CHARS``) however
-        long the thread is. Rerank is best-effort: on an SQLite error the
+        long the thread is; each row read is a subject the indexer
+        stored at most 2000 characters of (#541). Rerank is best-effort: on an SQLite error the
         candidates are reranked without these subjects and only the
         error's type is logged.
         """

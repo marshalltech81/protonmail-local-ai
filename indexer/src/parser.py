@@ -61,6 +61,20 @@ class OversizedMessageError(Exception):
 _DEFAULT_PARSE_MAX_BYTES = 50_000_000
 
 
+# Longest subject stored (#541), in decoded characters. ``parse_email``
+# cuts the decoded Subject here, so ``messages.subject``,
+# ``threads.subject`` / ``display_subject`` and every reader of them
+# (the ``threads_fts`` subject scan, the rerank reply-subject scan,
+# subject-fallback threading) handle at most this many characters per
+# row: a ``substr()`` in SQL bounds only what it returns, not what
+# SQLite reads. RFC 5322 limits a header line to 998 characters and a
+# real subject is far shorter, so the cap only touches crafted mail.
+# Subject-fallback threading compares the capped values: two subjects
+# that agree on their first ``SUBJECT_MAX_CHARS`` characters match,
+# and a ``Re:`` reply to a subject longer than the cap does not.
+SUBJECT_MAX_CHARS = 2000
+
+
 def _parse_max_bytes() -> int:
     raw = os.environ.get("INDEXER_PARSE_MAX_BYTES", "").strip()
     if not raw:
@@ -298,7 +312,7 @@ def parse_email(path: Path, maildir_root: Path | None = None) -> Message | None:
     in_reply_to = _clean_id(msg.get("In-Reply-To", ""))
     references = [_clean_id(r) for r in msg.get("References", "").split() if r.strip()]
 
-    subject = _decode_header(msg.get("Subject", "(no subject)"))
+    subject = _decode_header(msg.get("Subject", "(no subject)"))[:SUBJECT_MAX_CHARS]
     # Parse From structurally, like To / Cc: decoding the whole header
     # first turns an encoded name with a comma ("=?utf-8?q?Doe=2C_Jane?=")
     # into an unquoted "Doe, Jane <...>" that no longer parses as one
