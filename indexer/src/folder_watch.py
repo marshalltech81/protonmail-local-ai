@@ -14,11 +14,13 @@ sync, ``refresh`` walks the folder directories again and, when any
 directory is readable now that was not then, or was replaced by a new
 directory at the same path (deleting a directory drops its watch),
 re-schedules the watch, which walks the tree again and adds every watch
-it can.
+it can. A directory-create event from the watch itself also forces a
+re-schedule, since a recreated directory may reuse its inode number.
 """
 
 import logging
 import os
+import threading
 from pathlib import Path
 
 from watchdog.events import FileSystemEventHandler
@@ -72,15 +74,28 @@ class FolderWatchRefresher:
     different inode (deleted and recreated, which drops the watch), is
     re-checked on every ``refresh``. A watch survives a ``chmod``, so a
     watched directory closed and reopened needs nothing. Re-scheduling
-    replaces the watch, so there is never more than one. Limitation: a
-    directory recreated with a reused inode number looks unchanged; the
-    periodic Maildir rescan still indexes its mail.
+    replaces the watch, so there is never more than one.
+
+    ``directory_created`` is set by the event handler for every
+    directory the watch reports created. watchdog cannot watch one that
+    appears unreadable, and a directory deleted and recreated between
+    two refreshes may get its old inode number back, so the walk alone
+    cannot tell it apart; the event forces the next refresh to
+    re-schedule.
     """
 
-    def __init__(self, root: Path, observer: BaseObserver, handler: FileSystemEventHandler):
+    def __init__(
+        self,
+        root: Path,
+        observer: BaseObserver,
+        handler: FileSystemEventHandler,
+        *,
+        directory_created: threading.Event | None = None,
+    ):
         self.root = root
         self._observer = observer
         self._handler = handler
+        self._directory_created = directory_created or threading.Event()
         self._watch: ObservedWatch | None = None
         self._watched: dict[str, int] = {}
 
@@ -99,11 +114,15 @@ class FolderWatchRefresher:
 
     def refresh(self) -> bool:
         """Re-schedule the watch if a directory became readable, or was
-        recreated, since it was last scheduled, or if the last schedule
+        created, since it was last scheduled, or if the last schedule
         failed. Returns whether it did."""
+        # Cleared before the walk, so a directory created during this
+        # refresh forces the next one.
+        created = self._directory_created.is_set()
+        self._directory_created.clear()
         current = readable_dirs(self.root)
         added = sum(1 for path, inode in current.items() if self._watched.get(path) != inode)
-        if not added and self._watch is not None:
+        if not added and not created and self._watch is not None:
             return False
         log.info("Maildir watch: %d new or newly readable director(ies); re-watching", added)
         self._schedule(current)

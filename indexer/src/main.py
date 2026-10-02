@@ -488,6 +488,7 @@ class MaildirHandler(FileSystemEventHandler):
         reconciler: Reconciler | None = None,
         ingestion_state: _IngestionStateRecorder | None = None,
         sync_completed: threading.Event | None = None,
+        directory_created: threading.Event | None = None,
     ):
         self.db = db
         self.queue = queue
@@ -496,6 +497,10 @@ class MaildirHandler(FileSystemEventHandler):
         # Set on each mbsync sync stamp; the main loop then re-watches
         # folders the sync's permission repair made readable (#516).
         self.sync_completed = sync_completed
+        # Set on every directory the watch reports created: watchdog
+        # cannot watch one mbsync created 0700, so the next refresh
+        # re-schedules the watch.
+        self.directory_created = directory_created
 
     def _is_reaped_or_deleted(self, path: str | Path) -> bool:
         # With deletion reconciliation enabled, a T-flagged file is
@@ -507,6 +512,8 @@ class MaildirHandler(FileSystemEventHandler):
 
     def on_created(self, event):
         if event.is_directory:
+            if self.directory_created is not None:
+                self.directory_created.set()
             return
         path = Path(event.src_path)
         # Only enqueue files in cur/ or new/ subdirectories
@@ -2077,15 +2084,19 @@ def main():
     ingestion_state = _IngestionStateRecorder(db, MAILDIR_PATH)
     _ingestion_state = ingestion_state
     sync_completed = threading.Event()
+    directory_created = threading.Event()
     handler = MaildirHandler(
         db,
         queue,
         reconciler=reconciler,
         ingestion_state=ingestion_state,
         sync_completed=sync_completed,
+        directory_created=directory_created,
     )
     observer = Observer()
-    folder_watches = FolderWatchRefresher(MAILDIR_PATH, observer, handler)
+    folder_watches = FolderWatchRefresher(
+        MAILDIR_PATH, observer, handler, directory_created=directory_created
+    )
     folder_watches.start()
     observer.start()
     log.info("Watching Maildir for new emails...")

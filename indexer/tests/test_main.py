@@ -3550,6 +3550,17 @@ class TestLateFolderWatches:
 
         assert not sync_completed.is_set()
 
+    def test_directory_create_marks_the_watch_stale(self, tmp_path, db):
+        from watchdog.events import DirCreatedEvent, FileCreatedEvent
+
+        created = main.threading.Event()
+        handler = main.MaildirHandler(db, _make_queue(db), directory_created=created)
+        handler.on_created(FileCreatedEvent(str(tmp_path / "Box" / "new" / "m")))
+        assert not created.is_set()
+
+        handler.on_created(DirCreatedEvent(str(tmp_path / "Box")))
+        assert created.is_set()
+
     def test_refresh_watches_a_new_folder_and_queues_its_mail(self, tmp_path, db, monkeypatch):
         maildir = tmp_path / "maildir"
         _write_eml(maildir / "INBOX" / "cur" / "old.eml:2,S", "old@example.com")
@@ -3641,6 +3652,64 @@ class TestLateFolderWatches:
             assert wait_for("second") == main.REASON_ON_MOVED
         finally:
             late.chmod(0o755)
+            observer.stop()
+            observer.join()
+
+    @pytest.mark.skipif(
+        not sys.platform.startswith("linux") or os.geteuid() == 0,
+        reason="the EACCES gap is inotify-specific, and root can enter a 000 directory",
+    )
+    def test_folder_deleted_and_recreated_is_watched_again(self, tmp_path, db, monkeypatch):
+        """Review round 2, against the real inotify observer: removing a
+        watched folder drops its watch, and mbsync recreates it 0700, so
+        watchdog cannot watch the replacement, whose inode number may be
+        the old one's."""
+        import shutil
+        import threading
+        import time as _time
+
+        from watchdog.observers import Observer
+
+        maildir = tmp_path / "maildir"
+        box = maildir / "Box"
+        for sub in ("cur", "new", "tmp"):
+            (box / sub).mkdir(parents=True)
+        monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
+        queue = _make_queue(db)
+        created = threading.Event()
+        handler = main.MaildirHandler(db, queue, directory_created=created)
+        observer = Observer()
+        refresher = main.FolderWatchRefresher(maildir, observer, handler, directory_created=created)
+        refresher.start()
+        observer.start()
+
+        def wait_for(name: str, timeout: float = 5.0) -> str | None:
+            deadline = _time.monotonic() + timeout
+            while _time.monotonic() < deadline:
+                reason = _job_reasons(db).get(name)
+                if reason is not None:
+                    return reason
+                _time.sleep(0.05)
+            return None
+
+        try:
+            shutil.rmtree(box)
+            box.mkdir(mode=0o000)
+            assert created.wait(5)
+            box.chmod(0o755)
+            for sub in ("cur", "new", "tmp"):
+                (box / sub).mkdir()
+            _write_eml(box / "tmp" / "unseen", "unseen@example.com")
+            (box / "tmp" / "unseen").rename(box / "new" / "unseen")
+            assert wait_for("unseen", timeout=1.0) is None, "replacement already watched"
+
+            assert main._refresh_folder_watches(refresher, db, queue) is True
+            _write_eml(box / "tmp" / "after", "after@example.com")
+            (box / "tmp" / "after").rename(box / "new" / "after")
+            assert wait_for("after") == main.REASON_ON_MOVED
+        finally:
+            if box.exists():
+                box.chmod(0o755)
             observer.stop()
             observer.join()
 

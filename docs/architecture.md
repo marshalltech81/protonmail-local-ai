@@ -958,8 +958,9 @@ a folder created during a sync is unwatched when it becomes readable
 folder directories (not `cur`/`new`/`tmp`, so the walk is linear in
 folders) and, when any directory is readable that was not when the
 watch was last scheduled, or sits at a known path with a new inode
-(deleted and recreated, which drops its watch), unschedules and
-re-schedules the recursive watch (`FolderWatchRefresher`, `indexer/src/folder_watch.py`). Events
+(deleted and recreated, which drops its watch), or when the watch has
+reported a directory created since (a recreated directory may reuse
+its inode number), unschedules and re-schedules the recursive watch (`FolderWatchRefresher`, `indexer/src/folder_watch.py`). Events
 in the gap between the old and new watch are covered by the rename
 sweep (`sweep_paths`) and a Maildir walk, which also queues the mail
 already in the newly watched folders. A sync that opens no new

@@ -233,6 +233,31 @@ class TestFolderWatchRefresher:
         assert refresher.refresh() is False
         assert observer.calls == ["schedule", "unschedule", "schedule"]
 
+    def test_a_created_directory_forces_a_rewatch(self, tmp_path):
+        """Review round 2: a directory deleted and recreated between two
+        refreshes may get its old inode number back, so the walk alone
+        cannot see it. The watch's own directory-create event marks the
+        watch stale; the next refresh re-schedules once."""
+        import threading
+
+        _folder(tmp_path, "Box")
+        created = threading.Event()
+        observer = _FakeObserver()
+        refresher = FolderWatchRefresher(
+            tmp_path,
+            observer,
+            handler=None,  # type: ignore[arg-type]
+            directory_created=created,
+        )
+        refresher.start()
+        assert refresher.refresh() is False
+
+        created.set()
+        assert refresher.refresh() is True
+        assert not created.is_set()
+        assert refresher.refresh() is False
+        assert observer.calls == ["schedule", "unschedule", "schedule"]
+
     def test_failed_schedule_is_retried_on_the_next_refresh(self, tmp_path):
         observer = _FakeObserver()
         refresher = FolderWatchRefresher(tmp_path, observer, handler=None)  # type: ignore[arg-type]
