@@ -236,8 +236,8 @@ def test_failures_are_error_results(messages_db, name, args, text):
 def test_sender_controlled_headers_stay_bounded(tmp_path):
     """The structured side must honor the same bounds as the prose: a
     sender who writes 12,000 References, 30 recipients, and a 100K-char
-    subject gets shortened lists with full counts from get_thread and
-    query_messages; get_message alone returns everything."""
+    subject gets shortened lists with full counts from get_thread,
+    query_messages and (#489) get_message."""
     refs = [f"ref{i:05d}@example.com" for i in range(12000)]
     recipients = [f"r{i}@example.com" for i in range(30)]
     with _open_fixture_db(tmp_path) as (conn, db):
@@ -255,28 +255,45 @@ def test_sender_controlled_headers_stay_bounded(tmp_path):
         server = _server(db)
         thread = _call(server, "get_thread", thread_id="t")
         listed = _call(server, "query_messages")
-        full = _call(server, "get_message", message_id="a")
+        single = _call(server, "get_message", message_id="a")
 
-    for m in (thread["messages"][0], listed["messages"][0]):
+    rows = (thread["messages"][0], listed["messages"][0], single["message"])
+    for m in rows:
         assert len(m["references"]) == 10
         assert m["references_count"] == 12000
         assert len(m["to"]) == 10
         assert m["to_count"] == 30
-    for out in (thread, listed):
-        assert len(json.dumps(out)) < 5000
-    for m in (thread["messages"][0], listed["messages"][0]):
         assert m["subject"].endswith("[99,500 more characters]")
-    assert full["message"]["references"] == refs
-    assert len(full["message"]["to"]) == 30
-    assert full["message"]["subject"] == "S" * 100_000
+    for out in (thread, listed, single):
+        assert len(json.dumps(out)) < 5000
+
+
+def test_get_message_pages_the_body(tmp_path):
+    """#489: the structured body is one page, with its offset, the
+    body's length and the next page's offset; the schema validates."""
+    body = "z" * 45_000
+    with _open_fixture_db(tmp_path) as (conn, db):
+        _insert_message(
+            conn, message_id="a", thread_id="t", sent_at="2024-01-01T00:00:00+00:00", body=body
+        )
+        conn.close()
+        server = _server(db)
+        pages = [_call(server, "get_message", message_id="a")]
+        while pages[-1]["next_offset"] is not None:
+            pages.append(
+                _call(server, "get_message", message_id="a", offset=pages[-1]["next_offset"])
+            )
+    assert [p["body_offset"] for p in pages] == [0, 20_000, 40_000]
+    assert {p["body_total_chars"] for p in pages} == {45_000}
+    assert "".join(p["body"] for p in pages) == body
 
 
 def test_query_messages_cuts_each_long_header_value(tmp_path):
     """Review round 1: query_messages bounded list lengths but not the
     values in them, so one message with a huge In-Reply-To, Reference,
     subject, or display name made a multi-megabyte page at limit=1. Both
-    the prose and the structured side cut every value at 500 characters;
-    get_message returns them in full."""
+    the prose and the structured side cut every value at 500 characters,
+    as get_message does (#489)."""
     huge = "x" * 100_000
     with _open_fixture_db(tmp_path) as (conn, db):
         _insert_message(
@@ -294,7 +311,7 @@ def test_query_messages_cuts_each_long_header_value(tmp_path):
         conn.close()
         server = _server(db)
         result = _wire(server, "query_messages", {"limit": 1})
-        full = _call(server, "get_message", message_id="a")
+        single = _call(server, "get_message", message_id="a")
 
     assert isinstance(result, CallToolResult)
     assert len(result.content[0].text) < 3000
@@ -303,9 +320,9 @@ def test_query_messages_cuts_each_long_header_value(tmp_path):
     for value in (m["subject"], m["in_reply_to"], m["references"][0], m["from"][0]["name"]):
         assert value.endswith("[99,500 more characters]")
     assert m["from"][0]["address"] == "jane@example.com"
-    assert full["message"]["in_reply_to"] == huge
-    assert full["message"]["references"] == [huge]
-    assert full["message"]["from"][0]["name"] == huge
+    m = single["message"]
+    for value in (m["subject"], m["in_reply_to"], m["references"][0], m["from"][0]["name"]):
+        assert value.endswith("[99,500 more characters]")
 
 
 def test_get_thread_rows_do_not_repeat_the_thread_id(tmp_path):

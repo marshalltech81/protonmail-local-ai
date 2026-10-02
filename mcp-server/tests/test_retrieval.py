@@ -243,7 +243,7 @@ class TestGetThread:
         assert len(text) < 3000
         assert "ref00009@example.com (+11990 more)" in text
         assert "ref00010@example.com" not in text
-        assert "get_message returns full headers" in text
+        assert "long headers are shortened" in text
 
     def test_long_header_values_are_cut_with_a_marker(self, fake_server, tmp_path):
         with _open_fixture_db(tmp_path) as (conn, db):
@@ -331,9 +331,10 @@ class TestGetMessage:
         assert text.count("Paragraph P5 ") == 1
         assert text.count("Same line again.") == 2
 
-    def test_returns_every_reference(self, fake_server, tmp_path):
-        # get_message is the full-header view get_thread points to.
-        refs = [f"ref{i:03d}@example.com" for i in range(200)]
+    def test_long_references_are_bounded(self, fake_server, tmp_path):
+        # #489: References are sender-controlled; get_message lists at
+        # most 10 like every other tool, with a count of the rest.
+        refs = [f"ref{i:05d}@example.com" for i in range(12000)]
         with _open_fixture_db(tmp_path) as (conn, db):
             _insert_message(
                 conn,
@@ -341,14 +342,19 @@ class TestGetMessage:
                 thread_id="t",
                 sent_at="2024-01-01T00:00:00+00:00",
                 references=refs,
+                body="hello",
             )
             conn.close()
-            text = _text(asyncio.run(_handlers(fake_server, db)["get_message"](message_id="a")))
-        assert f"References: {', '.join(refs)}" in text
+            out = asyncio.run(_handlers(fake_server, db)["get_message"](message_id="a"))
+        text = _text(out)
+        assert len(text) < 3000
+        assert "ref00009@example.com (+11990 more)" in text
+        assert "ref00010@example.com" not in text
+        message = out.structured_content["message"]
+        assert message["references"] == refs[:10]
+        assert message["references_count"] == 12000
 
-    def test_lists_every_recipient(self, fake_server, tmp_path):
-        # get_message is the authoritative single-message view: no
-        # "+N more" summarizing.
+    def test_long_recipient_lists_are_summarized(self, fake_server, tmp_path):
         with _open_fixture_db(tmp_path) as (conn, db):
             _insert_message(
                 conn,
@@ -358,9 +364,30 @@ class TestGetMessage:
                 to=[f"r{i:02d}@example.com" for i in range(12)],
             )
             conn.close()
-            text = _text(asyncio.run(_handlers(fake_server, db)["get_message"](message_id="a")))
-        assert "r11@example.com" in text
-        assert "more)" not in text
+            out = asyncio.run(_handlers(fake_server, db)["get_message"](message_id="a"))
+        assert "r09@example.com (+2 more)" in _text(out)
+        assert "r11@example.com" not in _text(out)
+        assert len(out.structured_content["message"]["to"]) == 10
+        assert out.structured_content["message"]["to_count"] == 12
+
+    def test_long_header_values_are_cut_with_a_marker(self, fake_server, tmp_path):
+        with _open_fixture_db(tmp_path) as (conn, db):
+            _insert_message(
+                conn,
+                message_id="a",
+                thread_id="t",
+                sent_at="2024-01-01T00:00:00+00:00",
+                subject="S" * 100_000,
+                in_reply_to="i" * 100_000,
+                body="hello",
+            )
+            conn.close()
+            out = asyncio.run(_handlers(fake_server, db)["get_message"](message_id="a"))
+        text = _text(out)
+        # Message subject, In-Reply-To, and the thread subject.
+        assert text.count("… [99,500 more characters]") == 3
+        assert len(text) < 5000
+        assert out.structured_content["thread_subject"].endswith("[99,500 more characters]")
 
     def test_unknown_message_raises_not_found_error(self, fake_server, seeded_db):
         handler = _handlers(fake_server, seeded_db)["get_message"]
@@ -424,6 +451,121 @@ class TestGetMessage:
         seeded_db.get_message_view = boom  # type: ignore[assignment]
         handler = _handlers(fake_server, seeded_db)["get_message"]
         assert "Error" in _error(handler(message_id="anything"))
+
+
+class TestGetMessagePaging:
+    """#489: get_message returns the body in pages of
+    ``_MESSAGE_BODY_PAGE_CHARS`` characters with a ``next_offset``;
+    paging from offset 0 to the end reconstructs the body exactly."""
+
+    def _db(self, tmp_path, body):
+        with _open_fixture_db(tmp_path) as (conn, db):
+            _insert_message(
+                conn,
+                message_id="a",
+                thread_id="t",
+                sent_at="2024-01-01T00:00:00+00:00",
+                body=body,
+            )
+            conn.close()
+        return db
+
+    def _pages(self, handler):
+        pages, offset, calls = [], 0, 0
+        while offset is not None:
+            out = asyncio.run(handler(message_id="a", offset=offset))
+            calls += 1
+            assert calls < 100
+            pages.append(out)
+            offset = out.structured_content["next_offset"]
+        return pages
+
+    def test_huge_body_paged_to_completion_reconstructs_exactly(self, fake_server, tmp_path):
+        from src.tools.retrieval import _MESSAGE_BODY_PAGE_CHARS
+
+        body = "".join(f"line {i:06d} of the synthetic body\n" for i in range(5000))
+        handler = _handlers(fake_server, self._db(tmp_path, body))["get_message"]
+        pages = self._pages(handler)
+        assert "".join(p.structured_content["body"] for p in pages) == body
+        assert len(pages) == -(-len(body) // _MESSAGE_BODY_PAGE_CHARS)
+        offset = 0
+        for p in pages:
+            page = p.structured_content
+            assert page["body_offset"] == offset
+            assert page["body_total_chars"] == len(body)
+            assert len(page["body"]) <= _MESSAGE_BODY_PAGE_CHARS
+            # The prose carries the same page.
+            assert page["body"] in _text(p)
+            offset += len(page["body"])
+
+    def test_default_page_is_bounded_with_next_offset(self, fake_server, tmp_path):
+        body = "x" * 20_000 + "TAIL" + "y" * 29_996
+        out = asyncio.run(
+            _handlers(fake_server, self._db(tmp_path, body))["get_message"](message_id="a")
+        )
+        text = _text(out)
+        assert "TAIL" not in text
+        assert len(text) < 21_000
+        assert out.structured_content["next_offset"] == 20_000
+        assert out.structured_content["body_total_chars"] == 50_000
+        assert "characters 1-20,000 of 50,000" in text
+        assert "30,000 more characters: call get_message with offset=20000" in text
+
+    def test_short_body_has_no_next_offset(self, fake_server, messages_db):
+        out = asyncio.run(_handlers(fake_server, messages_db)["get_message"](message_id="m2"))
+        assert out.structured_content["body"] == "thanks, budget noted"
+        assert out.structured_content["next_offset"] is None
+        assert "call get_message with offset" not in _text(out)
+
+    def test_offset_at_end_returns_an_empty_page(self, fake_server, tmp_path):
+        handler = _handlers(fake_server, self._db(tmp_path, "abc"))["get_message"]
+        out = asyncio.run(handler(message_id="a", offset=3))
+        assert out.structured_content["body"] == ""
+        assert out.structured_content["next_offset"] is None
+        assert "No body text past offset 3; the body has 3 characters." in _text(out)
+
+    @pytest.mark.parametrize("offset", [-1, 4, 10**9])
+    def test_invalid_offset_is_rejected_and_only_the_field_logged(
+        self, fake_server, tmp_path, caplog, offset
+    ):
+        handler = _handlers(fake_server, self._db(tmp_path, "abc"))["get_message"]
+        with caplog.at_level("DEBUG"):
+            message = _error(handler(message_id="a", offset=offset))
+        assert message.startswith("Error: offset")
+        rejected = [r.getMessage() for r in caplog.records if "rejected" in r.getMessage()]
+        assert rejected == ["get_message rejected invalid offset"]
+
+    def test_offset_past_a_missing_body_is_rejected(self, fake_server, seeded_db):
+        handler = _handlers(fake_server, seeded_db)["get_message"]
+        assert "past the end of the body (0 characters)" in _error(
+            handler(message_id="t-alpha", offset=1)
+        )
+
+    @pytest.mark.parametrize(
+        ("body", "keep"),
+        [
+            # A combining acute accent on the cut.
+            ("a" * 19_999 + "e\u0301" + "b" * 100, 19_999),
+            # A zero-width joiner on the cut.
+            ("a" * 19_999 + "\U0001f469\u200d\U0001f4bb" + "b" * 100, 19_999),
+            # A zero-width joiner just before the cut.
+            ("a" * 19_998 + "\U0001f469\u200d\U0001f4bb" + "b" * 100, 19_998),
+        ],
+    )
+    def test_page_boundary_does_not_split_a_combining_sequence(
+        self, fake_server, tmp_path, body, keep
+    ):
+        handler = _handlers(fake_server, self._db(tmp_path, body))["get_message"]
+        pages = self._pages(handler)
+        assert pages[0].structured_content["next_offset"] == keep
+        assert "".join(p.structured_content["body"] for p in pages) == body
+
+    def test_a_long_run_of_marks_still_makes_progress(self, fake_server, tmp_path):
+        body = "a" + "\u0301" * 50_000
+        handler = _handlers(fake_server, self._db(tmp_path, body))["get_message"]
+        pages = self._pages(handler)
+        assert pages[0].structured_content["next_offset"] == 20_000
+        assert "".join(p.structured_content["body"] for p in pages) == body
 
 
 class TestReapedSources:
