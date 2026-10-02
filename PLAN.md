@@ -56,7 +56,10 @@ The stack runs four containers:
   app on the Mac, reached through `host.docker.internal` with a
   required certificate fingerprint.
 - **mbsync** — Docker, pulls into Maildir, `chmod go+r` after each
-  sync, TOFU cert pinning with explicit rotation flag.
+  sync; with the Bridge container, TOFU cert pinning with an explicit
+  rotation flag; in macOS Bridge mode, no TOFU: the certificate must
+  match the operator-supplied `BRIDGE_CERT_FINGERPRINT` on every
+  start.
 - **indexer** — Docker, parses Maildir, threads, embeds via any
   OpenAI-compatible `/v1/embeddings` provider (operator-supplied),
   writes SQLite. Schema v0 (the squashed, renumbered baseline,
@@ -692,7 +695,10 @@ Phase 3 is current.
 Operator steps before go-live, in addition to the checklist:
 
 1. **Rebuild any existing index from Maildir** (the volume wipe in
-   `docs/troubleshooting.md`, "Indexer refuses to start"). #527, #544
+   `docs/troubleshooting.md`, "Indexer refuses to start"; in macOS
+   Bridge mode finish with `make up-macos-bridge`, not the `make up`
+   that procedure ends with, which would switch back to the Bridge
+   container; #591 fixes the procedure). #527, #544
    and #564 edited the v0 schema (#564 added `reaped_messages`; a
    database built before it fails `get_thread` and every reap), and
    #546, #547 and #548 change parsed or chunked text; none of these
@@ -709,9 +715,11 @@ Operator steps before go-live, in addition to the checklist:
    its `headersHelper`; Claude Desktop uses the pinned `mcp-remote`
    with `--header-file` (`docs/setup.md` step 7). Never put the token
    in a command argument.
-4. **macOS Bridge mode (optional):** `make up-macos-bridge` instead of
-   `make first-run` + `make up`, with `BRIDGE_CERT_FINGERPRINT` taken
-   from the Bridge app (`docs/setup.md`, "macOS Bridge mode"). It is built and tested
+4. **macOS Bridge mode (optional):** `make build-macos-bridge` and
+   `make up-macos-bridge` replace the checklist's `make build`,
+   `make first-run` and `make up` (plain `make build` builds the unused
+   Bridge image), with `BRIDGE_CERT_FINGERPRINT` taken from the Bridge
+   app (`docs/setup.md`, "macOS Bridge mode"). It is built and tested
    against a synthetic STARTTLS server only (#571); the owner's live
    test against the real app is still to do (Open decisions 21). #497
    closed when #571 merged.
