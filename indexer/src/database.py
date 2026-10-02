@@ -572,6 +572,10 @@ class Database:
             );
             CREATE INDEX idx_message_participants_address
                 ON message_participants(address, role);
+            -- The reap's alias prune asks whether any surviving row
+            -- still carries an (address, display name) pair (#464).
+            CREATE INDEX idx_message_participants_address_name
+                ON message_participants(address, name);
 
             CREATE TABLE indexed_files (
                 filepath     TEXT PRIMARY KEY,
@@ -638,10 +642,10 @@ class Database:
         ``authority_class`` / ``authority_rule`` are the operator rules
         file's class for the entity and the rule that matched it
         (``unclassified`` / NULL when none did); metadata only, never a
-        ranking weight. Rows are written alongside ``message_participants`` and are not
-        pruned when a message is removed: the table is a directory of
-        identities ever indexed, and every query joins through
-        ``message_participants``, which is.
+        ranking weight. Rows are written alongside ``message_participants``
+        and pruned with them: when a reap removes the last participant row
+        for an address or display name, the entity or alias goes in the
+        same transaction (``_prune_orphan_entities``, #464).
         """
         for statement in (
             """
@@ -2434,6 +2438,8 @@ class Database:
             ]
             for cid in claimant_ids:
                 self._delete_attachments_for_message(cur, cid)
+            # Read before the map delete cascades the participant rows away.
+            mentions = self._participant_mentions(cur, claimant_ids)
             cur.execute("DELETE FROM message_thread_map WHERE thread_id = ?", (thread_id,))
             cur.execute("DELETE FROM threads WHERE thread_id = ?", (thread_id,))
             cur.execute("DELETE FROM pending_deletions WHERE thread_id = ?", (thread_id,))
@@ -2442,6 +2448,7 @@ class Database:
                 # A job still queued for the file (an embedder outage past
                 # the grace window) would re-index it from the kept .eml.
                 cur.execute("DELETE FROM indexing_jobs WHERE filepath = ?", (fp,))
+            self._prune_orphan_entities(cur, mentions)
             self._conn.commit()
         except Exception:
             self._conn.rollback()
@@ -2509,10 +2516,12 @@ class Database:
                 self._conn.rollback()
                 return None
             self._rewrite_thread_row(cur, thread, embedding)
+            mentions = self._participant_mentions(cur, reaped_claimant_ids)
             for cid in reaped_claimant_ids:
                 fp = self._remove_message_row(cur, cid)
                 if fp is not None:
                     removed_filepaths.append(fp)
+            self._prune_orphan_entities(cur, mentions)
             self._conn.commit()
         except Exception:
             self._conn.rollback()
@@ -2609,6 +2618,76 @@ class Database:
             "INSERT INTO threads_vec (thread_id, embedding) VALUES (?, ?)",
             (thread.thread_id, sqlite_vec.serialize_float32(embedding)),
         )
+
+    @staticmethod
+    def _participant_mentions(
+        cur: sqlite3.Cursor, claimant_ids: list[str]
+    ) -> set[tuple[str, str | None]]:
+        """The distinct ``(address, display name)`` pairs the given
+        messages' participant rows carry. Read before the rows cascade
+        away, so ``_prune_orphan_entities`` knows which entities and
+        aliases the reap may have orphaned."""
+        mentions: set[tuple[str, str | None]] = set()
+        for cid in claimant_ids:
+            mentions.update(
+                (r["address"], r["name"])
+                for r in cur.execute(
+                    "SELECT DISTINCT address, name FROM message_participants WHERE claimant_id = ?",
+                    (cid,),
+                )
+            )
+        return mentions
+
+    @staticmethod
+    def _prune_orphan_entities(cur: sqlite3.Cursor, mentions: set[tuple[str, str | None]]) -> None:
+        """Delete the entities and aliases that only the reaped messages
+        mentioned (#464), after their participant rows are gone. The
+        caller owns the transaction.
+
+        Only the entities behind ``mentions`` are examined, each with
+        indexed lookups, so the work follows the reaped messages'
+        participants, not the size of ``entities``:
+
+        - a person with no participant row left is deleted, and its
+          aliases with it (``ON DELETE CASCADE``);
+        - a surviving person loses each alias no remaining participant
+          row carries for its address;
+        - an organization of a deleted person is deleted once no person
+          belongs to it.
+        """
+        deleted: set[str] = set()
+        orgs: set[str] = set()
+        for address in sorted({address for address, _ in mentions}):
+            if cur.execute(
+                "SELECT 1 FROM message_participants WHERE address = ? LIMIT 1", (address,)
+            ).fetchone():
+                continue
+            person_id = person_entity_id(address)
+            row = cur.execute(
+                "SELECT organization_id FROM entities WHERE entity_id = ?", (person_id,)
+            ).fetchone()
+            if row is None:
+                # Past the per-message entity cap: never had an entity.
+                continue
+            if row["organization_id"] is not None:
+                orgs.add(row["organization_id"])
+            cur.execute("DELETE FROM entities WHERE entity_id = ?", (person_id,))
+            deleted.add(address)
+        for address, name in sorted(
+            (a, n) for a, n in mentions if n is not None and a not in deleted
+        ):
+            cur.execute(
+                "DELETE FROM entity_aliases WHERE entity_id = ? AND alias = ? "
+                "AND NOT EXISTS (SELECT 1 FROM message_participants "
+                "WHERE address = ? AND name = ?)",
+                (person_entity_id(address), name, address, name),
+            )
+        for org_id in sorted(orgs):
+            cur.execute(
+                "DELETE FROM entities WHERE entity_id = ? "
+                "AND NOT EXISTS (SELECT 1 FROM entities WHERE organization_id = ?)",
+                (org_id, org_id),
+            )
 
     def _remove_message_row(self, cur: sqlite3.Cursor, claimant_id: str) -> str | None:
         """Remove a message's map / indexed_files / tombstone / chunk /

@@ -144,3 +144,205 @@ class TestEntityPopulation:
         )
         db.upsert_thread(make_thread(messages=[msg], thread_id="t1"), _vec())
         assert _entities(db) == {}
+
+
+def _tombstone(db, thread_id: str) -> None:
+    for row in db.get_thread_messages(thread_id):
+        db.add_pending_deletion(row["filepath"], row["claimant_id"], thread_id)
+
+
+def _reap(db, thread_id: str, survivors: list, reaped: list) -> None:
+    """Remove ``reaped`` from ``thread_id`` as the reconciler does:
+    tombstone them, then rewrite the thread from ``survivors``."""
+    for msg in reaped:
+        db.add_pending_deletion(msg.filepath, msg.claimant_id, thread_id)
+    removed = db.reap_thread_messages(
+        make_thread(messages=survivors, thread_id=thread_id),
+        _vec(),
+        [m.claimant_id for m in reaped],
+    )
+    assert removed == [m.filepath for m in reaped]
+
+
+def _participant_rows(db, claimant_id: str) -> int:
+    return db._conn.execute(
+        "SELECT COUNT(*) FROM message_participants WHERE claimant_id = ?", (claimant_id,)
+    ).fetchone()[0]
+
+
+class TestEntityPruningOnReap:
+    """#464: reaping a message deletes the entities and aliases no
+    surviving message mentions, in the reap's own transaction, and
+    leaves everything a surviving message still mentions."""
+
+    def test_entity_shared_with_a_survivor_stays(self, db):
+        kept = make_message(
+            message_id="k@example.com",
+            from_addr="Jane Roe <jane@northwind.example>",
+            to_addrs=["sam@gmail.com"],
+            filepath="/maildir/INBOX/cur/k",
+        )
+        gone = make_message(
+            message_id="g@example.com",
+            from_addr="J. Roe <jane@northwind.example>",
+            to_addrs=["Pat Lee <pat@contoso.example>"],
+            filepath="/maildir/INBOX/cur/g",
+        )
+        db.upsert_thread(make_thread(messages=[kept, gone], thread_id="t1"), _vec())
+
+        _reap(db, "t1", survivors=[kept], reaped=[gone])
+
+        assert _participant_rows(db, gone.claimant_id) == 0
+        assert _entities(db) == {
+            "person:jane@northwind.example": (
+                "person",
+                "jane@northwind.example",
+                "org:northwind.example",
+            ),
+            "org:northwind.example": ("organization", "northwind.example", None),
+            "person:sam@gmail.com": ("person", "sam@gmail.com", None),
+        }
+        # The reaped message's display name goes; the survivor's stays.
+        assert _aliases(db, "person:jane@northwind.example") == {"Jane Roe"}
+        assert _aliases(db, "person:pat@contoso.example") == set()
+
+    def test_entity_mentioned_in_another_thread_stays(self, db):
+        gone = make_message(
+            message_id="g@example.com",
+            from_addr="Jane Roe <jane@northwind.example>",
+            filepath="/maildir/INBOX/cur/g",
+        )
+        other = make_message(
+            message_id="o@example.com",
+            from_addr="Sam Poe <sam@contoso.example>",
+            to_addrs=["Jane Roe <jane@northwind.example>"],
+            filepath="/maildir/INBOX/cur/o",
+        )
+        db.upsert_thread(make_thread(messages=[gone], thread_id="t1"), _vec())
+        db.upsert_thread(make_thread(messages=[other], thread_id="t2"), _vec())
+        # bob@example.com (the default recipient) is only in the reaped mail.
+        before = {k: v for k, v in _entities(db).items() if "example.com" not in k}
+
+        _tombstone(db, "t1")
+        assert db.delete_thread_completely("t1")
+
+        assert _entities(db) == before
+        assert _aliases(db, "person:jane@northwind.example") == {"Jane Roe"}
+
+    def test_entity_of_only_reaped_mail_is_removed_with_aliases(self, db):
+        gone = make_message(
+            message_id="g@example.com",
+            from_addr="Jane Roe <jane@northwind.example>",
+            to_addrs=["Sam Poe <sam@gmail.com>"],
+            filepath="/maildir/INBOX/cur/g",
+        )
+        db.upsert_thread(make_thread(messages=[gone], thread_id="t1"), _vec())
+        assert _entities(db)
+
+        _tombstone(db, "t1")
+        assert db.delete_thread_completely("t1")
+
+        assert _entities(db) == {}
+        assert db._conn.execute("SELECT COUNT(*) FROM entity_aliases").fetchone()[0] == 0
+
+    def test_organization_stays_while_another_person_belongs_to_it(self, db):
+        kept = make_message(
+            message_id="k@example.com",
+            from_addr="a@northwind.example",
+            to_addrs=["sam@gmail.com"],
+            filepath="/maildir/INBOX/cur/k",
+        )
+        gone = make_message(
+            message_id="g@example.com",
+            from_addr="b@northwind.example",
+            to_addrs=["sam@gmail.com"],
+            filepath="/maildir/INBOX/cur/g",
+        )
+        db.upsert_thread(make_thread(messages=[kept, gone], thread_id="t1"), _vec())
+
+        _reap(db, "t1", survivors=[kept], reaped=[gone])
+
+        entities = _entities(db)
+        assert "person:b@northwind.example" not in entities
+        assert "person:a@northwind.example" in entities
+        assert "org:northwind.example" in entities
+
+    def test_failed_reap_removes_nothing(self, db, monkeypatch):
+        """The prune runs inside the reap's transaction: a failure after
+        it rolls the entity deletes back with everything else."""
+        kept = make_message(
+            message_id="k@example.com",
+            from_addr="sam@gmail.com",
+            filepath="/maildir/INBOX/cur/k",
+        )
+        gone = make_message(
+            message_id="g@example.com",
+            from_addr="Jane Roe <jane@northwind.example>",
+            filepath="/maildir/INBOX/cur/g",
+        )
+        db.upsert_thread(make_thread(messages=[kept, gone], thread_id="t1"), _vec())
+        before = (_entities(db), _aliases(db, "person:jane@northwind.example"))
+
+        prune = db._prune_orphan_entities
+
+        def prune_then_fail(cur, mentions):
+            prune(cur, mentions)
+            assert "person:jane@northwind.example" not in _entities(db)
+            raise RuntimeError("synthetic failure after the prune")
+
+        monkeypatch.setattr(db, "_prune_orphan_entities", prune_then_fail)
+        with pytest.raises(RuntimeError):
+            _reap(db, "t1", survivors=[kept], reaped=[gone])
+        _tombstone(db, "t1")
+        with pytest.raises(RuntimeError):
+            db.delete_thread_completely("t1")
+
+        assert (_entities(db), _aliases(db, "person:jane@northwind.example")) == before
+        assert _participant_rows(db, gone.claimant_id) > 0
+
+    def test_prune_touches_only_the_reaped_messages_entities(self, db):
+        """The sweep runs per address of the reaped message, each an
+        indexed lookup: the number of entity statements does not grow
+        with the rest of the table, and none scans a table."""
+        for i in range(40):
+            msg = make_message(
+                message_id=f"u{i}@example.com",
+                from_addr=f"User {i} <u{i}@org{i}.example>",
+                to_addrs=["sam@gmail.com"],
+                filepath=f"/maildir/INBOX/cur/u{i}",
+            )
+            db.upsert_thread(make_thread(messages=[msg], thread_id=f"u{i}"), _vec())
+        kept = make_message(
+            message_id="k@example.com",
+            from_addr="Sam Poe <sam@gmail.com>",
+            filepath="/maildir/INBOX/cur/k",
+        )
+        gone = make_message(
+            message_id="g@example.com",
+            from_addr="Jane Roe <jane@northwind.example>",
+            to_addrs=["Sam Poe <sam@gmail.com>"],
+            filepath="/maildir/INBOX/cur/g",
+        )
+        db.upsert_thread(make_thread(messages=[kept, gone], thread_id="t1"), _vec())
+        total = len(_entities(db))
+        assert total > 80
+
+        statements: list[str] = []
+        db._conn.set_trace_callback(statements.append)
+        try:
+            _reap(db, "t1", survivors=[kept], reaped=[gone])
+        finally:
+            db._conn.set_trace_callback(None)
+
+        entity_statements = [s for s in statements if "entit" in s or "message_participants" in s]
+        # Two touched addresses: a handful of lookups each, not one per
+        # entity in the table.
+        assert 0 < len(entity_statements) <= 10
+        for sql in entity_statements:
+            plan = " ".join(
+                str(r[3]) for r in db._conn.execute(f"EXPLAIN QUERY PLAN {sql}").fetchall()
+            )
+            assert "SCAN" not in plan, (sql, plan)
+        assert "person:jane@northwind.example" not in _entities(db)
+        # Jane and her organization go; nothing else does.
+        assert len(_entities(db)) == total - 2

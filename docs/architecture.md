@@ -473,11 +473,23 @@ cannot drive unbounded writes; later participants still get their
 `message_participants` rows, just no new entity. The MCP server's
 `find_contact` reports each contact's organization.
 
-Known limitation: entities are not pruned when messages are removed,
-so an address seen only in reaped mail keeps its `entities` row and
-aliases. Every read joins through `message_participants`, which is
-pruned, so such an entity never surfaces in results; it only takes
-space.
+Entities are pruned with the mail that mentions them (#464). When the
+reaper removes messages (a partial reap or a whole-thread delete), the
+same transaction deletes, among the entities those messages mentioned
+only:
+
+- a person with no `message_participants` row left for its address,
+  with its aliases;
+- an alias that no remaining row carries for its address, while the
+  person stays;
+- an organization of a deleted person once no person belongs to it.
+
+Entities and aliases still mentioned by surviving mail are untouched.
+The sweep examines only the reaped messages' addresses, each with an
+indexed lookup (`idx_message_participants_address_name` serves the
+alias check), so its cost follows those messages, not the size of the
+table. No MCP output changes: every read joins through
+`message_participants`, so a pruned entity could never surface.
 
 ### Source authority
 
