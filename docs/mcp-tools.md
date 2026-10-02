@@ -250,24 +250,37 @@ chunks (extracted PDF / OCR / document text) are included — unlike
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `query` | string | required | The question or topic to gather evidence for |
-| `thread_id` | string | none | Scope evidence to one thread; omit to search the whole mailbox. Rejected in combination with `folders`, `from_addr`, `date_from`, `date_to` or `has_attachments`, which select threads |
+| `thread_id` | string | none | Scope evidence to one thread; omit to search the whole mailbox. Rejected in combination with `folders`, `from_addr`, `date_from`, `date_to`, `has_attachments` or `max_threads`, which select threads |
 | `folders` | list | all but Trash | Scope to threads with a message in any of these folders (the membership `list_threads` uses). Without it, threads filed only in Trash are left out; name `"Trash"` to include them ([Trash](#trash-is-left-out-by-default)) |
 | `from_addr` | string | none | Filter by sender address or domain |
 | `date_from` | string | none | ISO 8601 date lower bound |
 | `date_to` | string | none | ISO 8601 date upper bound |
 | `has_attachments` | bool | none | Restrict to threads with attachments |
-| `limit` | int | `12` | Max evidence chunks to return; clamped to `[1, 60]`, the most `ask_mailbox` can put in one prompt (10 threads × 6 chunks), so the cap never cuts below an answer's evidence set |
+| `max_threads` | int | none | Rank threads exactly as `ask_mailbox` does with this `max_threads` and return their evidence; clamped to `[1, 10]` like `ask_mailbox`'s. Omit it to rank by `limit` instead |
+| `limit` | int | `12`, or `max_threads` × 6 | Max evidence chunks to return (with `max_threads`, a smaller value keeps the first `limit` chunks of the audit set in rank order); clamped to `[1, 60]`, the most `ask_mailbox` can put in one prompt (10 threads × 6 chunks), so the cap never cuts below an answer's evidence set |
 | `include_scores` | bool | `false` | Annotate each thread with the retrieval lanes that matched (`thread_fts` / `chunk_fts` / `attachment_fts` / `thread_vec` / `chunk_vec` / `rerank`) and each chunk with its vector distance |
 
-The mailbox-wide path runs the same hybrid retrieval as `ask_mailbox`,
-with the same cap of six chunks per thread, and flattens the
-per-thread evidence into a flat `limit`-chunk budget, at up to 1,600
-characters a chunk. `limit` also sets how many threads the retrieval
-ranks, while `ask_mailbox` uses `max_threads`, so the two can surface
-different threads (more so with a reranker), and when the top threads
-are short the budget takes passages from lower-ranked threads. The
-returned set is close to an answer's evidence, not guaranteed to be the
-same ([#537](https://github.com/marshalltech81/protonmail-local-ai/issues/537)).
+The mailbox-wide path runs the same hybrid retrieval as `ask_mailbox`
+(the same code), with the same cap of six chunks per thread, and
+flattens the per-thread evidence into a flat `limit`-chunk budget, at
+up to 1,600 characters a chunk. With `max_threads` set, retrieval ranks
+that many threads, the number that sizes the lane fetch and the
+reranker's candidate pool, so `get_evidence(query, filters,
+max_threads=N)` returns the evidence `ask_mailbox(question=query,
+filters, max_threads=N)` retrieved: the same threads in the same order,
+each with the same chunks in the same order
+([#537](https://github.com/marshalltech81/protonmail-local-ai/issues/537)).
+This holds at the default `limit` (`max_threads` × 6, the most those
+threads can carry). A smaller `limit` cuts the same set in rank order:
+the first `limit` chunks, with the threads past the cut left out.
+A selected thread with no indexed chunks is listed in its place with
+an empty `chunks` list, since `ask_mailbox` shows the model that
+thread's indexed text instead; read it with `get_thread`.
+`has_attachments` is not an `ask_mailbox` filter; leave it unset for an
+audit. Without `max_threads`, `limit` also sets how many threads are
+ranked, so the result can surface different threads from an answer
+(more so with a reranker), and when the top threads are short the
+budget takes passages from lower-ranked threads.
 The `thread_id`-scoped path returns that thread's chunks ranked
 against the query the way `ask_mailbox` ranks them: chunks of any
 attachment whose filename or MIME type the query matches come first
@@ -703,7 +716,12 @@ model's words), a `Quote check:` count when the answer quotes, and
 the `Sources searched:` list. To audit a
 citation, call `get_evidence` with the same question and the
 citation's `thread_id`: the cited `chunk_id` is among the first six
-returned chunks, attachment-matched passages included. A `thread` citation
+returned chunks, attachment-matched passages included. To audit the
+whole answer, call `get_evidence` with the same question, filters and
+`max_threads`, no `thread_id` and no `limit`: it returns the evidence
+this call retrieved, the same chunks in the same order. The prompt budget can
+still leave some of those passages out of the prompt (the coverage
+note tells the model how many). A `thread` citation
 has no chunk; read it with `get_thread`.
 
 The check is about labels, statement coverage and quoted words, not
