@@ -117,9 +117,14 @@ class FolderWatchRefresher:
         created, since it was last scheduled, or if the last schedule
         failed. Returns whether it did."""
         # Cleared before the walk, so a directory created during this
-        # refresh forces the next one.
+        # refresh forces the next one. Cleared only when seen set: a
+        # ``set`` landing between the check and an unconditional clear
+        # would be erased unprocessed (#528). One landing after a true
+        # check is covered, since this refresh then re-schedules after
+        # that directory exists.
         created = self._directory_created.is_set()
-        self._directory_created.clear()
+        if created:
+            self._directory_created.clear()
         current = readable_dirs(self.root)
         added = sum(1 for path, inode in current.items() if self._watched.get(path) != inode)
         if not added and not created and self._watch is not None:
