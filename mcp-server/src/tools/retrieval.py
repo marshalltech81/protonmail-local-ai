@@ -78,15 +78,17 @@ _MAX_CUT_BACKOFF = 32
 _MAX_LISTED_REFERENCES = 10
 
 
-def _join_limited(items: list[str], limit: int | None) -> str:
-    if limit is None or len(items) <= limit:
-        return ", ".join(items)
-    return ", ".join(items[:limit]) + f" (+{len(items) - limit} more)"
+def _join_limited(items: list[str], limit: int) -> str:
+    """At most ``limit`` of ``items``, joined and cut at
+    ``HEADER_CHAR_LIMIT``, then a count of the entries not listed. The
+    count follows the cut so a list of long entries keeps it."""
+    joined = clip(", ".join(items[:limit]), HEADER_CHAR_LIMIT)
+    if len(items) <= limit:
+        return joined
+    return joined + f" (+{len(items) - limit} more)"
 
 
-def _format_participants(
-    people: list[Participant], limit: int | None = _MAX_LISTED_PARTICIPANTS
-) -> str:
+def _format_participants(people: list[Participant], limit: int = _MAX_LISTED_PARTICIPANTS) -> str:
     return _join_limited(
         [f"{p.name} <{p.address}>" if p.name else p.address for p in people], limit
     )
@@ -96,22 +98,23 @@ def _header_lines(m: MessageRecord) -> list[str]:
     """A message's own headers, one per line; absent ones are omitted.
 
     Long lists are summarized and long values cut, so a response stays
-    bounded whatever a sender put in the headers.
+    bounded whatever a sender put in the headers. List values come cut
+    from ``_join_limited``; the others are cut here.
     """
-    headers = [("Subject", m.subject)]
+    headers = [("Subject", clip(m.subject, HEADER_CHAR_LIMIT))]
     for label, people in (("From", m.from_), ("To", m.to), ("Cc", m.cc)):
         if people:
             headers.append((label, _format_participants(people)))
     headers.append(("Sent", m.sent_at))
     if m.occurred_at:
         headers.append(("Delivered", m.occurred_at))
-    headers.append(("Folder", m.folder))
+    headers.append(("Folder", clip(m.folder, HEADER_CHAR_LIMIT)))
     if m.in_reply_to:
-        headers.append(("In-Reply-To", m.in_reply_to))
+        headers.append(("In-Reply-To", clip(m.in_reply_to, HEADER_CHAR_LIMIT)))
     if m.references:
         headers.append(("References", _join_limited(m.references, _MAX_LISTED_REFERENCES)))
     headers.append(("Attachments", "yes" if m.has_attachments else "no"))
-    return [f"{label}: {clip(value, HEADER_CHAR_LIMIT)}" for label, value in headers]
+    return [f"{label}: {value}" for label, value in headers]
 
 
 def _joins_previous(text: str, i: int) -> bool:
@@ -295,11 +298,7 @@ def register_retrieval_tools(server, db):
                 f"Thread: {clip(thread.subject, HEADER_CHAR_LIMIT)}",
                 f"Thread ID: {thread.thread_id}",
                 f"Folder: {thread.folder}",
-                "Participants: "
-                + clip(
-                    _join_limited(thread.participants, _MAX_LISTED_PARTICIPANTS),
-                    HEADER_CHAR_LIMIT,
-                ),
+                "Participants: " + _join_limited(thread.participants, _MAX_LISTED_PARTICIPANTS),
                 f"Date range: {thread.date_first.strftime('%Y-%m-%d')} "
                 f"→ {thread.date_last.strftime('%Y-%m-%d')}",
                 f"Messages: {count}",
@@ -795,9 +794,7 @@ def register_retrieval_tools(server, db):
             lines.append(f"   Subject: {clip(m.subject, HEADER_CHAR_LIMIT)}")
             for label, people in (("From", m.from_), ("To", m.to), ("Cc", m.cc)):
                 if people:
-                    lines.append(
-                        f"   {label}: {clip(_format_participants(people), HEADER_CHAR_LIMIT)}"
-                    )
+                    lines.append(f"   {label}: {_format_participants(people)}")
             lines.append(f"   Message-ID: {m.message_id} | Claimant ID: {m.claimant_id}")
             lines.append(f"   Thread ID: {m.thread_id}")
             lines.append("")

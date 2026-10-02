@@ -568,6 +568,50 @@ class TestGetMessagePaging:
         assert "".join(p.structured_content["body"] for p in pages) == body
 
 
+def _long_list(prefix: str) -> list[str]:
+    # Twelve entries whose first ten join to well past HEADER_CHAR_LIMIT.
+    return [f"{prefix}{i:02d}-{'x' * 60}@example.com" for i in range(12)]
+
+
+@pytest.mark.parametrize(
+    ("tool", "args"),
+    [
+        ("get_message", {"message_id": "a"}),
+        ("get_thread", {"thread_id": "t"}),
+        ("query_messages", {}),
+    ],
+)
+def test_long_header_lists_keep_their_omitted_count(fake_server, tmp_path, tool, args):
+    """Review round 2 (#489): the "+N more" note was appended before the
+    500-character cut of the joined list, so a list of long entries lost
+    its count. Every prose list (From / To / Cc, References) keeps it."""
+    with _open_fixture_db(tmp_path) as (conn, db):
+        _insert_message(
+            conn,
+            message_id="a",
+            thread_id="t",
+            sent_at="2024-01-01T00:00:00+00:00",
+            from_=_long_list("f"),
+            to=_long_list("t"),
+            cc=_long_list("c"),
+            references=_long_list("r"),
+            body="hello",
+        )
+        conn.close()
+        text = _text(asyncio.run(_handlers(fake_server, db)[tool](**args)))
+    expected = 4 if tool != "query_messages" else 3  # query_messages lists no References
+    assert text.count("(+2 more)") == expected
+    assert len(text) < 10_000
+
+
+def test_long_thread_participants_keep_their_omitted_count(fake_server, tmp_path):
+    with _open_fixture_db(tmp_path) as (conn, db):
+        _insert_thread(conn, thread_id="t", subject="s", participants=_long_list("p"))
+        conn.close()
+        text = _text(asyncio.run(_handlers(fake_server, db)["get_thread"](thread_id="t")))
+    assert "(+2 more)" in text
+
+
 class TestReapedSources:
     """PLAN Phase 4 item 4: a caller holding a claimant ID or thread ID
     from an earlier answer learns that its source was reaped
