@@ -1,10 +1,32 @@
 name: Docker
 
+# Runs only when a build input changes: the four build contexts, the
+# Compose files, .env.example (copied to .env, it carries BRIDGE_VERSION
+# and BRIDGE_COMMIT), the Makefile (make init-secrets) and this file. The
+# main ruleset requires no status checks, so a skipped run blocks no merge.
 on:
   push:
     branches: [main]
+    paths:
+      - "bridge/**"
+      - "mbsync/**"
+      - "indexer/**"
+      - "mcp-server/**"
+      - "docker-compose*.yml"
+      - ".env.example"
+      - "Makefile"
+      - ".github/workflows/docker.yml"
   pull_request:
     branches: [main]
+    paths:
+      - "bridge/**"
+      - "mbsync/**"
+      - "indexer/**"
+      - "mcp-server/**"
+      - "docker-compose*.yml"
+      - ".env.example"
+      - "Makefile"
+      - ".github/workflows/docker.yml"
   workflow_dispatch:
 
 permissions:
