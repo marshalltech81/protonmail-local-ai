@@ -14,6 +14,11 @@ supersede it, on the same retrieval and checks. Each finding comes back
 with the attribution and a verbatim excerpt of the passages it cites,
 taken by the server from the indexed text, so a finding is always shown
 with its source quote. Nothing it produces is stored or indexed either.
+
+Both tools check the words the model quotes with ask_mailbox's quote
+checker (``_check_quotes``): each quotation is searched in the indexed
+text of the passages its entry cites, and a misattributed or unmatched
+quote is a citation problem that gets the one repair call.
 """
 
 import asyncio
@@ -41,9 +46,12 @@ from .intelligence import (
     _LABEL_RE,
     _LT_SPELLINGS,
     _MAX_ASK_THREADS,
+    _QUOTE_RE,
     UNTRUSTED_CONTENT_NOTICE,
     EvidenceRef,
+    QuoteCheck,
     _build_evidence,
+    _check_quotes,
     _citation,
     _citation_lines,
     _evidence_budget,
@@ -57,11 +65,13 @@ from .outputs import (
     Brief,
     BriefCitationProblem,
     BriefIssueOutput,
+    BriefQuoteCheck,
     BriefSection,
     CheckConclusionOutput,
     CheckedFinding,
     ConclusionCheck,
     ConclusionCitationProblem,
+    ConclusionQuoteCheck,
     FindingSource,
     clip,
     thread_summary,
@@ -116,6 +126,9 @@ Rules:
 - When passages disagree and none states which is right, add a conflicts
   entry citing the passages on each side (at least two labels).
 - Put what the passages leave unresolved in open_questions.
+- To quote a passage, copy its words exactly inside double quotes (escaped
+  as \\" in the JSON) in an entry that cites it; quotes are checked
+  against the passage text.
 - If the passages say nothing about the topic, return empty lists and
   "insufficient_evidence": true."""
     + UNTRUSTED_CONTENT_NOTICE
@@ -247,7 +260,117 @@ def _repair_reason(brief: Brief | None, problems: list[BriefCitationProblem]) ->
             "listed no entries but set insufficient_evidence to false; list the entries "
             "or set it to true"
         )
+    quoted = [_QUOTE_REPAIR_REASONS[k] for k in _QUOTE_REPAIR_REASONS if k in kinds]
+    if quoted:
+        reasons.append(f"had entries with {' and '.join(quoted)}; {_QUOTE_REPAIR_ADVICE}")
     return "; ".join(reasons)
+
+
+# Why a repair is asked for when an entry's quotes fail the check. Fixed
+# text: the rejected reply is not replayed.
+_QUOTE_REPAIR_REASONS = {
+    "unmatched_quotes": "quoted words that appear in no passage",
+    "misattributed_quotes": "quoted words from a passage the entry does not cite",
+}
+_QUOTE_REPAIR_ADVICE = "quote only words copied exactly from a passage the entry cites"
+
+
+def _reply_quotes(
+    units: list[tuple[str, list[str]]], known: dict[str, EvidenceRef]
+) -> list[QuoteCheck]:
+    """The quotations in each unit's text, checked by ask_mailbox's
+    ``_check_quotes`` against the passages that unit cites (its valid
+    labels); ``QuoteCheck.statement`` is the unit's index. One linear
+    scan per text; the quote count and length caps of ``_check_quotes``
+    apply to the reply as a whole."""
+    matches: list[re.Match[str]] = []
+    owner: list[int] = []
+    for index, (text, _labels) in enumerate(units):
+        for match in _QUOTE_RE.finditer(text):
+            matches.append(match)
+            owner.append(index)
+    return _check_quotes(matches, owner, [labels for _text, labels in units], known)
+
+
+def _by_unit(quotes: list[QuoteCheck]) -> dict[int, list[QuoteCheck]]:
+    """``quotes`` grouped by unit index, in unit order (quotes come in
+    unit order). One pass."""
+    grouped: dict[int, list[QuoteCheck]] = {}
+    for quote in quotes:
+        grouped.setdefault(quote.statement, []).append(quote)
+    return grouped
+
+
+_QuoteProblemKind = Literal["unmatched_quotes", "misattributed_quotes"]
+
+
+def _quote_problem_kinds(
+    quotes: list[QuoteCheck],
+) -> list[tuple[_QuoteProblemKind, list[str]]]:
+    """One ``(kind, labels)`` per quote problem kind among ``quotes`` (all
+    of one entry): unmatched with no labels, misattributed with the
+    passages the quotes were found in."""
+    problems: list[tuple[_QuoteProblemKind, list[str]]] = []
+    if any(q.status == "unmatched" for q in quotes):
+        problems.append(("unmatched_quotes", []))
+    found = [lbl for q in quotes if q.status == "misattributed" for lbl in q.found_in]
+    if found:
+        problems.append(("misattributed_quotes", list(dict.fromkeys(found))))
+    return problems
+
+
+def _quote_count_line(statuses: list[str]) -> list[str]:
+    """ask_mailbox's ``Quote check:`` count line, when there are quotes."""
+    if not statuses:
+        return []
+    verified = statuses.count("verified")
+    return [
+        f"\nQuote check: {verified} of {len(statuses)} quote(s) match the indexed text of a "
+        "cited passage (extracted, whitespace-normalized text, not the raw message)."
+    ]
+
+
+# The text fields of each brief section's entries that may hold quotes.
+_ENTRY_TEXT: dict[BriefSection, tuple[str, ...]] = {
+    "chronology": ("actor", "event"),
+    "positions": ("actor", "position"),
+    "decisions": ("decision",),
+    "open_questions": ("question",),
+    "conflicts": ("description",),
+}
+
+
+def _check_brief_quotes(
+    brief: Brief, known: dict[str, EvidenceRef]
+) -> tuple[list[BriefQuoteCheck], list[BriefCitationProblem]]:
+    """Each entry's quotations checked against the passages it cites
+    (run after ``_check_brief``, which canonicalizes the labels), and a
+    problem per entry with unmatched or misattributed quotes."""
+    where: list[tuple[BriefSection, int]] = []
+    units: list[tuple[str, list[str]]] = []
+    for section in _SECTIONS:
+        for index, entry in enumerate(getattr(brief, section)):
+            # Fields joined by a line break: a quotation never spans one.
+            text = "\n".join(getattr(entry, field) for field in _ENTRY_TEXT[section])
+            where.append((section, index))
+            units.append((text, _sort_labels(entry.labels, known)[0]))
+    checked = _reply_quotes(units, known)
+    quotes = [
+        BriefQuoteCheck(
+            text=q.text,
+            status=q.status,
+            found_in=q.found_in,
+            section=where[q.statement][0],
+            item=where[q.statement][1],
+        )
+        for q in checked
+    ]
+    problems = [
+        BriefCitationProblem(section=where[unit][0], item=where[unit][1], kind=kind, labels=labels)
+        for unit, entry_quotes in _by_unit(checked).items()
+        for kind, labels in _quote_problem_kinds(entry_quotes)
+    ]
+    return quotes, problems
 
 
 def _evidenced(
@@ -355,6 +478,9 @@ Rules:
     + """ findings.
 - "verdict_summary" says briefly how the cited evidence bears on the
   conclusion as a whole; it adds no facts the findings do not state.
+- To quote a passage, copy its words exactly inside double quotes (escaped
+  as \\" in the JSON) in a finding that cites it; quotes are checked
+  against the passage text.
 - If the passages say nothing about the conclusion, return no findings and
   "insufficient_evidence": true."""
     + UNTRUSTED_CONTENT_NOTICE
@@ -451,7 +577,42 @@ def _check_repair_reason(
             "listed no findings but set insufficient_evidence to false; list the findings "
             "or set it to true"
         )
+    quoted = [_QUOTE_REPAIR_REASONS[k] for k in _QUOTE_REPAIR_REASONS if k in kinds]
+    if quoted:
+        reasons.append(f"had entries with {' and '.join(quoted)}; {_QUOTE_REPAIR_ADVICE}")
     return "; ".join(reasons)
+
+
+def _check_conclusion_quotes(
+    check: ConclusionCheck, used: list[list[str]], known: dict[str, EvidenceRef]
+) -> tuple[list[ConclusionQuoteCheck], list[ConclusionCitationProblem]]:
+    """The verdict summary's and each finding's quotations, checked
+    against the passages cited (``used``, from ``_check_findings``), and
+    a problem per finding (``item`` null: the verdict) with unmatched or
+    misattributed quotes. The verdict cites no labels of its own; it
+    summarizes the findings, so its quotes are checked against every
+    passage a finding cites."""
+    every = list(dict.fromkeys(label for labels in used for label in labels))
+    units = [(check.verdict_summary, every)] + [
+        (f.explanation, labels) for f, labels in zip(check.findings, used, strict=True)
+    ]
+    checked = _reply_quotes(units, known)
+
+    def item(unit: int) -> int | None:
+        return None if unit == 0 else unit - 1
+
+    quotes = [
+        ConclusionQuoteCheck(
+            text=q.text, status=q.status, found_in=q.found_in, item=item(q.statement)
+        )
+        for q in checked
+    ]
+    problems = [
+        ConclusionCitationProblem(item=item(unit), kind=kind, labels=labels)
+        for unit, unit_quotes in _by_unit(checked).items()
+        for kind, labels in _quote_problem_kinds(unit_quotes)
+    ]
+    return quotes, problems
 
 
 def _finding_source(ref: EvidenceRef) -> FindingSource:
@@ -533,10 +694,11 @@ def register_experimental_tools(
         conflicting evidence (passages that disagree).
 
         Every entry cites evidence labels (E1, ...) that name passages of
-        specific messages, each with its sender and sent date. Labels are
-        checked against the passages the model was given (one repair
-        call when the check fails), but quotes are not verified and a
-        valid label does not prove the passage supports the entry. The
+        specific messages, each with its sender and sent date. Labels, and
+        words an entry quotes, are checked against the passages the model
+        was given (one repair call when the check fails), but a valid
+        label or verified quote does not prove the passage supports the
+        entry. The
         brief does not treat the newest message as authoritative; it
         reports a correction or cancellation only when a message states
         one. Nothing is stored.
@@ -559,8 +721,8 @@ def register_experimental_tools(
 
         Returns:
             The brief as prose and as structured output (status, brief,
-            as_of, citations, citation_problems, repair_attempted,
-            threads). When the model's reply is not the brief JSON even
+            as_of, citations, quotes, citation_problems,
+            repair_attempted, threads). When the model's reply is not the brief JSON even
             after one repair, status is invalid_json and raw_text holds it.
         """
         log_tool_call(
@@ -644,9 +806,19 @@ def register_experimental_tools(
             # (a second try would most likely be cut off too). The
             # repaired brief is used when it parses, else the first one
             # when that parsed; with neither, the raw reply is returned.
+            def check_brief(
+                brief: Brief | None,
+            ) -> tuple[list[str], list[BriefCitationProblem], list[BriefQuoteCheck]]:
+                """Labels, then quotes (which need canonical labels)."""
+                if brief is None:
+                    return [], [], []
+                cited, problems = _check_brief(brief, evidence_map)
+                quotes, quote_problems = _check_brief_quotes(brief, evidence_map)
+                return cited, problems + quote_problems, quotes
+
             text, truncated = await complete(user_prompt)
             brief = None if truncated else _parse_brief(text)
-            cited, problems = _check_brief(brief, evidence_map) if brief is not None else ([], [])
+            cited, problems, quotes = check_brief(brief)
             repair_attempted = not truncated and (brief is None or bool(problems))
             if repair_attempted:
                 reason = _repair_reason(brief, problems)
@@ -656,28 +828,31 @@ def register_experimental_tools(
                 brief2 = None if truncated2 else _parse_brief(text2)
                 if brief2 is not None:
                     brief = brief2
-                    cited, problems = _check_brief(brief, evidence_map)
+                    cited, problems, quotes = check_brief(brief)
                 elif brief is None:
                     text, truncated = text2, truncated2
 
             status: Literal["ok", "invalid_json", "truncated"] = (
                 "ok" if brief is not None else "truncated" if truncated else "invalid_json"
             )
-            # Counts only: labels and replies are provider output.
+            # Counts only: labels, quotes and replies are provider output.
             log.debug(
-                "brief_issue: %d threads, %d passages, status %s, %d cited, %d problems, repair %s",
+                "brief_issue: %d threads, %d passages, status %s, %d cited, %d problems, "
+                "%d quotes (%d verified), repair %s",
                 len(results),
                 len(evidence_map),
                 status,
                 len(cited),
                 len(problems),
+                len(quotes),
+                sum(q.status == "verified" for q in quotes),
                 "attempted" if repair_attempted else "not needed",
             )
 
             citations = [_citation(evidence_map[label]) for label in cited]
             lines = [
-                "EXPERIMENTAL brief (the format may change; citation labels are checked, "
-                "quotes are not verified).",
+                "EXPERIMENTAL brief (the format may change; citation labels and quotes are "
+                "checked, not whether a passage supports an entry).",
                 f"Evidence as of {as_of or 'an unknown date'}.",
             ]
             raw_text = None
@@ -695,6 +870,7 @@ def register_experimental_tools(
             for p in problems:
                 detail = f": {', '.join(p.labels)}" if p.labels else ""
                 lines.append(f"\nCitation check: {p.section} entry {p.item + 1}: {p.kind}{detail}.")
+            lines += _quote_count_line([q.status for q in quotes])
             lines.append(_sources_searched(results))
 
             return tool_result(
@@ -706,6 +882,7 @@ def register_experimental_tools(
                     raw_text=raw_text,
                     as_of=as_of,
                     citations=citations,
+                    quotes=quotes,
                     citation_problems=problems,
                     repair_attempted=repair_attempted,
                     threads=[thread_summary(r) for r in results],
@@ -741,8 +918,9 @@ def register_experimental_tools(
         labels (E1, ...). The server attaches to each finding the cited
         passages' message, sender, sent date and a short verbatim excerpt
         of the indexed text, so every finding is shown with its source.
-        Labels are checked against the passages the model was given (one
-        repair call when the check fails), but a valid label does not prove
+        Labels, and words the verdict or a finding quotes, are checked
+        against the passages the model was given (one repair call when the
+        check fails), but a valid label or verified quote does not prove
         the passage says what the finding claims. A later message is not
         treated as overriding an earlier one; supersedes is reported only
         when a message states the change. Nothing is stored.
@@ -765,7 +943,7 @@ def register_experimental_tools(
         Returns:
             The check as prose and as structured output (status,
             verdict_summary, findings with sources, insufficient_evidence,
-            as_of, citation_problems, repair_attempted, threads). When the
+            as_of, quotes, citation_problems, repair_attempted, threads). When the
             model's reply is not the check JSON even after one repair,
             status is invalid_json and raw_text holds it.
         """
@@ -849,9 +1027,22 @@ def register_experimental_tools(
             # Generate and check as brief_issue does: one repair call with
             # a fixed instruction for a reply that is not a check or has
             # problems, none for a reply cut off at max_tokens.
+            def check_reply(
+                check: ConclusionCheck | None,
+            ) -> tuple[
+                list[list[str]], list[ConclusionCitationProblem], list[ConclusionQuoteCheck]
+            ]:
+                """Labels and relations, then quotes (which need the
+                canonical labels)."""
+                if check is None:
+                    return [], [], []
+                used, problems = _check_findings(check, evidence_map)
+                quotes, quote_problems = _check_conclusion_quotes(check, used, evidence_map)
+                return used, problems + quote_problems, quotes
+
             text, truncated = await complete(user_prompt, CHECK_SYSTEM)
             check = None if truncated else _parse_check(text)
-            used, problems = _check_findings(check, evidence_map) if check else ([], [])
+            used, problems, quotes = check_reply(check)
             repair_attempted = not truncated and (check is None or bool(problems))
             if repair_attempted:
                 reason = _check_repair_reason(check, problems)
@@ -861,7 +1052,7 @@ def register_experimental_tools(
                 check2 = None if truncated2 else _parse_check(text2)
                 if check2 is not None:
                     check = check2
-                    used, problems = _check_findings(check, evidence_map)
+                    used, problems, quotes = check_reply(check)
                 elif check is None:
                     text, truncated = text2, truncated2
 
@@ -871,12 +1062,14 @@ def register_experimental_tools(
             # Counts only: labels and replies are provider output.
             log.debug(
                 "check_conclusion: %d threads, %d passages, status %s, %d findings, "
-                "%d problems, repair %s",
+                "%d problems, %d quotes (%d verified), repair %s",
                 len(results),
                 len(evidence_map),
                 status,
                 len(check.findings) if check else 0,
                 len(problems),
+                len(quotes),
+                sum(q.status == "verified" for q in quotes),
                 "attempted" if repair_attempted else "not needed",
             )
 
@@ -898,8 +1091,9 @@ def register_experimental_tools(
             verdict = clip(check.verdict_summary, _MAX_VERDICT_CHARS) if check else None
 
             lines = [
-                "EXPERIMENTAL conclusion check (the format may change; citation labels are "
-                "checked, excerpts are the indexed text, findings are the model's reading).",
+                "EXPERIMENTAL conclusion check (the format may change; citation labels and "
+                "quotes are checked, excerpts are the indexed text, findings are the model's "
+                "reading).",
                 f"Evidence as of {as_of or 'an unknown date'}.",
             ]
             raw_text = None
@@ -920,8 +1114,14 @@ def register_experimental_tools(
                 lines.append(f"\nThe model's reply {why}; its raw text follows.\n\n{raw_text}")
             for p in problems:
                 detail = f": {', '.join(p.labels)}" if p.labels else ""
-                where = "the check as a whole" if p.item is None else f"finding {p.item + 1}"
+                if p.item is not None:
+                    where = f"finding {p.item + 1}"
+                elif p.kind in _QUOTE_REPAIR_REASONS:
+                    where = "the verdict summary"
+                else:
+                    where = "the check as a whole"
                 lines.append(f"\nCitation check: {where}: {p.kind}{detail}.")
+            lines += _quote_count_line([q.status for q in quotes])
             lines.append(_sources_searched(results))
 
             return tool_result(
@@ -934,6 +1134,7 @@ def register_experimental_tools(
                     insufficient_evidence=check.insufficient_evidence if check else None,
                     raw_text=raw_text,
                     as_of=as_of,
+                    quotes=quotes,
                     citation_problems=problems,
                     repair_attempted=repair_attempted,
                     threads=[thread_summary(r) for r in results],

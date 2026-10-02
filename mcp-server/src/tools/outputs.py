@@ -751,14 +751,42 @@ class BriefCitationProblem(_Output):
         "too_few_labels",
         "insufficient_but_populated",
         "empty_but_sufficient",
+        "unmatched_quotes",
+        "misattributed_quotes",
     ] = Field(
         description="unknown_labels: the entry cites labels no supplied passage has. "
         "no_citations: it cites none. too_few_labels: a conflict cites fewer than two "
         "supplied passages. insufficient_but_populated (section brief): "
         "insufficient_evidence is true but a section has entries. empty_but_sufficient "
-        "(section brief): insufficient_evidence is false but every section is empty."
+        "(section brief): insufficient_evidence is false but every section is empty. "
+        "unmatched_quotes: the entry quotes words found in no supplied passage. "
+        "misattributed_quotes: it quotes words found only in passages it does not cite."
     )
-    labels: list[str] = Field(description="The unknown labels; empty for the other kinds.")
+    labels: list[str] = Field(
+        description="The unknown labels; for misattributed_quotes, the passages the quotes "
+        "were found in. Empty for the other kinds."
+    )
+
+
+class ReplyQuoteCheck(_Output):
+    text: str = Field(description="The quoted words as the reply gives them, cut for length.")
+    status: Literal["verified", "misattributed", "unmatched", "uncited", "not_checked"] = Field(
+        description="verified: found in the indexed text shown for a passage its entry "
+        "cites. misattributed: found only in other supplied passages. unmatched: found in no "
+        "supplied passage. uncited: its entry cites no supplied passage. not_checked: over "
+        "the per-reply quote cap or the quote length cap. Checked as ask_mailbox's quotes "
+        "are: whitespace and quote-mark style are ignored and an ellipsis may skip text; "
+        "indexed text is extracted and normalized, so a verified quote is not proof of the "
+        "raw message bytes, nor that the passage supports the entry."
+    )
+    found_in: list[str] = Field(
+        description="Labels of the supplied passages the quote was found in."
+    )
+
+
+class BriefQuoteCheck(ReplyQuoteCheck):
+    section: BriefSection = Field(description="The section of the entry holding the quote.")
+    item: int = Field(description="0-based index of that entry within its section.")
 
 
 class BriefIssueOutput(_Output):
@@ -781,9 +809,16 @@ class BriefIssueOutput(_Output):
     citations: list[Citation] = Field(
         description="Each cited label that names a supplied passage, in first-cited order."
     )
+    quotes: list[BriefQuoteCheck] = Field(
+        default=[],
+        description="Each quotation of three or more words in an entry, checked against "
+        "the passages the entry cites, and each quotation over 1,000 characters "
+        "(not_checked); in section order.",
+    )
     citation_problems: list[BriefCitationProblem] = Field(
-        description="Empty when every entry passed the label check. Labels only: a valid "
-        "label does not prove the passage supports the entry, and quotes are not verified."
+        description="Empty when every entry passed the check. Labels and quoted words are "
+        "checked: a valid label or a verified quote does not prove the passage supports "
+        "the entry."
     )
     repair_attempted: bool = Field(
         description="True when the first reply failed the check and the model was asked once more."
@@ -845,14 +880,30 @@ class ConclusionCitationProblem(_Output):
         "invalid_relation",
         "insufficient_but_populated",
         "no_findings_but_sufficient",
+        "unmatched_quotes",
+        "misattributed_quotes",
     ] = Field(
         description="unknown_labels: the finding cites labels no supplied passage has. "
         "no_citations: it cites none. invalid_relation: its relation is not supports, "
         "contradicts, qualifies or supersedes. insufficient_but_populated (item null): "
         "insufficient_evidence is true but there are findings. no_findings_but_sufficient "
-        "(item null): there are no findings but insufficient_evidence is false."
+        "(item null): there are no findings but insufficient_evidence is false. "
+        "unmatched_quotes: the finding (item null: the verdict summary) quotes words found "
+        "in no supplied passage. misattributed_quotes: it quotes words found only in "
+        "passages it does not cite."
     )
-    labels: list[str] = Field(description="The unknown labels; empty for the other kinds.")
+    labels: list[str] = Field(
+        description="The unknown labels; for misattributed_quotes, the passages the quotes "
+        "were found in. Empty for the other kinds."
+    )
+
+
+class ConclusionQuoteCheck(ReplyQuoteCheck):
+    item: int | None = Field(
+        description="0-based index of the finding whose explanation holds the quote; null "
+        "for the verdict summary, whose quotes are checked against the passages the "
+        "findings cite."
+    )
 
 
 class CheckConclusionOutput(_Output):
@@ -880,9 +931,16 @@ class CheckConclusionOutput(_Output):
         description="Latest sent date (YYYY-MM-DD) among the passages supplied to the "
         "model. Null when none is dated."
     )
+    quotes: list[ConclusionQuoteCheck] = Field(
+        default=[],
+        description="Each quotation of three or more words in the verdict summary and the "
+        "findings' explanations, checked against the passages cited, and each quotation "
+        "over 1,000 characters (not_checked); verdict first, then findings in order.",
+    )
     citation_problems: list[ConclusionCitationProblem] = Field(
-        description="Empty when every finding passed the check. Labels only: a valid label "
-        "does not prove the passage supports the finding."
+        description="Empty when every finding passed the check. Labels and quoted words are "
+        "checked: a valid label or a verified quote does not prove the passage supports "
+        "the finding."
     )
     repair_attempted: bool = Field(
         description="True when the first reply failed the check and the model was asked once more."

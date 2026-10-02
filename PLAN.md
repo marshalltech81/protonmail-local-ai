@@ -405,25 +405,25 @@ on #307):
 answers real knowledge questions, and identify why failures occur.
 
 **Status of Phases 3–5 (2026-10-02).** No phase is complete. Done:
-Phase 3 items 4 and 7, Phase 4 items 1 and 2. Partly done: Phase 3
-items 1, 2, 3, 6 and 8 (item 6 lacks only the #487 measurement),
-Phase 4 item 4, Phase 5 item 2. Not started:
-Phase 3 item 5, Phase 4 item 3, Phase 5 items 1, 3 and 4. Most of
+Phase 3 items 3, 4, 6 and 7 (3 as an experimental tool; 6's budgets
+are retuned once #487 measures them), Phase 4 items 1 and 2. Partly
+done: Phase 3 items 1, 2 and 8, Phase 4 item 4, Phase 5 item 2. Not
+started: Phase 3 item 5, Phase 4 item 3, Phase 5 items 1, 3 and 4. Most of
 what remains needs the real mailbox and providers (the go-live
 checklist) or an owner decision.
 
 | Item | Status | Landed in | Remaining |
 |---|---|---|---|
-| 3.1 Evals | Partly done | #452 (evidence recall vs hit rate), #494 (agent-level trace scoring) | live-client trace replay, abstention, corrections, conflicting sources, latency/cost, held-out set and thresholds (#283) |
+| 3.1 Evals | Partly done | #452 (evidence recall vs hit rate), #494 (agent-level trace scoring), #518 (#502) | live-client trace replay, abstention, corrections, conflicting sources, latency/cost, held-out set and thresholds (#283) |
 | 3.2 Latency | Partly done | #458 (stage timings) | benchmarks, budgets, cancellation (#287); needs real mail |
-| 3.3 `brief_issue` | Built, experimental | #466, #493 (hardening, #471) | accuracy/abstention scoring (#291) |
+| 3.3 `brief_issue` | Done (experimental) | #466, #493 (hardening, #471) | accuracy/abstention scoring (#291) is eval work under 3.1 |
 | 3.4 Injection suite | Done | #448, #534 (#442) | — |
-| 3.5 Thread weighting, rerank | Not started | — | needs real embedder/reranker (#288, #289) |
-| 3.6 Prompt evidence budget | Mostly done | #445 (shared character budget, dedup, coverage note), #496 (whole-prompt token budget, small-model profile) | measure and retune the budgets (#487) |
+| 3.5 Thread weighting, rerank | Not started | #535 (reply subjects in rerank candidate text, groundwork for #289) | needs real embedder/reranker (#288, #289) |
+| 3.6 Prompt evidence budget | Done | #445 (shared character budget, dedup, coverage note), #496 (whole-prompt token budget, small-model profile) | retune the budgets once measured (#487) |
 | 3.7 Filtered semantic recall | Done | #440, #470 | — |
-| 3.8 Citation contract | Partly done | #457, #495 (`ask_mailbox` statement coverage and quote checks) | the same contract for `summarize_thread` and `extract_from_emails`; semantic support (#284) |
+| 3.8 Citation contract | Partly done | #457, #495 (`ask_mailbox` statement coverage and quote checks), #519 and #525 (quote and label edge cases), #532 and #545 (thread-scoped `get_evidence` reproduces `ask_mailbox`'s evidence for that thread) | the same contract for `summarize_thread` and `extract_from_emails`; semantic support (#284); mailbox-wide audit parity (#537) |
 | 4.1 Entities | Done | #459, #527 (orphan pruning, #464) | — |
-| 4.2 Source authority | Done | #459, #474 (Spam guard) | verdict-header gating after go-live (#463) |
+| 4.2 Source authority | Done | #459, #474 (Spam guard), #523 and #542 (rules file kept private and validated) | verdict-header gating after go-live (#463) |
 | 4.3 Temporal retrieval | Not started | — | — |
 | 4.4 Retention | Mostly done | #451 (mirror default), #475 (Trash hidden from default search) | user-controlled retention; reaped-citation behaviour |
 | 5.1 Hardened `brief_issue` | Not started | — | needs Phase 3 usage on real mail |
@@ -468,8 +468,9 @@ checklist) or an owner decision.
    corrections, contradictions, "as of" questions; "newest is not
    authoritative"). An experimental MCP tool, registered only when
    `MCP_EXPERIMENTAL_TOOLS=true` (off by default; Resolved
-   decisions 12). **Status: built (experimental) in #466, hardened
-   in #493 (#471).** #291's accuracy and abstention scoring remains.
+   decisions 12). **Status: done (experimental): built in #466,
+   hardened in #493 (#471).** Scoring its accuracy and abstention
+   (#291) is eval work under item 1.
 4. **Adversarial injection suite** (hostile fixtures in the synthetic
    mailbox, asserting the Phase 0 serialization holds under real
    tool flows). **Status: done (#448).** The one gap it found,
@@ -495,7 +496,7 @@ checklist) or an owner decision.
    whole-prompt token budget, an evidence-selection policy, dedup,
    and a statement of what was left out. Nothing in the plan covered
    this; #214/#215 fixed only `summarize_thread`'s tail and
-   attachment identity. **Status: mostly done (#445, #496).** One
+   attachment identity. **Status: done (#445, #496).** One
    shared budget, per-thread dedup of long quoted passages, a
    counts-only coverage note, and a whole-prompt token budget for
    every intelligence tool against `INFERENCE_CONTEXT_TOKENS` (an
@@ -622,46 +623,20 @@ How the first batch was worked, and what to repeat:
 
 ### Carried over from the first batch
 
-- **#217 Message-ID conflicts** — split out of #246 after two review
-  rounds showed it needs a design. The earlier attempt is on the pushed
-  branch `fix/indexer-message-id-conflicts` (head `d479363`, based on a
-  pre-#246 `main`, so rebase before reuse); PR #246's description lists
-  every finding it must address:
-  - fail closed when the recorded original is unreadable
-  - compare full attachment metadata, not only content hashes
-  - replace rather than merge on takeover: remove the old message and
-    rebuild its thread first
-  - re-check a conflict only when the original disappears, not on every
-    walk
-  - verify source identity before a known Message-ID keeps its thread
-    (the #246 round-4 P3)
-  - owner decision pending: which claimant wins; the first-arrival
-    spoofing risk (the #246 round-1 P3)
-
-  Decided 2026-09-30: **keep both claimants** — the thread stays keyed
-  by Message-ID, each message row is keyed by Message-ID plus content
-  hash, and a conflict is exposed by `get_message` and status rather
-  than resolved by an arrival-order rule (either order is spoofable).
-  That needs a **stable claimant identifier in the MCP contract**
-  before the schema: today the chain is `get_thread` →
-  `messages[].message_id` → `get_message`, and `get_message` takes a
-  bare Message-ID, so two claimants would be indistinguishable to a
-  caller. Specify the identifier (Message-ID plus a short content-hash
-  discriminator, or a derived opaque ID), propagate it through thread,
-  message, search and evidence results and the retrieval parameters,
-  and keep the bare Message-ID working for the unambiguous case. The
-  identifier replaces the bare Message-ID in every per-message key,
-  not only `messages` and the MCP contract: the chunker's
-  `message_pk` (so the deterministic `sha256(message_pk || index ||
-  text)` shape is kept but two claimants' chunks cannot collide),
-  attachment occurrence and chunk IDs, and the deletion paths that
-  drop chunks and attachments by Message-ID — otherwise reprocessing
-  or reaping one claimant overwrites or deletes the other's evidence.
-  #260's serialized-form attachment hash gives the "compare full
-  attachment metadata" finding a deterministic identity. A schema
-  change: decided 2026-10-01 to fold it into the v0 schema now, since
-  no index is deployed (identifier: Message-ID plus a short
-  content-hash suffix).
+- ~~**#217 Message-ID conflicts**~~ — **resolved.** Decided
+  2026-09-30 to keep every claimant rather than pick a winner by
+  arrival order (either order is spoofable). Built in #453: every
+  per-message row, the chunker's `message_pk`, and attachment
+  occurrence and chunk IDs are keyed by a claimant ID (Message-ID plus `#` and eight hex digits of
+  the file's SHA-256), threads stay keyed by Message-ID, and
+  `get_message` accepts a claimant ID. `attachment_id` deliberately
+  stays the payload content hash, so identical payloads share one
+  `attachment_extractions` row. Conflicts are exposed, not
+  resolved: #536 and #544 bound `get_message`'s claimant listing, and
+  #539 reports conflict counts in `get_mailbox_status`. The earlier
+  arrival-order attempt (branch `fix/indexer-message-id-conflicts`)
+  was superseded and deleted 2026-10-02; its two unrelated commits
+  had already landed in #246. Open follow-up: #454 (the 32-bit suffix).
 - **#208 chunk overlap exceeds `max_tokens`** — harmless at default
   settings; it changes chunk IDs, so it lands in the Phase 2 reindex
   bundle (see Phase 2), not on its own.
@@ -705,31 +680,12 @@ open a line (#433, #546); stored subjects are capped at
 later part into the body (#450, #548); and the P3 fixes listed there.
 No code PR is open.
 
-Needs the owner:
-- **#432** (xlsx duplicate cells): a guard cannot fix it, because
-  openpyxl builds a row before our code sees it. The issue comment has
-  measurements and three options (document it, a counting
-  `WorkSheetParser` subclass, a streaming pre-pass) and the budget-size
-  question.
-- **#497** (Bridge on macOS) and **#498** (Streamable HTTP as the only
-  transport): owner-filed features, not started because they change the
-  architecture and defaults.
-- Follow-ups filed overnight: #550 (P2, chunks can exceed
-  `max_tokens`; it changes chunk text, so it joins #208 in the Phase 2
-  reindex bundle), #524 (folders opened by a failed mbsync
-  attempt are re-watched only at the recovery sweep), #526 (on Linux
-  Docker Engine the indexer cannot read a 600 operator-owned
-  `authority.toml`), #533 (delimiter escaping misses tag names spelled
-  with compatibility or confusable letters), #537 (`get_evidence` sizes
-  retrieval by its chunk limit, so it can rank threads differently from
-  `ask_mailbox`).
-- Open questions from earlier PRs: #494's strict argument matching and
-  replay of a live client's traces; #496's character-based token
-  estimate (no tokenizer, so dense scripts such as CJK are
-  undercounted); #491's security-scan path filters, left unchanged in
-  #512 because no scanner reads Compose files or scripts; #495's prose
-  statement split (rather than JSON statements) and its CJK terminators
-  and word counts.
+Needs the owner: the decisions listed under **Open decisions**
+(items 3–14), ordered by when they matter and each with options and a
+recommendation. Start the next session by walking through them; record
+each answer under Resolved decisions and strike it there. Items 3 and 4
+gate go-live; 5 and 6 are owner-filed features ready to start on a
+"go"; 7–14 can wait.
 
 Waiting on real data: #487 (evidence and output budgets), #488
 (container resource budgets) and #282 (the mbsync stall deadline, set
@@ -804,8 +760,10 @@ Still open from Phases 3–5, all waiting on a real mailbox or the
 owner: #283's remaining eval slices and #291's accuracy scoring;
 #287's budgets and benchmarks; #487's evidence and output budgets;
 #288 and #289, which need a real embedder and reranker; #284 for
-`summarize_thread`, `extract_from_emails` and semantic support; and
-Phase 4 item 3 and Phase 5 items 3–4.
+`summarize_thread`, `extract_from_emails` and semantic support;
+Phase 4 item 3 and item 4's user-controlled retention and
+reaped-citation behaviour; and Phase 5 items 1 (needs real-mail
+use), 2's quote and support verification, and 3–4.
 
 Go-live checklist (do these before more hardening):
 
@@ -1355,6 +1313,76 @@ do not ship persisted claims without them.
    `dual` both get it), and `custom_route` endpoints such as
    `/health` stay unauthenticated. `AuthSettings` requires an
    `issuer_url` even when only a verifier is used.
+   **Before go-live (2026-10-02):** decide whether to ship the local
+   static-token option now or go live on the stated "every local user
+   and process is trusted" condition. The token stops other local
+   accounts and browser-origin requests that cannot read
+   `.secrets/mcp_auth_token.txt`; it does not stop code running as the
+   operator's own user (a malicious package can read the mode-600
+   file), so it narrows the trust condition to "processes running as
+   the operator are trusted" rather than removing it. Recommendation:
+   ship it first; the design is pinned and small. Check that the MCP
+   client can send a bearer header before building it.
+4. **#432 xlsx duplicate cells (before go-live).** A ~100 KB crafted
+   workbook can drive the indexer to ~11 GB or hold its only worker
+   for 40 s or more; no guard fixes it because openpyxl builds a whole
+   row before our code sees a cell (measurements in the issue comment).
+   Options: (a) document the limitation; (b) own the sheet parse loop
+   with a counting `WorkSheetParser` subclass that stops mid-row,
+   built on openpyxl private attributes; (c) a streaming pre-pass that
+   counts raw cell nodes and cuts the sheet before an over-budget row,
+   public APIs only, about 2× parse time for normal sheets. The cell
+   budget's size is part of the decision: charging parsed cells at
+   their real cost shrinks the ceiling for large legitimate sheets and
+   needs an `EXTRACTOR_VERSIONS` bump. Recommendation: (c).
+5. **#498 Streamable HTTP as the only transport.** Owner-filed;
+   breaking (clients move from `/sse` to `/mcp`; explicit `sse` or
+   `dual` fails startup with a migration message) and it changes the
+   AGENTS.md default-transport rule. Decide go or no-go, and confirm
+   the MCP client connects over `/mcp` first. Recommendation: go.
+6. **#497 Bridge app on macOS.** Owner-filed; an optional overlay that
+   skips the Bridge container and points mbsync at
+   `host.docker.internal`, the container staying the default. Decide go
+   or no-go and whether it will be used; switching an existing Maildir
+   needs the documented migration (credentials, certificate pin,
+   UIDVALIDITY). The macOS app's certificate is issued for `localhost`
+   and `127.0.0.1`, not `host.docker.internal`, so the first step is to
+   confirm how the shipped isync treats an explicitly trusted
+   certificate under a hostname mismatch and choose a certificate-valid
+   connection path, never a TLS bypass. Recommendation: go, after the
+   first go-live on the container.
+7. **#537 `get_evidence` thread count.** Add a `max_threads` parameter
+   so an audit retrieves exactly the threads `ask_mailbox` used (a tool
+   interface change). Recommendation: yes; small and additive.
+8. **#533 look-alike letters in delimiter tags.** Escaping covers the
+   look-alike brackets but not tag names spelled with compatibility or
+   confusable letters; fixing it needs normalized matching or a
+   confusables table. Recommendation: defer.
+9. **#526 `authority.toml` on Linux Docker Engine.** A mode-600
+   operator-owned file is unreadable to the indexer there (OrbStack is
+   fine). Any fix must keep the file at mode 600: group-read is ruled
+   out (#523), because container GID 1002 may be an unrelated host
+   account. The mechanism is unspecified. Recommendation: keep it
+   documented; revisit if Linux is deployed.
+10. **#524 folders opened by a failed mbsync attempt** are re-watched
+    only at the 30-minute recovery sweep; prompt handling needs a new
+    signal from mbsync. Mail is late, never lost. Recommendation: defer.
+11. **#494 agent-eval scoring.** Keep strict argument matching (a
+    `from_addr` call does not count where `participant` is expected)
+    and first-call-only tool selection? Build a recorder to replay a
+    real client's traces? Recommendation: keep strict; add the recorder
+    after go-live from real-client traces.
+12. **#496 token counting.** Keep the 3-characters-per-token estimate
+    (undercounts dense scripts such as CJK) or add a real tokenizer?
+    Recommendation: keep the estimate; the right tokenizer depends on
+    the operator's model.
+13. **#495 CJK handling in statement and quote checks.** Keep the
+    `。！？` terminators and per-character CJK word counts added in
+    review, or exempt CJK text from statement checks? Recommendation:
+    keep.
+14. **Compose scanning (#491/#512).** No security scanner reads Compose
+    files or shell scripts, so the path filters were left unchanged.
+    File an issue to add one? Recommendation: yes, low priority.
 
 ## Recently Completed
 
