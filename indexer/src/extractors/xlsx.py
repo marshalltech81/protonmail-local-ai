@@ -44,12 +44,14 @@ dispatcher's own ``max_extracted_chars`` truncation would: a hostile
 workbook is truncated, and a long legitimate one still yields its
 first rows rather than nothing.
 
-Known limitation (#428): parts openpyxl loads whole (the shared-string
-table, ``[Content_Types].xml``, ``xl/workbook.xml``) are bounded only by
-the dispatcher's per-member zip cap, so a small, highly compressible
-attachment can still cost seconds and hundreds of MB. The pre-pass
-reads the last two once more to find the worksheets. The bytes of a
-worksheet, as opposed to its nodes, are bounded by the same cap.
+Parts openpyxl loads whole rather than streams (the shared-string
+table, ``[Content_Types].xml``, the workbook, styles and the rest; see
+``_MAX_EAGER_BYTES``) are a fourth dimension, bounded before any of
+them is read (#428): ``_check_eager_parts`` finds each the way openpyxl
+does and charges its declared size, and a workbook over a cap fails
+with ``XlsxEagerPartBudgetError``. No text is kept then: a part loaded
+whole cannot be cut the way a worksheet is. The bytes of a worksheet,
+as opposed to its nodes, are bounded by the dispatcher's zip cap.
 """
 
 from __future__ import annotations
@@ -63,7 +65,26 @@ from xml.parsers import expat
 
 import openpyxl
 from defusedxml import EntitiesForbidden, ExternalReferenceForbidden
+from openpyxl.drawing.spreadsheet_drawing import SpreadsheetDrawing
+from openpyxl.packaging.manifest import Manifest
+from openpyxl.packaging.relationship import RelationshipList, get_dependents, get_rels_path
+from openpyxl.packaging.workbook import WorkbookPackage
 from openpyxl.reader.excel import ExcelReader
+from openpyxl.xml.constants import (
+    ARC_CONTENT_TYPES,
+    ARC_CORE,
+    ARC_CUSTOM,
+    ARC_STYLE,
+    ARC_THEME,
+    ARC_WORKBOOK,
+    IMAGE_NS,
+    SHARED_STRINGS,
+    XLSM,
+    XLSX,
+    XLTM,
+    XLTX,
+)
+from openpyxl.xml.functions import fromstring
 
 # XML nodes (elements plus their attributes) in the worksheet parts
 # openpyxl will parse, across the workbook, and in any one row (#432).
@@ -78,6 +99,25 @@ from openpyxl.reader.excel import ExcelReader
 # memory, since openpyxl builds a row whole.
 _MAX_SHEET_NODES = 5_000_000
 _MAX_ROW_NODES = 131_072
+
+# Parts openpyxl reads whole rather than streams (#428): the manifest,
+# shared strings, workbook and the relationships it resolves, styles,
+# theme, core and custom properties, each worksheet's relationships,
+# and each chartsheet with its drawings, charts and images. A part over
+# ``_MAX_EAGER_PART_BYTES``, or reads that together cross
+# ``_MAX_EAGER_BYTES`` or ``_MAX_EAGER_READS``, fail the workbook before
+# openpyxl opens it. Plainly timed, the costliest shapes (empty shared
+# strings, empty fonts in the styles) cost about 0.4 s and 20 to 35 MB
+# per MB of part, so two of them filling the aggregate take about 7 s
+# and 300 MB; a legitimate shared-string table costs about a fifth of
+# that. Each sheet costs about 0.1 ms besides its bytes, and a
+# chartsheet about six reads, so a workbook naming thousands of sheets
+# stops at the read budget in about half a second. External links,
+# which openpyxl would also read whole, are not loaded at all
+# (``keep_links=False``): their cached values are not extracted.
+_MAX_EAGER_PART_BYTES = 8 * 1024 * 1024
+_MAX_EAGER_BYTES = 16 * 1024 * 1024
+_MAX_EAGER_READS = 4096
 
 # Bytes of worksheet XML fed to the pre-pass parser per call.
 _SCAN_CHUNK = 64 * 1024
@@ -135,15 +175,171 @@ def extract(
     on_progress: Callable[[], None] | None = None,  # noqa: ARG001
 ) -> tuple[str, str]:
     """Extract text from an XLSX payload. Returns (text, "xlsx")."""
+    _check_eager_parts(payload)
     workbook = openpyxl.load_workbook(
         _bound_worksheets(payload),
         read_only=True,
         data_only=True,
+        keep_links=False,
     )
     try:
         return _serialize(workbook), "xlsx"
     finally:
         workbook.close()
+
+
+class XlsxEagerPartBudgetError(Exception):
+    """A part openpyxl loads whole is over its cap, or the parts it loads
+    whole are over the workbook's budget (#428). Fixed text: the
+    dispatcher records the type name as a ``failed`` extraction."""
+
+    def __init__(self) -> None:
+        super().__init__("xlsx part openpyxl loads whole is over budget")
+
+
+class _EagerBudget:
+    """Charges each read openpyxl makes of a part it loads whole, by the
+    part's declared uncompressed size, before anything reads it.
+
+    zipfile never returns more than a member's declared size (it stops
+    there and checks the CRC), so the declared size bounds the read. A
+    name stored twice is read from its last entry, which is what
+    ``getinfo`` returns. A part read several times is charged each time.
+    """
+
+    def __init__(self, archive: zipfile.ZipFile) -> None:
+        self.archive = archive
+        self.names = set(archive.namelist())
+        self.bytes_left = _MAX_EAGER_BYTES
+        self.reads_left = _MAX_EAGER_READS
+
+    def count(self) -> None:
+        """Charge one member read with no byte charge."""
+        self.reads_left -= 1
+        if self.reads_left < 0:
+            raise XlsxEagerPartBudgetError
+
+    def charge(self, name: str) -> bool:
+        """Charge one read of ``name``; ``False`` when it is absent, so
+        openpyxl's own read of it fails or is skipped."""
+        if name not in self.names:
+            return False
+        self.count()
+        size = self.archive.getinfo(name).file_size
+        self.bytes_left -= size
+        if size > _MAX_EAGER_PART_BYTES or self.bytes_left < 0:
+            raise XlsxEagerPartBudgetError
+        return True
+
+    def read_rels(self, part: str) -> RelationshipList | None:
+        """Charge and read the relationships of ``part``, as openpyxl's
+        ``get_dependents`` resolves them, or ``None`` when it has none."""
+        rels_path = get_rels_path(part)
+        if not self.charge(rels_path):
+            return None
+        return get_dependents(self.archive, rels_path)
+
+
+def _check_eager_parts(payload: bytes) -> None:
+    """Raise ``XlsxEagerPartBudgetError`` when the parts
+    ``load_workbook(read_only=True, keep_links=False)`` reads whole cross
+    ``_MAX_EAGER_PART_BYTES`` each or ``_MAX_EAGER_BYTES`` /
+    ``_MAX_EAGER_READS`` together (#428).
+
+    Mirrors openpyxl 3.1.5's ``ExcelReader.read`` and finds each part the
+    way it does, through the manifest and relationships, and charges a
+    part before reading it. A part openpyxl would fail on (missing,
+    malformed) stops the walk and is left for openpyxl to report.
+    Worksheets are streamed and bounded by ``_bound_worksheets``; each
+    is charged one read here, and its relationships, read whole, bytes.
+    ``_bound_worksheets`` reads the manifest, workbook and workbook
+    relationships once more; the budgets were sized from timings that
+    include it.
+    """
+    try:
+        archive = zipfile.ZipFile(io.BytesIO(payload))
+    except zipfile.BadZipFile:
+        return  # openpyxl reports it
+    with archive:
+        budget = _EagerBudget(archive)
+        # read_manifest.
+        if not budget.charge(ARC_CONTENT_TYPES):
+            return
+        manifest = Manifest.from_tree(fromstring(archive.read(ARC_CONTENT_TYPES)))
+        # read_strings: found by content type, under any name.
+        strings = manifest.find(SHARED_STRINGS)
+        if strings is not None:
+            budget.charge(strings.PartName[1:])
+        # read_properties, read_custom, read_theme, apply_stylesheet.
+        for name in (ARC_CORE, ARC_CUSTOM, ARC_THEME, ARC_STYLE):
+            budget.charge(name)
+        # read_workbook. External links are not read (keep_links=False).
+        workbook_part = _workbook_part_name(manifest)
+        if workbook_part is None or not budget.charge(workbook_part):
+            return
+        package = WorkbookPackage.from_tree(fromstring(archive.read(workbook_part)))
+        workbook_rels = budget.read_rels(workbook_part)
+        if workbook_rels is None:
+            return
+        rels_by_id = workbook_rels.to_dict()
+        # read_worksheets, as ``WorkbookParser.find_sheets`` yields them.
+        for sheet in package.sheets:
+            if not sheet.id:
+                continue
+            rel = rels_by_id.get(sheet.id)
+            if rel is None:
+                return
+            if rel.target not in budget.names:
+                continue
+            if "chartsheet" in rel.Type:
+                _charge_chartsheet(budget, rel.target)
+            else:
+                budget.count()
+                budget.read_rels(rel.target)
+
+
+def _workbook_part_name(manifest: Manifest) -> str | None:
+    """The workbook part's name, as openpyxl's ``_find_workbook_part``
+    finds it, or ``None`` when it finds none."""
+    for content_type in (XLTM, XLTX, XLSM, XLSX):
+        part = manifest.find(content_type)
+        if part:
+            return part.PartName[1:]
+    defaults = {default.ContentType for default in manifest.Default}
+    if defaults & {XLTM, XLTX, XLSM, XLSX}:
+        return ARC_WORKBOOK
+    return None
+
+
+def _charge_chartsheet(budget: _EagerBudget, target: str) -> None:
+    """Charge what ``ExcelReader.read_chartsheet`` reads: the
+    chartsheet, its relationships, and for each drawing they name what
+    ``find_images`` reads, once per reference."""
+    budget.charge(target)
+    rels = budget.read_rels(target)
+    if rels is None:
+        return  # openpyxl fails on the missing relationships
+    for drawing_rel in rels.find(SpreadsheetDrawing._rel_type):
+        drawing_path = drawing_rel.target
+        if not budget.charge(drawing_path):
+            return
+        try:
+            drawing = SpreadsheetDrawing.from_tree(fromstring(budget.archive.read(drawing_path)))
+        except TypeError:
+            continue  # find_images reads nothing more from it
+        deps = budget.read_rels(drawing_path)
+        if deps is None:
+            return
+        # ``find_images`` reads a chart and its relationships per chart
+        # reference, and an image per picture reference.
+        for chart_rel in drawing._chart_rels:
+            chart_path = deps.get(chart_rel.id).target
+            if budget.charge(chart_path):
+                budget.read_rels(chart_path)
+        for blip in drawing._blip_rels:
+            dep = deps.get(blip.embed)
+            if dep.Type == IMAGE_NS:
+                budget.charge(dep.target)
 
 
 def _bound_worksheets(payload: bytes) -> io.BytesIO:
@@ -155,7 +351,7 @@ def _bound_worksheets(payload: bytes) -> io.BytesIO:
     budget across them all. A worksheet named twice is charged twice,
     as openpyxl parses it twice.
     """
-    reader = ExcelReader(io.BytesIO(payload), read_only=True, data_only=True)
+    reader = ExcelReader(io.BytesIO(payload), read_only=True, data_only=True, keep_links=False)
     # Per cut worksheet: how many of its leading bytes to keep, and what
     # follows them.
     cuts: dict[str, tuple[int, bytes]] = {}

@@ -784,6 +784,17 @@ scanned pages are not re-read when OCR is turned on later.
 | `INDEXER_PDF_MAX_DIGITAL_PAGES` | `500` | Cap pages walked by the digital pypdf path — protects against text-only PDFs with thousands of pages. Set `0` to disable. |
 | `INDEXER_ATTACHMENT_MAX_EXTRACTED_CHARS` | `2000000` (~500 pages) | Truncate extracted text before persisting in `attachment_extractions`. Bounds SQLite row size for very long OCR'd PDFs. Set to `0` to disable. The XLSX extractor also stops at 10,000,000 characters of its own, whatever this is set to, so shared strings repeated across many cells cannot expand without limit (#294). |
 
+The XLSX extractor has fixed budgets of its own besides these. It cuts
+worksheets at an XML node budget (#432). The parts openpyxl loads whole
+rather than streams (the shared-string table, `[Content_Types].xml`,
+the workbook and its relationships, styles, theme, core and custom
+properties, each worksheet's relationships, and chartsheets with their
+drawings, charts and images) are charged their declared sizes before
+openpyxl opens the workbook: 8 MiB per part, and 16 MiB and 4,096 reads
+across the workbook. A workbook over one of these fails as
+`XlsxEagerPartBudgetError` with no text kept (#428). External links
+are not loaded at all.
+
 ### Cascade on message removal
 
 When a message is reaped, `_delete_attachments_for_message` drops its
