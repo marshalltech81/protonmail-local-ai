@@ -234,7 +234,11 @@ Important facts:
   `127.0.0.1` and isync 1.4.4 checks Bridge's self-signed CA certificate
   against `Host`, so the entrypoint keeps `Host 127.0.0.1` and connects
   through an isync `Tunnel` (`socat`); STARTTLS, verification and the
-  pin are unchanged. Never make it work by relaxing the check. Details:
+  pin are unchanged. Because the app's loopback port can be held by
+  another local account while the app is down, this mode does not trust
+  on first use: the certificate must match the operator-supplied
+  `BRIDGE_CERT_FINGERPRINT` on every start. Never make it work by
+  relaxing the check. Details:
   `docs/architecture.md` "Bridge Modes"; checked by
   `mbsync/tests/tls_check.sh` and `scripts/tests/compose_test.sh`.
 - Bridge runs as non-root user `bridge` with UID 1000.

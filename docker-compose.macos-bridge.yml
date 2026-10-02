@@ -13,7 +13,8 @@
 # the certificate against the configured Host, so mbsync keeps
 # ``Host 127.0.0.1`` for verification and opens the TCP connection to
 # host.docker.internal through a ``Tunnel`` (socat). STARTTLS, certificate
-# verification and the persistent fingerprint pin are unchanged. See
+# verification and the persistent fingerprint pin are unchanged, and the
+# certificate must also match BRIDGE_CERT_FINGERPRINT from .env. See
 # docs/setup.md ("macOS Bridge mode") and docs/architecture.md.
 #
 # Usage (or the Makefile's *-macos-bridge targets):
@@ -35,10 +36,15 @@ services:
     depends_on: !reset {}
     environment:
       BRIDGE_HOST: host.docker.internal
-      # The app's IMAP port (Bridge app > Settings > Advanced). Read from
+      # The app's IMAP port, shown with its IMAP credentials. Read from
       # .env in this mode only; the Bridge container always listens on 1143.
       BRIDGE_IMAP_PORT: ${BRIDGE_IMAP_PORT:-1143}
       # The name the app's certificate is issued for (its CN). When set,
       # the entrypoint verifies the certificate against this name and
       # connects to BRIDGE_HOST:BRIDGE_IMAP_PORT through a tunnel.
       BRIDGE_CERT_HOST: 127.0.0.1
+      # Required: the SHA-256 fingerprint of the app's certificate, taken
+      # on the Mac (docs/setup.md). Another local account could hold the
+      # app's loopback port while it is down, so the first certificate is
+      # not trusted on first use as it is with the Bridge container.
+      BRIDGE_CERT_FINGERPRINT: ${BRIDGE_CERT_FINGERPRINT:-}

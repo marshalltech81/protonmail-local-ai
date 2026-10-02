@@ -276,6 +276,18 @@ Bridge container to inspect; check the app and the connection instead.
 - **`Bridge IMAP port is reachable` but `cert extraction failed`.** The
   app's IMAP connection mode is SSL rather than STARTTLS. Switch it back
   to STARTTLS in the app's settings.
+- **`BRIDGE_CERT_FINGERPRINT is not set`.** This mode does not trust
+  the app's certificate on first use. Take the fingerprint on the Mac
+  and set it in `.env`
+  ([Set it up](setup.md#set-it-up), step 3), then `make up-macos-bridge`.
+- **`the Bridge certificate does not match BRIDGE_CERT_FINGERPRINT`.**
+  Compare the `presented:` value with the fingerprint taken on the Mac
+  while the app is running. If they differ, something other than the app
+  answered on its port (for example another local account's process
+  while the app was closed): treat it as a security event. If the app's
+  certificate changed on purpose (reinstall, reset), update
+  `BRIDGE_CERT_FINGERPRINT` and rotate the pin as in
+  [Switching an existing installation](setup.md#switching-an-existing-installation).
 - **`certificate owner does not match hostname host.docker.internal`.**
   mbsync was recreated without the overlay's `BRIDGE_CERT_HOST`, or by a
   `docker compose` command missing

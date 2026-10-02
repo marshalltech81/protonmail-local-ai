@@ -28,6 +28,7 @@ render() {
     done
     env -i PATH="$PATH" HOME="${HOME:-/tmp}" BRIDGE_USER="synthetic@example.com" \
         ${BRIDGE_IMAP_PORT:+BRIDGE_IMAP_PORT="$BRIDGE_IMAP_PORT"} \
+        ${BRIDGE_CERT_FINGERPRINT:+BRIDGE_CERT_FINGERPRINT="$BRIDGE_CERT_FINGERPRINT"} \
         docker compose --project-directory "$ROOT_DIR" --env-file /dev/null "${args[@]}" \
         config --format json >"$WORK/config.json" 2>"$WORK/compose.err" || {
         cat "$WORK/compose.err"
@@ -80,6 +81,7 @@ default_mode_runs_the_bridge_container() {
     expect '.services.mbsync.environment.BRIDGE_HOST == "protonmail-bridge"' || return 1
     expect '.services.mbsync.environment.BRIDGE_IMAP_PORT == "1143"' || return 1
     expect '.services.mbsync.environment | has("BRIDGE_CERT_HOST") | not' || return 1
+    expect '.services.mbsync.environment | has("BRIDGE_CERT_FINGERPRINT") | not' || return 1
     expect_hardening_and_exposure
 }
 
@@ -109,6 +111,14 @@ macos_mode_points_mbsync_at_the_host_app() {
     expect '.services.mbsync.environment.BRIDGE_IMAP_PORT == "1143"' || return 1
     expect '.services.mbsync.environment.BRIDGE_CERT_HOST == "127.0.0.1"' || return 1
     expect '.services.mbsync.environment.BRIDGE_CERT_PIN_ROTATE == "false"' || return 1
+    # Empty unless set: the entrypoint then refuses to trust the app's
+    # certificate on first use.
+    expect '.services.mbsync.environment.BRIDGE_CERT_FINGERPRINT == ""' || return 1
+}
+
+macos_mode_takes_the_expected_fingerprint_from_the_environment() {
+    BRIDGE_CERT_FINGERPRINT="ab:cd" render "$BASE" "$MACOS"
+    expect '.services.mbsync.environment.BRIDGE_CERT_FINGERPRINT == "ab:cd"' || return 1
 }
 
 macos_mode_takes_the_port_from_the_environment() {
@@ -144,6 +154,8 @@ check "macOS mode drops only mbsync's Bridge dependency" macos_mode_drops_only_t
 check "macOS mode points mbsync at the host app" macos_mode_points_mbsync_at_the_host_app
 check "macOS mode takes the IMAP port from the environment" \
     macos_mode_takes_the_port_from_the_environment
+check "macOS mode takes the expected fingerprint from the environment" \
+    macos_mode_takes_the_expected_fingerprint_from_the_environment
 check "macOS mode keeps mbsync's hardening and exposes no new port" \
     macos_mode_keeps_mbsync_hardening_and_exposure
 check "macOS mode composes with the hardened overlay" macos_mode_composes_with_the_hardened_overlay

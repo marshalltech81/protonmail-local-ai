@@ -7,6 +7,9 @@ readonly BRIDGE_IMAP_PORT="${BRIDGE_IMAP_PORT:-1143}"
 # BRIDGE_HOST (the macOS Bridge overlay sets 127.0.0.1). See
 # render_mbsync_config.
 readonly BRIDGE_CERT_HOST="${BRIDGE_CERT_HOST:-}"
+# With BRIDGE_CERT_HOST, the SHA-256 fingerprint the operator took from
+# the Bridge app; see verify_expected_fingerprint.
+readonly BRIDGE_CERT_FINGERPRINT="${BRIDGE_CERT_FINGERPRINT:-}"
 readonly SYNC_INTERVAL="${SYNC_INTERVAL:-60}"
 readonly RUNTIME_DIR="/tmp/mbsync"
 readonly TEMPLATE_FILE="/etc/mbsyncrc.template"
@@ -87,6 +90,47 @@ validate_bridge_endpoint() {
     fi
     if [[ -n "$BRIDGE_CERT_HOST" && ! "$BRIDGE_CERT_HOST" =~ $host_re ]]; then
         echo ">>> ERROR: BRIDGE_CERT_HOST must be empty or a host name or IPv4 address." >&2
+        return 1
+    fi
+    if [[ -n "$BRIDGE_CERT_FINGERPRINT" && ! "$(expected_fingerprint)" =~ ^[0-9a-f]{64}$ ]]; then
+        echo ">>> ERROR: BRIDGE_CERT_FINGERPRINT must be a SHA-256 fingerprint: 64 hex digits, with or without colons." >&2
+        return 1
+    fi
+}
+
+expected_fingerprint() {
+    # BRIDGE_CERT_FINGERPRINT in the pin's form: openssl's
+    # "sha256 Fingerprint=AB:CD:..." line, its value, or bare hex.
+    local fp="${BRIDGE_CERT_FINGERPRINT##*=}"
+    fp="${fp//:/}"
+    printf '%s' "$fp" | tr '[:upper:]' '[:lower:]'
+}
+
+verify_expected_fingerprint() {
+    # With BRIDGE_CERT_HOST (the macOS Bridge app), mbsync connects to an
+    # unprivileged port on the Mac's loopback, which another local account
+    # can hold while the app is not running. Trust on first use there
+    # would pin that account's certificate and send it the Bridge
+    # password, so the certificate must match the fingerprint the operator
+    # took from the app, on every start and before the pin is consulted
+    # (a rotation accepts only that certificate too). The Bridge container
+    # sits alone on bridge-net, so its mode keeps trust on first use.
+    local current_fp="$1"
+
+    if [[ -z "$BRIDGE_CERT_HOST" ]]; then
+        return 0
+    fi
+    if [[ -z "$BRIDGE_CERT_FINGERPRINT" ]]; then
+        echo ">>> ERROR: BRIDGE_CERT_FINGERPRINT is not set — refusing to trust the Bridge app's certificate on first use." >&2
+        echo ">>>   presented: sha256:${current_fp}" >&2
+        echo ">>> Take the fingerprint from the Bridge app on the Mac (docs/setup.md, macOS Bridge mode), set it in .env, and start again." >&2
+        return 1
+    fi
+    if [[ "$(expected_fingerprint)" != "$current_fp" ]]; then
+        echo ">>> ERROR: the Bridge certificate does not match BRIDGE_CERT_FINGERPRINT — refusing to sync." >&2
+        echo ">>>   expected:  sha256:$(expected_fingerprint)" >&2
+        echo ">>>   presented: sha256:${current_fp}" >&2
+        echo ">>> If the app's certificate changed on purpose, update BRIDGE_CERT_FINGERPRINT. Otherwise this is a security event — something else may be listening on the app's port." >&2
         return 1
     fi
 }
@@ -284,7 +328,7 @@ extract_bridge_cert() {
         return 1
     fi
 
-    if ! verify_cert_pin "$current_fp"; then
+    if ! verify_expected_fingerprint "$current_fp" || ! verify_cert_pin "$current_fp"; then
         rm -f "$cert_tmp" "$openssl_err_file"
         return 1
     fi

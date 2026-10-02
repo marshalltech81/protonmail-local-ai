@@ -211,6 +211,17 @@ test-mbsync-tls`, run in CI) exercises both with a synthetic server
 whose certificate has this shape, along with recovery from a Bridge
 that is down at startup.
 
+The two modes differ in how the first certificate is trusted. The Bridge
+container is the only other service on `bridge-net`, so mbsync trusts
+the certificate it sees on first boot and pins it. The app listens on an
+unprivileged port on the Mac's loopback, which another local account can
+hold while the app is not running, so trust on first use would pin that
+account's certificate and send it the Bridge password. With
+`BRIDGE_CERT_HOST` set, the entrypoint therefore also requires
+`BRIDGE_CERT_FINGERPRINT`, taken from the app on the Mac, and refuses any
+other certificate on every start, before the pin is consulted (a
+rotation accepts only that certificate) and before mbsync logs in.
+
 ### Operator-supplied providers
 
 The embedder surface is OpenAI-compatible (`/v1/embeddings`). The

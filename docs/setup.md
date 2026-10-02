@@ -664,6 +664,14 @@ check and reaches `host.docker.internal:<port>` through an isync
 between mbsync and the app. See
 [architecture.md](architecture.md#bridge-modes) for the details.
 
+Unlike the Bridge container, which sits alone on its own Docker network,
+the app listens on an unprivileged port on the Mac's loopback, which
+another local account can hold while the app is not running. mbsync
+therefore does not trust the first certificate it sees: you give it the
+app's fingerprint in `BRIDGE_CERT_FINGERPRINT`, and it refuses any other
+certificate, before the pin and before the password is sent, on every
+start.
+
 ### Set it up
 
 1. In the Bridge app, open the account's mailbox details and note the
@@ -683,31 +691,45 @@ between mbsync and the app. See
 
    If the app's IMAP port is not 1143, set `BRIDGE_IMAP_PORT` in `.env`.
    It is read only in this mode.
-3. Configure the embedder and inference providers (step 5).
-4. Build and start:
-
-   ```bash
-   make build-macos-bridge
-   make up-macos-bridge
-   ```
-
-5. Check the first boot pinned the app's certificate and the first sync
-   ran:
-
-   ```bash
-   docker logs mbsync
-   ```
-
-   Compare the pinned fingerprint with the one the app presents, from a
-   Mac terminal:
+3. Take the app's certificate fingerprint on the Mac and put it in
+   `.env`. With the app running and logged in (so it, and nothing else,
+   holds its port), run this in a Mac terminal, replacing 1143 with the
+   app's IMAP port if it differs:
 
    ```bash
    openssl s_client -connect 127.0.0.1:1143 -starttls imap </dev/null 2>/dev/null \
        | openssl x509 -noout -fingerprint -sha256
    ```
 
-   The two print the same digest in different forms (colon-separated
-   upper case on the Mac, lower case hex in the log).
+   If your Bridge version can export its TLS certificate (in its
+   settings), `openssl x509 -in cert.pem -noout -fingerprint -sha256` on
+   the exported `cert.pem` gives the same value without a network
+   connection. Then:
+
+   ```bash
+   BRIDGE_CERT_FINGERPRINT=AB:CD:...   # the value after "Fingerprint="
+   ```
+
+   Colon-separated or bare hex, any case, and the whole
+   `sha256 Fingerprint=…` line are all accepted. The value is not
+   secret.
+4. Configure the embedder and inference providers (step 5 of the main setup).
+5. Build and start:
+
+   ```bash
+   make build-macos-bridge
+   make up-macos-bridge
+   ```
+
+6. Check the certificate was pinned and the first sync ran:
+
+   ```bash
+   docker logs mbsync
+   ```
+
+   Without `BRIDGE_CERT_FINGERPRINT`, or with a value that does not
+   match, mbsync refuses before logging in and pins nothing; the log
+   shows the fingerprint it was presented.
 
 ### Switching an existing installation
 
@@ -721,11 +743,13 @@ to be incompatible, and it starts with a backup.
    container's. Replace `BRIDGE_USER` and `.secrets/bridge_pass.txt`
    with the app's (the container Bridge's stay in its `bridge-data`
    volume, which this mode leaves untouched).
-3. **Certificate pin.** The app presents a different certificate, so the
-   first start refuses to sync with `Bridge cert fingerprint does not
-   match pinned value`. Check that the `current:` fingerprint in the log
-   is the app's (step 5 above), then accept it once and turn enforcement
-   back on:
+3. **Certificate pin.** Set `BRIDGE_CERT_FINGERPRINT` to the app's
+   fingerprint (step 3 of "Set it up"). The app presents a different
+   certificate from the Bridge container, so the first start still
+   refuses to sync with `Bridge cert fingerprint does not match pinned
+   value`. Accept the app's certificate once and turn enforcement back
+   on (a rotation in this mode accepts only the certificate matching
+   `BRIDGE_CERT_FINGERPRINT`):
 
    ```bash
    make up-macos-bridge                              # refused: pin mismatch

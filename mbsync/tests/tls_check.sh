@@ -9,10 +9,14 @@ set -Eeuo pipefail
 # name, as it reaches the app through host.docker.internal.
 #
 # Checks:
+#   0. Without BRIDGE_CERT_FINGERPRINT the first certificate is not
+#      trusted: mbsync exits before LOGIN and pins nothing.
 #   1. mbsync waits while the server is down, then syncs once it is up
 #      (STARTTLS, LOGIN over TLS, first-boot pin, success stamp).
 #   2. A restart against the same certificate is accepted.
-#   3. A different certificate at that address is refused by the pin.
+#   3. A different certificate at that address is refused, by the
+#      expected fingerprint and, with that set to the new certificate,
+#      by the pin.
 #   4. isync itself, without the entrypoint's pin, refuses a certificate
 #      other than the one in CertificateFile, and refuses the right
 #      certificate under a name it is not issued for (so the tunnel, not a
@@ -67,14 +71,21 @@ start_stub() {
         "$PYTHON_IMAGE" python /work/imap_stub.py "/work/$1.pem" "/work/$1.key" 1143 >/dev/null
 }
 
+# start_mbsync [EXPECTED_FINGERPRINT]
 start_mbsync() {
+    docker rm -f "$MBSYNC" >/dev/null 2>&1 || true
     docker run -d --name "$MBSYNC" --network "$NETWORK" --init --read-only \
         --tmpfs /tmp --cap-drop ALL --security-opt no-new-privileges:true \
         -e BRIDGE_HOST="$STUB" -e BRIDGE_IMAP_PORT=1143 -e BRIDGE_CERT_HOST=127.0.0.1 \
+        -e BRIDGE_CERT_FINGERPRINT="${1:-}" \
         -e BRIDGE_USER=synthetic@example.com -e SYNC_INTERVAL=3600 \
         -v "$WORK/bridge_pass:/run/secrets/bridge_pass:ro" \
         -v "$WORK/maildir:/maildir" -v "$WORK/state:/state" \
         "$IMAGE" >/dev/null
+}
+
+fingerprint() {
+    openssl x509 -in "$WORK/$1.pem" -outform DER | openssl dgst -sha256 | awk '{print $NF}'
 }
 
 # Waits, boundedly, for a line in a container's log.
@@ -150,9 +161,26 @@ mkdir -p "$WORK/maildir" "$WORK/state"
 chmod 644 "$WORK/bridge_pass" "$WORK/imap_stub.py"
 chmod 777 "$WORK/maildir" "$WORK/state"
 docker network create "$NETWORK" >/dev/null
+FP_A="$(fingerprint cert-a)"
+FP_B="$(fingerprint cert-b)"
+
+# 0. No expected fingerprint: nothing is trusted on first use.
+start_stub cert-a
+start_mbsync
+if [[ "$(wait_for_exit "$MBSYNC")" == "1" ]] \
+    && docker logs "$MBSYNC" 2>&1 | grep -q "BRIDGE_CERT_FINGERPRINT is not set" \
+    && docker logs "$MBSYNC" 2>&1 | grep -q "presented: sha256:${FP_A}" \
+    && ! docker logs "$STUB" 2>&1 | grep -q "command=LOGIN" \
+    && [[ ! -e "$WORK/state/bridge-cert.fingerprint" ]]; then
+    pass "without an expected fingerprint, nothing is pinned or sent"
+else
+    fail "without an expected fingerprint, nothing is pinned or sent"
+    docker logs "$MBSYNC" 2>&1 | tail -n 5 | sed 's/^/     /'
+fi
+docker rm -f "$STUB" >/dev/null
 
 # 1. Bridge down at start, then up.
-start_mbsync
+start_mbsync "$FP_A"
 if wait_for_log "$MBSYNC" "Waiting for ProtonBridge IMAP" && sleep 4 \
     && [[ "$(docker inspect -f '{{.State.Running}}' "$MBSYNC")" == "true" ]]; then
     start_stub cert-a
@@ -180,15 +208,24 @@ else
     fail "a restart against the same certificate syncs"
 fi
 
-# 3. A different certificate at the same address.
+# 3. A different certificate at the same address: refused by the expected
+# fingerprint, and by the pin when the expected fingerprint names it.
 docker stop "$MBSYNC" >/dev/null
 start_stub cert-b
 docker start "$MBSYNC" >/dev/null
 if [[ "$(wait_for_exit "$MBSYNC")" == "1" ]] \
-    && docker logs "$MBSYNC" 2>&1 | grep -q "does not match pinned value — refusing to sync"; then
-    pass "a different certificate at the pinned address is refused"
+    && docker logs "$MBSYNC" 2>&1 | grep -q "does not match BRIDGE_CERT_FINGERPRINT — refusing to sync"; then
+    pass "a different certificate is refused by the expected fingerprint"
 else
-    fail "a different certificate at the pinned address is refused"
+    fail "a different certificate is refused by the expected fingerprint"
+    docker logs "$MBSYNC" 2>&1 | tail -n 5 | sed 's/^/     /'
+fi
+start_mbsync "$FP_B"
+if [[ "$(wait_for_exit "$MBSYNC")" == "1" ]] \
+    && docker logs "$MBSYNC" 2>&1 | grep -q "does not match pinned value — refusing to sync"; then
+    pass "a different certificate is refused by the pin"
+else
+    fail "a different certificate is refused by the pin"
     docker logs "$MBSYNC" 2>&1 | tail -n 5 | sed 's/^/     /'
 fi
 docker rm -f "$MBSYNC" >/dev/null
