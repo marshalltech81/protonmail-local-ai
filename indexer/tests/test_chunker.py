@@ -768,6 +768,20 @@ class TestLeadingTabsAtSplits:
         for c in chunks:
             assert not c.text.startswith((" ", "\t", "\n"))
 
+    def test_tab_run_longer_than_a_chunk_loses_its_column(self):
+        # Documented limitation (PR #546 review round 1): a row whose
+        # empty leading cells alone exceed max_tokens cannot keep them in
+        # one chunk. The value survives, under the ceiling, without them.
+        chunks = chunk_message(
+            message_pk="m1",
+            body_text="\t" * 20000 + "value",
+            target_tokens=40,
+            max_tokens=60,
+            overlap_tokens=0,
+        )
+        assert [c.text for c in chunks] == ["value"]
+        assert chunks[0].token_est <= 60
+
     def test_spaces_before_line_opening_tabs_are_trimmed(self):
         chunks = chunk_message(message_pk="m1", body_text="  \t\tvalue\nnext")
         assert [c.text for c in chunks] == ["value\nnext"]

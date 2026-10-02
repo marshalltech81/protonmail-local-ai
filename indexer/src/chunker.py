@@ -482,7 +482,11 @@ def _leading_trim(source: str, start: int, end: int) -> int:
     leading cells as empty tab-separated fields, so those tabs carry the
     column of the row's first value and a chunk edge must not shift it
     (#433). Tabs that do not open a line (a split mid-row) are dropped:
-    the column of the value after them is unknown there. One linear scan
+    the column of the value after them is unknown there. Nor can a chunk
+    keep a run of tabs too long to fit in it (about 16 tabs per token, so
+    over ~7,800 empty leading cells at the default 500-token ceiling):
+    ``_split_by_tokens`` drops the tab-only slices and the value's slice
+    starts mid-run, so that value still loses its column. One linear scan
     over the leading whitespace, then one back over the tabs it ends with.
     """
     first = start
