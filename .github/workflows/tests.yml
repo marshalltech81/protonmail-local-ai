@@ -29,6 +29,26 @@ jobs:
       - name: Run entrypoint tests
         run: bash mbsync/tests/entrypoint_test.sh
 
+  mbsync-tls:
+    name: mbsync TLS check
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Run the TLS check against a synthetic Bridge
+        run: bash mbsync/tests/tls_check.sh
+
+  compose-rendering:
+    name: Compose rendering
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Run Compose rendering tests
+        run: bash scripts/tests/compose_test.sh
+
   bridge-entrypoint:
     name: Bridge entrypoint
     runs-on: ubuntu-latest

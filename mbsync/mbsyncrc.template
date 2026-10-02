@@ -4,10 +4,14 @@
 # This file is a template — environment variables are substituted at container
 # startup by envsubst. Do not put real credentials here — committed to git.
 #
-# Variables substituted at runtime:
-#   ${BRIDGE_HOST}      — hostname of the ProtonBridge container
-#   ${BRIDGE_IMAP_PORT} — IMAP port exposed by ProtonBridge (default: 1143)
-#   ${BRIDGE_USER}      — Bridge IMAP username (from bridge --cli → info)
+# Variables substituted at runtime (see render_mbsync_config in entrypoint.sh):
+#   ${MBSYNC_IMAP_HOST}    — the name Bridge's certificate is checked against:
+#                            BRIDGE_HOST, or BRIDGE_CERT_HOST when set
+#   ${MBSYNC_IMAP_CONNECT} — "Port <BRIDGE_IMAP_PORT>" to connect to that
+#                            host, or a Tunnel to BRIDGE_HOST:BRIDGE_IMAP_PORT
+#                            when BRIDGE_CERT_HOST is set (macOS Bridge app)
+#   ${BRIDGE_USER}         — Bridge IMAP username (from bridge --cli → info,
+#                            or the macOS Bridge app's mailbox details)
 # =============================================================================
 
 # IMAP Account — connection to ProtonBridge local IMAP server.
@@ -18,8 +22,8 @@
 # supported protocol instead of pinning the connection to TLS 1.2.
 # CertificateFile: extracted automatically at container startup by entrypoint.sh.
 IMAPAccount protonmail
-Host ${BRIDGE_HOST}
-Port ${BRIDGE_IMAP_PORT}
+Host ${MBSYNC_IMAP_HOST}
+${MBSYNC_IMAP_CONNECT}
 User ${BRIDGE_USER}
 PassCmd "cat /run/secrets/bridge_pass"
 SSLType STARTTLS

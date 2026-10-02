@@ -3,8 +3,16 @@ set -Eeuo pipefail
 
 readonly BRIDGE_HOST="${BRIDGE_HOST:-protonmail-bridge}"
 readonly BRIDGE_IMAP_PORT="${BRIDGE_IMAP_PORT:-1143}"
+# The name Bridge's certificate is checked against, when it differs from
+# BRIDGE_HOST (the macOS Bridge overlay sets 127.0.0.1). See
+# render_mbsync_config.
+readonly BRIDGE_CERT_HOST="${BRIDGE_CERT_HOST:-}"
+# With BRIDGE_CERT_HOST, the SHA-256 fingerprint the operator took from
+# the Bridge app; see verify_expected_fingerprint.
+readonly BRIDGE_CERT_FINGERPRINT="${BRIDGE_CERT_FINGERPRINT:-}"
 readonly SYNC_INTERVAL="${SYNC_INTERVAL:-60}"
 readonly RUNTIME_DIR="/tmp/mbsync"
+readonly TEMPLATE_FILE="/etc/mbsyncrc.template"
 readonly CONFIG_FILE="${RUNTIME_DIR}/mbsyncrc"
 readonly CERT_FILE="${RUNTIME_DIR}/bridge-cert.pem"
 # Liveness heartbeat for healthcheck.sh, touched around every sync attempt
@@ -62,6 +70,102 @@ require_prerequisites() {
         echo ">>> ERROR: SYNC_INTERVAL must be a positive integer number of seconds." >&2
         exit 1
     fi
+
+    validate_bridge_endpoint || exit 1
+}
+
+validate_bridge_endpoint() {
+    # These values are written into mbsyncrc and, with a tunnel, into the
+    # shell command isync runs for it, so only a plain host name or IPv4
+    # address and a decimal port are accepted.
+    local host_re='^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$'
+
+    if [[ ! "$BRIDGE_HOST" =~ $host_re ]]; then
+        echo ">>> ERROR: BRIDGE_HOST must be a host name or IPv4 address." >&2
+        return 1
+    fi
+    if [[ ! "$BRIDGE_IMAP_PORT" =~ ^[1-9][0-9]{0,4}$ ]] || ((BRIDGE_IMAP_PORT > 65535)); then
+        echo ">>> ERROR: BRIDGE_IMAP_PORT must be a port number from 1 to 65535." >&2
+        return 1
+    fi
+    if [[ -n "$BRIDGE_CERT_HOST" && ! "$BRIDGE_CERT_HOST" =~ $host_re ]]; then
+        echo ">>> ERROR: BRIDGE_CERT_HOST must be empty or a host name or IPv4 address." >&2
+        return 1
+    fi
+    if [[ -n "$BRIDGE_CERT_FINGERPRINT" && ! "$(expected_fingerprint)" =~ ^[0-9a-f]{64}$ ]]; then
+        echo ">>> ERROR: BRIDGE_CERT_FINGERPRINT must be a SHA-256 fingerprint: 64 hex digits, with or without colons." >&2
+        return 1
+    fi
+}
+
+expected_fingerprint() {
+    # BRIDGE_CERT_FINGERPRINT in the pin's form: openssl's
+    # "sha256 Fingerprint=AB:CD:..." line, its value, or bare hex.
+    local fp="${BRIDGE_CERT_FINGERPRINT##*=}"
+    fp="${fp//:/}"
+    printf '%s' "$fp" | tr '[:upper:]' '[:lower:]'
+}
+
+verify_expected_fingerprint() {
+    # With BRIDGE_CERT_HOST (the macOS Bridge app), mbsync connects to an
+    # unprivileged port on the Mac's loopback, which another local account
+    # can hold while the app is not running. Trust on first use there
+    # would pin that account's certificate and send it the Bridge
+    # password, so the certificate must match the fingerprint the operator
+    # took from the app, on every start and before the pin is consulted
+    # (a rotation accepts only that certificate too). The Bridge container
+    # sits alone on bridge-net, so its mode keeps trust on first use.
+    local current_fp="$1"
+
+    if [[ -z "$BRIDGE_CERT_HOST" ]]; then
+        return 0
+    fi
+    if [[ -z "$BRIDGE_CERT_FINGERPRINT" ]]; then
+        echo ">>> ERROR: BRIDGE_CERT_FINGERPRINT is not set — refusing to trust the Bridge app's certificate on first use." >&2
+        echo ">>>   presented: sha256:${current_fp}" >&2
+        echo ">>> Take the fingerprint from the Bridge app on the Mac (docs/setup.md, macOS Bridge mode), set it in .env, and start again." >&2
+        return 1
+    fi
+    if [[ "$(expected_fingerprint)" != "$current_fp" ]]; then
+        echo ">>> ERROR: the Bridge certificate does not match BRIDGE_CERT_FINGERPRINT — refusing to sync." >&2
+        echo ">>>   expected:  sha256:$(expected_fingerprint)" >&2
+        echo ">>>   presented: sha256:${current_fp}" >&2
+        echo ">>> If the app's certificate changed on purpose, update BRIDGE_CERT_FINGERPRINT. Otherwise this is a security event — something else may be listening on the app's port." >&2
+        return 1
+    fi
+}
+
+render_mbsync_config() {
+    # isync checks Bridge's certificate against the name in Host. Without
+    # BRIDGE_CERT_HOST that is BRIDGE_HOST, which mbsync connects to
+    # directly: the Bridge container's certificate is issued for
+    # protonmail-bridge.
+    #
+    # With BRIDGE_CERT_HOST (the macOS Bridge app, whose certificate is
+    # issued for 127.0.0.1 only), Host is that name and the connection to
+    # BRIDGE_HOST:BRIDGE_IMAP_PORT goes through a Tunnel, which isync opens
+    # instead of a socket to Host. STARTTLS, the certificate check and the
+    # pinned CertificateFile are unchanged: TLS runs end to end between
+    # mbsync and Bridge, and socat only relays bytes. socat rather than nc,
+    # because isync waits for the server's close after LOGOUT and nc does
+    # not pass it on.
+    local imap_host imap_connect
+
+    if [[ -z "$BRIDGE_CERT_HOST" ]]; then
+        imap_host="$BRIDGE_HOST"
+        imap_connect="Port ${BRIDGE_IMAP_PORT}"
+    else
+        imap_host="$BRIDGE_CERT_HOST"
+        imap_connect="Tunnel \"exec socat - TCP:${BRIDGE_HOST}:${BRIDGE_IMAP_PORT}\""
+    fi
+
+    # Only the named variables are substituted. BRIDGE_PASS is never one:
+    # mbsyncrc's PassCmd reads it from the Docker secret.
+    # shellcheck disable=SC2016 # the list names variables for envsubst
+    MBSYNC_IMAP_HOST="$imap_host" MBSYNC_IMAP_CONNECT="$imap_connect" \
+        envsubst '${MBSYNC_IMAP_HOST} ${MBSYNC_IMAP_CONNECT} ${BRIDGE_USER}' \
+        <"$TEMPLATE_FILE" >"$CONFIG_FILE"
+    chmod 600 "$CONFIG_FILE" # protect the file because it contains credentials
 }
 
 wait_for_bridge_imap() {
@@ -224,7 +328,7 @@ extract_bridge_cert() {
         return 1
     fi
 
-    if ! verify_cert_pin "$current_fp"; then
+    if ! verify_expected_fingerprint "$current_fp" || ! verify_cert_pin "$current_fp"; then
         rm -f "$cert_tmp" "$openssl_err_file"
         return 1
     fi
@@ -390,9 +494,9 @@ record_successful_sync() {
 }
 
 # =============================================================================
-# Generate mbsync config from template
-# envsubst substitutes ${BRIDGE_HOST}, ${BRIDGE_IMAP_PORT}, ${BRIDGE_USER}
-# from environment variables set in docker-compose.yml / .env.
+# Generate mbsync config from template (render_mbsync_config): the Bridge
+# endpoint from BRIDGE_HOST, BRIDGE_IMAP_PORT and BRIDGE_CERT_HOST, and
+# BRIDGE_USER, all set in docker-compose.yml / .env.
 # BRIDGE_PASS is NOT passed as an env var — mbsyncrc uses PassCmd to read
 # it directly from the Docker secret at /run/secrets/bridge_pass.
 # =============================================================================
@@ -411,8 +515,7 @@ if [[ "$BRIDGE_CERT_PIN_ROTATE" == "true" ]]; then
     echo ">>> Once the rotation succeeds, recreate mbsync with BRIDGE_CERT_PIN_ROTATE=false to re-enable pin enforcement (see docs/troubleshooting.md)." >&2
 fi
 
-envsubst < /etc/mbsyncrc.template > "$CONFIG_FILE"
-chmod 600 "$CONFIG_FILE" # protect the file because it contains credentials
+render_mbsync_config
 
 # =============================================================================
 # Wait for ProtonBridge IMAP to be available

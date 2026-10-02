@@ -6,7 +6,8 @@ This repository provides a privacy-first AI search and intelligence layer for Pr
 
 The stack consists of four containers:
 
-- ProtonBridge (container)
+- ProtonBridge (container; in the optional macOS Bridge mode, the
+  official Proton Mail Bridge app on the Mac instead)
 - mbsync (container)
 - indexer (container)
 - MCP server (container)
@@ -144,6 +145,10 @@ Do not make any of the following changes unless the repository owner explicitly 
 - Do not give `mcp-server` direct IMAP access to Bridge.
 - Do not give `indexer` direct IMAP access to Bridge.
 - mbsync is the only container that should talk directly to Bridge IMAP.
+- In the optional macOS Bridge mode (`docker-compose.macos-bridge.yml`,
+  #497) mbsync reaches the Bridge app on the Mac's loopback through
+  `host.docker.internal`; the same no-LAN-IP, no-host-networking and
+  no-published-port rules apply.
 ### Mail sync and safety constraints
 
 - Do not change mbsync to write back to Proton.
@@ -222,6 +227,21 @@ Bridge has special behavior and must be handled carefully.
 Important facts:
 
 - Bridge is built from Proton source using `make build-nogui`.
+- The optional macOS Bridge mode (#497, owner-approved 2026-10-02)
+  replaces the Bridge container with the official Bridge app on the
+  Mac: the overlay gives `protonmail-bridge` an unused profile, drops
+  mbsync's dependency on it, and sets `BRIDGE_HOST=host.docker.internal`
+  and `BRIDGE_CERT_HOST=127.0.0.1`. The app's certificate names only
+  `127.0.0.1` and isync 1.4.4 checks Bridge's self-signed CA certificate
+  against `Host`, so the entrypoint keeps `Host 127.0.0.1` and connects
+  through an isync `Tunnel` (`socat`); STARTTLS, verification and the
+  pin are unchanged. Because the app's loopback port can be held by
+  another local account while the app is down, this mode does not trust
+  on first use: the certificate must match the operator-supplied
+  `BRIDGE_CERT_FINGERPRINT` on every start. Never make it work by
+  relaxing the check. Details:
+  `docs/architecture.md` "Bridge Modes"; checked by
+  `mbsync/tests/tls_check.sh` and `scripts/tests/compose_test.sh`.
 - Bridge runs as non-root user `bridge` with UID 1000.
 - all required XDG variables must be set or Bridge may fall back to unexpected paths
 - Bridge account detection checks for:
@@ -295,7 +315,8 @@ Secrets are a hard boundary.
 
 ### Credential-specific rules
 
-- `BRIDGE_USER` comes from Bridge CLI `info`, not the Proton account password
+- `BRIDGE_USER` comes from Bridge CLI `info` (or, in macOS Bridge mode, the
+  Bridge app's IMAP details), not the Proton account password
 - `BRIDGE_PASS` belongs in `.secrets/bridge_pass.txt`, not `.env`
 - Each operator-supplied layer has one Docker secret:
   `.secrets/inference_api_key.txt`, `.secrets/embed_api_key.txt`,
@@ -480,6 +501,7 @@ Examples:
 make build
 make first-run
 make up
+make up-macos-bridge   # optional macOS Bridge mode instead of first-run + up
 make logs
 make status
 make clean
@@ -640,6 +662,9 @@ Notes:
 - this is the only container that should speak IMAP directly to Bridge
 - keep sync pull-only
 - preserve TLS cert extraction behavior
+- `BRIDGE_HOST`, `BRIDGE_IMAP_PORT` and `BRIDGE_CERT_HOST` are validated
+  as a plain host name or IPv4 address and a port before they reach
+  `mbsyncrc` or the tunnel's shell command
 - do not add writeback behavior
 
 ### `indexer/`
@@ -738,7 +763,8 @@ Notes:
 - threader changes should verify threading, subject fallback, references, and participant handling
 - database changes should verify schema creation, migration, and upsert/query behavior
 - MCP search changes should verify hybrid/RRF behavior where applicable
-- mbsync entrypoint changes should update `mbsync/tests/entrypoint_test.sh`, which loads the real functions with external commands mocked
+- mbsync entrypoint changes should update `mbsync/tests/entrypoint_test.sh`, which loads the real functions with external commands mocked; changes to mbsync's TLS or connection settings should also pass `make test-mbsync-tls` (the shipped image against a synthetic STARTTLS server)
+- Compose changes that touch service selection, dependencies, hardening or ports should keep `scripts/tests/compose_test.sh` passing for both Bridge modes
 - Bridge entrypoint changes should update `bridge/tests/entrypoint_test.sh`, which does the same with a synthetic GPG keyring and pass store
 - indexing, chunking, embedding-storage, or retrieval changes should pass `make baseline`; if ranking changes on purpose, regenerate the snapshot with `make baseline UPDATE=1` and explain the snapshot diff in the PR
 - before opening PRs that touch TLS, auth, logging, subprocess execution, or credential handling, run `bandit -r src/` and resolve any findings rated medium or higher (a CI job in `.github/workflows/security.yml` enforces this at medium+ severity for both services)
@@ -749,6 +775,8 @@ Run tests with:
 cd indexer    && uv run pytest
 cd mcp-server && uv run pytest
 make test-mbsync
+make test-mbsync-tls
+make test-compose
 make test-bridge
 make baseline
 make typecheck
