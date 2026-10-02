@@ -14,6 +14,7 @@ still searchable.
 from __future__ import annotations
 
 import codecs
+from collections.abc import Callable
 
 # UTF-32 first: its little-endian BOM begins with UTF-16's.
 _BOMS = (
@@ -49,6 +50,7 @@ def extract(
     max_ocr_pages: int = 20,  # noqa: ARG001 — accepted for dispatcher uniformity
     ocr_timeout_seconds: float | None = None,  # noqa: ARG001
     max_pdf_pages: int | None = None,  # noqa: ARG001
+    on_progress: Callable[[], None] | None = None,  # noqa: ARG001
 ) -> tuple[str, str]:
     """Decode bytes as text. Returns (text, "text")."""
     for bom, encoding in _BOMS:

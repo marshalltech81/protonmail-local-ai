@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
@@ -209,6 +210,7 @@ def _resolve_extracted_text(
     ocr_timeout_seconds: float | None = None,
     max_pdf_pages: int | None = None,
     batch_extractions: dict[str, ExtractionResult] | None = None,
+    on_progress: Callable[[], None] | None = None,
 ) -> tuple[str | None, str, ExtractionResult | None, bool]:
     """Return ``(text, status, extraction_to_persist, extraction_reused)``.
 
@@ -268,6 +270,7 @@ def _resolve_extracted_text(
         ocr_timeout_seconds=ocr_timeout_seconds,
         max_pdf_pages=max_pdf_pages,
         module_override=refresh_module,
+        on_progress=on_progress,
     )
     if batch_extractions is not None:
         batch_extractions[attachment.content_hash] = result
@@ -292,6 +295,7 @@ def prepare_attachment_writes(
     ocr_timeout_seconds: float | None = None,
     max_pdf_pages: int | None = None,
     batch_extractions: dict[str, ExtractionResult] | None = None,
+    on_progress: Callable[[], None] | None = None,
 ) -> AttachmentWritePlan:
     """Compute everything needed to write one attachment occurrence.
 
@@ -313,6 +317,9 @@ def prepare_attachment_writes(
     as a status-only row to persist, with no chunks. Hard failures
     (``Database`` I/O, embedder I/O) still propagate so the caller
     can decide whether to retry the message.
+
+    ``on_progress`` is passed to the extractor, which calls it after
+    each page it reads (#485).
     """
     occurrence_id = attachment_occurrence_id(
         claimant_id=claimant_id,
@@ -331,6 +338,7 @@ def prepare_attachment_writes(
         ocr_timeout_seconds=ocr_timeout_seconds,
         max_pdf_pages=max_pdf_pages,
         batch_extractions=batch_extractions,
+        on_progress=on_progress,
     )
 
     if status != STATUS_SUCCESS or not text:

@@ -1421,6 +1421,77 @@ class TestStallGuardProgress:
         assert ok
         assert len(calls) == len(entry.msg.attachments)
 
+    def test_phase2a_refreshes_heartbeat_during_extraction(self, tmp_path, monkeypatch):
+        """#485: a long OCR refreshes the heartbeat page by page, but does
+        not restart the stall guard's clock, which stays per attachment
+        so a stuck extraction is still caught."""
+        from src import attachment_indexing
+        from src.extractors import extract as real_extract
+
+        dest = tmp_path / "INBOX" / "new" / "att.eml"
+        _write_eml_with_text_attachment(dest, "att@example.com")
+        db = Database(tmp_path / "mail.db")
+        queue = _make_queue(db)
+        queue.enqueue(str(dest), REASON_INITIAL_SCAN)
+        row = queue.claim_batch(1)[0]
+        entry = main._phase1_commit_thread(row, db, Threader(db), queue)
+        assert entry is not None and entry.msg.attachments
+
+        def paged_extract(*, on_progress=None, **kwargs):
+            assert on_progress is not None
+            for _ in range(4):  # four pages read
+                on_progress()
+            return real_extract(**kwargs)
+
+        touches: list[int] = []
+        monkeypatch.setattr(attachment_indexing, "extract_attachment", paged_extract)
+        monkeypatch.setattr(main, "touch_health_file", lambda: touches.append(1))
+        guard: list[int] = []
+        ok, _ = main._phase2a_collect_chunks(entry, db, [], progress=lambda: guard.append(1))
+
+        assert ok
+        assert len(touches) == 4 * len(entry.msg.attachments)
+        assert len(guard) == len(entry.msg.attachments)
+
+    def test_heartbeat_failure_during_extraction_does_not_fail_the_attachment(
+        self, tmp_path, monkeypatch
+    ):
+        """A heartbeat write that fails inside an extractor would otherwise
+        be caught by the dispatcher and cached as a ``failed`` extraction
+        of a healthy payload. The file then goes stale, which the
+        healthcheck reports."""
+        dest = tmp_path / "INBOX" / "new" / "att.eml"
+        _write_eml_with_text_attachment(dest, "att@example.com")
+        db = Database(tmp_path / "mail.db")
+        queue = _make_queue(db)
+        queue.enqueue(str(dest), REASON_INITIAL_SCAN)
+        row = queue.claim_batch(1)[0]
+        entry = main._phase1_commit_thread(row, db, Threader(db), queue)
+        assert entry is not None
+
+        calls: list[int] = []
+
+        def broken_touch():
+            calls.append(1)
+            raise OSError(28, "No space left on device")
+
+        from src import attachment_indexing
+        from src.extractors import extract as real_extract
+
+        def paged_extract(*, on_progress=None, **kwargs):
+            assert on_progress is not None
+            on_progress()  # the extractor reports a page read
+            return real_extract(**kwargs)
+
+        monkeypatch.setattr(attachment_indexing, "extract_attachment", paged_extract)
+        monkeypatch.setattr(main, "touch_health_file", broken_touch)
+        all_texts: list[str] = []
+        ok, _ = main._phase2a_collect_chunks(entry, db, all_texts)
+
+        assert ok
+        assert calls == [1]
+        assert any("attachment text" in t for t in all_texts)
+
 
 class TestReprocessKeepsThreadMembership:
     def test_reprocessed_reply_keeps_its_thread_and_chunks_consistent(self, tmp_path):

@@ -351,6 +351,20 @@ def touch_health_file() -> None:
         _ingestion_state.maybe_record(time.monotonic())
 
 
+def _extraction_heartbeat() -> None:
+    """``touch_health_file`` for an extractor's per-page progress.
+
+    The dispatcher records any exception an extractor raises as a
+    ``failed`` extraction of the payload, so a heartbeat write error must
+    not escape into it. A file that cannot be refreshed goes stale, and
+    the healthcheck reports that.
+    """
+    try:
+        touch_health_file()
+    except OSError as e:
+        log.warning("health file refresh failed: %s", type(e).__name__)
+
+
 class _IngestionStateRecorder:
     """Writes the last acknowledged mbsync sync and the indexer's
     liveness into ``ingestion_state`` for mcp-server's
@@ -531,7 +545,8 @@ class MaildirHandler(FileSystemEventHandler):
 # messages. The aggregator itself has an independent rolling window —
 # this constant only controls how often the line is logged, not how many
 # samples back the percentiles look. It is unrelated to the health-file
-# heartbeat, which is refreshed per message and around each embed call.
+# heartbeat, which is refreshed per message, around each embed call and
+# after each attachment page read.
 TIMING_LOG_EVERY = 25
 
 
@@ -899,6 +914,11 @@ def _phase2a_collect_chunks(
                     occurrence_index=occurrence_index,
                     max_extracted_chars=cap,
                     batch_extractions=batch_extractions,
+                    # Each page read refreshes the heartbeat, so a long
+                    # OCR does not read as unhealthy (#485). It does not
+                    # restart the stall guard's clock, which stays per
+                    # attachment.
+                    on_progress=_extraction_heartbeat,
                 )
                 stored_attach_ids = db.get_chunk_ids_for_message(
                     msg.claimant_id, attachment_id=attachment.content_hash
@@ -1785,9 +1805,10 @@ def initial_index(
     long initial indexes (large mailboxes, slow embedding service, OCR
     on scanned PDFs) do not exceed ``HEALTH_MAX_AGE_SECONDS`` in the
     healthcheck and cause the container to be reported unhealthy
-    mid-scan. (A single message that itself takes longer than
-    ``HEALTH_MAX_AGE_SECONDS`` will still trip the healthcheck — that
-    case would need a heartbeat hook inside the batched drain path.)
+    mid-scan. Within one message the heartbeat is also refreshed after
+    each attachment page read and each embed request, so only a single
+    step that stalls past ``HEALTH_MAX_AGE_SECONDS`` trips the
+    healthcheck.
 
     Routing the initial scan through the queue — rather than indexing
     files inline — means a crash or embedding service outage mid-scan leaves the

@@ -26,7 +26,7 @@ acceptable until / unless a real ``.doc`` extractor (e.g. ``antiword``,
 from __future__ import annotations
 
 import io
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 
 import docx as _docx
 from docx.document import Document as DocxDocument
@@ -43,6 +43,7 @@ def extract(
     max_ocr_pages: int = 20,  # noqa: ARG001
     ocr_timeout_seconds: float | None = None,  # noqa: ARG001
     max_pdf_pages: int | None = None,  # noqa: ARG001
+    on_progress: Callable[[], None] | None = None,  # noqa: ARG001
 ) -> tuple[str, str]:
     """Extract text from a DOCX payload. Returns (text, "docx")."""
     document = _docx.Document(io.BytesIO(payload))

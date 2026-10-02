@@ -1756,6 +1756,35 @@ class TestPdfPageLevelOcr:
         assert pdf._ocr_dpi(buf.getvalue(), [1]) == 200
         assert pdf._ocr_dpi(buf.getvalue(), [0, 1]) < 200
 
+    def test_progress_is_reported_per_page_read(self, monkeypatch, tmp_path):
+        """#485: a scanned PDF can OCR for ~20 minutes, past the
+        healthcheck's 600 s heartbeat limit. Every digital page walked
+        and every page OCR'd reports progress, in step with the work."""
+        work = self._fake_ocr(monkeypatch, tmp_path)
+        events: list[str] = []
+        real_tesseract = __import__("pytesseract").image_to_string
+
+        def tesseract(image, **kwargs):
+            events.append("ocr")
+            return real_tesseract(image, **kwargs)
+
+        monkeypatch.setattr("pytesseract.image_to_string", tesseract)
+        result = self._extract("dsdss", on_progress=lambda: events.append("progress"))
+        assert result.status == STATUS_SUCCESS
+        assert work["ocr_calls"] == 3
+        # Five digital pages walked, then three pages OCR'd, each OCR
+        # followed by a heartbeat before the next page starts.
+        assert events == ["progress"] * 5 + ["ocr", "progress"] * 3
+
+    def test_progress_callback_is_optional(self, monkeypatch, tmp_path):
+        from src.extractors import pdf
+
+        work = self._fake_ocr(monkeypatch, tmp_path)
+        text, extractor = pdf.extract(self._pdf("ds"))
+        assert extractor == "pdf-ocr"
+        assert self.SCANNED in text
+        assert work["ocr_calls"] == 1
+
 
 class TestPdfExtractorVersion:
     """#292 changes what the PDF extractor returns for the same bytes, so
@@ -2005,6 +2034,38 @@ class TestMultipageTiff:
         seen = self._ocr_by_color(monkeypatch)
         extract(content_type="image/gif", filename="a.gif", payload=self._frames("GIF", 3))
         assert seen == ["PAGE_0"]
+
+    def test_progress_is_reported_per_page(self, monkeypatch):
+        """#485: each OCR'd page refreshes the heartbeat."""
+        seen = self._ocr_by_color(monkeypatch)
+        events: list[str] = []
+        from src.extractors import image as image_module
+
+        real_ocr = image_module.pytesseract.image_to_string
+
+        def ocr(img, **kwargs):
+            events.append("ocr")
+            return real_ocr(img, **kwargs)
+
+        monkeypatch.setattr(image_module.pytesseract, "image_to_string", ocr)
+        result = extract(
+            content_type="image/tiff",
+            filename="scan.tiff",
+            payload=self._frames("TIFF", 3),
+            on_progress=lambda: events.append("progress"),
+        )
+        assert result.status == STATUS_SUCCESS
+        assert seen == ["PAGE_0", "PAGE_1", "PAGE_2"]
+        assert events == ["ocr", "progress"] * 3
+
+    def test_progress_callback_is_optional(self, monkeypatch):
+        from src.extractors import image as image_module
+
+        seen = self._ocr_by_color(monkeypatch)
+        text, extractor = image_module.extract(self._frames("TIFF", 2))
+        assert extractor == "image-ocr"
+        assert text.split() == ["PAGE_0", "PAGE_1"]
+        assert seen == ["PAGE_0", "PAGE_1"]
 
 
 class TestGlobalImagePixelCap:

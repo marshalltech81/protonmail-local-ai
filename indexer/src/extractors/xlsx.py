@@ -41,6 +41,7 @@ attachment can still cost seconds and hundreds of MB.
 from __future__ import annotations
 
 import io
+from collections.abc import Callable
 
 import openpyxl
 
@@ -77,6 +78,7 @@ def extract(
     max_ocr_pages: int = 20,  # noqa: ARG001
     ocr_timeout_seconds: float | None = None,  # noqa: ARG001
     max_pdf_pages: int | None = None,  # noqa: ARG001
+    on_progress: Callable[[], None] | None = None,  # noqa: ARG001
 ) -> tuple[str, str]:
     """Extract text from an XLSX payload. Returns (text, "xlsx")."""
     workbook = openpyxl.load_workbook(
