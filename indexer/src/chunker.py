@@ -409,7 +409,9 @@ def _split_by_word(span: _Span, source: str, max_tokens: int) -> list[_Span]:
         return [span]
 
     sub_spans: list[_Span] = []
-    segment_start = words[0].start()
+    # Each segment starts at its first word, or at the tabs that open
+    # that word's line (#433), so the budget counts the kept tabs too.
+    segment_start = _leading_trim(source, span.start, span.end)
     for i, word in enumerate(words):
         candidate = text[segment_start : word.end()]
         # Only close once the current segment already contains at least
@@ -421,7 +423,7 @@ def _split_by_word(span: _Span, source: str, max_tokens: int) -> list[_Span]:
             sub = _make_subspan(span, source, segment_start, prev_end)
             if sub is not None:
                 sub_spans.append(sub)
-            segment_start = word.start()
+            segment_start = prev_end + _leading_trim(source, span.start + prev_end, span.end)
 
     tail = _make_subspan(span, source, segment_start, len(text))
     if tail is not None:
@@ -471,22 +473,48 @@ def _split_by_tokens(span: _Span, source: str, max_tokens: int) -> list[_Span]:
     return sub_spans if sub_spans else [span]
 
 
+def _leading_trim(source: str, start: int, end: int) -> int:
+    """Return how many leading whitespace chars of ``source[start:end]`` to drop.
+
+    All leading whitespace is dropped, except a run of tabs that opens a
+    line (it follows a newline, or the start of ``source``) directly
+    before the first non-whitespace char. The xlsx extractor writes empty
+    leading cells as empty tab-separated fields, so those tabs carry the
+    column of the row's first value and a chunk edge must not shift it
+    (#433). Tabs that do not open a line (a split mid-row) are dropped:
+    the column of the value after them is unknown there. One linear scan
+    over the leading whitespace, then one back over the tabs it ends with.
+    """
+    first = start
+    while first < end and source[first].isspace():
+        first += 1
+    if first == end:
+        return end - start
+    tabs_from = first
+    while tabs_from > start and source[tabs_from - 1] == "\t":
+        tabs_from -= 1
+    if tabs_from < first and (tabs_from == 0 or source[tabs_from - 1] == "\n"):
+        return tabs_from - start
+    return first - start
+
+
 def _make_subspan(parent: _Span, source: str, local_start: int, local_end: int) -> _Span | None:
     """Build a child span from ``parent`` using local offsets.
 
     Whitespace is trimmed from the rendered text but the stored offsets
     keep pointing at real content — leading/trailing whitespace is
     stripped by advancing / retreating the offsets, not by mutating them
-    blindly. Returns ``None`` if the resulting slice is empty.
+    blindly. Tabs that open a line are kept (see ``_leading_trim``).
+    Returns ``None`` if the resulting slice is empty.
     """
     if local_end <= local_start:
         return None
     slice_text = parent.text[local_start:local_end]
-    lead = len(slice_text) - len(slice_text.lstrip())
-    trail = len(slice_text) - len(slice_text.rstrip())
-    trimmed = slice_text.strip()
-    if not trimmed:
+    if not slice_text.strip():
         return None
+    lead = _leading_trim(source, parent.start + local_start, parent.start + local_end)
+    trail = len(slice_text) - len(slice_text.rstrip())
+    trimmed = slice_text[lead : len(slice_text) - trail]
     start = parent.start + local_start + lead
     end = parent.start + local_end - trail
     # Defensive check: offsets must round-trip through ``source`` even when
@@ -571,7 +599,8 @@ def _render_group(source: str, group: list[_Span]) -> tuple[str, int, int]:
 
     Slicing the source (rather than rejoining span text) preserves the
     exact whitespace between spans. Trailing/leading whitespace at the
-    edges of the slice is trimmed atomically so the offsets stay
+    edges of the slice (except tabs that open a line, see
+    ``_leading_trim``) is trimmed atomically so the offsets stay
     honest: the contract ``source[char_start:char_end] == text`` must
     hold for every chunk so downstream tools can map a chunk back to
     its position in the normalized body.
@@ -583,9 +612,11 @@ def _render_group(source: str, group: list[_Span]) -> tuple[str, int, int]:
     raw_start = group[0].start
     raw_end = group[-1].end
     raw = source[raw_start:raw_end]
-    lead = len(raw) - len(raw.lstrip())
+    if not raw.strip():
+        return "", raw_start, raw_start
+    lead = _leading_trim(source, raw_start, raw_end)
     trail = len(raw) - len(raw.rstrip())
-    return raw.strip(), raw_start + lead, raw_end - trail
+    return raw[lead : len(raw) - trail], raw_start + lead, raw_end - trail
 
 
 def _chunk_id(message_pk: str, index: int, text: str) -> str:

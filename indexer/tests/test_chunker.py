@@ -8,6 +8,7 @@ surface. Fixtures live in ``indexer/tests/fixtures/chunker/`` as raw
 can stay readable and editable.
 """
 
+import hashlib
 from email import message_from_bytes
 from pathlib import Path
 
@@ -654,3 +655,133 @@ class TestMeanVector:
 
         with pytest.raises(ValueError, match="dimension"):
             mean_vector([[0.1, 0.2], [0.3, 0.4, 0.5]])
+
+
+def _prose_pin_body() -> str:
+    """Prose that exercises every split path and every edge trim.
+
+    Paragraph packing with overlap, a sentence split, a word split of a
+    punctuation-free run, a paragraph indented with spaces, and
+    sentences separated by runs of spaces and newlines.
+    """
+    paragraphs = [f"Paragraph {i} opens here. " + ("filler words follow " * 15) for i in range(6)]
+    paragraphs.append("   Indented with spaces. " + ("Another sentence ends.  " * 40))
+    paragraphs.append(" ".join(f"word{i}" for i in range(400)))
+    paragraphs.append("Closing line one.\n  Closing line two.\n   \nTail.")
+    return "\n\n".join(paragraphs)
+
+
+# Pinned on main before #433: prose has no tabs opening a line, so its
+# chunk count and IDs (which bind each chunk's index and text) must not
+# move with the fix.
+PROSE_PIN_COUNT = 27
+PROSE_PIN_DIGEST = (
+    "83ce2d6b0f0e3729a5c1db2668713e28bfc776933ede75ef67b796d227107a26"  # pragma: allowlist secret
+)
+
+
+class TestLeadingTabsAtSplits:
+    """#433: a split keeps the tabs that open a line.
+
+    The xlsx extractor writes each row as tab-separated cells, with empty
+    leading cells as empty fields, so the tabs at the start of a line
+    carry the column of its first value. Leading spaces and newlines at
+    a chunk edge are still trimmed, and so are tabs that do not open a
+    line.
+    """
+
+    @staticmethod
+    def _ids_digest(chunks) -> str:
+        return hashlib.sha256("\n".join(c.chunk_id for c in chunks).encode()).hexdigest()
+
+    @staticmethod
+    def _sheet_rows(n: int) -> list[str]:
+        # One value per row behind 0-3 empty leading cells, so every
+        # word split lands at the start of a row.
+        return ["\t" * (i % 4) + f"value{i}" for i in range(n)]
+
+    def test_prose_chunks_are_unchanged(self):
+        chunks = chunk_message(
+            message_pk="m1",
+            body_text=_prose_pin_body(),
+            target_tokens=60,
+            max_tokens=90,
+            overlap_tokens=15,
+        )
+        assert len(chunks) == PROSE_PIN_COUNT
+        assert self._ids_digest(chunks) == PROSE_PIN_DIGEST
+        for c in chunks:
+            assert c.text == c.text.strip()
+
+    def test_word_split_keeps_leading_empty_cells(self):
+        rows = self._sheet_rows(300)
+        body = "Sheet: Data\n" + "\n".join(rows)
+        chunks = chunk_message(
+            message_pk="m1", body_text=body, target_tokens=40, max_tokens=60, overlap_tokens=0
+        )
+        assert len(chunks) >= 5
+        lines = [line for c in chunks for line in c.text.split("\n")]
+        # Every row keeps its column alignment in whichever chunk holds it.
+        assert lines == ["Sheet: Data", *rows]
+        assert any(c.text.startswith("\t") for c in chunks)
+
+    def test_sentence_split_keeps_leading_empty_cells(self):
+        rows = [("\t" * (i % 3)) + f"Value {i} ends." for i in range(200)]
+        chunks = chunk_message(
+            message_pk="m1",
+            body_text="\n".join(rows),
+            target_tokens=40,
+            max_tokens=60,
+            overlap_tokens=0,
+        )
+        assert len(chunks) >= 5
+        lines = [line for c in chunks for line in c.text.split("\n")]
+        assert lines == rows
+        assert any(c.text.startswith("\t") for c in chunks)
+
+    def test_paragraph_start_keeps_leading_empty_cells(self):
+        # Two sheets, each one paragraph whose first row opens with empty
+        # cells; the second sheet starts a new chunk.
+        sheet = "\n".join(["\t\tfirst"] + ["a\tb\tc"] * 20)
+        chunks = chunk_message(
+            message_pk="m1",
+            body_text=sheet + "\n\n" + sheet,
+            target_tokens=60,
+            max_tokens=120,
+            overlap_tokens=0,
+        )
+        assert len(chunks) == 2
+        assert all(c.text.startswith("\t\tfirst\n") for c in chunks)
+
+    def test_tabs_inside_a_row_are_trimmed_at_a_split(self):
+        # A split that lands mid-row cannot know the column of the first
+        # value it keeps, so it keeps none of the gap tabs, as before.
+        rows = [f"key{i}\t\tvalue{i}" for i in range(300)]
+        chunks = chunk_message(
+            message_pk="m1",
+            body_text="\n".join(rows),
+            target_tokens=40,
+            max_tokens=60,
+            overlap_tokens=0,
+        )
+        assert len(chunks) >= 5
+        for c in chunks:
+            assert not c.text.startswith((" ", "\t", "\n"))
+
+    def test_spaces_before_line_opening_tabs_are_trimmed(self):
+        chunks = chunk_message(message_pk="m1", body_text="  \t\tvalue\nnext")
+        assert [c.text for c in chunks] == ["value\nnext"]
+
+    def test_sheet_chunks_round_trip_fit_max_and_are_deterministic(self):
+        body = "\n".join(self._sheet_rows(300))
+        a = chunk_message(
+            message_pk="m1", body_text=body, target_tokens=40, max_tokens=60, overlap_tokens=0
+        )
+        b = chunk_message(
+            message_pk="m1", body_text=body, target_tokens=40, max_tokens=60, overlap_tokens=0
+        )
+        assert [c.chunk_id for c in a] == [c.chunk_id for c in b]
+        normalized = normalize_body(body)
+        for c in a:
+            assert normalized[c.char_start : c.char_end] == c.text
+            assert c.token_est <= 60
