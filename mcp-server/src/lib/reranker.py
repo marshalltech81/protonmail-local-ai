@@ -104,16 +104,28 @@ class CohereReranker:
         # ``timeout`` is always passed: the SDK default (300s) is longer
         # than we want a hybrid_search worker thread to wait on a
         # stalled Cohere call.
+        #
+        # ``max_retries=0`` disables SDK-internal retries so
+        # ``timeout_secs`` is the honest wall-clock ceiling for one
+        # ``rerank()`` call. The SDK default (2 retries + exponential
+        # backoff on 5xx/429 and connection errors) would turn one 503
+        # into three requests and ``RERANK_TIMEOUT_SECS`` into a 3×
+        # longer worst case before the RRF fallback (#483). Parity with
+        # the inference and embed clients, which also pin
+        # ``max_retries=0``; rerank is an optional stage with a
+        # fallback, so a retry is the wrong trade.
         if config.base_url:
             self.client = cohere.ClientV2(
                 api_key=config.api_key,
                 base_url=config.base_url.rstrip("/"),
                 timeout=config.timeout_secs,
+                max_retries=0,
             )
         else:
             self.client = cohere.ClientV2(
                 api_key=config.api_key,
                 timeout=config.timeout_secs,
+                max_retries=0,
             )
         # Note: ``EmbedClient`` / ``_OpenAIBackend`` / ``OpenAIEmbedder``
         # read back ``self.client.base_url`` after construction so the
