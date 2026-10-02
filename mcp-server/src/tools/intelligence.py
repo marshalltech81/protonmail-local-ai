@@ -606,9 +606,11 @@ passages do not answer the question, begin your answer with
 # semicolons ("[E1]", "[E1, E3]"). Each repetition must start with its
 # separator and an "E", so a run has one way to match; possessive
 # quantifiers keep a failed match from retrying shorter splits. The
-# answer is bounded by INFERENCE_MAX_TOKENS.
-_CITATION_RE = re.compile(r"\[\s*+(E\d{1,4}+(?:\s*+[,;]\s*+E\d{1,4}+)*+)\s*+\]")
-_LABEL_RE = re.compile(r"E\d{1,4}")
+# answer is bounded by INFERENCE_MAX_TOKENS. A label may have any number
+# of digits: one too long to name a supplied passage ("[E10000]") is an
+# unknown label, not prose (#465).
+_CITATION_RE = re.compile(r"\[\s*+(E\d++(?:\s*+[,;]\s*+E\d++)*+)\s*+\]")
+_LABEL_RE = re.compile(r"E\d++")
 
 # Appended after the question when the first answer fails the citation
 # check. Fixed text: the rejected answer is not replayed.

@@ -1138,3 +1138,91 @@ class TestCombiningMarks:
         assert statuses.count("unmatched") == intelligence._MAX_CHECKED_QUOTES
         # Each checked quote tries each occurrence in the passage once.
         assert tried == intelligence._MAX_CHECKED_QUOTES * text.count("ab ab ab")
+
+
+class _CountingPattern:
+    """A compiled pattern that counts the matches ``finditer`` yields."""
+
+    def __init__(self, pattern: re.Pattern[str]) -> None:
+        self._pattern = pattern
+        self.matches = 0
+
+    def finditer(self, text: str):
+        for match in self._pattern.finditer(text):
+            self.matches += 1
+            yield match
+
+    def __getattr__(self, name: str):
+        return getattr(self._pattern, name)
+
+
+class TestLongLabels:
+    """A label of any digit count is a citation (#465): one too long to
+    name a supplied passage is an unknown label, not prose, so the
+    statement citing it is invalid and the single repair runs."""
+
+    @pytest.mark.parametrize("label", ["E1", "E12", "E123", "E1234"])
+    def test_one_to_four_digit_labels_are_read_as_before(self, label):
+        known = {"E1", "E12", "E123", "E1234"}
+        assert _check_citations(f"Moved [{label}].", known) == ([label], [])
+        assert _check_citations(f"Moved [{label}, E9].", known) == ([label], ["E9"])
+
+    @pytest.mark.parametrize(
+        ("answer", "used", "unknown"),
+        [
+            ("Moved [E1]. Moved again [E10000].", ["E1"], ["E10000"]),
+            ("Moved [E1, E12345].", ["E1"], ["E12345"]),
+            ("Moved [E00001; E2].", ["E2"], ["E00001"]),
+        ],
+    )
+    def test_a_label_of_five_or_more_digits_is_unknown(self, answer, used, unknown):
+        assert _check_citations(answer, {"E1", "E2"}) == (used, unknown)
+
+    def test_a_statement_citing_only_a_long_label_is_invalid_not_uncited(self):
+        check = _check_answer("Shipping was on Friday [E1]. It moved again [E10000].", _EVIDENCE)
+        assert _statuses(check) == ["cited", "invalid"]
+        assert check.unknown == ["E10000"]
+        assert [(p.kind, p.labels) for p in check.problems] == [("unknown_labels", ["E10000"])]
+
+    def test_a_long_label_triggers_the_single_repair(self, cite_db):
+        llm = FakeInferenceClient(
+            complete_responses=["It is 700 units [E10000].", "It is 700 units [E1]."]
+        )
+        out = _ask(cite_db, llm)
+        assert len(llm.complete_calls) == 2
+        data = out.structured_content
+        assert data["repair_attempted"] is True
+        assert data["citation_problems"] == []
+        assert "no passage header has" in llm.complete_calls[1][1]
+
+    @pytest.mark.parametrize(
+        ("answer", "matches", "unknown"),
+        [
+            ("Moved again [E" + "1" * 100_000 + "].", 1, ["E" + "1" * 100_000]),
+            ("Moved again [E" + "1" * 100_000 + ".", 0, []),
+            ("[E1, E" + "1" * 50_000 + ", " * 50_000, 0, []),
+            ("[E" + "1" * 10 + ", E1" * 20_000, 0, []),
+            ("[E1] [E" + "1" * 10 + "]" * 20_000, 2, ["E" + "1" * 10]),
+        ],
+        ids=["closed", "unclosed", "long-list-unclosed", "many-labels-unclosed", "brackets"],
+    )
+    def test_a_long_digit_run_is_checked_in_bounded_time(
+        self, answer, matches, unknown, monkeypatch
+    ):
+        counting = _CountingPattern(intelligence._CITATION_RE)
+        monkeypatch.setattr(intelligence, "_CITATION_RE", counting)
+        start = time.perf_counter()
+        check = _check_answer(answer, _EVIDENCE)
+        assert time.perf_counter() - start < 5.0
+        assert counting.matches == matches
+        assert check.unknown == unknown
+
+    def test_no_marker_or_long_label_is_logged(self, cite_db, caplog):
+        llm = FakeInferenceClient(
+            complete_responses=[f"{_MARKER} is 700 [E10000].", f"{_MARKER} is 700 [E77777]."]
+        )
+        with caplog.at_level(logging.DEBUG):
+            out = _ask(cite_db, llm)
+        assert out.structured_content["citation_problems"][0]["labels"] == ["E77777"]
+        assert _MARKER not in caplog.text
+        assert "E10000" not in caplog.text and "E77777" not in caplog.text

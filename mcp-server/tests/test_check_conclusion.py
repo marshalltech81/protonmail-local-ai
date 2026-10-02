@@ -200,10 +200,12 @@ class TestFindings:
         assert "more characters]" in excerpt
         assert len(excerpt) < _CONCLUSION_EXCERPT_CHARS + 40
 
-    def test_unknown_label_is_flagged_after_one_repair(self, check_db):
+    # A label of five or more digits is unknown too, not cut to four (#465).
+    @pytest.mark.parametrize("label", ["E99", "E12345"])
+    def test_unknown_label_is_flagged_after_one_repair(self, check_db, label):
         def bad(_u: str) -> str:
             return _check(
-                findings=[{"relation": "supports", "explanation": "x", "labels": ["E99"]}]
+                findings=[{"relation": "supports", "explanation": "x", "labels": [label]}]
             )
 
         llm = ScriptedInference(bad, bad)
@@ -213,10 +215,10 @@ class TestFindings:
         assert data["status"] == "ok"
         assert data["repair_attempted"] is True
         assert data["citation_problems"] == [
-            {"item": 0, "kind": "unknown_labels", "labels": ["E99"]}
+            {"item": 0, "kind": "unknown_labels", "labels": [label]}
         ]
         assert data["findings"][0]["sources"] == []
-        assert "E99" in out.content[0].text
+        assert label in out.content[0].text
 
     def test_uncited_finding_and_invalid_relation_are_problems(self, check_db):
         def reply(user: str) -> str:
