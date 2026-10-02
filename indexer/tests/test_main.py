@@ -3548,6 +3548,29 @@ class TestEnqueueUnindexedMessages:
         assert enqueued == 0
         assert queue.is_dead(str(no_id))
 
+    def test_over_long_message_id_is_dead_lettered_without_the_id(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        """A Message-ID over 998 characters takes the no-Message-ID
+        dead-letter path; the ID is sender-controlled, so neither the
+        log nor ``last_error`` may carry it."""
+        maildir, inbox, db, queue = self._setup(tmp_path, monkeypatch)
+        long_id = inbox / "long-id.eml"
+        marker = "MSGID998MARKER"
+        _write_eml(long_id, marker + "x" * (999 - len(marker) - 13) + "@example.test")
+        with caplog.at_level(logging.DEBUG):
+            main.initial_index(db, make_mock_embedder(), Threader(db), queue)
+
+        assert queue.is_dead(str(long_id))
+        row = db._conn.execute(
+            "SELECT last_stage, last_error FROM indexing_jobs WHERE filepath = ?",
+            (str(long_id),),
+        ).fetchone()
+        assert row["last_stage"] == "parse"
+        assert row["last_error"] == "unindexable: no Message-ID or one over 998 characters"
+        assert marker not in caplog.text
+        assert db._conn.execute("SELECT COUNT(*) FROM threads").fetchone()[0] == 0
+
 
 def _job_reasons(db: Database) -> dict[str, str]:
     return {
