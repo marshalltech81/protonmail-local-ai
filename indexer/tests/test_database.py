@@ -1936,6 +1936,84 @@ class TestMessageDateOnChunks:
         ).fetchone()
         assert row["message_date"] == "2024-06-01T12:00:00+00:00"
 
+    @pytest.mark.parametrize("attachment_id", [None, "att-md3"])
+    def test_kept_chunks_take_the_new_message_date(self, db, attachment_id):
+        """A reprocess that keeps a chunk (same chunk ID) but carries a
+        different message date — a parser change re-reading the same
+        ``Date:`` header — rewrites the kept row's date, so the chunk
+        never disagrees with ``messages.sent_at``. The message's other
+        slice is refreshed too, since a run with attachment extraction
+        off writes only the body (review round 1), and no chunk is
+        re-inserted. Another message's chunks keep their date."""
+        _seed_thread_for_message(db, "m-md3@x", "t-md3")
+        _seed_thread_for_message(db, "m-md4@x", "t-md4")
+        bystander = _make_chunk("md4b".ljust(64, "0"), 0, "another message")
+        db.replace_message_chunks(
+            claimant_id="m-md4@x",
+            thread_id="t-md4",
+            chunks=[bystander],
+            embeddings_by_chunk_id={bystander.chunk_id: _one_hot(0)},
+            message_date="2024-01-01T00:00:00+00:00",
+        )
+        kept = _make_chunk("md3k".ljust(64, "0"), 0, "kept")
+        other = _make_chunk("md3o".ljust(64, "0"), 0, "other slice")
+        other_slice = "att-other" if attachment_id is None else None
+        old, new = "2024-01-01T00:00:00+00:00", "2024-06-01T12:00:00+00:00"
+        for chunk, slice_id in ((kept, attachment_id), (other, other_slice)):
+            db.replace_message_chunks(
+                claimant_id="m-md3@x",
+                thread_id="t-md3",
+                chunks=[chunk],
+                embeddings_by_chunk_id={chunk.chunk_id: _one_hot(0)},
+                attachment_id=slice_id,
+                message_date=old,
+            )
+
+        result = db.replace_message_chunks(
+            claimant_id="m-md3@x",
+            thread_id="t-md3",
+            chunks=[kept],
+            embeddings_by_chunk_id={},
+            attachment_id=attachment_id,
+            message_date=new,
+        )
+
+        assert result == {"inserted": 0, "deleted": 0, "kept": 1}
+        dates = dict(
+            db._conn.execute("SELECT chunk_id, message_date FROM message_chunks").fetchall()
+        )
+        assert dates == {kept.chunk_id: new, other.chunk_id: new, bystander.chunk_id: old}
+
+    def test_redated_message_moves_the_thread_range(self, db):
+        """Review round 2: reprocessing a message with a corrected date
+        sets the thread's range from its messages' ``sent_at``; the old
+        date does not linger as an endpoint (the threader hands over the
+        stored range widened by the new date)."""
+        from src.threader import Thread
+
+        jan = datetime(2024, 1, 10, 9, 0, tzinfo=UTC)
+        jun = datetime(2024, 6, 10, 9, 0, tzinfo=UTC)
+        msg = make_message(message_id="redate@x", filepath="/maildir/INBOX/cur/redate", date=jan)
+        db.upsert_thread(make_thread(messages=[msg], thread_id="t-redate"), FAKE_EMBEDDING)
+        msg.date = jun
+        widened = Thread(
+            thread_id="t-redate",
+            subject="hello world",
+            participants=[msg.from_addr, *msg.to_addrs],
+            messages=[msg],
+            folder="INBOX",
+            date_first=jan,
+            date_last=jun,
+        )
+        db.upsert_thread(widened, FAKE_EMBEDDING)
+
+        row = db._conn.execute(
+            "SELECT date_first, date_last FROM threads WHERE thread_id = 't-redate'"
+        ).fetchone()
+        sent_at = db.get_message_sent_at(msg.claimant_id)
+        assert sent_at == jun
+        assert (row["date_first"], row["date_last"]) == (jun.isoformat(), jun.isoformat())
+
     def test_schema_rejects_chunk_without_message_date(self, db):
         """Timeline retrieval orders by ``message_date`` with no
         fallback, so the column is ``NOT NULL``: a write path that

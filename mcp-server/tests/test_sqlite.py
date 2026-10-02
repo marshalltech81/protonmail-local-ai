@@ -5098,3 +5098,168 @@ class TestDefaultTrashExclusion:
         seeded_db.semantic_search(_TRASH_QUERY, limit=5)
         assert ks["thread"] == [10, 10] and len(ks["chunk"]) == 2
         assert calls == []
+
+
+class TestDateRangeMessageTime:
+    """``date_from`` / ``date_to`` bound ``sent_at`` everywhere; a thread
+    qualifies by its span, an evidence passage and an attachment by their
+    own message's time (docs/architecture.md, Message time).
+
+    Thread ``t-a``: ``a1`` (January, with ``a1-att``) and ``a2``
+    (September), so its span overlaps any 2024 range. Thread ``t-b``:
+    ``b1`` (June, with ``b1-att``).
+    """
+
+    @staticmethod
+    def _db(tmp_path, extra: tuple = ()) -> Database:
+        from tests.conftest import _insert_attachment, _insert_extraction, _insert_message
+
+        conn, path = _open_built_db_conn(tmp_path, "message-time.db")
+        rows = (
+            ("a1", "t-a", "2024-01-10T09:00:00+00:00", "report draft january", True),
+            ("a2", "t-a", "2024-09-01T09:00:00+00:00", "report final september", False),
+            ("b1", "t-b", "2024-06-01T09:00:00+00:00", "report notes june", True),
+            *extra,
+        )
+        for message_id, thread_id, sent_at, body, attached in rows:
+            _insert_message(
+                conn,
+                message_id=message_id,
+                thread_id=thread_id,
+                sent_at=sent_at,
+                subject="report",
+                has_attachments=attached,
+                body=body,
+                attachment_text=f"report attachment {message_id}" if attached else None,
+            )
+            if attached:
+                _insert_attachment(
+                    conn,
+                    message_id=message_id,
+                    thread_id=thread_id,
+                    attachment_id=f"{message_id}-att",
+                    filename=f"report-{message_id}.pdf",
+                )
+                _insert_extraction(
+                    conn,
+                    attachment_id=f"{message_id}-att",
+                    extracted_text=f"report attachment {message_id}",
+                )
+        # The fixture helper dates a thread by its first message; widen
+        # each thread to its messages' span as the indexer does.
+        conn.execute(
+            "UPDATE threads SET date_last = (SELECT MAX(sent_at) FROM messages m "
+            "WHERE m.thread_id = threads.thread_id)"
+        )
+        conn.commit()
+        conn.close()
+        return Database(str(path))
+
+    @pytest.mark.parametrize("query", [None, "report"])
+    def test_attachments_filter_on_the_carrying_message(self, tmp_path, query):
+        db = self._db(tmp_path)
+
+        def ids(**bounds) -> set[str]:
+            return {a.attachment_id for a in db.search_attachments(query=query, **bounds)}
+
+        # t-a's span overlaps both ranges; only the carrying message counts.
+        assert ids(date_from="2024-03-01") == {"b1-att"}
+        assert ids(date_to="2024-03-01") == {"a1-att"}
+        assert ids(date_from="2024-07-01") == set()
+
+    def test_attachment_scan_is_newest_sent_first(self, tmp_path):
+        results = self._db(tmp_path).search_attachments()
+        assert [(a.attachment_id, a.sent_at) for a in results] == [
+            ("b1-att", "2024-06-01T09:00:00+00:00"),
+            ("a1-att", "2024-01-10T09:00:00+00:00"),
+        ]
+
+    def test_evidence_passages_are_scoped_to_the_range(self, tmp_path):
+        db = self._db(tmp_path)
+
+        def evidence(**bounds) -> dict[str, set[str]]:
+            results = db.hybrid_search(
+                "report",
+                [1.0, 0.0, 0.0, 0.0],
+                limit=5,
+                with_evidence=True,
+                evidence_per_thread=6,
+                **bounds,
+            )
+            return {r.thread_id: {c.claimant_id for c in r.evidence_chunks} for r in results}
+
+        a1, a2, b1 = (claimant_of(m) for m in ("a1", "a2", "b1"))
+        assert evidence() == {"t-a": {a1, a2}, "t-b": {b1}}
+        assert evidence(date_from="2024-03-01") == {"t-a": {a2}, "t-b": {b1}}
+        assert evidence(date_to="2024-03-01") == {"t-a": {a1}}
+        # The span overlaps, but no passage is from a message in range:
+        # an evidence caller does not get the thread (review round 1).
+        assert evidence(date_from="2024-07-01", date_to="2024-08-01") == {}
+
+    def test_span_only_threads_give_up_their_slot(self, tmp_path):
+        """Review round 1: a higher-ranked thread with no passage in range
+        must not use up ``limit`` and hide a lower-ranked thread that has
+        one; ``search_emails`` (``keep_threads_without_evidence``) still
+        returns threads by span alone."""
+        # ``t-c``'s July message matches the query weakly (no keyword
+        # hit), so the span-only ``t-a`` outranks it.
+        db = self._db(tmp_path, extra=(("c1", "t-c", "2024-07-15T09:00:00+00:00", "notes", False),))
+
+        def threads(**kwargs) -> list[str]:
+            results = db.hybrid_search(
+                "report",
+                [1.0, 0.0, 0.0, 0.0],
+                limit=1,
+                with_evidence=True,
+                date_from="2024-07-01",
+                date_to="2024-08-01",
+                **kwargs,
+            )
+            return [r.thread_id for r in results]
+
+        assert threads(keep_threads_without_evidence=True) == ["t-a"]
+        assert threads() == ["t-c"]
+
+    def test_refill_walks_past_the_first_page(self, tmp_path):
+        """Review round 2: more span-only threads than one evidence page
+        (``limit`` × ``_FILTERED_OVERSAMPLE``) rank ahead of the thread
+        with an in-range passage; the walk continues until it is found."""
+        from src.lib.sqlite import _FILTERED_OVERSAMPLE
+
+        span_only = []
+        for i in range(_FILTERED_OVERSAMPLE + 1):
+            span_only += [
+                (f"s{i}a", f"t-s{i}", "2024-01-10T09:00:00+00:00", "report report", False),
+                (f"s{i}b", f"t-s{i}", "2024-09-01T09:00:00+00:00", "report report", False),
+            ]
+        july = ("c1", "t-c", "2024-07-15T09:00:00+00:00", "notes", False)
+        db = self._db(tmp_path, extra=(*span_only, july))
+        calls: list[int] = []
+        fetch = db.get_query_evidence_chunks
+
+        def counted(query, thread_ids, *args, **kwargs):
+            calls.append(len(thread_ids))
+            return fetch(query, thread_ids, *args, **kwargs)
+
+        db.get_query_evidence_chunks = counted  # type: ignore[method-assign]
+        results = db.hybrid_search(
+            "report",
+            [1.0, 0.0, 0.0, 0.0],
+            limit=1,
+            with_evidence=True,
+            date_from="2024-07-01",
+            date_to="2024-08-01",
+        )
+        assert [r.thread_id for r in results] == ["t-c"]
+        # Pages of ``_FILTERED_OVERSAMPLE`` threads, stopping once found.
+        assert calls[0] == _FILTERED_OVERSAMPLE and len(calls) >= 2
+
+    def test_attachment_match_bias_is_date_scoped(self, tmp_path):
+        """Review round 2: an out-of-range attachment the query names
+        does not reorder a thread's in-range evidence."""
+        db = self._db(tmp_path)
+        assert db._matched_attachments("report", ["t-a"]) == {"t-a": ["a1-att"]}
+        assert db._matched_attachments("report", ["t-a"], date_to="2024-03-01") == {
+            "t-a": ["a1-att"]
+        }
+        assert db._matched_attachments("report", ["t-a"], date_from="2024-03-01") == {}

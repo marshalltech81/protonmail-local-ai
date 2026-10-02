@@ -460,6 +460,80 @@ message's `message_thread_map` row. `messages` references
 both `ON DELETE CASCADE`, so every existing removal path — reaper,
 whole-thread delete, rebuild — cleans them up without separate code.
 
+## Message time
+
+The index records one time per message, `sent_at`, and every date the
+MCP tools filter on, sort by or return comes from it.
+
+**`sent_at`** is the message's `Date:` header as parsed by
+`parsedate_to_datetime` (`indexer/src/parser.py` `_parse_date`),
+converted to UTC and stored as an ISO 8601 string
+(`2024-03-05T12:00:00+00:00`). A header without a zone (`-0000`) is
+read as UTC. It is the sender's claim, not a delivery time: a sender
+can backdate or future-date it.
+
+*Undated mail.* A missing or unparseable `Date:` header is dated at
+the time the indexer first parses the file, and that first persisted
+date is kept when the message is reprocessed or its thread rebuilt
+(`Database.keep_persisted_fallback_date`, the first half of #297). A
+rebuild from an empty index dates such a message again at rebuild
+time; the deterministic source for it (top `Received:` header, then
+the Maildir filename's delivery timestamp, then the previously
+persisted date) is deferred to the Phase 2 reindex bundle (#297).
+
+Copies of `sent_at`, all derived from the same parsed value in one
+indexing pass:
+
+| Stored as | What it holds |
+|---|---|
+| `messages.sent_at` | The message's own time (authoritative) |
+| `message_chunks.message_date` | The `sent_at` of the chunk's message, body and attachment chunks alike. A reprocess that keeps a chunk (same chunk ID) rewrites its date when the message's `sent_at` changed, so the two never disagree |
+| `threads.date_first` / `date_last` | The earliest and latest `sent_at` among the thread's messages, recomputed from its `messages` rows on every upsert so a re-dated message moves the range |
+
+**`occurred_at`** is not defined. The index keeps no delivery or
+receipt time: the `Received:` headers and the Maildir filename's
+timestamp are not read for dating, and defining a delivery time means
+parsing `Received:`, which is #297's deferred chain. `messages.indexed_at`,
+`message_chunks.chunked_at`, `attachments.seen_at` and
+`indexed_files.indexed_at` are indexer bookkeeping, not message time,
+and no tool returns them as a message date. Bitemporal modeling (when a
+claim was made versus when the event it describes happened) waits for
+Phase 5.
+
+**Outputs.** Every per-message and per-passage result names the time
+`sent_at`, in the stored string form: message headers (`get_message`,
+`get_thread`, `query_messages`), evidence chunks (`get_evidence`),
+citations (`ask_mailbox`, `brief_issue`, `check_conclusion`) and
+attachment hits (`search_attachments`, the carrying message's time).
+Thread results carry `date_first` / `date_last`; an attachment hit also
+carries its thread's `date_last`. `get_mailbox_status` reports the
+oldest and newest `sent_at` in the index.
+
+**Filters and sorting.** `date_from` / `date_to` always bound `sent_at`
+(a date-only bound covers its whole UTC day). How a result qualifies
+depends on its unit:
+
+| Result | Qualifies when | Sorted by |
+|---|---|---|
+| Thread (`search_emails`; the threads `get_evidence`, `ask_mailbox`, `extract_from_emails`, `brief_issue` and `check_conclusion` retrieve) | Its `[date_first, date_last]` span overlaps the range | Relevance |
+| Evidence passage of a retrieved thread (same tools except `search_emails`, mailbox-wide path) | Its message's `sent_at` is in the range; a thread with no such passage is left out | Relevance within the thread |
+| Message (`query_messages`) | Its `sent_at` is in the range | `sent_at`, newest first |
+| Attachment (`search_attachments`) | The carrying message's `sent_at` is in the range | Relevance; with no query, `sent_at`, newest first |
+
+So a date range scopes the passages a model is shown, not only the
+threads: a thread whose span overlaps the range but holds no passage
+from a message inside it has no evidence passages, and the evidence
+tools leave it out: retrieval walks the filtered ranking in pages,
+fetching evidence until it has as many threads with an in-range passage
+as it needs or the ranking runs out, so a span-only thread does not use
+up a slot (and its
+out-of-range text is never shown). `search_emails` still returns
+threads by span alone. Ranking lanes are not date-scoped per
+passage: a passage outside the range can still lift its thread's rank.
+`list_threads` sorts by `date_last`, newest first; `get_thread` lists
+messages by `sent_at`, oldest first; `summarize_thread`'s recent tail
+takes the chunks with the latest `message_date`.
+
 ## Entities
 
 Entity resolution is deterministic: no model suggests or performs a

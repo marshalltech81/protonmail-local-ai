@@ -231,6 +231,16 @@ drive an unbounded query against the index.
   that takes both bounds. The bounds are compared after UTC
   normalization and date-only promotion, so `date_from` and `date_to`
   set to the same date select that whole day.
+- Date bounds apply to each message's send date (`sent_at`, its `Date:`
+  header in UTC). A thread matches when its span, from its earliest to
+  its latest `sent_at`, overlaps the range, so a thread with messages
+  either side of a short range matches it. The tools that hand passages
+  to a model (`get_evidence`, `ask_mailbox`, `extract_from_emails`,
+  `brief_issue`, `check_conclusion`) retrieve threads the same way and
+  then keep only passages from messages sent inside the range. A thread
+  left with no passage is dropped and the next-ranked thread with one
+  takes its place, so those tools never show a span-only thread's
+  out-of-range text; see [Message time](architecture.md#message-time).
 
 ---
 
@@ -242,8 +252,12 @@ fast synthesis-free path when only the source text is needed.
 
 Each chunk carries its `chunk_id` (the ID `ask_mailbox` citations
 name), its parent thread, Message-ID and claimant ID, the source
-(message body, or an attachment with filename + MIME type), the
-message date, and the passage's character offsets. Attachment-derived
+(message body, or an attachment with filename + MIME type), its
+message's send date (`sent_at`, the same value and format as that
+message's headers), and the passage's character offsets. With
+`date_from` / `date_to`, only passages from messages sent inside the
+range are returned, and a thread with none is left out (see
+`search_emails`). Attachment-derived
 chunks (extracted PDF / OCR / document text) are included — unlike
 `get_thread`, which is body-only.
 
@@ -295,8 +309,10 @@ distance but no lane provenance.
 Locate indexed attachments by filename, MIME type, and extracted
 text. Use it for attachment-centric questions ("find the quote PDF
 from Acme", "which emails had W-2 attachments?"). With no `query` it
-lists attachments by the structured filters alone, newest thread
-activity first.
+lists attachments by the structured filters alone, newest message
+first. Each result carries `sent_at`, the send date of the message
+carrying the attachment, which the date filters and the no-query order
+use, beside its thread's `date_last`.
 
 To read what an attachment says, use `get_evidence` (the matching
 passages of its extracted text, each capped at 1600 characters) or
@@ -309,7 +325,7 @@ three returns the whole document.
 | `query` | string | none | Match against filename, MIME type, and extracted text; omit to list by filter alone |
 | `content_type` | string | none | Exact MIME-type filter, e.g. `application/pdf`; blank means no filter |
 | `from_addr` | string | none | Restrict to attachments on threads sent by this address or domain |
-| `date_from` | string | none | ISO 8601 date lower bound (parent thread activity) |
+| `date_from` | string | none | ISO 8601 date lower bound on the carrying message's send date |
 | `date_to` | string | none | ISO 8601 date upper bound |
 | `extracted_only` | bool | `false` | Return only attachments whose text extraction succeeded |
 | `limit` | int | `20` | Max attachments to return; clamped to `[1, 50]` |
