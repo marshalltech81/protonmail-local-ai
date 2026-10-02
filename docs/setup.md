@@ -519,6 +519,10 @@ make update
 ```
 
 `make update` runs `make bridge-upgrade-check` first and stops if it fails.
+For a bump made in this repository, the Security Scan workflow's report-only
+"Bridge Go module scan" job lists the known advisories in Proton's Go modules
+at the `BRIDGE_COMMIT` pinned in `bridge/Dockerfile` (job summary; it never
+fails CI, and it reruns weekly).
 If the check fails, do not work around it. A commit mismatch is often a
 pin mistake to correct (see below). For patch drift, a smoke failure, or a
 moved upstream tag, stay on the working release — and because `.env`
