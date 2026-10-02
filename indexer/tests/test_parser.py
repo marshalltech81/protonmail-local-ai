@@ -2256,3 +2256,142 @@ def test_body_text_parts_decoded_are_capped(tmp_path, monkeypatch):
     assert calls == parser.MAX_BODY_TEXT_PARTS
     segments = msg.body_text.split("\n\n")
     assert segments == [f"S{i}" for i in range(parser.MAX_BODY_TEXT_PARTS)]
+
+
+# ---------------------------------------------------------------------------
+# Attachment filename shape catalogue (#362)
+# ---------------------------------------------------------------------------
+
+# Each shape is the filename-bearing header lines of one attachment part
+# and the filename the parser records. Most shapes pin what
+# ``get_filename()`` already returns. The RFC 2231 shapes whose charset
+# label names a codec that refuses ``errors="replace"`` (``idna``,
+# ``undefined``) or holds a NUL made ``get_filename()`` raise out of
+# ``parse_email``; they now fall back to the raw parameter text, as the
+# standard library already does for a charset label it does not know.
+_FILENAME_SHAPES = {
+    "plain": (
+        b'Content-Type: application/pdf\r\nContent-Disposition: attachment; filename="doc.pdf"',
+        "doc.pdf",
+    ),
+    "rfc2231-valid": (
+        b"Content-Type: application/pdf\r\n"
+        b"Content-Disposition: attachment; filename*=utf-8''r%C3%A9sum%C3%A9.pdf",
+        "résumé.pdf",
+    ),
+    "rfc2231-unknown-charset": (
+        b"Content-Type: application/pdf\r\n"
+        b"Content-Disposition: attachment; filename*=x-unknown-362''r%E9sum%E9.pdf",
+        "résumé.pdf",
+    ),
+    "rfc2231-idna": (
+        b"Content-Type: application/pdf\r\nContent-Disposition: attachment; filename*=idna''doc.pdf",
+        "doc.pdf",
+    ),
+    "rfc2231-idna-8bit": (
+        b"Content-Type: application/pdf\r\n"
+        b"Content-Disposition: attachment; filename*=idna''r%E9sum%E9.pdf",
+        "résumé.pdf",
+    ),
+    "rfc2231-undefined-codec": (
+        b"Content-Type: application/pdf\r\n"
+        b"Content-Disposition: attachment; filename*=undefined''doc.pdf",
+        "doc.pdf",
+    ),
+    "rfc2231-nul-in-charset": (
+        b"Content-Type: application/pdf\r\n"
+        b"Content-Disposition: attachment; filename*=utf-8\x00''doc.pdf",
+        "doc.pdf",
+    ),
+    "rfc2231-idna-empty": (
+        b"Content-Type: application/pdf\r\nContent-Disposition: attachment; filename*=idna''",
+        "unnamed",
+    ),
+    "content-type-name-only": (
+        b'Content-Type: application/pdf; name="doc.pdf"',
+        "doc.pdf",
+    ),
+    "content-type-name-idna-only": (
+        b"Content-Type: application/pdf; name*=idna''doc.pdf",
+        "doc.pdf",
+    ),
+    # The standard library leaves an encoded-word in a quoted parameter
+    # undecoded; pinned as is.
+    "encoded-word": (
+        b"Content-Type: application/pdf\r\n"
+        b'Content-Disposition: attachment; filename="=?utf-8?q?r=C3=A9sum=C3=A9.pdf?="',
+        "=?utf-8?q?r=C3=A9sum=C3=A9.pdf?=",
+    ),
+}
+
+
+def _write_filename_message(tmp_path: Path, headers: bytes) -> Path:
+    folder = tmp_path / "INBOX" / "cur"
+    folder.mkdir(parents=True)
+    path = folder / "m.eml"
+    path.write_bytes(
+        b"From: sender@example.test\r\n"
+        b"Message-ID: <fname@example.test>\r\n"
+        b"Date: Mon, 01 Jan 2024 12:00:00 +0000\r\n"
+        b"MIME-Version: 1.0\r\n"
+        b'Content-Type: multipart/mixed; boundary="b"\r\n'
+        b"\r\n"
+        b"--b\r\n"
+        b"Content-Type: text/plain; charset=utf-8\r\n"
+        b"\r\n"
+        b"Body text.\r\n"
+        b"--b\r\n" + headers + b"\r\n"
+        b"Content-Transfer-Encoding: base64\r\n"
+        b"\r\n"
+        b"AAAA\r\n"
+        b"--b--\r\n"
+    )
+    return path
+
+
+@pytest.mark.parametrize("shape", sorted(_FILENAME_SHAPES))
+def test_attachment_filename_shape_catalogue(tmp_path, shape):
+    headers, expected = _FILENAME_SHAPES[shape]
+    msg = parse_email(_write_filename_message(tmp_path, headers))
+    assert msg is not None
+    assert [a.filename for a in msg.attachments] == [expected]
+    assert msg.body_text == "Body text."
+
+
+@pytest.mark.parametrize("shape", sorted(_FILENAME_SHAPES))
+def test_attachment_filename_matches_stdlib_or_its_unknown_charset_fallback(shape):
+    """The class invariant: where ``get_filename()`` returns, the parser's
+    filename is its value; where it raises, the parser's filename is what
+    the standard library returns for the same parameter under a charset
+    label it does not know (its own raw-text fallback)."""
+    from src.parser import _part_filename
+
+    headers, _ = _FILENAME_SHAPES[shape]
+    part = email.message_from_bytes(headers + b"\r\n\r\nAAAA\r\n")
+    try:
+        stdlib = part.get_filename()
+    except ValueError:
+        unknown = headers
+        for label in (b"idna", b"undefined", b"utf-8\x00"):
+            unknown = unknown.replace(label + b"''", b"x-unknown-362''")
+        assert unknown != headers
+        stdlib = email.message_from_bytes(unknown + b"\r\n\r\nAAAA\r\n").get_filename()
+    assert _part_filename(part) == stdlib
+
+
+def test_undecodable_filename_is_not_logged(tmp_path, caplog):
+    """#362: the fallback logs one fixed warning naming the exception
+    type, never the filename."""
+    marker = "FNAME_MARKER_362"
+    headers = (
+        b"Content-Type: application/pdf\r\n"
+        b"Content-Disposition: attachment; filename*=idna''" + marker.encode() + b".pdf"
+    )
+    with caplog.at_level(logging.DEBUG):
+        msg = parse_email(_write_filename_message(tmp_path, headers))
+    assert msg is not None
+    assert [a.filename for a in msg.attachments] == [f"{marker}.pdf"]
+    warnings = [r for r in caplog.records if "filename" in r.getMessage()]
+    assert len(warnings) == 1
+    assert "UnicodeError" in warnings[0].getMessage()
+    assert marker not in caplog.text
