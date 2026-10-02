@@ -1258,7 +1258,7 @@ valid_endpoints_are_accepted() {
     endpoint_setup valid
     validate_bridge_endpoint || return 1
     BRIDGE_HOST="host.docker.internal" BRIDGE_IMAP_PORT=65535 BRIDGE_CERT_HOST="127.0.0.1" \
-        validate_bridge_endpoint
+        BRIDGE_CERT_FINGERPRINT="$FP_OLD" validate_bridge_endpoint
 }
 
 # The values are written into mbsyncrc and, with a tunnel, into the shell
@@ -1274,7 +1274,9 @@ invalid_endpoints_are_refused() {
             printf 'BRIDGE_HOST %q accepted\n' "$value"
             return 1
         fi
-        if BRIDGE_CERT_HOST="$value" validate_bridge_endpoint 2>/dev/null && [[ -n "$value" ]]; then
+        # With a valid fingerprint, so only the host can be refused.
+        if BRIDGE_CERT_HOST="$value" BRIDGE_CERT_FINGERPRINT="$FP_OLD" validate_bridge_endpoint 2>/dev/null \
+            && [[ -n "$value" ]]; then
             printf 'BRIDGE_CERT_HOST %q accepted\n' "$value"
             return 1
         fi
@@ -1464,6 +1466,22 @@ malformed_expected_fingerprint_is_refused_at_startup() {
     BRIDGE_CERT_FINGERPRINT="$(printf 'a%.0s' {1..64})" validate_bridge_endpoint
 }
 
+# A cert host without the expected fingerprint is refused by the startup
+# check, before the wait for Bridge (#584); the container mode needs none.
+# shellcheck disable=SC2034 # used by the entrypoint functions loaded with eval
+missing_expected_fingerprint_is_refused_at_startup() {
+    local err
+    endpoint_setup missing-fingerprint
+    validate_bridge_endpoint || return 1
+    BRIDGE_CERT_HOST="127.0.0.1"
+    if err="$(validate_bridge_endpoint 2>&1)"; then
+        echo "a cert host without BRIDGE_CERT_FINGERPRINT was accepted"
+        return 1
+    fi
+    [[ "$err" == *"BRIDGE_CERT_FINGERPRINT is not set"* ]] || return 1
+    [[ "$err" == *"docs/setup.md, macOS Bridge mode, step 3"* ]] || return 1
+}
+
 # --- shutdown signals reach the active child (#280) -------------------------
 #
 # The entrypoint is the only process Tini signals, so it must pass a stop on
@@ -1595,6 +1613,8 @@ check "rotation with a cert host still needs the expected fingerprint" \
 check "the container mode needs no expected fingerprint" container_mode_needs_no_expected_fingerprint
 check "a malformed expected fingerprint is refused at startup" \
     malformed_expected_fingerprint_is_refused_at_startup
+check "a missing expected fingerprint is refused at startup" \
+    missing_expected_fingerprint_is_refused_at_startup
 check "first boot pins the fingerprint (mode 600)" first_boot_pins_the_fingerprint
 check "first boot fails closed when the pin cannot be saved" \
     first_boot_fails_closed_when_the_pin_cannot_be_saved

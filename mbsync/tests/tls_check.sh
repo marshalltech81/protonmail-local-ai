@@ -10,7 +10,8 @@ set -Eeuo pipefail
 #
 # Checks:
 #   0. Without BRIDGE_CERT_FINGERPRINT the first certificate is not
-#      trusted: mbsync exits before LOGIN and pins nothing.
+#      trusted: mbsync exits at startup, before the wait for Bridge, so
+#      it neither connects nor pins.
 #   1. mbsync waits while the server is down, then syncs once it is up
 #      (STARTTLS, LOGIN over TLS, first-boot pin, success stamp).
 #   2. A restart against the same certificate is accepted.
@@ -200,12 +201,12 @@ start_stub cert-a
 start_mbsync
 if [[ "$(wait_for_exit "$MBSYNC")" == "1" ]] \
     && wait_for_log "$MBSYNC" "BRIDGE_CERT_FINGERPRINT is not set" \
-    && wait_for_log "$MBSYNC" "presented: sha256:${FP_A}" \
-    && ! log_has "$STUB" "command=LOGIN" \
+    && ! log_has "$MBSYNC" "Waiting for ProtonBridge IMAP" \
+    && ! log_has "$STUB" "command=" \
     && [[ ! -e "$WORK/state/bridge-cert.fingerprint" ]]; then
-    pass "without an expected fingerprint, nothing is pinned or sent"
+    pass "without an expected fingerprint, mbsync stops at startup: nothing is sent or pinned"
 else
-    fail "without an expected fingerprint, nothing is pinned or sent"
+    fail "without an expected fingerprint, mbsync stops at startup: nothing is sent or pinned"
     docker logs "$MBSYNC" 2>&1 | tail -n 5 | sed 's/^/     /'
 fi
 docker rm -f "$STUB" >/dev/null

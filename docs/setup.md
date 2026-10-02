@@ -866,9 +866,10 @@ start.
    docker logs mbsync
    ```
 
-   Without `BRIDGE_CERT_FINGERPRINT`, or with a value that does not
-   match, mbsync refuses before logging in and pins nothing; the log
-   shows the fingerprint it was presented.
+   Without `BRIDGE_CERT_FINGERPRINT`, mbsync refuses at startup, before
+   it waits for or connects to the app. With a value that does not
+   match, it refuses before logging in and pins nothing; the log shows
+   the fingerprint it was presented.
 
 ### Switching an existing installation
 
