@@ -27,6 +27,10 @@ dependencies = [
     # Pinned to a version ``fastmcp`` and ``mcp`` accept; declared
     # because the tool code imports it directly.
     "pydantic==2.13.5",
+    # The HTTP client fastmcp's Streamable HTTP transport uses; already
+    # locked through ``fastmcp``. Declared at that version because
+    # ``src/stdio_adapter.py`` builds its client directly.
+    "httpx2==2.13.1",
 ]
 
 [tool.uv]
