@@ -37,9 +37,11 @@ mbsync container
   - After each successful sync, writes a last-sync stamp
     (`.mbsync-last-sync.json`) at the Maildir root
   - Healthcheck is liveness only: healthy while the sync loop is alive
-    (a heartbeat touched around every attempt is fresh, or an mbsync is
-    running), so the indexer and MCP server start during a long first
-    sync; freshness comes from the last-sync stamp
+    (a heartbeat touched around every attempt is fresh, or an mbsync or
+    its permission repair walk is running), so the indexer and MCP
+    server start during a long first sync; freshness comes from the
+    last-sync stamp. Folders that sync creates are watched only after
+    an indexer restart (#516)
         │
         │  Maildir files (shared volume, read-only for indexer)
         ▼

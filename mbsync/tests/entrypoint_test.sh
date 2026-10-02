@@ -425,10 +425,10 @@ success_stamp_is_written_by_a_completed_sync() {
 # --- healthcheck: liveness, not freshness (#277) ----------------------------
 #
 # Healthy means the sync loop is alive: config and cert are in place and
-# either the activity heartbeat is fresh or an mbsync is running. A first
-# sync that takes hours is healthy with no success stamp; whether mail is
-# current is get_mailbox_status's job. /proc is a temporary directory and
-# stat reports the heartbeat's synthetic age.
+# either the activity heartbeat is fresh or an mbsync or its permission
+# repair walk is running. A first sync that takes hours is healthy with no
+# success stamp; whether mail is current is get_mailbox_status's job. /proc
+# is a temporary directory and stat reports the heartbeat's synthetic age.
 
 # shellcheck disable=SC2034,SC2329 # used by the healthcheck functions loaded with eval
 health_setup() {
@@ -448,7 +448,7 @@ health_setup() {
     add_process 1 docker-init
     add_process 7 entrypoint.sh
     stat() { printf '%s\n' "$(($(date +%s) - ACTIVITY_AGE))"; }
-    load_from "$HEALTHCHECK" mbsync_running check_health
+    load_from "$HEALTHCHECK" sync_in_progress check_health
 }
 
 add_process() {
@@ -488,9 +488,20 @@ stale_heartbeat_without_mbsync_is_unhealthy() {
     health_setup stale
     ACTIVITY_AGE=$HOURS_AGO
     add_process 43 sleep
-    add_process 44 find
+    add_process 44 chmod
     err="$(unhealthy 2>&1)" || return 1
     [[ "$err" == *"no sync activity"* ]] || return 1
+}
+
+# The permission repair after a sync walks the whole Maildir with no
+# mbsync running; on a large Maildir it can outlast the heartbeat limit
+# (#515 review round 1).
+# shellcheck disable=SC2034,SC2329 # used by the healthcheck functions loaded with eval
+repair_walk_in_progress_is_healthy() {
+    health_setup repair
+    ACTIVITY_AGE=$HOURS_AGO
+    add_process 44 find
+    check_health
 }
 
 # shellcheck disable=SC2034,SC2329 # used by the healthcheck functions loaded with eval
@@ -746,6 +757,7 @@ check "health: a long first sync in progress is healthy" long_first_sync_in_prog
 check "health: a fresh heartbeat between syncs is healthy" fresh_heartbeat_between_syncs_is_healthy
 check "health: a stale heartbeat without mbsync is unhealthy" \
     stale_heartbeat_without_mbsync_is_unhealthy
+check "health: the repair walk in progress is healthy" repair_walk_in_progress_is_healthy
 check "health: a heartbeat just past the limit is unhealthy" \
     heartbeat_just_past_the_limit_is_unhealthy
 check "health: no heartbeat before the first attempt is unhealthy" \

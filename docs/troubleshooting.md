@@ -310,17 +310,32 @@ docker compose logs indexer
 docker compose logs mbsync
 ```
 
-The indexer starts while mbsync's first sync is still running, but mbsync
-makes newly delivered files readable to the indexer only when a sync
-completes. Until then the indexer defers each unreadable file and retries it
-every minute, so most of the first sync's mail is indexed shortly after that
-sync ends. `make status` reports "no successful mail sync has been recorded"
-until it does.
+The indexer starts while mbsync's first sync is still running, but it cannot
+see that sync's mail yet. mbsync creates every folder owner-only (mode 0700)
+and makes folders and files readable to the indexer, which runs as a
+different user, only when a sync completes. `make status` reports "no
+successful mail sync has been recorded" until then.
 
-A deferred file is retried this way for a day after the indexer first saw
-it. If a first sync runs longer than that, files still unreadable afterwards
-take the normal retry path and can end up `dead`; once the sync has
-completed, run `make requeue-dead` to index them.
+### After the first sync completes: restart the indexer
+
+The indexer watches the Maildir for new files, but it cannot add a watch to
+a folder it could not read when the folder appeared, and making the folder
+readable later does not add one (#516). On a fresh install that is every
+folder from the first sync, INBOX included. Until the indexer restarts, mail
+in those folders, both the first sync's and later deliveries, is picked up
+only by the recovery sweep, every `INDEXER_RECOVERY_SWEEP_INTERVAL_SECS`
+(default 30 minutes).
+
+Once `make status` shows a last mail sync time, restart the indexer so it
+indexes the mailbox now and watches every folder:
+
+```bash
+docker compose restart indexer
+```
+
+Or leave it: nothing is lost, the sweep finds the mail, only later. The same
+applies to a folder created in Proton while the stack runs; restarting the
+indexer after it first syncs makes its deliveries real time again.
 
 ## `make up` fails — mbsync is unhealthy
 
@@ -332,7 +347,8 @@ start them.
 
 mbsync is healthy while its sync loop is alive: its config and the Bridge
 cert are in place, and either a sync attempt started or ended within three
-`SYNC_INTERVAL`s (plus 30 s) or an `mbsync` process is running. A long first
+`SYNC_INTERVAL`s (plus 30 s) or an `mbsync` process or the permission repair
+walk that follows it (`find`) is running. A long first
 sync is therefore healthy; it is not a reason for this failure. (Images built
 before this behaviour required a completed sync and failed any first sync
 longer than about three and a half minutes; rebuild with `make build`.)

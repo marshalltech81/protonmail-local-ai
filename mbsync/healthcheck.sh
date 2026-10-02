@@ -19,14 +19,16 @@ readonly PROC_DIR="/proc"
 readonly SYNC_INTERVAL="${SYNC_INTERVAL:-60}"
 readonly HEALTH_SLACK_SECONDS=30
 
-mbsync_running() {
-    # Any process named mbsync: inside this container that is the sync
-    # the entrypoint is waiting on. A process can exit between the listing
-    # and the read, so an unreadable entry is expected and skipped.
+sync_in_progress() {
+    # Any process named mbsync or find: inside this container these are
+    # the sync the entrypoint is waiting on and the permission repair that
+    # follows it, which walks the whole Maildir. A process can exit
+    # between the listing and the read, so an unreadable entry is expected
+    # and skipped.
     local comm_file name
     for comm_file in "$PROC_DIR"/[0-9]*/comm; do
         { read -r name <"$comm_file"; } 2>/dev/null || continue
-        if [[ "$name" == "mbsync" ]]; then
+        if [[ "$name" == "mbsync" || "$name" == "find" ]]; then
             return 0
         fi
     done
@@ -36,7 +38,8 @@ mbsync_running() {
 check_health() {
     # The heartbeat is touched before and after every sync attempt, so
     # between attempts it is at most SYNC_INTERVAL old; during an attempt
-    # it ages with the attempt, and the running mbsync stands in for it.
+    # it ages with the attempt, and the running mbsync or repair walk
+    # stands in for it.
     local now last_activity max_age_seconds
 
     if [[ ! -s "$CONFIG_FILE" || ! -s "$CERT_FILE" || ! -f "$SYNC_ACTIVITY_FILE" ]]; then
@@ -47,7 +50,7 @@ check_health() {
     last_activity="$(stat -c %Y "$SYNC_ACTIVITY_FILE")"
     max_age_seconds=$((SYNC_INTERVAL * 3 + HEALTH_SLACK_SECONDS))
 
-    if ((now - last_activity <= max_age_seconds)) || mbsync_running; then
+    if ((now - last_activity <= max_age_seconds)) || sync_in_progress; then
         return 0
     fi
 
