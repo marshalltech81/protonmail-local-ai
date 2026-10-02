@@ -686,7 +686,7 @@ is trusted: the MCP endpoint has no authentication yet (Phase 1 item
 5, Open decisions 3), and localhost is not a trust boundary. Rebuild
 any index created before the overnight changes from Maildir (the
 volume wipe in `docs/troubleshooting.md`, "Indexer refuses to
-start"): #544 edited the v0 schema, and #546, #547 and #548 change
+start"): #527 and #544 edited the v0 schema, and #546, #547 and #548 change
 parsed or chunked text, none of which reaches an existing database.
 Decide #432 (below) before go-live too: until it is fixed, a crafted
 xlsx attachment can exhaust the indexer's memory or hold its only
