@@ -306,8 +306,8 @@ Secrets are a hard boundary.
 
 - `.env`
 - `.secrets/bridge_pass.txt`
-- `.secrets/mcp_auth_token.txt` and `.secrets/mcp_client_headers.txt`
-  (the MCP bearer token and the `mcp-remote` header file holding it)
+- `.secrets/mcp_auth_token.txt` (the MCP bearer token), and
+  `.secrets/mcp_client_headers.txt` if an older setup left one
 - `mbsync/bridge-cert.pem`
 - any `.pem`, `.key`, `.p12`, or `.pfx` file
 - `config/authority.toml` (the operator's source-authority rules: real
@@ -343,8 +343,11 @@ Secrets are a hard boundary.
   `Authorization` header, and never document or script a client setup
   that passes the token as a command argument (other local accounts can
   read the process list): use a file or stdin, as
-  `scripts/mcp-auth-headers.sh` (Claude Code's `headersHelper`) and
-  `mcp-remote --header-file` do.
+  `scripts/mcp-auth-headers.sh` (Claude Code's `headersHelper` and
+  Codex's `http_headers_helper`) and `mcp-server/src/stdio_adapter.py`
+  (Claude Desktop's stdio adapter, which also checks the file is mode
+  600) do. Do not recommend third-party stdio bridges such as
+  `mcp-remote`.
 
 ### Commit hygiene
 

@@ -1,15 +1,15 @@
 {
   "mcpServers": {
     "protonmail-local-ai": {
-      "command": "npx",
+      "command": "/ABSOLUTE/PATH/TO/uv",
       "args": [
-        "-y",
-        "mcp-remote@0.14.3",
-        "http://localhost:3000/mcp",
-        "--transport",
-        "http-only",
-        "--header-file",
-        "/ABSOLUTE/PATH/TO/protonmail-local-ai/.secrets/mcp_client_headers.txt"
+        "run",
+        "--directory",
+        "/ABSOLUTE/PATH/TO/protonmail-local-ai/mcp-server",
+        "--frozen",
+        "python",
+        "-m",
+        "src.stdio_adapter"
       ]
     }
   }

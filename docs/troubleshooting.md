@@ -817,14 +817,16 @@ before #361) stays unindexed until you requeue it.
 1. Verify the MCP server is running: `docker compose ps`
 2. Check the server is responding: `curl http://localhost:3000/health`
    should print `{"status":"ok"}`
-3. Check the client points at `http://localhost:3000/mcp`. The legacy
+3. Check the client points at `http://127.0.0.1:3000/mcp`. The legacy
    `/sse` endpoint was removed and now returns `404`; see
    [Connect an MCP client](setup.md#7-connect-an-mcp-client) for the
-   Claude Desktop bridge setup
+   Claude Desktop adapter setup
 4. Verify the Claude Desktop config JSON is valid (no trailing commas),
-   and check `~/Library/Logs/Claude/mcp*.log` for the bridge's errors.
-   A `401` there means the token is missing or wrong; see the next
-   section
+   that `command` is `uv`'s absolute path and both paths in `args` are
+   absolute, and check `~/Library/Logs/Claude/mcp*.log` for the
+   adapter's `ERROR:` line, which names a token-file or `MCP_PORT`
+   problem. The adapter logs nothing else, so a server that starts but
+   shows no tools means the token was rejected; see the next section
 5. Restart Claude Desktop
 
 ## MCP client gets 401 Unauthorized
@@ -843,7 +845,7 @@ problem.
 
    ```bash
    printf 'Authorization: Bearer %s\n' "$(cat .secrets/mcp_auth_token.txt)" |
-     curl -s -o /dev/null -w '%{http_code}\n' -X POST http://localhost:3000/mcp \
+     curl -s -o /dev/null -w '%{http_code}\n' -X POST http://127.0.0.1:3000/mcp \
      -H @- \
      -H 'Accept: application/json, text/event-stream' \
      -H 'Content-Type: application/json' \
@@ -861,10 +863,18 @@ problem.
    absolute, that `claude mcp list` does not say the helper was not run
    (start Claude Code in the repository once and accept the trust
    dialog), and reconnect with `/mcp` in Claude Code.
-3. Claude Desktop: rewrite `.secrets/mcp_client_headers.txt` from the
-   current token (the command is in setup), check that the
-   `--header-file` path in `claude_desktop_config.json` is absolute and
-   points at it, and restart Claude Desktop.
+3. Claude Desktop: the adapter reads `.secrets/mcp_auth_token.txt`
+   (or its `--token-file`) only when it starts, so restart Claude
+   Desktop after the token changes. To see the adapter's own check of
+   the token file, run it once from the repository root with standard
+   input closed: `uv run --directory mcp-server --frozen python -m
+   src.stdio_adapter < /dev/null`. An `ERROR:` line names the problem;
+   no output means the file passed.
+4. Codex: run `scripts/mcp-auth-headers.sh > /dev/null` as for Claude
+   Code, and check that `http_headers_helper` in `~/.codex/config.toml`
+   is the script's absolute path in single quotes (Codex runs it with
+   `sh -c`). With `bearer_token_env_var` instead,
+   check that the variable is exported in the shell that starts Codex.
 
 The server logs a request with a wrong token as `Auth error returned:
 invalid_token (status=401)` and never logs the token or the
