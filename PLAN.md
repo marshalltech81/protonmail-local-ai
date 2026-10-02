@@ -727,7 +727,7 @@ Operator steps before go-live, in addition to the checklist:
    Bridge image), with `BRIDGE_CERT_FINGERPRINT` taken from the Bridge
    app (`docs/setup.md`, "macOS Bridge mode"). It is built and tested
    against a synthetic STARTTLS server only (#571); the owner's live
-   test against the real app is still to do (Open decisions 21). #497
+   test against the real app is the owner's go-live (Resolved decisions 14). #497
    closed when #571 merged.
 
 Open decisions 15–22 were answered on 2026-10-02 (Resolved decisions
@@ -1142,7 +1142,7 @@ linked from the Phase 3 items they track.
 - Semgrep Compose/shell rules match one file at a time (#566), with
   gaps filed: top-level `include` (#577), `volumes_from` (#578), long
   `chmod` options before the mode (#579), `!reset`/`!override`
-  clearing inherited hardening (#580, Open decisions 19), the
+  clearing inherited hardening (#580, merged-config check decided in Resolved decisions 14), the
   `compose.yaml`/`compose.yml` default names (#581), and a quoted `#`
   hiding a `curl`/`wget` TLS flag (#582)
 - mbsync macOS Bridge mode: report a missing `BRIDGE_CERT_FINGERPRINT`
