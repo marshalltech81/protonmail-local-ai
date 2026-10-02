@@ -862,8 +862,17 @@ supplied passages is `too_few_labels`. A brief that sets
 contradictory and reported once as `insufficient_but_populated`
 (`section: "brief"`, `item: 0`); so is the converse, a brief with every
 section empty and `insufficient_evidence: false`, as
-`empty_but_sufficient`. A reply that is not a brief, or
-that has any problem, gets exactly one repair call: the same prompt
+`empty_but_sufficient`. Words an entry quotes are then checked with
+`ask_mailbox`'s quote checker (see [Quotes](#ask_mailbox) above, same
+rules and caps, at most 20 quotes per reply): each quotation of three or
+more words in an entry's text fields (`actor` and `event`, `actor` and
+`position`, `decision`, `question`, `description`) is searched in the
+indexed text of the passages that entry cites. A quote found only in
+another supplied passage is a `misattributed_quotes` problem of the
+entry (its `labels` name where it was found), one found nowhere an
+`unmatched_quotes` problem. The model is asked to quote only words
+copied exactly, inside escaped double quotes in the JSON. A reply that
+is not a brief, or that has any problem, gets exactly one repair call: the same prompt
 plus a fixed instruction after the task (the rejected reply is not
 replayed). The repaired brief is used when it parses; otherwise the
 first one when it parsed; otherwise the raw reply is returned with
@@ -883,17 +892,20 @@ Structured output:
 | `raw_text` | The unparsed reply when `status` is not `ok`, else `null` |
 | `as_of` | Latest sent date (`YYYY-MM-DD`) among the passages supplied; the brief describes the evidence up to then |
 | `citations` | Each valid cited label, first-cited order, in the `ask_mailbox` citation shape (claimant, sender, own sent date, chunk) |
-| `citation_problems` | Entries `{section, item, kind, labels}`, `kind` one of `unknown_labels`, `no_citations`, `too_few_labels`, `insufficient_but_populated`, `empty_but_sufficient` (the last two with `section: "brief"`); `[]` when every check passed |
+| `quotes` | Each quotation in an entry: `text` (cut at 1,000 characters), `status` (`verified`, `misattributed`, `unmatched`, `uncited` when the entry cites no supplied passage, `not_checked`), `found_in` (labels of the passages it was found in), `section` and `item` (the entry holding it) |
+| `citation_problems` | Entries `{section, item, kind, labels}`, `kind` one of `unknown_labels`, `no_citations`, `too_few_labels`, `insufficient_but_populated`, `empty_but_sufficient` (these two with `section: "brief"`), `unmatched_quotes`, `misattributed_quotes` (`labels`: where the quotes were found); `[]` when every check passed |
 | `repair_attempted` | Whether the one repair call was made |
 | `threads` | The threads searched, best match first: the top `max_threads`, and further down to the last thread whose passages were offered |
 
 The prose in `content` opens with an EXPERIMENTAL notice and the
 "Evidence as of" date, then the brief's sections, the `Citations:`
-list, any citation-check lines and `Sources searched:`.
+list, any citation-check lines, a `Quote check:` count when the brief
+quotes, and `Sources searched:`.
 
-Limits: the check is about labels only. Quotes are not verified against
-the indexed text, a valid label does not prove the passage supports the
-entry, and an entry's `actor` and `date` are the model's reading. The
+Limits: the check is about labels and quoted words only. A valid label
+or a verified quote does not prove the passage supports the entry
+(semantic support needs a model judge and is not built), and an entry's
+`actor` and `date` are the model's reading. The
 date in a passage header is the message's own sent date; the receiving
 date is not indexed. `as_of` is computed by the server from the
 passages, not by the model.
@@ -941,7 +953,8 @@ check as a whole (problem `item` null) must agree with its abstention
 flag: `insufficient_evidence: true` with findings is
 `insufficient_but_populated`, and no findings with
 `insufficient_evidence: false` is `no_findings_but_sufficient`. Any
-failure gets exactly one repair call with fixed text; a reply that is
+failure gets exactly one repair call with fixed text, as does a quote
+problem (below); a reply that is
 still not a check comes back raw with `status: "invalid_json"`, and a
 reply cut off at `INFERENCE_MAX_TOKENS` comes back with `status:
 "truncated"` and no repair. Only counts are logged.
@@ -950,7 +963,21 @@ The server attaches a `sources` entry to each finding for every valid
 label it cites: the `ask_mailbox` citation fields (claimant, sender,
 own sent date, chunk) plus `excerpt`, the first 300 characters of the
 passage text the model was shown, verbatim from the index (longer text
-is cut with a marker). The excerpt is the server's, not the model's.
+is cut with a marker). The excerpt is the server's, not the model's, so
+it is not checked.
+
+Words the model quotes are checked with `ask_mailbox`'s quote checker
+(see [Quotes](#ask_mailbox) above, same rules and caps, at most 20
+quotes per reply, the verdict first): each quotation of three or more
+words in a finding's `explanation` is searched in the indexed text of
+the passages that finding cites, and each in `verdict_summary` in the
+passages any finding cites (the verdict cites nothing itself and only
+summarizes the findings). A quote found only in another supplied
+passage is a `misattributed_quotes` problem (its `labels` name where it
+was found), one found nowhere an `unmatched_quotes` problem, both with
+the finding's `item`, or `item` null for the verdict. Either gets the
+one repair call. The model is asked to quote only words copied exactly,
+inside escaped double quotes in the JSON.
 
 Structured output:
 
@@ -963,7 +990,8 @@ Structured output:
 | `insufficient_evidence` | The model's abstention flag; `null` unless `ok` |
 | `raw_text` | The unparsed reply when `status` is not `ok`, else `null` |
 | `as_of` | Latest sent date (`YYYY-MM-DD`) among the passages supplied |
-| `citation_problems` | Entries `{item, kind, labels}` (`item` null for a problem of the check as a whole); `[]` when the check passed |
+| `quotes` | Each quotation: `text` (cut at 1,000 characters), `status` (`verified`, `misattributed`, `unmatched`, `uncited` when nothing it could cite is a supplied passage, `not_checked`), `found_in` (labels of the passages it was found in) and `item` (the finding, or `null` for the verdict summary) |
+| `citation_problems` | Entries `{item, kind, labels}` (`item` null for a problem of the check as a whole, or of the verdict summary for the quote kinds); `kind` adds `unmatched_quotes` and `misattributed_quotes` to the kinds above; `[]` when the check passed |
 | `repair_attempted` | Whether the one repair call was made |
 | `threads` | The threads searched, best match first, as in `brief_issue` |
 
@@ -971,10 +999,12 @@ The prose in `content` opens with an EXPERIMENTAL notice and the
 "Evidence as of" date, then the verdict, each finding (relation in
 capitals, explanation, labels) followed by its sources' sender, date
 (and, for an attachment passage, `attachment <filename>`, cut for
-length as in the `Citations:` list) and quoted excerpt, any citation-check lines and `Sources searched:`.
+length as in the `Citations:` list) and quoted excerpt, any citation-check lines, a `Quote check:` count when the reply quotes, and `Sources searched:`.
 
-Limits: the check is about labels and relations only. A valid label
-does not prove the passage says what the finding claims, and the
+Limits: the check is about labels, relations and quoted words only. A
+valid label or a verified quote does not prove the passage says what the
+finding claims (semantic support needs a model judge and is not built),
+and the
 excerpt is the start of the passage, which may not contain the sentence
 the finding rests on. Whether a later message really supersedes an
 earlier one is the model's reading of a passage that states the change.

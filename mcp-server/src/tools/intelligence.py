@@ -8,7 +8,7 @@ import json
 import logging
 import re
 import unicodedata
-from collections.abc import Container, Iterable, Iterator, Mapping
+from collections.abc import Container, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Literal
 
@@ -896,11 +896,13 @@ def _statement_status(
 def _check_quotes(
     quote_matches: list[re.Match[str]],
     statement_of: list[int],
-    statements: list[AnswerStatement],
+    labels_of: Sequence[list[str]],
     evidence_map: Mapping[str, EvidenceRef],
 ) -> list[QuoteCheck]:
     """Each quotation of ``_MIN_CHECKED_WORDS`` or more words, checked
-    against the text shown for the passages its statement cites, then,
+    against the text shown for the passages its statement cites
+    (``labels_of[statement]``; ``brief_issue`` and ``check_conclusion``
+    pass their entries as statements), then,
     if not there, against the other supplied passages. One over
     ``_MAX_QUOTE_CHARS`` characters is listed as not_checked.
 
@@ -924,7 +926,7 @@ def _check_quotes(
         if len(raw) <= _MAX_QUOTE_CHARS and len(_WORD_RE.findall(raw)) < _MIN_CHECKED_WORDS:
             continue
         text = raw if len(raw) <= _MAX_QUOTE_CHARS else raw[:_MAX_QUOTE_CHARS] + "…"
-        cited = statements[statement].labels
+        cited = labels_of[statement]
         fragments = (
             _quote_fragments(raw) if len(raw) <= _MAX_QUOTE_CHARS and _is_quotation(match) else []
         )
@@ -1015,7 +1017,10 @@ def _check_answer(answer: str, evidence_map: Mapping[str, EvidenceRef]) -> Answe
         for i, (s, e) in enumerate(spans)
     ]
     quotes = _check_quotes(
-        quote_matches, owner(m.start() for m in quote_matches), statements, evidence_map
+        quote_matches,
+        owner(m.start() for m in quote_matches),
+        [s.labels for s in statements],
+        evidence_map,
     )
 
     problems: list[CitationProblem] = []
