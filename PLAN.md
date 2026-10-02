@@ -705,31 +705,12 @@ open a line (#433, #546); stored subjects are capped at
 later part into the body (#450, #548); and the P3 fixes listed there.
 No code PR is open.
 
-Needs the owner:
-- **#432** (xlsx duplicate cells): a guard cannot fix it, because
-  openpyxl builds a row before our code sees it. The issue comment has
-  measurements and three options (document it, a counting
-  `WorkSheetParser` subclass, a streaming pre-pass) and the budget-size
-  question.
-- **#497** (Bridge on macOS) and **#498** (Streamable HTTP as the only
-  transport): owner-filed features, not started because they change the
-  architecture and defaults.
-- Follow-ups filed overnight: #550 (P2, chunks can exceed
-  `max_tokens`; it changes chunk text, so it joins #208 in the Phase 2
-  reindex bundle), #524 (folders opened by a failed mbsync
-  attempt are re-watched only at the recovery sweep), #526 (on Linux
-  Docker Engine the indexer cannot read a 600 operator-owned
-  `authority.toml`), #533 (delimiter escaping misses tag names spelled
-  with compatibility or confusable letters), #537 (`get_evidence` sizes
-  retrieval by its chunk limit, so it can rank threads differently from
-  `ask_mailbox`).
-- Open questions from earlier PRs: #494's strict argument matching and
-  replay of a live client's traces; #496's character-based token
-  estimate (no tokenizer, so dense scripts such as CJK are
-  undercounted); #491's security-scan path filters, left unchanged in
-  #512 because no scanner reads Compose files or scripts; #495's prose
-  statement split (rather than JSON statements) and its CJK terminators
-  and word counts.
+Needs the owner: the decisions listed under **Open decisions**
+(items 3–14), ordered by when they matter and each with options and a
+recommendation. Start the next session by walking through them; record
+each answer under Resolved decisions and strike it there. Items 3 and 4
+gate go-live; 5 and 6 are owner-filed features ready to start on a
+"go"; 7–14 can wait.
 
 Waiting on real data: #487 (evidence and output budgets), #488
 (container resource budgets) and #282 (the mbsync stall deadline, set
@@ -1355,6 +1336,66 @@ do not ship persisted claims without them.
    `dual` both get it), and `custom_route` endpoints such as
    `/health` stay unauthenticated. `AuthSettings` requires an
    `issuer_url` even when only a verifier is used.
+   **Before go-live (2026-10-02):** decide whether to ship the local
+   static-token option now or go live on the stated "every local user
+   and process is trusted" condition. Recommendation: ship it first;
+   the design is pinned and small, and any local process (a malicious
+   package, a browser extension) can otherwise read the mailbox. Check
+   that the MCP client can send a bearer header before building it.
+4. **#432 xlsx duplicate cells (before go-live).** A ~100 KB crafted
+   workbook can drive the indexer to ~11 GB or hold its only worker
+   for 40 s or more; no guard fixes it because openpyxl builds a whole
+   row before our code sees a cell (measurements in the issue comment).
+   Options: (a) document the limitation; (b) own the sheet parse loop
+   with a counting `WorkSheetParser` subclass that stops mid-row,
+   built on openpyxl private attributes; (c) a streaming pre-pass that
+   counts raw cell nodes and cuts the sheet before an over-budget row,
+   public APIs only, about 2× parse time for normal sheets. The cell
+   budget's size is part of the decision: charging parsed cells at
+   their real cost shrinks the ceiling for large legitimate sheets and
+   needs an `EXTRACTOR_VERSIONS` bump. Recommendation: (c).
+5. **#498 Streamable HTTP as the only transport.** Owner-filed;
+   breaking (clients move from `/sse` to `/mcp`; explicit `sse` or
+   `dual` fails startup with a migration message) and it changes the
+   AGENTS.md default-transport rule. Decide go or no-go, and confirm
+   the MCP client connects over `/mcp` first. Recommendation: go.
+6. **#497 Bridge app on macOS.** Owner-filed; an optional overlay that
+   skips the Bridge container and points mbsync at
+   `host.docker.internal`, the container staying the default. Decide go
+   or no-go and whether it will be used; switching an existing Maildir
+   needs the documented migration (credentials, certificate pin,
+   UIDVALIDITY). Recommendation: go, after the first go-live on the
+   container.
+7. **#537 `get_evidence` thread count.** Add a `max_threads` parameter
+   so an audit retrieves exactly the threads `ask_mailbox` used (a tool
+   interface change). Recommendation: yes; small and additive.
+8. **#533 look-alike letters in delimiter tags.** Escaping covers the
+   look-alike brackets but not tag names spelled with compatibility or
+   confusable letters; fixing it needs normalized matching or a
+   confusables table. Recommendation: defer.
+9. **#526 `authority.toml` on Linux Docker Engine.** A mode-600
+   operator-owned file is unreadable to the indexer there (OrbStack is
+   fine); a safe path needs something like a group-read setup.
+   Recommendation: keep it documented; revisit if Linux is deployed.
+10. **#524 folders opened by a failed mbsync attempt** are re-watched
+    only at the 30-minute recovery sweep; prompt handling needs a new
+    signal from mbsync. Mail is late, never lost. Recommendation: defer.
+11. **#494 agent-eval scoring.** Keep strict argument matching (a
+    `from_addr` call does not count where `participant` is expected)
+    and first-call-only tool selection? Build a recorder to replay a
+    real client's traces? Recommendation: keep strict; add the recorder
+    after go-live from real-client traces.
+12. **#496 token counting.** Keep the 3-characters-per-token estimate
+    (undercounts dense scripts such as CJK) or add a real tokenizer?
+    Recommendation: keep the estimate; the right tokenizer depends on
+    the operator's model.
+13. **#495 CJK handling in statement and quote checks.** Keep the
+    `。！？` terminators and per-character CJK word counts added in
+    review, or exempt CJK text from statement checks? Recommendation:
+    keep.
+14. **Compose scanning (#491/#512).** No security scanner reads Compose
+    files or shell scripts, so the path filters were left unchanged.
+    File an issue to add one? Recommendation: yes, low priority.
 
 ## Recently Completed
 
