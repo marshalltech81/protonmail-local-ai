@@ -204,11 +204,12 @@ test-bridge-smoke:
 # Retrieval regression baseline. Step 1 indexes the synthetic mailbox with
 # the real indexer and a hashed embedder; step 2 checks the golden
 # questions and the rank snapshot in mcp-server. UPDATE=1 rewrites
-# mcp-server/tests/baseline/snapshot.json after an intended ranking change.
+# mcp-server/tests/baseline/snapshot.json after an intended ranking change;
+# any other value (UPDATE=0, UPDATE=no) only checks it.
 baseline: sync-indexer sync-mcp
 	@dir=$$(mktemp -d) && \
 	( cd indexer && uv run python -m tests.baseline.build "$$dir/out" ../mcp-server/tests/baseline/golden.json ) && \
-	( cd mcp-server && BASELINE_DIR="$$dir/out" uv run pytest -q --no-cov tests/baseline $(if $(UPDATE),--update-baseline) ); \
+	( cd mcp-server && BASELINE_DIR="$$dir/out" uv run pytest -q --no-cov tests/baseline $(if $(filter 1,$(UPDATE)),--update-baseline) ); \
 	status=$$?; rm -rf "$$dir"; exit $$status
 
 typecheck: typecheck-indexer typecheck-mcp

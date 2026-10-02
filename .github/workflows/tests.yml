@@ -10,12 +10,21 @@ on:
 permissions:
   contents: read
 
+# Cancel a pull request's in-progress run when a newer push supersedes it.
+# Every other event gets its own group (the run ID), so runs on main,
+# scheduled runs and manual dispatches never queue behind or cancel one
+# another.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   mbsync-entrypoint:
     name: mbsync entrypoint
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Run entrypoint tests
         run: bash mbsync/tests/entrypoint_test.sh
@@ -23,8 +32,9 @@ jobs:
   bridge-entrypoint:
     name: Bridge entrypoint
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Run entrypoint tests
         run: bash bridge/tests/entrypoint_test.sh
@@ -32,8 +42,9 @@ jobs:
   bridge-smoke-script:
     name: bridge smoke script
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Run bridge-smoke.sh tests
         run: bash scripts/tests/bridge_smoke_test.sh
@@ -41,15 +52,16 @@ jobs:
   indexer-pytest:
     name: indexer pytest
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version-file: ".python-version"
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v10.2.0
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           version: "0.11.6"
           enable-cache: true
@@ -64,7 +76,7 @@ jobs:
         run: uv run pytest -q --cov-report=xml:coverage.xml --cov-report=term
 
       - name: Upload indexer coverage report
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: indexer-coverage
           path: indexer/coverage.xml
@@ -74,15 +86,16 @@ jobs:
   mcp-server-pytest:
     name: mcp-server pytest
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version-file: ".python-version"
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v10.2.0
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           version: "0.11.6"
           enable-cache: true
@@ -97,7 +110,7 @@ jobs:
         run: uv run pytest -q --cov-report=xml:coverage.xml --cov-report=term
 
       - name: Upload mcp-server coverage report
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: mcp-server-coverage
           path: mcp-server/coverage.xml
@@ -110,15 +123,16 @@ jobs:
     # snapshot through mcp-server's read path. See `make baseline`.
     name: retrieval baseline
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version-file: ".python-version"
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v10.2.0
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           version: "0.11.6"
           enable-cache: true
