@@ -5,15 +5,18 @@
 #
 # Semgrep matches each file on its own; it does not merge overlays. So
 # the rules come in two kinds:
-#   - forbidden settings (privileged, host namespaces, cap_add, devices,
-#     docker socket, weakened security_opt, published ports, writable
-#     host bind mounts, extra services on bridge-net) apply to every
-#     file, so an overlay cannot add them;
+#   - forbidden settings (privileged, namespaces shared with the host or
+#     another container, cap_add, devices, docker socket, weakened
+#     security_opt, read_only other than true, unbounded pids_limit or
+#     logging, published ports, writable host bind mounts, extra
+#     services on bridge-net) apply to every file, so an overlay cannot
+#     add them. A security setting whose value is interpolated
+#     (`${VAR:-default}`) counts as unsafe, since its default can be;
 #   - required hardening (read_only, no-new-privileges, cap_drop ALL,
 #     pids_limit, logging) applies where a service is defined, that is
 #     where it names a `build` or an `image`. An overlay that only
 #     adjusts an existing service is not asked to repeat them, but it
-#     cannot undo read_only (compose-read-only-disabled).
+#     cannot set any of the forbidden values above.
 #
 # Tests: .semgrep/compose.test.yml (run `semgrep test .semgrep`).
 rules:
@@ -22,31 +25,40 @@ rules:
     severity: ERROR
     message: >-
       `privileged: true` gives the container every capability and all host
-      devices. AGENTS.md forbids it without explicit owner approval.
+      devices. AGENTS.md forbids it without explicit owner approval. Any
+      value other than a literal `false` is rejected, so an interpolated
+      default such as `${PRIVILEGED:-true}` cannot slip through.
     paths:
       include:
         - "docker-compose*.yml"
         - "docker-compose*.yaml"
-    pattern: "privileged: true"
+    patterns:
+      - pattern: "privileged: $VALUE"
+      - metavariable-regex:
+          metavariable: $VALUE
+          regex: ^(?!false$)
 
   - id: compose-host-namespace
     languages: [yaml]
     severity: ERROR
     message: >-
-      Sharing a host namespace removes the container's isolation from the
-      host. AGENTS.md forbids `network_mode: host`; the other host
-      namespaces are forbidden for the same reason.
+      `$KEY: $VALUE` shares a namespace with the host or with another
+      container. The host's removes the container's isolation (AGENTS.md
+      forbids `network_mode: host`); another container's gives it that
+      container's access, such as mbsync's route to Bridge. Interpolated
+      values are rejected because their default can be either.
     paths:
       include:
         - "docker-compose*.yml"
         - "docker-compose*.yaml"
-    pattern-either:
-      - pattern: "network_mode: host"
-      - pattern: "pid: host"
-      - pattern: "ipc: host"
-      - pattern: "uts: host"
-      - pattern: "userns_mode: host"
-      - pattern: "cgroup: host"
+    patterns:
+      - pattern: "$KEY: $VALUE"
+      - metavariable-regex:
+          metavariable: $KEY
+          regex: ^(network_mode|pid|ipc|uts|userns_mode|cgroup)$
+      - metavariable-regex:
+          metavariable: $VALUE
+          regex: (?i)^["']?(host|service:|container:|.*\$)
 
   - id: compose-cap-add
     languages: [yaml]
@@ -78,7 +90,8 @@ rules:
     severity: ERROR
     message: >-
       `$OPT` disables seccomp, AppArmor, SELinux labelling or
-      no-new-privileges. AGENTS.md keeps the default confinement in place.
+      no-new-privileges, or is interpolated and so could. AGENTS.md keeps
+      the default confinement in place.
     paths:
       include:
         - "docker-compose*.yml"
@@ -88,19 +101,69 @@ rules:
       - pattern: $OPT
       - metavariable-regex:
           metavariable: $OPT
-          regex: (?i)^["']?(seccomp|apparmor|systempaths)[:=]unconfined|^["']?label[:=](disable|type:\S*unconfined)|^["']?no-new-privileges[:=]false
+          regex: (?i)^["']?(seccomp|apparmor|systempaths)[:=]unconfined|^["']?label[:=](disable|type:\S*unconfined)|^["']?no-new-privileges[:=]false|.*\$
 
   - id: compose-read-only-disabled
     languages: [yaml]
     severity: ERROR
     message: >-
-      `read_only: false` makes the container's root filesystem writable.
-      AGENTS.md prefers a read-only rootfs with tmpfs for writable paths.
+      `read_only: $VALUE` can leave the container's root filesystem
+      writable. AGENTS.md prefers a read-only rootfs with tmpfs for
+      writable paths; any value other than a literal `true` (including an
+      interpolated one) is rejected.
     paths:
       include:
         - "docker-compose*.yml"
         - "docker-compose*.yaml"
-    pattern: "read_only: false"
+    patterns:
+      - pattern: "read_only: $VALUE"
+      - metavariable-regex:
+          metavariable: $VALUE
+          regex: ^(?!true$)
+
+  - id: compose-pids-limit-unbounded
+    languages: [yaml]
+    severity: ERROR
+    message: >-
+      `pids_limit: $LIMIT` is not a positive number, so it leaves the
+      process count unbounded (`-1` and `0` both mean no limit) or depends
+      on interpolation.
+    paths:
+      include:
+        - "docker-compose*.yml"
+        - "docker-compose*.yaml"
+    patterns:
+      - pattern: "pids_limit: $LIMIT"
+      - metavariable-regex:
+          metavariable: $LIMIT
+          regex: ^(?![1-9][0-9]*$)
+
+  - id: compose-logging-unbounded
+    languages: [yaml]
+    severity: ERROR
+    message: >-
+      This logging configuration does not bound the log size. Use
+      `logging: *default-logging` (json-file with `max-size`), or
+      `driver: none` as docker-compose.first-run.yml does for Bridge.
+    paths:
+      include:
+        - "docker-compose*.yml"
+        - "docker-compose*.yaml"
+    patterns:
+      - pattern: "logging: $LOGGING"
+      - pattern-not: |
+          logging:
+            ...
+            options:
+              ...
+              max-size: $SIZE
+              ...
+            ...
+      - pattern-not: |
+          logging:
+            ...
+            driver: none
+            ...
 
   - id: compose-docker-socket
     languages: [yaml]

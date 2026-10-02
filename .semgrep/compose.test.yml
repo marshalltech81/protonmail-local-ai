@@ -1,6 +1,9 @@
 # Test cases for .semgrep/compose.yaml. Not a real Compose file.
 x-logging: &default-logging
   driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
 
 services:
   # ok: compose-service-missing-read-only, compose-service-missing-no-new-privileges, compose-service-missing-cap-drop-all, compose-service-missing-pids-limit, compose-service-missing-logging, compose-bridge-net-member
@@ -123,3 +126,42 @@ services:
       BRIDGE_FORCE_CLI: "true"
     networks:
       - bridge-net
+    # ok: compose-logging-unbounded
+    logging:
+      driver: none
+    # ok: compose-privileged
+    privileged: false
+    # ok: compose-host-namespace
+    network_mode: none
+    # ok: compose-host-namespace
+    ipc: private
+    # ok: compose-pids-limit-unbounded
+    pids_limit: 256
+
+  # Values that only resolve to an unsafe setting through interpolation,
+  # shared namespaces of another container, and unbounded limits.
+  sneaky:
+    # ruleid: compose-privileged
+    privileged: ${PRIVILEGED:-true}
+    # ruleid: compose-read-only-disabled
+    read_only: ${READ_ONLY:-false}
+    # ruleid: compose-host-namespace
+    network_mode: service:mbsync
+    # ruleid: compose-host-namespace
+    ipc: container:other
+    # ruleid: compose-host-namespace
+    pid: ${PID_MODE:-host}
+    # ruleid: compose-pids-limit-unbounded
+    pids_limit: -1
+    # ruleid: compose-logging-unbounded
+    logging:
+      driver: json-file
+    security_opt:
+      # ruleid: compose-weakened-security-opt
+      - no-new-privileges:${NNP:-false}
+
+  sneaky-too:
+    # ruleid: compose-pids-limit-unbounded
+    pids_limit: 0
+    # ruleid: compose-logging-unbounded
+    logging: {}

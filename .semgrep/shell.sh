@@ -13,6 +13,12 @@ curl --insecure -o out "$url"
 # ok: shell-tls-verification-disabled
 curl -fsSL -o out "$url"
 # ruleid: shell-tls-verification-disabled
+curl -fsSL \
+    --insecure -o out "$url"
+# ruleid: shell-tls-verification-disabled
+wget -q \
+    --no-check-certificate "$url"
+# ruleid: shell-tls-verification-disabled
 wget --no-check-certificate "$url"
 # ruleid: shell-tls-verification-disabled
 git -c http.sslVerify=false clone "$url"
@@ -44,6 +50,13 @@ curl -fsSL "$url" | bash
 wget -qO- "$url" | sh -s -- --flag
 # ruleid: shell-pipe-to-shell
 bash <(curl -fsSL "$url")
+# ruleid: shell-pipe-to-shell
+curl -fsSL "$url" | /bin/bash
+# ruleid: shell-pipe-to-shell
+curl -fsSL "$url" | /usr/bin/env bash
+# ruleid: shell-pipe-to-shell
+wget -qO- "$url" \
+    | sh
 # ok: shell-pipe-to-shell
 curl -fsSL "$url" | sha256sum
 
