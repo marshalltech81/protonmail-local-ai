@@ -916,30 +916,11 @@ to be incompatible, and it starts with a backup.
      ([how to see which](troubleshooting.md#folder-names-in-mbsyncs-log)).
      The existing state cannot be
      reused. Either switch back (`make down`, then `make up` with the
-     old credentials and a pin rotation back), or start the Maildir
-     over from the app after backing it up:
-
-     ```bash
-     make down
-     mkdir -m 700 -p ~/protonmail-local-ai-backup
-     docker run --rm -v protonmail-local-ai_maildir-volume:/maildir:ro \
-         -v ~/protonmail-local-ai-backup:/backup debian:bookworm-slim \
-         tar -C /maildir -czf /backup/maildir-backup.tgz .
-     chmod 600 ~/protonmail-local-ai-backup/maildir-backup.tgz
-     docker volume rm protonmail-local-ai_maildir-volume protonmail-local-ai_sqlite-volume
-     make up-macos-bridge
-     ```
-
-     The archive is your whole mailbox, unencrypted. Keep it outside
-     the checkout, as above, so no `git add` can pick it up, and on an
-     encrypted disk (FileVault).
-
-     mbsync then pulls the whole mailbox from the app, and the indexer
-     rebuilds the index from it, which re-embeds every message (a cost
-     with a paid embedding provider). Removing the index too keeps
-     the old files' rows from going through deletion reconciliation.
-     The volume names assume the default Compose project name (the
-     checkout's directory); `docker volume ls` shows yours.
+     old credentials and a pin rotation back), or back up the Maildir
+     and start it over, with the index, from the app, as in
+     [mbsync reports a UIDVALIDITY change](troubleshooting.md#mbsync-reports-a-uidvalidity-change).
+   - `Recovered from change of UIDVALIDITY`: the change was spurious;
+     isync checked the messages and kept the state. Nothing to do.
 
 The same steps apply when switching back to the Bridge container, with
 `make up` and `make first-run`'s credentials.

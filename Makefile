@@ -35,7 +35,7 @@ help:
 	@echo "  test-mcp     Run mcp-server unit tests only"
 	@echo "  test-mbsync  Run mbsync entrypoint tests only"
 	@echo "  test-mbsync-tls  Run the mbsync TLS check against a synthetic Bridge (needs Docker)"
-	@echo "  test-mbsync-layout  Run the mbsync Maildir layout check with synthetic stores (needs Docker)"
+	@echo "  test-mbsync-layout  Run the mbsync Maildir layout and UIDVALIDITY checks with synthetic stores (needs Docker)"
 	@echo "  test-compose Run Compose rendering tests for both Bridge modes"
 	@echo "  test-bridge  Run Bridge entrypoint tests only"
 	@echo "  test-bridge-smoke  Run bridge-smoke.sh pass/fail tests (no Docker)"
