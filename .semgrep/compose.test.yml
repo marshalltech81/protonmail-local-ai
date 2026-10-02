@@ -1,0 +1,125 @@
+# Test cases for .semgrep/compose.yaml. Not a real Compose file.
+x-logging: &default-logging
+  driver: json-file
+
+services:
+  # ok: compose-service-missing-read-only, compose-service-missing-no-new-privileges, compose-service-missing-cap-drop-all, compose-service-missing-pids-limit, compose-service-missing-logging, compose-bridge-net-member
+  mbsync:
+    build:
+      context: ./mbsync
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 128
+    logging: *default-logging
+    volumes:
+      - maildir-volume:/maildir
+      # ok: compose-writable-host-bind-mount
+      - ./config:/config:ro
+      # ok: compose-writable-host-bind-mount
+      - ./config:/config:ro,z
+      # ruleid: compose-writable-host-bind-mount
+      - ./config:/config
+      # ruleid: compose-writable-host-bind-mount
+      - /etc:/host-etc:rw
+      # ruleid: compose-writable-host-bind-mount
+      - ${HOME}/x:/x
+      # ruleid: compose-writable-host-bind-mount
+      - type: bind
+        source: ./config
+        target: /config
+      # ok: compose-writable-host-bind-mount
+      - type: bind
+        source: ./config
+        target: /config
+        read_only: true
+      # ok: compose-writable-host-bind-mount
+      - type: volume
+        source: sqlite-volume
+        target: /data
+    networks:
+      - bridge-net
+
+  # ok: compose-service-missing-read-only, compose-service-missing-no-new-privileges, compose-service-missing-cap-drop-all, compose-service-missing-pids-limit, compose-service-missing-logging
+  mcp-server:
+    image: example/mcp
+    read_only: true
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    pids_limit: 128
+    logging: *default-logging
+    ports:
+      # ok: compose-port-not-loopback, compose-port-on-other-service
+      - "127.0.0.1:${MCP_PORT:-3000}:${MCP_PORT:-3000}"
+      # ruleid: compose-port-not-loopback
+      - "3000:3000"
+      # ruleid: compose-port-not-loopback
+      - "0.0.0.0:3000:3000"
+      # ruleid: compose-port-not-loopback
+      - target: 3000
+        host_ip: 127.0.0.1
+
+  # ruleid: compose-service-missing-read-only, compose-service-missing-cap-drop-all, compose-service-missing-pids-limit, compose-service-missing-logging
+  indexer:
+    build: ./indexer
+    security_opt:
+      # ruleid: compose-weakened-security-opt
+      - seccomp:unconfined
+      # ruleid: compose-weakened-security-opt
+      - apparmor=unconfined
+      # ruleid: compose-weakened-security-opt
+      - label:disable
+      # ruleid: compose-weakened-security-opt
+      - no-new-privileges:false
+      # ok: compose-weakened-security-opt
+      - no-new-privileges:true
+    cap_drop:
+      - NET_RAW
+    ports:
+      # ruleid: compose-port-on-other-service
+      - "127.0.0.1:8080:8080"
+    volumes:
+      # ruleid: compose-docker-socket, compose-writable-host-bind-mount
+      - /var/run/docker.sock:/var/run/docker.sock
+      # ruleid: compose-docker-socket
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - app-net
+
+  # ruleid: compose-bridge-net-member
+  evil:
+    # ruleid: compose-privileged
+    privileged: true
+    # ruleid: compose-host-namespace
+    network_mode: host
+    # ruleid: compose-host-namespace
+    pid: "host"
+    # ruleid: compose-cap-add
+    cap_add:
+      - NET_ADMIN
+    # ruleid: compose-host-devices
+    devices:
+      - /dev/fuse
+    # ruleid: compose-read-only-disabled
+    read_only: false
+    networks:
+      bridge-net:
+        aliases: [x]
+
+  # ruleid: compose-service-missing-read-only, compose-service-missing-no-new-privileges, compose-service-missing-cap-drop-all, compose-service-missing-pids-limit, compose-service-missing-logging, compose-bridge-net-member
+  worker:
+    image: example/worker
+    networks: [app-net, bridge-net]
+    security_opt:
+      - seccomp:default
+
+  # An overlay-style service (no build or image) is not asked to repeat
+  # the required hardening.
+  # ok: compose-service-missing-read-only, compose-service-missing-no-new-privileges, compose-service-missing-cap-drop-all, compose-service-missing-pids-limit, compose-service-missing-logging
+  protonmail-bridge:
+    environment:
+      BRIDGE_FORCE_CLI: "true"
+    networks:
+      - bridge-net

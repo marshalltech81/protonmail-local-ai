@@ -1,0 +1,402 @@
+# Semgrep rules for the Docker Compose files: the base file and every
+# overlay (docker-compose*.yml / docker-compose*.yaml anywhere in the
+# tree). They encode AGENTS.md "Network and exposure constraints",
+# "Dockerfile Conventions" and "Container Runtime Hardening".
+#
+# Semgrep matches each file on its own; it does not merge overlays. So
+# the rules come in two kinds:
+#   - forbidden settings (privileged, host namespaces, cap_add, devices,
+#     docker socket, weakened security_opt, published ports, writable
+#     host bind mounts, extra services on bridge-net) apply to every
+#     file, so an overlay cannot add them;
+#   - required hardening (read_only, no-new-privileges, cap_drop ALL,
+#     pids_limit, logging) applies where a service is defined, that is
+#     where it names a `build` or an `image`. An overlay that only
+#     adjusts an existing service is not asked to repeat them, but it
+#     cannot undo read_only (compose-read-only-disabled).
+#
+# Tests: .semgrep/compose.test.yml (run `semgrep test .semgrep`).
+rules:
+  - id: compose-privileged
+    languages: [yaml]
+    severity: ERROR
+    message: >-
+      `privileged: true` gives the container every capability and all host
+      devices. AGENTS.md forbids it without explicit owner approval.
+    paths:
+      include:
+        - "docker-compose*.yml"
+        - "docker-compose*.yaml"
+    pattern: "privileged: true"
+
+  - id: compose-host-namespace
+    languages: [yaml]
+    severity: ERROR
+    message: >-
+      Sharing a host namespace removes the container's isolation from the
+      host. AGENTS.md forbids `network_mode: host`; the other host
+      namespaces are forbidden for the same reason.
+    paths:
+      include:
+        - "docker-compose*.yml"
+        - "docker-compose*.yaml"
+    pattern-either:
+      - pattern: "network_mode: host"
+      - pattern: "pid: host"
+      - pattern: "ipc: host"
+      - pattern: "uts: host"
+      - pattern: "userns_mode: host"
+      - pattern: "cgroup: host"
+
+  - id: compose-cap-add
+    languages: [yaml]
+    severity: ERROR
+    message: >-
+      Services drop every capability and add none back (AGENTS.md
+      "Container Runtime Hardening"). Adding a capability needs owner
+      approval; allow-list it here with the reason if it is granted.
+    paths:
+      include:
+        - "docker-compose*.yml"
+        - "docker-compose*.yaml"
+    pattern: "cap_add: $CAPS"
+
+  - id: compose-host-devices
+    languages: [yaml]
+    severity: ERROR
+    message: >-
+      AGENTS.md forbids adding host devices to a container without
+      explicit owner approval.
+    paths:
+      include:
+        - "docker-compose*.yml"
+        - "docker-compose*.yaml"
+    pattern: "devices: $DEVICES"
+
+  - id: compose-weakened-security-opt
+    languages: [yaml]
+    severity: ERROR
+    message: >-
+      `$OPT` disables seccomp, AppArmor, SELinux labelling or
+      no-new-privileges. AGENTS.md keeps the default confinement in place.
+    paths:
+      include:
+        - "docker-compose*.yml"
+        - "docker-compose*.yaml"
+    patterns:
+      - pattern-inside: "security_opt: [..., $OPT, ...]"
+      - pattern: $OPT
+      - metavariable-regex:
+          metavariable: $OPT
+          regex: (?i)^["']?(seccomp|apparmor|systempaths)[:=]unconfined|^["']?label[:=](disable|type:\S*unconfined)|^["']?no-new-privileges[:=]false
+
+  - id: compose-read-only-disabled
+    languages: [yaml]
+    severity: ERROR
+    message: >-
+      `read_only: false` makes the container's root filesystem writable.
+      AGENTS.md prefers a read-only rootfs with tmpfs for writable paths.
+    paths:
+      include:
+        - "docker-compose*.yml"
+        - "docker-compose*.yaml"
+    pattern: "read_only: false"
+
+  - id: compose-docker-socket
+    languages: [yaml]
+    severity: ERROR
+    message: >-
+      Mounting the Docker socket gives the container control of the host's
+      Docker daemon. AGENTS.md forbids it.
+    paths:
+      include:
+        - "docker-compose*.yml"
+        - "docker-compose*.yaml"
+    patterns:
+      - pattern-inside: "volumes: [..., $VOL, ...]"
+      - pattern: $VOL
+      - metavariable-regex:
+          metavariable: $VOL
+          regex: (?s).*docker\.sock
+
+  - id: compose-writable-host-bind-mount
+    languages: [yaml]
+    severity: ERROR
+    message: >-
+      `$VOL` mounts a host path writable. Host bind mounts are read-only
+      (`:ro`, or `read_only: true` in the long syntax) so a compromised
+      container cannot change files on the host; data the service writes
+      belongs in a named volume.
+    paths:
+      include:
+        - "docker-compose*.yml"
+        - "docker-compose*.yaml"
+    pattern-either:
+      # Short syntax: a source that is a host path (relative, absolute,
+      # home or a variable) whose mode list lacks `ro`.
+      - patterns:
+          - pattern-inside: "volumes: [..., $VOL, ...]"
+          - pattern: $VOL
+          - metavariable-regex:
+              metavariable: $VOL
+              regex: ^["']?(\.{0,2}/|~|\$)(?!.*:([a-z]+,)*ro(,[a-z]+)*["']?$)
+      # Long syntax: `type: bind` without `read_only: true`.
+      - patterns:
+          - pattern-inside: "volumes: [..., $VOL, ...]"
+          - pattern: $VOL
+          - pattern: |
+              type: bind
+              ...
+          - pattern-not: |
+              type: bind
+              ...
+              read_only: true
+              ...
+
+  - id: compose-port-on-other-service
+    languages: [yaml]
+    severity: ERROR
+    message: >-
+      Service `$SVC` publishes a port to the host. AGENTS.md allows only
+      mcp-server:3000, bound to 127.0.0.1.
+    paths:
+      include:
+        - "docker-compose*.yml"
+        - "docker-compose*.yaml"
+    patterns:
+      - pattern-inside: |
+          services:
+            ...
+      - pattern-inside: |
+          $SVC:
+            ...
+            ports: $PORTS
+            ...
+      - pattern-inside: "ports: [..., $PORT, ...]"
+      - pattern: $PORT
+      - metavariable-regex:
+          metavariable: $SVC
+          regex: ^(?!mcp-server$)
+
+  - id: compose-port-not-loopback
+    languages: [yaml]
+    severity: ERROR
+    message: >-
+      `$PORT` publishes mcp-server beyond loopback. Bind it as
+      "127.0.0.1:<port>:<port>" (AGENTS.md "Network and exposure
+      constraints"); the long syntax is not accepted here.
+    paths:
+      include:
+        - "docker-compose*.yml"
+        - "docker-compose*.yaml"
+    patterns:
+      - pattern-inside: |
+          services:
+            ...
+      - pattern-inside: |
+          mcp-server:
+            ...
+            ports: $PORTS
+            ...
+      - pattern-inside: "ports: [..., $PORT, ...]"
+      - pattern: $PORT
+      - metavariable-regex:
+          metavariable: $PORT
+          regex: ^(?!["']?127\.0\.0\.1:)
+
+  - id: compose-bridge-net-member
+    languages: [yaml]
+    severity: ERROR
+    message: >-
+      Service `$SVC` joins bridge-net. Only protonmail-bridge and mbsync
+      may reach Bridge (AGENTS.md: mbsync is the only container that
+      talks to Bridge IMAP; indexer and mcp-server get no access).
+    paths:
+      include:
+        - "docker-compose*.yml"
+        - "docker-compose*.yaml"
+    patterns:
+      - pattern-either:
+          - pattern-inside: |
+              services:
+                ...
+                $SVC:
+                  ...
+                  networks: [..., bridge-net, ...]
+                  ...
+                ...
+          - pattern-inside: |
+              services:
+                ...
+                $SVC:
+                  ...
+                  networks:
+                    ...
+                    bridge-net: $CFG
+                    ...
+                  ...
+                ...
+      - pattern: |
+          $SVC:
+            ...
+      - metavariable-regex:
+          metavariable: $SVC
+          regex: ^(?!(protonmail-bridge|mbsync)$)
+
+  # ---------------------------------------------------------------------------
+  # Required hardening for every defined service (one that names a build
+  # or an image).
+  # ---------------------------------------------------------------------------
+  - id: compose-service-missing-read-only
+    languages: [yaml]
+    severity: ERROR
+    message: >-
+      Service `$SVC` does not set `read_only: true`. Use a read-only root
+      filesystem with tmpfs and volumes for the writable paths.
+    paths:
+      include:
+        - "docker-compose*.yml"
+        - "docker-compose*.yaml"
+    patterns:
+      - pattern-inside: |
+          services:
+            ...
+      - pattern-either:
+          - pattern: |
+              $SVC:
+                ...
+                build: $BUILD
+                ...
+          - pattern: |
+              $SVC:
+                ...
+                image: $IMAGE
+                ...
+      - pattern-not: |
+          $SVC:
+            ...
+            read_only: true
+            ...
+
+  - id: compose-service-missing-no-new-privileges
+    languages: [yaml]
+    severity: ERROR
+    message: >-
+      Service `$SVC` does not set `security_opt: [no-new-privileges:true]`.
+    paths:
+      include:
+        - "docker-compose*.yml"
+        - "docker-compose*.yaml"
+    patterns:
+      - pattern-inside: |
+          services:
+            ...
+      - pattern-either:
+          - pattern: |
+              $SVC:
+                ...
+                build: $BUILD
+                ...
+          - pattern: |
+              $SVC:
+                ...
+                image: $IMAGE
+                ...
+      - pattern-not: |
+          $SVC:
+            ...
+            security_opt: [..., "no-new-privileges:true", ...]
+            ...
+
+  - id: compose-service-missing-cap-drop-all
+    languages: [yaml]
+    severity: ERROR
+    message: >-
+      Service `$SVC` does not set `cap_drop: [ALL]`.
+    paths:
+      include:
+        - "docker-compose*.yml"
+        - "docker-compose*.yaml"
+    patterns:
+      - pattern-inside: |
+          services:
+            ...
+      - pattern-either:
+          - pattern: |
+              $SVC:
+                ...
+                build: $BUILD
+                ...
+          - pattern: |
+              $SVC:
+                ...
+                image: $IMAGE
+                ...
+      - pattern-not: |
+          $SVC:
+            ...
+            cap_drop: [..., ALL, ...]
+            ...
+
+  - id: compose-service-missing-pids-limit
+    languages: [yaml]
+    severity: ERROR
+    message: >-
+      Service `$SVC` does not set `pids_limit`, so a fork bomb inside it
+      can exhaust the host's process table.
+    paths:
+      include:
+        - "docker-compose*.yml"
+        - "docker-compose*.yaml"
+    patterns:
+      - pattern-inside: |
+          services:
+            ...
+      - pattern-either:
+          - pattern: |
+              $SVC:
+                ...
+                build: $BUILD
+                ...
+          - pattern: |
+              $SVC:
+                ...
+                image: $IMAGE
+                ...
+      - pattern-not: |
+          $SVC:
+            ...
+            pids_limit: $LIMIT
+            ...
+
+  - id: compose-service-missing-logging
+    languages: [yaml]
+    severity: ERROR
+    message: >-
+      Service `$SVC` does not set `logging`, so it inherits the daemon's
+      log policy, which on stock json-file is unbounded (#484). Use
+      `logging: *default-logging`.
+    paths:
+      include:
+        - "docker-compose*.yml"
+        - "docker-compose*.yaml"
+    patterns:
+      - pattern-inside: |
+          services:
+            ...
+      - pattern-either:
+          - pattern: |
+              $SVC:
+                ...
+                build: $BUILD
+                ...
+          - pattern: |
+              $SVC:
+                ...
+                image: $IMAGE
+                ...
+      - pattern-not: |
+          $SVC:
+            ...
+            logging: $LOGGING
+            ...
