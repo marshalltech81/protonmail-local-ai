@@ -678,8 +678,13 @@ them (one test-first commit per issue, `Fixes #N` per issue):
 **Handoff 2026-10-02, morning — start here.** **#277 is fixed
 (#515):** mbsync's healthcheck reports liveness rather than a completed
 sync, so a long first sync no longer keeps the indexer and MCP server
-from starting. Nothing blocks the first deployment; go live with the
-checklist below. Before the overnight run, four Phase 3 slices
+from starting. #277 no longer blocks the first deployment; go live
+with the checklist below, on a host where every local user and process
+is trusted: the MCP endpoint has no authentication yet (Phase 1 item
+5, Open decisions 3), and localhost is not a trust boundary. Rebuild
+any index created before #544 and #547 from Maildir (the volume
+wipe in `docs/troubleshooting.md`, "Indexer refuses to start"): those changes edited the v0 schema and the
+parse-time subject cap, and an existing database keeps neither. Before the overnight run, four Phase 3 slices
 (#493–#496; the status table under Phase 3 is current), eight
 defaults-audit fixes and #510 merged (see Recently Completed).
 Overnight (see Recently Completed): mbsync tolerates far-side folders
@@ -689,8 +694,9 @@ sync (#516, #520, #540); `config/authority.toml` must be mode 600,
 checked by `make up` and the new `make restart-indexer` (#523, #542);
 entities orphaned by a reap are pruned (#464, #527); OCR's English-only
 limit is documented (#517, refs #490); stored subjects are capped at
-2,000 characters (#541, #547); and the P3 fixes listed there. In
-review when this was written: #433 (PR #546), #450 (PR #548).
+2,000 characters (#541, #547); a `multipart/related` never promotes a
+later part into the body (#450, #548); and the P3 fixes listed there.
+In review when this was written: #433 (PR #546).
 
 Needs the owner:
 - **#432** (xlsx duplicate cells): a guard cannot fix it, because
@@ -743,9 +749,9 @@ Next session, in order:
 3. **Then** let real questions drive the eval work (#283, #291) and
    the measurements waiting on real data (#287 budgets, #288, #289).
 
-Backlog filed from review (P3 or edge cases, not scheduled): #450,
-#454, and from 2026-10-02 #524, #526, #533 and #537 (#442, #446,
-#447, #449, #455, #456, #460, #461, #464, #465, #468, #471, #477,
+Backlog filed from review (P3 or edge cases, not scheduled): #454,
+and from 2026-10-02 #524, #526, #533 and #537 (#442, #446, #447,
+#449, #450, #455, #456, #460, #461, #464, #465, #468, #471, #477,
 #478, #499, #500, #502 and #541 are fixed).
 
 **Status 2026-10-01 (end of the first session).**
@@ -1342,7 +1348,7 @@ do not ship persisted claims without them.
 
 ## Recently Completed
 
-### 2026-10-02 — Overnight fixes; first-deployment blocker closed (#515–#547)
+### 2026-10-02 — Overnight fixes; first-deployment blocker closed (#515–#548)
 
 mbsync: the healthcheck reports liveness, so a long first sync is
 healthy and no longer blocks the indexer and MCP server (#277, PR
@@ -1353,7 +1359,9 @@ sync are watched without a restart (#516, PR #520; #528 and #529, PR
 #540); entities and aliases orphaned by a reap are pruned (#464, PR
 #527); an undecodable attachment filename falls back to the raw
 parameter (#362, PR #522); stored subjects are capped at 2,000
-characters, so the subject scans read bounded rows (#541, PR #547); an xlsx sheet title is charged before it is
+characters, so the subject scans read bounded rows (#541, PR #547); a
+`multipart/related` whose root is labelled as an attachment no longer
+promotes a later part into the body (#450, PR #548); an xlsx sheet title is charged before it is
 copied (#435, PR #543); the subject-scan test asserts the SQL bound
 (#478, PR #531); OCR's English-only limit is documented (#490, PR
 #517). Setup: `config/authority.toml` is kept at mode 600 and checked
