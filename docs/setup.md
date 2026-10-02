@@ -269,7 +269,8 @@ services strip it. It fails fast if:
   (validation requires the files to exist with `600` permissions even when the
   matching layer is `none`, so the docker-compose `secrets:` references
   resolve cleanly)
-- `config/authority.toml`, when present, is not `600` or is a symlink
+- `config/authority.toml`, when present, is not a regular file (a symlink
+  counts as not one) or is not `600`
 - numeric or enum settings such as `SYNC_INTERVAL`, `MCP_PORT`, `MCP_TRANSPORT`, or `INFERENCE_MODE` are invalid
 
 Verify everything is running:
@@ -373,7 +374,8 @@ docker compose restart indexer
 `config/authority.toml` is gitignored: it holds real addresses and
 domains, so never commit it. Keep it a regular file at `600`, like the
 files in `.secrets/`, so other accounts on the host cannot read it;
-`make up` fails if it has any other mode or is a symlink. The indexer
+`make up` fails if it has any other mode, is a symlink or is not a
+regular file. The indexer
 runs as UID 1002, but on macOS the Docker Desktop and OrbStack file
 sharing serves a bind-mounted file to the container's user, so it still
 reads a `600` file you own (the same way the services read the `600`

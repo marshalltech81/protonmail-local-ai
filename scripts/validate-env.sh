@@ -67,7 +67,8 @@ require_mode_600() {
 # domains, so it is held to the secret files' 600. A symlink is
 # rejected: Compose mounts config/ as a directory, so a link whose
 # target the container cannot reach would pass here and stop the
-# indexer at startup.
+# indexer at startup; so is anything else that is not a regular file,
+# which the indexer refuses to open.
 require_private_optional_file() {
     local path="$1"
 
@@ -76,6 +77,10 @@ require_private_optional_file() {
         exit 1
     fi
     [[ -e "$path" ]] || return 0
+    [[ -f "$path" ]] || {
+        printf 'ERROR: %s must be a regular file.\n' "$path" >&2
+        exit 1
+    }
     require_mode_600 "$path"
 }
 

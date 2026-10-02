@@ -348,6 +348,18 @@ symlinked_authority_file_fails() {
     fails_with 'must be a regular file, not a symlink'
 }
 
+# The indexer opens only a regular file, so a 600 directory or FIFO
+# must fail here rather than at indexer startup.
+non_regular_authority_path_fails() {
+    setup
+    mkdir -p "$ROOT/config/authority.toml"
+    chmod 600 "$ROOT/config/authority.toml"
+    fails_with 'config/authority.toml must be a regular file'
+    rmdir "$ROOT/config/authority.toml"
+    mkfifo -m 600 "$ROOT/config/authority.toml"
+    fails_with 'config/authority.toml must be a regular file'
+}
+
 # --- Whitespace the readers strip (#506) ----------------------------------
 # The Python loaders read these values with .strip() (and modes with
 # .lower()), so a quoted value padded with spaces is valid; Compose
@@ -448,6 +460,7 @@ check "an absent authority file passes" absent_authority_file_passes
 check "a private authority file passes" private_authority_file_passes
 check "an authority file not 600 fails" loose_authority_file_fails
 check "a symlinked authority file fails" symlinked_authority_file_fails
+check "a non-regular authority path fails" non_regular_authority_path_fails
 check "padded quoted values pass" padded_quoted_values_pass
 check "padded and mixed-case modes pass" padded_and_cased_modes_pass
 check "a padded none disables the layer" padded_disabled_mode_disables_the_layer
