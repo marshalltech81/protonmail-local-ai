@@ -98,6 +98,10 @@ class FolderWatchRefresher:
         self._directory_created = directory_created or threading.Event()
         self._watch: ObservedWatch | None = None
         self._watched: dict[str, int] = {}
+        # Set when ``refresh`` re-schedules the watch; the caller clears
+        # it once its recovery walk for the re-schedule gap succeeds, so
+        # a failed walk is retried on the next refresh (#529).
+        self.recovery_pending = False
 
     def _schedule(self, readable: dict[str, int]) -> None:
         if self._watch is not None:
@@ -117,13 +121,19 @@ class FolderWatchRefresher:
         created, since it was last scheduled, or if the last schedule
         failed. Returns whether it did."""
         # Cleared before the walk, so a directory created during this
-        # refresh forces the next one.
+        # refresh forces the next one. Cleared only when seen set: a
+        # ``set`` landing between the check and an unconditional clear
+        # would be erased unprocessed (#528). One landing after a true
+        # check is covered, since this refresh then re-schedules after
+        # that directory exists.
         created = self._directory_created.is_set()
-        self._directory_created.clear()
+        if created:
+            self._directory_created.clear()
         current = readable_dirs(self.root)
         added = sum(1 for path, inode in current.items() if self._watched.get(path) != inode)
         if not added and not created and self._watch is not None:
             return False
         log.info("Maildir watch: %d new or newly readable director(ies); re-watching", added)
         self._schedule(current)
+        self.recovery_pending = True
         return True

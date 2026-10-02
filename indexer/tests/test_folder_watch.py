@@ -258,6 +258,45 @@ class TestFolderWatchRefresher:
         assert refresher.refresh() is False
         assert observer.calls == ["schedule", "unschedule", "schedule"]
 
+    def test_a_directory_created_while_checking_is_not_lost(self, tmp_path):
+        """#528: a directory-create event that sets the flag just after
+        ``refresh`` found it unset must survive to the next refresh, not
+        be erased by that refresh's clear."""
+        import threading
+
+        class _SetDuringCheck(threading.Event):
+            """The handler's ``set`` lands right after the first check."""
+
+            def __init__(self):
+                super().__init__()
+                self.armed = False
+
+            def is_set(self) -> bool:
+                was_set = super().is_set()
+                if self.armed:
+                    self.armed = False
+                    self.set()
+                return was_set
+
+        _folder(tmp_path, "Box")
+        created = _SetDuringCheck()
+        observer = _FakeObserver()
+        refresher = FolderWatchRefresher(
+            tmp_path,
+            observer,
+            handler=None,  # type: ignore[arg-type]
+            directory_created=created,
+        )
+        refresher.start()
+
+        created.armed = True
+        # The signal arrived after the check: this refresh has nothing
+        # to do, but the next one must re-schedule.
+        assert refresher.refresh() is False
+        assert refresher.refresh() is True
+        assert refresher.refresh() is False
+        assert observer.calls == ["schedule", "unschedule", "schedule"]
+
     def test_failed_schedule_is_retried_on_the_next_refresh(self, tmp_path):
         observer = _FakeObserver()
         refresher = FolderWatchRefresher(tmp_path, observer, handler=None)  # type: ignore[arg-type]

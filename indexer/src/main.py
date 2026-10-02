@@ -1848,12 +1848,16 @@ def _refresh_folder_watches(
     closed before the new one walks the tree, and events in that gap
     are lost: heal renames, then queue every unindexed message, as at
     startup. That walk also queues mail already delivered into the
-    newly watched folders. Returns whether the watch was re-scheduled.
+    newly watched folders. If either step raises, the re-schedule stays
+    pending and the next call (a sync stamp or the periodic tick) runs
+    both again, once per call (#529). Returns whether the recovery ran.
     """
-    if not folder_watches.refresh():
+    folder_watches.refresh()
+    if not folder_watches.recovery_pending:
         return False
     sweep_paths(db)
     _enqueue_unindexed_messages(db, queue, MAILDIR_PATH, REASON_RESCAN, skip_trashed=skip_trashed)
+    folder_watches.recovery_pending = False
     return True
 
 

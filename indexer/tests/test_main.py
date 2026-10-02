@@ -3591,6 +3591,64 @@ class TestLateFolderWatches:
         assert steps == ["sweep_paths"]
         assert _job_reasons(db) == {}
 
+    @pytest.mark.parametrize("failing_step", ["sweep_paths", "_enqueue_unindexed_messages"])
+    def test_failed_recovery_walk_is_retried_on_the_next_refresh(
+        self, tmp_path, db, monkeypatch, failing_step
+    ):
+        """#529: once the watch is replaced, the recovery steps must run
+        to completion. A step that raises is retried by the next refresh
+        (a sync stamp or the periodic tick), once per call, until both
+        steps succeed; then later refreshes do no walk."""
+        maildir = tmp_path / "maildir"
+        _write_eml(maildir / "INBOX" / "cur" / "old.eml:2,S", "old@example.com")
+        monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
+        attempts: list[str] = []
+        failures = {"left": 2}
+        real_walk = main._enqueue_unindexed_messages
+
+        def step(name, real):
+            def run(*a, **kw):
+                attempts.append(name)
+                if name == failing_step and failures["left"]:
+                    failures["left"] -= 1
+                    raise sqlite3.OperationalError("database is locked")
+                return real(*a, **kw)
+
+            return run
+
+        monkeypatch.setattr(main, "sweep_paths", step("sweep_paths", lambda db: 0))
+        monkeypatch.setattr(
+            main, "_enqueue_unindexed_messages", step("_enqueue_unindexed_messages", real_walk)
+        )
+        queue = _make_queue(db)
+        observer = _CountingObserver()
+        refresher = main.FolderWatchRefresher(maildir, observer, handler=None)  # type: ignore[arg-type]
+        refresher.start()
+        db._conn.execute("DELETE FROM indexing_jobs")
+        _write_eml(maildir / "Late" / "new" / "late.eml", "late@example.com")
+
+        for _ in range(2):
+            attempts.clear()
+            with pytest.raises(sqlite3.OperationalError):
+                main._refresh_folder_watches(refresher, db, queue)
+            # One attempt per call: a failure does not spin.
+            assert attempts.count(failing_step) == 1
+        # The watch is replaced once; only the recovery is retried.
+        assert observer.calls == ["schedule", "unschedule", "schedule"]
+
+        attempts.clear()
+        assert main._refresh_folder_watches(refresher, db, queue) is True
+        assert attempts == ["sweep_paths", "_enqueue_unindexed_messages"]
+        assert _job_reasons(db) == {
+            "late.eml": main.REASON_RESCAN,
+            "old.eml:2,S": main.REASON_RESCAN,
+        }
+
+        attempts.clear()
+        assert main._refresh_folder_watches(refresher, db, queue) is False
+        assert attempts == []
+        assert observer.calls == ["schedule", "unschedule", "schedule"]
+
     @pytest.mark.skipif(
         not sys.platform.startswith("linux") or os.geteuid() == 0,
         reason="the EACCES gap is inotify-specific, and root can enter a 000 directory",
