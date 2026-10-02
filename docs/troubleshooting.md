@@ -554,9 +554,22 @@ before #361) stays unindexed until you requeue it.
 ## Claude Desktop doesn't see the tools
 
 1. Verify the MCP server is running: `docker compose ps`
-2. Check the server is responding: `curl -N http://localhost:3000/sse`
-3. Verify the Claude Desktop config JSON is valid (no trailing commas)
-4. Restart Claude Desktop
+2. Check the server is responding: `curl http://localhost:3000/health`
+   should print `{"status":"ok"}`
+3. Check the client points at `http://localhost:3000/mcp`. The legacy
+   `/sse` endpoint was removed and now returns `404`; see
+   [Connect an MCP client](setup.md#7-connect-an-mcp-client) for the
+   Claude Desktop bridge setup
+4. Verify the Claude Desktop config JSON is valid (no trailing commas),
+   and check `~/Library/Logs/Claude/mcp*.log` for the bridge's errors
+5. Restart Claude Desktop
+
+## mcp-server exits with "MCP_TRANSPORT=sse was removed"
+
+The `.env` still sets `MCP_TRANSPORT=sse` or `MCP_TRANSPORT=dual` from a
+release that served the legacy SSE transport. Remove the line (or set it
+to `streamable-http`), run `make up`, and change client URLs from `/sse`
+to `/mcp`.
 
 ## Bridge credentials expired / need to re-authenticate
 

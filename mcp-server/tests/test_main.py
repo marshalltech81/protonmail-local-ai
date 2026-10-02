@@ -3,7 +3,7 @@ Tests for src/main.py.
 
 The MCP service entrypoint mostly assembles config and registers tool
 groups, which is hard to exercise in unit tests without spinning up the
-SSE transport. The two pieces that DO have unit-testable behavior live
+Streamable HTTP transport. The two pieces that DO have unit-testable behavior live
 here:
 
 - ``_read_secret`` — prefers Docker secret files over env vars; a
@@ -21,10 +21,8 @@ import threading
 import pytest
 from src.main import (
     _INFERENCE_MODES,
-    _build_app,
     _float_env,
     _normalize_mode,
-    _normalize_transport,
     _read_secret,
     _reject_url_userinfo,
     _require_env,
@@ -84,17 +82,45 @@ class TestReadSecret:
 
 
 class TestMcpTransport:
-    def test_supported_transports_are_normalized(self):
-        assert _normalize_transport("sse") == "sse"
-        assert _normalize_transport(" streamable-http ") == "streamable-http"
-        assert _normalize_transport("DUAL") == "dual"
+    """#498: Streamable HTTP at ``/mcp`` is the only transport.
+    ``MCP_TRANSPORT`` unset, empty or ``streamable-http`` starts; the
+    removed ``sse`` and ``dual`` values fail startup with migration
+    steps; anything else fails closed."""
 
-    def test_unknown_transport_fails_closed(self):
-        with pytest.raises(ValueError, match="MCP_TRANSPORT"):
-            _normalize_transport("websocket")
+    def _load(self, monkeypatch, value):
+        import importlib
 
-    @pytest.mark.parametrize("transport", ["sse", "streamable-http", "dual"])
-    def test_run_server_serves_the_built_app_with_uvicorn(self, monkeypatch, transport):
+        import src.main as main_mod
+
+        if value is None:
+            monkeypatch.delenv("MCP_TRANSPORT", raising=False)
+        else:
+            monkeypatch.setenv("MCP_TRANSPORT", value)
+        try:
+            return importlib.reload(main_mod)
+        finally:
+            monkeypatch.delenv("MCP_TRANSPORT", raising=False)
+            importlib.reload(main_mod)
+
+    @pytest.mark.parametrize("value", [None, "", "streamable-http", " Streamable-HTTP "])
+    def test_streamable_http_or_unset_starts(self, monkeypatch, value):
+        self._load(monkeypatch, value)
+
+    @pytest.mark.parametrize("value", ["sse", "dual", " SSE ", "Dual"])
+    def test_removed_transport_fails_with_migration_steps(self, monkeypatch, value):
+        with pytest.raises(ValueError) as exc:
+            self._load(monkeypatch, value)
+        message = str(exc.value)
+        assert f"MCP_TRANSPORT={value.strip().lower()}" in message
+        assert "removed" in message
+        assert "/sse" in message and "/mcp" in message
+
+    @pytest.mark.parametrize("value", ["websocket", "stdio", "http"])
+    def test_unknown_transport_fails_closed(self, monkeypatch, value):
+        with pytest.raises(ValueError, match="MCP_TRANSPORT must be 'streamable-http'"):
+            self._load(monkeypatch, value)
+
+    def test_run_server_serves_the_built_app_with_uvicorn(self, monkeypatch):
         """``FastMCP.run`` is bypassed (it prints a banner and checks PyPI
         for updates); uvicorn serves ``_build_app``'s app on 0.0.0.0 at
         ``MCP_PORT``."""
@@ -124,13 +150,11 @@ class TestMcpTransport:
         monkeypatch.setattr(
             main_mod,
             "_build_app",
-            lambda server, t, session_idle_timeout: (
-                app if (t, session_idle_timeout) == (transport, 900.0) else None
-            ),
+            lambda server, session_idle_timeout: app if session_idle_timeout == 900.0 else None,
         )
         monkeypatch.setattr(main_mod, "MCP_PORT", 3000)
         monkeypatch.setattr(main_mod, "MCP_SESSION_IDLE_TIMEOUT_SECS", 900.0)
-        _run_server(_Server(), transport)  # type: ignore[arg-type]
+        _run_server(_Server())  # type: ignore[arg-type]
         assert captured == {
             "app": app,
             "host": "0.0.0.0",  # nosec B104
@@ -138,49 +162,6 @@ class TestMcpTransport:
             "log_level": "info",
             "ran": True,
         }
-
-    def test_dual_transport_dispatches_paths_correctly(self):
-        """Verifies that the dual ASGI app routes ``/mcp`` and sub-paths to
-        the streamable HTTP app, and ``/sse``, ``/messages/``, ``/health``,
-        and ``/mcp-debug`` (a name that *starts with* ``/mcp`` but is not
-        ``/mcp`` or a sub-path) to the SSE app.
-        """
-
-        class _AppShim:
-            def __init__(self):
-                self.calls: list[str] = []
-
-            async def __call__(self, scope, receive, send):
-                self.calls.append(scope["path"])
-
-        sse = _AppShim()
-        http = _AppShim()
-
-        class _ServerStub:
-            """Only what ``_build_dual_app`` reads: ``http_app``."""
-
-            def http_app(self, *, path, transport, middleware, **_kwargs):
-                assert middleware
-                return {"sse": sse, "streamable-http": http}[transport]
-
-        app = _build_app(_ServerStub(), "dual", session_idle_timeout=1800.0)  # type: ignore[arg-type]
-
-        async def _dispatch(path):
-            await app({"type": "http", "path": path}, lambda: None, lambda *_: None)
-
-        for path in (
-            "/mcp",
-            "/mcp/messages/abc",
-            "/sse",
-            "/messages/x",
-            "/health",
-            "/mcp-debug",
-            "/mcpfoo",
-        ):
-            asyncio.run(_dispatch(path))
-
-        assert http.calls == ["/mcp", "/mcp/messages/abc"]
-        assert sse.calls == ["/sse", "/messages/x", "/health", "/mcp-debug", "/mcpfoo"]
 
 
 class TestSessionIdleTimeout:
@@ -577,7 +558,7 @@ class TestExperimentalToolsFlag:
             monkeypatch.setattr(main_mod, name, value)
         monkeypatch.setattr(main_mod, "Database", self._FakeDatabase)
         servers = []
-        monkeypatch.setattr(main_mod, "_run_server", lambda server, _t: servers.append(server))
+        monkeypatch.setattr(main_mod, "_run_server", lambda server: servers.append(server))
         main_mod.main()
 
         async def names():

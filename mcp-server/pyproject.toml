@@ -4,7 +4,7 @@ version = "0.0.0"
 requires-python = ">=3.14"
 dependencies = [
     # Standalone FastMCP (jlowin/Prefect): the server framework and its
-    # Streamable HTTP / SSE apps.
+    # Streamable HTTP app.
     "fastmcp==4.0.10",
     # ``fastmcp`` accepts any ``mcp`` 2.x. The tool code imports
     # ``mcp.types`` and ``main.py`` the SDK's Host/Origin validator
