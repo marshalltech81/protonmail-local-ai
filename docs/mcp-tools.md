@@ -608,9 +608,10 @@ and to open with "Not found in the provided emails" when the passages
 do not answer the question. After generation the server checks the
 answer against the passages it supplied:
 
-- **Labels.** A label no supplied passage has is an `unknown_labels`
-  problem, and an answer that cites nothing (and does not open with
-  that phrase) is a `no_citations` problem.
+- **Labels.** A label is `E` and any number of digits. One no supplied
+  passage has, however many digits it has (`[E10000]`), is an
+  `unknown_labels` problem, and an answer that cites nothing (and does
+  not open with that phrase) is a `no_citations` problem.
 - **Statements.** The answer is cut into statements at line breaks and
   at sentence ends followed by whitespace (a label written after the
   full stop, as in `Moved. [E2]`, belongs to the sentence before it; a

@@ -275,7 +275,9 @@ class TestBrief:
         assert labels[0] in {c["label"] for c in data["citations"]}
         assert "[[" not in out.content[0].text
 
-    def test_unknown_label_is_flagged_after_one_repair(self, brief_db):
+    # A label of five or more digits is unknown too, not cut to four (#465).
+    @pytest.mark.parametrize("label", ["E99", "E12345"])
+    def test_unknown_label_is_flagged_after_one_repair(self, brief_db, label):
         def bad(user: str) -> str:
             return _brief(
                 chronology=[
@@ -284,7 +286,7 @@ class TestBrief:
                         "date_source": "unknown",
                         "actor": "Alice",
                         "event": "proposed",
-                        "labels": ["E99"],
+                        "labels": [label],
                     }
                 ]
             )
@@ -296,10 +298,10 @@ class TestBrief:
         assert data["status"] == "ok"
         assert data["repair_attempted"] is True
         assert data["citation_problems"] == [
-            {"section": "chronology", "item": 0, "kind": "unknown_labels", "labels": ["E99"]}
+            {"section": "chronology", "item": 0, "kind": "unknown_labels", "labels": [label]}
         ]
         assert data["citations"] == []
-        assert "E99" in out.content[0].text
+        assert label in out.content[0].text
 
     def test_repair_is_a_fixed_instruction_and_its_brief_is_used(self, brief_db):
         uncited = _brief(decisions=[{"decision": f"{_MARKER} cancelled", "labels": []}])
