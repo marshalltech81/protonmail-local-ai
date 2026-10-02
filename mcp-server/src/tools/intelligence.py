@@ -609,7 +609,8 @@ passages do not answer the question, begin your answer with
 # answer is bounded by INFERENCE_MAX_TOKENS. A label may have any number
 # of digits: one too long to name a supplied passage ("[E10000]") is an
 # unknown label, not prose (#465).
-_CITATION_RE = re.compile(r"\[\s*+(E\d++(?:\s*+[,;]\s*+E\d++)*+)\s*+\]")
+_LABEL_LIST = r"E\d++(?:\s*+[,;]\s*+E\d++)*+"
+_CITATION_RE = re.compile(rf"\[\s*+({_LABEL_LIST})\s*+\]")
 _LABEL_RE = re.compile(r"E\d++")
 
 # Appended after the question when the first answer fails the citation
@@ -643,13 +644,15 @@ REPAIR_RESERVE_CHARS = 800
 
 def _sort_labels(labels: Iterable[str], known: Container[str]) -> tuple[list[str], list[str]]:
     """``labels`` split into those in ``known`` and the rest, each in
-    first-cited order without repeats."""
+    first-cited order without repeats. Each label is looked up once and
+    deduplicated with a set, so many distinct labels stay linear."""
     used: list[str] = []
     unknown: list[str] = []
+    seen: set[str] = set()
     for label in labels:
-        bucket = used if label in known else unknown
-        if label not in bucket:
-            bucket.append(label)
+        if label not in seen:
+            seen.add(label)
+            (used if label in known else unknown).append(label)
     return used, unknown
 
 
@@ -678,16 +681,18 @@ _MARK_RE = re.compile(r"\[(unsupported|uncertain)\]", re.IGNORECASE)
 
 # Where a statement ends: a line break, or a run of sentence terminators
 # (with any closing quote, parenthesis or Markdown emphasis or code
-# delimiter, and any short bracketed citations written after it, as in
+# delimiter, and any bracketed citations written after it, as in
 # "Moved. [E2]") followed by whitespace. The look-behind starts a match
-# only at the first terminator of a run and each bracket group is at
-# most 40 characters, so every attempt is bounded and the scan stays
+# only at the first terminator of a run, and each bracket group is at
+# most 40 characters or a citation of any length (#465), which holds no
+# bracket or terminator, so every attempt is bounded and the scan stays
 # linear.
 # The full-width terminators of Chinese and Japanese end a statement
 # without the whitespace those scripts do not use.
+_BRACKET_GROUP = rf"\[(?:[^\[\]\n]{{1,40}}+|\s*+{_LABEL_LIST}\s*+)\]"
 _STATEMENT_END_RE = re.compile(
-    r"\n|(?<![.!?])[.!?]++[\"”')*_`]*+(?:[ \t]*+\[[^\[\]\n]{1,40}+\])*+(?=\s)"
-    r"|(?<![。！？])[。！？]++[」』”)）*_`]*+(?:[ \t]*+\[[^\[\]\n]{1,40}+\])*+"
+    rf"\n|(?<![.!?])[.!?]++[\"”')*_`]*+(?:[ \t]*+{_BRACKET_GROUP})*+(?=\s)"
+    rf"|(?<![。！？])[。！？]++[」』”)）*_`]*+(?:[ \t]*+{_BRACKET_GROUP})*+"
 )
 
 # Paired double quotes: straight or curly, on one line, paired left to

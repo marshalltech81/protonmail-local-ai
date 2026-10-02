@@ -1217,6 +1217,57 @@ class TestLongLabels:
         assert counting.matches == matches
         assert check.unknown == unknown
 
+    def test_many_distinct_labels_are_sorted_in_linear_time(self):
+        """Review round 1: each label is classified once and deduplicated
+        with a set, not by scanning the labels kept so far."""
+        labels = [f"E{n}" for n in range(10_001, 50_001)]
+        answer = "Moved [" + ", ".join(labels + labels) + "]."
+
+        class CountingKnown(dict):
+            lookups = 0
+
+            def __contains__(self, key):
+                CountingKnown.lookups += 1
+                return super().__contains__(key)
+
+        known = CountingKnown(_EVIDENCE)
+        start = time.perf_counter()
+        check = _check_answer(answer, known)
+        assert time.perf_counter() - start < 5.0
+        assert check.unknown == labels
+        assert _statuses(check) == ["invalid"]
+        # Each distinct label once in the sort, and each citation of one
+        # once in the per-statement walk (every label is cited twice).
+        assert CountingKnown.lookups == len(labels) + 2 * len(labels)
+
+    @pytest.mark.parametrize("digits", [40, 41, 1_000])
+    def test_a_long_label_after_a_full_stop_belongs_to_the_statement_before(self, digits):
+        """Review round 1: a citation of any length written after the full
+        stop ends the statement before it, like a short one."""
+        label = "E" + "1" * digits
+        check = _check_answer(f"Fact one is here. [{label}] Fact two is here [E1].", _EVIDENCE)
+        assert [s.text for s in check.statements] == [
+            f"Fact one is here. [{label}]",
+            "Fact two is here [E1].",
+        ]
+        assert _statuses(check) == ["invalid", "cited"]
+
+    @pytest.mark.parametrize(
+        "answer",
+        [
+            "Fact one. [E1, E" + "1" * 100_000 + "] then",
+            ("Fact one. [E" + "1" * 50 + "]") * 20_000,
+            "Fact one. [E1, E" + "1" * 100_000,
+            ("Fact. [E1, " + "E1, " * 50) * 2_000,
+        ],
+        ids=["one-long", "many-long", "unclosed", "many-unclosed"],
+    )
+    def test_statement_ends_with_long_citations_are_found_in_linear_time(self, answer):
+        start = time.perf_counter()
+        spans = intelligence._statement_spans(answer, [])
+        assert time.perf_counter() - start < 5.0
+        assert "".join(answer[s:e] for s, e in spans).strip() == answer.strip()
+
     def test_no_marker_or_long_label_is_logged(self, cite_db, caplog):
         llm = FakeInferenceClient(
             complete_responses=[f"{_MARKER} is 700 [E10000].", f"{_MARKER} is 700 [E77777]."]
