@@ -312,14 +312,12 @@ newly ingested mail before the rebuild is gated behind the pipeline
 configuration so the live index stays internally consistent until the
 single staged rebuild picks all of them up. The fixes: chunk overlap past `max_tokens` (#208) and whitespace
 between split pieces rendered back into a chunk past `max_tokens`
-(#550); a deterministic date source for undated mail
-(#297's second half, the deferred received-date item: the top
-`Received:` header, then — since sent mail and stripped messages have
-none — the Maildir filename's delivery timestamp, which is sync time
-but stable for the life of the file, then the previously persisted
-date carried forward by the rebuild; `now()` only for a message with
-none of the three, on first sight, and persisted once; the first half
-— keep the first persisted date on reprocess — is a batch-1 guard).
+(#550), both moved to pre-go-live work; and #297's second half, the
+undated-mail date chain, **superseded** by Resolved decisions 14:
+`occurred_at` comes from the top `Received:` header only (NULL
+otherwise, no Maildir-timestamp or `now()` synthesis), filters fall
+back to `sent_at`, and undated mail keeps its first persisted
+`sent_at` (#297's first half, already a batch-1 guard).
 The all-zero chunk repair (#304) left the bundle: #349 rejects
 all-zero provider embeddings and no index older than that guard
 exists. Reply
@@ -754,8 +752,10 @@ roughly this order; each is its own PR:
 
 Waiting on real data: #487 (evidence and output budgets), #488
 (container resource budgets) and #282 (the mbsync stall deadline, set
-above the first sync's measured duration). Other open P3s: #489, #490
+above the first sync's measured duration). Other open P3s: #490
 (the limitation is documented; a language setting is not built).
+#489 is pre-go-live work by the owner's explicit decision (Resolved
+decisions 14), not under the small-P3 exception.
 
 **Handoff 2026-10-02, morning.** #277 was fixed (#515); the overnight
 fixes (#515–#548) and the owner's answers to Open decisions 3–14
@@ -1114,7 +1114,8 @@ linked from the Phase 3 items they track.
   `setup-go` in the patch-drift job~~ (done: #512 pins every action
   by SHA)
 - fix the `\t\t` BSD-sed portability bug in `bridge/patch-source.sh`
-- mbsync: move `BRIDGE_USER` to a file-backed secret; add
+- mbsync: ~~move `BRIDGE_USER` to a file-backed secret~~ (dropped:
+  it stays in `.env`, Resolved decisions 14); add
   memory/CPU limits (#488; log rotation done in #501); evaluate
   runtime package pinning
 - resource limits for the remaining Compose services (#488)
@@ -1514,7 +1515,9 @@ do not ship persisted claims without them.
       streams (shared strings, workbook, content types and styles, and
       also core/custom properties, theme, external links and
       chartsheets; the implementation confirms the list from openpyxl's
-      loader); worksheets keep #572's streaming budget.
+      loader); worksheets keep #572's streaming budget. It changes the
+      extracted text or status for the same bytes, so it bumps
+      `EXTRACTOR_VERSIONS["xlsx"]`.
     - **#275 / #281:** full collision-free folder-mapping redesign,
       before go-live so no state migration is needed (fresh Maildir).
     - **#279:** write and test the UIDVALIDITY recovery procedure before
@@ -1522,7 +1525,9 @@ do not ship persisted claims without them.
     - **#267:** not relevant to macOS Bridge mode (the pin is the
       operator-supplied fingerprint); the documented limitation stands.
     - **#489:** `get_message` pages the body with an offset (default
-      page plus `next_offset`), headers capped.
+      page plus `next_offset`), headers capped. An explicit owner
+      decision for go-live, separate from the small-P3 exception
+      (it is a new mechanism).
     - **Message-ID length:** limit to 998 characters at parse time; an
       over-long ID takes the existing no-`Message-ID` dead-letter path.
     - **`BRIDGE_USER`:** stays in `.env` (an identifier, not a
