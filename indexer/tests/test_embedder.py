@@ -82,8 +82,8 @@ class TestFloatEnv:
     The indexer's float parser uses a fall-back-with-warning policy
     rather than raising (a typo in a tunable timeout must not crash
     the indexer), but ``float("nan")`` and ``float("inf")`` parse
-    cleanly and would otherwise reach the SDK and break per-call
-    deadlines. Treat them as malformed input and warn-fall-back.
+    cleanly and would otherwise reach the SDK and break its HTTP
+    timeouts. Treat them as malformed input and warn-fall-back.
     """
 
     def test_returns_default_when_unset(self, monkeypatch):
@@ -114,7 +114,7 @@ class TestFloatEnv:
 
     def test_below_minimum_falls_back(self, monkeypatch, caplog):
         # ``0`` and negative values parse cleanly but would reach the
-        # OpenAI SDK as a per-call deadline of 0/negative and either
+        # OpenAI SDK as an HTTP timeout of 0/negative and either
         # fail oddly or short-circuit warmup. Treat them as malformed
         # so a misconfigured EMBED_WARMUP_TIMEOUT_SECS=0 falls back to
         # the documented default rather than breaking startup.

@@ -49,10 +49,11 @@ def _float_env(name: str, default: float, minimum: float = 1.0) -> float:
     not crash the indexer.
 
     ``minimum`` defines the lower bound (default 1.0) — values below
-    it are treated as malformed and fall back. ``EMBED_WARMUP_TIMEOUT_SECS``
-    and similar per-call deadlines must be positive: ``0`` or negative
-    values would reach the OpenAI SDK timeout path and either fail oddly
-    or make startup behavior brittle. Mirrors the
+    it are treated as malformed and fall back.
+    ``EMBED_WARMUP_TIMEOUT_SECS`` and similar per-operation HTTP
+    timeouts must be positive: ``0`` or negative values would reach the
+    OpenAI SDK timeout path and either fail oddly or make startup
+    behavior brittle. Mirrors the
     ``mcp-server/src/main._float_env`` helper's ``minimum`` parameter,
     differing only in the warn-fall-back vs raise policy that each
     service has already settled on.
@@ -66,7 +67,7 @@ def _float_env(name: str, default: float, minimum: float = 1.0) -> float:
         log.warning("invalid %s=%r; falling back to %.1f", name, raw, default)
         return default
     # ``float("nan")`` / ``float("inf")`` parse cleanly but would
-    # reach the SDK as a per-call deadline and break in surprising
+    # reach the SDK as an HTTP timeout and break in surprising
     # ways. Same warn-fall-back policy as a malformed string.
     if not math.isfinite(value):
         log.warning("invalid %s=%r; falling back to %.1f", name, raw, default)
@@ -238,8 +239,8 @@ class OpenAIEmbedder:
     # server (and a HuggingFace download on first run). Empirical
     # cold-start observations: Qwen3-Embedding-8B mxfp8 served via
     # ``mlx_lm.server`` ≈ 4 min from a cold HF cache, <30 s warm. Remote
-    # providers usually respond in <1 s. The ceiling sits comfortably
-    # above the cold-start case; operators on slow links can raise it
+    # providers usually respond in <1 s. The timeout (per-operation,
+    # not a total deadline) sits comfortably above the cold-start case; operators on slow links can raise it
     # via ``EMBED_WARMUP_TIMEOUT_SECS``.
     DEFAULT_WARMUP_TIMEOUT_SECS = 600.0
 
@@ -351,10 +352,13 @@ class OpenAIEmbedder:
           before declaring the service unreachable. A service that
           isn't bound on the port should fail in ~``timeout`` seconds,
           not 10 minutes.
-        - ``EMBED_WARMUP_TIMEOUT_SECS`` (default 600 s) bounds **one
-          successful response** — once TCP connects the request can
-          take this long before the SDK times out, absorbing a
-          multi-minute first-time HF model download.
+        - ``EMBED_WARMUP_TIMEOUT_SECS`` (default 600 s) is the HTTP
+          timeout on **one warmup request** — once TCP connects, the
+          provider can go this long without sending response data
+          before the SDK times out, absorbing a multi-minute
+          first-time HF model download. It is per-operation (each
+          connect, read or write), not a total deadline for the
+          request.
 
         Total wall-clock can exceed ``timeout`` only when a connection
         succeeded but the response is in flight. A 5xx after a long
