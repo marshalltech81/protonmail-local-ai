@@ -341,9 +341,6 @@ def register_search_tools(
                     with_evidence=reranker is not None,
                     reranker=reranker,
                     authority_class=authority_class,
-                    # Evidence here is only rerank text; a date range
-                    # must not change which threads search returns.
-                    keep_threads_without_evidence=True,
                 )
 
             count("results", len(results))
@@ -444,6 +441,10 @@ def register_search_tools(
                        ("jane@example.com", "@example.com"). For a
                        person's name, resolve it via find_contact first.
             date_from: ISO 8601 date lower bound, e.g. "2024-01-01".
+                       A thread qualifies when its span overlaps the
+                       range, and any of its passages may be returned;
+                       check each chunk's sent_at, which can fall
+                       outside the range.
             date_to: ISO 8601 date upper bound, e.g. "2024-12-31".
             has_attachments: True to restrict to threads with attachments.
             max_threads: Rank threads exactly as ask_mailbox does with

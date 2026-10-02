@@ -562,14 +562,14 @@ the first deployment needs a numbered migration like any other.
    for Phase 5. **Status: partly done (#561).** "Message time" is
    defined in `docs/architecture.md`: `sent_at` (the parsed `Date:`
    header) is the only message time, every date filter bounds it, a
-   message, passage or attachment qualifies by its own message's
-   `sent_at`, and under a date range the evidence tools show only
-   passages from messages sent inside it. Decided 2026-10-02
-   (Resolved decisions 14): define `occurred_at` from the top
-   `Received:` header, bound date filters and thread spans on
-   `occurred_at` falling back to `sent_at`, restore whole-thread
-   evidence under a date range (superseding #574), and read passage
-   dates from `messages` (#575). Not built yet.
+   message or attachment qualifies by its own message's `sent_at`, and
+   under a date range the evidence tools show any passage of a thread
+   whose span overlaps it, each with its own `sent_at` (the pre-#561
+   behaviour, restored in #593; #574 is superseded). Decided
+   2026-10-02 (Resolved decisions 14), not built yet: define
+   `occurred_at` from the top `Received:` header, bound date filters
+   and thread spans on `occurred_at` falling back to `sent_at`, and
+   read passage dates from `messages` (#575).
 4. **Deletion/retention semantics.** Mirror is the default
    (upstream delete → index delete after the grace window; #451),
    archive (`INDEXER_DELETION_ENABLED=false`) is the opt-in, and
@@ -1272,8 +1272,7 @@ can be revisited with an explicit owner decision.
 - mirror retention keeps a reaped attachment's extracted text in
   `attachment_extractions` until #562's purge lands (decided)
 - a chunk's stored date can lag its message's `sent_at` until a failed
-  re-date retries, until #575 lands (decided); #574 is superseded by
-  the whole-thread evidence revert
+  re-date retries, until #575 lands (decided)
 - macOS Bridge mode is tested only against a synthetic STARTTLS server
   (#571); the owner's go-live is the live test
 - coverage scope: both services measure `src/` with `src/main.py`
