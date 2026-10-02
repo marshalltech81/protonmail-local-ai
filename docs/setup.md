@@ -779,12 +779,18 @@ to be incompatible, and it starts with a backup.
 
      ```bash
      make down
+     mkdir -m 700 -p ~/protonmail-local-ai-backup
      docker run --rm -v protonmail-local-ai_maildir-volume:/maildir:ro \
-         -v "$PWD":/backup debian:bookworm-slim \
+         -v ~/protonmail-local-ai-backup:/backup debian:bookworm-slim \
          tar -C /maildir -czf /backup/maildir-backup.tgz .
+     chmod 600 ~/protonmail-local-ai-backup/maildir-backup.tgz
      docker volume rm protonmail-local-ai_maildir-volume protonmail-local-ai_sqlite-volume
      make up-macos-bridge
      ```
+
+     The archive is your whole mailbox, unencrypted. Keep it outside
+     the checkout, as above, so no `git add` can pick it up, and on an
+     encrypted disk (FileVault).
 
      mbsync then pulls the whole mailbox from the app, and the indexer
      rebuilds the index from it, which re-embeds every message (a cost
