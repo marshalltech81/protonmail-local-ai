@@ -1214,6 +1214,7 @@ class Database:
         reranker: RerankerBackend | None = None,
         evidence_per_thread: int = 3,
         authority_class: str | None = None,
+        keep_threads_without_evidence: bool = False,
     ) -> list[ThreadResult]:
         authority_class = normalize_authority_class(authority_class)
         folders = self._default_folder_scope(folders)
@@ -1332,6 +1333,19 @@ class Database:
             # ``get_evidence`` and ``extract_from_emails`` read whenever
             # the carrier email won by metadata but the attachment
             # chunks didn't enter the chunk-vec pool.
+            #
+            # A date range scopes the passages as well as the threads: a
+            # thread qualifies by its span, a passage only by its own
+            # message's ``sent_at``. A span-only thread then has no
+            # passage, so for evidence callers it gives up its slot: the
+            # evidence is fetched for a wider slice of the filtered
+            # ranking (``_FILTERED_OVERSAMPLE`` times the candidates) and
+            # the first ``candidates_n`` threads with a passage are kept.
+            # ``search_emails`` wants evidence only as rerank text and
+            # keeps its threads (``keep_threads_without_evidence``).
+            refill = bool(date_from or date_to) and not keep_threads_without_evidence
+            if refill:
+                candidates = filtered[: candidates_n * _FILTERED_OVERSAMPLE]
             wanted = [r.thread_id for r in candidates]
             # Recompute attachment-FTS hits standalone so we know which
             # candidates won via filename match. The keyword lane's RRF
@@ -1343,9 +1357,6 @@ class Database:
             # evidence" gap where the LLM saw body text instead of
             # the attachment the user asked about.
             with timings.stage("evidence_fetch"):
-                # A date range scopes the passages as well as the threads:
-                # a thread qualifies by its span, a passage only by its
-                # own message's ``sent_at``.
                 grouped = self.get_query_evidence_chunks(
                     query_text,
                     wanted,
@@ -1356,6 +1367,9 @@ class Database:
                 )
             for result in candidates:
                 result.evidence_chunks = grouped.get(result.thread_id, [])
+            if refill:
+                candidates = [r for r in candidates if r.evidence_chunks][:candidates_n]
+            for result in candidates:
                 timings.count("evidence_chunks", len(result.evidence_chunks))
 
         if reranker is not None and candidates:

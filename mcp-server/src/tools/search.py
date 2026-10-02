@@ -339,6 +339,9 @@ def register_search_tools(
                     with_evidence=reranker is not None,
                     reranker=reranker,
                     authority_class=authority_class,
+                    # Evidence here is only rerank text; a date range
+                    # must not change which threads search returns.
+                    keep_threads_without_evidence=True,
                 )
 
             count("results", len(results))

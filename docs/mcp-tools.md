@@ -238,10 +238,9 @@ drive an unbounded query against the index.
   to a model (`get_evidence`, `ask_mailbox`, `extract_from_emails`,
   `brief_issue`, `check_conclusion`) retrieve threads the same way and
   then keep only passages from messages sent inside the range. A thread
-  left with no passage is shown by its indexed thread text in
-  `ask_mailbox` and `extract_from_emails`, as any thread without
-  passages is, and skipped by `brief_issue` and `check_conclusion`; see
-  [Message time](architecture.md#message-time).
+  left with no passage is dropped and the next-ranked thread with one
+  takes its place, so those tools never show a span-only thread's
+  out-of-range text; see [Message time](architecture.md#message-time).
 
 ---
 
@@ -257,7 +256,7 @@ name), its parent thread, Message-ID and claimant ID, the source
 message's send date (`sent_at`, the same value and format as that
 message's headers), and the passage's character offsets. With
 `date_from` / `date_to`, only passages from messages sent inside the
-range are returned, though a thread qualifies by its whole span (see
+range are returned, and a thread with none is left out (see
 `search_emails`). Attachment-derived
 chunks (extracted PDF / OCR / document text) are included — unlike
 `get_thread`, which is body-only.

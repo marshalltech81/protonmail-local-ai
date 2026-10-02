@@ -1941,9 +1941,20 @@ class TestMessageDateOnChunks:
         """A reprocess that keeps a chunk (same chunk ID) but carries a
         different message date — a parser change re-reading the same
         ``Date:`` header — rewrites the kept row's date, so the chunk
-        never disagrees with ``messages.sent_at``. Only the slice being
-        written is touched, and no chunk is re-inserted."""
+        never disagrees with ``messages.sent_at``. The message's other
+        slice is refreshed too, since a run with attachment extraction
+        off writes only the body (review round 1), and no chunk is
+        re-inserted. Another message's chunks keep their date."""
         _seed_thread_for_message(db, "m-md3@x", "t-md3")
+        _seed_thread_for_message(db, "m-md4@x", "t-md4")
+        bystander = _make_chunk("md4b".ljust(64, "0"), 0, "another message")
+        db.replace_message_chunks(
+            claimant_id="m-md4@x",
+            thread_id="t-md4",
+            chunks=[bystander],
+            embeddings_by_chunk_id={bystander.chunk_id: _one_hot(0)},
+            message_date="2024-01-01T00:00:00+00:00",
+        )
         kept = _make_chunk("md3k".ljust(64, "0"), 0, "kept")
         other = _make_chunk("md3o".ljust(64, "0"), 0, "other slice")
         other_slice = "att-other" if attachment_id is None else None
@@ -1971,7 +1982,7 @@ class TestMessageDateOnChunks:
         dates = dict(
             db._conn.execute("SELECT chunk_id, message_date FROM message_chunks").fetchall()
         )
-        assert dates == {kept.chunk_id: new, other.chunk_id: old}
+        assert dates == {kept.chunk_id: new, other.chunk_id: new, bystander.chunk_id: old}
 
     def test_schema_rejects_chunk_without_message_date(self, db):
         """Timeline retrieval orders by ``message_date`` with no

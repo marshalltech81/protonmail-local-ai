@@ -513,16 +513,18 @@ depends on its unit:
 | Result | Qualifies when | Sorted by |
 |---|---|---|
 | Thread (`search_emails`; the threads `get_evidence`, `ask_mailbox`, `extract_from_emails`, `brief_issue` and `check_conclusion` retrieve) | Its `[date_first, date_last]` span overlaps the range | Relevance |
-| Evidence passage of a retrieved thread (same tools, mailbox-wide path) | Its message's `sent_at` is in the range | Relevance within the thread |
+| Evidence passage of a retrieved thread (same tools except `search_emails`, mailbox-wide path) | Its message's `sent_at` is in the range; a thread with no such passage is left out | Relevance within the thread |
 | Message (`query_messages`) | Its `sent_at` is in the range | `sent_at`, newest first |
 | Attachment (`search_attachments`) | The carrying message's `sent_at` is in the range | Relevance; with no query, `sent_at`, newest first |
 
 So a date range scopes the passages a model is shown, not only the
 threads: a thread whose span overlaps the range but holds no passage
-from a message inside it has no evidence passages. `ask_mailbox` and
-`extract_from_emails` then show the model that thread's accumulated
-text, as for any thread without passages; `brief_issue` and
-`check_conclusion` skip it. Ranking lanes are not date-scoped per
+from a message inside it has no evidence passages, and the evidence
+tools leave it out: retrieval fetches evidence for a wider slice of the
+filtered ranking and keeps the first threads that have a passage in
+range, so a span-only thread does not use up a slot (and its
+out-of-range text is never shown). `search_emails` still returns
+threads by span alone. Ranking lanes are not date-scoped per
 passage: a passage outside the range can still lift its thread's rank.
 `list_threads` sorts by `date_last`, newest first; `get_thread` lists
 messages by `sent_at`, oldest first; `summarize_thread`'s recent tail

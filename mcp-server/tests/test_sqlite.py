@@ -5084,7 +5084,7 @@ class TestDateRangeMessageTime:
     """
 
     @staticmethod
-    def _db(tmp_path) -> Database:
+    def _db(tmp_path, extra: tuple = ()) -> Database:
         from tests.conftest import _insert_attachment, _insert_extraction, _insert_message
 
         conn, path = _open_built_db_conn(tmp_path, "message-time.db")
@@ -5092,6 +5092,7 @@ class TestDateRangeMessageTime:
             ("a1", "t-a", "2024-01-10T09:00:00+00:00", "report draft january", True),
             ("a2", "t-a", "2024-09-01T09:00:00+00:00", "report final september", False),
             ("b1", "t-b", "2024-06-01T09:00:00+00:00", "report notes june", True),
+            *extra,
         )
         for message_id, thread_id, sent_at, body, attached in rows:
             _insert_message(
@@ -5163,5 +5164,30 @@ class TestDateRangeMessageTime:
         assert evidence() == {"t-a": {a1, a2}, "t-b": {b1}}
         assert evidence(date_from="2024-03-01") == {"t-a": {a2}, "t-b": {b1}}
         assert evidence(date_to="2024-03-01") == {"t-a": {a1}}
-        # The span overlaps, but no passage is from a message in range.
-        assert evidence(date_from="2024-07-01", date_to="2024-08-01") == {"t-a": set()}
+        # The span overlaps, but no passage is from a message in range:
+        # an evidence caller does not get the thread (review round 1).
+        assert evidence(date_from="2024-07-01", date_to="2024-08-01") == {}
+
+    def test_span_only_threads_give_up_their_slot(self, tmp_path):
+        """Review round 1: a higher-ranked thread with no passage in range
+        must not use up ``limit`` and hide a lower-ranked thread that has
+        one; ``search_emails`` (``keep_threads_without_evidence``) still
+        returns threads by span alone."""
+        # ``t-c``'s July message matches the query weakly (no keyword
+        # hit), so the span-only ``t-a`` outranks it.
+        db = self._db(tmp_path, extra=(("c1", "t-c", "2024-07-15T09:00:00+00:00", "notes", False),))
+
+        def threads(**kwargs) -> list[str]:
+            results = db.hybrid_search(
+                "report",
+                [1.0, 0.0, 0.0, 0.0],
+                limit=1,
+                with_evidence=True,
+                date_from="2024-07-01",
+                date_to="2024-08-01",
+                **kwargs,
+            )
+            return [r.thread_id for r in results]
+
+        assert threads(keep_threads_without_evidence=True) == ["t-a"]
+        assert threads() == ["t-c"]

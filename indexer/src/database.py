@@ -1028,7 +1028,8 @@ class Database:
 
         ``message_date`` is the source message's ``Date:`` header in
         ISO 8601 form (``msg.date.isoformat()``), stored on every new
-        chunk row and rewritten on kept rows whose date differs, so each
+        chunk row and rewritten on the message's other rows (any slice)
+        whose date differs, so each
         chunk carries its message's ``sent_at`` and timeline-style retrieval
         (``get_recent_chunks_for_thread`` / ``summarize_thread``) can
         order by message time instead of the chunker's wall-clock
@@ -1079,12 +1080,15 @@ class Database:
 
             # Kept chunks take the incoming date too: a re-parse can
             # date the same bytes differently (a parser fix), and the
-            # chunk must not disagree with ``messages.sent_at``. After the
-            # deletes, the slice's remaining rows are exactly the kept ones.
+            # chunk must not disagree with ``messages.sent_at``. The date
+            # belongs to the message, so every slice of it is refreshed:
+            # a slice this run does not write (attachment extraction
+            # turned off since it was indexed) keeps its rows but must
+            # not keep a stale date.
             cur.execute(
                 "UPDATE message_chunks SET message_date = ? "
-                "WHERE claimant_id = ? AND attachment_id IS ? AND message_date != ?",
-                (message_date, claimant_id, attachment_id, message_date),
+                "WHERE claimant_id = ? AND message_date != ?",
+                (message_date, claimant_id, message_date),
             )
 
             now_iso = datetime.now(UTC).isoformat()
