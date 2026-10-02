@@ -1277,6 +1277,9 @@ can be revisited with an explicit owner decision.
 - a reap deletes rows but does not overwrite them: with SQLite's
   default `secure_delete` off, freed pages keep a reaped message's
   bytes in the database file until reused or vacuumed (#602)
+- a database whose reaps ran before #562 keeps the extraction rows
+  those reaps orphaned until it is rebuilt or cleaned by hand (#626;
+  `docs/architecture.md` "Cascade on message removal")
 - a chunk's stored date can lag its message's `sent_at` until a failed
   re-date retries, until #575 lands (decided)
 - macOS Bridge mode is tested only against a synthetic STARTTLS server

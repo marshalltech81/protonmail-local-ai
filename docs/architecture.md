@@ -882,6 +882,18 @@ bytes in the database file until SQLite reuses them or the file is
 vacuumed. This holds for every row a reap deletes, not only
 extractions (#602).
 
+The purge only looks at payloads the message being reaped carried. A
+database whose reaps ran before #562 can still hold extraction rows
+whose last carrier was already reaped, and nothing revisits them
+(#626). Rebuild the index from Maildir, or, with the indexer stopped,
+run once against `mail.db`:
+
+```sql
+DELETE FROM attachment_extractions WHERE NOT EXISTS (
+  SELECT 1 FROM attachments a
+  WHERE a.attachment_id = attachment_extractions.attachment_id);
+```
+
 ## Deletion Reconciliation (mirror by default)
 
 `mbsync` is configured `Sync Pull` + `Expunge None`, which means a message
