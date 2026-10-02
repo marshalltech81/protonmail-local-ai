@@ -563,6 +563,14 @@ frames are animation and only the first is read.
 `INDEXER_OCR_MAX_PAGES` (default 20) caps the pages OCR'd per
 document of either kind.
 
+OCR assumes English. The indexer image installs only Tesseract's
+English language data (`eng`, plus `osd`), and the extractors pass no
+language to Tesseract, so it uses its English default. Scans in a
+non-Latin script or with heavy accents extract poorly, and installing
+another `tesseract-ocr-*` language pack would not change that by
+itself, since nothing selects it. There is no setting for this today;
+issue #490 tracks it.
+
 With OCR off, images, and PDFs whose whole text layer is below the
 threshold, are recorded as "OCR disabled". When the indexer starts
 with OCR on, it re-queues once each message carrying such an

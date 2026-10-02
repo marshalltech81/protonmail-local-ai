@@ -34,8 +34,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     # path used by image attachments and the scanned-PDF fallback in
     # src/extractors/{image,pdf}.py; Poppler's pdftoppm is what pdf2image
     # shells out to when rendering each PDF page to a PIL image. English
-    # is the only Tesseract language pack installed by default — extend
-    # via tesseract-ocr-* packages here if non-English mailboxes appear.
+    # is the only Tesseract language pack installed, and the extractors
+    # pass no language, so adding a tesseract-ocr-* pack here would not
+    # select it by itself (issue #490).
     tesseract-ocr \
     poppler-utils \
  && rm -rf /var/lib/apt/lists/*
