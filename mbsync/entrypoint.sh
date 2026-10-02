@@ -103,20 +103,28 @@ validate_bridge_endpoint() {
 
 check_maildir_layout() {
     # mbsyncrc keeps each folder's sync state in the folder's own directory
-    # (SyncState *, #275). A Maildir synced with the earlier layout has its
-    # state files at the root instead, which isync would ignore: it would
-    # download every folder again next to the copies already there. Refuse
-    # to sync until the operator starts the Maildir over. The message names
-    # no file, because those state file names hold folder names.
-    local found
+    # (SyncState *, #275) and writes a child folder as its parent's
+    # directory plus "/." and its name (SubFolders Legacy, #281). A Maildir
+    # synced with the earlier layout has its state files at the root and
+    # its child folders without the dot. isync would read neither: it would
+    # download every folder again, the nested ones into new directories,
+    # next to the copies already there. Refuse to sync until the operator
+    # starts the Maildir over. A top-level folder's directory holds only
+    # cur, new, tmp and dot entries in this layout, so any other directory
+    # there is the earlier one. The message names no path, because these
+    # paths hold folder names.
+    local state nested
 
-    if ! found="$(find "$MAILDIR_PATH" -mindepth 1 -maxdepth 1 -name '.mbsyncstate*' -print -quit)"; then
+    if ! state="$(find "$MAILDIR_PATH" -mindepth 1 -maxdepth 1 -name '.mbsyncstate*' -print -quit)" \
+        || ! nested="$(find "$MAILDIR_PATH" -mindepth 2 -maxdepth 2 -type d \
+            ! -path "${MAILDIR_PATH}/.*" ! -name '.*' ! -name cur ! -name new ! -name tmp \
+            -print -quit)"; then
         echo ">>> ERROR: could not inspect ${MAILDIR_PATH} for an earlier Maildir layout — refusing to sync." >&2
         return 1
     fi
-    if [[ -n "$found" ]]; then
-        echo ">>> ERROR: ${MAILDIR_PATH} was synced with an earlier mbsync layout (sync state at the Maildir root) — refusing to sync." >&2
-        echo ">>> Syncing it with this version would download every folder again. Start the Maildir over: see docs/troubleshooting.md, \"mbsync refuses an earlier Maildir layout\"." >&2
+    if [[ -n "$state" || -n "$nested" ]]; then
+        echo ">>> ERROR: ${MAILDIR_PATH} was synced with an earlier mbsync layout (sync state at the Maildir root, or subfolders without the leading dot) — refusing to sync." >&2
+        echo ">>> Syncing it with this version would download mail again next to the existing copies. Start the Maildir over: see docs/troubleshooting.md, \"mbsync refuses an earlier Maildir layout\"." >&2
         return 1
     fi
 }

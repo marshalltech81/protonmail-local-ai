@@ -20,6 +20,7 @@ from src.parser import (
     OversizedMessageError,
     _clean_id,
     _decode_header,
+    _derive_folder,
     _parse_addrs,
     parse_email,
 )
@@ -473,10 +474,10 @@ class TestParseEmail:
 
     def test_nested_folder_path_preserved_when_maildir_root_given(self, tmp_path):
         """Regression: without a ``maildir_root`` the folder is derived as
-        ``path.parent.parent.name``, which collapses ``Clients/ABC/cur/msg``
-        to just ``ABC`` and loses the parent context. Passing the root
-        preserves the full relative path."""
-        folder = tmp_path / "Clients" / "ABC" / "cur"
+        ``path.parent.parent.name``, which collapses
+        ``Clients/.ABC/cur/msg`` to just ``.ABC`` and loses the parent
+        context. Passing the root preserves the full folder name."""
+        folder = tmp_path / "Clients" / ".ABC" / "cur"
         folder.mkdir(parents=True)
         path = folder / "msg.eml"
         path.write_text(
@@ -512,6 +513,70 @@ class TestParseEmail:
         msg = parse_email(path)
         assert msg is not None
         assert msg.folder == "ABC"
+
+
+def _legacy_dir(name: str) -> Path:
+    """The directory isync 1.4.4 writes a folder to under
+    ``SubFolders Legacy`` (``maildir_join_path``): the first component as
+    it is, then ``/.`` before each later one."""
+    first, *rest = name.split("/")
+    return Path(first, *(f".{component}" for component in rest))
+
+
+# Folder names as Bridge lists them (isync 1.4.4 passes modified UTF-7
+# through undecoded), covering every shape the layout treats differently:
+# top level, nested, Maildir's own directory names as children, dots, a
+# leading dot, "!", spaces, INBOX below the top level and deep nesting.
+LEGACY_FOLDER_NAMES = [
+    "INBOX",
+    "Trash",
+    "Spam",
+    "Folders",
+    "INBOX/Child",
+    "Folders/Clients",
+    "Folders/Parent/cur",
+    "Folders/Parent/new",
+    "Folders/Parent/tmp",
+    "Folders/cur",
+    "Folders/a.b",
+    "Folders/.dot",
+    "Folders/..two",
+    "Folders/x!y",
+    "Folders/with space",
+    "Folders/Caf&AOk-",
+    "Folders/INBOX",
+    "Folders/Deep/Er/Est",
+]
+
+
+class TestDeriveFolderLegacyLayout:
+    """mbsync writes child folders with ``SubFolders Legacy`` (#281): the
+    folder name is the path below the root with the one leading dot
+    isync adds to every component after the first removed."""
+
+    @pytest.mark.parametrize(
+        ("relative", "expected"),
+        [
+            ("INBOX/cur/m", "INBOX"),
+            ("Folders/.Clients/cur/m", "Folders/Clients"),
+            ("Folders/.Parent/.cur/cur/m", "Folders/Parent/cur"),
+            ("Folders/.Parent/.new/new/m", "Folders/Parent/new"),
+            ("Folders/..dot/cur/m", "Folders/.dot"),
+            ("INBOX/.Child/new/m", "INBOX/Child"),
+        ],
+    )
+    def test_isync_paths_map_to_folder_names(self, tmp_path, relative, expected):
+        assert _derive_folder(tmp_path / relative, tmp_path) == expected
+
+    @pytest.mark.parametrize("name", LEGACY_FOLDER_NAMES)
+    @pytest.mark.parametrize("subdir", ["cur", "new"])
+    def test_every_name_round_trips(self, tmp_path, name, subdir):
+        path = tmp_path / _legacy_dir(name) / subdir / "1700000000.synthetic:2,S"
+        assert _derive_folder(path, tmp_path) == name
+
+    def test_distinct_names_get_distinct_directories(self):
+        dirs = {_legacy_dir(name) for name in LEGACY_FOLDER_NAMES}
+        assert len(dirs) == len(LEGACY_FOLDER_NAMES)
 
 
 # ---------------------------------------------------------------------------

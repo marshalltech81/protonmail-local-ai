@@ -844,7 +844,7 @@ success_stamp_is_written_by_a_completed_sync() {
     [[ "$(find "$MAILDIR_PATH" -type f | wc -l)" -eq 1 ]] || return 1
 }
 
-# --- check_maildir_layout: earlier layouts are refused (#275) -------------
+# --- check_maildir_layout: earlier layouts are refused (#275, #281) -------
 #
 # The Maildir must be started over rather than synced with sync state
 # isync would no longer read. Folder names stand in as a synthetic marker
@@ -864,12 +864,37 @@ an_empty_maildir_is_accepted() {
 
 # shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
 the_current_layout_is_accepted() {
+    local dir
     layout_setup current
+    # SubFolders Legacy: children carry a leading dot at every level,
+    # including ones named like Maildir's own directories (#281).
+    for dir in INBOX Folders Folders/.MarkerZq9 Folders/.MarkerZq9/.cur Folders/.MarkerZq9/.new \
+        Folders/.MarkerZq9/.Deep/.er; do
+        mkdir -p "$MAILDIR_PATH/$dir/cur" "$MAILDIR_PATH/$dir/new" "$MAILDIR_PATH/$dir/tmp"
+        : >"$MAILDIR_PATH/$dir/.mbsyncstate"
+        : >"$MAILDIR_PATH/$dir/.uidvalidity"
+    done
+    : >"$MAILDIR_PATH/Folders/.MarkerZq9/cur/1:2,S"
+    : >"$MAILDIR_PATH/.mbsync-last-sync.json"
+    check_maildir_layout
+}
+
+# shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
+earlier_subfolders_are_refused_without_naming_them() {
+    layout_setup nested
+    # SubFolders Verbatim wrote a child as Folders/<name>, with no dot.
     mkdir -p "$MAILDIR_PATH/INBOX/cur" "$MAILDIR_PATH/Folders/MarkerZq9/cur"
     : >"$MAILDIR_PATH/INBOX/.mbsyncstate"
     : >"$MAILDIR_PATH/Folders/MarkerZq9/.mbsyncstate"
-    : >"$MAILDIR_PATH/.mbsync-last-sync.json"
-    check_maildir_layout
+    if check_maildir_layout 2>"$WORK/layout-err"; then
+        echo "accepted a Verbatim subfolder"
+        return 1
+    fi
+    grep -q "synced with an earlier mbsync layout" "$WORK/layout-err" || return 1
+    if grep -q MarkerZq9 "$WORK/layout-err"; then
+        echo "a folder name reached the log"
+        return 1
+    fi
 }
 
 # shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
@@ -1134,7 +1159,11 @@ config_keeps_sync_safety() {
     grep -qx 'PassCmd "cat /run/secrets/bridge_pass"' "$CONFIG_FILE" || return 1
     grep -qx 'Sync Pull' "$CONFIG_FILE" || return 1
     grep -qx 'Expunge None' "$CONFIG_FILE" || return 1
-    grep -qx 'Patterns \* !"All Mail" !"Labels/\*"' "$CONFIG_FILE" || return 1
+    # All Mail and Labels/* stay out; anything after them only leaves out
+    # more (child folders named after isync's own files, #281).
+    grep -qxE 'Patterns \* !"All Mail" !"Labels/\*"( !"\*/[^"*]+(/\*)?")*' "$CONFIG_FILE" || return 1
+    grep -qx 'SyncState \*' "$CONFIG_FILE" || return 1
+    grep -qx 'SubFolders Legacy' "$CONFIG_FILE" || return 1
     [[ "$(stat -c %a "$CONFIG_FILE" 2>/dev/null || stat -f %Lp "$CONFIG_FILE")" == "600" ]] || return 1
 }
 
@@ -1559,6 +1588,8 @@ check "an empty Maildir passes the layout check" an_empty_maildir_is_accepted
 check "the current layout passes the layout check" the_current_layout_is_accepted
 check "sync state at the Maildir root is refused without naming it" \
     root_sync_state_is_refused_without_naming_it
+check "subfolders in the earlier layout are refused without naming them" \
+    earlier_subfolders_are_refused_without_naming_them
 check "a Maildir that cannot be inspected is refused" an_uninspectable_maildir_is_refused
 check "the layout check runs before any sync" the_layout_check_runs_before_any_sync
 check "health: a long first sync in progress is healthy" long_first_sync_in_progress_is_healthy

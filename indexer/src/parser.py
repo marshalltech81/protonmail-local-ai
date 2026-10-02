@@ -372,19 +372,26 @@ def parse_email(path: Path, maildir_root: Path | None = None) -> Message | None:
 def _derive_folder(path: Path, maildir_root: Path | None) -> str:
     """Derive a Maildir folder name for a message path.
 
-    With a root provided, returns the POSIX-style relative path from the
-    root to the directory containing ``cur/``/``new/`` — so
-    ``/maildir/Clients/ABC/cur/msg`` becomes ``Clients/ABC`` rather than
-    collapsing to ``ABC``. Falls back to the leaf directory name when the
-    path is outside the root (legacy behavior, for tests that do not pass
-    a root).
+    With a root provided, returns the folder name from the path below the
+    root to the directory containing ``cur/``/``new/``. mbsync writes child
+    folders with ``SubFolders Legacy`` (#281): a top-level folder is the
+    directory of that name, and each later component gets one leading dot,
+    which is removed here. So ``/maildir/Folders/.Clients/.cur/cur/msg``
+    is ``Folders/Clients/cur``. A component without the dot is kept as it
+    is. Falls back to the leaf directory name when the path is outside the
+    root (for tests that do not pass a root).
     """
     folder_dir = path.parent.parent
     if maildir_root is not None:
         try:
-            return folder_dir.relative_to(maildir_root).as_posix()
+            relative = folder_dir.relative_to(maildir_root)
         except ValueError:
             pass
+        else:
+            if not relative.parts:
+                return relative.as_posix()
+            first, *rest = relative.parts
+            return "/".join([first, *(c.removeprefix(".") for c in rest)])
     return folder_dir.name
 
 

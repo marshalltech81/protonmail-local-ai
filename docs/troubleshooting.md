@@ -382,25 +382,34 @@ docker exec mbsync mbsync -c /tmp/mbsync/mbsyncrc -a
 
 Add `| grep UIDVALIDITY` to see only UIDVALIDITY errors. Without running a
 sync, the sync state files show which folders mbsync tracks: each folder
-keeps one, `.mbsyncstate`, in its own Maildir directory:
+keeps one, `.mbsyncstate`, in its own Maildir directory, where every
+component after the first has a leading dot (`Folders/.Clients` is
+`Folders/Clients`):
 
 ```bash
 docker exec mbsync find /maildir -name .mbsyncstate
 ```
 
+A Proton child folder named `uidvalidity`, `isyncuidmap.db`,
+`mbsyncstate`, `mbsyncstate.journal`, `mbsyncstate.new` or
+`mbsyncstate.lock` is not synced, nor is anything below it: its Maildir
+directory would be a file isync keeps in its parent's directory. Nothing
+is logged for it. Rename the folder in Proton to sync it.
+
 ## mbsync refuses an earlier Maildir layout
 
 ```text
->>> ERROR: /maildir was synced with an earlier mbsync layout (sync state at the Maildir root) — refusing to sync.
+>>> ERROR: /maildir was synced with an earlier mbsync layout (sync state at the Maildir root, or subfolders without the leading dot) — refusing to sync.
 ```
 
 mbsync keeps each folder's sync state in that folder's own directory
-(#275). A Maildir synced by an earlier version keeps it at the Maildir
-root instead, where this version would not read it: it would download
-every folder a second time next to the copies already there. mbsync
-therefore refuses to start, before it connects to Bridge, and changes
-nothing. The message names no file, because the old state file names
-hold folder names.
+(#275) and writes a child folder with a leading dot (#281; see
+[Maildir layout](architecture.md#maildir-layout)). A Maildir synced by an
+earlier version keeps the state at the Maildir root and its child folders
+without the dot, where this version would read neither: it would download
+mail a second time next to the copies already there. mbsync therefore
+refuses to start, before it connects to Bridge, and changes nothing. The
+message names no path, because those paths hold folder names.
 
 Start the Maildir over. Mail is pulled again from Proton, so nothing is
 lost, but remove the index with it: its rows point at the old files, which

@@ -41,10 +41,10 @@ def readable_dirs(root: Path) -> dict[str, int]:
     Lists only folder directories, never a ``cur``/``new``/``tmp``
     directory, so the work is linear in the number of folders, not
     messages. Symlinks are skipped, as watchdog skips them. A directory
-    that cannot be listed, or vanishes mid-walk, ends that branch.
-    Limitation: a subfolder nested under a folder itself named ``cur``,
-    ``new`` or ``tmp`` is not seen; the periodic Maildir rescan still
-    indexes its mail.
+    that cannot be listed, or vanishes mid-walk, ends that branch. A child
+    folder named ``cur``, ``new`` or ``tmp`` is the directory ``.cur``,
+    ``.new`` or ``.tmp`` (mbsync's ``SubFolders Legacy``, #281), so it is
+    walked like any other folder.
     """
     found: dict[str, int] = {}
     pending = [root]
