@@ -275,6 +275,18 @@ class TestMailboxWideParity:
         audited = _get_evidence(parity_db, "budget", max_threads=2)
         assert sum(len(ids) for ids in audited.values()) == PROMPT_EVIDENCE_CHUNKS_PER_THREAD + 3
 
+    def test_smaller_limit_returns_a_rank_order_prefix(self, parity_db):
+        """A ``limit`` below the full evidence set cuts it in rank order:
+        the first ``limit`` chunks of ask_mailbox's evidence, and the
+        threads past the cut are left out (review round 2, documented)."""
+        asked = _ask_evidence(parity_db, "budget", max_threads=2)
+        flat = [(tid, c) for tid, ids in asked.items() for c in ids]
+        assert len(asked) == 2 and len(flat) > PROMPT_EVIDENCE_CHUNKS_PER_THREAD
+        cut = PROMPT_EVIDENCE_CHUNKS_PER_THREAD
+        audited = _get_evidence(parity_db, "budget", max_threads=2, limit=cut)
+        assert [(tid, c) for tid, ids in audited.items() for c in ids] == flat[:cut]
+        assert list(audited) == list(asked)[:1]
+
     def test_explicit_limit_still_caps_chunks(self, parity_db):
         audited = _get_evidence(parity_db, "budget", max_threads=2, limit=3)
         assert sum(len(ids) for ids in audited.values()) == 3
@@ -347,6 +359,14 @@ class TestChunklessThreads:
             db_with_chunkless, "budget memo", max_threads=3, from_addr="dave@example.net"
         )
         assert audited == {"t-bare": []}
+
+    def test_chunkless_thread_past_the_cut_is_left_out(self, db_with_chunkless):
+        """The ``limit`` cut is a rank-order prefix for every thread,
+        chunkless ones included."""
+        asked = _ask_evidence(db_with_chunkless, "budget memo", max_threads=3)
+        assert list(asked)[-1] == "t-bare", "the chunkless thread must rank last"
+        audited = _get_evidence(db_with_chunkless, "budget memo", max_threads=3, limit=1)
+        assert list(audited) == list(asked)[:1]
 
     def test_without_max_threads_chunkless_threads_still_drop(self, db_with_chunkless):
         audited = _get_evidence(db_with_chunkless, "budget memo")

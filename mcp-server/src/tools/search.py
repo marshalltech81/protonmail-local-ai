@@ -418,8 +418,10 @@ def register_search_tools(
         Pass thread_id to scope evidence to a single thread ("which
         part of this thread mentions the deadline?"); omit it to gather
         evidence across the whole mailbox. To audit an ask_mailbox
-        answer, pass the same question, filters and max_threads: the
-        result is the evidence that answer retrieved, in the same order.
+        answer, pass the same question, filters and max_threads and
+        leave limit unset: the result is the evidence that answer
+        retrieved, in the same order. A smaller limit keeps the first
+        limit chunks of it.
 
         Args:
             query: The question or topic to gather evidence for.
@@ -575,8 +577,12 @@ def register_search_tools(
                     # With ``max_threads``, a thread that has no indexed
                     # chunks stays, empty: ask_mailbox shows the model its
                     # indexed thread text instead, so the audit must still
-                    # list the thread in its place.
-                    keep_chunkless = max_threads is not None and not r.evidence_chunks
+                    # list the thread in its place. Once ``limit`` is
+                    # spent, later threads drop whether or not they have
+                    # chunks, so a smaller ``limit`` is a rank-order prefix.
+                    keep_chunkless = (
+                        max_threads is not None and not r.evidence_chunks and taken < limit
+                    )
                     if not chunks and not keep_chunkless:
                         continue
                     subject = clip(r.subject, HEADER_CHAR_LIMIT)

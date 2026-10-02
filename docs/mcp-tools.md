@@ -257,7 +257,7 @@ chunks (extracted PDF / OCR / document text) are included — unlike
 | `date_to` | string | none | ISO 8601 date upper bound |
 | `has_attachments` | bool | none | Restrict to threads with attachments |
 | `max_threads` | int | none | Rank threads exactly as `ask_mailbox` does with this `max_threads` and return their evidence; clamped to `[1, 10]` like `ask_mailbox`'s. Omit it to rank by `limit` instead |
-| `limit` | int | `12`, or `max_threads` × 6 | Max evidence chunks to return; clamped to `[1, 60]`, the most `ask_mailbox` can put in one prompt (10 threads × 6 chunks), so the cap never cuts below an answer's evidence set |
+| `limit` | int | `12`, or `max_threads` × 6 | Max evidence chunks to return (with `max_threads`, a smaller value keeps the first `limit` chunks of the audit set in rank order); clamped to `[1, 60]`, the most `ask_mailbox` can put in one prompt (10 threads × 6 chunks), so the cap never cuts below an answer's evidence set |
 | `include_scores` | bool | `false` | Annotate each thread with the retrieval lanes that matched (`thread_fts` / `chunk_fts` / `attachment_fts` / `thread_vec` / `chunk_vec` / `rerank`) and each chunk with its vector distance |
 
 The mailbox-wide path runs the same hybrid retrieval as `ask_mailbox`
@@ -270,6 +270,9 @@ max_threads=N)` returns the evidence `ask_mailbox(question=query,
 filters, max_threads=N)` retrieved: the same threads in the same order,
 each with the same chunks in the same order
 ([#537](https://github.com/marshalltech81/protonmail-local-ai/issues/537)).
+This holds at the default `limit` (`max_threads` × 6, the most those
+threads can carry). A smaller `limit` cuts the same set in rank order:
+the first `limit` chunks, with the threads past the cut left out.
 A selected thread with no indexed chunks is listed in its place with
 an empty `chunks` list, since `ask_mailbox` shows the model that
 thread's indexed text instead; read it with `get_thread`.
@@ -715,8 +718,8 @@ citation, call `get_evidence` with the same question and the
 citation's `thread_id`: the cited `chunk_id` is among the first six
 returned chunks, attachment-matched passages included. To audit the
 whole answer, call `get_evidence` with the same question, filters and
-`max_threads` and no `thread_id`: it returns the evidence this call
-retrieved, the same chunks in the same order. The prompt budget can
+`max_threads`, no `thread_id` and no `limit`: it returns the evidence
+this call retrieved, the same chunks in the same order. The prompt budget can
 still leave some of those passages out of the prompt (the coverage
 note tells the model how many). A `thread` citation
 has no chunk; read it with `get_thread`.
