@@ -274,6 +274,99 @@ class TestIntEnv:
             main._int_env("FAKE_INT_VAR", 7)
 
 
+class TestChunkBudgets:
+    """The chunk budgets are checked against each other at startup (#507).
+
+    ``chunker.chunk_message`` requires ``target <= max`` and
+    ``overlap < target`` and raises on every message otherwise, so a bad
+    combination used to start cleanly and dead-letter the whole queue.
+    """
+
+    @pytest.mark.parametrize(
+        ("target", "max_", "overlap"),
+        [
+            (1000, 1500, 150),  # the defaults
+            (1500, 1500, 150),  # target == max is allowed
+            (1000, 1500, 999),  # overlap == target - 1 is allowed
+            (1000, 1500, 0),  # no overlap
+            (1, 1, 0),  # smallest valid budgets
+        ],
+    )
+    def test_valid_combinations_pass(self, target, max_, overlap):
+        main._check_chunk_budgets(target, max_, overlap)
+
+    def test_module_defaults_pass(self):
+        main._check_chunk_budgets(
+            main.CHUNK_TARGET_TOKENS, main.CHUNK_MAX_TOKENS, main.CHUNK_OVERLAP_TOKENS
+        )
+
+    def test_target_above_max_fails(self):
+        with pytest.raises(
+            ValueError,
+            match=r"INDEXER_CHUNK_TARGET_TOKENS=2000 must be <= INDEXER_CHUNK_MAX_TOKENS=1500",
+        ):
+            main._check_chunk_budgets(2000, 1500, 150)
+
+    @pytest.mark.parametrize("overlap", [1000, 1001])
+    def test_overlap_not_below_target_fails(self, overlap):
+        with pytest.raises(
+            ValueError,
+            match=rf"INDEXER_CHUNK_OVERLAP_TOKENS={overlap} must be < "
+            r"INDEXER_CHUNK_TARGET_TOKENS=1000",
+        ):
+            main._check_chunk_budgets(1000, 1500, overlap)
+
+    @pytest.mark.parametrize(
+        ("target", "max_", "overlap"),
+        [
+            (1000, 1500, 150),
+            (1500, 1500, 1499),
+            (2000, 1500, 150),
+            (1000, 1500, 1000),
+        ],
+    )
+    def test_checks_agree_with_the_chunker(self, target, max_, overlap):
+        """Startup rejects exactly the combinations the chunker rejects."""
+        from src.chunker import chunk_message
+
+        try:
+            chunk_message(
+                message_pk="m1",
+                body_text="hello world",
+                target_tokens=target,
+                max_tokens=max_,
+                overlap_tokens=overlap,
+            )
+            chunker_ok = True
+        except ValueError:
+            chunker_ok = False
+        try:
+            main._check_chunk_budgets(target, max_, overlap)
+            startup_ok = True
+        except ValueError:
+            startup_ok = False
+        assert startup_ok == chunker_ok
+
+    def test_import_fails_on_a_bad_combination(self):
+        """The check runs when the module loads, not per message."""
+        import subprocess  # nosec B404 - runs this test's own interpreter
+        import sys
+
+        env = {**os.environ, "INDEXER_CHUNK_TARGET_TOKENS": "2000"}
+        env.pop("INDEXER_CHUNK_MAX_TOKENS", None)
+        result = subprocess.run(  # nosec B603 - fixed argv, no shell
+            [sys.executable, "-c", "import src.main"],
+            cwd=Path(main.__file__).resolve().parent.parent,
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=60,
+        )
+        assert result.returncode != 0
+        assert "INDEXER_CHUNK_TARGET_TOKENS=2000 must be <=" in result.stderr
+
+
 class TestBoolEnv:
     """``main._bool_env`` accepts a fixed vocabulary and rejects the rest (#481).
 
