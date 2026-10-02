@@ -934,6 +934,8 @@ def _reply_subject_db(tmp_path, subjects: list[str]) -> Database:
     sqlite_vec.load(conn)
     conn.enable_load_extension(False)
     _build_schema(conn)
+    # The production index the subject scan relies on (indexer schema).
+    conn.execute("CREATE INDEX idx_messages_thread_sent ON messages(thread_id, sent_at)")
     mids = [f"rs-{i}" for i in range(len(subjects))]
     _insert_thread(
         conn,
@@ -1046,6 +1048,32 @@ class TestRerankReplySubjects:
         # One call for the thread subject, then at most the scanned rows.
         assert 1 < len(seen) <= 1 + sqlite_module._RERANK_SUBJECT_SCAN_ROWS
         assert all(len(s) <= sqlite_module._RERANK_SUBJECT_CHARS for s in seen)
+
+    def test_subject_scan_is_served_by_the_index(self, tmp_path):
+        # Review round 1: a tie-breaker the index does not cover made
+        # SQLite sort every message sharing a (sender-controlled) Date
+        # before applying the LIMIT. The order must come from the index.
+        from src.lib import sqlite as sqlite_module
+
+        db = _reply_subject_db(tmp_path, ["Budget Review", "venue"])
+        with closing(sqlite3.connect(str(db.path))) as conn:
+            plan = " ".join(
+                str(row[3])
+                for row in conn.execute(
+                    "EXPLAIN QUERY PLAN " + sqlite_module._RERANK_SUBJECT_SQL,
+                    (sqlite_module._RERANK_SUBJECT_CHARS, "t-rs", 50),
+                )
+            )
+        assert "idx_messages_thread_sent" in plan
+        assert "TEMP B-TREE" not in plan
+
+    def test_tied_send_times_keep_a_deterministic_order(self, tmp_path):
+        db = _reply_subject_db(tmp_path, ["Budget Review", "zeta topic", "alpha topic"])
+        with closing(sqlite3.connect(str(db.path))) as conn:
+            conn.execute("UPDATE messages SET sent_at = '2024-01-01T10:00:00+00:00'")
+            conn.commit()
+        doc = _rerank_doc(db)
+        assert doc.index("zeta topic") < doc.index("alpha topic")
 
     def test_reply_subjects_are_not_logged(self, tmp_path, caplog):
         marker = "ZZMARKER447 venue"

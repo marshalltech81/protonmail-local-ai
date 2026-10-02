@@ -184,6 +184,14 @@ _RERANK_SUBJECT_CHARS = 500
 _RERANK_REPLY_SUBJECTS_MAX = 5
 _RERANK_REPLY_SUBJECTS_MAX_CHARS = 500
 _RERANK_SUBJECT_SCAN_ROWS = 50
+# Ordered entirely by ``idx_messages_thread_sent(thread_id, sent_at)``,
+# whose entries end in the rowid, so the ``LIMIT`` stops the index walk.
+# A tie-breaker the index does not cover (``claimant_id``) would make
+# SQLite sort every message sharing a sender-controlled ``Date`` first.
+_RERANK_SUBJECT_SQL = (
+    "SELECT substr(subject, 1, ?) AS subject FROM messages "
+    "WHERE thread_id = ? ORDER BY sent_at, rowid LIMIT ?"
+)
 
 # Reply / forward prefixes stripped when comparing subjects. Mirrors the
 # indexer's ``threader._SUBJECT_PREFIX_RE`` so a reply subject the
@@ -1359,8 +1367,7 @@ class Database:
             with closing(self._connect()) as conn:
                 for thread_id in dict.fromkeys(thread_ids):
                     rows = conn.execute(
-                        "SELECT substr(subject, 1, ?) AS subject FROM messages "
-                        "WHERE thread_id = ? ORDER BY sent_at, claimant_id LIMIT ?",
+                        _RERANK_SUBJECT_SQL,
                         (_RERANK_SUBJECT_CHARS, thread_id, _RERANK_SUBJECT_SCAN_ROWS),
                     ).fetchall()
                     out[thread_id] = [r["subject"] for r in rows]
