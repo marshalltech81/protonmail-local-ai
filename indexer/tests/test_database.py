@@ -15,6 +15,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from src.attachment_indexing import attachment_occurrence_id
 from src.database import (
+    _PURGE_ORPHAN_EXTRACTION_SQL,
     EMBEDDING_DIM,  # noqa: F401  -- via reuse
     SCHEMA_APPLICATION_ID,
     SCHEMA_VERSION,
@@ -2386,44 +2387,6 @@ class TestAttachmentCascadeOnMessageRemoval:
         ).fetchone()[0]
         assert after == 0
 
-    def test_extraction_cache_is_preserved_on_message_removal(self, db, threader):
-        """Cached extractions outlive their messages so a future
-        re-arrival of the same content (forwarded again) skips the
-        extract cost."""
-        msg = make_message(message_id="cas2@x", filepath="/m/cas2")
-        thread = threader.assign_thread(msg)
-        thread.messages.append(make_message(message_id="cas2-keep@x", filepath="/m/cas2-keep"))
-        db.upsert_thread(thread, FAKE_EMBEDDING)
-
-        attachment_id = "preserve-hash" * 4
-        db.upsert_attachment(
-            claimant_id="cas2@x",
-            thread_id=thread.thread_id,
-            attachment_id=attachment_id,
-            filename="preserved.pdf",
-            content_type="application/pdf",
-            size_bytes=1,
-            occurrence_id=attachment_occurrence_id(
-                claimant_id="cas2@x",
-                content_hash=attachment_id,
-                filename="preserved.pdf",
-                occurrence_index=0,
-            ),
-        )
-        db.store_attachment_extraction(
-            attachment_id=attachment_id,
-            extraction_status="success",
-            extractor="pdf-digital",
-            extracted_text="cached content",
-            extraction_error=None,
-        )
-
-        _reap_message(db, thread, "cas2@x")
-
-        cached = db.get_attachment_extraction(attachment_id)
-        assert cached is not None
-        assert cached["extracted_text"] == "cached content"
-
     def test_delete_thread_completely_drops_attachments_for_all_messages(self, db, threader):
         m1 = make_message(message_id="cas3a@x", filepath="/m/cas3a")
         m2 = make_message(message_id="cas3b@x", filepath="/m/cas3b")
@@ -2455,6 +2418,230 @@ class TestAttachmentCascadeOnMessageRemoval:
             "SELECT COUNT(*) FROM attachments WHERE thread_id = ?", (t.thread_id,)
         ).fetchone()[0]
         assert cnt == 0
+
+
+# A synthetic marker for extracted attachment text: it must not survive
+# in any table once every message that carried the payload is reaped.
+_EXTRACTION_MARKER = "zq-extracted-marker-562"
+
+
+def _attach(db, claimant_id: str, thread_id: str, attachment_id: str) -> None:
+    db.upsert_attachment(
+        claimant_id=claimant_id,
+        thread_id=thread_id,
+        attachment_id=attachment_id,
+        filename="shared.pdf",
+        content_type="application/pdf",
+        size_bytes=1,
+        occurrence_id=attachment_occurrence_id(
+            claimant_id=claimant_id,
+            content_hash=attachment_id,
+            filename="shared.pdf",
+            occurrence_index=0,
+        ),
+    )
+
+
+def _cache_extraction(db, attachment_id: str) -> None:
+    db.store_attachment_extraction(
+        attachment_id=attachment_id,
+        extraction_status="success",
+        extractor="pdf-digital",
+        extracted_text=f"cached {_EXTRACTION_MARKER} content",
+        extraction_error=None,
+    )
+
+
+def _marker_in_any_table(db) -> bool:
+    """True when ``_EXTRACTION_MARKER`` appears in any column of any
+    ordinary table (virtual tables are covered by their shadow tables)."""
+    tables = [
+        r["name"]
+        for r in db._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' "
+            "AND sql NOT LIKE 'CREATE VIRTUAL TABLE%'"
+        ).fetchall()
+    ]
+    for table in tables:
+        for row in db._conn.execute(f'SELECT * FROM "{table}"').fetchall():  # nosec B608
+            for value in tuple(row):
+                if isinstance(value, bytes):
+                    value = value.decode("utf-8", "replace")
+                if isinstance(value, str) and _EXTRACTION_MARKER in value:
+                    return True
+    return False
+
+
+class TestExtractionPurgeOnRemoval:
+    """A cached extraction is deleted in the same transaction as the
+    last ``attachments`` row that references its payload (#562)."""
+
+    def _seed(self, db, threader, ids: list[str]):
+        msgs = [make_message(message_id=mid, filepath=f"/m/{mid}") for mid in ids]
+        thread = threader.assign_thread(msgs[0])
+        thread.messages.extend(msgs[1:])
+        db.upsert_thread(thread, FAKE_EMBEDDING)
+        return thread
+
+    def test_reaping_the_only_carrier_purges_the_extraction(self, db, threader):
+        thread = self._seed(db, threader, ["pu1@x", "pu1-keep@x"])
+        attachment_id = "unique-hash".ljust(64, "0")
+        _attach(db, "pu1@x", thread.thread_id, attachment_id)
+        _cache_extraction(db, attachment_id)
+        assert _marker_in_any_table(db)
+
+        _reap_message(db, thread, "pu1@x")
+
+        assert db.get_attachment_extraction(attachment_id) is None
+        assert not _marker_in_any_table(db)
+
+    def test_reaping_one_of_two_carriers_keeps_the_extraction(self, db, threader):
+        thread = self._seed(db, threader, ["pu2a@x", "pu2b@x"])
+        attachment_id = "shared-hash".ljust(64, "0")
+        _attach(db, "pu2a@x", thread.thread_id, attachment_id)
+        _attach(db, "pu2b@x", thread.thread_id, attachment_id)
+        _cache_extraction(db, attachment_id)
+
+        _reap_message(db, thread, "pu2a@x")
+
+        cached = db.get_attachment_extraction(attachment_id)
+        assert cached is not None
+        assert _EXTRACTION_MARKER in cached["extracted_text"]
+
+    def test_reaping_both_carriers_in_turn_purges_the_extraction(self, db, threader):
+        thread = self._seed(db, threader, ["pu3a@x", "pu3b@x", "pu3-keep@x"])
+        attachment_id = "both-hash".ljust(64, "0")
+        _attach(db, "pu3a@x", thread.thread_id, attachment_id)
+        _attach(db, "pu3b@x", thread.thread_id, attachment_id)
+        _cache_extraction(db, attachment_id)
+
+        _reap_message(db, thread, "pu3a@x")
+        assert db.get_attachment_extraction(attachment_id) is not None
+        thread.messages = [m for m in thread.messages if m.message_id != "pu3a@x"]
+        _reap_message(db, thread, "pu3b@x")
+
+        assert db.get_attachment_extraction(attachment_id) is None
+        assert not _marker_in_any_table(db)
+
+    def test_reaping_both_carriers_in_one_reap_purges_the_extraction(self, db, threader):
+        thread = self._seed(db, threader, ["pu4a@x", "pu4b@x", "pu4-keep@x"])
+        attachment_id = "one-reap-hash".ljust(64, "0")
+        _attach(db, "pu4a@x", thread.thread_id, attachment_id)
+        _attach(db, "pu4b@x", thread.thread_id, attachment_id)
+        _cache_extraction(db, attachment_id)
+        for mid in ("pu4a@x", "pu4b@x"):
+            db.add_pending_deletion(f"/m/{mid}", mid, thread.thread_id)
+        survivors = make_thread(
+            messages=[m for m in thread.messages if m.message_id == "pu4-keep@x"],
+            thread_id=thread.thread_id,
+        )
+
+        db.reap_thread_messages(survivors, FAKE_EMBEDDING, ["pu4a@x", "pu4b@x"])
+
+        assert db.get_attachment_extraction(attachment_id) is None
+
+    def test_deleting_the_whole_thread_purges_its_extractions(self, db, threader):
+        thread = self._seed(db, threader, ["pu5a@x", "pu5b@x"])
+        shared = "thread-shared-hash".ljust(64, "0")
+        own = "thread-own-hash".ljust(64, "0")
+        _attach(db, "pu5a@x", thread.thread_id, shared)
+        _attach(db, "pu5b@x", thread.thread_id, shared)
+        _attach(db, "pu5b@x", thread.thread_id, own)
+        _cache_extraction(db, shared)
+        _cache_extraction(db, own)
+
+        _tombstone_thread(db, thread.thread_id)
+        assert db.delete_thread_completely(thread.thread_id)
+
+        assert db.get_attachment_extraction(shared) is None
+        assert db.get_attachment_extraction(own) is None
+        assert not _marker_in_any_table(db)
+
+    def test_deleting_a_thread_keeps_a_payload_another_thread_carries(self, db, threader):
+        doomed = self._seed(db, threader, ["pu6a@x"])
+        other = make_thread(
+            messages=[make_message(message_id="pu6-other@x", filepath="/m/pu6-other")],
+            thread_id="pu6-other-thread",
+        )
+        db.upsert_thread(other, FAKE_EMBEDDING)
+        attachment_id = "cross-thread-hash".ljust(64, "0")
+        _attach(db, "pu6a@x", doomed.thread_id, attachment_id)
+        _attach(db, "pu6-other@x", other.thread_id, attachment_id)
+        _cache_extraction(db, attachment_id)
+
+        _tombstone_thread(db, doomed.thread_id)
+        assert db.delete_thread_completely(doomed.thread_id)
+
+        assert db.get_attachment_extraction(attachment_id) is not None
+
+    def test_a_failed_reap_rolls_back_the_purge(self, db, threader, monkeypatch):
+        thread = self._seed(db, threader, ["pu7@x", "pu7-keep@x"])
+        attachment_id = "rollback-hash".ljust(64, "0")
+        _attach(db, "pu7@x", thread.thread_id, attachment_id)
+        _cache_extraction(db, attachment_id)
+
+        def boom(cur, mentions):
+            raise RuntimeError("synthetic failure after the purge")
+
+        # Runs after every per-message removal, so the purge has executed.
+        monkeypatch.setattr(Database, "_prune_orphan_entities", staticmethod(boom))
+        with pytest.raises(RuntimeError):
+            _reap_message(db, thread, "pu7@x")
+
+        assert db.get_attachment_extraction(attachment_id) is not None
+        assert (
+            db._conn.execute(
+                "SELECT COUNT(*) FROM attachments WHERE claimant_id = ?", ("pu7@x",)
+            ).fetchone()[0]
+            == 1
+        )
+
+    def test_a_failed_thread_delete_rolls_back_the_purge(self, db, threader, monkeypatch):
+        thread = self._seed(db, threader, ["pu8@x"])
+        attachment_id = "rollback-thread-hash".ljust(64, "0")
+        _attach(db, "pu8@x", thread.thread_id, attachment_id)
+        _cache_extraction(db, attachment_id)
+
+        def boom(cur, mentions):
+            raise RuntimeError("synthetic failure after the purge")
+
+        monkeypatch.setattr(Database, "_prune_orphan_entities", staticmethod(boom))
+        _tombstone_thread(db, thread.thread_id)
+        with pytest.raises(RuntimeError):
+            db.delete_thread_completely(thread.thread_id)
+
+        assert db.get_attachment_extraction(attachment_id) is not None
+
+    def test_the_orphan_check_is_one_indexed_statement_per_payload(self, db, threader):
+        """The purge looks up only the payloads the removed rows carried,
+        each through an index, so its cost follows the rows touched and
+        not the size of either table."""
+        thread = self._seed(db, threader, ["pu9@x", "pu9-keep@x"])
+        ids = [f"bound-hash-{i}".ljust(64, "0") for i in range(3)]
+        for attachment_id in ids:
+            _attach(db, "pu9@x", thread.thread_id, attachment_id)
+            _cache_extraction(db, attachment_id)
+        statements: list[str] = []
+        db._conn.set_trace_callback(statements.append)
+        try:
+            _reap_message(db, thread, "pu9@x")
+        finally:
+            db._conn.set_trace_callback(None)
+
+        purges = [s for s in statements if s.startswith("DELETE FROM attachment_extractions")]
+        assert len(purges) == len(ids)
+        plan = " | ".join(
+            r["detail"]
+            for r in db._conn.execute(
+                "EXPLAIN QUERY PLAN " + _PURGE_ORPHAN_EXTRACTION_SQL, ("a", "a")
+            ).fetchall()
+        )
+        assert "SEARCH attachments USING COVERING INDEX idx_attachments_attachment_id" in plan
+        assert (
+            "SEARCH attachment_extractions USING INDEX sqlite_autoindex_attachment_extractions_1"
+            in plan
+        )
+        assert "SCAN" not in plan
 
 
 class TestWalCheckpoint:

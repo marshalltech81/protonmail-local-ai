@@ -432,7 +432,7 @@ decision (Open decisions).
 | 4.1 Entities | Done | #459, #527 (orphan pruning, #464) | — |
 | 4.2 Source authority | Done | #459, #474 (Spam guard), #523 and #542 (rules file kept private and validated) | verdict-header gating after go-live (#463) |
 | 4.3 Temporal retrieval | Mostly done | #561 (`sent_at` defined and used consistently), #593 (whole-thread evidence under a date range), #597 (#575), `occurred_at` with filters and thread spans on the effective time (#297) | checking against real mail that the top `Received:` is Proton's (go-live); bitemporal claims (Phase 5) |
-| 4.4 Retention | Mostly done | #451 (mirror default), #475 (Trash hidden from default search), #564 and #583 (reaped sources reported for 30 days), the invariant restated (#610) | user-controlled retention; #562's purge (Resolved decisions 14) |
+| 4.4 Retention | Mostly done | #451 (mirror default), #475 (Trash hidden from default search), #564 and #583 (reaped sources reported for 30 days), the invariant restated (#610), #562 (extracted text purged on reap) | user-controlled retention |
 | 5.1 Hardened `brief_issue` | Not started | — | needs Phase 3 usage on real mail |
 | 5.2 Support/contradict | Built, experimental | #467 (`check_conclusion`), #493 (evidence-slot refill), #558 (quote verification, also for `brief_issue`) | semantic support (#284) |
 | 5.3 Position as of date | Not started | — | — |
@@ -586,8 +586,9 @@ the first deployment needs a numbered migration like any other.
    `get_thread` lists a surviving thread's reaped messages, from
    content-free `reaped_messages` records kept 30 days; after that, or
    an index rebuild, a reaped ID reads as "not found", which the
-   restated invariant accepts. Remaining: user-controlled retention,
-   and #562 (purge extracted attachment text on reap, decided).
+   restated invariant accepts. A reap also deletes the extracted
+   text of each attachment payload no remaining message carries
+   (#562). Remaining: user-controlled retention.
 
 ### Phase 5 — Knowledge reasoning
 
@@ -744,7 +745,8 @@ roughly this order; each is its own PR:
    `SubFolders Legacy`; an earlier-layout Maildir is refused at start)
    and ~~#279 (UIDVALIDITY recovery procedure)~~ (done 2026-10-02:
    documented and checked by `make test-mbsync-layout`).
-4. #562 (purge extracted text on reap) and ~~#428~~ (done: every xlsx
+4. ~~#562~~ (done: a reap deletes the extracted text of payloads no
+   remaining message carries) and ~~#428~~ (done: every xlsx
    part openpyxl loads whole is capped, 8 MiB each, 16 MiB together).
 5. ~~The Claude Desktop `fastmcp` adapter and the Codex setup docs~~
    (done: `mcp-server/src/stdio_adapter.py` replaces `mcp-remote`;
@@ -1277,8 +1279,12 @@ can be revisited with an explicit owner decision.
 - deletion reconciliation is on by default (mirror) and not yet validated under
   long-running real-world conditions; `INDEXER_UNLINK_ON_REAP=true`
   only removes the `.eml` when Maildir is mounted read-write
-- mirror retention keeps a reaped attachment's extracted text in
-  `attachment_extractions` until #562's purge lands (decided)
+- a reap deletes rows but does not overwrite them: with SQLite's
+  default `secure_delete` off, freed pages keep a reaped message's
+  bytes in the database file until reused or vacuumed (#602)
+- a database whose reaps ran before #562 keeps the extraction rows
+  those reaps orphaned until it is rebuilt or cleaned by hand (#626;
+  `docs/architecture.md` "Cascade on message removal")
 - a chunk's stored date can lag its message's `sent_at` until a failed
   re-date retries, until #575 lands (decided)
 - macOS Bridge mode is tested only against a synthetic STARTTLS server
