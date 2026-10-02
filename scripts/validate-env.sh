@@ -8,6 +8,7 @@ readonly BRIDGE_PASS_FILE="${ROOT_DIR}/.secrets/bridge_pass.txt"
 readonly INFERENCE_KEY_FILE="${ROOT_DIR}/.secrets/inference_api_key.txt"
 readonly EMBED_KEY_FILE="${ROOT_DIR}/.secrets/embed_api_key.txt"
 readonly RERANK_KEY_FILE="${ROOT_DIR}/.secrets/rerank_api_key.txt"
+readonly AUTHORITY_FILE="${ROOT_DIR}/config/authority.toml"
 
 require_file() {
     local path="$1"
@@ -60,6 +61,27 @@ require_mode_600() {
         printf 'ERROR: %s must have mode 600, found %s.\n' "$path" "$actual_mode" >&2
         exit 1
     }
+}
+
+# The optional source-authority rules file holds real addresses and
+# domains, so it is held to the secret files' 600. A symlink is
+# rejected: Compose mounts config/ as a directory, so a link whose
+# target the container cannot reach would pass here and stop the
+# indexer at startup; so is anything else that is not a regular file,
+# which the indexer refuses to open.
+require_private_optional_file() {
+    local path="$1"
+
+    if [[ -L "$path" ]]; then
+        printf 'ERROR: %s must be a regular file, not a symlink.\n' "$path" >&2
+        exit 1
+    fi
+    [[ -e "$path" ]] || return 0
+    [[ -f "$path" ]] || {
+        printf 'ERROR: %s must be a regular file.\n' "$path" >&2
+        exit 1
+    }
+    require_mode_600 "$path"
 }
 
 # API keys are wired as Docker secrets (see ``secrets:`` in
@@ -607,6 +629,7 @@ require_mode_600 "$BRIDGE_PASS_FILE"
 require_mode_600 "$INFERENCE_KEY_FILE"
 require_mode_600 "$EMBED_KEY_FILE"
 require_mode_600 "$RERANK_KEY_FILE"
+require_private_optional_file "$AUTHORITY_FILE"
 
 # Every enabled layer requires a non-empty API key — uniform rule
 # across the three operator-supplied layers. Operators pointing at an

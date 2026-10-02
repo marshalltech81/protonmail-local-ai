@@ -269,6 +269,8 @@ services strip it. It fails fast if:
   (validation requires the files to exist with `600` permissions even when the
   matching layer is `none`, so the docker-compose `secrets:` references
   resolve cleanly)
+- `config/authority.toml`, when present, is not a regular file (a symlink
+  counts as not one) or is not `600`
 - numeric or enum settings such as `SYNC_INTERVAL`, `MCP_PORT`, `MCP_TRANSPORT`, or `INFERENCE_MODE` are invalid
 
 Verify everything is running:
@@ -363,15 +365,26 @@ class plus the rule that set it on `find_contact`); they never change
 ranking. Nothing is classified by a model.
 
 ```bash
-cp config/authority.toml.example config/authority.toml
+install -m 600 config/authority.toml.example config/authority.toml
 # edit: one table per class, with `addresses` (exact) and/or
 # `domains` (the domain and its subdomains)
-chmod 644 config/authority.toml   # the indexer runs as UID 1002
 docker compose restart indexer
 ```
 
 `config/authority.toml` is gitignored: it holds real addresses and
-domains, so never commit it. The `config/` directory is mounted
+domains, so never commit it. Keep it a regular file at `600`, like the
+files in `.secrets/`, so other accounts on the host cannot read it;
+`make up` fails if it has any other mode, is a symlink or is not a
+regular file. The indexer
+runs as UID 1002, but on macOS the Docker Desktop and OrbStack file
+sharing serves a bind-mounted file to the container's user, so it still
+reads a `600` file you own (the same way the services read the `600`
+secret files). On Linux with Docker Engine the bind mount keeps your
+ownership, so the indexer cannot read a `600` file you own; a safe
+access path there is tracked in #526. Do not widen the mode or hand the
+file to a host group to work around it: GID 1002 may belong to another
+account on the host.
+The `config/` directory is mounted
 read-only into the indexer at `/config`, and the path
 `/config/authority.toml` is fixed (there is no environment setting for
 it). The indexer reads the file at

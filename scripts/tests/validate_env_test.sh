@@ -305,6 +305,61 @@ loose_secret_mode_fails() {
     fails_with 'must have mode 600'
 }
 
+# --- Source-authority rules file (#468) -----------------------------------
+# config/authority.toml is optional and holds real addresses, so like the
+# secret files it must be 600. A symlink is rejected: Compose mounts the
+# directory, so a link the container cannot follow would pass here and
+# stop the indexer.
+
+write_authority() {
+    mkdir -p "$ROOT/config"
+    printf '[counsel]\ndomains = ["lawfirm.example"]\n' >"$ROOT/config/authority.toml"
+    chmod "$1" "$ROOT/config/authority.toml"
+}
+
+absent_authority_file_passes() {
+    setup
+    passes
+}
+
+private_authority_file_passes() {
+    setup
+    write_authority 600
+    passes
+}
+
+loose_authority_file_fails() {
+    setup
+    local mode
+    for mode in 644 604 640 660 620 700; do
+        write_authority "$mode"
+        fails_with "config/authority.toml must have mode 600, found $mode"
+    done
+}
+
+symlinked_authority_file_fails() {
+    setup
+    write_authority 600
+    mv "$ROOT/config/authority.toml" "$ROOT/config/rules.toml"
+    ln -s rules.toml "$ROOT/config/authority.toml"
+    fails_with 'config/authority.toml must be a regular file, not a symlink'
+    rm "$ROOT/config/authority.toml"
+    ln -s missing.toml "$ROOT/config/authority.toml"
+    fails_with 'must be a regular file, not a symlink'
+}
+
+# The indexer opens only a regular file, so a 600 directory or FIFO
+# must fail here rather than at indexer startup.
+non_regular_authority_path_fails() {
+    setup
+    mkdir -p "$ROOT/config/authority.toml"
+    chmod 600 "$ROOT/config/authority.toml"
+    fails_with 'config/authority.toml must be a regular file'
+    rmdir "$ROOT/config/authority.toml"
+    mkfifo -m 600 "$ROOT/config/authority.toml"
+    fails_with 'config/authority.toml must be a regular file'
+}
+
 # --- Whitespace the readers strip (#506) ----------------------------------
 # The Python loaders read these values with .strip() (and modes with
 # .lower()), so a quoted value padded with spaces is valid; Compose
@@ -401,6 +456,11 @@ check "a one-sided INFERENCE_MAX_TOKENS fails" one_sided_max_tokens_fails
 check "a zero-padded INFERENCE_MAX_TOKENS is decimal" zero_padded_max_tokens_is_decimal
 check "an API key in .env fails" api_key_in_env_fails
 check "a secret file not 600 fails" loose_secret_mode_fails
+check "an absent authority file passes" absent_authority_file_passes
+check "a private authority file passes" private_authority_file_passes
+check "an authority file not 600 fails" loose_authority_file_fails
+check "a symlinked authority file fails" symlinked_authority_file_fails
+check "a non-regular authority path fails" non_regular_authority_path_fails
 check "padded quoted values pass" padded_quoted_values_pass
 check "padded and mixed-case modes pass" padded_and_cased_modes_pass
 check "a padded none disables the layer" padded_disabled_mode_disables_the_layer
