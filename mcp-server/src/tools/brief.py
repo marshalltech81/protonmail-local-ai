@@ -716,10 +716,12 @@ def register_experimental_tools(
                        email; resolve via find_contact if you only have
                        a name)
             date_from: Optionally scope to emails after this date (ISO 8601)
-                       A thread qualifies when its span overlaps the
-                       range, and any of its passages may be used;
-                       each citation's sent_at gives that passage's
-                       own date, which can fall outside the range.
+                       A thread qualifies when its span (its
+                       messages' occurred_at, else sent_at) overlaps
+                       the range, and any of its passages may be used;
+                       each citation's occurred_at and sent_at give
+                       that passage's own dates, which can fall
+                       outside the range.
             date_to: Optionally scope to emails before this date (ISO 8601)
             max_threads: Maximum threads to use as evidence (default: 5)
 
@@ -941,10 +943,12 @@ def register_experimental_tools(
                        email; resolve via find_contact if you only have
                        a name)
             date_from: Optionally scope to emails after this date (ISO 8601)
-                       A thread qualifies when its span overlaps the
-                       range, and any of its passages may be used;
-                       each citation's sent_at gives that passage's
-                       own date, which can fall outside the range.
+                       A thread qualifies when its span (its
+                       messages' occurred_at, else sent_at) overlaps
+                       the range, and any of its passages may be used;
+                       each citation's occurred_at and sent_at give
+                       that passage's own dates, which can fall
+                       outside the range.
             date_to: Optionally scope to emails before this date (ISO 8601)
             max_threads: Maximum threads to use as evidence (default: 5)
 

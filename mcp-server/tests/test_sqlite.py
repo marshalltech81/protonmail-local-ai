@@ -933,7 +933,7 @@ def _reply_subject_db(tmp_path, subjects: list[str]) -> Database:
     conn.enable_load_extension(True)
     sqlite_vec.load(conn)
     conn.enable_load_extension(False)
-    # ``_build_schema`` carries the indexer's ``idx_messages_thread_sent``,
+    # ``_build_schema`` carries the indexer's ``idx_messages_thread_effective``,
     # the index the subject scan relies on.
     _build_schema(conn)
     mids = [f"rs-{i}" for i in range(len(subjects))]
@@ -1064,7 +1064,7 @@ class TestRerankReplySubjects:
                     (sqlite_module._RERANK_SUBJECT_CHARS, "t-rs", 50),
                 )
             )
-        assert "idx_messages_thread_sent" in plan
+        assert "idx_messages_thread_effective" in plan
         assert "TEMP B-TREE" not in plan
 
     def test_tied_send_times_keep_a_deterministic_order(self, tmp_path):
@@ -5292,3 +5292,133 @@ class TestDateRangeMessageTime:
         assert db._matched_attachments("a1", ["t-a"]) == {"t-a": ["a1-att"]}
         grouped = self._evidence(db, query="a1", per_thread=1, date_from="2024-07-01")
         assert [c.attachment_id for c in grouped["t-a"]] == ["a1-att"]
+
+
+class TestEffectiveTime:
+    """A message's effective time is ``occurred_at`` (top ``Received:``)
+    falling back to ``sent_at``. Every date filter bounds it; outputs
+    carry both fields. The fixture message was sent on 31 January but
+    delivered on 1 February, so its two dates fall on opposite sides of
+    a month boundary."""
+
+    SENT = "2024-01-31T23:00:00+00:00"
+    DELIVERED = "2024-02-01T01:00:00+00:00"
+    FEB = {"date_from": "2024-02-01", "date_to": "2024-02-29"}
+    JAN = {"date_from": "2024-01-01", "date_to": "2024-01-31"}
+
+    @pytest.fixture
+    def db(self, tmp_path):
+        from tests.conftest import _insert_attachment, _insert_message
+
+        conn, path = _open_built_db_conn(tmp_path, "effective.db")
+        _insert_message(
+            conn,
+            message_id="late@example.com",
+            thread_id="t-late",
+            sent_at=self.SENT,
+            occurred_at=self.DELIVERED,
+            subject="Delivery report",
+            from_=["alice@example.com"],
+            has_attachments=True,
+            body="zephyr quarterly figures",
+            attachment_text="zephyr appendix",
+        )
+        _insert_attachment(
+            conn,
+            message_id="late@example.com",
+            thread_id="t-late",
+            attachment_id="late@example.com-att",
+            filename="zephyr.pdf",
+        )
+        conn.close()
+        return Database(str(path))
+
+    def test_query_messages_bounds_the_effective_time(self, db):
+        assert _ids(db.query_messages(**self.FEB)) == ["late@example.com"]
+        assert _ids(db.query_messages(**self.JAN)) == []
+
+    def test_message_record_carries_both_dates(self, db):
+        (record,) = db.query_messages().messages
+        assert (record.sent_at, record.occurred_at) == (self.SENT, self.DELIVERED)
+        assert record.effective_at == self.DELIVERED
+
+    @pytest.mark.parametrize("query", ["zephyr", None], ids=["query", "scan"])
+    def test_search_attachments_bounds_the_carrying_message_effective_time(self, db, query):
+        hits = db.search_attachments(query=query, **self.FEB)
+        assert [(h.sent_at, h.occurred_at) for h in hits] == [(self.SENT, self.DELIVERED)]
+        assert db.search_attachments(query=query, **self.JAN) == []
+
+    def test_thread_admission_and_evidence_agree(self, db):
+        """The thread spans the effective time, so the range that admits
+        the thread is the range its passages report."""
+        results = db.hybrid_search(
+            query_text="zephyr",
+            query_embedding=[1.0, 0.0, 0.0, 0.0],
+            with_evidence=True,
+            **self.FEB,
+        )
+        assert [r.thread_id for r in results] == ["t-late"]
+        assert {(c.message_date, c.message_occurred_at) for c in results[0].evidence_chunks} == {
+            (self.SENT, self.DELIVERED)
+        }
+        jan = db.hybrid_search(
+            query_text="zephyr", query_embedding=[1.0, 0.0, 0.0, 0.0], **self.JAN
+        )
+        assert jan == []
+
+    def test_message_without_occurred_at_uses_sent_at(self, tmp_path):
+        from tests.conftest import _insert_message
+
+        conn, path = _open_built_db_conn(tmp_path, "sent-only.db")
+        _insert_message(conn, message_id="sent@example.com", thread_id="t", sent_at=self.SENT)
+        conn.close()
+        db = Database(str(path))
+        (record,) = db.query_messages(**self.JAN).messages
+        assert record.occurred_at is None
+        assert record.effective_at == self.SENT
+        assert _ids(db.query_messages(**self.FEB)) == []
+
+    def test_orderings_use_the_effective_time(self, tmp_path):
+        """Sent first but delivered last: newest-first listings and
+        paging put it first, the thread page and the timeline last."""
+        from tests.conftest import _insert_message
+
+        conn, path = _open_built_db_conn(tmp_path, "order.db")
+        _insert_message(
+            conn,
+            message_id="a@example.com",
+            thread_id="t",
+            sent_at="2024-01-01T00:00:00+00:00",
+            occurred_at="2024-03-01T00:00:00+00:00",
+            body="a",
+        )
+        _insert_message(
+            conn,
+            message_id="b@example.com",
+            thread_id="t",
+            sent_at="2024-02-01T00:00:00+00:00",
+            body="b",
+        )
+        conn.close()
+        db = Database(str(path))
+        assert _ids(db.query_messages()) == ["a@example.com", "b@example.com"]
+        page = db.query_messages(limit=1)
+        assert _ids(page) == ["a@example.com"]
+        assert _ids(db.query_messages(limit=1, cursor=page.next_cursor)) == ["b@example.com"]
+        timeline = db.get_recent_chunks_for_thread("t")
+        assert [c.message_id for c in timeline] == ["b@example.com", "a@example.com"]
+        thread_page = db.get_thread_page("t", offset=0, limit=10, body_char_limit=100)
+        assert [m.message_id for m in thread_page.messages] == ["b@example.com", "a@example.com"]
+
+    def test_effective_time_filter_and_order_use_the_index(self, db):
+        with closing(sqlite3.connect(db.path)) as conn:
+            plan = " ".join(
+                str(r[3])
+                for r in conn.execute(
+                    "EXPLAIN QUERY PLAN SELECT claimant_id FROM messages m "
+                    "WHERE m.effective_at >= ? AND m.effective_at <= ? "
+                    "ORDER BY m.effective_at DESC, m.claimant_id DESC",
+                    ("2024-02-01", "2024-02-29"),
+                )
+            )
+        assert "idx_messages_effective" in plan

@@ -1271,7 +1271,7 @@ def test_evidence_tool_descriptions_state_the_date_contract(tool, fake_server, s
     """Under a date range the evidence tools select threads by span and
     may show passages from outside the range (docs/architecture.md,
     Message time), so each tool's description must say so and point the
-    model at each passage's own ``sent_at``."""
+    model at each passage's own ``occurred_at`` and ``sent_at``."""
     from src.tools.brief import register_experimental_tools
     from src.tools.intelligence import register_intelligence_tools
 
@@ -1281,5 +1281,5 @@ def test_evidence_tool_descriptions_state_the_date_contract(tool, fake_server, s
     register_intelligence_tools(fake_server, seeded_db, FakeEmbedClient(), FakeInferenceClient())
     register_experimental_tools(fake_server, seeded_db, FakeEmbedClient(), FakeInferenceClient())
     doc = " ".join((fake_server.tools[tool].__doc__ or "").split())
-    assert "span overlaps the range" in doc
-    assert "sent_at" in doc
+    assert "span (its messages' occurred_at, else sent_at) overlaps the range" in doc
+    assert "occurred_at and sent_at" in doc

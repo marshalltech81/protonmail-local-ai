@@ -92,7 +92,10 @@ def _header_lines(m: MessageRecord, *, full: bool) -> list[str]:
     for label, people in (("From", m.from_), ("To", m.to), ("Cc", m.cc)):
         if people:
             headers.append((label, _format_participants(people, people_limit)))
-    headers += [("Sent", m.sent_at), ("Folder", m.folder)]
+    headers.append(("Sent", m.sent_at))
+    if m.occurred_at:
+        headers.append(("Delivered", m.occurred_at))
+    headers.append(("Folder", m.folder))
     if m.in_reply_to:
         headers.append(("In-Reply-To", m.in_reply_to))
     if m.references:
@@ -204,8 +207,9 @@ def register_retrieval_tools(server, db):
 
         Returns:
             Thread metadata, then the page's messages oldest first: its own
-            Message-ID, subject, From / To / Cc, send date (UTC),
-            folder, reply headers, attachment flag, and indexed body
+            Message-ID, subject, From / To / Cc, send date and (when
+            known) delivery date (UTC), folder, reply headers,
+            attachment flag, and indexed body
             (the text after quoted-reply stripping). When no message
             body is indexed yet, the accumulated thread text instead.
         """
@@ -340,7 +344,8 @@ def register_retrieval_tools(server, db):
         Get one message's own headers and indexed body.
 
         Headers come from the message itself: subject, every From /
-        To / Cc entry, send date (UTC), folder, In-Reply-To,
+        To / Cc entry, send date and (when known) delivery date
+        (UTC), folder, In-Reply-To,
         References, and the attachment flag. Reconstructs the message
         body from the per-message chunk store (in document order) — the
         index keeps no raw per-message body, so this is the indexed text
@@ -613,7 +618,9 @@ def register_retrieval_tools(server, db):
             folder: Exact folder name (see list_folders). Without it,
                     messages filed in Trash are left out; pass "Trash"
                     to list them.
-            date_from: ISO 8601 lower bound on the send date, inclusive.
+            date_from: ISO 8601 lower bound, inclusive, on the
+                       message's time: its delivery date (occurred_at),
+                       else its send date (sent_at).
             date_to: ISO 8601 upper bound, inclusive; a date-only value
                      covers the whole day (UTC).
             has_attachments: True for messages with attachments, False
@@ -629,8 +636,9 @@ def register_retrieval_tools(server, db):
 
         Returns:
             The filter interpretation, total_matches, the page's
-            messages (send date, folder, subject, From / To / Cc,
-            Message-ID, Thread ID), and paging state.
+            messages newest first by that time (send and delivery
+            date, folder, subject, From / To / Cc, Message-ID, Thread
+            ID), and paging state.
         """
         args = {
             "sender": sender,
@@ -694,7 +702,8 @@ def register_retrieval_tools(server, db):
 
         for i, m in enumerate(page.messages, first):
             flags = " | attachments" if m.has_attachments else ""
-            lines.append(f"{i}. {m.sent_at} | {m.folder}{flags}")
+            delivered = f" | delivered {m.occurred_at}" if m.occurred_at else ""
+            lines.append(f"{i}. {m.sent_at}{delivered} | {m.folder}{flags}")
             lines.append(f"   Subject: {clip(m.subject, HEADER_CHAR_LIMIT)}")
             for label, people in (("From", m.from_), ("To", m.to), ("Cc", m.cc)):
                 if people:

@@ -187,13 +187,13 @@ _RERANK_SUBJECT_CHARS = 500
 _RERANK_REPLY_SUBJECTS_MAX = 5
 _RERANK_REPLY_SUBJECTS_MAX_CHARS = 500
 _RERANK_SUBJECT_SCAN_ROWS = 50
-# Ordered entirely by ``idx_messages_thread_sent(thread_id, sent_at)``,
+# Ordered entirely by ``idx_messages_thread_effective(thread_id, effective_at)``,
 # whose entries end in the rowid, so the ``LIMIT`` stops the index walk.
 # A tie-breaker the index does not cover (``claimant_id``) would make
 # SQLite sort every message sharing a sender-controlled ``Date`` first.
 _RERANK_SUBJECT_SQL = (
     "SELECT substr(subject, 1, ?) AS subject FROM messages "
-    "WHERE thread_id = ? ORDER BY sent_at, rowid LIMIT ?"
+    "WHERE thread_id = ? ORDER BY effective_at, rowid LIMIT ?"
 )
 
 # Reply / forward prefixes stripped when comparing subjects. Mirrors the
@@ -413,9 +413,11 @@ class ChunkResult:
     attachment cannot be cited.
 
     ``message_date`` is the ``sent_at`` of the chunk's ``messages`` row
-    (chunks store no date of their own, #575), carried so
-    ``get_evidence`` can show *when* a cited passage arrived. Left
-    ``None`` for query paths that do not SELECT it.
+    and ``message_occurred_at`` its ``occurred_at`` (chunks store no
+    date of their own, #575), carried so ``get_evidence`` can show
+    *when* a cited passage was sent and delivered. Left ``None`` for
+    query paths that do not SELECT them (and ``message_occurred_at``
+    for a message with no readable top ``Received:`` header).
 
     ``source_file`` is the raw file of the chunk's message (for an
     attachment chunk, the message that carries the attachment); ``None``
@@ -443,6 +445,7 @@ class ChunkResult:
     attachment_filename: str | None = None
     attachment_mime: str | None = None
     message_date: str | None = None
+    message_occurred_at: str | None = None
     source_file: SourceFile | None = None
     message_sender: str | None = None
 
@@ -472,6 +475,7 @@ def _row_to_chunk_result(r) -> ChunkResult:
         attachment_filename=(r["attachment_filename"] if "attachment_filename" in keys else None),
         attachment_mime=r["attachment_mime"] if "attachment_mime" in keys else None,
         message_date=r["message_date"] if "message_date" in keys else None,
+        message_occurred_at=(r["message_occurred_at"] if "message_occurred_at" in keys else None),
         source_file=_row_to_source(r),
         message_sender=r["message_sender"] if "message_sender" in keys else None,
     )
@@ -548,8 +552,10 @@ class AttachmentResult:
     subject: str
     folder: str
     date_last: datetime
-    # The carrying message's ``sent_at``; None when it has no messages row.
+    # The carrying message's ``sent_at`` and ``occurred_at``; None when
+    # it has no messages row (``occurred_at`` also when it is unknown).
     sent_at: str | None = None
+    occurred_at: str | None = None
     senders: list[str] = field(default_factory=list)
     extraction_status: str | None = None
     text_snippet: str = ""
@@ -580,6 +586,7 @@ def _row_to_attachment_result(r) -> AttachmentResult:
         folder=r["folder"],
         date_last=datetime.fromisoformat(r["date_last"]),
         sent_at=r["sent_at"],
+        occurred_at=r["occurred_at"],
         senders=json.loads(r["senders"]),
         extraction_status=r["extraction_status"],
         text_snippet=r["text_snippet"] or "",
@@ -620,10 +627,18 @@ class MessageRecord:
     to: list[Participant] = field(default_factory=list)
     cc: list[Participant] = field(default_factory=list)
     source_file: SourceFile | None = None
+    # Delivery time from the top ``Received:`` header; None when unknown.
+    occurred_at: str | None = None
+
+    @property
+    def effective_at(self) -> str:
+        """``messages.effective_at``: ``occurred_at``, else ``sent_at``."""
+        return self.occurred_at if self.occurred_at is not None else self.sent_at
 
 
 _MESSAGE_COLUMNS = (
-    "m.message_id, m.claimant_id, m.thread_id, m.subject, m.sent_at, m.folder, "
+    "m.message_id, m.claimant_id, m.thread_id, m.subject, m.sent_at, m.occurred_at, "
+    "m.folder, "
     "m.has_attachments, m.in_reply_to, m.references_json, " + _SOURCE_COLUMNS
 )
 
@@ -635,6 +650,7 @@ def _row_to_message_record(r) -> MessageRecord:
         thread_id=r["thread_id"],
         subject=r["subject"],
         sent_at=r["sent_at"],
+        occurred_at=r["occurred_at"],
         folder=r["folder"],
         has_attachments=bool(r["has_attachments"]),
         in_reply_to=r["in_reply_to"],
@@ -671,13 +687,13 @@ def _message_records(
     offset: int = 0,
     participants: bool = True,
 ) -> list[MessageRecord]:
-    """Messages matching ``where_sql``, oldest first (``claimant_id`` breaks
-    ties), with participants unless ``participants`` is false. ``sent_at``
-    is stored as UTC ISO 8601, so string order is chronological order.
-    ``limit=-1`` means no limit."""
+    """Messages matching ``where_sql``, oldest effective time first
+    (``claimant_id`` breaks ties), with participants unless
+    ``participants`` is false. Dates are stored as UTC ISO 8601, so
+    string order is chronological order. ``limit=-1`` means no limit."""
     rows = conn.execute(
         f"SELECT {_MESSAGE_COLUMNS} FROM messages m WHERE {where_sql} "  # nosec B608
-        "ORDER BY m.sent_at ASC, m.claimant_id ASC LIMIT ? OFFSET ?",
+        "ORDER BY m.effective_at ASC, m.claimant_id ASC LIMIT ? OFFSET ?",
         (*params, limit, offset),
     ).fetchall()
     records = [_row_to_message_record(r) for r in rows]
@@ -966,14 +982,15 @@ def _participant_clause(value: str, roles: tuple[str, ...], params: list) -> str
 
 def _encode_cursor(digest: str, last: MessageRecord, offset: int) -> str:
     payload = json.dumps(
-        {"v": 1, "q": digest, "s": last.sent_at, "m": last.claimant_id, "o": offset}
+        {"v": 2, "q": digest, "s": last.effective_at, "m": last.claimant_id, "o": offset}
     )
     return base64.urlsafe_b64encode(payload.encode()).rstrip(b"=").decode()
 
 
 def _decode_cursor(cursor: str, digest: str) -> tuple[str, str, int]:
-    """Return ``(sent_at, claimant_id, offset)`` of the last row already
-    returned. Raises ``InvalidFilterError`` (a ``ValueError``) on a
+    """Return ``(effective_at, claimant_id, offset)`` of the last row
+    already returned (version 2; version 1 cursors carried ``sent_at``
+    and are rejected). Raises ``InvalidFilterError`` (a ``ValueError``) on a
     malformed cursor or one issued for different predicates (keyset positions only mean something within
     the same filtered ordering)."""
     try:
@@ -983,7 +1000,7 @@ def _decode_cursor(cursor: str, digest: str) -> tuple[str, str, int]:
         raise InvalidFilterError("cursor", _INVALID_CURSOR) from exc
     if not (
         isinstance(data, dict)
-        and data.get("v") == 1
+        and data.get("v") == 2
         and isinstance(data.get("q"), str)
         and isinstance(data.get("s"), str)
         and isinstance(data.get("m"), str)
@@ -1693,10 +1710,11 @@ class Database:
         matches not already surfaced — a finder ("the quote PDF from
         Acme") is better served by the obvious filename hit on top. With
         no ``query`` the index is scanned by the structured filters
-        alone, newest carrying message (``sent_at``) first.
+        alone, newest carrying message (by effective time) first.
 
         Filters: ``content_type`` is an exact MIME match; ``date_from`` /
-        ``date_to`` bound the carrying message's ``sent_at`` (a bare date
+        ``date_to`` bound the carrying message's effective time
+        (``occurred_at``, else ``sent_at``; a bare date
         includes the whole day); ``extracted_only`` keeps only
         attachments whose text extraction succeeded; ``from_addr`` keeps
         only attachments on threads the address sent on (matched against
@@ -1774,7 +1792,8 @@ class Database:
         if date_from_iso is not None or date_to_iso is not None:
             clauses.append(
                 "EXISTS (SELECT 1 FROM messages ms WHERE ms.claimant_id = a.claimant_id "
-                "AND (? IS NULL OR ms.sent_at >= ?) AND (? IS NULL OR ms.sent_at <= ?))"
+                "AND (? IS NULL OR ms.effective_at >= ?) "
+                "AND (? IS NULL OR ms.effective_at <= ?))"
             )
             params += [date_from_iso, date_from_iso, date_to_iso, date_to_iso]
         if extracted_only:
@@ -1800,7 +1819,8 @@ class Database:
             "SELECT a.attachment_id, COALESCE(m.message_id, a.claimant_id) AS message_id, "
             "a.claimant_id, a.thread_id, a.filename, "
             "a.content_type, a.size_bytes, t.subject, t.display_subject, "
-            "t.folder, t.date_last, m.sent_at, t.senders, e.extraction_status, "
+            "t.folder, t.date_last, m.sent_at, m.occurred_at, t.senders, "
+            "e.extraction_status, "
             "substr(e.extracted_text, 1, 240) AS text_snippet, "
             f"{_SOURCE_COLUMNS}, "
             "bm25(attachments_fts) AS score "
@@ -1870,7 +1890,8 @@ class Database:
             "SELECT a.attachment_id, COALESCE(m.message_id, a.claimant_id) AS message_id, "
             "a.claimant_id, a.thread_id, a.filename, "
             "a.content_type, a.size_bytes, t.subject, t.display_subject, "
-            "t.folder, t.date_last, m.sent_at, t.senders, e.extraction_status, "
+            "t.folder, t.date_last, m.sent_at, m.occurred_at, t.senders, "
+            "e.extraction_status, "
             "substr(e.extracted_text, 1, 240) AS text_snippet, "
             f"{_SOURCE_COLUMNS}, "
             "best.score AS score "
@@ -1911,7 +1932,8 @@ class Database:
             "SELECT a.attachment_id, COALESCE(m.message_id, a.claimant_id) AS message_id, "
             "a.claimant_id, a.thread_id, a.filename, "
             "a.content_type, a.size_bytes, t.subject, t.display_subject, "
-            "t.folder, t.date_last, m.sent_at, t.senders, e.extraction_status, "
+            "t.folder, t.date_last, m.sent_at, m.occurred_at, t.senders, "
+            "e.extraction_status, "
             "substr(e.extracted_text, 1, 240) AS text_snippet, "
             f"{_SOURCE_COLUMNS}, "
             "0.0 AS score "
@@ -1920,7 +1942,7 @@ class Database:
             "LEFT JOIN attachment_extractions e ON e.attachment_id = a.attachment_id "
             "LEFT JOIN messages m ON m.claimant_id = a.claimant_id "
             "WHERE " + " AND ".join(where) + " "  # nosec B608
-            "ORDER BY m.sent_at DESC LIMIT ?"
+            "ORDER BY m.effective_at DESC LIMIT ?"
         )
         try:
             rows = self._fetchall(sql, params)
@@ -2486,6 +2508,7 @@ class Database:
                 "SELECT c.chunk_id, COALESCE(m.message_id, c.claimant_id) AS message_id, "
                 "c.claimant_id, c.thread_id, c.chunk_index, "
                 "c.text, c.char_start, c.char_end, c.attachment_id, m.sent_at AS message_date, "
+                "m.occurred_at AS message_occurred_at, "
                 "a.filename AS attachment_filename, "
                 "a.content_type AS attachment_mime, "
                 f"{_SOURCE_COLUMNS}, "
@@ -2572,13 +2595,14 @@ class Database:
         date within the selected tail) order so the LLM prompt reads naturally as a
         timeline. Caller can render them via ``_summarize_context``.
 
-        Ordering: ``m.sent_at DESC, c.chunk_index DESC``, the date of
-        each chunk's ``messages`` row (chunks store no date of their
-        own, so a re-dated message whose chunks were not rewritten
-        still sorts by its current date, #575). ``sent_at`` is the
-        sender-supplied ``Date:`` header, or the indexer's ingest time
-        when that header is missing or unparseable. It is not an IMAP
-        delivery timestamp, but it is stable across reindex,
+        Ordering: ``m.effective_at DESC, c.chunk_index DESC``, the
+        effective time of each chunk's ``messages`` row (chunks store no
+        date of their own, so a re-dated message whose chunks were not
+        rewritten still sorts by its current date, #575). The effective
+        time is ``occurred_at`` (the top ``Received:`` header's date),
+        else ``sent_at`` (the sender-supplied ``Date:`` header, or the
+        indexer's first ingest time when that header is missing or
+        unparseable). It is stable across reindex,
         reap-rebuild, dead-letter retry, and recovery-sweep paths
         (unlike ``chunked_at``, the chunker's wall-clock at insert,
         which this query does not use).
@@ -2605,13 +2629,14 @@ class Database:
                 "NULL AS attachment_filename, "
                 "NULL AS attachment_mime, "
                 "m.sent_at AS message_date, "
+                "m.occurred_at AS message_occurred_at, "
                 f"{_CHUNK_SENDER_SQL}, "
                 "0.0 AS score "
                 "FROM message_chunks c "
                 "LEFT JOIN messages m ON m.claimant_id = c.claimant_id "
                 "WHERE c.thread_id = ? "
                 "AND c.attachment_id IS NULL "
-                "ORDER BY m.sent_at DESC, c.chunk_index DESC "
+                "ORDER BY m.effective_at DESC, c.chunk_index DESC "
                 "LIMIT ?",
                 (thread_id, limit),
             )
@@ -3035,7 +3060,7 @@ class Database:
             # the OR is planned as two index searches merged in a temp
             # B-tree, which sorts every file claiming the Message-ID before
             # ``LIMIT`` applies (#538). The Message-ID lookup walks
-            # ``idx_messages_message_sent`` in listing order and stops at
+            # ``idx_messages_message_effective`` in listing order and stops at
             # the limit; merging in the at most one claimant-ID match (once,
             # should it also match the Message-ID) keeps the OR's result.
             limit = MAX_LISTED_CLAIMANTS + 1
@@ -3046,7 +3071,8 @@ class Database:
                     conn, where_sql, (identifier,), limit=limit, participants=False
                 )
             }
-            records = sorted(merged.values(), key=lambda r: (r.sent_at, r.claimant_id))[:limit]
+            records = sorted(merged.values(), key=lambda r: (r.effective_at, r.claimant_id))
+            records = records[:limit]
             # A claimant ID names one file. When no live message has it but
             # a reaped one did, report that reap even if another message's
             # sender-chosen Message-ID equals the string: before the reap
@@ -3330,7 +3356,7 @@ class Database:
         """Enumerate every message matching all given predicates.
 
         Unlike the search methods this does not rank: the result is the
-        exact matching set, newest ``sent_at`` first (``claimant_id``
+        exact matching set, newest effective time first (``claimant_id``
         breaks ties), with ``total_matches`` counted over the whole set
         and keyset pagination through ``cursor``. Blank predicates are
         ignored.
@@ -3344,7 +3370,8 @@ class Database:
           stripped quoted replies are not searched).
         - ``folder``: exact folder name. Without it, messages filed in a
           ``DEFAULT_EXCLUDED_FOLDERS`` folder are left out.
-        - ``date_from`` / ``date_to``: inclusive ``sent_at`` bounds;
+        - ``date_from`` / ``date_to``: inclusive bounds on the effective
+          time (``occurred_at``, else ``sent_at``);
           date-only values cover the whole UTC day.
         - ``has_attachments``: the message's own attachment flag.
         - ``authority_class``: the class the indexer gave the message's
@@ -3401,10 +3428,10 @@ class Database:
             where.append(f"m.folder NOT IN ({marks})")
             params.extend(DEFAULT_EXCLUDED_FOLDERS)
         if date_from_iso is not None:
-            where.append("m.sent_at >= ?")
+            where.append("m.effective_at >= ?")
             params.append(date_from_iso)
         if date_to_iso is not None:
-            where.append("m.sent_at <= ?")
+            where.append("m.effective_at <= ?")
             params.append(date_to_iso)
         if has_attachments is not None:
             where.append("m.has_attachments = ?")
@@ -3425,11 +3452,11 @@ class Database:
         page_params = list(params)
         offset = 0
         if cursor:
-            last_sent_at, last_id, offset = _decode_cursor(cursor, digest)
-            # Row-value form: SQLite seeks idx_messages_sent to the cursor;
-            # the equivalent OR expansion sorted every earlier row.
-            page_where.append("(m.sent_at, m.claimant_id) < (?, ?)")
-            page_params += [last_sent_at, last_id]
+            last_at, last_id, offset = _decode_cursor(cursor, digest)
+            # Row-value form: SQLite seeks idx_messages_effective to the
+            # cursor; the equivalent OR expansion sorted every earlier row.
+            page_where.append("(m.effective_at, m.claimant_id) < (?, ?)")
+            page_params += [last_at, last_id]
 
         where_sql = " AND ".join(where) or "1"
         page_where_sql = " AND ".join(page_where) or "1"
@@ -3445,7 +3472,7 @@ class Database:
             rows = conn.execute(
                 f"SELECT {_MESSAGE_COLUMNS} FROM messages m WHERE "  # nosec B608
                 + page_where_sql
-                + " ORDER BY m.sent_at DESC, m.claimant_id DESC LIMIT ?",
+                + " ORDER BY m.effective_at DESC, m.claimant_id DESC LIMIT ?",
                 [*page_params, limit + 1],
             ).fetchall()
             has_more = len(rows) > limit
@@ -3537,7 +3564,7 @@ def _normalize_date_range(
 ) -> tuple[str | None, str | None]:
     """``_parse_date_range`` as ISO 8601 strings for SQL pushdown, where
     they are compared lexicographically against stored ``+00:00``
-    timestamps (``date_first`` / ``date_last`` / ``sent_at``).
+    timestamps (``date_first`` / ``date_last`` / ``effective_at``).
     """
     start, end = _parse_date_range(date_from, date_to)
     return (

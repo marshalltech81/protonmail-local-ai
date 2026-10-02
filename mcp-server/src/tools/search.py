@@ -181,7 +181,10 @@ def register_search_tools(
                        not need to call find_contact yourself. If both
                        ``from_addr`` and ``from_name`` are given,
                        ``from_addr`` wins.
-            date_from: ISO 8601 date lower bound e.g. "2024-01-01"
+            date_from: ISO 8601 date lower bound e.g. "2024-01-01".
+                       A thread qualifies when its span (its messages'
+                       delivery dates, else send dates) overlaps the
+                       range.
             date_to: ISO 8601 date upper bound e.g. "2024-12-31"
             has_attachments: True to only show threads with attachments
             participant: Filter to threads where this person appears in
@@ -441,10 +444,11 @@ def register_search_tools(
                        ("jane@example.com", "@example.com"). For a
                        person's name, resolve it via find_contact first.
             date_from: ISO 8601 date lower bound, e.g. "2024-01-01".
-                       A thread qualifies when its span overlaps the
-                       range, and any of its passages may be returned;
-                       check each chunk's sent_at, which can fall
-                       outside the range.
+                       A thread qualifies when its span (its messages'
+                       occurred_at, else sent_at) overlaps the range,
+                       and any of its passages may be returned; check
+                       each chunk's occurred_at and sent_at, which can
+                       fall outside the range.
             date_to: ISO 8601 date upper bound, e.g. "2024-12-31".
             has_attachments: True to restrict to threads with attachments.
             max_threads: Rank threads exactly as ask_mailbox does with
@@ -639,6 +643,7 @@ def register_search_tools(
                             attachment_filename=_clip_optional(c.attachment_filename),
                             attachment_mime=_clip_optional(c.attachment_mime),
                             sent_at=c.message_date,
+                            occurred_at=c.message_occurred_at,
                             char_start=c.char_start,
                             char_end=c.char_end,
                             text=c.text[:_EVIDENCE_CHUNK_CHARS],
@@ -674,6 +679,8 @@ def register_search_tools(
                 )
             for chunk in chunks:
                 msg_date = (chunk.message_date or "")[:10] or "unknown date"
+                if chunk.message_occurred_at:
+                    msg_date += f" (delivered {chunk.message_occurred_at[:10]})"
                 lines.append(
                     f"    --- chunk {chunk.chunk_index} | msg {chunk.claimant_id} | {msg_date}"
                 )
@@ -735,8 +742,9 @@ def register_search_tools(
             from_addr: Restrict to attachments on threads sent by this
                        address or domain ("jane@example.com",
                        "@example.com").
-            date_from: ISO 8601 date lower bound on the send date of
-                       the message carrying the attachment.
+            date_from: ISO 8601 date lower bound on the message
+                       carrying the attachment: its delivery date
+                       (occurred_at), else its send date (sent_at).
             date_to: ISO 8601 date upper bound, likewise.
             extracted_only: True to return only attachments whose text
                             extraction succeeded.
@@ -809,6 +817,7 @@ def register_search_tools(
                     folder=a.folder,
                     date_last=a.date_last,
                     sent_at=a.sent_at,
+                    occurred_at=a.occurred_at,
                     senders=[clip(s, HEADER_CHAR_LIMIT) for s in a.senders[:MAX_LISTED]],
                     sender_count=len(a.senders),
                     extraction_status=a.extraction_status,
@@ -833,6 +842,8 @@ def register_search_tools(
                 f"| Claimant ID: {a.claimant_id}"
             )
             lines.append(f"    Sent: {(a.sent_at or '')[:10] or 'unknown date'}")
+            if a.occurred_at:
+                lines.append(f"    Delivered: {a.occurred_at[:10]}")
             if a.senders:
                 senders = ", ".join(clip(s, HEADER_CHAR_LIMIT) for s in a.senders[:3])
                 lines.append(f"    From: {senders}")

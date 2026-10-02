@@ -1188,6 +1188,7 @@ def _citation(ref: EvidenceRef) -> Citation:
             thread_id=ref.thread_id,
             sender=None,
             sent_at=None,
+            occurred_at=None,
             source="thread",
             attachment_id=None,
             attachment_filename=None,
@@ -1202,6 +1203,7 @@ def _citation(ref: EvidenceRef) -> Citation:
         thread_id=ref.thread_id,
         sender=clip(chunk.message_sender, HEADER_CHAR_LIMIT) if chunk.message_sender else None,
         sent_at=chunk.message_date,
+        occurred_at=chunk.message_occurred_at,
         source="body" if chunk.attachment_id is None else "attachment",
         attachment_id=chunk.attachment_id,
         attachment_filename=(
@@ -2151,10 +2153,12 @@ def register_intelligence_tools(
                        email; resolve via find_contact if you only
                        have a name)
             date_from: Optionally scope to emails after this date (ISO 8601)
-                       A thread qualifies when its span overlaps the
-                       range, and any of its passages may be used;
-                       each citation's sent_at gives that passage's
-                       own date, which can fall outside the range.
+                       A thread qualifies when its span (its
+                       messages' occurred_at, else sent_at) overlaps
+                       the range, and any of its passages may be used;
+                       each citation's occurred_at and sent_at give
+                       that passage's own dates, which can fall
+                       outside the range.
             date_to: Optionally scope to emails before this date (ISO 8601)
             folders: Optionally scope to specific folders. Without it,
                      threads filed only in Trash are left out; name
@@ -2165,7 +2169,8 @@ def register_intelligence_tools(
             A synthesized answer whose statements cite evidence labels
             inline ([E1]), and as structured output the answer, each
             cited label's source (chunk_id, claimant_id, thread_id,
-            sender, sent_at; chunk_id resolves through get_evidence),
+            sender, sent_at, occurred_at; chunk_id resolves through
+            get_evidence),
             the answer's statements with the labels each cites, each
             quote checked against the indexed text of the passages its
             statement cites, any citation problems (unknown labels, no
@@ -2515,11 +2520,12 @@ def register_intelligence_tools(
                      threads filed only in Trash are left out; name
                      "Trash" to include them.
             date_from: Optional date lower bound (ISO 8601).
-                       A thread qualifies when its span overlaps the
-                       range, and any of its passages may be used;
-                       each evidence entry's sent_at gives that
-                       passage's own date, which can fall outside the
-                       range.
+                       A thread qualifies when its span (its
+                       messages' occurred_at, else sent_at) overlaps
+                       the range, and any of its passages may be used;
+                       each evidence entry's occurred_at and sent_at
+                       give that passage's own dates, which can fall
+                       outside the range.
             date_to: Optional date upper bound (ISO 8601)
             limit: Max threads to search through (default: 20)
 
@@ -2528,7 +2534,8 @@ def register_intelligence_tools(
             indexed thread context. Each record's _evidence maps its
             fields to the evidence labels they were taken from; as
             structured output, the records, each cited label's source
-            (chunk_id, claimant_id, thread_id, sender, sent_at), each
+            (chunk_id, claimant_id, thread_id, sender, sent_at,
+            occurred_at), each
             field's label and value check, and any citation problems.
         """
         log_tool_call(

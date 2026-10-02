@@ -66,6 +66,8 @@ def _build_schema(conn: sqlite3.Connection) -> None:
             folder          TEXT NOT NULL,
             subject         TEXT NOT NULL,
             sent_at         TEXT NOT NULL,
+            occurred_at     TEXT,
+            effective_at    TEXT GENERATED ALWAYS AS (COALESCE(occurred_at, sent_at)) VIRTUAL,
             in_reply_to     TEXT,
             references_json TEXT NOT NULL,
             has_attachments INTEGER NOT NULL,
@@ -76,11 +78,11 @@ def _build_schema(conn: sqlite3.Connection) -> None:
 
         -- The indexer's ``messages`` indexes, so query plans match.
         CREATE INDEX idx_messages_message ON messages(message_id, claimant_id);
-        CREATE INDEX idx_messages_message_sent
-            ON messages(message_id, sent_at, claimant_id);
-        CREATE INDEX idx_messages_thread_sent ON messages(thread_id, sent_at);
-        CREATE INDEX idx_messages_folder_sent ON messages(folder, sent_at);
-        CREATE INDEX idx_messages_sent ON messages(sent_at);
+        CREATE INDEX idx_messages_message_effective
+            ON messages(message_id, effective_at, claimant_id);
+        CREATE INDEX idx_messages_thread_effective ON messages(thread_id, effective_at);
+        CREATE INDEX idx_messages_folder_effective ON messages(folder, effective_at);
+        CREATE INDEX idx_messages_effective ON messages(effective_at);
         CREATE INDEX idx_messages_filepath ON messages(filepath);
 
         CREATE TABLE message_participants (
@@ -445,6 +447,7 @@ def _insert_message_record(
     in_reply_to: str | None = None,
     references: list[str] | None = None,
     variant: str = "",
+    occurred_at: str | None = None,
 ) -> None:
     """Insert one ``messages`` row and its ``message_participants``.
 
@@ -455,9 +458,9 @@ def _insert_message_record(
         """
         INSERT INTO messages
             (claimant_id, message_id, thread_id, filepath, folder, subject, sent_at,
-             in_reply_to, references_json, has_attachments, size_bytes,
+             occurred_at, in_reply_to, references_json, has_attachments, size_bytes,
              content_hash, indexed_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 100, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 100, ?, ?)
         """,
         (
             claimant_of(message_id, variant),
@@ -467,6 +470,7 @@ def _insert_message_record(
             folder,
             subject,
             sent_at,
+            occurred_at,
             in_reply_to,
             json.dumps(references or []),
             1 if has_attachments else 0,
@@ -533,6 +537,7 @@ def _insert_message(
     in_reply_to: str | None = None,
     references: list[str] | None = None,
     variant: str = "",
+    occurred_at: str | None = None,
 ) -> None:
     """Insert one message with full per-message control.
 
@@ -541,6 +546,8 @@ def _insert_message(
     row on first use; ``body`` / ``attachment_text`` become a body chunk
     and an attachment chunk respectively. A non-empty ``variant`` makes
     it another claimant of an already inserted ``message_id`` (#217).
+    The thread row, when created here, spans the message's effective
+    time (``occurred_at`` else ``sent_at``), as the indexer derives it.
     """
     cur = conn.cursor()
     cur.execute(
@@ -550,7 +557,7 @@ def _insert_message(
             date_first, date_last, message_ids
         ) VALUES (?, ?, '[]', '[]', ?, ?, ?, '[]')
         """,
-        (thread_id, subject, folder, sent_at, sent_at),
+        (thread_id, subject, folder, occurred_at or sent_at, occurred_at or sent_at),
     )
     # Like the indexer, the thread's ``senders`` JSON records only each
     # message's primary author (``from_addr``, the first From entry, even
@@ -590,6 +597,7 @@ def _insert_message(
         in_reply_to=in_reply_to,
         references=references,
         variant=variant,
+        occurred_at=occurred_at,
     )
     conn.commit()
     if body is not None:
