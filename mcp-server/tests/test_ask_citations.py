@@ -1058,6 +1058,14 @@ class TestOverlongQuotes:
         # Declined, not searched.
         assert calls == 0
 
+    def test_the_output_schema_lists_overlong_quotations(self):
+        # Review round 1: the advertised contract covers what is returned.
+        from src.tools.outputs import AskMailboxOutput
+
+        description = AskMailboxOutput.model_fields["quotes"].description or ""
+        assert "three or more words" in description
+        assert "over 1,000 characters" in description
+
 
 _ACUTE = "́"  # COMBINING ACUTE ACCENT
 _DAKUTEN = "゙"  # COMBINING KATAKANA-HIRAGANA VOICED SOUND MARK
