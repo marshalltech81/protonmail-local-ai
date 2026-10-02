@@ -310,8 +310,63 @@ docker compose logs indexer
 docker compose logs mbsync
 ```
 
-mbsync must connect to Bridge and complete at least one sync before the indexer
-has emails to process.
+The indexer starts while mbsync's first sync is still running, but it cannot
+see that sync's mail yet. mbsync creates every folder owner-only (mode 0700)
+and makes folders and files readable to the indexer, which runs as a
+different user, only when a sync completes. `make status` reports "no
+successful mail sync has been recorded" until then.
+
+### After the first sync completes: restart the indexer
+
+The indexer watches the Maildir for new files, but it cannot add a watch to
+a folder it could not read when the folder appeared, and making the folder
+readable later does not add one (#516). On a fresh install that is every
+folder from the first sync, INBOX included. Until the indexer restarts, mail
+in those folders, both the first sync's and later deliveries, is picked up
+only by the recovery sweep, every `INDEXER_RECOVERY_SWEEP_INTERVAL_SECS`
+(default 30 minutes).
+
+Once `make status` shows a last mail sync time, restart the indexer so it
+indexes the mailbox now and watches every folder:
+
+```bash
+docker compose restart indexer
+```
+
+Or leave it: nothing is lost, the sweep finds the mail, only later. The same
+applies to a folder created in Proton while the stack runs; restarting the
+indexer after it first syncs makes its deliveries real time again.
+
+## `make up` fails — mbsync is unhealthy
+
+`make up` waits for mbsync to report healthy before it starts the indexer,
+and for the indexer before the MCP server. If it fails with
+"dependency failed to start: container mbsync is unhealthy", the indexer
+and MCP server were never started, and a later recovery of mbsync does not
+start them.
+
+mbsync is healthy while its sync loop is alive: its config and the Bridge
+cert are in place, and either a sync attempt started or ended within three
+`SYNC_INTERVAL`s (plus 30 s) or an `mbsync` process or the permission repair
+walk that follows it (`find`) is running. A long first
+sync is therefore healthy; it is not a reason for this failure. (Images built
+before this behaviour required a completed sync and failed any first sync
+longer than about three and a half minutes; rebuild with `make build`.)
+
+What remains unhealthy is mbsync that has not started syncing or has
+stopped: Bridge IMAP not reachable yet, cert extraction or the cert pin
+refused, or the loop stuck outside a sync. Check why:
+
+```bash
+docker compose logs mbsync --tail 50
+docker inspect mbsync --format='{{json .State.Health}}'
+```
+
+Fix the cause the log names (see "mbsync fails to connect" and the cert pin
+sections below). Repeated sync failures make the container exit and restart
+after five consecutive failures, so `docker compose ps` shows the restarts.
+Once mbsync is healthy, run `make up` again: Compose leaves the running
+services as they are and starts the indexer and then the MCP server.
 
 ## Indexer refuses to start — "wipe the sqlite-volume"
 

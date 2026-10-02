@@ -7,7 +7,10 @@ readonly SYNC_INTERVAL="${SYNC_INTERVAL:-60}"
 readonly RUNTIME_DIR="/tmp/mbsync"
 readonly CONFIG_FILE="${RUNTIME_DIR}/mbsyncrc"
 readonly CERT_FILE="${RUNTIME_DIR}/bridge-cert.pem"
-readonly HEALTH_FILE="${RUNTIME_DIR}/last-successful-sync"
+# Liveness heartbeat for healthcheck.sh, touched around every sync attempt
+# whatever its outcome (see mark_sync_activity). Freshness is the separate
+# success stamp below.
+readonly SYNC_ACTIVITY_FILE="${RUNTIME_DIR}/last-sync-activity"
 readonly BRIDGE_PASS_FILE="/run/secrets/bridge_pass"
 # State directory persists the pinned Bridge cert fingerprint across
 # container restarts. The directory is backed by a named volume so it
@@ -275,16 +278,30 @@ install_signal_handlers() {
     trap 'stop_on_signal INT 130' INT
 }
 
+mark_sync_activity() {
+    # Liveness, not success: healthcheck.sh treats the loop as alive while
+    # this is fresh or an mbsync is running, so a first sync that runs for
+    # hours stays healthy without a success stamp (#277).
+    touch "$SYNC_ACTIVITY_FILE"
+}
+
 run_sync() {
     # Fails when mbsync or the permission repair fails: a sync whose mail
     # the indexer cannot read must not be recorded as successful. The
     # repair runs even after a failed mbsync, for what it did deliver.
+    #
+    # Activity is marked before mbsync, again once it ends (the repair
+    # walks the whole Maildir with no mbsync running, so the heartbeat
+    # must be fresh for it), and after the attempt, whatever its outcome.
     local rc=0
+    mark_sync_activity
     run_child mbsync -c "$CONFIG_FILE" -a 2>&1 || rc=$?
+    mark_sync_activity
     if ! relax_new_maildir_perms; then
         echo ">>> ERROR: could not make new Maildir entries readable to the indexer." >&2
-        return 1
+        rc=1
     fi
+    mark_sync_activity
     return "$rc"
 }
 
@@ -302,7 +319,6 @@ record_successful_sync() {
         "$completed_at" "$SYNC_INTERVAL" >"$tmp"
     chmod 644 "$tmp"
     mv -f "$tmp" "$SYNC_STAMP_FILE"
-    touch "$HEALTH_FILE"
 }
 
 # =============================================================================
