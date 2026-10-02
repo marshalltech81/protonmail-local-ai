@@ -217,3 +217,7 @@ volumes:
       # ruleid: compose-writable-host-bind-mount
       o: bind
       device: /srv/data
+
+# ruleid: compose-include
+include:
+  - other-compose.yml

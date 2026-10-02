@@ -298,6 +298,27 @@ services:
 EOF
 }
 
+# docker compose config resolves a top-level include (#577), so the merged
+# check sees the services an included fragment brings in.
+merged_hardening_rejects_an_included_service() {
+    cat >"$WORK/fragment.yml" <<'EOF'
+services:
+  rogue:
+    image: example.invalid/rogue:1
+    ports: ["8080:80"]
+    networks: [bridge-net]
+networks:
+  bridge-net:
+    driver: bridge
+EOF
+    expect_overlay_rejected include \
+        "rogue: read_only is not true" "rogue: cap_drop lacks ALL" \
+        "rogue: publishes a port" "rogue: joins bridge-net" <<EOF
+include:
+  - $WORK/fragment.yml
+EOF
+}
+
 default_mode_runs_the_bridge_container() {
     render "$BASE"
     expect '.services | keys == ["indexer", "mbsync", "mcp-server", "protonmail-bridge"]' || return 1
@@ -402,6 +423,8 @@ check "merged hardening rejects !override of a read-only volume" \
 check "merged hardening rejects !override on ports and networks" \
     merged_hardening_rejects_override_ports_and_networks
 check "merged hardening rejects the forbidden settings" merged_hardening_rejects_forbidden_settings
+check "merged hardening rejects a service a top-level include brings in" \
+    merged_hardening_rejects_an_included_service
 
 if ((FAILURES > 0)); then
     printf '%d test(s) failed\n' "$FAILURES" >&2

@@ -356,6 +356,20 @@ rules:
         - "docker-compose*.yaml"
     pattern: "extends: $BASE"
 
+  - id: compose-include
+    languages: [yaml]
+    severity: ERROR
+    message: >-
+      A top-level `include` imports another file's services, networks and
+      volumes. The fragment is not named docker-compose*.yml, so these
+      rules never scan it and the Compose path filters never trigger on
+      it. Put the services in a docker-compose*.yml overlay instead.
+    paths:
+      include:
+        - "docker-compose*.yml"
+        - "docker-compose*.yaml"
+    pattern: "include: $FILES"
+
   - id: compose-bridge-net-member
     languages: [yaml]
     severity: ERROR
