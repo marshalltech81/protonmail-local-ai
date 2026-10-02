@@ -66,6 +66,10 @@ _ROW_COST = 64
 # unless an operator raises it past this.
 _MAX_TEXT_CHARS = 10_000_000
 
+# A sheet header's characters besides its title: ``[Sheet: ]`` and the
+# blank line before it.
+_HEADER_OVERHEAD = len("[Sheet: ]") + 2
+
 # A tab or line break inside a value would read as a column or row
 # boundary.
 _CELL_SEPARATORS = str.maketrans("\t\r\n", "   ")
@@ -99,8 +103,14 @@ def _serialize(workbook: openpyxl.Workbook) -> str:
     for sheet in workbook.worksheets:
         # Read-only mode trusts the dimension record and stops at it.
         sheet.reset_dimensions()
+        # Charge the header, and the blank line before it, before
+        # copying the title (#435). A header that leaves no budget for a
+        # value would drop its sheet and end the walk anyway, so stop
+        # here rather than copy a title of any length only to drop it.
+        chars_left -= len(sheet.title) + _HEADER_OVERHEAD
+        if chars_left <= 0:
+            break
         header = f"[Sheet: {sheet.title}]"
-        chars_left -= len(header) + 2  # and the blank line before it
         sheet_lines = [header]
         for row in sheet.iter_rows(values_only=True):
             expanded_cells += len(row) + _ROW_COST
