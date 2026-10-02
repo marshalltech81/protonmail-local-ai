@@ -436,8 +436,10 @@ for spec in \
 done
 
 # Indexer booleans: an unrecognised value stops the indexer at startup
-# rather than reading as false (#481).
+# rather than reading as false (#481). INDEXER_DELETION_ENABLED (the
+# retention mode) uses the same vocabulary.
 for name in \
+    INDEXER_DELETION_ENABLED \
     INDEXER_ATTACHMENT_EXTRACTION_ENABLED \
     INDEXER_OCR_ENABLED \
     INDEXER_DELETION_FORCE \
