@@ -62,6 +62,21 @@ json_breaking_token_fails_without_echoing_it() {
     ! grep -F 'marker-9b7c' "$WORK/err" >/dev/null
 }
 
+# #589: '=' is b64token padding, so only a trailing run of it is sent.
+inner_equals_sign_fails_without_echoing_it() {
+    setup 'synthetic=marker-4a8d'
+    run_helper
+    [[ "$STATUS" -eq 1 ]]
+    [[ ! -s "$WORK/out" ]]
+    if grep -F 'marker-4a8d' "$WORK/err" >/dev/null; then
+        return 1
+    fi
+    setup 'synthetic-token-4a8d=='
+    run_helper
+    [[ "$STATUS" -eq 0 ]]
+    [[ "$(<"$WORK/out")" == '{"Authorization": "Bearer synthetic-token-4a8d=="}' ]]
+}
+
 # Runs each case in a subshell with errexit on, outside any condition.
 check() {
     local description="$1" status
@@ -88,6 +103,7 @@ check "a missing token file fails" missing_token_file_fails
 check "an empty token fails" empty_token_fails
 check "a token that would break the JSON fails without echoing it" \
     json_breaking_token_fails_without_echoing_it
+check "an '=' before the end fails without echoing it" inner_equals_sign_fails_without_echoing_it
 
 if ((FAILURES > 0)); then
     printf '%d test(s) failed\n' "$FAILURES" >&2

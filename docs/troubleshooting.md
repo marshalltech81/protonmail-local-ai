@@ -755,6 +755,15 @@ Create a token with `make init-secrets` (when the file does not exist)
 or `(umask 077; openssl rand -hex 32 > .secrets/mcp_auth_token.txt)`,
 run `make up`, and configure each client with it.
 
+## mcp-server exits with "The MCP bearer token must be at least 32 characters"
+
+The token in `.secrets/mcp_auth_token.txt` is shorter than 32
+characters or holds a character outside `A-Z a-z 0-9 - . _ ~ + /` (with
+`=` allowed only at the end), so MCP clients could not send it as a
+bearer token. `make validate-env` reports the same. Replace it with
+`(umask 077; openssl rand -hex 32 > .secrets/mcp_auth_token.txt)`, run
+`make up`, and update each client.
+
 ## mcp-server exits with "MCP_TRANSPORT=sse was removed"
 
 The `.env` (or the shell you run `make` from) still sets
