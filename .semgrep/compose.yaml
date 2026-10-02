@@ -17,6 +17,9 @@
 #     where it names a `build` or an `image`. An overlay that only
 #     adjusts an existing service is not asked to repeat them, but it
 #     cannot set any of the forbidden values above.
+# What a file-by-file scan cannot see, such as an overlay's `!reset` or
+# `!override` clearing inherited hardening, scripts/tests/compose_test.sh
+# checks on the merged config of each overlay combination (#580).
 #
 # Tests: .semgrep/compose.test.yml (run `semgrep test .semgrep`).
 rules:

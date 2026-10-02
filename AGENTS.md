@@ -789,7 +789,7 @@ Notes:
 - database changes should verify schema creation, migration, and upsert/query behavior
 - MCP search changes should verify hybrid/RRF behavior where applicable
 - mbsync entrypoint changes should update `mbsync/tests/entrypoint_test.sh`, which loads the real functions with external commands mocked; changes to mbsync's TLS or connection settings should also pass `make test-mbsync-tls` (the shipped image against a synthetic STARTTLS server)
-- Compose changes that touch service selection, dependencies, hardening or ports should keep `scripts/tests/compose_test.sh` passing for both Bridge modes
+- Compose changes that touch service selection, dependencies, hardening or ports should keep `scripts/tests/compose_test.sh` passing for both Bridge modes; it also checks the required hardening on the merged config of every overlay combination the Makefile uses, so a new overlay or combination is added to its list
 - Bridge entrypoint changes should update `bridge/tests/entrypoint_test.sh`, which does the same with a synthetic GPG keyring and pass store
 - indexing, chunking, embedding-storage, or retrieval changes should pass `make baseline`; if ranking changes on purpose, regenerate the snapshot with `make baseline UPDATE=1` and explain the snapshot diff in the PR
 - before opening PRs that touch TLS, auth, logging, subprocess execution, or credential handling, run `bandit -r src/` and resolve any findings rated medium or higher (a CI job in `.github/workflows/security.yml` enforces this at medium+ severity for both services)
