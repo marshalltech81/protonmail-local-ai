@@ -10,12 +10,21 @@ on:
 permissions:
   contents: read
 
+# Cancel a pull request's in-progress run when a newer push supersedes it.
+# Every other event gets its own group (the run ID), so runs on main,
+# scheduled runs and manual dispatches never queue behind or cancel one
+# another.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   compose-config:
     name: docker compose config
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Seed local config for compose validation
         run: |
@@ -29,9 +38,10 @@ jobs:
   build-images:
     name: docker compose build
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     needs: compose-config
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Seed local config for image build
         run: |

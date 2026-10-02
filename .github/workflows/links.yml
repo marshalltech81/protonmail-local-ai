@@ -26,15 +26,24 @@ on:
 permissions:
   contents: read
 
+# Cancel a pull request's in-progress run when a newer push supersedes it.
+# Every other event gets its own group (the run ID), so runs on main,
+# scheduled runs and manual dispatches never queue behind or cancel one
+# another.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   lychee:
     name: lychee
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Check repository links
-        uses: lycheeverse/lychee-action@v2.9.0
+        uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8 # v2.9.0
         with:
           args: >-
             --config ./lychee.toml

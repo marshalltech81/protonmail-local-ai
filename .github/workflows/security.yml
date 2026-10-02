@@ -1,5 +1,11 @@
 name: Security Scan
 
+# The path filters list only files a scanner here reads: Trivy's vuln
+# scan reads the uv lockfiles and pyproject.toml, its misconfig scan
+# reads the Dockerfiles (it has no checks for Compose files, shell
+# scripts or workflow YAML), and Bandit reads indexer/src and
+# mcp-server/src. Shell scripts are linted by shellcheck in lint.yml,
+# and Compose is validated in docker.yml.
 on:
   push:
     branches: [main]
@@ -26,21 +32,30 @@ on:
 permissions:
   contents: read
 
+# Cancel a pull request's in-progress run when a newer push supersedes it.
+# Every other event gets its own group (the run ID), so runs on main,
+# scheduled runs and manual dispatches never queue behind or cancel one
+# another.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   trivy-deps:
     name: Trivy dependency scan
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install Trivy
-        uses: aquasecurity/setup-trivy@v0.3.1
+        uses: aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567 # v0.3.1
         with:
           version: v0.69.3
           cache: true
 
       - name: Scan indexer dependencies
-        uses: aquasecurity/trivy-action@v0.36.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           skip-setup-trivy: true
           scan-type: fs
@@ -51,7 +66,7 @@ jobs:
           severity: CRITICAL,HIGH
 
       - name: Scan mcp-server dependencies
-        uses: aquasecurity/trivy-action@v0.36.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           skip-setup-trivy: true
           scan-type: fs
@@ -64,10 +79,11 @@ jobs:
   bandit:
     name: Bandit static analysis
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version-file: ".python-version"
 
@@ -83,17 +99,18 @@ jobs:
   trivy-misconfig:
     name: Trivy misconfiguration scan
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install Trivy
-        uses: aquasecurity/setup-trivy@v0.3.1
+        uses: aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567 # v0.3.1
         with:
           version: v0.69.3
           cache: true
 
       - name: Scan repository configuration
-        uses: aquasecurity/trivy-action@v0.36.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           skip-setup-trivy: true
           scan-type: fs
