@@ -5,7 +5,9 @@
 protonmail-local-ai is a containerised, privacy-first AI search and
 intelligence layer for ProtonMail. The four containers (Bridge, mbsync,
 indexer, mcp-server) all run locally; storage, sync, and indexing
-never leave the host. Embedding and inference are operator-supplied
+never leave the host. In the optional macOS Bridge mode the official
+Bridge app on the Mac replaces the Bridge container (see
+[Bridge Modes](#bridge-modes)). Embedding and inference are operator-supplied
 external dependencies — the project itself ships no model-serving
 components, and whether they run on the host (LM Studio, vLLM,
 `mlx_lm.server`, etc.) or against a remote provider is a deployment
@@ -109,7 +111,7 @@ Claude Desktop (host machine)
 
 | Container / process | Reads from | Writes to | Exposes |
 |---|---|---|---|
-| `protonmail-bridge` | ProtonMail Cloud | `bridge-data` vol | IMAP 1143, SMTP 1025 (internal) |
+| `protonmail-bridge` (default mode; the macOS app in [macOS Bridge mode](#bridge-modes)) | ProtonMail Cloud | `bridge-data` vol | IMAP 1143, SMTP 1025 (internal) |
 | `mbsync` | Bridge IMAP | `maildir-volume` | nothing |
 | `indexer` | `maildir-volume`, embedder | `sqlite-volume` | nothing |
 | `mcp-server` | `sqlite-volume`, embedder, inference provider, optional reranker | nothing | HTTP 3000 (localhost only) |
@@ -150,6 +152,64 @@ incompatible with any remote provider — the overlay is meant for the
 
 The default stack exposes only `127.0.0.1:3000` for the MCP server.
 No container is reachable from outside the machine.
+
+## Bridge Modes
+
+mbsync syncs from one of two Bridges:
+
+- **Bridge container (default).** The source-built `protonmail-bridge`
+  service on `bridge-net`. mbsync waits for its health check, connects
+  to `protonmail-bridge:1143`, and checks the certificate against that
+  name, which the build's TLS patch adds to Bridge's certificate.
+- **Proton Mail Bridge app on macOS (optional, #497).**
+  `docker-compose.macos-bridge.yml` gives `protonmail-bridge` a profile
+  that is never activated (so it is neither built nor started), removes
+  mbsync's dependency on it, and points mbsync at
+  `host.docker.internal:${BRIDGE_IMAP_PORT:-1143}`, where OrbStack
+  forwards to the app on the Mac's loopback interface. mbsync stays on
+  `bridge-net` with its hardening unchanged; the indexer still waits
+  for mbsync's health check. No port is published and no host
+  networking is used. Login and updates happen in the app. Setup and
+  migration: [setup.md](setup.md#macos-bridge-mode-optional).
+
+The app's certificate is upstream Bridge's: self-signed, `CA:TRUE`,
+common name and only subject alternative name `127.0.0.1`. isync 1.4.4
+(the version in the mbsync image) loads `CertificateFile` like this
+(`src/socket.c`): a non-CA certificate in the file is trusted as the
+exact server certificate, whatever its name, but a CA certificate goes
+into the verification store, after which the chain must verify and the
+host name in `Host` must match a DNS subject alternative name or the
+common name. Bridge's certificate is a CA certificate, so with
+`Host host.docker.internal` the connection is refused with `certificate
+owner does not match hostname`. Overriding `localhost` with
+`extra_hosts` would not help either: the certificate has no `localhost`
+name, and only the literal `127.0.0.1` matches.
+
+The overlay therefore sets `BRIDGE_CERT_HOST=127.0.0.1`, and the
+entrypoint renders
+
+```text
+Host 127.0.0.1
+Tunnel "exec socat - TCP:host.docker.internal:<port>"
+SSLType STARTTLS
+CertificateFile /tmp/mbsync/bridge-cert.pem
+```
+
+With `Tunnel`, isync runs the command instead of opening a socket to
+`Host`, and keeps `Host` only for the certificate check. STARTTLS and
+verification run end to end between mbsync and the app; `socat` only
+relays bytes. (`nc` cannot be the relay: isync waits for the server to
+close the connection after `LOGOUT`, and `nc` does not pass that close
+on unless Bridge sends a TLS close_notify.) The trust anchors are
+unchanged: `CertificateFile` holds only the certificate the entrypoint
+extracted and checked against the persistent pin (isync also loads the
+system CA store in both modes, and public CAs do not issue certificates
+for `127.0.0.1`), so a different
+certificate at that address is refused twice, by the pin at startup and
+by isync's chain check on every sync. `mbsync/tests/tls_check.sh` (`make
+test-mbsync-tls`, run in CI) exercises both with a synthetic server
+whose certificate has this shape, along with recovery from a Bridge
+that is down at startup.
 
 ### Operator-supplied providers
 

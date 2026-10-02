@@ -21,7 +21,7 @@ host-side server you install yourself.
 
 | Component | Role |
 |---|---|
-| ProtonBridge | Decrypts ProtonMail, exposes local IMAP/SMTP |
+| ProtonBridge | Decrypts ProtonMail, exposes local IMAP/SMTP. Built from source in a container by default; the optional [macOS Bridge mode](docs/setup.md#macos-bridge-mode-optional) uses the official Bridge app on your Mac instead |
 | mbsync | Incremental pull-only sync to local Maildir, every `SYNC_INTERVAL` seconds |
 | Indexer | Parses threads, generates embeddings, builds SQLite index |
 | Embedder (operator-supplied) | OpenAI-compatible `/v1/embeddings` returning 4096-dim vectors (the schema's fixed width — e.g. Qwen3-Embedding-8B). Point `EMBED_BASE_URL` at a remote provider (DeepInfra, OpenRouter) or a host-side server you install yourself (LM Studio, vLLM, TEI, `mlx_lm.server`) |
@@ -272,6 +272,8 @@ with `BRIDGE_CERT_PIN_ROTATE=false` so pin enforcement is back on.
 make build        # Build all Docker images
 make validate-env # Check .env values and secret permissions before startup
 make up           # Start the full stack
+make build-macos-bridge  # Build for macOS Bridge mode (no Bridge container)
+make up-macos-bridge     # Start against the Bridge app on your Mac
 make down         # Stop the full stack
 make logs         # Tail all logs
 make first-run    # One-time Bridge login

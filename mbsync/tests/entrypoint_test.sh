@@ -820,6 +820,171 @@ refused_probes_fail_after_the_attempts_with_nc_stderr() {
     [[ "$err" == *"synthetic-refused"* ]] || return 1
 }
 
+# --- Bridge endpoint: container default and macOS app (#497) ----------------
+#
+# Without BRIDGE_CERT_HOST mbsync connects to BRIDGE_HOST and checks the
+# certificate against that name. With it (the macOS overlay), the name
+# checked is BRIDGE_CERT_HOST and the connection to BRIDGE_HOST goes
+# through a tunnel. Certificate extraction and the pin always use the
+# address mbsync actually connects to.
+
+TEMPLATE="$(dirname "$ENTRYPOINT")/mbsyncrc.template"
+readonly TEMPLATE
+
+# shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
+endpoint_setup() {
+    TEMPLATE_FILE="$TEMPLATE"
+    CONFIG_FILE="$WORK/mbsyncrc-$1"
+    BRIDGE_HOST="protonmail-bridge"
+    BRIDGE_IMAP_PORT=1143
+    BRIDGE_CERT_HOST=""
+    export BRIDGE_USER="synthetic@example.com"
+    load validate_bridge_endpoint render_mbsync_config
+}
+
+# The settings either mode must keep: STARTTLS with the extracted
+# certificate, pull-only, no expunge, the folder exclusions.
+config_keeps_sync_safety() {
+    grep -qx 'SSLType STARTTLS' "$CONFIG_FILE" || return 1
+    grep -qx 'CertificateFile /tmp/mbsync/bridge-cert.pem' "$CONFIG_FILE" || return 1
+    grep -qx 'User synthetic@example.com' "$CONFIG_FILE" || return 1
+    grep -qx 'PassCmd "cat /run/secrets/bridge_pass"' "$CONFIG_FILE" || return 1
+    grep -qx 'Sync Pull' "$CONFIG_FILE" || return 1
+    grep -qx 'Expunge None' "$CONFIG_FILE" || return 1
+    grep -qx 'Patterns \* !"All Mail" !"Labels/\*"' "$CONFIG_FILE" || return 1
+    [[ "$(stat -c %a "$CONFIG_FILE" 2>/dev/null || stat -f %Lp "$CONFIG_FILE")" == "600" ]] || return 1
+}
+
+default_config_connects_directly_to_the_bridge_container() {
+    endpoint_setup default
+    render_mbsync_config
+    grep -qx 'Host protonmail-bridge' "$CONFIG_FILE" || return 1
+    grep -qx 'Port 1143' "$CONFIG_FILE" || return 1
+    if grep -q '^Tunnel' "$CONFIG_FILE"; then
+        echo "the container mode must not tunnel"
+        return 1
+    fi
+    config_keeps_sync_safety
+}
+
+# shellcheck disable=SC2034 # used by the entrypoint functions loaded with eval
+cert_host_config_checks_that_name_and_tunnels_to_the_host() {
+    endpoint_setup tunnel
+    BRIDGE_HOST="host.docker.internal"
+    BRIDGE_IMAP_PORT=1144
+    BRIDGE_CERT_HOST="127.0.0.1"
+    render_mbsync_config
+    grep -qx 'Host 127.0.0.1' "$CONFIG_FILE" || return 1
+    grep -qx 'Tunnel "exec socat - TCP:host.docker.internal:1144"' "$CONFIG_FILE" || return 1
+    if grep -q '^Port' "$CONFIG_FILE"; then
+        echo "Port is ignored with a Tunnel and must not suggest otherwise"
+        return 1
+    fi
+    config_keeps_sync_safety
+}
+
+valid_endpoints_are_accepted() {
+    endpoint_setup valid
+    validate_bridge_endpoint || return 1
+    BRIDGE_HOST="host.docker.internal" BRIDGE_IMAP_PORT=65535 BRIDGE_CERT_HOST="127.0.0.1" \
+        validate_bridge_endpoint
+}
+
+# The values are written into mbsyncrc and, with a tunnel, into the shell
+# command isync runs, so anything but a plain name, address or port is
+# refused before either happens.
+# shellcheck disable=SC2034 # used by the entrypoint functions loaded with eval
+invalid_endpoints_are_refused() {
+    local value
+    endpoint_setup invalid
+    # shellcheck disable=SC2016 # a literal command substitution
+    for value in "" "bridge;id" 'host$(id)' "a b" "-bridge" "host:1143" $'host\nPort 1' "[::1]"; do
+        if BRIDGE_HOST="$value" validate_bridge_endpoint 2>/dev/null; then
+            printf 'BRIDGE_HOST %q accepted\n' "$value"
+            return 1
+        fi
+        if BRIDGE_CERT_HOST="$value" validate_bridge_endpoint 2>/dev/null && [[ -n "$value" ]]; then
+            printf 'BRIDGE_CERT_HOST %q accepted\n' "$value"
+            return 1
+        fi
+    done
+    for value in "" 0 01143 65536 99999 "1143;id" "11 43"; do
+        if BRIDGE_IMAP_PORT="$value" validate_bridge_endpoint 2>/dev/null; then
+            printf 'BRIDGE_IMAP_PORT %q accepted\n' "$value"
+            return 1
+        fi
+    done
+}
+
+# Real openssl for everything but s_client, which serves the certificate
+# named by the file $WORK/served-cert-$1 and logs its arguments.
+# shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
+extract_setup() {
+    local real_openssl
+    real_openssl="$(command -v openssl)"
+    RUNTIME_DIR="$WORK/runtime-extract-$1"
+    CERT_FILE="$RUNTIME_DIR/bridge-cert.pem"
+    STATE_DIR="$WORK/state-extract-$1"
+    PIN_FILE="$STATE_DIR/bridge-cert.fingerprint"
+    CERT_EXTRACT_TIMEOUT_SECONDS=10
+    BRIDGE_CERT_PIN_ROTATE="false"
+    BRIDGE_HOST="host.docker.internal"
+    BRIDGE_IMAP_PORT=1144
+    BRIDGE_CERT_HOST="127.0.0.1"
+    S_CLIENT_CALLS="$WORK/s-client-calls-$1"
+    SERVED="$WORK/served-cert-$1"
+    mkdir -p "$RUNTIME_DIR" "$STATE_DIR" "$WORK/bin-extract-$1"
+    : >"$S_CLIENT_CALLS"
+    # shellcheck disable=SC2016 # the mock's own expansions
+    printf '#!/bin/bash\nif [[ "$1" == s_client ]]; then\n  printf "%%s\\n" "$*" >>"%s"\n  cat "$(cat "%s")"\n  exit 0\nfi\nexec "%s" "$@"\n' \
+        "$S_CLIENT_CALLS" "$SERVED" "$real_openssl" >"$WORK/bin-extract-$1/openssl"
+    chmod 755 "$WORK/bin-extract-$1/openssl"
+    PATH="$WORK/bin-extract-$1:$PATH"
+    load cert_fingerprint write_pin verify_cert_pin extract_bridge_cert
+}
+
+# Synthetic certificates shaped like the macOS app's: self-signed, CN
+# 127.0.0.1. Generated once for all cases.
+make_synthetic_cert() {
+    openssl req -x509 -newkey rsa:2048 -nodes -days 2 -subj "/CN=127.0.0.1" \
+        -keyout "$WORK/$1.key" -out "$WORK/$1.pem" >/dev/null 2>&1
+}
+make_synthetic_cert cert-a
+make_synthetic_cert cert-b
+
+extraction_reaches_the_host_and_pins_its_cert() {
+    extract_setup pin
+    printf '%s\n' "$WORK/cert-a.pem" >"$SERVED"
+    extract_bridge_cert
+    grep -q -- '-connect host.docker.internal:1144 -starttls imap' "$S_CLIENT_CALLS" || return 1
+    if grep -q '127.0.0.1' "$S_CLIENT_CALLS"; then
+        echo "the certificate name is not an address to connect to"
+        return 1
+    fi
+    cmp -s "$CERT_FILE" "$WORK/cert-a.pem" || return 1
+    [[ "$(cat "$PIN_FILE")" == "$(cert_fingerprint "$WORK/cert-a.pem")" ]] || return 1
+    # A restart against the same app is accepted.
+    rm -f "$CERT_FILE"
+    extract_bridge_cert
+    cmp -s "$CERT_FILE" "$WORK/cert-a.pem" || return 1
+}
+
+a_different_cert_at_the_host_is_refused() {
+    local pinned
+    extract_setup refuse
+    printf '%s\n' "$WORK/cert-a.pem" >"$SERVED"
+    extract_bridge_cert
+    pinned="$(cat "$PIN_FILE")"
+    rm -f "$CERT_FILE"
+    printf '%s\n' "$WORK/cert-b.pem" >"$SERVED"
+    if extract_bridge_cert 2>/dev/null; then
+        echo "a different certificate at the pinned host was accepted"
+        return 1
+    fi
+    [[ ! -e "$CERT_FILE" ]] || return 1
+    [[ "$(cat "$PIN_FILE")" == "$pinned" ]] || return 1
+}
+
 # --- shutdown signals reach the active child (#280) -------------------------
 #
 # The entrypoint is the only process Tini signals, so it must pass a stop on
@@ -929,6 +1094,15 @@ check "hung probes are cut off by the per-attempt bound" \
 check "a reachable Bridge returns after one probe" reachable_bridge_returns_after_one_probe
 check "refused probes fail after the attempts with nc's stderr" \
     refused_probes_fail_after_the_attempts_with_nc_stderr
+check "the default config connects directly to the Bridge container" \
+    default_config_connects_directly_to_the_bridge_container
+check "a cert host config checks that name and tunnels to the host" \
+    cert_host_config_checks_that_name_and_tunnels_to_the_host
+check "valid Bridge endpoints are accepted" valid_endpoints_are_accepted
+check "invalid Bridge endpoints are refused" invalid_endpoints_are_refused
+check "extraction reaches the host and pins its cert; a restart is accepted" \
+    extraction_reaches_the_host_and_pins_its_cert
+check "a different cert at the pinned host is refused" a_different_cert_at_the_host_is_refused
 check "first boot pins the fingerprint (mode 600)" first_boot_pins_the_fingerprint
 check "first boot fails closed when the pin cannot be saved" \
     first_boot_fails_closed_when_the_pin_cannot_be_saved
