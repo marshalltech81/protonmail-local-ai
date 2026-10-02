@@ -286,6 +286,8 @@ Secrets are a hard boundary.
 
 - `.env`
 - `.secrets/bridge_pass.txt`
+- `.secrets/mcp_auth_token.txt` and `.secrets/mcp_client_headers.txt`
+  (the MCP bearer token and the `mcp-remote` header file holding it)
 - `mbsync/bridge-cert.pem`
 - any `.pem`, `.key`, `.p12`, or `.pfx` file
 - `config/authority.toml` (the operator's source-authority rules: real
@@ -311,6 +313,13 @@ Secrets are a hard boundary.
 - Which `*_MODE` values exist, and which `*_BASE_URL` / `*_MODEL` /
   `*_API_KEY` each requires, is defined once in the Architecture
   Summary above; keep it there rather than restating it here.
+- The MCP bearer token is the Docker secret
+  `.secrets/mcp_auth_token.txt` (mode 600, always non-empty;
+  `make init-secrets` generates it). `validate-env.sh` rejects a missing,
+  empty or non-600 file and an `MCP_AUTH_TOKEN` in `.env`; the
+  `MCP_AUTH_TOKEN` env fallback is for running the server outside a
+  container only, never the Compose path. Never log the token or the
+  `Authorization` header.
 
 ### Commit hygiene
 
@@ -682,6 +691,17 @@ Notes:
 - the Streamable HTTP app must be built with an explicit
   `session_idle_timeout` (`MCP_SESSION_IDLE_TIMEOUT_SECS`); fastmcp's
   default never ends an idle session
+- `/mcp` requires the static bearer token (owner, 2026-10-02):
+  `_build_app` sets `_StaticBearerTokenVerifier` (a fastmcp
+  `TokenVerifier` comparing with `hmac.compare_digest`) as
+  `server.auth`, so `http_app` wraps the `/mcp` route in fastmcp's
+  `RequireAuthMiddleware` and a rejected request gets 401 before any
+  session exists; `/health` stays unauthenticated, and startup fails
+  closed on an empty token. Do not swap in fastmcp's
+  `StaticTokenVerifier`, whose dict lookup is not constant-time, and do
+  not remove or bypass the check. The trust condition is "processes
+  running as the operator are trusted": the token stops other local
+  accounts and browser pages, not code running as the operator
 - keep the server read-only: do not add mail-changing tools (send, move,
   flag, draft) without explicit owner approval
 - do not give it any access to Bridge

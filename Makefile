@@ -49,6 +49,8 @@ help:
 # host-side servers (LM Studio, vLLM, mlx_lm.server) write any
 # placeholder string (e.g. ``unauthenticated``). Leave the file empty
 # only when the matching layer's *_MODE=none.
+# The MCP bearer token (.secrets/mcp_auth_token.txt) is generated here
+# with openssl when absent; every /mcp request must send it.
 init-secrets:
 	@mkdir -p .secrets
 	@chmod 700 .secrets
@@ -79,6 +81,13 @@ init-secrets:
 		echo "  created .secrets/rerank_api_key.txt (empty — fill in for RERANK_MODE=cohere)"; \
 	else \
 		echo "  .secrets/rerank_api_key.txt already exists, skipping"; \
+	fi
+	@if [ ! -f .secrets/mcp_auth_token.txt ]; then \
+		(umask 077 && openssl rand -hex 32 > .secrets/mcp_auth_token.txt) || { rm -f .secrets/mcp_auth_token.txt; exit 1; }; \
+		chmod 600 .secrets/mcp_auth_token.txt; \
+		echo "  created .secrets/mcp_auth_token.txt (random MCP bearer token; MCP clients send it as Authorization: Bearer <token>)"; \
+	else \
+		echo "  .secrets/mcp_auth_token.txt already exists, skipping"; \
 	fi
 
 # Build all images from source

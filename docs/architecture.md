@@ -87,6 +87,8 @@ mcp-server container
     [::1] or mcp-server (any port) with 421, and a browser Origin
     outside the same names over http with 403, before it reaches the
     transport (DNS-rebinding defense)
+  - Requires a static bearer token on /mcp (401 otherwise, before a
+    session is created); see Endpoint authentication below
   - Serves GET /health for the container healthcheck (200 when the
     read-only SQLite connection answers, 503 otherwise)
   - Hybrid search: three FTS5 lanes + two vector lanes → RRF merge
@@ -1179,6 +1181,36 @@ startup with migration steps. `/mcp` and `/health` sit behind the same
 Host/Origin allowlist, checked before a session is created. A Streamable HTTP session idle for
 `MCP_SESSION_IDLE_TIMEOUT_SECS` (default 1800 s) is ended, so abandoned
 sessions do not accumulate.
+
+### Endpoint authentication
+
+`/mcp` requires a static bearer token (`Authorization: Bearer <token>`),
+the `mcp_auth_token` Docker secret from `.secrets/mcp_auth_token.txt`
+(mode 600). `mcp-server/src/main.py` `_build_app` sets a fastmcp
+`TokenVerifier` as the server's auth provider, so fastmcp's `http_app`
+wraps the `/mcp` route in its `RequireAuthMiddleware`: a request without
+the token, or with another one, gets `401` before it reaches the
+Streamable HTTP session manager, so it creates no session. The token is
+compared in constant time (`hmac.compare_digest`). `/health` is a custom
+route outside that wrapper and stays open for the container
+healthcheck. The Host/Origin allowlist runs as before and still rejects
+a bad Host (`421`) or Origin (`403`) whatever the token. Startup fails
+when the token is empty, and neither the token nor the `Authorization`
+header is logged. The `MCP_AUTH_TOKEN` environment variable is read only
+when the secret file is absent, for running the server outside a
+container; Compose always mounts the secret, and `validate-env` rejects
+the variable in `.env`.
+
+**Trust condition.** The loopback-only port keeps other machines out.
+The token adds a boundary against other local accounts and against web
+pages in the operator's browser, which cannot read the mode-600 file.
+It does not separate the operator from code running as the operator's
+own user: any such process (a malicious package, a compromised tool)
+can read the file and call the endpoint. The model is therefore
+"processes running as the operator are trusted". Reaching the server
+from another device or from a hosted connector would need its own
+design (a private-network gateway or an OAuth resource server; PLAN.md
+Resolved decisions 13) and is not supported.
 
 ## Inference Mode Toggle
 

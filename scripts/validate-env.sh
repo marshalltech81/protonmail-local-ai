@@ -8,6 +8,7 @@ readonly BRIDGE_PASS_FILE="${ROOT_DIR}/.secrets/bridge_pass.txt"
 readonly INFERENCE_KEY_FILE="${ROOT_DIR}/.secrets/inference_api_key.txt"
 readonly EMBED_KEY_FILE="${ROOT_DIR}/.secrets/embed_api_key.txt"
 readonly RERANK_KEY_FILE="${ROOT_DIR}/.secrets/rerank_api_key.txt"
+readonly MCP_TOKEN_FILE="${ROOT_DIR}/.secrets/mcp_auth_token.txt"
 readonly AUTHORITY_FILE="${ROOT_DIR}/config/authority.toml"
 
 require_file() {
@@ -284,6 +285,14 @@ require_file "$BRIDGE_PASS_FILE" "Bridge password secret"
 require_file "$INFERENCE_KEY_FILE" "Inference API key secret file"
 require_file "$EMBED_KEY_FILE" "Embed API key secret file"
 require_file "$RERANK_KEY_FILE" "Rerank API key secret file"
+# Every /mcp request must carry this bearer token, and mcp-server fails
+# startup without it (PLAN.md Resolved decisions 13). The file is
+# required non-empty whatever the other settings are.
+if [[ ! -f "$MCP_TOKEN_FILE" ]] || ! grep -q '[^[:space:]]' "$MCP_TOKEN_FILE"; then
+    printf 'ERROR: MCP bearer token is missing or empty at %s. Create it with: (umask 077; openssl rand -hex 32 > .secrets/mcp_auth_token.txt)\n' \
+        "$MCP_TOKEN_FILE" >&2
+    exit 1
+fi
 
 # Mode selects the wire protocol; BASE_URL, MODEL and API_KEY configure
 # that mode, and ``none`` disables a layer. There is no inter-mode
@@ -297,6 +306,9 @@ require_file "$RERANK_KEY_FILE" "Rerank API key secret file"
 reject_secret_in_env "INFERENCE_API_KEY" "$INFERENCE_KEY_FILE"
 reject_secret_in_env "EMBED_API_KEY" "$EMBED_KEY_FILE"
 reject_secret_in_env "RERANK_API_KEY" "$RERANK_KEY_FILE"
+# MCP_AUTH_TOKEN is mcp-server's fallback for runs outside a container
+# only; under Compose the token is always the mcp_auth_token secret.
+reject_secret_in_env "MCP_AUTH_TOKEN" "$MCP_TOKEN_FILE"
 
 # Values resolve as Compose interpolates them: a variable exported in the
 # calling shell, else .env, else the ``${VAR:-default}`` fallback that
@@ -640,6 +652,7 @@ require_mode_600 "$BRIDGE_PASS_FILE"
 require_mode_600 "$INFERENCE_KEY_FILE"
 require_mode_600 "$EMBED_KEY_FILE"
 require_mode_600 "$RERANK_KEY_FILE"
+require_mode_600 "$MCP_TOKEN_FILE"
 require_private_optional_file "$AUTHORITY_FILE"
 
 # Every enabled layer requires a non-empty API key — uniform rule

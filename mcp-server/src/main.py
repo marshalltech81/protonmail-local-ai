@@ -1,11 +1,13 @@
 """
 MCP Server entry point.
 Exposes local mailbox search, retrieval, intelligence, and system tools over
-MCP's Streamable HTTP transport at ``/mcp``. The server is read-only: it has no mail-changing tools and no
+MCP's Streamable HTTP transport at ``/mcp``, behind a static bearer token.
+The server is read-only: it has no mail-changing tools and no
 connection to Bridge.
 """
 
 import asyncio
+import hmac
 import logging
 import math
 import os
@@ -15,6 +17,7 @@ from pathlib import Path
 import fastmcp
 import uvicorn
 from fastmcp import FastMCP
+from fastmcp.server.auth import AccessToken, TokenVerifier
 from mcp.server.transport_security import TransportSecurityMiddleware, TransportSecuritySettings
 from starlette.middleware import Middleware
 from starlette.requests import Request
@@ -292,6 +295,12 @@ RERANK_TIMEOUT_SECS = _float_env("RERANK_TIMEOUT_SECS", DEFAULT_RERANK_TIMEOUT_S
 
 MCP_PORT = int(os.environ.get("MCP_PORT", "3000"))
 
+# Static bearer token every ``/mcp`` request must present (PLAN.md
+# Resolved decisions 13). Compose mounts it as the ``mcp_auth_token``
+# Docker secret; the ``MCP_AUTH_TOKEN`` fallback is only for running the
+# server outside a container. ``main`` fails startup when it is empty.
+MCP_AUTH_TOKEN = _read_secret("mcp_auth_token", "MCP_AUTH_TOKEN")
+
 
 def _check_transport(raw: str) -> None:
     """Fail startup unless ``MCP_TRANSPORT`` is unset, empty or
@@ -390,7 +399,43 @@ class _HostOriginGuard:
         await self.app(scope, receive, send)
 
 
-def _build_app(server: FastMCP, *, session_idle_timeout: float) -> ASGIApp:
+_MISSING_AUTH_TOKEN = (
+    "The MCP bearer token is missing or empty. Create it with "
+    "'(umask 077; openssl rand -hex 32 > .secrets/mcp_auth_token.txt)' "
+    "(the mcp_auth_token Docker secret; MCP_AUTH_TOKEN only when running "
+    "outside a container), then configure MCP clients to send "
+    "'Authorization: Bearer <token>'. See docs/setup.md."
+)
+
+
+def _require_auth_token(token: str) -> str:
+    """Fail closed when the bearer token is empty. The message never
+    includes the value."""
+    if not token.strip():
+        raise ValueError(_MISSING_AUTH_TOKEN)
+    return token
+
+
+class _StaticBearerTokenVerifier(TokenVerifier):
+    """fastmcp token verifier accepting exactly one static bearer token.
+
+    fastmcp's ``StaticTokenVerifier`` looks tokens up in a dict, which
+    is not a constant-time comparison; this compares with
+    ``hmac.compare_digest``. No base URL is set, so fastmcp adds no
+    OAuth metadata routes.
+    """
+
+    def __init__(self, token: str) -> None:
+        super().__init__()
+        self._expected = _require_auth_token(token).encode()
+
+    async def verify_token(self, token: str) -> AccessToken | None:
+        if not hmac.compare_digest(token.encode(), self._expected):
+            return None
+        return AccessToken(token=token, client_id="local-operator", scopes=[])
+
+
+def _build_app(server: FastMCP, *, session_idle_timeout: float, auth_token: str) -> ASGIApp:
     """The Streamable HTTP ASGI app serving ``server`` at ``/mcp``.
 
     The app carries ``_HostOriginGuard``; fastmcp's own Streamable HTTP
@@ -398,7 +443,17 @@ def _build_app(server: FastMCP, *, session_idle_timeout: float) -> ASGIApp:
     served by the same app. Sessions end after ``session_idle_timeout``
     seconds without a request; it is required because fastmcp's default
     never ends them.
+
+    ``/mcp`` requires ``Authorization: Bearer <auth_token>``. Setting
+    ``server.auth`` makes ``http_app`` wrap the ``/mcp`` route in
+    fastmcp's ``RequireAuthMiddleware``, which answers 401 before the
+    request reaches the session manager, so a rejected request creates
+    no session. Custom routes are not wrapped, so ``/health`` stays
+    open for the healthcheck. ``_HostOriginGuard`` still rejects a bad
+    Host or Origin first: the auth middleware fastmcp adds ahead of it
+    only resolves the token, and the 401 comes from the route.
     """
+    server.auth = _StaticBearerTokenVerifier(auth_token)
     return server.http_app(
         path=_STREAMABLE_HTTP_PATH,
         transport="streamable-http",
@@ -429,7 +484,11 @@ def _run_server(server: FastMCP) -> None:
     loopback-only (``127.0.0.1:${MCP_PORT}:${MCP_PORT}``).
     """
     config = uvicorn.Config(
-        _build_app(server, session_idle_timeout=MCP_SESSION_IDLE_TIMEOUT_SECS),
+        _build_app(
+            server,
+            session_idle_timeout=MCP_SESSION_IDLE_TIMEOUT_SECS,
+            auth_token=MCP_AUTH_TOKEN,
+        ),
         host="0.0.0.0",  # nosec B104 — see docstring
         port=MCP_PORT,
         log_level="info",
@@ -438,6 +497,9 @@ def _run_server(server: FastMCP) -> None:
 
 
 def main():
+    # No MCP endpoint is served without its bearer token.
+    _require_auth_token(MCP_AUTH_TOKEN)
+
     # Validate per-mode required vars BEFORE constructing service clients
     # or opening the SQLite database. A missing volume mount or bad DB
     # path is a much less common operator error than a missing env var,
@@ -617,7 +679,7 @@ def main():
             f"  Rerank:         {RERANK_BASE_URL or '(SDK default)'} "
             f"(model={RERANK_MODEL}, candidates={RERANK_CANDIDATES})"
         )
-    log.info(f"  Transport: streamable-http at {_STREAMABLE_HTTP_PATH}")
+    log.info(f"  Transport: streamable-http at {_STREAMABLE_HTTP_PATH} (bearer token required)")
     log.info(f"  Session idle timeout: {MCP_SESSION_IDLE_TIMEOUT_SECS:g}s")
     log.info("  Retrieval: local SQLite index only")
 
