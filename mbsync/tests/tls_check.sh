@@ -74,7 +74,10 @@ start_stub() {
 # start_mbsync [EXPECTED_FINGERPRINT]
 start_mbsync() {
     docker rm -f "$MBSYNC" >/dev/null 2>&1 || true
+    # Run as the invoking user so the bind-mounted Maildir and state
+    # directories can stay private (700) instead of world-writable.
     docker run -d --name "$MBSYNC" --network "$NETWORK" --init --read-only \
+        --user "$(id -u):$(id -g)" \
         --tmpfs /tmp --cap-drop ALL --security-opt no-new-privileges:true \
         -e BRIDGE_HOST="$STUB" -e BRIDGE_IMAP_PORT=1143 -e BRIDGE_CERT_HOST=127.0.0.1 \
         -e BRIDGE_CERT_FINGERPRINT="${1:-}" \
@@ -159,7 +162,7 @@ make_cert cert-b
 printf 'synthetic-password\n' >"$WORK/bridge_pass"
 mkdir -p "$WORK/maildir" "$WORK/state"
 chmod 644 "$WORK/bridge_pass" "$WORK/imap_stub.py"
-chmod 777 "$WORK/maildir" "$WORK/state"
+chmod 700 "$WORK/maildir" "$WORK/state"
 docker network create "$NETWORK" >/dev/null
 FP_A="$(fingerprint cert-a)"
 FP_B="$(fingerprint cert-b)"
