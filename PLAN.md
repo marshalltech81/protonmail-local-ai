@@ -679,12 +679,12 @@ them (one test-first commit per issue, `Fixes #N` per issue):
 Phase 3 slices merged (#493–#496; the status table under Phase 3 is
 current) and eight fixes from a Codex defaults audit of 2026-10-01
 (#501, #503, #504, #505, #508, #509, #511, #512; see Recently
-Completed). In flight: #510 (`validate-env` agrees with Compose and
-the loaders, #482 and #506). Before the
+Completed), then #510 (`validate-env` agrees with Compose and the
+loaders, #482 and #506). Before the
 go-live checklist below: **#277** blocks the first deployment (a long
 first mbsync run keeps the indexer and MCP server from starting,
 since they wait on a health check only a completed sync satisfies);
-the direction is Resolved decisions 10 and the fix awaits the owner.
+the direction is Resolved decisions 10, and the fix is in progress.
 Open from the audit, waiting on real data: #487 (measure the evidence
 and output budgets) and #488 (container resource budgets). P3s from
 the audit and the day's reviews: #489, #490, #499, #500, #502.
