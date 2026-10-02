@@ -3,7 +3,8 @@ set -Eeuo pipefail
 
 # Rendering checks for docker-compose.yml with and without the macOS Bridge
 # overlay (#497): which services run, mbsync's Bridge dependency and
-# endpoint, and the hardening and exposure settings the overlay must keep.
+# endpoint, the hardening and exposure settings the overlay must keep, and
+# that the Bridge pin copies match .env.example.
 # Uses ``docker compose config``, which needs the Compose CLI but no
 # daemon, images or secret files.
 #
@@ -145,6 +146,28 @@ macos_mode_composes_with_the_hardened_overlay() {
     expect '.services.mbsync.environment.BRIDGE_HOST == "host.docker.internal"' || return 1
 }
 
+# .env.example is the source of truth for the Bridge pin. Compose and the
+# Dockerfile cannot read it, so the docker-compose.yml build-arg fallbacks
+# (used when .env leaves a key unset) and the bridge/Dockerfile ARG
+# defaults are copies that must equal it.
+bridge_pin_copies_match_env_example() {
+    local name source copy
+    render "$BASE"
+    for name in BRIDGE_VERSION BRIDGE_COMMIT; do
+        source="$(grep -E "^${name}=" "$ROOT_DIR/.env.example" | head -n 1 | cut -d= -f2-)"
+        [[ -n "$source" ]] || {
+            printf '%s is missing from .env.example\n' "$name"
+            return 1
+        }
+        expect ".services[\"protonmail-bridge\"].build.args.${name} == \"${source}\"" || return 1
+        copy="$(grep -E "^ARG ${name}=" "$ROOT_DIR/bridge/Dockerfile" | head -n 1 | cut -d= -f2-)"
+        [[ "$copy" == "$source" ]] || {
+            printf 'bridge/Dockerfile ARG %s=%s, .env.example has %s\n' "$name" "$copy" "$source"
+            return 1
+        }
+    done
+}
+
 check "default mode runs the Bridge container and waits for its health" \
     default_mode_runs_the_bridge_container
 check "default mode ignores the macOS port override" default_mode_ignores_the_macos_port_override
@@ -159,6 +182,7 @@ check "macOS mode takes the expected fingerprint from the environment" \
 check "macOS mode keeps mbsync's hardening and exposes no new port" \
     macos_mode_keeps_mbsync_hardening_and_exposure
 check "macOS mode composes with the hardened overlay" macos_mode_composes_with_the_hardened_overlay
+check "Bridge pin copies match .env.example" bridge_pin_copies_match_env_example
 
 if ((FAILURES > 0)); then
     printf '%d test(s) failed\n' "$FAILURES" >&2
