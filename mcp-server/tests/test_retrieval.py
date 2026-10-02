@@ -23,7 +23,7 @@ from contextlib import contextmanager
 import pytest
 import sqlite_vec
 from fastmcp.exceptions import ToolError
-from src.lib.sqlite import Database
+from src.lib.sqlite import MAX_LISTED_CLAIMANTS, Database
 from src.tools.retrieval import register_retrieval_tools
 
 from tests.conftest import _build_schema, _insert_message, _insert_thread, claimant_of
@@ -452,6 +452,7 @@ class TestMessageIdClaimants:
         assert message["message_id"] == "dup@example.com"
         assert message["claimant_id"] == second
         assert out.structured_content["other_claimants"] == [first]
+        assert out.structured_content["other_claimants_truncated"] is False
 
     def test_message_id_crafted_to_equal_a_claimant_id_is_ambiguous(self, fake_server, tmp_path):
         """A sender can set a Message-ID equal to another message's
@@ -482,6 +483,82 @@ class TestMessageIdClaimants:
         assert "alphaword" in messages[0]["body"] and "betaword" in messages[1]["body"]
         text = _text(out)
         assert f"Claimant ID: {first}" in text and f"Claimant ID: {second}" in text
+
+    def _many_claimants(self, tmp_path, count):
+        """``count`` files claiming ``dup@example.com``, inserted newest
+        first so arrival order differs from the listing order. Returns
+        the db and the claimant IDs, oldest first."""
+        with _open_fixture_db(tmp_path) as (conn, db):
+            for i in reversed(range(count)):
+                _insert_message(
+                    conn,
+                    message_id="dup@example.com",
+                    variant=f"v{i}",
+                    thread_id="t1",
+                    sent_at=f"2024-01-{i + 1:02d}T09:00:00+00:00",
+                    from_=["jane@example.com"],
+                    to=["bob@example.com"],
+                )
+            conn.close()
+        return db, [claimant_of("dup@example.com", f"v{i}") for i in range(count)]
+
+    @staticmethod
+    def _trace(db, monkeypatch):
+        """Record every statement ``db`` runs, with its bound values."""
+        statements: list[str] = []
+        connect = db._connect
+
+        def traced():
+            conn = connect()
+            conn.set_trace_callback(statements.append)
+            return conn
+
+        monkeypatch.setattr(db, "_connect", traced)
+        return statements
+
+    def test_bare_message_id_lists_at_most_the_cap(self, fake_server, tmp_path, monkeypatch):
+        """#456: a bare Message-ID claimed by many files lists the oldest
+        ``MAX_LISTED_CLAIMANTS`` and says more exist, reading at most one
+        row past the cap and no participants."""
+        db, claimants = self._many_claimants(tmp_path, MAX_LISTED_CLAIMANTS + 5)
+        statements = self._trace(db, monkeypatch)
+        text = _error(_handlers(fake_server, db)["get_message"](message_id="dup@example.com"))
+        assert f"more than {MAX_LISTED_CLAIMANTS} messages" in text
+        listed = claimants[:MAX_LISTED_CLAIMANTS]
+        assert [c for c in claimants if c in text] == listed
+        assert text.index(listed[0]) < text.index(listed[-1])
+        records = [s for s in statements if "FROM messages m WHERE" in s]
+        assert len(records) == 1 and f"LIMIT {MAX_LISTED_CLAIMANTS + 1} " in records[0]
+        assert not [s for s in statements if "FROM message_participants" in s]
+
+    def test_bare_message_id_at_the_cap_lists_all(self, fake_server, tmp_path):
+        db, claimants = self._many_claimants(tmp_path, MAX_LISTED_CLAIMANTS)
+        text = _error(_handlers(fake_server, db)["get_message"](message_id="dup@example.com"))
+        assert f"names {MAX_LISTED_CLAIMANTS} messages" in text
+        assert "more than" not in text
+        assert all(c in text for c in claimants)
+
+    def test_other_claimants_capped_and_flagged(self, fake_server, tmp_path, monkeypatch):
+        """#456: a claimant ID whose Message-ID many other files claim
+        lists at most ``MAX_LISTED_CLAIMANTS`` of them, in claimant-ID
+        order, with ``other_claimants_truncated`` set."""
+        db, claimants = self._many_claimants(tmp_path, MAX_LISTED_CLAIMANTS + 5)
+        statements = self._trace(db, monkeypatch)
+        out = asyncio.run(_handlers(fake_server, db)["get_message"](message_id=claimants[0]))
+        others = sorted(claimants[1:])[:MAX_LISTED_CLAIMANTS]
+        assert out.structured_content["other_claimants"] == others
+        assert out.structured_content["other_claimants_truncated"] is True
+        text = _text(out)
+        assert f"first {MAX_LISTED_CLAIMANTS} of more than" in text
+        query = [s for s in statements if "claimant_id != " in s]
+        assert len(query) == 1 and f"LIMIT {MAX_LISTED_CLAIMANTS + 1}" in query[0]
+
+    def test_other_claimants_at_the_cap_not_truncated(self, fake_server, tmp_path):
+        db, claimants = self._many_claimants(tmp_path, MAX_LISTED_CLAIMANTS + 1)
+        out = asyncio.run(_handlers(fake_server, db)["get_message"](message_id=claimants[0]))
+        assert out.structured_content["other_claimants"] == sorted(claimants[1:])
+        assert out.structured_content["other_claimants_truncated"] is False
+        assert "first " not in _text(out)
 
     def test_query_messages_returns_both_claimants(self, fake_server, tmp_path):
         db, first, second = self._two_claimants(tmp_path)

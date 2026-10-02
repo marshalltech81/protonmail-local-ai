@@ -345,9 +345,13 @@ source file's path, size, and SHA-256.
 `message_id` takes a claimant ID, which names one message, or a bare
 Message-ID, which works while one indexed message carries it. When
 several do, the call fails with an error listing each claimant ID with
-its send date and folder; call again with one of them. A successful
-response lists, in `other_claimants`, any other messages sharing the
-Message-ID.
+its send date and folder, oldest first; call again with one of them. A
+successful response lists, in `other_claimants`, any other messages
+sharing the Message-ID, in claimant-ID order. The sender sets the
+Message-ID, so either list is capped at 20 entries: past that the error
+says the Message-ID names "more than 20" messages and lists the oldest
+20, and a successful response sets `other_claimants_truncated` (false
+otherwise).
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
