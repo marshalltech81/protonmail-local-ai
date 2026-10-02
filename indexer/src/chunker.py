@@ -313,8 +313,16 @@ def chunk_message(
     )
 
     # The packer budgets each span and gap on its own; check the text
-    # each chunk actually renders to (#550).
-    packed = [run for group in packed for run in _fit_rendered(normalized, group, max_tokens)]
+    # each chunk actually renders to (#550). A cut can leave a run made
+    # only of the overlap seed, already in the chunk before it: a run
+    # that ends no further than its predecessor adds nothing and is
+    # dropped, so it gets no index of its own.
+    runs: list[list[_Span]] = []
+    for group in packed:
+        for run in _fit_rendered(normalized, group, max_tokens):
+            if not runs or run[-1].end > runs[-1][-1].end:
+                runs.append(run)
+    packed = runs
 
     chunks: list[MessageChunk] = []
     for index, group in enumerate(packed):

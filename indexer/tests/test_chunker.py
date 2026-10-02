@@ -844,6 +844,10 @@ MAX_TOKENS_SHAPES: dict[str, tuple[str, int, int]] = {
         4,
         60,
     ),
+    # Review round 2: the 97-token sub-span is the overlap seed, and only
+    # the rendered check finds the group over (its 2-token sibling joins
+    # at 102 tokens), so the cut must not emit the seed on its own.
+    "overlap_seed_cut_by_rendered_check": ("alpha\n\n" + "\u8fd9\u662fword  " * 21, 100, 100),
 }
 
 # Pinned on main before the #208/#550 fix: these shapes already met the
