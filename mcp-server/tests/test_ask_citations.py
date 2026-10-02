@@ -1025,3 +1025,116 @@ class TestReviewRound2Statements:
         assert check.quotes[0].status == "verified"
         check = _check_answer('It says "see </untrusted_email> the attached" [E1].', evidence_map)
         assert check.quotes[0].status == "unmatched"
+
+
+class TestOverlongQuotes:
+    """#499: a quotation the checker declines to search is listed as
+    not_checked, whatever words its first characters hold."""
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            "x" * (intelligence._MAX_QUOTE_CHARS + 1) + " ship the order",
+            "ship " + "x" * intelligence._MAX_QUOTE_CHARS + " the order",
+            "x" * (intelligence._MAX_QUOTE_CHARS * 2),
+        ],
+        ids=["one-token-prefix", "two-word-prefix", "one-token"],
+    )
+    def test_an_overlong_quote_is_not_checked(self, body, monkeypatch):
+        calls = 0
+        real = intelligence._quote_in
+
+        def counting(fragments, text):
+            nonlocal calls
+            calls += 1
+            return real(fragments, text)
+
+        monkeypatch.setattr(intelligence, "_quote_in", counting)
+        check = _check_answer(f'Alice wrote "{body}" [E1].', _EVIDENCE)
+        [quote] = check.quotes
+        assert quote.status == "not_checked"
+        assert len(quote.text) == intelligence._MAX_QUOTE_CHARS + 1
+        assert check.problems == []
+        # Declined, not searched.
+        assert calls == 0
+
+    def test_the_output_schema_lists_overlong_quotations(self):
+        # Review round 1: the advertised contract covers what is returned.
+        from src.tools.outputs import AskMailboxOutput
+
+        description = AskMailboxOutput.model_fields["quotes"].description or ""
+        assert "three or more words" in description
+        assert "over 1,000 characters" in description
+
+
+_ACUTE = "́"  # COMBINING ACUTE ACCENT
+_DAKUTEN = "゙"  # COMBINING KATAKANA-HIRAGANA VOICED SOUND MARK
+_MARK_MARKER = "SYNTHETIC_MARK_MARKER_5000"
+_MARK_EVIDENCE = {
+    "E1": _ref(
+        "E1",
+        f"Let us meet at cafe{_ACUTE} Rouge tomorrow. {_MARK_MARKER} はか{_DAKUTEN}きを送る。",
+        message="d1@example.com",
+        sender="dana@example.com",
+    ),
+}
+
+
+class TestCombiningMarks:
+    """#500: a combining mark (category M*) continues the character
+    before it, so a quote edge may not fall between the two."""
+
+    @pytest.mark.parametrize(
+        "quote",
+        ["meet at cafe", "Let us meet at cafe", "at cafe… tomorrow", f"{_MARK_MARKER} はか"],
+    )
+    def test_a_quote_that_drops_a_combining_mark_is_unmatched(self, quote):
+        check = _check_answer(f'Dana wrote "{quote}" [E1].', _MARK_EVIDENCE)
+        assert [q.status for q in check.quotes] == ["unmatched"]
+
+    @pytest.mark.parametrize(
+        "quote",
+        [f"meet at cafe{_ACUTE}", f"cafe{_ACUTE} Rouge tomorrow", f"はか{_DAKUTEN}きを"],
+    )
+    def test_a_quote_that_keeps_the_mark_is_verified(self, quote):
+        check = _check_answer(f'Dana wrote "{quote}" [E1].', _MARK_EVIDENCE)
+        assert [q.status for q in check.quotes] == ["verified"]
+
+    def test_a_quote_starting_on_a_combining_mark_is_unmatched(self):
+        check = _check_answer(f'Dana wrote "{_DAKUTEN}きを送る" [E1].', _MARK_EVIDENCE)
+        assert [q.status for q in check.quotes] == ["unmatched"]
+
+    def test_cjk_still_needs_no_word_boundary(self):
+        check = _check_answer("邮件写道 “日期是星期” [E1]。", _CJK_EVIDENCE)
+        assert [q.status for q in check.quotes] == ["verified"]
+
+    def test_nothing_from_the_passage_or_quote_is_logged(self, caplog):
+        with caplog.at_level(logging.DEBUG):
+            _check_answer(f'Dana wrote "{_MARK_MARKER} はか" [E1].', _MARK_EVIDENCE)
+            _check_answer('Dana wrote "meet at cafe" [E1].', _MARK_EVIDENCE)
+        assert _MARK_MARKER not in caplog.text
+        assert "cafe" not in caplog.text
+
+    def test_a_mark_heavy_passage_is_searched_in_bounded_time(self, monkeypatch):
+        # Each "ab ab ab" occurrence ends on a base letter whose accent
+        # follows, so every candidate is tried and rejected.
+        text = f"ab ab ab{_ACUTE} " * 7_000
+        evidence = {"E1": _ref("E1", text, message="w@example.com", sender="w@example.com")}
+        tried = 0
+        real = intelligence._candidates
+
+        def counting(passage, fragment, pos):
+            nonlocal tried
+            for found in real(passage, fragment, pos):
+                tried += 1
+                yield found
+
+        monkeypatch.setattr(intelligence, "_candidates", counting)
+        answer = " ".join(f'Q{i} "ab ab ab" [E1].' for i in range(30))
+        start = time.perf_counter()
+        check = _check_answer(answer, evidence)
+        assert time.perf_counter() - start < 5.0
+        statuses = [q.status for q in check.quotes]
+        assert statuses.count("unmatched") == intelligence._MAX_CHECKED_QUOTES
+        # Each checked quote tries each occurrence in the passage once.
+        assert tried == intelligence._MAX_CHECKED_QUOTES * text.count("ab ab ab")

@@ -533,7 +533,7 @@ class AskMailboxOutput(_Output):
     quotes: list[QuoteCheck] = Field(
         default=[],
         description="Each quotation of three or more words, checked against the "
-        "passages its statement cites.",
+        "passages its statement cites, and each quotation over 1,000 characters (not_checked).",
     )
     citation_problems: list[CitationProblem] = Field(
         description="Empty when the citation check passed. Labels and quotes are checked: a "

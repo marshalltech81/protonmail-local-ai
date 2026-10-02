@@ -626,8 +626,9 @@ answer against the passages it supplied:
   colon, fragments of fewer than three words (each kana or CJK
   ideograph counts as a word) and every statement of a not-found
   answer are not checked.
-- **Quotes.** Text of three or more words in double quotes (straight
-  or curly, on one line, paired left to right) is a quotation. A pair
+- **Quotes.** Text of three or more words, or of over 1,000
+  characters, in double quotes (straight or curly, on one line, paired
+  left to right) is a quotation. A pair
   whose text starts or ends with a space is the outer side of a nested
   quotation or a stray mark (`27"`): it is listed as `not_checked` and
   its text is not treated as quoted, so nested quotations are never
@@ -638,7 +639,12 @@ answer against the passages it supplied:
   ignores trailing `.,;:` and lets an ellipsis (`...` or `…`) skip
   text, but is otherwise exact (case included) and matches whole words
   only (`"on Fri"` does not match "on Friday"; kana and CJK ideographs
-  need no word boundary). A quote found
+  need no word boundary). A combining mark (Unicode category M) belongs
+  to the character before it, so a quote may not end or start between
+  them: `"meet at cafe"` does not match a decomposed `café` (`e` +
+  U+0301). Known gap: text is not Unicode-normalized, so a precomposed
+  `é` in a quote does not match a decomposed one in the passage, or
+  the reverse, and such a quote is `unmatched`. A quote found
   there is `verified`; one found only in another supplied passage is
   `misattributed` (a `misattributed_quotes` problem naming where it was
   found); one found nowhere is `unmatched` (an `unmatched_quotes`
