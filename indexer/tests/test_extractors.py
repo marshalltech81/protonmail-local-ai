@@ -812,6 +812,106 @@ class TestXlsxSharedStringBudget:
         assert extractors.stale_extractor_module("xlsx@2") is None
 
 
+def _titled_xlsx(sheets: list[tuple[str, list[list[object]]]]) -> bytes:
+    """A synthetic workbook with one sheet per ``(title, rows)`` pair.
+    openpyxl refuses titles it considers invalid, so each sheet is
+    written under a placeholder name and ``xl/workbook.xml`` is
+    rewritten to carry the real title."""
+    import io
+    import zipfile
+    from xml.sax.saxutils import quoteattr
+
+    import openpyxl
+
+    wb = openpyxl.Workbook()
+    wb.remove(wb.active)
+    for index, (_, rows) in enumerate(sheets):
+        ws = wb.create_sheet(f"placeholder{index}")
+        for row in rows:
+            ws.append(row)
+    buf = io.BytesIO()
+    wb.save(buf)
+    wb.close()
+    base = zipfile.ZipFile(io.BytesIO(buf.getvalue()))
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as rebuilt:
+        for info in base.infolist():
+            data = base.read(info)
+            if info.filename == "xl/workbook.xml":
+                text = data.decode()
+                for index, (title, _) in enumerate(sheets):
+                    text = text.replace(f'name="placeholder{index}"', f"name={quoteattr(title)}")
+                data = text.encode()
+            rebuilt.writestr(info.filename, data)
+    return out.getvalue()
+
+
+class TestXlsxSheetTitleBudget:
+    """#435: the ``[Sheet: name]`` header was built from the full title
+    before the text budget was charged, so a title larger than the
+    budget left was copied whole only to be dropped. The returned text
+    was already bounded; the copy was bounded only by lxml's 10 MB
+    limit on one XML attribute, which openpyxl happens to inherit."""
+
+    # The header's fixed characters plus the blank line charged with it.
+    _OVERHEAD = len("[Sheet: ]") + 2
+
+    @pytest.mark.parametrize(
+        ("title_len", "kept"),
+        [(10, True), (11, True), (12, False), (13, False), (500, False)],
+    )
+    def test_title_at_the_budget_boundary(self, monkeypatch, title_len, kept):
+        """Pins the output on both sides of the boundary: a header that
+        leaves no budget for a value drops its sheet, as before."""
+        from src.extractors import xlsx
+
+        first = "[Sheet: first]\nfirst"
+        # The first sheet leaves exactly 12 + overhead; a value then
+        # needs one character for itself and one for its newline.
+        monkeypatch.setattr(xlsx, "_MAX_TEXT_CHARS", len(first) + 2 + 12 + self._OVERHEAD + 1)
+        title = "T" * title_len
+        text, _ = xlsx.extract(_titled_xlsx([("first", [["first"]]), (title, [["v"]])]))
+
+        assert text == (f"{first}\n\n[Sheet: {title}]\nv" if kept else first)
+        assert len(text) <= xlsx._MAX_TEXT_CHARS
+
+    def test_title_past_the_budget_is_not_copied(self, monkeypatch):
+        import io
+        import time
+        import tracemalloc
+
+        import openpyxl
+        from src.extractors import xlsx
+
+        monkeypatch.setattr(xlsx, "_MAX_TEXT_CHARS", 1_000)
+        title_len = 5_000_000
+        payload = _titled_xlsx([("first", [["first"]]), ("T" * title_len, [["v"]])])
+        assert len(payload) < 20_000
+        # Loading parses the title (#428); only the walk is measured.
+        workbook = openpyxl.load_workbook(io.BytesIO(payload), read_only=True, data_only=True)
+        try:
+            tracemalloc.start()
+            started = time.perf_counter()
+            text = xlsx._serialize(workbook)
+            elapsed = time.perf_counter() - started
+            _, peak = tracemalloc.get_traced_memory()
+            tracemalloc.stop()
+        finally:
+            workbook.close()
+
+        assert text == "[Sheet: first]\nfirst"
+        assert elapsed < 5.0
+        # Copying the title would allocate at least its length.
+        assert peak < title_len // 10
+
+    def test_ordinary_titles_are_unchanged(self):
+        from src.extractors import xlsx
+
+        payload = _titled_xlsx([("Budget 2026", [["a", 1]]), ("Notes", [["b"]])])
+        text, _ = xlsx.extract(payload)
+        assert text == "[Sheet: Budget 2026]\na\t1\n\n[Sheet: Notes]\nb"
+
+
 class TestXlsxColumnPositions:
     """#296: dropping empty cells shifted later values left, so a value
     in one column read as belonging to another."""
