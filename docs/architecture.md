@@ -596,11 +596,11 @@ depends on its unit:
 | Message (`query_messages`) | Its `sent_at` is in the range | `sent_at`, newest first |
 | Attachment (`search_attachments`) | The carrying message's `sent_at` is in the range | Relevance; with no query, `sent_at`, newest first |
 
-So a date range selects whole threads (owner decision, PLAN.md
-Resolved decisions 14): any passage of a thread whose span overlaps
-the range may be shown, including one from a message sent outside it,
-and a thread whose span straddles a short range with no message inside
-it still qualifies. Each passage carries its own message's `sent_at`
+So a date range selects whole threads (owner decision, 2026-10-02,
+replacing #561's per-passage scoping): any passage of a thread whose
+span overlaps the range may be shown, including one from a message
+sent outside it, and a thread whose span straddles a short range with
+no message inside it still qualifies. Each passage carries its own message's `sent_at`
 (the `sent_at` of `get_evidence` chunks and of citations), so a model
 can see which passages fall outside the range. The attachment-name
 bias that leads a thread's evidence with the file the query names is

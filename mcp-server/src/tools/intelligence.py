@@ -2151,6 +2151,10 @@ def register_intelligence_tools(
                        email; resolve via find_contact if you only
                        have a name)
             date_from: Optionally scope to emails after this date (ISO 8601)
+                       A thread qualifies when its span overlaps the
+                       range, and any of its passages may be used;
+                       each citation's sent_at gives that passage's
+                       own date, which can fall outside the range.
             date_to: Optionally scope to emails before this date (ISO 8601)
             folders: Optionally scope to specific folders. Without it,
                      threads filed only in Trash are left out; name
@@ -2510,7 +2514,12 @@ def register_intelligence_tools(
             folders: Optionally scope to specific folders. Without it,
                      threads filed only in Trash are left out; name
                      "Trash" to include them.
-            date_from: Optional date lower bound (ISO 8601)
+            date_from: Optional date lower bound (ISO 8601).
+                       A thread qualifies when its span overlaps the
+                       range, and any of its passages may be used;
+                       each evidence entry's sent_at gives that
+                       passage's own date, which can fall outside the
+                       range.
             date_to: Optional date upper bound (ISO 8601)
             limit: Max threads to search through (default: 20)
 

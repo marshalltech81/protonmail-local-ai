@@ -5187,7 +5187,7 @@ class TestDateRangeMessageTime:
         return {r.thread_id: r.evidence_chunks for r in results}
 
     def test_evidence_shows_whole_overlapping_threads(self, tmp_path):
-        """Owner decision (PLAN.md Resolved decisions 14): a thread
+        """Owner decision (2026-10-02, replacing #561): a thread
         qualifies by its span, and any passage of it may be shown, each
         labelled with its own message's ``sent_at``."""
         db = self._db(tmp_path)

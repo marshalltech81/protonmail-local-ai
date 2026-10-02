@@ -1261,3 +1261,25 @@ class TestFolderFilterMatchesListThreads:
         register_search_tools(fake_server, cross_folder_db, fake_embed)
         out = asyncio.run(fake_server.tools["get_evidence"](query="ledger", folders=[folder]))
         assert {t["thread_id"] for t in out.structuredContent["threads"]} == listed
+
+
+@pytest.mark.parametrize(
+    "tool",
+    ["get_evidence", "ask_mailbox", "extract_from_emails", "brief_issue", "check_conclusion"],
+)
+def test_evidence_tool_descriptions_state_the_date_contract(tool, fake_server, seeded_db):
+    """Under a date range the evidence tools select threads by span and
+    may show passages from outside the range (docs/architecture.md,
+    Message time), so each tool's description must say so and point the
+    model at each passage's own ``sent_at``."""
+    from src.tools.brief import register_experimental_tools
+    from src.tools.intelligence import register_intelligence_tools
+
+    from tests.conftest import FakeEmbedClient, FakeInferenceClient
+
+    register_search_tools(fake_server, seeded_db, FakeEmbedClient())
+    register_intelligence_tools(fake_server, seeded_db, FakeEmbedClient(), FakeInferenceClient())
+    register_experimental_tools(fake_server, seeded_db, FakeEmbedClient(), FakeInferenceClient())
+    doc = " ".join((fake_server.tools[tool].__doc__ or "").split())
+    assert "span overlaps the range" in doc
+    assert "sent_at" in doc
