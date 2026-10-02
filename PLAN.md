@@ -711,7 +711,7 @@ Operator steps before go-live, in addition to the checklist:
    rejects a missing, empty or non-600 token file. Run it before
    writing the client configuration in step 3, which reads the token.
 3. **Update the MCP client:** the URL is now
-   `http://localhost:${MCP_PORT}/mcp` (default port 3000; Streamable
+   `http://127.0.0.1:${MCP_PORT}/mcp` (default port 3000; Streamable
    HTTP only, #563; remove any
    `MCP_TRANSPORT=sse` or `dual` from `.env`) and every request needs
    the bearer header. Claude Code uses `scripts/mcp-auth-headers.sh` as
@@ -864,7 +864,7 @@ Go-live checklist (do these before more hardening):
    indexer's progress; `make status` until the index is current.
    Record how long the initial sync takes: #282's stall deadline is
    set above it (#277 landed in #515).
-5. Point an MCP client at `http://localhost:${MCP_PORT}/mcp` with the
+5. Point an MCP client at `http://127.0.0.1:${MCP_PORT}/mcp` with the
    bearer token from `.secrets/mcp_auth_token.txt` (Claude Code
    and Codex through `scripts/mcp-auth-headers.sh`; Claude Desktop
    through `mcp-server/src/stdio_adapter.py`; see

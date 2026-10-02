@@ -320,7 +320,7 @@ def _check_transport(raw: str) -> None:
             "MCP transport. Remove MCP_TRANSPORT from .env and run "
             "'unset MCP_TRANSPORT' in any shell that exports it (or set it to "
             "streamable-http), and change MCP client URLs from "
-            "http://localhost:<MCP_PORT>/sse to http://localhost:<MCP_PORT>/mcp."
+            "http://localhost:<MCP_PORT>/sse to http://127.0.0.1:<MCP_PORT>/mcp."
         )
     raise ValueError("MCP_TRANSPORT must be 'streamable-http' or unset")
 

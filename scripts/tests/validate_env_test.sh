@@ -278,7 +278,7 @@ removed_transport_fails_with_migration_steps() {
         setup "MCP_TRANSPORT=\"$value\""
         fails_with "MCP_TRANSPORT=$expected was removed"
         grep -F '/sse to' "$WORK/output" >/dev/null
-        grep -F '/mcp' "$WORK/output" >/dev/null
+        grep -F 'http://127.0.0.1:<MCP_PORT>/mcp' "$WORK/output" >/dev/null
     done
 }
 
