@@ -363,7 +363,9 @@ sharing the Message-ID, in claimant-ID order. The sender sets the
 Message-ID, so either list is capped at 20 entries: past that the error
 says the Message-ID names "more than 20" messages and lists the oldest
 20, and a successful response sets `other_claimants_truncated` (false
-otherwise).
+otherwise). Each list walks a `messages` index in its own order and
+stops one row past the cap, so the cost does not grow with the number
+of files claiming the Message-ID.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|

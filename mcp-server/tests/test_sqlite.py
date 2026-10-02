@@ -933,9 +933,9 @@ def _reply_subject_db(tmp_path, subjects: list[str]) -> Database:
     conn.enable_load_extension(True)
     sqlite_vec.load(conn)
     conn.enable_load_extension(False)
+    # ``_build_schema`` carries the indexer's ``idx_messages_thread_sent``,
+    # the index the subject scan relies on.
     _build_schema(conn)
-    # The production index the subject scan relies on (indexer schema).
-    conn.execute("CREATE INDEX idx_messages_thread_sent ON messages(thread_id, sent_at)")
     mids = [f"rs-{i}" for i in range(len(subjects))]
     _insert_thread(
         conn,

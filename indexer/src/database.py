@@ -552,7 +552,13 @@ class Database:
                 FOREIGN KEY (claimant_id) REFERENCES message_thread_map(claimant_id)
                     ON DELETE CASCADE
             );
-            CREATE INDEX idx_messages_message ON messages(message_id);
+            -- ``get_message`` lists the claimants of one Message-ID in
+            -- claimant-ID order and oldest first; each index matches one
+            -- order so ``LIMIT`` stops the walk instead of every file
+            -- claiming the Message-ID being read and sorted (#538).
+            CREATE INDEX idx_messages_message ON messages(message_id, claimant_id);
+            CREATE INDEX idx_messages_message_sent
+                ON messages(message_id, sent_at, claimant_id);
             CREATE INDEX idx_messages_thread_sent ON messages(thread_id, sent_at);
             CREATE INDEX idx_messages_folder_sent ON messages(folder, sent_at);
             CREATE INDEX idx_messages_sent ON messages(sent_at);

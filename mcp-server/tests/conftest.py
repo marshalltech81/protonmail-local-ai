@@ -74,7 +74,14 @@ def _build_schema(conn: sqlite3.Connection) -> None:
             indexed_at      TEXT NOT NULL
         );
 
-        CREATE INDEX idx_messages_message ON messages(message_id);
+        -- The indexer's ``messages`` indexes, so query plans match.
+        CREATE INDEX idx_messages_message ON messages(message_id, claimant_id);
+        CREATE INDEX idx_messages_message_sent
+            ON messages(message_id, sent_at, claimant_id);
+        CREATE INDEX idx_messages_thread_sent ON messages(thread_id, sent_at);
+        CREATE INDEX idx_messages_folder_sent ON messages(folder, sent_at);
+        CREATE INDEX idx_messages_sent ON messages(sent_at);
+        CREATE INDEX idx_messages_filepath ON messages(filepath);
 
         CREATE TABLE message_participants (
             claimant_id TEXT NOT NULL,
