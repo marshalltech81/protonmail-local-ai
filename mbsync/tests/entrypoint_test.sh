@@ -282,10 +282,12 @@ sync_setup() {
     CONFIG_FILE="$WORK/mbsyncrc"
     FIND_CALLS="$WORK/find-calls-$1"
     SYNC_ACTIVITY_FILE="$WORK/activity-$1"
-    MBSYNC_STDERR_FILE="$WORK/mbsync-stderr-$1"
+    MBSYNC_ERROR_COUNTS_FILE="$WORK/mbsync-error-counts-$1"
+    MBSYNC_ERROR_COUNTS_WAIT_TENTHS=50
     mkdir -p "$MAILDIR_PATH"
     : >"$FIND_CALLS"
-    load run_child relax_new_maildir_perms mark_sync_activity report_mbsync_errors run_sync
+    load run_child relax_new_maildir_perms mark_sync_activity report_mbsync_errors \
+        read_mbsync_error_counts run_sync
 }
 
 # run_sync is called as `run_sync || rc=$?`, a condition like the
@@ -472,6 +474,40 @@ near_miss_line_is_not_tolerated() {
     grep -qxF "$MOCK_STDERR" "$SYNC_LOG" || return 1
 }
 
+# Errors other than an unopenable far box reach the log while mbsync is
+# still running, not when it ends: a first sync can take hours, or stall
+# after an error. The mock writes an error, then waits for it to appear
+# in the log before it exits; only the counts are kept until the end.
+# shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
+other_errors_are_streamed_while_mbsync_runs() {
+    local seen="$WORK/streamed-seen"
+    sync_setup far-stream
+    SYNC_LOG="$WORK/sync-log-far-stream"
+    : >"$SYNC_LOG"
+    find() { :; }
+    mbsync() {
+        local i
+        printf '%s\n' "$FAR_BOX_LINE" >&2
+        printf 'Error: synthetic streamed failure\n' >&2
+        for ((i = 0; i < 50; i++)); do
+            if grep -qxF "Error: synthetic streamed failure" "$SYNC_LOG"; then
+                : >"$seen"
+                break
+            fi
+            command sleep 0.1
+        done
+        return 1
+    }
+    SYNC_RC=0
+    run_sync >"$SYNC_LOG" 2>&1 || SYNC_RC=$?
+    [[ -f "$seen" ]] || return 1
+    ((SYNC_RC == 1)) || return 1
+    grep -q 'WARNING: 1 far-side folder' "$SYNC_LOG" || return 1
+    # Only the two counts were written to disk, and they are gone.
+    [[ ! -e "$MBSYNC_ERROR_COUNTS_FILE" ]] || return 1
+    marker_not_logged
+}
+
 # The real sync loop, extracted from the entrypoint, around the real
 # run_sync: failures still count to the exit, and a degraded success
 # resets the count and writes the success stamp like any success.
@@ -484,7 +520,8 @@ sync_loop_counts_failures_but_not_unopenable_far_boxes() {
     : >"$calls_file"
     : >"$stamps_file"
     find() { :; }
-    sleep() { :; }
+    # Skip only the interval sleep; short waits inside run_sync stay real.
+    sleep() { [[ "$1" == "$SYNC_INTERVAL" ]] || command sleep "$1"; }
     record_successful_sync() { printf 'stamp\n' >>"$stamps_file"; }
     # Calls 1-4 fail, call 5 meets only a vanished far box, 6-10 fail.
     mbsync() {
@@ -499,7 +536,7 @@ sync_loop_counts_failures_but_not_unopenable_far_boxes() {
         return 1
     }
     MAX_CONSECUTIVE_SYNC_FAILURES=5
-    SYNC_INTERVAL=1
+    SYNC_INTERVAL=3600
     consecutive_sync_failures=0
     (eval "$loop") >"$WORK/loop-log" 2>&1 || rc=$?
     ((rc == 1)) || return 1
@@ -796,7 +833,8 @@ stop_setup() {
     CONFIG_FILE="$WORK/mbsyncrc"
     CHILD_LOG="$WORK/child-$1"
     SYNC_ACTIVITY_FILE="$WORK/activity-stop-$1"
-    MBSYNC_STDERR_FILE="$WORK/mbsync-stderr-stop-$1"
+    MBSYNC_ERROR_COUNTS_FILE="$WORK/mbsync-error-counts-stop-$1"
+    MBSYNC_ERROR_COUNTS_WAIT_TENTHS=50
     mkdir -p "$MAILDIR_PATH" "$WORK/bin-stop-$1"
     : >"$CHILD_LOG"
     # A long-running child that records its start and any TERM it gets.
@@ -813,7 +851,7 @@ MOCK
     chmod 755 "$WORK/bin-stop-$1/mbsync"
     PATH="$WORK/bin-stop-$1:$PATH"
     load run_child stop_on_signal install_signal_handlers relax_new_maildir_perms \
-        mark_sync_activity report_mbsync_errors run_sync
+        mark_sync_activity report_mbsync_errors read_mbsync_error_counts run_sync
 }
 
 # Signals the stand-in entrypoint once its child has started and waits for
@@ -925,6 +963,7 @@ check "an unopenable far box with another status still fails" \
     unopenable_far_box_with_another_status_still_fails
 check "a failure with no stderr still fails" failure_without_stderr_still_fails
 check "a near-miss error line is not tolerated" near_miss_line_is_not_tolerated
+check "other errors are streamed while mbsync runs" other_errors_are_streamed_while_mbsync_runs
 check "the sync loop counts failures but not unopenable far boxes" \
     sync_loop_counts_failures_but_not_unopenable_far_boxes
 check "activity is marked before mbsync, before the repair and after the sync" \
