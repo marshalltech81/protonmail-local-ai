@@ -3,9 +3,11 @@ name: Security Scan
 # The path filters list only files a scanner here reads: Trivy's vuln
 # scan reads the uv lockfiles and pyproject.toml, its misconfig scan
 # reads the Dockerfiles (it has no checks for Compose files, shell
-# scripts or workflow YAML), and Bandit reads indexer/src and
-# mcp-server/src. Shell scripts are linted by shellcheck in lint.yml,
-# and Compose is validated in docker.yml.
+# scripts or workflow YAML), Bandit reads indexer/src and
+# mcp-server/src, and Semgrep reads the Compose files (base and
+# overlays) and shell scripts with the repo's own rules in .semgrep/.
+# shellcheck in lint.yml still lints the scripts for correctness, and
+# docker.yml validates the Compose syntax.
 on:
   push:
     branches: [main]
@@ -15,6 +17,12 @@ on:
       - "**/Dockerfile"
       - "indexer/src/**"
       - "mcp-server/src/**"
+      - "**/docker-compose*.yml"
+      - "**/docker-compose*.yaml"
+      - "**/*.sh"
+      - "scripts/**"
+      - ".semgrep/**"
+      - ".semgrepignore"
       - ".github/workflows/security.yml"
   pull_request:
     branches: [main]
@@ -24,6 +32,12 @@ on:
       - "**/Dockerfile"
       - "indexer/src/**"
       - "mcp-server/src/**"
+      - "**/docker-compose*.yml"
+      - "**/docker-compose*.yaml"
+      - "**/*.sh"
+      - "scripts/**"
+      - ".semgrep/**"
+      - ".semgrepignore"
       - ".github/workflows/security.yml"
   schedule:
     - cron: "0 8 * * 0"
@@ -120,3 +134,32 @@ jobs:
           exit-code: "1"
           severity: CRITICAL,HIGH
           skip-dirs: .git,.ruff_cache,.pytest_cache,.venv,indexer/.venv,mcp-server/.venv
+
+  semgrep:
+    name: Semgrep Compose and shell scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version-file: ".python-version"
+
+      - name: Install Semgrep
+        run: python -m pip install "semgrep==1.179.0"
+
+      # The rules are the repo's own (.semgrep/*.yaml), not the Semgrep
+      # registry, so the checks change only with this repository. Each
+      # rule file has a fixture of matching and non-matching cases.
+      - name: Test the rules
+        run: semgrep test .semgrep
+
+      # Each rule's paths.include picks its targets: docker-compose*.yml
+      # and docker-compose*.yaml anywhere in the tree, so a new overlay is
+      # scanned without a change here, and every *.sh file. --strict fails
+      # the job when a target cannot be parsed instead of skipping it.
+      - name: Scan Compose files and shell scripts
+        run: >-
+          semgrep scan --metrics=off --disable-version-check --strict --error
+          --config .semgrep/compose.yaml --config .semgrep/shell.yaml .

@@ -1988,6 +1988,17 @@ def _load_authority_rules(path: Path) -> AuthorityRules:
     return rules
 
 
+def _prune_reaped_records(db: Database) -> None:
+    """Expire ``reaped_messages`` records past their retention window."""
+    try:
+        pruned = db.prune_reaped_messages()
+    except Exception as e:
+        log.error("reaped-record prune failed: %s", type(e).__name__)
+        return
+    if pruned:
+        log.info("pruned %d expired reaped-message record(s)", pruned)
+
+
 def _log_reconciler_config(cfg: ReconcilerConfig) -> None:
     if not cfg.enabled:
         log.info(
@@ -2018,6 +2029,9 @@ def main():
     reclassified = db.set_authority_rules(authority_rules)
     if reclassified:
         log.info("Authority rules: reclassified %d existing entities", reclassified)
+    # Needs only the database: run before the embedder wait and the
+    # initial index, which can take hours or never finish (#576).
+    _prune_reaped_records(db)
     embedder = OpenAIEmbedder(
         base_url=EMBED_BASE_URL,
         model=EMBED_MODEL,
@@ -2143,6 +2157,7 @@ def main():
             reconciler.reap()
         except Exception as e:
             log.error("startup reconciliation failed: %s", e)
+    _prune_reaped_records(db)
 
     last_reconcile = time.monotonic()
     last_recovery_sweep = time.monotonic()
@@ -2204,14 +2219,16 @@ def main():
                     log.error("Maildir watch refresh failed: %s", type(e).__name__)
 
             now = time.monotonic()
-            if reconciler is not None:
-                if now - last_reconcile >= reconciler_config.sweep_interval_secs:
+            if now - last_reconcile >= reconciler_config.sweep_interval_secs:
+                if reconciler is not None:
                     try:
                         reconciler.sweep()
                         reconciler.reap()
                     except Exception as e:
                         log.error("periodic reconciliation failed: %s", e)
-                    last_reconcile = now
+                # In archive mode too, so records from before a switch expire.
+                _prune_reaped_records(db)
+                last_reconcile = now
 
             # Recovery sweep: re-enqueue messages on chunkless
             # zero-vector threads that are STILL retryable. A

@@ -12,7 +12,7 @@ import struct
 import threading
 import weakref
 from contextlib import contextmanager, suppress
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from email.utils import parseaddr
 from pathlib import Path
 
@@ -86,6 +86,12 @@ def _dedupe_by_canonical(addrs: list[str]) -> list[str]:
 # bump (owner, 2026-10-01).
 SCHEMA_VERSION = 0
 SCHEMA_APPLICATION_ID = 0x504D4149  # "PMAI"
+
+# How long a ``reaped_messages`` record outlives the reap. The record
+# holds identifiers derived from the sender's Message-ID, kept only so a
+# citation from a recent answer resolves to "reaped" instead
+# of "not found"; after this window the lookup reads as not found.
+REAPED_RECORD_RETENTION_DAYS = 30
 
 # The schema uses FTS5 ``contentless_delete=1``, which SQLite added in 3.43.
 # Validate the runtime version at Database init and fail fast with a clear
@@ -604,6 +610,23 @@ class Database:
             CREATE INDEX idx_pending_deletions_thread
                 ON pending_deletions(thread_id);
 
+            -- One row per message the reconciler reaped, written in the
+            -- reap transaction, so mcp-server can answer a lookup of a
+            -- cited claimant ID or thread ID with "reaped"
+            -- instead of "not found" (PLAN Phase 4 item 4). Identifiers
+            -- and the reap time only, never content; pruned after
+            -- ``REAPED_RECORD_RETENTION_DAYS`` (``prune_reaped_messages``).
+            CREATE TABLE reaped_messages (
+                claimant_id TEXT PRIMARY KEY,
+                message_id  TEXT NOT NULL,
+                thread_id   TEXT NOT NULL,
+                reaped_at   TEXT NOT NULL
+            );
+            CREATE INDEX idx_reaped_messages_message ON reaped_messages(message_id, reaped_at);
+            CREATE INDEX idx_reaped_messages_thread
+                ON reaped_messages(thread_id, reaped_at, claimant_id);
+            CREATE INDEX idx_reaped_messages_reaped_at ON reaped_messages(reaped_at);
+
             -- Durable retry / dead-letter queue. Every discovered file
             -- is enqueued first; the worker loop claims due rows and
             -- runs parse/thread/embed/upsert. Failures back off
@@ -913,6 +936,22 @@ class Database:
 
                 self._write_message_record(cur, msg, thread.thread_id)
 
+            # The thread's range is its messages' ``sent_at`` range. The
+            # merge above can only widen it, so a reprocess that re-dates
+            # a message (a parser fix) would leave the old date as an
+            # endpoint; recompute both from the rows just written.
+            cur.execute(
+                """
+                UPDATE threads SET
+                    date_first = COALESCE(
+                        (SELECT MIN(sent_at) FROM messages WHERE thread_id = :t), date_first),
+                    date_last = COALESCE(
+                        (SELECT MAX(sent_at) FROM messages WHERE thread_id = :t), date_last)
+                WHERE thread_id = :t
+                """,
+                {"t": thread.thread_id},
+            )
+
             # Update FTS5 index. threads_fts is contentless_delete=1 so DELETE
             # requires a specific rowid — read the existing fts_rowid and then
             # record the new rowid after INSERT.
@@ -1028,7 +1067,9 @@ class Database:
 
         ``message_date`` is the source message's ``Date:`` header in
         ISO 8601 form (``msg.date.isoformat()``), stored on every new
-        chunk row so timeline-style retrieval
+        chunk row and rewritten on the message's other rows (any slice)
+        whose date differs, so each
+        chunk carries its message's ``sent_at`` and timeline-style retrieval
         (``get_recent_chunks_for_thread`` / ``summarize_thread``) can
         order by message time instead of the chunker's wall-clock
         insert time. The parser always yields a date (falling back to
@@ -1075,6 +1116,19 @@ class Database:
                     cur.execute("DELETE FROM message_chunks_fts WHERE rowid = ?", (fts_rowid,))
                 cur.execute("DELETE FROM message_chunks_vec WHERE chunk_id = ?", (chunk_id,))
                 cur.execute("DELETE FROM message_chunks WHERE chunk_id = ?", (chunk_id,))
+
+            # Kept chunks take the incoming date too: a re-parse can
+            # date the same bytes differently (a parser fix), and the
+            # chunk must not disagree with ``messages.sent_at``. The date
+            # belongs to the message, so every slice of it is refreshed:
+            # a slice this run does not write (attachment extraction
+            # turned off since it was indexed) keeps its rows but must
+            # not keep a stale date.
+            cur.execute(
+                "UPDATE message_chunks SET message_date = ? "
+                "WHERE claimant_id = ? AND message_date != ?",
+                (message_date, claimant_id, message_date),
+            )
 
             now_iso = datetime.now(UTC).isoformat()
             for chunk in to_insert:
@@ -2402,6 +2456,19 @@ class Database:
         ).fetchall()
 
     @_synchronized
+    def prune_reaped_messages(self, *, now: datetime | None = None) -> int:
+        """Delete ``reaped_messages`` records older than
+        ``REAPED_RECORD_RETENTION_DAYS`` and return how many went. Runs
+        in both retention modes, so records written before a switch to
+        archive mode still expire."""
+        cutoff = (now or datetime.now(UTC)) - timedelta(days=REAPED_RECORD_RETENTION_DAYS)
+        cur = self._conn.execute(
+            "DELETE FROM reaped_messages WHERE reaped_at < ?", (cutoff.isoformat(),)
+        )
+        self._conn.commit()
+        return cur.rowcount
+
+    @_synchronized
     def delete_thread_completely(self, thread_id: str, *, grace_cutoff: str | None = None) -> bool:
         """Remove a thread and every derived row. Used when the last message
         in a thread has been reaped.
@@ -2447,6 +2514,13 @@ class Database:
                 self._delete_attachments_for_message(cur, cid)
             # Read before the map delete cascades the participant rows away.
             mentions = self._participant_mentions(cur, claimant_ids)
+            cur.execute(
+                "INSERT OR REPLACE INTO reaped_messages "
+                "(claimant_id, message_id, thread_id, reaped_at) "
+                "SELECT claimant_id, message_id, thread_id, ? FROM message_thread_map "
+                "WHERE thread_id = ?",
+                (datetime.now(UTC).isoformat(), thread_id),
+            )
             cur.execute("DELETE FROM message_thread_map WHERE thread_id = ?", (thread_id,))
             cur.execute("DELETE FROM threads WHERE thread_id = ?", (thread_id,))
             cur.execute("DELETE FROM pending_deletions WHERE thread_id = ?", (thread_id,))
@@ -2728,6 +2802,15 @@ class Database:
         # in ``attachment_extractions`` are deliberately kept — see
         # ``_delete_attachments_for_message``.
         self._delete_attachments_for_message(cur, claimant_id)
+        # Identifiers only, so a later lookup can report the message as
+        # reaped (see ``reaped_messages`` in the schema).
+        cur.execute(
+            "INSERT OR REPLACE INTO reaped_messages "
+            "(claimant_id, message_id, thread_id, reaped_at) "
+            "SELECT claimant_id, message_id, thread_id, ? FROM message_thread_map "
+            "WHERE claimant_id = ?",
+            (datetime.now(UTC).isoformat(), claimant_id),
+        )
         cur.execute("DELETE FROM message_thread_map WHERE claimant_id = ?", (claimant_id,))
         cur.execute("DELETE FROM indexed_files WHERE filepath = ?", (filepath,))
         cur.execute("DELETE FROM pending_deletions WHERE filepath = ?", (filepath,))

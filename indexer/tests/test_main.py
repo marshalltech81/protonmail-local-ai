@@ -3072,7 +3072,7 @@ class TestRequeueStaleExtractions:
         assert main._requeue_stale_extractions(db, queue) == 1
 
         with db.transaction():
-            db._conn.execute("UPDATE attachment_extractions SET extractor = 'xlsx@2'")
+            db._conn.execute("UPDATE attachment_extractions SET extractor = 'xlsx@3'")
         self._drain(db, queue)
         assert main._requeue_stale_extractions(db, queue) == 0
 
@@ -6153,3 +6153,161 @@ class TestMessageIdClaimants:
         assert json.loads(thread[1]) == [b]
         assert "betaword" in thread[2] and "alphaword" not in thread[2]
         assert db.is_indexed(str(second))
+
+
+class TestReapLeavesNoContent:
+    """PLAN Phase 4 item 4: a reap keeps an identifier-only record so a
+    cited source can be reported as reaped. Nothing about the
+    reaped message's content may survive it: no subject, body or
+    participant text in any table, including that record."""
+
+    _SUBJECT = "Zqxsubjectmarker quarterly"
+    _BODY = "Zqxbodymarker paragraph text."
+
+    def _reconciler(self, db, embedder, threader, maildir):
+        from src.reconciler import Reconciler, ReconcilerConfig
+
+        return Reconciler(
+            db,
+            embedder,
+            threader,
+            ReconcilerConfig(
+                enabled=True,
+                grace_days=0,
+                sweep_interval_secs=60,
+                max_batch_pct=1.0,
+                force=False,
+                unlink_on_reap=False,
+            ),
+            maildir_root=maildir,
+        )
+
+    @staticmethod
+    def _tables_holding(db, needles: list[str]) -> set[str]:
+        """Every regular table (FTS / vec shadow tables included) with a
+        text or blob value containing one of ``needles``, case-folded."""
+        found: set[str] = set()
+        tables = [
+            r[0]
+            for r in db._conn.execute(
+                "SELECT name FROM sqlite_master "
+                "WHERE type = 'table' AND sql NOT LIKE 'CREATE VIRTUAL%'"
+            )
+        ]
+        for table in tables:
+            for row in db._conn.execute(f'SELECT * FROM "{table}"'):  # nosec B608
+                for value in row:
+                    if isinstance(value, bytes):
+                        text = value.decode("latin-1").lower()
+                    elif isinstance(value, str):
+                        text = value.lower()
+                    else:
+                        continue
+                    if any(n.lower() in text for n in needles):
+                        found.add(table)
+        return found
+
+    def _index(self, tmp_path, monkeypatch, *, with_reply: bool):
+        maildir = tmp_path / "maildir"
+        inbox = maildir / "INBOX" / "cur"
+        root = inbox / "1700000000.M1.host:2,S"
+        _write_eml(
+            root,
+            "zqxreaped@example.com",
+            self._SUBJECT,
+            body=self._BODY,
+            from_addr="Zqxsendermarker <zqxsender@example.com>",
+        )
+        monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
+        db = Database(tmp_path / "mail.db")
+        threader = Threader(db)
+        embedder = make_mock_embedder(_UNIT_VECTOR)
+        queue = _make_queue(db)
+        main.initial_index(db, embedder, threader, queue)
+        if with_reply:
+            # Indexed after the root, so the walk order (filesystem
+            # dependent) cannot thread the reply on its own.
+            _write_eml(
+                inbox / "1700000001.M2.host:2,S",
+                "survivor@example.com",
+                "Re: " + self._SUBJECT,
+                in_reply_to="zqxreaped@example.com",
+                date="Tue, 02 Jan 2024 12:00:00 +0000",
+                body="The surviving reply.",
+            )
+            main.initial_index(db, embedder, threader, queue)
+            assert db._conn.execute("SELECT COUNT(*) FROM threads").fetchone()[0] == 1
+        assert {"threads", "message_chunks"} <= self._tables_holding(db, ["zqxbodymarker"])
+        root.rename(inbox / "1700000000.M1.host:2,ST")
+        return db, self._reconciler(db, embedder, threader, maildir)
+
+    def test_full_reap_leaves_only_identifiers(self, tmp_path, monkeypatch):
+        db, reconciler = self._index(tmp_path, monkeypatch, with_reply=False)
+        reconciler.sweep()
+        assert reconciler.reap()["threads_reaped"] == 1
+
+        needles = ["zqxsubjectmarker", "zqxbodymarker", "zqxsendermarker"]
+        assert self._tables_holding(db, needles) == set()
+        assert db._conn.execute("SELECT COUNT(*) FROM reaped_messages").fetchone()[0] == 1
+
+    def test_partial_reap_leaves_only_identifiers(self, tmp_path, monkeypatch):
+        db, reconciler = self._index(tmp_path, monkeypatch, with_reply=True)
+        reconciler.sweep()
+        assert reconciler.reap()["threads_rebuilt"] == 1
+
+        # The survivor's own subject repeats the subject marker; the
+        # reaped body and sender name appear nowhere.
+        assert self._tables_holding(db, ["zqxbodymarker", "zqxsendermarker"]) == set()
+        assert db._conn.execute("SELECT COUNT(*) FROM reaped_messages").fetchone()[0] == 1
+
+
+class TestPruneReapedRecords:
+    def test_prunes_expired_records(self, tmp_path, caplog):
+        db = Database(tmp_path / "mail.db")
+        with db.transaction():
+            db._conn.execute(
+                "INSERT INTO reaped_messages VALUES ('a#1', 'a', 't', '2000-01-01T00:00:00+00:00')"
+            )
+        with caplog.at_level(logging.INFO):
+            main._prune_reaped_records(db)
+        assert db._conn.execute("SELECT COUNT(*) FROM reaped_messages").fetchone()[0] == 0
+        assert "pruned 1 expired reaped-message record(s)" in caplog.text
+
+    def test_failure_is_logged_by_type(self, tmp_path, caplog, monkeypatch):
+        db = Database(tmp_path / "mail.db")
+
+        def boom(**_kw):
+            raise sqlite3.OperationalError("zqxmarker")
+
+        monkeypatch.setattr(db, "prune_reaped_messages", boom)
+        main._prune_reaped_records(db)
+        assert "reaped-record prune failed: OperationalError" in caplog.text
+        assert "zqxmarker" not in caplog.text
+
+    def test_startup_prunes_before_the_embedder_wait(self, tmp_path, monkeypatch):
+        """#576: an embedder that never answers holds ``main`` in
+        ``wait_for_ready`` before the initial index, so the startup prune
+        must run first or expired records outlive the retention window."""
+        db = Database(tmp_path / "mail.db")
+        with db.transaction():
+            db._conn.execute(
+                "INSERT INTO reaped_messages VALUES ('a#1', 'a', 't', '2000-01-01T00:00:00+00:00')"
+            )
+
+        class _Unreachable(Exception):
+            pass
+
+        def never_ready():
+            raise _Unreachable
+
+        embedder = make_mock_embedder()
+        embedder.wait_for_ready = never_ready
+        monkeypatch.setattr(main, "_validate_embed_config", lambda: None)
+        monkeypatch.setattr(main, "Database", lambda path: db)
+        monkeypatch.setattr(main, "OpenAIEmbedder", lambda **kw: embedder)
+        monkeypatch.setattr(main, "touch_health_file", lambda: None)
+        monkeypatch.setattr(main, "StallGuard", MagicMock())
+        monkeypatch.setattr(main, "initial_index", lambda *a, **kw: pytest.fail("indexed"))
+        with pytest.raises(_Unreachable):
+            main.main()
+        assert db._conn.execute("SELECT COUNT(*) FROM reaped_messages").fetchone()[0] == 0

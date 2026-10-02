@@ -14,7 +14,7 @@ import sqlite3
 import unicodedata
 from contextlib import closing
 from dataclasses import dataclass, field
-from datetime import UTC, date, datetime, time
+from datetime import UTC, date, datetime, time, timedelta
 from email.utils import parseaddr
 from itertools import groupby
 from pathlib import Path
@@ -547,6 +547,8 @@ class AttachmentResult:
     subject: str
     folder: str
     date_last: datetime
+    # The carrying message's ``sent_at``; None when it has no messages row.
+    sent_at: str | None = None
     senders: list[str] = field(default_factory=list)
     extraction_status: str | None = None
     text_snippet: str = ""
@@ -576,6 +578,7 @@ def _row_to_attachment_result(r) -> AttachmentResult:
         subject=r["display_subject"] or r["subject"],
         folder=r["folder"],
         date_last=datetime.fromisoformat(r["date_last"]),
+        sent_at=r["sent_at"],
         senders=json.loads(r["senders"]),
         extraction_status=r["extraction_status"],
         text_snippet=r["text_snippet"] or "",
@@ -748,6 +751,65 @@ def _message_bodies(
 
 
 @dataclass
+class ReapedMessage:
+    """A message the indexer's reconciler reaped (mirror retention): its
+    claimant ID and when it was reaped (ISO 8601 UTC). The indexer keeps
+    nothing else about it."""
+
+    claimant_id: str
+    reaped_at: str
+
+
+@dataclass
+class ReapedSource:
+    """A lookup that found no live message or thread, only the indexer's
+    record that it was reaped at ``reaped_at`` (ISO 8601 UTC)."""
+
+    reaped_at: str
+
+
+# How long the indexer keeps a reaped message's identifier-only record
+# (``indexer/src/database.py`` ``REAPED_RECORD_RETENTION_DAYS``); after
+# it a lookup of the message or thread reads as not found. Reads apply
+# it too, so a record the indexer has not pruned yet is never served
+# past the window (#576).
+REAPED_RECORD_RETENTION_DAYS = 30
+
+# Reap-record lookups for a claimant ID, a bare Message-ID and a thread
+# ID, each bound to the value and the retention cutoff. A Message-ID is
+# sender-controlled, so many reaped files can claim one: each lookup
+# walks an index in ``reaped_at`` order and reads one row, whatever the
+# count.
+REAPED_BY_CLAIMANT_SQL = (
+    "SELECT reaped_at FROM reaped_messages WHERE claimant_id = ? AND reaped_at >= ?"
+)
+REAPED_BY_MESSAGE_ID_SQL = (
+    "SELECT reaped_at FROM reaped_messages WHERE message_id = ? AND reaped_at >= ? "
+    "ORDER BY reaped_at DESC LIMIT 1"
+)
+REAPED_BY_THREAD_SQL = (
+    "SELECT reaped_at FROM reaped_messages WHERE thread_id = ? AND reaped_at >= ? "
+    "ORDER BY reaped_at DESC LIMIT 1"
+)
+
+
+def _reap_cutoff() -> str:
+    """The oldest ``reaped_at`` still inside the retention window, in the
+    indexer's ISO 8601 form; its prune deletes records below it."""
+    return (datetime.now(UTC) - timedelta(days=REAPED_RECORD_RETENTION_DAYS)).isoformat()
+
+
+def _reaped_at(conn: sqlite3.Connection, *lookups: tuple[str, str]) -> str | None:
+    """The latest unexpired reap time the ``(sql, value)`` lookups find,
+    or ``None``."""
+    cutoff = _reap_cutoff()
+    found = [
+        row[0] for sql, value in lookups if (row := conn.execute(sql, (value, cutoff)).fetchone())
+    ]
+    return max(found) if found else None
+
+
+@dataclass
 class ThreadPage:
     """One page of a thread's messages, read from one snapshot."""
 
@@ -759,6 +821,11 @@ class ThreadPage:
     bodies: dict[str, MessageBody]
     # Whether any message of the whole thread has an indexed body.
     has_bodies: bool
+    # Messages of this thread the indexer reaped (mirror retention) and
+    # still holds a record of, oldest reap first: at most
+    # ``MAX_LISTED_CLAIMANTS``, with ``reaped_truncated`` set when more.
+    reaped: list[ReapedMessage] = field(default_factory=list)
+    reaped_truncated: bool = False
 
 
 # Most claimants of one Message-ID that ``get_message_view`` lists
@@ -1226,6 +1293,7 @@ class Database:
         reranker: RerankerBackend | None = None,
         evidence_per_thread: int = 3,
         authority_class: str | None = None,
+        keep_threads_without_evidence: bool = False,
     ) -> list[ThreadResult]:
         authority_class = normalize_authority_class(authority_class)
         folders = self._default_folder_scope(folders)
@@ -1344,22 +1412,49 @@ class Database:
             # ``get_evidence`` and ``extract_from_emails`` read whenever
             # the carrier email won by metadata but the attachment
             # chunks didn't enter the chunk-vec pool.
-            wanted = [r.thread_id for r in candidates]
-            # Recompute attachment-FTS hits standalone so we know which
-            # candidates won via filename match. The keyword lane's RRF
-            # output is opaque to lane provenance, so we re-run the
-            # narrow query here (cheap FTS5 lookup, only when the
-            # caller wants evidence). For these threads, attachment
-            # chunks are floated to the front of the per-thread
-            # evidence slice — fixes the "filename match → wrong
-            # evidence" gap where the LLM saw body text instead of
-            # the attachment the user asked about.
-            with timings.stage("evidence_fetch"):
-                grouped = self.get_query_evidence_chunks(
-                    query_text, wanted, query_embedding, per_thread_limit=evidence_per_thread
-                )
+            #
+            # A date range scopes the passages as well as the threads: a
+            # thread qualifies by its span, a passage only by its own
+            # message's ``sent_at``. A span-only thread then has no
+            # passage, so for evidence callers it gives up its slot: the
+            # filtered ranking is walked in pages until ``candidates_n``
+            # threads with a passage are found or the ranking runs out.
+            # ``search_emails`` wants evidence only as rerank text and
+            # keeps its threads (``keep_threads_without_evidence``).
+            refill = bool(date_from or date_to) and not keep_threads_without_evidence
+            page_size = candidates_n * _FILTERED_OVERSAMPLE
+            pages = (
+                [filtered[i : i + page_size] for i in range(0, len(filtered), page_size)]
+                if refill
+                else [candidates]
+            )
+            kept: list[ThreadResult] = []
+            for page in pages:
+                # Recompute attachment-FTS hits standalone so we know
+                # which candidates won via filename match. The keyword
+                # lane's RRF output is opaque to lane provenance, so we
+                # re-run the narrow query here (cheap FTS5 lookup, only
+                # when the caller wants evidence). For these threads,
+                # attachment chunks are floated to the front of the
+                # per-thread evidence slice — fixes the "filename match
+                # → wrong evidence" gap where the LLM saw body text
+                # instead of the attachment the user asked about.
+                with timings.stage("evidence_fetch"):
+                    grouped = self.get_query_evidence_chunks(
+                        query_text,
+                        [r.thread_id for r in page],
+                        query_embedding,
+                        per_thread_limit=evidence_per_thread,
+                        date_from=date_from,
+                        date_to=date_to,
+                    )
+                for result in page:
+                    result.evidence_chunks = grouped.get(result.thread_id, [])
+                kept += [r for r in page if r.evidence_chunks or not refill]
+                if len(kept) >= candidates_n:
+                    break
+            candidates = kept[:candidates_n]
             for result in candidates:
-                result.evidence_chunks = grouped.get(result.thread_id, [])
                 timings.count("evidence_chunks", len(result.evidence_chunks))
 
         if reranker is not None and candidates:
@@ -1621,10 +1716,10 @@ class Database:
         matches not already surfaced — a finder ("the quote PDF from
         Acme") is better served by the obvious filename hit on top. With
         no ``query`` the index is scanned by the structured filters
-        alone, newest thread activity first.
+        alone, newest carrying message (``sent_at``) first.
 
         Filters: ``content_type`` is an exact MIME match; ``date_from`` /
-        ``date_to`` bound the parent thread's activity (a bare date
+        ``date_to`` bound the carrying message's ``sent_at`` (a bare date
         includes the whole day); ``extracted_only`` keeps only
         attachments whose text extraction succeeded; ``from_addr`` keeps
         only attachments on threads the address sent on (matched against
@@ -1695,13 +1790,16 @@ class Database:
         if content_type:
             clauses.append("a.content_type = ?")
             params.append(content_type)
+        # An attachment is dated by the message carrying it, not by its
+        # thread's span: a January attachment on a thread that ran to
+        # September is not "from" September.
         date_from_iso, date_to_iso = _normalize_date_range(date_from, date_to)
-        if date_from_iso is not None:
-            clauses.append("t.date_last >= ?")
-            params.append(date_from_iso)
-        if date_to_iso is not None:
-            clauses.append("t.date_first <= ?")
-            params.append(date_to_iso)
+        if date_from_iso is not None or date_to_iso is not None:
+            clauses.append(
+                "EXISTS (SELECT 1 FROM messages ms WHERE ms.claimant_id = a.claimant_id "
+                "AND (? IS NULL OR ms.sent_at >= ?) AND (? IS NULL OR ms.sent_at <= ?))"
+            )
+            params += [date_from_iso, date_from_iso, date_to_iso, date_to_iso]
         if extracted_only:
             # ``e`` is LEFT JOINed, so this also drops attachments with no
             # extraction row at all (status reads NULL) — the intent of
@@ -1725,7 +1823,7 @@ class Database:
             "SELECT a.attachment_id, COALESCE(m.message_id, a.claimant_id) AS message_id, "
             "a.claimant_id, a.thread_id, a.filename, "
             "a.content_type, a.size_bytes, t.subject, t.display_subject, "
-            "t.folder, t.date_last, t.senders, e.extraction_status, "
+            "t.folder, t.date_last, m.sent_at, t.senders, e.extraction_status, "
             "substr(e.extracted_text, 1, 240) AS text_snippet, "
             f"{_SOURCE_COLUMNS}, "
             "bm25(attachments_fts) AS score "
@@ -1795,7 +1893,7 @@ class Database:
             "SELECT a.attachment_id, COALESCE(m.message_id, a.claimant_id) AS message_id, "
             "a.claimant_id, a.thread_id, a.filename, "
             "a.content_type, a.size_bytes, t.subject, t.display_subject, "
-            "t.folder, t.date_last, t.senders, e.extraction_status, "
+            "t.folder, t.date_last, m.sent_at, t.senders, e.extraction_status, "
             "substr(e.extracted_text, 1, 240) AS text_snippet, "
             f"{_SOURCE_COLUMNS}, "
             "best.score AS score "
@@ -1836,7 +1934,7 @@ class Database:
             "SELECT a.attachment_id, COALESCE(m.message_id, a.claimant_id) AS message_id, "
             "a.claimant_id, a.thread_id, a.filename, "
             "a.content_type, a.size_bytes, t.subject, t.display_subject, "
-            "t.folder, t.date_last, t.senders, e.extraction_status, "
+            "t.folder, t.date_last, m.sent_at, t.senders, e.extraction_status, "
             "substr(e.extracted_text, 1, 240) AS text_snippet, "
             f"{_SOURCE_COLUMNS}, "
             "0.0 AS score "
@@ -1845,7 +1943,7 @@ class Database:
             "LEFT JOIN attachment_extractions e ON e.attachment_id = a.attachment_id "
             "LEFT JOIN messages m ON m.claimant_id = a.claimant_id "
             "WHERE " + " AND ".join(where) + " "  # nosec B608
-            "ORDER BY t.date_last DESC LIMIT ?"
+            "ORDER BY m.sent_at DESC LIMIT ?"
         )
         try:
             rows = self._fetchall(sql, params)
@@ -2104,7 +2202,13 @@ class Database:
         results = [self._row_to_result(r) for r in rows]
         return self._best_per_thread(results)[:limit]
 
-    def _matched_attachments(self, query: str, thread_ids: list[str]) -> dict[str, list[str]]:
+    def _matched_attachments(
+        self,
+        query: str,
+        thread_ids: list[str],
+        date_from: str | None = None,
+        date_to: str | None = None,
+    ) -> dict[str, list[str]]:
         """Map each of ``thread_ids`` to the attachments whose filename or
         MIME type matches ``query``, strongest match first.
 
@@ -2119,10 +2223,16 @@ class Database:
         re-applied. Cheap FTS5 query bounded by the candidates; falls
         back to an empty map on any error so the caller's main path is
         never blocked.
+
+        ``date_from`` / ``date_to`` keep only attachments whose carrying
+        message was sent in the range, the same bound the evidence
+        passages get, so an out-of-range file cannot reorder in-range
+        evidence.
         """
         fts_query = _sanitize_fts_query(query)
         if not thread_ids or not fts_query:
             return {}
+        date_from_iso, date_to_iso = _normalize_date_range(date_from, date_to)
         placeholders = ",".join(["?"] * len(thread_ids))
         sql = (
             "SELECT a.thread_id, a.attachment_id, bm25(attachments_fts) AS score "
@@ -2130,10 +2240,25 @@ class Database:
             "JOIN attachments a ON attachments_fts.rowid = a.fts_rowid "
             "WHERE attachments_fts MATCH ? "
             f"AND a.thread_id IN ({placeholders}) "  # nosec B608
+            "AND (? IS NULL AND ? IS NULL OR EXISTS (SELECT 1 FROM messages ms "
+            "  WHERE ms.claimant_id = a.claimant_id "
+            "  AND (? IS NULL OR ms.sent_at >= ?) AND (? IS NULL OR ms.sent_at <= ?))) "
             "ORDER BY score"
         )
         try:
-            rows = self._fetchall(sql, [fts_query, *thread_ids])
+            rows = self._fetchall(
+                sql,
+                [
+                    fts_query,
+                    *thread_ids,
+                    date_from_iso,
+                    date_to_iso,
+                    date_from_iso,
+                    date_from_iso,
+                    date_to_iso,
+                    date_to_iso,
+                ],
+            )
         except sqlite3.Error as e:
             log.warning("Attachment match lookup failed; skipping bias: %s", type(e).__name__)
             return {}
@@ -2325,6 +2450,8 @@ class Database:
         thread_ids: list[str],
         embedding: list[float],
         per_thread_limit: int,
+        date_from: str | None = None,
+        date_to: str | None = None,
     ) -> dict[str, list[ChunkResult]]:
         """Per-thread evidence for ``query_text``, as ``ask_mailbox`` sees it.
 
@@ -2334,14 +2461,19 @@ class Database:
         thread's slice. ``hybrid_search(with_evidence=True)`` and the
         thread-scoped ``get_evidence`` path both call this, so an audit
         of one thread returns the passages ``ask_mailbox`` was given for
-        it (#461).
+        it (#461). ``date_from`` / ``date_to`` keep only passages whose
+        message's ``sent_at`` is in the range.
         """
-        matched_attachments = self._matched_attachments(query_text, thread_ids)
+        matched_attachments = self._matched_attachments(
+            query_text, thread_ids, date_from=date_from, date_to=date_to
+        )
         return self.get_evidence_chunks_for_threads(
             thread_ids,
             embedding,
             per_thread_limit=per_thread_limit,
             matched_attachments=matched_attachments,
+            date_from=date_from,
+            date_to=date_to,
         )
 
     def get_evidence_chunks_for_threads(
@@ -2350,6 +2482,8 @@ class Database:
         embedding: list[float],
         per_thread_limit: int = 3,
         matched_attachments: dict[str, list[str]] | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
     ) -> dict[str, list[ChunkResult]]:
         """Return up to ``per_thread_limit`` best-matching chunks per thread.
 
@@ -2383,9 +2517,15 @@ class Database:
         even when a body chunk, or another attachment's chunk, has
         higher dense similarity. Remembering only the thread let the cap
         keep unrelated attachments and drop the one that matched.
+
+        ``date_from`` / ``date_to`` keep only chunks whose
+        ``message_date`` (their message's ``sent_at``) is in the range,
+        normalized as the thread filters normalize it; a thread with no
+        chunk in range gets an empty list.
         """
         if not thread_ids:
             return {}
+        date_from_iso, date_to_iso = _normalize_date_range(date_from, date_to)
         try:
             serialized = sqlite_vec.serialize_float32(embedding)
             placeholders = ",".join(["?"] * len(thread_ids))
@@ -2425,9 +2565,21 @@ class Database:
                 "         AND a2.claimant_id = c.claimant_id "
                 "  ) "
                 f"WHERE c.thread_id IN ({placeholders}) "  # nosec B608
+                "AND (? IS NULL OR c.message_date >= ?) "
+                "AND (? IS NULL OR c.message_date <= ?) "
                 "ORDER BY score ASC"
             )
-            rows = self._fetchall(sql, [serialized, *thread_ids])
+            rows = self._fetchall(
+                sql,
+                [
+                    serialized,
+                    *thread_ids,
+                    date_from_iso,
+                    date_from_iso,
+                    date_to_iso,
+                    date_to_iso,
+                ],
+            )
         except (sqlite3.Error, ValueError) as e:
             # Same catch surface as ``_chunk_vector_search`` — missing
             # vec extension, corrupt vec row, malformed serialised
@@ -2868,7 +3020,7 @@ class Database:
 
     def get_thread_page(
         self, thread_id: str, *, offset: int, limit: int, body_char_limit: int
-    ) -> ThreadPage | None:
+    ) -> ThreadPage | ReapedSource | None:
         """One page of a thread's messages, oldest first, each with its
         own headers and its body cut at ``body_char_limit``.
 
@@ -2880,7 +3032,10 @@ class Database:
             conn.execute("BEGIN")
             row = conn.execute("SELECT * FROM threads WHERE thread_id = ?", (thread_id,)).fetchone()
             if row is None:
-                return None
+                # Same snapshot as the miss, so a thread reindexed in
+                # between cannot read as reaped.
+                reaped_at = _reaped_at(conn, (REAPED_BY_THREAD_SQL, thread_id))
+                return ReapedSource(reaped_at) if reaped_at else None
             total = conn.execute(
                 "SELECT COUNT(*) FROM messages WHERE thread_id = ?", (thread_id,)
             ).fetchone()[0]
@@ -2895,6 +3050,20 @@ class Database:
                     (thread_id,),
                 ).fetchone()[0]
             )
+            # A message restored upstream after its reap is indexed again
+            # under the same claimant ID; its stale record is not listed.
+            # ``idx_reaped_messages_thread`` matches the order, so the
+            # walk stops at the limit.
+            reaped = [
+                ReapedMessage(claimant_id=r["claimant_id"], reaped_at=r["reaped_at"])
+                for r in conn.execute(
+                    "SELECT r.claimant_id, r.reaped_at FROM reaped_messages r "
+                    "WHERE r.thread_id = ? AND r.reaped_at >= ? AND NOT EXISTS "
+                    "(SELECT 1 FROM messages m WHERE m.claimant_id = r.claimant_id) "
+                    "ORDER BY r.reaped_at, r.claimant_id LIMIT ?",
+                    (thread_id, _reap_cutoff(), MAX_LISTED_CLAIMANTS + 1),
+                )
+            ]
         return ThreadPage(
             thread=self._row_to_result(row),
             total_messages=total,
@@ -2902,9 +3071,24 @@ class Database:
             messages=messages,
             bodies=bodies,
             has_bodies=has_bodies,
+            reaped=reaped[:MAX_LISTED_CLAIMANTS],
+            reaped_truncated=len(reaped) > MAX_LISTED_CLAIMANTS,
         )
 
-    def get_message_view(self, identifier: str) -> MessageView | AmbiguousMessageId | None:
+    def get_thread_or_reaped(self, thread_id: str) -> ThreadResult | ReapedSource | None:
+        """The thread row, or, when there is none, the indexer's record
+        that the thread was reaped, read from one snapshot."""
+        with closing(self._connect()) as conn:
+            conn.execute("BEGIN")
+            row = conn.execute("SELECT * FROM threads WHERE thread_id = ?", (thread_id,)).fetchone()
+            if row is not None:
+                return self._row_to_result(row)
+            reaped_at = _reaped_at(conn, (REAPED_BY_THREAD_SQL, thread_id))
+        return ReapedSource(reaped_at) if reaped_at else None
+
+    def get_message_view(
+        self, identifier: str
+    ) -> MessageView | AmbiguousMessageId | ReapedSource | None:
         """One message's headers, its thread, and its full body, from one
         read snapshot.
 
@@ -2912,7 +3096,8 @@ class Database:
         names several messages (#217) returns an ``AmbiguousMessageId``
         listing them instead of one of them: a bare Message-ID several
         indexed files claim, or a crafted Message-ID equal to another
-        message's claimant ID.
+        message's claimant ID. One that names no live message but was
+        reaped returns a ``ReapedSource``.
         """
         with closing(self._connect()) as conn:
             conn.execute("BEGIN")
@@ -2935,6 +3120,15 @@ class Database:
                 )
             }
             records = sorted(merged.values(), key=lambda r: (r.sent_at, r.claimant_id))[:limit]
+            # A claimant ID names one file. When no live message has it but
+            # a reaped one did, report that reap even if another message's
+            # sender-chosen Message-ID equals the string: before the reap
+            # that collision read as ambiguous, and an old citation must
+            # not silently resolve to a different source.
+            if identifier not in merged and (
+                reaped_at := _reaped_at(conn, (REAPED_BY_CLAIMANT_SQL, identifier))
+            ):
+                return ReapedSource(reaped_at)
             if len(records) > 1:
                 return AmbiguousMessageId(
                     message_id=identifier,
@@ -2942,7 +3136,10 @@ class Database:
                     truncated=len(records) > MAX_LISTED_CLAIMANTS,
                 )
             if not records:
-                return None
+                # No live message: the reap record, if any, from the same
+                # snapshot (a message restored in between reads as live).
+                reaped_at = _reaped_at(conn, (REAPED_BY_MESSAGE_ID_SQL, identifier))
+                return ReapedSource(reaped_at) if reaped_at else None
             record = records[0]
             _attach_participants(conn, [record])
             row = conn.execute(

@@ -262,6 +262,52 @@ If you want Docker's view of the current state:
 docker inspect mbsync --format='{{json .State.Health}}'
 ```
 
+## macOS Bridge mode: mbsync cannot reach or verify the Bridge app
+
+In [macOS Bridge mode](setup.md#macos-bridge-mode-optional) there is no
+Bridge container to inspect; check the app and the connection instead.
+
+- **`Waiting for ProtonBridge IMAP on host.docker.internal:1143...`
+  until mbsync gives up.** The app is not running, is logged out, or
+  listens on another port. Open the app, check the account is
+  connected, and compare its IMAP port with `BRIDGE_IMAP_PORT` in
+  `.env` (default 1143). To probe from the container:
+  `docker exec mbsync nc -z -w 2 host.docker.internal 1143`.
+- **`Bridge IMAP port is reachable` but `cert extraction failed`.** The
+  app's IMAP connection mode is SSL rather than STARTTLS. Switch it back
+  to STARTTLS in the app's settings.
+- **`BRIDGE_CERT_FINGERPRINT is not set`.** This mode does not trust
+  the app's certificate on first use. Take the fingerprint on the Mac
+  and set it in `.env`
+  ([Set it up](setup.md#set-it-up), step 3), then `make up-macos-bridge`.
+- **`the Bridge certificate does not match BRIDGE_CERT_FINGERPRINT`.**
+  Compare the `presented:` value with the fingerprint taken on the Mac
+  while the app is running. If they differ, something other than the app
+  answered on its port (for example another local account's process
+  while the app was closed): treat it as a security event. If the app's
+  certificate changed on purpose (reinstall, reset), update
+  `BRIDGE_CERT_FINGERPRINT` and rotate the pin as in
+  [Switching an existing installation](setup.md#switching-an-existing-installation).
+- **`certificate owner does not match hostname host.docker.internal`.**
+  mbsync was recreated without the overlay's `BRIDGE_CERT_HOST`, or by a
+  `docker compose` command missing
+  `-f docker-compose.macos-bridge.yml`. Run `make up-macos-bridge`.
+- **`certificate owner does not match hostname 127.0.0.1`.** The app
+  presents a certificate not issued for `127.0.0.1`, such as one
+  imported into Bridge by hand. Use a certificate for `127.0.0.1`; there
+  is no option to skip the check.
+- **`Bridge cert fingerprint does not match pinned value` after
+  switching modes, reinstalling the app, or resetting it.** Expected
+  once: the app presents a different certificate. Verify it and rotate
+  the pin as in
+  [Switching an existing installation](setup.md#switching-an-existing-installation).
+- **`UIDVALIDITY genuinely changed` or `Unable to recover from
+  UIDVALIDITY change` after switching modes.** mbsync's sync state
+  belongs to the previous Bridge. mbsync leaves those folders untouched;
+  see step 4 of
+  [Switching an existing installation](setup.md#switching-an-existing-installation).
+  These isync errors name the folder.
+
 ## A Proton folder was renamed or deleted
 
 mbsync never deletes local mail (`Expunge None`) and keeps a local folder

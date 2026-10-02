@@ -20,15 +20,31 @@ import asyncio
 import re
 import sqlite3
 from contextlib import closing, contextmanager
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
 import sqlite_vec
 from fastmcp.exceptions import ToolError
-from src.lib.sqlite import MAX_LISTED_CLAIMANTS, AmbiguousMessageId, Database
+from src.lib.sqlite import (
+    MAX_LISTED_CLAIMANTS,
+    REAPED_BY_CLAIMANT_SQL,
+    REAPED_BY_MESSAGE_ID_SQL,
+    REAPED_RECORD_RETENTION_DAYS,
+    AmbiguousMessageId,
+    Database,
+)
 from src.tools.retrieval import register_retrieval_tools
 
-from tests.conftest import _build_schema, _insert_message, _insert_thread, claimant_of
+from tests.conftest import (
+    RECENT_REAP_AT,
+    RECENT_REAP_DAY,
+    _build_schema,
+    _insert_message,
+    _insert_thread,
+    claimant_of,
+    insert_reaped,
+)
 
 
 @contextmanager
@@ -408,6 +424,269 @@ class TestGetMessage:
         seeded_db.get_message_view = boom  # type: ignore[assignment]
         handler = _handlers(fake_server, seeded_db)["get_message"]
         assert "Error" in _error(handler(message_id="anything"))
+
+
+class TestReapedSources:
+    """PLAN Phase 4 item 4: a caller holding a claimant ID or thread ID
+    from an earlier answer learns that its source was reaped
+    (mirror retention), not that the ID never existed."""
+
+    _REAPED_AT = RECENT_REAP_AT
+
+    def _db(self, tmp_path, *, survivor: bool = False):
+        with _open_fixture_db(tmp_path) as (conn, db):
+            claimant = insert_reaped(
+                conn, message_id="gone@example.com", thread_id="t-gone", reaped_at=self._REAPED_AT
+            )
+            if survivor:
+                _insert_message(
+                    conn,
+                    message_id="kept@example.com",
+                    thread_id="t-gone",
+                    sent_at="2024-01-11T09:00:00+00:00",
+                    body="the reply that survives",
+                )
+            conn.close()
+        return db, claimant
+
+    def test_get_message_by_claimant_id_reports_reaped(self, fake_server, tmp_path):
+        db, claimant = self._db(tmp_path)
+        message = _error(_handlers(fake_server, db)["get_message"](message_id=claimant))
+        assert f"reaped from the index on {RECENT_REAP_DAY} (mirror retention)" in message
+        assert "not found" not in message
+
+    def test_get_message_by_bare_message_id_reports_reaped(self, fake_server, tmp_path):
+        db, _ = self._db(tmp_path)
+        message = _error(_handlers(fake_server, db)["get_message"](message_id="gone@example.com"))
+        assert f"reaped from the index on {RECENT_REAP_DAY} (mirror retention)" in message
+
+    def test_get_message_unknown_id_still_not_found(self, fake_server, tmp_path):
+        db, _ = self._db(tmp_path)
+        message = _error(_handlers(fake_server, db)["get_message"](message_id="never@example.com"))
+        assert "Message not found" in message
+
+    def test_reaped_claimant_id_is_not_taken_over_by_a_bare_message_id(self, fake_server, tmp_path):
+        """Review round 2: a live message whose sender-chosen Message-ID
+        equals a reaped claimant ID must not answer a lookup of that
+        claimant ID; before the reap the collision read as ambiguous."""
+        with _open_fixture_db(tmp_path) as (conn, db):
+            reaped = insert_reaped(
+                conn,
+                message_id="gone@example.com",
+                thread_id="t-gone",
+                reaped_at=self._REAPED_AT,
+            )
+            _insert_message(
+                conn,
+                message_id=reaped,
+                thread_id="t-crafted",
+                sent_at="2024-01-11T09:00:00+00:00",
+                body="zqxcrafted body",
+            )
+            conn.close()
+        handlers = _handlers(fake_server, db)
+        message = _error(handlers["get_message"](message_id=reaped))
+        assert f"reaped from the index on {RECENT_REAP_DAY} (mirror retention)" in message
+        assert "zqxcrafted" not in message
+        # The crafted message stays reachable by its own claimant ID.
+        out = asyncio.run(handlers["get_message"](message_id=claimant_of(reaped)))
+        assert "zqxcrafted body" in _text(out)
+
+    def test_message_states_only_what_the_record_shows(self, fake_server, tmp_path):
+        """Review round 1: the stored time is the local reap, not the
+        upstream deletion, and a file missing from the Maildir is reaped
+        too, so the text must not claim an upstream deletion date."""
+        db, claimant = self._db(tmp_path)
+        message = _error(_handlers(fake_server, db)["get_message"](message_id=claimant))
+        assert "removed upstream" not in message
+        assert "deleted in ProtonMail" not in message
+        assert "deleted upstream or its file went missing" in message
+
+    @staticmethod
+    def _count_connections(db, monkeypatch) -> list[int]:
+        opened: list[int] = []
+        connect = db._connect
+
+        def counted():
+            opened.append(1)
+            return connect()
+
+        monkeypatch.setattr(db, "_connect", counted)
+        return opened
+
+    @pytest.mark.parametrize(
+        ("tool", "kwargs"),
+        [
+            ("get_message", {"message_id": "gone@example.com"}),
+            ("get_thread", {"thread_id": "t-gone"}),
+        ],
+    )
+    def test_live_and_reaped_state_read_in_one_snapshot(
+        self, fake_server, tmp_path, monkeypatch, tool, kwargs
+    ):
+        """Review round 1: a restore landing between a live miss and a
+        separate reap lookup would report a live message as reaped."""
+        db, _ = self._db(tmp_path)
+        opened = self._count_connections(db, monkeypatch)
+        message = _error(_handlers(fake_server, db)[tool](**kwargs))
+        assert "reaped from the index" in message
+        assert len(opened) == 1
+
+    def test_bare_message_id_reap_lookup_reads_one_row(self, tmp_path, monkeypatch):
+        """Review round 1: many reaped files claiming one sender-chosen
+        Message-ID must not make each lookup visit all of them."""
+        _RECENT = datetime.fromisoformat(RECENT_REAP_AT)
+        with _open_fixture_db(tmp_path) as (conn, db):
+            for i in range(MAX_LISTED_CLAIMANTS * 5):
+                insert_reaped(
+                    conn,
+                    message_id="dup@example.com",
+                    variant=f"v{i}",
+                    thread_id="t-gone",
+                    reaped_at=(_RECENT - timedelta(days=i % 28)).isoformat(),
+                )
+            plans = [
+                " ".join(r[3] for r in conn.execute(f"EXPLAIN QUERY PLAN {sql}", params))
+                for sql, params in (
+                    (REAPED_BY_MESSAGE_ID_SQL, ("dup@example.com", "")),
+                    (REAPED_BY_CLAIMANT_SQL, ("dup@example.com", "")),
+                )
+            ]
+            conn.close()
+        assert all("TEMP B-TREE" not in p and "USING" in p for p in plans), plans
+        assert REAPED_BY_MESSAGE_ID_SQL.rstrip().endswith("LIMIT 1")
+        statements = TestMessageIdClaimants._trace(db, monkeypatch)
+        view = db.get_message_view("dup@example.com")
+        assert view is not None and view.reaped_at == _RECENT.isoformat()
+        assert not [s for s in statements if "reaped_messages" in s and "MAX(" in s]
+
+    def test_get_thread_of_fully_reaped_thread_reports_reaped(self, fake_server, tmp_path):
+        db, _ = self._db(tmp_path)
+        message = _error(_handlers(fake_server, db)["get_thread"](thread_id="t-gone"))
+        assert f"reaped from the index on {RECENT_REAP_DAY} (mirror retention)" in message
+        assert "not found" not in message
+
+    def test_get_thread_unknown_id_still_not_found(self, fake_server, tmp_path):
+        db, _ = self._db(tmp_path)
+        message = _error(_handlers(fake_server, db)["get_thread"](thread_id="t-never"))
+        assert "Thread not found" in message
+
+    def test_get_thread_lists_messages_removed_from_a_surviving_thread(self, fake_server, tmp_path):
+        db, claimant = self._db(tmp_path, survivor=True)
+        out = asyncio.run(_handlers(fake_server, db)["get_thread"](thread_id="t-gone"))
+        assert "the reply that survives" in _text(out)
+        assert f"{claimant} (reaped {RECENT_REAP_DAY})" in _text(out)
+        assert out.structured_content["reaped_messages"] == [
+            {"claimant_id": claimant, "reaped_at": self._REAPED_AT}
+        ]
+        assert out.structured_content["reaped_messages_truncated"] is False
+
+    def test_get_thread_without_reaps_lists_none(self, fake_server, messages_db):
+        out = asyncio.run(_handlers(fake_server, messages_db)["get_thread"](thread_id="t1"))
+        assert "reaped" not in _text(out).lower()
+        assert out.structured_content["reaped_messages"] == []
+
+    def test_a_restored_message_is_not_listed_as_removed(self, fake_server, tmp_path):
+        """Restored upstream after the reap, the message is indexed again
+        under the same claimant ID; its stale record must not shadow it."""
+        with _open_fixture_db(tmp_path) as (conn, db):
+            insert_reaped(conn, message_id="back@example.com", thread_id="t1", reaped_at="x")
+            _insert_message(
+                conn,
+                message_id="back@example.com",
+                thread_id="t1",
+                sent_at="2024-01-11T09:00:00+00:00",
+                body="restored body",
+            )
+            conn.close()
+        handlers = _handlers(fake_server, db)
+        out = asyncio.run(handlers["get_thread"](thread_id="t1"))
+        assert out.structured_content["reaped_messages"] == []
+        out = asyncio.run(handlers["get_message"](message_id="back@example.com"))
+        assert "restored body" in _text(out)
+
+    def test_reaped_list_is_capped(self, fake_server, tmp_path):
+        with _open_fixture_db(tmp_path) as (conn, db):
+            for i in range(MAX_LISTED_CLAIMANTS + 5):
+                insert_reaped(
+                    conn,
+                    message_id=f"gone{i:02d}@example.com",
+                    thread_id="t1",
+                    reaped_at=self._REAPED_AT,
+                )
+            _insert_message(conn, message_id="kept", thread_id="t1", sent_at="2024-01-11")
+            conn.close()
+        out = asyncio.run(_handlers(fake_server, db)["get_thread"](thread_id="t1"))
+        assert len(out.structured_content["reaped_messages"]) == MAX_LISTED_CLAIMANTS
+        assert out.structured_content["reaped_messages_truncated"] is True
+
+    def _expired_db(self, tmp_path, *, survivor: bool = False):
+        """One record just inside the retention window and one just past
+        it, as an indexer whose prune has not run yet leaves them."""
+        now = datetime.fromisoformat(RECENT_REAP_AT)
+        expired = (now - timedelta(days=REAPED_RECORD_RETENTION_DAYS + 1)).isoformat()
+        with _open_fixture_db(tmp_path) as (conn, db):
+            old = insert_reaped(
+                conn, message_id="old@example.com", thread_id="t-old", reaped_at=expired
+            )
+            fresh = insert_reaped(
+                conn, message_id="new@example.com", thread_id="t-new", reaped_at=RECENT_REAP_AT
+            )
+            if survivor:
+                insert_reaped(
+                    conn, message_id="old2@example.com", thread_id="t-new", reaped_at=expired
+                )
+                _insert_message(
+                    conn,
+                    message_id="kept@example.com",
+                    thread_id="t-new",
+                    sent_at="2024-01-11T09:00:00+00:00",
+                    body="the reply that survives",
+                )
+            conn.close()
+        return db, old, fresh
+
+    def test_expired_record_reads_as_not_found(self, fake_server, tmp_path):
+        """#576: a record past the retention window is never served, even
+        while the indexer has not pruned it yet."""
+        db, old, fresh = self._expired_db(tmp_path)
+        handlers = _handlers(fake_server, db)
+        for identifier in (old, "old@example.com"):
+            message = _error(handlers["get_message"](message_id=identifier))
+            assert "Message not found" in message
+            assert "reaped" not in message
+        message = _error(handlers["get_thread"](thread_id="t-old"))
+        assert "Thread not found" in message
+        assert "reaped" not in message
+        # A fresh record is still served.
+        for identifier in (fresh, "new@example.com"):
+            assert "reaped from the index" in _error(handlers["get_message"](message_id=identifier))
+        assert "reaped from the index" in _error(handlers["get_thread"](thread_id="t-new"))
+
+    def test_expired_record_is_not_listed_on_a_surviving_thread(self, fake_server, tmp_path):
+        db, _old, fresh = self._expired_db(tmp_path, survivor=True)
+        out = asyncio.run(_handlers(fake_server, db)["get_thread"](thread_id="t-new"))
+        # The fresh record on the thread is listed; the expired one is not.
+        assert out.structured_content["reaped_messages"] == [
+            {"claimant_id": fresh, "reaped_at": RECENT_REAP_AT}
+        ]
+
+    def test_retention_and_schema_mirror_the_indexer(self, tmp_path):
+        """The documented retention and the fixture table are only true
+        while they match what the indexer writes."""
+        source = INDEXER_DATABASE.read_text()
+        assert f"REAPED_RECORD_RETENTION_DAYS = {REAPED_RECORD_RETENTION_DAYS}\n" in source
+        with _open_fixture_db(tmp_path) as (conn, _db):
+            mirror = [
+                " ".join(r[0].split())
+                for r in conn.execute(
+                    "SELECT sql FROM sqlite_master WHERE tbl_name = 'reaped_messages' "
+                    "AND sql IS NOT NULL ORDER BY name"
+                )
+            ]
+            conn.close()
+        flat = " ".join(source.split())
+        assert mirror and all(statement in flat for statement in mirror)
 
 
 class TestMessageIdClaimants:

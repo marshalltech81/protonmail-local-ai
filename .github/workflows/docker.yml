@@ -35,6 +35,9 @@ jobs:
       - name: Validate docker compose configuration
         run: docker compose config --quiet
 
+      - name: Validate the macOS Bridge overlay
+        run: docker compose -f docker-compose.yml -f docker-compose.macos-bridge.yml config --quiet
+
   build-images:
     name: docker compose build
     runs-on: ubuntu-latest

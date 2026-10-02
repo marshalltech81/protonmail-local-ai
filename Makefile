@@ -1,4 +1,4 @@
-.PHONY: build build-nocache up down logs first-run update status requeue-dead clean sync sync-indexer sync-mcp test test-indexer test-mcp test-mbsync test-bridge test-bridge-smoke test-validate-env restart-indexer baseline typecheck typecheck-indexer typecheck-mcp bridge-patch-check bridge-smoke bridge-upgrade-check init-secrets validate-env help
+.PHONY: build build-nocache build-macos-bridge up up-macos-bridge down logs first-run update status requeue-dead clean sync sync-indexer sync-mcp test test-indexer test-mcp test-mbsync test-mbsync-tls test-compose test-bridge test-bridge-smoke test-validate-env restart-indexer baseline typecheck typecheck-indexer typecheck-mcp bridge-patch-check bridge-smoke bridge-upgrade-check init-secrets validate-env help
 
 UV_CACHE_DIR ?= /tmp/uv-cache
 export UV_CACHE_DIR
@@ -16,6 +16,8 @@ help:
 	@echo "  build        Build all Docker images"
 	@echo "  build-nocache Rebuild all Docker images from scratch (skips BuildKit cache)"
 	@echo "  up           Start the full stack"
+	@echo "  build-macos-bridge  Build images for macOS Bridge mode (no Bridge container)"
+	@echo "  up-macos-bridge     Start mbsync, indexer and mcp-server against the macOS Bridge app"
 	@echo "  down         Stop the full stack"
 	@echo "  restart-indexer  Run validate-env, then restart the indexer (after editing config/authority.toml)"
 	@echo "  logs         Tail logs from all containers"
@@ -27,11 +29,13 @@ help:
 	@echo "  status       Show container and index status"
 	@echo "  requeue-dead Requeue dead-lettered indexing jobs (optional CLASS=retryable|permanent_source_failure|operator_action_required)"
 	@echo "  sync         Sync local uv environments for indexer and mcp-server"
-	@echo "  test         Run indexer, mcp-server, mbsync, Bridge entrypoint, bridge-smoke and validate-env script tests locally"
+	@echo "  test         Run indexer, mcp-server, mbsync, Compose, Bridge entrypoint, bridge-smoke and validate-env script tests locally"
 	@echo "  typecheck    Run mypy over the indexer and mcp-server Python services"
 	@echo "  test-indexer Run indexer unit tests only"
 	@echo "  test-mcp     Run mcp-server unit tests only"
 	@echo "  test-mbsync  Run mbsync entrypoint tests only"
+	@echo "  test-mbsync-tls  Run the mbsync TLS check against a synthetic Bridge (needs Docker)"
+	@echo "  test-compose Run Compose rendering tests for both Bridge modes"
 	@echo "  test-bridge  Run Bridge entrypoint tests only"
 	@echo "  test-bridge-smoke  Run bridge-smoke.sh pass/fail tests (no Docker)"
 	@echo "  test-validate-env  Run validate-env.sh and mcp-auth-headers.sh tests against synthetic fixtures"
@@ -115,6 +119,20 @@ validate-env:
 # Start the full stack in detached mode
 up: init-secrets validate-env
 	docker compose up -d
+
+# macOS Bridge mode (#497): use the Proton Mail Bridge app running on the
+# Mac instead of the Bridge container. Every command in this mode must carry
+# both -f files; a bare `docker compose up -d <svc>` drops the overlay and
+# points mbsync back at the Bridge container. Login and Bridge updates
+# happen in the app, so first-run and update do not apply. down, logs,
+# status, restart-indexer and clean work in either mode. See docs/setup.md.
+MACOS_BRIDGE_COMPOSE := docker compose -f docker-compose.yml -f docker-compose.macos-bridge.yml
+
+build-macos-bridge:
+	$(MACOS_BRIDGE_COMPOSE) build
+
+up-macos-bridge: init-secrets validate-env
+	$(MACOS_BRIDGE_COMPOSE) up -d
 
 # Restart the indexer after editing config/authority.toml, running the
 # same preflight as `make up` first so a loosened file mode fails here.
@@ -202,7 +220,7 @@ requeue-dead:
 	docker exec indexer python -m src.requeue_dead $(if $(CLASS),--class $(CLASS),)
 
 # Run unit tests locally using uv
-test: test-indexer test-mcp test-mbsync test-bridge test-bridge-smoke test-validate-env
+test: test-indexer test-mcp test-mbsync test-compose test-bridge test-bridge-smoke test-validate-env
 
 test-indexer: sync-indexer
 	cd indexer && uv run pytest -q
@@ -212,6 +230,12 @@ test-mcp: sync-mcp
 
 test-mbsync:
 	bash mbsync/tests/entrypoint_test.sh
+
+test-mbsync-tls:
+	bash mbsync/tests/tls_check.sh
+
+test-compose:
+	bash scripts/tests/compose_test.sh
 
 test-bridge:
 	bash bridge/tests/entrypoint_test.sh

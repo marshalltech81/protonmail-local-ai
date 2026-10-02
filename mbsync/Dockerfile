@@ -3,12 +3,16 @@
 # =============================================================================
 FROM debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251
 
+# socat relays the IMAP connection to the macOS Bridge app through
+# mbsync's Tunnel (BRIDGE_CERT_HOST, see entrypoint.sh); it is unused in
+# the default Bridge-container mode.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     isync \
     ca-certificates \
     netcat-openbsd \
     gettext-base \
     openssl \
+    socat \
  && rm -rf /var/lib/apt/lists/*
 
 # -----------------------------------------------------------------------------
