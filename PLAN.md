@@ -51,9 +51,15 @@ semantics are an explicit roadmap item (Phase 4).
 
 The stack runs four containers:
 
-- **ProtonBridge** — Docker, headless, IMAP/SMTP on `bridge-net` only.
+- **ProtonBridge** — Docker, headless, IMAP/SMTP on `bridge-net` only;
+  or, in the optional macOS Bridge mode (#571), the Proton Mail Bridge
+  app on the Mac, reached through `host.docker.internal` with a
+  required certificate fingerprint.
 - **mbsync** — Docker, pulls into Maildir, `chmod go+r` after each
-  sync, TOFU cert pinning with explicit rotation flag.
+  sync; with the Bridge container, TOFU cert pinning with an explicit
+  rotation flag; in macOS Bridge mode, no TOFU: the certificate must
+  match the operator-supplied `BRIDGE_CERT_FINGERPRINT` on every
+  start.
 - **indexer** — Docker, parses Maildir, threads, embeds via any
   OpenAI-compatible `/v1/embeddings` provider (operator-supplied),
   writes SQLite. Schema v0 (the squashed, renumbered baseline,
@@ -115,7 +121,7 @@ guessing about semantics, completeness, or identity.
    Completed). Received date deferred (see Deferred).
 4. ~~**Honest `get_mailbox_status`**~~ Done 2026-09-28 (see Recently
    Completed).
-5. ~~**MCP endpoint auth**~~ Done 2026-10-02 (#568, #569): `/mcp`
+5. ~~**MCP endpoint auth**~~ Done 2026-10-02 (#573; #568, #569): `/mcp`
    requires the local static bearer token from the `mcp_auth_token`
    Docker secret (Resolved decisions 13). The trust condition narrows
    to "processes running as the operator are trusted".
@@ -405,30 +411,31 @@ on #307):
 **Exit criterion:** we can objectively measure whether the system
 answers real knowledge questions, and identify why failures occur.
 
-**Status of Phases 3–5 (2026-10-02).** No phase is complete. Done:
-Phase 3 items 3, 4, 6 and 7 (3 as an experimental tool; 6's budgets
-are retuned once #487 measures them), Phase 4 items 1 and 2. Partly
-done: Phase 3 items 1, 2 and 8, Phase 4 item 4, Phase 5 item 2. Not
-started: Phase 3 item 5, Phase 4 item 3, Phase 5 items 1, 3 and 4. Most of
-what remains needs the real mailbox and providers (the go-live
-checklist) or an owner decision.
+**Status of Phases 3–5 (2026-10-02, afternoon).** No phase is
+complete. Done: Phase 3 items 3, 4, 6 and 7 (3 as an experimental
+tool; 6's budgets are retuned once #487 measures them), Phase 4 items
+1 and 2. Partly done: Phase 3 items 1, 2 and 8, Phase 4 items 3 and 4,
+Phase 5 item 2. Not started: Phase 3 item 5, Phase 5 items 1, 3 and 4.
+What remains needs the real mailbox and providers (the go-live
+checklist), a model judge for semantic support (#284), or an owner
+decision (Open decisions).
 
 | Item | Status | Landed in | Remaining |
 |---|---|---|---|
-| 3.1 Evals | Partly done | #452 (evidence recall vs hit rate), #494 (agent-level trace scoring), #518 (#502) | live-client trace replay, abstention, corrections, conflicting sources, latency/cost, held-out set and thresholds (#283) |
+| 3.1 Evals | Partly done | #452 (evidence recall vs hit rate), #494 (agent-level trace scoring), #518 (#502), #560 (abstention, corrections, conflicting sources, held-out split) | pass thresholds, live-client trace replay, latency/cost (#283) |
 | 3.2 Latency | Partly done | #458 (stage timings) | benchmarks, budgets, cancellation (#287); needs real mail |
 | 3.3 `brief_issue` | Done (experimental) | #466, #493 (hardening, #471) | accuracy/abstention scoring (#291) is eval work under 3.1 |
 | 3.4 Injection suite | Done | #448, #534 (#442) | — |
 | 3.5 Thread weighting, rerank | Not started | #535 (reply subjects in rerank candidate text, groundwork for #289) | needs real embedder/reranker (#288, #289) |
 | 3.6 Prompt evidence budget | Done | #445 (shared character budget, dedup, coverage note), #496 (whole-prompt token budget, small-model profile) | retune the budgets once measured (#487) |
 | 3.7 Filtered semantic recall | Done | #440, #470 | — |
-| 3.8 Citation contract | Partly done | #457, #495 (`ask_mailbox` statement coverage and quote checks), #519 and #525 (quote and label edge cases), #532 and #545 (thread-scoped `get_evidence` reproduces `ask_mailbox`'s evidence for that thread) | the same contract for `summarize_thread` and `extract_from_emails`; semantic support (#284); mailbox-wide audit parity (#537) |
+| 3.8 Citation contract | Partly done | #457, #495 (`ask_mailbox` statement coverage and quote checks), #519 and #525 (quote and label edge cases), #532 and #545 (thread-scoped `get_evidence` parity), #559 (mailbox-wide parity, #537), #565 (`summarize_thread`, `extract_from_emails`) | semantic support only (#284) |
 | 4.1 Entities | Done | #459, #527 (orphan pruning, #464) | — |
 | 4.2 Source authority | Done | #459, #474 (Spam guard), #523 and #542 (rules file kept private and validated) | verdict-header gating after go-live (#463) |
-| 4.3 Temporal retrieval | In progress (2026-10-02) | — | temporal fields |
-| 4.4 Retention | Mostly done | #451 (mirror default), #475 (Trash hidden from default search) | user-controlled retention; reaped-citation behaviour |
+| 4.3 Temporal retrieval | Partly done | #561 (`sent_at` defined and used consistently) | `occurred_at` (owner decision); #574, #575 |
+| 4.4 Retention | Mostly done | #451 (mirror default), #475 (Trash hidden from default search), #564 and #583 (reaped sources reported for 30 days) | user-controlled retention; the reaped-citation invariant (Open decisions 22); #562 |
 | 5.1 Hardened `brief_issue` | Not started | — | needs Phase 3 usage on real mail |
-| 5.2 Support/contradict | Built, experimental | #467 (`check_conclusion`), #493 (evidence-slot refill) | quote/support verification |
+| 5.2 Support/contradict | Built, experimental | #467 (`check_conclusion`), #493 (evidence-slot refill), #558 (quote verification, also for `brief_issue`) | semantic support (#284) |
 | 5.3 Position as of date | Not started | — | — |
 | 5.4 Persisted claims | Not started (by design) | — | only after 5.1–5.3 |
 
@@ -444,10 +451,14 @@ checklist) or an owner decision.
    Phase 2, Sequencing). **Status: partly done.** The first slice
    landed in #452 (required-evidence groups, evidence recall@10
    reported apart from hit@10 and MRR); #494 added deterministic
-   agent-level scoring of tool-call traces on synthetic scenarios.
-   Remaining: replaying a live client's traces, abstention,
-   corrections, conflicting sources, latency and cost, and a held-out
-   set with pass thresholds; answer quality stays a manual grade.
+   agent-level scoring of tool-call traces on synthetic scenarios;
+   #560 added abstention, correction and conflicting-source scenarios
+   and a stable held-out split. Known limits of #560: abstention is
+   credited only on a strict match of a golden absent term, and the
+   held-out rule ignores category, so the dev split has no
+   conflicting-source scenario. Remaining: pass thresholds, replaying
+   a live client's traces, latency and cost; answer quality stays a
+   manual grade.
 2. **Latency instrumentation before performance redesign.** Stage
    timers through the query path (query_embedding / per-lane FTS+KNN /
    fusion / rerank / evidence_fetch / inference / total). `ask_mailbox`
@@ -518,9 +529,12 @@ checklist) or an owner decision.
    Depends on #217's identity decision (landed in #453). First slice
    in #457 (labelled evidence, label validation, one repair);
    statement-level coverage and quote verification for `ask_mailbox`
-   in #495. **Status: partly done;** the same contract for
-   `summarize_thread` and `extract_from_emails`, and checking that a
-   cited passage supports its statement, remain.
+   in #495; mailbox-wide `get_evidence` reproduces `ask_mailbox`'s
+   evidence with `max_threads` (#559, #537); `summarize_thread` and
+   `extract_from_emails` carry the same labels, checks and single
+   repair (#565). **Status: partly done;** only semantic support
+   (checking that a cited passage supports its statement, which needs
+   a model judge) remains.
 
 ### Phase 4 — Deterministic knowledge scaffolding
 
@@ -547,7 +561,14 @@ the first deployment needs a numbered migration like any other.
    decided after go-live (#463).
 3. **Richer temporal retrieval:** capture and expose
    occurred_at/sent_at consistently; bitemporal claim modeling waits
-   for Phase 5. **Status: not started.**
+   for Phase 5. **Status: partly done (#561).** "Message time" is
+   defined in `docs/architecture.md`: `sent_at` (the parsed `Date:`
+   header) is the only message time, every date filter bounds it, a
+   message, passage or attachment qualifies by its own message's
+   `sent_at`, and under a date range the evidence tools show only
+   passages from messages sent inside it. `occurred_at` stays
+   undefined pending an owner decision (Open decisions 15); #574 and
+   #575 are follow-ups.
 4. **Deletion/retention semantics.** Mirror is the default
    (upstream delete → index delete after the grace window; #451),
    archive (`INDEXER_DELETION_ENABLED=false`) is the opt-in, and
@@ -556,7 +577,16 @@ the first deployment needs a numbered migration like any other.
    Provenance must define behavior when a citation's source is reaped
    (evidence row retained, source marked unavailable, chain never
    silently broken). **Status: mostly done** (#451 mirror default,
-   #475 Trash hidden from default search).
+   #475 Trash hidden from default search). Reaped sources are
+   reported (#564, #583): looking up a reaped message or thread
+   reports "reaped from the index" rather than "not found", and
+   `get_thread` lists a surviving thread's reaped messages, from
+   content-free `reaped_messages` records kept 30 days. This does not
+   yet meet the invariant above: no evidence row is retained (the
+   chunks are deleted and the record holds no chunk ID or text), and
+   after 30 days or an index rebuild a reaped ID reads as "not found"
+   again. Remaining: that gap (Open decisions 22), user-controlled
+   retention, and #562 (extracted attachment text outlives a reap).
 
 ### Phase 5 — Knowledge reasoning
 
@@ -567,8 +597,9 @@ the first deployment needs a numbered migration like any other.
    find evidence that supports, contradicts, qualifies, or
    supersedes it"). Experimental, behind `MCP_EXPERIMENTAL_TOOLS`
    like `brief_issue`. **Status: built (experimental) as
-   `check_conclusion` (#467);** quote and support verification
-   remain.
+   `check_conclusion` (#467);** quotes are verified against the cited
+   passages in it and in `brief_issue` (#558). Semantic support
+   remains (#284).
 3. Temporal position/change reasoning ("position as of date X" vs
    "current position"). **Status: not started.**
 4. **Only then** evaluate persisted claims/events — and only under
@@ -653,48 +684,60 @@ Triaged against `d30e500` by four parallel agents; every issue is real
 and most reproduced with synthetic input. PRs in the order to land
 them (one test-first commit per issue, `Fixes #N` per issue):
 
-**Handoff 2026-10-02, morning — start here.** **#277 is fixed
-(#515):** mbsync's healthcheck reports liveness rather than a completed
-sync, so a long first sync no longer keeps the indexer and MCP server
-from starting. #277 no longer blocks the first deployment. Go live
-with the checklist below only once #432 lands. The MCP bearer token
-has landed (Phase 1 item 5, Resolved decisions 13; operators create
-`.secrets/mcp_auth_token.txt` and add the header to each client, see
-`docs/setup.md`). Even with the token, the host must be one where
-processes running as the operator are trusted. Rebuild
-any index created before the overnight changes from Maildir (the
-volume wipe in `docs/troubleshooting.md`, "Indexer refuses to
-start"): #527 and #544 edited the v0 schema, and #546, #547 and #548 change
-parsed or chunked text, none of which reaches an existing database.
-Land #432 before go-live too (decided 2026-10-02: a streaming
-pre-pass, in progress): until it is fixed, a crafted xlsx attachment
-can exhaust the indexer's memory or hold its only worker. Before the overnight run, four Phase 3 slices
-(#493–#496; the status table under Phase 3 is current), eight
-defaults-audit fixes and #510 merged (see Recently Completed).
-Overnight (see Recently Completed): mbsync tolerates far-side folders
-that vanished (#276, #521); the indexer watches Maildir folders that
-become readable after a sync, so no restart is needed after the first
-sync (#516, #520, #540); `config/authority.toml` must be mode 600,
-checked by `make up` and the new `make restart-indexer` (#523, #542);
-entities orphaned by a reap are pruned (#464, #527); OCR's English-only
-limit is documented (#517, refs #490); chunk splits keep the tabs that
-open a line (#433, #546); stored subjects are capped at
-2,000 characters (#541, #547); a `multipart/related` never promotes a
-later part into the body (#450, #548); and the P3 fixes listed there.
-No code PR is open.
+**Handoff 2026-10-02, afternoon — start here.** Both go-live
+blockers are done: #432 (xlsx streaming pre-pass, #572) and MCP
+endpoint auth (the static bearer token, #573). #277 was fixed in the
+morning (#515). No code PR is open, and the stack is ready for the
+go-live checklist below. What landed this afternoon is under Recently
+Completed (2026-10-02, afternoon); the Phase 3–5 status table under
+Phase 3 is current.
 
-Owner decisions: Open decisions 3–14 were answered on 2026-10-02
-(Resolved decisions 13). Done from those answers: #498 (Streamable
-HTTP only, #563) and MCP auth (the local bearer token, #568, #569). In
-progress: #432 (xlsx streaming pre-pass), #497 (Bridge app on macOS),
-#537 (`get_evidence` `max_threads`) and #556 (Compose and shell
-scanning), plus the Phase 3–5 slices 3.8, 5.2's quote checks, 3.1's
-scenarios, 4.4's reaped-source lookups and 4.3's temporal fields.
+Operator steps before go-live, in addition to the checklist:
+
+1. **Rebuild any existing index from Maildir** (the volume wipe in
+   `docs/troubleshooting.md`, "Indexer refuses to start"; in macOS
+   Bridge mode finish with `make up-macos-bridge`, not the `make up`
+   that procedure ends with, which would switch back to the Bridge
+   container; #591 fixes the procedure). #527, #544
+   and #564 edited the v0 schema (#564 added `reaped_messages`; a
+   database built before it fails `get_thread` and every reap), and
+   #546, #547 and #548 change parsed or chunked text; none of these
+   reaches an existing database.
+2. **`make init-secrets`** (which `make up` also runs) creates the
+   missing `.secrets/mcp_auth_token.txt` (mode 600); `validate-env`
+   rejects a missing, empty or non-600 token file. Run it before
+   writing the client configuration in step 3, which reads the token.
+3. **Update the MCP client:** the URL is now
+   `http://localhost:${MCP_PORT}/mcp` (default port 3000; Streamable
+   HTTP only, #563; remove any
+   `MCP_TRANSPORT=sse` or `dual` from `.env`) and every request needs
+   the bearer header. Claude Code uses `scripts/mcp-auth-headers.sh` as
+   its `headersHelper`; Claude Desktop uses the pinned `mcp-remote`
+   with `--header-file` (`docs/setup.md` step 7). Never put the token
+   in a command argument.
+4. **macOS Bridge mode (optional):** `make build-macos-bridge` and
+   `make up-macos-bridge` replace the checklist's `make build`,
+   `make first-run` and `make up` (plain `make build` builds the unused
+   Bridge image), with `BRIDGE_CERT_FINGERPRINT` taken from the Bridge
+   app (`docs/setup.md`, "macOS Bridge mode"). It is built and tested
+   against a synthetic STARTTLS server only (#571); the owner's live
+   test against the real app is still to do (Open decisions 21). #497
+   closed when #571 merged.
+
+What still needs the owner: Open decisions 15–22 (`occurred_at`, the
+date-range evidence behaviour, #574/#575, #562, #580, the
+`mcp-remote` pin review, the #497 live test and the reaped-citation
+invariant).
 
 Waiting on real data: #487 (evidence and output budgets), #488
 (container resource budgets) and #282 (the mbsync stall deadline, set
 above the first sync's measured duration). Other open P3s: #489, #490
 (the limitation is documented; a language setting is not built).
+
+**Handoff 2026-10-02, morning.** #277 was fixed (#515); the overnight
+fixes (#515–#548) and the owner's answers to Open decisions 3–14
+(Resolved decisions 13) are recorded under Recently Completed and
+Resolved decisions.
 
 **Handoff 2026-10-01, end of the second session.**
 Every PR from the session is merged (#436–#479); no PR is open and
@@ -719,10 +762,12 @@ Next session, in order:
    the measurements waiting on real data (#287 budgets, #288, #289).
 
 Backlog filed from review (P3 or edge cases, not scheduled): #454,
-and from 2026-10-02 #524, #526 and #533 (#537 is in progress; #442, #446, #447,
-#449, #450, #455, #456, #460, #461, #464, #465, #468, #471, #477,
-#478, #499, #500, #502 and #541 are fixed; #433 too, and #550 joins
-the reindex bundle).
+and from 2026-10-02 #524, #526 and #533, plus the afternoon's
+deferred findings (#562, #574, #575, #577–#582, #584, #588, #589; see
+Known limitations, Maintenance backlog and Open decisions). #442,
+#446, #447, #449, #450, #455, #456, #460, #461, #464, #465, #468,
+#471, #477, #478, #499, #500, #502, #537, #541, #570, #576 and #585
+are fixed; #433 too, and #550 joins the reindex bundle.
 
 **Status 2026-10-01 (end of the first session).**
 Focus has moved from hardening to running the stack for real
@@ -760,14 +805,14 @@ and #471. The two owner decisions from the run are settled
 first step keeps Spam mail out of authority filters (#474), with
 verdict-header gating decided after go-live.
 
-Still open from Phases 3–5, all waiting on a real mailbox or the
-owner: #283's remaining eval slices and #291's accuracy scoring;
-#287's budgets and benchmarks; #487's evidence and output budgets;
-#288 and #289, which need a real embedder and reranker; #284 for
-`summarize_thread`, `extract_from_emails` and semantic support;
-Phase 4 item 3 and item 4's user-controlled retention and
-reaped-citation behaviour; and Phase 5 items 1 (needs real-mail
-use), 2's quote and support verification, and 3–4.
+Still open from Phases 3–5 (updated 2026-10-02, afternoon), all
+waiting on a real mailbox, a model judge or the owner: #283's pass
+thresholds, live trace replay and latency/cost, and #291's accuracy
+scoring; #287's budgets and benchmarks; #487's evidence and output
+budgets; #288 and #289, which need a real embedder and reranker;
+#284's semantic support (for every tool that cites); Phase 4 item 3's
+`occurred_at` and item 4's user-controlled retention; and Phase 5
+items 1 (needs real-mail use), 2's semantic support, and 3–4.
 
 Go-live checklist (do these before more hardening):
 
@@ -792,9 +837,11 @@ Go-live checklist (do these before more hardening):
    indexer's progress; `make status` until the index is current.
    Record how long the initial sync takes: #282's stall deadline is
    set above it (#277 landed in #515).
-5. Point an MCP client at `http://localhost:${MCP_PORT}/mcp` (Claude
-   Desktop through a local stdio bridge; see `docs/setup.md` step 7),
-   and try real questions by hand; `mcp-server/tests/eval/README.md` covers turning
+5. Point an MCP client at `http://localhost:${MCP_PORT}/mcp` with the
+   bearer token from `.secrets/mcp_auth_token.txt` (Claude Code
+   through `scripts/mcp-auth-headers.sh`, Claude Desktop through
+   `mcp-remote --header-file`; see `docs/setup.md` step 7), and try
+   real questions by hand; `mcp-server/tests/eval/README.md` covers turning
    the good ones into a retrieval eval.
 6. Let what breaks set the next priorities; then the #283 eval slice,
    which must precede the first Phase 2 generation as its validation
@@ -1064,8 +1111,21 @@ linked from the Phase 3 items they track.
   length check, and IDs cannot be cut in responses without breaking
   chaining. Decide on a parse-time length limit (Message-IDs are
   ≤998 characters per RFC 5322 line length) or a hashed thread ID
-- AGENTS.md commit-hygiene secret check: `grep '^\+'` fails under
-  ugrep (a common `grep` alias); use the portable `grep '^[+]'`
+- ~~AGENTS.md commit-hygiene secret check: `grep '^\+'` fails under
+  ugrep (a common `grep` alias); use the portable `grep '^[+]'`~~
+  (done: #555)
+- Semgrep Compose/shell rules match one file at a time (#566), with
+  gaps filed: top-level `include` (#577), `volumes_from` (#578), long
+  `chmod` options before the mode (#579), `!reset`/`!override`
+  clearing inherited hardening (#580, Open decisions 19), the
+  `compose.yaml`/`compose.yml` default names (#581), and a quoted `#`
+  hiding a `curl`/`wget` TLS flag (#582)
+- mbsync macOS Bridge mode: report a missing `BRIDGE_CERT_FINGERPRINT`
+  at startup, before the Bridge wait (#584)
+- `make test-mbsync-tls` is intermittently flaky on unchanged `main`
+  (#588)
+- validate the MCP auth token's character set at startup and in
+  `validate-env` (#589)
 
 ## Not doing (decided 2026-09-26)
 
@@ -1183,6 +1243,14 @@ can be revisited with an explicit owner decision.
 - deletion reconciliation is on by default (mirror) and not yet validated under
   long-running real-world conditions; `INDEXER_UNLINK_ON_REAP=true`
   only removes the `.eml` when Maildir is mounted read-write
+- mirror retention keeps a reaped attachment's extracted text in
+  `attachment_extractions` (#562, Open decisions 18)
+- under a date range the evidence tools can return no passages when
+  span-only threads fill the retrieval lanes (#574), and a chunk's
+  stored date can lag its message's `sent_at` until a failed re-date
+  retries (#575); Open decisions 17
+- macOS Bridge mode is tested only against a synthetic STARTTLS server
+  (#571); the live test is Open decisions 21
 - coverage scope: both services measure `src/` with `src/main.py`
   omitted. The indexer's `main.py` has grown to hold the whole
   two-phase pipeline, which `tests/test_main.py` exercises but the
@@ -1283,7 +1351,8 @@ do not ship persisted claims without them.
     decisions 3–14)
     - **MCP endpoint auth (Phase 1 item 5):** ship the local static
       bearer token before go-live, built after #498 lands, since both
-      touch `mcp-server/src/main.py`. Done 2026-10-02 (#568, #569). The token stops other local
+      touch `mcp-server/src/main.py`. Done 2026-10-02 (#573; design
+      notes #568, #569). The token stops other local
       accounts and browser-origin requests that cannot read the
       secret; it does not stop code running as the operator's own user
       (a malicious package can read the mode-600 file), so the trust
@@ -1332,8 +1401,8 @@ do not ship persisted claims without them.
     - **#432 xlsx duplicate cells:** option (c), a streaming pre-pass
       that counts raw `<c>` nodes and cuts the sheet before an
       over-budget row, public APIs only. It changes the extracted
-      text, so it bumps the xlsx entry in `EXTRACTOR_VERSIONS`. In
-      progress; lands before go-live.
+      text, so it bumps the xlsx entry in `EXTRACTOR_VERSIONS`. Done
+      2026-10-02 (#572; xlsx 2→3).
     - **#498 Streamable HTTP as the only transport:** go. Breaking:
       clients move from `/sse` to `/mcp`, and an explicit `sse` or
       `dual` fails startup with a migration message; it changes the
@@ -1346,10 +1415,14 @@ do not ship persisted claims without them.
       migration (credentials, certificate pin, UIDVALIDITY). The
       macOS app's certificate is issued for `localhost` and
       `127.0.0.1`, not `host.docker.internal`, so the first step is a
-      certificate-valid connection path (never a TLS bypass). In
-      progress.
-    - **#537 `get_evidence` thread count:** add `max_threads`. In
-      progress.
+      certificate-valid connection path (never a TLS bypass). Built
+      2026-10-02 (#571): `make up-macos-bridge`, a required
+      `BRIDGE_CERT_FINGERPRINT` (no trust on first use), and
+      verification under `BRIDGE_CERT_HOST=127.0.0.1` through a `socat`
+      tunnel. The live test against the real app is pending (Open
+      decisions 21).
+    - **#537 `get_evidence` thread count:** add `max_threads`. Done
+      2026-10-02 (#559).
     - **#533 look-alike letters in delimiter tags:** defer.
     - **#526 `authority.toml` on Linux Docker Engine:** stays
       documented; deferred until a Linux deployment.
@@ -1361,7 +1434,8 @@ do not ship persisted claims without them.
       estimate.
     - **#495 CJK handling:** keep the CJK terminators and word counts.
     - **Compose and shell scanning (#491/#512):** build it, filed as
-      #556. In progress.
+      #556. Done 2026-10-02 (#566, Semgrep with repo-owned rules);
+      per-file matching gaps are #577–#582.
     - **#287 request cancellation:** waits for real-mail measurements
       before it is designed or built.
 
@@ -1373,21 +1447,96 @@ do not ship persisted claims without them.
    #526, #524, #494, #496, #495 and Compose scanning): resolved
    2026-10-02 (Resolved decisions 13).
 
+Raised by the 2026-10-02 afternoon work (none blocks go-live):
+
+15. **`occurred_at` (Phase 4 item 3, #561).** (a) Leave it undefined:
+    `sent_at`, the sender's `Date:` claim, stays the only message time.
+    (b) Define it as the delivery time from the top `Received:` header,
+    which is #297's deferred chain and the Deferred "per-message
+    received date" item (a schema change and a re-parse of every
+    `.eml`). Recommendation: (a) until temporal reasoning (Phase 5
+    item 3) or real mail shows a need, then (b) with the Phase 2
+    reindex.
+16. **Date-range evidence (#561).** Under `date_from`/`date_to`, the
+    evidence tools (`get_evidence`, `ask_mailbox`,
+    `extract_from_emails`, `brief_issue`, `check_conclusion`) now show
+    only passages from messages sent inside the range, where before
+    every passage of a thread whose span overlapped it could appear.
+    Confirm, or ask for the old thread-span behaviour back.
+17. **#574 and #575**, each a new mechanism. #574: a date range can
+    leave the evidence tools with no passages when span-only threads
+    fill the retrieval lanes (options: re-query the lanes with a
+    per-message date predicate, or push the date filter into the chunk
+    lanes). #575: a chunk's stored date can lag `messages.sent_at`
+    until a failed re-date retries (options: refresh the chunk dates
+    in the Phase 1 transaction, or read the joined `sent_at`). Both
+    are rare before a re-dating parser change.
+18. **#562: extracted attachment text after a reap.** Mirror retention
+    removes a reaped message's attachments and chunks, but
+    `attachment_extractions` keeps the extracted text, keyed by content
+    hash, as a re-arrival cache. Options: purge rows no `attachments`
+    row references, in the reap transaction or a sweep (privacy); or
+    keep the cache and document it. Recommendation: purge on reap; the
+    cost is re-extracting a payload that arrives again.
+19. **#580: scan the merged Compose config.** Semgrep matches each
+    file alone, so an overlay can `!reset` inherited hardening. Options:
+    reject `!reset`/`!override` on hardening keys if Semgrep can see
+    YAML tags, or run the required-hardening rules against
+    `docker compose -f docker-compose.yml -f <overlay> config` for each
+    overlay (a new mechanism that would also settle #577's `include`).
+20. **`mcp-remote` supply chain.** Claude Desktop reaches `/mcp`
+    through `mcp-remote@0.14.3` via `npx`. The npm package changed
+    maintainers (its repository moved from `geelen/mcp-remote` to
+    `punkpeye/mcp-remote`); `docs/setup.md` warns about this. Review the
+    pinned version before using it, or use Claude Code, which needs no
+    bridge.
+21. **#497 live test.** Run macOS Bridge mode against the real Bridge
+    app (`docs/setup.md`, "macOS Bridge mode"), including the
+    documented migration of an existing Maildir if switching from the
+    container (credentials, certificate pin, UIDVALIDITY).
+22. **Reaped-citation invariant (Phase 4 item 4).** The plan says a
+    reaped citation keeps its evidence row and the chain is never
+    silently broken. #564 keeps only a content-free record (claimant
+    ID, Message-ID, thread ID, reap time) for 30 days; the chunks are
+    deleted, and after 30 days or a rebuild a reaped ID reads as "not
+    found". Options: (a) accept the 30-day, content-free record and
+    restate the invariant, since keeping evidence text would keep
+    upstream-deleted mail in the index; (b) keep the records longer or
+    for good (identifiers only); (c) keep evidence text, which
+    conflicts with mirror retention. Recommendation: (a), possibly with
+    (b)'s longer window.
+
 ## Recently Completed
 
-### 2026-10-02 — MCP endpoint auth (Phase 1 item 5; #568, #569)
+### 2026-10-02, afternoon — Go-live blockers closed; Phase 3–5 slices (#558–#587)
 
-`/mcp` requires `Authorization: Bearer <token>`, the `mcp_auth_token`
-Docker secret (`.secrets/mcp_auth_token.txt`, mode 600, generated by
-`make init-secrets`). A missing or wrong token gets 401 before a
-session is created, compared in constant time; `/health` stays open,
-the Host/Origin allowlist still runs, startup fails closed on an empty
-token, and `validate-env` rejects a missing, empty or non-600 file and
-`MCP_AUTH_TOKEN` in `.env`. Clients never take the token as a command
-argument: Claude Code gets the header from `scripts/mcp-auth-headers.sh`
-as its `headersHelper`, and Claude Desktop's `mcp-remote` reads it from
-a mode-600 `--header-file`. PLAN.md's auth design now names
-standalone fastmcp's hook and the single `/mcp` app.
+Go-live blockers: xlsx worksheets are cut at an XML node budget by a
+streaming pre-pass before openpyxl parses them, `xlsx` 2→3 in
+`EXTRACTOR_VERSIONS` (#432, PR #572); `/mcp` requires a static bearer
+token, the `mcp_auth_token` Docker secret created by
+`make init-secrets`, checked in constant time with 401 before any
+session, `/health` open, and clients given the header from a file
+(Claude Code's `headersHelper` script, `mcp-remote --header-file`)
+(Phase 1 item 5, #568, #569, PR #573). MCP: Streamable HTTP at `/mcp`
+is the only transport, and `MCP_TRANSPORT=sse` or `dual` fails startup
+(#498, PR #563). Phase 3–5: quote verification for `check_conclusion`
+and `brief_issue` (5.2, PR #558); `get_evidence` `max_threads`, giving
+mailbox-wide parity with `ask_mailbox` (#537, PR #559); abstention,
+correction and conflicting-source eval scenarios and a held-out split
+(3.1, PR #560); "Message time" defined, with `sent_at` the only message
+time and date ranges scoping evidence to in-range messages (4.3, PR
+#561); reaped sources reported as reaped from the index, from
+`reaped_messages` records kept 30 days and pruned before the embedder
+wait (4.4, PR #564; #576, PR #583); the citation contract for
+`summarize_thread` and `extract_from_emails` (3.8, PR #565).
+Bridge and mbsync: the optional macOS Bridge mode (#497, PR #571);
+folder names and Bridge text redacted from all mbsync output, which
+also made the filter stream under mawk (#570, PR #586); the TLS check
+keeps its bind mounts at 700 (#585, PR #587). CI: Semgrep scans every
+`docker-compose*.yml` file and shell script with repo-owned rules
+(#556, PR #566; default `compose.yaml`/`compose.yml` names are not
+covered, #581).
+Deferred findings filed: #562, #574, #575, #577–#582, #584, #588, #589.
 
 ### 2026-10-02 — Overnight fixes; first-deployment blocker closed (#515–#548)
 
