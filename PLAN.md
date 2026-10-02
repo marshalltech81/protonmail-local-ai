@@ -677,17 +677,17 @@ them (one test-first commit per issue, `Fixes #N` per issue):
 
 **Handoff 2026-10-02 — start here.** Since the handoff below, four
 Phase 3 slices merged (#493–#496; the status table under Phase 3 is
-current) and seven fixes from a Codex defaults audit of 2026-10-01
-(#501, #503, #504, #505, #508, #509, #511; see Recently Completed).
-In flight: #510 (`validate-env` agrees with Compose and the loaders,
-#482) and #512 (CI job timeouts and concurrency, #491). Before the
+current) and eight fixes from a Codex defaults audit of 2026-10-01
+(#501, #503, #504, #505, #508, #509, #511, #512; see Recently
+Completed). In flight: #510 (`validate-env` agrees with Compose and
+the loaders, #482 and #506). Before the
 go-live checklist below: **#277** blocks the first deployment (a long
 first mbsync run keeps the indexer and MCP server from starting,
 since they wait on a health check only a completed sync satisfies);
 the direction is Resolved decisions 10 and the fix awaits the owner.
 Open from the audit, waiting on real data: #487 (measure the evidence
 and output budgets) and #488 (container resource budgets). P3s from
-the audit and the day's reviews: #489, #490, #499, #500, #502, #506.
+the audit and the day's reviews: #489, #490, #499, #500, #502.
 
 **Handoff 2026-10-01, end of the second session.**
 Every PR from the session is merged (#436–#479); no PR is open and
@@ -1015,8 +1015,8 @@ linked from the Phase 3 items they track.
 
 - consolidate `BRIDGE_VERSION` to a single source of truth
   (`.env.example`); parameterize the Go toolchain as an `ARG`
-- `timeout-minutes` + path filters on `.github/workflows/docker.yml`
-  (#491; PR #512 in flight)
+- path filters on `.github/workflows/docker.yml` (its
+  `timeout-minutes` landed in #512)
 - Bridge build: `go mod download` has no retry, so one blip at
   `proxy.golang.org` (seen 2026-09-30: an HTTP/2 `INTERNAL_ERROR` on a
   single module) fails the whole `docker compose build` check. Add a
@@ -1025,8 +1025,9 @@ linked from the Phase 3 items they track.
 - Trivy scan of the Bridge Go module graph in `security.yml` (#272
   closed as its duplicate; needs an exception policy for upstream
   Proton dependencies we cannot patch)
-- pin `actions/checkout` to a commit SHA in `bridge.yml`; pinned
-  `setup-go` in the patch-drift job
+- ~~pin `actions/checkout` to a commit SHA in `bridge.yml`; pinned
+  `setup-go` in the patch-drift job~~ (done: #512 pins every action
+  by SHA)
 - fix the `\t\t` BSD-sed portability bug in `bridge/patch-source.sh`
 - mbsync: move `BRIDGE_USER` to a file-backed secret; add
   memory/CPU limits (#488; log rotation done in #501); evaluate
@@ -1300,7 +1301,7 @@ do not ship persisted claims without them.
 
 ## Recently Completed
 
-### 2026-10-01 — Phase 3 slices and defaults-audit fixes (#493–#511)
+### 2026-10-01 — Phase 3 slices and defaults-audit fixes (#493–#512)
 
 Phase 3, one PR per slice: `brief_issue` hardening, with chunkless
 evidence slots refilled (also in `check_conclusion`), a repair for
@@ -1318,8 +1319,10 @@ after one attempt (#483, PR #504); the indexer heartbeat refreshed during
 attachment extraction and OCR (#485, PR #505); provider timeouts
 documented as per-operation, not total deadlines (#486, PR #508);
 chunk budgets checked against each other at startup (#507, PR #509);
-and `PYTHONDONTWRITEBYTECODE` set and FastMCP telemetry off in the
-MCP server (#492, PR #511).
+`PYTHONDONTWRITEBYTECODE` set and FastMCP telemetry off in the MCP
+server (#492, PR #511); and CI job timeouts, cancellation of
+superseded PR runs, every action pinned by SHA, and `make baseline`
+accepting only `UPDATE=1` (#491, PR #512).
 
 ### 2026-09-30 — Second review batch, items 6–12 (#258–#264)
 
