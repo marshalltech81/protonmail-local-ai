@@ -7,6 +7,7 @@ import asyncio
 import json
 import logging
 import re
+import unicodedata
 from collections.abc import Container, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from typing import Literal
@@ -729,9 +730,16 @@ def _quote_fragments(quote: str) -> list[str]:
     return [f for f in fragments if f]
 
 
+def _is_mark(char: str) -> bool:
+    """A combining mark (category M*), which continues the character
+    before it."""
+    return unicodedata.category(char).startswith("M")
+
+
 def _is_word_char(char: str) -> bool:
-    """A letter, digit or underscore of a script that spaces its words."""
-    return (char.isalnum() or char == "_") and not _CJK_RE.match(char)
+    """A letter, digit, underscore or combining mark of a script that
+    spaces its words."""
+    return (char.isalnum() or char == "_" or _is_mark(char)) and not _CJK_RE.match(char)
 
 
 def _candidates(text: str, fragment: str, pos: int) -> Iterator[int]:
@@ -745,7 +753,9 @@ def _candidates(text: str, fragment: str, pos: int) -> Iterator[int]:
 def _quote_in(fragments: list[str], text: str) -> bool:
     """Whether ``fragments`` occur in folded ``text`` in order, each as
     whole words: a fragment edge that is a word character may not touch
-    another word character, so "on Fri" does not match "on Friday".
+    another word character, so "on Fri" does not match "on Friday", and
+    no edge may fall between a character and a combining mark after it
+    (in any script), so "cafe" does not match a decomposed "café".
     Each fragment takes its first whole-word occurrence after the one
     before, which is the earliest any later fragment can follow; each
     occurrence is tried at most once."""
@@ -753,8 +763,18 @@ def _quote_in(fragments: list[str], text: str) -> bool:
     for fragment in fragments:
         for found in _candidates(text, fragment, pos):
             end = found + len(fragment)
-            if (found and _is_word_char(fragment[0]) and _is_word_char(text[found - 1])) or (
-                end < len(text) and _is_word_char(fragment[-1]) and _is_word_char(text[end])
+            if (
+                found
+                and (
+                    _is_mark(fragment[0])
+                    or (_is_word_char(fragment[0]) and _is_word_char(text[found - 1]))
+                )
+            ) or (
+                end < len(text)
+                and (
+                    _is_mark(text[end])
+                    or (_is_word_char(fragment[-1]) and _is_word_char(text[end]))
+                )
             ):
                 continue
             pos = end
