@@ -751,6 +751,43 @@ def _message_bodies(
 
 
 @dataclass
+class ReapedMessage:
+    """A message the indexer's reconciler reaped (mirror retention): its
+    claimant ID and when it was reaped (ISO 8601 UTC). The indexer keeps
+    nothing else about it."""
+
+    claimant_id: str
+    reaped_at: str
+
+
+@dataclass
+class ReapedSource:
+    """A lookup that found no live message or thread, only the indexer's
+    record that it was reaped at ``reaped_at`` (ISO 8601 UTC)."""
+
+    reaped_at: str
+
+
+# Reap-record lookups for a claimant ID, a bare Message-ID and a thread
+# ID. A Message-ID is sender-controlled, so many reaped files can claim
+# one: each lookup walks an index in ``reaped_at`` order and reads one
+# row, whatever the count.
+REAPED_BY_CLAIMANT_SQL = "SELECT reaped_at FROM reaped_messages WHERE claimant_id = ?"
+REAPED_BY_MESSAGE_ID_SQL = (
+    "SELECT reaped_at FROM reaped_messages WHERE message_id = ? ORDER BY reaped_at DESC LIMIT 1"
+)
+REAPED_BY_THREAD_SQL = (
+    "SELECT reaped_at FROM reaped_messages WHERE thread_id = ? ORDER BY reaped_at DESC LIMIT 1"
+)
+
+
+def _reaped_at(conn: sqlite3.Connection, *lookups: tuple[str, str]) -> str | None:
+    """The latest reap time the ``(sql, value)`` lookups find, or ``None``."""
+    found = [row[0] for sql, value in lookups if (row := conn.execute(sql, (value,)).fetchone())]
+    return max(found) if found else None
+
+
+@dataclass
 class ThreadPage:
     """One page of a thread's messages, read from one snapshot."""
 
@@ -762,6 +799,11 @@ class ThreadPage:
     bodies: dict[str, MessageBody]
     # Whether any message of the whole thread has an indexed body.
     has_bodies: bool
+    # Messages of this thread the indexer reaped (mirror retention) and
+    # still holds a record of, oldest reap first: at most
+    # ``MAX_LISTED_CLAIMANTS``, with ``reaped_truncated`` set when more.
+    reaped: list[ReapedMessage] = field(default_factory=list)
+    reaped_truncated: bool = False
 
 
 # Most claimants of one Message-ID that ``get_message_view`` lists
@@ -2956,7 +2998,7 @@ class Database:
 
     def get_thread_page(
         self, thread_id: str, *, offset: int, limit: int, body_char_limit: int
-    ) -> ThreadPage | None:
+    ) -> ThreadPage | ReapedSource | None:
         """One page of a thread's messages, oldest first, each with its
         own headers and its body cut at ``body_char_limit``.
 
@@ -2968,7 +3010,10 @@ class Database:
             conn.execute("BEGIN")
             row = conn.execute("SELECT * FROM threads WHERE thread_id = ?", (thread_id,)).fetchone()
             if row is None:
-                return None
+                # Same snapshot as the miss, so a thread reindexed in
+                # between cannot read as reaped.
+                reaped_at = _reaped_at(conn, (REAPED_BY_THREAD_SQL, thread_id))
+                return ReapedSource(reaped_at) if reaped_at else None
             total = conn.execute(
                 "SELECT COUNT(*) FROM messages WHERE thread_id = ?", (thread_id,)
             ).fetchone()[0]
@@ -2983,6 +3028,20 @@ class Database:
                     (thread_id,),
                 ).fetchone()[0]
             )
+            # A message restored upstream after its reap is indexed again
+            # under the same claimant ID; its stale record is not listed.
+            # ``idx_reaped_messages_thread`` matches the order, so the
+            # walk stops at the limit.
+            reaped = [
+                ReapedMessage(claimant_id=r["claimant_id"], reaped_at=r["reaped_at"])
+                for r in conn.execute(
+                    "SELECT r.claimant_id, r.reaped_at FROM reaped_messages r "
+                    "WHERE r.thread_id = ? AND NOT EXISTS "
+                    "(SELECT 1 FROM messages m WHERE m.claimant_id = r.claimant_id) "
+                    "ORDER BY r.reaped_at, r.claimant_id LIMIT ?",
+                    (thread_id, MAX_LISTED_CLAIMANTS + 1),
+                )
+            ]
         return ThreadPage(
             thread=self._row_to_result(row),
             total_messages=total,
@@ -2990,9 +3049,24 @@ class Database:
             messages=messages,
             bodies=bodies,
             has_bodies=has_bodies,
+            reaped=reaped[:MAX_LISTED_CLAIMANTS],
+            reaped_truncated=len(reaped) > MAX_LISTED_CLAIMANTS,
         )
 
-    def get_message_view(self, identifier: str) -> MessageView | AmbiguousMessageId | None:
+    def get_thread_or_reaped(self, thread_id: str) -> ThreadResult | ReapedSource | None:
+        """The thread row, or, when there is none, the indexer's record
+        that the thread was reaped, read from one snapshot."""
+        with closing(self._connect()) as conn:
+            conn.execute("BEGIN")
+            row = conn.execute("SELECT * FROM threads WHERE thread_id = ?", (thread_id,)).fetchone()
+            if row is not None:
+                return self._row_to_result(row)
+            reaped_at = _reaped_at(conn, (REAPED_BY_THREAD_SQL, thread_id))
+        return ReapedSource(reaped_at) if reaped_at else None
+
+    def get_message_view(
+        self, identifier: str
+    ) -> MessageView | AmbiguousMessageId | ReapedSource | None:
         """One message's headers, its thread, and its full body, from one
         read snapshot.
 
@@ -3000,7 +3074,8 @@ class Database:
         names several messages (#217) returns an ``AmbiguousMessageId``
         listing them instead of one of them: a bare Message-ID several
         indexed files claim, or a crafted Message-ID equal to another
-        message's claimant ID.
+        message's claimant ID. One that names no live message but was
+        reaped returns a ``ReapedSource``.
         """
         with closing(self._connect()) as conn:
             conn.execute("BEGIN")
@@ -3023,6 +3098,15 @@ class Database:
                 )
             }
             records = sorted(merged.values(), key=lambda r: (r.sent_at, r.claimant_id))[:limit]
+            # A claimant ID names one file. When no live message has it but
+            # a reaped one did, report that reap even if another message's
+            # sender-chosen Message-ID equals the string: before the reap
+            # that collision read as ambiguous, and an old citation must
+            # not silently resolve to a different source.
+            if identifier not in merged and (
+                reaped_at := _reaped_at(conn, (REAPED_BY_CLAIMANT_SQL, identifier))
+            ):
+                return ReapedSource(reaped_at)
             if len(records) > 1:
                 return AmbiguousMessageId(
                     message_id=identifier,
@@ -3030,7 +3114,10 @@ class Database:
                     truncated=len(records) > MAX_LISTED_CLAIMANTS,
                 )
             if not records:
-                return None
+                # No live message: the reap record, if any, from the same
+                # snapshot (a message restored in between reads as live).
+                reaped_at = _reaped_at(conn, (REAPED_BY_MESSAGE_ID_SQL, identifier))
+                return ReapedSource(reaped_at) if reaped_at else None
             record = records[0]
             _attach_participants(conn, [record])
             row = conn.execute(

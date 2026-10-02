@@ -14,6 +14,7 @@ from ..lib.security import log_tool_call, safe_provider_exception_text
 from ..lib.sqlite import (
     PROMPT_EVIDENCE_CHUNKS_PER_THREAD,
     InvalidFilterError,
+    ReapedSource,
     VectorLanesUnavailableError,
     normalize_authority_class,
     validate_date_range,
@@ -31,6 +32,7 @@ from .outputs import (
     SearchAttachmentsOutput,
     SearchEmailsOutput,
     clip,
+    reaped_source,
     source,
     thread_summary,
     tool_result,
@@ -535,7 +537,9 @@ def register_search_tools(
         groups: list[tuple[str, str, dict[str, int] | None, float | None, list]] = []
         try:
             if thread_id:
-                thread = await asyncio.to_thread(db.get_thread, thread_id)
+                thread = await asyncio.to_thread(db.get_thread_or_reaped, thread_id)
+                if isinstance(thread, ReapedSource):
+                    raise ToolError(reaped_source("Thread", thread_id, thread.reaped_at))
                 if not thread:
                     raise ToolError(f"Thread not found: {thread_id}")
                 embedding = await embed_query(embed_client, query, expected_embed_dim)
@@ -546,6 +550,15 @@ def register_search_tools(
                         db.get_query_evidence_chunks, query, [thread_id], embedding, limit
                     )
                 chunks = grouped.get(thread_id, [])
+                if not chunks:
+                    # The reaper may have committed while the query was
+                    # embedded; a thread gone since the first read reads
+                    # as reaped (or not found), not as "No evidence".
+                    current = await asyncio.to_thread(db.get_thread_or_reaped, thread_id)
+                    if isinstance(current, ReapedSource):
+                        raise ToolError(reaped_source("Thread", thread_id, current.reaped_at))
+                    if not current:
+                        raise ToolError(f"Thread not found: {thread_id}")
                 count("evidence_chunks", len(chunks))
                 if chunks:
                     groups.append(

@@ -16,6 +16,7 @@ from ..lib.sqlite import (
     MessageBody,
     MessageRecord,
     Participant,
+    ReapedSource,
     address_match_mode,
     canonical_addr,
     validate_date_range,
@@ -33,10 +34,12 @@ from .outputs import (
     ListFoldersOutput,
     ListThreadsOutput,
     QueryMessagesOutput,
+    ReapedMessage,
     ThreadMessage,
     clip,
     listed_message,
     message_headers,
+    reaped_source,
     thread_summary,
     tool_result,
 )
@@ -226,6 +229,8 @@ def register_retrieval_tools(server, db):
                 limit=limit,
                 body_char_limit=_THREAD_BODY_CHAR_LIMIT,
             )
+            if isinstance(page, ReapedSource):
+                raise ToolError(reaped_source("Thread", thread_id, page.reaped_at))
             if not page:
                 raise ToolError(f"Thread not found: {thread_id}")
             thread, messages, total = page.thread, page.messages, page.total_messages
@@ -277,6 +282,14 @@ def register_retrieval_tools(server, db):
                     "",
                     f"More messages: call get_thread with offset={offset + len(messages)}.",
                 ]
+            if page.reaped:
+                more = " (more not listed)" if page.reaped_truncated else ""
+                lines += [
+                    "",
+                    "Messages reaped from the index (mirror retention: deleted upstream "
+                    f"or missing from the Maildir; content no longer available){more}:",
+                    *(f"  {r.claimant_id} (reaped {r.reaped_at[:10]})" for r in page.reaped),
+                ]
 
             # No message body indexed yet (e.g. chunking still pending):
             # fall back to the accumulated thread text, a retrieval
@@ -305,6 +318,11 @@ def register_retrieval_tools(server, db):
                 messages=[_thread_message(m, page.bodies.get(m.claimant_id)) for m in messages],
                 next_offset=next_offset if next_offset < total else None,
                 indexed_thread_text=thread_text,
+                reaped_messages=[
+                    ReapedMessage(claimant_id=r.claimant_id, reaped_at=r.reaped_at)
+                    for r in page.reaped
+                ],
+                reaped_messages_truncated=page.reaped_truncated,
             )
             return tool_result("\n".join(lines), output)
 
@@ -358,6 +376,8 @@ def register_retrieval_tools(server, db):
         )
         try:
             view = await asyncio.to_thread(db.get_message_view, message_id)
+            if isinstance(view, ReapedSource):
+                raise ToolError(reaped_source("Message", message_id, view.reaped_at))
             if not view:
                 raise ToolError(f"Message not found: {message_id}")
             if isinstance(view, AmbiguousMessageId):

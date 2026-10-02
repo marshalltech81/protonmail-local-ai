@@ -152,6 +152,48 @@ The excluded folder list is `DEFAULT_EXCLUDED_FOLDERS` in
 `mcp-server/src/lib/sqlite.py`, matched exactly as `folders` values
 are.
 
+## Reaped sources
+
+Under mirror retention the indexer reaps a message once its grace
+window passes after it was deleted in Proton or its file went missing
+from the local Maildir. A claimant ID, Message-ID or thread ID taken
+from an earlier answer (a citation, a search hit) can then name a
+source the index no longer holds. Such a lookup reports the reap
+instead of reading like an ID that never existed:
+
+- `get_message` fails with `Message reaped from the index on <date>
+  (mirror retention): <id>` when no live message has the ID and one
+  it names was reaped.
+- `get_thread` and `get_evidence` with `thread_id` fail with `Thread
+  reaped from the index on <date> (mirror retention): <id>` when the
+  whole thread was reaped.
+- `get_thread` on a thread that survives a partial reap lists the
+  reaped messages' claimant IDs and reap times in `reaped_messages`
+  (oldest first, at most 20, with `reaped_messages_truncated`), so a
+  cited message missing from the page is accounted for.
+
+The date is when the local index reaped the source, not when it was
+deleted upstream (that is at least the grace window earlier), and the
+record does not say which of the two causes applied. The live lookup
+and the reap record are read in one snapshot, and a bare Message-ID
+reads one record however many reaped files claimed it. A reaped
+claimant ID keeps naming its reaped file: a live message whose
+sender-chosen Message-ID equals that string does not answer for it
+(it stays reachable by its own claimant ID). Thread-scoped
+`get_evidence` checks the thread again when the evidence fetch finds
+no passages, so a reap that lands while the query is embedded reads
+as reaped rather than as no evidence.
+
+The reaped content is gone: the index keeps only the message's
+claimant ID, Message-ID, thread ID and reap time, never its subject,
+body, participants or attachments. These records last 30 days after
+the reap; after that the lookup returns `not found` again. They live
+only in the index, so rebuilding the index from Maildir drops them
+too: a reaped file is not reindexed, and an ID reaped before the
+rebuild then reads as `not found`. A message restored upstream is
+indexed again under the same claimant ID and reads as live. Other
+tools that take a thread ID (`summarize_thread`) are unchanged.
+
 ## Group 1 — Search
 
 ### `search_emails`
@@ -303,7 +345,9 @@ then body chunks, each group by vector distance. With no attachment
 match the order is vector distance alone. At `limit=6` the result is
 the slice `ask_mailbox` gives its model for that thread. This path
 bypasses RRF fusion, so `include_scores` shows per-chunk vector
-distance but no lane provenance.
+distance but no lane provenance. A `thread_id` whose thread was reaped
+fails with `Thread reaped from the index` rather than `Thread not
+found` ([Reaped sources](#reaped-sources)).
 
 ### `search_attachments`
 Locate indexed attachments by filename, MIME type, and extracted
@@ -364,6 +408,11 @@ per role, 10 thread participants, and 10 References are listed (with a
 a marker — `get_message` returns full headers. The page is read from
 one database snapshot.
 
+Messages of the thread reaped under mirror retention are listed by
+claimant ID and reap time in `reaped_messages`; a fully reaped thread
+fails with `Thread reaped from the index` rather than `Thread not
+found` ([Reaped sources](#reaped-sources)).
+
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `thread_id` | string | required | Thread ID from search results |
@@ -394,7 +443,9 @@ says the Message-ID names "more than 20" messages and lists the oldest
 20, and a successful response sets `other_claimants_truncated` (false
 otherwise). Each list walks a `messages` index in its own order and
 stops one row past the cap, so the cost does not grow with the number
-of files claiming the Message-ID.
+of files claiming the Message-ID. An ID whose message was reaped under
+mirror retention fails with `Message reaped from the index` rather
+than `Message not found` ([Reaped sources](#reaped-sources)).
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|

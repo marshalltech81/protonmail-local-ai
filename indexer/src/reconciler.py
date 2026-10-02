@@ -17,7 +17,10 @@ mode); ``INDEXER_DELETION_ENABLED=false`` opts out (archive mode):
 2. **Reap**: after a configurable grace window the reaper deletes the
    message's ``message_thread_map`` / ``indexed_files`` rows, and either
    rebuilds the parent thread from the surviving messages on disk or removes
-   the thread entirely when no messages remain.
+   the thread entirely when no messages remain. The same transaction
+   writes an identifier-only ``reaped_messages`` record per message so
+   mcp-server can report a cited source as reaped; records
+   expire after ``REAPED_RECORD_RETENTION_DAYS``.
 
 A mass-delete brake caps how many messages the reaper may touch in one pass,
 so a transient Bridge outage (vault rebuild, folder rename, auth glitch) that
