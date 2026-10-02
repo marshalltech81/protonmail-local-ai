@@ -988,8 +988,10 @@ reported a directory created since (a recreated directory may reuse
 its inode number), unschedules and re-schedules the recursive watch (`FolderWatchRefresher`, `indexer/src/folder_watch.py`). Events
 in the gap between the old and new watch are covered by the rename
 sweep (`sweep_paths`) and a Maildir walk, which also queues the mail
-already in the newly watched folders. A sync that opens no new
-directory costs only the folder walk. The same check also runs with
+already in the newly watched folders; if either step fails, both run
+again on the next sync stamp or periodic tick until they succeed. A
+sync that opens no new directory costs only the folder walk. The
+same check also runs with
 the periodic rescan, for a failed sync attempt (whose permission
 repair opens new folders but writes no stamp) and to retry a
 re-schedule that failed.

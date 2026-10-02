@@ -98,6 +98,10 @@ class FolderWatchRefresher:
         self._directory_created = directory_created or threading.Event()
         self._watch: ObservedWatch | None = None
         self._watched: dict[str, int] = {}
+        # Set when ``refresh`` re-schedules the watch; the caller clears
+        # it once its recovery walk for the re-schedule gap succeeds, so
+        # a failed walk is retried on the next refresh (#529).
+        self.recovery_pending = False
 
     def _schedule(self, readable: dict[str, int]) -> None:
         if self._watch is not None:
@@ -131,4 +135,5 @@ class FolderWatchRefresher:
             return False
         log.info("Maildir watch: %d new or newly readable director(ies); re-watching", added)
         self._schedule(current)
+        self.recovery_pending = True
         return True
