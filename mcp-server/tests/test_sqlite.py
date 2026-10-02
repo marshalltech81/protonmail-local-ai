@@ -5102,8 +5102,9 @@ class TestDefaultTrashExclusion:
 
 class TestDateRangeMessageTime:
     """``date_from`` / ``date_to`` bound ``sent_at`` everywhere; a thread
-    qualifies by its span, an evidence passage and an attachment by their
-    own message's time (docs/architecture.md, Message time).
+    qualifies by its span, and so do the evidence passages it carries;
+    an attachment hit qualifies by its carrying message's time
+    (docs/architecture.md, Message time).
 
     Thread ``t-a``: ``a1`` (January, with ``a1-att``) and ``a2``
     (September), so its span overlaps any 2024 range. Thread ``t-b``:
@@ -5174,92 +5175,75 @@ class TestDateRangeMessageTime:
             ("a1-att", "2024-01-10T09:00:00+00:00"),
         ]
 
-    def test_evidence_passages_are_scoped_to_the_range(self, tmp_path):
+    def _evidence(self, db, query="report", limit=5, per_thread=6, **bounds):
+        results = db.hybrid_search(
+            query,
+            [1.0, 0.0, 0.0, 0.0],
+            limit=limit,
+            with_evidence=True,
+            evidence_per_thread=per_thread,
+            **bounds,
+        )
+        return {r.thread_id: r.evidence_chunks for r in results}
+
+    def test_evidence_shows_whole_overlapping_threads(self, tmp_path):
+        """Owner decision (PLAN.md Resolved decisions 14): a thread
+        qualifies by its span, and any passage of it may be shown, each
+        labelled with its own message's ``sent_at``."""
         db = self._db(tmp_path)
 
         def evidence(**bounds) -> dict[str, set[str]]:
-            results = db.hybrid_search(
-                "report",
-                [1.0, 0.0, 0.0, 0.0],
-                limit=5,
-                with_evidence=True,
-                evidence_per_thread=6,
-                **bounds,
-            )
-            return {r.thread_id: {c.claimant_id for c in r.evidence_chunks} for r in results}
+            grouped = self._evidence(db, **bounds)
+            return {tid: {c.claimant_id for c in chunks} for tid, chunks in grouped.items()}
 
         a1, a2, b1 = (claimant_of(m) for m in ("a1", "a2", "b1"))
         assert evidence() == {"t-a": {a1, a2}, "t-b": {b1}}
-        assert evidence(date_from="2024-03-01") == {"t-a": {a2}, "t-b": {b1}}
-        assert evidence(date_to="2024-03-01") == {"t-a": {a1}}
-        # The span overlaps, but no passage is from a message in range:
-        # an evidence caller does not get the thread (review round 1).
-        assert evidence(date_from="2024-07-01", date_to="2024-08-01") == {}
+        assert evidence(date_from="2024-03-01") == {"t-a": {a1, a2}, "t-b": {b1}}
+        assert evidence(date_to="2024-03-01") == {"t-a": {a1, a2}}
+        # The span straddles the range with no message inside it: the
+        # thread still qualifies, with all its passages.
+        assert evidence(date_from="2024-07-01", date_to="2024-08-01") == {"t-a": {a1, a2}}
 
-    def test_span_only_threads_give_up_their_slot(self, tmp_path):
-        """Review round 1: a higher-ranked thread with no passage in range
-        must not use up ``limit`` and hide a lower-ranked thread that has
-        one; ``search_emails`` (``keep_threads_without_evidence``) still
-        returns threads by span alone."""
+    def test_out_of_range_passages_keep_their_own_sent_at(self, tmp_path):
+        sent = {
+            claimant_of("a1"): "2024-01-10T09:00:00+00:00",
+            claimant_of("a2"): "2024-09-01T09:00:00+00:00",
+        }
+        grouped = self._evidence(self._db(tmp_path), date_from="2024-07-01", date_to="2024-08-01")
+        chunks = grouped["t-a"]
+        assert {c.claimant_id for c in chunks} == set(sent)
+        assert all(c.message_date == sent[c.claimant_id] for c in chunks)
+
+    def test_span_overlapping_thread_keeps_its_slot(self, tmp_path):
+        """A higher-ranked thread whose span overlaps the range keeps its
+        slot even with no message inside the range, as in
+        ``search_emails``; evidence is fetched once, for the candidates."""
         # ``t-c``'s July message matches the query weakly (no keyword
-        # hit), so the span-only ``t-a`` outranks it.
+        # hit), so the span-overlapping ``t-a`` outranks it.
         db = self._db(tmp_path, extra=(("c1", "t-c", "2024-07-15T09:00:00+00:00", "notes", False),))
-
-        def threads(**kwargs) -> list[str]:
-            results = db.hybrid_search(
-                "report",
-                [1.0, 0.0, 0.0, 0.0],
-                limit=1,
-                with_evidence=True,
-                date_from="2024-07-01",
-                date_to="2024-08-01",
-                **kwargs,
-            )
-            return [r.thread_id for r in results]
-
-        assert threads(keep_threads_without_evidence=True) == ["t-a"]
-        assert threads() == ["t-c"]
-
-    def test_refill_walks_past_the_first_page(self, tmp_path):
-        """Review round 2: more span-only threads than one evidence page
-        (``limit`` × ``_FILTERED_OVERSAMPLE``) rank ahead of the thread
-        with an in-range passage; the walk continues until it is found."""
-        from src.lib.sqlite import _FILTERED_OVERSAMPLE
-
-        span_only = []
-        for i in range(_FILTERED_OVERSAMPLE + 1):
-            span_only += [
-                (f"s{i}a", f"t-s{i}", "2024-01-10T09:00:00+00:00", "report report", False),
-                (f"s{i}b", f"t-s{i}", "2024-09-01T09:00:00+00:00", "report report", False),
-            ]
-        july = ("c1", "t-c", "2024-07-15T09:00:00+00:00", "notes", False)
-        db = self._db(tmp_path, extra=(*span_only, july))
-        calls: list[int] = []
+        calls: list[list[str]] = []
         fetch = db.get_query_evidence_chunks
 
         def counted(query, thread_ids, *args, **kwargs):
-            calls.append(len(thread_ids))
+            calls.append(list(thread_ids))
             return fetch(query, thread_ids, *args, **kwargs)
 
         db.get_query_evidence_chunks = counted  # type: ignore[method-assign]
-        results = db.hybrid_search(
-            "report",
-            [1.0, 0.0, 0.0, 0.0],
-            limit=1,
-            with_evidence=True,
-            date_from="2024-07-01",
-            date_to="2024-08-01",
-        )
-        assert [r.thread_id for r in results] == ["t-c"]
-        # Pages of ``_FILTERED_OVERSAMPLE`` threads, stopping once found.
-        assert calls[0] == _FILTERED_OVERSAMPLE and len(calls) >= 2
+        grouped = self._evidence(db, limit=1, date_from="2024-07-01", date_to="2024-08-01")
+        assert list(grouped) == ["t-a"]
+        assert calls == [["t-a"]]
 
-    def test_attachment_match_bias_is_date_scoped(self, tmp_path):
-        """Review round 2: an out-of-range attachment the query names
-        does not reorder a thread's in-range evidence."""
-        db = self._db(tmp_path)
-        assert db._matched_attachments("report", ["t-a"]) == {"t-a": ["a1-att"]}
-        assert db._matched_attachments("report", ["t-a"], date_to="2024-03-01") == {
-            "t-a": ["a1-att"]
-        }
-        assert db._matched_attachments("report", ["t-a"], date_from="2024-03-01") == {}
+    def test_attachment_match_bias_ignores_the_range(self, tmp_path):
+        """The attachment the query names leads its thread's evidence
+        even when its message is outside the range: the bias orders
+        passages of a qualifying thread, and every such passage may be
+        shown."""
+        # ``a3`` adds an in-range (August) attachment to ``t-a``; the
+        # query names only ``a1``'s January file.
+        db = self._db(
+            tmp_path,
+            extra=(("a3", "t-a", "2024-08-01T09:00:00+00:00", "report memo", True),),
+        )
+        assert db._matched_attachments("a1", ["t-a"]) == {"t-a": ["a1-att"]}
+        grouped = self._evidence(db, query="a1", per_thread=1, date_from="2024-07-01")
+        assert [c.attachment_id for c in grouped["t-a"]] == ["a1-att"]
