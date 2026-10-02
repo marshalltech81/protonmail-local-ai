@@ -316,26 +316,21 @@ and makes folders and files readable to the indexer, which runs as a
 different user, only when a sync completes. `make status` reports "no
 successful mail sync has been recorded" until then.
 
-### After the first sync completes: restart the indexer
+### Mail from the first sync is indexed only after it completes
 
 The indexer watches the Maildir for new files, but it cannot add a watch to
 a folder it could not read when the folder appeared, and making the folder
-readable later does not add one (#516). On a fresh install that is every
-folder from the first sync, INBOX included. Until the indexer restarts, mail
-in those folders, both the first sync's and later deliveries, is picked up
-only by the recovery sweep, every `INDEXER_RECOVERY_SWEEP_INTERVAL_SECS`
-(default 30 minutes).
+readable later does not add one by itself. On a fresh install that is every
+folder from the first sync, INBOX included. After each sync, once mbsync
+writes its last-sync stamp, the indexer checks for directories that became
+readable and, if it finds any, re-creates its watch and queues the mail
+already in them (#516). No restart is needed. The same applies to a folder
+created in Proton while the stack runs: its mail is indexed after the sync
+that created it, and its later deliveries in real time.
 
-Once `make status` shows a last mail sync time, restart the indexer so it
-indexes the mailbox now and watches every folder:
-
-```bash
-docker compose restart indexer
-```
-
-Or leave it: nothing is lost, the sweep finds the mail, only later. The same
-applies to a folder created in Proton while the stack runs; restarting the
-indexer after it first syncs makes its deliveries real time again.
+The check runs in the indexer's main loop. While the indexer's startup
+index is still draining a large backlog, it waits until that finishes; the
+mail is not lost, only indexed later.
 
 ## `make up` fails — mbsync is unhealthy
 

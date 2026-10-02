@@ -17,6 +17,7 @@ import json
 import logging
 import os
 import sqlite3
+import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -3497,6 +3498,153 @@ class TestEnqueueUnindexedMessages:
         assert queue.is_dead(str(no_id))
 
 
+def _job_reasons(db: Database) -> dict[str, str]:
+    return {
+        Path(row["filepath"]).name: row["reason"]
+        for row in db._conn.execute("SELECT filepath, reason FROM indexing_jobs")
+    }
+
+
+class _CountingObserver:
+    """Stand-in observer for ``FolderWatchRefresher``: counts schedules."""
+
+    def __init__(self):
+        self.calls: list[str] = []
+
+    def schedule(self, handler, path, *, recursive=False):
+        self.calls.append("schedule")
+        return object()
+
+    def unschedule(self, watch):
+        self.calls.append("unschedule")
+
+
+class TestLateFolderWatches:
+    """#516: mbsync creates folders 0700 and opens them to the indexer
+    only after the sync, so the watch cannot cover a folder created
+    during it. Each sync stamp triggers a re-watch of such folders."""
+
+    _STAMP_TMP = ".mbsync-last-sync.2026-09-28T12:00:00Z.60.tmp"
+
+    def test_stamp_rename_signals_a_completed_sync(self, tmp_path, db, monkeypatch):
+        from watchdog.events import FileMovedEvent
+
+        monkeypatch.setattr(main, "MAILDIR_PATH", tmp_path)
+        sync_completed = main.threading.Event()
+        handler = main.MaildirHandler(db, _make_queue(db), sync_completed=sync_completed)
+        handler.on_moved(
+            FileMovedEvent(str(tmp_path / self._STAMP_TMP), str(tmp_path / main.SYNC_STAMP_NAME))
+        )
+
+        assert sync_completed.is_set()
+
+    def test_unrecognized_rename_onto_the_stamp_signals_nothing(self, tmp_path, db, monkeypatch):
+        from watchdog.events import FileMovedEvent
+
+        monkeypatch.setattr(main, "MAILDIR_PATH", tmp_path)
+        sync_completed = main.threading.Event()
+        handler = main.MaildirHandler(db, _make_queue(db), sync_completed=sync_completed)
+        handler.on_moved(
+            FileMovedEvent(str(tmp_path / "other.tmp"), str(tmp_path / main.SYNC_STAMP_NAME))
+        )
+
+        assert not sync_completed.is_set()
+
+    def test_refresh_watches_a_new_folder_and_queues_its_mail(self, tmp_path, db, monkeypatch):
+        maildir = tmp_path / "maildir"
+        _write_eml(maildir / "INBOX" / "cur" / "old.eml:2,S", "old@example.com")
+        monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
+        steps: list[str] = []
+        monkeypatch.setattr(main, "sweep_paths", lambda db: steps.append("sweep_paths"))
+        queue = _make_queue(db)
+        observer = _CountingObserver()
+        refresher = main.FolderWatchRefresher(maildir, observer, handler=None)  # type: ignore[arg-type]
+        refresher.start()
+        db._conn.execute("DELETE FROM indexing_jobs")
+        _write_eml(maildir / "Late" / "new" / "late.eml", "late@example.com")
+
+        assert main._refresh_folder_watches(refresher, db, queue) is True
+        assert observer.calls == ["schedule", "unschedule", "schedule"]
+        # Renames lost while the watch was replaced are healed before
+        # the walk, as at startup.
+        assert steps == ["sweep_paths"]
+        assert _job_reasons(db) == {
+            "late.eml": main.REASON_RESCAN,
+            "old.eml:2,S": main.REASON_RESCAN,
+        }
+
+        # A later sync with no new folder costs neither a watch nor a walk.
+        db._conn.execute("DELETE FROM indexing_jobs")
+        assert main._refresh_folder_watches(refresher, db, queue) is False
+        assert observer.calls == ["schedule", "unschedule", "schedule"]
+        assert steps == ["sweep_paths"]
+        assert _job_reasons(db) == {}
+
+    @pytest.mark.skipif(
+        not sys.platform.startswith("linux") or os.geteuid() == 0,
+        reason="the EACCES gap is inotify-specific, and root can enter a 000 directory",
+    )
+    def test_delivery_into_a_late_folder_is_queued_by_the_watcher(self, tmp_path, db, monkeypatch):
+        """Acceptance for #516 against watchdog's real inotify observer:
+        a folder unreadable when the watch starts, opened by the sync's
+        permission repair, is watched after the sync stamp."""
+        import threading
+        import time as _time
+
+        from watchdog.observers import Observer
+
+        maildir = tmp_path / "maildir"
+        late = maildir / "Late"
+        for sub in ("cur", "new", "tmp"):
+            (late / sub).mkdir(parents=True)
+        # Delivered by the sync while the folder is still 0700 (owned by
+        # mbsync; here, unreadable to everyone).
+        _write_eml(late / "new" / "first", "first@example.com")
+        late.chmod(0o000)
+        monkeypatch.setattr(main, "MAILDIR_PATH", maildir)
+        queue = _make_queue(db)
+        sync_completed = threading.Event()
+        handler = main.MaildirHandler(db, queue, sync_completed=sync_completed)
+        observer = Observer()
+        refresher = main.FolderWatchRefresher(maildir, observer, handler)
+        refresher.start()
+        observer.start()
+
+        def wait_for(name: str, timeout: float = 5.0) -> str | None:
+            deadline = _time.monotonic() + timeout
+            while _time.monotonic() < deadline:
+                reason = _job_reasons(db).get(name)
+                if reason is not None:
+                    return reason
+                _time.sleep(0.05)
+            return None
+
+        try:
+            # The sync repairs permissions, then stamps. Nothing has
+            # watched the folder: a delivery into it stays unqueued.
+            late.chmod(0o755)
+            _write_eml(late / "tmp" / "unseen", "unseen@example.com")
+            (late / "tmp" / "unseen").rename(late / "new" / "unseen")
+            assert wait_for("unseen", timeout=1.0) is None, "watch already covered the late folder"
+            (maildir / self._STAMP_TMP).write_text(STAMP_JSON)
+            (maildir / self._STAMP_TMP).rename(maildir / main.SYNC_STAMP_NAME)
+            assert sync_completed.wait(5)
+
+            assert main._refresh_folder_watches(refresher, db, queue) is True
+            # Mail delivered before the re-watch is queued by its walk.
+            assert _job_reasons(db)["first"] == main.REASON_RESCAN
+            assert _job_reasons(db)["unseen"] == main.REASON_RESCAN
+
+            # The next delivery reaches the watcher, not a sweep.
+            _write_eml(late / "tmp" / "second", "second@example.com")
+            (late / "tmp" / "second").rename(late / "new" / "second")
+            assert wait_for("second") == main.REASON_ON_MOVED
+        finally:
+            late.chmod(0o755)
+            observer.stop()
+            observer.join()
+
+
 class _FakeObserver:
     def __init__(self, events: list[str]):
         self._events = events
@@ -3520,7 +3668,9 @@ class TestMainStartupAndLoop:
     never enqueued), and the main loop must periodically re-walk the
     Maildir so a missed event cannot cause a permanent omission."""
 
-    def _run_main(self, tmp_path, monkeypatch, *, sweep_due: bool, drain=None):
+    def _run_main(
+        self, tmp_path, monkeypatch, *, sweep_due: bool, drain=None, synced=False, refresh=None
+    ):
         events: list[str] = []
         db = Database(tmp_path / "mail.db")
         self._db = db
@@ -3565,6 +3715,21 @@ class TestMainStartupAndLoop:
         )
         if sweep_due:
             monkeypatch.setattr(main, "RECOVERY_SWEEP_INTERVAL_SECS", 0)
+        monkeypatch.setattr(
+            main,
+            "_refresh_folder_watches",
+            refresh
+            or (lambda fw, db, queue, **kw: events.append(f"refresh:{kw.get('skip_trashed')}")),
+        )
+        if synced:
+            # A sync stamp arrived before the main loop's first tick.
+            real_handler = main.MaildirHandler
+
+            def handler(*a, **kw):
+                kw["sync_completed"].set()
+                return real_handler(*a, **kw)
+
+            monkeypatch.setattr(main, "MaildirHandler", handler)
 
         class _FakeStallGuard:
             def __init__(self, queue, *, limit_seconds):
@@ -3650,6 +3815,24 @@ class TestMainStartupAndLoop:
         self._run_main(tmp_path, monkeypatch, sweep_due=False, drain=drain)
 
         assert "queue drain failed: ValueError" in caplog.text
+        assert SYNTHETIC_MARKER not in caplog.text
+
+    def test_main_loop_rewatches_folders_after_a_sync(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("INDEXER_DELETION_ENABLED", "true")
+        assert "refresh:True" in self._run_main(tmp_path, monkeypatch, sweep_due=False, synced=True)
+
+    def test_main_loop_leaves_the_watch_alone_without_a_sync(self, tmp_path, monkeypatch):
+        events = self._run_main(tmp_path, monkeypatch, sweep_due=False)
+
+        assert not any(e.startswith("refresh:") for e in events)
+
+    def test_rewatch_failure_log_keeps_paths_out(self, tmp_path, monkeypatch, caplog):
+        def refresh(*_a, **_kw):
+            raise PermissionError(13, "denied", SYNTHETIC_MARKER)
+
+        self._run_main(tmp_path, monkeypatch, sweep_due=False, synced=True, refresh=refresh)
+
+        assert "Maildir watch refresh failed: PermissionError" in caplog.text
         assert SYNTHETIC_MARKER not in caplog.text
 
     def test_main_loop_periodically_rewalks_the_maildir(self, tmp_path, monkeypatch):

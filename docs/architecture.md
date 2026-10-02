@@ -40,8 +40,8 @@ mbsync container
     (a heartbeat touched around every attempt is fresh, or an mbsync or
     its permission repair walk is running), so the indexer and MCP
     server start during a long first sync; freshness comes from the
-    last-sync stamp. Folders that sync creates are watched only after
-    an indexer restart (#516)
+    last-sync stamp. Folders that sync creates are watched once the
+    indexer handles that sync's stamp (#516)
         │
         │  Maildir files (shared volume, read-only for indexer)
         ▼
@@ -948,6 +948,21 @@ already-queued files; enqueue the rest with reason `rescan`). A file
 whose event was missed — restart, event coalescing, a delivery
 while the observer was not running — is therefore indexed
 eventually rather than omitted until the next container restart.
+
+mbsync creates each folder directory 0700 and makes it readable to
+the indexer's UID only in its post-sync permission repair, which runs
+before the last-sync stamp is written. inotify cannot watch a
+directory the indexer cannot read, and watchdog skips it silently, so
+a folder created during a sync is unwatched when it becomes readable
+(#516). The stamp's rename signals the main loop, which walks the
+folder directories (not `cur`/`new`/`tmp`, so the walk is linear in
+folders) and, when any directory is readable that was not when the
+watch was last scheduled, unschedules and re-schedules the recursive
+watch (`FolderWatchRefresher`, `indexer/src/folder_watch.py`). Events
+in the gap between the old and new watch are covered by the rename
+sweep (`sweep_paths`) and a Maildir walk, which also queues the mail
+already in the newly watched folders. A sync that opens no new
+directory costs only the folder walk.
 
 When deletion reconciliation is enabled, every enqueue path — the
 startup scan, the periodic rescan, the zero-vector recovery sweep, and
