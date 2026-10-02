@@ -522,11 +522,11 @@ done
 # requires target <= max and overlap < target, and the indexer checks
 # this at startup (#507). An omitted side takes its docker-compose.yml
 # default. Each value already passed require_integer_min above.
-chunk_target="$(get_env_value INDEXER_CHUNK_TARGET_TOKENS)"
+chunk_target="$(env_value_stripped INDEXER_CHUNK_TARGET_TOKENS)"
 chunk_target="${chunk_target:-1000}"
-chunk_max="$(get_env_value INDEXER_CHUNK_MAX_TOKENS)"
+chunk_max="$(env_value_stripped INDEXER_CHUNK_MAX_TOKENS)"
 chunk_max="${chunk_max:-1500}"
-chunk_overlap="$(get_env_value INDEXER_CHUNK_OVERLAP_TOKENS)"
+chunk_overlap="$(env_value_stripped INDEXER_CHUNK_OVERLAP_TOKENS)"
 chunk_overlap="${chunk_overlap:-150}"
 (( 10#$chunk_target <= 10#$chunk_max )) || {
     printf 'ERROR: INDEXER_CHUNK_TARGET_TOKENS (%s) must be <= INDEXER_CHUNK_MAX_TOKENS (%s).\n' "$chunk_target" "$chunk_max" >&2

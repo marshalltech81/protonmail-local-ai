@@ -76,6 +76,64 @@ check() {
     fi
 }
 
+# --- Chunk budgets checked against each other (#507) ---------------------
+# chunker.chunk_message needs target <= max and overlap < target; an
+# omitted or empty side takes its Compose default (1000 / 1500 / 150).
+
+chunk_case() {
+    local expected="$1"
+    shift
+    setup "$@"
+    if [[ "$expected" == ok ]]; then
+        passes
+    else
+        fails_with "$expected"
+    fi
+}
+
+readonly CHUNK_TARGET_OVER_MAX='INDEXER_CHUNK_TARGET_TOKENS (2000) must be <= INDEXER_CHUNK_MAX_TOKENS (1500)'
+
+chunk_budget_table() {
+    chunk_case ok
+    chunk_case ok 'INDEXER_CHUNK_TARGET_TOKENS=1000' 'INDEXER_CHUNK_MAX_TOKENS=1500' \
+        'INDEXER_CHUNK_OVERLAP_TOKENS=150'
+    chunk_case "$CHUNK_TARGET_OVER_MAX" 'INDEXER_CHUNK_TARGET_TOKENS=2000'
+    chunk_case ok 'INDEXER_CHUNK_TARGET_TOKENS=1500'
+    chunk_case 'INDEXER_CHUNK_TARGET_TOKENS (1501) must be <=' 'INDEXER_CHUNK_TARGET_TOKENS=1501'
+    chunk_case 'INDEXER_CHUNK_TARGET_TOKENS (1000) must be <= INDEXER_CHUNK_MAX_TOKENS (999)' \
+        'INDEXER_CHUNK_MAX_TOKENS=999'
+    chunk_case ok 'INDEXER_CHUNK_MAX_TOKENS=1000'
+    chunk_case 'INDEXER_CHUNK_OVERLAP_TOKENS (1000) must be < INDEXER_CHUNK_TARGET_TOKENS (1000)' \
+        'INDEXER_CHUNK_OVERLAP_TOKENS=1000'
+    chunk_case ok 'INDEXER_CHUNK_OVERLAP_TOKENS=999'
+    chunk_case ok 'INDEXER_CHUNK_OVERLAP_TOKENS=0'
+    chunk_case 'INDEXER_CHUNK_OVERLAP_TOKENS (150) must be < INDEXER_CHUNK_TARGET_TOKENS (150)' \
+        'INDEXER_CHUNK_TARGET_TOKENS=150'
+    chunk_case ok 'INDEXER_CHUNK_TARGET_TOKENS=151'
+    chunk_case ok 'INDEXER_CHUNK_TARGET_TOKENS=0100' 'INDEXER_CHUNK_MAX_TOKENS=0100' \
+        'INDEXER_CHUNK_OVERLAP_TOKENS=099'
+    chunk_case ok 'INDEXER_CHUNK_TARGET_TOKENS=08' 'INDEXER_CHUNK_MAX_TOKENS=09' \
+        'INDEXER_CHUNK_OVERLAP_TOKENS=07'
+    chunk_case 'INDEXER_CHUNK_TARGET_TOKENS (1000) must be <= INDEXER_CHUNK_MAX_TOKENS (500)' \
+        'INDEXER_CHUNK_TARGET_TOKENS=' 'INDEXER_CHUNK_MAX_TOKENS=500'
+    chunk_case 'INDEXER_CHUNK_TARGET_TOKENS must be an integer' 'INDEXER_CHUNK_TARGET_TOKENS=abc'
+}
+
+exported_chunk_budget_overrides_env() {
+    setup 'INDEXER_CHUNK_TARGET_TOKENS=1000'
+    fails_with "$CHUNK_TARGET_OVER_MAX" INDEXER_CHUNK_TARGET_TOKENS=2000
+    setup 'INDEXER_CHUNK_TARGET_TOKENS=2000'
+    passes INDEXER_CHUNK_TARGET_TOKENS=
+}
+
+padded_chunk_budgets_are_stripped() {
+    setup 'INDEXER_CHUNK_TARGET_TOKENS=" 1500 "' 'INDEXER_CHUNK_MAX_TOKENS=" 1500 "' \
+        'INDEXER_CHUNK_OVERLAP_TOKENS="  "'
+    passes
+    setup 'INDEXER_CHUNK_TARGET_TOKENS=" 2000 "'
+    fails_with "$CHUNK_TARGET_OVER_MAX"
+}
+
 # --- Compose defaults (#482) ----------------------------------------------
 
 keys_with_compose_defaults_may_be_omitted() {
@@ -326,6 +384,9 @@ check "a padded invalid boolean fails" padded_invalid_bool_fails
 check "a padded value below its minimum fails" padded_value_below_minimum_fails
 check "a padded quoted SYNC_INTERVAL fails" padded_quoted_sync_interval_fails
 check "unquoted values are trimmed like Compose" unquoted_values_are_trimmed_like_compose
+check "chunk budgets follow the chunker's rules" chunk_budget_table
+check "an exported chunk budget overrides .env" exported_chunk_budget_overrides_env
+check "padded chunk budgets are stripped" padded_chunk_budgets_are_stripped
 
 if ((FAILURES > 0)); then
     printf '%d test(s) failed\n' "$FAILURES" >&2
