@@ -303,7 +303,9 @@ reindex each. One rebuild, not one PR: each fix is its own reviewed PR
 per the review rules, and a fix that would change bodies or IDs for
 newly ingested mail before the rebuild is gated behind the pipeline
 configuration so the live index stays internally consistent until the
-single staged rebuild picks all of them up. The fixes: chunk overlap past `max_tokens` (#208); a deterministic date source for undated mail
+single staged rebuild picks all of them up. The fixes: chunk overlap past `max_tokens` (#208) and whitespace
+between split pieces rendered back into a chunk past `max_tokens`
+(#550); a deterministic date source for undated mail
 (#297's second half, the deferred received-date item: the top
 `Received:` header, then — since sent mail and stripped messages have
 none — the Maildir filename's delivery timestamp, which is sync time
@@ -415,12 +417,12 @@ checklist) or an owner decision.
 | 3.1 Evals | Partly done | #452 (evidence recall vs hit rate), #494 (agent-level trace scoring) | live-client trace replay, abstention, corrections, conflicting sources, latency/cost, held-out set and thresholds (#283) |
 | 3.2 Latency | Partly done | #458 (stage timings) | benchmarks, budgets, cancellation (#287); needs real mail |
 | 3.3 `brief_issue` | Built, experimental | #466, #493 (hardening, #471) | accuracy/abstention scoring (#291) |
-| 3.4 Injection suite | Done | #448 | gap filed as #442 |
+| 3.4 Injection suite | Done | #448, #534 (#442) | — |
 | 3.5 Thread weighting, rerank | Not started | — | needs real embedder/reranker (#288, #289) |
 | 3.6 Prompt evidence budget | Mostly done | #445 (shared character budget, dedup, coverage note), #496 (whole-prompt token budget, small-model profile) | measure and retune the budgets (#487) |
 | 3.7 Filtered semantic recall | Done | #440, #470 | — |
 | 3.8 Citation contract | Partly done | #457, #495 (`ask_mailbox` statement coverage and quote checks) | the same contract for `summarize_thread` and `extract_from_emails`; semantic support (#284) |
-| 4.1 Entities | Done | #459 | orphan cleanup (#464) |
+| 4.1 Entities | Done | #459, #527 (orphan pruning, #464) | — |
 | 4.2 Source authority | Done | #459, #474 (Spam guard) | verdict-header gating after go-live (#463) |
 | 4.3 Temporal retrieval | Not started | — | — |
 | 4.4 Retention | Mostly done | #451 (mirror default), #475 (Trash hidden from default search) | user-controlled retention; reaped-citation behaviour |
@@ -470,8 +472,8 @@ checklist) or an owner decision.
    in #493 (#471).** #291's accuracy and abstention scoring remains.
 4. **Adversarial injection suite** (hostile fixtures in the synthetic
    mailbox, asserting the Phase 0 serialization holds under real
-   tool flows). **Status: done (#448).** The one gap it found is
-   #442.
+   tool flows). **Status: done (#448).** The one gap it found,
+   #442, is fixed (#534).
 5. Unparked by the eval harness:
    - **Thread-vector weighting** — attachment chunks currently
      dominate the thread-vector mean (a 50-chunk PDF on a 5-chunk
@@ -529,8 +531,8 @@ the first deployment needs a numbered migration like any other.
    mapping; `entities` / `entity_aliases` relational tables.
    Deterministic only (Resolved decisions 12): two addresses are never
    merged by display name, and no model-suggested merges or
-   confirmation flow are built. **Status: done (#459);** orphaned
-   entities are not cleaned up yet (#464).
+   confirmation flow are built. **Status: done (#459);** entities
+   and aliases orphaned by a reap are pruned (#464, #527).
 2. **Source authority metadata:** `source_type` / `authority_class`
    as explicit, filterable metadata with provenance, assigned only
    from an operator rules file (domain/address → class; Resolved
@@ -675,19 +677,64 @@ Triaged against `d30e500` by four parallel agents; every issue is real
 and most reproduced with synthetic input. PRs in the order to land
 them (one test-first commit per issue, `Fixes #N` per issue):
 
-**Handoff 2026-10-02 — start here.** Since the handoff below, four
-Phase 3 slices merged (#493–#496; the status table under Phase 3 is
-current) and eight fixes from a Codex defaults audit of 2026-10-01
-(#501, #503, #504, #505, #508, #509, #511, #512; see Recently
-Completed), then #510 (`validate-env` agrees with Compose and the
-loaders, #482 and #506). Before the
-go-live checklist below: **#277** blocks the first deployment (a long
-first mbsync run keeps the indexer and MCP server from starting,
-since they wait on a health check only a completed sync satisfies);
-the direction is Resolved decisions 10, and the fix is in progress.
-Open from the audit, waiting on real data: #487 (measure the evidence
-and output budgets) and #488 (container resource budgets). P3s from
-the audit and the day's reviews: #489, #490, #499, #500, #502.
+**Handoff 2026-10-02, morning — start here.** **#277 is fixed
+(#515):** mbsync's healthcheck reports liveness rather than a completed
+sync, so a long first sync no longer keeps the indexer and MCP server
+from starting. #277 no longer blocks the first deployment; go live
+with the checklist below, on a host where every local user and process
+is trusted: the MCP endpoint has no authentication yet (Phase 1 item
+5, Open decisions 3), and localhost is not a trust boundary. Rebuild
+any index created before the overnight changes from Maildir (the
+volume wipe in `docs/troubleshooting.md`, "Indexer refuses to
+start"): #544 edited the v0 schema, and #546, #547 and #548 change
+parsed or chunked text, none of which reaches an existing database.
+Decide #432 (below) before go-live too: until it is fixed, a crafted
+xlsx attachment can exhaust the indexer's memory or hold its only
+worker. Before the overnight run, four Phase 3 slices
+(#493–#496; the status table under Phase 3 is current), eight
+defaults-audit fixes and #510 merged (see Recently Completed).
+Overnight (see Recently Completed): mbsync tolerates far-side folders
+that vanished (#276, #521); the indexer watches Maildir folders that
+become readable after a sync, so no restart is needed after the first
+sync (#516, #520, #540); `config/authority.toml` must be mode 600,
+checked by `make up` and the new `make restart-indexer` (#523, #542);
+entities orphaned by a reap are pruned (#464, #527); OCR's English-only
+limit is documented (#517, refs #490); chunk splits keep the tabs that
+open a line (#433, #546); stored subjects are capped at
+2,000 characters (#541, #547); a `multipart/related` never promotes a
+later part into the body (#450, #548); and the P3 fixes listed there.
+No code PR is open.
+
+Needs the owner:
+- **#432** (xlsx duplicate cells): a guard cannot fix it, because
+  openpyxl builds a row before our code sees it. The issue comment has
+  measurements and three options (document it, a counting
+  `WorkSheetParser` subclass, a streaming pre-pass) and the budget-size
+  question.
+- **#497** (Bridge on macOS) and **#498** (Streamable HTTP as the only
+  transport): owner-filed features, not started because they change the
+  architecture and defaults.
+- Follow-ups filed overnight: #550 (P2, chunks can exceed
+  `max_tokens`; it changes chunk text, so it joins #208 in the Phase 2
+  reindex bundle), #524 (folders opened by a failed mbsync
+  attempt are re-watched only at the recovery sweep), #526 (on Linux
+  Docker Engine the indexer cannot read a 600 operator-owned
+  `authority.toml`), #533 (delimiter escaping misses tag names spelled
+  with compatibility or confusable letters), #537 (`get_evidence` sizes
+  retrieval by its chunk limit, so it can rank threads differently from
+  `ask_mailbox`).
+- Open questions from earlier PRs: #494's strict argument matching and
+  replay of a live client's traces; #496's character-based token
+  estimate (no tokenizer, so dense scripts such as CJK are
+  undercounted); #491's security-scan path filters, left unchanged in
+  #512 because no scanner reads Compose files or scripts; #495's prose
+  statement split (rather than JSON statements) and its CJK terminators
+  and word counts.
+
+Waiting on real data: #487 (evidence and output budgets), #488
+(container resource budgets) and #282 (the mbsync stall deadline, set
+above the first sync's measured duration). Other open P3s: #489, #490
+(the limitation is documented; a language setting is not built).
 
 **Handoff 2026-10-01, end of the second session.**
 Every PR from the session is merged (#436–#479); no PR is open and
@@ -711,9 +758,11 @@ Next session, in order:
 3. **Then** let real questions drive the eval work (#283, #291) and
    the measurements waiting on real data (#287 budgets, #288, #289).
 
-Backlog filed from review (P3 or edge cases, not scheduled): #442,
-#447, #449, #450, #454, #455, #456, #461, #464, #465, #468, #478,
-#499, #500, #502 (#446, #460, #471 and #477 are fixed).
+Backlog filed from review (P3 or edge cases, not scheduled): #454,
+and from 2026-10-02 #524, #526, #533 and #537 (#442, #446, #447,
+#449, #450, #455, #456, #460, #461, #464, #465, #468, #471, #477,
+#478, #499, #500, #502 and #541 are fixed; #433 too, and #550 joins
+the reindex bundle).
 
 **Status 2026-10-01 (end of the first session).**
 Focus has moved from hardening to running the stack for real
@@ -779,8 +828,8 @@ Go-live checklist (do these before more hardening):
 4. `make up` (it runs `make validate-env` first, which needs the Bridge
    credentials from step 3); watch `make logs` for the mbsync initial sync and the
    indexer's progress; `make status` until the index is current.
-   Record how long the initial sync takes: it is the measurement the
-   mbsync supervision design (#277, #282) is waiting for.
+   Record how long the initial sync takes: #282's stall deadline is
+   set above it (#277 landed in #515).
 5. Point an MCP client at `http://localhost:${MCP_PORT}` plus `/sse`
    (the default `MCP_TRANSPORT=sse`) or `/mcp` (`streamable-http`;
    `dual` serves both), and try real questions by hand; `mcp-server/tests/eval/README.md` covers turning
@@ -789,10 +838,11 @@ Go-live checklist (do these before more hardening):
    which must precede the first Phase 2 generation as its validation
    gate, then the Phase 2 reindex bundle.
 
-Deferred as issues: #362 (owner chose: fall back to the raw filename
-parameter when `get_filename()` raises), #428 (xlsx parts openpyxl
+Deferred as issues: ~~#362~~ (done: #522, falls back to the raw
+filename parameter when `get_filename()` raises), #428 (xlsx parts openpyxl
 loads whole), #316's index-side remainder (Phase 2 reindex), and the
-mbsync design families (#275, #276, #279, #281; #277, #282).
+mbsync design families (#275, #279, #281; #282; #276 and #277 are
+done in #521 and #515).
 
 Open owner decision: **#267** one-shot rotation. #342 shipped the
 documented limitation (recreate with `BRIDGE_CERT_PIN_ROTATE=false`);
@@ -821,7 +871,7 @@ first, one test-first commit per issue, keep three PRs in flight):
    4.0.10 migration with an explicit session idle timeout); #316's
    remainder needs the Phase 2 reindex.
 5. ~~mbsync #271, #280~~ (done: #419). Parser: ~~#361~~ (done: #414);
-   #362 is decided (fall back to the raw filename parameter) and filed.
+   ~~#362~~ (done: #522).
 6. ~~Bridge entrypoint (#242, #266, #270) and smoke check (#268,
    #269)~~ (done: #423, #422); the updater gate (#245) is #429.
 7. Then the go-live checklist above, the Phase 1.5/#283 eval slice,
@@ -995,8 +1045,9 @@ Order of work, chosen to minimise reindexes:
    pair (#277, #282; their small siblings #271 and #280 are batch-1
    guards above and are not repeated here); see Resolved decisions 9
    and 10 for the chosen direction and the one measurement still
-   needed.
-4. **The Phase 2 reindex bundle** (see Phase 2): #208 and #297's
+   needed. #276 (#521) and #277 (#515) are done; #275 and #281 wait
+   for a real report, #282 for the first-sync measurement.
+4. **The Phase 2 reindex bundle** (see Phase 2): #208, #550 and #297's
    second half. #303, #298, #295 and #217 landed directly instead
    (2026-10-01, no live index yet), and #304's repair is unneeded
    (#349).
@@ -1043,7 +1094,8 @@ linked from the Phase 3 items they track.
   huge response; decide on body continuation (offset paging) or a
   documented cap — fits alongside Phase 1 item 2's structured output
   (#489)
-- OCR language is fixed to Tesseract's English default (#490)
+- OCR language is fixed to Tesseract's English default (#490;
+  documented in #517, no setting yet)
 - ~~mcp-server: remove the dead `Database.get_thread_message_ids`~~
   (done: already gone from the code)
 - IDs are unbounded: a root Message-ID becomes the thread ID with no
@@ -1155,6 +1207,10 @@ can be revisited with an explicit owner decision.
 ## Known limitations
 
 - initial sync may take a long time on large mailboxes
+- attachment OCR assumes English (#490)
+- on Linux Docker Engine the indexer cannot read a mode-600
+  `config/authority.toml` owned by the operator (#526); macOS file
+  sharing (OrbStack, Docker Desktop) is unaffected
 - the schema is effectively locked to 4096-dim
   Qwen3-Embedding-8B-shaped models (hardcoded dim, no stored model
   identity, vendored tokenizer) — Phase 2
@@ -1229,13 +1285,14 @@ do not ship persisted claims without them.
    tolerate a far-side box that cannot be opened (warn, keep syncing
    the rest) rather than far-only patterns or `Remove Near`, which
    deletes local mail. #275 and #281 change the on-disk layout and wait
-   for a real report.
+   for a real report. #276 implemented in #521.
 10. **#277/#282 health during a long first sync (2026-09-30):**
     separate liveness (process alive, progress observed) from
     freshness (the success stamp), so a first sync is "healthy, not
     yet current"; then set #282's stall deadline above the observed
     initial backfill — that duration is the one measurement still
-    needed, and #277 lands before #282.
+    needed, and #277 lands before #282. #277 implemented in #515;
+    #282 waits on the measurement.
 11. **#268 smoke-test scope (2026-09-30):** the minimal fix
     (distinguish the intentional post-marker kill from a fatal exit)
     with #269; the requested IMAP/STARTTLS/SAN/restart checks are the
@@ -1300,6 +1357,39 @@ do not ship persisted claims without them.
    `issuer_url` even when only a verifier is used.
 
 ## Recently Completed
+
+### 2026-10-02 — Overnight fixes; first-deployment blocker closed (#515–#548)
+
+mbsync: the healthcheck reports liveness, so a long first sync is
+healthy and no longer blocks the indexer and MCP server (#277, PR
+#515, Resolved decisions 10); a far-side folder that can no longer be
+opened is warned about and the rest keeps syncing (#276, PR #521,
+Resolved decisions 9). Indexer: folders that become readable after a
+sync are watched without a restart (#516, PR #520; #528 and #529, PR
+#540); entities and aliases orphaned by a reap are pruned (#464, PR
+#527); an undecodable attachment filename falls back to the raw
+parameter (#362, PR #522); stored subjects are capped at 2,000
+characters, so the subject scans read bounded rows (#541, PR #547); a
+`multipart/related` whose root is labelled as an attachment no longer
+promotes a later part into the body (#450, PR #548); chunk splits keep
+the tabs that open a line, so xlsx columns survive a split (#433, PR
+#546; #550 filed for the Phase 2 bundle); an xlsx sheet title is charged before it is
+copied (#435, PR #543); the subject-scan test asserts the SQL bound
+(#478, PR #531); OCR's English-only limit is documented (#490, PR
+#517). Setup: `config/authority.toml` is kept at mode 600 and checked
+by `validate-env` (#468, PR #523), and `make restart-indexer` runs that
+check before a restart (#530, PR #542). MCP: citation labels of any
+length (#465, PR #525); fullwidth and small-form brackets escaped in
+delimiter tags (#442, PR #534); changed reply subjects reach the
+reranker, with the README privacy table updated (#447, PR #535);
+`get_message` caps and bounds its claimant listings (#456, PR #536;
+#538, PR #544); `get_mailbox_status` reports Message-ID conflicts as
+counts (#455, PR #539); `get_evidence` can return `ask_mailbox`'s full
+evidence set and floats attachment-matched chunks like it (#449, PR
+#532; #461, PR #545); the quote check reports overlong quotes and keeps
+combining marks with their base letter (#499, #500, PR #519); the
+agent eval normalizes `query_messages` filters as the tool does (#502,
+PR #518). #432 is parked for an owner decision.
 
 ### 2026-10-01 — Phase 3 slices and defaults-audit fixes (#493–#512)
 
