@@ -14,6 +14,7 @@ import urllib.parse
 from pathlib import Path
 from typing import Literal
 
+import fastmcp
 import uvicorn
 from fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecurityMiddleware, TransportSecuritySettings
@@ -52,6 +53,13 @@ _fastmcp_logger = logging.getLogger("fastmcp")
 for _handler in list(_fastmcp_logger.handlers):
     _fastmcp_logger.removeHandler(_handler)
 _fastmcp_logger.propagate = True
+
+# fastmcp's default ``telemetry_mode`` is ``native``: it creates
+# OpenTelemetry spans and propagates trace context, a no-op only while no
+# OTel SDK and exporter are configured. ``off`` creates no spans and leaves
+# the OTel context untouched. Set here rather than as an image ``ENV`` so it
+# holds wherever ``src.main`` runs, and over any ``FASTMCP_TELEMETRY_MODE``.
+fastmcp.settings.telemetry_mode = "off"
 
 
 class _SilenceClientDisconnect(logging.Filter):

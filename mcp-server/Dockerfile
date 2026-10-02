@@ -43,7 +43,8 @@ RUN groupadd --gid 1003 mcp && \
             mcp
 
 WORKDIR /app
-ENV PATH="/app/.venv/bin:$PATH"
+ENV PATH="/app/.venv/bin:$PATH" \
+    PYTHONDONTWRITEBYTECODE=1
 
 # Copy the uv-managed virtualenv from the builder; runtime keeps no toolchain.
 COPY --from=builder /app/.venv /app/.venv
