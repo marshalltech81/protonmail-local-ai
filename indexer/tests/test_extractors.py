@@ -807,9 +807,10 @@ class TestXlsxSharedStringBudget:
             filename="book.xlsx",
             payload=_xlsx_bytes([["versioned"]]),
         )
-        assert result.extractor == "xlsx@2"
+        assert result.extractor == "xlsx@3"
         assert extractors.stale_extractor_module("xlsx") == "xlsx"
-        assert extractors.stale_extractor_module("xlsx@2") is None
+        assert extractors.stale_extractor_module("xlsx@2") == "xlsx"
+        assert extractors.stale_extractor_module("xlsx@3") is None
 
 
 def _titled_xlsx(sheets: list[tuple[str, list[list[object]]]]) -> bytes:
@@ -1242,6 +1243,392 @@ class TestXlsxExtractor:
         # Every row inside the budget is kept; the one that crossed it
         # is not.
         assert (result.text or "").split("\n")[1:] == ["1"] * (parsed[0] - 1)
+
+
+# Distinct column letters for a wide synthetic row.
+_COLUMNS = [chr(ord("A") + i) for i in range(26)]
+
+
+def _rows_before_sheet_end(rows_xml: str):
+    """An ``_rewrite_sheet_xml`` edit that appends ``rows_xml`` to the
+    sheet data."""
+
+    def edit(xml: str) -> str:
+        end = xml.index("</sheetData>")
+        return xml[:end] + rows_xml + xml[end:]
+
+    return edit
+
+
+def _count_calls(monkeypatch, owner, name: str) -> list[int]:
+    """Count calls to ``owner.name`` without changing what it does."""
+    calls = [0]
+    original = getattr(owner, name)
+
+    def counting(*args, **kwargs):
+        calls[0] += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(owner, name, counting)
+    return calls
+
+
+class TestXlsxRawNodeBudget:
+    """#432: openpyxl builds every XML node of a row, and collapses
+    duplicate coordinates, before the cell budget sees the row, so a
+    small workbook of repeated ``<c r="A1"/>`` nodes cost gigabytes and
+    seconds while it was charged one cell. A streaming pre-pass charges
+    the nodes of each worksheet and cuts it before the row that crosses
+    the workbook or the row budget."""
+
+    _XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+    @staticmethod
+    def _parsed_cells(monkeypatch) -> list[int]:
+        """Count the ``<c>`` nodes openpyxl's worksheet parser builds
+        into cells."""
+        from openpyxl.worksheet._reader import WorkSheetParser
+
+        return _count_calls(monkeypatch, WorkSheetParser, "parse_cell")
+
+    @staticmethod
+    def _scanned_nodes(monkeypatch) -> list[int]:
+        """Count the elements the pre-pass visits."""
+        from src.extractors import xlsx
+
+        return _count_calls(monkeypatch, xlsx._WorksheetScan, "_start")
+
+    def test_one_row_of_a_million_duplicate_cells_is_cut(self, monkeypatch):
+        import time
+        import tracemalloc
+
+        from src.extractors import xlsx
+
+        payload = _rewrite_sheet_xml(
+            _xlsx_bytes([["first"]]),
+            _rows_before_sheet_end('<row r="2">' + '<c r="A2"/>' * 1_000_000 + "</row>"),
+        )
+        assert len(payload) < 100_000
+        parsed = self._parsed_cells(monkeypatch)
+        scanned = self._scanned_nodes(monkeypatch)
+
+        # Before the pre-pass: about 2 s and 700 MB. Generous for CI.
+        started = time.monotonic()
+        result = extract(content_type=self._XLSX, filename="dup.xlsx", payload=payload)
+        assert time.monotonic() - started < 10.0
+
+        assert result.status == STATUS_SUCCESS
+        assert result.text == "[Sheet: Sheet]\nfirst"
+        # openpyxl built the one cell before the cut, and the pre-pass
+        # stopped once the row crossed the row budget.
+        assert parsed[0] == 1
+        assert scanned[0] < xlsx._MAX_ROW_NODES // 2 + 100
+
+        tracemalloc.start()
+        try:
+            xlsx.extract(payload)
+            peak = tracemalloc.get_traced_memory()[1]
+        finally:
+            tracemalloc.stop()
+        assert peak < 32 * 1024 * 1024
+
+    @pytest.mark.parametrize(
+        ("row", "nodes", "width", "yields_each"),
+        [
+            # A row of repeated cells: the row and its ``r`` attribute,
+            # then each cell, its ``r`` and its value.
+            pytest.param(
+                lambda r: f'<row r="{r}">' + f'<c r="A{r}"><v>{r}</v></c>' * 200 + "</row>",
+                2 + 200 * 3,
+                1,
+                True,
+                id="duplicate-cells",
+            ),
+            # One-value rows that all claim the same row number: openpyxl
+            # parses each but yields only the first, so the cell budget
+            # never charged them.
+            pytest.param(
+                lambda r: f'<row r="2"><c r="A2"><v>{r}</v></c></row>',
+                2 + 3,
+                1,
+                False,
+                id="duplicate-rows",
+            ),
+            # Wide rows of distinct cells, each with a value.
+            pytest.param(
+                lambda r: (
+                    f'<row r="{r}">'
+                    + "".join(f'<c r="{col}{r}"><v>{r}</v></c>' for col in _COLUMNS)
+                    + "</row>"
+                ),
+                2 + len(_COLUMNS) * 3,
+                len(_COLUMNS),
+                True,
+                id="wide-distinct-rows",
+            ),
+        ],
+    )
+    def test_rows_past_the_workbook_budget_are_cut(
+        self, monkeypatch, row, nodes, width, yields_each
+    ):
+        from src.extractors import xlsx
+
+        monkeypatch.setattr(xlsx, "_MAX_SHEET_NODES", 20_000)
+        count = 2 * xlsx._MAX_SHEET_NODES // nodes
+        payload = _rewrite_sheet_xml(
+            _xlsx_bytes([["first"]]),
+            _rows_before_sheet_end("".join(row(r) for r in range(2, count + 2))),
+        )
+        parsed = self._parsed_cells(monkeypatch)
+        scanned = self._scanned_nodes(monkeypatch)
+
+        text, _ = xlsx.extract(payload)
+
+        # Whole rows are parsed up to the budget, and none after it.
+        cells_per_row = nodes // 3
+        kept, partial = divmod(parsed[0] - 1, cells_per_row)
+        assert partial == 0
+        assert 0 < kept < count
+        assert (kept + 1) * nodes > xlsx._MAX_SHEET_NODES - 100
+        assert kept * nodes <= xlsx._MAX_SHEET_NODES
+        assert scanned[0] <= xlsx._MAX_SHEET_NODES
+        lines = text.split("\n")
+        assert lines[:2] == ["[Sheet: Sheet]", "first"]
+        # Rows claiming one row number are parsed but read once.
+        expected = ["\t".join([str(r)] * width) for r in range(2, (kept if yields_each else 1) + 2)]
+        assert lines[2:] == expected
+
+    def test_a_row_past_the_row_budget_ends_the_worksheet(self, monkeypatch):
+        from src.extractors import xlsx
+
+        monkeypatch.setattr(xlsx, "_MAX_ROW_NODES", 1_000)
+        wide = '<row r="3">' + '<c r="A3"><v>1</v></c>' * 400 + "</row>"
+        payload = _rewrite_sheet_xml(
+            _xlsx_bytes([["first"], ["second"]]),
+            _rows_before_sheet_end(wide + '<row r="4"><c r="A4"><v>4</v></c></row>'),
+        )
+        parsed = self._parsed_cells(monkeypatch)
+
+        text, _ = xlsx.extract(payload)
+
+        assert text == "[Sheet: Sheet]\nfirst\nsecond"
+        assert parsed[0] == 2
+
+    def test_elements_outside_the_rows_are_charged(self, monkeypatch):
+        """openpyxl keeps elements it does not know in memory, so they
+        are charged like any other, and a cut after the sheet data
+        keeps every row."""
+        from src.extractors import xlsx
+
+        monkeypatch.setattr(xlsx, "_MAX_SHEET_NODES", 10_000)
+
+        def edit(xml: str) -> str:
+            end = xml.index("</worksheet>")
+            return xml[:end] + "<junk/>" * 100_000 + xml[end:]
+
+        payload = _rewrite_sheet_xml(_xlsx_bytes([["first"], ["second"]]), edit)
+        scanned = self._scanned_nodes(monkeypatch)
+
+        text, _ = xlsx.extract(payload)
+
+        assert text == "[Sheet: Sheet]\nfirst\nsecond"
+        assert scanned[0] <= xlsx._MAX_SHEET_NODES + 1
+
+    def test_sheets_after_the_budget_are_emptied(self, monkeypatch):
+        from src.extractors import xlsx
+
+        payload = _titled_xlsx([("one", [["first"]] * 50), ("two", [["second"]])])
+        cut = xlsx._bound_worksheets(payload)
+        monkeypatch.setattr(xlsx, "_MAX_SHEET_NODES", 300)
+
+        text, _ = xlsx.extract(payload)
+
+        assert cut.getvalue() == payload
+        assert text.startswith("[Sheet: one]\nfirst")
+        assert "two" not in text
+        assert "second" not in text
+
+    @pytest.mark.parametrize(("budget", "both_kept"), [(1_000, True), (400, False)])
+    def test_a_worksheet_named_twice_is_charged_twice(self, monkeypatch, budget, both_kept):
+        """openpyxl parses a worksheet once for each sheet that names
+        it, so both are charged, and the shorter cut serves both: here
+        the second, or an empty worksheet when the first cut left no
+        budget for the second."""
+        import io
+        import zipfile
+
+        from src.extractors import xlsx
+
+        base = _xlsx_bytes([["first"]] + [[r] for r in range(2, 101)])
+        out = io.BytesIO()
+        with zipfile.ZipFile(io.BytesIO(base)) as original, zipfile.ZipFile(out, "w") as rebuilt:
+            for info in original.infolist():
+                data = original.read(info).decode()
+                if info.filename == "xl/workbook.xml":
+                    data = data.replace(
+                        "</sheets>",
+                        '<sheet xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/'
+                        'relationships" name="Again" sheetId="2" state="visible" r:id="rId9"/>'
+                        "</sheets>",
+                    )
+                elif info.filename == "xl/_rels/workbook.xml.rels":
+                    data = data.replace(
+                        "</Relationships>",
+                        '<Relationship Type="http://schemas.openxmlformats.org/officeDocument/'
+                        '2006/relationships/worksheet" Target="/xl/worksheets/sheet1.xml" '
+                        'Id="rId9"/></Relationships>',
+                    )
+                rebuilt.writestr(info.filename, data)
+        payload = out.getvalue()
+        whole, _ = xlsx.extract(payload)
+        assert whole.count("\n100") == 2
+        monkeypatch.setattr(xlsx, "_MAX_SHEET_NODES", budget)
+
+        text, _ = xlsx.extract(payload)
+
+        if not both_kept:
+            assert text == ""
+            return
+        first, again = text.split("\n\n")
+        assert first.removeprefix("[Sheet: Sheet]") == again.removeprefix("[Sheet: Again]")
+        assert 1 < len(first.split("\n")) < 100
+
+    @pytest.mark.parametrize(
+        "document",
+        [
+            pytest.param(
+                lambda body: (
+                    '<?xml version="1.0" encoding="UTF-8"?>\n<x:worksheet '
+                    'xmlns:x="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+                    f"<x:sheetData>{body.replace('<', '<x:').replace('<x:/', '</x:')}"
+                    "</x:sheetData></x:worksheet>"
+                ),
+                id="prefixed",
+            ),
+            pytest.param(
+                lambda body: (
+                    "\ufeff"
+                    '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+                    f"<sheetData>{body}</sheetData></worksheet>"
+                ),
+                id="byte-order-mark",
+            ),
+            pytest.param(
+                lambda body: (
+                    '<?xml version="1.0" encoding="ISO-8859-1"?>'
+                    '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+                    f"<sheetData>{body}</sheetData></worksheet>"
+                ),
+                id="latin-1",
+            ),
+        ],
+    )
+    def test_a_cut_closes_the_open_elements(self, monkeypatch, document):
+        from src.extractors import xlsx
+
+        monkeypatch.setattr(xlsx, "_MAX_SHEET_NODES", 300)
+        body = "".join(
+            f'<row r="{r}"><c r="A{r}" t="inlineStr"><is><t>v{r}</t></is></c></row>'
+            for r in range(1, 101)
+        )
+        payload = _rewrite_sheet_xml(_xlsx_bytes([["first"]]), lambda _: document(body))
+
+        text, _ = xlsx.extract(payload)
+
+        lines = text.split("\n")
+        assert lines[0] == "[Sheet: Sheet]"
+        assert 1 < len(lines) < 100
+        assert lines[1:] == [f"v{r}" for r in range(1, len(lines))]
+
+    def test_a_cut_in_an_encoding_without_ascii_end_tags_empties_the_sheet(self, monkeypatch):
+        import io
+        import zipfile
+
+        from src.extractors import xlsx
+
+        monkeypatch.setattr(xlsx, "_MAX_SHEET_NODES", 300)
+        body = "".join(f'<row r="{r}"><c r="A{r}"><v>{r}</v></c></row>' for r in range(1, 101))
+        document = (
+            '<?xml version="1.0" encoding="UTF-16"?><worksheet '
+            'xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+            f"<sheetData>{body}</sheetData></worksheet>"
+        ).encode("utf-16")
+        base = _xlsx_bytes([["first"]])
+        out = io.BytesIO()
+        with zipfile.ZipFile(io.BytesIO(base)) as original, zipfile.ZipFile(out, "w") as rebuilt:
+            for info in original.infolist():
+                data = original.read(info)
+                if info.filename == "xl/worksheets/sheet1.xml":
+                    data = document
+                rebuilt.writestr(info.filename, data)
+
+        text, _ = xlsx.extract(out.getvalue())
+
+        assert text == ""
+
+    def test_malformed_xml_is_left_to_openpyxl(self):
+        import io
+
+        from src.extractors import xlsx
+
+        left, cut = xlsx._scan_worksheet(io.BytesIO(b"<worksheet><sheetData><row></sheetData>"), 50)
+
+        assert cut is None
+        assert left == 50 - 3
+
+    def test_entity_declarations_are_refused(self):
+        payload = _rewrite_sheet_xml(
+            _xlsx_bytes([["first"]]),
+            lambda xml: '<!DOCTYPE worksheet [<!ENTITY e "boom">]>' + xml,
+        )
+
+        result = extract(content_type=self._XLSX, filename="entity.xlsx", payload=payload)
+
+        assert result.status == STATUS_FAILED
+        assert result.error == "EntitiesForbidden"
+
+    @pytest.mark.parametrize(
+        "rows",
+        [
+            [["first"]],
+            [["Item", "Price"], ["Widget", 25], ["Gadget", 75.5]],
+            [[r * c for c in range(1, 30)] for r in range(1, 300)],
+            [[None, "gap", None, "x" * 5_000]],
+        ],
+        ids=["one-cell", "mixed", "dense", "sparse-long"],
+    )
+    def test_workbooks_under_the_budget_are_not_rewritten(self, rows):
+        from src.extractors import xlsx
+
+        payload = _xlsx_bytes(rows)
+
+        assert xlsx._bound_worksheets(payload).getvalue() == payload
+
+    def test_chartsheets_are_not_scanned(self, monkeypatch):
+        """openpyxl reads a chartsheet whole, not as a worksheet, so the
+        pre-pass leaves it to the dispatcher's caps (#428)."""
+        import io
+
+        import openpyxl
+        from openpyxl.chart import BarChart, Reference
+        from src.extractors import xlsx
+
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        for value in (1, 2, 3):
+            ws.append([value])
+        chart = BarChart()
+        chart.add_data(Reference(ws, min_col=1, min_row=1, max_row=3))
+        wb.create_chartsheet("Chart").add_chart(chart)
+        buf = io.BytesIO()
+        wb.save(buf)
+        wb.close()
+        scans = _count_calls(monkeypatch, xlsx, "_scan_worksheet")
+
+        text, _ = xlsx.extract(buf.getvalue())
+
+        assert text == "[Sheet: Sheet]\n1\n2\n3"
+        assert scans[0] == 1
 
 
 class TestPdfDigitalExtractor:

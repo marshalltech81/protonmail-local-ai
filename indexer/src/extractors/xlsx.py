@@ -12,8 +12,19 @@ forwarded-as-XLSX flow the user expects to see the same numbers.
 
 Massive spreadsheets are bounded by the dispatcher's
 ``INDEXER_ATTACHMENT_MAX_BYTES`` cap, but byte size does not bound the
-work, along two dimensions:
+work, along three dimensions:
 
+* XML nodes parsed: openpyxl builds every element of a row, and every
+  attribute, before any code here sees the row, then collapses cells
+  that repeat a coordinate, so a few KB of workbook could cost
+  gigabytes and seconds while it was charged one cell (#432). It parses
+  each worksheet when the workbook loads as well as during the walk.
+  Before openpyxl opens the workbook, ``_bound_worksheets`` streams
+  every worksheet it will parse through expat, charges each element
+  and each attribute one node, and cuts the worksheet before the row
+  that crosses ``_MAX_SHEET_NODES`` across the workbook or
+  ``_MAX_ROW_NODES`` in one row. A cut ends that worksheet; a worksheet
+  reached with no budget left is read as empty.
 * cells visited: the declared worksheet dimension is ignored, since a
   stale one would silently hide cells outside it (#305), so each parsed
   row is padded to its own last cell and every missing row between two
@@ -26,24 +37,55 @@ work, along two dimensions:
   gigabytes of text (#294). ``_MAX_TEXT_CHARS`` bounds the characters
   read from cell values across the whole workbook.
 
-When either budget runs out the walk stops and the text collected so
-far is returned, as the dispatcher's own ``max_extracted_chars``
-truncation would: a hostile workbook is truncated, and a long
-legitimate one still yields its first rows rather than nothing.
+When a budget runs out the text collected so far is returned, as the
+dispatcher's own ``max_extracted_chars`` truncation would: a hostile
+workbook is truncated, and a long legitimate one still yields its
+first rows rather than nothing.
 
-Known limitation (#428): these budgets apply during the walk. Parts
-openpyxl loads whole before it (the shared-string table,
-``[Content_Types].xml``, ``xl/workbook.xml``) are bounded only by the
-dispatcher's per-member zip cap, so a small, highly compressible
-attachment can still cost seconds and hundreds of MB.
+Known limitation (#428): parts openpyxl loads whole (the shared-string
+table, ``[Content_Types].xml``, ``xl/workbook.xml``) are bounded only by
+the dispatcher's per-member zip cap, so a small, highly compressible
+attachment can still cost seconds and hundreds of MB. The pre-pass
+reads the last two once more to find the worksheets. The bytes of a
+worksheet, as opposed to its nodes, are bounded by the same cap.
 """
 
 from __future__ import annotations
 
 import io
+import shutil
+import zipfile
 from collections.abc import Callable
+from typing import IO
+from xml.parsers import expat
 
 import openpyxl
+from defusedxml import EntitiesForbidden, ExternalReferenceForbidden
+from openpyxl.reader.excel import ExcelReader
+
+# XML nodes (elements plus their attributes) in the worksheet parts
+# openpyxl will parse, across the workbook, and in any one row (#432).
+# Plainly timed, openpyxl spends one to two microseconds on a node,
+# whatever its kind (a cell, a row, an attribute, an element it does
+# not know), counting the parse at load and the walk, so the worst
+# shapes stop in about 5 to 10 s and a few hundred MB; the pre-pass adds
+# about a fifth to a normal sheet. A dense sheet has four or five nodes
+# a cell, so about a million cells fit, past what the dispatcher's
+# default 2,000,000-character cap keeps. The row budget allows each of
+# Excel's 16,384 columns eight nodes and bounds what one row costs in
+# memory, since openpyxl builds a row whole.
+_MAX_SHEET_NODES = 5_000_000
+_MAX_ROW_NODES = 131_072
+
+# Bytes of worksheet XML fed to the pre-pass parser per call.
+_SCAN_CHUNK = 64 * 1024
+
+# Encodings in which an ASCII end tag can be appended to a cut prefix.
+_ASCII_COMPATIBLE = frozenset({"utf-8", "utf8", "us-ascii", "ascii", "iso-8859-1", "latin-1"})
+
+# What a worksheet past the node budget is replaced with: a worksheet
+# with no rows.
+_EMPTY_WORKSHEET = b'<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"/>'
 
 # Cells visited, empty padding included, across every sheet, plus
 # ``_ROW_COST`` per row. Plainly timed, openpyxl parses a row in about a
@@ -86,7 +128,7 @@ def extract(
 ) -> tuple[str, str]:
     """Extract text from an XLSX payload. Returns (text, "xlsx")."""
     workbook = openpyxl.load_workbook(
-        io.BytesIO(payload),
+        _bound_worksheets(payload),
         read_only=True,
         data_only=True,
     )
@@ -94,6 +136,179 @@ def extract(
         return _serialize(workbook), "xlsx"
     finally:
         workbook.close()
+
+
+def _bound_worksheets(payload: bytes) -> io.BytesIO:
+    """Return the workbook with every worksheet cut before the row that
+    crosses a node budget, or the workbook unchanged when none does.
+
+    The worksheets are found the way openpyxl finds them, through its
+    public ``ExcelReader``, and scanned in the order it walks them, one
+    budget across them all. A worksheet named twice is charged twice,
+    as openpyxl parses it twice.
+    """
+    reader = ExcelReader(io.BytesIO(payload), read_only=True, data_only=True)
+    # Per cut worksheet: how many of its leading bytes to keep, and what
+    # follows them.
+    cuts: dict[str, tuple[int, bytes]] = {}
+    try:
+        reader.read_manifest()
+        reader.read_workbook()
+        left = _MAX_SHEET_NODES
+        # As ``ExcelReader.read_worksheets`` selects them.
+        for _sheet, rel in reader.parser.find_sheets():
+            target = rel.target
+            if target not in reader.valid_files or "chartsheet" in rel.Type:
+                continue
+            with reader.archive.open(target) as member:
+                if target in cuts:
+                    # Charge what openpyxl will parse: the cut worksheet.
+                    keep, tail = cuts[target]
+                    cut_member = io.BytesIO()
+                    _copy_prefix(member, cut_member, keep)
+                    cut_member.write(tail)
+                    cut_member.seek(0)
+                    left, cut = _scan_worksheet(cut_member, left)
+                else:
+                    left, cut = _scan_worksheet(member, left)
+            if cut is not None:
+                # A cut of the cut worksheet falls inside its kept bytes.
+                cuts[target] = cut
+    finally:
+        reader.archive.close()
+    if not cuts:
+        return io.BytesIO(payload)
+    # Rewrite the archive with the cut worksheets. A name stored twice
+    # is read from its last entry, by openpyxl as here, so one copy is
+    # kept. Members are stored uncompressed: the dispatcher caps their
+    # total size, and recompressing would cost more than it saves.
+    rebuilt = io.BytesIO()
+    with (
+        zipfile.ZipFile(io.BytesIO(payload)) as original,
+        zipfile.ZipFile(rebuilt, "w") as out,
+    ):
+        for name in dict.fromkeys(original.namelist()):
+            with out.open(name, "w") as member, original.open(name) as data:
+                if name in cuts:
+                    keep, tail = cuts[name]
+                    _copy_prefix(data, member, keep)
+                    member.write(tail)
+                else:
+                    shutil.copyfileobj(data, member)
+    rebuilt.seek(0)
+    return rebuilt
+
+
+class _Cut(Exception):
+    """Raised by the scan at the node that crosses a budget."""
+
+
+class _WorksheetScan:
+    """Expat handlers that charge each element, and each of its
+    attributes, one node.
+
+    A depth-3 element (a ``<row>`` inside ``<sheetData>``, or any other
+    grandchild of the root) and everything inside it is one unit: the
+    scan cuts at the start of the unit holding the node that crosses a
+    budget, so openpyxl sees whole rows, or at the start of a shallower
+    element that crosses it.
+    """
+
+    def __init__(self, left: int) -> None:
+        self.parser = expat.ParserCreate()
+        self.parser.StartElementHandler = self._start
+        self.parser.EndElementHandler = self._end
+        self.parser.XmlDeclHandler = self._declaration
+        # As defusedxml configures the parser openpyxl reads with.
+        self.parser.EntityDeclHandler = self._forbid_entity
+        self.parser.UnparsedEntityDeclHandler = self._forbid_entity
+        self.parser.ExternalEntityRefHandler = self._forbid_external
+        self.left = left
+        self.encoding: str | None = None
+        self.depth = 0
+        self.outer: list[str] = []  # names of the open elements above depth 3
+        self.unit_start = 0  # byte offset of the open unit
+        self.unit_nodes = 0
+        self.left_before_unit = left
+        self.cut_at: int | None = None
+        self.cut_depth = 0
+
+    def _start(self, name: str, attributes: dict[str, str]) -> None:
+        self.depth += 1
+        if self.depth <= 3:
+            self.unit_start = self.parser.CurrentByteIndex
+            self.unit_nodes = 0
+            self.left_before_unit = self.left
+        if self.depth <= 2:
+            self.outer.append(name)
+        cost = 1 + len(attributes)
+        self.unit_nodes += cost
+        self.left -= cost
+        if self.left < 0 or self.unit_nodes > _MAX_ROW_NODES:
+            self.cut_at = self.unit_start
+            self.cut_depth = min(self.depth, 3)
+            raise _Cut
+
+    def _end(self, _name: str) -> None:
+        if self.depth <= 2:
+            self.outer.pop()
+        self.depth -= 1
+
+    def _declaration(self, _version: str, encoding: str | None, _standalone: int) -> None:
+        self.encoding = encoding
+
+    @staticmethod
+    def _forbid_entity(*_args: object) -> None:
+        raise EntitiesForbidden(None, None, None, None, None, None)
+
+    @staticmethod
+    def _forbid_external(
+        _context: str, _base: str | None, _system_id: str | None, _public_id: str | None
+    ) -> int:
+        raise ExternalReferenceForbidden(None, None, None, None)
+
+
+def _copy_prefix(source: IO[bytes], target: IO[bytes], size: int) -> None:
+    """Copy the first ``size`` bytes of ``source`` to ``target``."""
+    while size > 0 and (chunk := source.read(min(size, _SCAN_CHUNK))):
+        target.write(chunk)
+        size -= len(chunk)
+
+
+def _scan_worksheet(source: IO[bytes], left: int) -> tuple[int, tuple[int, bytes] | None]:
+    """Charge one worksheet's nodes against ``left``.
+
+    Returns the budget left and, when the worksheet crosses a budget,
+    its cut: the bytes to keep and the end tags of the elements still
+    open there, or no bytes and a worksheet with no rows when the root
+    itself crosses or an ASCII end tag cannot be appended in the
+    worksheet's encoding.
+    """
+    scan = _WorksheetScan(left)
+    head = b""
+    try:
+        while chunk := source.read(_SCAN_CHUNK):
+            head = head or chunk[:4]
+            scan.parser.Parse(chunk, False)
+        scan.parser.Parse(b"", True)
+    except _Cut:
+        pass
+    except expat.ExpatError:
+        # openpyxl's parser is expat too and stops at the same error,
+        # so it parses no more than was charged.
+        pass
+    if scan.cut_at is None:
+        return scan.left, None
+    encoding = (scan.encoding or "utf-8").lower()
+    ascii_compatible = (
+        encoding in _ASCII_COMPATIBLE
+        and not head.startswith((b"\xff\xfe", b"\xfe\xff"))
+        and b"\x00" not in head
+    )
+    if scan.cut_depth == 1 or not ascii_compatible:
+        return scan.left_before_unit, (0, _EMPTY_WORKSHEET)
+    closers = "".join(f"</{name}>" for name in reversed(scan.outer[: scan.cut_depth - 1]))
+    return scan.left_before_unit, (scan.cut_at, closers.encode(encoding))
 
 
 def _serialize(workbook: openpyxl.Workbook) -> str:
