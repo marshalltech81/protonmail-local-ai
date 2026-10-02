@@ -95,6 +95,14 @@ validate_bridge_endpoint() {
         echo ">>> ERROR: BRIDGE_CERT_HOST must be empty or a host name or IPv4 address." >&2
         return 1
     fi
+    # A cert host needs the expected fingerprint (verify_expected_fingerprint).
+    # Say so now rather than after the wait for Bridge, which can run for
+    # the full bounded wait when the app is not running (#584).
+    if [[ -n "$BRIDGE_CERT_HOST" && -z "$BRIDGE_CERT_FINGERPRINT" ]]; then
+        echo ">>> ERROR: BRIDGE_CERT_FINGERPRINT is not set — refusing to trust the Bridge app's certificate on first use." >&2
+        echo ">>> Take the fingerprint from the Bridge app on the Mac (docs/setup.md, macOS Bridge mode, step 3), set it in .env, and start again." >&2
+        return 1
+    fi
     if [[ -n "$BRIDGE_CERT_FINGERPRINT" && ! "$(expected_fingerprint)" =~ ^[0-9a-f]{64}$ ]]; then
         echo ">>> ERROR: BRIDGE_CERT_FINGERPRINT must be a SHA-256 fingerprint: 64 hex digits, with or without colons." >&2
         return 1
@@ -566,7 +574,9 @@ filter_mbsync_output() {
             dest = (stream == "err") ? "/dev/stderr" : "/dev/stdout"
         }
         stream == "err" && $0 ~ far_box && $0 != inbox { withheld++; next }
-        { other++; printf "%s\n", redact($0) > dest; fflush(dest) }
+        # One string, so each line is one write: mawk writes the parts
+        # of a format separately, and the other filter may share dest.
+        { other++; printf "%s", redact($0) "\n" > dest; fflush(dest) }
         END { print withheld + 0, other + 0 > counts; close(counts) }
     '
 }

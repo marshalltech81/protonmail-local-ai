@@ -265,7 +265,9 @@ account's certificate and send it the Bridge password. With
 `BRIDGE_CERT_HOST` set, the entrypoint therefore also requires
 `BRIDGE_CERT_FINGERPRINT`, taken from the app on the Mac, and refuses any
 other certificate on every start, before the pin is consulted (a
-rotation accepts only that certificate) and before mbsync logs in.
+rotation accepts only that certificate) and before mbsync logs in. An
+unset `BRIDGE_CERT_FINGERPRINT` stops mbsync at startup, before it waits
+for the app.
 
 ### Operator-supplied providers
 
