@@ -301,14 +301,11 @@ healthy as soon as that sync is running, so the indexer and MCP server
 start during it. Until the first sync completes, `get_mailbox_status`
 (and `make status`) reports the index as not current, with "no
 successful mail sync has been recorded". mbsync makes the synced
-folders readable to the indexer only when the sync finishes, and the
-indexer cannot watch a folder that was unreadable when it appeared
-(#516). **Once `make status` shows a last mail sync time, run
-`docker compose restart indexer`** so the indexer indexes the mailbox
-now and watches every folder in real time. Without the restart the
-mail is still indexed, but only by the recovery sweep (default every 30
-minutes), until the indexer next restarts. See "After the first sync
-completes: restart the indexer" in `docs/troubleshooting.md`.
+folders readable to the indexer only when the sync finishes; when it
+records that sync, the indexer starts watching those folders and
+queues their mail, with no restart needed (#516). See "Mail from the
+first sync is indexed only after it completes" in
+`docs/troubleshooting.md`.
 If `make up` fails with "dependency failed to start: container mbsync is
 unhealthy", see "`make up` fails — mbsync is unhealthy" in
 `docs/troubleshooting.md` for the cause and how to start the rest.

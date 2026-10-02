@@ -29,6 +29,7 @@ off. See ``src/reconciler.py``.
 import logging
 import os
 import sqlite3
+import threading
 import time
 import urllib.parse
 from collections.abc import Callable
@@ -65,6 +66,7 @@ from .embedder import (
 )
 from .entities import AuthorityRules, AuthorityRulesError, load_authority_rules
 from .extractors import ExtractionResult, is_stale_extractor
+from .folder_watch import FolderWatchRefresher
 from .maildir import (
     SYNC_STAMP_NAME,
     SyncStamp,
@@ -485,11 +487,20 @@ class MaildirHandler(FileSystemEventHandler):
         queue: IndexingQueue,
         reconciler: Reconciler | None = None,
         ingestion_state: _IngestionStateRecorder | None = None,
+        sync_completed: threading.Event | None = None,
+        directory_created: threading.Event | None = None,
     ):
         self.db = db
         self.queue = queue
         self.reconciler = reconciler
         self.ingestion_state = ingestion_state
+        # Set on each mbsync sync stamp; the main loop then re-watches
+        # folders the sync's permission repair made readable (#516).
+        self.sync_completed = sync_completed
+        # Set on every directory the watch reports created: watchdog
+        # cannot watch one mbsync created 0700, so the next refresh
+        # re-schedules the watch.
+        self.directory_created = directory_created
 
     def _is_reaped_or_deleted(self, path: str | Path) -> bool:
         # With deletion reconciliation enabled, a T-flagged file is
@@ -501,6 +512,8 @@ class MaildirHandler(FileSystemEventHandler):
 
     def on_created(self, event):
         if event.is_directory:
+            if self.directory_created is not None:
+                self.directory_created.set()
             return
         path = Path(event.src_path)
         # Only enqueue files in cur/ or new/ subdirectories
@@ -536,8 +549,11 @@ class MaildirHandler(FileSystemEventHandler):
             stamp = parse_sync_stamp_rename(src_path)
             if stamp is None:
                 log.warning("ignoring unrecognized rename onto the mbsync sync stamp")
-            elif self.ingestion_state is not None:
-                self.ingestion_state.acknowledge(stamp)
+            else:
+                if self.ingestion_state is not None:
+                    self.ingestion_state.acknowledge(stamp)
+                if self.sync_completed is not None:
+                    self.sync_completed.set()
             return
 
         if self.db.is_indexed(src_path):
@@ -1816,6 +1832,31 @@ def _enqueue_unindexed_messages(
     return enqueued
 
 
+def _refresh_folder_watches(
+    folder_watches: FolderWatchRefresher,
+    db: Database,
+    queue: IndexingQueue,
+    *,
+    skip_trashed: bool = False,
+) -> bool:
+    """After an mbsync sync, watch the folders it made readable (#516).
+
+    mbsync creates folders 0700 and opens them to the indexer only in
+    its post-sync permission repair, which the stamp follows, so the
+    watch cannot have been added to a folder created during the sync.
+    When ``folder_watches`` re-schedules the watch, the old watch is
+    closed before the new one walks the tree, and events in that gap
+    are lost: heal renames, then queue every unindexed message, as at
+    startup. That walk also queues mail already delivered into the
+    newly watched folders. Returns whether the watch was re-scheduled.
+    """
+    if not folder_watches.refresh():
+        return False
+    sweep_paths(db)
+    _enqueue_unindexed_messages(db, queue, MAILDIR_PATH, REASON_RESCAN, skip_trashed=skip_trashed)
+    return True
+
+
 def initial_index(
     db: Database,
     embedder: EmbeddingBackend,
@@ -2042,9 +2083,21 @@ def main():
     global _ingestion_state
     ingestion_state = _IngestionStateRecorder(db, MAILDIR_PATH)
     _ingestion_state = ingestion_state
-    handler = MaildirHandler(db, queue, reconciler=reconciler, ingestion_state=ingestion_state)
+    sync_completed = threading.Event()
+    directory_created = threading.Event()
+    handler = MaildirHandler(
+        db,
+        queue,
+        reconciler=reconciler,
+        ingestion_state=ingestion_state,
+        sync_completed=sync_completed,
+        directory_created=directory_created,
+    )
     observer = Observer()
-    observer.schedule(handler, str(MAILDIR_PATH), recursive=True)
+    folder_watches = FolderWatchRefresher(
+        MAILDIR_PATH, observer, handler, directory_created=directory_created
+    )
+    folder_watches.start()
     observer.start()
     log.info("Watching Maildir for new emails...")
 
@@ -2134,6 +2187,18 @@ def main():
             except Exception as e:
                 log.error("queue drain failed: %s", _stage_error(e))
 
+            # A sync completed: watch any folder its permission repair
+            # made readable. Cleared first, so a sync that completes
+            # during the refresh triggers another.
+            if sync_completed.is_set():
+                sync_completed.clear()
+                try:
+                    _refresh_folder_watches(
+                        folder_watches, db, queue, skip_trashed=reconciler is not None
+                    )
+                except Exception as e:
+                    log.error("Maildir watch refresh failed: %s", type(e).__name__)
+
             now = time.monotonic()
             if reconciler is not None:
                 if now - last_reconcile >= reconciler_config.sweep_interval_secs:
@@ -2170,6 +2235,15 @@ def main():
                     ingestion_state.acknowledge(stamp)
                 except Exception as e:
                     log.error("periodic Maildir rescan failed: %s", e)
+                # Also re-watch here: a failed sync attempt still opens
+                # the folders it created but writes no stamp, and a
+                # failed re-schedule leaves no watch until the next try.
+                try:
+                    _refresh_folder_watches(
+                        folder_watches, db, queue, skip_trashed=reconciler is not None
+                    )
+                except Exception as e:
+                    log.error("Maildir watch refresh failed: %s", type(e).__name__)
                 last_recovery_sweep = now
 
             # WAL checkpoint: keep the WAL file size bounded over a
