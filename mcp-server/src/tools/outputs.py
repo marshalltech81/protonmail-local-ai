@@ -932,7 +932,7 @@ class FindingSource(Citation):
 class CheckedFinding(ConclusionFinding):
     sources: list[FindingSource] = Field(
         description="Each cited label that names a supplied passage: its message, sender, "
-        "sent date and excerpt. Unknown labels have no source."
+        "sent and delivery dates and excerpt. Unknown labels have no source."
     )
 
 

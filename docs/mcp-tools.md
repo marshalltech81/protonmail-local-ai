@@ -1087,9 +1087,11 @@ Limits: the check is about labels and quoted words only. A valid label
 or a verified quote does not prove the passage supports the entry
 (semantic support needs a model judge and is not built), and an entry's
 `actor` and `date` are the model's reading. The
-date in a passage header is the message's own sent date; the receiving
-date is not indexed. `as_of` is computed by the server from the
-passages, not by the model.
+date in a passage header the model sees is the message's own sent
+date; the delivery date (`occurred_at`, which date filters use when
+known) is returned on each citation and shown in the `Citations:`
+list, but not in the model's passage headers. `as_of` is computed by
+the server from the passages' sent dates, not by the model.
 
 ### `check_conclusion`
 Checks a caller-supplied conclusion against the mailbox (PLAN.md Phase

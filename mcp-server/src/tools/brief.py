@@ -642,6 +642,7 @@ def _finding_lines(findings: list[CheckedFinding]) -> list[str]:
                 "thread text"
                 if s.source == "thread"
                 else f"{s.sender or 'unknown sender'}, {(s.sent_at or 'unknown date')[:10]}"
+                + (f", delivered {s.occurred_at[:10]}" if s.occurred_at else "")
                 + (f", attachment {s.attachment_filename}" if s.source == "attachment" else "")
             )
             lines.append(f'      [{s.label}] {where}: "{s.excerpt}"')

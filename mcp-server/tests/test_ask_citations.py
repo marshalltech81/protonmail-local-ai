@@ -305,6 +305,10 @@ class TestValidation:
             ("m1@example.com", "2024-03-01T09:00:00+00:00", None),
             ("m2@example.com", "2024-03-04T10:30:00+00:00", delivered),
         }
+        # Review round 1: the prose Citations list shows it too.
+        text = out.content[0].text
+        assert "bob@example.com, 2024-03-04, delivered 2024-03-04" in text
+        assert "alice@example.com>, 2024-03-01 (thread" in text
 
     def test_text_output_lists_citations_and_sources(self, cite_db):
         out = _ask(cite_db, FakeInferenceClient(response="700 [E1]."))

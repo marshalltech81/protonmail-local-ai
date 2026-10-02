@@ -585,6 +585,40 @@ class TestReviewRound2:
         assert len(line) < HEADER_CHAR_LIMIT + 200
         assert line.endswith('"Renewal clause: renews each year."')
 
+    @pytest.mark.parametrize(
+        ("occurred_at", "expected"),
+        [
+            (None, "Alice Example <alice@example.com>, 2024-03-01: "),
+            (
+                "2024-03-02T01:00:00+00:00",
+                "Alice Example <alice@example.com>, 2024-03-01, delivered 2024-03-02: ",
+            ),
+        ],
+        ids=["sent-only", "delivered"],
+    )
+    def test_source_shows_the_delivery_date_when_known(self, occurred_at, expected):
+        """Review round 1: a passage admitted by its delivery date must
+        show it in the prose, not only its send date."""
+        chunk = ChunkResult(
+            chunk_id="c-body",
+            message_id="m@example.com",
+            claimant_id="m@example.com#1a2b3c4d",
+            thread_id="t",
+            chunk_index=0,
+            text="Renewal clause.",
+            char_start=0,
+            char_end=15,
+            message_sender="Alice Example <alice@example.com>",
+            message_date="2024-03-01T23:00:00+00:00",
+            message_occurred_at=occurred_at,
+        )
+        source = _finding_source(EvidenceRef("E1", "t", chunk, 15))
+        finding = CheckedFinding(
+            relation="supports", explanation="x", labels=["E1"], sources=[source]
+        )
+        [line] = [ln for ln in _finding_lines([finding]) if ln.lstrip().startswith("[E1]")]
+        assert expected in line
+
 
 class TestWire:
     def test_structured_output_satisfies_the_declared_schema(self, check_db):

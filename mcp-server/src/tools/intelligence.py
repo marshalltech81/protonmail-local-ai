@@ -1851,6 +1851,7 @@ def _citation_lines(citations: list[Citation]) -> list[str]:
             "thread text"
             if c.source == "thread"
             else f"{c.sender or 'unknown sender'}, {(c.sent_at or 'unknown date')[:10]}"
+            + (f", delivered {c.occurred_at[:10]}" if c.occurred_at else "")
             + (f", attachment {c.attachment_filename}" if c.source == "attachment" else "")
         )
         lines.append(f"  [{c.label}] {where} (thread {c.thread_id}, chunk {c.chunk_id})")
