@@ -111,7 +111,7 @@ mcp-server container
         │
         │  Streamable HTTP (localhost:3000/mcp)
         ▼
-MCP client (host machine; Claude Desktop via a local stdio bridge)
+MCP client (host machine; Claude Desktop via the repo's stdio adapter)
   - Calls MCP tools via natural language
   - Receives structured responses
 ```
@@ -546,6 +546,23 @@ before. The MCP tools return `claimant_id` beside `message_id`, and
 `get_message` accepts either, listing the claimants when a bare
 Message-ID names several (see `docs/mcp-tools.md`).
 
+**Message-ID length.** A Message-ID is at most 998 characters
+(`parser.MESSAGE_ID_MAX_CHARS`, the RFC 5322 line limit), counted as
+stored: after surrounding whitespace, header folding and the angle
+brackets are removed, so `<` plus 998 characters plus `>` is accepted.
+A message whose own Message-ID is longer is unindexable, like one with
+none: it is dead-lettered at the parse stage with the fixed text
+`unindexable: no Message-ID or one over 998 characters`, and the ID
+itself never reaches the log or `last_error`. A new thread's ID is its
+root message's Message-ID, so this also bounds thread IDs. A longer
+`In-Reply-To` or `References` entry is dropped from the message (it
+could never match an indexed Message-ID), so threading uses the rest
+and the stored reply fields stay bounded. This assumes no indexed
+message has a longer ID: an index built before the limit (none is
+deployed) is rebuilt from Maildir, as for any pre-deployment change,
+since a reply's dropped reference to an older over-long ID could no
+longer find that message's thread.
+
 Each indexed message gets one row — its own
 subject (cut to `SUBJECT_MAX_CHARS`, 2,000 decoded characters, at parse
 time, #541), `sent_at` (`Date:` header; a missing or unparseable header is
@@ -935,9 +952,13 @@ startup rather than picking a mode.
    pass.
 
 **Reaped-source records.** A citation or search hit from an earlier
-answer can name a message or thread the reaper has since removed. So
-that the chain is never silently broken (PLAN Phase 4 item 4), the reap
-transaction writes one `reaped_messages` row per removed message:
+answer can name a message or thread the reaper has since removed. Such
+a source reads as removed for 30 days and then as not found, and the
+record never keeps its evidence text (PLAN Resolved decisions 14;
+extracted attachment text the reap leaves in `attachment_extractions`
+is the separate #562, see *Cascade on message removal*). For that
+window the reap transaction writes one content-free `reaped_messages`
+row per removed message:
 claimant ID, Message-ID, thread ID and reap time, and nothing else (no
 subject, body, participants, attachment names or chunk IDs, which hash
 the passage text). `get_message`, `get_thread` and thread-scoped

@@ -304,11 +304,7 @@ Bridge container to inspect; check the app and the connection instead.
 - **`UIDVALIDITY genuinely changed` or `Unable to recover from
   UIDVALIDITY change` after switching modes.** mbsync's sync state
   belongs to the previous Bridge. mbsync leaves those folders untouched;
-  see step 4 of
-  [Switching an existing installation](setup.md#switching-an-existing-installation).
-  The log shows `<folder>` in place of the folder name; see
-  [Folder names in mbsync's log](#folder-names-in-mbsyncs-log) to find
-  which folders are affected.
+  see [mbsync reports a UIDVALIDITY change](#mbsync-reports-a-uidvalidity-change).
 
 ## A Proton folder was renamed or deleted
 
@@ -431,12 +427,139 @@ docker volume rm $names
 make up                # or make up-macos-bridge in macOS Bridge mode
 ```
 
-To keep a copy of the old Maildir first, back it up as in step 4 of
-[Switching an existing installation](setup.md#switching-an-existing-installation).
+To keep a copy of the old Maildir first, back it up as in
+[Recover from a genuine change](#recover-from-a-genuine-change).
 The Bridge vault and mbsync's certificate pin (the `mbsync-state` volume)
 are untouched. mbsync then pulls the whole mailbox, and the indexer
 rebuilds the index from it, which re-embeds every message (a cost with a
 paid embedding provider).
+
+## mbsync reports a UIDVALIDITY change
+
+Reinstalling or resetting Bridge, re-adding the account, rebuilding the
+Bridge container's vault, or switching between the Bridge container and
+the macOS Bridge app can leave three pieces of mbsync's state stale. Each
+one stops the sync before the next can show, so after such a change they
+appear in this order:
+
+| Log line in `docker logs mbsync` | What is stale | Fix |
+| --- | --- | --- |
+| `Bridge cert fingerprint does not match pinned value`, or in macOS Bridge mode `the Bridge certificate does not match BRIDGE_CERT_FINGERPRINT` | The certificate pin. Checked before mbsync logs in. | Verify the new certificate, then rotate the pin: [Bridge cert pin mismatch](#mbsync-refuses-to-sync--bridge-cert-pin-mismatch), or [macOS Bridge mode](#macos-bridge-mode-mbsync-cannot-reach-or-verify-the-bridge-app). |
+| `IMAP command 'LOGIN <user> <pass>' returned an error: NO (server text withheld)` (or `AUTHENTICATE PLAIN <authdata>`, or `BAD`) | The credentials: Bridge refused `BRIDGE_USER` or `.secrets/bridge_pass.txt`. | Copy the new username and password from Bridge: [re-authenticate](#bridge-credentials-expired--need-to-re-authenticate), or step 2 of [Switching an existing installation](setup.md#switching-an-existing-installation). |
+| `Error: channel protonmail, far side box <folder>: UIDVALIDITY genuinely changed (at UID 42).` or `... Unable to recover from UIDVALIDITY change.` | The sync state: this Bridge numbers the folder's messages differently. | Below. |
+
+### Spurious or genuine
+
+mbsync records each folder's IMAP UIDVALIDITY and the UID of every
+message it pulled, in the folder's `.mbsyncstate` (see
+[Folder names in mbsync's log](#folder-names-in-mbsyncs-log)). When
+Bridge reports a different UIDVALIDITY, isync 1.4.4 tells the two cases
+apart itself, by comparing the Message-ID of each message it pulled with
+the message Bridge now serves at that UID:
+
+- **Spurious**: every message it can check is still at its old UID.
+  isync accepts the new UIDVALIDITY, logs
+  `Notice: channel protonmail, far side box <folder>: Recovered from change of UIDVALIDITY.`
+  and syncs as usual. Nothing to do.
+- **Genuine**: a UID now holds another message. isync logs
+  `UIDVALIDITY genuinely changed (at UID <n>)`.
+- **Unknown**: no UID contradicts the old state, but too few messages
+  could be confirmed (fewer than 20, and fewer than 80% of those it
+  pulled before; typical of Drafts). isync logs
+  `Unable to recover from UIDVALIDITY change`. Treat it as genuine.
+
+`UIDVALIDITY of both far side <folder> and near side <folder> changed`,
+or a `near side box` line, means the local Maildir's own UIDVALIDITY
+changed, which happens when something other than mbsync rewrites the
+Maildir (a restore from a backup, for example). Treat it as genuine too.
+
+In each error case isync skips that folder and changes nothing in it
+(mbsync is pull-only and never expunges); the other folders keep
+syncing. The run counts as a failed sync, and five in a row restart
+mbsync. Retrying does not help: the state cannot be reused.
+
+If every folder reports a genuine change right after `BRIDGE_USER`
+changed, first check that it names the right account (the Bridge CLI's
+`info`, or the account's IMAP details in the Bridge app). Another
+account's mailbox looks like a genuine change too.
+
+### Recover from a genuine change
+
+Back up the Maildir, then start it over together with the index. Mail
+is pulled again from Proton, and the backup keeps every file the
+Maildir held. Run these from the checkout, with the project name the
+stack runs under:
+
+```bash
+make down
+names=$(docker compose config --format json | python3 -c 'import json, sys
+v = json.load(sys.stdin)["volumes"]
+print(v["maildir-volume"]["name"], v["sqlite-volume"]["name"])')
+maildir=${names%% *}
+mkdir -m 700 -p ~/protonmail-local-ai-backup
+docker run --rm -v "$maildir:/maildir:ro" -v ~/protonmail-local-ai-backup:/backup \
+    debian:bookworm-slim bash -c '
+        tar -C /maildir -czf /backup/maildir-uidvalidity.tgz . &&
+        find /maildir -type f \( -path "*/cur/*" -o -path "*/new/*" \) | wc -l &&
+        tar -tzf /backup/maildir-uidvalidity.tgz | grep -cE "/(cur|new)/[^/]+$"'
+chmod 600 ~/protonmail-local-ai-backup/maildir-uidvalidity.tgz
+```
+
+The two numbers it prints are the message files in the Maildir and in
+the archive. Continue only if they match:
+
+```bash
+docker volume rm $names
+make up                # or make up-macos-bridge in macOS Bridge mode
+docker logs mbsync     # no UIDVALIDITY errors
+```
+
+What this keeps and changes:
+
+- The archive is the old Maildir as it was, every `.eml` included, and
+  is the only copy of mail that Proton no longer has (deleted there but
+  kept locally, with the `T` flag). It is your mailbox, unencrypted:
+  keep it outside the checkout, as above, so no `git add` can pick it
+  up, and on an encrypted disk (FileVault).
+- The sync state lives inside the Maildir, so it goes with it. The
+  certificate pin (the `mbsync-state` volume) and the Bridge vault are
+  untouched.
+- mbsync pulls the whole mailbox into the new Maildir, each message
+  once, and the indexer rebuilds the index from it, which re-embeds
+  every message (a cost with a paid embedding provider). Removing the
+  index too keeps the old files' rows from going through
+  [deletion reconciliation](#deletion-reconciliation-mirror-vs-archive).
+- The new index holds what Proton holds now. Under mirror retention
+  (the default) that is where the old index was heading: mail deleted in
+  Proton is reaped after the grace window anyway. Under archive mode
+  (`INDEXER_DELETION_ENABLED=false`), mail deleted in Proton before the
+  recovery is in the archive only and no longer searchable (#603).
+
+`make test-mbsync-layout` runs this against synthetic stores: a spurious
+change, a genuine one that fails every sync without changing a local
+file, and the fresh Maildir that then holds each message once while the
+old one stays whole.
+
+### Why not reset only the sync state
+
+Moving a folder's `.mbsyncstate` files aside (or editing them, or
+`.uidvalidity`) makes mbsync sync again, but it does not recover:
+
+- isync then knows none of the local files and downloads every message
+  again next to its old copy.
+- The copies differ in their bytes: isync writes a random `X-TUID`
+  header into each file it stores. The indexer keys a message on its
+  Message-ID and a hash of its bytes, so it indexes both, and every
+  message appears twice.
+- The old copies are no longer tracked: a flag change or deletion in
+  Proton reaches only the new copy, so a message deleted in Proton
+  stays searchable through its old copy, even under mirror retention.
+- Removing the old copies afterwards means deleting `.eml` files by
+  guesswork.
+
+`make test-mbsync-layout` checks each of these. A folder-by-folder reset
+saves only download time, since the index has to be rebuilt either way,
+and the log does not name the folders.
 
 ## Embedder or inference endpoint unreachable from containers
 
@@ -541,7 +664,8 @@ docker inspect mbsync --format='{{json .State.Health}}'
 Fix the cause the log names (see "mbsync fails to connect" and the cert pin
 sections below). Repeated sync failures make the container exit and restart
 after five consecutive failures, so `docker compose ps` shows the restarts.
-Once mbsync is healthy, run `make up` again: Compose leaves the running
+Once mbsync is healthy, run `make up` again (`make up-macos-bridge` in
+[macOS Bridge mode](setup.md#macos-bridge-mode-optional)): Compose leaves the running
 services as they are and starts the indexer and then the MCP server.
 
 ## Indexer refuses to start — "wipe the sqlite-volume"
@@ -560,9 +684,9 @@ rather than assumed:
 ```bash
 volume=$(docker compose config --format json \
   | python3 -c 'import json, sys; print(json.load(sys.stdin)["volumes"]["sqlite-volume"]["name"])')
-docker compose down
+make down
 docker volume rm "$volume"
-make up
+make up                # or make up-macos-bridge in macOS Bridge mode
 ```
 
 Maildir and Bridge state are untouched. The indexer re-parses and
@@ -590,7 +714,7 @@ brake, unlink-on-reap).
 
 The indexer reads these settings once at startup, so a change takes
 effect only when the `indexer` container is recreated. After editing
-`.env`, run `make up`: Compose recreates every container whose
+`.env`, run `make up` (`make up-macos-bridge` in macOS Bridge mode): Compose recreates every container whose
 configuration changed. `docker compose restart` is not enough, because
 a restarted container keeps the environment it was created with. If
 the stack was started with an overlay (such as
@@ -673,7 +797,7 @@ Every failed row records a `last_error_class`:
 | Class | Meaning |
 |---|---|
 | `retryable` | May succeed on a later attempt; `dead` means the attempt budget ran out |
-| `permanent_source_failure` | This file can never be indexed under the current config (oversized, no `Message-ID`, input the embedder rejects) — dead-lettered immediately |
+| `permanent_source_failure` | This file can never be indexed under the current config (oversized, no `Message-ID` or one over 998 characters, input the embedder rejects) — dead-lettered immediately |
 | `operator_action_required` | The embedder rejected a health probe (bad key or model); jobs stay `queued` until you fix the config |
 
 Once the cause of a dead-letter is fixed, requeue with a fresh budget
@@ -694,14 +818,16 @@ before #361) stays unindexed until you requeue it.
 1. Verify the MCP server is running: `docker compose ps`
 2. Check the server is responding: `curl http://localhost:3000/health`
    should print `{"status":"ok"}`
-3. Check the client points at `http://localhost:3000/mcp`. The legacy
+3. Check the client points at `http://127.0.0.1:3000/mcp`. The legacy
    `/sse` endpoint was removed and now returns `404`; see
    [Connect an MCP client](setup.md#7-connect-an-mcp-client) for the
-   Claude Desktop bridge setup
+   Claude Desktop adapter setup
 4. Verify the Claude Desktop config JSON is valid (no trailing commas),
-   and check `~/Library/Logs/Claude/mcp*.log` for the bridge's errors.
-   A `401` there means the token is missing or wrong; see the next
-   section
+   that `command` is `uv`'s absolute path and both paths in `args` are
+   absolute, and check `~/Library/Logs/Claude/mcp*.log` for the
+   adapter's `ERROR:` line, which names a token-file or `MCP_PORT`
+   problem. The adapter logs nothing else, so a server that starts but
+   shows no tools means the token was rejected; see the next section
 5. Restart Claude Desktop
 
 ## MCP client gets 401 Unauthorized
@@ -720,7 +846,7 @@ problem.
 
    ```bash
    printf 'Authorization: Bearer %s\n' "$(cat .secrets/mcp_auth_token.txt)" |
-     curl -s -o /dev/null -w '%{http_code}\n' -X POST http://localhost:3000/mcp \
+     curl -s -o /dev/null -w '%{http_code}\n' -X POST http://127.0.0.1:3000/mcp \
      -H @- \
      -H 'Accept: application/json, text/event-stream' \
      -H 'Content-Type: application/json' \
@@ -738,10 +864,18 @@ problem.
    absolute, that `claude mcp list` does not say the helper was not run
    (start Claude Code in the repository once and accept the trust
    dialog), and reconnect with `/mcp` in Claude Code.
-3. Claude Desktop: rewrite `.secrets/mcp_client_headers.txt` from the
-   current token (the command is in setup), check that the
-   `--header-file` path in `claude_desktop_config.json` is absolute and
-   points at it, and restart Claude Desktop.
+3. Claude Desktop: the adapter reads `.secrets/mcp_auth_token.txt`
+   (or its `--token-file`) only when it starts, so restart Claude
+   Desktop after the token changes. To see the adapter's own check of
+   the token file, run it once from the repository root with standard
+   input closed: `uv run --directory mcp-server --frozen python -m
+   src.stdio_adapter < /dev/null`. An `ERROR:` line names the problem;
+   no output means the file passed.
+4. Codex: run `scripts/mcp-auth-headers.sh > /dev/null` as for Claude
+   Code, and check that `http_headers_helper` in `~/.codex/config.toml`
+   is the script's absolute path in single quotes (Codex runs it with
+   `sh -c`). With `bearer_token_env_var` instead,
+   check that the variable is exported in the shell that starts Codex.
 
 The server logs a request with a wrong token as `Auth error returned:
 invalid_token (status=401)` and never logs the token or the
@@ -753,7 +887,8 @@ invalid_token (status=401)` and never logs the token or the
 `make validate-env`, which `make up` runs first, catches this too.
 Create a token with `make init-secrets` (when the file does not exist)
 or `(umask 077; openssl rand -hex 32 > .secrets/mcp_auth_token.txt)`,
-run `make up`, and configure each client with it.
+run `make up` (`make up-macos-bridge` in macOS Bridge mode), and
+configure each client with it.
 
 ## mcp-server exits with "MCP_TRANSPORT=sse was removed"
 
@@ -761,8 +896,8 @@ The `.env` (or the shell you run `make` from) still sets
 `MCP_TRANSPORT=sse` or `MCP_TRANSPORT=dual` from a release that served
 the legacy SSE transport. Remove the line from `.env`, run
 `unset MCP_TRANSPORT` in a shell that exports it (an exported value wins
-over `.env`), or set it to `streamable-http`; then run `make up` and
-change client URLs from `/sse` to `/mcp`.
+over `.env`), or set it to `streamable-http`; then run `make up`
+(`make up-macos-bridge` in macOS Bridge mode) and change client URLs from `/sse` to `/mcp`.
 
 ## Bridge credentials expired / need to re-authenticate
 
@@ -793,6 +928,11 @@ two-step rotation in
 recreate `mbsync` once with `BRIDGE_CERT_PIN_ROTATE=true`, check the
 `rotating pin` warning, then recreate it with
 `BRIDGE_CERT_PIN_ROTATE=false` to re-enable pin enforcement.
+
+Once the pin is rotated, the new Bridge may number the mailbox's
+messages differently. If mbsync then reports `UIDVALIDITY genuinely
+changed`, see
+[mbsync reports a UIDVALIDITY change](#mbsync-reports-a-uidvalidity-change).
 
 ## mbsync refuses to sync — Bridge cert pin mismatch
 
