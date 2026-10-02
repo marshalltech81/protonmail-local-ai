@@ -27,7 +27,7 @@ from typing import Literal
 from mcp.types import CallToolResult, TextContent
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from ..lib.sqlite import MessageRecord, SourceFile, ThreadResult
+from ..lib.sqlite import MAX_LISTED_CLAIMANTS, MessageRecord, SourceFile, ThreadResult
 from ..lib.sqlite import Participant as ParticipantRecord
 
 # Entries listed per bounded list (thread participants, senders, one
@@ -326,7 +326,11 @@ class GetMessageOutput(_Output):
     message: ListedMessage
     other_claimants: list[str] = Field(
         description="Claimant IDs of other indexed messages with the same Message-ID "
-        "(different files reusing it); empty in the usual case."
+        "(different files reusing it), in claimant-ID order; empty in the usual case. "
+        f"At most {MAX_LISTED_CLAIMANTS} are listed."
+    )
+    other_claimants_truncated: bool = Field(
+        description="True when more files claim the Message-ID than other_claimants lists."
     )
     thread_subject: str
     body: str | None = Field(

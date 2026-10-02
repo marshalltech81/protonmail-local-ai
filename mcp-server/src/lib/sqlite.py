@@ -573,18 +573,26 @@ def _attach_participants(conn: sqlite3.Connection, records: list[MessageRecord])
 
 
 def _message_records(
-    conn: sqlite3.Connection, where_sql: str, params: tuple, *, limit: int = -1, offset: int = 0
+    conn: sqlite3.Connection,
+    where_sql: str,
+    params: tuple,
+    *,
+    limit: int = -1,
+    offset: int = 0,
+    participants: bool = True,
 ) -> list[MessageRecord]:
     """Messages matching ``where_sql``, oldest first (``claimant_id`` breaks
-    ties), with participants. ``sent_at`` is stored as UTC ISO 8601, so
-    string order is chronological order. ``limit=-1`` means no limit."""
+    ties), with participants unless ``participants`` is false. ``sent_at``
+    is stored as UTC ISO 8601, so string order is chronological order.
+    ``limit=-1`` means no limit."""
     rows = conn.execute(
         f"SELECT {_MESSAGE_COLUMNS} FROM messages m WHERE {where_sql} "  # nosec B608
         "ORDER BY m.sent_at ASC, m.claimant_id ASC LIMIT ? OFFSET ?",
         (*params, limit, offset),
     ).fetchall()
     records = [_row_to_message_record(r) for r in rows]
-    _attach_participants(conn, records)
+    if participants:
+        _attach_participants(conn, records)
     return records
 
 
@@ -667,17 +675,28 @@ class ThreadPage:
     has_bodies: bool
 
 
+# Most claimants of one Message-ID that ``get_message_view`` lists
+# (#456). The sender sets the Message-ID, so a flood of files reusing
+# one would otherwise be read, with participants, and returned in full.
+# A genuine reuse is two or three files; 20 leaves room for those while
+# bounding the rows read (one past the cap, to tell that more exist).
+MAX_LISTED_CLAIMANTS = 20
+
+
 @dataclass
 class MessageView:
     """One message, its thread, and its full body, read from one snapshot.
 
-    ``other_claimants`` lists the claimant IDs of every other indexed
-    file claiming the same Message-ID (#217); empty in the usual case."""
+    ``other_claimants`` lists the claimant IDs of other indexed files
+    claiming the same Message-ID (#217), in claimant-ID order: at most
+    ``MAX_LISTED_CLAIMANTS``, with ``other_claimants_truncated`` set when
+    more exist. Empty in the usual case."""
 
     record: MessageRecord
     thread: ThreadResult
     body: MessageBody | None
     other_claimants: list[str] = field(default_factory=list)
+    other_claimants_truncated: bool = False
 
 
 @dataclass
@@ -687,11 +706,13 @@ class AmbiguousMessageId:
     ``get_message_view`` returns this rather than choosing one: an
     arrival-order rule would let a later (or earlier) file with a reused
     Message-ID stand in for the message the caller meant. ``claimants``
-    holds each one's headers, oldest first, so the caller can pick a
-    claimant ID."""
+    holds each one's message row (without participants), oldest first,
+    so the caller can pick a claimant ID: at most ``MAX_LISTED_CLAIMANTS``, with ``truncated`` set
+    when more exist."""
 
     message_id: str
     claimants: list[MessageRecord]
+    truncated: bool = False
 
 
 @dataclass
@@ -2751,14 +2772,26 @@ class Database:
         """
         with closing(self._connect()) as conn:
             conn.execute("BEGIN")
+            # One row past the cap tells whether more exist (#456).
+            # Participants are read only once one message is chosen: the
+            # ambiguity listing needs claimant ID, date and folder alone.
             records = _message_records(
-                conn, "m.claimant_id = ? OR m.message_id = ?", (identifier, identifier)
+                conn,
+                "m.claimant_id = ? OR m.message_id = ?",
+                (identifier, identifier),
+                limit=MAX_LISTED_CLAIMANTS + 1,
+                participants=False,
             )
             if len(records) > 1:
-                return AmbiguousMessageId(message_id=identifier, claimants=records)
+                return AmbiguousMessageId(
+                    message_id=identifier,
+                    claimants=records[:MAX_LISTED_CLAIMANTS],
+                    truncated=len(records) > MAX_LISTED_CLAIMANTS,
+                )
             if not records:
                 return None
             record = records[0]
+            _attach_participants(conn, [record])
             row = conn.execute(
                 "SELECT * FROM threads WHERE thread_id = ?", (record.thread_id,)
             ).fetchone()
@@ -2768,13 +2801,17 @@ class Database:
                 r["claimant_id"]
                 for r in conn.execute(
                     "SELECT claimant_id FROM messages WHERE message_id = ? AND claimant_id != ? "
-                    "ORDER BY claimant_id",
-                    (record.message_id, record.claimant_id),
+                    "ORDER BY claimant_id LIMIT ?",
+                    (record.message_id, record.claimant_id, MAX_LISTED_CLAIMANTS + 1),
                 )
             ]
             body = _message_bodies(conn, [record.claimant_id], None).get(record.claimant_id)
         return MessageView(
-            record=record, thread=self._row_to_result(row), body=body, other_claimants=others
+            record=record,
+            thread=self._row_to_result(row),
+            body=body,
+            other_claimants=others[:MAX_LISTED_CLAIMANTS],
+            other_claimants_truncated=len(others) > MAX_LISTED_CLAIMANTS,
         )
 
     def list_threads(

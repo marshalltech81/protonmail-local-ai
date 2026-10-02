@@ -365,10 +365,20 @@ def register_retrieval_tools(server, db):
                 listed = "; ".join(
                     f"{c.claimant_id} (sent {c.sent_at}, folder {c.folder})" for c in view.claimants
                 )
+                count = (
+                    f"more than {len(view.claimants)}"
+                    if view.truncated
+                    else str(len(view.claimants))
+                )
+                shown = (
+                    f"the oldest {len(view.claimants)} of these claimant IDs"
+                    if view.truncated
+                    else "these claimant IDs"
+                )
                 raise ToolError(
-                    f"Message-ID {view.message_id} names {len(view.claimants)} messages "
-                    "(different files claim it). Call get_message with one of these "
-                    f"claimant IDs: {listed}"
+                    f"Message-ID {view.message_id} names {count} messages "
+                    f"(different files claim it). Call get_message with one of {shown}: "
+                    f"{listed}"
                 )
             thread = view.thread
             thread_text = None
@@ -378,8 +388,14 @@ def register_retrieval_tools(server, db):
                 f"Claimant ID: {view.record.claimant_id}",
             ]
             if view.other_claimants:
+                shown = (
+                    f" (first {len(view.other_claimants)} of more than "
+                    f"{len(view.other_claimants)}, by claimant ID)"
+                    if view.other_claimants_truncated
+                    else ""
+                )
                 lines.append(
-                    "Other messages with this Message-ID (different files claim it): "
+                    f"Other messages with this Message-ID (different files claim it){shown}: "
                     + ", ".join(view.other_claimants)
                 )
             lines += [
@@ -420,6 +436,7 @@ def register_retrieval_tools(server, db):
             output = GetMessageOutput(
                 message=listed_message(view.record, full=True),
                 other_claimants=view.other_claimants,
+                other_claimants_truncated=view.other_claimants_truncated,
                 thread_subject=thread.subject,
                 body=view.body.text if view.body else None,
                 indexed_thread_text=thread_text,
