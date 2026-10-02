@@ -96,7 +96,9 @@ require_integer_min() {
     local minimum="$3"
 
     require_integer "$name" "$value"
-    [[ "$value" -ge "$minimum" ]] || {
+    # Force base 10: a zero-padded value such as 08 would otherwise be
+    # read as octal, while the Python loaders parse it as decimal.
+    (( 10#$value >= minimum )) || {
         printf 'ERROR: %s must be >= %s, found %s.\n' "$name" "$minimum" "$value" >&2
         exit 1
     }
