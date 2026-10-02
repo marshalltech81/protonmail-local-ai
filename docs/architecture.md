@@ -1117,7 +1117,7 @@ and exporter were present.
 | Embedding — `EMBED_BASE_URL` points at a host-side server | ✅ | Never |
 | Embedding — `EMBED_BASE_URL` points at a remote provider | Retrieval queries + indexed content | Email body chunks → provider |
 | Reranking — `RERANK_BASE_URL` points at a host-side server | ✅ | Never |
-| Reranking — `RERANK_BASE_URL` points at a remote provider | Retrieval queries | Retrieved chunks → provider |
+| Reranking — `RERANK_BASE_URL` points at a remote provider | Retrieval queries | Candidate thread subjects, up to five changed reply subjects each, and retrieved chunks → provider |
 | Q&A — `INFERENCE_MODE=openai`, host-side `INFERENCE_BASE_URL` | Retrieval local | Never |
 | Q&A — `INFERENCE_MODE=openai`, remote `INFERENCE_BASE_URL` | Retrieval local | Retrieved chunks → OpenAI-compatible provider |
 | Q&A — `INFERENCE_MODE=anthropic` (default) | Retrieval local | Retrieved chunks → Anthropic-compatible provider |

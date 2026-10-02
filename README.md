@@ -184,7 +184,7 @@ Reranking is a separate, opt-in stage of hybrid search, controlled by
 | Mode | What happens to retrieved email content |
 |---|---|
 | `none` (default) | No reranking; nothing is sent anywhere for this stage. |
-| `cohere` | The search query and each candidate thread's subject plus its best-matching passage (or snippet) are sent to the Cohere rerank API, or to `RERANK_BASE_URL` if set. Requires `RERANK_MODEL` and `.secrets/rerank_api_key.txt`. |
+| `cohere` | The search query and each candidate thread's subject, up to five changed reply subjects from its messages, and its best-matching passage (or snippet) are sent to the Cohere rerank API, or to `RERANK_BASE_URL` if set. Requires `RERANK_MODEL` and `.secrets/rerank_api_key.txt`. |
 
 These settings only govern what the MCP server does *internally* during a tool
 call. They do not govern what your MCP *client* does with the result.
