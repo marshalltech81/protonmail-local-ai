@@ -504,6 +504,39 @@ it stays within local-LLM context windows. The bounds differ by tool:
   indexer's front-preserved body cap drops. It is body-only: attachment
   text is never included.
 
+These character caps are one bound; the model window is the other
+(#285). Every intelligence prompt is counted whole: system prompt,
+security notice, provenance headers, the question, schema or
+conclusion, the coverage note, and (for the tools that can make one)
+room for the repair instruction. It must fit in
+`INFERENCE_CONTEXT_TOKENS` (default 32768) less `INFERENCE_MAX_TOKENS`
+of reply and 64 tokens of chat-template overhead. mcp-server has no
+tokenizer, so a prompt is counted at three characters per token, which
+over-counts English prose (about four per token) by a third. Text that
+tokenizes more densely (CJK scripts, long digit or base64 runs) can
+still run over; the provider then cuts the reply short or rejects the
+call, as it would without the count. Escaping delimiter tags in the
+mail lengthens it after the budget is set, so the budget leaves room
+for that as well.
+
+At the default window the character caps above bind first, so prompts
+are what they were before the window was counted. For a small local
+model, set `INFERENCE_CONTEXT_TOKENS` to its window (for example 8192
+or 4096): the evidence budget shrinks to what fits, and the coverage
+note reports what was left out or cut. `summarize_thread` keeps at
+least a 2:1 share for its body and recent-message sections and gives
+room one does not need to the other. `extract_from_emails` adds a
+counts-only evidence note when the window cut passages from any
+thread, so a `null` answer from such a thread is not read as a genuine
+absence. Thread subjects and participants are sender-controlled and can
+be long, so when the thread blocks of `ask_mailbox`, `brief_issue` or
+`check_conclusion` alone do not fit, lower-ranked threads are left out
+whole and the coverage note counts them. When the request itself (a
+very long question or schema, with the instructions and the top
+thread's headers) cannot fit, the tool returns an error naming the two
+settings before any model call. A window that leaves fewer than 1024
+prompt tokens after `INFERENCE_MAX_TOKENS` fails startup.
+
 ### Prompt-injection hardening
 
 Email is attacker-controlled input: any external sender can attempt to

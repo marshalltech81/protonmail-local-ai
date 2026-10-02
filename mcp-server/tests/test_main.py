@@ -215,6 +215,78 @@ class TestSessionIdleTimeout:
             self._load(monkeypatch, value)
 
 
+class TestContextTokens:
+    """#285: ``INFERENCE_CONTEXT_TOKENS`` is the model window prompts are
+    fitted into; it defaults to 32,768, and a window that leaves too
+    little room after ``INFERENCE_MAX_TOKENS`` fails startup."""
+
+    class _FakeDatabase:
+        def __init__(self, _path):
+            pass
+
+        def get_embedding_dim(self):
+            return 4
+
+    def _load(self, monkeypatch, value):
+        import importlib
+
+        import src.main as main_mod
+
+        if value is None:
+            monkeypatch.delenv("INFERENCE_CONTEXT_TOKENS", raising=False)
+        else:
+            monkeypatch.setenv("INFERENCE_CONTEXT_TOKENS", value)
+        try:
+            return importlib.reload(main_mod).INFERENCE_CONTEXT_TOKENS
+        finally:
+            monkeypatch.delenv("INFERENCE_CONTEXT_TOKENS", raising=False)
+            importlib.reload(main_mod)
+
+    def test_defaults_to_32k(self, monkeypatch):
+        assert self._load(monkeypatch, None) == 32768
+
+    def test_operator_value_is_used(self, monkeypatch):
+        assert self._load(monkeypatch, "8192") == 8192
+
+    @pytest.mark.parametrize("value", ["0", "-1", "big"])
+    def test_invalid_value_fails_startup(self, monkeypatch, value):
+        with pytest.raises(ValueError, match="INFERENCE_CONTEXT_TOKENS"):
+            self._load(monkeypatch, value)
+
+    def _run_main(self, monkeypatch, *, context, max_tokens, mode="anthropic"):
+        import src.main as main_mod
+
+        for name, value in {
+            "EMBED_BASE_URL": "http://host.docker.internal:8001/v1",
+            "EMBED_MODEL": "synthetic",
+            "EMBED_API_KEY": _PLACEHOLDER_KEY,
+            "INFERENCE_MODE": mode,
+            "INFERENCE_BASE_URL": "http://host.docker.internal:8002",
+            "INFERENCE_MODEL": "synthetic",
+            "INFERENCE_API_KEY": _PLACEHOLDER_KEY,
+            "INFERENCE_CONTEXT_TOKENS": context,
+            "INFERENCE_MAX_TOKENS": max_tokens,
+            "RERANK_MODE": "none",
+        }.items():
+            monkeypatch.setattr(main_mod, name, value)
+        monkeypatch.setattr(main_mod, "Database", self._FakeDatabase)
+        ran = []
+        monkeypatch.setattr(main_mod, "_run_server", lambda *args: ran.append(args))
+        main_mod.main()
+        return ran
+
+    def test_window_without_room_for_a_prompt_fails_startup(self, monkeypatch):
+        with pytest.raises(ValueError, match="INFERENCE_CONTEXT_TOKENS"):
+            self._run_main(monkeypatch, context=4096, max_tokens=4000)
+
+    def test_small_window_starts(self, monkeypatch):
+        assert self._run_main(monkeypatch, context=4096, max_tokens=1024)
+
+    def test_window_is_not_checked_without_inference(self, monkeypatch, caplog):
+        caplog.set_level(logging.INFO)
+        assert self._run_main(monkeypatch, context=1, max_tokens=1024, mode="none")
+
+
 class TestFloatEnv:
     """``_float_env`` rejects non-finite values.
 
