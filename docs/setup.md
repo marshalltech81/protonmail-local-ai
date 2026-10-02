@@ -355,7 +355,8 @@ leave empty for the Cohere SDK default.
 
 The MCP server reads the rerank settings once at startup, so a change
 takes effect only when the `mcp-server` container is recreated. After
-editing `.env`, run `make up`: Compose recreates every container whose
+editing `.env`, run `make up` (`make up-macos-bridge` in
+[macOS Bridge mode](#macos-bridge-mode-optional)): Compose recreates every container whose
 configuration changed. `docker compose restart` is not enough, because
 a restarted container keeps the environment it was created with. If
 the stack was started with an overlay (such as
@@ -715,7 +716,7 @@ reconnect it (`/mcp` in Claude Code); for Claude Desktop, rewrite
 
 **Upgrading from a release without MCP authentication.** Run
 `make init-secrets` (it creates only the missing token file), then
-`make up`, then add the header to each client as above. Until a client
+`make up` (`make up-macos-bridge` in macOS Bridge mode), then add the header to each client as above. Until a client
 sends the token, its requests get `401`.
 
 **Upgrading from a release that served `/sse` (breaking change).** The
