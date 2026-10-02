@@ -1142,6 +1142,34 @@ class TestStatsAndFolders:
         stats = empty_db.get_mailbox_status()
         assert stats["queue"] == {"pending": 0, "retrying": 0, "dead": 0}
         assert stats["ingestion"] is None
+        assert stats["conflicting_message_ids"] == 0
+        assert stats["extra_claimant_files"] == 0
+
+    def test_get_mailbox_status_without_conflicts(self, seeded_db: Database):
+        stats = seeded_db.get_mailbox_status()
+        assert stats["conflicting_message_ids"] == 0
+        assert stats["extra_claimant_files"] == 0
+
+    def test_get_mailbox_status_counts_message_id_conflicts(self, conflicts_db: Database):
+        """#455: two Message-IDs have several claimants (2 and 3), so
+        three files beyond the first claimant of each."""
+        stats = conflicts_db.get_mailbox_status()
+        assert stats["conflicting_message_ids"] == 2
+        assert stats["extra_claimant_files"] == 3
+        assert stats["total_messages"] == 6
+
+    def test_message_id_conflict_count_reads_only_the_message_id_index(self, empty_db: Database):
+        """The count must stay cheap on a large mailbox: SQLite walks the
+        ``message_id`` index alone (a covering scan) rather than the
+        ``messages`` table rows."""
+        from src.lib.sqlite import MESSAGE_ID_CONFLICTS_SQL
+
+        with closing(empty_db._connect()) as conn:
+            plan = [
+                row[3] for row in conn.execute(f"EXPLAIN QUERY PLAN {MESSAGE_ID_CONFLICTS_SQL}")
+            ]
+        message_scans = [step for step in plan if "messages" in step]
+        assert message_scans == ["SCAN messages USING COVERING INDEX idx_messages_message"]
 
     def test_list_folders_ranked_by_thread_count(self, seeded_db: Database):
         folders = seeded_db.list_folders()

@@ -947,6 +947,34 @@ def empty_db(tmp_path: Path):
 
 
 @pytest.fixture
+def conflicts_db(tmp_path: Path):
+    """Message-ID conflicts (#455): one Message-ID claimed by two files,
+    another by three, and one claimed by a single file."""
+    db_path = tmp_path / "mcp-conflicts.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.enable_load_extension(True)
+    sqlite_vec.load(conn)
+    conn.enable_load_extension(False)
+    _build_schema(conn)
+    for message_id, variants in (
+        ("two@example.com", ("", "b")),
+        ("three@example.com", ("", "b", "c")),
+        ("single@example.com", ("",)),
+    ):
+        for variant in variants:
+            _insert_message(
+                conn,
+                message_id=message_id,
+                variant=variant,
+                thread_id=f"t-{message_id}",
+                sent_at="2024-01-10T09:00:00+00:00",
+            )
+    conn.commit()
+    conn.close()
+    yield Database(str(db_path))
+
+
+@pytest.fixture
 def attachments_db(tmp_path: Path):
     """Populated read-only DB exercising the attachment search lanes.
 

@@ -70,6 +70,30 @@ class TestGetMailboxStatus:
         assert "Queue:          1 pending, 1 retrying, 1 dead" in text
         assert "1 message failed permanently and is incompletely indexed" in text
 
+    def test_no_message_id_conflicts(self, fake_server, seeded_db):
+        out = asyncio.run(_handler(fake_server, seeded_db)())
+        text = _text(out)
+        assert out.structured_content["conflicting_message_ids"] == 0
+        assert out.structured_content["extra_claimant_files"] == 0
+        assert "Message-ID conflicts: none" in text
+        assert "get_message" not in text
+
+    def test_message_id_conflicts_reported_as_counts_only(self, fake_server, conflicts_db):
+        """#455: status reports how many Message-IDs several files claim,
+        never the IDs, and points at get_message for the detail."""
+        out = asyncio.run(_handler(fake_server, conflicts_db)())
+        text = _text(out)
+        assert out.structured_content["conflicting_message_ids"] == 2
+        assert out.structured_content["extra_claimant_files"] == 3
+        assert (
+            "Message-ID conflicts: 2 Message-IDs are claimed by more than one file "
+            "(3 extra files)" in text
+        )
+        assert "get_message" in text
+        for message_id in ("two@example.com", "three@example.com"):
+            assert message_id not in text
+            assert message_id not in str(out.structured_content)
+
     def test_empty_index_before_any_sync(self, fake_server, empty_db):
         out = asyncio.run(_handler(fake_server, empty_db)())
         text = _text(out)

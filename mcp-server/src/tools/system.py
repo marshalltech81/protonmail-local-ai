@@ -124,6 +124,8 @@ def _mailbox_status(db) -> MailboxStatusOutput:
         total_messages=stats["total_messages"],
         oldest_message=stats["oldest_message"],
         newest_message=stats["newest_message"],
+        conflicting_message_ids=stats["conflicting_message_ids"],
+        extra_claimant_files=stats["extra_claimant_files"],
         checked_at=now,
     )
 
@@ -155,9 +157,24 @@ def _render(out: MailboxStatusOutput) -> str:
         f"Total messages: {out.total_messages:,}",
         f"Oldest message: {out.oldest_message or 'unknown'}",
         f"Newest message: {out.newest_message or 'unknown'}",
-        f"Checked at:     {out.checked_at.isoformat()}",
     ]
+    lines += _conflict_lines(out)
+    lines.append(f"Checked at:     {out.checked_at.isoformat()}")
     return "\n".join(lines)
+
+
+def _conflict_lines(out: MailboxStatusOutput) -> list[str]:
+    """Message-ID conflicts as counts and a fixed hint, never the IDs (#455)."""
+    ids, extra = out.conflicting_message_ids, out.extra_claimant_files
+    if not ids:
+        return ["Message-ID conflicts: none"]
+    return [
+        f"Message-ID conflicts: {ids:,} Message-ID{'' if ids == 1 else 's'} "
+        f"{'is' if ids == 1 else 'are'} claimed by more than one file "
+        f"({extra:,} extra file{'' if extra == 1 else 's'})",
+        "  get_message on such a Message-ID lists its claimant IDs; "
+        "call get_message with a claimant ID to read one file.",
+    ]
 
 
 def register_system_tools(server, db):
@@ -178,7 +195,8 @@ def register_system_tools(server, db):
         Returns:
             current and the reasons it is false, last sync time, indexer
             liveness, queue counts (pending, retrying, dead), total threads
-            and messages, and the date range.
+            and messages, the date range, and how many Message-IDs more
+            than one file claims (counts only).
         """
         log.info("tool=get_mailbox_status")
         try:
