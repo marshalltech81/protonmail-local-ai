@@ -914,9 +914,13 @@ startup rather than picking a mode.
    pass.
 
 **Reaped-source records.** A citation or search hit from an earlier
-answer can name a message or thread the reaper has since removed. So
-that the chain is never silently broken (PLAN Phase 4 item 4), the reap
-transaction writes one `reaped_messages` row per removed message:
+answer can name a message or thread the reaper has since removed. Such
+a source reads as removed for 30 days and then as not found, and the
+record never keeps its evidence text (PLAN Resolved decisions 14;
+extracted attachment text the reap leaves in `attachment_extractions`
+is the separate #562, see *Cascade on message removal*). For that
+window the reap transaction writes one content-free `reaped_messages`
+row per removed message:
 claimant ID, Message-ID, thread ID and reap time, and nothing else (no
 subject, body, participants, attachment names or chunk IDs, which hash
 the passage text). `get_message`, `get_thread` and thread-scoped
