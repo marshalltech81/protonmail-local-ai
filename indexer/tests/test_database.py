@@ -2896,6 +2896,22 @@ class TestFtsSubjectScanBound:
             return real(s)
 
         monkeypatch.setattr(threader_mod, "_normalize_subject", counting)
+
+        # ``fts_subject_text`` caps its own input too, so the counts above
+        # would still pass if the upsert dropped the SQL ``substr``/``LIMIT``
+        # and fetched every full subject (#478). Record the rows the upsert
+        # actually fetched from the database before that cap applies.
+        from src import database as database_mod
+
+        fetched: list[list[str]] = []
+        real_fts_subject_text = database_mod.fts_subject_text
+
+        def recording(thread_subject, subjects):
+            subjects = list(subjects)
+            fetched.append(subjects)
+            return real_fts_subject_text(thread_subject, subjects)
+
+        monkeypatch.setattr(database_mod, "fts_subject_text", recording)
         start = time.perf_counter()
         per_upsert: list[int] = []
         messages = []
@@ -2917,6 +2933,14 @@ class TestFtsSubjectScanBound:
 
         assert max(per_upsert) <= 1 + threader_mod.FTS_SUBJECT_SCAN_ROWS
         assert max(calls) <= threader_mod.FTS_SUBJECT_SCAN_CHARS
+        # One fetch per upsert, each capped in SQL: the last upserts see a
+        # thread longer than the row cap, every subject longer than the
+        # character cap.
+        assert len(fetched) == 300
+        assert max(len(rows) for rows in fetched) == threader_mod.FTS_SUBJECT_SCAN_ROWS
+        assert max(len(s) for rows in fetched for s in rows) == (
+            threader_mod.FTS_SUBJECT_SCAN_CHARS
+        )
         # The work bound above is the real check. The wall-clock bound only
         # catches a gross regression: ~8 s locally, but one CI runner took
         # 69 s on unchanged code (#474), so it is set well clear of that.
