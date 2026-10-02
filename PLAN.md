@@ -430,7 +430,7 @@ decision (Open decisions).
 | 4.1 Entities | Done | #459, #527 (orphan pruning, #464) | — |
 | 4.2 Source authority | Done | #459, #474 (Spam guard), #523 and #542 (rules file kept private and validated) | verdict-header gating after go-live (#463) |
 | 4.3 Temporal retrieval | Partly done | #561 (`sent_at` defined and used consistently) | `occurred_at` (owner decision); #574, #575 |
-| 4.4 Retention | Mostly done | #451 (mirror default), #475 (Trash hidden from default search), #564 and #583 (reaped sources reported, 30-day records) | user-controlled retention; #562 |
+| 4.4 Retention | Mostly done | #451 (mirror default), #475 (Trash hidden from default search), #564 and #583 (reaped sources reported for 30 days) | user-controlled retention; the reaped-citation invariant (Open decisions 22); #562 |
 | 5.1 Hardened `brief_issue` | Not started | — | needs Phase 3 usage on real mail |
 | 5.2 Support/contradict | Built, experimental | #467 (`check_conclusion`), #493 (evidence-slot refill), #558 (quote verification, also for `brief_issue`) | semantic support (#284) |
 | 5.3 Position as of date | Not started | — | — |
@@ -574,11 +574,15 @@ the first deployment needs a numbered migration like any other.
    Provenance must define behavior when a citation's source is reaped
    (evidence row retained, source marked unavailable, chain never
    silently broken). **Status: mostly done** (#451 mirror default,
-   #475 Trash hidden from default search). Reaped sources are done
-   (#564, #583): looking up a reaped message or thread reports
-   "reaped from the index" rather than "not found", and `get_thread`
-   lists a surviving thread's reaped messages, from content-free
-   `reaped_messages` records kept 30 days. Remaining: user-controlled
+   #475 Trash hidden from default search). Reaped sources are
+   reported (#564, #583): looking up a reaped message or thread
+   reports "reaped from the index" rather than "not found", and
+   `get_thread` lists a surviving thread's reaped messages, from
+   content-free `reaped_messages` records kept 30 days. This does not
+   yet meet the invariant above: no evidence row is retained (the
+   chunks are deleted and the record holds no chunk ID or text), and
+   after 30 days or an index rebuild a reaped ID reads as "not found"
+   again. Remaining: that gap (Open decisions 22), user-controlled
    retention, and #562 (extracted attachment text outlives a reap).
 
 ### Phase 5 — Knowledge reasoning
@@ -698,7 +702,8 @@ Operator steps before go-live, in addition to the checklist:
    rejects a missing, empty or non-600 token file. Run it before
    writing the client configuration in step 3, which reads the token.
 3. **Update the MCP client:** the URL is now
-   `http://localhost:3000/mcp` (Streamable HTTP only, #563; remove any
+   `http://localhost:${MCP_PORT}/mcp` (default port 3000; Streamable
+   HTTP only, #563; remove any
    `MCP_TRANSPORT=sse` or `dual` from `.env`) and every request needs
    the bearer header. Claude Code uses `scripts/mcp-auth-headers.sh` as
    its `headersHelper`; Claude Desktop uses the pinned `mcp-remote`
@@ -711,9 +716,10 @@ Operator steps before go-live, in addition to the checklist:
    test against the real app is still to do (Open decisions 21). #497
    closed when #571 merged.
 
-What still needs the owner: Open decisions 15–21 (`occurred_at`, the
-date-range evidence behaviour, #574/#575, #562, #580, the #497 live
-test and the `mcp-remote` pin review).
+What still needs the owner: Open decisions 15–22 (`occurred_at`, the
+date-range evidence behaviour, #574/#575, #562, #580, the
+`mcp-remote` pin review, the #497 live test and the reaped-citation
+invariant).
 
 Waiting on real data: #487 (evidence and output budgets), #488
 (container resource budgets) and #282 (the mbsync stall deadline, set
@@ -1480,6 +1486,17 @@ Raised by the 2026-10-02 afternoon work (none blocks go-live):
     app (`docs/setup.md`, "macOS Bridge mode"), including the
     documented migration of an existing Maildir if switching from the
     container (credentials, certificate pin, UIDVALIDITY).
+22. **Reaped-citation invariant (Phase 4 item 4).** The plan says a
+    reaped citation keeps its evidence row and the chain is never
+    silently broken. #564 keeps only a content-free record (claimant
+    ID, Message-ID, thread ID, reap time) for 30 days; the chunks are
+    deleted, and after 30 days or a rebuild a reaped ID reads as "not
+    found". Options: (a) accept the 30-day, content-free record and
+    restate the invariant, since keeping evidence text would keep
+    upstream-deleted mail in the index; (b) keep the records longer or
+    for good (identifiers only); (c) keep evidence text, which
+    conflicts with mirror retention. Recommendation: (a), possibly with
+    (b)'s longer window.
 
 ## Recently Completed
 
@@ -1508,7 +1525,9 @@ Bridge and mbsync: the optional macOS Bridge mode (#497, PR #571);
 folder names and Bridge text redacted from all mbsync output, which
 also made the filter stream under mawk (#570, PR #586); the TLS check
 keeps its bind mounts at 700 (#585, PR #587). CI: Semgrep scans every
-Compose file and shell script with repo-owned rules (#556, PR #566).
+`docker-compose*.yml` file and shell script with repo-owned rules
+(#556, PR #566; default `compose.yaml`/`compose.yml` names are not
+covered, #581).
 Deferred findings filed: #562, #574, #575, #577–#582, #584, #588, #589.
 
 ### 2026-10-02 — Overnight fixes; first-deployment blocker closed (#515–#548)
