@@ -20,6 +20,7 @@ from ..lib.sqlite import (
 )
 from ..lib.timings import count, rerank_mode, stage, timed_tool
 from ..lib.validation import clamp_int
+from .intelligence import _MAX_ASK_THREADS
 from .outputs import (
     HEADER_CHAR_LIMIT,
     MAX_LISTED,
@@ -49,6 +50,14 @@ def _clip_optional(value: str | None) -> str | None:
 # payload to ship back through the protocol. 50 is well above any
 # reasonable interactive use of the search tool.
 _MAX_SEARCH_LIMIT = 50
+
+# Hard ceiling on ``get_evidence``'s ``limit`` (evidence chunks). It is
+# the audit view of ``ask_mailbox``, whose prompt can hold up to
+# ``_MAX_ASK_THREADS`` threads x ``PROMPT_EVIDENCE_CHUNKS_PER_THREAD``
+# chunks, so the ceiling is derived from those constants and never falls
+# below what an answer drew on (#449). At 1,600 characters a chunk the
+# largest response stays near 100k characters of passage text.
+_MAX_EVIDENCE_LIMIT = max(_MAX_SEARCH_LIMIT, _MAX_ASK_THREADS * PROMPT_EVIDENCE_CHUNKS_PER_THREAD)
 
 _VALID_SEARCH_MODES = frozenset({"hybrid", "semantic", "keyword"})
 
@@ -427,7 +436,8 @@ def register_search_tools(
             date_to: ISO 8601 date upper bound, e.g. "2024-12-31".
             has_attachments: True to restrict to threads with attachments.
             limit: Maximum evidence chunks to return (default 12,
-                   clamped to [1, 50]).
+                   clamped to [1, 60] — ask_mailbox's largest
+                   evidence set, so a full answer can be audited).
             include_scores: When true, annotate each thread with the
                             retrieval lanes that matched (thread_fts /
                             chunk_fts / attachment_fts / thread_vec /
@@ -483,10 +493,10 @@ def register_search_tools(
                     "them to read this thread's evidence, or drop thread_id to "
                     "search the mailbox with them."
                 )
-        # Same clamp ceiling as search_emails — ``limit`` here counts
-        # evidence chunks, and an LLM-inflated value would drive a large
-        # per-thread chunk fetch and an oversized response payload.
-        limit = clamp_int(limit, default=12, minimum=1, maximum=_MAX_SEARCH_LIMIT)
+        # ``limit`` counts evidence chunks; the ceiling covers ask_mailbox's
+        # largest evidence set, and an LLM-inflated value would otherwise
+        # drive a large per-thread chunk fetch and an oversized payload.
+        limit = clamp_int(limit, default=12, minimum=1, maximum=_MAX_EVIDENCE_LIMIT)
         # Reject a bad date range before any provider or retrieval work.
         # The thread-scoped path takes no dates (blank ones are ignored
         # above), so only the mailbox-wide path checks them.

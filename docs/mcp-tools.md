@@ -256,12 +256,15 @@ chunks (extracted PDF / OCR / document text) are included — unlike
 | `date_from` | string | none | ISO 8601 date lower bound |
 | `date_to` | string | none | ISO 8601 date upper bound |
 | `has_attachments` | bool | none | Restrict to threads with attachments |
-| `limit` | int | `12` | Max evidence chunks to return; clamped to `[1, 50]` |
+| `limit` | int | `12` | Max evidence chunks to return; clamped to `[1, 60]`, the most `ask_mailbox` can put in one prompt (10 threads × 6 chunks), so a whole answer can be audited in one call |
 | `include_scores` | bool | `false` | Annotate each thread with the retrieval lanes that matched (`thread_fts` / `chunk_fts` / `attachment_fts` / `thread_vec` / `chunk_vec` / `rerank`) and each chunk with its vector distance |
 
 The mailbox-wide path runs the same hybrid retrieval as `ask_mailbox`,
 with the same cap of six chunks per thread, and flattens the
-per-thread evidence into a flat `limit`-chunk budget.
+per-thread evidence into a flat `limit`-chunk budget. At `limit=60`,
+with the same question and filters, it covers every passage an
+`ask_mailbox(max_threads=10)` answer drew on, at up to 1,600
+characters each.
 The `thread_id`-scoped path returns that thread's chunks ranked
 against the query; it bypasses RRF fusion, so `include_scores` shows
 per-chunk vector distance but no lane provenance.
@@ -681,7 +684,7 @@ model's words), a `Quote check:` count when the answer quotes, and
 the `Sources searched:` list. To audit a
 citation, call `get_evidence` with the same question and the
 citation's `thread_id`: the cited `chunk_id` is among the returned
-chunks (pass `limit` up to 50 for a long thread). A `thread` citation
+chunks (pass `limit` up to 60 for a long thread). A `thread` citation
 has no chunk; read it with `get_thread`.
 
 The check is about labels, statement coverage and quoted words, not
