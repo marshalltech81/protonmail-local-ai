@@ -623,46 +623,18 @@ How the first batch was worked, and what to repeat:
 
 ### Carried over from the first batch
 
-- **#217 Message-ID conflicts** — split out of #246 after two review
-  rounds showed it needs a design. The earlier attempt is on the pushed
-  branch `fix/indexer-message-id-conflicts` (head `d479363`, based on a
-  pre-#246 `main`, so rebase before reuse); PR #246's description lists
-  every finding it must address:
-  - fail closed when the recorded original is unreadable
-  - compare full attachment metadata, not only content hashes
-  - replace rather than merge on takeover: remove the old message and
-    rebuild its thread first
-  - re-check a conflict only when the original disappears, not on every
-    walk
-  - verify source identity before a known Message-ID keeps its thread
-    (the #246 round-4 P3)
-  - owner decision pending: which claimant wins; the first-arrival
-    spoofing risk (the #246 round-1 P3)
-
-  Decided 2026-09-30: **keep both claimants** — the thread stays keyed
-  by Message-ID, each message row is keyed by Message-ID plus content
-  hash, and a conflict is exposed by `get_message` and status rather
-  than resolved by an arrival-order rule (either order is spoofable).
-  That needs a **stable claimant identifier in the MCP contract**
-  before the schema: today the chain is `get_thread` →
-  `messages[].message_id` → `get_message`, and `get_message` takes a
-  bare Message-ID, so two claimants would be indistinguishable to a
-  caller. Specify the identifier (Message-ID plus a short content-hash
-  discriminator, or a derived opaque ID), propagate it through thread,
-  message, search and evidence results and the retrieval parameters,
-  and keep the bare Message-ID working for the unambiguous case. The
-  identifier replaces the bare Message-ID in every per-message key,
-  not only `messages` and the MCP contract: the chunker's
-  `message_pk` (so the deterministic `sha256(message_pk || index ||
-  text)` shape is kept but two claimants' chunks cannot collide),
-  attachment occurrence and chunk IDs, and the deletion paths that
-  drop chunks and attachments by Message-ID — otherwise reprocessing
-  or reaping one claimant overwrites or deletes the other's evidence.
-  #260's serialized-form attachment hash gives the "compare full
-  attachment metadata" finding a deterministic identity. A schema
-  change: decided 2026-10-01 to fold it into the v0 schema now, since
-  no index is deployed (identifier: Message-ID plus a short
-  content-hash suffix).
+- ~~**#217 Message-ID conflicts**~~ — **resolved.** Decided
+  2026-09-30 to keep every claimant rather than pick a winner by
+  arrival order (either order is spoofable). Built in #453: every
+  per-message row, the chunker's `message_pk` and attachment IDs are
+  keyed by a claimant ID (Message-ID plus `#` and eight hex digits of
+  the file's SHA-256), threads stay keyed by Message-ID, and
+  `get_message` accepts a claimant ID. Conflicts are exposed, not
+  resolved: #536 and #544 bound `get_message`'s claimant listing, and
+  #539 reports conflict counts in `get_mailbox_status`. The earlier
+  arrival-order attempt (branch `fix/indexer-message-id-conflicts`)
+  was superseded and deleted 2026-10-02; its two unrelated commits
+  had already landed in #246. Open follow-up: #454 (the 32-bit suffix).
 - **#208 chunk overlap exceeds `max_tokens`** — harmless at default
   settings; it changes chunk IDs, so it lands in the Phase 2 reindex
   bundle (see Phase 2), not on its own.
