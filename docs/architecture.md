@@ -384,8 +384,11 @@ headers rather than the truncated accumulated body. `ask_mailbox`
 labels each passage (`E1`, `E2` ...) with its message's claimant ID,
 sender and sent date, and checks the labels its answer cites, that
 each statement cites a passage or is marked unsupported or uncertain,
-and that its quotes appear in the indexed text of the passages cited
-(see `docs/mcp-tools.md`).
+and that its quotes appear in the indexed text of the passages cited.
+`summarize_thread` applies the same check to its summary, and
+`extract_from_emails` checks the labels each record field cites and
+looks for its text values in the cited passages (see
+`docs/mcp-tools.md`).
 
 ### Chunk write idempotency
 

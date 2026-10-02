@@ -364,6 +364,21 @@ _SOURCE_COLUMNS = (
 # every clip applied to them later (``HEADER_CHAR_LIMIT``).
 _SENDER_FETCH_CHARS = 1000
 
+# The chunk's message's own first From entry as ``Name <address>`` (or
+# the bare address), for per-passage attribution in prompts (#284).
+# Name and address are cut to ``_SENDER_FETCH_CHARS`` here so a huge
+# display name is not copied onto every row. Selects ``message_sender``
+# for a query over ``message_chunks c``. Built from constants only.
+_CHUNK_SENDER_SQL = (
+    "(SELECT CASE WHEN p.name IS NOT NULL AND p.name != '' "  # nosec B608
+    f"  THEN substr(p.name, 1, {_SENDER_FETCH_CHARS}) || ' <' "
+    f"    || substr(p.address, 1, {_SENDER_FETCH_CHARS}) || '>' "
+    f"  ELSE substr(p.address, 1, {_SENDER_FETCH_CHARS}) END "
+    "  FROM message_participants p "
+    "  WHERE p.claimant_id = c.claimant_id AND p.role = 'from' "
+    "  ORDER BY p.address LIMIT 1) AS message_sender"
+)
+
 
 def _row_to_source(r) -> SourceFile | None:
     """The ``_SOURCE_COLUMNS`` of ``r``; ``None`` when the row has none or
@@ -2397,17 +2412,7 @@ class Database:
                 "a.filename AS attachment_filename, "
                 "a.content_type AS attachment_mime, "
                 f"{_SOURCE_COLUMNS}, "
-                # The message's own first From entry, for per-passage
-                # attribution in prompts (#284).
-                # Name and address are cut to ``_SENDER_FETCH_CHARS`` here
-                # so a huge display name is not copied onto every row.
-                "(SELECT CASE WHEN p.name IS NOT NULL AND p.name != '' "
-                f"  THEN substr(p.name, 1, {_SENDER_FETCH_CHARS}) || ' <' "
-                f"    || substr(p.address, 1, {_SENDER_FETCH_CHARS}) || '>' "
-                f"  ELSE substr(p.address, 1, {_SENDER_FETCH_CHARS}) END "
-                "  FROM message_participants p "
-                "  WHERE p.claimant_id = c.claimant_id AND p.role = 'from' "
-                "  ORDER BY p.address LIMIT 1) AS message_sender, "
+                f"{_CHUNK_SENDER_SQL}, "
                 "vec_distance_l2(v.embedding, ?) AS score "
                 "FROM message_chunks c "
                 "JOIN message_chunks_vec v ON c.chunk_id = v.chunk_id "
@@ -2511,22 +2516,24 @@ class Database:
         if limit <= 0:
             return []
         try:
+            # The message's sender and its own date go with each chunk so
+            # summarize_thread can attribute the passage (#284). Composed
+            # from constants only; every value is a bound parameter.
             rows = self._fetchall(
-                """
-                SELECT c.chunk_id, COALESCE(m.message_id, c.claimant_id) AS message_id,
-                       c.claimant_id, c.thread_id, c.chunk_index,
-                       c.text, c.char_start, c.char_end, c.attachment_id,
-                       NULL AS attachment_filename,
-                       NULL AS attachment_mime,
-                       0.0 AS score
-                FROM message_chunks c
-                LEFT JOIN messages m ON m.claimant_id = c.claimant_id
-                WHERE c.thread_id = ?
-                  AND c.attachment_id IS NULL
-                ORDER BY c.message_date DESC,
-                         c.chunk_index DESC
-                LIMIT ?
-                """,
+                "SELECT c.chunk_id, COALESCE(m.message_id, c.claimant_id) AS message_id, "  # nosec B608
+                "c.claimant_id, c.thread_id, c.chunk_index, "
+                "c.text, c.char_start, c.char_end, c.attachment_id, "
+                "NULL AS attachment_filename, "
+                "NULL AS attachment_mime, "
+                "c.message_date, "
+                f"{_CHUNK_SENDER_SQL}, "
+                "0.0 AS score "
+                "FROM message_chunks c "
+                "LEFT JOIN messages m ON m.claimant_id = c.claimant_id "
+                "WHERE c.thread_id = ? "
+                "AND c.attachment_id IS NULL "
+                "ORDER BY c.message_date DESC, c.chunk_index DESC "
+                "LIMIT ?",
                 (thread_id, limit),
             )
         except sqlite3.Error as e:

@@ -160,7 +160,7 @@ class TestInferencePrompts:
     def test_summarize_thread(self, fake_server, huge_db):
         llm = FakeInferenceClient()
         out = asyncio.run(self._tools(fake_server, huge_db, llm)["summarize_thread"](thread_id="t"))
-        self._assert_bounded(llm, out)
+        self._assert_bounded(llm, out.content)
 
     def test_extract_from_emails(self, fake_server, huge_db):
         llm = FakeInferenceClient(response='{"total": 1}')
@@ -169,7 +169,7 @@ class TestInferencePrompts:
                 query="invoice", schema={"total": "number"}, limit=1
             )
         )
-        self._assert_bounded(llm, out)
+        self._assert_bounded(llm, out.content)
 
 
 def test_rerank_candidate_text_cuts_subject(huge_db):

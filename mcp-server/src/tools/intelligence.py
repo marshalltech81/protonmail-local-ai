@@ -8,7 +8,7 @@ import json
 import logging
 import re
 import unicodedata
-from collections.abc import Container, Iterable, Iterator, Mapping
+from collections.abc import Callable, Container, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from typing import Literal
 
@@ -34,7 +34,12 @@ from .outputs import (
     AskMailboxOutput,
     Citation,
     CitationProblem,
+    ExtractCitationProblem,
+    ExtractedField,
+    ExtractFromEmailsOutput,
     QuoteCheck,
+    SummarizeThreadOutput,
+    SummaryStyle,
     clip,
     thread_summary,
     tool_result,
@@ -484,9 +489,14 @@ def _untrusted_email_block(content: str, *, index: int | None = None) -> str:
 _CODE_FENCE_RE = re.compile(r"^```[A-Za-z]*+[^\S\n]*+\n(.*?)\n?```$", re.DOTALL)
 
 
+# The field each extracted record names its evidence in (#284): the
+# model writes it, the server checks it and writes back the valid labels.
+_EVIDENCE_FIELD = "_evidence"
+
 # Fields extract_from_emails writes on every record to say where it came
-# from. A schema may not request fields of these names (#329).
-_PROVENANCE_FIELDS = ("_source_thread", "_date")
+# from: its thread, date and evidence labels. A schema may not request
+# fields of these names (#329, #284).
+_PROVENANCE_FIELDS = ("_source_thread", "_date", _EVIDENCE_FIELD)
 
 
 def _is_json_schema(schema: dict) -> bool:
@@ -583,15 +593,6 @@ def _strip_code_fence(text: str) -> str:
     return match.group(1).strip() if match else stripped
 
 
-SUMMARIZE_SYSTEM = (
-    """You are an email assistant. You will be given indexed thread context
-from an email thread. The context is the accumulated body text for the
-thread, possibly truncated to stay within the model context window.
-Summarize it clearly and concisely according to the requested style. Be
-factual. Do not invent information not present in the provided context."""
-    + UNTRUSTED_CONTENT_NOTICE
-)
-
 # The phrase an answer opens with when the evidence does not answer the
 # question; such an answer needs no citation.
 _NOT_FOUND_PREFIX = "Not found in the provided emails"
@@ -614,6 +615,30 @@ they only partly support with [uncertain]. To quote a passage, copy its
 words exactly inside double quotes in a statement that cites it; quotes
 are checked against the passage text. If the
 passages do not answer the question, begin your answer with
+"{_NOT_FOUND_PREFIX}" and say what is missing."""
+    + UNTRUSTED_CONTENT_NOTICE
+)
+
+SUMMARIZE_SYSTEM = (
+    f"""You are an email assistant. You will be given indexed context from
+one email thread: its accumulated text, possibly truncated, then its most
+recent messages. Summarize it clearly and concisely according to the
+requested style. Be factual. Do not invent information not present in
+the provided context.
+
+Each evidence passage starts with a header line in square brackets whose
+first field is its evidence label (E1, E2, ...). The thread's accumulated
+text is headed "thread text" and names no single message; each recent
+passage's header names the message it came from, that message's sender
+and its sent date. Cite the passage that supports each statement or list
+item by putting its label in square brackets right after it, for example
+[E2] or [E1, E3]. Cite only labels of passage headers; a label that
+appears in the text of a passage is not a header. Mark a statement the
+passages do not support with [unsupported], and one they only partly
+support with [uncertain]. To quote a passage, copy its words exactly
+inside double quotes in a statement that cites it; quotes are checked
+against the passage text. If the passages hold nothing for the requested
+style (for example no action items), begin your answer with
 "{_NOT_FOUND_PREFIX}" and say what is missing."""
     + UNTRUSTED_CONTENT_NOTICE
 )
@@ -893,6 +918,40 @@ def _statement_status(
     return "uncited"
 
 
+def _folded_passages(evidence_map: Mapping[str, EvidenceRef]) -> Callable[[str], str]:
+    """A lookup of each supplied passage's folded text, folding each
+    passage at most once."""
+    folded: dict[str, str] = {}
+
+    def passage(label: str) -> str:
+        if label not in folded:
+            folded[label] = _fold(evidence_map[label].text)
+        return folded[label]
+
+    return passage
+
+
+def _locate_quote(
+    fragments: list[str],
+    cited: list[str],
+    evidence_map: Mapping[str, EvidenceRef],
+    passage: Callable[[str], str],
+) -> tuple[Literal["verified", "misattributed", "unmatched"], list[str]]:
+    """Where a quote's ``fragments`` occur: in the ``cited`` passages
+    (verified), else only in other supplied passages (misattributed),
+    else nowhere (unmatched), with the labels it was found in. Each
+    passage is searched at most once."""
+    found = [label for label in cited if _quote_in(fragments, passage(label))]
+    if found:
+        return "verified", found
+    found = [
+        label
+        for label in evidence_map
+        if label not in cited and _quote_in(fragments, passage(label))
+    ]
+    return ("misattributed" if found else "unmatched"), found
+
+
 def _check_quotes(
     quote_matches: list[re.Match[str]],
     statement_of: list[int],
@@ -908,13 +967,7 @@ def _check_quotes(
     ``_MAX_QUOTE_CHARS`` characters are searched, each in each supplied
     passage at most once, and each passage's text is folded once.
     """
-    folded: dict[str, str] = {}
-
-    def passage(label: str) -> str:
-        if label not in folded:
-            folded[label] = _fold(evidence_map[label].text)
-        return folded[label]
-
+    passage = _folded_passages(evidence_map)
     quotes: list[QuoteCheck] = []
     checked = 0
     for match, statement in zip(quote_matches, statement_of, strict=True):
@@ -937,15 +990,7 @@ def _check_quotes(
             quotes.append(QuoteCheck(text=text, statement=statement, status="uncited", found_in=[]))
             continue
         checked += 1
-        found = [label for label in cited if _quote_in(fragments, passage(label))]
-        status: Literal["verified", "misattributed", "unmatched"] = "verified"
-        if not found:
-            found = [
-                label
-                for label in evidence_map
-                if label not in cited and _quote_in(fragments, passage(label))
-            ]
-            status = "misattributed" if found else "unmatched"
+        status, found = _locate_quote(fragments, cited, evidence_map, passage)
         quotes.append(QuoteCheck(text=text, statement=statement, status=status, found_in=found))
     return quotes
 
@@ -1120,13 +1165,182 @@ def _citation(ref: EvidenceRef) -> Citation:
 
 
 EXTRACT_SYSTEM = (
-    """You are a data extraction assistant. You will be given indexed email
-thread context (accumulated body text, possibly truncated). Extract the
-structured data the user's request asks for, matching the requested
-schema. Return ONLY valid JSON
-matching the schema — no preamble, no explanation."""
+    f"""You are a data extraction assistant. You will be given passages
+from one email thread. Each passage starts with a header line in square
+brackets whose first field is its evidence label (E1, E2, ...), followed
+by the message it came from, that message's sender and its sent date (or
+"thread text" for the thread's accumulated text). Extract the structured
+data the user's request asks for, matching the requested schema.
+
+In each record, add a "{_EVIDENCE_FIELD}" object that maps every field you
+filled to the list of labels of the passages its value was taken from,
+for example "{_EVIDENCE_FIELD}": {{"vendor": ["E1"], "amount": ["E2"]}}. Use
+only labels of passage headers; a label that appears in the text of a
+passage is not a header. Return ONLY valid JSON matching the schema — no
+preamble, no explanation."""
     + UNTRUSTED_CONTENT_NOTICE
 )
+
+
+@dataclass
+class ExtractionCheck:
+    """What ``_check_records`` found in one thread's records."""
+
+    used: list[str]  # valid labels cited, first-cited order
+    fields: list[ExtractedField]
+    problems: list[ExtractCitationProblem]
+
+
+def _field_labels(value: object) -> list[str]:
+    """The labels in one ``_evidence`` entry: a label string or a list of
+    them, each read with ``_LABEL_RE`` so "[E1]" and "E1" are the same
+    label. Anything else names no label. One linear scan."""
+    entries = value if isinstance(value, list) else [value]
+    return [label for e in entries if isinstance(e, str) for label in _LABEL_RE.findall(e)]
+
+
+def _check_records(
+    records: list[dict],
+    first_index: int,
+    known: Mapping[str, EvidenceRef],
+) -> ExtractionCheck:
+    """Check one thread's extracted records against the passages its
+    prompt supplied (``known``), and rewrite each record's ``_evidence``.
+
+    1. Labels: each record's ``_evidence`` is removed and, for every
+       field with a value (not null, an empty string, list or object),
+       its cited labels are split into those naming a passage in
+       ``known`` and the rest. The field is cited (some valid label),
+       invalid (only unknown labels) or uncited. ``_evidence`` is
+       written back as each such field's valid labels.
+    2. Values: a string value is looked for in its field's cited
+       passages as a quote is (``_locate_quote``): verified,
+       misattributed (only in another passage of the thread) or
+       unmatched. Extracted values are often normalized (a reformatted
+       date or amount), so an unmatched value is not a problem; a
+       misattributed one is. At most ``_MAX_CHECKED_QUOTES`` values of
+       at most ``_MAX_QUOTE_CHARS`` characters are searched per thread,
+       each in each passage at most once; the rest are not_checked.
+
+    Records are numbered from ``first_index`` (their place in the tool's
+    output). Labels and words are checked, not meaning.
+    """
+    passage = _folded_passages(known)
+    # Ordered sets (dicts), so many distinct labels stay linear.
+    used: dict[str, None] = {}
+    fields: list[ExtractedField] = []
+    problems: list[ExtractCitationProblem] = []
+    checked = 0
+    for index, record in enumerate(records, first_index):
+        raw = record.pop(_EVIDENCE_FIELD, None)
+        cited_by = raw if isinstance(raw, dict) else {}
+        evidence: dict[str, list[str]] = {}
+        unknown_labels: dict[str, None] = {}
+        uncited: list[str] = []
+        misattributed: list[str] = []
+        misattributed_in: dict[str, None] = {}
+        for name, value in record.items():
+            # Provenance is the server's to write; a value the model put
+            # under its name is replaced, so it is not checked.
+            if name in _PROVENANCE_FIELDS or value is None or value in ("", [], {}):
+                continue
+            valid, unknown = _sort_labels(_field_labels(cited_by.get(name)), known)
+            evidence[name] = valid
+            used.update(dict.fromkeys(valid))
+            unknown_labels.update(dict.fromkeys(unknown))
+            status: Literal["cited", "uncited", "invalid"] = (
+                "cited" if valid else "invalid" if unknown else "uncited"
+            )
+            if status == "uncited":
+                uncited.append(name)
+            value_check: Literal[
+                "verified", "misattributed", "unmatched", "uncited", "not_checked"
+            ] = "not_checked"
+            found: list[str] = []
+            fragments = (
+                _quote_fragments(value)
+                if isinstance(value, str) and len(value) <= _MAX_QUOTE_CHARS
+                else []
+            )
+            if fragments and not valid:
+                value_check = "uncited"  # nothing cited to search
+            elif fragments and checked < _MAX_CHECKED_QUOTES:
+                checked += 1
+                value_check, found = _locate_quote(fragments, valid, known, passage)
+                if value_check == "misattributed":
+                    misattributed.append(name)
+                    misattributed_in.update(dict.fromkeys(found))
+            fields.append(
+                ExtractedField(
+                    record=index,
+                    field=name,
+                    labels=valid,
+                    status=status,
+                    value_check=value_check,
+                    found_in=found,
+                )
+            )
+        record[_EVIDENCE_FIELD] = evidence
+        if unknown_labels:
+            problems.append(
+                ExtractCitationProblem(
+                    record=index, kind="unknown_labels", labels=list(unknown_labels), fields=[]
+                )
+            )
+        if uncited:
+            problems.append(
+                ExtractCitationProblem(
+                    record=index, kind="uncited_fields", labels=[], fields=uncited
+                )
+            )
+        if misattributed:
+            problems.append(
+                ExtractCitationProblem(
+                    record=index,
+                    kind="misattributed_values",
+                    labels=list(misattributed_in),
+                    fields=misattributed,
+                )
+            )
+    return ExtractionCheck(list(used), fields, problems)
+
+
+def _extraction_lines(
+    fields: list[ExtractedField], problems: list[ExtractCitationProblem]
+) -> list[str]:
+    """The prose report of the extraction check: fixed text and counts."""
+
+    def total(kind: str) -> tuple[int, int]:
+        hits = [p for p in problems if p.kind == kind]
+        return len(hits), sum(len(p.fields) or len(p.labels) for p in hits)
+
+    lines: list[str] = []
+    records, n = total("unknown_labels")
+    if records:
+        lines.append(
+            f"Citation check: {records} record(s) cite {n} label(s) that name no passage "
+            "supplied for their thread."
+        )
+    records, n = total("uncited_fields")
+    if records:
+        lines.append(
+            f"Citation check: {n} field value(s) in {records} record(s) cite no supplied passage."
+        )
+    records, n = total("misattributed_values")
+    if records:
+        lines.append(
+            f"Citation check: {n} field value(s) in {records} record(s) appear only in a "
+            "passage their field does not cite."
+        )
+    searched = [f for f in fields if f.value_check in ("verified", "misattributed", "unmatched")]
+    if searched:
+        verified = sum(f.value_check == "verified" for f in searched)
+        lines.append(
+            f"Value check: {verified} of {len(searched)} text value(s) appear verbatim in a "
+            "cited passage (extracted, whitespace-normalized text, not the raw message; a "
+            "normalized value such as a reformatted date does not)."
+        )
+    return lines
 
 
 @dataclass
@@ -1294,6 +1508,7 @@ def _build_evidence(
     budget: int,
     *,
     evidence_map: dict[str, EvidenceRef] | None = None,
+    first_label: int = 1,
 ) -> tuple[list[str], EvidenceCoverage]:
     """Render each thread's evidence so all of it fits in ``budget`` chars.
 
@@ -1322,7 +1537,9 @@ def _build_evidence(
     the header cost is known up front. Labels sit in labelled headers
     (``_chunk_header``); each passage rendered, whole or cut, is added
     to ``evidence_map``, and one left out is not, so its number goes
-    unused.
+    unused. ``first_label`` is the first number: extract_from_emails
+    starts each thread's prompt after the last label of the one before,
+    so a label names one passage across the whole call.
 
     Returns one rendered string per thread, in input order.
     """
@@ -1356,7 +1573,7 @@ def _build_evidence(
 
     # Labels by thread rank, then passage order; None without a map.
     labels_by_thread: list[list[str | None]] = []
-    numbered = 0
+    numbered = first_label - 1
     for pieces in pieces_by_thread:
         labels_by_thread.append(
             [f"E{numbered + k}" if cite else None for k in range(1, len(pieces) + 1)]
@@ -1598,7 +1815,11 @@ def _sources_searched(results: list[ThreadResult]) -> str:
 
 
 def _summarize_context(
-    thread: ThreadResult, recent_chunks: list[ChunkResult], budget: int = _SUMMARIZE_CONTEXT_CHARS
+    thread: ThreadResult,
+    recent_chunks: list[ChunkResult],
+    budget: int = _SUMMARIZE_CONTEXT_CHARS,
+    *,
+    evidence_map: dict[str, EvidenceRef] | None = None,
 ) -> str:
     """Build ``summarize_thread``'s prompt body: accumulated ``body_text``
     *plus* a recent-message tail.
@@ -1616,21 +1837,48 @@ def _summarize_context(
     a few wasted tokens, but context is never silently dropped. The
     recent chunks are BODY-only (``get_recent_chunks_for_thread``
     excludes attachment rows), so each renders with the short
-    ``[chunk N chars X-Y]`` header.
+    ``[chunk N chars X-Y]`` header, or a labelled one (below).
 
     The result is at most ``budget`` characters. Below
     ``_SUMMARIZE_CONTEXT_CHARS`` (a small model window, #285) each
     section is guaranteed its 2:1 share, so the start of the thread and
     its newest reply are both still shown, and room one section does not
     need goes to the other. Neither ever exceeds its own cap above.
+
+    With ``evidence_map`` (the citation contract, #284) every passage
+    is labelled as in ``_build_evidence``: the thread text is ``E1``
+    under a ``[E1 | thread text]`` header, and the recent chunks are
+    ``E2`` ... in the order they render, numbered before the budget is
+    spent, each under a labelled header naming its own message, sender
+    and sent date. Headers count against the section caps. Each passage
+    shown is added to ``evidence_map``; one left out is not.
     """
+    cite = evidence_map is not None
+    by_message: dict[str, list[ChunkResult]] = {}
+    for chunk in recent_chunks:  # oldest-first, so dict order is too
+        by_message.setdefault(chunk.claimant_id, []).append(chunk)
+    for chunks in by_message.values():
+        chunks.sort(key=lambda c: c.chunk_index)
+    # Labels in render order: E1 is the thread text, then the chunks.
+    labels = {
+        chunk.chunk_id: f"E{n}"
+        for n, chunk in enumerate((c for cs in by_message.values() for c in cs), 2)
+    }
+
+    def chunk_header(chunk: ChunkResult, char_end: int) -> str:
+        # A labelled header for a cut chunk is never longer than the
+        # full-range one (``_chunk_header``), nor is an unlabelled one:
+        # a smaller end offset never has more digits.
+        if cite:
+            return _chunk_header(chunk, char_end, labels[chunk.chunk_id])
+        return f"[chunk {chunk.chunk_index} chars {chunk.char_start}-{char_end}]"
+
     full_body = thread.body_text or thread.snippet or ""
+    body_header = _piece_header(None, 0, "E1") if cite and full_body else ""
+    body_header_cost = len(body_header) + 1 if body_header else 0
     # The most the tail could use: every recent chunk with its header,
     # newline and join (the accounting of the loop below).
-    tail_demand = sum(
-        len(f"[chunk {c.chunk_index} chars {c.char_start}-{c.char_end}]") + len(c.text) + 3
-        for c in recent_chunks
-    )
+    tail_demand = sum(len(chunk_header(c, c.char_end)) + len(c.text) + 3 for c in recent_chunks)
     sections = budget if not recent_chunks else max(budget - len(_RECENT_SEPARATOR), 0)
     body_share = (
         sections
@@ -1639,27 +1887,32 @@ def _summarize_context(
     )
     body_budget = min(
         _SUMMARIZE_BODY_CHAR_BUDGET,
-        len(full_body),
+        len(full_body) + body_header_cost,
         max(body_share, sections - min(_SUMMARIZE_TAIL_CHAR_BUDGET, tail_demand)),
     )
+    # A body section too small for its header and some text is left out.
+    if body_budget <= body_header_cost:
+        body_budget = 0
     tail_budget = min(_SUMMARIZE_TAIL_CHAR_BUDGET, sections - body_budget)
-    body = full_body[:body_budget]
+    body_text = full_body[: max(body_budget - body_header_cost, 0)]
+    body = f"{body_header}\n{body_text}" if body_header and body_text else body_text
+    if evidence_map is not None and body_text:
+        evidence_map["E1"] = EvidenceRef(
+            "E1", thread.thread_id, None, None, _DELIMITER_TAG_RE.sub(r"&lt;\1", body_text)
+        )
     # The tail budget is spent on messages newest-first — the latest
     # reply is what the tail exists for, and one ordinary chunk can fill
     # the whole budget — and within a message from its first chunk, where
     # a reply usually states its answer. A chunk cut to fit keeps its
     # beginning, with a header stating the chars actually shown.
     # Everything renders oldest-first.
-    by_message: dict[str, list[ChunkResult]] = {}
-    for chunk in recent_chunks:  # oldest-first, so dict order is too
-        by_message.setdefault(chunk.claimant_id, []).append(chunk)
     kept_by_message: list[list[str]] = []
     used = 0
     exhausted = False
     for chunks in reversed(list(by_message.values())):
         kept: list[str] = []
-        for chunk in sorted(chunks, key=lambda c: c.chunk_index):
-            header = f"[chunk {chunk.chunk_index} chars {chunk.char_start}-{chunk.char_end}]"
+        for chunk in chunks:
+            header = chunk_header(chunk, chunk.char_end)
             # Each part costs its header's newline and, at most, the
             # "\n\n" joining it to the next: three characters.
             remaining = tail_budget - used - len(header) - 3
@@ -1668,14 +1921,20 @@ def _summarize_context(
                 break
             text = chunk.text
             if len(text) > remaining:
-                # A smaller end offset never has more digits, so the
-                # header cannot outgrow the budget computed above.
+                # The header for the kept range cannot outgrow the
+                # one budgeted (see ``chunk_header``).
                 text = text[:remaining]
-                header = (
-                    f"[chunk {chunk.chunk_index} chars "
-                    f"{chunk.char_start}-{chunk.char_start + len(text)}]"
-                )
+                header = chunk_header(chunk, chunk.char_start + len(text))
             kept.append(f"{header}\n{text}")
+            if evidence_map is not None:
+                label = labels[chunk.chunk_id]
+                evidence_map[label] = EvidenceRef(
+                    label,
+                    thread.thread_id,
+                    chunk,
+                    chunk.char_start + len(text),
+                    _DELIMITER_TAG_RE.sub(r"&lt;\1", text),
+                )
             used += len(header) + len(text) + 3
         if kept:
             kept_by_message.append(kept)
@@ -1745,6 +2004,40 @@ def register_intelligence_tools(
             if not e.partial.strip():
                 raise
             return e.partial + _TRUNCATED_NOTICE
+
+    async def complete_checked(
+        tool: str, system: str, user_prompt: str, evidence_map: Mapping[str, EvidenceRef]
+    ) -> tuple[str, AnswerCheck, bool]:
+        """Generate a prose answer, then check it against the evidence
+        actually supplied (``_check_answer``, #284). A failed check gets
+        one repair call with a fixed instruction, never more; whatever it
+        returns is checked again and returned with its problems. An
+        answer cut off at max_tokens is not repaired: a second try would
+        most likely be cut off too. Returns the answer, its check and
+        whether the repair call was made."""
+        answer = await llm_complete_prose(system, user_prompt)
+        check = _check_answer(answer, evidence_map)
+        repair_attempted = bool(check.problems) and not answer.endswith(_TRUNCATED_NOTICE)
+        if repair_attempted:
+            reason = _repair_reason(check.problems)
+            answer = await llm_complete_prose(
+                system, user_prompt + _REPAIR_INSTRUCTION.format(reason=reason)
+            )
+            check = _check_answer(answer, evidence_map)
+        # Counts only: labels, statements and quotes are provider output.
+        log.debug(
+            "%s citations: %d valid, %d unknown, %d statements (%d uncited), "
+            "%d quotes (%d verified), repair %s",
+            tool,
+            len(check.used),
+            len(check.unknown),
+            len(check.statements),
+            sum(s.status == "uncited" for s in check.statements),
+            len(check.quotes),
+            sum(q.status == "verified" for q in check.quotes),
+            "attempted" if repair_attempted else "not needed",
+        )
+        return answer, check, repair_attempted
 
     # Config identifiers for the per-call timing line.
     timing_config = {"rerank": rerank_mode(reranker), "inference": inference_client.mode}
@@ -1913,32 +2206,10 @@ def register_intelligence_tools(
                 prompt_budget.prompt_tokens,
             )
 
-            # Generate, then check the labels the answer cites against the
-            # evidence actually supplied (#284). A failed check gets one
-            # repair call with a fixed instruction, never more; whatever
-            # it returns is checked again and returned with its problems.
-            # An answer cut off at max_tokens is not repaired: a second
-            # try would most likely be cut off too.
-            answer = await llm_complete_prose(ASK_SYSTEM, user_prompt)
-            check = _check_answer(answer, evidence_map)
-            repair_attempted = bool(check.problems) and not answer.endswith(_TRUNCATED_NOTICE)
-            if repair_attempted:
-                reason = _repair_reason(check.problems)
-                answer = await llm_complete_prose(
-                    ASK_SYSTEM, user_prompt + _REPAIR_INSTRUCTION.format(reason=reason)
-                )
-                check = _check_answer(answer, evidence_map)
-            # Counts only: labels, statements and quotes are provider output.
-            log.debug(
-                "ask_mailbox citations: %d valid, %d unknown, %d statements (%d uncited), "
-                "%d quotes (%d verified), repair %s",
-                len(check.used),
-                len(check.unknown),
-                len(check.statements),
-                sum(s.status == "uncited" for s in check.statements),
-                len(check.quotes),
-                sum(q.status == "verified" for q in check.quotes),
-                "attempted" if repair_attempted else "not needed",
+            # Generate, check the answer's citations, statements and quotes
+            # against the evidence supplied, and repair once (#284).
+            answer, check, repair_attempted = await complete_checked(
+                "ask_mailbox", ASK_SYSTEM, user_prompt, evidence_map
             )
 
             citations = [_citation(evidence_map[label]) for label in check.used]
@@ -1970,12 +2241,12 @@ def register_intelligence_tools(
             log.error("ask_mailbox error: %s", safe_error)
             raise ToolError(f"Error: {safe_error}") from e
 
-    @server.tool()
+    @server.tool(output_schema=SummarizeThreadOutput.model_json_schema())
     @timed_tool("summarize_thread", **timing_config)
     async def summarize_thread(
         thread_id: str,
         style: str = "brief",
-    ) -> list[TextContent]:
+    ) -> CallToolResult:
         """
         Summarize indexed context for an email thread.
 
@@ -2006,7 +2277,13 @@ def register_intelligence_tools(
                    "timeline" (chronological sequence of events)
 
         Returns:
-            A summary of the available indexed thread context in the requested style.
+            A summary of the available indexed thread context in the
+            requested style, whose statements and list items cite
+            evidence labels inline ([E1]; E1 is the thread's indexed
+            text, the others its recent messages), and as structured
+            output the summary, each cited label's source, its
+            statements, each quote checked against the cited passages,
+            any citation problems, and the thread.
         """
         log_tool_call(log, "summarize_thread", {"thread_id": thread_id, "style": style})
         try:
@@ -2065,14 +2342,15 @@ def register_intelligence_tools(
                 db.get_recent_chunks_for_thread, thread.thread_id, _SUMMARIZE_RECENT_CHUNKS
             )
 
-            style_instructions = {
+            style_instructions: dict[SummaryStyle, str] = {
                 "brief": "Summarize in 2-3 sentences.",
                 "detailed": "Provide a comprehensive summary covering all key points, decisions, and outcomes.",
                 "action-items": "Extract all action items and next steps as a bullet list. Each item should name who is responsible if known.",
                 "timeline": "Present the key events in this thread as a chronological timeline with dates.",
             }
 
-            instruction = style_instructions.get(style, style_instructions["brief"])
+            used_style: SummaryStyle = next((k for k in style_instructions if k == style), "brief")
+            instruction = style_instructions[used_style]
             subject = clip(thread.subject, HEADER_CHAR_LIMIT)
             participants = ", ".join(
                 clip(p, HEADER_CHAR_LIMIT) for p in thread.participants[:MAX_LISTED]
@@ -2094,19 +2372,52 @@ def register_intelligence_tools(
                     f"Task: {instruction}"
                 )
 
-            # The context is sized so the complete prompt fits the model
-            # window (#285); at the default window it is what it was.
+            # The context is sized so the complete prompt, with room for a
+            # repair instruction, fits the model window (#285). The texts
+            # counted for tag escaping include each labelled header.
             context_chars = _text_budget(
                 prompt_budget,
-                len(SUMMARIZE_SYSTEM) + len(render("")),
+                len(SUMMARIZE_SYSTEM) + len(render("")) + REPAIR_RESERVE_CHARS,
                 _SUMMARIZE_CONTEXT_CHARS,
-                [thread.body_text or thread.snippet or "", *(c.text for c in recent_chunks)],
+                [
+                    thread.body_text or thread.snippet or "",
+                    *(c.text for c in recent_chunks),
+                    *(
+                        _render_chunk_header(c, c.char_end, "E0", short=False)
+                        for c in recent_chunks
+                    ),
+                ],
             )
-            user_prompt = render(_summarize_context(thread, recent_chunks, context_chars))
+            evidence_map: dict[str, EvidenceRef] = {}
+            user_prompt = render(
+                _summarize_context(thread, recent_chunks, context_chars, evidence_map=evidence_map)
+            )
 
-            summary = await llm_complete_prose(SUMMARIZE_SYSTEM, user_prompt)
-
-            return [TextContent(type="text", text=f"Summary ({style}) — {subject}:\n\n{summary}")]
+            # The citation contract of ask_mailbox (#284): every statement
+            # and list item in every style is checked the same way, with
+            # one bounded repair.
+            summary, check, repair_attempted = await complete_checked(
+                "summarize_thread", SUMMARIZE_SYSTEM, user_prompt, evidence_map
+            )
+            citations = [_citation(evidence_map[label]) for label in check.used]
+            lines = [
+                f"Summary ({style}) — {subject}:\n\n{summary}",
+                *_citation_lines(citations),
+                *_problem_lines(check),
+            ]
+            return tool_result(
+                "\n".join(lines),
+                SummarizeThreadOutput(
+                    summary=summary,
+                    style=used_style,
+                    thread=thread_summary(thread),
+                    citations=citations,
+                    statements=check.statements,
+                    quotes=check.quotes,
+                    citation_problems=check.problems,
+                    repair_attempted=repair_attempted,
+                ),
+            )
 
         except ToolError:
             raise
@@ -2115,7 +2426,7 @@ def register_intelligence_tools(
             log.error("summarize_thread error: %s", safe_error)
             raise ToolError(f"Error: {safe_error}") from e
 
-    @server.tool()
+    @server.tool(output_schema=ExtractFromEmailsOutput.model_json_schema())
     @timed_tool("extract_from_emails", **timing_config)
     async def extract_from_emails(
         query: str,
@@ -2124,7 +2435,7 @@ def register_intelligence_tools(
         date_from: str | None = None,
         date_to: str | None = None,
         limit: int = 20,
-    ) -> list[TextContent]:
+    ) -> CallToolResult:
         """
         Extract structured data from indexed emails matching a query.
 
@@ -2146,8 +2457,9 @@ def register_intelligence_tools(
                     or a JSON Schema object. Records are checked for
                     required fields and JSON types only; one that fails
                     is dropped and reported as an incomplete thread.
-                    Must not declare _source_thread or _date: every
-                    record carries those as its source thread and date.
+                    Must not declare _source_thread, _date or _evidence:
+                    every record carries those as its source thread, date
+                    and evidence labels.
             folders: Optionally scope to specific folders. Without it,
                      threads filed only in Trash are left out; name
                      "Trash" to include them.
@@ -2156,7 +2468,12 @@ def register_intelligence_tools(
             limit: Max threads to search through (default: 20)
 
         Returns:
-            A JSON array of extracted records found in the available indexed thread context.
+            A JSON array of extracted records found in the available
+            indexed thread context. Each record's _evidence maps its
+            fields to the evidence labels they were taken from; as
+            structured output, the records, each cited label's source
+            (chunk_id, claimant_id, thread_id, sender, sent_at), each
+            field's label and value check, and any citation problems.
         """
         log_tool_call(
             log,
@@ -2182,7 +2499,8 @@ def register_intelligence_tools(
         if reserved:
             raise ToolError(
                 f"Error: schema declares {', '.join(reserved)}, which are reserved for "
-                "each record's source thread subject and date; rename the field."
+                "each record's source thread subject, date and evidence labels; rename the "
+                "field."
             )
         # Reject a bad date range before any provider or retrieval work.
         try:
@@ -2212,11 +2530,32 @@ def register_intelligence_tools(
             )
             count("results", len(results))
 
+            def output(texts: list[str], notice: str | None = None) -> CallToolResult:
+                citations = [_citation(evidence_map[label]) for label in used]
+                return CallToolResult(
+                    content=[TextContent(type="text", text=t) for t in texts],
+                    structured_content=ExtractFromEmailsOutput(
+                        records=extracted_records,
+                        citations=citations,
+                        fields=fields,
+                        citation_problems=problems,
+                        notice=notice,
+                        threads=[thread_summary(r) for r in results],
+                    ).model_dump(mode="json", by_alias=True),
+                )
+
+            extracted_records: list[dict] = []
+            # Every passage shown across the call, by its label; labels are
+            # numbered across threads so each names one passage (#284).
+            evidence_map: dict[str, EvidenceRef] = {}
+            used: list[str] = []
+            fields: list[ExtractedField] = []
+            problems: list[ExtractCitationProblem] = []
+
             if not results:
-                return [TextContent(type="text", text="No matching emails found.")]
+                return output(["No matching emails found."])
 
             schema_str = json.dumps(schema, indent=2)
-            extracted_records = []
             # Threads whose answer says nothing about their data: cut off
             # at max_tokens, or not a JSON object / array of objects.
             # Counted apart from a valid ``null`` (or ``[]``) so a failure
@@ -2245,7 +2584,8 @@ def register_intelligence_tools(
                         f"Body:\n{body}"
                     )
                     + "\n\n"
-                    "Return a JSON object matching the schema, "
+                    "Return a JSON object matching the schema, with its "
+                    f'"{_EVIDENCE_FIELD}" object naming the labels each value came from, '
                     "or null if no relevant data found."
                 )
 
@@ -2262,11 +2602,19 @@ def register_intelligence_tools(
                 for thread in results
             ]
 
+            next_label = 1
             for thread, evidence_chars in zip(results, budgets, strict=True):
                 subject = clip(thread.subject, HEADER_CHAR_LIMIT)
                 # One thread per prompt, so the whole budget is its own.
                 # No coverage note here: the model must answer in JSON only.
-                [body], coverage = _build_evidence([thread], evidence_chars)
+                # Its labels start after the last one shown so far, and its
+                # records are checked against its own passages only.
+                known: dict[str, EvidenceRef] = {}
+                [body], coverage = _build_evidence(
+                    [thread], evidence_chars, evidence_map=known, first_label=next_label
+                )
+                next_label = 1 + max((int(label[1:]) for label in known), default=next_label - 1)
+                evidence_map.update(known)
                 if evidence_chars < PER_THREAD_CHAR_BUDGET and (
                     coverage.omitted or coverage.truncated
                 ):
@@ -2309,10 +2657,34 @@ def register_intelligence_tools(
                     nonconforming += 1
                 if not records:
                     continue
+                check = _check_records(records, len(extracted_records), known)
+                used.extend(label for label in check.used if label not in used)
+                fields.extend(check.fields)
+                problems.extend(check.problems)
                 for item in records:
                     item["_source_thread"] = subject
                     item["_date"] = thread.date_last.strftime("%Y-%m-%d")
                     extracted_records.append(item)
+
+            # Counts only: labels, fields and values are provider output.
+            log.debug(
+                "extract_from_emails citations: %d records, %d fields (%d cited), %d problems",
+                len(extracted_records),
+                len(fields),
+                sum(f.status == "cited" for f in fields),
+                len(problems),
+            )
+            report = "\n".join(
+                [
+                    *(
+                        line.lstrip("\n")
+                        for line in _citation_lines(
+                            [_citation(evidence_map[label]) for label in used]
+                        )
+                    ),
+                    *_extraction_lines(fields, problems),
+                ]
+            )
 
             failed = truncated + unparseable + nonconforming
             # Fixed text and counts only.
@@ -2344,11 +2716,15 @@ def register_intelligence_tools(
                 if window_note:
                     notice += f" {window_note}"
                 if not extracted_records:
-                    return [TextContent(type="text", text=f"No records extracted. {notice}")]
-                return [
-                    TextContent(type="text", text=json.dumps(extracted_records, indent=2)),
-                    TextContent(type="text", text=notice),
-                ]
+                    return output([f"No records extracted. {notice}"], notice)
+                return output(
+                    [
+                        json.dumps(extracted_records, indent=2),
+                        notice,
+                        *([report] if report else []),
+                    ],
+                    notice,
+                )
 
             if not extracted_records:
                 none_found = (
@@ -2356,12 +2732,16 @@ def register_intelligence_tools(
                 )
                 if window_note:
                     none_found += f" {window_note}"
-                return [TextContent(type="text", text=none_found)]
+                return output([none_found], window_note or None)
 
-            records_text = TextContent(type="text", text=json.dumps(extracted_records, indent=2))
-            if window_note:
-                return [records_text, TextContent(type="text", text=window_note)]
-            return [records_text]
+            return output(
+                [
+                    json.dumps(extracted_records, indent=2),
+                    *([window_note] if window_note else []),
+                    *([report] if report else []),
+                ],
+                window_note or None,
+            )
 
         except InvalidFilterError as e:
             # The message quotes the rejected value, which log_tool_call

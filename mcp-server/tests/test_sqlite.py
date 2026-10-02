@@ -9,7 +9,7 @@ import sqlite3
 from contextlib import closing
 
 import pytest
-from src.lib.sqlite import Database, address_match_mode, canonical_addr
+from src.lib.sqlite import _SENDER_FETCH_CHARS, Database, address_match_mode, canonical_addr
 
 from tests.conftest import claimant_of, write_ingestion
 
@@ -2432,6 +2432,33 @@ class TestGetRecentChunksForThread:
     def test_limit_zero_returns_empty(self, tmp_path):
         db = self._build_chunked_db_with_timeline(tmp_path)
         assert db.get_recent_chunks_for_thread("t-tl", limit=0) == []
+
+    def test_chunks_carry_their_own_sender_and_date(self, tmp_path):
+        """#284: summarize_thread labels each recent passage with its own
+        message's sender and sent date; the sender is cut in SQL."""
+        from tests.conftest import _build_schema, _insert_message
+
+        conn = sqlite3.connect(str(tmp_path / "attr.db"))
+        conn.enable_load_extension(True)
+        import sqlite_vec
+
+        sqlite_vec.load(conn)
+        conn.enable_load_extension(False)
+        _build_schema(conn)
+        for mid, sent, sender in (
+            ("a@example.com", "2024-01-01T09:00:00+00:00", "Alice <alice@example.com>"),
+            ("b@example.com", "2024-01-02T09:00:00+00:00", "N" * 5000 + " <bob@example.com>"),
+        ):
+            _insert_message(
+                conn, message_id=mid, thread_id="t", sent_at=sent, from_=[sender], body="text"
+            )
+        conn.close()
+        chunks = Database(str(tmp_path / "attr.db")).get_recent_chunks_for_thread("t")
+        assert [(c.message_sender, c.message_date) for c in chunks][0] == (
+            "Alice <alice@example.com>",
+            "2024-01-01T09:00:00+00:00",
+        )
+        assert chunks[1].message_sender == "N" * _SENDER_FETCH_CHARS + " <bob@example.com>"
 
     def test_thread_without_chunks_returns_empty(self, chunked_db: Database):
         # ``t-gamma`` has no chunks in chunked_db.
