@@ -1293,7 +1293,6 @@ class Database:
         reranker: RerankerBackend | None = None,
         evidence_per_thread: int = 3,
         authority_class: str | None = None,
-        keep_threads_without_evidence: bool = False,
     ) -> list[ThreadResult]:
         authority_class = normalize_authority_class(authority_class)
         folders = self._default_folder_scope(folders)
@@ -1413,48 +1412,25 @@ class Database:
             # the carrier email won by metadata but the attachment
             # chunks didn't enter the chunk-vec pool.
             #
-            # A date range scopes the passages as well as the threads: a
-            # thread qualifies by its span, a passage only by its own
-            # message's ``sent_at``. A span-only thread then has no
-            # passage, so for evidence callers it gives up its slot: the
-            # filtered ranking is walked in pages until ``candidates_n``
-            # threads with a passage are found or the ranking runs out.
-            # ``search_emails`` wants evidence only as rerank text and
-            # keeps its threads (``keep_threads_without_evidence``).
-            refill = bool(date_from or date_to) and not keep_threads_without_evidence
-            page_size = candidates_n * _FILTERED_OVERSAMPLE
-            pages = (
-                [filtered[i : i + page_size] for i in range(0, len(filtered), page_size)]
-                if refill
-                else [candidates]
-            )
-            kept: list[ThreadResult] = []
-            for page in pages:
-                # Recompute attachment-FTS hits standalone so we know
-                # which candidates won via filename match. The keyword
-                # lane's RRF output is opaque to lane provenance, so we
-                # re-run the narrow query here (cheap FTS5 lookup, only
-                # when the caller wants evidence). For these threads,
-                # attachment chunks are floated to the front of the
-                # per-thread evidence slice — fixes the "filename match
-                # → wrong evidence" gap where the LLM saw body text
-                # instead of the attachment the user asked about.
-                with timings.stage("evidence_fetch"):
-                    grouped = self.get_query_evidence_chunks(
-                        query_text,
-                        [r.thread_id for r in page],
-                        query_embedding,
-                        per_thread_limit=evidence_per_thread,
-                        date_from=date_from,
-                        date_to=date_to,
-                    )
-                for result in page:
-                    result.evidence_chunks = grouped.get(result.thread_id, [])
-                kept += [r for r in page if r.evidence_chunks or not refill]
-                if len(kept) >= candidates_n:
-                    break
-            candidates = kept[:candidates_n]
+            # A date range selects threads by span only: every passage of
+            # a qualifying thread may be shown, each carrying its own
+            # message's date (docs/architecture.md, Message time).
+            wanted = [r.thread_id for r in candidates]
+            # Recompute attachment-FTS hits standalone so we know which
+            # candidates won via filename match. The keyword lane's RRF
+            # output is opaque to lane provenance, so we re-run the
+            # narrow query here (cheap FTS5 lookup, only when the
+            # caller wants evidence). For these threads, attachment
+            # chunks are floated to the front of the per-thread
+            # evidence slice — fixes the "filename match → wrong
+            # evidence" gap where the LLM saw body text instead of
+            # the attachment the user asked about.
+            with timings.stage("evidence_fetch"):
+                grouped = self.get_query_evidence_chunks(
+                    query_text, wanted, query_embedding, per_thread_limit=evidence_per_thread
+                )
             for result in candidates:
+                result.evidence_chunks = grouped.get(result.thread_id, [])
                 timings.count("evidence_chunks", len(result.evidence_chunks))
 
         if reranker is not None and candidates:
@@ -2202,13 +2178,7 @@ class Database:
         results = [self._row_to_result(r) for r in rows]
         return self._best_per_thread(results)[:limit]
 
-    def _matched_attachments(
-        self,
-        query: str,
-        thread_ids: list[str],
-        date_from: str | None = None,
-        date_to: str | None = None,
-    ) -> dict[str, list[str]]:
+    def _matched_attachments(self, query: str, thread_ids: list[str]) -> dict[str, list[str]]:
         """Map each of ``thread_ids`` to the attachments whose filename or
         MIME type matches ``query``, strongest match first.
 
@@ -2222,17 +2192,13 @@ class Database:
         threads already passed the search's filters, so none are
         re-applied. Cheap FTS5 query bounded by the candidates; falls
         back to an empty map on any error so the caller's main path is
-        never blocked.
-
-        ``date_from`` / ``date_to`` keep only attachments whose carrying
-        message was sent in the range, the same bound the evidence
-        passages get, so an out-of-range file cannot reorder in-range
-        evidence.
+        never blocked. A date range is not re-applied either: it
+        selects threads by span, and every attachment of a selected
+        thread may be shown.
         """
         fts_query = _sanitize_fts_query(query)
         if not thread_ids or not fts_query:
             return {}
-        date_from_iso, date_to_iso = _normalize_date_range(date_from, date_to)
         placeholders = ",".join(["?"] * len(thread_ids))
         sql = (
             "SELECT a.thread_id, a.attachment_id, bm25(attachments_fts) AS score "
@@ -2240,25 +2206,10 @@ class Database:
             "JOIN attachments a ON attachments_fts.rowid = a.fts_rowid "
             "WHERE attachments_fts MATCH ? "
             f"AND a.thread_id IN ({placeholders}) "  # nosec B608
-            "AND (? IS NULL AND ? IS NULL OR EXISTS (SELECT 1 FROM messages ms "
-            "  WHERE ms.claimant_id = a.claimant_id "
-            "  AND (? IS NULL OR ms.sent_at >= ?) AND (? IS NULL OR ms.sent_at <= ?))) "
             "ORDER BY score"
         )
         try:
-            rows = self._fetchall(
-                sql,
-                [
-                    fts_query,
-                    *thread_ids,
-                    date_from_iso,
-                    date_to_iso,
-                    date_from_iso,
-                    date_from_iso,
-                    date_to_iso,
-                    date_to_iso,
-                ],
-            )
+            rows = self._fetchall(sql, [fts_query, *thread_ids])
         except sqlite3.Error as e:
             log.warning("Attachment match lookup failed; skipping bias: %s", type(e).__name__)
             return {}
@@ -2450,8 +2401,6 @@ class Database:
         thread_ids: list[str],
         embedding: list[float],
         per_thread_limit: int,
-        date_from: str | None = None,
-        date_to: str | None = None,
     ) -> dict[str, list[ChunkResult]]:
         """Per-thread evidence for ``query_text``, as ``ask_mailbox`` sees it.
 
@@ -2461,19 +2410,14 @@ class Database:
         thread's slice. ``hybrid_search(with_evidence=True)`` and the
         thread-scoped ``get_evidence`` path both call this, so an audit
         of one thread returns the passages ``ask_mailbox`` was given for
-        it (#461). ``date_from`` / ``date_to`` keep only passages whose
-        message's ``sent_at`` is in the range.
+        it (#461).
         """
-        matched_attachments = self._matched_attachments(
-            query_text, thread_ids, date_from=date_from, date_to=date_to
-        )
+        matched_attachments = self._matched_attachments(query_text, thread_ids)
         return self.get_evidence_chunks_for_threads(
             thread_ids,
             embedding,
             per_thread_limit=per_thread_limit,
             matched_attachments=matched_attachments,
-            date_from=date_from,
-            date_to=date_to,
         )
 
     def get_evidence_chunks_for_threads(
@@ -2482,8 +2426,6 @@ class Database:
         embedding: list[float],
         per_thread_limit: int = 3,
         matched_attachments: dict[str, list[str]] | None = None,
-        date_from: str | None = None,
-        date_to: str | None = None,
     ) -> dict[str, list[ChunkResult]]:
         """Return up to ``per_thread_limit`` best-matching chunks per thread.
 
@@ -2517,15 +2459,9 @@ class Database:
         even when a body chunk, or another attachment's chunk, has
         higher dense similarity. Remembering only the thread let the cap
         keep unrelated attachments and drop the one that matched.
-
-        ``date_from`` / ``date_to`` keep only chunks whose
-        ``message_date`` (their message's ``sent_at``) is in the range,
-        normalized as the thread filters normalize it; a thread with no
-        chunk in range gets an empty list.
         """
         if not thread_ids:
             return {}
-        date_from_iso, date_to_iso = _normalize_date_range(date_from, date_to)
         try:
             serialized = sqlite_vec.serialize_float32(embedding)
             placeholders = ",".join(["?"] * len(thread_ids))
@@ -2565,21 +2501,9 @@ class Database:
                 "         AND a2.claimant_id = c.claimant_id "
                 "  ) "
                 f"WHERE c.thread_id IN ({placeholders}) "  # nosec B608
-                "AND (? IS NULL OR c.message_date >= ?) "
-                "AND (? IS NULL OR c.message_date <= ?) "
                 "ORDER BY score ASC"
             )
-            rows = self._fetchall(
-                sql,
-                [
-                    serialized,
-                    *thread_ids,
-                    date_from_iso,
-                    date_from_iso,
-                    date_to_iso,
-                    date_to_iso,
-                ],
-            )
+            rows = self._fetchall(sql, [serialized, *thread_ids])
         except (sqlite3.Error, ValueError) as e:
             # Same catch surface as ``_chunk_vector_search`` — missing
             # vec extension, corrupt vec row, malformed serialised

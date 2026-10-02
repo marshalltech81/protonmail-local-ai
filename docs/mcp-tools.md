@@ -278,11 +278,11 @@ drive an unbounded query against the index.
   its latest `sent_at`, overlaps the range, so a thread with messages
   either side of a short range matches it. The tools that hand passages
   to a model (`get_evidence`, `ask_mailbox`, `extract_from_emails`,
-  `brief_issue`, `check_conclusion`) retrieve threads the same way and
-  then keep only passages from messages sent inside the range. A thread
-  left with no passage is dropped and the next-ranked thread with one
-  takes its place, so those tools never show a span-only thread's
-  out-of-range text; see [Message time](architecture.md#message-time).
+  `brief_issue`, `check_conclusion`) retrieve threads the same way, and
+  any passage of a matching thread may be shown, including passages
+  from messages sent outside the range. Each passage carries its own
+  message's `sent_at`, so its date stays visible; see
+  [Message time](architecture.md#message-time).
 
 ---
 
@@ -297,9 +297,9 @@ name), its parent thread, Message-ID and claimant ID, the source
 (message body, or an attachment with filename + MIME type), its
 message's send date (`sent_at`, the same value and format as that
 message's headers), and the passage's character offsets. With
-`date_from` / `date_to`, only passages from messages sent inside the
-range are returned, and a thread with none is left out (see
-`search_emails`). Attachment-derived
+`date_from` / `date_to`, threads are selected by span as in
+`search_emails`, and their passages can come from messages sent
+outside the range; check each chunk's `sent_at`. Attachment-derived
 chunks (extracted PDF / OCR / document text) are included — unlike
 `get_thread`, which is body-only.
 

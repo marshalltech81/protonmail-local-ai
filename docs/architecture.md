@@ -592,20 +592,21 @@ depends on its unit:
 | Result | Qualifies when | Sorted by |
 |---|---|---|
 | Thread (`search_emails`; the threads `get_evidence`, `ask_mailbox`, `extract_from_emails`, `brief_issue` and `check_conclusion` retrieve) | Its `[date_first, date_last]` span overlaps the range | Relevance |
-| Evidence passage of a retrieved thread (same tools except `search_emails`, mailbox-wide path) | Its message's `sent_at` is in the range; a thread with no such passage is left out | Relevance within the thread |
+| Evidence passage of a retrieved thread (same tools except `search_emails`, mailbox-wide path) | Its thread qualifies; the passage's own `sent_at` may fall outside the range | Relevance within the thread |
 | Message (`query_messages`) | Its `sent_at` is in the range | `sent_at`, newest first |
 | Attachment (`search_attachments`) | The carrying message's `sent_at` is in the range | Relevance; with no query, `sent_at`, newest first |
 
-So a date range scopes the passages a model is shown, not only the
-threads: a thread whose span overlaps the range but holds no passage
-from a message inside it has no evidence passages, and the evidence
-tools leave it out: retrieval walks the filtered ranking in pages,
-fetching evidence until it has as many threads with an in-range passage
-as it needs or the ranking runs out, so a span-only thread does not use
-up a slot (and its
-out-of-range text is never shown). `search_emails` still returns
-threads by span alone. Ranking lanes are not date-scoped per
-passage: a passage outside the range can still lift its thread's rank.
+So a date range selects whole threads (owner decision, PLAN.md
+Resolved decisions 14): any passage of a thread whose span overlaps
+the range may be shown, including one from a message sent outside it,
+and a thread whose span straddles a short range with no message inside
+it still qualifies. Each passage carries its own message's `sent_at`
+(the `sent_at` of `get_evidence` chunks and of citations), so a model
+can see which passages fall outside the range. The attachment-name
+bias that leads a thread's evidence with the file the query names is
+not date-scoped either: it orders passages within a qualifying thread.
+Ranking lanes are not date-scoped per passage: a passage outside the
+range can still lift its thread's rank.
 `list_threads` sorts by `date_last`, newest first; `get_thread` lists
 messages by `sent_at`, oldest first; `summarize_thread`'s recent tail
 takes the chunks with the latest `message_date`.
