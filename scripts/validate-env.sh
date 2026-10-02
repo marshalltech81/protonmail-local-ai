@@ -19,14 +19,16 @@ require_file() {
     }
 }
 
+# The services strip surrounding whitespace from every secret they read,
+# so a file holding only whitespace (a stray newline) counts as empty.
 require_nonempty_file() {
     local path="$1"
     local description="$2"
 
-    [[ -s "$path" ]] || {
+    if [[ ! -f "$path" ]] || ! grep -q '[^[:space:]]' "$path"; then
         printf 'ERROR: %s is missing or empty at %s.\n' "$description" "$path" >&2
         exit 1
-    }
+    fi
 }
 
 file_mode() {
@@ -86,10 +88,8 @@ require_integer() {
     }
 }
 
-# Validate as integer (>= minimum). Accept int form only — the python
-# *_env helpers will tolerate floats for timeout-style vars, but the
-# operator-facing default in .env.example is always an integer and
-# rejecting decimal values here keeps the validation contract simple.
+# Validate as integer (>= minimum), for the knobs the services read
+# with ``int()``.
 require_integer_min() {
     local name="$1"
     local value="$2"
@@ -99,6 +99,28 @@ require_integer_min() {
     # Force base 10: a zero-padded value such as 08 would otherwise be
     # read as octal, while the Python loaders parse it as decimal.
     (( 10#$value >= minimum )) || {
+        printf 'ERROR: %s must be >= %s, found %s.\n' "$name" "$minimum" "$value" >&2
+        exit 1
+    }
+}
+
+# Validate a decimal number (>= an integer minimum), for the timeouts
+# the services read with ``float()`` (``_float_env`` in
+# mcp-server/src/main.py and indexer/src/embedder.py). Plain decimals
+# only; exponent forms such as 1e3 are rejected.
+require_number_min() {
+    local name="$1"
+    local value="$2"
+    local minimum="$3"
+    local whole
+
+    [[ "$value" =~ ^([0-9]+(\.[0-9]*)?|\.[0-9]+)$ ]] || {
+        printf 'ERROR: %s must be a number, found %s.\n' "$name" "$value" >&2
+        exit 1
+    }
+    # With an integer minimum, comparing the whole part is exact.
+    whole="${value%%.*}"
+    (( 10#${whole:-0} >= minimum )) || {
         printf 'ERROR: %s must be >= %s, found %s.\n' "$name" "$minimum" "$value" >&2
         exit 1
     }
@@ -140,6 +162,15 @@ reject_url_userinfo() {
     fi
 }
 
+# Print VALUE without leading or trailing whitespace.
+trim() {
+    local value="$1"
+
+    value="${value#"${value%%[![:space:]]*}"}"
+    value="${value%"${value##*[![:space:]]}"}"
+    printf '%s\n' "$value"
+}
+
 # Read a single KEY=VALUE from .env without shell-sourcing.
 # Shell-sourcing would evaluate command substitutions in values, so a
 # malformed or hostile .env line could execute arbitrary commands from the
@@ -148,6 +179,7 @@ reject_url_userinfo() {
 # Semantics:
 #   - last assignment wins (matches `source` behavior)
 #   - comment (#) and blank lines are ignored
+#   - whitespace around the value is dropped, as Compose does
 #   - optional surrounding single or double quotes are stripped
 #   - no variable expansion, no command substitution, no escape processing
 get_env_value() {
@@ -167,7 +199,7 @@ get_env_value() {
     done < "$ENV_FILE"
     [[ -n "$raw" ]] || { printf '\n'; return 0; }
 
-    value="${raw#*=}"
+    value="$(trim "${raw#*=}")"
     # strip a single pair of matching surrounding quotes, if present
     if [[ "$value" =~ ^\"(.*)\"$ ]]; then
         value="${BASH_REMATCH[1]}"
@@ -175,6 +207,43 @@ get_env_value() {
         value="${BASH_REMATCH[1]}"
     fi
     printf '%s\n' "$value"
+}
+
+# The value Compose interpolates for KEY: a variable exported in the
+# calling shell wins over .env, even when it is empty, as in Compose.
+# Callers apply the ``${KEY:-default}`` fallback from docker-compose.yml
+# themselves, which Compose uses for an empty value as well as an unset
+# one.
+env_value() {
+    local key="$1"
+
+    [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || {
+        printf 'ERROR: invalid environment key: %s\n' "$key" >&2
+        return 2
+    }
+    if [[ -n "${!key+set}" ]]; then
+        printf '%s\n' "${!key}"
+    else
+        get_env_value "$key"
+    fi
+}
+
+# env_value with surrounding whitespace removed, for the values the
+# Python services read with ``.strip()``: every number, boolean and mode
+# below. SYNC_INTERVAL (mbsync's shell), MCP_PORT (also Compose's port
+# mapping), URLs and model names are passed on unstripped, so they are
+# read with env_value.
+env_value_stripped() {
+    local value
+
+    value="$(env_value "$1")" || return 2
+    trim "$value"
+}
+
+# The loaders read a mode as ``.strip().lower()`` of the value Compose
+# passes, after Compose has applied the default to an empty one.
+normalize_mode() {
+    trim "$1" | tr '[:upper:]' '[:lower:]'
 }
 
 if [[ "${1:-}" == "--get" ]]; then
@@ -207,62 +276,69 @@ reject_secret_in_env "INFERENCE_API_KEY" "$INFERENCE_KEY_FILE"
 reject_secret_in_env "EMBED_API_KEY" "$EMBED_KEY_FILE"
 reject_secret_in_env "RERANK_API_KEY" "$RERANK_KEY_FILE"
 
-BRIDGE_USER="$(get_env_value BRIDGE_USER)"
-BRIDGE_VERSION="$(get_env_value BRIDGE_VERSION)"
-INFERENCE_MODE="$(get_env_value INFERENCE_MODE)"
-INFERENCE_BASE_URL="$(get_env_value INFERENCE_BASE_URL)"
-INFERENCE_MODEL="$(get_env_value INFERENCE_MODEL)"
-INFERENCE_TIMEOUT_SECS="$(get_env_value INFERENCE_TIMEOUT_SECS)"
-INFERENCE_MAX_TOKENS="$(get_env_value INFERENCE_MAX_TOKENS)"
-INFERENCE_CONTEXT_TOKENS="$(get_env_value INFERENCE_CONTEXT_TOKENS)"
-EMBED_MODE="$(get_env_value EMBED_MODE)"
-EMBED_BASE_URL="$(get_env_value EMBED_BASE_URL)"
-EMBED_MODEL="$(get_env_value EMBED_MODEL)"
-EMBED_TIMEOUT_SECS="$(get_env_value EMBED_TIMEOUT_SECS)"
-EMBED_WARMUP_TIMEOUT_SECS="$(get_env_value EMBED_WARMUP_TIMEOUT_SECS)"
-RERANK_MODE="$(get_env_value RERANK_MODE)"
-RERANK_BASE_URL="$(get_env_value RERANK_BASE_URL)"
-RERANK_MODEL="$(get_env_value RERANK_MODEL)"
-RERANK_CANDIDATES="$(get_env_value RERANK_CANDIDATES)"
-RERANK_TIMEOUT_SECS="$(get_env_value RERANK_TIMEOUT_SECS)"
-INDEXER_PARSE_MAX_BYTES="$(get_env_value INDEXER_PARSE_MAX_BYTES)"
-INDEXER_MAX_ATTEMPTS="$(get_env_value INDEXER_MAX_ATTEMPTS)"
-INDEXER_RETRY_BASE_SECONDS="$(get_env_value INDEXER_RETRY_BASE_SECONDS)"
-INDEXER_MESSAGE_TIMEOUT_SECONDS="$(get_env_value INDEXER_MESSAGE_TIMEOUT_SECONDS)"
-SYNC_INTERVAL="$(get_env_value SYNC_INTERVAL)"
-MCP_PORT="$(get_env_value MCP_PORT)"
-MCP_TRANSPORT="$(get_env_value MCP_TRANSPORT)"
-MCP_SESSION_IDLE_TIMEOUT_SECS="$(get_env_value MCP_SESSION_IDLE_TIMEOUT_SECS)"
-MCP_EXPERIMENTAL_TOOLS="$(get_env_value MCP_EXPERIMENTAL_TOOLS)"
+# Values resolve as Compose interpolates them: a variable exported in the
+# calling shell, else .env, else the ``${VAR:-default}`` fallback that
+# docker-compose.yml gives it (applied below, after each read). So a
+# key Compose defaults (BRIDGE_VERSION, SYNC_INTERVAL, MCP_PORT,
+# INFERENCE_MODEL) may be left out of .env, and ``SYNC_INTERVAL=0 make
+# up`` is checked as 0. BRIDGE_VERSION has nothing to check beyond its
+# default. INFERENCE_MODEL's default is an Anthropic model, so it only
+# satisfies the required-model contract in anthropic mode (see below).
+BRIDGE_USER="$(env_value BRIDGE_USER)"
+INFERENCE_MODE="$(env_value INFERENCE_MODE)"
+INFERENCE_BASE_URL="$(env_value INFERENCE_BASE_URL)"
+INFERENCE_MODEL="$(env_value INFERENCE_MODEL)"
+INFERENCE_TIMEOUT_SECS="$(env_value_stripped INFERENCE_TIMEOUT_SECS)"
+INFERENCE_MAX_TOKENS="$(env_value_stripped INFERENCE_MAX_TOKENS)"
+INFERENCE_CONTEXT_TOKENS="$(env_value_stripped INFERENCE_CONTEXT_TOKENS)"
+EMBED_MODE="$(env_value EMBED_MODE)"
+EMBED_BASE_URL="$(env_value EMBED_BASE_URL)"
+EMBED_MODEL="$(env_value EMBED_MODEL)"
+EMBED_TIMEOUT_SECS="$(env_value_stripped EMBED_TIMEOUT_SECS)"
+EMBED_WARMUP_TIMEOUT_SECS="$(env_value_stripped EMBED_WARMUP_TIMEOUT_SECS)"
+RERANK_MODE="$(env_value RERANK_MODE)"
+RERANK_BASE_URL="$(env_value RERANK_BASE_URL)"
+RERANK_MODEL="$(env_value RERANK_MODEL)"
+RERANK_CANDIDATES="$(env_value_stripped RERANK_CANDIDATES)"
+RERANK_TIMEOUT_SECS="$(env_value_stripped RERANK_TIMEOUT_SECS)"
+INDEXER_PARSE_MAX_BYTES="$(env_value_stripped INDEXER_PARSE_MAX_BYTES)"
+INDEXER_MAX_ATTEMPTS="$(env_value_stripped INDEXER_MAX_ATTEMPTS)"
+INDEXER_RETRY_BASE_SECONDS="$(env_value_stripped INDEXER_RETRY_BASE_SECONDS)"
+INDEXER_MESSAGE_TIMEOUT_SECONDS="$(env_value_stripped INDEXER_MESSAGE_TIMEOUT_SECONDS)"
+SYNC_INTERVAL="$(env_value SYNC_INTERVAL)"
+SYNC_INTERVAL="${SYNC_INTERVAL:-60}"
+MCP_PORT="$(env_value MCP_PORT)"
+MCP_PORT="${MCP_PORT:-3000}"
+MCP_TRANSPORT="$(env_value MCP_TRANSPORT)"
+MCP_SESSION_IDLE_TIMEOUT_SECS="$(env_value_stripped MCP_SESSION_IDLE_TIMEOUT_SECS)"
+MCP_EXPERIMENTAL_TOOLS="$(env_value_stripped MCP_EXPERIMENTAL_TOOLS)"
 
 [[ -n "$BRIDGE_USER" && "$BRIDGE_USER" != "your@proton.me" ]] || {
     echo "ERROR: BRIDGE_USER in .env must be set to the Bridge username from 'bridge --cli info'." >&2
     exit 1
 }
 
-[[ -n "$BRIDGE_VERSION" ]] || {
-    echo "ERROR: BRIDGE_VERSION must be set in .env." >&2
-    exit 1
-}
-
 # Optional (docker-compose.yml carries the default pin). When set, it must
 # be a full commit SHA: the Bridge build refuses a tag that resolves to
 # anything else, so a typo here would only surface deep inside the build.
-BRIDGE_COMMIT="$(get_env_value BRIDGE_COMMIT)"
+BRIDGE_COMMIT="$(env_value BRIDGE_COMMIT)"
 [[ -z "$BRIDGE_COMMIT" || "$BRIDGE_COMMIT" =~ ^[0-9a-f]{40}$ ]] || {
     echo "ERROR: BRIDGE_COMMIT in .env must be a full 40-character lowercase commit SHA." >&2
     exit 1
 }
 
 # ----- INFERENCE -----
-INFERENCE_MODE="${INFERENCE_MODE:-anthropic}"
+INFERENCE_MODE="$(normalize_mode "${INFERENCE_MODE:-anthropic}")"
 [[ "$INFERENCE_MODE" =~ ^(openai|anthropic|none)$ ]] || {
     echo "ERROR: INFERENCE_MODE must be one of: anthropic, openai, none." >&2
     exit 1
 }
 
 if [[ "$INFERENCE_MODE" != "none" ]]; then
-    [[ -n "$INFERENCE_MODEL" ]] || {
+    # An empty INFERENCE_MODEL becomes Compose's ``claude-sonnet-4-6``,
+    # which an OpenAI-compatible endpoint does not serve, so openai mode
+    # must name its model.
+    [[ -n "$INFERENCE_MODEL" || "$INFERENCE_MODE" == "anthropic" ]] || {
         echo "ERROR: INFERENCE_MODEL must be set when INFERENCE_MODE=$INFERENCE_MODE." >&2
         exit 1
     }
@@ -280,7 +356,7 @@ if [[ "$INFERENCE_MODE" != "none" ]]; then
     # routine sub-second failures. ``INFERENCE_MAX_TOKENS`` must be
     # >= 1 — zero or negative would request an empty completion.
     if [[ -n "$INFERENCE_TIMEOUT_SECS" ]]; then
-        require_integer_min "INFERENCE_TIMEOUT_SECS" "$INFERENCE_TIMEOUT_SECS" 1
+        require_number_min "INFERENCE_TIMEOUT_SECS" "$INFERENCE_TIMEOUT_SECS" 1
     fi
     if [[ -n "$INFERENCE_MAX_TOKENS" ]]; then
         require_integer_min "INFERENCE_MAX_TOKENS" "$INFERENCE_MAX_TOKENS" 1
@@ -294,7 +370,7 @@ if [[ "$INFERENCE_MODE" != "none" ]]; then
         require_integer_min "INFERENCE_CONTEXT_TOKENS" "$INFERENCE_CONTEXT_TOKENS" 1
     fi
     require_integer_min "INFERENCE_CONTEXT_TOKENS (32768 when unset)" \
-        "${INFERENCE_CONTEXT_TOKENS:-32768}" "$(( ${INFERENCE_MAX_TOKENS:-1024} + 1088 ))"
+        "${INFERENCE_CONTEXT_TOKENS:-32768}" "$(( 10#${INFERENCE_MAX_TOKENS:-1024} + 1088 ))"
     if [[ -n "$INFERENCE_BASE_URL" ]]; then
         [[ "$INFERENCE_BASE_URL" =~ ^https?:// ]] || {
             echo "ERROR: INFERENCE_BASE_URL must start with http:// or https://." >&2
@@ -321,7 +397,7 @@ fi
 # retrieval feature and the indexer cannot run without an embedder
 # either. ``EMBED_MODE=openai`` is the only valid value and is kept as
 # a config knob for symmetry with the other layers.
-EMBED_MODE="${EMBED_MODE:-openai}"
+EMBED_MODE="$(normalize_mode "${EMBED_MODE:-openai}")"
 [[ "$EMBED_MODE" == "openai" ]] || {
     echo "ERROR: EMBED_MODE must be 'openai' (the only supported embed mode)." >&2
     exit 1
@@ -352,18 +428,18 @@ fi
 # here keeps the .env contract aligned with the in-container check
 # (no value silently overridden by the loader).
 if [[ -n "$EMBED_WARMUP_TIMEOUT_SECS" ]]; then
-    require_integer_min "EMBED_WARMUP_TIMEOUT_SECS" "$EMBED_WARMUP_TIMEOUT_SECS" 1
+    require_number_min "EMBED_WARMUP_TIMEOUT_SECS" "$EMBED_WARMUP_TIMEOUT_SECS" 1
 fi
 
 # Optional per-call embed deadline used by the mcp-server query path.
 # Must be >= 1 for the same reason as ``RERANK_TIMEOUT_SECS`` — bound
 # a stalled call without rejecting routine sub-second failures.
 if [[ -n "$EMBED_TIMEOUT_SECS" ]]; then
-    require_integer_min "EMBED_TIMEOUT_SECS" "$EMBED_TIMEOUT_SECS" 1
+    require_number_min "EMBED_TIMEOUT_SECS" "$EMBED_TIMEOUT_SECS" 1
 fi
 
 # ----- RERANK -----
-RERANK_MODE="${RERANK_MODE:-none}"
+RERANK_MODE="$(normalize_mode "${RERANK_MODE:-none}")"
 [[ "$RERANK_MODE" =~ ^(cohere|none)$ ]] || {
     echo "ERROR: RERANK_MODE must be one of: cohere, none." >&2
     exit 1
@@ -394,7 +470,7 @@ if [[ -n "$RERANK_CANDIDATES" ]]; then
     require_integer_min "RERANK_CANDIDATES" "$RERANK_CANDIDATES" 1
 fi
 if [[ -n "$RERANK_TIMEOUT_SECS" ]]; then
-    require_integer_min "RERANK_TIMEOUT_SECS" "$RERANK_TIMEOUT_SECS" 1
+    require_number_min "RERANK_TIMEOUT_SECS" "$RERANK_TIMEOUT_SECS" 1
 fi
 
 # Per-message parse byte cap. ``0`` disables the cap, so the
@@ -442,7 +518,7 @@ for spec in \
     INDEXER_DELETION_GRACE_DAYS:0 \
     INDEXER_DELETION_SWEEP_INTERVAL_SECS:60; do
     name="${spec%%:*}"
-    value="$(get_env_value "$name")"
+    value="$(env_value_stripped "$name")"
     if [[ -n "$value" ]]; then
         require_integer_min "$name" "$value" "${spec##*:}"
     fi
@@ -452,11 +528,11 @@ done
 # requires target <= max and overlap < target, and the indexer checks
 # this at startup (#507). An omitted side takes its docker-compose.yml
 # default. Each value already passed require_integer_min above.
-chunk_target="$(get_env_value INDEXER_CHUNK_TARGET_TOKENS)"
+chunk_target="$(env_value_stripped INDEXER_CHUNK_TARGET_TOKENS)"
 chunk_target="${chunk_target:-1000}"
-chunk_max="$(get_env_value INDEXER_CHUNK_MAX_TOKENS)"
+chunk_max="$(env_value_stripped INDEXER_CHUNK_MAX_TOKENS)"
 chunk_max="${chunk_max:-1500}"
-chunk_overlap="$(get_env_value INDEXER_CHUNK_OVERLAP_TOKENS)"
+chunk_overlap="$(env_value_stripped INDEXER_CHUNK_OVERLAP_TOKENS)"
 chunk_overlap="${chunk_overlap:-150}"
 (( 10#$chunk_target <= 10#$chunk_max )) || {
     printf 'ERROR: INDEXER_CHUNK_TARGET_TOKENS (%s) must be <= INDEXER_CHUNK_MAX_TOKENS (%s).\n' "$chunk_target" "$chunk_max" >&2
@@ -476,7 +552,7 @@ for name in \
     INDEXER_OCR_ENABLED \
     INDEXER_DELETION_FORCE \
     INDEXER_UNLINK_ON_REAP; do
-    value="$(get_env_value "$name")"
+    value="$(env_value_stripped "$name")"
     if [[ -n "$value" ]]; then
         require_bool "$name" "$value"
     fi
@@ -484,7 +560,7 @@ done
 
 # Mass-delete brake: a decimal fraction in [0, 1]. The reconciler
 # rejects anything else, including NaN and infinity, at startup.
-INDEXER_DELETION_MAX_BATCH_PCT="$(get_env_value INDEXER_DELETION_MAX_BATCH_PCT)"
+INDEXER_DELETION_MAX_BATCH_PCT="$(env_value_stripped INDEXER_DELETION_MAX_BATCH_PCT)"
 if [[ -n "$INDEXER_DELETION_MAX_BATCH_PCT" ]]; then
     [[ "$INDEXER_DELETION_MAX_BATCH_PCT" =~ ^(0*\.[0-9]+|0+(\.[0-9]*)?|0*1(\.0*)?)$ ]] || {
         printf 'ERROR: INDEXER_DELETION_MAX_BATCH_PCT must be a decimal between 0 and 1, found %s.\n' "$INDEXER_DELETION_MAX_BATCH_PCT" >&2
@@ -492,19 +568,20 @@ if [[ -n "$INDEXER_DELETION_MAX_BATCH_PCT" ]]; then
     }
 fi
 
-require_integer "SYNC_INTERVAL" "$SYNC_INTERVAL"
-[[ "$SYNC_INTERVAL" -gt 0 ]] || {
-    echo "ERROR: SYNC_INTERVAL must be greater than zero." >&2
+# Same pattern as mbsync/entrypoint.sh, which reads the value unstripped.
+[[ "$SYNC_INTERVAL" =~ ^[1-9][0-9]*$ ]] || {
+    echo "ERROR: SYNC_INTERVAL must be a positive integer without leading zeros." >&2
     exit 1
 }
 
 require_integer "MCP_PORT" "$MCP_PORT"
-[[ "$MCP_PORT" -ge 1 && "$MCP_PORT" -le 65535 ]] || {
+# Base 10, as Compose and the mcp-server loader read a zero-padded port.
+(( 10#$MCP_PORT >= 1 && 10#$MCP_PORT <= 65535 )) || {
     echo "ERROR: MCP_PORT must be between 1 and 65535." >&2
     exit 1
 }
 
-MCP_TRANSPORT="${MCP_TRANSPORT:-sse}"
+MCP_TRANSPORT="$(normalize_mode "${MCP_TRANSPORT:-sse}")"
 [[ "$MCP_TRANSPORT" =~ ^(sse|streamable-http|dual)$ ]] || {
     echo "ERROR: MCP_TRANSPORT must be 'sse', 'streamable-http', or 'dual'." >&2
     exit 1
@@ -514,7 +591,7 @@ MCP_TRANSPORT="${MCP_TRANSPORT:-sse}"
 # session a client abandons is ended; validated only when set so the
 # mcp-server/src/main.py default (1800) stays authoritative otherwise.
 if [[ -n "$MCP_SESSION_IDLE_TIMEOUT_SECS" ]]; then
-    require_integer_min "MCP_SESSION_IDLE_TIMEOUT_SECS" "$MCP_SESSION_IDLE_TIMEOUT_SECS" 1
+    require_number_min "MCP_SESSION_IDLE_TIMEOUT_SECS" "$MCP_SESSION_IDLE_TIMEOUT_SECS" 1
 fi
 
 # Experimental tools flag; mcp-server/src/main.py accepts the same
