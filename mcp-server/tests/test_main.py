@@ -114,6 +114,9 @@ class TestMcpTransport:
         assert f"MCP_TRANSPORT={value.strip().lower()}" in message
         assert "removed" in message
         assert "/sse" in message and "/mcp" in message
+        # #612: the new client URL uses the IPv4 loopback, not localhost,
+        # which can resolve to ::1 where another local account can listen.
+        assert "http://127.0.0.1:<MCP_PORT>/mcp" in message
         # Compose and validate-env read an exported value ahead of .env,
         # so the steps must cover the shell environment too.
         assert "unset MCP_TRANSPORT" in message

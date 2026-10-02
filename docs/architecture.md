@@ -109,7 +109,7 @@ mcp-server container
     injection from attacker-controlled email content
   - Read-only: no mail-changing tools and no connection to Bridge
         │
-        │  Streamable HTTP (localhost:3000/mcp)
+        │  Streamable HTTP (127.0.0.1:3000/mcp)
         ▼
 MCP client (host machine; Claude Desktop via the repo's stdio adapter)
   - Calls MCP tools via natural language

@@ -842,11 +842,13 @@ problem.
 1. Check the token works without printing it (from the repository
    root). The header goes to `curl` on standard input (`-H @-`), so the
    token is not in `curl`'s arguments, which other local accounts can
-   read:
+   read. `--noproxy '*'` keeps an `http_proxy` or `ALL_PROXY` in your
+   shell from sending the request, header included, to a proxy instead
+   of straight to loopback:
 
    ```bash
    printf 'Authorization: Bearer %s\n' "$(cat .secrets/mcp_auth_token.txt)" |
-     curl -s -o /dev/null -w '%{http_code}\n' -X POST http://127.0.0.1:3000/mcp \
+     curl -s --noproxy '*' -o /dev/null -w '%{http_code}\n' -X POST http://127.0.0.1:3000/mcp \
      -H @- \
      -H 'Accept: application/json, text/event-stream' \
      -H 'Content-Type: application/json' \

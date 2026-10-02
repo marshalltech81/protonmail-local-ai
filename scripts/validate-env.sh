@@ -624,7 +624,7 @@ if [[ "$MCP_TRANSPORT" == "sse" || "$MCP_TRANSPORT" == "dual" ]]; then
     echo "       Remove MCP_TRANSPORT from .env and run 'unset MCP_TRANSPORT' in any shell that" >&2
     echo "       exports it (an exported value wins over .env), or set it to streamable-http." >&2
     echo "       Change MCP client URLs from http://localhost:<MCP_PORT>/sse to" >&2
-    echo "       http://localhost:<MCP_PORT>/mcp." >&2
+    echo "       http://127.0.0.1:<MCP_PORT>/mcp." >&2
     exit 1
 fi
 [[ -z "$MCP_TRANSPORT" || "$MCP_TRANSPORT" == "streamable-http" ]] || {
