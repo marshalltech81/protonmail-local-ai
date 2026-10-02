@@ -1232,7 +1232,10 @@ class TestXlsxExtractor:
             filename="rows.xlsx",
             payload=payload,
         )
-        assert time.monotonic() - started < 1.0
+        # Generous wall-clock ceiling: about 0.3 s locally, but shared CI
+        # runners have taken just over 1 s. The row count below is what
+        # proves the charge stops the walk.
+        assert time.monotonic() - started < 10.0
         assert result.status == STATUS_SUCCESS
         assert parsed[0] == xlsx._MAX_EXPANDED_CELLS // (1 + xlsx._ROW_COST) + 1
         assert parsed[0] < count
