@@ -6,6 +6,9 @@ name: Security Scan
 # scripts or workflow YAML), Bandit reads indexer/src and
 # mcp-server/src, and Semgrep reads the Compose files (base and
 # overlays) and shell scripts with the repo's own rules in .semgrep/.
+# The Bridge Go module scan reads the BRIDGE_COMMIT pins in
+# .env.example, bridge/Dockerfile and docker-compose.yml; bridge/** is
+# listed so any Bridge build change reports the module graph it compiles.
 # shellcheck in lint.yml still lints the scripts for correctness, and
 # docker.yml validates the Compose syntax.
 on:
@@ -25,6 +28,8 @@ on:
       - "scripts/**"
       - ".semgrep/**"
       - ".semgrepignore"
+      - "bridge/**"
+      - ".env.example"
       - ".github/workflows/security.yml"
   pull_request:
     branches: [main]
@@ -42,6 +47,8 @@ on:
       - "scripts/**"
       - ".semgrep/**"
       - ".semgrepignore"
+      - "bridge/**"
+      - ".env.example"
       - ".github/workflows/security.yml"
   schedule:
     - cron: "0 8 * * 0"
@@ -93,6 +100,86 @@ jobs:
           format: table
           exit-code: "1"
           severity: CRITICAL,HIGH
+
+  # Report only (owner decision, #608): Bridge's Go modules are Proton's
+  # to update, not ours, so a finding here is information for a Bridge
+  # bump, never a gate. The scan runs at every severity with exit code 0,
+  # the job continues on error, and so do the fetch and scan steps (so the
+  # summary still runs), so the job never fails the workflow. The weekly
+  # schedule surfaces new advisories against an unchanged pin.
+  bridge-go-deps:
+    name: Bridge Go module scan (report only)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Fetch exactly the commit the Bridge build compiles. The Dockerfile
+      # refuses any BRIDGE_VERSION that does not resolve to BRIDGE_COMMIT,
+      # so the commit alone identifies the source. Bridge CI and operators
+      # build through Compose from .env (copied from .env.example), whose
+      # BRIDGE_COMMIT overrides the Dockerfile and docker-compose.yml
+      # defaults, so .env.example is the pin scanned; the summary warns
+      # when the other two pin sites disagree with it.
+      - name: Fetch the pinned Bridge source
+        id: fetch
+        continue-on-error: true
+        run: |
+          hex='[0-9a-f]\{40\}'
+          commit="$(sed -n "s/^BRIDGE_COMMIT=\(${hex}\)$/\1/p" .env.example)"
+          dockerfile="$(sed -n "s/^ARG BRIDGE_COMMIT=\(${hex}\)$/\1/p" bridge/Dockerfile)"
+          compose="$(sed -n "s/^ *BRIDGE_COMMIT: \${BRIDGE_COMMIT:-\(${hex}\)}$/\1/p" docker-compose.yml)"
+          if [[ -z "${commit}" ]]; then
+            printf 'No 40-hex BRIDGE_COMMIT found in .env.example.\n' >&2
+            exit 1
+          fi
+          printf 'BRIDGE_COMMIT=%s\n' "${commit}" >> "${GITHUB_ENV}"
+          if [[ "${dockerfile}" != "${commit}" || "${compose}" != "${commit}" ]]; then
+            printf 'PIN_MISMATCH=1\n' >> "${GITHUB_ENV}"
+            printf '::warning::BRIDGE_COMMIT differs across .env.example, bridge/Dockerfile and docker-compose.yml; scanning the .env.example pin.\n'
+          fi
+          git init -q bridge-src
+          git -C bridge-src fetch -q --depth 1 https://github.com/ProtonMail/proton-bridge.git "${commit}"
+          git -C bridge-src checkout -q FETCH_HEAD
+
+      - name: Install Trivy
+        if: steps.fetch.outcome == 'success'
+        uses: aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567 # v0.3.1
+        with:
+          version: v0.69.3
+          cache: true
+
+      - name: Scan Bridge Go modules
+        if: steps.fetch.outcome == 'success'
+        continue-on-error: true
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          skip-setup-trivy: true
+          scan-type: fs
+          scan-ref: bridge-src
+          scanners: vuln
+          format: table
+          output: bridge-go-vulns.txt
+          exit-code: "0"
+
+      - name: Write the report to the job summary
+        if: always()
+        run: |
+          {
+            printf '## Bridge Go module scan (report only)\n\n'
+            printf 'Proton Bridge commit <code>%s</code>, every severity. Findings never fail CI.\n\n' "${BRIDGE_COMMIT:-unknown}"
+            if [[ -n "${PIN_MISMATCH:-}" ]]; then
+              printf '**Warning:** BRIDGE_COMMIT differs across .env.example, bridge/Dockerfile and docker-compose.yml; this report covers the .env.example pin.\n\n'
+            fi
+            if [[ -s bridge-go-vulns.txt ]]; then
+              printf '```\n'
+              cat bridge-go-vulns.txt
+              printf '```\n'
+            else
+              printf 'The scan produced no report; see the step logs.\n'
+            fi
+          } >> "${GITHUB_STEP_SUMMARY}"
 
   bandit:
     name: Bandit static analysis

@@ -762,7 +762,10 @@ Notes:
   beside it. A rule change gets matching cases in its fixture
   (`.semgrep/compose.test.yml`, `.semgrep/shell.sh`).
 - for Dockerfile, build, or container-runtime changes, run the smallest relevant `docker compose build ...` subset when practical
-- for Bridge build, patch, or version-bump changes, run `make bridge-upgrade-check`
+- for Bridge build, patch, or version-bump changes, run `make bridge-upgrade-check`;
+  the report-only "Bridge Go module scan" job in `.github/workflows/security.yml`
+  lists advisories in Proton's Go modules at the pinned `BRIDGE_COMMIT` in its
+  job summary and never fails CI
 - prefer real `.eml` fixtures for parser tests
 - integration tests should mock IMAP rather than hitting a live Bridge instance
 - add or update tests when behavior changes
