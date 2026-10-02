@@ -517,9 +517,11 @@ def register_search_tools(
                 if not thread:
                     raise ToolError(f"Thread not found: {thread_id}")
                 embedding = await embed_query(embed_client, query, expected_embed_dim)
+                # The same selection as ask_mailbox: chunks of attachments
+                # whose filename or MIME type the query matches lead.
                 with stage("evidence_fetch"):
                     grouped = await asyncio.to_thread(
-                        db.get_evidence_chunks_for_threads, [thread_id], embedding, limit
+                        db.get_query_evidence_chunks, query, [thread_id], embedding, limit
                     )
                 chunks = grouped.get(thread_id, [])
                 count("evidence_chunks", len(chunks))
