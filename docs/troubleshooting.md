@@ -304,11 +304,7 @@ Bridge container to inspect; check the app and the connection instead.
 - **`UIDVALIDITY genuinely changed` or `Unable to recover from
   UIDVALIDITY change` after switching modes.** mbsync's sync state
   belongs to the previous Bridge. mbsync leaves those folders untouched;
-  see step 4 of
-  [Switching an existing installation](setup.md#switching-an-existing-installation).
-  The log shows `<folder>` in place of the folder name; see
-  [Folder names in mbsync's log](#folder-names-in-mbsyncs-log) to find
-  which folders are affected.
+  see [mbsync reports a UIDVALIDITY change](#mbsync-reports-a-uidvalidity-change).
 
 ## A Proton folder was renamed or deleted
 
@@ -431,12 +427,139 @@ docker volume rm $names
 make up                # or make up-macos-bridge in macOS Bridge mode
 ```
 
-To keep a copy of the old Maildir first, back it up as in step 4 of
-[Switching an existing installation](setup.md#switching-an-existing-installation).
+To keep a copy of the old Maildir first, back it up as in
+[Recover from a genuine change](#recover-from-a-genuine-change).
 The Bridge vault and mbsync's certificate pin (the `mbsync-state` volume)
 are untouched. mbsync then pulls the whole mailbox, and the indexer
 rebuilds the index from it, which re-embeds every message (a cost with a
 paid embedding provider).
+
+## mbsync reports a UIDVALIDITY change
+
+Reinstalling or resetting Bridge, re-adding the account, rebuilding the
+Bridge container's vault, or switching between the Bridge container and
+the macOS Bridge app can leave three pieces of mbsync's state stale. Each
+one stops the sync before the next can show, so after such a change they
+appear in this order:
+
+| Log line in `docker logs mbsync` | What is stale | Fix |
+| --- | --- | --- |
+| `Bridge cert fingerprint does not match pinned value`, or in macOS Bridge mode `the Bridge certificate does not match BRIDGE_CERT_FINGERPRINT` | The certificate pin. Checked before mbsync logs in. | Verify the new certificate, then rotate the pin: [Bridge cert pin mismatch](#mbsync-refuses-to-sync--bridge-cert-pin-mismatch), or [macOS Bridge mode](#macos-bridge-mode-mbsync-cannot-reach-or-verify-the-bridge-app). |
+| `IMAP command 'LOGIN <user> <pass>' returned an error: NO (server text withheld)` (or `AUTHENTICATE PLAIN <authdata>`, or `BAD`) | The credentials: Bridge refused `BRIDGE_USER` or `.secrets/bridge_pass.txt`. | Copy the new username and password from Bridge: [re-authenticate](#bridge-credentials-expired--need-to-re-authenticate), or step 2 of [Switching an existing installation](setup.md#switching-an-existing-installation). |
+| `Error: channel protonmail, far side box <folder>: UIDVALIDITY genuinely changed (at UID 42).` or `... Unable to recover from UIDVALIDITY change.` | The sync state: this Bridge numbers the folder's messages differently. | Below. |
+
+### Spurious or genuine
+
+mbsync records each folder's IMAP UIDVALIDITY and the UID of every
+message it pulled, in the folder's `.mbsyncstate` (see
+[Folder names in mbsync's log](#folder-names-in-mbsyncs-log)). When
+Bridge reports a different UIDVALIDITY, isync 1.4.4 tells the two cases
+apart itself, by comparing the Message-ID of each message it pulled with
+the message Bridge now serves at that UID:
+
+- **Spurious**: every message it can check is still at its old UID.
+  isync accepts the new UIDVALIDITY, logs
+  `Notice: channel protonmail, far side box <folder>: Recovered from change of UIDVALIDITY.`
+  and syncs as usual. Nothing to do.
+- **Genuine**: a UID now holds another message. isync logs
+  `UIDVALIDITY genuinely changed (at UID <n>)`.
+- **Unknown**: no UID contradicts the old state, but too few messages
+  could be confirmed (fewer than 20, and fewer than 80% of those it
+  pulled before; typical of Drafts). isync logs
+  `Unable to recover from UIDVALIDITY change`. Treat it as genuine.
+
+`UIDVALIDITY of both far side <folder> and near side <folder> changed`,
+or a `near side box` line, means the local Maildir's own UIDVALIDITY
+changed, which happens when something other than mbsync rewrites the
+Maildir (a restore from a backup, for example). Treat it as genuine too.
+
+In each error case isync skips that folder and changes nothing in it
+(mbsync is pull-only and never expunges); the other folders keep
+syncing. The run counts as a failed sync, and five in a row restart
+mbsync. Retrying does not help: the state cannot be reused.
+
+If every folder reports a genuine change right after `BRIDGE_USER`
+changed, first check that it names the right account (the Bridge CLI's
+`info`, or the account's IMAP details in the Bridge app). Another
+account's mailbox looks like a genuine change too.
+
+### Recover from a genuine change
+
+Back up the Maildir, then start it over together with the index. Mail
+is pulled again from Proton, and the backup keeps every file the
+Maildir held. Run these from the checkout, with the project name the
+stack runs under:
+
+```bash
+make down
+names=$(docker compose config --format json | python3 -c 'import json, sys
+v = json.load(sys.stdin)["volumes"]
+print(v["maildir-volume"]["name"], v["sqlite-volume"]["name"])')
+maildir=${names%% *}
+mkdir -m 700 -p ~/protonmail-local-ai-backup
+docker run --rm -v "$maildir:/maildir:ro" -v ~/protonmail-local-ai-backup:/backup \
+    debian:bookworm-slim bash -c '
+        tar -C /maildir -czf /backup/maildir-uidvalidity.tgz . &&
+        find /maildir -type f \( -path "*/cur/*" -o -path "*/new/*" \) | wc -l &&
+        tar -tzf /backup/maildir-uidvalidity.tgz | grep -cE "/(cur|new)/[^/]+$"'
+chmod 600 ~/protonmail-local-ai-backup/maildir-uidvalidity.tgz
+```
+
+The two numbers it prints are the message files in the Maildir and in
+the archive. Continue only if they match:
+
+```bash
+docker volume rm $names
+make up                # or make up-macos-bridge in macOS Bridge mode
+docker logs mbsync     # no UIDVALIDITY errors
+```
+
+What this keeps and changes:
+
+- The archive is the old Maildir as it was, every `.eml` included, and
+  is the only copy of mail that Proton no longer has (deleted there but
+  kept locally, with the `T` flag). It is your mailbox, unencrypted:
+  keep it outside the checkout, as above, so no `git add` can pick it
+  up, and on an encrypted disk (FileVault).
+- The sync state lives inside the Maildir, so it goes with it. The
+  certificate pin (the `mbsync-state` volume) and the Bridge vault are
+  untouched.
+- mbsync pulls the whole mailbox into the new Maildir, each message
+  once, and the indexer rebuilds the index from it, which re-embeds
+  every message (a cost with a paid embedding provider). Removing the
+  index too keeps the old files' rows from going through
+  [deletion reconciliation](#deletion-reconciliation-mirror-vs-archive).
+- The new index holds what Proton holds now. Under mirror retention
+  (the default) that is where the old index was heading: mail deleted in
+  Proton is reaped after the grace window anyway. Under archive mode
+  (`INDEXER_DELETION_ENABLED=false`), mail deleted in Proton before the
+  recovery is in the archive only and no longer searchable (#603).
+
+`make test-mbsync-layout` runs this against synthetic stores: a spurious
+change, a genuine one that fails every sync without changing a local
+file, and the fresh Maildir that then holds each message once while the
+old one stays whole.
+
+### Why not reset only the sync state
+
+Moving a folder's `.mbsyncstate` files aside (or editing them, or
+`.uidvalidity`) makes mbsync sync again, but it does not recover:
+
+- isync then knows none of the local files and downloads every message
+  again next to its old copy.
+- The copies differ in their bytes: isync writes a random `X-TUID`
+  header into each file it stores. The indexer keys a message on its
+  Message-ID and a hash of its bytes, so it indexes both, and every
+  message appears twice.
+- The old copies are no longer tracked: a flag change or deletion in
+  Proton reaches only the new copy, so a message deleted in Proton
+  stays searchable through its old copy, even under mirror retention.
+- Removing the old copies afterwards means deleting `.eml` files by
+  guesswork.
+
+`make test-mbsync-layout` checks each of these. A folder-by-folder reset
+saves only download time, since the index has to be rebuilt either way,
+and the log does not name the folders.
 
 ## Embedder or inference endpoint unreachable from containers
 
@@ -793,6 +916,11 @@ two-step rotation in
 recreate `mbsync` once with `BRIDGE_CERT_PIN_ROTATE=true`, check the
 `rotating pin` warning, then recreate it with
 `BRIDGE_CERT_PIN_ROTATE=false` to re-enable pin enforcement.
+
+Once the pin is rotated, the new Bridge may number the mailbox's
+messages differently. If mbsync then reports `UIDVALIDITY genuinely
+changed`, see
+[mbsync reports a UIDVALIDITY change](#mbsync-reports-a-uidvalidity-change).
 
 ## mbsync refuses to sync — Bridge cert pin mismatch
 
