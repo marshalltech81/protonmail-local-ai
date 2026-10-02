@@ -137,12 +137,25 @@ def bounded_logging:
     (if $svc != "mcp-server" and ($s | list("ports")) != []
         then "publishes a port" else empty end),
     (if $svc == "mcp-server"
-        and ($s | list("ports") | map("\(.host_ip):\(.published):\(.target)")) != ["127.0.0.1:3000:3000"]
-        then "ports are not only 127.0.0.1:3000:3000" else empty end),
+        and ($s | list("ports") | map("\(.host_ip):\(.published):\(.target)/\(.protocol)"))
+            != ["127.0.0.1:3000:3000/tcp"]
+        then "ports are not only 127.0.0.1:3000:3000/tcp" else empty end),
+    (if [$s | list("post_start")[], list("pre_stop")[] | select(.privileged == true)] != []
+        then "runs a privileged lifecycle hook" else empty end),
+    (if ($s.deploy.resources.reservations.devices // []) != []
+        then "reserves devices" else empty end),
     (if ($s.networks // {} | has("bridge-net"))
         and ($svc | IN("protonmail-bridge", "mbsync") | not)
         then "joins bridge-net" else empty end),
-    (if $bs == null then empty else
+    # A service the base does not define must name its non-root user (an
+    # unset user is the image default, possibly root) and gets no secrets.
+    (if $bs == null then
+        (if $s.user == null then "sets no user" else empty end),
+        (if ($s | list("secrets")) != [] then "uses a secret" else empty end)
+    else
+        ($s | list("secrets")[] | .source as $src
+            | select([$bs | list("secrets")[] | select(.source == $src)] == [])
+            | "gains secret \($src)"),
         (if $bs.init == true and $s.init != true then "init is not true" else empty end),
         ($bs | list("cap_drop")[] | select(. as $c | $s | list("cap_drop") | index($c) == null)
             | "cap_drop lost \(.)"),
@@ -207,6 +220,58 @@ merged_hardening_holds_for_every_overlay_combination() {
     expect_merged_hardening "$BASE" "$MACOS" "$HARDENED" || return 1
 }
 
+# make first-run must keep Bridge's log driver at none: its `info` output
+# holds the Bridge credentials. Bounded logging alone would accept json-file.
+first_run_logging_disabled() {
+    render "$BASE" "$FIRST_RUN" "$@" || return 1
+    expect '.services["protonmail-bridge"].logging.driver == "none"'
+}
+
+first_run_keeps_bridge_logging_disabled() {
+    first_run_logging_disabled || return 1
+    cat >"$WORK/first-run-logging.yml" <<'EOF'
+services:
+  protonmail-bridge:
+    logging: !reset null
+EOF
+    if first_run_logging_disabled "$WORK/first-run-logging.yml" >/dev/null; then
+        printf 'a reset first-run log driver passed\n'
+        return 1
+    fi
+}
+
+# Settings the base never uses, so its own render cannot vouch for them:
+# a new service's user and secrets, lifecycle hooks, device reservations.
+merged_hardening_rejects_new_grants() {
+    expect_overlay_rejected new-grants \
+        "extra: sets no user" "extra: uses a secret" \
+        "extra: runs a privileged lifecycle hook" "extra: reserves devices" \
+        "mcp-server: gains secret bridge_pass" <<'EOF'
+services:
+  mcp-server:
+    secrets: [bridge_pass]
+  extra:
+    image: example.invalid/extra:1
+    init: true
+    read_only: true
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    pids_limit: 16
+    logging:
+      driver: none
+    networks: [app-net]
+    secrets: [embed_api_key]
+    post_start:
+      - command: ["true"]
+        privileged: true
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities: [gpu]
+EOF
+}
+
 merged_hardening_rejects_reset_security_opt() {
     expect_overlay_rejected reset-security-opt \
         "mbsync: security_opt lacks no-new-privileges:true" <<'EOF'
@@ -268,11 +333,18 @@ EOF
 
 merged_hardening_rejects_override_ports_and_networks() {
     expect_overlay_rejected override-ports \
-        "mcp-server: ports are not only 127.0.0.1:3000:3000" <<'EOF' || return 1
+        "mcp-server: ports are not only 127.0.0.1:3000:3000/tcp" <<'EOF' || return 1
 services:
   mcp-server:
     ports: !override
       - "3000:3000"
+EOF
+    expect_overlay_rejected override-ports-udp \
+        "mcp-server: ports are not only 127.0.0.1:3000:3000/tcp" <<'EOF' || return 1
+services:
+  mcp-server:
+    ports: !override
+      - "127.0.0.1:3000:3000/udp"
 EOF
     expect_overlay_rejected override-networks "mcp-server: joins bridge-net" <<'EOF'
 services:
@@ -473,6 +545,9 @@ check "merged hardening rejects an !override that drops a service" \
 check "merged hardening rejects max-size on a driver other than json-file" \
     merged_hardening_rejects_max_size_on_another_logging_driver
 check "merged hardening rejects renamed or shared networks" merged_hardening_rejects_renamed_networks
+check "first run keeps Bridge's log driver at none" first_run_keeps_bridge_logging_disabled
+check "merged hardening rejects new users, secrets, hooks and devices" \
+    merged_hardening_rejects_new_grants
 check "merged hardening rejects a service a top-level include brings in" \
     merged_hardening_rejects_an_included_service
 
