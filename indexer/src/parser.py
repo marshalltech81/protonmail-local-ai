@@ -713,9 +713,9 @@ def _assemble_body(nodes: list[_BodyNode]) -> str:
     carrying any text (the parts of an alternative are renderings of one
     body), and a ``multipart/related`` contributes only its root, taken
     to be its first child (RFC 2387's default; a ``start`` parameter
-    naming another root is not read): its other parts are resources the
-    root refers to. The parts of any other container are sequential
-    content (#295).
+    naming another root is not read), and nothing when that child is an
+    attachment (#450): its other parts are resources the root refers to.
+    The parts of any other container are sequential content (#295).
 
     ``nodes`` is in walk (pre-)order, so a child always follows its
     parent: one backward pass settles each alternative's and related's
@@ -798,6 +798,12 @@ def _extract_body_and_attachments(
             nodes.append(node)
             if parent >= 0 and _selects(nodes[parent]):
                 nodes[parent].children.append(len(nodes) - 1)
+        elif is_attachment and parent >= 0 and nodes[parent].related:
+            # An attachment keeps its position among a related's children
+            # as an empty node, so one that is the root makes the related
+            # contribute nothing rather than promoting the next part (#450).
+            nodes.append(_BodyNode(parent, alternative=False))
+            nodes[parent].children.append(len(nodes) - 1)
         if part.is_multipart():
             # A decoded container stands in for its transport form; its
             # children are one decode deeper.
