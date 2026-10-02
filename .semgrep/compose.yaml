@@ -8,8 +8,8 @@
 #   - forbidden settings (privileged, namespaces shared with the host or
 #     another container, cap_add, devices, docker socket, weakened
 #     security_opt, read_only other than true, unbounded pids_limit or
-#     logging, published ports, writable host bind mounts, extra
-#     services on bridge-net) apply to every file, so an overlay cannot
+#     logging, published ports, writable host bind mounts, extends and
+#     volumes_from, extra services on bridge-net) apply to every file, so an overlay cannot
 #     add them. A security setting whose value is interpolated
 #     (`${VAR:-default}`) counts as unsafe, since its default can be;
 #   - required hardening (read_only, no-new-privileges, cap_drop ALL,
@@ -352,6 +352,20 @@ rules:
         - "docker-compose*.yml"
         - "docker-compose*.yaml"
     pattern: "extends: $BASE"
+
+  - id: compose-volumes-from
+    languages: [yaml]
+    severity: ERROR
+    message: >-
+      `volumes_from` mounts every volume of another service or container
+      without naming them here, so the other rules cannot see what the
+      service gets (from mbsync it would hand mcp-server the Maildir).
+      Name each volume the service needs instead.
+    paths:
+      include:
+        - "docker-compose*.yml"
+        - "docker-compose*.yaml"
+    pattern: "volumes_from: $SOURCES"
 
   - id: compose-bridge-net-member
     languages: [yaml]
