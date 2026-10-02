@@ -316,7 +316,7 @@ Secrets are a hard boundary.
 Before staging or committing, check for secrets:
 
 ```bash
-git diff --staged | grep -iE '(password|pass|secret|token|key|credential)' | grep '^\+'
+git diff --staged | grep -iE '(password|pass|secret|token|key|credential)' | grep '^[+]'
 ```
 
 If a secret was committed, rotate it and remove it from git history using `git filter-repo`.
