@@ -101,6 +101,26 @@ validate_bridge_endpoint() {
     fi
 }
 
+check_maildir_layout() {
+    # mbsyncrc keeps each folder's sync state in the folder's own directory
+    # (SyncState *, #275). A Maildir synced with the earlier layout has its
+    # state files at the root instead, which isync would ignore: it would
+    # download every folder again next to the copies already there. Refuse
+    # to sync until the operator starts the Maildir over. The message names
+    # no file, because those state file names hold folder names.
+    local found
+
+    if ! found="$(find "$MAILDIR_PATH" -mindepth 1 -maxdepth 1 -name '.mbsyncstate*' -print -quit)"; then
+        echo ">>> ERROR: could not inspect ${MAILDIR_PATH} for an earlier Maildir layout — refusing to sync." >&2
+        return 1
+    fi
+    if [[ -n "$found" ]]; then
+        echo ">>> ERROR: ${MAILDIR_PATH} was synced with an earlier mbsync layout (sync state at the Maildir root) — refusing to sync." >&2
+        echo ">>> Syncing it with this version would download every folder again. Start the Maildir over: see docs/troubleshooting.md, \"mbsync refuses an earlier Maildir layout\"." >&2
+        return 1
+    fi
+}
+
 expected_fingerprint() {
     # BRIDGE_CERT_FINGERPRINT in the pin's form: openssl's
     # "sha256 Fingerprint=AB:CD:..." line, its value, or bare hex.
@@ -645,6 +665,7 @@ record_successful_sync() {
 # =============================================================================
 install_signal_handlers
 require_prerequisites
+check_maildir_layout || exit 1
 
 # BRIDGE_CERT_PIN_ROTATE is an opt-in for accepting one legitimate
 # Bridge cert rotation. It is part of the container's environment, so

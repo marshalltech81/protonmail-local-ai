@@ -31,7 +31,10 @@ ProtonBridge container
 mbsync container
   - Polls Bridge IMAP every SYNC_INTERVAL seconds in a bounded retry loop
   - Writes Maildir format to maildir-volume
-  - Maintains sync state for incremental updates
+  - Maintains sync state for incremental updates, in each folder's own
+    Maildir directory (`SyncState *`, so no two folders share a state
+    file, #275); refuses to start on a Maildir synced with the earlier
+    root-level state
   - Pins Bridge TLS cert on first boot (SHA-256 fingerprint stored in
     mbsync-state volume); refuses to sync on mismatch unless the operator
     sets BRIDGE_CERT_PIN_ROTATE=true for a legitimate rotation

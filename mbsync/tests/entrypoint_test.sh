@@ -844,6 +844,71 @@ success_stamp_is_written_by_a_completed_sync() {
     [[ "$(find "$MAILDIR_PATH" -type f | wc -l)" -eq 1 ]] || return 1
 }
 
+# --- check_maildir_layout: earlier layouts are refused (#275) -------------
+#
+# The Maildir must be started over rather than synced with sync state
+# isync would no longer read. Folder names stand in as a synthetic marker
+# that must not reach the log.
+
+layout_setup() {
+    MAILDIR_PATH="$WORK/maildir-layout-$1"
+    load check_maildir_layout
+}
+
+# shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
+an_empty_maildir_is_accepted() {
+    layout_setup empty
+    mkdir -p "$MAILDIR_PATH"
+    check_maildir_layout
+}
+
+# shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
+the_current_layout_is_accepted() {
+    layout_setup current
+    mkdir -p "$MAILDIR_PATH/INBOX/cur" "$MAILDIR_PATH/Folders/MarkerZq9/cur"
+    : >"$MAILDIR_PATH/INBOX/.mbsyncstate"
+    : >"$MAILDIR_PATH/Folders/MarkerZq9/.mbsyncstate"
+    : >"$MAILDIR_PATH/.mbsync-last-sync.json"
+    check_maildir_layout
+}
+
+# shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
+root_sync_state_is_refused_without_naming_it() {
+    local name i=0
+    for name in '.mbsyncstateFolders!MarkerZq9' '.mbsyncstateINBOX.journal'; do
+        i=$((i + 1))
+        layout_setup "root-$i"
+        mkdir -p "$MAILDIR_PATH/INBOX/cur"
+        : >"$MAILDIR_PATH/$name"
+        if check_maildir_layout 2>"$WORK/layout-err"; then
+            echo "accepted $name"
+            return 1
+        fi
+        grep -q "synced with an earlier mbsync layout" "$WORK/layout-err" || return 1
+        if grep -q MarkerZq9 "$WORK/layout-err"; then
+            echo "a folder name reached the log"
+            return 1
+        fi
+    done
+}
+
+# shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
+an_uninspectable_maildir_is_refused() {
+    layout_setup missing
+    if check_maildir_layout 2>"$WORK/layout-err"; then
+        return 1
+    fi
+    grep -q "could not inspect" "$WORK/layout-err"
+}
+
+the_layout_check_runs_before_any_sync() {
+    local check_line sync_line
+    check_line="$(grep -n '^check_maildir_layout || exit 1$' "$ENTRYPOINT" | cut -d: -f1)"
+    sync_line="$(grep -n '^wait_for_bridge_imap$' "$ENTRYPOINT" | cut -d: -f1)"
+    [[ -n "$check_line" && -n "$sync_line" ]] || return 1
+    ((check_line < sync_line)) || return 1
+}
+
 # --- healthcheck: liveness, not freshness (#277) ----------------------------
 #
 # Healthy means the sync loop is alive: config and cert are in place and
@@ -1490,6 +1555,12 @@ check "activity is marked after a failed mbsync" activity_is_marked_after_a_fail
 check "activity is marked after a failed repair" activity_is_marked_after_a_failed_repair
 check "a completed sync still writes the success stamp" \
     success_stamp_is_written_by_a_completed_sync
+check "an empty Maildir passes the layout check" an_empty_maildir_is_accepted
+check "the current layout passes the layout check" the_current_layout_is_accepted
+check "sync state at the Maildir root is refused without naming it" \
+    root_sync_state_is_refused_without_naming_it
+check "a Maildir that cannot be inspected is refused" an_uninspectable_maildir_is_refused
+check "the layout check runs before any sync" the_layout_check_runs_before_any_sync
 check "health: a long first sync in progress is healthy" long_first_sync_in_progress_is_healthy
 check "health: a fresh heartbeat between syncs is healthy" fresh_heartbeat_between_syncs_is_healthy
 check "health: a stale heartbeat without mbsync is unhealthy" \

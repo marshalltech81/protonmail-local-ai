@@ -903,9 +903,9 @@ to be incompatible, and it starts with a backup.
    [troubleshooting](troubleshooting.md#mbsync-refuses-to-sync--bridge-cert-pin-mismatch)
    for the rotation flag's semantics.
 4. **mbsync's sync state (UIDVALIDITY).** mbsync records each Proton
-   folder's IMAP UIDVALIDITY and message UIDs in `.mbsyncstate*` files at
-   the Maildir root. Another Bridge instance usually numbers the same
-   folders differently. Watch the first sync after the switch:
+   folder's IMAP UIDVALIDITY and message UIDs in a `.mbsyncstate` file in
+   that folder's Maildir directory. Another Bridge instance usually
+   numbers the same folders differently. Watch the first sync after the switch:
    - No `UIDVALIDITY` errors: the state is compatible and syncing
      continues into the existing Maildir.
    - `UIDVALIDITY genuinely changed` or `Unable to recover from

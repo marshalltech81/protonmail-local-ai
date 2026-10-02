@@ -39,6 +39,16 @@ jobs:
       - name: Run the TLS check against a synthetic Bridge
         run: bash mbsync/tests/tls_check.sh
 
+  mbsync-layout:
+    name: mbsync layout check
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Run the Maildir layout check with synthetic stores
+        run: bash mbsync/tests/layout_check.sh
+
   compose-rendering:
     name: Compose rendering
     runs-on: ubuntu-latest
