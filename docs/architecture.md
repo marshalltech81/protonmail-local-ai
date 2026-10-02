@@ -35,7 +35,10 @@ mbsync container
     sets BRIDGE_CERT_PIN_ROTATE=true for a legitimate rotation
   - Fails closed if cert extraction or repeated sync attempts fail
   - After each successful sync, writes a last-sync stamp
-    (`.mbsync-last-sync.json`) at the Maildir root
+    (`.mbsync-last-sync.json`) at the Maildir root. A sync whose only
+    errors are Proton folders it can no longer open (renamed or deleted
+    upstream; the local copy is kept) counts as successful, with a
+    warning that gives a count, not folder names (#276)
   - Healthcheck is liveness only: healthy while the sync loop is alive
     (a heartbeat touched around every attempt is fresh, or an mbsync or
     its permission repair walk is running), so the indexer and MCP

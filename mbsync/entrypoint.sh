@@ -11,6 +11,11 @@ readonly CERT_FILE="${RUNTIME_DIR}/bridge-cert.pem"
 # whatever its outcome (see mark_sync_activity). Freshness is the separate
 # success stamp below.
 readonly SYNC_ACTIVITY_FILE="${RUNTIME_DIR}/last-sync-activity"
+# Two numbers report_mbsync_errors leaves for run_sync once mbsync's
+# stderr closes: far-side box lines withheld and other lines passed on.
+readonly MBSYNC_ERROR_COUNTS_FILE="${RUNTIME_DIR}/mbsync-error-counts"
+# How long run_sync waits for those counts after mbsync exits.
+readonly MBSYNC_ERROR_COUNTS_WAIT_TENTHS=100
 readonly BRIDGE_PASS_FILE="/run/secrets/bridge_pass"
 # State directory persists the pinned Bridge cert fingerprint across
 # container restarts. The directory is backed by a named volume so it
@@ -285,18 +290,81 @@ mark_sync_activity() {
     touch "$SYNC_ACTIVITY_FILE"
 }
 
+report_mbsync_errors() {
+    # Filters mbsync's stderr as it arrives, passing each line on to ours
+    # at once, except a line saying a far-side box cannot be opened: it
+    # names a Proton folder, which is mailbox content, so it is withheld
+    # and counted instead. Only the counts are kept, in memory; at end of
+    # input it writes "<withheld> <passed on>" to MBSYNC_ERROR_COUNTS_FILE.
+    #
+    # isync 1.4.4 (Debian bookworm) writes exactly this line to stderr
+    # when Bridge refuses to open a box, then syncs the remaining boxes
+    # and exits 1. That is what a folder renamed or deleted in Proton
+    # after it synced produces on every run, since Create Near and
+    # Expunge None keep its local copy (#276). An INBOX line is passed on
+    # and counted as another error: INBOX cannot be renamed or deleted,
+    # so Bridge refusing it means Bridge is refusing boxes. One pass,
+    # linear in the output.
+    awk -v far_box='^Error: channel protonmail: far side box .+ cannot be opened[.]$' \
+        -v inbox='Error: channel protonmail: far side box INBOX cannot be opened.' \
+        -v counts="$MBSYNC_ERROR_COUNTS_FILE" '
+        $0 ~ far_box && $0 != inbox { withheld++; next }
+        { other++; print > "/dev/stderr"; fflush("/dev/stderr") }
+        END { print withheld + 0, other + 0 > counts; close(counts) }
+    '
+}
+
+read_mbsync_error_counts() {
+    # mbsync's stderr closes when it exits, but the filter may still be
+    # finishing. Waits a bounded time for its counts and prints them;
+    # fails if they never arrive, so nothing is tolerated.
+    local i
+    for ((i = 0; i < MBSYNC_ERROR_COUNTS_WAIT_TENTHS; i++)); do
+        if [[ -s "$MBSYNC_ERROR_COUNTS_FILE" ]]; then
+            cat "$MBSYNC_ERROR_COUNTS_FILE"
+            return 0
+        fi
+        sleep 0.1
+    done
+    echo ">>> WARNING: mbsync's error filter did not finish; not classifying this sync's errors." >&2
+    return 1
+}
+
 run_sync() {
     # Fails when mbsync or the permission repair fails: a sync whose mail
     # the indexer cannot read must not be recorded as successful. The
     # repair runs even after a failed mbsync, for what it did deliver.
     #
+    # One failure is tolerated: when mbsync's only errors are far-side
+    # folders it could not open (see report_mbsync_errors), the rest of
+    # the mailbox synced and those folders have nothing left to pull, so
+    # the run counts as a success, with a warning. Its success stamp is
+    # then written as usual: the local Maildir is as current as Proton
+    # allows, and withholding the stamp would report a stale mailbox for
+    # as long as the local copy is kept.
+    #
     # Activity is marked before mbsync, again once it ends (the repair
     # walks the whole Maildir with no mbsync running, so the heartbeat
     # must be fresh for it), and after the attempt, whatever its outcome.
-    local rc=0
+    local rc=0 counts="" withheld=0 other=0
+    rm -f "$MBSYNC_ERROR_COUNTS_FILE"
     mark_sync_activity
-    run_child mbsync -c "$CONFIG_FILE" -a 2>&1 || rc=$?
+    # stderr goes through the filter as it is written; run_child still
+    # waits on (and signals) mbsync itself.
+    run_child mbsync -c "$CONFIG_FILE" -a 2> >(report_mbsync_errors) || rc=$?
     mark_sync_activity
+    # Missing counts leave withheld at 0, so nothing is tolerated.
+    if counts="$(read_mbsync_error_counts)"; then
+        read -r withheld other <<<"$counts"
+    fi
+    rm -f "$MBSYNC_ERROR_COUNTS_FILE"
+    if ((withheld > 0)); then
+        echo ">>> WARNING: ${withheld} far-side folder(s) could not be opened, most likely renamed or deleted in Proton; their local copies are kept. Folder names are not logged (see docs/troubleshooting.md)." >&2
+        if ((rc == 1 && other == 0)); then
+            echo ">>> mbsync reported no other error — counting this sync as successful." >&2
+            rc=0
+        fi
+    fi
     if ! relax_new_maildir_perms; then
         echo ">>> ERROR: could not make new Maildir entries readable to the indexer." >&2
         rc=1
