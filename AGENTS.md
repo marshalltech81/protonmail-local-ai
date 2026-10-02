@@ -696,6 +696,16 @@ Notes:
 - run `make typecheck` for mypy checks when Python service code changes
 - run `pre-commit run --all-files` when practical before opening a PR or finalising a substantial change; the `hadolint-docker` hook needs a running Docker daemon, so when Docker is down and no Dockerfile changed, run with `SKIP=hadolint-docker` and say so in the PR
 - for Docker Compose or env wiring changes, run `docker compose config --quiet`
+- for Docker Compose or shell script changes, run the Semgrep job from
+  `.github/workflows/security.yml` locally:
+  `uvx --from semgrep==1.179.0 semgrep test .semgrep` and
+  `uvx --from semgrep==1.179.0 semgrep scan --metrics=off --strict --error --config .semgrep/compose.yaml --config .semgrep/shell.yaml .`.
+  The rules in `.semgrep/` encode the hardening and exposure rules
+  above and cover every `docker-compose*.yml` overlay and `*.sh` file.
+  Fix a finding; allow-list one only with owner approval, as a
+  `# nosemgrep: <rule-id>` comment on the reported line with the reason
+  beside it. A rule change gets matching cases in its fixture
+  (`.semgrep/compose.test.yml`, `.semgrep/shell.sh`).
 - for Dockerfile, build, or container-runtime changes, run the smallest relevant `docker compose build ...` subset when practical
 - for Bridge build, patch, or version-bump changes, run `make bridge-upgrade-check`
 - prefer real `.eml` fixtures for parser tests
