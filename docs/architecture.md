@@ -557,7 +557,11 @@ itself never reaches the log or `last_error`. A new thread's ID is its
 root message's Message-ID, so this also bounds thread IDs. A longer
 `In-Reply-To` or `References` entry is dropped from the message (it
 could never match an indexed Message-ID), so threading uses the rest
-and the stored reply fields stay bounded.
+and the stored reply fields stay bounded. This assumes no indexed
+message has a longer ID: an index built before the limit (none is
+deployed) is rebuilt from Maildir, as for any pre-deployment change,
+since a reply's dropped reference to an older over-long ID could no
+longer find that message's thread.
 
 Each indexed message gets one row — its own
 subject (cut to `SUBJECT_MAX_CHARS`, 2,000 decoded characters, at parse
