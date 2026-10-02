@@ -1337,12 +1337,8 @@ class Database:
             # evidence" gap where the LLM saw body text instead of
             # the attachment the user asked about.
             with timings.stage("evidence_fetch"):
-                matched_attachments = self._matched_attachments(query_text, wanted)
-                grouped = self.get_evidence_chunks_for_threads(
-                    wanted,
-                    query_embedding,
-                    per_thread_limit=evidence_per_thread,
-                    matched_attachments=matched_attachments,
+                grouped = self.get_query_evidence_chunks(
+                    query_text, wanted, query_embedding, per_thread_limit=evidence_per_thread
                 )
             for result in candidates:
                 result.evidence_chunks = grouped.get(result.thread_id, [])
@@ -2097,7 +2093,7 @@ class Database:
         "proposal-quote pdf" matches every PDF; ranking by BM25 keeps the
         file the query named ahead of the generic hits.
 
-        Used by ``hybrid_search(with_evidence=True)`` so per-thread
+        Used by ``get_query_evidence_chunks`` so per-thread
         evidence leads with the specific attachment the query named, not
         just any attachment in a thread that has one. The candidate
         threads already passed the search's filters, so none are
@@ -2303,6 +2299,31 @@ class Database:
             # other exception type is unexpected and should propagate.
             log.warning("Chunk vector search error: %s", type(e).__name__)
             return None
+
+    def get_query_evidence_chunks(
+        self,
+        query_text: str,
+        thread_ids: list[str],
+        embedding: list[float],
+        per_thread_limit: int,
+    ) -> dict[str, list[ChunkResult]]:
+        """Per-thread evidence for ``query_text``, as ``ask_mailbox`` sees it.
+
+        Looks up which of the threads' attachments the query names
+        (``_matched_attachments``) and passes them to
+        ``get_evidence_chunks_for_threads`` so their chunks lead each
+        thread's slice. ``hybrid_search(with_evidence=True)`` and the
+        thread-scoped ``get_evidence`` path both call this, so an audit
+        of one thread returns the passages ``ask_mailbox`` was given for
+        it (#461).
+        """
+        matched_attachments = self._matched_attachments(query_text, thread_ids)
+        return self.get_evidence_chunks_for_threads(
+            thread_ids,
+            embedding,
+            per_thread_limit=per_thread_limit,
+            matched_attachments=matched_attachments,
+        )
 
     def get_evidence_chunks_for_threads(
         self,

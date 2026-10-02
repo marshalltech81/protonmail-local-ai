@@ -269,8 +269,14 @@ are short the budget takes passages from lower-ranked threads. The
 returned set is close to an answer's evidence, not guaranteed to be the
 same ([#537](https://github.com/marshalltech81/protonmail-local-ai/issues/537)).
 The `thread_id`-scoped path returns that thread's chunks ranked
-against the query; it bypasses RRF fusion, so `include_scores` shows
-per-chunk vector distance but no lane provenance.
+against the query the way `ask_mailbox` ranks them: chunks of any
+attachment whose filename or MIME type the query matches come first
+(strongest match first), then the thread's other attachment chunks,
+then body chunks, each group by vector distance. With no attachment
+match the order is vector distance alone. At `limit=6` the result is
+the slice `ask_mailbox` gives its model for that thread. This path
+bypasses RRF fusion, so `include_scores` shows per-chunk vector
+distance but no lane provenance.
 
 ### `search_attachments`
 Locate indexed attachments by filename, MIME type, and extracted
@@ -694,8 +700,8 @@ citation-check lines (fixed text with counts and labels, never the
 model's words), a `Quote check:` count when the answer quotes, and
 the `Sources searched:` list. To audit a
 citation, call `get_evidence` with the same question and the
-citation's `thread_id`: the cited `chunk_id` is among the returned
-chunks (pass `limit` up to 60 for a long thread). A `thread` citation
+citation's `thread_id`: the cited `chunk_id` is among the first six
+returned chunks, attachment-matched passages included. A `thread` citation
 has no chunk; read it with `get_thread`.
 
 The check is about labels, statement coverage and quoted words, not
