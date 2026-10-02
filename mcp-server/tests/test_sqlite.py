@@ -2366,8 +2366,8 @@ class TestGetRecentChunksForThread:
     """
 
     def _build_chunked_db_with_timeline(self, tmp_path):
-        """Thread with three chunks at distinct ``chunked_at`` timestamps."""
-        from tests.conftest import _build_schema, _insert_chunk, _insert_thread
+        """Thread with three messages, one chunk each, at distinct dates."""
+        from tests.conftest import _build_schema, _insert_chunk, _insert_message, _insert_thread
 
         db_path = tmp_path / "timeline.db"
         conn = sqlite3.connect(str(db_path))
@@ -2388,31 +2388,40 @@ class TestGetRecentChunksForThread:
             snippet="oldest content",
             embedding=[1.0, 0.0, 0.0, 0.0],
         )
-        # Three chunks, oldest → newest by chunked_at.
+        # Three messages, oldest → newest.
+        _insert_message(
+            conn, message_id="m-old", thread_id="t-tl", sent_at="2024-01-01T00:00:00+00:00"
+        )
         _insert_chunk(
             conn,
             chunk_id="c-old",
-            message_id="t-tl",
+            message_id="m-old",
             thread_id="t-tl",
             text="oldest message content",
             embedding=[1.0, 0.0, 0.0, 0.0],
             chunk_index=0,
             chunked_at="2024-01-01T00:00:00+00:00",
         )
+        _insert_message(
+            conn, message_id="m-mid", thread_id="t-tl", sent_at="2024-06-01T00:00:00+00:00"
+        )
         _insert_chunk(
             conn,
             chunk_id="c-mid",
-            message_id="t-tl",
+            message_id="m-mid",
             thread_id="t-tl",
             text="middle message content",
             embedding=[1.0, 0.0, 0.0, 0.0],
             chunk_index=0,
             chunked_at="2024-06-01T00:00:00+00:00",
         )
+        _insert_message(
+            conn, message_id="m-new", thread_id="t-tl", sent_at="2024-12-01T00:00:00+00:00"
+        )
         _insert_chunk(
             conn,
             chunk_id="c-new",
-            message_id="t-tl",
+            message_id="m-new",
             thread_id="t-tl",
             text="newest reply content",
             embedding=[1.0, 0.0, 0.0, 0.0],
@@ -2425,7 +2434,7 @@ class TestGetRecentChunksForThread:
     def test_returns_latest_chunks_in_chronological_order(self, tmp_path):
         db = self._build_chunked_db_with_timeline(tmp_path)
         chunks = db.get_recent_chunks_for_thread("t-tl", limit=2)
-        # Selection picked the two newest by ``chunked_at DESC``;
+        # Selection picked the two newest by message date;
         # output reverses so the prompt reads oldest-first.
         assert [c.chunk_id for c in chunks] == ["c-mid", "c-new"]
 
@@ -2474,12 +2483,12 @@ class TestGetRecentChunksForThread:
         ``chunked_at`` than chunks for a recent reply — so the prior
         ordering surfaced stale content as "latest activity."
 
-        The query orders by ``message_date DESC``. A scenario where
+        The query orders by the message row's ``sent_at DESC``. A scenario where
         the two columns disagree (old message reindexed later than a
         newer message arrived) must rank by message date, not insert
         time.
         """
-        from tests.conftest import _build_schema, _insert_chunk, _insert_thread
+        from tests.conftest import _build_schema, _insert_chunk, _insert_message, _insert_thread
 
         db_path = tmp_path / "msg_date_ordering.db"
         conn = sqlite3.connect(str(db_path))
@@ -2501,8 +2510,10 @@ class TestGetRecentChunksForThread:
             embedding=[1.0, 0.0, 0.0, 0.0],
         )
         # Old message (2024-01) was REINDEXED today (e.g. reap-rebuild
-        # rewrote its chunks) — so chunked_at=NOW but message_date=
-        # 2024-01.
+        # rewrote its chunks) — so chunked_at=NOW but sent_at=2024-01.
+        _insert_message(
+            conn, message_id="m-old", thread_id="t-rebuild", sent_at="2024-01-01T00:00:00+00:00"
+        )
         _insert_chunk(
             conn,
             chunk_id="c-old-reindexed",
@@ -2512,10 +2523,12 @@ class TestGetRecentChunksForThread:
             embedding=[1.0, 0.0, 0.0, 0.0],
             chunk_index=0,
             chunked_at="2026-05-13T00:00:00+00:00",
-            message_date="2024-01-01T00:00:00+00:00",
         )
         # Recent reply (2024-12) was indexed in steady state — both
         # columns match.
+        _insert_message(
+            conn, message_id="m-newer", thread_id="t-rebuild", sent_at="2024-12-01T00:00:00+00:00"
+        )
         _insert_chunk(
             conn,
             chunk_id="c-newer-reply",
@@ -2525,7 +2538,6 @@ class TestGetRecentChunksForThread:
             embedding=[1.0, 0.0, 0.0, 0.0],
             chunk_index=0,
             chunked_at="2024-12-01T00:00:00+00:00",
-            message_date="2024-12-01T00:00:00+00:00",
         )
         conn.close()
 
@@ -2540,7 +2552,7 @@ class TestGetRecentChunksForThread:
             "c-old-reindexed",
             "c-newer-reply",
         ], (
-            "ordering must be by message_date (oldest-first in display), "
+            "ordering must be by message sent_at (oldest-first in display), "
             "not chunked_at — see Codex P1 finding on summarize_thread"
         )
 
@@ -3756,27 +3768,60 @@ class TestLaneProvenance:
 
 
 class TestMessageDateOnChunks:
-    """``ChunkResult.message_date`` is populated from ``message_chunks`` by
-    ``get_evidence_chunks_for_threads`` so get_evidence can show when a
-    cited passage arrived."""
+    """``ChunkResult.message_date`` is the ``sent_at`` of the chunk's
+    ``messages`` row, read by ``get_evidence_chunks_for_threads`` so
+    get_evidence can show when a cited passage arrived."""
 
     def test_evidence_chunks_carry_message_date(self, tmp_path):
-        from tests.conftest import _insert_chunk
+        from tests.conftest import _insert_message
 
         conn, path = _open_built_db_conn(tmp_path, "msgdate.db")
-        _insert_chunk(
+        _insert_message(
             conn,
-            chunk_id="c1",
             message_id="m1",
             thread_id="t1",
-            text="hello world",
-            embedding=[1.0, 0.0, 0.0, 0.0],
-            message_date="2024-05-09T08:00:00+00:00",
+            sent_at="2024-05-09T08:00:00+00:00",
+            body="hello world",
         )
         conn.close()
         db = Database(str(path))
         grouped = db.get_evidence_chunks_for_threads(["t1"], [1.0, 0.0, 0.0, 0.0])
         assert grouped["t1"][0].message_date == "2024-05-09T08:00:00+00:00"
+
+    def test_passage_date_is_always_its_message_row_sent_at(self, tmp_path):
+        """#575: a passage's date is its message row's ``sent_at``. A
+        reprocess that re-dates a message commits ``messages.sent_at``
+        in Phase 1; when Phase 2 then fails, the chunks are not
+        rewritten. Evidence dates and the timeline order must still
+        follow the new date."""
+        from tests.conftest import _insert_message
+
+        conn, path = _open_built_db_conn(tmp_path, "redate.db")
+        for mid, sent in (
+            ("early@example.com", "2024-01-01T09:00:00+00:00"),
+            ("late@example.com", "2024-02-01T09:00:00+00:00"),
+        ):
+            _insert_message(conn, message_id=mid, thread_id="t", sent_at=sent, body=mid)
+        redated = "2024-03-01T09:00:00+00:00"
+        # Only the message row changes, as after a Phase 1 commit.
+        conn.execute(
+            "UPDATE messages SET sent_at = ? WHERE claimant_id = ?",
+            (redated, claimant_of("early@example.com")),
+        )
+        conn.commit()
+        conn.close()
+        db = Database(str(path))
+
+        evidence = db.get_evidence_chunks_for_threads(["t"], [1.0, 0.0, 0.0, 0.0])["t"]
+        assert {c.message_id: c.message_date for c in evidence} == {
+            "early@example.com": redated,
+            "late@example.com": "2024-02-01T09:00:00+00:00",
+        }
+        timeline = db.get_recent_chunks_for_thread("t")
+        assert [(c.message_id, c.message_date) for c in timeline] == [
+            ("late@example.com", "2024-02-01T09:00:00+00:00"),
+            ("early@example.com", redated),
+        ]
 
 
 class TestSearchAttachments:
