@@ -213,7 +213,7 @@ class TestGetThread:
         assert "TAIL" not in text
         assert (
             f'[1,000 more characters not shown; get_message("{claimant_of("a")}") '
-            "returns the full body]"
+            "pages through the full body: follow next_offset]"
         ) in text
 
     def test_overlapping_chunks_render_once(self, fake_server, overlap_db):

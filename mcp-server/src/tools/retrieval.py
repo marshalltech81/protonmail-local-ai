@@ -327,7 +327,8 @@ def register_retrieval_tools(server, db):
                 if body.omitted_chars:
                     lines.append(
                         f"[{body.omitted_chars:,} more characters not shown; "
-                        f'get_message("{m.claimant_id}") returns the full body]'
+                        f'get_message("{m.claimant_id}") pages through the full body: '
+                        "follow next_offset]"
                     )
             if offset + len(messages) < total:
                 lines += [
