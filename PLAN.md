@@ -70,7 +70,8 @@ The stack runs four containers:
   rerank), exhaustive `query_messages` enumeration, and intelligence
   tools. `INFERENCE_MODE=anthropic` (default,
   `claude-sonnet-4-6`) or `openai`; Streamable HTTP at `/mcp` is the
-  only transport (#498); localhost:3000 only.
+  only transport (#498), behind a static bearer token; localhost:3000
+  only.
 
 Inference and embedding endpoints are operator-supplied — the project
 ships no model-serving components. Host-side servers keep retrieval
@@ -114,10 +115,10 @@ guessing about semantics, completeness, or identity.
    Completed). Received date deferred (see Deferred).
 4. ~~**Honest `get_mailbox_status`**~~ Done 2026-09-28 (see Recently
    Completed).
-5. **MCP endpoint auth — pinned 2026-09-28; decided 2026-10-02:** the
-   local static bearer token ships before go-live, built after #498
-   (see Resolved decisions 13). Localhost topology alone is not a
-   trust boundary against other local processes.
+5. ~~**MCP endpoint auth**~~ Done 2026-10-02 (#568, #569): `/mcp`
+   requires the local static bearer token from the `mcp_auth_token`
+   Docker secret (Resolved decisions 13). The trust condition narrows
+   to "processes running as the operator are trusted".
 6. ~~**Delete the dead action/IMAP surface.**~~ Done 2026-09-28 (see
    Recently Completed).
 7. ~~**Source integrity exposure.**~~ Done 2026-09-28 (see Recently
@@ -656,10 +657,10 @@ them (one test-first commit per issue, `Fixes #N` per issue):
 (#515):** mbsync's healthcheck reports liveness rather than a completed
 sync, so a long first sync no longer keeps the indexer and MCP server
 from starting. #277 no longer blocks the first deployment. Go live
-with the checklist below only once #432 and the MCP bearer token land
-(the token is built after #498; Phase 1 item 5, Resolved decisions
-13): the MCP endpoint has no authentication yet, and localhost is not
-a trust boundary. Even with the token, the host must be one where
+with the checklist below only once #432 lands. The MCP bearer token
+has landed (Phase 1 item 5, Resolved decisions 13; operators create
+`.secrets/mcp_auth_token.txt` and add the header to each client, see
+`docs/setup.md`). Even with the token, the host must be one where
 processes running as the operator are trusted. Rebuild
 any index created before the overnight changes from Maildir (the
 volume wipe in `docs/troubleshooting.md`, "Indexer refuses to
@@ -683,13 +684,12 @@ later part into the body (#450, #548); and the P3 fixes listed there.
 No code PR is open.
 
 Owner decisions: Open decisions 3–14 were answered on 2026-10-02
-(Resolved decisions 13). In progress from those answers: #498
-(Streamable HTTP only), #432 (xlsx streaming pre-pass), #497 (Bridge
-app on macOS), #537 (`get_evidence` `max_threads`) and #556 (Compose
-and shell scanning), plus the Phase 3–5 slices 3.8, 5.2's quote
-checks, 3.1's scenarios, 4.4's reaped-source lookups and 4.3's
-temporal fields. MCP auth (the local bearer token) follows #498,
-since both touch `mcp-server/src/main.py`.
+(Resolved decisions 13). Done from those answers: #498 (Streamable
+HTTP only, #563) and MCP auth (the local bearer token, #568, #569). In
+progress: #432 (xlsx streaming pre-pass), #497 (Bridge app on macOS),
+#537 (`get_evidence` `max_threads`) and #556 (Compose and shell
+scanning), plus the Phase 3–5 slices 3.8, 5.2's quote checks, 3.1's
+scenarios, 4.4's reaped-source lookups and 4.3's temporal fields.
 
 Waiting on real data: #487 (evidence and output budgets), #488
 (container resource budgets) and #282 (the mbsync stall deadline, set
@@ -1283,7 +1283,7 @@ do not ship persisted claims without them.
     decisions 3–14)
     - **MCP endpoint auth (Phase 1 item 5):** ship the local static
       bearer token before go-live, built after #498 lands, since both
-      touch `mcp-server/src/main.py`. The token stops other local
+      touch `mcp-server/src/main.py`. Done 2026-10-02 (#568, #569). The token stops other local
       accounts and browser-origin requests that cannot read the
       secret; it does not stop code running as the operator's own user
       (a malicious package can read the mode-600 file), so the trust
@@ -1294,12 +1294,18 @@ do not ship persisted claims without them.
         via `_read_secret`; the env-var fallback stays a non-container
         local-dev convenience only, never the Compose path.
         Constant-time compare; fail closed on an empty token.
-      - It plugs into the MCP SDK's `TokenVerifier` / `AuthSettings`
-        hooks: `sse_app()` and `streamable_http_app()` add the
-        bearer-auth middleware themselves (so `server.run()` and
-        `dual` both get it), and `custom_route` endpoints such as
-        `/health` stay unauthenticated. `AuthSettings` requires an
-        `issuer_url` even when only a verifier is used.
+      - It plugs into standalone fastmcp's auth provider, composed
+        through `_build_app` in `mcp-server/src/main.py`, the one app
+        (`server.http_app(path="/mcp", transport="streamable-http",
+        ...)`) the server builds since #498 (#568, #569). `_build_app`
+        sets a `TokenVerifier` subclass comparing with
+        `hmac.compare_digest` as `server.auth`; `http_app` then wraps
+        the `/mcp` route in fastmcp's `RequireAuthMiddleware`, which
+        answers 401 before the session manager, while `custom_route`
+        endpoints such as `/health` stay unauthenticated and
+        `_HostOriginGuard` still runs. fastmcp's
+        `StaticTokenVerifier` is not used: its dict lookup is not
+        constant-time.
       - Not chosen, and each needs its own owner decision and a
         privacy-posture update in AGENTS.md first, because both send
         mailbox content off the host (Cloudflare adds a third-party
@@ -1319,7 +1325,10 @@ do not ship persisted claims without them.
         protected-resource metadata route and the `resource_metadata`
         challenge parameter only when that URL is set; without them
         connectors cannot discover the authorization server, and the
-        proxy must expose that well-known route.
+        proxy must expose that well-known route. In standalone fastmcp
+        that is a `RemoteAuthProvider` with a `base_url` (or
+        `resource_base_url`), which registers the same metadata route
+        and challenge parameter.
     - **#432 xlsx duplicate cells:** option (c), a streaming pre-pass
       that counts raw `<c>` nodes and cuts the sheet before an
       over-budget row, public APIs only. It changes the extracted
@@ -1329,7 +1338,7 @@ do not ship persisted claims without them.
       clients move from `/sse` to `/mcp`, and an explicit `sse` or
       `dual` fails startup with a migration message; it changes the
       AGENTS.md default-transport rule. Confirm the MCP client
-      connects over `/mcp` first. In progress.
+      connects over `/mcp` first. Done 2026-10-02 (#563).
     - **#497 Bridge app on macOS:** go now rather than after go-live.
       An optional overlay that skips the Bridge container and points
       mbsync at `host.docker.internal`; the container stays the
@@ -1365,6 +1374,20 @@ do not ship persisted claims without them.
    2026-10-02 (Resolved decisions 13).
 
 ## Recently Completed
+
+### 2026-10-02 — MCP endpoint auth (Phase 1 item 5; #568, #569)
+
+`/mcp` requires `Authorization: Bearer <token>`, the `mcp_auth_token`
+Docker secret (`.secrets/mcp_auth_token.txt`, mode 600, generated by
+`make init-secrets`). A missing or wrong token gets 401 before a
+session is created, compared in constant time; `/health` stays open,
+the Host/Origin allowlist still runs, startup fails closed on an empty
+token, and `validate-env` rejects a missing, empty or non-600 file and
+`MCP_AUTH_TOKEN` in `.env`. Clients never take the token as a command
+argument: Claude Code gets the header from `scripts/mcp-auth-headers.sh`
+as its `headersHelper`, and Claude Desktop's `mcp-remote` reads it from
+a mode-600 `--header-file`. PLAN.md's auth design now names
+standalone fastmcp's hook and the single `/mcp` app.
 
 ### 2026-10-02 — Overnight fixes; first-deployment blocker closed (#515–#548)
 

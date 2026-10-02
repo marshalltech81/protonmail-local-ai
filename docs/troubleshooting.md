@@ -650,8 +650,61 @@ before #361) stays unindexed until you requeue it.
    [Connect an MCP client](setup.md#7-connect-an-mcp-client) for the
    Claude Desktop bridge setup
 4. Verify the Claude Desktop config JSON is valid (no trailing commas),
-   and check `~/Library/Logs/Claude/mcp*.log` for the bridge's errors
+   and check `~/Library/Logs/Claude/mcp*.log` for the bridge's errors.
+   A `401` there means the token is missing or wrong; see the next
+   section
 5. Restart Claude Desktop
+
+## MCP client gets 401 Unauthorized
+
+Every request to `/mcp` must send `Authorization: Bearer <token>` with
+the token in `.secrets/mcp_auth_token.txt`. The server answers `401`
+when the header is missing, uses another scheme, or carries a different
+token (including one with extra spaces). `/health` needs no token, so a
+healthy container with a `401` from `/mcp` is a client configuration
+problem.
+
+1. Check the token works without printing it (from the repository
+   root). The header goes to `curl` on standard input (`-H @-`), so the
+   token is not in `curl`'s arguments, which other local accounts can
+   read:
+
+   ```bash
+   printf 'Authorization: Bearer %s\n' "$(cat .secrets/mcp_auth_token.txt)" |
+     curl -s -o /dev/null -w '%{http_code}\n' -X POST http://localhost:3000/mcp \
+     -H @- \
+     -H 'Accept: application/json, text/event-stream' \
+     -H 'Content-Type: application/json' \
+     -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"curl","version":"1"}}}'
+   ```
+
+   `200` means the server accepts the file's token, so the client is
+   sending something else. `401` with the file's token means the server
+   started with a different one: the token is read once at startup, so
+   run `docker compose restart mcp-server` after changing the file.
+2. Claude Code: run `scripts/mcp-auth-headers.sh > /dev/null`; an
+   error there names the problem with the token file. Check that the
+   `headersHelper` path from
+   [Connect an MCP client](setup.md#7-connect-an-mcp-client) is
+   absolute, that `claude mcp list` does not say the helper was not run
+   (start Claude Code in the repository once and accept the trust
+   dialog), and reconnect with `/mcp` in Claude Code.
+3. Claude Desktop: rewrite `.secrets/mcp_client_headers.txt` from the
+   current token (the command is in setup), check that the
+   `--header-file` path in `claude_desktop_config.json` is absolute and
+   points at it, and restart Claude Desktop.
+
+The server logs a request with a wrong token as `Auth error returned:
+invalid_token (status=401)` and never logs the token or the
+`Authorization` header.
+
+## mcp-server exits with "The MCP bearer token is missing or empty"
+
+`.secrets/mcp_auth_token.txt` is empty (or holds only whitespace).
+`make validate-env`, which `make up` runs first, catches this too.
+Create a token with `make init-secrets` (when the file does not exist)
+or `(umask 077; openssl rand -hex 32 > .secrets/mcp_auth_token.txt)`,
+run `make up`, and configure each client with it.
 
 ## mcp-server exits with "MCP_TRANSPORT=sse was removed"
 

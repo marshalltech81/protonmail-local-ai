@@ -3,18 +3,21 @@ The HTTP apps ``src.main._build_app`` serves, driven over ASGI.
 
 These go through a real ``FastMCP`` instance and the same app the
 container runs, so they pin what a client on the network sees: the
-Host/Origin allowlist on every route, the Streamable HTTP route at
-``/mcp`` (the only transport, #498), the ``/health`` route, and that a
-tool failure stays out of the logs.
+Host/Origin allowlist on every route, the static bearer token on the
+Streamable HTTP route at ``/mcp`` (the only transport, #498), the
+unauthenticated ``/health`` route, and that a tool failure stays out of
+the logs.
 """
 
 import asyncio
+import hmac
 import json
 import logging
 
 import anyio
 import httpx2
 import pytest
+import src.main as main_mod
 from fastmcp import Client, FastMCP
 from fastmcp.exceptions import ToolError
 from src.main import _build_app
@@ -33,10 +36,14 @@ _INIT = {
         "clientInfo": {"name": "test", "version": "1"},
     },
 }
-_POST_HEADERS = {
+# A synthetic bearer token; every authenticated request in this file
+# sends it.
+_TOKEN = "synthetic-bearer-token-5e0b"
+_UNAUTHENTICATED_POST_HEADERS = {
     "accept": "application/json, text/event-stream",
     "content-type": "application/json",
 }
+_POST_HEADERS = dict(_UNAUTHENTICATED_POST_HEADERS, authorization=f"Bearer {_TOKEN}")
 # The address uvicorn reports as the local end of the socket when a
 # request arrives through the Docker port forward.
 _CONTAINER_ADDR = ("172.18.0.5", 3000)
@@ -44,7 +51,9 @@ _MARKER = "synthetic-mail-marker-c41d"
 
 
 def _app(server: FastMCP | None = None, session_idle_timeout: float = 1800.0):
-    return _build_app(server or _server(), session_idle_timeout=session_idle_timeout)
+    return _build_app(
+        server or _server(), session_idle_timeout=session_idle_timeout, auth_token=_TOKEN
+    )
 
 
 def _server() -> FastMCP:
@@ -139,11 +148,16 @@ def _with_lifespan(app, fn):
     return asyncio.run(run())
 
 
-def _mcp_status(app, **kw):
+def _mcp_status(app, headers: dict[str, str] | None = None, **kw):
     return _with_lifespan(
         app,
         lambda: _status(
-            app, "POST", "/mcp", body=json.dumps(_INIT).encode(), headers=_POST_HEADERS, **kw
+            app,
+            "POST",
+            "/mcp",
+            body=json.dumps(_INIT).encode(),
+            headers=_POST_HEADERS if headers is None else headers,
+            **kw,
         ),
     )
 
@@ -346,9 +360,10 @@ class TestToolFailures:
 
 
 def _session_manager(app):
-    """The Streamable HTTP session manager behind ``app``'s ``/mcp`` route."""
+    """The Streamable HTTP session manager behind ``app``'s ``/mcp`` route,
+    which fastmcp wraps in its ``RequireAuthMiddleware``."""
     route = next(r for r in app.routes if getattr(r, "path", "") == "/mcp")
-    return route.endpoint.session_manager
+    return route.endpoint.app.session_manager
 
 
 class TestSessionBound:
@@ -391,6 +406,27 @@ class TestSessionBound:
 
         assert _with_lifespan(app, run) == ([421, 421, 421], 0)
 
+    @pytest.mark.parametrize(
+        "headers",
+        [_UNAUTHENTICATED_POST_HEADERS, dict(_POST_HEADERS, authorization="Bearer wrong-token")],
+        ids=["no-token", "wrong-token"],
+    )
+    def test_rejected_token_leaves_no_session(self, headers):
+        app = _app()
+
+        async def run():
+            statuses = []
+            for _ in range(3):
+                transport = httpx2.ASGITransport(app=app)
+                async with httpx2.AsyncClient(
+                    transport=transport, base_url="http://localhost"
+                ) as c:
+                    r = await c.post("/mcp", json=_INIT, headers=headers)
+                    statuses.append(r.status_code)
+            return statuses, len(_session_manager(app)._server_instances)
+
+        assert _with_lifespan(app, run) == ([401, 401, 401], 0)
+
     def test_idle_timeout_reaches_the_streamable_http_app(self):
         server = _server()
         calls = []
@@ -406,3 +442,108 @@ class TestSessionBound:
         assert calls[0]["transport"] == "streamable-http"
         assert calls[0]["path"] == "/mcp"
         assert calls[0]["session_idle_timeout"] == 42.0
+
+
+class TestBearerAuth:
+    """PLAN.md Resolved decisions 13: ``/mcp`` requires the static bearer
+    token, checked in constant time before a session is created; the
+    Host/Origin allowlist still runs and ``/health`` stays open."""
+
+    def test_missing_token_is_unauthorized(self):
+        assert _mcp_status(_app(), headers=_UNAUTHENTICATED_POST_HEADERS) == 401
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "Bearer wrong-token",
+            f"Bearer {_TOKEN}x",
+            f"Bearer {_TOKEN[:-1]}",
+            f"Bearer  {_TOKEN}",
+            f"Basic {_TOKEN}",
+            _TOKEN,
+            "Bearer ",
+            "Bearer t\u00f6ken",
+        ],
+    )
+    def test_wrong_token_is_unauthorized(self, value):
+        headers = dict(_POST_HEADERS, authorization=value)
+        assert _mcp_status(_app(), headers=headers) == 401
+
+    def test_right_token_is_accepted(self):
+        assert _mcp_status(_app()) == 200
+
+    @pytest.mark.parametrize("method", ["GET", "DELETE"])
+    def test_other_methods_need_the_token(self, method):
+        app = _app()
+        status = _with_lifespan(
+            app,
+            lambda: _status(app, method, "/mcp", headers={"accept": "text/event-stream"}),
+        )
+        assert status == 401
+
+    def test_session_id_without_the_token_is_unauthorized(self):
+        """A session id alone does not authenticate a later request."""
+        app = _app()
+
+        async def run():
+            transport = httpx2.ASGITransport(app=app)
+            async with httpx2.AsyncClient(transport=transport, base_url="http://localhost") as c:
+                r = await c.post("/mcp", json=_INIT, headers=_POST_HEADERS)
+                assert r.status_code == 200
+                headers = dict(
+                    _UNAUTHENTICATED_POST_HEADERS,
+                    **{
+                        "mcp-protocol-version": "2025-06-18",
+                        "mcp-session-id": r.headers["mcp-session-id"],
+                    },
+                )
+                r = await c.post(
+                    "/mcp",
+                    json={"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
+                    headers=headers,
+                )
+                return r.status_code
+
+        assert _with_lifespan(app, run) == 401
+
+    def test_health_needs_no_token(self):
+        app = _app()
+        assert _with_lifespan(app, lambda: _status(app, "GET", "/health")) == 200
+        wrong = {"authorization": "Bearer wrong-token"}
+        assert _with_lifespan(app, lambda: _status(app, "GET", "/health", headers=wrong)) == 200
+
+    def test_host_and_origin_checks_still_run_with_a_valid_token(self):
+        assert _mcp_status(_app(), host="evil.example") == 421
+        assert _mcp_status(_app(), origin="http://evil.example") == 403
+
+    def test_compare_is_constant_time(self, monkeypatch):
+        calls = []
+        compare_digest = hmac.compare_digest
+
+        def recording_compare_digest(a, b):
+            calls.append((a, b))
+            return compare_digest(a, b)
+
+        monkeypatch.setattr(main_mod.hmac, "compare_digest", recording_compare_digest)
+        wrong = dict(_POST_HEADERS, authorization="Bearer wrong-token")
+        assert _mcp_status(_app(), headers=wrong) == 401
+        assert _mcp_status(_app()) == 200
+        assert (b"wrong-token", _TOKEN.encode()) in calls
+        assert (_TOKEN.encode(), _TOKEN.encode()) in calls
+
+    @pytest.mark.parametrize("token", ["", "   "])
+    def test_empty_token_fails_closed(self, token):
+        with pytest.raises(ValueError, match="bearer token"):
+            _build_app(_server(), session_idle_timeout=1800.0, auth_token=token)
+
+    def test_tokens_stay_out_of_the_log(self, caplog):
+        """Neither the configured token nor a presented wrong one is
+        logged, at any level."""
+        marker = "synthetic-wrong-token-marker-91c2"
+        with caplog.at_level(logging.DEBUG):
+            wrong = dict(_POST_HEADERS, authorization=f"Bearer {marker}")
+            assert _mcp_status(_app(), headers=wrong) == 401
+            assert _mcp_status(_app(), headers=_UNAUTHENTICATED_POST_HEADERS) == 401
+            _http_session_calls(_app(), [("ping", {})])
+        assert marker not in caplog.text
+        assert _TOKEN not in caplog.text

@@ -153,10 +153,15 @@ class TestMcpTransport:
         monkeypatch.setattr(
             main_mod,
             "_build_app",
-            lambda server, session_idle_timeout: app if session_idle_timeout == 900.0 else None,
+            lambda server, session_idle_timeout, auth_token: (
+                app
+                if (session_idle_timeout, auth_token) == (900.0, "synthetic-mcp-token")
+                else None
+            ),
         )
         monkeypatch.setattr(main_mod, "MCP_PORT", 3000)
         monkeypatch.setattr(main_mod, "MCP_SESSION_IDLE_TIMEOUT_SECS", 900.0)
+        monkeypatch.setattr(main_mod, "MCP_AUTH_TOKEN", "synthetic-mcp-token")
         _run_server(_Server())  # type: ignore[arg-type]
         assert captured == {
             "app": app,
@@ -165,6 +170,41 @@ class TestMcpTransport:
             "log_level": "info",
             "ran": True,
         }
+
+
+class TestMcpAuthToken:
+    """PLAN.md Resolved decisions 13: the MCP bearer token is the
+    ``mcp_auth_token`` Docker secret (``MCP_AUTH_TOKEN`` only outside
+    a container), and startup fails closed without it."""
+
+    class _FakeDatabase:
+        def __init__(self, _path):  # pragma: no cover — must not be opened
+            raise AssertionError("the index must not be opened without a token")
+
+    def test_token_is_read_from_the_secret_with_env_fallback(self, monkeypatch):
+        import importlib
+
+        import src.main as main_mod
+
+        monkeypatch.setenv("MCP_AUTH_TOKEN", "  synthetic-env-token  ")
+        try:
+            assert importlib.reload(main_mod).MCP_AUTH_TOKEN == "synthetic-env-token"
+        finally:
+            monkeypatch.delenv("MCP_AUTH_TOKEN", raising=False)
+            importlib.reload(main_mod)
+
+    @pytest.mark.parametrize("token", ["", "   "])
+    def test_missing_or_empty_token_fails_startup(self, monkeypatch, token):
+        import src.main as main_mod
+
+        monkeypatch.setattr(main_mod, "MCP_AUTH_TOKEN", token)
+        monkeypatch.setattr(main_mod, "Database", self._FakeDatabase)
+        monkeypatch.setattr(main_mod, "_run_server", lambda *_: pytest.fail("server started"))
+        with pytest.raises(ValueError) as excinfo:
+            main_mod.main()
+        message = str(excinfo.value)
+        assert ".secrets/mcp_auth_token.txt" in message
+        assert "openssl rand -hex 32" in message
 
 
 class TestSessionIdleTimeout:
@@ -243,6 +283,7 @@ class TestContextTokens:
         for name, value in {
             "EMBED_BASE_URL": "http://host.docker.internal:8001/v1",
             "EMBED_MODEL": "synthetic",
+            "MCP_AUTH_TOKEN": _PLACEHOLDER_TOKEN,
             "EMBED_API_KEY": _PLACEHOLDER_KEY,
             "INFERENCE_MODE": mode,
             "INFERENCE_BASE_URL": "http://host.docker.internal:8002",
@@ -352,6 +393,7 @@ class TestRejectUrlUserinfo:
 
 
 _PLACEHOLDER_KEY = "sk-test-marker"  # pragma: allowlist secret
+_PLACEHOLDER_TOKEN = "synthetic-mcp-token"  # pragma: allowlist secret
 _URL_CREDENTIAL_MARKER = "SYNTHETIC_URL_CREDENTIAL"
 _INHERITED_URL = (
     f"https://user:{_URL_CREDENTIAL_MARKER}@provider.invalid/v1"  # pragma: allowlist secret
@@ -377,6 +419,7 @@ class TestInheritedEndpointUserinfo:
         defaults = {
             "EMBED_BASE_URL": "",
             "EMBED_MODEL": "synthetic",
+            "MCP_AUTH_TOKEN": _PLACEHOLDER_TOKEN,
             "EMBED_API_KEY": _PLACEHOLDER_KEY,
             "INFERENCE_MODE": "none",
             "RERANK_MODE": "none",
@@ -439,6 +482,7 @@ class TestInheritedEndpointUserinfo:
         for name, value in {
             "EMBED_BASE_URL": "",
             "EMBED_MODEL": "synthetic",
+            "MCP_AUTH_TOKEN": _PLACEHOLDER_TOKEN,
             "EMBED_API_KEY": _PLACEHOLDER_KEY,
             "INFERENCE_MODE": "anthropic",
             "INFERENCE_BASE_URL": "",
@@ -550,6 +594,7 @@ class TestExperimentalToolsFlag:
         for name, value in {
             "EMBED_BASE_URL": "http://host.docker.internal:8001/v1",
             "EMBED_MODEL": "synthetic",
+            "MCP_AUTH_TOKEN": _PLACEHOLDER_TOKEN,
             "EMBED_API_KEY": _PLACEHOLDER_KEY,
             "INFERENCE_MODE": inference_mode,
             "INFERENCE_BASE_URL": "http://host.docker.internal:8002",

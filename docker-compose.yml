@@ -265,7 +265,8 @@ services:
   # MCP Server
   # Exposes search, Q&A, and agentic tools over MCP transports.
   # Accessible on the host machine only. Streamable HTTP is the only
-  # transport: http://localhost:MCP_PORT/mcp.
+  # transport: http://localhost:MCP_PORT/mcp. Every /mcp request must send
+  # Authorization: Bearer <the mcp_auth_token secret>; /health is open.
   # ---------------------------------------------------------------------------
   mcp-server:
     build:
@@ -288,6 +289,7 @@ services:
       - inference_api_key
       - embed_api_key
       - rerank_api_key
+      - mcp_auth_token
     environment:
       SQLITE_PATH: /data/mail.db
       # INFERENCE_MODE selects the inference client/SDK. For any enabled
@@ -423,3 +425,9 @@ secrets:
   # empty when RERANK_MODE=none.
   rerank_api_key:
     file: ./.secrets/rerank_api_key.txt
+  # MCP bearer token — required (non-empty). Every /mcp request must
+  # send ``Authorization: Bearer <token>``; mcp-server fails startup
+  # without it. ``make init-secrets`` generates one. Never put this
+  # value in .env (MCP_AUTH_TOKEN is only for runs outside a container).
+  mcp_auth_token:
+    file: ./.secrets/mcp_auth_token.txt

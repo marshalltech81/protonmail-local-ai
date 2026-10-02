@@ -38,8 +38,9 @@ make init-secrets
 
 This creates `.secrets/bridge_pass.txt`, `.secrets/inference_api_key.txt`,
 `.secrets/embed_api_key.txt`, and `.secrets/rerank_api_key.txt` as
-empty placeholders with `600` permissions. Docker Compose requires
-all four files to exist before starting. You will overwrite them
+empty placeholders, and `.secrets/mcp_auth_token.txt` holding a random
+token, all with `600` permissions. Docker Compose requires all five
+files to exist before starting. You will overwrite the placeholders
 with real values only as needed:
 
 - `bridge_pass.txt` — after the Bridge login step below
@@ -61,6 +62,11 @@ with real values only as needed:
   server ignores the bearer header.
 - `rerank_api_key.txt` — required (non-empty) when `RERANK_MODE=cohere`.
   Leave empty only when `RERANK_MODE=none`.
+- `mcp_auth_token.txt` — required (non-empty). The bearer token every
+  MCP client must send (see [Connect an MCP client](#7-connect-an-mcp-client)).
+  `make init-secrets` generates it; to create or replace it yourself,
+  run `(umask 077; openssl rand -hex 32 > .secrets/mcp_auth_token.txt)`.
+  Never put it in `.env`.
 
 ### 3. Build all Docker images
 
@@ -260,8 +266,9 @@ services strip it. It fails fast if:
 - any enabled layer's secret file is missing, empty, or not `600`:
   `inference_api_key.txt` when `INFERENCE_MODE` is `anthropic` or
   `openai`; `embed_api_key.txt` always (`EMBED_MODE` has no `none`
-  mode); `rerank_api_key.txt` when `RERANK_MODE=cohere`. For
-  unauthenticated host-side servers, write any non-empty placeholder
+  mode); `rerank_api_key.txt` when `RERANK_MODE=cohere`;
+  `mcp_auth_token.txt` always (`MCP_AUTH_TOKEN` in `.env` also fails).
+  For unauthenticated host-side servers, write any non-empty placeholder
   string (e.g. `unauthenticated`). **`{LAYER}_BASE_URL` may be empty
   for any enabled layer — empty means "use the SDK default" (OpenAI
   proper, Anthropic API, Cohere API) and validation does NOT fail
@@ -580,11 +587,38 @@ whether a client can connect: whether it speaks Streamable HTTP, and
 whether its connection starts on this machine (and so can reach
 `localhost`).
 
-**Claude Code** connects from this machine and speaks Streamable HTTP:
+**Every request to `/mcp` must carry the bearer token** from
+`.secrets/mcp_auth_token.txt` as `Authorization: Bearer <token>`. A
+request without it, or with another token, gets `401` before any MCP
+session is created; `/health` needs no token. The token keeps other
+local accounts, and web pages in your browser, from using the endpoint.
+It does not stop code running as your own user, which can read the
+file, so the trust condition is "processes running as the operator are
+trusted". Keep the token out of shell history, chat transcripts and
+committed files, and out of any command's arguments: on a shared
+machine other accounts can read every process's arguments from the
+process list, so a command such as `--header "Authorization: Bearer
+$(cat ...)"` hands them the token. The setups below read it from a file
+instead.
+
+**Claude Code** connects from this machine and speaks Streamable HTTP.
+It asks `scripts/mcp-auth-headers.sh`, as its `headersHelper`, for the
+header each time it connects; the script reads
+`.secrets/mcp_auth_token.txt` and prints the header without passing the
+token to another program. Run this from the repository root (`$PWD`
+records the script's absolute path):
 
 ```bash
-claude mcp add --transport http protonmail-local-ai http://localhost:3000/mcp
+claude mcp add-json protonmail-local-ai \
+  "{\"type\":\"http\",\"url\":\"http://localhost:3000/mcp\",\"headersHelper\":\"$PWD/scripts/mcp-auth-headers.sh\"}"
 ```
+
+Claude Code runs a `headersHelper` only in a workspace whose trust
+dialog you have accepted, so start Claude Code in this repository once
+interactively if `claude mcp list` reports that the helper was not run.
+Keep the default `local` scope (or `user`); `--scope project` writes the
+entry to `.mcp.json` in the current directory. The configuration holds
+only the script path, never the token.
 
 **Claude Desktop** has two ways to add an MCP server, and neither
 takes this URL directly:
@@ -600,11 +634,27 @@ takes this URL directly:
 
 Connect Claude Desktop through a local stdio-to-Streamable-HTTP bridge
 instead. The npm package `mcp-remote` is one
-(it needs Node.js). Add the `protonmail-local-ai` entry below to the
+(it needs Node.js). It sends the token from a header file, so the token
+is neither in `claude_desktop_config.json` nor in the bridge's command
+line (which other local users can read from the process list). From the
+repository root, write the header file once, and again whenever the
+token changes:
+
+```bash
+(umask 077; printf 'Authorization: Bearer %s\n' "$(cat .secrets/mcp_auth_token.txt)" \
+  > .secrets/mcp_client_headers.txt)
+```
+
+(`printf` is a shell builtin and `cat` is given only the path, so the
+token is not in any process's arguments.)
+
+Then add the `protonmail-local-ai` entry below to the
 `mcpServers` object in `claude_desktop_config.json`, keeping any servers
 already there; use the whole example (also in
 [`claude_desktop_config.example.json`](claude_desktop_config.example.json))
-only when the file does not exist yet:
+only when the file does not exist yet. Replace
+`/ABSOLUTE/PATH/TO/protonmail-local-ai` with the repository's absolute
+path:
 
 ```json
 {
@@ -616,14 +666,20 @@ only when the file does not exist yet:
         "mcp-remote@0.14.3",
         "http://localhost:3000/mcp",
         "--transport",
-        "http-only"
+        "http-only",
+        "--header-file",
+        "/ABSOLUTE/PATH/TO/protonmail-local-ai/.secrets/mcp_client_headers.txt"
       ]
     }
   }
 }
 ```
 
-`--transport http-only` stops it falling back to the removed SSE
+`--header-file` reads one `Name: value` header per line and fails if
+the file cannot be read, rather than connecting without the token.
+`mcp-remote` also takes `--header "Authorization:${AUTH_HEADER}"` with
+the value in the entry's `env` object, but that puts the token in the
+JSON file. `--transport http-only` stops it falling back to the removed SSE
 transport; `mcp-remote` accepts a plain `http://` URL only for
 `localhost` or `127.0.0.1`. It is third-party code that runs as your
 user and relays every tool call and result, so pin a version you have
@@ -644,7 +700,23 @@ Streamable HTTP but cannot reach a localhost-only server, and this
 project does not support exposing it.
 
 **Other MCP clients** that run on this machine and speak Streamable HTTP
-connect to `http://localhost:3000/mcp` directly.
+connect to `http://localhost:3000/mcp` directly, sending the
+`Authorization: Bearer <token>` header. A client that cannot send a
+custom header cannot connect.
+
+**Rotating the token.** Write a new token to
+`.secrets/mcp_auth_token.txt` (the `openssl` command above), restart the
+server with `docker compose restart mcp-server` (the token is read once
+at startup, and `make up` does not recreate a container whose
+configuration is unchanged), then update
+each client. Claude Code's helper reads the file on each connection, so
+reconnect it (`/mcp` in Claude Code); for Claude Desktop, rewrite
+`.secrets/mcp_client_headers.txt` and restart it.
+
+**Upgrading from a release without MCP authentication.** Run
+`make init-secrets` (it creates only the missing token file), then
+`make up`, then add the header to each client as above. Until a client
+sends the token, its requests get `401`.
 
 **Upgrading from a release that served `/sse` (breaking change).** The
 legacy HTTP+SSE transport, its `/sse` and `/messages/` endpoints, and

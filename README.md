@@ -96,7 +96,8 @@ Edit `.env` to point at the providers you want to use:
   `cohere` SDK; `none` (default) returns RRF order directly.
 - API keys go in `.secrets/inference_api_key.txt`,
   `.secrets/embed_api_key.txt`, and `.secrets/rerank_api_key.txt`
-  (`chmod 600`). Leave any unused ones empty.
+  (`chmod 600`). Leave any unused ones empty. The MCP bearer token
+  goes in `.secrets/mcp_auth_token.txt` (`chmod 600`, required).
 
 See [`docs/setup.md`](docs/setup.md) for end-to-end examples.
 
@@ -121,18 +122,24 @@ The MCP server is read-only:
 ### 6. Connect an MCP client
 
 The server speaks MCP's Streamable HTTP transport at
-`http://localhost:3000/mcp`, on this machine only. Claude Code connects
-directly:
+`http://localhost:3000/mcp`, on this machine only. Every request must
+send the bearer token from `.secrets/mcp_auth_token.txt` (created by
+`make init-secrets`) as `Authorization: Bearer <token>`; without it the
+server answers `401`. Claude Code connects directly, reading the token
+through `scripts/mcp-auth-headers.sh` so it never appears in a command
+line (run from the repository root):
 
 ```bash
-claude mcp add --transport http protonmail-local-ai http://localhost:3000/mcp
+claude mcp add-json protonmail-local-ai \
+  "{\"type\":\"http\",\"url\":\"http://localhost:3000/mcp\",\"headersHelper\":\"$PWD/scripts/mcp-auth-headers.sh\"}"
 ```
 
 Claude Desktop's `claude_desktop_config.json` starts local servers as
 commands, and its Connectors settings reach servers from Anthropic's
 cloud, which cannot reach `localhost`. Connect it through a local
-stdio bridge such as `mcp-remote` instead: add the `protonmail-local-ai`
-entry from
+stdio bridge such as `mcp-remote` instead, which reads the token from a
+header file: write `.secrets/mcp_client_headers.txt` as described in
+setup, add the `protonmail-local-ai` entry from
 [`docs/claude_desktop_config.example.json`](docs/claude_desktop_config.example.json)
 to the `mcpServers` object in
 `~/Library/Application Support/Claude/claude_desktop_config.json`,
@@ -145,6 +152,10 @@ details and caveats.
 transport was removed. Change client URLs from `/sse` to `/mcp`, and
 remove `MCP_TRANSPORT=sse` or `MCP_TRANSPORT=dual` from `.env` and from
 any shell that exports it (either now fails startup).
+
+**Upgrading from a release without MCP authentication:** run
+`make init-secrets` (it creates only the missing token file) and
+`make up`, then add the `Authorization` header to each client as above.
 
 ## Usage Examples
 

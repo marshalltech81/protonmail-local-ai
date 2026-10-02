@@ -78,6 +78,9 @@ jobs:
       - name: Run validate-env.sh tests
         run: bash scripts/tests/validate_env_test.sh
 
+      - name: Run mcp-auth-headers.sh tests
+        run: bash scripts/tests/mcp_auth_headers_test.sh
+
   indexer-pytest:
     name: indexer pytest
     runs-on: ubuntu-latest

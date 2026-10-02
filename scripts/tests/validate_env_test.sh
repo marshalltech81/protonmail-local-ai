@@ -30,6 +30,7 @@ setup() {
     printf 'placeholder\n' >"$ROOT/.secrets/inference_api_key.txt"
     printf 'placeholder\n' >"$ROOT/.secrets/embed_api_key.txt"
     : >"$ROOT/.secrets/rerank_api_key.txt"
+    printf 'placeholder-mcp-token\n' >"$ROOT/.secrets/mcp_auth_token.txt"
     chmod 600 "$ROOT"/.secrets/*.txt
 }
 
@@ -324,6 +325,40 @@ api_key_in_env_fails() {
     fails_with 'EMBED_API_KEY must be stored in'
 }
 
+# --- MCP bearer token (PLAN.md Resolved decisions 13) ---------------------
+
+missing_mcp_token_file_fails() {
+    setup
+    rm "$ROOT/.secrets/mcp_auth_token.txt"
+    fails_with 'MCP bearer token is missing or empty'
+}
+
+empty_mcp_token_fails() {
+    setup
+    : >"$ROOT/.secrets/mcp_auth_token.txt"
+    fails_with 'MCP bearer token is missing or empty'
+    printf ' \n' >"$ROOT/.secrets/mcp_auth_token.txt"
+    fails_with 'MCP bearer token is missing or empty'
+}
+
+loose_mcp_token_mode_fails() {
+    setup
+    chmod 644 "$ROOT/.secrets/mcp_auth_token.txt"
+    fails_with 'mcp_auth_token.txt must have mode 600'
+}
+
+mcp_token_in_env_fails() {
+    setup 'MCP_AUTH_TOKEN=placeholder'
+    fails_with 'MCP_AUTH_TOKEN must be stored in'
+}
+
+mcp_token_failure_does_not_echo_the_value() {
+    setup
+    chmod 644 "$ROOT/.secrets/mcp_auth_token.txt"
+    fails_with 'must have mode 600'
+    ! grep -F 'placeholder-mcp-token' "$WORK/output" >/dev/null
+}
+
 loose_secret_mode_fails() {
     setup
     chmod 644 "$ROOT/.secrets/embed_api_key.txt"
@@ -498,6 +533,11 @@ check "a one-sided INFERENCE_MAX_TOKENS fails" one_sided_max_tokens_fails
 check "a zero-padded INFERENCE_MAX_TOKENS is decimal" zero_padded_max_tokens_is_decimal
 check "an API key in .env fails" api_key_in_env_fails
 check "a secret file not 600 fails" loose_secret_mode_fails
+check "a missing MCP token file fails" missing_mcp_token_file_fails
+check "an empty MCP token fails" empty_mcp_token_fails
+check "an MCP token file not 600 fails" loose_mcp_token_mode_fails
+check "an MCP token in .env fails" mcp_token_in_env_fails
+check "an MCP token failure does not echo the token" mcp_token_failure_does_not_echo_the_value
 check "an absent authority file passes" absent_authority_file_passes
 check "a private authority file passes" private_authority_file_passes
 check "an authority file not 600 fails" loose_authority_file_fails
