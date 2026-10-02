@@ -256,15 +256,18 @@ chunks (extracted PDF / OCR / document text) are included — unlike
 | `date_from` | string | none | ISO 8601 date lower bound |
 | `date_to` | string | none | ISO 8601 date upper bound |
 | `has_attachments` | bool | none | Restrict to threads with attachments |
-| `limit` | int | `12` | Max evidence chunks to return; clamped to `[1, 60]`, the most `ask_mailbox` can put in one prompt (10 threads × 6 chunks), so a whole answer can be audited in one call |
+| `limit` | int | `12` | Max evidence chunks to return; clamped to `[1, 60]`, the most `ask_mailbox` can put in one prompt (10 threads × 6 chunks), so the cap never cuts below an answer's evidence set |
 | `include_scores` | bool | `false` | Annotate each thread with the retrieval lanes that matched (`thread_fts` / `chunk_fts` / `attachment_fts` / `thread_vec` / `chunk_vec` / `rerank`) and each chunk with its vector distance |
 
 The mailbox-wide path runs the same hybrid retrieval as `ask_mailbox`,
 with the same cap of six chunks per thread, and flattens the
-per-thread evidence into a flat `limit`-chunk budget. At `limit=60`,
-with the same question and filters, it covers every passage an
-`ask_mailbox(max_threads=10)` answer drew on, at up to 1,600
-characters each.
+per-thread evidence into a flat `limit`-chunk budget, at up to 1,600
+characters a chunk. `limit` also sets how many threads the retrieval
+ranks, while `ask_mailbox` uses `max_threads`, so the two can surface
+different threads (more so with a reranker), and when the top threads
+are short the budget takes passages from lower-ranked threads. The
+returned set is close to an answer's evidence, not guaranteed to be the
+same ([#537](https://github.com/marshalltech81/protonmail-local-ai/issues/537)).
 The `thread_id`-scoped path returns that thread's chunks ranked
 against the query; it bypasses RRF fusion, so `include_scores` shows
 per-chunk vector distance but no lane provenance.

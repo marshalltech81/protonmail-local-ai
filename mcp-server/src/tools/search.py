@@ -436,8 +436,8 @@ def register_search_tools(
             date_to: ISO 8601 date upper bound, e.g. "2024-12-31".
             has_attachments: True to restrict to threads with attachments.
             limit: Maximum evidence chunks to return (default 12,
-                   clamped to [1, 60] — ask_mailbox's largest
-                   evidence set, so a full answer can be audited).
+                   clamped to [1, 60], ask_mailbox's largest
+                   evidence set).
             include_scores: When true, annotate each thread with the
                             retrieval lanes that matched (thread_fts /
                             chunk_fts / attachment_fts / thread_vec /
