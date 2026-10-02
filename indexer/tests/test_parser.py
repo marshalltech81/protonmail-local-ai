@@ -2220,6 +2220,110 @@ def test_body_assembly_shape_catalogue(tmp_path, shape, expected):
         assert marker not in msg.body_text
 
 
+# ---------------------------------------------------------------------------
+# multipart/related root shape catalogue (#450)
+# ---------------------------------------------------------------------------
+#
+# Invariant: a multipart/related contributes only its first child, and
+# contributes nothing when that child is presented as an attachment (a
+# filename or an attachment disposition); a later part is never promoted
+# to the root. The standard library's ``get_body()`` also takes the first
+# part as the root candidate and never a later one (it differs only on an
+# inline root with a filename, which this parser treats as an attachment
+# everywhere). A ``start`` parameter naming another root is not read
+# (pinned below).
+
+_CID_IMG = ("image/png", "iVBORw0=", {"Content-ID": "<img1@example.test>"})
+_BARE_IMG = ("image/png", "iVBORw0=", {})
+_ROOT_ATTACHMENTS = {
+    "named-attachment": _plain("ROOT_MARKER", 'attachment; filename="r.txt"'),
+    "nameless-attachment": _plain("ROOT_MARKER", "attachment"),
+    "named-inline": _plain("ROOT_MARKER", 'inline; filename="r.txt"'),
+    "named-html": (
+        "text/html",
+        "<p>ROOT_MARKER</p>",
+        {"Content-Disposition": 'inline; filename="r.html"'},
+    ),
+    "image-with-filename": _IMG,
+    "pdf": _PDF,
+    "forwarded-email": _FORWARDED,
+}
+_RESOURCE = ("text/html", "<p>RESOURCE</p>", {"Content-ID": "<res@example.test>"})
+
+_RELATED_SHAPES = {
+    # Shapes handled correctly before #450; the expected bodies pin that.
+    "related-html-root-cid-image": (_multi("related", _html("H1"), _CID_IMG), "H1"),
+    "related-html-root-bare-image": (_multi("related", _html("H1"), _BARE_IMG), "H1"),
+    "related-plain-root-cid-resource": (_multi("related", _plain("P1"), _RESOURCE), "P1"),
+    "related-8bit-root": (_multi("related", _html("café H1"), _CID_IMG), "café H1"),
+    "related-empty": (_multi("related"), ""),
+    "related-cid-image-root": (_multi("related", _CID_IMG, _RESOURCE), ""),
+    "related-bare-image-root": (_multi("related", _BARE_IMG, _RESOURCE), ""),
+    "mixed-related-root-then-attachment": (
+        _multi("mixed", _multi("related", _html("H1"), _CID_IMG), _PDF),
+        "H1",
+    ),
+    "mixed-plain-then-related": (
+        _multi("mixed", _plain("P1"), _multi("related", _html("H2"), _RESOURCE)),
+        "P1\n\nH2",
+    ),
+    "alt-plain-related-attachment-root": (
+        _multi("alternative", _plain("P1"), _multi("related", _PDF, _RESOURCE)),
+        "P1",
+    ),
+    # Not read: the root is the first child even when ``start`` names
+    # another part.
+    "related-start-names-second-part": (
+        (
+            'multipart/related; start="<root@example.test>"',
+            [_html("FIRST"), ("text/html", "<p>NAMED</p>", {"Content-ID": "<root@example.test>"})],
+            {},
+        ),
+        "FIRST",
+    ),
+}
+# The #450 class: each root presented as an attachment, followed by a
+# filename-less text resource, alone and nested.
+_BUG_450 = pytest.mark.xfail(strict=True, reason="#450: resource promoted to root")
+for _name, _root in _ROOT_ATTACHMENTS.items():
+    _RELATED_SHAPES[f"related-{_name}-root"] = pytest.param(
+        _multi("related", _root, _RESOURCE), "", marks=_BUG_450
+    )
+    _RELATED_SHAPES[f"mixed-related-{_name}-root-then-plain"] = pytest.param(
+        _multi("mixed", _multi("related", _root, _RESOURCE), _plain("P2")),
+        "P2",
+        marks=_BUG_450,
+    )
+    _RELATED_SHAPES[f"alt-blank-plain-related-{_name}-root"] = pytest.param(
+        _multi("alternative", _plain(""), _multi("related", _root, _RESOURCE)),
+        "",
+        marks=_BUG_450,
+    )
+
+
+@pytest.mark.parametrize(
+    ("shape", "expected"), _RELATED_SHAPES.values(), ids=_RELATED_SHAPES.keys()
+)
+def test_related_root_shape_catalogue(tmp_path, caplog, shape, expected):
+    """#450: a related whose root was presented as an attachment got no
+    body node, so its next text resource was taken as the root."""
+    raw = (
+        "Message-ID: <related@example.test>\r\nFrom: sender@example.test\r\n"
+        "Date: Mon, 28 Sep 2026 12:00:00 +0000\r\nMIME-Version: 1.0\r\n"
+    ) + _render(shape, [0])
+    folder = tmp_path / "INBOX" / "cur"
+    folder.mkdir(parents=True)
+    path = folder / "related.eml"
+    path.write_bytes(raw.encode("utf-8"))
+    with caplog.at_level(logging.DEBUG):
+        msg = parse_email(path)
+    assert msg is not None
+    assert msg.body_text == expected
+    for marker in ("ROOT_MARKER", "RESOURCE", "FORWARDED_MARKER"):
+        assert marker not in msg.body_text
+        assert marker not in caplog.text
+
+
 def test_body_text_parts_decoded_are_capped(tmp_path, monkeypatch):
     """#295: every inline text part is now decoded, each with a fresh
     html2text converter, so the number decoded per message is capped."""
