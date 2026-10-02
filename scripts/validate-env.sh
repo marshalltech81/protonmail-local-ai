@@ -282,13 +282,12 @@ reject_secret_in_env "RERANK_API_KEY" "$RERANK_KEY_FILE"
 # key Compose defaults (BRIDGE_VERSION, SYNC_INTERVAL, MCP_PORT,
 # INFERENCE_MODEL) may be left out of .env, and ``SYNC_INTERVAL=0 make
 # up`` is checked as 0. BRIDGE_VERSION has nothing to check beyond its
-# default; INFERENCE_MODEL's default keeps the required-model contract
-# for an enabled inference layer satisfied.
+# default. INFERENCE_MODEL's default is an Anthropic model, so it only
+# satisfies the required-model contract in anthropic mode (see below).
 BRIDGE_USER="$(env_value BRIDGE_USER)"
 INFERENCE_MODE="$(env_value INFERENCE_MODE)"
 INFERENCE_BASE_URL="$(env_value INFERENCE_BASE_URL)"
 INFERENCE_MODEL="$(env_value INFERENCE_MODEL)"
-INFERENCE_MODEL="${INFERENCE_MODEL:-claude-sonnet-4-6}"
 INFERENCE_TIMEOUT_SECS="$(env_value_stripped INFERENCE_TIMEOUT_SECS)"
 INFERENCE_MAX_TOKENS="$(env_value_stripped INFERENCE_MAX_TOKENS)"
 INFERENCE_CONTEXT_TOKENS="$(env_value_stripped INFERENCE_CONTEXT_TOKENS)"
@@ -336,6 +335,13 @@ INFERENCE_MODE="$(normalize_mode "${INFERENCE_MODE:-anthropic}")"
 }
 
 if [[ "$INFERENCE_MODE" != "none" ]]; then
+    # An empty INFERENCE_MODEL becomes Compose's ``claude-sonnet-4-6``,
+    # which an OpenAI-compatible endpoint does not serve, so openai mode
+    # must name its model.
+    [[ -n "$INFERENCE_MODEL" || "$INFERENCE_MODE" == "anthropic" ]] || {
+        echo "ERROR: INFERENCE_MODEL must be set when INFERENCE_MODE=$INFERENCE_MODE." >&2
+        exit 1
+    }
     # ``INFERENCE_BASE_URL`` may be empty for any enabled mode. Empty
     # means "use the SDK default" — Anthropic Messages API for
     # ``anthropic`` mode (``api.anthropic.com``) and OpenAI proper for

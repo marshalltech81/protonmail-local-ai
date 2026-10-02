@@ -152,6 +152,20 @@ explicit_values_still_pass() {
     passes
 }
 
+# The Compose default model is an Anthropic one, so openai mode needs its
+# own (Codex review round 2).
+openai_mode_requires_a_model() {
+    setup 'INFERENCE_MODE=openai'
+    fails_with 'INFERENCE_MODEL must be set when INFERENCE_MODE=openai'
+    setup 'INFERENCE_MODE=" OpenAI "' 'INFERENCE_MODEL='
+    fails_with 'INFERENCE_MODEL must be set when INFERENCE_MODE=openai'
+    setup 'INFERENCE_MODE=openai' 'INFERENCE_MODEL=placeholder-model'
+    passes
+    setup 'INFERENCE_MODEL=placeholder-model'
+    fails_with 'INFERENCE_MODEL must be set when INFERENCE_MODE=openai' \
+        INFERENCE_MODE=openai INFERENCE_MODEL=
+}
+
 # --- Shell exports win over .env, as in Compose (#482) --------------------
 
 exported_invalid_value_overrides_valid_env() {
@@ -308,8 +322,8 @@ padded_quoted_values_pass() {
 }
 
 padded_and_cased_modes_pass() {
-    setup 'INFERENCE_MODE=" OpenAI "' 'EMBED_MODE=" openai "' \
-        'RERANK_MODE=" None "' 'MCP_TRANSPORT=" Dual "'
+    setup 'INFERENCE_MODE=" OpenAI "' 'INFERENCE_MODEL=placeholder-model' \
+        'EMBED_MODE=" openai "' 'RERANK_MODE=" None "' 'MCP_TRANSPORT=" Dual "'
     passes
 }
 
@@ -362,6 +376,7 @@ check "keys with Compose defaults may be omitted" keys_with_compose_defaults_may
 check "empty keys with Compose defaults use the default" \
     empty_keys_with_compose_defaults_use_the_default
 check "explicit values still pass" explicit_values_still_pass
+check "openai mode requires an explicit model" openai_mode_requires_a_model
 check "an exported invalid value overrides a valid .env" exported_invalid_value_overrides_valid_env
 check "an exported valid value overrides an invalid .env" exported_valid_value_overrides_invalid_env
 check "an exported empty value takes the Compose default" \

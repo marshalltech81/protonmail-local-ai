@@ -246,8 +246,8 @@ make up
 `make up` now validates `.env` and the secret files first. It checks the
 values Compose will use: a variable exported in your shell overrides `.env`,
 and a key left empty or out takes its `docker-compose.yml` default, so
-`BRIDGE_VERSION`, `SYNC_INTERVAL`, `MCP_PORT` and `INFERENCE_MODEL` may be
-omitted. A secret file holding only whitespace counts as empty, since the
+`BRIDGE_VERSION`, `SYNC_INTERVAL`, `MCP_PORT` and (in `anthropic` mode)
+`INFERENCE_MODEL` may be omitted. A secret file holding only whitespace counts as empty, since the
 services strip it. It fails fast if:
 
 - `BRIDGE_USER` is still unset or left at the placeholder value
@@ -262,8 +262,9 @@ services strip it. It fails fast if:
   proper, Anthropic API, Cohere API) and validation does NOT fail
   on an empty URL.**
 - any enabled layer's `{LAYER}_MODEL` is empty (model is always
-  required — no SDK has a default model; an empty `INFERENCE_MODEL`
-  takes the Compose default `claude-sonnet-4-6`)
+  required — no SDK has a default model; in `anthropic` mode an empty
+  `INFERENCE_MODEL` takes the Compose default `claude-sonnet-4-6`, which
+  `openai` mode cannot use)
 - inference / embed / rerank secret placeholder files are missing or not `600`
   (validation requires the files to exist with `600` permissions even when the
   matching layer is `none`, so the docker-compose `secrets:` references
