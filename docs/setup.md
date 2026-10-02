@@ -594,7 +594,7 @@ takes this URL directly:
   the server is designed to be local-only.
 
 Connect Claude Desktop through a local stdio-to-Streamable-HTTP bridge
-instead. [`mcp-remote`](https://www.npmjs.com/package/mcp-remote) is one
+instead. The npm package `mcp-remote` is one
 (it needs Node.js). Put this in `claude_desktop_config.json` (also in
 [`claude_desktop_config.example.json`](claude_desktop_config.example.json)):
 
