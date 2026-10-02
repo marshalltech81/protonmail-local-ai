@@ -2284,20 +2284,15 @@ _RELATED_SHAPES = {
 }
 # The #450 class: each root presented as an attachment, followed by a
 # filename-less text resource, alone and nested.
-_BUG_450 = pytest.mark.xfail(strict=True, reason="#450: resource promoted to root")
 for _name, _root in _ROOT_ATTACHMENTS.items():
-    _RELATED_SHAPES[f"related-{_name}-root"] = pytest.param(
-        _multi("related", _root, _RESOURCE), "", marks=_BUG_450
-    )
-    _RELATED_SHAPES[f"mixed-related-{_name}-root-then-plain"] = pytest.param(
+    _RELATED_SHAPES[f"related-{_name}-root"] = (_multi("related", _root, _RESOURCE), "")
+    _RELATED_SHAPES[f"mixed-related-{_name}-root-then-plain"] = (
         _multi("mixed", _multi("related", _root, _RESOURCE), _plain("P2")),
         "P2",
-        marks=_BUG_450,
     )
-    _RELATED_SHAPES[f"alt-blank-plain-related-{_name}-root"] = pytest.param(
+    _RELATED_SHAPES[f"alt-blank-plain-related-{_name}-root"] = (
         _multi("alternative", _plain(""), _multi("related", _root, _RESOURCE)),
         "",
-        marks=_BUG_450,
     )
 
 
