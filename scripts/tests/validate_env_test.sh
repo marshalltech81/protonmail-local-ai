@@ -306,9 +306,10 @@ loose_secret_mode_fails() {
 }
 
 # --- Source-authority rules file (#468) -----------------------------------
-# config/authority.toml is optional and holds real addresses, so it must
-# not be readable by other host accounts. Owner-only (600) and group
-# read (640, for a Linux group the indexer's GID shares) both pass.
+# config/authority.toml is optional and holds real addresses, so like the
+# secret files it must be 600. A symlink is rejected: Compose mounts the
+# directory, so a link the container cannot follow would pass here and
+# stop the indexer.
 
 write_authority() {
     mkdir -p "$ROOT/config"
@@ -325,27 +326,26 @@ private_authority_file_passes() {
     setup
     write_authority 600
     passes
-    write_authority 640
-    passes
 }
 
-world_readable_authority_file_fails() {
+loose_authority_file_fails() {
     setup
-    write_authority 644
-    fails_with 'config/authority.toml must not be accessible to other users'
-    write_authority 604
-    fails_with 'found 604'
+    local mode
+    for mode in 644 604 640 660 620 700; do
+        write_authority "$mode"
+        fails_with "config/authority.toml must have mode 600, found $mode"
+    done
 }
 
-# A symlink is judged by its target, which is what the bind mount serves.
-symlinked_authority_file_checks_the_target() {
+symlinked_authority_file_fails() {
     setup
-    write_authority 644
+    write_authority 600
     mv "$ROOT/config/authority.toml" "$ROOT/config/rules.toml"
     ln -s rules.toml "$ROOT/config/authority.toml"
-    fails_with 'found 644'
-    chmod 600 "$ROOT/config/rules.toml"
-    passes
+    fails_with 'config/authority.toml must be a regular file, not a symlink'
+    rm "$ROOT/config/authority.toml"
+    ln -s missing.toml "$ROOT/config/authority.toml"
+    fails_with 'must be a regular file, not a symlink'
 }
 
 # --- Whitespace the readers strip (#506) ----------------------------------
@@ -446,8 +446,8 @@ check "an API key in .env fails" api_key_in_env_fails
 check "a secret file not 600 fails" loose_secret_mode_fails
 check "an absent authority file passes" absent_authority_file_passes
 check "a private authority file passes" private_authority_file_passes
-check "a world-readable authority file fails" world_readable_authority_file_fails
-check "a symlinked authority file is checked by its target" symlinked_authority_file_checks_the_target
+check "an authority file not 600 fails" loose_authority_file_fails
+check "a symlinked authority file fails" symlinked_authority_file_fails
 check "padded quoted values pass" padded_quoted_values_pass
 check "padded and mixed-case modes pass" padded_and_cased_modes_pass
 check "a padded none disables the layer" padded_disabled_mode_disables_the_layer

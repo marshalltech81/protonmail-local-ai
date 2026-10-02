@@ -269,8 +269,7 @@ services strip it. It fails fast if:
   (validation requires the files to exist with `600` permissions even when the
   matching layer is `none`, so the docker-compose `secrets:` references
   resolve cleanly)
-- `config/authority.toml`, when present, grants any permission to other
-  users (`600` passes, and so does `640` for a group the indexer shares)
+- `config/authority.toml`, when present, is not `600` or is a symlink
 - numeric or enum settings such as `SYNC_INTERVAL`, `MCP_PORT`, `MCP_TRANSPORT`, or `INFERENCE_MODE` are invalid
 
 Verify everything is running:
@@ -372,15 +371,18 @@ docker compose restart indexer
 ```
 
 `config/authority.toml` is gitignored: it holds real addresses and
-domains, so never commit it. Keep it at `600`, like the files in
-`.secrets/`, so other accounts on the host cannot read it; `make up`
-fails if the file grants any permission to other users. The indexer
+domains, so never commit it. Keep it a regular file at `600`, like the
+files in `.secrets/`, so other accounts on the host cannot read it;
+`make up` fails if it has any other mode or is a symlink. The indexer
 runs as UID 1002, but on macOS the Docker Desktop and OrbStack file
 sharing serves a bind-mounted file to the container's user, so it still
 reads a `600` file you own (the same way the services read the `600`
-secret files). On Linux with Docker Engine the bind mount keeps
-your ownership, so give the indexer's group read access instead:
-`sudo chgrp 1002 config/authority.toml && chmod 640 config/authority.toml`. The `config/` directory is mounted
+secret files). On Linux with Docker Engine the bind mount keeps your
+ownership, so the indexer cannot read a `600` file you own; a safe
+access path there is tracked in #526. Do not widen the mode or hand the
+file to a host group to work around it: GID 1002 may belong to another
+account on the host.
+The `config/` directory is mounted
 read-only into the indexer at `/config`, and the path
 `/config/authority.toml` is fixed (there is no environment setting for
 it). The indexer reads the file at
