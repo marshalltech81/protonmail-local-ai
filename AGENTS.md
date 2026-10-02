@@ -505,7 +505,8 @@ Examples:
   deferred; the PR is then ready for the owner's merge go-ahead once
   CI is green (the go-ahead rule below still applies).
 - File P3 findings as issues rather than fixing them ahead of
-  go-live or P1/P2 work.
+  go-live or P1/P2 work. Exception (owner, 2026-10-02): a small P3
+  with an agreed fix and no new mechanism may be fixed before go-live.
 - Merge (squash) only on the owner's explicit go-ahead.
 
 ## Common Commands
