@@ -312,7 +312,8 @@ newly ingested mail before the rebuild is gated behind the pipeline
 configuration so the live index stays internally consistent until the
 single staged rebuild picks all of them up. The fixes: chunk overlap past `max_tokens` (#208) and whitespace
 between split pieces rendered back into a chunk past `max_tokens`
-(#550), both moved to pre-go-live work; and #297's second half, the
+(#550), both moved to pre-go-live work and done (#594); and #297's
+second half, the
 undated-mail date chain, **superseded** by Resolved decisions 14:
 `occurred_at` comes from the top `Received:` header only (NULL
 otherwise, no Maildir-timestamp or `now()` synthesis), filters fall
@@ -431,7 +432,7 @@ decision (Open decisions).
 | 4.1 Entities | Done | #459, #527 (orphan pruning, #464) | — |
 | 4.2 Source authority | Done | #459, #474 (Spam guard), #523 and #542 (rules file kept private and validated) | verdict-header gating after go-live (#463) |
 | 4.3 Temporal retrieval | Mostly done | #561 (`sent_at` defined and used consistently), #593 (whole-thread evidence under a date range), #597 (#575), `occurred_at` with filters and thread spans on the effective time (#297) | checking against real mail that the top `Received:` is Proton's (go-live); bitemporal claims (Phase 5) |
-| 4.4 Retention | Mostly done | #451 (mirror default), #475 (Trash hidden from default search), #564 and #583 (reaped sources reported for 30 days) | user-controlled retention; restating the reaped-citation invariant and #562's purge (Resolved decisions 14) |
+| 4.4 Retention | Mostly done | #451 (mirror default), #475 (Trash hidden from default search), #564 and #583 (reaped sources reported for 30 days), the invariant restated (#610) | user-controlled retention; #562's purge (Resolved decisions 14) |
 | 5.1 Hardened `brief_issue` | Not started | — | needs Phase 3 usage on real mail |
 | 5.2 Support/contradict | Built, experimental | #467 (`check_conclusion`), #493 (evidence-slot refill), #558 (quote verification, also for `brief_issue`) | semantic support (#284) |
 | 5.3 Position as of date | Not started | — | — |
@@ -1084,7 +1085,8 @@ Order of work, chosen to minimise reindexes:
    needed. #276 (#521), #277 (#515), #275, #279 and #281 are done;
    #282 waits for the first-sync measurement.
 4. **The Phase 2 reindex bundle** (see Phase 2): #208, #550 and #297's
-   second half moved to pre-go-live work (Resolved decisions 14). #303, #298, #295 and #217 landed directly instead
+   second half moved to pre-go-live work (Resolved decisions 14);
+   #208 and #550 are done (#594), #297's second half too (#599). #303, #298, #295 and #217 landed directly instead
    (2026-10-01, no live index yet), and #304's repair is unneeded
    (#349).
 
@@ -1128,17 +1130,19 @@ linked from the Phase 3 items they track.
   excerpts to a remote provider
 - `get_message`: returns a message's full body and headers with no
   bound, so one huge message (a pasted log, 12,000 References) is one
-  huge response; decide on body continuation (offset paging) or a
-  documented cap — fits alongside Phase 1 item 2's structured output
-  (#489)
+  huge response. **Decided** (Resolved decisions 14, #592): offset
+  paging of the body (default page plus `next_offset`), headers
+  capped; the paging-or-cap choice is superseded (#489)
 - OCR language is fixed to Tesseract's English default (#490;
   documented in #517, no setting yet)
 - ~~mcp-server: remove the dead `Database.get_thread_message_ids`~~
   (done: already gone from the code)
 - IDs are unbounded: a root Message-ID becomes the thread ID with no
   length check, and IDs cannot be cut in responses without breaking
-  chaining. Decide on a parse-time length limit (Message-IDs are
-  ≤998 characters per RFC 5322 line length) or a hashed thread ID
+  chaining. **Decided** (Resolved decisions 14, #592): a 998-character
+  Message-ID limit at parse time (RFC 5322 line length), an over-long
+  ID taking the no-`Message-ID` dead-letter path; the hashed thread ID
+  alternative is superseded
 - ~~AGENTS.md commit-hygiene secret check: `grep '^\+'` fails under
   ugrep (a common `grep` alias); use the portable `grep '^[+]'`~~
   (done: #555)
@@ -1207,7 +1211,9 @@ can be revisited with an explicit owner decision.
   relevant if generic-IMAP decoupling is pursued)
 - attachment download support (needs the read-only action-path
   decision it was always gated on)
-- per-message received date: the sender controls `Date:`, so a
+- ~~per-message received date~~ (done: `occurred_at`, #599; Resolved
+  decisions 14 landed it in the v0 schema rather than with the Phase 2
+  reindex, so the scheduling below is superseded): the sender controls `Date:`, so a
   trustworthy timeline needs the receiving server's timestamp (top
   `Received:` header; Maildir mtime is sync time, not delivery). Needs
   a schema bump plus a re-parse of every `.eml`, so land it with the
@@ -1340,8 +1346,9 @@ do not ship persisted claims without them.
 9. **#276 and family, retained near-side mbsync state (2026-09-30):**
    tolerate a far-side box that cannot be opened (warn, keep syncing
    the rest) rather than far-only patterns or `Remove Near`, which
-   deletes local mail. #275 and #281 change the on-disk layout and wait
-   for a real report. #276 implemented in #521.
+   deletes local mail. ~~#275 and #281 change the on-disk layout and wait
+   for a real report~~ (superseded by Resolved decisions 14: done
+   before go-live, #598). #276 implemented in #521.
 10. **#277/#282 health during a long first sync (2026-09-30):**
     separate liveness (process alive, progress observed) from
     freshness (the success stamp), so a first sync is "healthy, not
