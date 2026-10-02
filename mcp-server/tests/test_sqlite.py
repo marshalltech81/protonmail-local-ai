@@ -918,6 +918,196 @@ class _ScriptedReranker:
         return list(self._scored)
 
 
+def _reply_subject_db(tmp_path, subjects: list[str]) -> Database:
+    """One thread whose messages carry ``subjects``, oldest first.
+
+    The thread row keeps the first subject, the way the indexer keeps
+    the root's; later messages may change it (#447).
+    """
+    import sqlite_vec
+
+    from tests.conftest import _build_schema, _insert_thread
+
+    db_path = tmp_path / "reply-subjects.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.enable_load_extension(True)
+    sqlite_vec.load(conn)
+    conn.enable_load_extension(False)
+    _build_schema(conn)
+    # The production index the subject scan relies on (indexer schema).
+    conn.execute("CREATE INDEX idx_messages_thread_sent ON messages(thread_id, sent_at)")
+    mids = [f"rs-{i}" for i in range(len(subjects))]
+    _insert_thread(
+        conn,
+        thread_id="t-rs",
+        subject="budget review",
+        display_subject=subjects[0],
+        participants=["alice@example.com"],
+        senders=["alice@example.com"],
+        snippet="see below",
+        body_text="see below",
+        message_ids=mids,
+        embedding=[1.0, 0.0, 0.0, 0.0],
+    )
+    for i, (mid, subject) in enumerate(zip(mids, subjects, strict=True)):
+        conn.execute(
+            "UPDATE messages SET subject = ?, sent_at = ? WHERE claimant_id = ?",
+            (subject, f"2024-01-01T10:{i // 60:02d}:{i % 60:02d}+00:00", claimant_of(mid)),
+        )
+    conn.commit()
+    conn.close()
+    return Database(str(db_path))
+
+
+def _rerank_doc(db: Database) -> str:
+    scripted = _IndexScoringReranker(scores_by_index={}, candidates=10)
+    db.hybrid_search(
+        query_text="offsite venue",
+        query_embedding=[1.0, 0.0, 0.0, 0.0],
+        limit=1,
+        reranker=scripted,
+    )
+    assert scripted._last_docs is not None and len(scripted._last_docs) == 1
+    return scripted._last_docs[0]
+
+
+class TestRerankReplySubjects:
+    """#447: a reply that changed the subject joins its thread through
+    References, and the keyword lane matches its subject, but the text
+    sent to the reranker carried only the thread's first subject."""
+
+    def test_changed_reply_subject_reaches_the_reranker(self, tmp_path):
+        db = _reply_subject_db(
+            tmp_path, ["Budget Review", "Re: budget review", "Venue change for offsite"]
+        )
+        doc = _rerank_doc(db)
+        assert doc.startswith("Subject: Budget Review\n")
+        assert "venue change for offsite" in doc.lower()
+
+    def test_unchanged_and_repeated_subjects_are_not_duplicated(self, tmp_path):
+        db = _reply_subject_db(
+            tmp_path,
+            [
+                "Budget Review",
+                "Re: budget review",
+                "RE: Re:  Budget   Review",
+                "Venue change for offsite",
+                "Fwd: Venue change for offsite",
+            ],
+        )
+        doc = _rerank_doc(db).lower()
+        assert doc.count("budget review") == 1
+        assert doc.count("venue change for offsite") == 1
+
+    def test_no_changed_subject_leaves_the_text_unchanged(self, tmp_path):
+        db = _reply_subject_db(tmp_path, ["Budget Review", "Re: Budget Review"])
+        doc = _rerank_doc(db)
+        assert doc == "Subject: Budget Review\n\nsee below"
+
+    def test_changed_subjects_keep_send_order(self, tmp_path):
+        db = _reply_subject_db(tmp_path, ["Budget Review", "zeta topic", "alpha topic"])
+        doc = _rerank_doc(db)
+        assert doc.index("zeta topic") < doc.index("alpha topic")
+
+    def test_added_subjects_are_capped_in_count_and_characters(self, tmp_path):
+        from src.lib import sqlite as sqlite_module
+
+        many = [f"topic {i:03d} " + "x" * 40 for i in range(60)]
+        db = _reply_subject_db(tmp_path, ["Budget Review", *many])
+        doc = _rerank_doc(db)
+        added = doc.split("\n\n", 1)[0].split("\n")[1:]
+        assert 0 < len(added) <= sqlite_module._RERANK_REPLY_SUBJECTS_MAX
+        assert sum(len(line) for line in added) <= (
+            sqlite_module._RERANK_REPLY_SUBJECTS_MAX_CHARS + len(added) * len("Reply subject: ")
+        )
+
+        long_one = "venue " * 1000
+        (tmp_path / "long").mkdir()
+        db = _reply_subject_db(tmp_path / "long", ["Budget Review", long_one])
+        doc = _rerank_doc(db)
+        assert len(doc) <= len("Subject: Budget Review\n\nsee below") + (
+            sqlite_module._RERANK_REPLY_SUBJECTS_MAX_CHARS + len("\nReply subject: ")
+        )
+
+    def test_subject_scan_reads_a_bounded_number_of_rows(self, tmp_path, monkeypatch):
+        # Work bound: a long thread of distinct subjects is not read or
+        # normalized in full on every reranked search.
+        from src.lib import sqlite as sqlite_module
+
+        seen: list[str] = []
+        real = sqlite_module._normalize_subject
+
+        def counting(subject: str) -> str:
+            seen.append(subject)
+            return real(subject)
+
+        monkeypatch.setattr(sqlite_module, "_normalize_subject", counting)
+        many = ["Budget Review"] * 300
+        db = _reply_subject_db(tmp_path, many)
+        _rerank_doc(db)
+        # One call for the thread subject, then at most the scanned rows.
+        assert 1 < len(seen) <= 1 + sqlite_module._RERANK_SUBJECT_SCAN_ROWS
+        assert all(len(s) <= sqlite_module._RERANK_SUBJECT_CHARS for s in seen)
+
+    def test_subject_scan_is_served_by_the_index(self, tmp_path):
+        # Review round 1: a tie-breaker the index does not cover made
+        # SQLite sort every message sharing a (sender-controlled) Date
+        # before applying the LIMIT. The order must come from the index.
+        from src.lib import sqlite as sqlite_module
+
+        db = _reply_subject_db(tmp_path, ["Budget Review", "venue"])
+        with closing(sqlite3.connect(str(db.path))) as conn:
+            plan = " ".join(
+                str(row[3])
+                for row in conn.execute(
+                    "EXPLAIN QUERY PLAN " + sqlite_module._RERANK_SUBJECT_SQL,
+                    (sqlite_module._RERANK_SUBJECT_CHARS, "t-rs", 50),
+                )
+            )
+        assert "idx_messages_thread_sent" in plan
+        assert "TEMP B-TREE" not in plan
+
+    def test_tied_send_times_keep_a_deterministic_order(self, tmp_path):
+        db = _reply_subject_db(tmp_path, ["Budget Review", "zeta topic", "alpha topic"])
+        with closing(sqlite3.connect(str(db.path))) as conn:
+            conn.execute("UPDATE messages SET sent_at = '2024-01-01T10:00:00+00:00'")
+            conn.commit()
+        doc = _rerank_doc(db)
+        assert doc.index("zeta topic") < doc.index("alpha topic")
+
+    def test_reply_subjects_are_not_logged(self, tmp_path, caplog):
+        marker = "ZZMARKER447 venue"
+        db = _reply_subject_db(tmp_path, ["Budget Review", marker])
+        with caplog.at_level("DEBUG"):
+            doc = _rerank_doc(db)
+        assert "zzmarker447" in doc.lower()
+        assert "zzmarker447" not in caplog.text.lower()
+
+    def test_lookup_failure_reranks_without_reply_subjects(self, tmp_path, caplog, monkeypatch):
+        db = _reply_subject_db(tmp_path, ["Budget Review", "ZZMARKER447 venue"])
+        real_connect = db._connect
+
+        class _FailingConn:
+            def execute(self, *_args, **_kwargs):
+                raise sqlite3.OperationalError("ZZMARKER447 no such table")
+
+            def close(self):
+                pass
+
+        candidates = db.hybrid_search(
+            query_text="offsite venue", query_embedding=[1.0, 0.0, 0.0, 0.0], limit=1
+        )
+        monkeypatch.setattr(db, "_connect", lambda: _FailingConn())
+        scripted = _IndexScoringReranker(scores_by_index={0: 1.0}, candidates=10)
+        with caplog.at_level("DEBUG"):
+            results = db._apply_rerank("offsite venue", candidates, scripted, 1)
+        monkeypatch.setattr(db, "_connect", real_connect)
+        assert [r.thread_id for r in results] == ["t-rs"]
+        assert scripted._last_docs == ["Subject: Budget Review\n\nsee below"]
+        assert "OperationalError" in caplog.text
+        assert "zzmarker447" not in caplog.text.lower()
+
+
 class TestDirectLookups:
     def test_get_thread_returns_result(self, seeded_db: Database):
         thread = seeded_db.get_thread("t-alpha")
