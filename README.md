@@ -27,7 +27,7 @@ host-side server you install yourself.
 | Embedder (operator-supplied) | OpenAI-compatible `/v1/embeddings` returning 4096-dim vectors (the schema's fixed width — e.g. Qwen3-Embedding-8B). Point `EMBED_BASE_URL` at a remote provider (DeepInfra, OpenRouter) or a host-side server you install yourself (LM Studio, vLLM, TEI, `mlx_lm.server`) |
 | Inference (operator-supplied) | Anthropic-compatible Messages API by default (`INFERENCE_MODE=anthropic`); switch to `INFERENCE_MODE=openai` for any OpenAI-compatible chat-completions endpoint at `INFERENCE_BASE_URL` |
 | SQLite (FTS5 + sqlite-vec) | Hybrid keyword + vector search index |
-| MCP Server | Exposes tools to MCP clients over Streamable HTTP at `localhost:3000/mcp` |
+| MCP Server | Exposes tools to MCP clients over Streamable HTTP at `127.0.0.1:3000/mcp` |
 
 ## Prerequisites
 
@@ -177,7 +177,10 @@ embeddings, inference, and your *conversations* leave the host depends
 on four independent choices: which embedder URL you wire up, which
 `INFERENCE_MODE` you select, whether you enable reranking with
 `RERANK_MODE`, and which MCP client you connect. Be deliberate about
-all four layers.
+all four layers. At startup the indexer and the MCP server log one
+`Privacy:` warning per enabled embed, inference or rerank layer whose
+endpoint is not host-local (`127.0.0.1`, `::1`, `localhost`,
+`host.docker.internal`), naming the mode and the endpoint's host.
 
 ### 1. Storage and indexing layer — always local
 

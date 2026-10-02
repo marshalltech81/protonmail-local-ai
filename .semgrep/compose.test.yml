@@ -185,6 +185,9 @@ services:
     # ruleid: compose-extends
     extends:
       service: mbsync
+    # ruleid: compose-volumes-from
+    volumes_from:
+      - mbsync
 
   sneaky-three:
     labels:

@@ -109,7 +109,7 @@ mcp-server container
     injection from attacker-controlled email content
   - Read-only: no mail-changing tools and no connection to Bridge
         │
-        │  Streamable HTTP (localhost:3000/mcp)
+        │  Streamable HTTP (127.0.0.1:3000/mcp)
         ▼
 MCP client (host machine; Claude Desktop via the repo's stdio adapter)
   - Calls MCP tools via natural language
@@ -546,6 +546,23 @@ before. The MCP tools return `claimant_id` beside `message_id`, and
 `get_message` accepts either, listing the claimants when a bare
 Message-ID names several (see `docs/mcp-tools.md`).
 
+**Message-ID length.** A Message-ID is at most 998 characters
+(`parser.MESSAGE_ID_MAX_CHARS`, the RFC 5322 line limit), counted as
+stored: after surrounding whitespace, header folding and the angle
+brackets are removed, so `<` plus 998 characters plus `>` is accepted.
+A message whose own Message-ID is longer is unindexable, like one with
+none: it is dead-lettered at the parse stage with the fixed text
+`unindexable: no Message-ID or one over 998 characters`, and the ID
+itself never reaches the log or `last_error`. A new thread's ID is its
+root message's Message-ID, so this also bounds thread IDs. A longer
+`In-Reply-To` or `References` entry is dropped from the message (it
+could never match an indexed Message-ID), so threading uses the rest
+and the stored reply fields stay bounded. This assumes no indexed
+message has a longer ID: an index built before the limit (none is
+deployed) is rebuilt from Maildir, as for any pre-deployment change,
+since a reply's dropped reference to an older over-long ID could no
+longer find that message's thread.
+
 Each indexed message gets one row — its own
 subject (cut to `SUBJECT_MAX_CHARS`, 2,000 decoded characters, at parse
 time, #541), `sent_at` (`Date:` header; a missing or unparseable header is
@@ -784,7 +801,7 @@ as message bodies. Two extra tables sit alongside `message_chunks`:
 | Table | Keyed by | Purpose |
 |---|---|---|
 | `attachments` | attachment_occurrence_id | Per-occurrence row capturing filename + MIME + size as it appeared on a specific email. The occurrence id includes the message, payload hash, filename, and attachment slot so duplicate same-payload files in one email are still represented. |
-| `attachment_extractions` | attachment_id (= sha256 of payload) | Per-content-hash cache of extracted text + status. The expensive work (Tesseract OCR, pypdf parse, DOCX walk) runs at most once per unique payload, including within one indexing batch, where results not yet committed are shared by content hash. Non-success rows are also honored: `empty` / `too_large` short-circuit unconditionally; `unsupported` short-circuits while it also holds for the occurrence at hand (an "OCR disabled" row, for an occurrence that needs OCR — an image, or a PDF whose row the PDF extractor wrote because it found no digital text layer — until OCR is turned on; any other until the occurrence's MIME type or filename selects an extractor, since the same bytes can arrive as `.bin` first and `.txt` later); `failed` short-circuits within a 7-day retry window so a chronic failure stops re-running on every reappearance, but a real fix landed via dependency upgrade can pick the payload up later. The `extractor` column carries a version (`docx@3`); a row written by an older version of a fixed extractor (`extractors.EXTRACTOR_VERSIONS`) is refreshed by re-running that extractor from whichever occurrence of the bytes arrives (whatever its own filename or MIME type), and the indexer re-queues every message carrying those bytes once at startup so their chunks are rebuilt, except dead-lettered messages, which keep their stale chunks until `make requeue-dead` rescues them. Rows from a newer version (after a rollback) are kept. A stale row an OCR extractor wrote (`image-ocr`, `pdf-ocr`) is kept and served while `INDEXER_OCR_ENABLED=false`, since a refresh could only replace its text with "OCR disabled"; it is refreshed once OCR is on. Likewise, once OCR is on, the startup sweep re-queues each message whose occurrence of bytes cached "OCR disabled" would now be OCR'd; an occurrence that selects no extractor (`.bin`) is not re-queued, since its reprocess would serve the same row. |
+| `attachment_extractions` | attachment_id (= sha256 of payload) | Per-content-hash cache of extracted text + status. The expensive work (Tesseract OCR, pypdf parse, DOCX walk) runs at most once per unique payload, including within one indexing batch, where results not yet committed are shared by content hash. Non-success rows are also honored: `empty` / `too_large` short-circuit unconditionally; `unsupported` short-circuits while it also holds for the occurrence at hand (an "OCR disabled" row, for an occurrence that needs OCR — an image, or a PDF whose row the PDF extractor wrote because it found no digital text layer — until OCR is turned on; any other until the occurrence's MIME type or filename selects an extractor, since the same bytes can arrive as `.bin` first and `.txt` later); `failed` short-circuits within a 7-day retry window so a chronic failure stops re-running on every reappearance, but a real fix landed via dependency upgrade can pick the payload up later. The `extractor` column carries a version (`docx@3`); a row written by an older version of a fixed extractor (`extractors.EXTRACTOR_VERSIONS`) is refreshed by re-running that extractor from whichever occurrence of the bytes arrives (whatever its own filename or MIME type), and the indexer re-queues every message carrying those bytes once at startup so their chunks are rebuilt, except dead-lettered messages, which keep their stale chunks until `make requeue-dead` rescues them. Rows from a newer version (after a rollback) are kept. A row is deleted with the last `attachments` row that references it (see *Cascade on message removal*). A stale row an OCR extractor wrote (`image-ocr`, `pdf-ocr`) is kept and served while `INDEXER_OCR_ENABLED=false`, since a refresh could only replace its text with "OCR disabled"; it is refreshed once OCR is on. Likewise, once OCR is on, the startup sweep re-queues each message whose occurrence of bytes cached "OCR disabled" would now be OCR'd; an occurrence that selects no extractor (`.bin`) is not re-queued, since its reprocess would serve the same row. |
 
 Per-occurrence chunks land in `message_chunks` with the
 `attachment_id` column populated. They embed exactly like body chunks
@@ -868,10 +885,31 @@ are not loaded at all.
 When a message is reaped, `_delete_attachments_for_message` drops its
 `attachments` rows and FTS shadows; the `_delete_chunks_for_message`
 cascade also drops the message's attachment chunks (they share the
-`claimant_id` key). Cached extractions in `attachment_extractions` are
-**deliberately preserved** — another message may still reference the
-same content_hash, and even when nothing does today the cached
-extraction means a future re-arrival skips the OCR cost.
+`claimant_id` key). In the same transaction it deletes the cached
+`attachment_extractions` row of each payload no remaining `attachments`
+row references, so a payload's extracted text does not outlive every
+message that carried it (#562). A payload another message still carries
+keeps its row. The cost is the cache for a re-arrival: the same bytes
+arriving after their last carrier was reaped are extracted again. The
+check is one indexed statement per payload the message carried
+(`idx_attachments_attachment_id` and the extraction primary key), so
+it does not scan either table. The rows are deleted, not overwritten:
+with SQLite's default `secure_delete` off, the freed pages keep the old
+bytes in the database file until SQLite reuses them or the file is
+vacuumed. This holds for every row a reap deletes, not only
+extractions (#602).
+
+The purge only looks at payloads the message being reaped carried. A
+database whose reaps ran before #562 can still hold extraction rows
+whose last carrier was already reaped, and nothing revisits them
+(#626). Rebuild the index from Maildir, or, with the indexer stopped,
+run once against `mail.db`:
+
+```sql
+DELETE FROM attachment_extractions WHERE NOT EXISTS (
+  SELECT 1 FROM attachments a
+  WHERE a.attachment_id = attachment_extractions.attachment_id);
+```
 
 ## Deletion Reconciliation (mirror by default)
 
@@ -914,9 +952,13 @@ startup rather than picking a mode.
    pass.
 
 **Reaped-source records.** A citation or search hit from an earlier
-answer can name a message or thread the reaper has since removed. So
-that the chain is never silently broken (PLAN Phase 4 item 4), the reap
-transaction writes one `reaped_messages` row per removed message:
+answer can name a message or thread the reaper has since removed. Such
+a source reads as removed for 30 days and then as not found, and the
+record never keeps its evidence text (PLAN Resolved decisions 14;
+extracted attachment text the reap leaves in `attachment_extractions`
+is the separate #562, see *Cascade on message removal*). For that
+window the reap transaction writes one content-free `reaped_messages`
+row per removed message:
 claimant ID, Message-ID, thread ID and reap time, and nothing else (no
 subject, body, participants, attachment names or chunk IDs, which hash
 the passage text). `get_message`, `get_thread` and thread-scoped
@@ -1415,7 +1457,9 @@ and exporter were present.
 > through the inference and reranker endpoints. This is a deliberate
 > departure from a fully-local posture; choose the provider URLs
 > accordingly. To keep all retrieval traffic on the box, point each
-> URL at a host-side server you install yourself.
+> URL at a host-side server you install yourself. Startup logs one
+> `Privacy:` warning per enabled layer whose endpoint host is not
+> `127.0.0.1`, `::1`, `localhost` or `host.docker.internal`.
 
 ### MCP client layer (governed by which client you connect)
 

@@ -51,7 +51,20 @@ RUN git clone --depth 1 --branch "${BRIDGE_VERSION}" \
 # go mod download pre-populates the module cache; go mod verify then confirms
 # every cached module matches its recorded checksum, failing the build if any
 # module has been tampered with or corrupted.
-RUN go mod download && go mod verify
+# The download is retried up to three times with a short backoff, because
+# one transient proxy.golang.org error otherwise fails the whole build
+# (#618). A persistent failure still fails it, and go mod verify runs once,
+# unconditionally, after the download succeeds.
+RUN for attempt in 1 2 3; do \
+        if go mod download; then break; fi; \
+        if [ "${attempt}" -eq 3 ]; then \
+            echo "ERROR: go mod download failed after 3 attempts." >&2; \
+            exit 1; \
+        fi; \
+        echo "go mod download failed (attempt ${attempt}/3); retrying in $((attempt * 10))s." >&2; \
+        sleep "$((attempt * 10))"; \
+    done \
+    && go mod verify
 
 # Patch Bridge to bind on the container network and to include the Docker
 # hostname in the generated TLS certificate. The helper fails closed if the

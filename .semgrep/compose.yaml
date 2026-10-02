@@ -1,15 +1,16 @@
 # Semgrep rules for the Docker Compose files: the base file and every
-# overlay (docker-compose*.yml / docker-compose*.yaml anywhere in the
-# tree). They encode AGENTS.md "Network and exposure constraints",
-# "Dockerfile Conventions" and "Container Runtime Hardening".
+# overlay (docker-compose*.yml / *.yaml and compose*.yml / *.yaml
+# anywhere in the tree). They encode AGENTS.md "Network and exposure
+# constraints", "Dockerfile Conventions" and "Container Runtime
+# Hardening".
 #
 # Semgrep matches each file on its own; it does not merge overlays. So
 # the rules come in two kinds:
 #   - forbidden settings (privileged, namespaces shared with the host or
 #     another container, cap_add, devices, docker socket, weakened
 #     security_opt, read_only other than true, unbounded pids_limit or
-#     logging, published ports, writable host bind mounts, extra
-#     services on bridge-net) apply to every file, so an overlay cannot
+#     logging, published ports, writable host bind mounts, extends and
+#     volumes_from, extra services on bridge-net) apply to every file, so an overlay cannot
 #     add them. A security setting whose value is interpolated
 #     (`${VAR:-default}`) counts as unsafe, since its default can be;
 #   - required hardening (read_only, no-new-privileges, cap_drop ALL,
@@ -21,7 +22,14 @@
 # `!override` clearing inherited hardening, scripts/tests/compose_test.sh
 # checks on the merged config of each overlay combination (#580).
 #
-# Tests: .semgrep/compose.test.yml (run `semgrep test .semgrep`).
+# Every rule's paths.include lists each file name Docker Compose loads:
+# the docker-compose* names and the newer compose* defaults, which
+# Compose prefers when both exist. The fixture (.semgrep/compose.test.yml)
+# matches compose*.yml, so .semgrep/ is excluded from the scan.
+#
+# Tests: .semgrep/compose.test.yml (run `semgrep test .semgrep`), and
+# scripts/tests/semgrep_paths_test.sh, which checks that every rule
+# reads every Compose file name, since `semgrep test` ignores `paths`.
 rules:
   - id: compose-privileged
     languages: [yaml]
@@ -35,6 +43,10 @@ rules:
       include:
         - "docker-compose*.yml"
         - "docker-compose*.yaml"
+        - "compose*.yml"
+        - "compose*.yaml"
+      exclude:
+        - ".semgrep/"
     patterns:
       - pattern: "privileged: $VALUE"
       - metavariable-regex:
@@ -54,6 +66,10 @@ rules:
       include:
         - "docker-compose*.yml"
         - "docker-compose*.yaml"
+        - "compose*.yml"
+        - "compose*.yaml"
+      exclude:
+        - ".semgrep/"
     patterns:
       - pattern: "$KEY: $VALUE"
       - metavariable-regex:
@@ -74,6 +90,10 @@ rules:
       include:
         - "docker-compose*.yml"
         - "docker-compose*.yaml"
+        - "compose*.yml"
+        - "compose*.yaml"
+      exclude:
+        - ".semgrep/"
     pattern: "cap_add: $CAPS"
 
   - id: compose-host-devices
@@ -86,6 +106,10 @@ rules:
       include:
         - "docker-compose*.yml"
         - "docker-compose*.yaml"
+        - "compose*.yml"
+        - "compose*.yaml"
+      exclude:
+        - ".semgrep/"
     pattern-either:
       - pattern: "devices: $DEVICES"
       - pattern: "gpus: $GPUS"
@@ -101,6 +125,10 @@ rules:
       include:
         - "docker-compose*.yml"
         - "docker-compose*.yaml"
+        - "compose*.yml"
+        - "compose*.yaml"
+      exclude:
+        - ".semgrep/"
     patterns:
       - pattern-inside: "security_opt: [..., $OPT, ...]"
       - pattern: $OPT
@@ -120,6 +148,10 @@ rules:
       include:
         - "docker-compose*.yml"
         - "docker-compose*.yaml"
+        - "compose*.yml"
+        - "compose*.yaml"
+      exclude:
+        - ".semgrep/"
     patterns:
       - pattern: "read_only: $VALUE"
       - metavariable-regex:
@@ -137,6 +169,10 @@ rules:
       include:
         - "docker-compose*.yml"
         - "docker-compose*.yaml"
+        - "compose*.yml"
+        - "compose*.yaml"
+      exclude:
+        - ".semgrep/"
     patterns:
       - pattern: "pids_limit: $LIMIT"
       - metavariable-regex:
@@ -154,6 +190,10 @@ rules:
       include:
         - "docker-compose*.yml"
         - "docker-compose*.yaml"
+        - "compose*.yml"
+        - "compose*.yaml"
+      exclude:
+        - ".semgrep/"
     pattern-either:
       # A logging block with no max-size, other than the drivers that keep
       # no unbounded file: none, and local (which rotates by default).
@@ -196,6 +236,10 @@ rules:
       include:
         - "docker-compose*.yml"
         - "docker-compose*.yaml"
+        - "compose*.yml"
+        - "compose*.yaml"
+      exclude:
+        - ".semgrep/"
     pattern-either:
       - patterns:
           - pattern-inside: "volumes: [..., $VOL, ...]"
@@ -221,6 +265,10 @@ rules:
       include:
         - "docker-compose*.yml"
         - "docker-compose*.yaml"
+        - "compose*.yml"
+        - "compose*.yaml"
+      exclude:
+        - ".semgrep/"
     pattern-either:
       # Short syntax: a source that is a host path (relative, absolute,
       # home or a variable) whose mode list lacks `ro`.
@@ -263,6 +311,10 @@ rules:
       include:
         - "docker-compose*.yml"
         - "docker-compose*.yaml"
+        - "compose*.yml"
+        - "compose*.yaml"
+      exclude:
+        - ".semgrep/"
     patterns:
       - pattern-inside: |
           services:
@@ -290,6 +342,10 @@ rules:
       include:
         - "docker-compose*.yml"
         - "docker-compose*.yaml"
+        - "compose*.yml"
+        - "compose*.yaml"
+      exclude:
+        - ".semgrep/"
     patterns:
       - pattern-inside: |
           services:
@@ -315,6 +371,10 @@ rules:
       include:
         - "docker-compose*.yml"
         - "docker-compose*.yaml"
+        - "compose*.yml"
+        - "compose*.yaml"
+      exclude:
+        - ".semgrep/"
     patterns:
       - pattern-inside: |
           services:
@@ -336,6 +396,10 @@ rules:
       include:
         - "docker-compose*.yml"
         - "docker-compose*.yaml"
+        - "compose*.yml"
+        - "compose*.yaml"
+      exclude:
+        - ".semgrep/"
     patterns:
       - pattern: "user: $USER"
       - metavariable-regex:
@@ -354,20 +418,46 @@ rules:
       include:
         - "docker-compose*.yml"
         - "docker-compose*.yaml"
+        - "compose*.yml"
+        - "compose*.yaml"
+      exclude:
+        - ".semgrep/"
     pattern: "extends: $BASE"
+
+  - id: compose-volumes-from
+    languages: [yaml]
+    severity: ERROR
+    message: >-
+      `volumes_from` mounts every volume of another service or container
+      without naming them here, so the other rules cannot see what the
+      service gets (from mbsync it would hand mcp-server the Maildir).
+      Name each volume the service needs instead.
+    paths:
+      include:
+        - "docker-compose*.yml"
+        - "docker-compose*.yaml"
+        - "compose*.yml"
+        - "compose*.yaml"
+      exclude:
+        - ".semgrep/"
+    pattern: "volumes_from: $SOURCES"
 
   - id: compose-include
     languages: [yaml]
     severity: ERROR
     message: >-
       A top-level `include` imports another file's services, networks and
-      volumes. The fragment is not named docker-compose*.yml, so these
-      rules never scan it and the Compose path filters never trigger on
-      it. Put the services in a docker-compose*.yml overlay instead.
+      volumes. The fragment can have any name, so these rules may never
+      scan it and the Compose path filters may never trigger on it. Put
+      the services in a docker-compose*.yml overlay instead.
     paths:
       include:
         - "docker-compose*.yml"
         - "docker-compose*.yaml"
+        - "compose*.yml"
+        - "compose*.yaml"
+      exclude:
+        - ".semgrep/"
     # Only the root-level key imports anything; a nested `include` (a
     # label, an x- extension field) is data.
     patterns:
@@ -389,6 +479,10 @@ rules:
       include:
         - "docker-compose*.yml"
         - "docker-compose*.yaml"
+        - "compose*.yml"
+        - "compose*.yaml"
+      exclude:
+        - ".semgrep/"
     patterns:
       - pattern-either:
           - pattern-inside: |
@@ -431,6 +525,10 @@ rules:
       include:
         - "docker-compose*.yml"
         - "docker-compose*.yaml"
+        - "compose*.yml"
+        - "compose*.yaml"
+      exclude:
+        - ".semgrep/"
     patterns:
       - pattern-inside: |
           services:
@@ -461,6 +559,10 @@ rules:
       include:
         - "docker-compose*.yml"
         - "docker-compose*.yaml"
+        - "compose*.yml"
+        - "compose*.yaml"
+      exclude:
+        - ".semgrep/"
     patterns:
       - pattern-inside: |
           services:
@@ -491,6 +593,10 @@ rules:
       include:
         - "docker-compose*.yml"
         - "docker-compose*.yaml"
+        - "compose*.yml"
+        - "compose*.yaml"
+      exclude:
+        - ".semgrep/"
     patterns:
       - pattern-inside: |
           services:
@@ -522,6 +628,10 @@ rules:
       include:
         - "docker-compose*.yml"
         - "docker-compose*.yaml"
+        - "compose*.yml"
+        - "compose*.yaml"
+      exclude:
+        - ".semgrep/"
     patterns:
       - pattern-inside: |
           services:
@@ -554,6 +664,10 @@ rules:
       include:
         - "docker-compose*.yml"
         - "docker-compose*.yaml"
+        - "compose*.yml"
+        - "compose*.yaml"
+      exclude:
+        - ".semgrep/"
     patterns:
       - pattern-inside: |
           services:

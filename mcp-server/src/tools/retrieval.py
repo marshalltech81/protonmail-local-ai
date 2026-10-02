@@ -5,6 +5,7 @@ Fetch thread and message context from the local SQLite index.
 
 import asyncio
 import logging
+import unicodedata
 
 from fastmcp.exceptions import ToolError
 from mcp.types import CallToolResult
@@ -54,54 +55,104 @@ _MAX_QUERY_LIMIT = 100
 _MAX_LISTED_PARTICIPANTS = 10
 
 # get_thread pages by message and cuts each body, so neither a long thread
-# nor a long message makes an unbounded response; get_message returns a
-# message's full body.
+# nor a long message makes an unbounded response; get_message pages one
+# message's body by character offset, so every page is bounded and the
+# pages together hold the whole body.
 _DEFAULT_THREAD_PAGE = 10
 _MAX_THREAD_PAGE = 50
 _THREAD_BODY_CHAR_LIMIT = 4000
-# Headers are sender-controlled too: get_thread and query_messages list at
-# most this many References and cut every header value at
-# HEADER_CHAR_LIMIT characters; get_message returns full headers.
+# One get_message body page (#489): about 6,700 tokens at the 3
+# characters per token the inference budget counts
+# (``lib/inference.py`` ``CHARS_PER_TOKEN``), a fifth of the default
+# 32,768-token window and half of a full get_thread page (10 bodies of
+# 4,000 characters). Five get_thread body cuts, so a long message reads in
+# a few calls.
+_MESSAGE_BODY_PAGE_CHARS = 20_000
+# A page cut that would split a combining sequence moves back at most
+# this many code points; past that (a run of marks longer than any real
+# grapheme) the cut stays where it is. Reconstruction is exact either way.
+_MAX_CUT_BACKOFF = 32
+# Headers are sender-controlled too: every tool, get_message included,
+# lists at most this many References and cuts every header value at
+# HEADER_CHAR_LIMIT characters.
 _MAX_LISTED_REFERENCES = 10
 
 
-def _join_limited(items: list[str], limit: int | None) -> str:
-    if limit is None or len(items) <= limit:
-        return ", ".join(items)
-    return ", ".join(items[:limit]) + f" (+{len(items) - limit} more)"
+def _join_limited(items: list[str], limit: int) -> str:
+    """At most ``limit`` of ``items``, joined and cut at
+    ``HEADER_CHAR_LIMIT``, then a count of the entries not listed. The
+    count follows the cut so a list of long entries keeps it."""
+    joined = clip(", ".join(items[:limit]), HEADER_CHAR_LIMIT)
+    if len(items) <= limit:
+        return joined
+    return joined + f" (+{len(items) - limit} more)"
 
 
-def _format_participants(
-    people: list[Participant], limit: int | None = _MAX_LISTED_PARTICIPANTS
-) -> str:
+def _format_participants(people: list[Participant], limit: int = _MAX_LISTED_PARTICIPANTS) -> str:
     return _join_limited(
         [f"{p.name} <{p.address}>" if p.name else p.address for p in people], limit
     )
 
 
-def _header_lines(m: MessageRecord, *, full: bool) -> list[str]:
+def _header_lines(m: MessageRecord) -> list[str]:
     """A message's own headers, one per line; absent ones are omitted.
 
-    Unless ``full``, long lists are summarized and long values cut, so
-    get_thread stays bounded whatever a sender put in the headers.
+    Long lists are summarized and long values cut, so a response stays
+    bounded whatever a sender put in the headers. List values come cut
+    from ``_join_limited``; the others are cut here.
     """
-    people_limit = None if full else _MAX_LISTED_PARTICIPANTS
-    refs_limit = None if full else _MAX_LISTED_REFERENCES
-    chars = None if full else HEADER_CHAR_LIMIT
-    headers = [("Subject", m.subject)]
+    headers = [("Subject", clip(m.subject, HEADER_CHAR_LIMIT))]
     for label, people in (("From", m.from_), ("To", m.to), ("Cc", m.cc)):
         if people:
-            headers.append((label, _format_participants(people, people_limit)))
+            headers.append((label, _format_participants(people)))
     headers.append(("Sent", m.sent_at))
     if m.occurred_at:
         headers.append(("Delivered", m.occurred_at))
-    headers.append(("Folder", m.folder))
+    headers.append(("Folder", clip(m.folder, HEADER_CHAR_LIMIT)))
     if m.in_reply_to:
-        headers.append(("In-Reply-To", m.in_reply_to))
+        headers.append(("In-Reply-To", clip(m.in_reply_to, HEADER_CHAR_LIMIT)))
     if m.references:
-        headers.append(("References", _join_limited(m.references, refs_limit)))
+        headers.append(("References", _join_limited(m.references, _MAX_LISTED_REFERENCES)))
     headers.append(("Attachments", "yes" if m.has_attachments else "no"))
-    return [f"{label}: {clip(value, chars)}" for label, value in headers]
+    return [f"{label}: {value}" for label, value in headers]
+
+
+def _joins_previous(text: str, i: int) -> bool:
+    """Whether ``text[i]`` belongs to the same grapheme as ``text[i - 1]``:
+    a combining mark, or either side of a zero-width joiner."""
+    return (
+        unicodedata.category(text[i]).startswith("M")
+        or text[i] == "\u200d"
+        or text[i - 1] == "\u200d"
+    )
+
+
+def _body_page(text: str, offset: int) -> tuple[str, int | None]:
+    """The page of ``text`` starting at ``offset`` and the next page's
+    offset (``None`` at the end).
+
+    Python strings index by code point, so a cut never splits one; a cut
+    that would separate a combining mark or a zero-width-joined pair from
+    the character before it moves back to that character (at most
+    ``_MAX_CUT_BACKOFF`` code points, and never to ``offset`` itself, so
+    every page makes progress).
+    """
+    if offset < 0 or offset > len(text):
+        raise InvalidFilterError(
+            "offset",
+            f"offset {offset} is past the end of the body ({len(text):,} characters)"
+            if offset > 0
+            else f"offset must be 0 or more, got {offset}",
+        )
+    end = offset + _MESSAGE_BODY_PAGE_CHARS
+    if end >= len(text):
+        return text[offset:], None
+    cut = end
+    while cut > offset + 1 and end - cut < _MAX_CUT_BACKOFF and _joins_previous(text, cut):
+        cut -= 1
+    if _joins_previous(text, cut):
+        cut = end
+    return text[offset:cut], cut
 
 
 def _thread_message(m: MessageRecord, body: MessageBody | None) -> ThreadMessage:
@@ -176,7 +227,7 @@ def register_retrieval_tools(server, db):
         count and, when more remain, the ``offset`` for the next call.
         Each body is cut at 4,000 characters, with a marker saying how
         much was left out; long header values and lists are shortened the
-        same way. ``get_message`` returns a full body and full headers.
+        same way. ``get_message`` pages through a full body.
 
         DO NOT use this to read attachment content (PDFs, OCR'd
         images, scans). It returns the message bodies only; the
@@ -247,11 +298,7 @@ def register_retrieval_tools(server, db):
                 f"Thread: {clip(thread.subject, HEADER_CHAR_LIMIT)}",
                 f"Thread ID: {thread.thread_id}",
                 f"Folder: {thread.folder}",
-                "Participants: "
-                + clip(
-                    _join_limited(thread.participants, _MAX_LISTED_PARTICIPANTS),
-                    HEADER_CHAR_LIMIT,
-                ),
+                "Participants: " + _join_limited(thread.participants, _MAX_LISTED_PARTICIPANTS),
                 f"Date range: {thread.date_first.strftime('%Y-%m-%d')} "
                 f"→ {thread.date_last.strftime('%Y-%m-%d')}",
                 f"Messages: {count}",
@@ -262,14 +309,14 @@ def register_retrieval_tools(server, db):
                 lines.append(
                     "Messages, oldest first (bodies are the indexed text after "
                     "quoted-reply stripping; attachment text is not included; "
-                    "long headers are shortened, get_message returns full headers):"
+                    "long headers are shortened):"
                 )
             elif total:
                 lines.append(f"No messages at offset {offset}; the thread has {total}.")
             for i, m in enumerate(messages, offset + 1):
                 lines += ["", f"[{i}/{total}] Message-ID: {m.message_id}"]
                 lines.append(f"Claimant ID: {m.claimant_id}")
-                lines += _header_lines(m, full=False)
+                lines += _header_lines(m)
                 lines.append("")
                 body = page.bodies.get(m.claimant_id)
                 if body is None:
@@ -279,7 +326,8 @@ def register_retrieval_tools(server, db):
                 if body.omitted_chars:
                     lines.append(
                         f"[{body.omitted_chars:,} more characters not shown; "
-                        f'get_message("{m.claimant_id}") returns the full body]'
+                        f'get_message("{m.claimant_id}") pages through the full body: '
+                        "follow next_offset]"
                     )
             if offset + len(messages) < total:
                 lines += [
@@ -339,22 +387,30 @@ def register_retrieval_tools(server, db):
     @server.tool(output_schema=GetMessageOutput.model_json_schema())
     async def get_message(
         message_id: str,
+        offset: int = 0,
     ) -> CallToolResult:
         """
-        Get one message's own headers and indexed body.
+        Get one message's own headers and indexed body, one page of the
+        body at a time.
 
-        Headers come from the message itself: subject, every From /
-        To / Cc entry, send date and (when known) delivery date
-        (UTC), folder, In-Reply-To,
-        References, and the attachment flag. Reconstructs the message
-        body from the per-message chunk store (in document order) — the
-        index keeps no raw per-message body, so this is the indexed text
-        after quoted-reply stripping, which
+        Headers come from the message itself: subject, From / To / Cc,
+        send date and (when known) delivery date (UTC), folder,
+        In-Reply-To, References, and the attachment flag. Headers are
+        sender-controlled, so at most 10 entries per recipient role and
+        10 References are listed (with a "+N more" count) and any value
+        past 500 characters is cut with a marker.
+
+        Reconstructs the message body from the per-message chunk store
+        (in document order) — the index keeps no raw per-message body,
+        so this is the indexed text after quoted-reply stripping, which
         is usually what you want for "show me the message from Jane on
-        Tuesday". Attachment text is NOT included here; use
-        get_evidence or ask_mailbox for attachment content. When no
-        body chunks are indexed for the message, falls back to
-        parent-thread context.
+        Tuesday". The body is returned in pages of 20,000 characters:
+        the response states which characters it shows of how many and,
+        when more remain, the ``offset`` for the next call. Calling
+        with each ``next_offset`` in turn returns the whole body.
+        Attachment text is NOT included here; use get_evidence or
+        ask_mailbox for attachment content. When no body chunks are
+        indexed for the message, falls back to parent-thread context.
 
         ``message_id`` is a ``Claimant ID`` (the Message-ID plus
         ``#`` and a short hash, which names exactly one message) or the
@@ -368,18 +424,23 @@ def register_retrieval_tools(server, db):
 
         Args:
             message_id: A claimant ID, or the Message-ID header value
+            offset: Body character to start the page at (default 0); pass
+                the previous response's next_offset to read on
 
         Returns:
-            The message's headers, its thread ID and subject, and its
-            reconstructed indexed body, or thread context when no body
-            chunks are indexed.
+            The message's headers, its thread ID and subject, and one
+            page of its reconstructed indexed body, or thread context
+            when no body chunks are indexed.
         """
         log_tool_call(
             log,
             "get_message",
-            {"message_id": message_id},
+            {"message_id": message_id, "offset": offset},
         )
         try:
+            if offset < 0:
+                # Rejected before any read; past-the-end needs the body.
+                _body_page("", offset)
             view = await asyncio.to_thread(db.get_message_view, message_id)
             if isinstance(view, ReapedSource):
                 raise ToolError(reaped_source("Message", message_id, view.reaped_at))
@@ -407,6 +468,8 @@ def register_retrieval_tools(server, db):
                 )
             thread = view.thread
             thread_text = None
+            body_text = view.body.text if view.body else ""
+            page, next_offset = _body_page(body_text, offset)
 
             lines = [
                 f"Message-ID: {view.record.message_id}",
@@ -424,8 +487,8 @@ def register_retrieval_tools(server, db):
                     + ", ".join(view.other_claimants)
                 )
             lines += [
-                *_header_lines(view.record, full=True),
-                f"Thread: {thread.subject}",
+                *_header_lines(view.record),
+                f"Thread: {clip(thread.subject, HEADER_CHAR_LIMIT)}",
                 f"Thread ID: {thread.thread_id}",
                 f"Mode: {local_only_note}",
             ]
@@ -433,14 +496,31 @@ def register_retrieval_tools(server, db):
                 size = "unknown size" if f.size_bytes is None else f"{f.size_bytes:,} bytes"
                 lines.append(f"Source file: {f.locator} ({size}, sha256 {f.sha256 or 'unknown'})")
 
-            if view.body:
+            if view.body and not page:
+                lines += [
+                    "",
+                    f"No body text past offset {offset}; the body has "
+                    f"{len(body_text):,} characters.",
+                ]
+            elif view.body:
+                shown = (
+                    ""
+                    if offset == 0 and next_offset is None
+                    else f"; characters {offset + 1:,}-{offset + len(page):,} of {len(body_text):,}"
+                )
                 lines += [
                     "",
                     "Message body (the indexed body after quoted-reply "
-                    "stripping, not the raw message):",
+                    f"stripping, not the raw message{shown}):",
                     "",
-                    view.body.text,
+                    page,
                 ]
+                if next_offset is not None:
+                    lines += [
+                        "",
+                        f"[{len(body_text) - next_offset:,} more characters: "
+                        f"call get_message with offset={next_offset}]",
+                    ]
             else:
                 # No body chunks — an empty-body message or one not
                 # chunked yet. Fall back to the
@@ -459,17 +539,24 @@ def register_retrieval_tools(server, db):
                     lines += ["", "Indexed snippet:", "", thread.snippet]
 
             output = GetMessageOutput(
-                message=listed_message(view.record, full=True),
+                message=listed_message(view.record),
                 other_claimants=view.other_claimants,
                 other_claimants_truncated=view.other_claimants_truncated,
-                thread_subject=thread.subject,
-                body=view.body.text if view.body else None,
+                thread_subject=clip(thread.subject, HEADER_CHAR_LIMIT),
+                body=page if view.body else None,
+                body_offset=offset,
+                body_total_chars=len(body_text),
+                next_offset=next_offset,
                 indexed_thread_text=thread_text,
             )
             return tool_result("\n".join(lines), output)
 
         except ToolError:
             raise
+        except InvalidFilterError as e:
+            # The message quotes the offset; log only the field.
+            log.warning("get_message rejected invalid %s", e.field_name)
+            raise ToolError(f"Error: {e}") from e
         except Exception as e:
             log.error("get_message error: %s", type(e).__name__)
             raise ToolError(f"Error: {type(e).__name__}") from e
@@ -707,9 +794,7 @@ def register_retrieval_tools(server, db):
             lines.append(f"   Subject: {clip(m.subject, HEADER_CHAR_LIMIT)}")
             for label, people in (("From", m.from_), ("To", m.to), ("Cc", m.cc)):
                 if people:
-                    lines.append(
-                        f"   {label}: {clip(_format_participants(people), HEADER_CHAR_LIMIT)}"
-                    )
+                    lines.append(f"   {label}: {_format_participants(people)}")
             lines.append(f"   Message-ID: {m.message_id} | Claimant ID: {m.claimant_id}")
             lines.append(f"   Thread ID: {m.thread_id}")
             lines.append("")

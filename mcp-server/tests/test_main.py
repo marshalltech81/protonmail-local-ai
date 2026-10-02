@@ -27,6 +27,7 @@ from src.main import (
     _reject_url_userinfo,
     _require_env,
     _run_server,
+    _warn_if_remote_endpoint,
 )
 
 
@@ -114,6 +115,9 @@ class TestMcpTransport:
         assert f"MCP_TRANSPORT={value.strip().lower()}" in message
         assert "removed" in message
         assert "/sse" in message and "/mcp" in message
+        # #612: the new client URL uses the IPv4 loopback, not localhost,
+        # which can resolve to ::1 where another local account can listen.
+        assert "http://127.0.0.1:<MCP_PORT>/mcp" in message
         # Compose and validate-env read an exported value ahead of .env,
         # so the steps must cover the shell environment too.
         assert "unset MCP_TRANSPORT" in message
@@ -155,13 +159,14 @@ class TestMcpTransport:
             "_build_app",
             lambda server, session_idle_timeout, auth_token: (
                 app
-                if (session_idle_timeout, auth_token) == (900.0, "synthetic-mcp-token")
+                if (session_idle_timeout, auth_token)
+                == (900.0, "synthetic-mcp-token-xxxxxxxxxxxxxxxx")
                 else None
             ),
         )
         monkeypatch.setattr(main_mod, "MCP_PORT", 3000)
         monkeypatch.setattr(main_mod, "MCP_SESSION_IDLE_TIMEOUT_SECS", 900.0)
-        monkeypatch.setattr(main_mod, "MCP_AUTH_TOKEN", "synthetic-mcp-token")
+        monkeypatch.setattr(main_mod, "MCP_AUTH_TOKEN", "synthetic-mcp-token-xxxxxxxxxxxxxxxx")
         _run_server(_Server())  # type: ignore[arg-type]
         assert captured == {
             "app": app,
@@ -186,9 +191,11 @@ class TestMcpAuthToken:
 
         import src.main as main_mod
 
-        monkeypatch.setenv("MCP_AUTH_TOKEN", "  synthetic-env-token  ")
+        monkeypatch.setenv("MCP_AUTH_TOKEN", "  synthetic-env-token-xxxxxxxxxxxxxxxx  ")
         try:
-            assert importlib.reload(main_mod).MCP_AUTH_TOKEN == "synthetic-env-token"
+            assert (
+                importlib.reload(main_mod).MCP_AUTH_TOKEN == "synthetic-env-token-xxxxxxxxxxxxxxxx"
+            )
         finally:
             monkeypatch.delenv("MCP_AUTH_TOKEN", raising=False)
             importlib.reload(main_mod)
@@ -205,6 +212,51 @@ class TestMcpAuthToken:
         message = str(excinfo.value)
         assert ".secrets/mcp_auth_token.txt" in message
         assert "openssl rand -hex 32" in message
+
+    # #589: the token must be one scripts/mcp-auth-headers.sh can send
+    # (RFC 6750 b64token) and at least 32 characters long.
+    @pytest.mark.parametrize(
+        "token",
+        [
+            "synthetic marker 5d1a xxxxxxxxxxxxxxxx",  # space
+            "synthetic-marker-5d1a-xxxxxxxxxxxxxxxx:x",  # outside b64token
+            "synthetic-marker-5d1a-xxxxxxxxxxxxxxxx?x",
+            'synthetic-marker-5d1a-xxxxxxxxxxxxxxxx"x',
+            "synthetic-marker-5d1a-xxxxxxxxxxxxxxxx\tx",  # control character
+            "synthetic-marker-5d1a-xxxxxxxxxxxxxxxx\x7fx",
+            "synthetic-marker-5d1a-xxxxxxxxxxxxxxxx\u00e9",  # non-ASCII
+            "synthetic-marker-5d1a=xxxxxxxxxxxxxxxx",  # '=' only as padding
+            "synthetic-marker-5d1a",  # shorter than 32 characters
+            "synthetic-marker-" + "x" * 14,  # 31 characters
+        ],
+    )
+    def test_unusable_token_fails_startup_without_echoing_it(self, monkeypatch, caplog, token):
+        import src.main as main_mod
+
+        monkeypatch.setattr(main_mod, "MCP_AUTH_TOKEN", token)
+        monkeypatch.setattr(main_mod, "Database", self._FakeDatabase)
+        monkeypatch.setattr(main_mod, "_run_server", lambda *_: pytest.fail("server started"))
+        with caplog.at_level(logging.DEBUG), pytest.raises(ValueError) as excinfo:
+            main_mod.main()
+        message = str(excinfo.value)
+        assert "openssl rand -hex 32" in message
+        assert "marker" not in message
+        assert "marker" not in caplog.text
+
+    @pytest.mark.parametrize(
+        "token",
+        [
+            "0123456789abcdef" * 4,  # make init-secrets: openssl rand -hex 32
+            "AZaz09-._~+/" * 3,
+            "SyntheticBase64TokenSyntheticBase64TokenAAA=",  # openssl rand -base64 32
+            "SyntheticBase64TokenSyntheticBase64TokenA==",
+            "x" * 32,
+        ],
+    )
+    def test_b64token_of_32_or_more_characters_is_accepted(self, token):
+        import src.main as main_mod
+
+        assert main_mod._require_auth_token(token) == token
 
 
 class TestSessionIdleTimeout:
@@ -393,7 +445,7 @@ class TestRejectUrlUserinfo:
 
 
 _PLACEHOLDER_KEY = "sk-test-marker"  # pragma: allowlist secret
-_PLACEHOLDER_TOKEN = "synthetic-mcp-token"  # pragma: allowlist secret
+_PLACEHOLDER_TOKEN = "synthetic-mcp-token-xxxxxxxxxxxxxxxx"  # pragma: allowlist secret
 _URL_CREDENTIAL_MARKER = "SYNTHETIC_URL_CREDENTIAL"
 _INHERITED_URL = (
     f"https://user:{_URL_CREDENTIAL_MARKER}@provider.invalid/v1"  # pragma: allowlist secret
@@ -503,6 +555,122 @@ class TestInheritedEndpointUserinfo:
         main_mod.main()
         assert ran
         assert "https://api.openai.com/v1" in caplog.text
+
+
+class TestRemoteEndpointWarning:
+    """An enabled provider layer whose endpoint is not host-local sends
+    mail-derived text off the machine. Startup logs one WARNING per such
+    layer naming the mode and the endpoint host only (#622)."""
+
+    @staticmethod
+    def _warnings(caplog):
+        return [r for r in caplog.records if r.levelno == logging.WARNING]
+
+    @pytest.mark.parametrize(
+        ("url", "host"),
+        [
+            ("https://api.anthropic.com", "api.anthropic.com"),
+            ("https://gateway.example:8443/v1?tenant=SYNTHETIC_QUERY#frag", "gateway.example"),
+            ("http://192.0.2.10:1234/v1", "192.0.2.10"),
+        ],
+    )
+    def test_remote_url_warns_once_with_host_only(self, caplog, url, host):
+        caplog.set_level(logging.DEBUG)
+        _warn_if_remote_endpoint("INFERENCE_MODE", "openai", url, "retrieved email excerpts")
+        [record] = self._warnings(caplog)
+        # Exact text, so no scheme, port, path, query or fragment survives.
+        assert record.getMessage() == (
+            "Privacy: INFERENCE_MODE=openai sends retrieved email excerpts off this "
+            f"host, to {host}."
+        )
+
+    def test_empty_url_warns_about_sdk_default(self, caplog):
+        caplog.set_level(logging.DEBUG)
+        _warn_if_remote_endpoint("RERANK_MODE", "cohere", "", "search queries")
+        [record] = self._warnings(caplog)
+        assert "RERANK_MODE=cohere" in record.getMessage()
+        assert "default endpoint" in record.getMessage()
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "http://127.0.0.1:1234/v1",
+            "http://[::1]:8000/v1",
+            "http://localhost:8001/v1",
+            "http://LOCALHOST/v1",
+            "http://host.docker.internal:8001/v1",
+        ],
+    )
+    def test_host_local_url_is_silent(self, caplog, url):
+        caplog.set_level(logging.DEBUG)
+        _warn_if_remote_endpoint("EMBED_MODE", "openai", url, "search query text")
+        assert self._warnings(caplog) == []
+
+    def _run_main(self, monkeypatch, caplog, **config):
+        import src.main as main_mod
+
+        defaults = {
+            "MCP_AUTH_TOKEN": _PLACEHOLDER_TOKEN,
+            "EMBED_MODEL": "synthetic",
+            "EMBED_API_KEY": _PLACEHOLDER_KEY,
+            "INFERENCE_MODE": "anthropic",
+            "INFERENCE_MODEL": "synthetic",
+            "INFERENCE_API_KEY": _PLACEHOLDER_KEY,
+            "RERANK_MODE": "cohere",
+            "RERANK_MODEL": "synthetic",
+            "RERANK_API_KEY": _PLACEHOLDER_KEY,
+        }
+        for name, value in {**defaults, **config}.items():
+            monkeypatch.setattr(main_mod, name, value)
+        for name in ("OPENAI_BASE_URL", "ANTHROPIC_BASE_URL", "CO_API_URL"):
+            monkeypatch.delenv(name, raising=False)
+        monkeypatch.setattr(main_mod, "Database", TestInheritedEndpointUserinfo._FakeDatabase)
+        monkeypatch.setattr(main_mod, "_run_server", lambda *_: None)
+        caplog.set_level(logging.DEBUG)
+        main_mod.main()
+        assert _PLACEHOLDER_KEY not in caplog.text
+        return [r.getMessage() for r in self._warnings(caplog)]
+
+    def test_main_warns_once_per_remote_layer(self, monkeypatch, caplog):
+        warnings = self._run_main(
+            monkeypatch,
+            caplog,
+            EMBED_BASE_URL="",
+            INFERENCE_BASE_URL="",
+            RERANK_BASE_URL="https://rerank.example/v2",
+        )
+        # Exact lines: one per layer, each ending at the bare host.
+        assert warnings == [
+            "Privacy: EMBED_MODE=openai sends search query text off this host, to api.openai.com.",
+            "Privacy: INFERENCE_MODE=anthropic sends retrieved email excerpts off this "
+            "host, to api.anthropic.com.",
+            "Privacy: RERANK_MODE=cohere sends search queries and retrieved email "
+            "excerpts off this host, to rerank.example.",
+        ]
+
+    def test_main_is_silent_for_host_local_layers(self, monkeypatch, caplog):
+        local = "http://host.docker.internal:8001/v1"
+        warnings = self._run_main(
+            monkeypatch,
+            caplog,
+            EMBED_BASE_URL=local,
+            INFERENCE_MODE="openai",
+            INFERENCE_BASE_URL=local,
+            RERANK_BASE_URL="http://127.0.0.1:8002",
+        )
+        assert warnings == []
+
+    def test_main_skips_disabled_layers(self, monkeypatch, caplog):
+        warnings = self._run_main(
+            monkeypatch,
+            caplog,
+            EMBED_BASE_URL="http://localhost:8001/v1",
+            INFERENCE_MODE="none",
+            INFERENCE_BASE_URL="",
+            RERANK_MODE="none",
+            RERANK_BASE_URL="",
+        )
+        assert warnings == []
 
 
 class TestRequireEnv:

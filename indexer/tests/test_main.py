@@ -1147,6 +1147,51 @@ class TestValidateEmbedConfig:
             main._validate_embed_config()
 
 
+class TestWarnIfRemoteEndpoint:
+    """``_warn_if_remote_endpoint`` flags an embedder that is not
+    host-local: indexing sends mail text there (#622)."""
+
+    @staticmethod
+    def _warnings(caplog):
+        return [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+
+    @pytest.mark.parametrize(
+        ("url", "host"),
+        [
+            ("https://api.openai.com/v1", "api.openai.com"),
+            ("http://192.0.2.10:1234/v1", "192.0.2.10"),
+        ],
+    )
+    def test_remote_url_warns_once(self, caplog, url, host):
+        caplog.set_level(logging.DEBUG)
+        main._warn_if_remote_endpoint("EMBED_MODE", "openai", url, "email text")
+        [message] = self._warnings(caplog)
+        assert "EMBED_MODE=openai" in message
+        assert host in message
+        assert "/v1" not in message
+        assert ":1234" not in message
+
+    def test_empty_url_warns_about_sdk_default(self, caplog):
+        caplog.set_level(logging.DEBUG)
+        main._warn_if_remote_endpoint("EMBED_MODE", "openai", "", "email text")
+        [message] = self._warnings(caplog)
+        assert "default endpoint" in message
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "http://127.0.0.1:1234/v1",
+            "http://[::1]:8000/v1",
+            "http://localhost:8001/v1",
+            "http://host.docker.internal:8001/v1",
+        ],
+    )
+    def test_host_local_url_is_silent(self, caplog, url):
+        caplog.set_level(logging.DEBUG)
+        main._warn_if_remote_endpoint("EMBED_MODE", "openai", url, "email text")
+        assert self._warnings(caplog) == []
+
+
 class TestValidateEmbeddingDim:
     def test_matching_dim_passes_silently(self):
         embedder = make_mock_embedder()
@@ -3548,6 +3593,29 @@ class TestEnqueueUnindexedMessages:
         assert enqueued == 0
         assert queue.is_dead(str(no_id))
 
+    def test_over_long_message_id_is_dead_lettered_without_the_id(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        """A Message-ID over 998 characters takes the no-Message-ID
+        dead-letter path; the ID is sender-controlled, so neither the
+        log nor ``last_error`` may carry it."""
+        maildir, inbox, db, queue = self._setup(tmp_path, monkeypatch)
+        long_id = inbox / "long-id.eml"
+        marker = "MSGID998MARKER"
+        _write_eml(long_id, marker + "x" * (999 - len(marker) - 13) + "@example.test")
+        with caplog.at_level(logging.DEBUG):
+            main.initial_index(db, make_mock_embedder(), Threader(db), queue)
+
+        assert queue.is_dead(str(long_id))
+        row = db._conn.execute(
+            "SELECT last_stage, last_error FROM indexing_jobs WHERE filepath = ?",
+            (str(long_id),),
+        ).fetchone()
+        assert row["last_stage"] == "parse"
+        assert row["last_error"] == "unindexable: no Message-ID or one over 998 characters"
+        assert marker not in caplog.text
+        assert db._conn.execute("SELECT COUNT(*) FROM threads").fetchone()[0] == 0
+
 
 def _job_reasons(db: Database) -> dict[str, str]:
     return {
@@ -3847,7 +3915,15 @@ class TestMainStartupAndLoop:
     Maildir so a missed event cannot cause a permanent omission."""
 
     def _run_main(
-        self, tmp_path, monkeypatch, *, sweep_due: bool, drain=None, synced=False, refresh=None
+        self,
+        tmp_path,
+        monkeypatch,
+        *,
+        sweep_due: bool,
+        drain=None,
+        synced=False,
+        refresh=None,
+        embed_url="http://host.docker.internal:8001/v1",
     ):
         events: list[str] = []
         db = Database(tmp_path / "mail.db")
@@ -3857,7 +3933,9 @@ class TestMainStartupAndLoop:
         monkeypatch.setattr(main, "_validate_embed_config", lambda: None)
         monkeypatch.setattr(main, "_validate_embedding_dim", lambda e: None)
         monkeypatch.setattr(main, "Database", lambda path: db)
-        monkeypatch.setattr(main, "OpenAIEmbedder", lambda **kw: make_mock_embedder())
+        embedder = make_mock_embedder()
+        embedder.base_url = embed_url
+        monkeypatch.setattr(main, "OpenAIEmbedder", lambda **kw: embedder)
         monkeypatch.setattr(main, "touch_health_file", lambda: None)
         monkeypatch.setattr(main, "sweep_paths", lambda db: events.append("sweep_paths"))
         monkeypatch.setattr(main, "Observer", lambda: _FakeObserver(events))
@@ -3949,6 +4027,34 @@ class TestMainStartupAndLoop:
 
         init = next(e for e in events if e.startswith("initial_index"))
         assert events.index("sweep_paths") < events.index(init)
+
+    def test_remote_embedder_warns_once_with_host_only(self, tmp_path, monkeypatch, caplog):
+        """#622: an embedder off the host receives mail text, so startup
+        logs one WARNING naming the mode and host, not the path or key."""
+        monkeypatch.setattr(
+            main, "EMBED_API_KEY", "sk-synthetic-marker"
+        )  # pragma: allowlist secret
+        caplog.set_level(logging.DEBUG)
+        self._run_main(
+            tmp_path,
+            monkeypatch,
+            sweep_due=False,
+            embed_url="https://embed.example:8443/v1?tenant=SYNTHETIC_QUERY",
+        )
+
+        warnings = [r.getMessage() for r in caplog.records if r.getMessage().startswith("Privacy:")]
+        assert len(warnings) == 1
+        assert "EMBED_MODE=openai" in warnings[0]
+        assert "embed.example" in warnings[0]
+        for part in ("/v1", "SYNTHETIC_QUERY", ":8443"):
+            assert part not in warnings[0]
+        assert "sk-synthetic-marker" not in caplog.text
+
+    def test_host_local_embedder_does_not_warn(self, tmp_path, monkeypatch, caplog):
+        caplog.set_level(logging.DEBUG)
+        self._run_main(tmp_path, monkeypatch, sweep_due=False)
+
+        assert not [r for r in caplog.records if r.getMessage().startswith("Privacy:")]
 
     def test_observer_starts_before_initial_drain(self, tmp_path, monkeypatch):
         events = self._run_main(tmp_path, monkeypatch, sweep_due=False)
@@ -6353,6 +6459,7 @@ class TestPruneReapedRecords:
 
         embedder = make_mock_embedder()
         embedder.wait_for_ready = never_ready
+        embedder.base_url = "http://host.docker.internal:8001/v1"
         monkeypatch.setattr(main, "_validate_embed_config", lambda: None)
         monkeypatch.setattr(main, "Database", lambda path: db)
         monkeypatch.setattr(main, "OpenAIEmbedder", lambda **kw: embedder)

@@ -37,7 +37,7 @@ help:
 	@echo "  test-mbsync-tls  Run the mbsync TLS check against a synthetic Bridge (needs Docker)"
 	@echo "  test-mbsync-layout  Run the mbsync Maildir layout and UIDVALIDITY checks with synthetic stores (needs Docker)"
 	@echo "  test-compose Run Compose rendering tests for both Bridge modes"
-	@echo "  test-bridge  Run Bridge entrypoint tests only"
+	@echo "  test-bridge  Run Bridge entrypoint, patch-source and Dockerfile tests only"
 	@echo "  test-bridge-smoke  Run bridge-smoke.sh pass/fail tests (no Docker)"
 	@echo "  test-validate-env  Run validate-env.sh and mcp-auth-headers.sh tests against synthetic fixtures"
 	@echo "  baseline     Run the retrieval regression baseline (UPDATE=1 rewrites the rank snapshot)"
@@ -243,6 +243,8 @@ test-compose:
 
 test-bridge:
 	bash bridge/tests/entrypoint_test.sh
+	bash bridge/tests/patch_source_test.sh
+	bash bridge/tests/dockerfile_test.sh
 
 test-bridge-smoke:
 	bash scripts/tests/bridge_smoke_test.sh

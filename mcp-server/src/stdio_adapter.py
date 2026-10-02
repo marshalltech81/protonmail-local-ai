@@ -38,9 +38,10 @@ from fastmcp.server import create_proxy
 
 _DEFAULT_TOKEN_FILE = Path(__file__).resolve().parents[2] / ".secrets" / "mcp_auth_token.txt"
 _DEFAULT_PORT = "3000"
-# RFC 6750 ``b64token`` characters, as scripts/mcp-auth-headers.sh checks.
+# RFC 6750 ``b64token`` characters ('=' as trailing padding), as
+# scripts/mcp-auth-headers.sh and mcp-server startup check.
 # ``openssl rand -hex 32`` output always matches.
-_TOKEN_RE = re.compile(r"[A-Za-z0-9._~+/=-]+")
+_TOKEN_RE = re.compile(r"[A-Za-z0-9._~+/-]+=*")
 
 
 class AdapterConfigError(Exception):
@@ -73,7 +74,7 @@ def read_token(path: Path) -> str:
     if _TOKEN_RE.fullmatch(token) is None:
         raise AdapterConfigError(
             f"MCP bearer token in {path} has characters outside "
-            "A-Z a-z 0-9 . _ ~ + / = -; regenerate it with openssl rand -hex 32."
+            "A-Z a-z 0-9 . _ ~ + / - (and trailing =); regenerate it with openssl rand -hex 32."
         )
     return token
 

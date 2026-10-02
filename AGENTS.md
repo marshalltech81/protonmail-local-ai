@@ -337,7 +337,11 @@ Secrets are a hard boundary.
 - The MCP bearer token is the Docker secret
   `.secrets/mcp_auth_token.txt` (mode 600, always non-empty;
   `make init-secrets` generates it). `validate-env.sh` rejects a missing,
-  empty or non-600 file and an `MCP_AUTH_TOKEN` in `.env`; the
+  empty or non-600 file, a token shorter than 32 characters or outside
+  the RFC 6750 b64token set (mcp-server startup,
+  `scripts/mcp-auth-headers.sh` and the stdio adapter apply the same
+  set), and an
+  `MCP_AUTH_TOKEN` in `.env`; the
   `MCP_AUTH_TOKEN` env fallback is for running the server outside a
   container only, never the Compose path. Never log the token or the
   `Authorization` header, and never document or script a client setup
@@ -603,6 +607,10 @@ build in `bridge/Dockerfile` or any future Go service, follow these rules:
 - run `go mod download && go mod verify` after cloning source and before building;
   `go mod verify` confirms every cached module matches its checksum in `go.sum`,
   failing the build if any module has been tampered with or corrupted
+- the download may be retried a bounded number of times against transient
+  proxy errors (three attempts today, #618), but `go mod verify` always runs
+  after it and a persistent download failure still fails the build;
+  `bridge/tests/dockerfile_test.sh` checks both
 
 ### CGO build mode
 
@@ -751,16 +759,21 @@ Notes:
 - for Docker Compose or env wiring changes, run `docker compose config --quiet`
 - for Docker Compose or shell script changes, run the Semgrep job from
   `.github/workflows/security.yml` locally:
-  `uvx --from semgrep==1.179.0 semgrep test .semgrep` and
+  `uvx --from semgrep==1.179.0 semgrep test .semgrep`,
+  `uvx --from semgrep==1.179.0 bash scripts/tests/semgrep_paths_test.sh` and
   `uvx --from semgrep==1.179.0 semgrep scan --metrics=off --strict --error --config .semgrep/compose.yaml --config .semgrep/shell.yaml .`.
   The rules in `.semgrep/` encode the hardening and exposure rules
-  above and cover every `docker-compose*.yml` overlay and `*.sh` file.
+  above and cover every `docker-compose*.yml` and `compose*.yml`
+  overlay (`.yaml` too) and `*.sh` file.
   Fix a finding; allow-list one only with owner approval, as a
   `# nosemgrep: <rule-id>` comment on the reported line with the reason
   beside it. A rule change gets matching cases in its fixture
   (`.semgrep/compose.test.yml`, `.semgrep/shell.sh`).
 - for Dockerfile, build, or container-runtime changes, run the smallest relevant `docker compose build ...` subset when practical
-- for Bridge build, patch, or version-bump changes, run `make bridge-upgrade-check`
+- for Bridge build, patch, or version-bump changes, run `make bridge-upgrade-check`;
+  the report-only "Bridge Go module scan" job in `.github/workflows/security.yml`
+  lists advisories in Proton's Go modules at the pinned `BRIDGE_COMMIT` in its
+  job summary and never fails CI
 - prefer real `.eml` fixtures for parser tests
 - integration tests should mock IMAP rather than hitting a live Bridge instance
 - add or update tests when behavior changes
@@ -795,6 +808,7 @@ Notes:
 - changes to `mbsync/mbsyncrc.template` should pass `make test-mbsync-layout` (the shipped image's isync against synthetic Maildir stores: folder layout, and spurious and genuine UIDVALIDITY changes with the documented recovery)
 - Compose changes that touch service selection, dependencies, hardening or ports should keep `scripts/tests/compose_test.sh` passing for both Bridge modes; it also checks the required hardening on the merged config of every overlay combination the Makefile uses, so a new overlay or combination is added to its list
 - Bridge entrypoint changes should update `bridge/tests/entrypoint_test.sh`, which does the same with a synthetic GPG keyring and pass store
+- `bridge/patch-source.sh` text-patch changes should keep `bridge/tests/patch_source_test.sh` passing; it runs the helper on a synthetic tree under strict (non-GNU) sed escapes, since `make bridge-patch-check` runs it with BSD sed on macOS
 - indexing, chunking, embedding-storage, or retrieval changes should pass `make baseline`; if ranking changes on purpose, regenerate the snapshot with `make baseline UPDATE=1` and explain the snapshot diff in the PR
 - before opening PRs that touch TLS, auth, logging, subprocess execution, or credential handling, run `bandit -r src/` and resolve any findings rated medium or higher (a CI job in `.github/workflows/security.yml` enforces this at medium+ severity for both services)
 

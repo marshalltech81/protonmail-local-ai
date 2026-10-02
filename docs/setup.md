@@ -66,7 +66,11 @@ with real values only as needed:
   MCP client must send (see [Connect an MCP client](#7-connect-an-mcp-client)).
   `make init-secrets` generates it; to create or replace it yourself,
   run `(umask 077; openssl rand -hex 32 > .secrets/mcp_auth_token.txt)`.
-  Never put it in `.env`.
+  A token you choose yourself must be at least 32 characters from
+  `A-Z a-z 0-9 - . _ ~ + /` with optional trailing `=` (the RFC 6750
+  bearer-token set, which `openssl rand -hex 32` and
+  `openssl rand -base64 32` output both meet); `make validate-env` and
+  mcp-server startup reject anything else. Never put it in `.env`.
 
 ### 3. Build all Docker images
 
@@ -267,7 +271,9 @@ services strip it. It fails fast if:
   `inference_api_key.txt` when `INFERENCE_MODE` is `anthropic` or
   `openai`; `embed_api_key.txt` always (`EMBED_MODE` has no `none`
   mode); `rerank_api_key.txt` when `RERANK_MODE=cohere`;
-  `mcp_auth_token.txt` always (`MCP_AUTH_TOKEN` in `.env` also fails).
+  `mcp_auth_token.txt` always (`MCP_AUTH_TOKEN` in `.env` also fails,
+  and so does a token shorter than 32 characters or outside the RFC 6750
+  set described above).
   For unauthenticated host-side servers, write any non-empty placeholder
   string (e.g. `unauthenticated`). **`{LAYER}_BASE_URL` may be empty
   for any enabled layer — empty means "use the SDK default" (OpenAI
@@ -355,7 +361,8 @@ leave empty for the Cohere SDK default.
 
 The MCP server reads the rerank settings once at startup, so a change
 takes effect only when the `mcp-server` container is recreated. After
-editing `.env`, run `make up`: Compose recreates every container whose
+editing `.env`, run `make up` (`make up-macos-bridge` in
+[macOS Bridge mode](#macos-bridge-mode-optional)): Compose recreates every container whose
 configuration changed. `docker compose restart` is not enough, because
 a restarted container keeps the environment it was created with. If
 the stack was started with an overlay (such as
@@ -519,6 +526,11 @@ make update
 ```
 
 `make update` runs `make bridge-upgrade-check` first and stops if it fails.
+For a bump made in this repository, the Security Scan workflow's report-only
+"Bridge Go module scan" job lists the known advisories in Proton's Go modules
+at the `BRIDGE_COMMIT` pinned in `.env.example` (job summary, with a warning
+when the `bridge/Dockerfile` or `docker-compose.yml` default disagrees; it
+never fails CI, and it reruns weekly).
 If the check fails, do not work around it. A commit mismatch is often a
 pin mistake to correct (see below). For patch drift, a smoke failure, or a
 moved upstream tag, stay on the working release — and because `.env`
@@ -784,7 +796,7 @@ restart Claude Desktop.
 
 **Upgrading from a release without MCP authentication.** Run
 `make init-secrets` (it creates only the missing token file), then
-`make up`, then add the header to each client as above. Until a client
+`make up` (`make up-macos-bridge` in macOS Bridge mode), then add the header to each client as above. Until a client
 sends the token, its requests get `401`.
 
 **Upgrading from a release that served `/sse` (breaking change).** The

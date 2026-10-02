@@ -30,7 +30,7 @@ setup() {
     printf 'placeholder\n' >"$ROOT/.secrets/inference_api_key.txt"
     printf 'placeholder\n' >"$ROOT/.secrets/embed_api_key.txt"
     : >"$ROOT/.secrets/rerank_api_key.txt"
-    printf 'placeholder-mcp-token\n' >"$ROOT/.secrets/mcp_auth_token.txt"
+    printf 'placeholder-mcp-token-xxxxxxxxxxxxxxxx\n' >"$ROOT/.secrets/mcp_auth_token.txt"
     chmod 600 "$ROOT"/.secrets/*.txt
 }
 
@@ -278,7 +278,7 @@ removed_transport_fails_with_migration_steps() {
         setup "MCP_TRANSPORT=\"$value\""
         fails_with "MCP_TRANSPORT=$expected was removed"
         grep -F '/sse to' "$WORK/output" >/dev/null
-        grep -F '/mcp' "$WORK/output" >/dev/null
+        grep -F 'http://127.0.0.1:<MCP_PORT>/mcp' "$WORK/output" >/dev/null
     done
 }
 
@@ -339,6 +339,61 @@ empty_mcp_token_fails() {
     fails_with 'MCP bearer token is missing or empty'
     printf ' \n' >"$ROOT/.secrets/mcp_auth_token.txt"
     fails_with 'MCP bearer token is missing or empty'
+}
+
+# #589: the token must be at least 32 RFC 6750 b64token characters, the
+# set scripts/mcp-auth-headers.sh sends, and the failure never echoes it.
+# write_mcp_token CONTENTS: replace the token file, keeping mode 600.
+write_mcp_token() {
+    printf '%s' "$1" >"$ROOT/.secrets/mcp_auth_token.txt"
+}
+
+unusable_mcp_token_fails_without_echoing_it() {
+    local token
+    setup
+    for token in \
+        'synthetic marker 5d1a xxxxxxxxxxxxxxxx' \
+        'synthetic-marker-5d1a-xxxxxxxxxxxxxxxx:x' \
+        'synthetic-marker-5d1a-xxxxxxxxxxxxxxxx?x' \
+        'synthetic-marker-5d1a-xxxxxxxxxxxxxxxx"x' \
+        $'synthetic-marker-5d1a-xxxxxxxxxxxxxxxx\tx' \
+        $'synthetic-marker-5d1a-xxxxxxxxxxxxxxxx\x7fx' \
+        $'synthetic-marker-5d1a-xxxxxxxxxxxxxxxx\nx' \
+        $'synthetic-marker-5d1a-xxxxxxxxxxxxxxxx\xc3\xa9' \
+        'synthetic-marker-5d1a=xxxxxxxxxxxxxxxx' \
+        'synthetic-marker-5d1a' \
+        'synthetic-marker-xxxxxxxxxxxxxx'; do
+        write_mcp_token "$token"
+        fails_with 'MCP bearer token in'
+        if grep -F 'marker' "$WORK/output" >/dev/null; then
+            return 1
+        fi
+    done
+}
+
+# Review round 1: command substitution drops NUL bytes, so a token with
+# one inside must be refused before the file is read into a variable.
+mcp_token_with_nul_byte_fails() {
+    setup
+    printf 'synthetic-marker-xxxxxxx\0xxxxxxxxxxxxxxxx' >"$ROOT/.secrets/mcp_auth_token.txt"
+    fails_with 'MCP bearer token in'
+    if grep -F 'marker' "$WORK/output" >/dev/null; then
+        return 1
+    fi
+}
+
+usable_mcp_token_passes() {
+    local token
+    setup
+    for token in \
+        "$(printf '0123456789abcdef%.0s' 1 2 3 4)" \
+        'AZaz09-._~+/AZaz09-._~+/AZaz09-._~+/' \
+        'SyntheticBase64TokenSyntheticBase64TokenAAA=' \
+        'SyntheticBase64TokenSyntheticBase64TokenA==' \
+        $'  xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx \t\n\n'; do
+        write_mcp_token "$token"
+        passes
+    done
 }
 
 loose_mcp_token_mode_fails() {
@@ -535,6 +590,9 @@ check "an API key in .env fails" api_key_in_env_fails
 check "a secret file not 600 fails" loose_secret_mode_fails
 check "a missing MCP token file fails" missing_mcp_token_file_fails
 check "an empty MCP token fails" empty_mcp_token_fails
+check "an unusable MCP token fails without echoing it" unusable_mcp_token_fails_without_echoing_it
+check "an MCP token with a NUL byte fails" mcp_token_with_nul_byte_fails
+check "a usable MCP token passes" usable_mcp_token_passes
 check "an MCP token file not 600 fails" loose_mcp_token_mode_fails
 check "an MCP token in .env fails" mcp_token_in_env_fails
 check "an MCP token failure does not echo the token" mcp_token_failure_does_not_echo_the_value

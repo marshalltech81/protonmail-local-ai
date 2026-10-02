@@ -93,6 +93,15 @@ SCHEMA_APPLICATION_ID = 0x504D4149  # "PMAI"
 # of "not found"; after this window the lookup reads as not found.
 REAPED_RECORD_RETENTION_DAYS = 30
 
+# Drop a payload's cached extraction once no ``attachments`` row
+# references it (#562). Both lookups use an index (the extraction
+# primary key and ``idx_attachments_attachment_id``), so a removal costs
+# one indexed statement per payload it carried, whatever the table sizes.
+_PURGE_ORPHAN_EXTRACTION_SQL = (
+    "DELETE FROM attachment_extractions WHERE attachment_id = ? "
+    "AND NOT EXISTS (SELECT 1 FROM attachments WHERE attachment_id = ?)"
+)
+
 # The schema uses FTS5 ``contentless_delete=1``, which SQLite added in 3.43.
 # Validate the runtime version at Database init and fail fast with a clear
 # message instead of degrading silently.
@@ -352,7 +361,8 @@ class Database:
           captures filename/MIME), ``attachments_fts`` (filename + MIME
           search), and ``attachment_extractions`` (per content-hash
           cache so OCR / PDF parse cost runs at most once per unique
-          payload regardless of forwarding count).
+          payload regardless of forwarding count; a row is deleted with
+          the last occurrence that references it).
 
         Plus the cross-cutting tables: ``message_thread_map`` (message
         → thread index), ``indexed_files`` (file identity for rename
@@ -1372,21 +1382,26 @@ class Database:
             raise
 
     def _delete_attachments_for_message(self, cur: sqlite3.Cursor, claimant_id: str) -> None:
-        """Drop all ``attachments`` occurrences and their FTS rows for ``claimant_id``.
+        """Drop all ``attachments`` occurrences and their FTS rows for
+        ``claimant_id``, then the cached ``attachment_extractions`` row of
+        each payload no remaining occurrence references (#562).
 
-        Cached ``attachment_extractions`` rows are left in place: another
-        message may still reference the same content_hash, and even when
-        nothing does today, retaining the cached extraction means a
-        future re-arrival (forwarded from outside) skips the extract
-        cost. A separate sweep can prune true orphans periodically.
+        A payload another message still carries keeps its row. Purging
+        an orphan gives up the extraction cache for a later re-arrival of
+        the same bytes, which is extracted again; the extracted text must
+        not outlive every message that carried it. Runs on the caller's
+        cursor, inside the caller's transaction.
         """
         rows = cur.execute(
-            "SELECT fts_rowid FROM attachments WHERE claimant_id = ?", (claimant_id,)
+            "SELECT fts_rowid, attachment_id FROM attachments WHERE claimant_id = ?",
+            (claimant_id,),
         ).fetchall()
         for row in rows:
             if row["fts_rowid"] is not None:
                 cur.execute("DELETE FROM attachments_fts WHERE rowid = ?", (row["fts_rowid"],))
         cur.execute("DELETE FROM attachments WHERE claimant_id = ?", (claimant_id,))
+        for attachment_id in sorted({row["attachment_id"] for row in rows}):
+            cur.execute(_PURGE_ORPHAN_EXTRACTION_SQL, (attachment_id, attachment_id))
 
     @_synchronized
     def replace_thread_vector(self, thread_id: str, embedding: list[float]) -> None:
@@ -2792,11 +2807,10 @@ class Database:
         filepath = row["filepath"]
         # Per-message chunk cascade. ``_delete_chunks_for_message``
         # drops both body-chunk and attachment-chunk rows because both
-        # carry this claimant_id; the deduped extraction cache stays.
+        # carry this claimant_id.
         self._delete_chunks_for_message(cur, claimant_id)
-        # Attachment occurrences for this message. Cached extractions
-        # in ``attachment_extractions`` are deliberately kept — see
-        # ``_delete_attachments_for_message``.
+        # Attachment occurrences for this message, and the cached
+        # extraction of any payload no other message still carries.
         self._delete_attachments_for_message(cur, claimant_id)
         # Identifiers only, so a later lookup can report the message as
         # reaped (see ``reaped_messages`` in the schema).

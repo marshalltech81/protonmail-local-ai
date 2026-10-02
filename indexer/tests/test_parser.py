@@ -19,6 +19,7 @@ from pathlib import Path
 
 import pytest
 from src.parser import (
+    MESSAGE_ID_MAX_CHARS,
     OversizedMessageError,
     _clean_id,
     _decode_header,
@@ -2260,6 +2261,89 @@ class TestDecodeHeader:
 # ---------------------------------------------------------------------------
 # _clean_id
 # ---------------------------------------------------------------------------
+
+
+def _id_of(length: int, marker: str = "MSGID998MARKER") -> str:
+    """A synthetic Message-ID of exactly ``length`` characters, no brackets."""
+    domain = "@example.test"
+    return marker + "x" * (length - len(marker) - len(domain)) + domain
+
+
+def _id_eml(tmp_path: Path, headers: str, name: str = "id.eml") -> Path:
+    folder = tmp_path / "INBOX" / "cur"
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / name
+    path.write_bytes(
+        (
+            "From: alice@example.com\r\nTo: bob@example.com\r\nSubject: x\r\n"
+            + headers
+            + "Date: Mon, 01 Jan 2024 12:00:00 +0000\r\n\r\nbody\r\n"
+        ).encode("ascii")
+    )
+    return path
+
+
+class TestMessageIdLength:
+    """A Message-ID longer than ``MESSAGE_ID_MAX_CHARS`` (998) is
+    unindexable, like a missing one, so a crafted root ID cannot become
+    an unbounded thread ID. The count is of the ID as stored: after the
+    surrounding whitespace (including folding) and angle brackets are
+    removed, so ``<`` + 998 characters + ``>`` is accepted."""
+
+    def test_limit_is_998(self):
+        assert MESSAGE_ID_MAX_CHARS == 998
+
+    @pytest.mark.parametrize("bracketed", [True, False])
+    def test_998_characters_are_accepted(self, tmp_path, bracketed):
+        mid = _id_of(998)
+        value = f"<{mid}>" if bracketed else mid
+        msg = parse_email(_id_eml(tmp_path, f"Message-ID: {value}\r\n"))
+        assert msg is not None
+        assert msg.message_id == mid
+
+    @pytest.mark.parametrize("bracketed", [True, False])
+    def test_999_characters_are_unindexable(self, tmp_path, bracketed, caplog):
+        mid = _id_of(999)
+        value = f"<{mid}>" if bracketed else mid
+        with caplog.at_level(logging.DEBUG, logger="indexer.parser"):
+            assert parse_email(_id_eml(tmp_path, f"Message-ID: {value}\r\n")) is None
+        assert "MSGID998MARKER" not in caplog.text
+
+    def test_folded_header_counts_the_id_not_the_folding(self, tmp_path):
+        mid = _id_of(998)
+        msg = parse_email(_id_eml(tmp_path, f"Message-ID:\r\n <{mid}>\r\n"))
+        assert msg is not None
+        assert msg.message_id == mid
+
+    def test_folded_over_long_id_is_unindexable(self, tmp_path):
+        mid = _id_of(999)
+        assert parse_email(_id_eml(tmp_path, f"Message-ID:\r\n <{mid}>\r\n")) is None
+
+    def test_over_long_in_reply_to_is_dropped(self, tmp_path):
+        headers = f"Message-ID: <m@example.test>\r\nIn-Reply-To: <{_id_of(999)}>\r\n"
+        msg = parse_email(_id_eml(tmp_path, headers))
+        assert msg is not None
+        assert msg.in_reply_to is None
+
+    def test_998_character_in_reply_to_is_kept(self, tmp_path):
+        parent = _id_of(998)
+        headers = f"Message-ID: <m@example.test>\r\nIn-Reply-To: <{parent}>\r\n"
+        msg = parse_email(_id_eml(tmp_path, headers))
+        assert msg is not None
+        assert msg.in_reply_to == parent
+
+    def test_over_long_references_entries_are_dropped(self, tmp_path):
+        """Only the over-long entries go; the rest keep their order,
+        including across folded lines."""
+        kept = _id_of(998, marker="KEPT")
+        headers = (
+            "Message-ID: <m@example.test>\r\n"
+            f"References: <a@example.test> <{_id_of(999)}>\r\n"
+            f" <{kept}>\r\n <{_id_of(5000)}> <b@example.test>\r\n"
+        )
+        msg = parse_email(_id_eml(tmp_path, headers))
+        assert msg is not None
+        assert msg.references == ["a@example.test", kept, "b@example.test"]
 
 
 class TestCleanId:

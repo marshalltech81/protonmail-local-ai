@@ -664,7 +664,8 @@ docker inspect mbsync --format='{{json .State.Health}}'
 Fix the cause the log names (see "mbsync fails to connect" and the cert pin
 sections below). Repeated sync failures make the container exit and restart
 after five consecutive failures, so `docker compose ps` shows the restarts.
-Once mbsync is healthy, run `make up` again: Compose leaves the running
+Once mbsync is healthy, run `make up` again (`make up-macos-bridge` in
+[macOS Bridge mode](setup.md#macos-bridge-mode-optional)): Compose leaves the running
 services as they are and starts the indexer and then the MCP server.
 
 ## Indexer refuses to start — "wipe the sqlite-volume"
@@ -683,9 +684,9 @@ rather than assumed:
 ```bash
 volume=$(docker compose config --format json \
   | python3 -c 'import json, sys; print(json.load(sys.stdin)["volumes"]["sqlite-volume"]["name"])')
-docker compose down
+make down
 docker volume rm "$volume"
-make up
+make up                # or make up-macos-bridge in macOS Bridge mode
 ```
 
 Maildir and Bridge state are untouched. The indexer re-parses and
@@ -713,7 +714,7 @@ brake, unlink-on-reap).
 
 The indexer reads these settings once at startup, so a change takes
 effect only when the `indexer` container is recreated. After editing
-`.env`, run `make up`: Compose recreates every container whose
+`.env`, run `make up` (`make up-macos-bridge` in macOS Bridge mode): Compose recreates every container whose
 configuration changed. `docker compose restart` is not enough, because
 a restarted container keeps the environment it was created with. If
 the stack was started with an overlay (such as
@@ -796,7 +797,7 @@ Every failed row records a `last_error_class`:
 | Class | Meaning |
 |---|---|
 | `retryable` | May succeed on a later attempt; `dead` means the attempt budget ran out |
-| `permanent_source_failure` | This file can never be indexed under the current config (oversized, no `Message-ID`, input the embedder rejects) — dead-lettered immediately |
+| `permanent_source_failure` | This file can never be indexed under the current config (oversized, no `Message-ID` or one over 998 characters, input the embedder rejects) — dead-lettered immediately |
 | `operator_action_required` | The embedder rejected a health probe (bad key or model); jobs stay `queued` until you fix the config |
 
 Once the cause of a dead-letter is fixed, requeue with a fresh budget
@@ -841,11 +842,13 @@ problem.
 1. Check the token works without printing it (from the repository
    root). The header goes to `curl` on standard input (`-H @-`), so the
    token is not in `curl`'s arguments, which other local accounts can
-   read:
+   read. `--noproxy '*'` keeps an `http_proxy` or `ALL_PROXY` in your
+   shell from sending the request, header included, to a proxy instead
+   of straight to loopback:
 
    ```bash
    printf 'Authorization: Bearer %s\n' "$(cat .secrets/mcp_auth_token.txt)" |
-     curl -s -o /dev/null -w '%{http_code}\n' -X POST http://127.0.0.1:3000/mcp \
+     curl -s --noproxy '*' -o /dev/null -w '%{http_code}\n' -X POST http://127.0.0.1:3000/mcp \
      -H @- \
      -H 'Accept: application/json, text/event-stream' \
      -H 'Content-Type: application/json' \
@@ -886,7 +889,17 @@ invalid_token (status=401)` and never logs the token or the
 `make validate-env`, which `make up` runs first, catches this too.
 Create a token with `make init-secrets` (when the file does not exist)
 or `(umask 077; openssl rand -hex 32 > .secrets/mcp_auth_token.txt)`,
-run `make up`, and configure each client with it.
+run `make up` (`make up-macos-bridge` in macOS Bridge mode), and
+configure each client with it.
+
+## mcp-server exits with "The MCP bearer token must be at least 32 characters"
+
+The token in `.secrets/mcp_auth_token.txt` is shorter than 32
+characters or holds a character outside `A-Z a-z 0-9 - . _ ~ + /` (with
+`=` allowed only at the end), so MCP clients could not send it as a
+bearer token. `make validate-env` reports the same. Replace it with
+`(umask 077; openssl rand -hex 32 > .secrets/mcp_auth_token.txt)`, run
+`make up`, and update each client.
 
 ## mcp-server exits with "MCP_TRANSPORT=sse was removed"
 
@@ -894,8 +907,8 @@ The `.env` (or the shell you run `make` from) still sets
 `MCP_TRANSPORT=sse` or `MCP_TRANSPORT=dual` from a release that served
 the legacy SSE transport. Remove the line from `.env`, run
 `unset MCP_TRANSPORT` in a shell that exports it (an exported value wins
-over `.env`), or set it to `streamable-http`; then run `make up` and
-change client URLs from `/sse` to `/mcp`.
+over `.env`), or set it to `streamable-http`; then run `make up`
+(`make up-macos-bridge` in macOS Bridge mode) and change client URLs from `/sse` to `/mcp`.
 
 ## Bridge credentials expired / need to re-authenticate
 

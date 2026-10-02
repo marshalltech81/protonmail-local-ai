@@ -265,7 +265,7 @@ services:
   # MCP Server
   # Exposes search, Q&A, and agentic tools over MCP transports.
   # Accessible on the host machine only. Streamable HTTP is the only
-  # transport: http://localhost:MCP_PORT/mcp. Every /mcp request must send
+  # transport: http://127.0.0.1:MCP_PORT/mcp. Every /mcp request must send
   # Authorization: Bearer <the mcp_auth_token secret>; /health is open.
   # ---------------------------------------------------------------------------
   mcp-server:

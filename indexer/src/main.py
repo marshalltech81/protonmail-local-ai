@@ -137,6 +137,30 @@ EMBED_BASE_URL = os.environ.get("EMBED_BASE_URL", "")
 EMBED_MODEL = os.environ.get("EMBED_MODEL", "")
 
 
+# Endpoint hosts that keep a provider call on this machine: the host's
+# loopback, or OrbStack's route from a container to it.
+_HOST_LOCAL_HOSTS = frozenset({"127.0.0.1", "::1", "localhost", "host.docker.internal"})
+
+
+def _warn_if_remote_endpoint(mode_setting: str, mode: str, url: str, sends: str) -> None:
+    """Log one WARNING when the embedder endpoint is not host-local.
+
+    ``url`` is the resolved endpoint; empty means an SDK default, which
+    is always a remote provider. Only the host is named: never the
+    path, query, port or the API key. Mirrors the mcp-server helper.
+    """
+    host = urllib.parse.urlsplit(url).hostname if url else None
+    if host in _HOST_LOCAL_HOSTS:
+        return
+    log.warning(
+        "Privacy: %s=%s sends %s off this host, to %s.",
+        mode_setting,
+        mode,
+        sends,
+        host or "the SDK's default endpoint",
+    )
+
+
 def _validate_embed_config() -> None:
     """Raise at startup when the embedder is misconfigured.
 
@@ -771,12 +795,15 @@ def _phase1_commit_thread(
         return None
     parse_ms = (time.perf_counter() - t0) * 1000
     if msg is None:
-        # Parser returned None for a terminal reason (no Message-ID).
+        # Parser returned None for a terminal reason (no Message-ID, or
+        # one over ``MESSAGE_ID_MAX_CHARS``).
         # Dead-letter rather than delete the row: the file is never
         # written to ``indexed_files``, so a deleted row would let every
         # Maildir walk re-enqueue and re-parse it forever. The dead row
         # makes the walk skip it and keeps it visible in queue stats.
-        queue.mark_dead_terminal(filepath, stage="parse", error="unindexable: no Message-ID")
+        queue.mark_dead_terminal(
+            filepath, stage="parse", error="unindexable: no Message-ID or one over 998 characters"
+        )
         return None
 
     t0 = time.perf_counter()
@@ -2047,6 +2074,8 @@ def main():
     )
     if EMBED_API_KEY:
         log.info("  Embedder API key: present (Bearer auth enabled)")
+    # A loud line when indexing sends mail text off the host (#622).
+    _warn_if_remote_endpoint("EMBED_MODE", EMBED_MODE, embedder.base_url, "email text")
     threader = Threader(db)
     touch_health_file()
 

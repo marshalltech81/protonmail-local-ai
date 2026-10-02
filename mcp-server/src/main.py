@@ -11,6 +11,7 @@ import hmac
 import logging
 import math
 import os
+import re
 import urllib.parse
 from pathlib import Path
 
@@ -262,6 +263,30 @@ def _reject_url_userinfo(name: str, value: str) -> str:
     return value
 
 
+# Endpoint hosts that keep a provider call on this machine: the host's
+# loopback, or OrbStack's route from a container to it.
+_HOST_LOCAL_HOSTS = frozenset({"127.0.0.1", "::1", "localhost", "host.docker.internal"})
+
+
+def _warn_if_remote_endpoint(mode_setting: str, mode: str, url: str, sends: str) -> None:
+    """Log one WARNING when an enabled layer's endpoint is not host-local.
+
+    ``url`` is the resolved endpoint, or empty for an SDK default the
+    client does not expose (always a remote provider). Only the host is
+    named: never the path, query, port or the API key.
+    """
+    host = urllib.parse.urlsplit(url).hostname if url else None
+    if host in _HOST_LOCAL_HOSTS:
+        return
+    log.warning(
+        "Privacy: %s=%s sends %s off this host, to %s.",
+        mode_setting,
+        mode,
+        sends,
+        host or "the SDK's default endpoint",
+    )
+
+
 INFERENCE_MODE = _normalize_mode(
     "INFERENCE_MODE", os.environ.get("INFERENCE_MODE", "anthropic"), _INFERENCE_MODES
 )
@@ -320,7 +345,7 @@ def _check_transport(raw: str) -> None:
             "MCP transport. Remove MCP_TRANSPORT from .env and run "
             "'unset MCP_TRANSPORT' in any shell that exports it (or set it to "
             "streamable-http), and change MCP client URLs from "
-            "http://localhost:<MCP_PORT>/sse to http://localhost:<MCP_PORT>/mcp."
+            "http://localhost:<MCP_PORT>/sse to http://127.0.0.1:<MCP_PORT>/mcp."
         )
     raise ValueError("MCP_TRANSPORT must be 'streamable-http' or unset")
 
@@ -408,11 +433,33 @@ _MISSING_AUTH_TOKEN = (
 )
 
 
+# RFC 6750 ``b64token``: the characters a bearer token may carry in an
+# ``Authorization`` header, and the set ``scripts/mcp-auth-headers.sh``
+# sends (#589). The class holds ASCII ranges only, so ``fullmatch``
+# rejects spaces, control characters and non-ASCII alike.
+_AUTH_TOKEN_PATTERN = re.compile(r"[A-Za-z0-9._~+/-]+=*")
+# ``make init-secrets`` writes 64 hex characters (256 bits). 32 is the
+# floor: 128 bits even for a hex token, and it admits
+# ``openssl rand -base64 32`` (44 characters) while refusing a short
+# hand-typed password.
+_AUTH_TOKEN_MIN_LENGTH = 32
+_UNUSABLE_AUTH_TOKEN = (
+    "The MCP bearer token must be at least 32 characters from "
+    "A-Z a-z 0-9 - . _ ~ + / with optional trailing '=' (RFC 6750), the "
+    "set MCP clients can send. Regenerate it with "
+    "'(umask 077; openssl rand -hex 32 > .secrets/mcp_auth_token.txt)'. "
+    "See docs/setup.md."
+)
+
+
 def _require_auth_token(token: str) -> str:
-    """Fail closed when the bearer token is empty. The message never
-    includes the value."""
+    """Fail closed when the bearer token is empty, shorter than 32
+    characters or outside the RFC 6750 character set. The messages never
+    include the value."""
     if not token.strip():
         raise ValueError(_MISSING_AUTH_TOKEN)
+    if len(token) < _AUTH_TOKEN_MIN_LENGTH or not _AUTH_TOKEN_PATTERN.fullmatch(token):
+        raise ValueError(_UNUSABLE_AUTH_TOKEN)
     return token
 
 
@@ -682,6 +729,20 @@ def main():
     log.info(f"  Transport: streamable-http at {_STREAMABLE_HTTP_PATH} (bearer token required)")
     log.info(f"  Session idle timeout: {MCP_SESSION_IDLE_TIMEOUT_SECS:g}s")
     log.info("  Retrieval: local SQLite index only")
+    # One loud line per enabled layer that sends mail-derived text off
+    # the host, so it stands out from the INFO block above (#622).
+    _warn_if_remote_endpoint("EMBED_MODE", EMBED_MODE, embed_client.base_url, "search query text")
+    if inference_client is not None:
+        _warn_if_remote_endpoint(
+            "INFERENCE_MODE", INFERENCE_MODE, inference_client.base_url, "retrieved email excerpts"
+        )
+    if reranker is not None:
+        _warn_if_remote_endpoint(
+            "RERANK_MODE",
+            RERANK_MODE,
+            RERANK_BASE_URL or os.environ.get("CO_API_URL", ""),
+            "search queries and retrieved email excerpts",
+        )
 
     _run_server(server)
 
