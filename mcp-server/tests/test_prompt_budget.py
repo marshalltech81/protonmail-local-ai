@@ -181,6 +181,8 @@ class TestPromptBudget:
                 "too_few_labels",
                 "insufficient_but_populated",
                 "empty_but_sufficient",
+                "unmatched_quotes",
+                "misattributed_quotes",
             )
         ]
         brief = len(_BRIEF_REPAIR_INSTRUCTION.format(reason=_repair_reason(_BRIEF, every_brief)))
@@ -192,6 +194,8 @@ class TestPromptBudget:
                 "no_citations",
                 "insufficient_but_populated",
                 "no_findings_but_sufficient",
+                "unmatched_quotes",
+                "misattributed_quotes",
             )
         ]
         check = len(
