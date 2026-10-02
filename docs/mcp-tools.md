@@ -270,6 +270,9 @@ max_threads=N)` returns the evidence `ask_mailbox(question=query,
 filters, max_threads=N)` retrieved: the same threads in the same order,
 each with the same chunks in the same order
 ([#537](https://github.com/marshalltech81/protonmail-local-ai/issues/537)).
+A selected thread with no indexed chunks is listed in its place with
+an empty `chunks` list, since `ask_mailbox` shows the model that
+thread's indexed text instead; read it with `get_thread`.
 `has_attachments` is not an `ask_mailbox` filter; leave it unset for an
 audit. Without `max_threads`, `limit` also sets how many threads are
 ranked, so the result can surface different threads from an answer

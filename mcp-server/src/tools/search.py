@@ -572,7 +572,12 @@ def register_search_tools(
                 taken = 0
                 for r in results:
                     chunks = r.evidence_chunks[: limit - taken]
-                    if not chunks:
+                    # With ``max_threads``, a thread that has no indexed
+                    # chunks stays, empty: ask_mailbox shows the model its
+                    # indexed thread text instead, so the audit must still
+                    # list the thread in its place.
+                    keep_chunkless = max_threads is not None and not r.evidence_chunks
+                    if not chunks and not keep_chunkless:
                         continue
                     subject = clip(r.subject, HEADER_CHAR_LIMIT)
                     groups.append((subject, r.thread_id, r.lane_ranks, r.score, chunks))
@@ -624,7 +629,7 @@ def register_search_tools(
                 for subject, tid, lane_ranks, score, chunks in groups
             ],
         )
-        if total_chunks == 0:
+        if not groups:
             return tool_result(f"No evidence found for: '{query}'", output)
 
         lines = [
@@ -639,6 +644,11 @@ def register_search_tools(
                 lanes = ", ".join(f"{name}#{rank}" for name, rank in sorted(lane_ranks.items()))
                 score_str = f" | retrieval score {score:.4f}" if score is not None else ""
                 lines.append(f"    Lanes: {lanes}{score_str}")
+            if not chunks:
+                lines.append(
+                    "    No indexed passages: ask_mailbox shows this thread's indexed "
+                    "text instead; read it with get_thread."
+                )
             for chunk in chunks:
                 msg_date = (chunk.message_date or "")[:10] or "unknown date"
                 lines.append(

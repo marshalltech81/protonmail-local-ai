@@ -300,3 +300,54 @@ class TestMailboxWideParity:
     def test_rejected_with_thread_id(self, parity_db):
         with pytest.raises(ToolError, match="max_threads"):
             _get_evidence(parity_db, "budget", thread_id="t-quote", max_threads=2)
+
+
+class TestChunklessThreads:
+    """A surfaced thread with no indexed chunks reaches ask_mailbox's
+    prompt as its indexed thread text, so the audit keeps it, in place
+    and with no chunks (review round 1)."""
+
+    @pytest.fixture
+    def db_with_chunkless(self, parity_db):
+        conn = sqlite3.connect(parity_db.path)
+        conn.enable_load_extension(True)
+        sqlite_vec.load(conn)
+        conn.enable_load_extension(False)
+        _insert_thread(
+            conn,
+            thread_id="t-bare",
+            subject="budget memo",
+            participants=["dave@example.net"],
+            senders=["dave@example.net"],
+            body_text="budget memo text with no chunks indexed",
+            embedding=[1.0, 0.0, 0.0, 0.0],
+        )
+        conn.commit()
+        conn.close()
+        return parity_db
+
+    def test_same_threads_in_same_order(self, db_with_chunkless):
+        asked = _ask_evidence(db_with_chunkless, "budget memo", max_threads=3)
+        assert asked.get("t-bare") == [], "the corpus must surface the chunkless thread"
+        audited = _get_evidence(db_with_chunkless, "budget memo", max_threads=3)
+        assert list(audited.items()) == list(asked.items())
+
+    def test_prose_names_the_thread_text_source(self, db_with_chunkless):
+        server = FakeMCPServer()
+        register_search_tools(server, db_with_chunkless, FakeEmbedClient())
+        out = asyncio.run(server.tools["get_evidence"](query="budget memo", max_threads=3))
+        text = out.content[0].text
+        assert "Thread ID: t-bare" in text
+        assert "get_thread" in text
+
+    def test_only_chunkless_threads_still_list_them(self, db_with_chunkless):
+        """Folder-scoped to the chunkless thread alone: the result names
+        it rather than reporting no evidence."""
+        audited = _get_evidence(
+            db_with_chunkless, "budget memo", max_threads=3, from_addr="dave@example.net"
+        )
+        assert audited == {"t-bare": []}
+
+    def test_without_max_threads_chunkless_threads_still_drop(self, db_with_chunkless):
+        audited = _get_evidence(db_with_chunkless, "budget memo")
+        assert "t-bare" not in audited
