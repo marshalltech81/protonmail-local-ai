@@ -281,8 +281,11 @@ def chunk_message(
     """Split a message body into ordered ``MessageChunk`` entries.
 
     ``target_tokens`` is the preferred chunk size; a chunk closes once it
-    reaches this budget. ``max_tokens`` is the hard ceiling that triggers
-    sentence- and word-level splitting of oversized paragraphs.
+    reaches this budget. ``max_tokens`` is the hard ceiling: every
+    returned chunk's ``text`` is at most ``max_tokens`` tokens by the
+    bundled tokenizer, separators and whitespace between its spans
+    included (#208, #550). Oversized paragraphs are split at sentence,
+    word and then token boundaries to meet it.
     ``overlap_tokens`` is the approximate size of the tail carried from
     the previous chunk into the next — overlap is always carried as whole
     paragraph-spans, never mid-sentence.
@@ -303,10 +306,15 @@ def chunk_message(
 
     packed = _pack_spans(
         spans,
+        normalized,
         target_tokens=target_tokens,
         max_tokens=max_tokens,
         overlap_tokens=overlap_tokens,
     )
+
+    # The packer budgets each span and gap on its own; check the text
+    # each chunk actually renders to (#550).
+    packed = [run for group in packed for run in _fit_rendered(normalized, group, max_tokens)]
 
     chunks: list[MessageChunk] = []
     for index, group in enumerate(packed):
@@ -530,6 +538,7 @@ def _make_subspan(parent: _Span, source: str, local_start: int, local_end: int) 
 
 def _pack_spans(
     spans: list[_Span],
+    source: str,
     *,
     target_tokens: int,
     max_tokens: int,
@@ -539,32 +548,52 @@ def _pack_spans(
 
     When a chunk closes, overlap spans are carried forward from its tail
     so the next chunk starts with context rather than a hard cut.
+
+    ``target_tokens`` is checked against the spans' own tokens.
+    ``max_tokens`` is checked against the spans plus the source between
+    them, since the rendered chunk holds both: a paragraph separator, or
+    whitespace the splitters dropped between sub-spans, which has no size
+    bound (#550). Each gap is counted once, on its own; ``_fit_rendered``
+    then checks the joined text, whose count can differ.
     """
     groups: list[list[_Span]] = []
     current: list[_Span] = []
     current_tokens = 0
+    # Tokens of ``current``'s spans plus the gaps between them.
+    current_rendered = 0
+    # Tokens of the source between each span and the span before it,
+    # keyed by span start (spans never share a start).
+    gap_tokens: dict[int, int] = {}
 
     def close() -> list[_Span]:
         """Close ``current``, seed the next group with its overlap tail."""
-        nonlocal current, current_tokens
+        nonlocal current, current_tokens, current_rendered
         if not current:
             return []
         groups.append(current)
         overlap = _overlap_tail(current, overlap_tokens)
         current = list(overlap)
         current_tokens = sum(estimate_tokens(s.text) for s in current)
+        current_rendered = current_tokens + sum(gap_tokens[s.start] for s in current[1:])
         return overlap
 
+    prev_end: int | None = None
     for span in spans:
         span_tokens = estimate_tokens(span.text)
-        if current and current_tokens + span_tokens > max_tokens:
+        gap = 0 if prev_end is None else estimate_tokens(source[prev_end : span.start])
+        gap_tokens[span.start] = gap
+        prev_end = span.end
+        if current and current_rendered + gap + span_tokens > max_tokens:
             close()
         # The overlap seed ``close()`` leaves behind is not bounded by
         # the overlap budget (a carried span may be larger than it), so
         # it can still overflow next to this span (#208). Drop seed
         # spans from the front until the span fits.
-        while current and current_tokens + span_tokens > max_tokens:
-            current_tokens -= estimate_tokens(current.pop(0).text)
+        while current and current_rendered + gap + span_tokens > max_tokens:
+            dropped_tokens = estimate_tokens(current.pop(0).text)
+            current_tokens -= dropped_tokens
+            current_rendered -= dropped_tokens + (gap_tokens[current[0].start] if current else 0)
+        current_rendered += span_tokens + (gap if current else 0)
         current.append(span)
         current_tokens += span_tokens
         if current_tokens >= target_tokens:
@@ -602,6 +631,32 @@ def _overlap_tail(group: list[_Span], overlap_tokens: int) -> list[_Span]:
     if len(tail) == len(group):
         tail = tail[1:]
     return tail
+
+
+def _fit_rendered(source: str, group: list[_Span], max_tokens: int) -> list[list[_Span]]:
+    """Cut ``group`` into consecutive runs whose rendered text fits ``max_tokens``.
+
+    BPE counts are not additive: a span and the gap after it can take more
+    tokens joined than counted apart, so a group the packer accepted can
+    still render past the ceiling. Such a group is cut at a prefix that
+    fits, found by binary search over the span count: O(log n) renders per
+    cut, where dropping one span at a time would cost one per span. The
+    packer bounds the group, so each render is bounded too. A single span
+    is never cut: ``_enforce_max_tokens`` already bounded it.
+    """
+    runs: list[list[_Span]] = []
+    while len(group) > 1 and estimate_tokens(_render_group(source, group)[0]) > max_tokens:
+        fits, overflows = 1, len(group)
+        while overflows - fits > 1:
+            mid = (fits + overflows) // 2
+            if estimate_tokens(_render_group(source, group[:mid])[0]) <= max_tokens:
+                fits = mid
+            else:
+                overflows = mid
+        runs.append(group[:fits])
+        group = group[fits:]
+    runs.append(group)
+    return runs
 
 
 def _render_group(source: str, group: list[_Span]) -> tuple[str, int, int]:
