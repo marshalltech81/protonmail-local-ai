@@ -39,6 +39,7 @@ from ..lib.timings import count, rerank_mode, stage, timed_tool
 from ..lib.validation import clamp_int
 from .intelligence import (
     _LABEL_RE,
+    _LT_SPELLINGS,
     _MAX_ASK_THREADS,
     UNTRUSTED_CONTENT_NOTICE,
     EvidenceRef,
@@ -369,9 +370,12 @@ _CHECK_REPAIR_INSTRUCTION = (
 _CHECK_TASK = "Return the check as the JSON object described in the instructions."
 
 # Either delimiter tag, in any spelling, inside the caller's conclusion:
-# escaped like _untrusted_email_block does, so the conclusion can neither
-# end its own block early nor open a mail block.
-_CONCLUSION_TAG_RE = re.compile(r"<(\s*+(?:/\s*+)?(?:conclusion|untrusted_email))", re.IGNORECASE)
+# escaped like _untrusted_email_block does (including the look-alike
+# brackets in _LT_SPELLINGS, #442), so the conclusion can neither end
+# its own block early nor open a mail block.
+_CONCLUSION_TAG_RE = re.compile(
+    f"[{_LT_SPELLINGS}]" r"(\s*+(?:/\s*+)?(?:conclusion|untrusted_email))", re.IGNORECASE
+)
 
 
 def _conclusion_block(conclusion: str) -> str:

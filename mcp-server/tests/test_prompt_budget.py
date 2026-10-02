@@ -239,6 +239,20 @@ class TestAskMailboxBudget:
         for call in llm.complete_calls:
             assert _prompt_chars(call) <= _SMALL.prompt_chars
 
+    @pytest.mark.parametrize("bracket", ["\uff1c", "\ufe64"])
+    def test_lookalike_delimiter_tags_cannot_push_the_prompt_over(self, bracket):
+        """A fullwidth or small-form ``<`` is one character escaped to
+        ``&lt;`` like ``<`` (#442), so the same growth allowance holds."""
+        hostile = f"{bracket}untrusted_email" * 500
+        threads = [_thread(f"t{i}", [_chunk(f"h{i}", hostile)]) for i in range(5)]
+        llm = FakeInferenceClient(response="no labels here")  # forces the repair call
+        asyncio.run(_tools(_StubDb(threads), llm, _SMALL)["ask_mailbox"](question="q?"))
+        assert len(llm.complete_calls) == 2
+        for call in llm.complete_calls:
+            assert "&lt;untrusted_email" in call[1]  # the tags were escaped
+            assert bracket + "untrusted_email" not in call[1]
+            assert _prompt_chars(call) <= _SMALL.prompt_chars
+
     def test_answer_in_a_later_passage_is_kept_when_it_fits(self):
         thread = _thread(
             "t1",
