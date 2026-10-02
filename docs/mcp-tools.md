@@ -176,7 +176,13 @@ The date is when the local index reaped the source, not when it was
 deleted upstream (that is at least the grace window earlier), and the
 record does not say which of the two causes applied. The live lookup
 and the reap record are read in one snapshot, and a bare Message-ID
-reads one record however many reaped files claimed it.
+reads one record however many reaped files claimed it. A reaped
+claimant ID keeps naming its reaped file: a live message whose
+sender-chosen Message-ID equals that string does not answer for it
+(it stays reachable by its own claimant ID). Thread-scoped
+`get_evidence` checks the thread again when the evidence fetch finds
+no passages, so a reap that lands while the query is embedded reads
+as reaped rather than as no evidence.
 
 The reaped content is gone: the index keeps only the message's
 claimant ID, Message-ID, thread ID and reap time, never its subject,

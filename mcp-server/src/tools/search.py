@@ -528,6 +528,15 @@ def register_search_tools(
                         db.get_query_evidence_chunks, query, [thread_id], embedding, limit
                     )
                 chunks = grouped.get(thread_id, [])
+                if not chunks:
+                    # The reaper may have committed while the query was
+                    # embedded; a thread gone since the first read reads
+                    # as reaped (or not found), not as "No evidence".
+                    current = await asyncio.to_thread(db.get_thread_or_reaped, thread_id)
+                    if isinstance(current, ReapedSource):
+                        raise ToolError(reaped_source("Thread", thread_id, current.reaped_at))
+                    if not current:
+                        raise ToolError(f"Thread not found: {thread_id}")
                 count("evidence_chunks", len(chunks))
                 if chunks:
                     groups.append(

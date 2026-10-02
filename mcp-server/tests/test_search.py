@@ -681,6 +681,31 @@ class TestGetEvidence:
         # Review round 1: the live miss and the reap record share a snapshot.
         assert len(opened) == 1
 
+    def test_thread_reaped_during_the_embed_reports_reaped(
+        self, fake_server, fake_embed, chunked_db, monkeypatch
+    ):
+        """Review round 2: the thread is live at the first read, then the
+        reaper commits before the evidence fetch, which finds no chunks.
+        That reads as reaped, not as "No evidence found"."""
+        fetch = chunked_db.get_query_evidence_chunks
+
+        def reap_then_fetch(*args, **kwargs):
+            with closing(sqlite3.connect(chunked_db.path)) as conn:
+                conn.execute("DELETE FROM message_chunks WHERE thread_id = 't-alpha'")
+                conn.execute("DELETE FROM threads WHERE thread_id = 't-alpha'")
+                insert_reaped(
+                    conn,
+                    message_id="alpha@example.com",
+                    thread_id="t-alpha",
+                    reaped_at="2026-09-30T08:15:00+00:00",
+                )
+            return fetch(*args, **kwargs)
+
+        monkeypatch.setattr(chunked_db, "get_query_evidence_chunks", reap_then_fetch)
+        handler = self._handler(fake_server, fake_embed, chunked_db)
+        message = _error(handler(query="invoice", thread_id="t-alpha"))
+        assert "reaped from the index on 2026-09-30 (mirror retention)" in message
+
     def test_blank_query_returns_guidance(self, fake_server, fake_embed, chunked_db):
         handler = self._handler(fake_server, fake_embed, chunked_db)
         assert "Provide a query" in _error(handler(query="   "))

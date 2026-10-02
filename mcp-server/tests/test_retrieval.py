@@ -462,6 +462,33 @@ class TestReapedSources:
         message = _error(_handlers(fake_server, db)["get_message"](message_id="never@example.com"))
         assert "Message not found" in message
 
+    def test_reaped_claimant_id_is_not_taken_over_by_a_bare_message_id(self, fake_server, tmp_path):
+        """Review round 2: a live message whose sender-chosen Message-ID
+        equals a reaped claimant ID must not answer a lookup of that
+        claimant ID; before the reap the collision read as ambiguous."""
+        with _open_fixture_db(tmp_path) as (conn, db):
+            reaped = insert_reaped(
+                conn,
+                message_id="gone@example.com",
+                thread_id="t-gone",
+                reaped_at=self._REAPED_AT,
+            )
+            _insert_message(
+                conn,
+                message_id=reaped,
+                thread_id="t-crafted",
+                sent_at="2024-01-11T09:00:00+00:00",
+                body="zqxcrafted body",
+            )
+            conn.close()
+        handlers = _handlers(fake_server, db)
+        message = _error(handlers["get_message"](message_id=reaped))
+        assert "reaped from the index on 2026-09-30 (mirror retention)" in message
+        assert "zqxcrafted" not in message
+        # The crafted message stays reachable by its own claimant ID.
+        out = asyncio.run(handlers["get_message"](message_id=claimant_of(reaped)))
+        assert "zqxcrafted body" in _text(out)
+
     def test_message_states_only_what_the_record_shows(self, fake_server, tmp_path):
         """Review round 1: the stored time is the local reap, not the
         upstream deletion, and a file missing from the Maildir is reaped

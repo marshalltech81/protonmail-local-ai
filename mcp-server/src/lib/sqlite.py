@@ -3003,6 +3003,15 @@ class Database:
                 )
             }
             records = sorted(merged.values(), key=lambda r: (r.sent_at, r.claimant_id))[:limit]
+            # A claimant ID names one file. When no live message has it but
+            # a reaped one did, report that reap even if another message's
+            # sender-chosen Message-ID equals the string: before the reap
+            # that collision read as ambiguous, and an old citation must
+            # not silently resolve to a different source.
+            if identifier not in merged and (
+                reaped_at := _reaped_at(conn, (REAPED_BY_CLAIMANT_SQL, identifier))
+            ):
+                return ReapedSource(reaped_at)
             if len(records) > 1:
                 return AmbiguousMessageId(
                     message_id=identifier,
@@ -3012,11 +3021,7 @@ class Database:
             if not records:
                 # No live message: the reap record, if any, from the same
                 # snapshot (a message restored in between reads as live).
-                reaped_at = _reaped_at(
-                    conn,
-                    (REAPED_BY_CLAIMANT_SQL, identifier),
-                    (REAPED_BY_MESSAGE_ID_SQL, identifier),
-                )
+                reaped_at = _reaped_at(conn, (REAPED_BY_MESSAGE_ID_SQL, identifier))
                 return ReapedSource(reaped_at) if reaped_at else None
             record = records[0]
             _attach_participants(conn, [record])
