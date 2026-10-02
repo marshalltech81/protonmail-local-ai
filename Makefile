@@ -34,7 +34,7 @@ help:
 	@echo "  test-mbsync  Run mbsync entrypoint tests only"
 	@echo "  test-bridge  Run Bridge entrypoint tests only"
 	@echo "  test-bridge-smoke  Run bridge-smoke.sh pass/fail tests (no Docker)"
-	@echo "  test-validate-env  Run validate-env.sh tests against synthetic .env fixtures"
+	@echo "  test-validate-env  Run validate-env.sh and mcp-auth-headers.sh tests against synthetic fixtures"
 	@echo "  baseline     Run the retrieval regression baseline (UPDATE=1 rewrites the rank snapshot)"
 	@echo "  clean        Remove all containers and volumes (destructive)"
 	@echo ""
@@ -221,6 +221,7 @@ test-bridge-smoke:
 
 test-validate-env:
 	bash scripts/tests/validate_env_test.sh
+	bash scripts/tests/mcp_auth_headers_test.sh
 
 # Retrieval regression baseline. Step 1 indexes the synthetic mailbox with
 # the real indexer and a hashed embedder; step 2 checks the golden

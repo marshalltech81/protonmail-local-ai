@@ -319,7 +319,11 @@ Secrets are a hard boundary.
   empty or non-600 file and an `MCP_AUTH_TOKEN` in `.env`; the
   `MCP_AUTH_TOKEN` env fallback is for running the server outside a
   container only, never the Compose path. Never log the token or the
-  `Authorization` header.
+  `Authorization` header, and never document or script a client setup
+  that passes the token as a command argument (other local accounts can
+  read the process list): use a file or stdin, as
+  `scripts/mcp-auth-headers.sh` (Claude Code's `headersHelper`) and
+  `mcp-remote --header-file` do.
 
 ### Commit hygiene
 

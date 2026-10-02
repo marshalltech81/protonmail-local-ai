@@ -125,12 +125,13 @@ The server speaks MCP's Streamable HTTP transport at
 `http://localhost:3000/mcp`, on this machine only. Every request must
 send the bearer token from `.secrets/mcp_auth_token.txt` (created by
 `make init-secrets`) as `Authorization: Bearer <token>`; without it the
-server answers `401`. Claude Code connects directly (run from the
-repository root):
+server answers `401`. Claude Code connects directly, reading the token
+through `scripts/mcp-auth-headers.sh` so it never appears in a command
+line (run from the repository root):
 
 ```bash
-claude mcp add --transport http protonmail-local-ai http://localhost:3000/mcp \
-  --header "Authorization: Bearer $(cat .secrets/mcp_auth_token.txt)"
+claude mcp add-json protonmail-local-ai \
+  "{\"type\":\"http\",\"url\":\"http://localhost:3000/mcp\",\"headersHelper\":\"$PWD/scripts/mcp-auth-headers.sh\"}"
 ```
 
 Claude Desktop's `claude_desktop_config.json` starts local servers as
