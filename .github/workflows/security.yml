@@ -19,6 +19,8 @@ on:
       - "mcp-server/src/**"
       - "**/docker-compose*.yml"
       - "**/docker-compose*.yaml"
+      - "**/compose*.yml"
+      - "**/compose*.yaml"
       - "**/*.sh"
       - "scripts/**"
       - ".semgrep/**"
@@ -34,6 +36,8 @@ on:
       - "mcp-server/src/**"
       - "**/docker-compose*.yml"
       - "**/docker-compose*.yaml"
+      - "**/compose*.yml"
+      - "**/compose*.yaml"
       - "**/*.sh"
       - "scripts/**"
       - ".semgrep/**"
@@ -155,10 +159,16 @@ jobs:
       - name: Test the rules
         run: semgrep test .semgrep
 
-      # Each rule's paths.include picks its targets: docker-compose*.yml
-      # and docker-compose*.yaml anywhere in the tree, so a new overlay is
-      # scanned without a change here, and every *.sh file. --strict fails
-      # the job when a target cannot be parsed instead of skipping it.
+      # `semgrep test` ignores each rule's paths, so check separately that
+      # every Compose rule reads every Compose file name.
+      - name: Test the Compose rules' file names
+        run: bash scripts/tests/semgrep_paths_test.sh
+
+      # Each rule's paths.include picks its targets: docker-compose*.yml,
+      # docker-compose*.yaml, compose*.yml and compose*.yaml anywhere in
+      # the tree, so a new overlay is scanned without a change here, and
+      # every *.sh file. --strict fails the job when a target cannot be
+      # parsed instead of skipping it.
       - name: Scan Compose files and shell scripts
         run: >-
           semgrep scan --metrics=off --disable-version-check --strict --error

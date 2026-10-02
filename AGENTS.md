@@ -748,10 +748,12 @@ Notes:
 - for Docker Compose or env wiring changes, run `docker compose config --quiet`
 - for Docker Compose or shell script changes, run the Semgrep job from
   `.github/workflows/security.yml` locally:
-  `uvx --from semgrep==1.179.0 semgrep test .semgrep` and
+  `uvx --from semgrep==1.179.0 semgrep test .semgrep`,
+  `uvx --from semgrep==1.179.0 bash scripts/tests/semgrep_paths_test.sh` and
   `uvx --from semgrep==1.179.0 semgrep scan --metrics=off --strict --error --config .semgrep/compose.yaml --config .semgrep/shell.yaml .`.
   The rules in `.semgrep/` encode the hardening and exposure rules
-  above and cover every `docker-compose*.yml` overlay and `*.sh` file.
+  above and cover every `docker-compose*.yml` and `compose*.yml`
+  overlay (`.yaml` too) and `*.sh` file.
   Fix a finding; allow-list one only with owner approval, as a
   `# nosemgrep: <rule-id>` comment on the reported line with the reason
   beside it. A rule change gets matching cases in its fixture
