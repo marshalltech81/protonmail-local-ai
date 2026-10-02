@@ -14,6 +14,7 @@ from ..lib.security import log_tool_call, safe_provider_exception_text
 from ..lib.sqlite import (
     PROMPT_EVIDENCE_CHUNKS_PER_THREAD,
     InvalidFilterError,
+    ReapedSource,
     VectorLanesUnavailableError,
     normalize_authority_class,
     validate_date_range,
@@ -31,7 +32,7 @@ from .outputs import (
     SearchAttachmentsOutput,
     SearchEmailsOutput,
     clip,
-    removed_upstream,
+    reaped_source,
     source,
     thread_summary,
     tool_result,
@@ -514,11 +515,10 @@ def register_search_tools(
         groups: list[tuple[str, str, dict[str, int] | None, float | None, list]] = []
         try:
             if thread_id:
-                thread = await asyncio.to_thread(db.get_thread, thread_id)
+                thread = await asyncio.to_thread(db.get_thread_or_reaped, thread_id)
+                if isinstance(thread, ReapedSource):
+                    raise ToolError(reaped_source("Thread", thread_id, thread.reaped_at))
                 if not thread:
-                    removed_at = await asyncio.to_thread(db.reaped_thread_at, thread_id)
-                    if removed_at:
-                        raise ToolError(removed_upstream("Thread", thread_id, removed_at))
                     raise ToolError(f"Thread not found: {thread_id}")
                 embedding = await embed_query(embed_client, query, expected_embed_dim)
                 # The same selection as ask_mailbox: chunks of attachments

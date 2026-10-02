@@ -89,7 +89,7 @@ SCHEMA_APPLICATION_ID = 0x504D4149  # "PMAI"
 
 # How long a ``reaped_messages`` record outlives the reap. The record
 # holds identifiers derived from the sender's Message-ID, kept only so a
-# citation from a recent answer resolves to "removed upstream" instead
+# citation from a recent answer resolves to "reaped" instead
 # of "not found"; after this window the lookup reads as not found.
 REAPED_RECORD_RETENTION_DAYS = 30
 
@@ -612,7 +612,7 @@ class Database:
 
             -- One row per message the reconciler reaped, written in the
             -- reap transaction, so mcp-server can answer a lookup of a
-            -- cited claimant ID or thread ID with "removed upstream"
+            -- cited claimant ID or thread ID with "reaped"
             -- instead of "not found" (PLAN Phase 4 item 4). Identifiers
             -- and the reap time only, never content; pruned after
             -- ``REAPED_RECORD_RETENTION_DAYS`` (``prune_reaped_messages``).
@@ -622,7 +622,7 @@ class Database:
                 thread_id   TEXT NOT NULL,
                 reaped_at   TEXT NOT NULL
             );
-            CREATE INDEX idx_reaped_messages_message ON reaped_messages(message_id);
+            CREATE INDEX idx_reaped_messages_message ON reaped_messages(message_id, reaped_at);
             CREATE INDEX idx_reaped_messages_thread
                 ON reaped_messages(thread_id, reaped_at, claimant_id);
             CREATE INDEX idx_reaped_messages_reaped_at ON reaped_messages(reaped_at);
@@ -2772,7 +2772,7 @@ class Database:
         # ``_delete_attachments_for_message``.
         self._delete_attachments_for_message(cur, claimant_id)
         # Identifiers only, so a later lookup can report the message as
-        # removed upstream (see ``reaped_messages`` in the schema).
+        # reaped (see ``reaped_messages`` in the schema).
         cur.execute(
             "INSERT OR REPLACE INTO reaped_messages "
             "(claimant_id, message_id, thread_id, reaped_at) "

@@ -195,7 +195,7 @@ def _build_schema(conn: sqlite3.Connection) -> None:
             thread_id   TEXT NOT NULL,
             reaped_at   TEXT NOT NULL
         );
-        CREATE INDEX idx_reaped_messages_message ON reaped_messages(message_id);
+        CREATE INDEX idx_reaped_messages_message ON reaped_messages(message_id, reaped_at);
         CREATE INDEX idx_reaped_messages_thread
             ON reaped_messages(thread_id, reaped_at, claimant_id);
         CREATE INDEX idx_reaped_messages_reaped_at ON reaped_messages(reaped_at);

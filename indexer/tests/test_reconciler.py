@@ -1752,7 +1752,7 @@ def _reaped_rows(db: Database) -> list[dict]:
 class TestReapedMessageRecords:
     """A reap leaves an identifier-only record per message, so a later
     lookup of a cited claimant ID or thread ID can say the source was
-    removed upstream rather than that it never existed."""
+    reaped rather than that it never existed."""
 
     def test_full_reap_records_each_reaped_message(self, db, threader, reconciler, maildir):
         path = maildir / "1700000000.M1.host:2,S"

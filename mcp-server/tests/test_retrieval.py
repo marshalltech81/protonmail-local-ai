@@ -25,7 +25,13 @@ from pathlib import Path
 import pytest
 import sqlite_vec
 from fastmcp.exceptions import ToolError
-from src.lib.sqlite import MAX_LISTED_CLAIMANTS, AmbiguousMessageId, Database
+from src.lib.sqlite import (
+    MAX_LISTED_CLAIMANTS,
+    REAPED_BY_CLAIMANT_SQL,
+    REAPED_BY_MESSAGE_ID_SQL,
+    AmbiguousMessageId,
+    Database,
+)
 from src.tools.outputs import REAPED_RECORD_RETENTION_DAYS
 from src.tools.retrieval import register_retrieval_tools
 
@@ -419,7 +425,7 @@ class TestGetMessage:
 
 class TestReapedSources:
     """PLAN Phase 4 item 4: a caller holding a claimant ID or thread ID
-    from an earlier answer learns that its source was removed upstream
+    from an earlier answer learns that its source was reaped
     (mirror retention), not that the ID never existed."""
 
     _REAPED_AT = "2026-09-30T08:15:00+00:00"
@@ -440,28 +446,93 @@ class TestReapedSources:
             conn.close()
         return db, claimant
 
-    def test_get_message_by_claimant_id_reports_removed_upstream(self, fake_server, tmp_path):
+    def test_get_message_by_claimant_id_reports_reaped(self, fake_server, tmp_path):
         db, claimant = self._db(tmp_path)
         message = _error(_handlers(fake_server, db)["get_message"](message_id=claimant))
-        assert "removed upstream on 2026-09-30 (mirror retention)" in message
+        assert "reaped from the index on 2026-09-30 (mirror retention)" in message
         assert "not found" not in message
 
-    def test_get_message_by_bare_message_id_reports_removed_upstream(self, fake_server, tmp_path):
+    def test_get_message_by_bare_message_id_reports_reaped(self, fake_server, tmp_path):
         db, _ = self._db(tmp_path)
         message = _error(_handlers(fake_server, db)["get_message"](message_id="gone@example.com"))
-        assert "removed upstream on 2026-09-30 (mirror retention)" in message
+        assert "reaped from the index on 2026-09-30 (mirror retention)" in message
 
     def test_get_message_unknown_id_still_not_found(self, fake_server, tmp_path):
         db, _ = self._db(tmp_path)
         message = _error(_handlers(fake_server, db)["get_message"](message_id="never@example.com"))
         assert "Message not found" in message
 
-    def test_get_thread_of_fully_reaped_thread_reports_removed_upstream(
-        self, fake_server, tmp_path
+    def test_message_states_only_what_the_record_shows(self, fake_server, tmp_path):
+        """Review round 1: the stored time is the local reap, not the
+        upstream deletion, and a file missing from the Maildir is reaped
+        too, so the text must not claim an upstream deletion date."""
+        db, claimant = self._db(tmp_path)
+        message = _error(_handlers(fake_server, db)["get_message"](message_id=claimant))
+        assert "removed upstream" not in message
+        assert "deleted in ProtonMail" not in message
+        assert "deleted upstream or its file went missing" in message
+
+    @staticmethod
+    def _count_connections(db, monkeypatch) -> list[int]:
+        opened: list[int] = []
+        connect = db._connect
+
+        def counted():
+            opened.append(1)
+            return connect()
+
+        monkeypatch.setattr(db, "_connect", counted)
+        return opened
+
+    @pytest.mark.parametrize(
+        ("tool", "kwargs"),
+        [
+            ("get_message", {"message_id": "gone@example.com"}),
+            ("get_thread", {"thread_id": "t-gone"}),
+        ],
+    )
+    def test_live_and_reaped_state_read_in_one_snapshot(
+        self, fake_server, tmp_path, monkeypatch, tool, kwargs
     ):
+        """Review round 1: a restore landing between a live miss and a
+        separate reap lookup would report a live message as reaped."""
+        db, _ = self._db(tmp_path)
+        opened = self._count_connections(db, monkeypatch)
+        message = _error(_handlers(fake_server, db)[tool](**kwargs))
+        assert "reaped from the index" in message
+        assert len(opened) == 1
+
+    def test_bare_message_id_reap_lookup_reads_one_row(self, tmp_path, monkeypatch):
+        """Review round 1: many reaped files claiming one sender-chosen
+        Message-ID must not make each lookup visit all of them."""
+        with _open_fixture_db(tmp_path) as (conn, db):
+            for i in range(MAX_LISTED_CLAIMANTS * 5):
+                insert_reaped(
+                    conn,
+                    message_id="dup@example.com",
+                    variant=f"v{i}",
+                    thread_id="t-gone",
+                    reaped_at=f"2026-09-{1 + i % 28:02d}T00:00:00+00:00",
+                )
+            plans = [
+                " ".join(r[3] for r in conn.execute(f"EXPLAIN QUERY PLAN {sql}", params))
+                for sql, params in (
+                    (REAPED_BY_MESSAGE_ID_SQL, ("dup@example.com",)),
+                    (REAPED_BY_CLAIMANT_SQL, ("dup@example.com",)),
+                )
+            ]
+            conn.close()
+        assert all("TEMP B-TREE" not in p and "USING" in p for p in plans), plans
+        assert REAPED_BY_MESSAGE_ID_SQL.rstrip().endswith("LIMIT 1")
+        statements = TestMessageIdClaimants._trace(db, monkeypatch)
+        view = db.get_message_view("dup@example.com")
+        assert view is not None and view.reaped_at == "2026-09-28T00:00:00+00:00"
+        assert not [s for s in statements if "reaped_messages" in s and "MAX(" in s]
+
+    def test_get_thread_of_fully_reaped_thread_reports_reaped(self, fake_server, tmp_path):
         db, _ = self._db(tmp_path)
         message = _error(_handlers(fake_server, db)["get_thread"](thread_id="t-gone"))
-        assert "removed upstream on 2026-09-30 (mirror retention)" in message
+        assert "reaped from the index on 2026-09-30 (mirror retention)" in message
         assert "not found" not in message
 
     def test_get_thread_unknown_id_still_not_found(self, fake_server, tmp_path):
@@ -473,16 +544,16 @@ class TestReapedSources:
         db, claimant = self._db(tmp_path, survivor=True)
         out = asyncio.run(_handlers(fake_server, db)["get_thread"](thread_id="t-gone"))
         assert "the reply that survives" in _text(out)
-        assert f"{claimant} (removed upstream on 2026-09-30)" in _text(out)
-        assert out.structured_content["removed_messages"] == [
-            {"claimant_id": claimant, "removed_at": self._REAPED_AT}
+        assert f"{claimant} (reaped 2026-09-30)" in _text(out)
+        assert out.structured_content["reaped_messages"] == [
+            {"claimant_id": claimant, "reaped_at": self._REAPED_AT}
         ]
-        assert out.structured_content["removed_messages_truncated"] is False
+        assert out.structured_content["reaped_messages_truncated"] is False
 
     def test_get_thread_without_reaps_lists_none(self, fake_server, messages_db):
         out = asyncio.run(_handlers(fake_server, messages_db)["get_thread"](thread_id="t1"))
-        assert "removed upstream" not in _text(out)
-        assert out.structured_content["removed_messages"] == []
+        assert "reaped" not in _text(out).lower()
+        assert out.structured_content["reaped_messages"] == []
 
     def test_a_restored_message_is_not_listed_as_removed(self, fake_server, tmp_path):
         """Restored upstream after the reap, the message is indexed again
@@ -499,11 +570,11 @@ class TestReapedSources:
             conn.close()
         handlers = _handlers(fake_server, db)
         out = asyncio.run(handlers["get_thread"](thread_id="t1"))
-        assert out.structured_content["removed_messages"] == []
+        assert out.structured_content["reaped_messages"] == []
         out = asyncio.run(handlers["get_message"](message_id="back@example.com"))
         assert "restored body" in _text(out)
 
-    def test_removed_list_is_capped(self, fake_server, tmp_path):
+    def test_reaped_list_is_capped(self, fake_server, tmp_path):
         with _open_fixture_db(tmp_path) as (conn, db):
             for i in range(MAX_LISTED_CLAIMANTS + 5):
                 insert_reaped(
@@ -515,8 +586,8 @@ class TestReapedSources:
             _insert_message(conn, message_id="kept", thread_id="t1", sent_at="2024-01-11")
             conn.close()
         out = asyncio.run(_handlers(fake_server, db)["get_thread"](thread_id="t1"))
-        assert len(out.structured_content["removed_messages"]) == MAX_LISTED_CLAIMANTS
-        assert out.structured_content["removed_messages_truncated"] is True
+        assert len(out.structured_content["reaped_messages"]) == MAX_LISTED_CLAIMANTS
+        assert out.structured_content["reaped_messages_truncated"] is True
 
     def test_retention_and_schema_mirror_the_indexer(self, tmp_path):
         """The documented retention and the fixture table are only true

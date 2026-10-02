@@ -684,17 +684,23 @@ transaction writes one `reaped_messages` row per removed message:
 claimant ID, Message-ID, thread ID and reap time, and nothing else (no
 subject, body, participants, attachment names or chunk IDs, which hash
 the passage text). `get_message`, `get_thread` and thread-scoped
-`get_evidence` consult it only after the live lookup finds nothing, and
-answer "removed upstream on <date> (mirror retention)" instead of "not
-found"; `get_thread` on a surviving thread lists its reaped messages
-(see *Sources removed upstream* in `docs/mcp-tools.md`). The
+`get_evidence` consult it, in the same read snapshot, only after the
+live lookup finds nothing, and answer "reaped from the index on <date>
+(mirror retention)" instead of "not found"; `get_thread` on a surviving
+thread lists its reaped messages (see *Reaped sources* in
+`docs/mcp-tools.md`). The date is the local reap, not the upstream
+deletion, and the record does not say whether the message was deleted
+upstream or its file went missing locally. The
 identifiers come from the sender's Message-ID, so the records are kept
 short: the indexer deletes rows older than 30 days
 (`REAPED_RECORD_RETENTION_DAYS` in `indexer/src/database.py`) at startup
 and on every reconciliation interval, in archive mode too, so rows
 written before a switch to archive still expire. The table holds at
 most the messages reaped in the last 30 days. Answers are not
-persisted, so nothing else refers to a reaped source.
+persisted, so nothing else refers to a reaped source. The records are
+not carried across a rebuild of the index from Maildir (reaped files
+are not reindexed), so after a rebuild an earlier reap reads as "not
+found".
 
 A **mass-delete brake** (`INDEXER_DELETION_MAX_BATCH_PCT`, default 5%) caps
 the fraction of total indexed messages the reaper will touch in a single

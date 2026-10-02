@@ -19,7 +19,7 @@ mode); ``INDEXER_DELETION_ENABLED=false`` opts out (archive mode):
    rebuilds the parent thread from the surviving messages on disk or removes
    the thread entirely when no messages remain. The same transaction
    writes an identifier-only ``reaped_messages`` record per message so
-   mcp-server can report a cited source as removed upstream; records
+   mcp-server can report a cited source as reaped; records
    expire after ``REAPED_RECORD_RETENTION_DAYS``.
 
 A mass-delete brake caps how many messages the reaper may touch in one pass,

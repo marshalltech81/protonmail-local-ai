@@ -308,9 +308,12 @@ class ThreadMessage(MessageHeaders):
     body_omitted_chars: int = Field(description="Characters of the body not included.")
 
 
-class RemovedMessage(_Output):
+class ReapedMessage(_Output):
     claimant_id: str
-    removed_at: str = Field(description="When the index reaped it (ISO 8601 UTC).")
+    reaped_at: str = Field(
+        description="When the local index reaped it (ISO 8601 UTC), not when it was "
+        "deleted upstream."
+    )
 
 
 # How long the indexer keeps a reaped message's identifier-only record
@@ -319,14 +322,16 @@ class RemovedMessage(_Output):
 REAPED_RECORD_RETENTION_DAYS = 30
 
 
-def removed_upstream(kind: str, identifier: str, removed_at: str) -> str:
+def reaped_source(kind: str, identifier: str, reaped_at: str) -> str:
     """The fixed error for a lookup whose source was reaped: ``kind`` is
-    ``Message`` or ``Thread``. Only the caller's own ID and the reap
-    date appear; the index holds nothing else about the source."""
+    ``Message`` or ``Thread``. Only the caller's own ID and the local
+    reap date appear; the index holds nothing else about the source,
+    not even why it was reaped or when it was deleted upstream."""
     return (
-        f"{kind} removed upstream on {removed_at[:10]} (mirror retention): {identifier}. "
-        "It was deleted in ProtonMail and reaped from the local index, so its "
-        "content is no longer available."
+        f"{kind} reaped from the index on {reaped_at[:10]} (mirror retention): "
+        f"{identifier}. Mirror retention reaps a message after a grace window once "
+        "it was deleted upstream or its file went missing from the local Maildir; "
+        "its content is no longer available."
     )
 
 
@@ -342,14 +347,15 @@ class GetThreadOutput(_Output):
             "when no message of the thread has an indexed body."
         )
     )
-    removed_messages: list[RemovedMessage] = Field(
-        description="Messages of this thread deleted upstream and reaped from the index "
-        "(mirror retention), oldest removal first; empty in the usual case. A record "
+    reaped_messages: list[ReapedMessage] = Field(
+        description="Messages of this thread reaped from the index (mirror retention: "
+        "deleted upstream or missing from the Maildir), oldest reap first; empty in the "
+        "usual case. A record "
         f"lasts {REAPED_RECORD_RETENTION_DAYS} days. At most {MAX_LISTED_CLAIMANTS} "
         "are listed."
     )
-    removed_messages_truncated: bool = Field(
-        description="True when more removed messages exist than removed_messages lists."
+    reaped_messages_truncated: bool = Field(
+        description="True when more reaped messages exist than reaped_messages lists."
     )
 
 

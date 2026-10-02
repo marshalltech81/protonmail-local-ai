@@ -6157,7 +6157,7 @@ class TestMessageIdClaimants:
 
 class TestReapLeavesNoContent:
     """PLAN Phase 4 item 4: a reap keeps an identifier-only record so a
-    cited source can be reported as removed upstream. Nothing about the
+    cited source can be reported as reaped. Nothing about the
     reaped message's content may survive it: no subject, body or
     participant text in any table, including that record."""
 
