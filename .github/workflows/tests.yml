@@ -72,6 +72,9 @@ jobs:
       - name: Run patch-source tests
         run: bash bridge/tests/patch_source_test.sh
 
+      - name: Run Dockerfile module-step tests
+        run: bash bridge/tests/dockerfile_test.sh
+
   bridge-smoke-script:
     name: bridge smoke script
     runs-on: ubuntu-latest

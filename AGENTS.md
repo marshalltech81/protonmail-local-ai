@@ -603,6 +603,10 @@ build in `bridge/Dockerfile` or any future Go service, follow these rules:
 - run `go mod download && go mod verify` after cloning source and before building;
   `go mod verify` confirms every cached module matches its checksum in `go.sum`,
   failing the build if any module has been tampered with or corrupted
+- the download may be retried a bounded number of times against transient
+  proxy errors (three attempts today, #618), but `go mod verify` always runs
+  after it and a persistent download failure still fails the build;
+  `bridge/tests/dockerfile_test.sh` checks both
 
 ### CGO build mode
 
