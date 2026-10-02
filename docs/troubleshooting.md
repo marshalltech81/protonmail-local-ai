@@ -206,7 +206,9 @@ fails, `mbsync` now logs a specific cause such as:
   "Bridge cert pin mismatch" section below)
 
 Repeated sync failures now count toward an exit threshold so the container
-restarts instead of looping forever in a broken state.
+restarts instead of looping forever in a broken state. A Proton folder
+that was renamed or deleted is not such a failure; see
+[A Proton folder was renamed or deleted](#a-proton-folder-was-renamed-or-deleted).
 
 **2. Did any mail land in the Maildir volume?**
 
@@ -259,6 +261,44 @@ If you want Docker's view of the current state:
 ```bash
 docker inspect mbsync --format='{{json .State.Health}}'
 ```
+
+## A Proton folder was renamed or deleted
+
+mbsync never deletes local mail (`Expunge None`) and keeps a local folder
+after its Proton folder goes away. A renamed folder syncs again under its
+new name; the old local copy stays. On every later sync, mbsync tries to
+open the old name on Bridge, cannot, and logs:
+
+```text
+>>> WARNING: 1 far-side folder(s) could not be opened, most likely renamed or deleted in Proton; their local copies are kept. Folder names are not logged (see docs/troubleshooting.md).
+>>> mbsync reported no other error — counting this sync as successful.
+```
+
+This is expected and harmless. The rest of the mailbox keeps syncing, the
+sync counts as successful (it does not count toward the restart threshold),
+and the last-sync stamp is still written, so `get_mailbox_status` does not
+report the mailbox as stale: the old folder has nothing left to pull. The
+log holds a count, not the folder names, because folder names are mailbox
+content.
+
+The run still counts as a failure, as before, when mbsync reports any other
+error in the same run, exits with any status other than 1, or cannot open
+`INBOX` (which cannot be renamed or deleted, so Bridge refusing it means
+Bridge is refusing folders, not that one went away). The match is the exact
+line isync 1.4.4 prints, `Error: channel protonmail: far side box <name>
+cannot be opened.`; a different isync version that words it differently
+falls back to counting the run as a failure.
+
+To see which local folders are affected, run one sync by hand:
+
+```bash
+docker exec mbsync mbsync -c /tmp/mbsync/mbsyncrc -a 2>&1 | grep 'cannot be opened'
+```
+
+The warning repeats for as long as the local copy exists. Nothing removes
+it automatically. Removing or moving the folder out of the Maildir yourself
+stops the warning, but its messages then count as deleted for the indexer
+(see [Deletion reconciliation](#deletion-reconciliation-mirror-vs-archive)).
 
 ## Embedder or inference endpoint unreachable from containers
 

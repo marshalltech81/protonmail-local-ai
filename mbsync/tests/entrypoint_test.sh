@@ -282,9 +282,10 @@ sync_setup() {
     CONFIG_FILE="$WORK/mbsyncrc"
     FIND_CALLS="$WORK/find-calls-$1"
     SYNC_ACTIVITY_FILE="$WORK/activity-$1"
+    MBSYNC_STDERR_FILE="$WORK/mbsync-stderr-$1"
     mkdir -p "$MAILDIR_PATH"
     : >"$FIND_CALLS"
-    load run_child relax_new_maildir_perms mark_sync_activity run_sync
+    load run_child relax_new_maildir_perms mark_sync_activity report_mbsync_errors run_sync
 }
 
 # run_sync is called as `run_sync || rc=$?`, a condition like the
@@ -340,6 +341,173 @@ repair_still_runs_after_a_failed_mbsync() {
     run_sync || rc=$?
     ((rc == 3)) || return 1
     [[ "$(wc -l <"$FIND_CALLS")" -eq 2 ]] || return 1
+}
+
+# --- far-side boxes that cannot be opened (#276) ------------------------------
+#
+# A Proton folder renamed or deleted after it synced keeps its local copy
+# (Create Near, Expunge None), so isync 1.4.4 tries to open the vanished
+# far-side box on every run, prints the line below on stderr, syncs the
+# other boxes and exits 1. That run is a degraded success: warned with a
+# count, not counted as a failure. Folder names are mailbox content, so a
+# synthetic marker stands in for one and must never reach the log.
+
+readonly FAR_BOX_MARKER="Folders/MarkerZq9-276"
+FAR_BOX_LINE="Error: channel protonmail: far side box ${FAR_BOX_MARKER} cannot be opened."
+readonly FAR_BOX_LINE
+
+# A mock mbsync: writes stdout line $1 (if any), each stderr line in
+# MOCK_STDERR (newline-separated), then returns MOCK_RC.
+mock_mbsync_output() {
+    if [[ -n "${MOCK_STDOUT:-}" ]]; then
+        printf '%s\n' "$MOCK_STDOUT"
+    fi
+    if [[ -n "${MOCK_STDERR:-}" ]]; then
+        printf '%s\n' "$MOCK_STDERR" >&2
+    fi
+    return "$MOCK_RC"
+}
+
+# Runs run_sync the way the entrypoint does, capturing its output in
+# SYNC_LOG and its status in SYNC_RC.
+run_sync_logged() {
+    SYNC_LOG="$WORK/sync-log-$1"
+    SYNC_RC=0
+    run_sync >"$SYNC_LOG" 2>&1 || SYNC_RC=$?
+}
+
+marker_not_logged() {
+    if grep -qF "MarkerZq9" "$SYNC_LOG"; then
+        echo "a folder name reached the log:"
+        cat "$SYNC_LOG"
+        return 1
+    fi
+}
+
+# shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
+unopenable_far_box_only_is_a_warned_success() {
+    sync_setup far-only
+    mbsync() { mock_mbsync_output; }
+    find() { printf 'find\n' >>"$FIND_CALLS"; }
+    MOCK_RC=1
+    MOCK_STDOUT="Maildir notice: sleeping due to recent directory modification."
+    MOCK_STDERR="${FAR_BOX_LINE}"$'\n'"${FAR_BOX_LINE/MarkerZq9-276/MarkerZq9-other}"
+    run_sync_logged far-only
+    ((SYNC_RC == 0)) || return 1
+    grep -q 'WARNING: 2 far-side folder' "$SYNC_LOG" || return 1
+    # mbsync's own stdout still passes through.
+    grep -qxF "$MOCK_STDOUT" "$SYNC_LOG" || return 1
+    [[ "$(wc -l <"$FIND_CALLS")" -eq 2 ]] || return 1
+    marker_not_logged
+}
+
+# shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
+unopenable_far_box_with_another_error_still_fails() {
+    sync_setup far-mixed
+    mbsync() { mock_mbsync_output; }
+    find() { :; }
+    MOCK_RC=1
+    MOCK_STDERR="${FAR_BOX_LINE}"$'\n'"Error: synthetic other failure"
+    run_sync_logged far-mixed
+    ((SYNC_RC == 1)) || return 1
+    grep -qxF "Error: synthetic other failure" "$SYNC_LOG" || return 1
+    grep -q 'WARNING: 1 far-side folder' "$SYNC_LOG" || return 1
+    marker_not_logged
+}
+
+# INBOX cannot be renamed or deleted, so an INBOX that cannot be opened is
+# Bridge refusing boxes, not a vanished folder.
+# shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
+unopenable_far_inbox_still_fails() {
+    sync_setup far-inbox
+    mbsync() { mock_mbsync_output; }
+    find() { :; }
+    MOCK_RC=1
+    MOCK_STDERR="${FAR_BOX_LINE}"$'\n'"Error: channel protonmail: far side box INBOX cannot be opened."
+    run_sync_logged far-inbox
+    ((SYNC_RC == 1)) || return 1
+    grep -qxF "Error: channel protonmail: far side box INBOX cannot be opened." "$SYNC_LOG" || return 1
+    marker_not_logged
+}
+
+# Only mbsync's ordinary failure status (1) is tolerated; anything else (a
+# crash, a signal) keeps its status.
+# shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
+unopenable_far_box_with_another_status_still_fails() {
+    sync_setup far-status
+    mbsync() { mock_mbsync_output; }
+    find() { :; }
+    MOCK_RC=139
+    MOCK_STDERR="${FAR_BOX_LINE}"
+    run_sync_logged far-status
+    ((SYNC_RC == 139)) || return 1
+    marker_not_logged
+}
+
+# shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
+failure_without_stderr_still_fails() {
+    sync_setup far-silent
+    mbsync() { mock_mbsync_output; }
+    find() { :; }
+    MOCK_RC=1
+    MOCK_STDERR=""
+    run_sync_logged far-silent
+    ((SYNC_RC == 1)) || return 1
+    if grep -q WARNING "$SYNC_LOG"; then
+        return 1
+    fi
+}
+
+# Only the exact, anchored line counts: a similar line with extra text is
+# another error and is passed on as it is.
+# shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
+near_miss_line_is_not_tolerated() {
+    sync_setup far-near-miss
+    mbsync() { mock_mbsync_output; }
+    find() { :; }
+    MOCK_RC=1
+    MOCK_STDERR="Error: channel protonmail: near side box Synthetic cannot be opened."
+    run_sync_logged far-near-miss
+    ((SYNC_RC == 1)) || return 1
+    grep -qxF "$MOCK_STDERR" "$SYNC_LOG" || return 1
+}
+
+# The real sync loop, extracted from the entrypoint, around the real
+# run_sync: failures still count to the exit, and a degraded success
+# resets the count and writes the success stamp like any success.
+# shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
+sync_loop_counts_failures_but_not_unopenable_far_boxes() {
+    local loop calls_file="$WORK/loop-calls" stamps_file="$WORK/loop-stamps" rc=0
+    sync_setup loop
+    loop="$(awk '$0 == "while true; do" {p = 1} p {print} p && $0 == "done" {exit}' "$ENTRYPOINT")"
+    [[ -n "$loop" ]] || return 1
+    : >"$calls_file"
+    : >"$stamps_file"
+    find() { :; }
+    sleep() { :; }
+    record_successful_sync() { printf 'stamp\n' >>"$stamps_file"; }
+    # Calls 1-4 fail, call 5 meets only a vanished far box, 6-10 fail.
+    mbsync() {
+        local n
+        printf 'call\n' >>"$calls_file"
+        n="$(wc -l <"$calls_file")"
+        if ((n == 5)); then
+            printf '%s\n' "$FAR_BOX_LINE" >&2
+        else
+            printf 'Error: synthetic other failure\n' >&2
+        fi
+        return 1
+    }
+    MAX_CONSECUTIVE_SYNC_FAILURES=5
+    SYNC_INTERVAL=1
+    consecutive_sync_failures=0
+    (eval "$loop") >"$WORK/loop-log" 2>&1 || rc=$?
+    ((rc == 1)) || return 1
+    [[ "$(wc -l <"$calls_file")" -eq 10 ]] || return 1
+    [[ "$(wc -l <"$stamps_file")" -eq 1 ]] || return 1
+    grep -q 'exceeded 5 consecutive failures' "$WORK/loop-log" || return 1
+    SYNC_LOG="$WORK/loop-log"
+    marker_not_logged
 }
 
 # --- sync activity heartbeat (#277) ------------------------------------------
@@ -628,6 +796,7 @@ stop_setup() {
     CONFIG_FILE="$WORK/mbsyncrc"
     CHILD_LOG="$WORK/child-$1"
     SYNC_ACTIVITY_FILE="$WORK/activity-stop-$1"
+    MBSYNC_STDERR_FILE="$WORK/mbsync-stderr-stop-$1"
     mkdir -p "$MAILDIR_PATH" "$WORK/bin-stop-$1"
     : >"$CHILD_LOG"
     # A long-running child that records its start and any TERM it gets.
@@ -644,7 +813,7 @@ MOCK
     chmod 755 "$WORK/bin-stop-$1/mbsync"
     PATH="$WORK/bin-stop-$1:$PATH"
     load run_child stop_on_signal install_signal_handlers relax_new_maildir_perms \
-        mark_sync_activity run_sync
+        mark_sync_activity report_mbsync_errors run_sync
 }
 
 # Signals the stand-in entrypoint once its child has started and waits for
@@ -747,6 +916,17 @@ check "sync succeeds when mbsync and the repair succeed" \
 check "a failed directory repair fails the sync" failed_directory_repair_fails_the_sync
 check "a failed file repair fails the sync" failed_file_repair_fails_the_sync
 check "the repair still runs after a failed mbsync" repair_still_runs_after_a_failed_mbsync
+check "unopenable far boxes alone are a warned success" \
+    unopenable_far_box_only_is_a_warned_success
+check "an unopenable far box with another error still fails" \
+    unopenable_far_box_with_another_error_still_fails
+check "an unopenable far INBOX still fails" unopenable_far_inbox_still_fails
+check "an unopenable far box with another status still fails" \
+    unopenable_far_box_with_another_status_still_fails
+check "a failure with no stderr still fails" failure_without_stderr_still_fails
+check "a near-miss error line is not tolerated" near_miss_line_is_not_tolerated
+check "the sync loop counts failures but not unopenable far boxes" \
+    sync_loop_counts_failures_but_not_unopenable_far_boxes
 check "activity is marked before mbsync, before the repair and after the sync" \
     activity_is_marked_around_a_successful_sync
 check "activity is marked after a failed mbsync" activity_is_marked_after_a_failed_mbsync
