@@ -34,23 +34,39 @@ IMAPStore protonmail-remote
 Account protonmail
 
 # Local store — where emails are written in Maildir format.
-# SubFolders Verbatim preserves ProtonMail folder names exactly as-is.
+# SubFolders Legacy: a top-level folder is the directory of that name, and
+# each child is its parent's directory plus "/." and the child's name, so
+# Folders/Clients/cur is /maildir/Folders/.Clients/.cur. A child can then
+# never land on its parent's own cur, new or tmp directory, as it did with
+# SubFolders Verbatim (#281), and names keep their dots, which
+# SubFolders Maildir++ refuses. The indexer reads the folder name back
+# from the path (indexer/src/parser.py _derive_folder).
 MaildirStore protonmail-local
 Path /maildir/
 Inbox /maildir/INBOX
-SubFolders Verbatim
+SubFolders Legacy
 
 # Channel — connects remote Bridge IMAP to local Maildir.
 # Patterns excludes All Mail and Labels/* — these are virtual folders in
 # Bridge v3's Gluon IMAP library that cause IMAP CLOSE errors on expunge.
+# It also leaves out a child folder, and everything below it, named after
+# a file isync keeps in its parent's directory: under SubFolders Legacy
+# its directory would be that file (.uidvalidity, .isyncuidmap.db, and the
+# .mbsyncstate files of SyncState *). Such folders are not synced; see
+# docs/troubleshooting.md. The last matching pattern wins.
 # Sync Pull — one direction only, never pushes changes back to Proton.
-# SyncState — explicit path prevents full re-sync on container restart.
+# SyncState * — each folder's sync state (UIDVALIDITY and UIDs) lives in
+#   its own Maildir directory as .mbsyncstate*, so it survives container
+#   restarts and two folders can never share a state file. A path prefix
+#   such as /maildir/.mbsyncstate would name each file after the folder
+#   with "/" written as "!", so Folders/A/B and Folders/A!B would collide
+#   (#275).
 # Expunge None — never permanently deletes on either side.
 Channel protonmail
 Far :protonmail-remote:
 Near :protonmail-local:
-Patterns * !"All Mail" !"Labels/*"
+Patterns * !"All Mail" !"Labels/*" !"*/uidvalidity" !"*/uidvalidity/*" !"*/isyncuidmap.db" !"*/isyncuidmap.db/*" !"*/mbsyncstate" !"*/mbsyncstate/*" !"*/mbsyncstate.journal" !"*/mbsyncstate.journal/*" !"*/mbsyncstate.new" !"*/mbsyncstate.new/*" !"*/mbsyncstate.lock" !"*/mbsyncstate.lock/*"
 Create Near
-SyncState /maildir/.mbsyncstate
+SyncState *
 Sync Pull
 Expunge None

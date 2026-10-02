@@ -739,8 +739,10 @@ roughly this order; each is its own PR:
    superseded); then #575 (drop `message_chunks.message_date`); then
    `occurred_at` with date filters and thread spans on it.
 2. #208 and #550 (rendered chunks within `max_tokens`).
-3. #275 and #281 (collision-free folder mapping; no migration with a
-   fresh Maildir) and #279 (UIDVALIDITY recovery procedure).
+3. ~~#275 and #281 (collision-free folder mapping; no migration with a
+   fresh Maildir)~~ (done 2026-10-02: `SyncState *` and
+   `SubFolders Legacy`; an earlier-layout Maildir is refused at start)
+   and #279 (UIDVALIDITY recovery procedure).
 4. #562 (purge extracted text on reap) and ~~#428~~ (done: every xlsx
    part openpyxl loads whole is capped, 8 MiB each, 16 MiB together).
 5. The Claude Desktop `fastmcp` adapter (replacing `mcp-remote` in
@@ -874,8 +876,8 @@ Go-live checklist (do these before more hardening):
 Deferred as issues: ~~#362~~ (done: #522, falls back to the raw
 filename parameter when `get_filename()` raises), #428 (xlsx parts openpyxl
 loads whole), #316's index-side remainder (Phase 2 reindex), and the
-mbsync design families (#275, #279, #281; #282; #276 and #277 are
-done in #521 and #515).
+mbsync design families (#279; #282; #275 and #281 are done, #276 and
+#277 are done in #521 and #515).
 
 Open owner decision: **#267** one-shot rotation. #342 shipped the
 documented limitation (recreate with `BRIDGE_CERT_PIN_ROTATE=false`);
@@ -1078,8 +1080,8 @@ Order of work, chosen to minimise reindexes:
    pair (#277, #282; their small siblings #271 and #280 are batch-1
    guards above and are not repeated here); see Resolved decisions 9
    and 10 for the chosen direction and the one measurement still
-   needed. #276 (#521) and #277 (#515) are done; #275, #281 and #279
-   are now pre-go-live work (Resolved decisions 14); #282 waits for the
+   needed. #276 (#521), #277 (#515), #275 and #281 are done; #279 is
+   pre-go-live work (Resolved decisions 14); #282 waits for the
    first-sync measurement.
 4. **The Phase 2 reindex bundle** (see Phase 2): #208, #550 and #297's
    second half moved to pre-go-live work (Resolved decisions 14). #303, #298, #295 and #217 landed directly instead

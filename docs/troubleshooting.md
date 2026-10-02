@@ -381,13 +381,62 @@ docker exec mbsync mbsync -c /tmp/mbsync/mbsyncrc -a
 ```
 
 Add `| grep UIDVALIDITY` to see only UIDVALIDITY errors. Without running a
-sync, the sync state files show which folders mbsync tracks: there is one
-per folder at the Maildir root, named after the folder with `/` written as
-`!`:
+sync, the sync state files show which folders mbsync tracks: each folder
+keeps one, `.mbsyncstate`, in its own Maildir directory, where every
+component after the first has a leading dot (`Folders/.Clients` is
+`Folders/Clients`):
 
 ```bash
-docker exec mbsync find /maildir -maxdepth 1 -name '.mbsyncstate*'
+docker exec mbsync find /maildir -name .mbsyncstate
 ```
+
+A Proton child folder named `uidvalidity`, `isyncuidmap.db`,
+`mbsyncstate`, `mbsyncstate.journal`, `mbsyncstate.new` or
+`mbsyncstate.lock` is not synced, nor is anything below it: its Maildir
+directory would be a file isync keeps in its parent's directory. Nothing
+is logged for it. Rename the folder in Proton to sync it.
+
+## mbsync refuses an earlier Maildir layout
+
+```text
+>>> ERROR: /maildir was synced with an earlier mbsync layout (sync state at the Maildir root, or subfolders without the leading dot) — refusing to sync.
+```
+
+mbsync keeps each folder's sync state in that folder's own directory
+(#275) and writes a child folder with a leading dot (#281; see
+[Maildir layout](architecture.md#maildir-layout)). A Maildir synced by an
+earlier version keeps the state at the Maildir root and its child folders
+without the dot, where this version would read neither: it would download
+mail a second time next to the copies already there. mbsync therefore
+refuses to start, before it connects to Bridge, and changes nothing. The
+message names no path, because those paths hold folder names.
+
+If it says instead that it `could not inspect /maildir`, `find` could not
+read part of the Maildir (usually a permission problem); it gives only a
+count of `find`'s errors, for the same reason. Run the `docker exec`
+command it prints to see them in your terminal.
+
+Start the Maildir over. Mail is pulled again from Proton, so nothing is
+lost, but remove the index with it: its rows point at the old files, which
+would otherwise go through
+[deletion reconciliation](#deletion-reconciliation-mirror-vs-archive).
+Run these from the checkout, with the project name the stack runs under:
+
+```bash
+names=$(docker compose config --format json | python3 -c 'import json, sys
+v = json.load(sys.stdin)["volumes"]
+print(v["maildir-volume"]["name"], v["sqlite-volume"]["name"])')
+make down
+docker volume rm $names
+make up                # or make up-macos-bridge in macOS Bridge mode
+```
+
+To keep a copy of the old Maildir first, back it up as in step 4 of
+[Switching an existing installation](setup.md#switching-an-existing-installation).
+The Bridge vault and mbsync's certificate pin (the `mbsync-state` volume)
+are untouched. mbsync then pulls the whole mailbox, and the indexer
+rebuilds the index from it, which re-embeds every message (a cost with a
+paid embedding provider).
 
 ## Embedder or inference endpoint unreachable from containers
 

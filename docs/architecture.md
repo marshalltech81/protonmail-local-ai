@@ -31,7 +31,11 @@ ProtonBridge container
 mbsync container
   - Polls Bridge IMAP every SYNC_INTERVAL seconds in a bounded retry loop
   - Writes Maildir format to maildir-volume
-  - Maintains sync state for incremental updates
+  - Maintains sync state for incremental updates, in each folder's own
+    Maildir directory, and writes child folders with a leading dot so no
+    folder name can collide with another or with Maildir's own
+    directories (#275, #281; see [Maildir layout](#maildir-layout));
+    refuses to start on a Maildir synced with the earlier layout
   - Pins Bridge TLS cert on first boot (SHA-256 fingerprint stored in
     mbsync-state volume); refuses to sync on mismatch unless the operator
     sets BRIDGE_CERT_PIN_ROTATE=true for a legitimate rotation
@@ -131,6 +135,42 @@ MCP client (host machine; Claude Desktop via a local stdio bridge)
 | `bridge-data` | Bridge credentials and TLS cert (`vault.enc` under `/data/config`), GPG key (`/data/gnupg`), pass store (`/data/pass`), Gluon IMAP cache and logs (`/data/local`), cache (`/data/cache`) | Yes — back up `/data/config`, `/data/gnupg`, and `/data/pass` together: `vault.enc` cannot be decrypted without the GPG key, so a backup missing `gnupg/` is useless, and the Bridge entrypoint refuses to start over it. `/data/local` and `/data/cache` can be omitted — Bridge rebuilds them from Proton — but rebuilding the Gluon cache re-downloads the whole mailbox, which can take hours. Losing the whole volume means re-login plus that full re-download. |
 | `maildir-volume` | Raw email in Maildir format | Optional — mbsync can re-sync |
 | `sqlite-volume` | SQLite index (FTS5 + vectors) | Optional — indexer can rebuild |
+
+### Maildir layout
+
+mbsync writes one Maildir per Proton folder (`mbsync/mbsyncrc.template`):
+
+- **Folders:** `SubFolders Legacy`. A top-level folder (`INBOX`, `Sent`,
+  `Trash`, `Spam`, `Folders`, ...: Bridge's fixed names) is the directory
+  of that name under `/maildir`; each child is its parent's directory plus
+  `/.` and its name. `Folders/Clients/cur` is
+  `/maildir/Folders/.Clients/.cur`, so a child can never land on its
+  parent's own `cur`, `new` or `tmp` (#281), and a name keeps its dots
+  (`SubFolders Maildir++` refuses them). Names reach isync 1.4.4 as Bridge
+  lists them, modified UTF-7 included, and become directory names as they
+  are.
+- **Sync state:** `SyncState *`. Each folder's UIDVALIDITY and UIDs live
+  in `.mbsyncstate` (with `.journal`, `.new` and `.lock` while a sync runs)
+  in the folder's own directory, next to isync's `.uidvalidity`, so no two
+  folders can share a state file (#275).
+- **Names isync needs for itself:** a child folder named `uidvalidity`,
+  `isyncuidmap.db`, `mbsyncstate`, `mbsyncstate.journal`, `mbsyncstate.new`
+  or `mbsyncstate.lock` would be one of those files, so the channel's
+  `Patterns` leave it, and everything below it, out. It is not synced and
+  nothing reports it.
+- **Indexer:** a message's folder is the path below `/maildir` to the
+  directory holding its `cur`/`new`, with the one leading dot of every
+  component after the first removed (`indexer/src/parser.py`
+  `_derive_folder`), so tools report `Folders/Clients/cur`. The isync
+  state files sit outside every `cur`/`new` and are never read as mail.
+- **Earlier layout:** a Maildir synced before this layout (state files at
+  the root, children without the dot) is refused at mbsync's start,
+  before it connects to Bridge; see
+  [troubleshooting](troubleshooting.md#mbsync-refuses-an-earlier-maildir-layout).
+
+`mbsync/tests/layout_check.sh` (`make test-mbsync-layout`, run in CI)
+syncs these cases with the shipped image's isync and synthetic Maildir
+stores.
 
 Container logs are not in a volume. Every service uses the `json-file`
 driver capped at three 10 MiB files (the `x-logging` block in

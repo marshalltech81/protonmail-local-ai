@@ -86,6 +86,20 @@ class TestReadableDirs:
             "Folders/Clients/tmp",
         }
 
+    def test_walks_children_named_like_message_dirs(self, tmp_path):
+        """Under mbsync's ``SubFolders Legacy`` a child folder named
+        ``cur`` is the directory ``.cur`` (#281), so the walk reaches it
+        and the folders below it."""
+        parent = _folder(tmp_path / "Folders", ".Parent")
+        child = _folder(parent, ".cur")
+        below = _folder(child, ".Below")
+
+        found = readable_dirs(tmp_path)
+
+        assert str(child) in found
+        assert str(below) in found
+        assert str(below / "cur") in found
+
     @needs_unprivileged
     def test_skips_a_directory_it_cannot_enter(self, tmp_path, unreadable):
         _folder(tmp_path, "INBOX")

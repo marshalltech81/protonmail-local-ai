@@ -101,6 +101,41 @@ validate_bridge_endpoint() {
     fi
 }
 
+check_maildir_layout() {
+    # mbsyncrc keeps each folder's sync state in the folder's own directory
+    # (SyncState *, #275) and writes a child folder as its parent's
+    # directory plus "/." and its name (SubFolders Legacy, #281). A Maildir
+    # synced with the earlier layout has its state files at the root and
+    # its child folders without the dot. isync would read neither: it would
+    # download every folder again, the nested ones into new directories,
+    # next to the copies already there. Refuse to sync until the operator
+    # starts the Maildir over. A top-level folder's directory holds only
+    # cur, new, tmp and dot entries in this layout, so any other directory
+    # there is the earlier one. The messages name no path, because these
+    # paths hold folder names: find's own diagnostics (a directory it
+    # cannot read, by path) are kept in a file and only counted.
+    local state nested find_err lines
+
+    find_err="$(mktemp "${RUNTIME_DIR}/layout-find.XXXXXX")"
+    if ! state="$(find "$MAILDIR_PATH" -mindepth 1 -maxdepth 1 -name '.mbsyncstate*' -print -quit \
+        2>"$find_err")" \
+        || ! nested="$(find "$MAILDIR_PATH" -mindepth 2 -maxdepth 2 -type d \
+            ! -path "${MAILDIR_PATH}/.*" ! -name '.*' ! -name cur ! -name new ! -name tmp \
+            -print -quit 2>>"$find_err")"; then
+        lines="$(wc -l <"$find_err" | tr -d '[:space:]')"
+        rm -f "$find_err"
+        echo ">>> ERROR: could not inspect ${MAILDIR_PATH} for an earlier Maildir layout — refusing to sync." >&2
+        echo ">>> find reported ${lines} error line(s), not logged because they name folders. To see them: docker exec mbsync find ${MAILDIR_PATH} -maxdepth 2 -type d" >&2
+        return 1
+    fi
+    rm -f "$find_err"
+    if [[ -n "$state" || -n "$nested" ]]; then
+        echo ">>> ERROR: ${MAILDIR_PATH} was synced with an earlier mbsync layout (sync state at the Maildir root, or subfolders without the leading dot) — refusing to sync." >&2
+        echo ">>> Syncing it with this version would download mail again next to the existing copies. Start the Maildir over: see docs/troubleshooting.md, \"mbsync refuses an earlier Maildir layout\"." >&2
+        return 1
+    fi
+}
+
 expected_fingerprint() {
     # BRIDGE_CERT_FINGERPRINT in the pin's form: openssl's
     # "sha256 Fingerprint=AB:CD:..." line, its value, or bare hex.
@@ -645,6 +680,7 @@ record_successful_sync() {
 # =============================================================================
 install_signal_handlers
 require_prerequisites
+check_maildir_layout || exit 1
 
 # BRIDGE_CERT_PIN_ROTATE is an opt-in for accepting one legitimate
 # Bridge cert rotation. It is part of the container's environment, so

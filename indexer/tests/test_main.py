@@ -556,11 +556,11 @@ class TestOnMovedIndexesDestination:
 class TestInitialIndexNestedFolders:
     def test_recursive_scan_indexes_nested_folders(self, tmp_path, monkeypatch):
         """Regression: ``initial_index`` walked only one level under
-        ``MAILDIR_PATH``. With mbsync ``SubFolders Verbatim``, nested
-        folders like ``Clients/ABC`` were never scanned. The recursive
-        walk now picks them up at any depth."""
+        ``MAILDIR_PATH``, so nested folders like ``Clients/ABC``
+        (``Clients/.ABC`` under mbsync's ``SubFolders Legacy``) were never
+        scanned. The recursive walk now picks them up at any depth."""
         maildir = tmp_path / "maildir"
-        nested = maildir / "Clients" / "ABC" / "cur"
+        nested = maildir / "Clients" / ".ABC" / "cur"
         nested.mkdir(parents=True)
         flat = maildir / "INBOX" / "cur"
         flat.mkdir(parents=True)
@@ -580,10 +580,10 @@ class TestInitialIndexNestedFolders:
         assert db.is_indexed(str(flat / "top.eml"))
 
     def test_nested_folder_stored_as_relative_path(self, tmp_path, monkeypatch):
-        """Once indexed, a nested message's stored ``folder`` reflects the
-        full relative path under the Maildir root."""
+        """Once indexed, a nested message's stored ``folder`` is the full
+        folder name, read back from mbsync's ``SubFolders Legacy`` path."""
         maildir = tmp_path / "maildir"
-        nested = maildir / "Clients" / "ABC" / "cur"
+        nested = maildir / "Clients" / ".ABC" / "cur"
         nested.mkdir(parents=True)
         _write_eml(nested / "m.eml", "nested@example.com")
 

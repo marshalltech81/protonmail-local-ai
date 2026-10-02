@@ -1,4 +1,4 @@
-.PHONY: build build-nocache build-macos-bridge up up-macos-bridge down logs first-run update status requeue-dead clean sync sync-indexer sync-mcp test test-indexer test-mcp test-mbsync test-mbsync-tls test-compose test-bridge test-bridge-smoke test-validate-env restart-indexer baseline typecheck typecheck-indexer typecheck-mcp bridge-patch-check bridge-smoke bridge-upgrade-check init-secrets validate-env help
+.PHONY: build build-nocache build-macos-bridge up up-macos-bridge down logs first-run update status requeue-dead clean sync sync-indexer sync-mcp test test-indexer test-mcp test-mbsync test-mbsync-tls test-mbsync-layout test-compose test-bridge test-bridge-smoke test-validate-env restart-indexer baseline typecheck typecheck-indexer typecheck-mcp bridge-patch-check bridge-smoke bridge-upgrade-check init-secrets validate-env help
 
 UV_CACHE_DIR ?= /tmp/uv-cache
 export UV_CACHE_DIR
@@ -35,6 +35,7 @@ help:
 	@echo "  test-mcp     Run mcp-server unit tests only"
 	@echo "  test-mbsync  Run mbsync entrypoint tests only"
 	@echo "  test-mbsync-tls  Run the mbsync TLS check against a synthetic Bridge (needs Docker)"
+	@echo "  test-mbsync-layout  Run the mbsync Maildir layout check with synthetic stores (needs Docker)"
 	@echo "  test-compose Run Compose rendering tests for both Bridge modes"
 	@echo "  test-bridge  Run Bridge entrypoint tests only"
 	@echo "  test-bridge-smoke  Run bridge-smoke.sh pass/fail tests (no Docker)"
@@ -233,6 +234,9 @@ test-mbsync:
 
 test-mbsync-tls:
 	bash mbsync/tests/tls_check.sh
+
+test-mbsync-layout:
+	bash mbsync/tests/layout_check.sh
 
 test-compose:
 	bash scripts/tests/compose_test.sh

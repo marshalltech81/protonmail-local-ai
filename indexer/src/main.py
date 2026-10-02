@@ -603,9 +603,10 @@ TIMING_LOG_EVERY = 25
 
 def _iter_maildir_messages(root: Path):
     """Yield every message file under ``root`` whose parent is ``cur`` or
-    ``new``, at any nesting depth. mbsync ``SubFolders Verbatim`` can
-    produce ``Clients/ABC/cur/msg`` — a flat ``iterdir`` over ``root``
-    would miss every nested folder's mail."""
+    ``new``, at any nesting depth. mbsync ``SubFolders Legacy`` writes
+    ``Folders/.Clients/cur/msg`` — a flat ``iterdir`` over ``root`` would
+    miss every nested folder's mail. ``rglob`` includes the dot
+    directories."""
     for filepath in root.rglob("*"):
         if filepath.is_file() and filepath.parent.name in ("cur", "new"):
             yield filepath
