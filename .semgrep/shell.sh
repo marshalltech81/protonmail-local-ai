@@ -30,8 +30,16 @@ NODE_TLS_REJECT_UNAUTHORIZED=0 node app.js
 git config --global http.sslVerify false
 # ruleid: shell-tls-verification-disabled
 curl "https://example.invalid/tool#v1" --insecure -o tool
+# ruleid: shell-tls-verification-disabled
+curl -H "X-Note: # release" --insecure -o out "$url"
+# ruleid: shell-tls-verification-disabled
+wget --header "X-Note: # release" --no-check-certificate "$url"
+# ruleid: shell-tls-verification-disabled
+printf '%s\n' "# fetch"; curl -k "$url"
 # ok: shell-tls-verification-disabled
 # A commented-out line is not a finding: curl -k "$url"
+# ok: shell-tls-verification-disabled
+    # Nor is an indented one: wget --no-check-certificate "$url"
 
 # ruleid: shell-xtrace-enabled
 set -x
@@ -61,8 +69,14 @@ curl -fsSL "$url" | /usr/bin/env bash
 # ruleid: shell-pipe-to-shell
 wget -qO- "$url" \
     | sh
+# ruleid: shell-pipe-to-shell
+curl -H "X-Note: # release" -fsSL "$url" | bash
+# ruleid: shell-pipe-to-shell
+printf '%s\n' "# install"; bash <(curl -fsSL "$url")
 # ok: shell-pipe-to-shell
 curl -fsSL "$url" | sha256sum
+# ok: shell-pipe-to-shell
+# curl -fsSL "$url" | bash
 
 # ruleid: shell-world-writable
 chmod 777 "$dir"

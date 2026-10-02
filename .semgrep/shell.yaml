@@ -8,10 +8,16 @@
 # patterns: Semgrep's bash parser rejects several of the repo's scripts
 # (validate-env.sh, bridge/tests/entrypoint_test.sh, part of
 # mbsync/entrypoint.sh), and a structural rule silently skips what it
-# cannot parse. A regex reads every line. `^[^#\n]*` before each match
-# keeps commented-out lines from counting. In the gap between a command
-# and its flag, `#` counts only where bash would start a comment (at the
-# start of a word), and the gap may cross backslash-continued lines.
+# cannot parse. A regex reads every line.
+#
+# The TLS and pipe-to-shell rules skip only lines that start with `#`
+# (`^(?![ \t]*#)`) and let `#` appear anywhere else, because a regex
+# cannot tell a `#` inside quotes (`-H "X-Note: # release"`) from one
+# that starts a comment. A trailing comment that mentions an unsafe
+# flag is reported too; reword it. The other rules use `^[^#\n]*`
+# before each match, and in the gap between a command and its flag `#`
+# counts only where bash would start a comment (at the start of a
+# word). Gaps may cross backslash-continued lines.
 #
 # Tests: .semgrep/shell.sh (run `semgrep test .semgrep`).
 rules:
@@ -28,13 +34,13 @@ rules:
         - ".semgrep/"
     pattern-either:
       # curl -k / --insecure, alone or in a group of short flags.
-      - pattern-regex: (?m)^[^#\n]*\bcurl\b(?:[^#\n]|(?<=\S)#|\\\n)*\s(-[a-zA-Z]*k[a-zA-Z]*|--insecure)(\s|$)
-      - pattern-regex: (?m)^[^#\n]*\bwget\b(?:[^#\n]|(?<=\S)#|\\\n)*\s--no-check-certificate\b
+      - pattern-regex: (?m)^(?![ \t]*#)[^\n]*\bcurl\b(?:[^\n]|\\\n)*\s(-[a-zA-Z]*k[a-zA-Z]*|--insecure)(\s|$)
+      - pattern-regex: (?m)^(?![ \t]*#)[^\n]*\bwget\b(?:[^\n]|\\\n)*\s--no-check-certificate\b
       # git -c http.sslVerify=false, git config http.sslVerify false
-      - pattern-regex: (?mi)^[^#\n]*\bhttp\.sslverify["']?[\s=]+["']?(false|0|no|off)\b
+      - pattern-regex: (?mi)^(?![ \t]*#)[^\n]*\bhttp\.sslverify["']?[\s=]+["']?(false|0|no|off)\b
       # Environment switches that turn verification off for git, Python
       # and Node.
-      - pattern-regex: (?m)^[^#\n]*\b(GIT_SSL_NO_VERIFY=["']?[^"'\s]|PYTHONHTTPSVERIFY=["']?0|NODE_TLS_REJECT_UNAUTHORIZED=["']?0)
+      - pattern-regex: (?m)^(?![ \t]*#)[^\n]*\b(GIT_SSL_NO_VERIFY=["']?[^"'\s]|PYTHONHTTPSVERIFY=["']?0|NODE_TLS_REJECT_UNAUTHORIZED=["']?0)
 
   - id: shell-xtrace-enabled
     languages: [regex]
@@ -65,8 +71,8 @@ rules:
       exclude:
         - ".semgrep/"
     pattern-either:
-      - pattern-regex: (?m)^[^#\n]*\b(curl|wget)\b(?:[^#\n|]|(?<=\S)#|\\\n)*\|(?:\s|\\\n)*(sudo\s+)?(\S*/)?(env\s+(-\S+\s+)*)?(\S*/)?(ba|z|da|k)?sh\b
-      - pattern-regex: (?m)^[^#\n]*(\b(ba|z|da)?sh|\bsource|\.)\s+<\(\s*(curl|wget)\b
+      - pattern-regex: (?m)^(?![ \t]*#)[^\n]*\b(curl|wget)\b(?:[^\n|]|\\\n)*\|(?:\s|\\\n)*(sudo\s+)?(\S*/)?(env\s+(-\S+\s+)*)?(\S*/)?(ba|z|da|k)?sh\b
+      - pattern-regex: (?m)^(?![ \t]*#)[^\n]*(\b(ba|z|da)?sh|\bsource|\.)\s+<\(\s*(curl|wget)\b
 
   - id: shell-world-writable
     languages: [regex]
