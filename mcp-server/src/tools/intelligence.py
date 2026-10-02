@@ -858,7 +858,8 @@ def _check_quotes(
 ) -> list[QuoteCheck]:
     """Each quotation of ``_MIN_CHECKED_WORDS`` or more words, checked
     against the text shown for the passages its statement cites, then,
-    if not there, against the other supplied passages.
+    if not there, against the other supplied passages. One over
+    ``_MAX_QUOTE_CHARS`` characters is listed as not_checked.
 
     Bounded: at most ``_MAX_CHECKED_QUOTES`` quotes of at most
     ``_MAX_QUOTE_CHARS`` characters are searched, each in each supplied
@@ -875,7 +876,9 @@ def _check_quotes(
     checked = 0
     for match, statement in zip(quote_matches, statement_of, strict=True):
         raw = match.group(1)
-        if len(_WORD_RE.findall(raw[: _MAX_QUOTE_CHARS + 1])) < _MIN_CHECKED_WORDS:
+        # A quote too long to search is not_checked whatever its words;
+        # a shorter one under the word threshold is a scare quote.
+        if len(raw) <= _MAX_QUOTE_CHARS and len(_WORD_RE.findall(raw)) < _MIN_CHECKED_WORDS:
             continue
         text = raw if len(raw) <= _MAX_QUOTE_CHARS else raw[:_MAX_QUOTE_CHARS] + "…"
         cited = statements[statement].labels

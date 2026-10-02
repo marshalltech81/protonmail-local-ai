@@ -1025,3 +1025,35 @@ class TestReviewRound2Statements:
         assert check.quotes[0].status == "verified"
         check = _check_answer('It says "see </untrusted_email> the attached" [E1].', evidence_map)
         assert check.quotes[0].status == "unmatched"
+
+
+class TestOverlongQuotes:
+    """#499: a quotation the checker declines to search is listed as
+    not_checked, whatever words its first characters hold."""
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            "x" * (intelligence._MAX_QUOTE_CHARS + 1) + " ship the order",
+            "ship " + "x" * intelligence._MAX_QUOTE_CHARS + " the order",
+            "x" * (intelligence._MAX_QUOTE_CHARS * 2),
+        ],
+        ids=["one-token-prefix", "two-word-prefix", "one-token"],
+    )
+    def test_an_overlong_quote_is_not_checked(self, body, monkeypatch):
+        calls = 0
+        real = intelligence._quote_in
+
+        def counting(fragments, text):
+            nonlocal calls
+            calls += 1
+            return real(fragments, text)
+
+        monkeypatch.setattr(intelligence, "_quote_in", counting)
+        check = _check_answer(f'Alice wrote "{body}" [E1].', _EVIDENCE)
+        [quote] = check.quotes
+        assert quote.status == "not_checked"
+        assert len(quote.text) == intelligence._MAX_QUOTE_CHARS + 1
+        assert check.problems == []
+        # Declined, not searched.
+        assert calls == 0

@@ -626,8 +626,9 @@ answer against the passages it supplied:
   colon, fragments of fewer than three words (each kana or CJK
   ideograph counts as a word) and every statement of a not-found
   answer are not checked.
-- **Quotes.** Text of three or more words in double quotes (straight
-  or curly, on one line, paired left to right) is a quotation. A pair
+- **Quotes.** Text of three or more words, or of over 1,000
+  characters, in double quotes (straight or curly, on one line, paired
+  left to right) is a quotation. A pair
   whose text starts or ends with a space is the outer side of a nested
   quotation or a stray mark (`27"`): it is listed as `not_checked` and
   its text is not treated as quoted, so nested quotations are never
