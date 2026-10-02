@@ -362,7 +362,7 @@ class TestSummarizeBudget:
         thread, recent = self._thread_and_tail()
         llm = FakeInferenceClient()
         asyncio.run(_tools(_StubDb([thread], recent), llm)["summarize_thread"](thread_id="t1"))
-        assert _summarize_context(thread, recent) in llm.complete_calls[0][1]
+        assert _summarize_context(thread, recent, evidence_map={}) in llm.complete_calls[0][1]
 
     def test_small_window_prompt_never_exceeds_the_budget(self):
         thread, recent = self._thread_and_tail()
@@ -371,8 +371,12 @@ class TestSummarizeBudget:
         asyncio.run(
             _tools(_StubDb([thread], recent), llm, small)["summarize_thread"](thread_id="t1")
         )
+        # The uncited stub answer gets the repair call (#284); the repair
+        # prompt fits too.
+        assert len(llm.complete_calls) == 2
+        for repair in llm.complete_calls:
+            assert _prompt_chars(repair) <= small.prompt_chars
         call = llm.complete_calls[0]
-        assert _prompt_chars(call) <= small.prompt_chars
         # Both the start of the thread and its newest reply survive the cut.
         assert f"{_MARKER} body" in call[1]
         assert f"{_MARKER} recent 3" in call[1]
@@ -433,7 +437,7 @@ class TestExtractBudget:
                 query="invoices", schema={"amount": "number"}
             )
         )
-        text = "\n".join(c.text for c in out)
+        text = "\n".join(c.text for c in out.content)
         assert "1 of 1 threads" in text
         assert "INFERENCE_CONTEXT_TOKENS" in text
         assert _MARKER not in text
@@ -447,8 +451,8 @@ class TestExtractBudget:
                 query="invoices", schema={"amount": "number"}
             )
         )
-        assert '"amount": 5' in out[0].text
-        assert "INFERENCE_CONTEXT_TOKENS" in out[-1].text
+        assert '"amount": 5' in out.content[0].text
+        assert "INFERENCE_CONTEXT_TOKENS" in out.content[1].text
 
     def test_default_window_adds_no_note(self):
         threads = [_thread("t1", [_chunk("c1", "x" * 9000)])]
@@ -458,8 +462,8 @@ class TestExtractBudget:
                 query="invoices", schema={"amount": "number"}
             )
         )
-        assert len(out) == 1
-        assert "INFERENCE_CONTEXT_TOKENS" not in out[0].text
+        assert len(out.content) == 1
+        assert "INFERENCE_CONTEXT_TOKENS" not in out.content[0].text
 
     def test_schema_too_large_for_the_window_fails_before_inference(self):
         threads = [_thread("t1", [_chunk("c1", "text")])]

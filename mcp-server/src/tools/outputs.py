@@ -1,6 +1,7 @@
 """
 Structured output for the search, retrieval, evidence, and status tools,
-and for ask_mailbox's checked citations and the experimental brief_issue
+and for the checked citations of ask_mailbox, summarize_thread and
+extract_from_emails, and the experimental brief_issue
 and check_conclusion.
 
 Each tool declares one of these models as its ``outputSchema`` (via
@@ -22,7 +23,7 @@ default; only get_message asks for full headers.
 """
 
 from datetime import date, datetime
-from typing import Literal
+from typing import Any, Literal
 
 from mcp.types import CallToolResult, TextContent
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -553,6 +554,105 @@ class AskMailboxOutput(_Output):
     )
     repair_attempted: bool = Field(
         description="True when the first answer failed the check and the model was asked once more."
+    )
+    threads: list[ThreadSummary] = Field(description="The threads searched, best match first.")
+
+
+SummaryStyle = Literal["brief", "detailed", "action-items", "timeline"]
+
+
+class SummarizeThreadOutput(_Output):
+    summary: str = Field(description="The model's summary, with inline labels such as [E1].")
+    style: SummaryStyle = Field(
+        description="The style used; an unknown style is summarized as brief."
+    )
+    thread: ThreadSummary = Field(description="The thread summarized.")
+    citations: list[Citation] = Field(
+        description="Each cited label that names a supplied passage, in first-cited order. "
+        "E1 is the thread's indexed text (source thread); the others are its recent messages."
+    )
+    statements: list[AnswerStatement] = Field(
+        description="The summary split into statements (sentences, list items and lines), "
+        "each with its labels."
+    )
+    quotes: list[QuoteCheck] = Field(
+        description="Each quotation of three or more words, checked against the passages "
+        "its statement cites, and each quotation over 1,000 characters (not_checked)."
+    )
+    citation_problems: list[CitationProblem] = Field(
+        description="Empty when the citation check passed. Labels and quotes are checked: a "
+        "valid label or a verified quote does not prove the passage supports the claim."
+    )
+    repair_attempted: bool = Field(
+        description="True when the first summary failed the check and the model was asked "
+        "once more."
+    )
+
+
+class ExtractedField(_Output):
+    record: int = Field(description="0-based index of the record in records.")
+    field: str = Field(description="The field's name in the record.")
+    labels: list[str] = Field(
+        description="The supplied passages its _evidence entry cites, in cited order."
+    )
+    status: Literal["cited", "uncited", "invalid"] = Field(
+        description="cited: it cites a passage supplied for its thread. uncited: it cites "
+        "none. invalid: it cites only unknown labels."
+    )
+    value_check: Literal["verified", "misattributed", "unmatched", "uncited", "not_checked"] = (
+        Field(
+            description="For a string value, whether its words occur in the indexed text shown "
+            "for a cited passage (verified), only in another passage of its thread "
+            "(misattributed) or in none (unmatched; often a normalized value such as a "
+            "reformatted date). uncited: the field cites no supplied passage. not_checked: not "
+            "a string, over 1,000 characters, or over the 20 values searched per thread. The "
+            "comparison is the quote check's: whitespace and quote-mark style are ignored, "
+            "case is not, and indexed text is extracted and normalized, so a verified value is "
+            "not proof of the raw message bytes."
+        )
+    )
+    found_in: list[str] = Field(description="Labels of the passages the value was found in.")
+
+
+class ExtractCitationProblem(_Output):
+    record: int = Field(description="0-based index of the record in records.")
+    kind: Literal["unknown_labels", "uncited_fields", "misattributed_values"] = Field(
+        description="unknown_labels: the record cites labels no passage supplied for its "
+        "thread has. uncited_fields: fields with a value whose _evidence entry cites no "
+        "label. misattributed_values: string values found only in a passage their field "
+        "does not cite."
+    )
+    labels: list[str] = Field(
+        description="The unknown labels; for misattributed_values, the labels of the passages "
+        "the values were found in. Empty otherwise."
+    )
+    fields: list[str] = Field(
+        description="The fields concerned (uncited_fields, misattributed_values); empty for "
+        "unknown_labels."
+    )
+
+
+class ExtractFromEmailsOutput(_Output):
+    records: list[dict[str, Any]] = Field(
+        description="The extracted records, as in the first content item. Each carries "
+        "_source_thread (thread subject), _date (the thread's last date) and _evidence (each "
+        "field with a value mapped to the valid labels of the passages it was taken from)."
+    )
+    citations: list[Citation] = Field(
+        description="Each valid label any record cites, in first-cited order. Labels are "
+        "numbered across the whole call, so one label names one passage."
+    )
+    fields: list[ExtractedField] = Field(
+        description="Each field with a value, per record: its labels and checks."
+    )
+    citation_problems: list[ExtractCitationProblem] = Field(
+        description="Empty when every field cites a supplied passage. Records with problems "
+        "are kept. Labels and words are checked: a valid label does not prove the passage "
+        "states the value."
+    )
+    notice: str | None = Field(
+        description="The incomplete-extraction and evidence note in content, if any: "
+        "counts of threads that could not be extracted or whose passages were cut."
     )
     threads: list[ThreadSummary] = Field(description="The threads searched, best match first.")
 

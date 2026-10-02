@@ -72,12 +72,12 @@ and the server's own fixed-text errors (such as an empty or wrong-sized
 response) in full with secrets redacted, and anything else as its
 exception type name alone.
 
-Of the intelligence tools (Group 3), `ask_mailbox` publishes an
-`outputSchema`: its answer with checked citations (see
-[`ask_mailbox`](#ask_mailbox)). `summarize_thread` and
-`extract_from_emails` have no typed output model; their answer is the
-prose in `content`, with no `outputSchema` and no `structuredContent`.
-The opt-in experimental `brief_issue` and `check_conclusion` also
+Of the intelligence tools (Group 3), `ask_mailbox`,
+`summarize_thread` and `extract_from_emails` publish an
+`outputSchema`: the answer, summary or records with checked citations
+(see [`ask_mailbox`](#ask_mailbox),
+[`summarize_thread`](#summarize_thread) and
+[`extract_from_emails`](#extract_from_emails)). The opt-in experimental `brief_issue` and `check_conclusion` also
 publish an `outputSchema` (see [Experimental tools](#experimental-tools));
 unlike the others, their format may change.
 
@@ -516,7 +516,8 @@ it stays within local-LLM context windows. The bounds differ by tool:
   dropped before it uses any space. Shorter passages ("Approved."),
   attachment chunks and copies in different threads are all kept.
   `extract_from_emails` sends one prompt per thread, with up to ``2000``
-  characters of evidence (three chunks at most). `ask_mailbox` puts up
+  characters of evidence (three chunks at most), each passage under a
+  labelled header as in `ask_mailbox`. `ask_mailbox` puts up
   to ``max_threads`` threads in one prompt, with up to six chunks per
   thread and one evidence budget of ``2000`` characters per thread
   retrieved, shared across them: a thread that needs less leaves the
@@ -532,8 +533,9 @@ it stays within local-LLM context windows. The bounds differ by tool:
   (or the ``snippet`` when the body is empty), up to ``8000``
   characters, followed by up to ``4000`` characters of the thread's most
   recent body chunks, which recovers the newest replies that the
-  indexer's front-preserved body cap drops. It is body-only: attachment
-  text is never included.
+  indexer's front-preserved body cap drops. Each section's headers
+  count against its cap. It is body-only: attachment text is never
+  included.
 
 These character caps are one bound; the model window is the other
 (#285). Every intelligence prompt is counted whole: system prompt,
@@ -755,6 +757,41 @@ embedder, rather than matching a subject on its domain or local part.
 To find a thread by address, or by a match that is only in message
 bodies, call `search_emails` first and pass the returned `Thread ID`.
 
+**Citations (#284).** The summary follows the `ask_mailbox` citation
+contract. The thread's indexed text is `E1`, under a `[E1 | thread
+text]` header: it is the thread's accumulated body and names no single
+message. Each recent passage is `E2`, `E3` ... in the order shown
+(oldest first), numbered before the budget is spent, under the
+labelled header `ask_mailbox` uses, with its own message's claimant
+ID, sender and sent date. The model is asked to cite a label after
+each statement or list item, to mark what the passages do not support
+`[unsupported]` or `[uncertain]`, to quote only words copied exactly,
+and to open with "Not found in the provided emails" when the passages
+hold nothing for the requested style (no action items, say). The
+summary is then checked exactly as an `ask_mailbox` answer is
+(labels, statements, quotes), with the same single repair call and no
+repair of a summary cut off at `INFERENCE_MAX_TOKENS`.
+
+Every style is checked the same way. The statement splitter already
+cuts at line breaks, so each `action-items` bullet and each `timeline`
+entry is a statement that must cite or be marked, a list introduction
+ending in a colon is not checked, and `brief` and `detailed` are cut
+into sentences. The known gap is the same as for any answer: a bullet
+of fewer than three words ("Call Bob") is a fragment and is not
+checked. A summary of a short thread may quote words found in both the
+thread text and a recent passage; it is verified when it cites either.
+
+Structured output: `summary`, `style` (the style used; an unknown
+style is summarized as `brief`), `thread` (the `search_emails` thread
+shape), and `citations`, `statements`, `quotes`,
+`citation_problems` and `repair_attempted` as in
+[`ask_mailbox`](#ask_mailbox). The prose in `content` is the summary
+under its `Summary (<style>) — <subject>:` heading, then the
+`Citations:` list and any citation-check lines (fixed text, counts and
+labels). An `E1` citation has source `thread` and no chunk; read it
+with `get_thread`. A recent passage's `chunk_id` is a body chunk of
+the thread.
+
 ### `extract_from_emails`
 Extract structured data from emails matching a query. Attachment text
 (digital and OCR'd PDFs, images) that ranks for the query is included in
@@ -778,10 +815,11 @@ extracted.
 The extractor accepts either a single JSON object matching the schema
 or a JSON array of such objects (useful when a thread contains
 multiple invoices, receipts, etc.). Every returned record carries
-`_source_thread` (the thread subject) and `_date` (the thread's last
-message date), so these two names are reserved: a schema that declares
-either one, as a shorthand key or in JSON Schema `properties` or
-`required`, is rejected before any model call. `limit` is clamped to `[1, 50]`
+`_source_thread` (the thread subject), `_date` (the thread's last
+message date) and `_evidence` (below), so these three names are
+reserved: a schema that declares any of them, as a shorthand key or in
+JSON Schema `properties` or `required`, is rejected before any model
+call. `limit` is clamped to `[1, 50]`
 at the tool boundary. Each retrieved thread drives one LLM call, so
 inflated values fan out into that many model calls.
 
@@ -815,6 +853,57 @@ second item says how many of the searched threads could not be
 extracted and why; if none were extracted the response says so rather
 than "No structured data … found", which is reserved for every thread
 answering `null` or `[]`.
+
+**Citations (#284).** Each thread's passages are labelled as in
+`ask_mailbox`, numbered across the whole call (the second thread's
+first label follows the first thread's last), so one label names one
+passage in the output. The model is asked to add to each record an
+`_evidence` object mapping every field it filled to the labels of the
+passages its value came from (`{"vendor": ["E1"], "amount": ["E2"]}`).
+The server then checks each record against the passages of its own
+thread only (a label shown only to another thread's prompt is unknown
+here):
+
+- **Labels.** For each field with a value (not `null`, `""`, `[]` or
+  `{}`; `_source_thread` and `_date` are the server's), the labels in
+  its `_evidence` entry (a label or a list of them; `"[E1]"` and
+  `"E1"` are the same) are split into valid and unknown. A field is
+  `cited` (a valid label), `invalid` (only unknown labels, an
+  `unknown_labels` problem) or `uncited` (an `uncited_fields`
+  problem). The record's `_evidence` is rewritten to each such field's
+  valid labels.
+- **Values.** A string value is looked for in its field's cited
+  passages with the `ask_mailbox` quote comparison: `verified`, or
+  `misattributed` when found only in another passage of the thread (a
+  `misattributed_values` problem), or `unmatched`. Extracted values
+  are often normalized (a reformatted date or amount, a trimmed name),
+  so `unmatched` is reported but is not a problem. A value of a field
+  that cites nothing is `uncited` and not searched. At most 20 values
+  of at most 1,000 characters are searched per thread, each in each of
+  the thread's passages at most once; the rest are `not_checked`, as
+  are values that are not strings.
+
+There is no repair call: each thread still drives exactly one model
+call, and a record with problems is kept and reported. Only counts are
+logged.
+
+Structured output:
+
+| Field | Description |
+|---|---|
+| `records` | The records, as in the first content item, each with `_source_thread`, `_date` and `_evidence` |
+| `citations` | One entry per valid label any record cites, in first-cited order, with the `ask_mailbox` citation fields |
+| `fields` | One entry per field with a value: `record` (index into `records`), `field`, `labels`, `status` (`cited`, `uncited`, `invalid`), `value_check` (`verified`, `misattributed`, `unmatched`, `uncited`, `not_checked`) and `found_in` |
+| `citation_problems` | `[]` when every field cites a supplied passage, else entries `{record, kind, labels, fields}`, `kind` one of `unknown_labels`, `uncited_fields`, `misattributed_values` |
+| `notice` | The incomplete-extraction or evidence note in `content`, or `null` |
+| `threads` | The threads searched, best match first |
+
+In `content`, the records stay the first item (pure JSON) and any
+incomplete-extraction or evidence note the second; a last item holds
+the `Citations:` list and the citation- and value-check lines (fixed
+text and counts). As with `ask_mailbox`, the check is about labels and
+words, not meaning: a valid label or a verified value does not show
+that the passage states that value for that record.
 
 ---
 

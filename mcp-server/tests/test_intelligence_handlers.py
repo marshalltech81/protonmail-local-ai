@@ -21,6 +21,7 @@ seeded DB and the FakeEmbedClient / FakeInferenceClient stubs. Coverage targets:
 
 import asyncio
 import json
+import re
 
 import pytest
 from fastmcp import Client, FastMCP
@@ -50,7 +51,8 @@ def _text(result) -> str:
 
 
 def _all_text(result) -> str:
-    return "\n".join(item.text for item in result)
+    content = result.content if isinstance(result, CallToolResult) else result
+    return "\n".join(item.text for item in content)
 
 
 class TestAskMailbox:
@@ -324,7 +326,8 @@ class TestSummarizeThread:
         # appended under its section header in chunk-rendered form.
         assert "invoice number 12345" in user
         assert "--- recent messages ---" in user
-        assert "[chunk " in user
+        # Each tail passage has a labelled header naming its message (#284).
+        assert re.search(r"^\[E\d+ \| message [^\n]*\| chunk \d+ chars", user, re.M)
 
     def test_chunkless_thread_still_uses_body_text(
         self, fake_server, chunked_db, fake_embed, fake_inference
@@ -432,8 +435,8 @@ class TestExtractFromEmails:
         handler = _handlers(fake_server, seeded_db, FakeEmbedClient(), llm)["extract_from_emails"]
         out = asyncio.run(handler(query="invoice OR lunch OR meeting", schema={"vendor": "string"}))
 
-        assert [r["vendor"] for r in json.loads(out[0].text)] == ["Acme"]
-        assert "1 of 3 threads could not be extracted" in _all_text(out[1:])
+        assert [r["vendor"] for r in json.loads(out.content[0].text)] == ["Acme"]
+        assert "1 of 3 threads could not be extracted" in _all_text(out.content[1:])
 
     def test_empty_list_still_means_no_data(self, fake_server, seeded_db):
         llm = FakeInferenceClient(complete_responses=["[]", "null", "[]"])
@@ -452,9 +455,9 @@ class TestExtractFromEmails:
         handler = _handlers(fake_server, seeded_db, FakeEmbedClient(), llm)["extract_from_emails"]
         out = asyncio.run(handler(query="invoice OR lunch OR meeting", schema={"vendor": "string"}))
 
-        records = json.loads(out[0].text)
+        records = json.loads(out.content[0].text)
         assert [r["vendor"] for r in records] == ["Acme"]
-        notice = _all_text(out[1:])
+        notice = _all_text(out.content[1:])
         assert "1 of" in notice
         assert "INFERENCE_MAX_TOKENS" in notice
 
@@ -473,7 +476,7 @@ class TestExtractFromEmails:
                 schema={"vendor": "string"},
             )
         )
-        text = _text(out)
+        text = _all_text(out)
         assert "Acme" in text
         # Annotation fields ensure the LLM's extracted record is
         # traceable back to a thread — dropping these would make
@@ -499,7 +502,7 @@ class TestExtractFromEmails:
                 schema={"vendor": "string"},
             )
         )
-        text = _text(out)
+        text = _all_text(out)
         assert "Acme" in text
         assert "Beta" in text
 
@@ -516,7 +519,7 @@ class TestExtractFromEmails:
         )
         handler = _handlers(fake_server, seeded_db, FakeEmbedClient(), llm)["extract_from_emails"]
         out = asyncio.run(handler(query="invoice OR lunch OR meeting", schema={"vendor": "string"}))
-        text = _text(out)
+        text = _all_text(out)
         assert "Acme" in text
         assert "Beta" in text
 
@@ -553,7 +556,7 @@ class TestExtractFromEmails:
         llm = FakeInferenceClient(complete_responses=['{"amount": 5, "_date": "2020-02-03"}'])
         handler = _handlers(fake_server, seeded_db, fake_embed, llm)["extract_from_emails"]
         out = asyncio.run(handler(query="invoice", schema={"amount": "number"}))
-        [record] = json.loads(_text(out))
+        [record] = json.loads(out.content[0].text)
         assert record["amount"] == 5
         assert record["_date"] == "2024-01-02"
         assert record["_source_thread"].startswith("Invoice")
@@ -676,7 +679,7 @@ class TestExtractSchemaConformance:
         out = self._run(
             fake_server, seeded_db, [json.dumps(record), "null", "null"], schema, caplog
         )
-        [returned] = json.loads(_text(out))
+        [returned] = json.loads(out.content[0].text)
         assert {k: v for k, v in returned.items() if not k.startswith("_")} == record
 
     def test_mixed_batch_keeps_valid_records_and_reports_the_thread(
@@ -688,8 +691,8 @@ class TestExtractSchemaConformance:
             "null",
         ]
         out = self._run(fake_server, seeded_db, responses, _AMOUNT_SCHEMA, caplog)
-        assert [r["amount"] for r in json.loads(out[0].text)] == [1, 2]
-        notice = _all_text(out[1:])
+        assert [r["amount"] for r in json.loads(out.content[0].text)] == [1, 2]
+        notice = _all_text(out.content[1:])
         assert "1 of 3 threads could not be extracted" in notice
         assert "did not match the schema" in notice
         assert _EXTRACT_MARKER not in _all_text(out)
