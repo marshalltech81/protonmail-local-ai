@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import io
 import warnings
+from collections.abc import Callable
 
 import pytesseract
 from PIL import Image, ImageOps
@@ -42,6 +43,7 @@ def extract(
     max_ocr_pages: int = 20,
     ocr_timeout_seconds: float | None = None,
     max_pdf_pages: int | None = None,  # noqa: ARG001 — single-page format
+    on_progress: Callable[[], None] | None = None,
 ) -> tuple[str, str]:
     """OCR an image attachment. Returns (text, "image-ocr").
 
@@ -53,6 +55,8 @@ def extract(
     reaps Tesseract. ``pytesseract`` raises ``RuntimeError`` when the
     timeout fires; the dispatcher converts that to a ``failed``
     extraction row.
+
+    ``on_progress`` (when set) is called after each page is OCR'd.
     """
     with warnings.catch_warnings():
         # Promote the bomb warning to an error so anything between the
@@ -73,6 +77,8 @@ def extract(
             texts.append(
                 pytesseract.image_to_string(ImageOps.exif_transpose(image), **tesseract_kwargs)
             )
+            if on_progress is not None:
+                on_progress()
             page += 1
             if image.format != "TIFF" or (max_ocr_pages > 0 and page >= max_ocr_pages):
                 break

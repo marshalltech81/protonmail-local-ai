@@ -257,6 +257,7 @@ def extract(
     ocr_timeout_seconds: float | None = None,
     max_pdf_pages: int | None = None,
     module_override: str | None = None,
+    on_progress: Callable[[], None] | None = None,
 ) -> ExtractionResult:
     """Run text extraction for one attachment payload.
 
@@ -275,6 +276,10 @@ def extract(
     ``module_override`` runs that extractor module instead of the one the
     metadata resolves to; used to refresh a stale cache row (see
     ``stale_extractor_module``).
+
+    ``on_progress`` (when supplied) is called after each page an
+    extractor reads (the PDF and image extractors), so the indexer can
+    refresh its heartbeat through a long OCR (#485).
     """
     if len(payload) > max_bytes:
         return ExtractionResult(
@@ -339,6 +344,7 @@ def extract(
             max_ocr_pages=max_ocr_pages,
             ocr_timeout_seconds=ocr_timeout_seconds,
             max_pdf_pages=max_pdf_pages,
+            on_progress=on_progress,
         )
     except MemoryError, RecursionError:
         # Resource-exhaustion errors are not "the extractor failed on

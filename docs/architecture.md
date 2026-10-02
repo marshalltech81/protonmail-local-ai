@@ -922,6 +922,13 @@ slow scanned PDFs (up to ~21 min each at the default OCR limits) is not
 cut off. The restart policy brings the indexer back with the attempt
 counted.
 
+The container healthcheck (`indexer/healthcheck.sh`) fails once the
+heartbeat file is 10 minutes old. Besides each message and embed
+request, the PDF and image extractors refresh it after every page they
+read or OCR, so a scanned PDF that runs for ~20 minutes stays healthy
+(#485). Pages do not restart the stall guard's clock, which stays per
+attachment; a page that hangs refreshes nothing.
+
 ### Ingestion completeness
 
 The watchdog observer starts **before** the initial drain, so mail
@@ -1007,7 +1014,8 @@ is queued:
   stamp read before the walk is acknowledged.
 
 Acknowledgements only move forward. With every health heartbeat
-(per message and per embed batch, at most every 30 s), the indexer
+(per message, per embed batch and per attachment page read, at most
+every 30 s), the indexer
 upserts the latest acknowledged sync and its own timestamp into the
 one-row `ingestion_state` table. A missed stamp event
 reads as a stale sync until the next rescan; a missed delivery event

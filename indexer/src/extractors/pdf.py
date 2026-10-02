@@ -41,6 +41,7 @@ import logging
 import math
 import tempfile
 import time
+from collections.abc import Callable
 
 import pypdf
 
@@ -72,6 +73,7 @@ def extract(
     max_ocr_pages: int = 20,
     ocr_timeout_seconds: float | None = None,
     max_pdf_pages: int | None = None,
+    on_progress: Callable[[], None] | None = None,
 ) -> tuple[str, str]:
     """Extract text from a PDF payload, falling back to OCR if needed.
 
@@ -82,8 +84,14 @@ def extract(
 
     ``ocr_timeout_seconds`` is forwarded into the OCR fallback for the
     same reason as ``image.extract`` — see that module's docstring.
+
+    ``on_progress`` (when set) is called after each page the digital
+    walk reads and after each page OCR'd, so the indexer's heartbeat
+    keeps up with a long scan (#485). A page that hangs reports nothing.
     """
-    digital_pages = _extract_digital_pages(payload, max_pdf_pages=max_pdf_pages)
+    digital_pages = _extract_digital_pages(
+        payload, max_pdf_pages=max_pdf_pages, on_progress=on_progress
+    )
     digital_text = "\n\n".join(text for text in digital_pages if text)
 
     if not ocr_enabled:
@@ -109,6 +117,7 @@ def extract(
             payload,
             pages=ocr_pages,
             ocr_timeout_seconds=ocr_timeout_seconds,
+            on_progress=on_progress,
         )
     except MemoryError, RecursionError:
         # Host pressure, not this document: the dispatcher re-raises it.
@@ -140,7 +149,12 @@ def extract(
     return "\n\n".join(page for page in merged if page), "pdf-ocr"
 
 
-def _extract_digital_pages(payload: bytes, *, max_pdf_pages: int | None = None) -> list[str]:
+def _extract_digital_pages(
+    payload: bytes,
+    *,
+    max_pdf_pages: int | None = None,
+    on_progress: Callable[[], None] | None = None,
+) -> list[str]:
     """Pull the embedded text layer out of a PDF: one stripped string
     per page, empty for a page without text or whose extraction failed.
 
@@ -164,6 +178,8 @@ def _extract_digital_pages(payload: bytes, *, max_pdf_pages: int | None = None) 
             log.debug("pypdf page extract failed: %s", type(exc).__name__)
             text = ""
         pages.append(text.strip())
+        if on_progress is not None:
+            on_progress()
     return pages
 
 
@@ -172,6 +188,7 @@ def _extract_ocr(
     *,
     pages: list[int],
     ocr_timeout_seconds: float | None = None,
+    on_progress: Callable[[], None] | None = None,
 ) -> dict[int, str]:
     """Render ``pages`` (ascending 0-based indexes) to images and OCR
     them via Tesseract; returns each page's stripped text by index.
@@ -252,6 +269,8 @@ def _extract_ocr(
             for index, image in zip(run, images, strict=False):
                 text = pytesseract.image_to_string(image, **tesseract_kwargs)
                 texts[index] = (text or "").strip()
+                if on_progress is not None:
+                    on_progress()
         return texts
 
 

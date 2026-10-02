@@ -9,6 +9,8 @@ for retrieval.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import html2text
 
 
@@ -19,6 +21,7 @@ def extract(
     max_ocr_pages: int = 20,  # noqa: ARG001
     ocr_timeout_seconds: float | None = None,  # noqa: ARG001
     max_pdf_pages: int | None = None,  # noqa: ARG001
+    on_progress: Callable[[], None] | None = None,  # noqa: ARG001
 ) -> tuple[str, str]:
     """Decode HTML bytes and convert to plain text. Returns (text, "html")."""
     try:
