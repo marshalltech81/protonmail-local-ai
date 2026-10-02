@@ -1060,6 +1060,11 @@ walkthrough; the table below is the per-operation reference.
 | Keyword search | ✅ (SQLite FTS5) | Never |
 | Send/Move/Flag | Disabled by default | Never |
 
+The MCP server switches off FastMCP's OpenTelemetry instrumentation at
+startup (`telemetry_mode = "off"`, overriding any `FASTMCP_TELEMETRY_MODE`),
+so it creates no spans and propagates no trace context even if an OTel SDK
+and exporter were present.
+
 ### Embedder, reranker, and inference (operator-supplied)
 
 | Operation | Local only | Leaves machine |

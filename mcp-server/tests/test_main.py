@@ -719,3 +719,39 @@ class TestSilenceClientDisconnect:
 
         record = self._record(msg="Some other event the SDK might log")
         assert _SilenceClientDisconnect().filter(record) is True
+
+
+class TestTelemetryOff:
+    """FastMCP's OpenTelemetry instrumentation is switched off (#492).
+
+    fastmcp defaults ``telemetry_mode`` to ``native``: it creates spans and
+    propagates trace context, which stays a no-op only while no OTel SDK
+    and exporter are configured. ``src.main`` sets ``off`` at import so the
+    privacy posture does not depend on that absence.
+    """
+
+    def test_import_sets_telemetry_off_over_environment(self):
+        # A fresh interpreter, so the import-time setting is what the test
+        # observes, with the environment asking for the fastmcp default.
+        import os
+        import subprocess
+        import sys
+        from pathlib import Path
+
+        env = {**os.environ, "FASTMCP_TELEMETRY_MODE": "native"}
+        script = (
+            "import fastmcp, fastmcp.telemetry\n"
+            "assert fastmcp.settings.telemetry_mode == 'native'\n"
+            "import src.main\n"
+            "print(fastmcp.settings.telemetry_mode, fastmcp.telemetry.telemetry_mode())\n"
+        )
+        result = subprocess.run(  # noqa: S603 — fixed argv, no shell
+            [sys.executable, "-c", script],
+            cwd=Path(__file__).resolve().parents[1],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=True,
+        )
+        assert result.stdout.split() == ["off", "off"]
