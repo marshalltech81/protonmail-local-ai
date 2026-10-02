@@ -283,10 +283,12 @@ sync_setup() {
     FIND_CALLS="$WORK/find-calls-$1"
     SYNC_ACTIVITY_FILE="$WORK/activity-$1"
     MBSYNC_ERROR_COUNTS_FILE="$WORK/mbsync-error-counts-$1"
+    MBSYNC_NOTICES_DONE_FILE="$WORK/mbsync-notices-done-$1"
     MBSYNC_ERROR_COUNTS_WAIT_TENTHS=50
     mkdir -p "$MAILDIR_PATH"
     : >"$FIND_CALLS"
-    load run_child relax_new_maildir_perms mark_sync_activity report_mbsync_errors \
+    load run_child relax_new_maildir_perms mark_sync_activity filter_mbsync_output \
+        report_mbsync_errors report_mbsync_notices wait_for_mbsync_filter \
         read_mbsync_error_counts run_sync
 }
 
@@ -460,24 +462,29 @@ failure_without_stderr_still_fails() {
     fi
 }
 
-# Only the exact, anchored line counts: a similar line with extra text is
-# another error and is passed on as it is.
+# Only the far-side line is tolerated: the near-side one is another
+# error, passed on with its folder name redacted (#570).
 # shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
 near_miss_line_is_not_tolerated() {
     sync_setup far-near-miss
     mbsync() { mock_mbsync_output; }
     find() { :; }
     MOCK_RC=1
-    MOCK_STDERR="Error: channel protonmail: near side box Synthetic cannot be opened."
+    MOCK_STDERR="Error: channel protonmail: near side box ${FAR_BOX_MARKER} cannot be opened."
     run_sync_logged far-near-miss
     ((SYNC_RC == 1)) || return 1
-    grep -qxF "$MOCK_STDERR" "$SYNC_LOG" || return 1
+    grep -qxF "Error: channel protonmail: near side box <folder> cannot be opened." "$SYNC_LOG" || return 1
+    if grep -q WARNING "$SYNC_LOG"; then
+        return 1
+    fi
+    marker_not_logged
 }
 
 # Errors other than an unopenable far box reach the log while mbsync is
 # still running, not when it ends: a first sync can take hours, or stall
-# after an error. The mock writes an error, then waits for it to appear
-# in the log before it exits; only the counts are kept until the end.
+# after an error. The mock writes an error and a stdout notice, then
+# waits for both to appear in the log before it exits; only the counts
+# are kept until the end. In the image, awk is mawk (#570).
 # shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
 other_errors_are_streamed_while_mbsync_runs() {
     local seen="$WORK/streamed-seen"
@@ -489,8 +496,10 @@ other_errors_are_streamed_while_mbsync_runs() {
         local i
         printf '%s\n' "$FAR_BOX_LINE" >&2
         printf 'Error: synthetic streamed failure\n' >&2
+        printf 'Maildir notice: synthetic streamed notice.\n'
         for ((i = 0; i < 50; i++)); do
-            if grep -qxF "Error: synthetic streamed failure" "$SYNC_LOG"; then
+            if grep -qxF "Error: synthetic streamed failure" "$SYNC_LOG" \
+                && grep -qxF "Maildir notice: synthetic streamed notice." "$SYNC_LOG"; then
                 : >"$seen"
                 break
             fi
@@ -544,6 +553,203 @@ sync_loop_counts_failures_but_not_unopenable_far_boxes() {
     [[ "$(wc -l <"$stamps_file")" -eq 1 ]] || return 1
     grep -q 'exceeded 5 consecutive failures' "$WORK/loop-log" || return 1
     SYNC_LOG="$WORK/loop-log"
+    marker_not_logged
+}
+
+# --- folder names in other mbsync output (#570) -------------------------------
+#
+# Besides the far-side line above, isync 1.4.4 names a folder in many
+# messages: UIDVALIDITY errors (likely after switching Bridge instances),
+# other box errors, and every message quoting a Maildir or sync state path
+# (the path holds the folder name). Each shape below comes from isync
+# 1.4.4's source (src/sync.c, main.c, drv_imap.c, drv_maildir.c). @F@ is
+# a box name and @P@ a path under the Maildir; both carry a synthetic
+# marker with a space, a colon and quotes. The filters replace them with
+# <folder> and <path> and keep the rest of the message; a tab-separated
+# second column gives the expected line where it differs from that.
+
+readonly SHAPE_FOLDER="Folders/MarkerZq9: a 'b' (c)"
+
+FOLDER_SHAPES="$(cat <<'EOF'
+Error: channel protonmail: near side box @F@ cannot be opened.
+Error: channel protonmail: both far side @F@ and near side @F@ cannot be opened.
+Warning: channel protonmail: far side box @F@ cannot be opened and near side box @F@ is not empty.
+Warning: channel protonmail: near side box @F@ cannot be opened and far side box @F@ is not empty.
+Error: channel protonmail: UIDVALIDITY of both far side @F@ and near side @F@ changed.
+Error: channel protonmail, far side box @F@: UIDVALIDITY genuinely changed (at UID 42).
+Error: channel protonmail, near side box @F@: UIDVALIDITY genuinely changed (at UID 7).
+Error: channel protonmail, far side box @F@: Unable to recover from UIDVALIDITY change.
+Notice: channel protonmail, near side box @F@: Recovered from change of UIDVALIDITY.
+Opening far side box @F@...
+Creating near side box @F@...
+Deleting near side box @F@...
+Error: channel :protonmail-remote:@F@-:protonmail-local:@F@ is locked	Error: channel :protonmail-remote:<folders> is locked
+Error: canonical mailbox name '@F@' contains flattened hierarchy delimiter
+Error: flattened mailbox name '@F@' contains canonical hierarchy delimiter
+IMAP warning: ignoring unreasonably long mailbox name '@F@[...]'
+IMAP warning: ignoring mailbox @F@ (reserved character '/' in name)
+IMAP warning: ignoring mailbox '@F@' due to empty name component
+IMAP warning: ignoring mailbox '@F@' due to '.' component
+IMAP error: LIST'd mailbox name '@F@' contains '..' component - THIS MIGHT BE AN ATTEMPT TO HACK YOU!
+IMAP error: mailbox name @F@ contains server's hierarchy delimiter
+IMAP error: cannot use unqualified '@F@'. Did you mean INBOX?	IMAP error: cannot use unqualified '<folder>' (rest of line withheld)
+IMAP command 'SELECT "@F@"' returned an error: BAD @F@	IMAP command 'SELECT <folder>' (rest of line withheld)
+IMAP command 'CREATE "@F@"' returned an error: NO exists	IMAP command 'CREATE <folder>' (rest of line withheld)
+IMAP command 'DELETE "@F@"' returned an error: NO gone	IMAP command 'DELETE <folder>' (rest of line withheld)
+IMAP command 'UID COPY 12 "@F@"' returned an error: NO [TRYCREATE] gone	IMAP command 'UID COPY 12 <folder>' (rest of line withheld)
+IMAP command 'UID MOVE 12 "@F@"' returned an error: NO [TRYCREATE] gone	IMAP command 'UID MOVE 12 <folder>' (rest of line withheld)
+IMAP command 'APPEND "@F@" (\Seen) ' returned an error: NO full	IMAP command 'APPEND <folder>' (rest of line withheld)
+Maildir error: accessing subfolder '@F@', but store 'protonmail-local' does not specify SubFolders style
+Maildir error: store 'protonmail-local', folder '@F@': SubFolders style Maildir++ does not support dots in mailbox names
+Maildir error: found subfolder '@F@', but store 'protonmail-local' does not specify SubFolders style
+Error: cannot create new sync state @P@: Permission denied
+Error: cannot create journal @P@: No space left on device
+Error: cannot create SyncState directory '@P@': Read-only file system
+Error: cannot create lock file @P@: Permission denied
+Error: cannot read sync state @P@: Input/output error
+Error: cannot read journal @P@: Permission denied
+Error: invalid SyncState location '@P@'
+Error: incomplete sync state header entry at @P@:3
+Error: malformed sync state header entry at @P@:3
+Error: unrecognized sync state header entry at @P@:3
+Error: incomplete sync state entry at @P@:12
+Error: invalid sync state entry at @P@:12
+Error: incomplete journal entry at @P@:5
+Error: malformed journal entry at @P@:5
+Error: unrecognized journal entry at @P@:5
+Error: journal entry at @P@:5 refers to non-existing sync state entry
+Error: invalid sync state header in @P@
+Error: unterminated sync state header in @P@
+Error: incomplete journal header in @P@
+Warning: cannot commit sync state @P@
+Warning: cannot delete journal @P@
+Maildir error: cannot list @P@: No such file or directory
+Maildir error: cannot access @P@: Permission denied
+Maildir error: cannot access mailbox '@P@': Permission denied
+Maildir error: cannot create mailbox '@P@': File exists
+Maildir error: cannot create directory @P@: Permission denied
+Maildir error: cannot create @P@: No space left on device
+Maildir error: cannot stat @P@: No such file or directory
+Maildir error: cannot re-stat @P@: No such file or directory
+Maildir error: cannot open @P@: Permission denied
+Maildir error: cannot read @P@: Input/output error
+Maildir error: cannot write @P@: No space left on device
+Maildir error: cannot write @P@. Disk full?
+Maildir error: cannot set times for @P@: Operation not permitted
+Maildir error: cannot remove @P@: Permission denied
+Maildir error: cannot remove '@P@': Directory not empty
+Maildir warning: cannot remove '@P@': Directory not empty
+Maildir error: cannot rename @P@ to @P@: No such file or directory
+Maildir error: cannot move @P@ to @P@: Permission denied
+Maildir error: path @P@ is too deeply nested. Symlink loop?
+Maildir error: '@P@' is no valid mailbox
+Maildir warning: ignoring INBOX in @P@
+Maildir notice: removing stale file @P@
+Maildir error: @P@ is too big	Maildir error: <path>
+EOF
+)"
+readonly FOLDER_SHAPES
+
+# Lines that name no folder, or name INBOX (a fixed IMAP name, not
+# mailbox content), pass through either filter unchanged.
+UNRELATED_LINES="$(cat <<'EOF'
+Error: synthetic other failure
+Maildir notice: sleeping due to recent directory modification.
+Maildir notice: no UIDVALIDITY, creating new.
+Warning: lost track of 3 pulled message(s)
+Notice: far side store does not support flag(s) 'T'; not propagating.
+Socket error: secure read from protonmail-bridge (172.18.0.2:1143): Connection reset by peer
+IMAP command 'UID FETCH 1:5 (UID FLAGS)' returned an error: NO busy
+Error: channel protonmail: far side box INBOX cannot be opened.
+Error: channel protonmail: near side box INBOX cannot be opened.
+Error: channel protonmail, far side box INBOX: UIDVALIDITY genuinely changed (at UID 42).
+Notice: channel protonmail, near side box INBOX: Recovered from change of UIDVALIDITY.
+EOF
+)"
+readonly UNRELATED_LINES
+
+# Runs one line through the filter for stream $1 (err or out), printing
+# what it writes.
+filter_one_line() {
+    filter_mbsync_output "$1" "$WORK/filter-counts" <<<"$2" 2>&1
+}
+
+# shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
+catalogue_shapes_are_redacted_by_class() {
+    local entry template expected input path stream got count=0
+    sync_setup catalogue
+    path="${MAILDIR_PATH}/.mbsyncstateFolders!MarkerZq9: a 'b' (c)/cur/1:2,S"
+    while IFS= read -r entry; do
+        template="${entry%%$'\t'*}"
+        if [[ "$entry" == *$'\t'* ]]; then
+            expected="${entry#*$'\t'}"
+        else
+            expected="${template//@F@/<folder>}"
+            expected="${expected//@P@/<path>}"
+        fi
+        input="${template//@F@/$SHAPE_FOLDER}"
+        input="${input//@P@/$path}"
+        for stream in err out; do
+            got="$(filter_one_line "$stream" "$input")"
+            if [[ "$got" != "$expected" ]]; then
+                printf 'stream %s, shape: %s\n  got:      %s\n  expected: %s\n' \
+                    "$stream" "$template" "$got" "$expected"
+                return 1
+            fi
+        done
+        count=$((count + 1))
+    done <<<"$FOLDER_SHAPES"
+    ((count == 75)) || return 1
+}
+
+# shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
+unrelated_lines_pass_through_unchanged() {
+    local line stream got
+    sync_setup unrelated
+    while IFS= read -r line; do
+        for stream in err out; do
+            got="$(filter_one_line "$stream" "$line")"
+            if [[ "$got" != "$line" ]]; then
+                printf 'stream %s changed: %s\n  got: %s\n' "$stream" "$line" "$got"
+                return 1
+            fi
+        done
+    done <<<"$UNRELATED_LINES"
+}
+
+# A rule keeps only fixed text or a strerror after the name. A line whose
+# tail would still hold a Maildir path (not an isync shape, but the
+# strerror match takes anything after the last ": ") is cut at the path.
+# shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
+a_path_in_a_kept_tail_is_cut() {
+    local path got
+    sync_setup kept-tail
+    path="${MAILDIR_PATH}/${SHAPE_FOLDER}/cur/1:2,S"
+    got="$(filter_one_line err "Maildir error: cannot stat ${path}: x ${path}")"
+    [[ "$got" == "Maildir error: cannot stat <path>" ]] || return 1
+}
+
+# A UIDVALIDITY failure (stderr) and a recovery notice (stdout) reach the
+# log redacted, and the run still fails: only unopenable far boxes are
+# tolerated.
+# shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
+uidvalidity_errors_are_redacted_and_still_fail() {
+    sync_setup uidvalidity
+    mbsync() { mock_mbsync_output; }
+    find() { :; }
+    MOCK_RC=1
+    MOCK_STDOUT="Notice: channel protonmail, near side box ${SHAPE_FOLDER}: Recovered from change of UIDVALIDITY."
+    MOCK_STDERR="Error: channel protonmail, far side box ${SHAPE_FOLDER}: UIDVALIDITY genuinely changed (at UID 42)."
+    run_sync_logged uidvalidity
+    ((SYNC_RC == 1)) || return 1
+    grep -qxF "Notice: channel protonmail, near side box <folder>: Recovered from change of UIDVALIDITY." \
+        "$SYNC_LOG" || return 1
+    grep -qxF "Error: channel protonmail, far side box <folder>: UIDVALIDITY genuinely changed (at UID 42)." \
+        "$SYNC_LOG" || return 1
+    if grep -q WARNING "$SYNC_LOG"; then
+        return 1
+    fi
+    [[ ! -e "$MBSYNC_NOTICES_DONE_FILE" ]] || return 1
     marker_not_logged
 }
 
@@ -1108,6 +1314,7 @@ stop_setup() {
     CHILD_LOG="$WORK/child-$1"
     SYNC_ACTIVITY_FILE="$WORK/activity-stop-$1"
     MBSYNC_ERROR_COUNTS_FILE="$WORK/mbsync-error-counts-stop-$1"
+    MBSYNC_NOTICES_DONE_FILE="$WORK/mbsync-notices-done-stop-$1"
     MBSYNC_ERROR_COUNTS_WAIT_TENTHS=50
     mkdir -p "$MAILDIR_PATH" "$WORK/bin-stop-$1"
     : >"$CHILD_LOG"
@@ -1125,7 +1332,8 @@ MOCK
     chmod 755 "$WORK/bin-stop-$1/mbsync"
     PATH="$WORK/bin-stop-$1:$PATH"
     load run_child stop_on_signal install_signal_handlers relax_new_maildir_perms \
-        mark_sync_activity report_mbsync_errors read_mbsync_error_counts run_sync
+        mark_sync_activity filter_mbsync_output report_mbsync_errors report_mbsync_notices \
+        wait_for_mbsync_filter read_mbsync_error_counts run_sync
 }
 
 # Signals the stand-in entrypoint once its child has started and waits for
@@ -1260,6 +1468,11 @@ check "a near-miss error line is not tolerated" near_miss_line_is_not_tolerated
 check "other errors are streamed while mbsync runs" other_errors_are_streamed_while_mbsync_runs
 check "the sync loop counts failures but not unopenable far boxes" \
     sync_loop_counts_failures_but_not_unopenable_far_boxes
+check "every isync folder-naming shape is redacted" catalogue_shapes_are_redacted_by_class
+check "lines naming no folder pass through unchanged" unrelated_lines_pass_through_unchanged
+check "a Maildir path in a kept tail is cut" a_path_in_a_kept_tail_is_cut
+check "UIDVALIDITY errors are redacted and still fail the sync" \
+    uidvalidity_errors_are_redacted_and_still_fail
 check "activity is marked before mbsync, before the repair and after the sync" \
     activity_is_marked_around_a_successful_sync
 check "activity is marked after a failed mbsync" activity_is_marked_after_a_failed_mbsync
