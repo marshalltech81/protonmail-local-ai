@@ -23,8 +23,10 @@ work, along three dimensions:
   every worksheet it will parse through expat, charges each element
   and each attribute one node, and cuts the worksheet before the row
   that crosses ``_MAX_SHEET_NODES`` across the workbook or
-  ``_MAX_ROW_NODES`` in one row. A cut ends that worksheet; a worksheet
-  reached with no budget left is read as empty.
+  ``_MAX_ROW_NODES`` in one row, or before a start tag that runs past
+  ``_MAX_TAG_BYTES``, since expat builds a tag's attributes before they
+  can be charged. A cut ends that worksheet; a worksheet reached with
+  no budget left is read as empty.
 * cells visited: the declared worksheet dimension is ignored, since a
   stale one would silently hide cells outside it (#305), so each parsed
   row is padded to its own last cell and every missing row between two
@@ -79,6 +81,12 @@ _MAX_ROW_NODES = 131_072
 
 # Bytes of worksheet XML fed to the pre-pass parser per call.
 _SCAN_CHUNK = 64 * 1024
+
+# Bytes the pre-pass feeds expat with no event: expat holds a start tag
+# whole and builds every attribute before the tag's handler can charge
+# them, so a tag with millions of attributes would cost gigabytes first.
+# Text and end tags are events, and a cell Excel writes is far smaller.
+_MAX_TAG_BYTES = 1024 * 1024
 
 # Encodings in which an ASCII end tag can be appended to a cut prefix.
 _ASCII_COMPATIBLE = frozenset({"utf-8", "utf8", "us-ascii", "ascii", "iso-8859-1", "latin-1"})
@@ -218,6 +226,7 @@ class _WorksheetScan:
         self.parser = expat.ParserCreate()
         self.parser.StartElementHandler = self._start
         self.parser.EndElementHandler = self._end
+        self.parser.CharacterDataHandler = self._text
         self.parser.XmlDeclHandler = self._declaration
         # As defusedxml configures the parser openpyxl reads with.
         self.parser.EntityDeclHandler = self._forbid_entity
@@ -228,15 +237,18 @@ class _WorksheetScan:
         self.depth = 0
         self.outer: list[str] = []  # names of the open elements above depth 3
         self.unit_start = 0  # byte offset of the open unit
+        self.unit_depth = 1
+        self.last_event = 0  # byte offset of the latest event
         self.unit_nodes = 0
         self.left_before_unit = left
         self.cut_at: int | None = None
-        self.cut_depth = 0
 
     def _start(self, name: str, attributes: dict[str, str]) -> None:
         self.depth += 1
+        self.last_event = self.parser.CurrentByteIndex
         if self.depth <= 3:
-            self.unit_start = self.parser.CurrentByteIndex
+            self.unit_start = self.last_event
+            self.unit_depth = self.depth
             self.unit_nodes = 0
             self.left_before_unit = self.left
         if self.depth <= 2:
@@ -245,11 +257,19 @@ class _WorksheetScan:
         self.unit_nodes += cost
         self.left -= cost
         if self.left < 0 or self.unit_nodes > _MAX_ROW_NODES:
-            self.cut_at = self.unit_start
-            self.cut_depth = min(self.depth, 3)
+            self.cut()
             raise _Cut
 
+    def cut(self) -> None:
+        """Cut at the start of the latest unit: the open one, or when
+        none is open the one before, a row more than it needs."""
+        self.cut_at = self.unit_start
+
+    def _text(self, _data: str) -> None:
+        self.last_event = self.parser.CurrentByteIndex
+
     def _end(self, _name: str) -> None:
+        self.last_event = self.parser.CurrentByteIndex
         if self.depth <= 2:
             self.outer.pop()
         self.depth -= 1
@@ -286,11 +306,17 @@ def _scan_worksheet(source: IO[bytes], left: int) -> tuple[int, tuple[int, bytes
     """
     scan = _WorksheetScan(left)
     head = b""
+    fed = 0
     try:
         while chunk := source.read(_SCAN_CHUNK):
             head = head or chunk[:4]
             scan.parser.Parse(chunk, False)
-        scan.parser.Parse(b"", True)
+            fed += len(chunk)
+            if fed - scan.last_event > _MAX_TAG_BYTES:
+                scan.cut()
+                break
+        else:
+            scan.parser.Parse(b"", True)
     except _Cut:
         pass
     except expat.ExpatError:
@@ -305,9 +331,9 @@ def _scan_worksheet(source: IO[bytes], left: int) -> tuple[int, tuple[int, bytes
         and not head.startswith((b"\xff\xfe", b"\xfe\xff"))
         and b"\x00" not in head
     )
-    if scan.cut_depth == 1 or not ascii_compatible:
+    if scan.unit_depth == 1 or not ascii_compatible:
         return scan.left_before_unit, (0, _EMPTY_WORKSHEET)
-    closers = "".join(f"</{name}>" for name in reversed(scan.outer[: scan.cut_depth - 1]))
+    closers = "".join(f"</{name}>" for name in reversed(scan.outer[: scan.unit_depth - 1]))
     return scan.left_before_unit, (scan.cut_at, closers.encode(encoding))
 
 

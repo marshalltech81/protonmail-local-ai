@@ -1398,6 +1398,52 @@ class TestXlsxRawNodeBudget:
         expected = ["\t".join([str(r)] * width) for r in range(2, (kept if yields_each else 1) + 2)]
         assert lines[2:] == expected
 
+    def test_a_start_tag_past_the_tag_budget_is_cut_before_expat_builds_it(self, monkeypatch):
+        """Review round 1: expat hands a start tag's attributes over as
+        one dict, built before any budget is checked, so a cell with
+        hundreds of thousands of attributes cost hundreds of MB. The
+        scan stops feeding a tag that has run past ``_MAX_TAG_BYTES``
+        with no event, and cuts before its row."""
+        import tracemalloc
+
+        from src.extractors import xlsx
+
+        attributes = "".join(f' a{i}="1"' for i in range(400_000))
+        payload = _rewrite_sheet_xml(
+            _xlsx_bytes([["first"]]),
+            _rows_before_sheet_end(f'<row r="2"><c r="A2"{attributes}/></row>'),
+        )
+        scanned = self._scanned_nodes(monkeypatch)
+
+        tracemalloc.start()
+        try:
+            text, _ = xlsx.extract(payload)
+            peak = tracemalloc.get_traced_memory()[1]
+        finally:
+            tracemalloc.stop()
+
+        assert text == "[Sheet: Sheet]\nfirst"
+        # The tag's start event never fired: only the elements before it.
+        assert scanned[0] < 50
+        assert peak < 32 * 1024 * 1024
+
+    def test_long_text_does_not_count_against_the_tag_budget(self):
+        from src.extractors import xlsx
+
+        long_value = "x" * (2 * xlsx._MAX_TAG_BYTES)
+        payload = _rewrite_sheet_xml(
+            _xlsx_bytes([["first"]]),
+            _rows_before_sheet_end(
+                f'<row r="2"><c r="A2" t="inlineStr"><is><t>{long_value}</t></is></c></row>'
+                '<row r="3"><c r="A3" t="inlineStr"><is><t>third</t></is></c></row>'
+            ),
+        )
+
+        text, _ = xlsx.extract(payload)
+
+        assert xlsx._bound_worksheets(payload).getvalue() == payload
+        assert text == f"[Sheet: Sheet]\nfirst\n{long_value}\nthird"
+
     def test_a_row_past_the_row_budget_ends_the_worksheet(self, monkeypatch):
         from src.extractors import xlsx
 
