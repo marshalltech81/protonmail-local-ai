@@ -559,6 +559,12 @@ def _pack_spans(
         span_tokens = estimate_tokens(span.text)
         if current and current_tokens + span_tokens > max_tokens:
             close()
+        # The overlap seed ``close()`` leaves behind is not bounded by
+        # the overlap budget (a carried span may be larger than it), so
+        # it can still overflow next to this span (#208). Drop seed
+        # spans from the front until the span fits.
+        while current and current_tokens + span_tokens > max_tokens:
+            current_tokens -= estimate_tokens(current.pop(0).text)
         current.append(span)
         current_tokens += span_tokens
         if current_tokens >= target_tokens:

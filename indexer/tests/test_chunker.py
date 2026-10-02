@@ -799,3 +799,106 @@ class TestLeadingTabsAtSplits:
         for c in a:
             assert normalized[c.char_start : c.char_end] == c.text
             assert c.token_est <= 60
+
+
+def _words(n: int) -> str:
+    """A paragraph of ``n`` real tokens: ``alpha`` then ``n - 1`` × `` alpha``."""
+    return " ".join(["alpha"] * n)
+
+
+# Shape catalogue for the rendered-chunk ceiling (#208, #550). Each entry is
+# (body, target_tokens, max_tokens); every shape runs with overlap 0 and with
+# overlap at a quarter of the target. Synthetic text only.
+MAX_TOKENS_SHAPES: dict[str, tuple[str, int, int]] = {
+    "plain_paragraphs": ("\n\n".join(_words(40) for _ in range(12)), 100, 150),
+    "sentence_split": ("A sentence of moderate length ends here. " * 120, 40, 60),
+    "near_limit_after_multi_span": (
+        "\n\n".join([_words(400), _words(400), _words(1400)]),
+        1000,
+        1500,
+    ),
+    "many_tiny_paragraphs": ("\n\n".join(["alpha"] * 200), 60, 60),
+    "tab_gap_in_paragraph": ("a\n" + "\t" * 20000 + "value\nb", 40, 60),
+    "space_gap_in_paragraph": ("a " + " " * 20000 + "value b", 40, 60),
+    "newline_gap_in_paragraph": ("a\n" + " \n" * 3000 + "value", 40, 60),
+    "tab_line_between_paragraphs": (
+        "\n\n".join(["word"] * 5) + "\n" + "\t" * 5000 + "\n" + "tail",
+        40,
+        60,
+    ),
+    "xlsx_rows_many_empty_cells": (
+        "\n".join("\t" * (300 * (i % 3)) + f"value{i}" for i in range(200)),
+        40,
+        60,
+    ),
+    "xlsx_rows_short": ("\n".join("\t" * (i % 4) + f"value{i}" for i in range(300)), 40, 60),
+    "cjk_without_spaces": ("这是一个测试句子没有空格" * 400, 40, 60),
+    "single_over_max_word": ("x" * 5000 + " y", 40, 60),
+}
+
+# Pinned on main before the #208/#550 fix: these shapes already met the
+# rendered ceiling there, so their chunk IDs (which bind each chunk's index
+# and text) must not move with the fix.
+MAX_TOKENS_PINNED_CASES: list[tuple[str, int]] = [
+    ("plain_paragraphs", 0),
+    ("plain_paragraphs", 25),
+    ("sentence_split", 0),
+    ("sentence_split", 10),
+    ("near_limit_after_multi_span", 0),
+    ("newline_gap_in_paragraph", 0),
+    ("newline_gap_in_paragraph", 10),
+    ("xlsx_rows_many_empty_cells", 0),
+    ("xlsx_rows_many_empty_cells", 10),
+    ("xlsx_rows_short", 0),
+    ("xlsx_rows_short", 10),
+    ("cjk_without_spaces", 0),
+    ("cjk_without_spaces", 10),
+    ("single_over_max_word", 0),
+    ("single_over_max_word", 10),
+]
+MAX_TOKENS_PIN_DIGEST = (
+    "5705760585bbbca682b1005701b075d0e89e3334044a16bb401b5c399e5aad9d"  # pragma: allowlist secret
+)
+
+
+def _catalogue_cases() -> list[tuple[str, int]]:
+    """Every catalogue shape, once with overlap 0 and once with overlap > 0."""
+    return [
+        (name, overlap)
+        for name, (_, target, _) in MAX_TOKENS_SHAPES.items()
+        for overlap in (0, target // 4)
+    ]
+
+
+def _catalogue_chunks(name: str, overlap: int):
+    body, target, max_tokens = MAX_TOKENS_SHAPES[name]
+    return chunk_message(
+        message_pk="m1",
+        body_text=body,
+        target_tokens=target,
+        max_tokens=max_tokens,
+        overlap_tokens=overlap,
+    )
+
+
+class TestRenderedChunkCeiling:
+    """Every rendered chunk's real token count is <= max_tokens (#208, #550)."""
+
+    def test_in_budget_shapes_are_unchanged(self):
+        ids = [c.chunk_id for case in MAX_TOKENS_PINNED_CASES for c in _catalogue_chunks(*case)]
+        digest = hashlib.sha256("\n".join(ids).encode()).hexdigest()
+        assert digest == MAX_TOKENS_PIN_DIGEST
+
+    def test_overlap_seed_is_dropped_when_next_span_would_overflow(self):
+        # #208: 400 + 400 tokens, then a 1,400-token paragraph. The overlap
+        # carried from the first chunk (the whole 400-token paragraph) used
+        # to sit in front of the 1,400 tokens, giving a 1,801-token chunk.
+        p1, p2, p3 = _words(400), _words(400), _words(1400)
+        chunks = chunk_message(
+            message_pk="m1",
+            body_text="\n\n".join([p1, p2, p3]),
+            target_tokens=1000,
+            max_tokens=1500,
+            overlap_tokens=150,
+        )
+        assert [c.text for c in chunks] == [p1 + "\n\n" + p2, p3]
