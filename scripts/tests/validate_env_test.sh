@@ -360,6 +360,20 @@ non_regular_authority_path_fails() {
     fails_with 'config/authority.toml must be a regular file'
 }
 
+# The documented authority edit flow restarts the indexer through
+# `make restart-indexer`, which must run this validator first (#530).
+# A dry run prints the recipes in order without running them.
+restart_indexer_validates_first() {
+    local repo plan validate_line restart_line
+    repo="$(cd "$(dirname "$SCRIPT")/.." && pwd)"
+    plan="$(make -n -C "$repo" restart-indexer)"
+    printf '%s\n' "$plan"
+    validate_line="$(grep -n -F './scripts/validate-env.sh' <<<"$plan" | cut -d: -f1)"
+    restart_line="$(grep -n -x 'docker compose restart indexer' <<<"$plan" | cut -d: -f1)"
+    [[ -n "$validate_line" && -n "$restart_line" ]] || return 1
+    ((validate_line < restart_line)) || return 1
+}
+
 # --- Whitespace the readers strip (#506) ----------------------------------
 # The Python loaders read these values with .strip() (and modes with
 # .lower()), so a quoted value padded with spaces is valid; Compose
@@ -461,6 +475,7 @@ check "a private authority file passes" private_authority_file_passes
 check "an authority file not 600 fails" loose_authority_file_fails
 check "a symlinked authority file fails" symlinked_authority_file_fails
 check "a non-regular authority path fails" non_regular_authority_path_fails
+check "make restart-indexer validates before restarting" restart_indexer_validates_first
 check "padded quoted values pass" padded_quoted_values_pass
 check "padded and mixed-case modes pass" padded_and_cased_modes_pass
 check "a padded none disables the layer" padded_disabled_mode_disables_the_layer

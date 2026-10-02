@@ -1,7 +1,8 @@
 # Source authority rules (optional).
 #
 # Copy to config/authority.toml (gitignored: it holds real addresses)
-# and restart the indexer. Each table names one authority class:
+# at mode 600 and run `make restart-indexer`, which checks the mode
+# before restarting. Each table names one authority class:
 #   counsel, management, vendor, government, personal, other
 # Every sender with no matching rule is "unclassified"; without this
 # file, every sender is.

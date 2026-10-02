@@ -365,14 +365,16 @@ ranking. Nothing is classified by a model.
 install -m 600 config/authority.toml.example config/authority.toml
 # edit: one table per class, with `addresses` (exact) and/or
 # `domains` (the domain and its subdomains)
-docker compose restart indexer
+make restart-indexer
 ```
 
 `config/authority.toml` is gitignored: it holds real addresses and
 domains, so never commit it. Keep it a regular file at `600`, like the
 files in `.secrets/`, so other accounts on the host cannot read it;
-`make up` fails if it has any other mode, is a symlink or is not a
-regular file. The indexer
+`make up` and `make restart-indexer` fail if it has any other mode, is
+a symlink or is not a regular file. Restart with `make restart-indexer`
+rather than `docker compose restart indexer`, which skips that check, so
+an editor that saves the file with a looser mode is caught. The indexer
 runs as UID 1002, but on macOS the Docker Desktop and OrbStack file
 sharing serves a bind-mounted file to the container's user, so it still
 reads a `600` file you own (the same way the services read the `600`
