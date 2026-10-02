@@ -402,29 +402,30 @@ on #307):
 **Exit criterion:** we can objectively measure whether the system
 answers real knowledge questions, and identify why failures occur.
 
-**Status of Phases 3–5 (2026-10-01).** No phase is complete. Done:
+**Status of Phases 3–5 (2026-10-02).** No phase is complete. Done:
 Phase 3 items 4 and 7, Phase 4 items 1 and 2. Partly done: Phase 3
-items 1, 2, 3, 6 and 8, Phase 4 item 4, Phase 5 item 2. Not started:
+items 1, 2, 3, 6 and 8 (item 6 lacks only the #487 measurement),
+Phase 4 item 4, Phase 5 item 2. Not started:
 Phase 3 item 5, Phase 4 item 3, Phase 5 items 1, 3 and 4. Most of
 what remains needs the real mailbox and providers (the go-live
 checklist) or an owner decision.
 
 | Item | Status | Landed in | Remaining |
 |---|---|---|---|
-| 3.1 Evals | Partly done | #452 (evidence recall vs hit rate) | agent-level and answer-quality evals (#283) |
+| 3.1 Evals | Partly done | #452 (evidence recall vs hit rate), #494 (agent-level trace scoring) | live-client trace replay, abstention, corrections, conflicting sources, latency/cost, held-out set and thresholds (#283) |
 | 3.2 Latency | Partly done | #458 (stage timings) | benchmarks, budgets, cancellation (#287); needs real mail |
-| 3.3 `brief_issue` | Built, experimental | #466 | accuracy/abstention scoring (#291), hardening (#471) |
+| 3.3 `brief_issue` | Built, experimental | #466, #493 (hardening, #471) | accuracy/abstention scoring (#291) |
 | 3.4 Injection suite | Done | #448 | gap filed as #442 |
 | 3.5 Thread weighting, rerank | Not started | — | needs real embedder/reranker (#288, #289) |
-| 3.6 Prompt evidence budget | Partly done | #445 (shared character budget, dedup, coverage note) | the token-based whole-prompt budget and small-model profile (#285) |
+| 3.6 Prompt evidence budget | Mostly done | #445 (shared character budget, dedup, coverage note), #496 (whole-prompt token budget, small-model profile) | measure and retune the budgets (#487) |
 | 3.7 Filtered semantic recall | Done | #440, #470 | — |
-| 3.8 Citation contract | Partly done | #457 | statement-level and quote checks (#284) |
+| 3.8 Citation contract | Partly done | #457, #495 (`ask_mailbox` statement coverage and quote checks) | the same contract for `summarize_thread` and `extract_from_emails`; semantic support (#284) |
 | 4.1 Entities | Done | #459 | orphan cleanup (#464) |
 | 4.2 Source authority | Done | #459, #474 (Spam guard) | verdict-header gating after go-live (#463) |
 | 4.3 Temporal retrieval | Not started | — | — |
 | 4.4 Retention | Mostly done | #451 (mirror default), #475 (Trash hidden from default search) | user-controlled retention; reaped-citation behaviour |
 | 5.1 Hardened `brief_issue` | Not started | — | needs Phase 3 usage on real mail |
-| 5.2 Support/contradict | Built, experimental | #467 (`check_conclusion`) | quote/support verification |
+| 5.2 Support/contradict | Built, experimental | #467 (`check_conclusion`), #493 (evidence-slot refill) | quote/support verification |
 | 5.3 Position as of date | Not started | — | — |
 | 5.4 Persisted claims | Not started (by design) | — | only after 5.1–5.3 |
 
@@ -439,8 +440,11 @@ checklist) or an owner decision.
    "Recall@10" is the latter); its first slice precedes Phase 2 (see
    Phase 2, Sequencing). **Status: partly done.** The first slice
    landed in #452 (required-evidence groups, evidence recall@10
-   reported apart from hit@10 and MRR); agent-level and
-   answer-quality evals remain.
+   reported apart from hit@10 and MRR); #494 added deterministic
+   agent-level scoring of tool-call traces on synthetic scenarios.
+   Remaining: replaying a live client's traces, abstention,
+   corrections, conflicting sources, latency and cost, and a held-out
+   set with pass thresholds; answer quality stays a manual grade.
 2. **Latency instrumentation before performance redesign.** Stage
    timers through the query path (query_embedding / per-lane FTS+KNN /
    fusion / rerank / evidence_fetch / inference / total). `ask_mailbox`
@@ -462,8 +466,8 @@ checklist) or an owner decision.
    corrections, contradictions, "as of" questions; "newest is not
    authoritative"). An experimental MCP tool, registered only when
    `MCP_EXPERIMENTAL_TOOLS=true` (off by default; Resolved
-   decisions 12). **Status: built (experimental) in #466.** #291's
-   accuracy and abstention scoring and the #471 hardening remain.
+   decisions 12). **Status: built (experimental) in #466, hardened
+   in #493 (#471).** #291's accuracy and abstention scoring remains.
 4. **Adversarial injection suite** (hostile fixtures in the synthetic
    mailbox, asserting the Phase 0 serialization holds under real
    tool flows). **Status: done (#448).** The one gap it found is
@@ -489,10 +493,12 @@ checklist) or an owner decision.
    whole-prompt token budget, an evidence-selection policy, dedup,
    and a statement of what was left out. Nothing in the plan covered
    this; #214/#215 fixed only `summarize_thread`'s tail and
-   attachment identity. **Status: partly done (#445).** One shared budget,
-   per-thread dedup of long quoted passages, and a counts-only
-   coverage note; a token-based count and a small-model profile stay
-   on #285.
+   attachment identity. **Status: mostly done (#445, #496).** One
+   shared budget, per-thread dedup of long quoted passages, a
+   counts-only coverage note, and a whole-prompt token budget for
+   every intelligence tool against `INFERENCE_CONTEXT_TOKENS` (an
+   estimate, no tokenizer; a small local model sets it to its
+   window). Measuring and retuning the budgets is #487.
 7. **Semantic recall under selective filters** (**#286**): the vector
    lanes run unfiltered and sender/date/folder filters apply
    afterwards, so a selective filter can empty the candidate window.
@@ -506,9 +512,11 @@ checklist) or an owner decision.
    evidence, bounded repair. The plan verified quotes only for
    Phase 5's persisted claims; ephemeral answers need it first.
    Depends on #217's identity decision (landed in #453). First slice
-   in #457 (labelled evidence, label validation, one repair).
-   **Status: partly done;** statement-level coverage and quote checks
-   remain.
+   in #457 (labelled evidence, label validation, one repair);
+   statement-level coverage and quote verification for `ask_mailbox`
+   in #495. **Status: partly done;** the same contract for
+   `summarize_thread` and `extract_from_emails`, and checking that a
+   cited passage supports its statement, remain.
 
 ### Phase 4 — Deterministic knowledge scaffolding
 
@@ -667,7 +675,21 @@ Triaged against `d30e500` by four parallel agents; every issue is real
 and most reproduced with synthetic input. PRs in the order to land
 them (one test-first commit per issue, `Fixes #N` per issue):
 
-**Handoff 2026-10-01, end of the second session — start here.**
+**Handoff 2026-10-02 — start here.** Since the handoff below, four
+Phase 3 slices merged (#493–#496; the status table under Phase 3 is
+current) and seven fixes from a Codex defaults audit of 2026-10-01
+(#501, #503, #504, #505, #508, #509, #511; see Recently Completed).
+In flight: #510 (`validate-env` agrees with Compose and the loaders,
+#482) and #512 (CI job timeouts and concurrency, #491). Before the
+go-live checklist below: **#277** blocks the first deployment (a long
+first mbsync run keeps the indexer and MCP server from starting,
+since they wait on a health check only a completed sync satisfies);
+the direction is Resolved decisions 10 and the fix awaits the owner.
+Open from the audit, waiting on real data: #487 (measure the evidence
+and output budgets) and #488 (container resource budgets). P3s from
+the audit and the day's reviews: #489, #490, #499, #500, #502, #506.
+
+**Handoff 2026-10-01, end of the second session.**
 Every PR from the session is merged (#436–#479); no PR is open and
 `main` is green. Beyond the result-quality and Phase 3–5 work listed
 below, the session also hid Trash from default search (#475), kept
@@ -690,8 +712,8 @@ Next session, in order:
    the measurements waiting on real data (#287 budgets, #288, #289).
 
 Backlog filed from review (P3 or edge cases, not scheduled): #442,
-#446, #447, #449, #450, #454, #455, #456, #460, #461, #464, #465,
-#468, #471, #477, #478.
+#447, #449, #450, #454, #455, #456, #461, #464, #465, #468, #478,
+#499, #500, #502 (#446, #460, #471 and #477 are fixed).
 
 **Status 2026-10-01 (end of the first session).**
 Focus has moved from hardening to running the stack for real
@@ -730,10 +752,11 @@ first step keeps Spam mail out of authority filters (#474), with
 verdict-header gating decided after go-live.
 
 Still open from Phases 3–5, all waiting on a real mailbox or the
-owner: the #283 agent-level and answer-quality evals and #291's
-accuracy scoring; #287's budgets and benchmarks; #288 and #289,
-which need a real embedder and reranker; #284's statement-level and
-quote checks; and Phase 4 item 3 and Phase 5 items 3–4.
+owner: #283's remaining eval slices and #291's accuracy scoring;
+#287's budgets and benchmarks; #487's evidence and output budgets;
+#288 and #289, which need a real embedder and reranker; #284 for
+`summarize_thread`, `extract_from_emails` and semantic support; and
+Phase 4 item 3 and Phase 5 items 3–4.
 
 Go-live checklist (do these before more hardening):
 
@@ -747,7 +770,9 @@ Go-live checklist (do these before more hardening):
    `EMBED_MODEL`, `.secrets/embed_api_key.txt`. For inference set
    `INFERENCE_MODE`, `INFERENCE_MODEL` (the default is an Anthropic
    model id), `INFERENCE_BASE_URL` for a non-default provider, and
-   `.secrets/inference_api_key.txt`. Leave `RERANK_MODE=none` to start.
+   `.secrets/inference_api_key.txt`; for a small local model, set
+   `INFERENCE_CONTEXT_TOKENS` to its context window (default 32768).
+   Leave `RERANK_MODE=none` to start.
 3. `make build`, then `make first-run` and log in to Proton in the
    Bridge CLI (`login`, then `info` for `BRIDGE_USER` and the bridge
    password into `.secrets/bridge_pass.txt`), `exit`.
@@ -991,6 +1016,7 @@ linked from the Phase 3 items they track.
 - consolidate `BRIDGE_VERSION` to a single source of truth
   (`.env.example`); parameterize the Go toolchain as an `ARG`
 - `timeout-minutes` + path filters on `.github/workflows/docker.yml`
+  (#491; PR #512 in flight)
 - Bridge build: `go mod download` has no retry, so one blip at
   `proxy.golang.org` (seen 2026-09-30: an HTTP/2 `INTERNAL_ERROR` on a
   single module) fails the whole `docker compose build` check. Add a
@@ -1002,9 +1028,10 @@ linked from the Phase 3 items they track.
 - pin `actions/checkout` to a commit SHA in `bridge.yml`; pinned
   `setup-go` in the patch-drift job
 - fix the `\t\t` BSD-sed portability bug in `bridge/patch-source.sh`
-- mbsync: move `BRIDGE_USER` to a file-backed secret; add log
-  rotation + memory/CPU limits; evaluate runtime package pinning
-- resource limits for the remaining Compose services
+- mbsync: move `BRIDGE_USER` to a file-backed secret; add
+  memory/CPU limits (#488; log rotation done in #501); evaluate
+  runtime package pinning
+- resource limits for the remaining Compose services (#488)
   (`protonmail-bridge` first — it holds live Proton credentials; #273
   closed as its duplicate: a measured, operator-overridable memory
   budget, tested against the initial Gluon sync)
@@ -1014,6 +1041,8 @@ linked from the Phase 3 items they track.
   bound, so one huge message (a pasted log, 12,000 References) is one
   huge response; decide on body continuation (offset paging) or a
   documented cap — fits alongside Phase 1 item 2's structured output
+  (#489)
+- OCR language is fixed to Tesseract's English default (#490)
 - ~~mcp-server: remove the dead `Database.get_thread_message_ids`~~
   (done: already gone from the code)
 - IDs are unbounded: a root Message-ID becomes the thread ID with no
@@ -1110,8 +1139,8 @@ can be revisited with an explicit owner decision.
 - Bridge built from upstream Proton source via `make build-nogui`; a
   patch-drift check + smoke test gate version bumps.
 - All long-running services run as non-root with `cap_drop: ["ALL"]`,
-  `no-new-privileges`, read-only root filesystems, `pids_limit`, and
-  `init: true`.
+  `no-new-privileges`, read-only root filesystems, `pids_limit`,
+  `init: true`, and Docker log rotation (#501).
 - Bridge password lives in `.secrets/bridge_pass.txt` (Docker
   Compose secret), never `.env`. `make first-run` uses
   `logging: driver: none` to keep credentials out of Docker logs.
@@ -1270,6 +1299,27 @@ do not ship persisted claims without them.
    `issuer_url` even when only a verifier is used.
 
 ## Recently Completed
+
+### 2026-10-01 — Phase 3 slices and defaults-audit fixes (#493–#511)
+
+Phase 3, one PR per slice: `brief_issue` hardening, with chunkless
+evidence slots refilled (also in `check_conclusion`), a repair for
+empty briefs that claim sufficient evidence, and strict chronology
+dates (#471, PR #493); deterministic agent-level scoring of tool-call
+traces on synthetic scenarios (#283, PR #494); statement-level
+citation coverage and quote verification in `ask_mailbox` (#284, PR
+#495); and a whole-prompt token budget for every intelligence tool
+against the new `INFERENCE_CONTEXT_TOKENS` (#285, PR #496). Fixes
+from a Codex defaults audit of the configuration: log rotation on
+every Compose service (#484, PR #501); indexer config loaders reject
+invalid values at startup instead of coercing them (#481, PR #503);
+Cohere SDK retries disabled, so a failed rerank falls back to RRF
+after one attempt (#483, PR #504); the indexer heartbeat refreshed during
+attachment extraction and OCR (#485, PR #505); provider timeouts
+documented as per-operation, not total deadlines (#486, PR #508);
+chunk budgets checked against each other at startup (#507, PR #509);
+and `PYTHONDONTWRITEBYTECODE` set and FastMCP telemetry off in the
+MCP server (#492, PR #511).
 
 ### 2026-09-30 — Second review batch, items 6–12 (#258–#264)
 
