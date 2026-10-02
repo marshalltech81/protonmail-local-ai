@@ -15,7 +15,8 @@ checks two layers:
    evidence recall@10 (the fraction of groups found, which is where a
    multi-source question can fall short of a hit) must stay above the
    floors in ``golden.json``. Enumeration questions must return the
-   exact message set.
+   exact message set. Unanswerable questions' terms must occur nowhere
+   in the synthetic Maildir.
 2. Rank snapshot — unchanged behaviour. The top-10 order of every
    search question must equal ``snapshot.json``. After an intended
    ranking change, regenerate it with ``--update-baseline`` and review
@@ -24,6 +25,8 @@ checks two layers:
 Skipped unless ``BASELINE_DIR`` is set; ``make baseline`` runs both steps.
 """
 
+import email
+import email.policy
 import json
 import os
 from pathlib import Path
@@ -150,6 +153,28 @@ def test_enumerate_golden(baseline_db: Database, e: dict) -> None:
     got = sorted(_message_ref(m.message_id) for m in page.messages)
     assert got == sorted(e["expect"])
     assert page.total_matches == len(e["expect"])
+
+
+def _corpus_texts(maildir: Path) -> list[str]:
+    """Every message's subject and text parts (body and attachments), casefolded."""
+    texts = []
+    for path in sorted(maildir.rglob("*.eml")):
+        msg = email.message_from_bytes(path.read_bytes(), policy=email.policy.default)
+        texts.append(str(msg["Subject"] or "").casefold())
+        for part in msg.walk():
+            if part.get_content_maintype() == "text":
+                texts.append(part.get_content().casefold())
+    return texts
+
+
+@pytest.mark.parametrize("u", GOLDEN["unanswerable"], ids=lambda u: u["id"])
+def test_unanswerable_golden(baseline_dir: Path, u: dict) -> None:
+    # The abstention scenarios in tests/eval/agent_scenarios.json rest on
+    # these questions having no answer in the corpus.
+    texts = _corpus_texts(baseline_dir / "maildir")
+    assert texts, "no messages found in the baseline maildir"
+    for term in u["absent_terms"]:
+        assert not any(term.casefold() in t for t in texts), f"{u['id']}: {term!r} is in the corpus"
 
 
 def test_rank_snapshot(

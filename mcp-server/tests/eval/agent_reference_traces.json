@@ -1,5 +1,5 @@
 {
-  "_comment": "Scripted reference traces, one per scenario in agent_scenarios.json: the calls a good agent makes on the synthetic baseline mailbox, each call's structuredContent trimmed to the fields the scorers read, and the IDs the answer cites. tests/test_agent_eval.py requires each to score with no failures. Claimant-ID hash suffixes are placeholders, not the real file hashes.",
+  "_comment": "Scripted reference traces, one per scenario in agent_scenarios.json: the calls a good agent makes on the synthetic baseline mailbox, each call's structuredContent trimmed to the fields the scorers read, and the IDs the answer cites, with abstained: true where the answer says the mailbox holds no answer. tests/test_agent_eval.py requires each to score with no failures. Claimant-ID hash suffixes are placeholders, not the real file hashes.",
   "traces": [
     {
       "scenario": "roof-estimate-total",
@@ -124,6 +124,84 @@
         }
       ],
       "answer": {"text": "Two messages.", "cited": ["t10.3@baseline.example#00000103", "t10.1@baseline.example#00000101"]}
+    },
+    {
+      "scenario": "recital-new-date",
+      "calls": [
+        {
+          "tool": "get_evidence",
+          "arguments": {"query": "summer piano recital date"},
+          "result": {"chunk_count": 2, "threads": [{"thread_id": "t24.1@baseline.example", "chunks": [
+            {"chunk_id": "c-t24-a", "message_id": "t24.1@baseline.example", "claimant_id": "t24.1@baseline.example#00000241", "source": "body"},
+            {"chunk_id": "c-t24-b", "message_id": "t24.2@baseline.example", "claimant_id": "t24.2@baseline.example#00000242", "source": "body"}
+          ]}]}
+        }
+      ],
+      "answer": {"text": "The recital moved from the first announced date; the later message gives the new one.", "cited": ["t24.2@baseline.example#00000242"]}
+    },
+    {
+      "scenario": "final-offer-salary",
+      "calls": [
+        {
+          "tool": "search_emails",
+          "arguments": {"query": "AlpineSoft offer base salary"},
+          "result": {"mode": "hybrid", "results": [{"thread_id": "t17.1@baseline.example"}]}
+        },
+        {
+          "tool": "get_thread",
+          "arguments": {"thread_id": "t17.1@baseline.example"},
+          "result": {"thread": {"thread_id": "t17.1@baseline.example", "message_count": 3}, "total_messages": 3, "next_offset": null, "messages": [
+            {"message_id": "t17.1@baseline.example", "claimant_id": "t17.1@baseline.example#00000171"},
+            {"message_id": "t17.2@baseline.example", "claimant_id": "t17.2@baseline.example#00000172"},
+            {"message_id": "t17.3@baseline.example", "claimant_id": "t17.3@baseline.example#00000173"}
+          ]}
+        }
+      ],
+      "answer": {"text": "The revised offer in the last reply replaces the first one.", "cited": ["t17.3@baseline.example#00000173"]}
+    },
+    {
+      "scenario": "block-party-date",
+      "calls": [
+        {
+          "tool": "get_evidence",
+          "arguments": {"query": "Juniper Lane block party date"},
+          "result": {"chunk_count": 3, "threads": [
+            {"thread_id": "t29.1@baseline.example", "chunks": [
+              {"chunk_id": "c-t29-a", "message_id": "t29.1@baseline.example", "claimant_id": "t29.1@baseline.example#00000291", "source": "body"}
+            ]},
+            {"thread_id": "t30.1@baseline.example", "chunks": [
+              {"chunk_id": "c-t30-a", "message_id": "t30.1@baseline.example", "claimant_id": "t30.1@baseline.example#00000301", "source": "body"},
+              {"chunk_id": "c-t30-b", "message_id": "t30.2@baseline.example", "claimant_id": "t30.2@baseline.example#00000302", "source": "body"}
+            ]}
+          ]}
+        }
+      ],
+      "answer": {"text": "The two messages give different dates; neither corrects the other.", "cited": ["t29.1@baseline.example#00000291", "t30.2@baseline.example#00000302"]}
+    },
+    {
+      "scenario": "cabin-wifi",
+      "calls": [
+        {
+          "tool": "get_evidence",
+          "arguments": {"query": "Pinecrest cabin wifi network name"},
+          "result": {"chunk_count": 2, "threads": [
+            {"thread_id": "t27.1@baseline.example", "chunks": [{"chunk_id": "c-t27-a", "message_id": "t27.1@baseline.example", "claimant_id": "t27.1@baseline.example#00000027", "source": "body"}]},
+            {"thread_id": "t28.1@baseline.example", "chunks": [{"chunk_id": "c-t28-a", "message_id": "t28.1@baseline.example", "claimant_id": "t28.1@baseline.example#00000028", "source": "body"}]}
+          ]}
+        }
+      ],
+      "answer": {"text": "The cabin emails do not mention a wifi network.", "cited": [], "abstained": true}
+    },
+    {
+      "scenario": "electrician-quote",
+      "calls": [
+        {
+          "tool": "search_emails",
+          "arguments": {"query": "electrician quote breaker panel"},
+          "result": {"mode": "hybrid", "results": [{"thread_id": "t10.1@baseline.example"}, {"thread_id": "t01.1@baseline.example"}]}
+        }
+      ],
+      "answer": {"text": "No electrician quote is in the mailbox.", "cited": [], "abstained": true}
     }
   ]
 }

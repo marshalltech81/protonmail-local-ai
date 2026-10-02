@@ -1,5 +1,5 @@
 {
-  "_comment": "Agent-level scenarios on the synthetic baseline mailbox (indexer/tests/baseline/corpus.py). Each names the tools an agent should reach for first (expected_tools, alternatives), a call budget (max_calls) and one golden question in tests/baseline/golden.json: golden_search inherits that question's required_evidence and filters (as expected arguments), golden_enumerate its args and expected messages. Scored by tests/agent_metrics.py; tests/test_agent_eval.py checks the reference traces in agent_reference_traces.json against them. Synthetic data only.",
+  "_comment": "Agent-level scenarios on the synthetic baseline mailbox (indexer/tests/baseline/corpus.py). Each names the tools an agent should reach for first (expected_tools, alternatives), a call budget (max_calls) and one golden question in tests/baseline/golden.json: golden_search inherits that question's required_evidence and filters (as expected arguments), golden_enumerate its args and expected messages, golden_unanswerable makes the scenario expect abstention. required_citations (golden_search only) lists message refs the answer must cite: the correcting reply for a correction, each side for conflicting sources. held_out must equal tests/agent_metrics.py is_held_out(id); held-out scenarios are never used to tune anything. Scored by tests/agent_metrics.py; tests/test_agent_eval.py checks the reference traces in agent_reference_traces.json against them. Synthetic data only.",
   "scenarios": [
     {
       "id": "roof-estimate-total",
@@ -23,7 +23,8 @@
       "question": "Find the pool resurfacing thread I archived.",
       "golden_search": "filter-folder",
       "expected_tools": ["search_emails"],
-      "max_calls": 1
+      "max_calls": 1,
+      "held_out": true
     },
     {
       "id": "frontdesk-appointment",
@@ -31,7 +32,8 @@
       "question": "Which appointment thread was frontdesk@brightsmile.example on, in any role?",
       "golden_search": "filter-participant",
       "expected_tools": ["search_emails"],
-      "max_calls": 1
+      "max_calls": 1,
+      "held_out": true
     },
     {
       "id": "kayak-total-cost",
@@ -39,7 +41,8 @@
       "question": "How much will the tandem kayaks cost for everyone coming on the kayak day?",
       "golden_search": "multi-kayak",
       "expected_tools": ["search_emails", "get_evidence", "ask_mailbox"],
-      "max_calls": 3
+      "max_calls": 3,
+      "held_out": true
     },
     {
       "id": "cabin-address",
@@ -64,6 +67,51 @@
       "golden_enumerate": "sender",
       "expected_tools": ["query_messages"],
       "max_calls": 1
+    },
+    {
+      "id": "recital-new-date",
+      "category": "correction",
+      "question": "When is the summer piano recital?",
+      "golden_search": "correction-recital",
+      "required_citations": [["t24.2"]],
+      "expected_tools": ["search_emails", "get_evidence", "ask_mailbox"],
+      "max_calls": 2
+    },
+    {
+      "id": "final-offer-salary",
+      "category": "correction",
+      "question": "What base salary did AlpineSoft end up offering me?",
+      "golden_search": "evidence-counteroffer",
+      "required_citations": [["t17.3"]],
+      "expected_tools": ["search_emails", "get_evidence", "ask_mailbox", "get_thread"],
+      "max_calls": 2
+    },
+    {
+      "id": "block-party-date",
+      "category": "conflicting_sources",
+      "question": "What date is the Juniper Lane block party?",
+      "golden_search": "conflict-block-party",
+      "required_citations": [["t29.1"], ["t30.2"]],
+      "expected_tools": ["search_emails", "get_evidence", "ask_mailbox"],
+      "max_calls": 2,
+      "held_out": true
+    },
+    {
+      "id": "cabin-wifi",
+      "category": "unanswerable",
+      "question": "What is the wifi network name at the Pinecrest cabin?",
+      "golden_unanswerable": "cabin-wifi",
+      "expected_tools": ["search_emails", "get_evidence", "ask_mailbox"],
+      "max_calls": 2
+    },
+    {
+      "id": "electrician-quote",
+      "category": "unanswerable",
+      "question": "How much did the electrician quote to replace the breaker panel?",
+      "golden_unanswerable": "electrician-quote",
+      "expected_tools": ["search_emails", "get_evidence", "ask_mailbox"],
+      "max_calls": 2,
+      "held_out": true
     }
   ]
 }

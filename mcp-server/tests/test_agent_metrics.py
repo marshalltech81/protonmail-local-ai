@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import pytest
 
-from tests.agent_metrics import Scenario, score_trace, summarize
+from tests.agent_metrics import Scenario, is_held_out, score_trace, summarize
 
 
 def _scenario(**overrides: object) -> Scenario:
@@ -59,8 +59,34 @@ def _page(
     }
 
 
-def _trace(calls: list[dict], cited: list[str] | None = None) -> dict:
-    return {"scenario": "s1", "calls": calls, "answer": {"text": "synthetic", "cited": cited or []}}
+def _trace(calls: list[dict], cited: list[str] | None = None, *, abstained: object = None) -> dict:
+    answer: dict = {"text": "synthetic", "cited": cited or []}
+    if abstained is not None:
+        answer["abstained"] = abstained
+    return {"scenario": "s1", "calls": calls, "answer": answer}
+
+
+def _passages(*message_ids: str) -> dict:
+    """A get_evidence call returning one passage per message of thread a.1."""
+    return {
+        "tool": "get_evidence",
+        "arguments": {"query": "q"},
+        "result": {
+            "threads": [
+                {
+                    "thread_id": "a.1@x.example",
+                    "chunks": [
+                        {
+                            "chunk_id": f"c-{m}",
+                            "message_id": m,
+                            "claimant_id": f"{m}#0000abcd",
+                        }
+                        for m in message_ids
+                    ],
+                }
+            ]
+        },
+    }
 
 
 class TestToolSelection:
@@ -225,6 +251,136 @@ class TestCitations:
         score = score_trace(_scenario(), _trace([_search(["a.1@x.example"])]))
         assert score.citation_validity is None
         assert score.citation_recall == 0.0
+
+
+class TestMessageCitations:
+    """Corrections and conflicts are scored on the messages the answer cites."""
+
+    def _correction(self) -> Scenario:
+        # a.2 corrects a.1 in the same thread: citing the thread is not enough.
+        return _scenario(
+            category="correction",
+            expected_tools=["get_evidence"],
+            required_evidence=[["a.1@x.example"]],
+            required_citations=[["a.2@x.example"]],
+        )
+
+    def test_citing_the_correcting_message_passes(self) -> None:
+        trace = _trace([_passages("a.1@x.example", "a.2@x.example")], cited=["c-a.2@x.example"])
+        score = score_trace(self._correction(), trace)
+        assert score.message_citation_recall == 1.0
+        assert score.failures == []
+
+    def test_citing_only_the_superseded_message_fails(self) -> None:
+        # Thread-level citation recall passes (a.1 covers its thread); the
+        # message-level score catches the stale answer.
+        trace = _trace([_passages("a.1@x.example", "a.2@x.example")], cited=["c-a.1@x.example"])
+        score = score_trace(self._correction(), trace)
+        assert score.citation_recall == 1.0
+        assert score.message_citation_recall == 0.0
+        assert "message_citation_recall" in score.failures
+
+    def test_citing_both_the_old_and_the_correcting_message_passes(self) -> None:
+        trace = _trace(
+            [_passages("a.1@x.example", "a.2@x.example")],
+            cited=["a.1@x.example#0000abcd", "a.2@x.example#0000abcd"],
+        )
+        assert score_trace(self._correction(), trace).message_citation_recall == 1.0
+
+    def test_a_cited_message_id_counts_when_a_result_returned_it(self) -> None:
+        trace = _trace([_passages("a.2@x.example")], cited=["a.2@x.example"])
+        assert score_trace(self._correction(), trace).message_citation_recall == 1.0
+
+    def test_a_cited_id_no_tool_returned_does_not_count(self) -> None:
+        # The agent names the correcting message without having retrieved it.
+        trace = _trace([_passages("a.1@x.example")], cited=["a.2@x.example"])
+        score = score_trace(self._correction(), trace)
+        assert score.message_citation_recall == 0.0
+        assert score.citation_validity == 0.0
+
+    def test_a_cited_thread_id_does_not_cover_its_later_messages(self) -> None:
+        # The thread ID is its root's Message-ID, so it names the root
+        # message only, never the reply that corrects it.
+        trace = _trace(
+            [_search(["a.1@x.example"]), _passages("a.1@x.example", "a.2@x.example")],
+            cited=["a.1@x.example"],
+        )
+        assert score_trace(self._correction(), trace).message_citation_recall == 0.0
+
+    def test_a_conflict_needs_both_sides_cited(self) -> None:
+        scenario = _scenario(
+            category="conflicting_sources",
+            expected_tools=["get_evidence"],
+            required_evidence=[["a.1@x.example"]],
+            required_citations=[["a.1@x.example"], ["a.2@x.example"]],
+        )
+        calls = [_passages("a.1@x.example", "a.2@x.example")]
+        one_side = score_trace(scenario, _trace(calls, cited=["c-a.2@x.example"]))
+        assert one_side.message_citation_recall == 0.5
+        assert "message_citation_recall" in one_side.failures
+        both = score_trace(scenario, _trace(calls, cited=["c-a.1@x.example", "c-a.2@x.example"]))
+        assert both.failures == []
+
+    def test_none_without_required_citations(self) -> None:
+        trace = _trace([_search(["a.1@x.example"])], cited=["a.1@x.example"])
+        assert score_trace(_scenario(), trace).message_citation_recall is None
+
+
+class TestAbstention:
+    def _unanswerable(self) -> Scenario:
+        return _scenario(category="unanswerable", required_evidence=[], unanswerable=True)
+
+    def test_abstaining_without_citations_passes(self) -> None:
+        trace = _trace([_search(["a.1@x.example"])], abstained=True)
+        score = score_trace(self._unanswerable(), trace)
+        assert score.abstention_correct is True
+        assert score.failures == []
+
+    def test_answering_an_unanswerable_question_fails(self) -> None:
+        score = score_trace(self._unanswerable(), _trace([_search(["a.1@x.example"])]))
+        assert score.abstention_correct is False
+        assert "abstention_correct" in score.failures
+
+    def test_abstaining_while_citing_unrelated_evidence_fails(self) -> None:
+        # The search returned a near-miss thread; citing it presents it as
+        # support for an answer the mailbox does not hold.
+        trace = _trace([_search(["a.1@x.example"])], cited=["a.1@x.example"], abstained=True)
+        score = score_trace(self._unanswerable(), trace)
+        assert score.abstention_correct is False
+        assert "abstention_correct" in score.failures
+
+    def test_only_a_boolean_true_marks_abstention(self) -> None:
+        for flag in ("true", 1, "yes"):
+            trace = _trace([_search(["a.1@x.example"])], abstained=flag)
+            assert score_trace(self._unanswerable(), trace).abstention_correct is False, flag
+
+    def test_abstaining_on_an_answerable_question_fails(self) -> None:
+        trace = _trace([_search(["a.1@x.example"])], cited=[], abstained=True)
+        score = score_trace(_scenario(), trace)
+        assert score.abstention_correct is False
+        assert "abstention_correct" in score.failures
+
+    def test_an_answer_without_the_flag_did_not_abstain(self) -> None:
+        trace = _trace([_search(["a.1@x.example"])], cited=["a.1@x.example"])
+        assert score_trace(_scenario(), trace).abstention_correct is True
+
+    def test_abstaining_without_looking_fails_tool_selection(self) -> None:
+        score = score_trace(self._unanswerable(), _trace([], abstained=True))
+        assert score.abstention_correct is True
+        assert score.failures == ["tool_selected"]
+
+
+class TestHeldOut:
+    def test_membership_is_a_fixed_function_of_the_id(self) -> None:
+        # Pinned values: changing the rule moves scenarios between splits.
+        assert is_held_out("archived-pool-bids") is True
+        assert is_held_out("roof-estimate-total") is False
+        assert is_held_out("archived-pool-bids") is is_held_out("archived-pool-bids")
+
+    def test_scores_carry_the_split(self) -> None:
+        trace = _trace([_search(["a.1@x.example"])], cited=["a.1@x.example"])
+        assert score_trace(_scenario(held_out=True), trace).held_out is True
+        assert score_trace(_scenario(), trace).held_out is False
 
 
 class TestEnumeration:
@@ -482,6 +638,17 @@ class TestSummarize:
         assert "Argument accuracy:   0.00% (0/1)" in out
         assert "narrow_filter: s2 (arguments_correct)" in out
         assert "exact_fact" not in out.split("Failures by category:")[1]
+
+    def test_reports_the_held_out_split_apart(self) -> None:
+        clean = _trace([_search(["a.1@x.example"])], cited=["a.1@x.example"])
+        dev = score_trace(_scenario(), clean)
+        held = score_trace(_scenario(held_out=True), _trace([_search([])]))
+        out = summarize([dev, held])
+        assert "Held-out clean:      0.00% (0/1)" in out
+        assert "Dev clean:           100.00% (1/1)" in out
+        assert "exact_fact: s1 [held-out] (" in out
+        assert "Abstention correct:  100.00% (2/2)" in out
+        assert "Message citation recall: n/a" in out
 
     def test_no_failures_says_so(self) -> None:
         good = score_trace(

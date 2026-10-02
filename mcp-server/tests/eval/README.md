@@ -110,7 +110,9 @@ the default suite because it needs no mailbox or provider.
   agent should reach for first, a call budget, and one golden question
   in `tests/baseline/golden.json` whose evidence, filters or
   enumeration answer it inherits; `make baseline` checks those answers
-  against a real index.
+  against a real index. An unanswerable scenario names a golden
+  `unanswerable` question instead, whose `absent_terms` `make baseline`
+  checks occur nowhere in the synthetic Maildir.
 - `agent_reference_traces.json` holds one scripted trace per scenario:
   the calls a good agent makes, each call's `structuredContent`
   (trimmed to the ID and paging fields), and the IDs its answer cites.
@@ -128,9 +130,51 @@ groups cited; a cited message or passage covers its thread), enumeration complet
 listed by one `query_messages` cursor chain over exactly the expected
 filters as the tool normalizes them (strings stripped, blank ones
 absent, dates as UTC bounds), any page size, and whether that chain's last page said
-`has_more: false`), and calls over budget or repeated. `summarize`
-prints the aggregates and the failing scenarios by category. Failure
-cases for each scorer are in `tests/test_agent_metrics.py`.
+`has_more: false`), message citation recall (see below), abstention
+(see below), and calls over budget or repeated. `summarize` prints the
+aggregates, the clean rate of each split, and the failing scenarios by
+category with held-out ones tagged. Failure cases for each scorer are
+in `tests/test_agent_metrics.py`; `tests/test_agent_eval.py` also
+mutates reference traces into the failures the new categories exist
+to catch and checks each is caught.
+
+Three categories need more than thread-level scoring:
+
+- **Corrections** (`correction`): a later reply corrects an earlier
+  message (the recital date in `t24`, the revised salary offer in
+  `t17`). The scenario lists the correcting message in
+  `required_citations`, and *message citation recall* requires the
+  answer to cite it: a cited passage (`chunk_id`) or `claimant_id`
+  counts as the message the tool result returned it with. Citing only
+  the superseded message passes thread-level citation recall but fails
+  here. Citing both is fine.
+- **Conflicting sources** (`conflicting_sources`): two messages
+  disagree and neither supersedes the other (`t29.1` and `t30.2` give
+  different block-party dates). `required_citations` lists one group per
+  side, so the answer must cite both.
+- **Unanswerable** (`unanswerable`): the mailbox holds no answer. The
+  trace's answer marks abstention with `"abstained": true`, a
+  structural flag recorded with the trace, not read from the prose. The
+  scenario passes when the answer abstains and cites nothing, since a
+  citation would present a near-miss source as support. Every other
+  scenario fails if its answer abstains. Only a JSON `true` counts.
+
+The agent should still search before abstaining, so tool selection
+applies to unanswerable scenarios as usual.
+
+### Held-out split
+
+About one scenario in four is held out: `is_held_out` in
+`tests/agent_metrics.py` takes the SHA-256 of the scenario ID modulo
+4, so membership is fixed when a scenario is written and adding
+scenarios never moves an existing one. Each row repeats its membership
+as `held_out` (the loader rejects a row that disagrees), and
+`test_held_out_split_is_stable` pins the current held-out IDs. Tune
+prompts, tool descriptions and any future pass thresholds against the
+dev split only. Report the held-out clean rate as the check on that
+tuning, and do not change a held-out scenario because it fails. The
+rule ignores category, so a category can sit entirely in one split
+(today the only conflicting-sources scenario is held out).
 
 These checks are deterministic and do not grade the answer: a valid
 citation shows the agent saw the source, not that the source supports
