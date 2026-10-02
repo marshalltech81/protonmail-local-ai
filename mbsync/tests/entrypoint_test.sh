@@ -764,6 +764,37 @@ uidvalidity_errors_are_redacted_and_still_fail() {
     marker_not_logged
 }
 
+# The two filters run at the same time, and when mbsync's stdout and
+# stderr end up in one file (as in run_sync_logged) they write to it
+# together. Each line must reach it in one write, or a line from the
+# other filter can land inside it (#607). In the image awk is mawk, whose
+# printf "%s\n" writes the text and the newline separately.
+# shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
+filter_lines_reach_a_shared_log_whole() {
+    local log="$WORK/shared-filter-log" i bad
+    sync_setup shared-log
+    for ((i = 0; i < 2000; i++)); do
+        printf 'Notice: synthetic notice %d\n' "$i"
+    done >"$WORK/shared-filter-out"
+    for ((i = 0; i < 2000; i++)); do
+        printf 'Error: synthetic error %d\n' "$i"
+    done >"$WORK/shared-filter-err"
+    {
+        filter_mbsync_output out "$WORK/shared-filter-out-counts" <"$WORK/shared-filter-out" &
+        filter_mbsync_output err "$WORK/shared-filter-err-counts" <"$WORK/shared-filter-err" &
+        wait
+    } >"$log" 2>&1
+    [[ "$(cat "$WORK/shared-filter-out-counts")" == "0 2000" ]] || return 1
+    [[ "$(cat "$WORK/shared-filter-err-counts")" == "0 2000" ]] || return 1
+    [[ "$(wc -l <"$log" | tr -d '[:space:]')" == "4000" ]] || return 1
+    # grep -c exits 1 when it counts nothing.
+    bad="$(grep -cvxE '(Notice: synthetic notice|Error: synthetic error) [0-9]+' "$log" || true)"
+    if ((bad > 0)); then
+        echo "${bad} line(s) in the shared log are not whole"
+        return 1
+    fi
+}
+
 # --- sync activity heartbeat (#277) ------------------------------------------
 #
 # The healthcheck counts the sync loop alive while this file is fresh or
@@ -1606,6 +1637,7 @@ check "lines naming no folder pass through unchanged" unrelated_lines_pass_throu
 check "a Maildir path in a kept tail is cut" a_path_in_a_kept_tail_is_cut
 check "UIDVALIDITY errors are redacted and still fail the sync" \
     uidvalidity_errors_are_redacted_and_still_fail
+check "both filters' lines reach a shared log whole" filter_lines_reach_a_shared_log_whole
 check "activity is marked before mbsync, before the repair and after the sync" \
     activity_is_marked_around_a_successful_sync
 check "activity is marked after a failed mbsync" activity_is_marked_after_a_failed_mbsync

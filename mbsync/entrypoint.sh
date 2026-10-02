@@ -566,7 +566,9 @@ filter_mbsync_output() {
             dest = (stream == "err") ? "/dev/stderr" : "/dev/stdout"
         }
         stream == "err" && $0 ~ far_box && $0 != inbox { withheld++; next }
-        { other++; printf "%s\n", redact($0) > dest; fflush(dest) }
+        # One string, so each line is one write: mawk writes the parts
+        # of a format separately, and the other filter may share dest.
+        { other++; printf "%s", redact($0) "\n" > dest; fflush(dest) }
         END { print withheld + 0, other + 0 > counts; close(counts) }
     '
 }
