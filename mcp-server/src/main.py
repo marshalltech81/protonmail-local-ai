@@ -263,6 +263,30 @@ def _reject_url_userinfo(name: str, value: str) -> str:
     return value
 
 
+# Endpoint hosts that keep a provider call on this machine: the host's
+# loopback, or OrbStack's route from a container to it.
+_HOST_LOCAL_HOSTS = frozenset({"127.0.0.1", "::1", "localhost", "host.docker.internal"})
+
+
+def _warn_if_remote_endpoint(mode_setting: str, mode: str, url: str, sends: str) -> None:
+    """Log one WARNING when an enabled layer's endpoint is not host-local.
+
+    ``url`` is the resolved endpoint, or empty for an SDK default the
+    client does not expose (always a remote provider). Only the host is
+    named: never the path, query, port or the API key.
+    """
+    host = urllib.parse.urlsplit(url).hostname if url else None
+    if host in _HOST_LOCAL_HOSTS:
+        return
+    log.warning(
+        "Privacy: %s=%s sends %s off this host, to %s.",
+        mode_setting,
+        mode,
+        sends,
+        host or "the SDK's default endpoint",
+    )
+
+
 INFERENCE_MODE = _normalize_mode(
     "INFERENCE_MODE", os.environ.get("INFERENCE_MODE", "anthropic"), _INFERENCE_MODES
 )
@@ -705,6 +729,20 @@ def main():
     log.info(f"  Transport: streamable-http at {_STREAMABLE_HTTP_PATH} (bearer token required)")
     log.info(f"  Session idle timeout: {MCP_SESSION_IDLE_TIMEOUT_SECS:g}s")
     log.info("  Retrieval: local SQLite index only")
+    # One loud line per enabled layer that sends mail-derived text off
+    # the host, so it stands out from the INFO block above (#622).
+    _warn_if_remote_endpoint("EMBED_MODE", EMBED_MODE, embed_client.base_url, "search query text")
+    if inference_client is not None:
+        _warn_if_remote_endpoint(
+            "INFERENCE_MODE", INFERENCE_MODE, inference_client.base_url, "retrieved email excerpts"
+        )
+    if reranker is not None:
+        _warn_if_remote_endpoint(
+            "RERANK_MODE",
+            RERANK_MODE,
+            RERANK_BASE_URL or os.environ.get("CO_API_URL", ""),
+            "search queries and retrieved email excerpts",
+        )
 
     _run_server(server)
 
