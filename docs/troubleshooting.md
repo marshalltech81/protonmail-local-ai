@@ -310,8 +310,47 @@ docker compose logs indexer
 docker compose logs mbsync
 ```
 
-mbsync must connect to Bridge and complete at least one sync before the indexer
-has emails to process.
+The indexer starts while mbsync's first sync is still running, but mbsync
+makes newly delivered files readable to the indexer only when a sync
+completes. Until then the indexer defers each unreadable file and retries it
+every minute, so most of the first sync's mail is indexed shortly after that
+sync ends. `make status` reports "no successful mail sync has been recorded"
+until it does.
+
+A deferred file is retried this way for a day after the indexer first saw
+it. If a first sync runs longer than that, files still unreadable afterwards
+take the normal retry path and can end up `dead`; once the sync has
+completed, run `make requeue-dead` to index them.
+
+## `make up` fails — mbsync is unhealthy
+
+`make up` waits for mbsync to report healthy before it starts the indexer,
+and for the indexer before the MCP server. If it fails with
+"dependency failed to start: container mbsync is unhealthy", the indexer
+and MCP server were never started, and a later recovery of mbsync does not
+start them.
+
+mbsync is healthy while its sync loop is alive: its config and the Bridge
+cert are in place, and either a sync attempt started or ended within three
+`SYNC_INTERVAL`s (plus 30 s) or an `mbsync` process is running. A long first
+sync is therefore healthy; it is not a reason for this failure. (Images built
+before this behaviour required a completed sync and failed any first sync
+longer than about three and a half minutes; rebuild with `make build`.)
+
+What remains unhealthy is mbsync that has not started syncing or has
+stopped: Bridge IMAP not reachable yet, cert extraction or the cert pin
+refused, or the loop stuck outside a sync. Check why:
+
+```bash
+docker compose logs mbsync --tail 50
+docker inspect mbsync --format='{{json .State.Health}}'
+```
+
+Fix the cause the log names (see "mbsync fails to connect" and the cert pin
+sections below). Repeated sync failures make the container exit and restart
+after five consecutive failures, so `docker compose ps` shows the restarts.
+Once mbsync is healthy, run `make up` again: Compose leaves the running
+services as they are and starts the indexer and then the MCP server.
 
 ## Indexer refuses to start — "wipe the sqlite-volume"
 

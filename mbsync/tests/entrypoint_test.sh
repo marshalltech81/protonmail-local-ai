@@ -1,7 +1,8 @@
 #!/bin/bash
 set -Eeuo pipefail
 
-# Tests for mbsync/entrypoint.sh functions that must fail closed.
+# Tests for mbsync/entrypoint.sh functions that must fail closed, and for
+# the liveness check in mbsync/healthcheck.sh.
 #
 # Both callers run these functions as `if` conditions, where Bash disables
 # errexit for the whole call: a failed command inside them is ignored
@@ -13,22 +14,28 @@ set -Eeuo pipefail
 # Run: bash mbsync/tests/entrypoint_test.sh
 
 ENTRYPOINT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/entrypoint.sh"
+HEALTHCHECK="$(dirname "$ENTRYPOINT")/healthcheck.sh"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 FAILURES=0
 
-# Define the named functions exactly as the entrypoint writes them: from
-# the `name() {` line through the first line that is a lone `}`.
-load() {
-    local name definition
+# Define the named functions exactly as the script writes them: from the
+# `name() {` line through the first line that is a lone `}`.
+load_from() {
+    local script="$1" name definition
+    shift
     for name in "$@"; do
-        definition="$(awk -v start="${name}() {" '$0 == start {p = 1} p {print} p && $0 == "}" {exit}' "$ENTRYPOINT")"
+        definition="$(awk -v start="${name}() {" '$0 == start {p = 1} p {print} p && $0 == "}" {exit}' "$script")"
         if [[ -z "$definition" ]]; then
-            printf 'cannot find %s() in %s\n' "$name" "$ENTRYPOINT" >&2
+            printf 'cannot find %s() in %s\n' "$name" "$script" >&2
             exit 1
         fi
         eval "$definition"
     done
+}
+
+load() {
+    load_from "$ENTRYPOINT" "$@"
 }
 
 # Runs each case in a subshell outside any condition, so errexit stays on
@@ -274,9 +281,10 @@ sync_setup() {
     MAILDIR_PATH="$WORK/maildir-$1"
     CONFIG_FILE="$WORK/mbsyncrc"
     FIND_CALLS="$WORK/find-calls-$1"
+    SYNC_ACTIVITY_FILE="$WORK/activity-$1"
     mkdir -p "$MAILDIR_PATH"
     : >"$FIND_CALLS"
-    load run_child relax_new_maildir_perms run_sync
+    load run_child relax_new_maildir_perms mark_sync_activity run_sync
 }
 
 # run_sync is called as `run_sync || rc=$?`, a condition like the
@@ -332,6 +340,205 @@ repair_still_runs_after_a_failed_mbsync() {
     run_sync || rc=$?
     ((rc == 3)) || return 1
     [[ "$(wc -l <"$FIND_CALLS")" -eq 2 ]] || return 1
+}
+
+# --- sync activity heartbeat (#277) ------------------------------------------
+#
+# The healthcheck counts the sync loop alive while this file is fresh or
+# mbsync is running, so it is touched before mbsync starts, after mbsync
+# ends (the permission repair that follows walks the whole Maildir), and
+# once the attempt is over, whatever its outcome. Each mock consumes the
+# file, so the log shows which touch preceded which step.
+
+# shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
+activity_setup() {
+    sync_setup "activity-$1"
+    ACTIVITY_LOG="$WORK/activity-log-$1"
+    : >"$ACTIVITY_LOG"
+}
+
+# Logs the named step if the heartbeat was there for it, then removes it.
+consume_activity() {
+    if [[ -f "$SYNC_ACTIVITY_FILE" ]]; then
+        printf '%s\n' "$1" >>"$ACTIVITY_LOG"
+    fi
+    rm -f "$SYNC_ACTIVITY_FILE"
+}
+
+# shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
+activity_is_marked_around_a_successful_sync() {
+    local rc=0
+    activity_setup ok
+    mbsync() { consume_activity mbsync; }
+    find() { consume_activity "find-$3"; }
+    run_sync || rc=$?
+    ((rc == 0)) || return 1
+    [[ "$(cat "$ACTIVITY_LOG")" == "mbsync"$'\n'"find-d" ]] || return 1
+    [[ -f "$SYNC_ACTIVITY_FILE" ]] || return 1
+}
+
+# shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
+activity_is_marked_after_a_failed_mbsync() {
+    local rc=0
+    activity_setup mbsync-fail
+    mbsync() {
+        consume_activity mbsync
+        return 3
+    }
+    find() { consume_activity "find-$3"; }
+    run_sync || rc=$?
+    ((rc == 3)) || return 1
+    [[ "$(cat "$ACTIVITY_LOG")" == "mbsync"$'\n'"find-d" ]] || return 1
+    [[ -f "$SYNC_ACTIVITY_FILE" ]] || return 1
+}
+
+# shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
+activity_is_marked_after_a_failed_repair() {
+    local rc=0
+    activity_setup repair-fail
+    mbsync() { consume_activity mbsync; }
+    find() {
+        consume_activity "find-$3"
+        return 1
+    }
+    run_sync || rc=$?
+    ((rc == 1)) || return 1
+    [[ -f "$SYNC_ACTIVITY_FILE" ]] || return 1
+}
+
+# The success stamp is freshness, not liveness: a completed sync still
+# writes it with the same content and mode, and nothing else.
+# shellcheck disable=SC2034,SC2329 # used by the entrypoint functions loaded with eval
+success_stamp_is_written_by_a_completed_sync() {
+    MAILDIR_PATH="$WORK/maildir-stamp"
+    SYNC_STAMP_FILE="$MAILDIR_PATH/.mbsync-last-sync.json"
+    SYNC_INTERVAL=60
+    mkdir -p "$MAILDIR_PATH"
+    load record_successful_sync
+    record_successful_sync
+    grep -qE '^\{"completed_at": "[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]{8}Z", "sync_interval_secs": 60\}$' \
+        "$SYNC_STAMP_FILE" || return 1
+    [[ "$(stat -c %a "$SYNC_STAMP_FILE" 2>/dev/null || stat -f %Lp "$SYNC_STAMP_FILE")" == "644" ]] || return 1
+    [[ "$(find "$MAILDIR_PATH" -type f | wc -l)" -eq 1 ]] || return 1
+}
+
+# --- healthcheck: liveness, not freshness (#277) ----------------------------
+#
+# Healthy means the sync loop is alive: config and cert are in place and
+# either the activity heartbeat is fresh or an mbsync is running. A first
+# sync that takes hours is healthy with no success stamp; whether mail is
+# current is get_mailbox_status's job. /proc is a temporary directory and
+# stat reports the heartbeat's synthetic age.
+
+# shellcheck disable=SC2034,SC2329 # used by the healthcheck functions loaded with eval
+health_setup() {
+    local dir="$WORK/health-$1"
+    CONFIG_FILE="$dir/mbsyncrc"
+    CERT_FILE="$dir/bridge-cert.pem"
+    SYNC_ACTIVITY_FILE="$dir/last-sync-activity"
+    PROC_DIR="$dir/proc"
+    SYNC_INTERVAL=60
+    HEALTH_SLACK_SECONDS=30
+    ACTIVITY_AGE=0
+    mkdir -p "$PROC_DIR"
+    printf 'synthetic-config\n' >"$CONFIG_FILE"
+    printf 'synthetic-cert\n' >"$CERT_FILE"
+    : >"$SYNC_ACTIVITY_FILE"
+    # Processes that are always there: init and the entrypoint.
+    add_process 1 docker-init
+    add_process 7 entrypoint.sh
+    stat() { printf '%s\n' "$(($(date +%s) - ACTIVITY_AGE))"; }
+    load_from "$HEALTHCHECK" mbsync_running check_health
+}
+
+add_process() {
+    mkdir -p "$PROC_DIR/$1"
+    printf '%s\n' "$2" >"$PROC_DIR/$1/comm"
+}
+
+unhealthy() {
+    if check_health; then
+        echo "reported healthy"
+        return 1
+    fi
+}
+
+# Three hours: far past the 210 s heartbeat limit at SYNC_INTERVAL=60.
+readonly HOURS_AGO=10800
+
+# shellcheck disable=SC2034,SC2329 # used by the healthcheck functions loaded with eval
+long_first_sync_in_progress_is_healthy() {
+    health_setup first-sync
+    ACTIVITY_AGE=$HOURS_AGO
+    add_process 42 mbsync
+    check_health
+}
+
+# shellcheck disable=SC2034,SC2329 # used by the healthcheck functions loaded with eval
+fresh_heartbeat_between_syncs_is_healthy() {
+    health_setup between
+    ACTIVITY_AGE=60
+    add_process 43 sleep
+    check_health
+}
+
+# shellcheck disable=SC2034,SC2329 # used by the healthcheck functions loaded with eval
+stale_heartbeat_without_mbsync_is_unhealthy() {
+    local err
+    health_setup stale
+    ACTIVITY_AGE=$HOURS_AGO
+    add_process 43 sleep
+    add_process 44 find
+    err="$(unhealthy 2>&1)" || return 1
+    [[ "$err" == *"no sync activity"* ]] || return 1
+}
+
+# shellcheck disable=SC2034,SC2329 # used by the healthcheck functions loaded with eval
+heartbeat_just_past_the_limit_is_unhealthy() {
+    health_setup limit
+    ACTIVITY_AGE=211
+    unhealthy
+}
+
+# shellcheck disable=SC2034,SC2329 # used by the healthcheck functions loaded with eval
+missing_heartbeat_is_unhealthy_before_the_first_attempt() {
+    health_setup no-heartbeat
+    rm -f "$SYNC_ACTIVITY_FILE"
+    add_process 42 mbsync
+    unhealthy
+}
+
+# shellcheck disable=SC2034,SC2329 # used by the healthcheck functions loaded with eval
+missing_config_is_unhealthy_even_while_syncing() {
+    health_setup no-config
+    rm -f "$CONFIG_FILE"
+    add_process 42 mbsync
+    unhealthy
+}
+
+# shellcheck disable=SC2034,SC2329 # used by the healthcheck functions loaded with eval
+empty_cert_is_unhealthy_even_while_syncing() {
+    health_setup no-cert
+    : >"$CERT_FILE"
+    add_process 42 mbsync
+    unhealthy
+}
+
+# A process that exits between the /proc listing and the read is skipped
+# (a directory stands in for its comm file, which then cannot be read).
+# shellcheck disable=SC2034,SC2329 # used by the healthcheck functions loaded with eval
+a_vanished_process_is_skipped() {
+    health_setup vanished
+    ACTIVITY_AGE=$HOURS_AGO
+    mkdir -p "$PROC_DIR/50/comm"
+    add_process 51 mbsync
+    check_health
+}
+
+healthcheck_does_not_read_the_success_stamp() {
+    if grep -n 'last-successful-sync\|mbsync-last-sync' "$HEALTHCHECK"; then
+        return 1
+    fi
 }
 
 # --- wait_for_bridge_imap (#271) ---------------------------------------------
@@ -409,6 +616,7 @@ stop_setup() {
     MAILDIR_PATH="$WORK/maildir-stop-$1"
     CONFIG_FILE="$WORK/mbsyncrc"
     CHILD_LOG="$WORK/child-$1"
+    SYNC_ACTIVITY_FILE="$WORK/activity-stop-$1"
     mkdir -p "$MAILDIR_PATH" "$WORK/bin-stop-$1"
     : >"$CHILD_LOG"
     # A long-running child that records its start and any TERM it gets.
@@ -424,7 +632,8 @@ wait
 MOCK
     chmod 755 "$WORK/bin-stop-$1/mbsync"
     PATH="$WORK/bin-stop-$1:$PATH"
-    load run_child stop_on_signal install_signal_handlers relax_new_maildir_perms run_sync
+    load run_child stop_on_signal install_signal_handlers relax_new_maildir_perms \
+        mark_sync_activity run_sync
 }
 
 # Signals the stand-in entrypoint once its child has started and waits for
@@ -527,6 +736,26 @@ check "sync succeeds when mbsync and the repair succeed" \
 check "a failed directory repair fails the sync" failed_directory_repair_fails_the_sync
 check "a failed file repair fails the sync" failed_file_repair_fails_the_sync
 check "the repair still runs after a failed mbsync" repair_still_runs_after_a_failed_mbsync
+check "activity is marked before mbsync, before the repair and after the sync" \
+    activity_is_marked_around_a_successful_sync
+check "activity is marked after a failed mbsync" activity_is_marked_after_a_failed_mbsync
+check "activity is marked after a failed repair" activity_is_marked_after_a_failed_repair
+check "a completed sync still writes the success stamp" \
+    success_stamp_is_written_by_a_completed_sync
+check "health: a long first sync in progress is healthy" long_first_sync_in_progress_is_healthy
+check "health: a fresh heartbeat between syncs is healthy" fresh_heartbeat_between_syncs_is_healthy
+check "health: a stale heartbeat without mbsync is unhealthy" \
+    stale_heartbeat_without_mbsync_is_unhealthy
+check "health: a heartbeat just past the limit is unhealthy" \
+    heartbeat_just_past_the_limit_is_unhealthy
+check "health: no heartbeat before the first attempt is unhealthy" \
+    missing_heartbeat_is_unhealthy_before_the_first_attempt
+check "health: missing config is unhealthy even while syncing" \
+    missing_config_is_unhealthy_even_while_syncing
+check "health: an empty cert is unhealthy even while syncing" \
+    empty_cert_is_unhealthy_even_while_syncing
+check "health: a vanished process is skipped" a_vanished_process_is_skipped
+check "health: the success stamp is not read" healthcheck_does_not_read_the_success_stamp
 
 if ((FAILURES > 0)); then
     printf '%d test(s) failed\n' "$FAILURES" >&2

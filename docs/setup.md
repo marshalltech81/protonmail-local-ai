@@ -294,6 +294,17 @@ a small `curl` against `$EMBED_BASE_URL`, `$INFERENCE_BASE_URL`, or
 
 The initial index scan may take several minutes depending on mailbox size.
 
+mbsync's first sync can take hours for a large mailbox. mbsync reports
+healthy as soon as that sync is running, so the indexer and MCP server
+start during it and index mail as it arrives. Until the first sync
+completes, `get_mailbox_status` (and `make status`) reports the index
+as not current, with "no successful mail sync has been recorded". mbsync
+makes newly delivered files readable to the indexer only when a sync
+finishes, so most mail from the first sync is indexed after it ends.
+If `make up` fails with "dependency failed to start: container mbsync is
+unhealthy", see "`make up` fails — mbsync is unhealthy" in
+`docs/troubleshooting.md` for the cause and how to start the rest.
+
 The MCP server is read-only:
 - search, retrieval, and intelligence tools use the local SQLite index
 - there are no mail-changing tools, and mcp-server has no connection to Bridge
