@@ -5119,9 +5119,10 @@ class TestDateRangeMessageTime:
                     extracted_text=f"report attachment {message_id}",
                 )
         # The fixture helper dates a thread by its first message; widen
-        # ``t-a`` to its real span as the indexer would.
+        # each thread to its messages' span as the indexer does.
         conn.execute(
-            "UPDATE threads SET date_last = '2024-09-01T09:00:00+00:00' WHERE thread_id = 't-a'"
+            "UPDATE threads SET date_last = (SELECT MAX(sent_at) FROM messages m "
+            "WHERE m.thread_id = threads.thread_id)"
         )
         conn.commit()
         conn.close()
@@ -5191,3 +5192,47 @@ class TestDateRangeMessageTime:
 
         assert threads(keep_threads_without_evidence=True) == ["t-a"]
         assert threads() == ["t-c"]
+
+    def test_refill_walks_past_the_first_page(self, tmp_path):
+        """Review round 2: more span-only threads than one evidence page
+        (``limit`` × ``_FILTERED_OVERSAMPLE``) rank ahead of the thread
+        with an in-range passage; the walk continues until it is found."""
+        from src.lib.sqlite import _FILTERED_OVERSAMPLE
+
+        span_only = []
+        for i in range(_FILTERED_OVERSAMPLE + 1):
+            span_only += [
+                (f"s{i}a", f"t-s{i}", "2024-01-10T09:00:00+00:00", "report report", False),
+                (f"s{i}b", f"t-s{i}", "2024-09-01T09:00:00+00:00", "report report", False),
+            ]
+        july = ("c1", "t-c", "2024-07-15T09:00:00+00:00", "notes", False)
+        db = self._db(tmp_path, extra=(*span_only, july))
+        calls: list[int] = []
+        fetch = db.get_query_evidence_chunks
+
+        def counted(query, thread_ids, *args, **kwargs):
+            calls.append(len(thread_ids))
+            return fetch(query, thread_ids, *args, **kwargs)
+
+        db.get_query_evidence_chunks = counted  # type: ignore[method-assign]
+        results = db.hybrid_search(
+            "report",
+            [1.0, 0.0, 0.0, 0.0],
+            limit=1,
+            with_evidence=True,
+            date_from="2024-07-01",
+            date_to="2024-08-01",
+        )
+        assert [r.thread_id for r in results] == ["t-c"]
+        # Pages of ``_FILTERED_OVERSAMPLE`` threads, stopping once found.
+        assert calls[0] == _FILTERED_OVERSAMPLE and len(calls) >= 2
+
+    def test_attachment_match_bias_is_date_scoped(self, tmp_path):
+        """Review round 2: an out-of-range attachment the query names
+        does not reorder a thread's in-range evidence."""
+        db = self._db(tmp_path)
+        assert db._matched_attachments("report", ["t-a"]) == {"t-a": ["a1-att"]}
+        assert db._matched_attachments("report", ["t-a"], date_to="2024-03-01") == {
+            "t-a": ["a1-att"]
+        }
+        assert db._matched_attachments("report", ["t-a"], date_from="2024-03-01") == {}

@@ -485,7 +485,7 @@ indexing pass:
 |---|---|
 | `messages.sent_at` | The message's own time (authoritative) |
 | `message_chunks.message_date` | The `sent_at` of the chunk's message, body and attachment chunks alike. A reprocess that keeps a chunk (same chunk ID) rewrites its date when the message's `sent_at` changed, so the two never disagree |
-| `threads.date_first` / `date_last` | The earliest and latest `sent_at` among the thread's messages |
+| `threads.date_first` / `date_last` | The earliest and latest `sent_at` among the thread's messages, recomputed from its `messages` rows on every upsert so a re-dated message moves the range |
 
 **`occurred_at`** is not defined. The index keeps no delivery or
 receipt time: the `Received:` headers and the Maildir filename's
@@ -520,9 +520,10 @@ depends on its unit:
 So a date range scopes the passages a model is shown, not only the
 threads: a thread whose span overlaps the range but holds no passage
 from a message inside it has no evidence passages, and the evidence
-tools leave it out: retrieval fetches evidence for a wider slice of the
-filtered ranking and keeps the first threads that have a passage in
-range, so a span-only thread does not use up a slot (and its
+tools leave it out: retrieval walks the filtered ranking in pages,
+fetching evidence until it has as many threads with an in-range passage
+as it needs or the ranking runs out, so a span-only thread does not use
+up a slot (and its
 out-of-range text is never shown). `search_emails` still returns
 threads by span alone. Ranking lanes are not date-scoped per
 passage: a passage outside the range can still lift its thread's rank.

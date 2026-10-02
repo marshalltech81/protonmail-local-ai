@@ -913,6 +913,22 @@ class Database:
 
                 self._write_message_record(cur, msg, thread.thread_id)
 
+            # The thread's range is its messages' ``sent_at`` range. The
+            # merge above can only widen it, so a reprocess that re-dates
+            # a message (a parser fix) would leave the old date as an
+            # endpoint; recompute both from the rows just written.
+            cur.execute(
+                """
+                UPDATE threads SET
+                    date_first = COALESCE(
+                        (SELECT MIN(sent_at) FROM messages WHERE thread_id = :t), date_first),
+                    date_last = COALESCE(
+                        (SELECT MAX(sent_at) FROM messages WHERE thread_id = :t), date_last)
+                WHERE thread_id = :t
+                """,
+                {"t": thread.thread_id},
+            )
+
             # Update FTS5 index. threads_fts is contentless_delete=1 so DELETE
             # requires a specific rowid — read the existing fts_rowid and then
             # record the new rowid after INSERT.
